@@ -59,8 +59,19 @@ jobs:
           node-version: "22"
 
       - name: Install ClawHub CLI
-        # Pinned to exact version to prevent supply-chain risk from a compromised
-        # or typosquatted release executing with the CLAWHUB_TOKEN release secret.
+        # CLAWSECCHECK-C-548: `npm i -g clawhub@X.Y.Z` pins one package name+version,
+        # but npm still resolves clawhub's WHOLE transitive dependency tree fresh at
+        # install time and may run any package's lifecycle scripts — inside the job
+        # that holds CLAWHUB_TOKEN, contents:write and id-token:write (cosign's OIDC
+        # signing authority). `.github/tools/package.json` + its committed
+        # `package-lock.json` pin that entire tree; `npm ci --ignore-scripts`
+        # reproduces it exactly and refuses to execute any lifecycle script.
+        # Verified before adopting `--ignore-scripts`: a scripts-free local install
+        # of clawhub@0.23.3 still runs (`clawhub --help` / `clawhub publish` work) —
+        # it has no postinstall step whose absence would break the CLI.
+        #
+        # Exact version to prevent supply-chain risk from a compromised or
+        # typosquatted release executing with the CLAWHUB_TOKEN release secret.
         # Bumped 0.22.0 -> 0.23.3 (CLAWSECCHECK-B-440): v3.59.0's publish 413'd
         # (Request Entity Too Large) on a bundle well under ClawHub's documented
         # 50MB limit — filed openclaw/clawhub#3375. Root cause per their fix,
@@ -71,8 +82,12 @@ jobs:
         # pins would keep hitting the old (now-replaced) path. Confirmed by reading
         # the 0.23.3 tarball: publish.js now requests an `uploadUrl`/`uploadTicket`
         # pair instead of building the old raw multipart form body, and --dry-run
-        # (options.dryRun) is unchanged.
-        run: npm i -g clawhub@0.23.3
+        # (options.dryRun) is unchanged. Bump the pin in .github/tools/package.json
+        # (then regenerate package-lock.json), not here.
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --prefix .github/tools
+          echo "$PWD/.github/tools/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Resolve & verify version
         id: ver
@@ -203,13 +218,18 @@ jobs:
 
       - name: Smoke gate — lint, tests, compile
         run: |
-          # Pinned to exact versions (not `-U`): this job later authenticates with the
-          # CLAWHUB_TOKEN release secret and holds contents/id-token:write, so a
-          # compromised or typosquatted pytest/ruff release must not be able to execute
-          # here (C-183 — same supply-chain discipline as the pinned clawhub@0.23.3
-          # install above). Bump these deliberately, like clawhub@ / markdownlint-cli@.
+          # Pinned to exact versions AND exact hashes (not `-U`): this job later
+          # authenticates with the CLAWHUB_TOKEN release secret and holds
+          # contents/id-token:write, so a compromised or typosquatted pytest/ruff
+          # release — or a compromised one of THEIR transitive deps — must not be
+          # able to execute here (C-183/C-548 — same supply-chain discipline as the
+          # lockfile-pinned clawhub install above). --require-hashes refuses to
+          # install anything whose hash isn't in the committed manifest, pinned
+          # transitive tree included. Bump deliberately: edit
+          # .github/tools/requirements-ci.in and regenerate requirements-ci.txt with
+          # pip-compile (see that file's header), like clawhub@ / markdownlint-cli@.
           set -euo pipefail
-          python -m pip install pytest==7.4.4 ruff==0.15.20
+          python -m pip install --require-hashes -r .github/tools/requirements-ci.txt
           python -m pytest -q
           ruff check .
           python -m compileall clawseccheck
@@ -683,13 +703,29 @@ jobs:
         # rejects could ship. This runs the exact user-facing command against the fresh
         # bundle. A few attempts absorb TUF/network flake; a genuinely invalid signature
         # fails every attempt and fails the job.
+        #
+        # B-875: the identity regexp used to be anchored only at the start with
+        # unescaped dots (`^https://github.com/gl0di/clawseccheck/`), which — because
+        # cosign's Go regexp match is a substring search, not a full-string match —
+        # accepted a signature from ANY workflow on ANY ref of this repo, not
+        # specifically this release workflow on a release tag. It now pins the exact
+        # workflow file and requires a `refs/tags/v` ref prefix. Checked what ref a
+        # `workflow_dispatch` run actually signs with: it is whatever ref was used to
+        # dispatch (e.g. `refs/heads/main`), which will NOT match this tightened
+        # pattern and will correctly fail this step. That is intentional, not a
+        # regression — docs/RELEASING.md: "Publishing is deliberately tag-gated —
+        # there is no auto-release", and `Create GitHub Release` below already only
+        # runs `if: github.ref_type == 'tag'`, so a workflow_dispatch run off a branch
+        # never produces a publicly downloadable, release-attached bundle anyway. A
+        # workflow_dispatch retry of an already-tagged version (dispatched with that
+        # tag selected as the ref) still signs `refs/tags/vX.Y.Z` and passes here.
         run: |
           set -euo pipefail
           ok=0
           for attempt in 1 2 3; do
             if cosign verify-blob \
               --bundle SHA256SUMS.txt.bundle \
-              --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \
+              --certificate-identity-regexp "^https://github\.com/gl0di/clawseccheck/\.github/workflows/clawhub-publish\.yml@refs/tags/v" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               SHA256SUMS.txt; then
               ok=1
@@ -908,6 +944,15 @@ jobs:
           asset_names() {
             gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
           }
+          # B-837: `gh release create` with assets is several API calls under the hood
+          # (create as a draft, upload the assets, then publish). If the publish call
+          # fails after the upload succeeded, the release is left as a draft that
+          # already carries both asset names — the name-only check below used to treat
+          # that as success, so the job went green while the release never went public
+          # (README's releases/download/... URLs 404 on a draft).
+          is_draft() {
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft'
+          }
           ensure_release() {
             if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               names="$(asset_names)" || return 1
@@ -948,7 +993,26 @@ jobs:
               exit 1
             fi
           done
-          echo "Release ${TAG} carries ${ASSETS[*]}."
+          draft="$(is_draft)" || {
+            echo "::error::Could not read isDraft state for release ${TAG}."
+            exit 1
+          }
+          if [ "$draft" = "true" ]; then
+            echo "Release ${TAG} carries both assets but is still a draft; publishing it."
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false || {
+              echo "::error::Release ${TAG} is a draft and could not be published."
+              exit 1
+            }
+            draft="$(is_draft)" || {
+              echo "::error::Could not re-read isDraft state for release ${TAG} after publishing."
+              exit 1
+            }
+          fi
+          if [ "$draft" != "false" ]; then
+            echo "::error::Release ${TAG} still reports isDraft=${draft} after attempting to publish it."
+            exit 1
+          fi
+          echo "Release ${TAG} carries ${ASSETS[*]} and is published (isDraft=false)."
 
       - name: Finalize job status
         # C-368: the single pass/fail point for this job's publish outcome. Every step

@@ -77,6 +77,34 @@ with the documented user command. After publishing to ClawHub it creates the
 GitHub Release with both assets and fails the run unless both are attached.
 Publishing is deliberately tag-gated — there is no auto-release.
 
+### If "Create GitHub Release" hard-exits on a half-created release
+
+The step retries `gh release create`/`gh release upload` up to 3 times, but a
+release left with exactly **one** of the two expected assets
+(`SHA256SUMS.txt`, `SHA256SUMS.txt.bundle`) — e.g. a partial upload from an
+earlier, interrupted run — is treated as a mismatch it will not silently
+"complete": it exits immediately with
+`::error::Release vX.Y.Z has only one of the two signed assets; a human must
+resolve the mismatch.` A release left with **zero** of the two, or a `gh`
+call that keeps failing, exhausts its 3 retries and exits with
+`::error::Could not create or complete the GitHub Release for vX.Y.Z.`
+Either way this needs a human, not a re-run of CI alone:
+
+1. Check what is actually attached:
+   `gh release view vX.Y.Z --json assets --jq '.assets[].name'`.
+2. Fix the mismatch by hand — either attach the missing asset(s)
+   (`gh release upload vX.Y.Z SHA256SUMS.txt SHA256SUMS.txt.bundle`, run
+   locally from the tagged tree so the files match the digest cosign signed),
+   or, if the release is otherwise unusable, delete it entirely
+   (`gh release delete vX.Y.Z`). Never force-replace assets on an existing
+   release with mismatched bytes — a `DUPLICATE` verdict must not let a later
+   run's upload overwrite a prior, honestly-signed one.
+3. Once the release is either fixed or deleted, re-run the workflow
+   (`workflow_dispatch`, or push the tag again) so it verifies (or recreates)
+   the release cleanly — this also re-checks `isDraft` and publishes a
+   lingering draft automatically. Confirm afterwards with
+   `gh release view vX.Y.Z --json isDraft,assets`.
+
 ## Release-notes template
 
 Lead with user impact; the exhaustive technical changelog can follow below it.

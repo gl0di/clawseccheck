@@ -219,25 +219,91 @@ def _real_publish_invocation() -> dict:
     return real[0]
 
 
-def test_publish_workflow_pins_clawhub() -> None:
-    """clawhub must be installed at an exact pinned version (clawhub@X.Y.Z).
+TOOLS_DIR = REPO_ROOT / ".github" / "tools"
 
-    A bare 'npm i -g clawhub' line (with no '@' version suffix) must not exist.
+
+def test_publish_workflow_pins_clawhub() -> None:
+    """clawhub is installed via a pinned, script-free lockfile install.
+
+    CLAWSECCHECK-C-548: 'npm i -g clawhub@X.Y.Z' pins one package name+version, but
+    npm still resolves clawhub's WHOLE transitive dependency tree fresh at install
+    time and may run any package's lifecycle scripts — inside the job that holds
+    CLAWHUB_TOKEN, contents:write and id-token:write. 'npm ci --ignore-scripts'
+    against the committed .github/tools/package-lock.json pins that entire tree and
+    refuses to execute any lifecycle script. A future edit that quietly reverts to
+    'npm i -g' (global, unpinned tree, scripts allowed) must fail this test.
     """
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    # The pinned form must be present.
-    assert "clawhub@" in text, (
-        "Expected 'clawhub@<version>' pin in workflow but found none."
+    assert "npm ci --ignore-scripts" in text, (
+        "Expected clawhub to be installed with 'npm ci --ignore-scripts' against "
+        "the committed .github/tools lockfile, but found no such line."
     )
-    # No bare unpinned install line (the pattern: contains 'npm' and 'clawhub'
-    # but lacks '@' on the same line as 'clawhub').
+    # No bare global npm install may reappear anywhere in the workflow (comments
+    # excluded, so prose mentioning the old form doesn't false-positive here).
     for line in _lines():
         stripped = line.strip()
-        if "npm" in stripped and "clawhub" in stripped:
-            assert "@" in stripped, (
-                f"Found unpinned clawhub install line: {line!r}\n"
-                "Change it to 'npm i -g clawhub@<version>'."
+        if stripped.startswith("#"):
+            continue
+        if re.search(r"\bnpm\s+(i|install)\b", stripped) and "-g" in stripped:
+            raise AssertionError(
+                f"Found a global npm install line: {line!r}\n"
+                "clawhub/markdownlint-cli must be installed from the pinned "
+                ".github/tools lockfile with 'npm ci --ignore-scripts', not '-g'."
             )
+    # The manifest itself pins an exact version — no caret/tilde/range — so the
+    # committed lockfile's resolved tree is reproducible, not just "some 0.23.x".
+    manifest = json.loads((TOOLS_DIR / "package.json").read_text(encoding="utf-8"))
+    clawhub_spec = manifest.get("devDependencies", {}).get("clawhub", "")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", clawhub_spec), (
+        f".github/tools/package.json must pin clawhub to an exact version, "
+        f"got {clawhub_spec!r}"
+    )
+    lock = json.loads((TOOLS_DIR / "package-lock.json").read_text(encoding="utf-8"))
+    locked_spec = lock["packages"][""]["devDependencies"]["clawhub"]
+    assert locked_spec == clawhub_spec, (
+        f"package.json pins clawhub@{clawhub_spec} but package-lock.json's root "
+        f"devDependencies entry says {locked_spec!r} — regenerate the lockfile."
+    )
+
+
+def test_publish_workflow_pins_pytest_ruff_with_hashes() -> None:
+    """The smoke-gate pip install is hash-pinned against a committed lockfile.
+
+    CLAWSECCHECK-C-548: a bare 'pip install pytest==X ruff==Y' pins the two direct
+    packages but still resolves their transitive deps (iniconfig/packaging/pluggy)
+    unpinned, with no hash check — the same job that holds CLAWHUB_TOKEN /
+    contents:write / id-token:write. '--require-hashes -r .github/tools/
+    requirements-ci.txt' refuses to install anything whose hash isn't in the
+    committed, pip-compile-generated manifest.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "pip install --require-hashes -r .github/tools/requirements-ci.txt" in text, (
+        "Expected the smoke gate to install pytest/ruff via "
+        "'pip install --require-hashes -r .github/tools/requirements-ci.txt'."
+    )
+    for line in _lines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        assert not re.search(r"pip install (?!--require-hashes)\S*pytest==", stripped), (
+            f"Found an unhashed pytest install line: {line!r}"
+        )
+    req_txt = (TOOLS_DIR / "requirements-ci.txt").read_text(encoding="utf-8")
+    for pkg in ("pytest==7.4.4", "ruff==0.15.20"):
+        assert pkg in req_txt, f"{pkg!r} missing from .github/tools/requirements-ci.txt"
+    # --require-hashes refuses the WHOLE install if even one resolved package (direct
+    # or transitive) lacks a hash — so every "name==version" block, up to the next
+    # such line or EOF, must carry at least one --hash=sha256: line.
+    lines = req_txt.splitlines()
+    pkg_starts = [i for i, ln in enumerate(lines) if re.match(r"^[A-Za-z0-9_.-]+==", ln)]
+    assert pkg_starts, "requirements-ci.txt has no pinned '==' package lines at all."
+    for idx, start in enumerate(pkg_starts):
+        end = pkg_starts[idx + 1] if idx + 1 < len(pkg_starts) else len(lines)
+        block = "\n".join(lines[start:end])
+        assert "--hash=sha256:" in block, (
+            f"Package pinned at line {start + 1} ({lines[start]!r}) has no "
+            "--hash=sha256: entry; --require-hashes would refuse this file."
+        )
 
 
 def test_publish_workflow_runs_smoke_before_publish() -> None:
@@ -1455,6 +1521,82 @@ def test_ci_verifies_the_bundle_with_exactly_the_readme_command() -> None:
     assert "set -euo pipefail" in block
 
 
+def _extract_identity_regexp(tokens: list) -> str:
+    tok = next(t for t in tokens if t.startswith("--certificate-identity-regexp"))
+    m = re.search(r'"([^"]+)"', tok)
+    assert m, f"Could not parse the identity regexp out of {tok!r}"
+    return m.group(1)
+
+
+def test_certificate_identity_regexp_pins_workflow_and_tag_ref() -> None:
+    """CLAWSECCHECK-B-875 regression test.
+
+    Pre-fix, both CI and README used `^https://github.com/gl0di/clawseccheck/`:
+    anchored only at the START, with unescaped dots. cosign's `--certificate-
+    identity-regexp` match (Go's regexp.MatchString, a substring/prefix search, not
+    a full-string match — mirrored here with Python's `re.match`, which has the same
+    "anchor at start, don't require consuming the whole string" semantics) therefore
+    accepted a signature from ANY workflow on ANY ref of this repo, and let any
+    single character stand in for a literal '.'. Neither half is what the README
+    claims the check proves ("the release workflow produced it").
+    """
+    block = _step_shell_block("Verify the signed bundle with the documented command")
+    ci_tokens = _cosign_tokens(block)
+    readme_tokens = _cosign_tokens(README_PATH.read_text(encoding="utf-8"))
+    new_pattern = _extract_identity_regexp(ci_tokens)
+    assert new_pattern == _extract_identity_regexp(readme_tokens), (
+        "CI and README must use the identical identity regexp"
+    )
+    # Pin the exact fixed shape so a future edit can't quietly re-loosen either end.
+    assert new_pattern == (
+        r"^https://github\.com/gl0di/clawseccheck/\.github/workflows/"
+        r"clawhub-publish\.yml@refs/tags/v"
+    ), new_pattern
+
+    # The exact pre-fix pattern this bug report was filed against.
+    old_pattern = "^https://github.com/gl0di/clawseccheck/"
+
+    # A signature from a DIFFERENT workflow, on a non-tag ref of the SAME repo —
+    # exactly the "any workflow, any ref" shape the bug report describes. This is
+    # what a `workflow_dispatch` run off a branch (or a compromised workflow added
+    # to some other ref of this same repo) would present.
+    forged_workflow_and_ref = (
+        "https://github.com/gl0di/clawseccheck/.github/workflows/"
+        "some-other-workflow.yml@refs/heads/attacker-controlled-branch"
+    )
+    # Unescaped-dot half of the same defect: a non-'.' character standing in for the
+    # literal dot in "github.com".
+    forged_host = (
+        "https://githubXcom/gl0di/clawseccheck/.github/workflows/"
+        "clawhub-publish.yml@refs/tags/v4.2.1"
+    )
+    # The genuine identity a real tag-triggered release run signs with.
+    genuine_identity = (
+        "https://github.com/gl0di/clawseccheck/.github/workflows/"
+        "clawhub-publish.yml@refs/tags/v4.2.1"
+    )
+
+    assert re.match(old_pattern, forged_workflow_and_ref), (
+        "sanity check: the pre-fix pattern must reproduce the reported defect by "
+        "accepting a different workflow on a different ref"
+    )
+    assert re.match(old_pattern, forged_host), (
+        "sanity check: the pre-fix pattern must reproduce the reported defect by "
+        "accepting a non-'.' character where the pattern intends a literal dot"
+    )
+
+    assert not re.match(new_pattern, forged_workflow_and_ref), (
+        f"tightened pattern {new_pattern!r} must reject a different workflow/ref"
+    )
+    assert not re.match(new_pattern, forged_host), (
+        f"tightened pattern {new_pattern!r} must reject an unescaped-dot lookalike host"
+    )
+    assert re.match(new_pattern, genuine_identity), (
+        f"tightened pattern {new_pattern!r} must still accept the genuine "
+        "tag-triggered identity"
+    )
+
+
 def _run_verify_step(tmp_path, results: list) -> subprocess.CompletedProcess:
     """Run the verify step with a stub cosign that returns *results* per attempt."""
     stub = tmp_path / "bin"
@@ -1495,9 +1637,18 @@ echo "$*" >> "$STUB/argv.log"
 case "$1 $2" in
   "release view")
     [ -f "$STUB/exists" ] || exit 1
-    case " $* " in *" --json "*) cat "$STUB/assets" ;; esac
+    case " $* " in
+      *" --json isDraft "*)
+        if [ -f "$STUB/draft" ]; then echo true; else echo false; fi ;;
+      *" --json "*) cat "$STUB/assets" ;;
+    esac
     exit 0 ;;
   "release create")
+    if [ -n "${GH_FAIL_CREATE_TIMES:-}" ]; then
+      n=$(( $(cat "$STUB/create_calls" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$STUB/create_calls"
+      [ "$n" -gt "$GH_FAIL_CREATE_TIMES" ] || exit 1
+    fi
     [ -z "${GH_FAIL_CREATE:-}" ] || exit 1
     touch "$STUB/exists"
     if [ -z "${GH_NO_ASSETS_ADDED:-}" ]; then
@@ -1510,12 +1661,16 @@ case "$1 $2" in
       for a in "$@"; do case "$a" in SHA256SUMS*) echo "$a" >> "$STUB/assets" ;; esac; done
     fi
     exit 0 ;;
+  "release edit")
+    [ -z "${GH_FAIL_EDIT:-}" ] || exit 1
+    rm -f "$STUB/draft"
+    exit 0 ;;
 esac
 exit 99
 """
 
 
-def _run_create_step(tmp_path, existing=None, **flags):
+def _run_create_step(tmp_path, existing=None, draft=False, **flags):
     """Run the real Create GitHub Release shell against a stateful stub gh."""
     stub = tmp_path / "stub"
     stub.mkdir()
@@ -1529,6 +1684,8 @@ def _run_create_step(tmp_path, existing=None, **flags):
     if existing is not None:
         (stub / "exists").write_text("", encoding="utf-8")
         (stub / "assets").write_text("".join(f"{a}\n" for a in existing), encoding="utf-8")
+    if draft:
+        (stub / "draft").write_text("", encoding="utf-8")
     work = tmp_path / "work"
     work.mkdir()
     (work / "CHANGELOG.md").write_text("## [9.9.9]\n- something\n", encoding="utf-8")
@@ -1536,7 +1693,7 @@ def _run_create_step(tmp_path, existing=None, **flags):
         os.environ, PATH=f"{bindir}:{os.environ['PATH']}", STUB=str(stub),
         GITHUB_REF_NAME="v9.9.9", GITHUB_REPOSITORY="owner/repo", GH_TOKEN="x",
     )
-    env.update({k: "1" for k, v in flags.items() if v})
+    env.update({k: str(v) for k, v in flags.items() if v})
     proc = subprocess.run(
         ["bash", "-eo", "pipefail", "-c", _step_shell_block("Create GitHub Release")],
         cwd=str(work), capture_output=True, text=True, env=env,
@@ -1581,6 +1738,80 @@ def test_create_release_step_fails_loudly_and_asserts_both_assets(
     assert "--clobber" not in log, ctx
     if not ok:
         assert "::error::" in proc.stdout, ctx
+
+
+
+# ---------------------------------------------------------------------------------
+# CLAWSECCHECK-B-837: `gh release create` with assets is several API calls under the
+# hood (create as a draft, upload the assets, then publish). If the publish call
+# fails after the upload, the release is left as a DRAFT that already carries both
+# asset names — the retry's "already carries both assets" short-circuit, and the
+# final name-only assertion, both used to treat that as success. These prove the
+# step now also reads isDraft and either publishes the lingering draft or fails.
+# ---------------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_fails_on_a_lingering_draft_it_cannot_publish(tmp_path) -> None:
+    """Both assets already present but the release is still a draft, and the recovery
+    `gh release edit --draft=false` call also fails: the job must turn red, not
+    report success on asset-names-alone."""
+    proc, log = _run_create_step(tmp_path, existing=_BOTH, draft=True, GH_FAIL_EDIT=1)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode != 0, ctx
+    assert "::error::" in proc.stdout, ctx
+    assert "release edit" in log, ctx
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_publishes_a_lingering_draft_when_it_can(tmp_path) -> None:
+    """Same starting state, but `gh release edit --draft=false` succeeds: the step
+    recovers the draft and the job passes."""
+    proc, log = _run_create_step(tmp_path, existing=_BOTH, draft=True)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode == 0, ctx
+    assert "release edit" in log, ctx
+    assert "isDraft=false" in proc.stdout, ctx
+
+
+# ---------------------------------------------------------------------------------
+# CLAWSECCHECK-B-874: the outer `for attempt in 1 2 3; do ... done` retry loop around
+# `ensure_release` was never pinned by a test. A test that only checks pass/fail (as
+# the existing `create-fails` parametrized case does) cannot distinguish a correctly
+# bounded 3-attempt retry from one that gives up after a single try, or from one that
+# would loop forever on a permanent failure -- all three "look the same" from a bare
+# return-code assertion when the failure is permanent. These count the actual number
+# of `gh release create` invocations to pin the bound in both directions: retries
+# really happen (a transient failure recovers) and they are capped (a permanent
+# failure exits non-zero after exactly 3 attempts, not 1 and not forever).
+# ---------------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_retries_a_transient_failure_then_succeeds(tmp_path) -> None:
+    """`gh release create` fails once, then succeeds: the job must pass, and it must
+    have actually retried (two calls), not failed outright on the first try."""
+    proc, log = _run_create_step(tmp_path, existing=None, GH_FAIL_CREATE_TIMES=1)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode == 0, ctx
+    calls = log.count("release create v9.9.9")
+    assert calls == 2, f"expected exactly one retry (2 calls), got {calls}\n{ctx}"
+    assert "Release attempt 1 failed." in proc.stdout, ctx
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_retry_loop_is_bounded_and_fails_red(tmp_path) -> None:
+    """A permanent `gh release create` failure must exhaust a BOUNDED number of
+    attempts (3, per the workflow's `for attempt in 1 2 3`) and then fail the job --
+    not retry once and give up, and not retry indefinitely."""
+    proc, log = _run_create_step(tmp_path, existing=None, GH_FAIL_CREATE=1)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode != 0, ctx
+    calls = log.count("release create v9.9.9")
+    assert calls == 3, f"expected exactly 3 bounded attempts, got {calls}\n{ctx}"
+    assert "Release attempt 1 failed." in proc.stdout, ctx
+    assert "Release attempt 2 failed." in proc.stdout, ctx
+    assert "Release attempt 3 failed." in proc.stdout, ctx
+    assert "Release attempt 4 failed." not in proc.stdout, (
+        "a 4th attempt means the retry bound was loosened or removed" + f"\n{ctx}"
+    )
+    assert "::error::Could not create or complete the GitHub Release for v9.9.9." in proc.stdout, ctx
 
 
 def test_create_release_step_never_swallows_errors_or_clobbers() -> None:

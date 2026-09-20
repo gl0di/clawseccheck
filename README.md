@@ -324,13 +324,16 @@ curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SU
 
 cosign verify-blob \
   --bundle SHA256SUMS.txt.bundle \
-  --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \
+  --certificate-identity-regexp "^https://github\.com/gl0di/clawseccheck/\.github/workflows/clawhub-publish\.yml@refs/tags/v" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS.txt
 ```
 
-A passing verification proves the reference digest was produced by this repo's
-release workflow and hasn't been altered since.
+A passing verification proves the reference digest was produced by *this* repo's
+`clawhub-publish.yml` workflow running on a `vX.Y.Z` release tag, and hasn't been
+altered since — not merely that some workflow, on some branch, in this repo signed
+it. (The identity pins the workflow file and the `refs/tags/v` ref prefix; the
+version suffix varies per release and cannot be pinned here.)
 
 `SHA256SUMS.txt` also lists the files shipped beside the engine package
 (`SKILL.md`, `audit.py`, `pyproject.toml`, `references/cli-flags.md`, `docs/`, …)

@@ -270,6 +270,49 @@ def test_dependabot_labels_exist() -> None:
     assert labels and set(labels) <= set(_KNOWN_LABELS), labels
 
 
+def test_dependabot_watches_the_ci_toolchain_manifests() -> None:
+    """npm/pip ecosystems watch .github/tools, closing the update-channel blind spot.
+
+    CLAWSECCHECK-C-548: before this, clawhub/markdownlint-cli (npm, `npm i -g`) and
+    pytest/ruff (pip, inline `pip install`) had no update channel or advisory path —
+    Dependabot's github-actions ecosystem only ever parses `uses:` lines.
+    """
+    text = (REPO_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    for ecosystem in ("npm", "pip"):
+        m = re.search(
+            rf'package-ecosystem:\s*"{ecosystem}"\s*\n\s*directory:\s*"([^"]+)"',
+            text,
+        )
+        assert m, f"No {ecosystem!r} package-ecosystem block found in dependabot.yml"
+        assert m.group(1).rstrip("/").endswith(".github/tools"), (
+            f"{ecosystem} ecosystem directory {m.group(1)!r} should scope to "
+            ".github/tools, not the whole repo — a repo-root directory would also "
+            "pick up the intentionally-vulnerable fixtures/**/requirements.txt "
+            "test vectors, which must NOT be touched by Dependabot."
+        )
+
+
+def test_ci_uses_pinned_toolchain_manifests() -> None:
+    """markdownlint-cli and pytest/ruff install from the pinned .github/tools manifests.
+
+    CLAWSECCHECK-C-548: 'npm install -g markdownlint-cli@X' and a bare
+    'pip install pytest==X ruff==Y' each resolve their own transitive tree fresh at
+    install time, with no lockfile and no hash check. Both jobs now install from the
+    committed .github/tools/package-lock.json ('npm ci --ignore-scripts') and
+    .github/tools/requirements-ci.txt ('pip install --require-hashes').
+    """
+    markdownlint_body = _step_body("Install markdownlint-cli")
+    assert "npm ci --ignore-scripts --prefix .github/tools" in markdownlint_body
+    assert "GITHUB_PATH" in markdownlint_body
+    assert "npm install -g" not in _strip_comments(CI_PATH.read_text(encoding="utf-8"))
+
+    test_job_body = _job_blocks()["test"]
+    assert (
+        "pip install --require-hashes -r .github/tools/requirements-ci.txt"
+        in test_job_body
+    )
+
+
 def _step_body(name_fragment: str) -> str:
     lines = CI_PATH.read_text(encoding="utf-8").splitlines()
     start = next(
@@ -428,3 +471,71 @@ def test_empty_range_falls_back_to_tip_and_still_catches_trailer(repo, case) -> 
     assert r.returncode == 0 and "Inspecting 1 commit(s)" in r.stdout, r.stdout + r.stderr
     r2, _ = _chain("No AI-agent co-author", rng, repo)
     assert r2.returncode == 1 and "OK: no AI co-author tags" not in r2.stdout
+
+
+# ---------------------------------------------------------------------------
+# B-840: "No agent config files" was fail-open (root-only pathspec, no `set -e`)
+# ---------------------------------------------------------------------------
+
+
+@needs_bash
+def test_agent_config_guard_catches_a_nested_config_file(repo) -> None:
+    """A bare `git ls-files CLAUDE.md` pathspec matches only the repo root.
+
+    Before B-840 this step passed with "OK" on a tracked sub/CLAUDE.md, since the
+    pathspec never looked below the top level. The guard must inspect the whole
+    tracked-file list so a match at any depth is caught.
+    """
+    (repo / "sub").mkdir()
+    (repo / "sub" / "CLAUDE.md").write_text("nested agent config")
+    _git(repo, "add", "sub/CLAUDE.md")
+    _commit(repo, "add nested config")
+    r, _ = _bash(_step_body("No agent config files"), repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "sub/CLAUDE.md" in r.stdout
+    assert "OK: no agent config files in git tree" not in r.stdout
+
+
+@needs_bash
+def test_agent_config_guard_catches_a_nested_dotdir(repo) -> None:
+    """Same defect, a different forbidden name: a nested `.claude/` directory."""
+    (repo / "sub" / ".claude").mkdir(parents=True)
+    (repo / "sub" / ".claude" / "settings.json").write_text("{}")
+    _git(repo, "add", "sub/.claude/settings.json")
+    _commit(repo, "add nested dotdir")
+    r, _ = _bash(_step_body("No agent config files"), repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "sub/.claude/settings.json" in r.stdout
+
+
+def test_agent_config_guard_passes_on_the_real_tree() -> None:
+    """The real tree's only match is the allowlisted fixture; the guard stays green.
+
+    Run against REPO_ROOT itself (not the `repo` fixture, which has no bash
+    dependency requirement here since REPO_ROOT is a real git checkout).
+    """
+    if shutil.which("bash") is None:
+        pytest.skip("bash not available")
+    r, _ = _bash(_step_body("No agent config files"), REPO_ROOT)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "OK: no agent config files in git tree" in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# B-840: "Author identity check" warned spuriously on an empty log
+# ---------------------------------------------------------------------------
+
+
+@needs_bash
+def test_author_check_is_silent_on_an_empty_range(repo) -> None:
+    """An empty range (e.g. a merge-only HEAD^! fallback) must not fake a warning.
+
+    Before B-840, `grep -vE "$OK" <<<""` fed one blank line to grep, which "matched"
+    (a blank line is not a canonical author) and printed "Non-canonical author(s)"
+    with nothing after it — noise on every empty range.
+    """
+    _commit(repo, "root")
+    r, _ = _chain("Author identity check", "HEAD..HEAD", repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "::warning::" not in r.stdout
+    assert "OK: no non-merge commits in range to check" in r.stdout
