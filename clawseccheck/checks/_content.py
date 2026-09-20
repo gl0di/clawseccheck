@@ -3190,10 +3190,12 @@ def _b170_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             continue
         start = max(0, m.start() - _B170_WINDOW)
         end = min(len(text), m.end() + _B170_WINDOW)
-        # B-762: trim before window is built/searched -- see _trim_partial_token.
         truncated_head = start > 0
         truncated_tail = end < len(text)
-        start, end = _trim_partial_token(text, start, end, m.start(), m.end())
+        # B-867: `window` is the GATING corpus for `_B170_SOURCE_RE` below, so it stays on
+        # the RAW bounds -- trimming it (the B-762 mistake) can drop the source noun the
+        # gate is searching for right off the edge and silence a real finding. The trim is
+        # display-only; see `disp_start`/`disp_end` below.
         window = text[start:end]
         if not _B170_SOURCE_RE.search(window):
             continue
@@ -3201,7 +3203,8 @@ def _b170_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         if key in seen:
             continue
         seen.add(key)
-        snippet = window.strip().replace("\n", " ")
+        disp_start, disp_end = _trim_partial_token(text, start, end, m.start(), m.end())
+        snippet = text[disp_start:disp_end].strip().replace("\n", " ")
         capped = len(snippet) > 120
         if capped:
             snippet = snippet[:117] + "..."
@@ -5023,19 +5026,17 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             continue
         start = max(0, m.start() - _B65_WINDOW)
         end = min(len(text), m.end() + _B65_WINDOW)
-        # B-762: drop any ASCII token the fixed-width slice cut in half, mirroring
-        # _b61_window's B-286 fix (see its docstring) via the shared
-        # _trim_partial_token -- without it a shown snippet can start or end mid-word
-        # ("ders." for the tail of a cut "triggers"), which reads as garbled and,
-        # unlike B61's pattern-matching window, is purely a display defect here since
-        # `window` below only ever reaches evidence text, never a regex search corpus
-        # of its own construction. `truncated_head`/`truncated_tail` are recorded from
-        # the PRE-trim bounds (trimming only ever narrows further inward, so the
-        # boundary question they answer -- "is there more text past this edge" -- is
-        # unchanged by it) so the marker added below is accurate either way.
         truncated_head = start > 0
         truncated_tail = end < len(text)
-        start, end = _trim_partial_token(text, start, end, m.start(), m.end())
+        # B-867: `window` is the GATING corpus -- it feeds `_B65_QUERY_RE`, `_B65_DELAY_RE`,
+        # `_B65_MARKER_TRIGGER_RE`, `_b65_live_action_match`, `_has_outbound_exfil`,
+        # `_B65_EXFIL_HINT_RE` and `_b65_secret_send_corroborated` below, so it is built from
+        # the RAW `start`/`end` and never trimmed: trimming it (the B-762 mistake) can drop a
+        # destination/trigger token that straddles the fixed-width edge and silence a real
+        # WARN (a false negative), contradicting B-762's own claim that the trim "never
+        # touches whether a finding fires". The word-boundary trim is display-only -- see
+        # `disp_start`/`disp_end` below, computed from these same raw bounds but fed only to
+        # the rendered snippet, never back into a search or position calculation.
         window = text[start:end]
         # B-186: an absolute-count trigger in the window IS persistence framing, so it
         # satisfies the query-or-delay gate on its own (no "user says" query phrase needed).
@@ -5139,7 +5140,10 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             for a0, a1 in action_spans
         ):
             continue
-        snippet = window.strip().replace("\n", " ")
+        # B-867: trim only the DISPLAYED slice, from the same raw bounds -- never fed back
+        # into a search or into `start`, which the caller no longer needs after this point.
+        disp_start, disp_end = _trim_partial_token(text, start, end, m.start(), m.end())
+        snippet = text[disp_start:disp_end].strip().replace("\n", " ")
         capped = len(snippet) > 120
         if capped:
             snippet = snippet[:117] + "..."
@@ -5290,12 +5294,15 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             continue
         start = max(0, m.start() - _B66_WINDOW)
         end = min(len(text), m.end() + _B66_WINDOW)
-        # B-762: trim before window is built (not after) -- trigger.start() below is
-        # measured against `window`'s own coordinates and start+trigger.start() maps it
-        # back to `text`, so the trim must land before either the search or that math.
         truncated_head = start > 0
         truncated_tail = end < len(text)
-        start, end = _trim_partial_token(text, start, end, m.start(), m.end())
+        # B-867: `window` is the GATING corpus for `_B66_CORE_RE`/`_B66_RESET_RE` below --
+        # it stays on the RAW `start`/`end` (trimming it, the B-762 mistake, can drop the
+        # jailbreak trigger token itself off the edge and silence a real WARN).
+        # `start + trigger.start()` below maps a match found in THIS window back to `text`,
+        # so `start` must stay the window's own (untrimmed) origin throughout. The
+        # word-boundary trim is applied only to the separate `disp_start`/`disp_end` used
+        # for the rendered snippet, never fed back into a search or this position math.
         window = text[start:end]
         # A high-signal jailbreak CORE token OR a persona-RESET verb fires on its own
         # (B-120); an ambiguous weakening phrase alone (_B66_WEAK_RE) does not (B-117).
@@ -5319,7 +5326,8 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         # heading) must not WARN (B-120 guard for the reset-alone firing path).
         if _under_defensive_heading(text, m.start()):
             continue
-        snippet = window.strip().replace("\n", " ")
+        disp_start, disp_end = _trim_partial_token(text, start, end, m.start(), m.end())
+        snippet = text[disp_start:disp_end].strip().replace("\n", " ")
         capped = len(snippet) > 120
         if capped:
             snippet = snippet[:117] + "..."
@@ -5338,11 +5346,14 @@ def _b66_authority_override_scan(text: str, fr: list[tuple[int, int]]) -> list[s
             continue
         start = max(0, m.start() - _B66_WINDOW)
         end = min(len(text), m.end() + _B66_WINDOW)
-        # B-762: trim before window is built -- trigger.start() below is measured
-        # against `window`'s own coordinates, same reasoning as _b66_scan above.
         truncated_head = start > 0
         truncated_tail = end < len(text)
-        start, end = _trim_partial_token(text, start, end, m.start(), m.end())
+        # B-867: `window` is the GATING corpus for `_B66_AUTHORITY_NEUTRALIZE_RE` below and
+        # stays on the RAW `start`/`end`, same reasoning as `_b66_scan` above -- trimming it
+        # can drop the neutralize-clause token off the edge and silence a real WARN, and
+        # `start + trigger.start()` below must map back to `text` through this same
+        # untrimmed `start`. The word-boundary trim is display-only (`disp_start`/`disp_end`
+        # below).
         window = text[start:end]
         trigger = _B66_AUTHORITY_NEUTRALIZE_RE.search(window)
         if not trigger:
@@ -5369,7 +5380,8 @@ def _b66_authority_override_scan(text: str, fr: list[tuple[int, int]]) -> list[s
             continue
         if _under_defensive_heading(text, m.start()):
             continue
-        snippet = window.strip().replace("\n", " ")
+        disp_start, disp_end = _trim_partial_token(text, start, end, m.start(), m.end())
+        snippet = text[disp_start:disp_end].strip().replace("\n", " ")
         capped = len(snippet) > 120
         if capped:
             snippet = snippet[:117] + "..."
