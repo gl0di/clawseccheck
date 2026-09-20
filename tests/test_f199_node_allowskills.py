@@ -100,7 +100,7 @@ def test_accessor_is_quiet_on_a_config_with_neither():
         assert path == "gateway.nodes.allowSkills"
 
 
-# -------------------------------------------------------------------- B383 (the check)
+# -------------------------------------------------------------------- B386 (the check)
 
 @pytest.mark.parametrize("shape", _SHAPES)
 def test_warns_on_explicit_true_in_either_shape(shape):
@@ -157,15 +157,15 @@ def test_unknown_when_config_unparseable():
 
 def test_still_registered_and_scored_consistently():
     from clawseccheck.catalog import BY_ID
-    meta = BY_ID["B383"]
+    meta = BY_ID["B386"]
     assert meta.scored is False
 
 
 # ------------------------------------------------------------------- fixtures
 
 @pytest.mark.parametrize("name,status", [
-    ("bad_b383_allowskills_default_on", "WARN"),
-    ("clean_b383_allowskills_disabled_legacy", "PASS"),
+    ("bad_b386_allowskills_default_on", "WARN"),
+    ("clean_b386_allowskills_disabled_legacy", "PASS"),
 ])
 def test_fixture_produces_the_expected_status(name, status):
     from clawseccheck.collector import collect

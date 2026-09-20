@@ -2105,7 +2105,7 @@ def check_node_denycommands_ineffective(ctx: Context) -> Finding:
 
 
 def check_node_allowskills_default_on(ctx: Context) -> Finding:
-    """B383 — gateway.nodes.allowSkills default-on paired-node skill push.
+    """B386 — gateway.nodes.allowSkills default-on paired-node skill push.
 
     Grounded against the installed 2026.9.5 dist (F-199): the vendor's own field
     description (schema-*.mjs) reads "Accept skills published by paired nodes while
@@ -2131,12 +2131,12 @@ def check_node_allowskills_default_on(ctx: Context) -> Finding:
     """
     if not ctx.config_found:
         return _finding(
-            "B383",
+            "B386",
             UNKNOWN,
             "No openclaw.json found -- gateway.nodes.allowSkills cannot be assessed.",
             "Run the audit against the OpenClaw profile directory (its openclaw.json).",
         )
-    unreadable = _config_unreadable("B383", ctx)
+    unreadable = _config_unreadable("B386", ctx)
     if unreadable is not None:
         return unreadable
 
@@ -2144,7 +2144,7 @@ def check_node_allowskills_default_on(ctx: Context) -> Finding:
 
     if value is False:
         return _finding(
-            "B383",
+            "B386",
             PASS,
             f"{path}=false -- paired gateway nodes may not publish skills into this "
             "setup.",
@@ -2168,7 +2168,7 @@ def check_node_allowskills_default_on(ctx: Context) -> Finding:
                "publishing skills.")
 
     return _finding(
-        "B383",
+        "B386",
         WARN,
         f"{spelling} -- OpenClaw's own default for this key is true, so a paired "
         "gateway node may publish skills into this setup the moment it is connected, "

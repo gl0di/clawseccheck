@@ -1468,7 +1468,7 @@ CHECKS = [
     check_exec_strict_inline_eval,
     check_trustedproxy_loopback,
     check_node_denycommands_ineffective,
-    check_node_allowskills_default_on,  # B383 — paired-node skill push default-on (F-199)
+    check_node_allowskills_default_on,  # B386 — paired-node skill push default-on (F-199)
     check_subagents_allow_agents,
     check_discovery_mdns_mode,
     check_mcp_tool_inheritance,

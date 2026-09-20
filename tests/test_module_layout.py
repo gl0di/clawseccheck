@@ -243,7 +243,7 @@ _EXEMPT = {
                              "why it's WARN-only and correcting a prior false "
                              "\"per-agent layers can only narrow\" claim in two docstrings. "
                              "Grew again with CLAWSECCHECK-F-199: check_node_"
-                             "allowskills_default_on (B383), the sibling of B71's "
+                             "allowskills_default_on (B386), the sibling of B71's "
                              "gateway.nodes.commands dual-shape read for the "
                              "gateway.nodes.allowSkills / legacy skills.enabled rename. "
                              "A finer split is a later cycle.",
