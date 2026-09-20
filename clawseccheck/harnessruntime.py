@@ -58,9 +58,23 @@ from .collector import agent_roster
 #: not model", so it degrades to the previous WARN until the battery is re-run against that
 #: build (``python3.12 tests/_harnessoracle.py --write``) and ``ORACLE_MAX`` is raised with it.
 #: Only the first three components are compared, so a correction release of the validated
-#: build (2026.9.4-1) stays inside the window; a new patch or minor does not.
-ORACLE_MIN = (2026, 9, 4)
-ORACLE_MAX = (2026, 9, 4)
+#: build (2026.9.5-1) stays inside the window; a new patch or minor does not.
+#:
+#: The floor moved off 2026.9.4 when the battery was regenerated on 2026.9.5, and that was a
+#: measurement, not housekeeping: over the 770 pinned rows the vendor's own answer changed on
+#: six, all in the same direction -- 9.5 THROWS where 9.4 returned a runtime. Two of the three
+#: throw sites are reachable from ``collectConfiguredAgentHarnessRuntimes`` on config the
+#: loader accepts: ``Object.keys(null)`` in ``model-extra-params-*.mjs`` (its guard is
+#: ``source !== void 0``, which catches undefined but not null) when an agent carries
+#: ``params: null`` AND a model that routes through the OpenAI path -- measured, an
+#: ``anthropic/*`` model with the same ``params: null`` never reaches the check; and
+#: ``value?.id?.trim is not a function`` in ``hasRuntimePolicy``
+#: (``model-runtime-policy-*.mjs``) when ``models[ref].agentRuntime.id`` is a number -- the
+#: optional chain guards null and undefined but not a non-string. So the two builds are NOT
+#: interchangeable here, and after the regeneration nothing pins 9.4 any more. Keeping it in
+#: the window would have asserted a validation this repo no longer holds evidence for.
+ORACLE_MIN = (2026, 9, 5)
+ORACLE_MAX = (2026, 9, 5)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 
@@ -599,7 +613,7 @@ def codex_harness_reach(cfg, version, environ=None) -> HarnessReach:
     """Whether a configured agent runs the Codex app-server harness. See the module docstring.
 
     *version* is the installed (or config-stamped) OpenClaw build as a numeric tuple such as
-    ``(2026, 9, 4)``, or None when unknown. Outside ``ORACLE_MIN <= build[:3] <= ORACLE_MAX``
+    ``(2026, 9, 5)``, or None when unknown. Outside ``ORACLE_MIN <= build[:3] <= ORACLE_MAX``
     every answer is ``unknown``. *environ* defaults to this process's environment; tests
     pass their own.
     """

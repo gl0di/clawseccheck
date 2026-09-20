@@ -48,7 +48,7 @@ BATTERY_PATH = HERE / "data" / "harnessruntime_battery.json"
 FIXTURES = HERE.parent / "fixtures"
 
 #: The build the battery was generated against (recorded in the battery header).
-ORACLE_BUILD = "2026.9.4"
+ORACLE_BUILD = "2026.9.5"
 
 # --------------------------------------------------------------------------------------
 # node side
@@ -545,7 +545,8 @@ def write_battery() -> None:
     ver = dist_version()
     assert ver == ORACLE_BUILD, (
         f"installed OpenClaw is {ver}, the battery is pinned to {ORACLE_BUILD}. Re-baseline "
-        f"deliberately: bump ORACLE_BUILD and harnessruntime._ORACLE_MIN together.")
+        f"deliberately: bump ORACLE_BUILD here, then diff the regenerated rows before moving "
+        f"harnessruntime.ORACLE_MIN / ORACLE_MAX to match.")
     cases = all_cases()
     results = run_oracle(copy.deepcopy(cases))
     rows = []

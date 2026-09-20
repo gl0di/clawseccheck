@@ -21,7 +21,12 @@ from clawseccheck import harnessruntime as hr
 from clawseccheck.catalog import PASS, WARN
 from clawseccheck.collector import collect
 
-VALIDATED = "2026.9.4"
+#: Derived from the port's own window, not written out: a re-baseline moves it (2026.9.4 ->
+#: 2026.9.5 did, because the vendor's answers changed), and a literal here would silently go
+#: on testing the build the port is no longer validated on. Whether the window matches the
+#: INSTALLED dist is grounded separately, in ``test_harnessruntime_dist_grounding``.
+VALIDATED = ".".join(str(x) for x in hr.ORACLE_MAX)
+ABOVE_WINDOW = (hr.ORACLE_MAX[0], hr.ORACLE_MAX[1], hr.ORACLE_MAX[2] + 1)
 BELOW = "2026.8.2"
 
 _APPROVE = {"mcp": {"servers": {"ops": {"command": "c",
@@ -127,7 +132,7 @@ def test_b353_hermetic_run_with_no_known_build_stays_unknown():
 def test_a_config_stamp_at_the_floor_counts_but_an_older_one_does_not():
     base = _cfg(_APPROVE, _models())
     # a stamp NEWER than the validated window is not extrapolated from: it degrades to WARN
-    for stamp, expect in (("2026.9.4", PASS), ("2026.9.9", WARN), ("2026.7.1", WARN),
+    for stamp, expect in ((VALIDATED, PASS), ("2026.9.9", WARN), ("2026.7.1", WARN),
                           ("2026.8.2", WARN)):
         cfg = _cfg(base, {"meta": {"lastTouchedVersion": stamp}})
         home = Path(tempfile.mkdtemp(prefix="b708-"))
@@ -300,7 +305,7 @@ def _harness_build(installed, stamp=None):
 def test_an_unorderable_installed_build_never_falls_through_to_the_stamp():
     """``2026.9.6-beta.1`` is KNOWN and newer than the validated build; reading the config's
     old stamp instead would call it the validated one and defeat the ceiling."""
-    for installed in ("2026.9.6-beta.1", "2026.9.6-rc.2", "2026.9.4-beta.1", "garbage", 5):
+    for installed in ("2026.9.6-beta.1", "2026.9.6-rc.2", f"{VALIDATED}-beta.1", "garbage", 5):
         assert _harness_build(installed, stamp=VALIDATED) is None, installed
     assert hr.codex_harness_reach(_models("anthropic/c"),
                                   _harness_build("2026.9.6-beta.1", VALIDATED)).answer \
@@ -309,13 +314,13 @@ def test_an_unorderable_installed_build_never_falls_through_to_the_stamp():
 
 def test_an_absent_installed_build_still_uses_an_in_window_stamp():
     for installed in (None, ""):
-        assert _harness_build(installed, stamp=VALIDATED) == (2026, 9, 4)
+        assert _harness_build(installed, stamp=VALIDATED) == hr.ORACLE_MAX
         assert _harness_build(installed, stamp="2026.9.9") is None
         assert _harness_build(installed) is None
     # a correction release of the validated build is orderable, stays inside the window, and
     # the (older) stamp plays no part in it
     assert hr.codex_harness_reach(_models("anthropic/c"),
-                                  _harness_build("2026.9.4-1", stamp="2026.7.1")).answer \
+                                  _harness_build(f"{VALIDATED}-1", stamp="2026.7.1")).answer \
         == hr.NO
 
 
@@ -505,7 +510,7 @@ def test_b353_a_plugin_hook_model_is_not_an_inert_pass():
 def test_no_precondition_a_known_build_inside_the_validated_window():
     assert hr.codex_harness_reach(_models("anthropic/c"), None).answer == hr.UNKNOWN
     assert hr.codex_harness_reach(_models("anthropic/c"), (2026, 9, 3)).answer == hr.UNKNOWN
-    assert hr.codex_harness_reach(_models("anthropic/c"), (2026, 9, 5)).answer == hr.UNKNOWN
+    assert hr.codex_harness_reach(_models("anthropic/c"), ABOVE_WINDOW).answer == hr.UNKNOWN
     assert hr.codex_harness_reach(_models("anthropic/c"), (2027, 1, 1)).answer == hr.UNKNOWN
 
 
