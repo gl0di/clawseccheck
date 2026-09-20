@@ -11,6 +11,7 @@ from pathlib import Path
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist
 from .. import sockets as _sockets
+from .. import toolgrant as _toolgrant
 from ..catalog import (
     CRITICAL,
     FAIL,
@@ -122,17 +123,80 @@ CLOUD_PROVIDERS = (
 # ---------- B32: Control-Plane Mutation Reachability ----------
 # gateway.tools.allow — explicit re-enablement of a tool over the HTTP gateway.
 # gateway.tools.deny  — explicit denial list.
-# Control-plane / mutation tool names that are dangerous to expose over HTTP:
+#
+# B-835: this set is now grounded on the installed openclaw@2026.9.5 dist's own
+# GATEWAY_CONTROL_PLANE_TOOLS (dangerous-tools-D5_2xo_6.mjs:35-39 — "Sensitive
+# control-plane tools. `automations` can persist scheduled runs; `gateway` exposes
+# config and self-update; `plugins` manages executable plugin lifecycles."), resolving
+# its AUTOMATIONS_TOOL_NAME import to the canonical id "automations"
+# (automations-tool-name-DBMZPbPL.mjs). Entries compared against this set MUST go
+# through _normalize_tool_name (below) first, the same normalizeToolPolicyName the
+# vendor itself applies (toolgrant._normalize_tool_name, reused rather than a third
+# copy — toolgrant.py's own docstring names checks/_shared.py's and toolpolicy.py's
+# two-entry alias tables as the narrower siblings NOT to copy from). Before this fix
+# the set held the literal alias "cron" instead of the canonical "automations" and
+# compared it against raw (non-normalised) config strings, so `gateway.tools.allow:
+# ["automations"]` (the canonical, more likely spelling) PASSED while only the legacy
+# alias "cron" FAILed — backwards from the vendor's own alias direction
+# (TOOL_NAME_ALIASES maps "cron" -> "automations", tool-policy-shared bundle).
+#
+# "plugins" is new here (B-835): 9.5 added it to GATEWAY_CONTROL_PLANE_TOOLS AND to
+# DEFAULT_GATEWAY_HTTP_TOOL_DENY (same file:25); on <=9.4 (dangerous-tools-*.mjs:34,41
+# in that release) it was neither, so gateway.tools.allow:["plugins"] was inert there.
+# Deliberately NOT made version-aware (contrast the version-gated
+# `_workshop_symlink_knob`, checks/_shared.py:1049): "plugins" manages executable
+# plugin lifecycles (dist comment above) — an explicit allow of it over the HTTP
+# gateway is a real control-plane exposure on every build this check can see, whether
+# or not the running OpenClaw version happens to default-deny it. A stale PASS on an
+# old build is a worse failure mode than an occasional inert-but-flagged allow.
+#
+# "sessions_spawn"/"sessions_send" (real CORE_TOOL_DEFINITIONS ids, tool-catalog-*.mjs)
+# stay for the "cross-session spawn/send" mutation this check has always modelled;
+# vendor's own GATEWAY_CONTROL_PLANE_TOOLS does not name them (that list only covers
+# automations/gateway/plugins) but they are still real, dangerous-over-HTTP tool ids
+# per DEFAULT_GATEWAY_HTTP_TOOL_DENY, and dropping detection coverage is out of scope
+# for this fix. "config.apply"/"update.run" also stay: they are real, grounded gateway
+# control-plane identifiers (method-scopes-CF6Mdynq.mjs, tagged CONTROL_PLANE_WRITE,
+# operator.admin scope) even though they name JSON-RPC *methods* on a different
+# gateway authorization axis (operator scopes) than the *tool* ids gateway.tools.
+# allow/deny governs — kept as a defensive, deliberately-conservative extra match on
+# the (harmless if never hit) chance a config string is set to look like one of them.
+#
+# Deliberately EXCLUDED despite being real tool ids in the same two vendor deny lists
+# (DEFAULT_GATEWAY_HTTP_TOOL_DENY and GATEWAY_OWNER_ONLY_CORE_TOOLS,
+# dangerous-tools-D5_2xo_6.mjs:8-30,45-58): "nodes" ("Nodes + devices" — device
+# pairing/control, tool-catalog-BAOwO8Un.mjs:369) and "openclaw" ("Delegate OpenClaw
+# setup and repair", ibid:362). The vendor itself keeps both OUT of
+# GATEWAY_CONTROL_PLANE_TOOLS while putting them in the broader, differently-justified
+# GATEWAY_OWNER_ONLY_CORE_TOOLS (owner-identity requirement, not "control-plane
+# mutation" — that list also adds sessions/screen/terminal/portal/conversations_*/
+# computer/mobile_ui, none of which this check's "config mutation / cron scheduling /
+# cross-session spawn-send" framing covers either). Folding device control or
+# setup-delegation into a check specifically named "control-plane mutation" would
+# assert a vendor classification the vendor's own source does not make — filed as an
+# open question for a future check (owner-only-tool exposure is a different, real
+# question) rather than smuggled into B32.
 _B32_CONTROL_PLANE_TOOLS = frozenset(
     {
+        "automations",
         "gateway",
-        "cron",
+        "plugins",
         "sessions_spawn",
         "sessions_send",
         "config.apply",
         "update.run",
     }
 )
+
+
+def _b32_normalize_tools(raw) -> set:
+    """Normalise a gateway.tools.allow/deny entry list the same way the vendor's
+    resolver does (trim + lowercase + alias fold — toolgrant._normalize_tool_name,
+    itself grounded against the installed dist's TOOL_NAME_ALIASES) before comparing
+    against _B32_CONTROL_PLANE_TOOLS. Non-string entries fold to "" (dropped), matching
+    normalizeLowercaseStringOrEmpty rather than Python's str() (a stray int/dict/list
+    entry is not a tool name, canonical or otherwise)."""
+    return {n for n in (_toolgrant._normalize_tool_name(t) for t in raw) if n}
 
 
 _C015_MAX_BYTES = 200_000
@@ -1065,8 +1129,9 @@ def _trusted_proxies_ok(value) -> bool:
 def check_control_plane_mutation(ctx: Context) -> Finding:
     """B32 — Control-plane mutation reachability via gateway.
 
-    FAIL   — gateway.tools.allow re-enables a control-plane tool (config mutation,
-             cron scheduling, or cross-session spawn/send exposed over HTTP).
+    FAIL   — gateway.tools.allow re-enables a control-plane tool (plugin lifecycle,
+             config mutation, cron/automations scheduling, or cross-session spawn/send
+             exposed over HTTP).
     WARN   — gateway is exposed (non-loopback bind or auth.mode=="none") AND
              control-plane tools are not explicitly denied in gateway.tools.deny.
     PASS   — control-plane tools are denied / not re-enabled.
@@ -1079,6 +1144,15 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
               read is ``ctx.config``, so config-locus completeness is the entire proof
               obligation; an absent/unparseable/truncated config degrades the flag back
               to ordinary UNKNOWN and the check keeps its blind-spot posture.
+
+    B-835: allow/deny entries are matched by NORMALISED identity (trim + lowercase +
+    the vendor's own alias fold — ``toolgrant._normalize_tool_name``), the same way
+    OpenClaw's own ``normalizeToolPolicyName`` resolves ``gateway.tools.allow``/
+    ``deny`` before comparing — so ``"Automations"``, ``" automations "`` and the
+    legacy alias ``"cron"`` are all recognised as the one canonical control-plane
+    tool. The FAIL message still shows each entry in the SPELLING the operator wrote
+    (not the canonical form), so a config that names the legacy alias is not reported
+    back under a name that never appears in that config.
     """
     cfg = ctx.config
     gw = cfg.get("gateway")
@@ -1100,11 +1174,21 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
     if not isinstance(deny_list, list):
         deny_list = []
 
-    allow_set = {str(t).strip() for t in allow_list}
-    deny_set = {str(t).strip() for t in deny_list}
+    deny_set = _b32_normalize_tools(deny_list)
 
-    # FAIL: a control-plane tool is explicitly re-enabled in gateway.tools.allow
-    re_enabled = sorted(_B32_CONTROL_PLANE_TOOLS & allow_set)
+    # FAIL: a control-plane tool is explicitly re-enabled in gateway.tools.allow.
+    # Matched by normalised (canonical) identity, but reported back in the spelling
+    # the operator actually wrote (raw, merely trimmed) — see the docstring's B-835
+    # note. Deduplicated + sorted so two spellings of the same tool (e.g. "cron" and
+    # "Automations" both present) do not repeat the same canonical finding twice.
+    re_enabled = sorted(
+        {
+            t.strip()
+            for t in allow_list
+            if isinstance(t, str)
+            and _toolgrant._normalize_tool_name(t) in _B32_CONTROL_PLANE_TOOLS
+        }
+    )
     if re_enabled:
         return _finding(
             "B32",
