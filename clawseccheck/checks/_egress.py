@@ -3309,10 +3309,17 @@ def check_leak(ctx: Context) -> Finding:
         }
 
     `mode` is a CONSTANT -- config feeds only `patterns`, so no configuration reaches the
-    module's `mode === "off"` branch. And custom patterns are UNIONED with the built-ins,
-    so a user list adds to the redaction set and cannot replace it; an empty list falls
-    through to the defaults. No env var disables it either -- the only `OPENCLAW_REDACT*`
-    symbol in the dist is the `OPENCLAW_REDACTED__` output marker.
+    module's `mode === "off"` branch. But a non-empty custom list does not add to the
+    built-ins on every path -- only `resolveToolPayloadRedaction` above unions it in
+    (transcripts, tool payloads, structured file-log fields). `resolveConfigRedaction`
+    hands `cfg?.redactPatterns` straight through, and the shared `resolvePatterns()` it
+    feeds REPLACES `DEFAULT_REDACT_PATTERNS` outright for a non-empty list -- that is the
+    console-output, warnings, and `openclaw logs` path. Identical on OpenClaw 2026.9.4
+    (`dist/redact-Ck-hjLec.mjs:1432-1441`) and 2026.9.5 (`dist/redact-CrCCqliq.mjs:1977-
+    1987`, `:2327-2333`) -- CLAWSECCHECK-B-836; an earlier version of this docstring
+    described the union as universal, which it is not. An empty list falls through to
+    the defaults on every path. No env var disables it either -- the only
+    `OPENCLAW_REDACT*` symbol in the dist is the `OPENCLAW_REDACTED__` output marker.
 
     That made this check actively harmful on a current build: the field is always absent,
     so it emitted WARN on EVERY 2026.8.1 config, telling the user to "pin
@@ -3343,8 +3350,11 @@ def check_leak(ctx: Context) -> Finding:
             PASS,
             "Sensitive redaction is unconditional on this OpenClaw build — the logging "
             "block has no setting that turns it off.",
-            "Nothing to set. Use logging.redactPatterns only to ADD patterns; it cannot "
-            "disable the built-in redaction.",
+            "Nothing to set. If you do set logging.redactPatterns, note it REPLACES the "
+            "built-in patterns on console output, warnings, and `openclaw logs` (it only "
+            "adds to them for transcripts/tool payloads) -- include the built-in shapes "
+            "in your list, or leave the field unset, unless you have verified your "
+            "list's own coverage.",
         )
     # A PRESENT value keeps its original verdict on every build. An earlier version of this
     # fix collapsed "off" and "tools" into one WARN on a modern build, reasoning that an
