@@ -627,6 +627,25 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="sessions",
     ),
+    # B383 (F-195): browser.extensionRelay.allowLegacyAuth (new in OpenClaw 2026.8.1,
+    # re-grounded at 2026.9.5) defaults to true "for one migration window" -- absent and
+    # explicit true are the SAME runtime state (config-Bv9CXmGW.mjs:230
+    # `?? true`; gateway-relay-route-2phSkPrI.mjs:116 `!== false`), so the relay accepts
+    # legacy Bearer/Basic/token-subprotocol auth alongside v2 on every fresh install.
+    # WARN-max by design, not FAIL-capable: it's a vendor-declared compatibility default
+    # an operator did not choose, OpenClaw's own bundled audit rates the identical
+    # condition `warn`, and the legacy path still requires the correct relay token (a
+    # protocol downgrade, not an auth bypass) -- see check_browser_extension_relay_
+    # legacy_auth's docstring/leading comment in checks/_egress.py for the full record.
+    CheckMeta(
+        "B383",
+        "browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default",
+        MEDIUM,
+        "hardening",
+        "Browser / SSRF",
+        confidence="HIGH",
+        surface="sessions",
+    ),
     # E-060 parallel-workflow batch (2026-07-25): B321/B322/B323/B325/B327/B328 grounded,
     # implemented, and independently C-135-adversarially reviewed against the installed
     # OpenClaw dist. B329 (cron.webhook/cron.webhookToken) was deferred, NOT shipped --
@@ -3505,6 +3524,7 @@ AST_MAP = {
     "B195": ("AST06",),  # extraArgs disables same-origin/loads extensions = Weak Isolation
     "B196": ("AST06",),  # arbitrary-JS eval sink reachable from page content = Weak Isolation
     "B330": ("AST06",),  # unauthenticated CDP control channel reachable off-host/cross-origin
+    "B383": ("AST06",),  # extension relay accepts legacy (weaker) auth by default = Weak Isolation (cf. B330)
     "B73": ("AST06",),  # mDNS full advertise on non-loopback exposes the agent (cf. B70)
     "B74": ("AST05",),  # forged role/provenance = untrusted external instructions (cf. B64)
     "B76": ("AST03",),  # MCP tool-inheritance bypass = over-privileged reach (cf. B75)
@@ -3849,6 +3869,16 @@ REMEDIATION = {
                 "set": False,
                 "note": "disable the browser's arbitrary-JS evaluate sink unless a "
                 "workflow genuinely requires it",
+            }
+        ]
+    },
+    "B383": {
+        "config": [
+            {
+                "path": "browser.extensionRelay.allowLegacyAuth",
+                "set": False,
+                "note": "only after every paired Chrome extension and external CDP "
+                "client speaks Browser Relay Authentication v2",
             }
         ]
     },

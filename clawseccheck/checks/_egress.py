@@ -5043,3 +5043,113 @@ def check_browser_cdp_control_port(ctx: Context) -> Finding:
         "browser.enabled=false whenever the browser tool is not needed.",
         pass_confidence="no_signal",
     )
+
+
+# F-195: browser.extensionRelay.allowLegacyAuth -- new in OpenClaw 2026.8.1, re-grounded
+# against the installed 2026.9.5 dist. Runtime resolution is IDENTICAL on both call sites
+# that read it -- config-Bv9CXmGW.mjs:230 `cfg?.extensionRelay?.allowLegacyAuth ?? true`
+# (resolveBrowserConfig, feeding the actual relay-server startup in
+# relay-lifecycle-BNLtuauY.mjs) and gateway-relay-route-2phSkPrI.mjs:116
+# `... !== false` (the Gateway HTTP route's own auth gate) -- so absent and explicit
+# `true` are the SAME runtime state, not two severities apart. zod-schema-DN2u5FdA.mjs:
+# 1601-1604 and schema-CwAIqZVE.mjs:766 confirm the field path and the vendor's own
+# "Default: true for one migration window" description still hold at 2026.9.5; the field
+# has not been retired or flipped since the tracker entry was scoped.
+#
+# Capped at WARN, never FAIL, by design -- this is not a FAIL-capable check and C-135's
+# adversarial FAIL-review does not gate it:
+#   1. It is a vendor-declared, time-bound COMPATIBILITY default, not a state the
+#      operator chose. A FAIL would fire on essentially every fresh 2026.8.1+ install.
+#   2. OpenClaw's own bundled audit rates the identical condition `warn`
+#      (docs/gateway/security/audit-checks.md: `browser.extension_relay_legacy_auth`).
+#   3. The legacy path still requires the correct relay token
+#      (safeEqualSecret(token, legacyToken), gateway-relay-route-2phSkPrI.mjs:118) -- it
+#      is a protocol-strength downgrade (no replay-bound HMAC proof), not an
+#      authentication bypass.
+# Inputs deliberately NOT escalated past WARN (false-FAIL surface excluded by design,
+# not left undiagnosed): explicit `true` (identical runtime effect to absent, see above);
+# any non-boolean/malformed value (dig() returns it as-is; only literal `False` reaches
+# the PASS branch, mirroring the runtime's own `!== false`); a config where `browser` is
+# configured only through the bundled-plugin path (`plugins.entries.browser`) with no
+# `browser` object at all -- this reports UNKNOWN (via `_browser_surface_absent`), not a
+# presumed WARN, matching B38/B195/B196/B321/B322/B330's shared idiom for "no browser
+# dict to read" rather than resolving a default this check cannot see corroborated.
+def check_browser_extension_relay_legacy_auth(ctx: Context) -> Finding:
+    """B383 — browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default.
+
+    WARN    — browser is configured/intended and not disabled, and
+              browser.extensionRelay.allowLegacyAuth is absent, explicitly `true`, or any
+              other non-`false` value. The Chrome extension/CDP relay then accepts legacy
+              Bearer, Basic, and token-subprotocol authentication alongside Browser Relay
+              Authentication v2 -- a weaker, non-replay-bound credential shape the vendor
+              ships on by default "for one migration window" with no stated expiry.
+    PASS    — browser.extensionRelay.allowLegacyAuth is explicitly `false` (legacy auth
+              refused, v2 only), or browser.enabled is `false` (no browser capability
+              wiring in the gateway at all, so the relay never starts).
+    UNKNOWN — no openclaw.json, an unparseable one, or no browser config to read (the
+              browser tool is not in use, or is reachable only through a path this check
+              cannot corroborate — see `_browser_surface_absent`).
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B383",
+            UNKNOWN,
+            "No openclaw.json found — browser.extensionRelay.allowLegacyAuth cannot be "
+            "assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B383", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    browser = ctx.config.get("browser")
+    if not isinstance(browser, dict):
+        return _finding(
+            "B383",
+            UNKNOWN,
+            "No browser config — the browser tool is not in use, so no Chrome extension "
+            "relay ever listens and there is nothing to assess.",
+            "—",
+            not_applicable=_browser_surface_absent(ctx),
+        )
+
+    if browser.get("enabled") is False:
+        return _finding(
+            "B383",
+            PASS,
+            "browser.enabled=false — OpenClaw wires up no browser capability in the "
+            "gateway at all, so the Chrome extension relay never starts and "
+            "browser.extensionRelay.allowLegacyAuth has nothing to weaken.",
+            "Keep browser.enabled=false while no workflow needs the browser tool.",
+            pass_confidence="verified",
+        )
+
+    allow_legacy = dig(ctx.config, "browser.extensionRelay.allowLegacyAuth")
+    if allow_legacy is False:
+        return _finding(
+            "B383",
+            PASS,
+            "browser.extensionRelay.allowLegacyAuth=false — the Chrome extension/CDP "
+            "relay accepts only Browser Relay Authentication v2 (a replay-bound, "
+            "connection-scoped HMAC proof); legacy Bearer/Basic/token-subprotocol "
+            "credentials are refused.",
+            "Nothing to change. Keep every paired extension and external CDP client on "
+            "v2 before revisiting this.",
+            pass_confidence="verified",
+        )
+
+    state = "explicitly true" if allow_legacy is True else "unset (the vendor default)"
+    return _finding(
+        "B383",
+        WARN,
+        "The browser tool is configured, so OpenClaw's Chrome extension/CDP relay is in "
+        f"play, and browser.extensionRelay.allowLegacyAuth is {state}. The relay accepts "
+        "legacy Bearer, Basic, and token-subprotocol authentication alongside Browser "
+        "Relay Authentication v2 — a weaker, non-replay-bound credential shape the "
+        "vendor ships on for one undated migration window. Every fresh 2026.8.1+ "
+        "install starts here; nothing in openclaw.json currently says otherwise.",
+        "Once every paired Chrome extension and external CDP client speaks Browser "
+        "Relay Authentication v2, set browser.extensionRelay.allowLegacyAuth to false "
+        "so the relay stops accepting the legacy credential shape.",
+        evidence=[f"browser.extensionRelay.allowLegacyAuth={allow_legacy!r}"],
+    )
