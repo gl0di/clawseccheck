@@ -2491,6 +2491,24 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="secrets",
     ),
+    # B384 (F-197): desktop.host.passwordFile's at-rest permissions -- the sole VNC
+    # credential gating the B383 listener (TigerVNC's -SecurityTypes VncAuth
+    # -PasswordFile, buildTigerVncArgv, host-source-v64nW4u1.mjs; VncAuth's DES-based
+    # obfuscation is not a real secret boundary once the file itself is readable). FAIL
+    # only when the file exists and is readable by another local account
+    # (_file_readable_by_others, same B182/B193 idiom -- a user-private group is not
+    # flagged, per B-127). HIGH: an exposed password file hands remote desktop control to
+    # any local account that can read it.
+    CheckMeta(
+        "B384",
+        "desktop.host.passwordFile (VNC credential) readable by others",
+        HIGH,
+        "hardening",
+        "Secrets Vault",
+        scored=True,
+        confidence="HIGH",
+        surface="secrets",
+    ),
     # B183 (B-281, ENV-1): the audited config file may not be the one the agent loads.
     # scored=False and WARN-capable only — a divergence means "this report may describe
     # the wrong subject", which is a reason to re-run, not a proven misconfiguration.
@@ -2936,6 +2954,26 @@ CATALOG: list[CheckMeta] = [
     CheckMeta(
         "B340",
         "Effective-bind verification (declared gateway.bind vs. the actual listening socket)",
+        HIGH,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
+    # B383 (F-197): desktop.host is a second network listener beside the gateway (a
+    # VNC/RFB service opted into by desktop.host.enabled, default port 5900) --
+    # completely unread before this. Grounded against the installed OpenClaw 2026.9.5
+    # dist (zod-schema-DN2u5FdA.mjs + host-source-v64nW4u1.mjs): the schema has no
+    # host-restriction field to "declare" (unlike gateway.bind) -- OpenClaw's own managed
+    # desktop is unconditionally spawned `-localhost yes`, so this corroborates that
+    # always-loopback assumption against the ACTUAL listening socket via sockets.py, same
+    # spirit as B340. FAIL-capable only when the non-loopback listener is POSITIVELY
+    # confirmed (kernel-resolved /proc/<pid>/exe) as OpenClaw's own managed `Xtigervnc`
+    # child; an unconfirmed/unmanaged non-loopback listener WARNs instead (scored=False)
+    # to avoid the exact port-sharing false-FAIL C-135 caught for B340. HIGH: a confirmed
+    # exposure is a second, less-audited path to full remote desktop control.
+    CheckMeta(
+        "B383",
+        "Gateway-host desktop (VNC/RFB) listener exposure (loopback-only design vs. actual)",
         HIGH,
         "hardening",
         "Zero Trust / Gateway",
