@@ -3089,13 +3089,13 @@ def _agent_legs(tools: list) -> dict:
     ATTESTED roster on purpose — attestation can reflect session-granted runtime tools
     that static per-agent config fields can't (see check_agent_separation for why). The
     config-level signals A1 also consults (the credential store's CONTENT -- B-666, not
-    the directory's existence -- and elevated.allowFrom) are GLOBAL, not attributable to
-    one agent, so they are intentionally not applied here. This sentence used to read
-    "credentials dir, gateway password": both were stale. A1 has not raised this leg on
-    the gateway password since B-666 (it is the gateway's own auth secret, not
-    agent-readable data, and B1 flags it), and the credential signal is a content scan.
-    report.py's capability graph applies these global signals to the `main` node only,
-    for the reason above; see B-730.
+    the directory's existence -- `gateway.auth.password` -- B-876 -- and
+    elevated.allowFrom) are GLOBAL, not attributable to one agent, so they are
+    intentionally not applied here — not because A1 excludes them (it now counts all of
+    them; see `_trifecta_leg_sources`), but because a per-agent classification has no
+    single agent to attribute a config-level signal to. report.py's capability graph
+    applies these global signals to the `main` node only, for the same reason; see
+    B-730/B-876.
     """
     return {
         "untrusted input": _hint(tools, INPUT_TOOL_HINTS),
@@ -4098,8 +4098,8 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
 
     # Agent-readable private data: a data tool (db/credential/vault/fs_read/...), a
     # plaintext credential inside the credentials/ store (B-666 — its content, not the
-    # directory's existence), or ungated exec (NOT gateway.auth.password —
-    # that is the gateway's own auth secret, not agent-readable data; B1 flags it).
+    # directory's existence), the gateway's own auth password (B-876, see below), or
+    # ungated exec.
     sensitive: list = []
     sensitive.extend(_tool_hint_sources(cfg, SENSITIVE_TOOL_HINTS))
     # B-667: the generic hints above cannot see OpenClaw's own tool ids — see
@@ -4148,6 +4148,22 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
             f"(+{len(names) - _CRED_STORE_MAX_NAMES} more file(s) in credentials/ "
             "hold a plaintext credential)"
         )
+    # CLAWSECCHECK-B-876: this leg used to exclude `gateway.auth.password` on the stated
+    # ground that it is "the gateway's own auth secret, not agent-readable data" — true of
+    # WHO minted it, not of whether the agent can reach it, and `risk.py::_has_sensitive_data`
+    # / report.py's capability graph (`main_secrets`) both already counted it. Reproduced by
+    # the B-730 review: a home with an empty credentials store, `fs.workspaceOnly=true` and
+    # only this key set gave A1 PASS "Active legs 2/3" next to a RISK-02 HIGH asserting all
+    # three legs active in the SAME run — the exact contradiction B-730 fixed for the
+    # credential store, reached through a different term (pinned, until this task, by
+    # `tests/test_b730_sensitive_data_model_agreement.py::
+    # test_the_gateway_password_asymmetry_is_the_one_known_divergence`). Dave's decision
+    # (2026-09-20): widen A1 to match the other two consumers, not narrow them. B1
+    # (`check_secrets`) still separately FAILs/CRITICALs on the same key — that is a
+    # different question (a plaintext secret sitting in the config file) from this leg's
+    # question (data the agent can reach), and both answers can be true at once.
+    if dig(cfg, "gateway.auth.password"):
+        sensitive.append("gateway.auth.password is set")
     # B-061: ungated exec/shell can read any private file. Approval-gated exec (see
     # _has_approval_gate) is NOT autonomous, so it must not raise this leg — matches
     # _trifecta_legs' exec_enabled = _real_exec_enabled(cfg) and not _has_approval_gate(cfg).

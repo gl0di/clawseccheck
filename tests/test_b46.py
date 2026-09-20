@@ -20,7 +20,8 @@ def _ctx(config):
 #   open DM channel  -> untrusted input
 #   fs_read tool     -> sensitive data (agent-readable private data)
 #   send tool        -> outbound
-# (gateway.auth.password is a B1 plaintext-secret signal, NOT an A1 sensitive-data leg.)
+# (gateway.auth.password is ALSO a sensitive-data leg source as of B-876, in addition to
+# being a B1 plaintext-secret signal; this fixture doesn't set it, so that is untested here.)
 def _full_trifecta():
     return {
         "channels": {"tg": {"dmPolicy": "open"}},

@@ -174,17 +174,20 @@ def test_a1_web_fetch_enabled_is_untrusted_input():
     assert "untrusted input" in (a1.evidence or [])
 
 
-def test_a1_gateway_password_alone_is_not_sensitive_data():
-    """§5 false-positive guard: gateway.auth.password is the gateway's own auth secret,
-    NOT agent-readable private data, so it must not constitute the sensitive-data leg.
-    web_fetch fills input + outbound, so counting the gateway password as sensitive would
-    let "web browsing + a gateway password" reach a spurious 3/3 FAIL. B1 still flags the
-    password as a plaintext secret — that is its proper home."""
+def test_a1_gateway_password_alone_is_sensitive_data():
+    """CLAWSECCHECK-B-876: gateway.auth.password IS agent-readable data for this leg's
+    purposes, matching risk.py::_has_sensitive_data and report.py's capability graph
+    (main_secrets), which always counted it. web_fetch fills input + outbound, so a
+    gateway password is now enough for "web browsing + a gateway password" to reach a
+    genuine 3/3 FAIL — the same verdict RISK-02 already gave this exact shape. B1 still
+    separately flags the password as a plaintext secret in config; that is a different
+    question (plaintext-in-config) from this leg's question (agent-reachable data), and
+    both can be true at once."""
     a1 = _a1({"tools": {"web": {"fetch": {"enabled": True}}},
               "gateway": {"auth": {"password": "x"}}})
-    assert "sensitive data" not in (a1.evidence or [])
-    assert a1.status != FAIL
-    # contrast: web_fetch + a REAL data tool (fs_read) IS a genuine 3/3 lethal trifecta
+    assert "sensitive data" in (a1.evidence or [])
+    assert a1.status == FAIL
+    # contrast: web_fetch + a REAL data tool (fs_read) is the same genuine 3/3 verdict
     real = _a1({"tools": {"web": {"fetch": {"enabled": True}}, "allow": ["fs_read"]}})
     assert real.status == FAIL
     assert "sensitive data" in (real.evidence or [])
