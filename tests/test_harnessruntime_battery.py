@@ -97,8 +97,25 @@ def test_the_oracle_never_says_no_because_nothing_was_configured():
 
 # ------------------------------------------------------------------ version gate
 
-@pytest.mark.parametrize("version", [None, (), (2026, 9, 3), (2026, 8, 2), (2026, 7, 1, 2),
-                                     (2026, 9, 5), (2026, 10, 1), (2027, 1, 1)])
+def _step(version, delta):
+    """The build immediately below/above the window — where extrapolating is most tempting.
+
+    Derived from the constants rather than written as a literal: every re-baseline moves the
+    window (2026.9.4 -> 2026.9.5 did), and a literal here only records where the window used
+    to be. What the constants must NOT be trusted for is whether they match the INSTALLED
+    build — ``test_harnessruntime_dist_grounding`` grounds that against the real dist."""
+    major, minor, patch = version[0], version[1], version[2]
+    if patch + delta < 0:
+        return (major, minor - 1, 99)
+    return (major, minor, patch + delta)
+
+
+BELOW_WINDOW = _step(hr.ORACLE_MIN, -1)
+ABOVE_WINDOW = _step(hr.ORACLE_MAX, +1)
+
+
+@pytest.mark.parametrize("version", [None, (), BELOW_WINDOW, ABOVE_WINDOW,
+                                     (2026, 8, 2), (2026, 7, 1, 2), (2026, 10, 1), (2027, 1, 1)])
 def test_outside_the_validated_window_or_unknown_is_always_unknown(version):
     for label in ("openai-primary", "anthropic-primary", "pin-provider-codex"):
         row = next(r for r in ROWS if r["label"] == label)
@@ -110,15 +127,19 @@ def test_inside_the_validated_window_answers_are_definite():
     assert _reach(row, hr.ORACLE_MIN).answer == hr.YES
     assert _reach(row, hr.ORACLE_MAX).answer == hr.YES
     # a correction release of the validated build is the same code family
-    assert _reach(row, (2026, 9, 4, 1)).answer == hr.YES
+    assert _reach(row, hr.ORACLE_MAX + (1,)).answer == hr.YES
 
 
 def test_a_newer_build_is_never_definite_until_the_battery_is_rerun():
     """The dangerous direction is a wrong `no` (a live WARN turned PASS). A build newer than the
-    one the port was validated on is an unmodelled input, so it must degrade, not extrapolate."""
+    one the port was validated on is an unmodelled input, so it must degrade, not extrapolate.
+
+    Not hypothetical: regenerating this battery on 2026.9.5 changed the VENDOR's own answer on
+    six of the 770 rows — 9.5 throws (``Object.keys(undefined)`` on ``params: null``, and
+    ``value?.id?.trim`` on a numeric ``agentRuntime.id``) where 9.4 returned a runtime."""
     for label in ("openai-primary", "anthropic-primary", "pin-provider-codex"):
         row = next(r for r in ROWS if r["label"] == label)
-        for newer in ((2026, 9, 5), (2026, 10, 1), (2027, 1, 1), (2026, 9, 9)):
+        for newer in (ABOVE_WINDOW, (2026, 10, 1), (2027, 1, 1), (2026, 9, 9)):
             assert _reach(row, newer).answer == hr.UNKNOWN, (label, newer)
 
 

@@ -1,5 +1,5 @@
 {
- "build": "2026.9.4",
+ "build": "2026.9.5",
  "rows": [
   {
    "label": "empty",
@@ -9446,19 +9446,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
-    "refs": [
-     "anthropic/o3",
-     "azure/m:work",
-     "x/gpt-image-1",
-     "openai/o3",
-     "x/codex-mini"
-    ],
-    "runtimes": [
-     "codex"
-    ]
+    "error": "Cannot convert undefined or null to object"
    }
   },
   {
@@ -11200,20 +11188,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
-    "refs": [
-     "x/*",
-     "google/gpt-5",
-     "x/m:work",
-     "anthropic/*",
-     "openai /m",
-     "azure/m:work"
-    ],
-    "runtimes": [
-     "codex"
-    ]
+    "error": "Cannot convert undefined or null to object"
    }
   },
   {
@@ -13273,17 +13248,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [],
-    "refs": [
-     "google/m:work",
-     "openai-codex/m:work",
-     "/x",
-     "google/gpt-5",
-     "openai /gpt-5"
-    ],
-    "runtimes": [
-     "codex"
-    ]
+    "error": "value?.id?.trim is not a function"
    }
   },
   {
@@ -15710,9 +15675,7 @@
      "OpenAI/*",
      "openai /gpt-image-1"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "error": "Cannot convert undefined or null to object"
    }
   },
   {
@@ -15764,21 +15727,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
-    "refs": [
-     "openai/gpt-5.6-sol",
-     "azure/*",
-     "openai/gpt-image-1",
-     "OpenAI/gpt-5.6-sol",
-     "azure/gpt-5",
-     "openai:w/o3",
-     "x/"
-    ],
-    "runtimes": [
-     "codex"
-    ]
+    "error": "Cannot convert undefined or null to object"
    }
   },
   {
@@ -20727,21 +20676,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
-    "refs": [
-     "anthropic/gpt-5",
-     "openai /m:work",
-     "openai/m:work",
-     "openai/*",
-     "openai-codex/gpt-5",
-     "openai/gpt-5",
-     "/x"
-    ],
-    "runtimes": [
-     "codex"
-    ]
+    "error": "Cannot convert undefined or null to object"
    }
   },
   {
