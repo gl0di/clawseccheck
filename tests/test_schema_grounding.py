@@ -1446,9 +1446,11 @@ _NOT_IN_CURRENT_SCHEMA = {
     ),
     "logging.redactSensitive": (
         "safeParse: unrecognized_keys@logging keys=[\"redactSensitive\"]; REMOVED with no "
-        "replacement. Redaction is unconditional on 2026.8.1 — `DEFAULT_REDACT_MODE` is a "
-        "constant config never feeds, and custom `redactPatterns` are UNIONED with the "
-        "built-ins. B9 keeps the read for 2026.7.x — B-700."
+        "replacement. Redaction MODE is unconditional on 2026.8.1 — `DEFAULT_REDACT_MODE` "
+        "is a constant config never feeds; a custom `redactPatterns` list only UNIONS with "
+        "the built-ins on the tool-payload/transcript path -- it REPLACES them outright on "
+        "console output, warnings, and `openclaw logs` (CLAWSECCHECK-B-836). B9 keeps the "
+        "read for 2026.7.x — B-700."
     ),
     "marketplaces.feeds": (
         "safeParse: unrecognized_keys@<root> keys=[\"marketplaces\"]; the whole block was "
