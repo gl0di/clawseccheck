@@ -42,6 +42,7 @@ from ._shared import (
     _has_approval_gate,
     _hint,
     _key_advice,
+    _node_allow_skills,
     _node_commands,
     _open_channels,
     _profile_is_powerful,
@@ -2100,6 +2101,83 @@ def check_node_denycommands_ineffective(ctx: Context) -> Finding:
         f"All {deny_path} entries are bare exact command names.",
         f"Keep {deny_path} entries as bare exact command names without "
         "spaces, globs, or path separators.",
+    )
+
+
+def check_node_allowskills_default_on(ctx: Context) -> Finding:
+    """B383 — gateway.nodes.allowSkills default-on paired-node skill push.
+
+    Grounded against the installed 2026.9.5 dist (F-199): the vendor's own field
+    description (schema-*.mjs) reads "Accept skills published by paired nodes while
+    they are connected (default: true). Set false to ignore node-published skills." — a
+    PAIRED node can publish executable skills into this setup while connected, and the
+    gate defaults OPEN. `node-registry-*.mjs`'s own runtime confirms the effective-state
+    rule this check applies: ``node.nodeSkills = cfg?.gateway?.nodes?.allowSkills ===
+    false ? [] : policy.skills`` — only a literal ``false`` closes the gate; an absent
+    key behaves exactly like an explicit ``true``.
+
+    Reads BOTH spellings via ``_node_allow_skills`` (F-199) — ``gateway.nodes
+    .allowSkills`` on OpenClaw 2026.8.1+, ``gateway.nodes.skills.enabled`` before it —
+    the same dual-shape pattern B71 already applies to the sibling ``commands`` setting
+    (B-698), and every user-facing string names the spelling actually found.
+
+    WARN — the effective value is anything other than the literal ``False``: absent
+           (vendor default true), explicit ``true``, or any other non-``False`` value.
+           Same effective-state doctrine B196 applies to ``browser.evaluateEnabled`` —
+           an absent key and an explicit ``true`` are the same runtime exposure, so a
+           no-op deletion of the line cannot move the verdict two grades.
+    PASS — explicitly ``False`` in either shape (the only state that closes the gate).
+    UNKNOWN — openclaw.json not found, or present but unparseable.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B383",
+            UNKNOWN,
+            "No openclaw.json found -- gateway.nodes.allowSkills cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B383", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    value, path = _node_allow_skills(ctx.config)
+
+    if value is False:
+        return _finding(
+            "B383",
+            PASS,
+            f"{path}=false -- paired gateway nodes may not publish skills into this "
+            "setup.",
+            f"Keep {path}=false unless a specific paired-node workflow needs it.",
+        )
+
+    if value is None:
+        # Nothing found in either shape -- there is no single path to point the fix
+        # at, so (like B71's own UNKNOWN-branch fix text) it names both spellings.
+        spelling = ("gateway.nodes.allowSkills is not set (pre-2026.8.1: "
+                    "gateway.nodes.skills.enabled)")
+        fix = ("Set gateway.nodes.allowSkills=false unless this setup genuinely relies "
+               "on a paired node publishing skills; on OpenClaw builds before 2026.8.1 "
+               "the equivalent key is gateway.nodes.skills.enabled=false.")
+    else:
+        # A value WAS found in one shape -- point only at the spelling this config
+        # actually contains, same precedent as B71's WARN/PASS branches (deny_path).
+        spelling = (f"{path}=true" if value is True
+                    else f"{path} is set to a value that is not the boolean false")
+        fix = (f"Set {path}=false unless this setup genuinely relies on a paired node "
+               "publishing skills.")
+
+    return _finding(
+        "B383",
+        WARN,
+        f"{spelling} -- OpenClaw's own default for this key is true, so a paired "
+        "gateway node may publish skills into this setup the moment it is connected, "
+        "with no operator opt-in. A pushed skill is executable surface reaching the "
+        "same content-security ring this tool audits every INSTALLED skill against "
+        "(B13 and the rest of SKILL_CONTENT_RING) -- pairing a node is not the same "
+        "act as approving what it publishes.",
+        fix,
+        evidence=[spelling],
     )
 
 

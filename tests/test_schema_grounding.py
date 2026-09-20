@@ -1439,6 +1439,13 @@ _NOT_IN_CURRENT_SCHEMA = {
         "is gateway.nodes.commands.deny. Same accessor and same precedence as "
         "allowCommands above — B-698."
     ),
+    "gateway.nodes.skills.enabled": (
+        "safeParse: unrecognized_keys@gateway.nodes keys=[\"skills\"]; the object no "
+        "longer declares a `skills` key at all (not merely a changed leaf under one) — "
+        "the real path is gateway.nodes.allowSkills. `_shared._node_allow_skills` reads "
+        "both, with the vendor's precedence (`allowSkills === void 0` guards the copy) "
+        "— F-199."
+    ),
     "hooks.internal.installs": (
         "safeParse: unrecognized_keys@hooks.internal keys=[\"installs\"]; the value moved "
         "into the machine-owned state store. B179 reads the state first and this key as "

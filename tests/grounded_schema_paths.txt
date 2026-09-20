@@ -83,10 +83,12 @@ gateway.http.endpoints.chatCompletions.images
 gateway.http.endpoints.chatCompletions.images.allowUrl
 gateway.http.endpoints.chatCompletions.images.urlAllowlist
 gateway.nodes.allowCommands
+gateway.nodes.allowSkills
 gateway.nodes.commands.allow
 gateway.nodes.commands.deny
 gateway.nodes.denyCommands
 gateway.nodes.pairing.autoApproveCidrs
+gateway.nodes.skills.enabled
 gateway.port
 gateway.remote
 gateway.remote.sshHostKeyPolicy

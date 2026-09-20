@@ -73,6 +73,7 @@ gateway.http.endpoints.chatCompletions.enabled
 gateway.http.endpoints.chatCompletions.images
 gateway.http.endpoints.chatCompletions.images.allowUrl
 gateway.http.endpoints.chatCompletions.images.urlAllowlist
+gateway.nodes.allowSkills
 gateway.nodes.commands.allow
 gateway.nodes.commands.deny
 gateway.nodes.pairing.autoApproveCidrs
