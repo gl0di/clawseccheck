@@ -46,6 +46,7 @@ from .layers import (
     LAYER_ORDER,
     describe_layer,
 )
+from . import openclawdist as _openclawdist
 from .scoring import ScoreResult, assessment_coverage
 from .skillast import capability_families
 from .invocation import command_prefix
@@ -3109,6 +3110,31 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # --ascii drops the mascot and folds the separator (brand.header()).
     head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
     lines = [head, "=" * 44]
+    # C-571: run-level grounding disclosure, ahead of everything else — this is a fact
+    # about the BUILD, not about this run's findings, so it belongs above the per-run
+    # disclosures that follow. `openclawdist.grounding_gap` answers None on anything it
+    # cannot place past GROUNDED_MAX_VERSION (unknown install, unparseable/pre-release
+    # string, a version too short to be a calendar release), so this never fires on
+    # "we don't know" — only on a build genuinely newer than any check here was measured
+    # against. Presentation-only: never touches score/grade/cap (¶2.4/Golden Rule #5 —
+    # this is honesty about a gap, not a manufactured FAIL), and it does not name which
+    # checks are affected because that set is not sound to enumerate — see B363's B-833
+    # fix for the one flip that WAS found, entirely inside the check, with no schema-path
+    # diff to hang a static list on.
+    _gap = _openclawdist.grounding_gap(
+        getattr(ctx, "installed_dist_version", None) if ctx is not None else None
+    )
+    if _gap is not None:
+        gap_icon = "[!]" if ascii_only else "⚠️ "
+        _grounded_str = ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION)
+        _running_str = ".".join(str(p) for p in _gap)
+        lines.append(
+            f"{gap_icon}This build's checks were last grounded against OpenClaw up to "
+            f"{_grounded_str}; you are running {_running_str}. Some checks assume "
+            "behavior measured on the older build and may be mis-grounded on this one — "
+            "a real gap can still read as a clean PASS. Not a finding; the score below "
+            "is unchanged."
+        )
     # B-313/B-399: disclosed ABOVE the grade, unconditionally whenever any check degraded
     # this run (crashed, timed out, or — B-399 — ran to completion but could not reach a
     # verdict for an engine-side reason, e.g. an input it expected to read that turned out
