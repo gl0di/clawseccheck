@@ -473,8 +473,10 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     # B-644: threaded through both `_has_approval_gate` calls below so an exec-scoped
-    # gate is never read as covering the non-exec "elevated" grant these branches are
-    # actually about — see `_has_approval_gate`'s docstring.
+    # gate is never read as covering a genuinely non-exec write tool (fs_write/write/
+    # edit/fs_delete/fs_move) — see `_has_approval_gate`'s docstring. B-848: this no
+    # longer includes "elevated" — a bare `tools.elevated.allowFrom` grant IS reached
+    # by tools.exec.mode/security/ask (see `_exec_gate_covers_tools`'s B-848 note).
     tools = _enabled_tools(cfg)
     # Untrusted ingress = open/allowlist/paired (authenticated sender != trusted
     # content), matching the trifecta input leg computed in _trifecta_legs(); an
@@ -1730,8 +1732,12 @@ def check_subagents(ctx: Context) -> Finding:
             "tools.exec.mode to 'ask'/'allowlist' to gate subagent actions.",
         )
 
-    # B-644: pass `tools` so an exec-scoped gate is never read as covering the
-    # non-exec "elevated" grant — see `_has_approval_gate`'s docstring.
+    # B-644: pass `tools` so an exec-scoped gate is never read as covering a
+    # genuinely non-exec write tool — see `_has_approval_gate`'s docstring. B-848:
+    # "elevated" is NOT one of those (tools.exec.mode/security/ask does gate a bare
+    # tools.elevated.allowFrom grant's own escalation bypass), so this correctly
+    # still reads as PASS below when only "elevated" (no non-exec write tool) is
+    # present alongside a real exec gate.
     if _has_approval_gate(cfg, tools):
         return _finding(
             "B18",

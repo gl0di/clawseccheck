@@ -3159,9 +3159,25 @@ def _unclassified_leg_verbs(tools: list) -> list:
 # "fs_delete"/"fs_move" collide with "refs_delete"/"prefs_delete" as substrings).
 # Deliberately narrower than OUTBOUND_TOOL_HINTS: "send"/"webhook"/"http_post"/
 # "publish" are a different tool family (messaging/network) that this fix does not
-# touch — only the write-to-local-files/elevated-escalation family the B20/B22/RISK-07
-# self-modification shape actually depends on.
-_NON_EXEC_WRITE_TOKENS = ("write", "edit", "fs_delete", "fs_move", "elevated")
+# touch — only the write-to-local-files family the B20/B22/RISK-07 self-modification
+# shape actually depends on.
+#
+# B-848: "elevated" does NOT belong here and has been removed. B-644 added it on the
+# premise that `tools.elevated.allowFrom` is entirely outside tools.exec.*'s reach,
+# citing _capability.py's B-395 note — but that note answers a different question
+# (whether `tools.elevated` is one of OpenClaw's tool-*policy-resolution* layers that
+# decide which tools an agent can reach at all; it is not). Exec *approval* is a
+# separate mechanism: the installed OpenClaw dist (2026.9.5) shows an "elevated
+# full" request's approval bypass is gated by the SAME tools.exec fields —
+# `bash-tools-BBKNLrRH.mjs:4085` (`modePolicyAllowsFullBypass = modePolicy.security
+# === "full" && modePolicy.ask === "off"`) and `:4090` (the bypass only applies when
+# `elevatedMode === "full" && modePolicyAllowsFullBypass && hostPolicyAllowsFullBypass`).
+# So tools.exec.mode='ask' (or any non-"full"/"off" security/ask combination) DOES
+# block the elevated-escalation bypass and forces the same human-approval path as an
+# ordinary exec command. Treating "elevated" as ungated by tools.exec.* was the wrong
+# premise and produced a false WARN (B18) and a false new RISK-07/B8/B46 chain
+# wherever `tools.elevated.allowFrom` was set alongside a real tools.exec gate.
+_NON_EXEC_WRITE_TOKENS = ("write", "edit", "fs_delete", "fs_move")
 
 
 def _exec_gate_covers_tools(tools) -> bool:
@@ -3169,13 +3185,17 @@ def _exec_gate_covers_tools(tools) -> bool:
     `tools.exec.mode/security/ask` to have any bearing on it at all.
 
     False when *tools* contains a non-exec write tool (fs_write/write/edit/
-    fs_delete/fs_move/elevated) — none of those are reached by tools.exec.* (see
+    fs_delete/fs_move) — none of those are reached by tools.exec.* (see
     `_has_approval_gate`'s own grounded field list), so an exec-scoped gate does not
     cover them regardless of its own value. True otherwise, INCLUDING when *tools*
     is empty/None: a caller that has not established a non-exec write tool is
     present gets the plain exec-only reading `_has_approval_gate(cfg)` already gave
     before this fix — this helper only ever narrows, never widens, what counts as
     gated.
+
+    B-848: "elevated" is deliberately NOT in `_NON_EXEC_WRITE_TOKENS` (see that
+    tuple's comment) — a bare `tools.elevated.allowFrom` grant IS reached by
+    tools.exec.mode/security/ask, so it must not make this return False.
     """
     if not tools:
         return True
@@ -3188,8 +3208,11 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
     """Return True when the config has a meaningful exec approval gate.
 
     Real fields — grounded against the installed OpenClaw dist's Zod schema
-    (`zod-schema.agent-runtime-C02vY4RT.js:358-381`, ToolExecBaseShape), which
-    corrects the field-list doc at docs.openclaw.ai/tools/permission-modes:
+    (`zod-schema.agent-runtime-DQfiImgc.mjs:511-538`, ToolExecBaseShape; B-848
+    re-grounded this citation — the file the docstring previously named,
+    `zod-schema.agent-runtime-C02vY4RT.js`, does not exist in the installed
+    2026.9.5 dist, though the schema fact itself still held), which corrects the
+    field-list doc at docs.openclaw.ai/tools/permission-modes:
       tools.exec.mode     — deny/allowlist/ask/auto/full
       tools.exec.security — deny/allowlist/full   ("ask" is NOT a valid value of THIS
                              field — it belongs to tools.exec.ask below; a Zod
@@ -3197,6 +3220,13 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
                              security/ask, see addExecPolicyModeConflictIssue)
       tools.exec.ask      — off/on-miss/always
     Non-existent: tools.confirm, tools.requireApproval, tools.elevated.requireApproval
+
+    B-848: these same fields also gate `tools.elevated`'s own "full" escalation
+    bypass, not just plain exec — `bash-tools-BBKNLrRH.mjs:4085,4090` shows an
+    elevated "full" request skips approval only when
+    `modePolicy.security === "full" && modePolicy.ask === "off"`. So a bare
+    `tools.elevated.allowFrom` grant IS covered by this function's reading; see
+    `_exec_gate_covers_tools`'s B-848 note.
 
     security="allowlist" is a real gate even with an empty/default allowlist and even
     when tools.exec.ask is unset (default "off"): verified against the live runtime

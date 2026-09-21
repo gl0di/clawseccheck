@@ -1077,8 +1077,10 @@ def _rule_self_modification(ctx: Context, findings: list[Finding],
     # B-644 (closes the B-494 gap noted here): `_has_approval_gate` reads only
     # `tools.exec.*` and on its own does not know a bare fs_write grant (no exec
     # tool) is left ungated by an exec-only "ask" mode. Passing `tools` makes it
-    # refuse to call a non-exec write tool (fs_write/write/edit/elevated) gated by
-    # an exec-scoped key at all -- shared by the pre-existing B20/B22 path too.
+    # refuse to call a non-exec write tool (fs_write/write/edit/fs_delete/fs_move)
+    # gated by an exec-scoped key at all -- shared by the pre-existing B20/B22 path
+    # too. B-848: "elevated" is deliberately not in that non-exec set -- a bare
+    # tools.elevated.allowFrom grant IS reached by tools.exec.mode/security/ask.
     if _has_approval_gate(cfg, tools):
         return None
     return RiskPath(

@@ -2217,8 +2217,10 @@ def check_human_approval(ctx: Context) -> Finding:
     destructive = _hint(tools, OUTBOUND_TOOL_HINTS)
     if not destructive:
         return _finding("B8", UNKNOWN, "No destructive/outbound tools detected.", "—")
-    # B-644: pass `tools` so an exec-scoped gate is never read as covering a non-exec
-    # write tool (fs_write/write/edit/elevated) — see `_has_approval_gate`'s docstring.
+    # B-644: pass `tools` so an exec-scoped gate is never read as covering a genuinely
+    # non-exec write tool (fs_write/write/edit/fs_delete/fs_move) — see
+    # `_has_approval_gate`'s docstring. B-848: "elevated" is NOT one of those (a bare
+    # tools.elevated.allowFrom grant IS reached by tools.exec.mode/security/ask).
     if not _has_approval_gate(cfg, tools):
         return _finding(
             "B8",
