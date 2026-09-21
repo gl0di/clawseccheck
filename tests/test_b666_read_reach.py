@@ -223,6 +223,24 @@ def test_dist_still_grants_read_to_exactly_the_profiles_we_name():
     assert named | {"full"} == set(toolpolicy._PROFILES_GRANTING_READ), named
 
 
+def test_dist_group_fs_membership_matches_core_tool_definitions():
+    """C-584: ``group:fs`` (``TOOL_GROUPS``, built by ``buildCoreToolGroupMap`` from every
+    CORE_TOOL_DEFINITIONS entry whose ``sectionId`` is "fs") had drifted from
+    ``_GROUP_FS_MEMBERS`` by exactly one tool ("ls") with nothing catching it — this is
+    that guard, so the next vendor addition is caught mechanically instead of by
+    inspection. See ``_GROUP_FS_MEMBERS``'s own comment for why the drift was inert
+    rather than a lying-PASS."""
+    text = dist_text("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
+                     contains="CORE_TOOL_DEFINITIONS")
+    block = re.search(r"CORE_TOOL_DEFINITIONS = \[(.*?)\n\];", text, re.S)
+    assert block, "CORE_TOOL_DEFINITIONS not found — re-ground _GROUP_FS_MEMBERS"
+    members = set(re.findall(
+        r'id: "([a-z_]+)",\s*[^{}]*?sectionId: "fs"', block.group(1), re.S
+    ))
+    assert members, "no fs-sectioned tool found — re-ground _GROUP_FS_MEMBERS"
+    assert members == set(toolpolicy._GROUP_FS_MEMBERS), members
+
+
 def test_module_docstring_dist_citation_still_declares_the_predicate():
     """C-477: the module docstring names the dist bundle
     ``resolveEffectiveToolFsRootExpansionAllowed`` lives in. It used to pin a hash
