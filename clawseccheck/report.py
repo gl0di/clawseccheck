@@ -1598,7 +1598,7 @@ def _capability_graph(ctx) -> dict:
     # rejected means the term is unreachable, ignored means the key is not agent-reachable
     # either -- but the stronger claim is not made here.
     #
-    # `gateway.auth.password` STAYS, unchanged -- CLAWSECCHECK-B-876 settled its
+    # `gateway.auth.password` STAYS, unchanged -- B-876 settled its
     # divergence from A1 by widening A1 to match this term (see
     # `checks/_shared.py::_trifecta_leg_sources`) rather than narrowing this one away.
     # The three models agree again.

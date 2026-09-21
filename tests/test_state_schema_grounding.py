@@ -840,6 +840,9 @@ _REGISTRY: "dict[str, _Entry]" = {
 
     # ---- config_machine_state (F-183) ----
     "tests/test_b177_installed_index_shapes.py:55": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
+    # B-862 reuses the same loose 3-column shape verbatim to build an oversized
+    # plugins.installedIndex row; same classification, same reason.
+    "tests/test_b862_sarif_limit_hits_delimited_paths.py:138": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
 
     # ---- audit_events (B191 / F-154) ----
     "tests/test_b191_audit_events.py:44": _Entry(LEGACY_COLS, _AUDIT_EVENTS_PARTIAL_LEGACY),
@@ -933,7 +936,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_f192_update_runs.py:30": _Entry(MODERN),
 }
 
-assert len(_REGISTRY) == 54, f"registry has {len(_REGISTRY)} entries, expected 54"
+assert len(_REGISTRY) == 55, f"registry has {len(_REGISTRY)} entries, expected 55"
 
 
 # ========================================================================================

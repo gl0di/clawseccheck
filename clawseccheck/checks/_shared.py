@@ -4282,7 +4282,7 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
             f"(+{len(names) - _CRED_STORE_MAX_NAMES} more file(s) in credentials/ "
             "hold a plaintext credential)"
         )
-    # CLAWSECCHECK-B-876: this leg used to exclude `gateway.auth.password` on the stated
+    # B-876: this leg used to exclude `gateway.auth.password` on the stated
     # ground that it is "the gateway's own auth secret, not agent-readable data" — true of
     # WHO minted it, not of whether the agent can reach it, and `risk.py::_has_sensitive_data`
     # / report.py's capability graph (`main_secrets`) both already counted it. Reproduced by

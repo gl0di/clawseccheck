@@ -463,7 +463,7 @@ def _skill_capabilities(ctx) -> tuple[bool, set]:
     re-scan of disk, no checks import. Families are `skillast.CAPABILITY_FAMILIES`:
     network / exec / write / read / cred.
 
-    CLAWSECCHECK-B-878: `has_code` used to ask only `installed_skill_py`, so a skill
+    B-878: `has_code` used to ask only `installed_skill_py`, so a skill
     bundling nothing but JS or shell answered `has_code=False` -- indistinguishable from
     a skill with no code at all -- and the Persistence/Connections axes printed "no
     executable code to analyze" about a directory containing exactly that (repro: a
@@ -565,7 +565,7 @@ def _pool_capabilities(pool) -> tuple[bool, set]:
 
 def _skill_has_unread_language_code(ctx) -> bool:
     """True when ``ctx`` bundles JS or shell source for an installed skill -- code
-    ``_skill_capabilities.has_code`` now counts as PRESENT (CLAWSECCHECK-B-878) but whose
+    ``_skill_capabilities.has_code`` now counts as PRESENT (B-878) but whose
     capability families this scan cannot compute: ``capability_families`` walks a Python
     AST and has no JS/shell reader, and `analyze_javascript`/`analyze_shell` are narrow,
     rule-shaped danger scanners (specific RCE/exfil patterns), not general network / exec /
@@ -762,7 +762,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # caught it. Reading a file for dangerous patterns is not measuring its persistence or
     # its outbound surface; those are computed from bundled-skill Contexts, and a loose
     # plugin file has none.
-    # CLAWSECCHECK-B-878: same bar for a bundled skill's JS/shell — `has_code` now counts
+    # B-878: same bar for a bundled skill's JS/shell — `has_code` now counts
     # it as code present (see `_skill_capabilities`), but `capability_families` still
     # cannot read it, so it must not be measurable either. See
     # `_skill_has_unread_language_code` for why this is the same "code present, no reader
@@ -1004,7 +1004,7 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
       Python is analysed only inside a dispatched skill dir. A plugin shipping
       fetch-to-exec as a root-level `install.py` is opened by nobody, and the reviewer
       measured this axis printing an affirmative PASS over exactly that.
-      CLAWSECCHECK-B-878 adds a second producer of this same state: a dispatched
+      B-878 adds a second producer of this same state: a dispatched
       SKILL's bundled JS/shell (`_skill_has_unread_language_code`). `capability_families`
       is Python-AST-only, so a JS- or shell-only skill has no reader for THIS axis either,
       even though the file itself was read (has_code=True) and may already carry a Danger

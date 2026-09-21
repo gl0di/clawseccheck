@@ -3428,7 +3428,7 @@ def check_leak(ctx: Context) -> Finding:
     feeds REPLACES `DEFAULT_REDACT_PATTERNS` outright for a non-empty list -- that is the
     console-output, warnings, and `openclaw logs` path. Identical on OpenClaw 2026.9.4
     (`dist/redact-Ck-hjLec.mjs:1432-1441`) and 2026.9.5 (`dist/redact-CrCCqliq.mjs:1977-
-    1987`, `:2327-2333`) -- CLAWSECCHECK-B-836; an earlier version of this docstring
+    1987`, `:2327-2333`) -- B-836; an earlier version of this docstring
     described the union as universal, which it is not. An empty list falls through to
     the defaults on every path. No env var disables it either -- the only
     `OPENCLAW_REDACT*` symbol in the dist is the `OPENCLAW_REDACTED__` output marker.

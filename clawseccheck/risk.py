@@ -194,7 +194,7 @@ def _has_sensitive_data(tools: list[str], ctx: Context) -> bool:
     # the uncertainty still reaches the user -- through A1's WARN, not through a HIGH
     # chain built on a store the audit could not read.
     #
-    # SETTLED (CLAWSECCHECK-B-876, 2026-09-20): A1 used to exclude `gateway.auth.password`
+    # SETTLED (B-876, 2026-09-20): A1 used to exclude `gateway.auth.password`
     # from its leg on the stated grounds that it is "the gateway's own auth secret, not
     # agent-readable data" and that B1 flags it -- true, but this module and report.py's
     # capability graph both counted it anyway, so a home with only that key set reproduced
