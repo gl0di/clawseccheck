@@ -220,6 +220,7 @@ def subject_coverage(findings: list[Finding], *,
     (the same `_CHECKED_STATUSES` `coverage()` above uses); "total" = every CATALOG
     check id routed to this subject via `SUBJECT_OF`. `not_scanned` names the check
     ids that stayed UNKNOWN (or never fired at all this run) — never merely counted.
+    `not_scanned_reasons` (C-566) names WHY, per id — see `_not_scanned_reason`.
 
     Args:
         findings: list of Finding objects from a scan run (e.g. checks.run_all).
@@ -231,8 +232,9 @@ def subject_coverage(findings: list[Finding], *,
             function can forget a subject the catalog routes.
 
     Returns:
-        {subject: {"total": int, "scanned": int, "not_scanned": [check_id, ...]}}
-        for each requested subject.
+        {subject: {"total": int, "scanned": int, "not_scanned": [check_id, ...],
+                   "not_scanned_reasons": {check_id: reason}}} for each requested
+        subject.
     """
     wanted = _CHECK_OWNING_SUBJECTS if subjects is None else tuple(subjects)
     ids_by_subject: dict[str, list[str]] = {s: [] for s in wanted}
@@ -254,8 +256,43 @@ def subject_coverage(findings: list[Finding], *,
             "total": len(cids),
             "scanned": len(cids) - len(not_scanned),
             "not_scanned": not_scanned,
+            "not_scanned_reasons": {
+                cid: _not_scanned_reason(latest.get(cid)) for cid in not_scanned
+            },
         }
     return result
+
+
+def _shorten(text: str, limit: int = 60) -> str:
+    """One clause, ASCII-safe (no glyph the ``ascii_only`` renderers would need to
+    degrade — see `coverage_page_lines`'s own note on why it stays plain ASCII)."""
+    text = " ".join(text.split())  # collapse embedded newlines/whitespace runs
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _not_scanned_reason(finding: "Finding | None") -> str:
+    """Why a check id is missing from this run's numerator — grounded in what the
+    engine actually recorded, never invented (Golden Rule #4's spirit applied to
+    this page, not just to CVE/schema claims).
+
+    A Finding that reached UNKNOWN this run already carries its own reason in
+    `detail` (docs/CHECK_AUTHORING.md: "UNKNOWN details name why state is
+    undetermined") — reused here, shortened to one clause. `detail` is sanitized
+    first: some producers build it from trajectory-sourced, attacker-influenced
+    text (see behavioral.py's own `_sanitize` note on T1/T2/T3/B191), and this is
+    the one path that text takes into the coverage page.
+
+    A check with NO Finding at all this run (never invoked — e.g. an off-`CHECKS`
+    behavioral detector, B-558, that stayed inconclusive) has no producer-supplied
+    reason to draw on; this says exactly that rather than guessing at one.
+    """
+    if finding is None:
+        return "not evaluated this run"
+    from .report import _sanitize  # noqa: PLC0415 — see build_coverage_page's own
+                                    # note on why this stays a deferred import.
+    return _shorten(_sanitize(finding.detail))
 
 
 def _sweep_coverage(sweep, *, skip_reason: str | None = None) -> dict:
@@ -308,13 +345,24 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     what the audit's own findings support, which is right for any run that did not run
     those phases.
 
-    V1 scope note (F-165): file/byte-level detail for `logs` ("N of M
-    trajectory files, X of Y MB scanned") is intentionally NOT in this page yet — that
-    data exists today only as prose inside B164/trajaudit/behavioral's own Finding
-    text, not as structured counts. `logs` here is CHECK-granularity, same as the
-    other bucket subjects, honest but coarser than the epic's target shape. Tracked as
-    a separate follow-up rather than blocking this page on a new cross-module
-    structured-stats channel.
+    V1 scope note (F-165, re-confirmed C-566 2026-09-21): file/byte-level detail for
+    `logs` ("N of M trajectory files, X of Y MB scanned") is still NOT in this page.
+    The FILE-count half of that premise has moved since F-165 shipped — `behavioral.
+    analyze()`'s and `trajaudit.analyze()`'s own result dicts already carry structured
+    `files_total`/`files_scanned` (see behavioral.py's `files_capped` handling, around
+    line 1384) — but
+    nothing threads either into `build_coverage_page` today: `logs`' denominator here
+    is still the 7 CATALOG check ids `_CHECK_OWNING_SUBJECTS` routes to it, not a file
+    count, and none of this function's callers (`pipeline.run_pipeline`, cli.py's
+    `--dashboard --full` path) passes one in. The BYTE half of the premise still fully
+    holds: no producer anywhere counts bytes read, only files. Wiring the file count in
+    is a real design decision, not a one-line fix — which call site builds it, whether
+    it replaces or supplements the check-granularity row, and whether behavioral's and
+    trajaudit's two independent `analyze()` passes should be reconciled first — and
+    rushing a partial version risks exactly the half-wired-renderer defect this page
+    was rejected for three times already (see this function's own docstring). C-566
+    leaves it deferred rather than repeat that; no follow-up ticket has been filed yet
+    (flagged since the 2026-08-04 review comment) — filing one is still owed.
 
     Consumed by ``--full`` (text, via ``pipeline.render_sections``), ``--full --json``
     (``coveragePage``), and — since the renderer-wiring gap three separate reviews
@@ -378,12 +426,25 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     return page
 
 
-def coverage_page_lines(page: dict, *, ascii_only: bool = False) -> list[str]:
+def coverage_page_lines(page: dict, *, ascii_only: bool = False,
+                        show_reasons: bool = True) -> list[str]:
     """Text rendering of `build_coverage_page`'s output — one function, reused by the
-    ``--full`` narrative section (`pipeline.render_sections`) and, eventually,
-    dashboard/HTML/PDF (see that function's own V1 scope note). ``ascii_only`` is
-    accepted for signature parity with every other renderer in this codebase; the
-    output here is already plain ASCII (no glyphs to degrade)."""
+    ``--full`` narrative section (`pipeline.render_sections`), `report.render_dashboard`,
+    `report.render_html` and `pdf.render_pdf` (each behind its own optional
+    ``coverage_page`` parameter — see that function's own docstring for the renderer
+    wiring). ``ascii_only`` is accepted for signature parity with every other renderer
+    in this codebase; the output here is already plain ASCII (no glyphs to degrade).
+
+    ``show_reasons`` (C-566): the per-id ``not_scanned_reasons`` (see
+    `subject_coverage`) are rendered by default. `report.render_dashboard` passes
+    `show_reasons=not compact` — `--dashboard --full --compact` targets a fixed,
+    small character budget (`_COMPACT_CHAR_BUDGET`, a Telegram-paste size) that the
+    reduction ladder already fights for on the findings themselves; reasons are
+    genuinely useful detail, not noise, but exactly the kind `--compact`'s own
+    contract sacrifices first, and doing so here (rather than leaving them in and
+    letting `_hard_truncate_compact` cut the card's tail blindly, which silently
+    dropped the "Full pipeline detail" pointer in an early version of this change)
+    keeps that sacrifice deliberate instead of accidental."""
     del ascii_only
     if not page:
         return []
@@ -412,18 +473,35 @@ def coverage_page_lines(page: dict, *, ascii_only: bool = False) -> list[str]:
             head += f"; {checks['scanned']} of {checks['total']} checks scanned"
         lines.append(head)
         if entry["total"]:
-            lines.extend(_not_scanned_lines(entry["not_scanned"], f"{unit} not {verb}"))
+            lines.extend(_not_scanned_lines(
+                entry["not_scanned"], f"{unit} not {verb}",
+                reasons=entry.get("not_scanned_reasons") if show_reasons else None))
         if checks:
-            lines.extend(_not_scanned_lines(checks["not_scanned"], "checks not scanned"))
+            lines.extend(_not_scanned_lines(
+                checks["not_scanned"], "checks not scanned",
+                reasons=checks.get("not_scanned_reasons") if show_reasons else None))
     return lines
 
 
-def _not_scanned_lines(not_scanned: list, label: str) -> list[str]:
+def _not_scanned_lines(not_scanned: list, label: str, *,
+                       reasons: "dict[str, str] | None" = None) -> list[str]:
     """One ``   <label>: a, b, c (+N more)`` line, or nothing when the list is empty.
     Shared so the instance tally and the check tally (B-565) name their skips the same
-    way and neither can quietly start merely counting them."""
+    way and neither can quietly start merely counting them.
+
+    ``reasons`` (C-566), when given, names WHY each shown id is absent — ``id
+    (reason)`` instead of a bare id. Only the CHECK-granularity lists carry one
+    (`subject_coverage`'s own `not_scanned_reasons`, see `_not_scanned_reason`);
+    the instance lists (skills/plugins target names, from the duck-typed sweep's
+    own `not_scanned()`) do not, because that surface is deliberately narrow —
+    see `_sweep_coverage`'s docstring — and reaching into a sweep's per-target
+    row status for a reason is left as a follow-up rather than widening that
+    contract here."""
     if not not_scanned:
         return []
-    shown = ", ".join(str(x) for x in not_scanned[:8])
+    def _fmt(x: str) -> str:
+        reason = (reasons or {}).get(x)
+        return f"{x} ({reason})" if reason else str(x)
+    shown = ", ".join(_fmt(x) for x in not_scanned[:8])
     more = f" (+{len(not_scanned) - 8} more)" if len(not_scanned) > 8 else ""
     return [f"   {label}: {shown}{more}"]

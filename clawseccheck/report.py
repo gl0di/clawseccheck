@@ -4534,7 +4534,14 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # caller passes nothing and reproduces the exact prior card, byte-identical.
     if coverage_page:
         from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
-        cov_page_lines = _coverage_page_lines(coverage_page, ascii_only=ascii_only)
+        # C-566: reasons are dropped under --compact, same "budget beats extra detail"
+        # rule --compact already applies everywhere else on this card (see
+        # `coverage_page_lines`'s own `show_reasons` note) — a fixed small budget and
+        # per-id reason text otherwise compound into `_hard_truncate_compact` cutting
+        # this card's tail blind, up to and including the "Full pipeline detail"
+        # pointer below.
+        cov_page_lines = _coverage_page_lines(coverage_page, ascii_only=ascii_only,
+                                              show_reasons=not compact)
         if cov_page_lines:
             tail_block += ("\n" + f"{sep} Coverage page {sep}" + "\n"
                           + "\n".join(cov_page_lines) + "\n")

@@ -1494,12 +1494,31 @@ One entry per subject in the 8-subject taxonomy (§18):
 - Presentation-only, same as `inventory` — never alters `score`/`grade`/`findings`.
 - **V1 scope**: `logs` is CHECK-granularity here (same as the other bucket subjects),
   not the file/byte-level detail ("N of M trajectory files, X of Y MB scanned") a
-  future revision may add — that data exists today only as prose inside
-  `B164`/trajectory-audit/behavioral findings, not as structured counts.
+  future revision may add. Re-confirmed at C-566 (2026-09-21): a structured file
+  count now exists (`behavioral.analyze()`/`trajaudit.analyze()` both return
+  `files_total`/`files_scanned`), but nothing threads it into this page yet; a
+  structured byte count still does not exist anywhere. See `coverage.
+  build_coverage_page`'s own V1 scope note for why wiring the file count in is
+  deferred rather than done partially.
+- **Named reasons (C-566)**: every check-granularity `not_scanned` list — the bucket
+  subjects and the `checks` sub-entry under `skills`/`mcp`/`plugins` — carries a sibling
+  `not_scanned_reasons: {check_id: reason}`. The text/dashboard/HTML/PDF renderers show
+  it inline as `id (reason)`. The reason is whatever the check's own UNKNOWN `detail`
+  said (shortened to one clause), or `"not evaluated this run"` when no Finding exists
+  for that id at all this run. The two INSTANCE lists (`skills`/`plugins`' own
+  target-name `not_scanned`, from the sweep) do not carry reasons yet — narrower sweep
+  contract, tracked as a smaller follow-up, not this one.
 - Also rendered as a text section (`--full`, banner `CLAWSECCHECK COVERAGE`), and —
   as a "Coverage page" block, same underlying `build_coverage_page`/`coverage_page_lines`
-  functions — by `--dashboard --full` (the chat card), `--html`, and `--pdf`. The
-  `--dashboard --full` path builds its own page inline rather than through
+  functions — by `--dashboard --full` (the chat card, plus its own `--html`/`--pdf`
+  riders written via `_write_dashboard_side_outputs`/the dashboard's direct
+  `render_pdf` call). **Disclosed gap, confirmed at C-566 (2026-09-21), accepted as-is:**
+  standalone `--html` (its own primary mode) and standalone `--pdf` (ditto), and a bare
+  `--dashboard` without `--full`, render NO coverage page — `cli.py`'s `--html`/`--pdf`
+  mode branches call `render_html`/`render_pdf` with no `coverage_page` argument at all,
+  unconditionally, so this stays true even given `--full` on the same command line
+  (`--full` is not a modifier those two modes read). Only `--full` (bare) and
+  `--dashboard --full` ever build one; the latter does so inline rather than through
   `pipeline.run_pipeline` (that one code path hand-rolls its phases; see cli.py's
   `_dashboard_phases` comment), so it is wired at that specific call site.
 
