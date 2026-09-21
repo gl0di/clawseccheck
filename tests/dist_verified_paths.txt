@@ -49,6 +49,7 @@ commands.mcp
 commands.ownerAllowFrom
 commands.plugins
 cron
+desktop.host
 discovery.mdns.mode
 env.shellEnv.enabled
 gateway.allowRealIpFallback

@@ -55,6 +55,7 @@ commands.plugins
 commands.useAccessGroups
 cron
 cron.store
+desktop.host
 diagnostics.cacheTrace.filePath
 discovery.mdns.mode
 env.shellEnv.enabled
