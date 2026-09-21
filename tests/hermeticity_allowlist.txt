@@ -16,9 +16,15 @@
 # raw '/home/<user>/...' path here; test_allowlist_file_parses_and_is_nonempty() fails
 # the build if one leaks in.
 #
-# Every entry under "known, diagnosed violations" below also carries a
-# "Last confirmed exercised: YYYY-MM-DD via `<command>`" line.
-# tests/test_hermeticity_allowlist_staleness.py fails the build if that marker is
+# Every entry below also carries a "Last confirmed exercised: YYYY-MM-DD via
+# `<command>`" line UNLESS every one of its patterns is on
+# tests/test_hermeticity_allowlist_staleness.py's own hardcoded _UNIVERSAL_PATTERNS set
+# (the /proc, /dev/null, /dev/urandom, /dev/random lines below) -- that guard's default
+# is "must explain," not "exempt unless flagged," and it does not trust THIS FILE's own
+# comments or section headers to decide what counts as universal: only the guard
+# module's own literal, hardcoded set does, checked against whichever comments actually
+# sit in a block regardless of their order. Extending what counts as universal means
+# editing that module's source, not this file. The guard fails the build if a marker is
 # missing, malformed, or names a tests/test_*.py file that no longer exists -- it does
 # NOT re-run the command (CSC_HERMETICITY_LEDGER is opt-in and pytest_unconfigure
 # deletes the ledger tmpdir before a normal run ends, so a live re-check is not
