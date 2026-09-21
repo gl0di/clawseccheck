@@ -451,7 +451,7 @@ curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SU
 
 cosign verify-blob \
   --bundle SHA256SUMS.txt.bundle \
-  --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \
+  --certificate-identity-regexp "^https://github\.com/gl0di/clawseccheck/\.github/workflows/clawhub-publish\.yml@refs/tags/v" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS.txt
 ```
