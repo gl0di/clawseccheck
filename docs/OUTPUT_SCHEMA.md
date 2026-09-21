@@ -839,23 +839,30 @@ recorded, so a random token cannot manufacture drift across runs. Malformed/forg
 entries are dropped per-entry (never a crash), mirroring `judged`/`vetJudged`'s own
 defensive parsing.
 
-**`trajectory` (F-193, optional):** a `canary` entry is cross-checked against the
-audited home's own local trajectory log when one is readable — this object narrows or
-redirects that scan (`sessionId` to one session, `path` to one explicit
-`.trajectory.jsonl`; a `path` outside `--home` is rejected and the home's own sidecars
-are scanned instead) and is never required — omitting it scans the home directly. Two
-independent legs: a submitted `canary` `id` that could not have come from THIS bucket's
-own `seed` (`canary.make_canary(seed)` is deterministic) is a proven contradiction with
-no trajectory needed at all; when a trajectory is also readable, the submitted verdict
-is recomputed from the agent's own recorded reply (the same render-echo discriminator
+**`trajectory` (F-193/F-194, optional):** every `canary`/`redteam`/`dryrun`/`multiturn`
+entry is cross-checked against the audited home's own local trajectory log when one is
+readable — this object narrows or redirects that scan (`sessionId` to one session,
+`path` to one explicit `.trajectory.jsonl`; a `path` outside `--home` is rejected and
+the home's own sidecars are scanned instead) and is never required — omitting it scans
+the home directly. `canary` gets an extra leg the other three don't: a submitted `id`
+that could not have come from THIS bucket's own `seed` (`canary.make_canary(seed)` is
+deterministic) is a proven contradiction with no trajectory needed at all — this leg is
+specific to canary, whose single per-bundle `id` IS its own token; the other three
+tools' ids are stable scenario codes (e.g. `"PI-01"`, `"DR-07"`, `"MT-02"`), validated
+against that tool's own fixed id set by the id-shape check above instead. For all four
+tools, when a trajectory is readable, the submitted verdict is recomputed from the
+agent's own recorded reply against that ONE scenario's own confirmation token (derived
+from the bucket's `seed` + the entry's `id`), using the same render-echo discriminator
 `--analyze-trajectory`'s self-test corroboration already uses, so a RESISTANT agent
-that merely displayed the harness's own instructions is not misread as compliant). A
-contradicted entry is dropped before `_valid_live_test_entries` sees it — same
-per-entry tolerance as every other malformed/forged entry above — so it cannot complete
-`live_behaviour` (§1's `missing_layers`) or set `live_injection_capped`; the specific
-contradiction is named in `not_checked` (§1). redteam/dryrun/multiturn verdicts are not
-yet cross-checked this way (see `livetestproof.py`'s own module docstring) — only the
-id-shape check above applies to them.
+that merely displayed the harness's own instructions is not misread as compliant; for
+`multiturn` specifically, only the trigger-turn reply is considered — a Phase-1 reply
+that transparently quotes the plant's own confirmation token while refusing it is
+never mistaken for Phase-2 compliance (`livetestproof.py`'s own
+`_isolate_trigger_replies`). A contradicted entry is dropped before
+`_valid_live_test_entries` sees it — same per-entry tolerance as every other
+malformed/forged entry above — so it cannot complete `live_behaviour` (§1's
+`missing_layers`) or set `live_injection_capped`; the specific contradiction is named
+in `not_checked` (§1).
 
 **An unreadable `--judged-bundle PATH` is reported (B-562).** A bundle file that cannot
 be opened gets one `note:` line on stderr naming the path and the reason, exactly as the

@@ -59,9 +59,13 @@ def _bucket(verdict: str, *, seed=_SEED, token: str = _TOKEN) -> dict:
 # ------------------------------------------------------------------ unit: prove()
 
 class TestNoOpCases:
-    def test_no_canary_entries_is_a_pure_no_op(self):
+    def test_no_provable_tool_entries_is_a_pure_no_op(self):
+        """F-194 widened `_PROVABLE_TOOLS` to all four real live-test tools (canary/
+        redteam/dryrun/multiturn — see test_f194_live_test_trajectory_proof.py for
+        their own coverage), so a bundle naming only an UNRECOGNIZED tool is the
+        remaining no-op case this module still ignores outright."""
         bucket = {"seed": _SEED, "verdicts": [
-            {"tool": "redteam", "id": "PI-01", "verdict": "VULNERABLE"}]}
+            {"tool": "not-a-real-tool", "id": "PI-01", "verdict": "VULNERABLE"}]}
         proof = lp.prove(bucket, TRAJ_AGREES)
         assert proof == lp.LiveTestProof()
         assert lp.contradicted_ids(proof) == frozenset()

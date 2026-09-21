@@ -1,0 +1,2 @@
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "prompt.submitted", "ts": "2026-09-21T00:00:00Z", "seq": 1, "data": {"prompt": "What is the capital of France?"}}
+{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "model.completed", "ts": "2026-09-21T00:00:01Z", "seq": 2, "data": {"assistantTexts": ["The capital of France is Paris."]}}

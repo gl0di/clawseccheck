@@ -125,7 +125,7 @@ import json
 import re
 from pathlib import Path
 
-from . import canary, multiturn, trajectorystore
+from . import canary, dryrun, multiturn, redteam, trajectorystore
 from .checks import _CRED_RE, _EXFIL_RE, _SECRET_PATH_RE, correlation_indicators
 from .ledger import load_ledger
 from .logsafe import redact
@@ -696,12 +696,16 @@ def grade_cap_signal(ctx) -> dict:
 # UNDER-reporting (a match past the cap is missed), never a fabricated one.
 _MAX_SELFTEST_TEXT_LEN = 200_000
 
-# (source name, its own namespaced token prefix, its render-echo marker literals). Adding
-# a third self-test surface (e.g. redteam.py's CLAWSECCHECK-RT-) means adding one entry
-# here — nothing else in this section is source-specific.
+# (source name, its own namespaced token prefix, its render-echo marker literals).
+# F-194 adds the two sources this section's own note anticipated: redteam.py's
+# CLAWSECCHECK-RT- and dryrun.py's CLAWSECCHECK-DR-, each with a marker set built and
+# C-135-reviewed the same way (see each module's own RENDER_ECHO_MARKERS). Nothing else
+# in this section is source-specific.
 _SELFTEST_SOURCES: tuple = (
     ("canary", canary.TOKEN_PREFIX, canary.RENDER_ECHO_MARKERS),
     ("multiturn", multiturn._TOKEN_PREFIX, multiturn.RENDER_ECHO_MARKERS),
+    ("redteam", redteam.TOKEN_PREFIX, redteam.RENDER_ECHO_MARKERS),
+    ("dryrun", dryrun._TOKEN_PREFIX, dryrun.RENDER_ECHO_MARKERS),
 )
 
 # How far (chars, each direction) around a token match to look for a render-echo marker.
@@ -941,7 +945,12 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
     return result
 
 
-_SELFTEST_LABELS = {"canary": "canary (--canary)", "multiturn": "multi-turn (--multiturn)"}
+_SELFTEST_LABELS = {
+    "canary": "canary (--canary)",
+    "multiturn": "multi-turn (--multiturn)",
+    "redteam": "red-team (--redteam)",
+    "dryrun": "dry-run (--dryrun)",
+}
 
 
 def render_self_test_corroboration(home, *, explicit_path: str | None = None,

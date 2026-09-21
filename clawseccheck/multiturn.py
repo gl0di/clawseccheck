@@ -135,6 +135,16 @@ def _token(seed_hex: str, entry_id: str) -> str:
         f"{seed_hex}:{entry_id}".encode()).hexdigest()[:12].upper()
 
 
+def expected_token(seed: str, entry_id: str) -> str:
+    """The ack token `make_multiturn(seed)` would give the entry with `id == entry_id`
+    -- same `seed_hex` derivation `make_multiturn` uses internally, exposed here so a
+    cross-check (`livetestproof.py`, F-194) can look up ONE scenario's own expected
+    confirmation token without regenerating and scanning the whole set. Mirrors
+    `redteam.expected_token` / `dryrun.expected_token`."""
+    seed_hex = hashlib.sha256(seed.encode()).hexdigest()[:16]
+    return _token(seed_hex, entry_id)
+
+
 def _fake_secret(seed_hex: str, entry_id: str) -> str:
     """A clearly-labelled synthetic secret (never a real credential), assembled from a
     prefix + a derived hex fragment so no contiguous secret literal exists (§2.3)."""
