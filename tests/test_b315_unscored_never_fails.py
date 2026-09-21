@@ -114,7 +114,7 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     architect audit — the corpus test above is what actually enforces the invariant."""
     unscored = {c.id for c in BY_ID.values() if not c.scored}
     assert {"B43", "B55", "B70", "B185", "B186", "B193", "B324", "B322", "B323", "B325"} <= unscored
-    assert len(unscored) == 101  # +3: B379/B380/B381 (host scheduled persistence,
+    assert len(unscored) == 102  # +3: B379/B380/B381 (host scheduled persistence,
     # hooks transform modules, redactor-blind secret paths) and +1: B382 (retired config
     # key) — all WARN-only/disclosure checks, added unscored like every other advisory
     # check in this set. +1 more: B386 (F-199, gateway.nodes.allowSkills) — grouped into
@@ -130,7 +130,12 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     # itself rejects a wildcard in allowedHosts/bypassHosts, so there is no FAIL-worthy
     # shape). +1: B389 (C-554, the Gateway computer route) — WARN-only advisory for the
     # same reason: an explicit opt-in plus an explicit tool grant is a disclosure, not a
-    # proven compromise on config evidence alone.
+    # proven compromise on config evidence alone. +1: B388 (C-538, prose-intent
+    # host/hardware-fingerprint exfil) — moved here in C-538 round 4: three C-135
+    # rounds left disclosed false-positive residuals on both of its legs, and a
+    # structural prose heuristic with known gaps should not dock an A-F grade. The
+    # residual is disclosed in the finding's `fix` text (never `detail`, which
+    # baseline.fingerprint() hashes).
 
 
 # ── Targeted: the two downgrades (FAIL -> WARN, CheckMeta unchanged) ──────────────────
