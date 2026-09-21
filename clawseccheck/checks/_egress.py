@@ -35,6 +35,7 @@ from ._shared import (
     _channels,
     _config_unreadable,
     _custom,
+    _detail_path,
     _enabled_tools,
     _openclaw_generation,
     _pattern_hits_real_secret,
@@ -2072,7 +2073,7 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
                 "config's setting is the one that applies. The config alone cannot turn "
                 "this off while the variable is set.",
                 evidence=[
-                    f"OPENCLAW_CACHE_TRACE={raw!r} in {source}",
+                    f"OPENCLAW_CACHE_TRACE={raw!r} in {_detail_path(source, ctx.home)}",
                     f"transcripts written to {where}",
                 ],
             )
@@ -2089,7 +2090,10 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
             "here do not settle the question either way.",
             "Run the audit on the machine and account the agent runs as, with no --home "
             "argument, so the environment that actually applies can be read.",
-            evidence=[f"global dotenv present: {', '.join(ctx.dotenv_files)}"],
+            evidence=[
+                "global dotenv present: "
+                + ", ".join(_detail_path(p, ctx.home) for p in ctx.dotenv_files)
+            ],
         )
     # B-657: on the common audited-home-is-own path (the branch above only
     # guards the OTHER-home case), `raw is None` can mean OPENCLAW_CACHE_TRACE sits past
@@ -2115,7 +2119,10 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
             "Keep OpenClaw's global dotenv files (~/.openclaw/.env, "
             "~/.config/openclaw/gateway.env) under the collector's size cap, then "
             "re-run the audit.",
-            evidence=[f"global dotenv present: {', '.join(ctx.dotenv_files)}"],
+            evidence=[
+                "global dotenv present: "
+                + ", ".join(_detail_path(p, ctx.home) for p in ctx.dotenv_files)
+            ],
             engine_degraded=True,
         )
     return None
@@ -3002,13 +3009,13 @@ def check_debug_proxy_capture(ctx: Context) -> Finding:
     for name, what in _B190_TRUTHY_VARS:
         raw, source = dotenv_override(ctx, name)
         if raw is not None and is_truthy_env_value(raw):
-            hits.append(f"{name} is on ({source}) — it {what}")
+            hits.append(f"{name} is on ({_detail_path(source, ctx.home)}) — it {what}")
     for name, what in _B190_VALUE_VARS:
         raw, source = dotenv_override(ctx, name)
         if isinstance(raw, str) and raw.strip():
             # The VALUE is deliberately not echoed: a proxy URL can embed credentials
             # (http://user:pass@host). Naming the variable and its source is enough.
-            hits.append(f"{name} is set ({source}) — it {what}")
+            hits.append(f"{name} is set ({_detail_path(source, ctx.home)}) — it {what}")
 
     rows = ctx.capture_event_rows if ctx.capture_tables_found else 0
     blobs = ctx.capture_blob_rows if ctx.capture_tables_found else 0
