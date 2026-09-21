@@ -287,18 +287,42 @@ def _write_manifest() -> None:
     MANIFEST.write_text(_HEADER + "\n".join(lines) + "\n", encoding="utf-8")
 
 
-# One audit per fixture for the whole module: the parametrized guard below and the two
-# whole-corpus property tests would otherwise re-run the same 496 audits three times.
+# One audit per fixture for the whole module: the parametrized guard below, the two
+# guard-the-guard tests, and test_finding_ids_and_statuses_are_safely_parseable all key
+# off this cache instead of re-auditing their fixture. (test_no_detail_is_environment_derived
+# and test_no_finding_detail_leaks_a_machine_specific_path still audit independently --
+# they need the raw, uncanonicalized Finding.detail text, which this cache deliberately
+# does not retain; that used to make a hash-only cache useless to them, and still does.)
 # Deliberately caches only the small derived strings, never the Finding objects.
 _ENCODED_CACHE: dict[Path, str] = {}
+
+# {home: [(id, status), ...]} for every finding on that fixture, in the same order as
+# _fingerprint_pairs. Populated by the SAME audit() call _encoded() already makes on a
+# cache miss -- never a second pass -- so a test that only needs raw ids/statuses (not
+# the encoded digest string) can share this audit instead of re-running it. This closes
+# the gap the status column itself opened: test_finding_ids_and_statuses_are_safely_
+# parseable (below) used to call audit() a second time over the whole corpus for
+# exactly this data.
+_ID_STATUS_CACHE: dict[Path, list[tuple[str, str]]] = {}
 
 
 def _encoded(home: Path) -> str:
     cached = _ENCODED_CACHE.get(home)
     if cached is None:
-        cached = _encode_pairs(_fingerprint_pairs(home))
+        pairs = _fingerprint_pairs(home)
+        cached = _encode_pairs(pairs)
         _ENCODED_CACHE[home] = cached
+        _ID_STATUS_CACHE[home] = [(fid, status) for fid, status, _fp in pairs]
     return cached
+
+
+def _ids_and_statuses(home: Path) -> list[tuple[str, str]]:
+    """``[(id, status), ...]`` for every finding on *home*, via the shared cache --
+    populates it (one ``audit()`` call, through ``_encoded``) on a miss, so callers never
+    trigger a second full-corpus audit pass just to read ids and statuses."""
+    if home not in _ID_STATUS_CACHE:
+        _encoded(home)
+    return _ID_STATUS_CACHE[home]
 
 
 # ---------------------------------------------------------------------------------------
@@ -666,16 +690,21 @@ def test_finding_ids_and_statuses_are_safely_parseable():
     assumption would make ``_split_entry`` mis-attribute fields SILENTLY -- this test
     is what fails loudly instead, the moment a future check or status literal violates
     it, rather than corrupting the manifest without any test noticing.
+
+    Reads ids/statuses via ``_ids_and_statuses`` (the shared cache), not a fresh
+    ``audit(home)`` call -- this needs no ``Finding.detail`` text, only ``id``/
+    ``status``, both of which the cache already carries once the parametrized guard (or
+    this test itself, on a cold cache) has audited *home*. Auditing directly here would
+    silently turn the module's "one audit per fixture" cache into two.
     """
     bad_status: dict[str, str] = {}
     bad_id: dict[str, str] = {}
     for home in CORPUS:
-        _, findings, _ = audit(home)
-        for f in findings:
-            if ":" in f.status:
-                bad_status.setdefault(f.id, f.status)
-            if f.id.count(":") > 1:
-                bad_id.setdefault(f.id, f.status)
+        for fid, status in _ids_and_statuses(home):
+            if ":" in status:
+                bad_status.setdefault(fid, status)
+            if fid.count(":") > 1:
+                bad_id.setdefault(fid, status)
     assert not bad_status, (
         "finding.status contains a colon, which the manifest's 3-field encoding "
         f"reserves as a separator between id/status/digest: {sorted(bad_status.items())[:5]}"
