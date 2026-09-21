@@ -4904,7 +4904,17 @@ def render_events(events, ascii_only: bool = False, *,
     else:
         header = f"showing {len(body)} event(s) (most recent last)"
     if pruned_note is not None:
-        header += f"; {_sanitize(str(pruned_note.get('message', '')))}"
+        # B-847: the windowed header above already ends mid-sentence ("...see them"), so
+        # joining the pruning note with "; " reads naturally there. But this branch also
+        # runs when `shown_from` is 0 -- i.e. the UNWINDOWED case (a short journal, or an
+        # explicit `--all`) -- where the header ends a full sentence ("(most recent
+        # last)") and the pre-C-448 text joined the note with " -- " instead. C-448
+        # promised `--all` reproduces the pre-C-448 output byte-for-byte; unconditionally
+        # switching to "; " broke that promise for exactly the real-machine case (a
+        # rotated journal) that promise exists to cover. Only the windowed sentence is
+        # new text with no pre-C-448 form to match, so only it gets the new separator.
+        sep = "; " if shown_from else " — "
+        header += f"{sep}{_sanitize(str(pruned_note.get('message', '')))}"
     lines = ["Agent Watch journal", "=" * 30, header + ":", ""]
     for e in visible:
         ts = str(e.get("ts", "?"))

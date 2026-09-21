@@ -447,7 +447,8 @@ class HistoryRows(list):
 #: C-448: how many of the most recent rows `render_trend` prints by default. Chosen to
 #: match the worked example the task that added this was filed with ("showing the last
 #: 30 of 4,604 runs"); not itself load-bearing, since `window=None` (the `--all` opt-out)
-#: reproduces the pre-C-448 unbounded output byte-for-byte.
+#: reproduces the pre-C-448 unbounded ROW output byte-for-byte -- the summary/disclosure
+#: sentences below the rows do not (see the `window` note on `render_trend` and B-847).
 DEFAULT_TREND_WINDOW = 30
 
 
@@ -468,17 +469,30 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         C-448: print only the last *window* rows (most recent), stated as a count in
         the header so nothing is hidden SILENTLY — the same problem this fixes as
         `render_events`' own retention-marker header. ``None`` (or a value ``>=
-        len(rows)``) prints every row, reproducing the pre-C-448 behaviour exactly;
-        this is what the CLI's ``--all`` flag passes. The window affects ONLY which
-        lines are printed: every arrow, the "N of M runs have no grade" ratio, and
-        every other statistic below is still computed by walking the FULL ``rows``
-        list in order — narrowing the denominator to the visible slice is the exact
-        defect the deleted source filter (see the design note below) already taught
-        this function not to repeat, just on a different axis (recency instead of
-        source/grade). A windowed row's arrow still compares against the true
+        len(rows)``) prints every ROW, in the same per-row format, as the pre-C-448
+        behaviour; this is what the CLI's ``--all`` flag passes. The window affects
+        ONLY which lines are printed: every arrow, the "N of M runs have no grade"
+        ratio, and every other statistic below is still computed by walking the FULL
+        ``rows`` list in order — narrowing the denominator to the visible slice is the
+        exact defect the deleted source filter (see the design note below) already
+        taught this function not to repeat, just on a different axis (recency instead
+        of source/grade). A windowed row's arrow still compares against the true
         previous GRADED row even when that row itself sits outside the window and is
         never printed, because ``last_graded_score``/``last_graded_row`` are updated
         on every row unconditionally, before the window check ever runs.
+
+        B-847: "prints the same as pre-C-448" stops at the ROW lines. The six
+        disclosure/summary sentences below the table ("N runs ... have no grade", the
+        pinned/compounded-fall notes, the uncorroborated-runs note) -- plus the B-580
+        retention-notice sentence, worded to match them under B-847 -- were reworded
+        because "shown above"/"runs above" stopped being true the moment a hidden row
+        could be one being counted. ``window=None``/``--all`` does NOT revert this
+        wording, on purpose: under ``--all`` every row genuinely IS "above", so the old
+        wording would not be wrong there, but reverting it would mean the sentence's
+        truth depended on which flag was passed, which is worse than picking one
+        accurate wording and keeping it. So ``--all`` reproduces the pre-C-448 output
+        byte-for-byte for the rows and the window disclosure, but NOT for these seven
+        sentences -- see ``docs/USAGE.md``'s ``--trend`` section and B-847.
 
     Parameters
     ----------
@@ -803,12 +817,22 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     # B-580: what this trend does NOT cover. Said after the rows, because it qualifies the
     # shape the reader has just looked at — the pruned runs are the OLDEST, i.e. the
     # baseline against which "improving" would be judged.
+    #
+    # B-847: used to read "Not every recorded run is above: {notice}", which implied the
+    # named pruned count was the WHOLE reason a recorded run might not be on screen. C-448
+    # made that false: a `window` can also leave recorded (loaded) rows off screen, and it
+    # is not named here. This is the same "above" staleness C-448 fixed in the six
+    # sentences above, just missed on this one -- worded now as a fact about the FILE
+    # (rows dropped before `load()` ever saw them), kept separate from the window
+    # disclosure above (rows that WERE loaded but are not printed).
     notice = getattr(rows, "retention_notice", None)
     if notice:
         lines.append("")
         lines.append(
-            "Not every recorded run is above: " + notice.strip()
-            + " The trend therefore starts mid-history; the pruned runs are the oldest."
+            "This history's own file already dropped some of what it recorded: "
+            + notice.strip() + " The trend therefore starts mid-history; the pruned "
+            "runs were the oldest, and are gone from the file entirely -- distinct "
+            "from any --all/window cut on the rows that remain, described above."
         )
 
     # B-582: the chain check this store has always had, run on the path a human
