@@ -1386,6 +1386,11 @@ def check_cron_job_content(ctx: Context) -> Finding:
     `is_exec` self-erasure heuristic below). Same detectors, same evidence shape as
     payload.message/trigger.script.
 
+    B-824 (C-476 follow-up): a `command`-kind payload's `cwd` and `env` are scanned the
+    same way — `env`'s key=value pairs joined space-separated like `argv`, so a
+    poisoned environment variable (an injected LD_PRELOAD path, a hijacked interpreter
+    flag, a credential/URL-shaped value) is visible to the same detectors.
+
     C048 (above) only sees the top-level `cron` config *key*; the actual scheduled job
     payloads live in a separate store the collector now reads read-only (B-231):
     ~/.openclaw/cron/jobs.json, or the SQLite-backed cron_jobs table when the JSON file
@@ -1576,17 +1581,25 @@ def check_cron_job_content(ctx: Context) -> Finding:
         # process's stdin. Same content-injection risk as argv/script; scanned the
         # same way.
         _scan_field(f"{job_label}.payload.input", job.get("payload_input"))
-        # C-135 (independent, post-commit): `payload_cwd`/`payload_env` are collected
-        # by collector._cron_payload_extras (same call as argv/script/input above) but
-        # deliberately NOT content-scanned here yet, unlike toolsAllow/agentTurn's
-        # allowUnsafeExternalContent/externalContentSource, whose deferral this task
-        # already states explicitly. Making that the same here: a poisoned env value
-        # (an injected LD_PRELOAD path, an attacker-controlled interpreter flag riding
-        # in an env var a spawned process trusts) is a real, distinct execution-time
-        # risk from argv/script/input content, but widening this FAIL-capable check's
-        # scan surface needs its own C-135 pass and fixtures, not a same-commit
-        # add-on — tracked separately (internal task tracker) rather than left
-        # silently unscanned.
+        # B-824 (C-476 follow-up, independent C-135 review of cd9e6af):
+        # `payload_cwd`/`payload_env` are collected by collector._cron_payload_extras
+        # (same call as argv/script/input above) and are now scanned the same way.
+        # `payload_env` in particular is a distinct execution-time risk from
+        # argv/script/input: an attacker-controlled environment variable handed to a
+        # spawned process can carry an injected LD_PRELOAD path, a poisoned interpreter
+        # flag (PYTHONSTARTUP, NODE_OPTIONS), or a credential/URL-shaped value the same
+        # content-ring detectors below already catch in argv text. `env` is a key=value
+        # mapping, not a sentence, so it is joined the same way `argv` is space-joined
+        # (`KEY=value KEY2=value2 ...`) so the detectors can match across pairs the way
+        # they already match across argv elements. `payload_cwd` is a single path string
+        # and is scanned as-is.
+        _scan_field(f"{job_label}.payload.cwd", job.get("payload_cwd"))
+        env = job.get("payload_env")
+        if isinstance(env, dict):
+            _scan_field(
+                f"{job_label}.payload.env",
+                " ".join(f"{k}={v}" for k, v in env.items()),
+            )
 
         # C-476: `script`-kind is an execution surface exactly like `command`-kind (an
         # arbitrary script body vs. an argv vector) and was missing from this flag —
