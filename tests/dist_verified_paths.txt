@@ -127,6 +127,8 @@ relative:tools.fs.workspaceOnly
 relative:tools.message.crossContext
 relative:tools.message.crossContext.allowAcrossProviders
 relative:tools.profile
+secrets.egressProxy.allowedHosts
+secrets.egressProxy.enabled
 secrets.providers
 security.audit.suppressions
 security.installPolicy

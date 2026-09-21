@@ -1982,6 +1982,111 @@ def check_memory_search_remote_egress(ctx: Context) -> Finding:
     )
 
 
+def check_secrets_egress_proxy(ctx: Context) -> Finding:
+    """B387 (F-196) — secrets.egressProxy traffic-allowlist gap.
+
+    ``secrets.egressProxy`` (new in OpenClaw 2026.8.1; re-grounded here against the
+    installed 2026.9.5 dist and unchanged) is a loopback HTTP(S) forward proxy OpenClaw
+    injects into Gateway-hosted agent exec environments (``HTTPS_PROXY``/``HTTP_PROXY``,
+    per-run Basic-auth credentials) that substitutes an ``oc-sent-v2...end`` sentinel for
+    a real secret value, but only toward the destination host(s) that secret is bound to
+    (``openclaw secrets store set NAME --allow-host HOST``). Schema:
+    ``SecretsConfigSchema`` (`dist/zod-schema.core-CZ0zDyHR.mjs:326-339`) —
+    ``{enabled?: boolean, allowedHosts?: string[], bypassHosts?: string[]}.strict()``,
+    all optional, default ``enabled: false``. Off by default is not a gap (Golden
+    Rule #5: absence of an opt-in feature is never a FAIL).
+
+    ``allowedHosts`` and ``bypassHosts`` both validate through the SAME
+    ``EgressProxyExactHostSchema`` (same file, lines 329-330), which calls
+    ``normalizeExactAllowedHost`` (`dist/exact-hostname-B5MIU7_E.mjs`) and REJECTS any
+    entry containing ``*`` at config-load time: "Allowed host ... cannot contain a
+    wildcard; use one exact hostname." The filed task asked whether an unscoped wildcard
+    in ``bypassHosts`` was itself the FAIL-worthy shape, the way other allowlist checks
+    in this module (e.g. ``check_browser_ssrf``) treat one — it is not: the schema makes
+    that value impossible to persist through ``openclaw config set``, and a hand-edited
+    config carrying it would fail the SAME validation on the next config load, so this
+    check does not look for one.
+
+    What the vendor docs (`docs/gateway/secrets/secret-store-and-egress.md`, re-read
+    against 2026.9.5) actually describe is the OPPOSITE of the "empty allowlist is wide
+    open" shape several sibling checks in this module use for THEIR allowlists: "An
+    empty array is lockdown mode: only per-secret bound hosts and bypassHosts remain
+    reachable. Omitting allowedHosts leaves traffic unrestricted." So
+    ``allowedHosts: []`` is the MOST restrictive setting here, not the least — the real
+    gap is ``allowedHosts`` being ABSENT while the proxy is enabled, which leaves
+    non-sentinel traffic through the proxy unrestricted: any host, once a Gateway-hosted
+    run holds proxy credentials. Per-secret destination binding still protects the bound
+    secret VALUES either way; this check is only about that separate traffic surface,
+    which the vendor's own docs call "defense in depth" (a subprocess that ignores the
+    proxy environment variables and opens a raw socket bypasses it entirely) — which is
+    why this stays WARN-only and never escalates to FAIL.
+
+    PASS    — ``enabled`` is not ``true`` (the default; nothing runs, nothing to
+              assess), OR ``enabled: true`` and ``allowedHosts`` is a list (empty =
+              lockdown, non-empty = scoped — either way the vendor's own semantics call
+              this restricted).
+    WARN    — ``enabled: true`` and ``allowedHosts`` is absent, ``null``, or any other
+              non-list shape (a shape the real ``array().optional()`` schema would also
+              refuse, so it never enacts a restriction either) — the proxy's traffic
+              allowlist is not in effect.
+    UNKNOWN — config unreadable.
+    """
+    unreadable = _config_unreadable("B387", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    cfg = ctx.config
+    enabled = dig(cfg, "secrets.egressProxy.enabled")
+
+    if enabled is not True:
+        return _finding(
+            "B387", PASS,
+            "secrets.egressProxy is not enabled (the default) — no secret-egress "
+            "substitution proxy runs for Gateway-hosted agent exec, so there is no "
+            "proxy traffic allowlist to assess.",
+            "If you enable secrets.egressProxy, also set "
+            "secrets.egressProxy.allowedHosts so non-sentinel proxy traffic is "
+            "restricted to the hosts this workload actually needs, instead of left "
+            "open.",
+            config_field_paths=frozenset({"secrets.egressProxy.enabled"}),
+        )
+
+    allowed_hosts = dig(cfg, "secrets.egressProxy.allowedHosts")
+
+    if not isinstance(allowed_hosts, list):
+        return _finding(
+            "B387", WARN,
+            "secrets.egressProxy.enabled is true but secrets.egressProxy.allowedHosts "
+            "is not set. OpenClaw's own default then applies: non-sentinel traffic "
+            "through the secret-egress proxy can reach any host once a Gateway-hosted "
+            "agent run holds proxy credentials. Secrets bound to a specific host via "
+            "the store stay protected either way — this is about the separate traffic "
+            "surface.",
+            "Set secrets.egressProxy.allowedHosts to the exact hosts this workload "
+            "needs (an empty array locks down everything not already bound to a "
+            "secret). Treat this as defense in depth alongside per-secret "
+            "--allow-host binding, since a subprocess that ignores the proxy "
+            "environment variables bypasses the allowlist entirely.",
+            evidence=[f"secrets.egressProxy.allowedHosts={allowed_hosts!r}"],
+            config_field_paths=frozenset({
+                "secrets.egressProxy.enabled", "secrets.egressProxy.allowedHosts",
+            }),
+        )
+
+    return _finding(
+        "B387", PASS,
+        "secrets.egressProxy is enabled and secrets.egressProxy.allowedHosts is set, "
+        "so non-sentinel proxy traffic is restricted to the declared hosts (an empty "
+        "list locks it down to nothing but per-secret bound hosts).",
+        "Keep secrets.egressProxy.allowedHosts scoped to only the hosts this "
+        "workload needs.",
+        evidence=[f"secrets.egressProxy.allowedHosts={allowed_hosts!r}"],
+        config_field_paths=frozenset({
+            "secrets.egressProxy.enabled", "secrets.egressProxy.allowedHosts",
+        }),
+    )
+
+
 def _b82_undeterminable(path: str, value: object, expected: str) -> Finding:
     """B82's single UNKNOWN shape, shared by all three malformed levels.
 

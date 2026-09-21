@@ -128,6 +128,8 @@ plugins.slots
 proxy
 proxy.enabled
 proxy.proxyUrl
+secrets.egressProxy.allowedHosts
+secrets.egressProxy.enabled
 secrets.providers
 security.audit.suppressions
 security.installPolicy
