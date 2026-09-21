@@ -1352,11 +1352,20 @@ def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
     Returns ``(value, source)`` or ``(None, None)``. The value is returned only so the
     caller can test presence — it is a secret and must never reach a message, evidence
     entry, or log (§8).
+
+    ``source`` IS meant to reach evidence/detail (every caller names it so the operator
+    knows where to go fix the setting), so it is redacted here, once, for all three
+    callers (B41/B2/B80) rather than at each call site — the same home-rooted-absolute-
+    path hazard ``_detail_path`` exists for (B-856; ``persistent_env_evidence`` can hand
+    back either a global dotenv's absolute path or a systemd unit path, and both can be
+    home-rooted). ``_detail_path`` already renders the composite unit form
+    (``"<unit> (Environment=)"``) correctly since it rewrites any string that merely
+    *starts with* the home/home-parent prefix.
     """
     for var in _GATEWAY_ENV_CREDENTIAL_VARS:
         value, source = persistent_env_evidence(ctx, var)
         if value is not None and value.strip():
-            return value, source or "an environment file"
+            return value, _detail_path(source, ctx.home) if source else "an environment file"
     return None, None
 
 

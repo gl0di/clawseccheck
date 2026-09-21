@@ -236,6 +236,48 @@ def test_soft_clause_does_not_mask_a_real_fail_clause(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# B-856 — the env-credential SOURCE must not leak an absolute, home-rooted path.
+#
+# `_gateway_env_credential` returns `source` straight from `persistent_env_evidence`,
+# which can be the two global runtime dotenv files' absolute path or a systemd unit's
+# absolute path -- both are home-rooted on a normal install, so quoting either verbatim
+# in a Finding leaks the operator's real directory layout, and (for B2, whose WARN/FAIL
+# `detail` embeds it) is hashed into `baseline.fingerprint()`, silently orphaning a
+# user's `.clawseccheckignore` suppression the moment their workspace or home moves.
+# ---------------------------------------------------------------------------
+
+def test_b2_softened_warn_does_not_leak_the_absolute_dotenv_path(tmp_path):
+    f = check_gateway(
+        collect(_home(tmp_path, EXPOSED_NO_AUTH, dotenv=f"{TOKEN_VAR}={_VALUE}"))
+    )
+    assert f.status == WARN
+    assert str(tmp_path) not in f.detail
+    assert ".env" in f.detail
+
+
+def test_b2_weak_credential_fail_does_not_leak_the_absolute_dotenv_path(tmp_path):
+    f = check_gateway(
+        collect(_home(tmp_path, EXPOSED_NO_AUTH, dotenv=f"{TOKEN_VAR}=tooshort"))
+    )
+    assert f.status == FAIL
+    assert "shorter than 24 chars" in f.detail
+    assert str(tmp_path) not in f.detail
+    assert ".env" in f.detail
+
+
+def test_b2_softened_warn_does_not_leak_the_absolute_unit_path(tmp_path):
+    """Same leak, the systemd-unit source (the composite '<unit> (Environment=)' form
+    `_detail_path` is documented to also rewrite)."""
+    f = check_gateway(
+        collect(_home(tmp_path, EXPOSED_NO_AUTH,
+                      unit_lines=f"Environment={TOKEN_VAR}={_VALUE}\n"))
+    )
+    assert f.status == WARN
+    assert str(tmp_path) not in f.detail
+    assert "Environment=" in f.detail
+
+
+# ---------------------------------------------------------------------------
 # B41 — the credential inventory
 # ---------------------------------------------------------------------------
 
@@ -262,6 +304,15 @@ def test_b41_names_where_the_env_credential_came_from(tmp_path):
     )
     assert any(".env" in e for e in f.evidence)
     assert _VALUE not in _blob(f)
+
+
+def test_b41_evidence_does_not_leak_the_absolute_dotenv_path(tmp_path):
+    """B-856: 'supplied by <source>' must name the dotenv file relative to the audited
+    home, not as an absolute, home-rooted machine path."""
+    f = check_credential_blast_radius(
+        collect(_home(tmp_path, EXPOSED_NO_AUTH, dotenv=f"{TOKEN_VAR}={_VALUE}"))
+    )
+    assert str(tmp_path) not in " ".join(f.evidence)
 
 
 def test_b41_config_token_evidence_is_unchanged(tmp_path):

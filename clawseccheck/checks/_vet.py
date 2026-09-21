@@ -7090,6 +7090,9 @@ def detect_vet_type_with_reason(
         # truncated or malformed document. The membership test below never happened, so
         # "unknown" here means "I could not look", and the caller is told so rather than
         # left to report only a missing path.
+        # `cfg_file` is unredacted here on purpose (B-856 item 4, not a live leak): the
+        # sole caller, cli.py's `_report_unassessable`, already redacts `undetermined`
+        # via `_redact_home_paths()` (B-581) before it reaches stderr.
         return "unknown", (
             f"the OpenClaw config at {cfg_file} could not be read, so whether this "
             "names a configured MCP server is undetermined"
