@@ -50,6 +50,7 @@ from clawseccheck import collector as _collector_mod
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN
 from clawseccheck.checks import vet_skill
 from clawseccheck.collector import (
+    _MAX_OWN_SOURCE_BYTES,
     _OWN_ENGINE_MARKER_STATEMENTS,
     _OWN_ENGINE_MARKERS,
     _is_own_source,
@@ -416,3 +417,47 @@ def test_is_own_source_is_not_pathologically_slow_against_the_real_package():
         f"_is_own_source took {elapsed:.3f}s against the real repo root — the "
         f"short-circuit may have regressed (measured ~0.26-0.39s with it working)"
     )
+
+
+class TestOversizedEngineSourceIsSkippedWhole:
+    """B-846 round 5, C-135 follow-up: an oversized .py must not cost a parse.
+
+    `_is_own_source` runs per candidate skill directory during discovery, and the AST
+    round made each call a real `ast.parse` rather than a text scan. Planting one huge
+    .py under `<root>/clawseccheck/checks/` in any real skill root would otherwise make
+    every later audit and every --monitor run pay a parse proportional to its size. The
+    C-135 reviewer measured ~3s against sub-ms. It is a denial-of-audit surface, not an
+    identity forgery -- but it is unbounded, so it is capped.
+    """
+
+    def test_a_file_over_the_cap_is_skipped_and_costs_no_parse(self, tmp_path):
+        checks = tmp_path / "clawseccheck" / "checks"
+        checks.mkdir(parents=True)
+        oversized = "x = 1  # " + ("p" * (_MAX_OWN_SOURCE_BYTES + 1_000)) + "\n"
+        (checks / "decoy.py").write_text(oversized, encoding="utf-8")
+        (checks / "engine.py").write_text(
+            "\n".join(_OWN_ENGINE_MARKER_STATEMENTS), encoding="utf-8"
+        )
+
+        start = time.perf_counter()
+        assert _is_own_source(tmp_path) is True
+        elapsed = time.perf_counter() - start
+
+        # Generous: the point is that the decoy is not parsed at all, which is orders of
+        # magnitude below the ~3s the reviewer measured without the cap.
+        assert elapsed < 1.0, f"the oversized decoy was parsed after all ({elapsed:.2f}s)"
+
+    def test_skipping_an_oversized_file_fails_in_the_safe_direction(self, tmp_path):
+        """If the ONLY copy of a marker sits in an oversized file, the answer is False.
+
+        That costs recognition of a tree that really is ours, never a false identity --
+        the tree then gets scanned, which is the safe way to be wrong.
+        """
+        checks = tmp_path / "clawseccheck" / "checks"
+        checks.mkdir(parents=True)
+        markers = list(_OWN_ENGINE_MARKER_STATEMENTS)
+        (checks / "engine.py").write_text("\n".join(markers[:-1]), encoding="utf-8")
+        padding = "# " + ("p" * (_MAX_OWN_SOURCE_BYTES + 1_000)) + "\n"
+        (checks / "big.py").write_text(padding + markers[-1], encoding="utf-8")
+
+        assert _is_own_source(tmp_path) is False

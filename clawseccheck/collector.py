@@ -163,6 +163,21 @@ _ARCHIVE_MAX_EXPANSION_RATIO = 100
 # bounded — a 500MB config caps at 5MB read, not unbounded RSS growth.
 _MAX_CONFIG_BYTES = 5_000_000
 
+# B-846: `_is_own_source` parses candidate engine sources with `ast.parse`, which costs
+# strictly more than the text scan it replaced, and it runs per candidate skill directory
+# during discovery. Without a cap, planting one huge .py under `<root>/clawseccheck/
+# checks/` in any real skill root makes every later audit and every --monitor run pay a
+# parse proportional to that file's size, unbounded -- a denial-of-audit surface, found
+# by the C-135 pass on the AST round (measured ~3s against sub-ms). A file over this cap
+# is skipped WHOLE, never truncated: truncation would feed a partial prefix to the
+# parser, which can only ever LOSE a marker node, so both paths fail in the safe
+# direction (answer "not our source", scan the tree) -- but dropping it whole matches
+# what collect_skill_files already does for _MAX_FILE_BYTES and needs no reasoning about
+# partial parses. Deliberately larger than _MAX_FILE_BYTES: our own biggest engine module
+# is ~808KB today and the topic modules grew ~11% in a single release, so a 1MB cap would
+# start dropping real sources -- which would cost RECOGNITION of our own tree, not safety.
+_MAX_OWN_SOURCE_BYTES = 2_000_000
+
 # B-231 sub-item 1: the cron job store (~/.openclaw/cron/jobs.json, or the SQLite-backed
 # cron_jobs table when the legacy JSON file is absent) is read-only, symlink-safe, and
 # capped the same way as the config/bootstrap reads above — a huge/padded store must not
@@ -3776,10 +3791,14 @@ def _is_own_source(p: Path) -> bool:
         sources = [p / "checks.py"]
     else:
         return False
-    try:
-        heads = [s.read_text(encoding="utf-8", errors="replace") for s in sources]
-    except OSError:
-        return False
+    heads = []
+    for src in sources:
+        try:
+            if src.stat().st_size > _MAX_OWN_SOURCE_BYTES:
+                continue  # see _MAX_OWN_SOURCE_BYTES: skipped whole, never truncated
+            heads.append(src.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return False
     # B-846: see the class docstring. A marker is matched by AST STRUCTURE
     # (`_own_engine_symbols_in_ast`) — a real `FunctionDef`/`Assign` node — never by
     # substring text, so no lexer/grammar mismatch (comment, string, f-string, or a
