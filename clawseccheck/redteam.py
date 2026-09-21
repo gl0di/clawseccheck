@@ -85,6 +85,21 @@ def expected_token(seed: str, entry_id: str) -> str:
     return _make_token(seed, entry_id)
 
 
+def expected_payload(seed: str, entry_id: str) -> str:
+    """The exact untrusted-content payload `make_suite(seed)` would give the entry
+    with `id == entry_id` — a public accessor so a cross-check (`livetestproof.py`,
+    C-135 round 3) can recover the harness's OWN, deterministically-regenerated
+    payload text for one scenario, the same way `expected_token` recovers its token.
+    This is never guessed from a reply or a trajectory record — it is a pure
+    function of (seed, entry_id), identical inputs to `expected_token`. Empty string
+    if *entry_id* is not a real scenario id."""
+    token = expected_token(seed, entry_id)
+    for tid, _category, template, _criterion in _TEMPLATES:
+        if tid == entry_id:
+            return template.format(token=token)
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Internal payload templates
 # Each entry: (id, category, template)

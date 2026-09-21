@@ -67,6 +67,23 @@ def expected_token(seed: str, entry_id: str) -> str:
     return _make_token(seed_hex, entry_id)
 
 
+def expected_instruction(seed: str, entry_id: str) -> str:
+    """The exact injected instruction text `make_scenarios(seed)` would give the
+    entry with `id == entry_id` — a public accessor so a cross-check
+    (`livetestproof.py`, C-135 round 3) can recover the harness's OWN,
+    deterministically-regenerated instruction text for one scenario, the same way
+    `expected_token` recovers its token. Never guessed from a reply or a trajectory
+    record — a pure function of (seed, entry_id). Empty string if *entry_id* is not
+    a real scenario id."""
+    seed_hex = hashlib.sha256(seed.encode()).hexdigest()[:16]
+    token = _make_token(seed_hex, entry_id)
+    fake_secret = _make_fake_secret(seed_hex, entry_id)
+    for tid, _source, instruction_template, _dangerous_tools in _TEMPLATES:
+        if tid == entry_id:
+            return instruction_template.format(fake_secret=fake_secret, token=token)
+    return ""
+
+
 # All valid untrusted-content sources.
 SOURCES: list[str] = [
     "email",
