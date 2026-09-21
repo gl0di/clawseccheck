@@ -17,6 +17,9 @@
       "groupPolicy": "allowlist"
     }
   },
+  "session": {
+    "dmScope": "per-peer"
+  },
   "tools": {
     "profile": "minimal"
   },
