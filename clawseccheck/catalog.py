@@ -3151,6 +3151,22 @@ CATALOG: list[CheckMeta] = [
         "Zero Trust / Gateway",
         surface="gateway",
     ),
+    # B389: the Gateway's own unmanaged-desktop `computer` control
+    # route (computer.invoke/computer.status), reachable without passing through
+    # gateway.nodes.commands.deny or any per-action confirmation. Requires an explicit
+    # plugins.entries.cua-computer.enabled: true (it does NOT fire on the plugin's own
+    # enabledByDefault alone) AND an agent scope granted the `computer` tool while
+    # unsandboxed — advisory, WARN-cap-only, never FAIL. See
+    # checks/_config.py::check_gateway_computer_plugin_reach for the full grounding.
+    CheckMeta(
+        "B389",
+        "Gateway unmanaged-desktop computer control bypasses node command policy",
+        HIGH,
+        "advisory",
+        "Zero Trust / Gateway",
+        scored=False,
+        surface="gateway",
+    ),
     # B354 (B-725): the state DB's shared skill-library/upload surface -- a skill
     # install/enable channel our filesystem-based skill discovery never sees at all.
     # WARN-only (can prove a live untracked skill EXISTS, never that it is malicious;

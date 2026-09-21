@@ -2517,6 +2517,22 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B389 - Gateway unmanaged-desktop computer control bypasses node command policy
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Zero Trust / Gateway
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Gateway unmanaged-desktop computer control bypasses node command policy
+- Remediation:
+  - none
+
+## Hardening checks
+
 ### B354 - Shared skill-library / upload surface bypasses filesystem discovery
 
 - Severity: HIGH
