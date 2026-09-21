@@ -787,7 +787,13 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         if not applicable:
             reason, fix = _na_reason(axis, target_type), ""
         elif status == PASS:
-            reason, fix = _clean_reason(axis, families), ""
+            # B-846: danger's PASS on the self-source path is this function's own
+            # canned Finding (see `self_source` above), not a scan result — the
+            # generic `_clean_reason` text would falsely claim a completed scan.
+            if self_source and axis == "danger":
+                reason, fix = _self_source_danger_reason(), ""
+            else:
+                reason, fix = _clean_reason(axis, families), ""
         elif status == UNKNOWN and not bucket:
             reason, fix = _unmeasurable_reason(
                 axis, truncated=scan_truncated, unanalysed=bool(unread_code),
@@ -922,6 +928,21 @@ def _clean_reason(axis: str, families: set) -> str:
     return "no issue found"
 
 
+def _self_source_danger_reason() -> str:
+    """B-846: the danger axis's PASS on the self-source path is a POLICY default, not a
+    scan result. `_vet_resolved_skill` (checks/_vet.py) returns this canned B13 PASS
+    Finding on `_is_own_source(p)` BEFORE any read_skill_python/shell/js call runs, so
+    `_clean_reason`'s "no malware signature or known-bad indicator [found]" would
+    falsely claim a scan ran and came back clean over ClawSecCheck's own ~7,000-line
+    engine. Say what actually happened instead: nothing was read.
+    """
+    return (
+        "not scanned at all — this is ClawSecCheck's own source, so it is treated as "
+        "safe by policy rather than by a completed malware scan (scanning it would "
+        "self-flag on its own attack-signature data)"
+    )
+
+
 def _unmeasurable_reason(axis: str, *, truncated: bool = False,
                         unanalysed: bool = False, danger_only: bool = False,
                         self_source: bool = False,
@@ -960,6 +981,12 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
       artifact (B-628, same as the other two), and build/behavior fell through to an
       unearned PASS ("no issue found") instead of even reaching this function, since only
       `connections`/`persistence` gated on code-measurability -- see `build_profile`.
+      B-846: the first version of THIS string still overclaimed on the danger axis's
+      behalf -- "only the danger axis ran, by design" -- when danger did not run either
+      (`_vet_resolved_skill` returns the canned B13 PASS before any read_skill_* call).
+      The wording below, and the danger axis's own PASS reason (`build_profile`'s PASS
+      branch), now both say nothing ran; danger's PASS is a policy default, not a
+      completed scan.
 
     Truncation wins the wording when several hold: "we stopped early" already implies the
     rest is unknown, while naming an unread file would suggest the rest WAS read.
@@ -1007,7 +1034,8 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
         return (
             "this is ClawSecCheck's own source; a security auditor necessarily ships "
             "attack signatures and payload text as data, so scanning it for malware "
-            f"would self-flag — only the danger axis ran, by design, {tail}"
+            f"would self-flag — nothing here was scanned at all, not even the danger "
+            f"axis (its PASS is a policy default, not a completed scan), {tail}"
         )
     if axis == "connections":
         return "no executable code to analyze for outbound connections"

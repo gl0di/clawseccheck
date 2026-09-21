@@ -3641,11 +3641,25 @@ def _is_own_source(p: Path) -> bool:
     HONEST SCOPE — this CLOSES the rename-only cloak but does not make self-exclusion
     unforgeable: an attacker who copies our actual engine sources (all of
     `_OWN_ENGINE_MARKERS` present, in a `checks/` package laid out like ours) alongside
-    a payload would still be excluded. That residual is strictly narrower than the old
-    one — it costs the attacker shipping our whole engine rather than one `mv` — and it
-    is bounded further by `check_installed_skills` being only one of the surfaces that
-    sees a skill. Making exclusion tamper-proof needs a signed/attested identity, not a
-    content heuristic; tracked separately, not solvable inside a static string test.
+    a payload would still be excluded. Bounded further by `check_installed_skills`
+    being only one of the surfaces that sees a skill. Making exclusion tamper-proof
+    needs a signed/attested identity, not a content heuristic; tracked separately, not
+    solvable inside a static string test.
+
+    B-846 — the "costs the attacker shipping our whole engine" framing above was FALSE
+    as originally shipped: the match was a bare substring test, so three one-line `#`
+    comments containing the marker text (no real code at all) satisfied it just as well
+    as the genuine ~7,000-line engine. Reproduced against a real DO-NOT-INSTALL fixture:
+    adding one `clawseccheck/checks/x.py` file containing only
+    `# def check_installed_skills` / `# def vet_skill` / `# _SKILL_CRIT` flipped it to
+    INSTALL with Danger PASS, cloaking a genuinely malicious sibling skill. Whole-line
+    comments are now stripped before matching (below), which closes that specific,
+    cheaply-automatable forgery — but the honest residual is narrower than the original
+    claim, not zero: a forger who writes three trivial *real* statements (a `def
+    vet_skill(): pass` stub, say) instead of comments still passes. Left there
+    deliberately: distinguishing a real stub from real code is not a substring test at
+    all, and is the same signed/attested-identity gap the paragraph above already
+    defers. Pinned by `tests/test_b846_self_source_axis_and_marker_forgery.py`.
 
     C-135 residual, accepted deliberately: an own install that ships the DOCS but not the
     engine (a hand-made partial copy — `SKILL.md` + `README.md` + `docs/` under a
@@ -3684,9 +3698,26 @@ def _is_own_source(p: Path) -> bool:
     else:
         return False
     try:
-        head = "\n".join(s.read_text(encoding="utf-8", errors="replace") for s in sources)
+        heads = [s.read_text(encoding="utf-8", errors="replace") for s in sources]
     except OSError:
         return False
+    # B-846: a marker string that appears ONLY inside a `#` comment costs an attacker
+    # nothing to forge — three bare comment lines (`# def check_installed_skills`,
+    # `# def vet_skill`, `# _SKILL_CRIT`) in one otherwise-empty file used to satisfy
+    # `all(m in head ...)` below and grant "own source" identity to any directory,
+    # cloaking a genuinely malicious sibling skill as ClawSecCheck itself (measured:
+    # a real DO-NOT-INSTALL fixture flipped to INSTALL / Danger PASS this way). The
+    # real engine carries every marker as actual source — `_SKILL_CRIT = [...]`,
+    # `def check_installed_skills(...)`, `def vet_skill(...)` are statements, not
+    # prose about them — so dropping whole-line comments before matching closes the
+    # forgery without narrowing genuine recognition. This is a content-shape check,
+    # not a security boundary on its own (a forger could still write three real,
+    # trivial `def`/assignment stubs instead of comments); it closes the specific,
+    # cheaply-automatable cloak this ticket reproduced.
+    head = "\n".join(
+        "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+        for text in heads
+    )
     return all(m in head for m in _OWN_ENGINE_MARKERS)
 
 
