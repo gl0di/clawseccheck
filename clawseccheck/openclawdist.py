@@ -338,3 +338,56 @@ def self_reported_version(config: "dict | None") -> str:
         return ""
     value = meta.get("lastTouchedVersion")
     return value if isinstance(value, str) else ""
+
+
+# ---------- C-571: audit-wide grounding ceiling ----------
+#
+# Every check that reads a config value assumes the installed OpenClaw resolves that
+# value the way the build this project last executed against did. `checks/_shared.py`'s
+# `_cross_context_default` (B363's B-833 fix) is the proof this assumption breaks in
+# practice: `tools.message.crossContext.allowAcrossProviders`'s config PATH and its
+# declared schema default/enum did not move between 2026.9.4 and 2026.9.5 — only the
+# RESOLVER LINE did (`=== true` -> `!== false`) — so nothing short of executing the
+# vendor caught it, and B363 silently PASSed the newly-dangerous default until that fix
+# landed. That fix covers the one flip that was found. It says nothing about the next
+# one, on the next release, in some other check that has no version-aware branch at all
+# — which is the audit-level gap this exists to disclose.
+#
+# GROUNDED_MAX_VERSION is deliberately NOT "the newest release any one check's window
+# validates" — `harnessruntime.ORACLE_MAX` is that, for the one check family narrow
+# enough to have a closed, differentially-validated window, and it already degrades to
+# `unknown` on its own outside that window, so it needs no help from this constant. This
+# is the newest release ANY check in this build was actually measured against, full
+# stop — the ceiling the whole report's grounding sits below. A SHIPPED constant (Golden
+# Rule #1: no lookup, no phone-home, nothing computed from a live probe of the install),
+# bumped by hand whenever a re-grounding pass (CLAUDE.md's C-125) touches a check against
+# a newer dist — the same discipline the code-digest measurements above already keep
+# release over release. Bump it only when a check was actually re-grounded that far, never
+# just because a newer OpenClaw exists.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 5)
+
+
+def grounding_gap(installed_version: "str | None"):
+    """The installed build's numeric ``(year, month, patch)`` when it is NEWER than
+    ``GROUNDED_MAX_VERSION`` — the newest release this build's checks were grounded
+    against — else ``None``.
+
+    ``None`` covers "not installed" (``installed_version`` falsy or not a string), "not
+    parseable as a version" and "not shaped like a calendar release" (fewer than three
+    numeric parts — ``"2026.9"``, ``"0.0.0"`` — sort of a version that no one measured
+    this constant against either) and "carries a pre-release token" (``_numeric_parts``
+    already answers ``None`` for those, per its own docstring). Every one of those is "we
+    cannot place this build on the timeline", never evidence of a gap — the same asymmetry
+    ``_cross_context_default``/``_openclaw_generation`` already apply to their own
+    thresholds, so an ambiguous version string never manufactures a warning any more than
+    it manufactures a verdict.
+
+    Only the first three components are compared, mirroring ``harnessruntime.ORACLE_MAX``'s
+    own rule: a correction release of the grounded build itself (``2026.9.5-1``) sorts
+    alongside it, not past it, so it does not read as a gap that was never grounded.
+    """
+    parts = _numeric_parts(installed_version) if isinstance(installed_version, str) else None
+    if parts is None or len(parts) < 3:
+        return None
+    build = parts[:3]
+    return build if build > GROUNDED_MAX_VERSION else None
