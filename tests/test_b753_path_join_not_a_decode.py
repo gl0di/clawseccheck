@@ -192,6 +192,76 @@ def test_an_import_that_is_later_rebound_loses_its_standing():
 
 
 # ---------------------------------------------------------------------------
+# B-855 — a plain `Name = ...` was not the only way to take path-module standing
+# back. Every case below pairs a genuine `from os import path` with a DIFFERENT
+# rebinding form for the very same name, exactly the pairing shape from the B-753
+# tests above: the real in-artifact read satisfies `found_any`, and if the
+# shadowed name is still trusted its disguised join is skipped alongside it,
+# carrying the payload out inside an exempt expression.
+# ---------------------------------------------------------------------------
+
+_B855_PRELUDE = "import os\nfrom os import path\n"
+
+
+def test_every_non_assign_rebinding_form_still_convicts_when_paired():
+    """A for-loop target, a `with` target, a walrus, `def path`, `except ... as
+    path`, a second import binding `path` to something else, and tuple/list
+    unpacking all took `path` away from a plain-`Name`-only rebind check, so each
+    one used to leave the pairing attack absolved (DANGEROUS_SINK/info only, no
+    OBFUSCATED_EXEC) -- confirmed against `dev` before this fix."""
+    cases = {
+        "for-loop target": f'frags = {_PAYLOAD}\nfor path in ("",):\n    exec({_REAL_READ} + path.join(frags))\n',
+        "with target": f'frags = {_PAYLOAD}\nwith 0 as path:\n    exec({_REAL_READ} + path.join(frags))\n',
+        "walrus": f'frags = {_PAYLOAD}\n(path := "")\nexec({_REAL_READ} + path.join(frags))\n',
+        "def path": f'frags = {_PAYLOAD}\ndef path(): pass\nexec({_REAL_READ} + path.join(frags))\n',
+        "except ... as path": (
+            f'frags = {_PAYLOAD}\ntry:\n    pass\n'
+            f'except Exception as path:\n    exec({_REAL_READ} + path.join(frags))\n'
+        ),
+        "import evil as path": f'frags = {_PAYLOAD}\nimport sys as path\nexec({_REAL_READ} + path.join(frags))\n',
+        "tuple unpacking": f'frags = {_PAYLOAD}\npath, k = "", 1\nexec({_REAL_READ} + path.join(frags))\n',
+        "list unpacking": f'frags = {_PAYLOAD}\n[path] = [""]\nexec({_REAL_READ} + path.join(frags))\n',
+        "comprehension variable": (
+            f'frags = {_PAYLOAD}\n'
+            f'exec({_REAL_READ} + next(path.join(frags) for path in ("x",)))\n'
+        ),
+    }
+    for label, body in cases.items():
+        assert _convicts(_B855_PRELUDE + body), label
+
+
+def test_an_os_path_attribute_rebind_also_loses_viaos_standing():
+    """`os.path = <obj>` is not a name rebind at all -- it mutates the `.path`
+    attribute the `X.path.join(...)` (`viaos`) reading depends on. Paired with a
+    genuine, UNTOUCHED `os.path.join`/`os.path.dirname` read via a separate `os`
+    import, so this isolates the attribute-rebind gap from the read itself."""
+    assert _convicts(
+        "import os\n"
+        "import os as o2\n"
+        "o2.path = 0\n"
+        f"frags = {_PAYLOAD}\n"
+        f"exec({_REAL_READ} + o2.path.join(frags))\n"
+    )
+
+
+def test_b855_finding_reason_names_the_real_sink():
+    """The printed-report text a person actually reads: not just that *something*
+    convicted, but that it is OBFUSCATED_EXEC on `exec`, not a downgraded/renamed
+    rule. Regressing to a different rule id or a `DANGEROUS_SINK` info-finding here
+    would pass a bare severity check while still losing the signal."""
+    src = (
+        _B855_PRELUDE
+        + f'frags = {_PAYLOAD}\n'
+        + f'for path in ("",):\n    exec({_REAL_READ} + path.join(frags))\n'
+    )
+    findings = [f for f in analyze_python(src) if f.rule == "OBFUSCATED_EXEC"]
+    assert len(findings) == 1, analyze_python(src)
+    assert findings[0].severity == "crit"
+    assert "exec" in findings[0].reason
+    assert "decoded/obfuscated string" in findings[0].reason
+
+
+# ---------------------------------------------------------------------------
 # Untouched neighbours — non-vacuity for the whole file.
 # ---------------------------------------------------------------------------
 
