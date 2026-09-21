@@ -1369,7 +1369,7 @@ CATALOG: list[CheckMeta] = [
     # skill's prose and sent to a non-first-party endpoint. Also the prose-side
     # analogue of skillast.py's HOST_INFO_EXFIL_FLOW (C-203), which only recognizes
     # this behaviour in bundled CODE, not natural-language onboarding instructions
-    # (CLAWSECCHECK-C-388: a real vendor sample, moltfounders.com). Always WARN,
+    # (a real vendor sample, moltfounders.com). Always WARN,
     # never FAIL -- a hardware fingerprint is a real tracking/targeting signal but
     # not the credential-theft severity B160's own is_cred leg carries.
     CheckMeta(

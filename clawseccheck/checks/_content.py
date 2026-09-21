@@ -14595,14 +14595,78 @@ _HOST_FP_ATTR_TERM_RE = re.compile(
 )
 
 
-def _host_fingerprint_object(obj_window: str) -> bool:
-    """True when *obj_window* describes the current host's hardware/OS
-    fingerprint -- see the C-538 comment above `_HOST_FP_NAMED_OBJECT_RE`."""
-    if _HOST_FP_NAMED_OBJECT_RE.search(obj_window):
-        return True
-    return bool(
-        _HOST_FP_SELF_REF_RE.search(obj_window) and _HOST_FP_ATTR_TERM_RE.search(obj_window)
-    )
+# C-135 (round 2, real vendor benign sample -- a video-encoding skill): a bare
+# "does the noun class appear anywhere in `obj_window`" search (the original
+# C-538 design) is not enough, for the exact reason `_bulk_cred_object_correlated`
+# (B-212, above) was needed for B160's is_bulk_cred leg -- `obj_window` is a
+# wide, BIDIRECTIONAL window (300 chars before the verb through the URL end),
+# and a bare presence search never requires the described fingerprint to be
+# what the verb actually sends. Unlike B160's own
+# is_bulk noun class ("all customer records", "entire database"), which is rare
+# in benign prose, B388's noun class -- "your device" / "this machine" co-
+# occurring with "GPU" / "total RAM" -- is ORDINARY prose in any game, media,
+# benchmark, or diagnostics skill that merely reads local hardware for an
+# unrelated reason (choosing a video-encoding preset) while ALSO, elsewhere and
+# unrelated, sending something else (a render log) to an external endpoint:
+#
+#   "This tool inspects your device's GPU and total RAM to pick the best video
+#   encoding preset automatically -- nothing about this leaves your machine.
+#   ... Once a render finishes, export the render log to <URL> ..."
+#
+# Both halves fall inside the same 300-char backward window even though they
+# are in unrelated sentences ~180 chars apart. Fixed the same way B-212 fixed
+# is_bulk_cred: correlate the OBJECT match's own position against the verb,
+# not merely its presence anywhere in the wide window -- shares the verb's own
+# sentence, or the verb's immediate object backreferences it. Reuses
+# `_SENTENCE_BREAK_RE` (imported at module top) exactly as `_bulk_cred_object_
+# correlated` does; the only new piece is `_HOST_FP_BACKREF_RE`, which -- unlike
+# B-212's bare pronoun set (them/it/these/those) -- also recognizes the bare
+# demonstratives "this"/"that" immediately after the verb ("Send that object to
+# <URL>", "Send that fingerprint to <URL>"), both real shapes: the former is the
+# real vendor sample this check exists for (moltfounders.com's `agentCapabilities`
+# step), the latter is this check's own bad_c538 fixture.
+_HOST_FP_BACKREF_RE = re.compile(r"\b(?:it|them|this|that|these|those)\b", re.I)
+_HOST_FP_BACKREF_WINDOW = 20  # chars right after the verb -- mirrors B-212's window
+
+
+def _host_fp_span_correlated(
+    blob: str, span_start: int, span_end: int, verb_start: int, verb_end: int
+) -> bool:
+    """True when [span_start, span_end) -- a single fingerprint-object-shaped
+    match -- is actually correlated with the exfil verb spanning
+    [verb_start, verb_end) (absolute positions in *blob*), per the C-135 comment
+    above `_HOST_FP_BACKREF_RE`."""
+    lo, hi = sorted((span_start, verb_start))
+    if _SENTENCE_BREAK_RE.search(blob, lo, hi) is None:
+        return True  # shares the exfil verb's own sentence
+    verb_object_span = blob[verb_end : verb_end + _HOST_FP_BACKREF_WINDOW]
+    return bool(_HOST_FP_BACKREF_RE.search(verb_object_span))
+
+
+def _host_fingerprint_object_correlated(
+    blob: str, obj_window: str, obj_start: int, verb_start: int, verb_end: int
+) -> bool:
+    """True when a hardware/OS-fingerprint OBJECT in *obj_window* is actually
+    correlated with the exfil verb at [verb_start, verb_end) -- see the C-135
+    comment above `_HOST_FP_BACKREF_RE`. Checks each candidate match's own
+    position, exactly like `_bulk_cred_object_correlated` does for B160:
+    leg (a), the named-artifact phrase itself; leg (b), an attribute-term match
+    that also has a self-reference marker present somewhere in the window (the
+    self-reference marker's OWN position is not what is tested for correlation
+    -- its job is only to establish "this machine", not "the fleet" -- the
+    attribute term is the thing actually being described as sent)."""
+    for m in _HOST_FP_NAMED_OBJECT_RE.finditer(obj_window):
+        if _host_fp_span_correlated(
+            blob, obj_start + m.start(), obj_start + m.end(), verb_start, verb_end
+        ):
+            return True
+    if _HOST_FP_SELF_REF_RE.search(obj_window):
+        for m in _HOST_FP_ATTR_TERM_RE.finditer(obj_window):
+            if _host_fp_span_correlated(
+                blob, obj_start + m.start(), obj_start + m.end(), verb_start, verb_end
+            ):
+                return True
+    return False
 
 
 def _prose_host_fingerprint_scan(
@@ -14647,7 +14711,7 @@ def _prose_host_fingerprint_scan(
         obj_start = max(0, vm.start() - _EXFIL_OBJECT_WINDOW)
         obj_end = vm.end() + um.end()  # um is relative to url_window, which starts at vm.end()
         obj_window = blob[obj_start:obj_end]
-        if not _host_fingerprint_object(obj_window):
+        if not _host_fingerprint_object_correlated(blob, obj_window, obj_start, vm.start(), vm.end()):
             continue
         last_end = obj_end
         snippet_raw = blob[obj_start:obj_end]
@@ -14666,8 +14730,7 @@ def check_prose_host_fingerprint_exfil(ctx: Context) -> Finding:
     sibling of skillast.py's HOST_INFO_EXFIL_FLOW (C-203), which is a CODE-only
     AST taint rule and has no equivalent when the same behaviour is described in
     natural language: a "follow these instructions" skill has the agent execute
-    it with its own tools instead of bundled code (CLAWSECCHECK-C-388,
-    moltfounders.com).
+    it with its own tools instead of bundled code (moltfounders.com).
 
     WARN — a hardware/OS fingerprint object is described near an exfil verb +
            external URL. Always WARN, never FAIL: a device fingerprint is a real
