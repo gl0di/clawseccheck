@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from clawseccheck.collector import _OWN_ENGINE_MARKERS, collect
+from clawseccheck.collector import _OWN_ENGINE_MARKER_STATEMENTS, collect
 from clawseccheck.report import (
     _skills_roster_text,
     _subject_summary_rows,
@@ -66,7 +66,7 @@ def _own_engine(skill_dir: Path) -> None:
     _skill_md(skill_dir, "clawseccheck")
     checks = skill_dir / "checks"
     checks.mkdir(parents=True, exist_ok=True)
-    (checks / "_engine.py").write_text("\n".join(_OWN_ENGINE_MARKERS), encoding="utf-8")
+    (checks / "_engine.py").write_text("\n".join(_OWN_ENGINE_MARKER_STATEMENTS), encoding="utf-8")
 
 
 def _bundled(home: Path, name: str, pkg: Path) -> None:
