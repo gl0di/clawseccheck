@@ -1,0 +1,7 @@
+{
+  "secrets": {
+    "egressProxy": {
+      "enabled": true
+    }
+  }
+}

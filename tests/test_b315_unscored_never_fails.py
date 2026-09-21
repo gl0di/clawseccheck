@@ -125,7 +125,12 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     # CheckMeta.scored stays True (its one narrow, C-135-vetted FAIL branch participates
     # by default) while its WARN branch explicitly passes scored=False on that Finding
     # alone (checks/_config.py) — see test_no_unscored_check_fails_on_the_real_corpus
-    # above for the invariant this documents rather than re-derives.
+    # above for the invariant this documents rather than re-derives. +1: B387 (F-196,
+    # secrets.egressProxy traffic-allowlist gap) — WARN-only, never FAIL (the schema
+    # itself rejects a wildcard in allowedHosts/bypassHosts, so there is no FAIL-worthy
+    # shape). +1: B389 (C-554, the Gateway computer route) — WARN-only advisory for the
+    # same reason: an explicit opt-in plus an explicit tool grant is a disclosure, not a
+    # proven compromise on config evidence alone.
 
 
 # ── Targeted: the two downgrades (FAIL -> WARN, CheckMeta unchanged) ──────────────────

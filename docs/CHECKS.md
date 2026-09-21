@@ -653,6 +653,22 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B387 - secrets.egressProxy enabled with no traffic allowlist (allowedHosts unset)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Proxy / Egress Hardening
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: secrets.egressProxy enabled with no traffic allowlist (allowedHosts unset)
+- Remediation:
+  - none
+
+## Hardening checks
+
 ### B39 - Session visibility / cross-user transcript leak
 
 - Severity: MEDIUM

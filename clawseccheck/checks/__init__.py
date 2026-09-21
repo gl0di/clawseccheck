@@ -210,6 +210,7 @@ from ._egress import (
     check_provider_baseurl,
     check_otel_content_capture_egress,
     check_memory_search_remote_egress,
+    check_secrets_egress_proxy,
     check_cachetrace_redaction,
     check_config_audit_log,
     check_config_health_integrity,
@@ -1405,6 +1406,13 @@ CHECKS = [
     # memory chunk to a configured third-party endpoint (global + per-agent scope).
     check_otel_content_capture_egress,
     check_memory_search_remote_egress,
+    # B387 (F-196) — secrets.egressProxy (new in OpenClaw 2026.8.1, re-grounded on
+    # 2026.9.5): WARN when the proxy is enabled with no allowedHosts, since OpenClaw's
+    # own docs say omitting it (not an empty array — that is lockdown) leaves
+    # non-sentinel proxy traffic unrestricted. Never FAIL: both allowedHosts and
+    # bypassHosts already reject a wildcard at config-load time (EgressProxyExactHostSchema
+    # / normalizeExactAllowedHost), so there is no FAIL-worthy wildcard shape to catch.
+    check_secrets_egress_proxy,
     check_session_visibility,
     # B361-B364 (C-411) — remote-ingress / multi-user session hardening: unrestricted
     # cross-agent session-tool access reachable from an open channel; session.scope

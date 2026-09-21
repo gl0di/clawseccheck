@@ -809,6 +809,32 @@ CATALOG: list[CheckMeta] = [
         "Proxy / Egress Hardening",
         surface="tools",
     ),
+    # B387 (F-196): secrets.egressProxy — new in OpenClaw 2026.8.1, re-grounded here
+    # against the installed 2026.9.5 dist (SecretsConfigSchema,
+    # dist/zod-schema.core-CZ0zDyHR.mjs:326-339). A loopback secret-substitution forward
+    # proxy for Gateway-hosted agent exec, off by default. The filed task's own
+    # hypothesis — flag an unscoped wildcard in bypassHosts, the way other allowlist
+    # checks in this module treat one — is DISPROVEN by the schema: both allowedHosts
+    # and bypassHosts validate through EgressProxyExactHostSchema /
+    # normalizeExactAllowedHost (dist/exact-hostname-B5MIU7_E.mjs), which rejects any
+    # "*" at config-load time. The real, vendor-documented gap is also the OPPOSITE of
+    # this module's usual "empty allowlist = wide open" shape: per
+    # docs/gateway/secrets/secret-store-and-egress.md, omitting allowedHosts (not an
+    # empty array — that is lockdown mode) leaves non-sentinel proxy traffic
+    # unrestricted once the proxy is enabled. Per-secret destination binding still
+    # protects bound secret VALUES either way, and the docs call the traffic allowlist
+    # itself "defense in depth" (a subprocess that ignores the proxy env vars bypasses
+    # it entirely) — so this stays WARN-only, never FAIL.
+    CheckMeta(
+        "B387",
+        "secrets.egressProxy enabled with no traffic allowlist (allowedHosts unset)",
+        MEDIUM,
+        "advisory",
+        "Proxy / Egress Hardening",
+        scored=False,
+        confidence="HIGH",
+        surface="secrets",
+    ),
     CheckMeta(
         "B39",
         "Session visibility / cross-user transcript leak",
