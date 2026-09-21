@@ -461,7 +461,18 @@ After the user chooses (or says "check" / "go"), proceed to Step 2.
 
 ### Step 2 — Run the audit
 
-**Stop rule — checked FIRST, before anything else in this step.** If a run this session
+**Suspected-sandbox rule — checked FIRST, before the stop rule below, and before anything
+else in this step.** Suspecting you cannot see the host's real OpenClaw setup is not the same
+as a run having told you so — only a run is evidence. If no run this session has yet reported
+on OpenClaw visibility, run the bare default audit ONCE anyway (`python3 {baseDir}/audit.py`,
+no other flags) even if you suspect sandboxing — it is read-only, exits 0, and costs one
+command. Its own output tells you and the user whether the session is sandboxed, in wording
+you must relay verbatim; never write your own paraphrase of it. Never assert sandboxing from
+priors — only a run's own output may state it. Do not invent your own command line either;
+`--version` / `--menu` above are the one prescribed invocation, not a template to add untested
+flags to. Once that run has reported, the stop rule below governs everything after.
+
+**Stop rule — checked next, before proceeding further in this step.** If a run this session
 already reported no OpenClaw config found, or reported that this session is sandboxed
 and cannot see the host's real OpenClaw setup: STOP here. Do not proceed to the
 capability self-report, the judge panel, `--attest`, or any live test below — there is
