@@ -134,8 +134,21 @@ _TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch"}
 # Only the one group that contains "read" is modelled: a group entry is expanded to its
 # members before matching, so `allow: ["group:fs"]` grants read and `deny: ["group:fs"]`
 # removes it. Other groups cannot change this predicate's answer.
+#
+# C-584: this had gone stale by one member. "ls" carries `sectionId: "fs"` in
+# CORE_TOOL_DEFINITIONS (tool-catalog-*.js) alongside read/write/edit/apply_patch, and
+# ``toolgrant.py``'s own whole-table-grounded copy already recorded "2026.9.2: group:fs
+# gained 'ls'" — but this module's independent literal was never updated to match. Verified
+# by EXECUTING the vendor (``tests/_toolgrantoracle.py --tables`` against openclaw@2026.9.5,
+# 2026-09-21): ``groups["group:fs"] == ["ls", "read", "write", "edit", "apply_patch"]``.
+# Confirmed inert rather than a lying-PASS: this table is consulted (`_expand`) only to
+# decide whether the fixed tool name "read" matches an expanded allow/deny list, and "read"
+# was already a member either way, so no config changed verdict — but it is corrected here
+# to keep this a faithful port rather than a table trusted to happen not to matter, and
+# ``test_dist_group_fs_membership_matches_core_tool_definitions`` now grounds the full set
+# so the next vendor addition is caught mechanically instead of by inspection.
 _GROUP_FS = "group:fs"
-_GROUP_FS_MEMBERS = ("read", "write", "edit", "apply_patch")
+_GROUP_FS_MEMBERS = ("ls", "read", "write", "edit", "apply_patch")
 
 # ``CORE_TOOL_PROFILES`` (dist tool-catalog-*.js). Only the read-grant answer is kept
 # rather than all four tool lists: the full tables are ~40 tool ids whose only use here
