@@ -1210,7 +1210,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Severity: MEDIUM
 - Block: hardening
 - Framework: Data Exfiltration / Prompt Injection
-- Scored: yes
+- Scored: no
 - Confidence: MEDIUM
 - OWASP: none
 - What it checks: Prose-intent host/hardware-fingerprint exfiltration directive

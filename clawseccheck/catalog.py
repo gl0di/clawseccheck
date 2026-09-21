@@ -1372,6 +1372,22 @@ CATALOG: list[CheckMeta] = [
     # (a real vendor sample, moltfounders.com). Always WARN,
     # never FAIL -- a hardware fingerprint is a real tracking/targeting signal but
     # not the credential-theft severity B160's own is_cred leg carries.
+    #
+    # scored=False (C-135 round 4): four rounds of adversarial review found this is
+    # a purely STRUCTURAL/positional heuristic ("is the hardware description in the
+    # same document section as the send"), and a structural check cannot always
+    # distinguish "this section's hardware mention is what gets sent" from "this
+    # section happens to also mention hardware, unrelated to what gets sent" -- an
+    # un-punctuated bullet/Q&A block with no blank line or heading between an
+    # unrelated pair of lines (round 4's own un-closed residual: see
+    # `_host_fp_same_block` in checks/_content.py) reads as one section either way,
+    # and a negated/disclaimed mention ("never transmits it anywhere") in the same
+    # section as a genuine, unrelated send is likewise indistinguishable from the
+    # real thing without content-level judgment a regex cannot make soundly. A new,
+    # three-times-broken prose heuristic docking a real A-F grade on a residual its
+    # own author cannot close is the B68-B73 WARN-only-advisory shape, not a scored
+    # check's. See the WARN finding's own `fix` text (check_prose_host_fingerprint_
+    # exfil, checks/_content.py) for the user-facing disclosure of the same residual.
     CheckMeta(
         "B388",
         "Prose-intent host/hardware-fingerprint exfiltration directive",
@@ -1379,6 +1395,7 @@ CATALOG: list[CheckMeta] = [
         "hardening",
         "Data Exfiltration / Prompt Injection",
         confidence="MEDIUM",
+        scored=False,
         surface="skills",
     ),
     # B161 (C-217): identity-file injection -- an override/jailbreak directive planted
