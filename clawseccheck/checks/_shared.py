@@ -1290,6 +1290,93 @@ def _sandbox_docker_binds(sandbox: dict) -> "list | None":
     return None
 
 
+def _sandbox_browser_binds(sandbox: dict) -> "list | None":
+    """Normalize `sandbox.browser.binds` -- same real schema as `sandbox.docker.binds`
+    (a bind-spec string, or a list of them) -- to a plain `list[str]`. Mirrors
+    `_sandbox_docker_binds` exactly, one field over; see that function's docstring
+    for the `[]` vs `list[str]` vs `None` return contract.
+
+    B-641: ``resolveSandboxBrowserConfig`` (dist/config-Bo2B3kKQ.mjs:85-103,
+    installed OpenClaw 2026.9.5) is a SECOND, distinct bind surface with the
+    identical shape and resolution semantics as ``docker.binds``: global+agent are
+    CONCATENATED (``binds = [...globalBrowser?.binds ?? [], ...agentBrowser?.binds
+    ?? []]``, :95-96) and the agent leg is discarded entirely under ``scope:
+    "shared"`` (``agentBrowser = params.scope === "shared" ? void 0 :
+    params.agentBrowser``, :86 -- the SAME ``scope`` value ``_resolve_sandbox_scope``
+    already computes for ``docker.binds``, since both are read off the one per-agent
+    ``sandbox`` object OpenClaw resolves once via ``resolveSandboxConfigForAgent``).
+
+    This reaches a REAL host mount, not just the resolved config object:
+    ``ensureSandboxBrowserContainer`` builds
+    ``resolveSandboxBrowserDockerCreateConfig({docker: cfg.docker, browser:
+    cfg.browser})`` (dist/config-Bo2B3kKQ.mjs:31-39), which REPLACES -- not merges
+    -- the docker bind list with ``browser.binds`` whenever ``browser.binds`` is
+    configured (``params.browser.binds !== void 0 ? {...base, binds:
+    params.browser.binds} : base``), then feeds that straight into
+    ``prepareSandboxMountPlan({..., binds: browserDockerCfg.binds})``
+    (dist/context-D_TiLPsh.mjs:263-279) -- the SAME mount-selection pipeline
+    ``docker.binds`` goes through (``resolveSandboxMountSelection`` ->
+    ``resolveSandboxBindMounts``, dist/workspace-mounts-DY5rC3hd.mjs:99-110), whose
+    ``readOnly`` is ``options.toLowerCase().split(",").some(o => o.trim() ===
+    "ro")`` -- the identical comma-separated-option-list shape ``_bind_mode_is_ro``
+    already parses. So a writable ``browser.binds`` entry is exactly as
+    host-writable as a writable ``docker.binds`` entry, through the same parser,
+    with no new mode-string handling needed.
+    """
+    browser = sandbox.get("browser") if isinstance(sandbox, dict) else None
+    if browser is None:
+        return []
+    if not isinstance(browser, dict):
+        return None
+    binds = browser.get("binds")
+    if not binds:
+        return []
+    if isinstance(binds, str):
+        return [binds]
+    if isinstance(binds, list):
+        return [str(b) for b in binds]
+    return None
+
+
+def _sandbox_browser_enabled(sandbox: dict, fallback: bool) -> bool:
+    """Mirrors ``resolveSandboxBrowserConfig``'s ``enabled`` resolution
+    (dist/config-Bo2B3kKQ.mjs:88,93, installed OpenClaw 2026.9.5): ``agentBrowser
+    ?.enabled ?? globalBrowser?.enabled ?? false`` -- JS ``??``, so an explicit
+    ``False`` declared on *sandbox* itself STICKS and does not fall through to
+    *fallback*; only a missing/non-boolean value does. The same
+    discard-the-whole-sub-object-under-``scope: "shared"`` rule that gates
+    ``browser.binds`` (see ``_sandbox_browser_binds``) also gates ``browser.enabled``
+    -- both are read off the one ``agentBrowser`` reference the vendor code
+    scope-gates once -- so a caller resolves *sandbox* to the empty/skipped case
+    under shared scope the same way it already does for the binds leg via
+    ``_resolve_sandbox_scope``, and this function itself does not need scope.
+
+    Only relevant to whether a declared ``browser.binds`` can ever reach a host
+    mount: ``ensureSandboxBrowser`` returns before creating any container when
+    ``!params.cfg.browser.enabled`` (dist/context-D_TiLPsh.mjs:245) -- a browser
+    sandbox that never launches leaves its binds inert, not a containment defeater.
+
+    A non-dict ``browser`` (the whole sub-object malformed) correctly falls through
+    to *fallback* rather than failing closed: real JS property access on a
+    non-object primitive (``"foo"?.enabled``) yields ``undefined``, which ``??``
+    ALSO falls through on -- so this matches the vendor's own behaviour, not just
+    this function's convenience. Left uninvestigated, and narrower: ``enabled``
+    present as a non-null, non-boolean value (e.g. a stray string) inside an
+    otherwise-well-formed ``browser`` dict. Real JS ``??`` would NOT fall through
+    there (only null/undefined do) and would use that literal value's truthiness
+    instead -- diverging from this function's *fallback* return in that one shape.
+    Believed unreachable in practice (mirrors why ``_resolve_sandbox_backend``
+    does not handle a non-string ``backend`` either: OpenClaw's own resolver calls
+    ``.trim()`` on it unconditionally and would throw before ever reaching a check
+    like this one, implying its config schema already rejects the wrong type at
+    load time) but not proven against the vendor's zod schema, so recorded here
+    rather than silently assumed.
+    """
+    browser = sandbox.get("browser") if isinstance(sandbox, dict) else None
+    v = browser.get("enabled") if isinstance(browser, dict) else None
+    return v if isinstance(v, bool) else fallback
+
+
 def _bind_mentions_docker_sock(binds: "list | None") -> bool:
     """True if any bind spec in *binds* (as returned by `_sandbox_docker_binds`)
     references `docker.sock` — full host control / container-escape signal. The one
@@ -1364,34 +1451,51 @@ def _bind_mode_is_ro(bind: object) -> bool:
     return "ro" in opts and "rw" not in opts
 
 
-def _sandbox_has_writable_bind(sandbox: dict) -> bool:
+def _sandbox_has_writable_bind(sandbox: dict, browser_enabled: bool = False) -> bool:
     """True when this ONE sandbox node (defaults, or one agent's own override)
-    declares at least one ``docker.binds`` entry that is NOT verifiably read-only
-    -- see ``_bind_mode_is_ro`` and ``_fs_writes_contained``'s ROUND 3/4 notes for
-    why a writable bind at either level defeats containment and why the two levels
-    are checked independently rather than merged first.
+    declares at least one ``docker.binds`` OR (when *browser_enabled*)
+    ``browser.binds`` entry that is NOT verifiably read-only -- see
+    ``_bind_mode_is_ro`` and ``_fs_writes_contained``'s ROUND 3/4 notes for why a
+    writable bind at either level defeats containment and why the two levels
+    (defaults vs. per-agent) are checked independently rather than merged first.
 
-    A ``docker`` key that is PRESENT but not a dict (a string, list, etc.) is
-    malformed/unparseable and, per this function's fail-closed-on-ambiguity
-    philosophy, is treated as a defeater rather than silently ignored -- an
-    ABSENT ``docker`` key (the normal case) is not, and returns False.
-
-    NOT READ HERE (flagged, filed separately, deliberately not chased in this
-    round): ``sandbox.browser.binds`` (``resolveSandboxBrowserConfig``) is a
-    SECOND, distinct bind surface this function never examines -- an unexamined
-    false-negative candidate independent of the ``docker.binds`` leg above.
+    A ``docker`` (or, when checked, ``browser``) key that is PRESENT but not a dict
+    (a string, list, etc.) is malformed/unparseable and, per this function's
+    fail-closed-on-ambiguity philosophy, is treated as a defeater rather than
+    silently ignored -- an ABSENT key (the normal case) is not, and does not by
+    itself return True.
 
     C-454: normalization delegated to ``_sandbox_docker_binds`` -- its ``None``
     return (malformed ``docker``/``binds`` shape) maps to this function's own
     fail-closed ``True``, preserving the exact behaviour this docstring already
     documented before the extraction.
+
+    B-641: ``sandbox.browser.binds`` (``resolveSandboxBrowserConfig``) is a SECOND,
+    distinct bind surface -- flagged in a prior round as unexamined, now folded in
+    via ``_sandbox_browser_binds`` (see its docstring for the dist grounding of why
+    it is exactly as host-writable as ``docker.binds``). It is gated on
+    *browser_enabled* rather than checked unconditionally: the browser sandbox
+    container -- and therefore any host mount ``browser.binds`` would produce --
+    is only ever created when the resolved ``browser.enabled`` is true
+    (``_sandbox_browser_enabled``, grounded on ``ensureSandboxBrowser``'s own early
+    return). An inert, declared-but-never-launched ``browser.binds`` must NOT
+    defeat containment -- that would be a new, undiagnosed false positive of
+    exactly the kind CLAUDE.md §2.5 forbids -- so the caller (``_fs_writes_contained``)
+    resolves the effective ``browser.enabled`` per level, the same per-field
+    default/agent fallback already used for ``mode``/``workspaceAccess``/``backend``,
+    and passes it in here.
     """
-    binds = _sandbox_docker_binds(sandbox)
-    if binds is None:
+    docker_binds = _sandbox_docker_binds(sandbox)
+    if docker_binds is None:
         return True  # present but malformed -- fail closed, cannot verify safety
-    if not binds:
+    if any(not _bind_mode_is_ro(b) for b in docker_binds):
+        return True
+    if not browser_enabled:
         return False
-    return any(not _bind_mode_is_ro(b) for b in binds)
+    browser_binds = _sandbox_browser_binds(sandbox)
+    if browser_binds is None:
+        return True  # same fail-closed rule as the docker leg, one field over
+    return any(not _bind_mode_is_ro(b) for b in browser_binds)
 
 
 def _resolve_sandbox_scope(agent_sandbox: dict, default_sandbox: dict) -> str:
