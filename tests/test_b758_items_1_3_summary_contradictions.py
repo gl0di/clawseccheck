@@ -72,7 +72,7 @@ def _risk(id_="RISK-01", severity=CRITICAL, title="chain") -> RiskPath:
 
 def test_default_call_with_no_risk_matches_the_prior_finding_only_behavior():
     f = _finding("B1", HIGH, FAIL, "a fail")
-    assert _urgent_headline([f]) == "Most urgent: HIGH — a fail  [B1]"
+    assert _urgent_headline([f]) == "Most urgent: HIGH — a fail"
     assert _urgent_headline([f]) == _urgent_headline([f], risk=None)
     assert _urgent_headline([f]) == _urgent_headline([f], risk=[])
 
@@ -84,21 +84,24 @@ def test_a_more_severe_risk_chain_leads_over_a_less_severe_fail_finding():
     assert "CRITICAL" in headline
     assert "dangerous capability chain" in headline
     assert "a dangerous combination" in headline
-    assert "[RISK-01]" in headline
+    # CLAWSECCHECK headline-id-leak: the headline states the risk, not the chain's own
+    # id -- RISK-01 stays discoverable in the dedicated "RISK Chains" section
+    # (_risk_chain_lines), the analogous deliberate exception to the inventory index.
+    assert "RISK-01" not in headline
 
 
 def test_a_less_severe_risk_chain_does_not_override_a_worse_fail_finding():
     f = _finding("B1", CRITICAL, FAIL, "the real worst thing")
     chain = _risk(severity=HIGH, title="a lesser combination")
     headline = _urgent_headline([f], risk=[chain])
-    assert headline == "Most urgent: CRITICAL — the real worst thing  [B1]"
+    assert headline == "Most urgent: CRITICAL — the real worst thing"
 
 
 def test_an_exact_severity_tie_keeps_the_finding_not_the_chain():
     f = _finding("B1", HIGH, FAIL, "a fail")
     chain = _risk(severity=HIGH, title="a same-severity chain")
     headline = _urgent_headline([f], risk=[chain])
-    assert headline == "Most urgent: HIGH — a fail  [B1]"
+    assert headline == "Most urgent: HIGH — a fail"
 
 
 def test_a_risk_chain_can_headline_over_warn_only_findings():
@@ -120,7 +123,7 @@ def test_a_suppressed_risk_chain_is_ignored_even_if_it_would_otherwise_win():
     chain = _risk(severity=CRITICAL, title="suppressed")
     chain.suppressed = True
     headline = _urgent_headline([f], risk=[chain])
-    assert headline == "Most urgent: HIGH — a fail  [B1]"
+    assert headline == "Most urgent: HIGH — a fail"
 
 
 def test_no_findings_and_no_risk_is_still_the_all_clear():
