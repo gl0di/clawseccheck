@@ -1233,6 +1233,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B388 - Prose-intent host/hardware-fingerprint exfiltration directive
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Data Exfiltration / Prompt Injection
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Prose-intent host/hardware-fingerprint exfiltration directive
+- Remediation:
+  - none
+
 ### B161 - Identity-file injection (override/jailbreak directive in bootstrap files)
 
 - Severity: CRITICAL

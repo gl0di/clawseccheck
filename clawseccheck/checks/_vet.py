@@ -141,6 +141,7 @@ from ._content import (
     check_pth_persistence,
     check_python_runtime_persist_install,
     check_prose_bulk_exfil,
+    check_prose_host_fingerprint_exfil,
     check_remote_code_dependency,
     check_self_erase_directive,
     check_self_modification_directive,
@@ -7536,6 +7537,7 @@ SKILL_CONTENT_RING = (
     check_undocumented_helper_directive,  # B334 — undocumented bundled helper + directive
     check_self_privesc_directive,  # B159 — self-privilege-escalation directive (C-207)
     check_prose_bulk_exfil,  # B160 — prose-intent bulk-data exfiltration (C-210)
+    check_prose_host_fingerprint_exfil,  # B388 — prose-intent host/hardware-fingerprint exfiltration (C-538)
     check_social_engineering_phishing,  # B163 — social-engineering / credential-phishing prose (C-209)
     check_conditional_sleeper_trigger,  # B65 — conditional sleeper-trigger
     check_persona_jailbreak,  # B66 — persona / DAN jailbreak

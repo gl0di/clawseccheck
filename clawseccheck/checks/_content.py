@@ -14541,6 +14541,365 @@ def check_prose_bulk_exfil(ctx: Context) -> Finding:
     )
 
 
+# C-538: prose-intent HOST/HARDWARE-FINGERPRINT exfiltration -- a skill's prose
+# describes collecting the CURRENT machine's hardware/OS fingerprint (CPU core
+# count, RAM, disk, GPU, machine/compute type, kernel/uname version string,
+# hostname) and sending it to an external endpoint. B160 (C-210) above is the
+# prose-side sibling for bulk/PII/credential data; this is the prose-side sibling
+# of skillast.py's HOST_INFO_EXFIL_FLOW (C-203), which recognizes the same
+# behaviour only in CODE (an actual socket.gethostname()/platform.uname() call
+# reaching an outbound sink) -- a "follow these onboarding instructions" skill
+# with no bundled Python/JS at all is invisible to that AST rule (CLAWSECCHECK-
+# C-388: a real vendor sample, moltfounders.com's registration protocol, delivers
+# exactly this behaviour entirely through prose the agent executes with its own
+# tools).
+#
+# Deliberately its OWN noun class, not a widening of B160's _BULK_DATA_OBJECT_RE /
+# _BULK_CRED_OBJECT_RE: a hardware/OS fingerprint is neither bulk/PII user data nor
+# credential-shaped, so folding it into either would blur what a WARN/FAIL from
+# this check actually means. Kept WARN-grade only, never FAIL: a device
+# fingerprint is a real tracking/targeting signal but not the "attacker now has
+# the keys" severity of a credential exfil (B160's own is_cred leg).
+#
+# Reuses B160's exfil-verb + external-URL proximity gate as-is (same
+# _EXFIL_INTENT_VERB_RE/_BACKUP_TRANSPORT_VERB_RE, _EXFIL_URL_RE,
+# _EXFIL_VERB_URL_WINDOW, defensive-context/heading/export-declaration skips, and
+# the own-host allowlist) -- that gate is what keeps this check off ordinary
+# system-REQUIREMENTS documentation ("Requires: 8 CPU cores, 16GB RAM, 100GB
+# disk"), which never contains a send/export verb next to a destination URL at
+# all, regardless of how the noun class below is worded.
+#
+# The noun class itself needs two independent shapes, checked against the object
+# window between the verb and its destination (mirrors B160's obj_window):
+#   (a) a named fingerprint/profile artifact ("hardware fingerprint", "device
+#       fingerprint", "hardware profile", the real vendor field name
+#       `agentCapabilities`) -- inherently self-referential, no extra marker
+#       needed.
+#   (b) a THIS-MACHINE self-reference ("this machine", "the current machine",
+#       "your device", "this agent's host", a bare "the host") co-occurring with
+#       a concrete hardware/OS attribute term (CPU core count, RAM, disk, GPU,
+#       kernel version/uname, machine/compute type, hostname). Requiring the
+#       self-reference marker is what keeps ordinary requirements phrasing out --
+#       "Requires 8 CPU cores and 16GB RAM" states a REQUIREMENT, it never
+#       "describes the current machine".
+_HOST_FP_NAMED_OBJECT_RE = re.compile(
+    r"\b(?:hardware|device|machine|host|system)\s+fingerprint\b|"
+    r"\bhardware\s+profile\b|"
+    r"\bagentCapabilities\b",
+    re.I,
+)
+_HOST_FP_SELF_REF_RE = re.compile(
+    r"\b(?:this|the\s+current|your|the\s+user'?s|this\s+agent'?s|the\s+host'?s|local)\s+"
+    r"(?:machine|host|device|system)\b|"
+    r"\bthis\s+host\b|\bthe\s+(?:current\s+)?host\b",
+    re.I,
+)
+_HOST_FP_ATTR_TERM_RE = re.compile(
+    r"\bCPU\s+(?:logical\s+)?cores?\b|\bcore\s+count\b|"
+    r"\btotal\s+(?:RAM|memory)\b|"
+    r"\btotal\s+disk(?:\s+space)?\b|"
+    r"\bGPU\b|"
+    r"\bkernel\s+version\b|\buname\b|"
+    r"\bmachine\s+type\b|\bcompute\s+type\b|"
+    r"\boperating\s+system\s+version\b|\bOS\s+version\b|"
+    r"\bhostname\b",
+    re.I,
+)
+
+
+# C-135 round 2 (real vendor benign sample -- a video-encoding skill): a bare
+# "does the noun class appear anywhere in `obj_window`" search (the original
+# C-538 design) let a self-reference marker ("your device") co-occurring with
+# an attribute term ("GPU", "total RAM") ANYWHERE in the wide, bidirectional
+# `obj_window` (300 chars before the verb through the URL end) WARN even when
+# the description had nothing to do with what a later, unrelated verb sent:
+#
+#   "This tool inspects your device's GPU and total RAM to pick the best video
+#   encoding preset automatically -- nothing about this leaves your machine.
+#   ... Once a render finishes, export the render log to <URL> ..."
+#
+# Round 2 gated BOTH legs with one SENTENCE-scoped correlation (same sentence,
+# or a bare-pronoun backreference in the verb's own object) mirrored on
+# `_bulk_cred_object_correlated` (B-212, above). An adversarial re-review found
+# that wrong in both directions: leg (a) (a NAMED artifact phrase -- "hardware
+# fingerprint", `agentCapabilities`) was never the FP source, so gating it lost
+# real one-sentence-apart detections; leg (b) (self-ref + attribute term) WAS
+# the FP source, but the bare-pronoun backreference has no antecedent
+# resolution -- "send it to <url>" WARNed whether "it" meant the fingerprint,
+# an unrelated support ticket, or an unrelated crash dump.
+#
+# Round 3 split the two legs (leg (a) ungated again, leg (b) gated to same-
+# SENTENCE only, backreference path deleted) -- and a second adversarial
+# re-review found the underlying primitive itself unsound in BOTH directions,
+# because `_SENTENCE_BREAK_RE` (`_shared.py`) is a crude `.!?`+whitespace/
+# blank-line detector with no concept of a markdown list item:
+#
+#   * Side B got WORSE than disclosed: `_SENTENCE_BREAK_RE` treats a numbered-
+#     list marker's own period ("1.", "2.") as a sentence break, so an
+#     ordinary numbered workflow-steps list -- literally this check's own
+#     target object class per its docstring -- defeats leg (b) at every item
+#     boundary. So does the single most natural way to write "do X. Then do
+#     Y." as two adjacent declarative sentences with no list involved at all.
+#   * Side A was NOT closed: an un-punctuated bullet or Q&A block (ordinary
+#     SKILL.md style -- no terminal periods, no blank line between items) has
+#     NO `_SENTENCE_BREAK_RE` match anywhere in it, so the whole block reads as
+#     one giant "sentence" -- reopening the identical FP shape leg (b)'s gate
+#     was built to close, e.g. a disclaimed hardware-probe bullet followed by
+#     an unrelated heartbeat-ping bullet with no punctuation between them.
+#   * Leg (a) was shown to share the same defect it was exempted from: a
+#     NEGATED, disclaimed named-artifact mention ("builds a hardware
+#     fingerprint ... and never transmits it anywhere ... Completely
+#     separately, ... send the report to <url>") still WARNs, because leg (a)
+#     checks bare presence with NO relationship at all to the verb's position.
+#
+# Round 4 replaces the SENTENCE primitive with a BLOCK primitive for both legs
+# -- reusing `_b334_blocks`/`_b334_block_of` (B334, above in this file) rather
+# than inventing a third prose-segmentation scheme, per this project's "match
+# the surrounding code" rule. A block is a blank-line- or markdown-heading-
+# bounded span (a fenced code block is atomic within it) -- i.e. "the same
+# section", not "the same grammatical sentence". This directly fixes the
+# numbered-list and adjacent-declarative-sentence misses above (list items and
+# adjacent sentences with no blank line/heading between them are ONE block,
+# so they now correlate), and meaningfully narrows leg (a)'s blast radius from
+# "anywhere in the whole 300-char window" to "the same section" (a fingerprint
+# named in one `##`-headed section and an unrelated send verb three sections
+# later no longer correlates). It does NOT, and cannot soundly, close the
+# un-punctuated-bullet/negated-mention residual above: an un-punctuated bullet
+# block and a same-block negated mention are, respectively, indistinguishable
+# BY BLOCK STRUCTURE ALONE from the genuine numbered-list and one-sentence-
+# apart cases round 4 exists to keep catching -- both are "adjacent lines/
+# clauses, no blank line or heading between them", and only their CONTENT
+# (is the second line's object actually the first line's referent? is the
+# mention negated?) tells them apart. Approximating that content judgment
+# cheaply is exactly the unsound shortcut round 2's pronoun backreference
+# took and round 3 removed; round 4 does not reintroduce it under a new name.
+# See tests/test_c538_host_fingerprint_exfil.py's "round 4" section for the
+# full, pinned probe set (both the newly-fixed numbered-list/two-sentence
+# WARNs and the still-open bullet/negation residual PASSes -- sic, WARNs)
+# and the commit message for why this residual is what moved B388 to
+# `scored=False` (CheckMeta, catalog.py) instead of a fifth regex attempt.
+def _host_fp_same_block(
+    blocks: list[tuple[int, int]], pos_a: int, pos_b: int
+) -> bool:
+    """True when *pos_a* and *pos_b* (absolute positions in the scanned blob)
+    fall in the same blank-line/heading-bounded block -- see the C-135 round 4
+    comment above. Positions falling between blocks (empty span filtered out
+    by `_b334_blocks`) never correlate -- the safe default."""
+    a = _b334_block_of(blocks, pos_a)
+    b = _b334_block_of(blocks, pos_b)
+    return a is not None and a == b
+
+
+def _host_fp_leg_a_correlated(
+    obj_window: str, obj_start: int, verb_start: int, blocks: list[tuple[int, int]]
+) -> bool:
+    """Leg (a): True when a named-artifact-phrase match in *obj_window*
+    shares the exfil verb's own block -- see the C-135 round 4 comment
+    above. No longer ungated (round 1/3 behaviour): a same-block requirement
+    is a real, if incomplete, narrowing of what was previously "anywhere in
+    the 300-char window, regardless of section"."""
+    for m in _HOST_FP_NAMED_OBJECT_RE.finditer(obj_window):
+        if _host_fp_same_block(blocks, obj_start + m.start(), verb_start):
+            return True
+    return False
+
+
+def _host_fp_leg_b_correlated(
+    obj_window: str, obj_start: int, verb_start: int, blocks: list[tuple[int, int]]
+) -> bool:
+    """Leg (b): True when a self-reference marker is present anywhere in
+    *obj_window* (establishing "this machine", not "the fleet") AND at least
+    one attribute-term match shares the exfil verb's own block -- see the
+    C-135 round 4 comment above."""
+    if not _HOST_FP_SELF_REF_RE.search(obj_window):
+        return False
+    for m in _HOST_FP_ATTR_TERM_RE.finditer(obj_window):
+        if _host_fp_same_block(blocks, obj_start + m.start(), verb_start):
+            return True
+    return False
+
+
+def _host_fingerprint_object_correlated(
+    obj_window: str,
+    obj_start: int,
+    verb_start: int,
+    blocks: list[tuple[int, int]],
+) -> bool:
+    """True when a hardware/OS-fingerprint OBJECT in *obj_window* is actually
+    correlated with the exfil verb at *verb_start* -- see the C-135 round 4
+    comment above. Both legs are gated to "same block" (see
+    `_host_fp_leg_a_correlated` / `_host_fp_leg_b_correlated`); this is a
+    disclosed, incomplete fix -- see the same comment for what it does not
+    close, and CheckMeta("B388", ..., scored=False) in catalog.py."""
+    if _host_fp_leg_a_correlated(obj_window, obj_start, verb_start, blocks):
+        return True
+    return _host_fp_leg_b_correlated(obj_window, obj_start, verb_start, blocks)
+
+
+def _prose_host_fingerprint_scan(
+    blob: str, own_host, fence_ranges: list[tuple[int, int]]
+) -> list[str]:
+    """Scan *blob* for prose-intent host/hardware-fingerprint exfiltration.
+    Returns a snippet for each verb+external-URL match that also has a
+    hardware/OS fingerprint object described nearby. Mirrors `_prose_exfil_scan`'s
+    verb/URL/defensive-context/own-host plumbing (B160/C-210) with a different
+    object-noun class -- see the C-538 comment above."""
+    hits: list[str] = []
+    last_end = -1
+    header_matches = list(_MANIFEST_HEADER_RE.finditer(blob))
+    heading_matches = list(_ANY_HEADING_RE.finditer(blob))
+    blocks = _b334_blocks(blob, fence_ranges)  # C-135 round 4 -- see comment above
+    for vm in _verb_class_matches(blob, _EXFIL_INTENT_VERB_RE, _BACKUP_TRANSPORT_VERB_RE):
+        if vm.start() < last_end:
+            continue
+        if _defensive_context(blob, vm.start(), fence_ranges, header_matches=header_matches,
+                               heading_matches=heading_matches):
+            continue
+        # B-287 (mirrored from B160): `export NAME=value` / `export const x` is
+        # language syntax, not the English verb "export <data> to <dest>".
+        if _is_export_declaration(blob, vm.start()):
+            continue
+        url_window = blob[vm.end() : min(len(blob), vm.end() + _EXFIL_VERB_URL_WINDOW)]
+        um = _EXFIL_URL_RE.search(url_window)
+        if not um:
+            continue
+        url_abs_start = vm.end() + um.start()
+        # Mirrored from B160: skip a bare section-heading verb match whose URL
+        # falls outside the heading's own line (see B160's C-135 round 2/3 comment).
+        line_start = blob.rfind("\n", 0, vm.start()) + 1
+        line_end = blob.find("\n", vm.start())
+        line_end = line_end if line_end != -1 else len(blob)
+        line = blob[line_start:line_end]
+        if _ANY_HEADING_RE.match(line) and url_abs_start >= line_end:
+            continue
+        um_full = _EXFIL_URL_RE.match(blob, url_abs_start)
+        url = (um_full.group(0) if um_full else um.group(0)).rstrip(").,;:'\"")
+        if _url_matches_own_host(url, own_host):
+            continue  # first-party endpoint
+        obj_start = max(0, vm.start() - _EXFIL_OBJECT_WINDOW)
+        obj_end = vm.end() + um.end()  # um is relative to url_window, which starts at vm.end()
+        obj_window = blob[obj_start:obj_end]
+        if not _host_fingerprint_object_correlated(obj_window, obj_start, vm.start(), blocks):
+            continue
+        last_end = obj_end
+        snippet_raw = blob[obj_start:obj_end]
+        snippet = " ".join(snippet_raw.split())
+        if len(snippet) > 140:
+            snippet = snippet[:137] + "..."
+        hits.append(snippet)
+    return hits
+
+
+def check_prose_host_fingerprint_exfil(ctx: Context) -> Finding:
+    """B388 (C-538) — a skill's prose/workflow steps describe collecting the
+    CURRENT machine's hardware/OS fingerprint (CPU core count, RAM, disk, GPU,
+    machine/compute type, kernel/uname version string, hostname) and sending it
+    to an external endpoint that is not the skill's own declared host. Prose-side
+    sibling of skillast.py's HOST_INFO_EXFIL_FLOW (C-203), which is a CODE-only
+    AST taint rule and has no equivalent when the same behaviour is described in
+    natural language: a "follow these instructions" skill has the agent execute
+    it with its own tools instead of bundled code (moltfounders.com).
+
+    WARN — a hardware/OS fingerprint object is described in the same document
+           section (see the C-135 round 4 comment above `_host_fp_same_block`)
+           as an exfil verb + external URL. Always WARN, never FAIL: a device
+           fingerprint is a real tracking/targeting signal but not the
+           "attacker now has the keys" severity of a credential exfil (see
+           B160). unscored (`CheckMeta.scored=False`, catalog.py) — four
+           rounds of adversarial review (C-135) showed this is a structural/
+           positional heuristic that cannot always tell "this section's
+           hardware description is what the verb sends" from "this section
+           happens to also mention hardware, unrelated to what the verb
+           sends" — see the fix text below for the concrete residual shapes.
+    PASS — no prose-intent host-fingerprint exfil pattern found, or the
+           destination is the skill's own declared homepage/repo/api/endpoint
+           (first-party allowlist, reused from B-132/B160). This is NOT a
+           certification that no skill's hardware/OS details are ever
+           reported anywhere — see WARN's caveat above and the miss surface
+           documented next to `_host_fp_same_block`.
+    UNKNOWN — no installed skills to inspect, or every installed skill's
+           content came back empty (present-but-unreadable, e.g. every file
+           in the skill directory failed to read as text) — B-661: a skill
+           entry existing with nothing actually readable in it must not read
+           as "scanned and clean" (config's own `config_found` guard idiom,
+           checks/_config.py, applied to skill content instead of config —
+           B388 never reads ctx.config at all, so that guard itself does not
+           apply here, but the same fail-open SHAPE does).
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B388",
+            UNKNOWN,
+            "No installed skills found — nothing to inspect for prose-intent "
+            "host/hardware-fingerprint exfiltration.",
+            "Run on a host where installed skills exist (~/.openclaw/skills, "
+            "workspace/skills).",
+        )
+
+    warn_ev: list[str] = []
+    any_content = False
+    for skill_name, blob in ctx.installed_skills.items():
+        if not blob:
+            continue  # B-661-shape guard: this skill's content was never actually read
+        any_content = True
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        own_host = _skill_own_host(norm, fr)
+        for snippet in _prose_host_fingerprint_scan(norm, own_host, fr):
+            warn_ev.append(f'{skill_name}: "{snippet}"')
+
+    if not any_content:
+        return _finding(
+            "B388",
+            UNKNOWN,
+            "Installed skills were found, but none had any readable text "
+            "content — nothing to inspect for prose-intent host/hardware-"
+            "fingerprint exfiltration.",
+            "Check file permissions under the affected skill director(y/ies); "
+            "re-run once their content is actually readable.",
+        )
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B388",
+            WARN,
+            "Possible prose-intent host/hardware-fingerprint exfiltration found "
+            "— a skill describes collecting the current machine's hardware/OS "
+            "fingerprint and sending it to a non-first-party endpoint: "
+            + ev_summary + extra,
+            "Review the flagged content. Confirm the destination is a trusted, "
+            "declared endpoint (or the skill's own homepage/API/base-url) and "
+            "that reporting host hardware/OS details is a genuine, documented, "
+            "necessary feature of the skill — a hardware fingerprint can be used "
+            "to track or target this specific machine. Note: this check is a "
+            "structural heuristic (same document section as the send, not a "
+            "meaning-level check) and is NOT scored for that reason — it can "
+            "WARN on a hardware/OS mention that is genuinely unrelated to what "
+            "gets sent, most often when both sit in the same un-punctuated "
+            "bullet list or Q&A block with no blank line or heading between "
+            "them (e.g. a disclaimed local-only hardware check followed by an "
+            "unrelated heartbeat/log upload with no separator), or when a "
+            "hardware-fingerprint mention is itself explicitly negated/"
+            "disclaimed ('never transmits it anywhere') in the same section as "
+            "an unrelated, genuine send elsewhere. If the flagged snippet reads "
+            "that way, this is a known false positive — no action needed "
+            "beyond confirming it against the quoted snippet.",
+            warn_ev,
+            severity=MEDIUM,
+        )
+
+    return _finding(
+        "B388",
+        PASS,
+        "No prose-intent host/hardware-fingerprint exfiltration directives found "
+        "in installed skills.",
+        "Ensure no skill describes collecting the current machine's hardware/OS "
+        "fingerprint and sending it to an undeclared external endpoint.",
+    )
+
+
 # C-209: social-engineering / credential-phishing prose -- a skill's OWN prose instructs
 # the HUMAN READER (not the agent) to act on a fabricated urgent/authoritative pretext
 # and hand over a credential or take an out-of-band action. Distinct from B159 (targets
