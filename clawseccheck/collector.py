@@ -3619,20 +3619,76 @@ def _config_workspace_dirs(
     return out
 
 
-def _strip_comments_and_strings(text: str) -> str:
-    """Blank out every COMMENT and STRING/docstring token in `text`, keeping the
-    original line/column layout intact so a plain substring search over the result
-    only ever sees bytes that are actually part of a statement — never prose about one.
+# Token types capable of carrying attacker-chosen literal TEXT of arbitrary length —
+# as opposed to a fixed, grammar-bounded vocabulary (punctuation, keywords) or an
+# identifier (which cannot itself contain whitespace, so cannot spell a space-
+# separated marker phrase). `FSTRING_MIDDLE` is looked up via `getattr` because it
+# does not exist before Python 3.12: PEP 701 changed f-string tokenizing so an
+# f-string is no longer a single `STRING` token — `f"def vet_skill"` on 3.12 produces
+# `FSTRING_START` / `FSTRING_MIDDLE` / `FSTRING_END`, and the literal text lives in
+# `FSTRING_MIDDLE`, not `STRING`. This is the B-846 ROUND 3 gap (a C-135 reviewer
+# reproduced it on 3.12 in the same fixed-yet code): the round-2 fix only blanked
+# `COMMENT` and `STRING`, so an f-string marker sailed through untouched on 3.12 while
+# already being closed on 3.9, where the same f-string DOES still tokenize as one
+# ordinary `STRING` token. This project supports 3.9+ (CLAUDE.md) and CI runs both, so
+# the type list must resolve correctly on either.
+_TEXT_BEARING_TOKEN_TYPES = tuple(
+    t for t in (
+        tokenize.COMMENT,
+        tokenize.STRING,
+        getattr(tokenize, "FSTRING_MIDDLE", None),
+    )
+    if t is not None
+)
 
-    Used by `_is_own_source` (B-846 ROUND 2, see its docstring) to stop a marker string
-    from being forged for free via an inline comment, a comment after a `;`, a string
-    literal, or a multi-line docstring. Tokenizing — the real Python lexer, via the
-    stdlib `tokenize` module — is what correctly tells a `#` inside a string from a
-    real comment, and a marker sitting inside a triple-quoted docstring from a real
-    `def`/assignment; a hand-rolled character scan for `#`/quotes would have to
-    reimplement string-literal parsing (raw strings, escapes, f-strings, triple quotes)
-    to get the same answer, and would be exactly the unsound whack-a-mole this
-    project's CLAUDE.md warns against.
+
+def _strip_comments_and_strings(text: str) -> str:
+    """Blank out every token in `_TEXT_BEARING_TOKEN_TYPES` (COMMENT, STRING, and — on
+    3.12+ — FSTRING_MIDDLE) in `text`, keeping the original line/column layout intact
+    so a plain substring search over the result only ever sees bytes that are actually
+    part of a statement — never prose about one, nor a string/f-string VALUE.
+
+    Used by `_is_own_source` (B-846, see its docstring for the ROUND 1-3 history) to
+    stop a marker string from being forged for free via an inline comment, a comment
+    after a `;`, a string literal, an f-string, or a multi-line docstring. Tokenizing —
+    the real Python lexer, via the stdlib `tokenize` module — is what correctly tells a
+    `#` inside a string from a real comment, and a marker sitting inside a triple-
+    quoted docstring or an f-string from a real `def`/assignment; a hand-rolled
+    character scan for `#`/quotes would have to reimplement string-literal parsing
+    (raw strings, escapes, f-strings, triple quotes) to get the same answer, and would
+    be exactly the unsound whack-a-mole this project's CLAUDE.md warns against.
+
+    THE REST OF THE TOKEN SURFACE, and why none of it needs blanking (read this before
+    adding a new "round" — enumerate the FULL `tokenize.tok_name` table for the
+    Python version in hand, not just the token shape one report happened to use):
+      * `NAME` (identifiers/keywords) — this is real code and must stay VISIBLE; it is
+        the actual shape `_OWN_ENGINE_MARKERS` matches against (`def`, `vet_skill`,
+        `_SKILL_CRIT`, ...). An identifier cannot contain whitespace, so on its own it
+        cannot spell a space-separated marker phrase either.
+      * `NUMBER` — a fixed digit/underscore/hex/exponent alphabet (`0-9`, `_`, `.`,
+        `e`/`E`, `j`/`J`, `x`/`o`/`b` prefixes, `a`-`f`/`A`-`F` hex digits only). Cannot
+        contain a space, and cannot spell `_SKILL_CRIT` (S/K/R/I/L/T are not hex
+        digits) or any letter sequence outside that alphabet.
+      * Every bracket/operator token (`LPAR`..`EXCLAMATION`, `OP`, `AWAIT`, `ASYNC`) —
+        a fixed, short, grammar-enumerated punctuation/keyword vocabulary; none of
+        those literal strings is or contains one of our markers.
+      * `FSTRING_START` / `FSTRING_END` (3.12+) — bounded prefix+quote characters only
+        (e.g. `f"`, `rf'''`), never attacker-extensible free text.
+      * `SOFT_KEYWORD` exists as a `tok_name` entry on 3.12 but is never actually
+        *emitted* by `tokenize.generate_tokens` — `match`/`case`/`type`/`_` still come
+        through as plain `NAME` (verified empirically); nothing to special-case.
+      * `TYPE_COMMENT` / `TYPE_IGNORE` are only emitted when tokenizing is invoked with
+        `type_comments=True`, which this function never passes — verified empirically
+        that a bare `# type: ignore[...]` comment tokenizes here as an ordinary
+        `COMMENT` (already blanked).
+      * `INDENT` / `DEDENT` / `NEWLINE` / `NL` / `ENDMARKER` — structural or pure
+        whitespace, never attacker-chosen text.
+      * `ERRORTOKEN` — a single character the tokenizer could not classify; any run of
+        letters/digits/underscores always lexes as `NAME`/`NUMBER` first, so this
+        cannot itself carry a multi-character marker phrase.
+      * `ENCODING` — only produced by `tokenize.tokenize()` reading BYTES; this
+        function only ever calls `tokenize.generate_tokens()` on a `str`, which never
+        emits it.
 
     Fails CLOSED, not open: source that does not tokenize cleanly (unbalanced
     brackets/quotes) returns "" — contributing NO marker text — rather than falling
@@ -3656,7 +3712,7 @@ def _strip_comments_and_strings(text: str) -> str:
                 line[col] = " "
 
     for tok in tokens:
-        if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+        if tok.type not in _TEXT_BEARING_TOKEN_TYPES:
             continue
         (srow, scol), (erow, ecol) = tok.start, tok.end
         if srow == erow:
@@ -3745,6 +3801,43 @@ def _is_own_source(p: Path) -> bool:
     docstring / semicolon-comment cases added to
     `tests/test_b846_self_source_axis_and_marker_forgery.py`.
 
+    B-846 ROUND 3: ROUND 2's `_strip_comments_and_strings` only blanked
+    `tokenize.COMMENT` and `tokenize.STRING` — but on Python 3.12, PEP 701 changed
+    f-string tokenizing so an f-string is no longer a single `STRING` token:
+    `f"def vet_skill"` now produces `FSTRING_START` / `FSTRING_MIDDLE` /
+    `FSTRING_END`, and the literal text lives in `FSTRING_MIDDLE`. Reproduced
+    end-to-end on python3.12.3 exactly like round 2 (three `f"..."`-wrapped marker
+    lines beside the real `envtools` fixture): the source came back UNCHANGED from
+    `_strip_comments_and_strings`, `_is_own_source` read `True`, and `vet_skill`
+    returned the self-source PASS. Confirmed on python3.9.25 that the SAME source was
+    never vulnerable to this specific gap — 3.9 still tokenizes an f-string as one
+    ordinary `STRING` token, already covered. Fixed by adding `FSTRING_MIDDLE` to the
+    blanked set via `getattr(tokenize, "FSTRING_MIDDLE", None)` (the name does not
+    exist before 3.12, and this project supports 3.9+; CI runs both).
+    `_strip_comments_and_strings`'s docstring enumerates the FULL `tokenize.tok_name`
+    surface and states why every other token type is safe to leave unblanked, so a
+    future round does not have to rediscover that one token type at a time. Pinned by
+    the f-string case added to `tests/test_b846_self_source_axis_and_marker_forgery.py`.
+
+    B-846 ROUND 4 (performance, no behaviour change): round 2/3's blanking
+    unconditionally tokenized every engine source file on every call. Measured against
+    the real repo root's `checks/` package (~3.4M characters across 11 files) on
+    Python 3.12.3: ~1.08s/call before this round, versus ~8ms before round 2 — a real
+    cost, since `_is_own_source` runs per candidate skill directory during discovery.
+    Fixed with two short-circuits (see the comment above the matching loop, below):
+    skip tokenizing a file outright when none of the still-missing markers appear in
+    its RAW text (sound, not a heuristic — see that comment for the proof), and stop
+    once every marker is accounted for. Only `checks/_vet.py` and `checks/__init__.py`
+    end up tokenized against the real package; the other 9 files, including the two
+    largest, are skipped on the raw-text check alone. Measured after this round:
+    ~0.18s/call (~6x). The residual cost is `_vet.py` itself (~435KB, the markers'
+    actual home) — its own last marker (`def vet_skill`) sits near the end of the
+    file, so no amount of "stop once found" logic inside a single file's token stream
+    would shorten tokenizing it much further without skipping code that must actually
+    be inspected; getting materially below this would mean not verifying the file
+    that carries the real markers, which is the check this whole function exists to
+    make.
+
     C-135 residual, accepted deliberately: an own install that ships the DOCS but not the
     engine (a hand-made partial copy — `SKILL.md` + `README.md` + `docs/` under a
     `clawseccheck/` dir with no `clawseccheck/checks/`) is no longer excluded, so the
@@ -3785,13 +3878,61 @@ def _is_own_source(p: Path) -> bool:
         heads = [s.read_text(encoding="utf-8", errors="replace") for s in sources]
     except OSError:
         return False
-    # B-846 ROUND 2: see the class docstring. A marker that appears only inside a
-    # comment or a string/docstring literal costs an attacker nothing to forge, so
-    # `_strip_comments_and_strings` (a real tokenizer, not a `#`-only scan) blanks both
-    # before the substring match below — the real engine's markers are genuine
-    # statements and survive unchanged; forged ones never do.
-    head = "\n".join(_strip_comments_and_strings(text) for text in heads)
-    return all(m in head for m in _OWN_ENGINE_MARKERS)
+    # B-846 ROUND 2/3: see the class docstring. A marker that appears only inside a
+    # comment, a string/f-string, or a docstring costs an attacker nothing to forge, so
+    # `_strip_comments_and_strings` (a real tokenizer, not a `#`-only scan) blanks all
+    # of those before the substring match below — the real engine's markers are
+    # genuine statements and survive unchanged; forged ones never do.
+    #
+    # PERFORMANCE: tokenizing is real lexing, not a cheap scan, and the real engine is
+    # ~3.4M characters across 11 files (measured: ~1.0-1.4s per call on 3.12 if every
+    # file is unconditionally tokenized — a real regression against the ~8ms this took
+    # pre-round-2, and `_is_own_source` runs per candidate skill during discovery). Two
+    # short-circuits below cut that to tokenizing only the ~2 files that can possibly
+    # matter, without weakening the check in either direction:
+    #
+    # 1. Per-file, skip tokenizing entirely when NONE of the still-missing markers
+    #    appear anywhere in that file's RAW text. This is a sound necessary condition,
+    #    not a heuristic: `_strip_comments_and_strings` only ever turns a character
+    #    INTO the single space character ' ' (it never inserts, deletes, or reorders
+    #    characters, and never turns a character into anything OTHER than a space).
+    #    So for a marker to appear in the STRIPPED text at some position, every
+    #    NON-space character of the marker must already be that exact character in
+    #    the RAW text at the same position (a blanked position can only produce ' ',
+    #    never a specific letter/digit/underscore) — and the marker's one internal
+    #    space (all three `_OWN_ENGINE_MARKERS` have zero or exactly one) can only be
+    #    manufactured by blanking a comment/string/f-string token that is EXACTLY one
+    #    character wide at that position while leaving both neighbours untouched. No
+    #    such token exists: the minimum width of a blankable STRING is 2 (`''`), a
+    #    COMMENT of width 1 only occurs at true end-of-line (nothing can follow it on
+    #    that line to supply the marker's remaining characters), and FSTRING_MIDDLE
+    #    requires a preceding FSTRING_START of its own width sitting somewhere before
+    #    it. So blanking can only ever turn a real occurrence of a marker into a
+    #    NON-match (by blanking away one of its required non-space characters); it can
+    #    never create a match that the raw text did not already contain. Net: "marker
+    #    absent from raw" soundly implies "marker absent from stripped", in the safe
+    #    direction only (a file can be skipped, never wrongly excluded from scanning).
+    # 2. Across files, stop entirely once every marker has been confirmed present in
+    #    some file's stripped text — later files (sorted, so this is deterministic)
+    #    are never even considered for tokenizing.
+    #
+    # Measured on the real `checks/` package: only `checks/_vet.py` (the markers'
+    # actual home) and `checks/__init__.py` (which imports `_SKILL_CRIT` by name) ever
+    # get tokenized; the other 9 files, including the two largest
+    # (`_content.py`/`_mcp.py`, together over half the package's bytes), are skipped
+    # on the raw-text check alone. This is why `heads` above is still read in full
+    # (reading is cheap and preserves the existing fail-closed-on-any-unreadable-file
+    # behaviour unchanged) while the strip/tokenize step below is the part made lazy.
+    remaining = set(_OWN_ENGINE_MARKERS)
+    for text in heads:
+        if not remaining:
+            break
+        candidates = [m for m in remaining if m in text]
+        if not candidates:
+            continue
+        stripped = _strip_comments_and_strings(text)
+        remaining -= {m for m in candidates if m in stripped}
+    return not remaining
 
 
 def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
