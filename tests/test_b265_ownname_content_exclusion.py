@@ -18,7 +18,13 @@ from pathlib import Path
 import pytest
 
 from clawseccheck import audit
-from clawseccheck.collector import _OWN_ENGINE_MARKERS, _OWN_SKILL_NAMES, _is_own_source, collect
+from clawseccheck.collector import (
+    _OWN_ENGINE_MARKER_STATEMENTS,
+    _OWN_ENGINE_MARKERS,
+    _OWN_SKILL_NAMES,
+    _is_own_source,
+    collect,
+)
 from clawseccheck.monitor import _skill_sig, diff, snapshot
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -131,21 +137,21 @@ def test_is_own_source_rejects_the_name_alone(tmp_path):
 def test_is_own_source_rejects_a_partial_marker_set(tmp_path):
     """All markers are required — a look-alike that copies one symbol is still scanned."""
     d = tmp_path / "clawseccheck"
-    _write_engine(d / "checks", _OWN_ENGINE_MARKERS[:1])
+    _write_engine(d / "checks", _OWN_ENGINE_MARKER_STATEMENTS[:1])
     assert _is_own_source(d) is False
 
 
 def test_is_own_source_accepts_the_real_package_layout(tmp_path):
     """Full marker set in a checks/ package under an own name -> own source."""
     d = tmp_path / "clawseccheck"
-    _write_engine(d / "checks", _OWN_ENGINE_MARKERS)
+    _write_engine(d / "checks", _OWN_ENGINE_MARKER_STATEMENTS)
     assert _is_own_source(d) is True
 
 
 def test_is_own_source_accepts_the_install_dir_layout(tmp_path):
     """Nested clawseccheck/checks/ (repo root or install dir) is name-independent."""
     d = tmp_path / "some-other-name"
-    _write_engine(d / "clawseccheck" / "checks", _OWN_ENGINE_MARKERS)
+    _write_engine(d / "clawseccheck" / "checks", _OWN_ENGINE_MARKER_STATEMENTS)
     assert _is_own_source(d) is True
 
 
@@ -153,7 +159,7 @@ def test_is_own_source_accepts_the_legacy_single_file_layout(tmp_path):
     """Pre-I-022 single-file checks.py still recognised."""
     d = tmp_path / "clawseccheck"
     d.mkdir()
-    (d / "checks.py").write_text("\n".join(_OWN_ENGINE_MARKERS), encoding="utf-8")
+    (d / "checks.py").write_text("\n".join(_OWN_ENGINE_MARKER_STATEMENTS), encoding="utf-8")
     assert _is_own_source(d) is True
 
 
@@ -167,7 +173,7 @@ def test_is_own_source_is_false_when_the_engine_is_unreadable(tmp_path):
     checks = d / "checks"
     checks.mkdir(parents=True)
     src = checks / "_engine.py"
-    src.write_text("\n".join(_OWN_ENGINE_MARKERS), encoding="utf-8")
+    src.write_text("\n".join(_OWN_ENGINE_MARKER_STATEMENTS), encoding="utf-8")
     assert _is_own_source(d) is True          # readable: excluded
     src.chmod(0o000)
     try:
@@ -198,7 +204,7 @@ def test_docs_only_own_install_is_scanned(tmp_path):
         "docs-only own copy must NOT be granted identity — it carries no engine to verify"
     )
     # ...and the moment the engine is present, it is recognised again.
-    _write_engine(d / "checks", _OWN_ENGINE_MARKERS)
+    _write_engine(d / "checks", _OWN_ENGINE_MARKER_STATEMENTS)
     assert _is_own_source(d) is True
 
 
