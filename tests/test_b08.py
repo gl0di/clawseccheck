@@ -59,6 +59,41 @@ def test_b08_tools_allow_shell_no_gate_warns():
     assert f.status == WARN
 
 
+def test_b08_send_tool_with_exec_mode_ask_passes_known_accepted_gap():
+    # KNOWN, DOCUMENTED, ACCEPTED gap (reviewer C-135 comment, 2026-09-17, carried
+    # into CLAWSECCHECK-B-848's brief as item 5) -- NOT fixed by B-848, which is
+    # scoped to the write-to-local-files/elevated-escalation family only (see the
+    # comment above `_NON_EXEC_WRITE_TOKENS` in clawseccheck/checks/_shared.py).
+    # `_exec_gate_covers_tools` only refuses to call a tools.exec.* gate meaningful
+    # for the write-tool family (fs_write/write/edit/fs_delete/fs_move); it has no
+    # equivalent refusal for OUTBOUND_TOOL_HINTS' messaging/network family
+    # (send/webhook/http_post/publish), so a bare "send" grant + tools.exec.mode=
+    # 'ask' still reads as gated even though tools.exec.* has no bearing on it
+    # either. This is the SAME shape test_b46_gate_present_passes (tests/test_b46.py)
+    # already pins for B46's own "send_email" case -- widening the token family to
+    # cover it is a separate, larger change (it would need its own C-135 pass and
+    # real-fleet FP gate run, and can flip existing PASSes like that one to WARN),
+    # deliberately out of scope for B-848. This test exists so that widening, if it
+    # ever happens, is a conscious decision that updates a named test rather than an
+    # invisible drift.
+    f = check_human_approval(_ctx({"tools": {"allow": ["send"], "exec": {"mode": "ask"}}}))
+    assert f.status == PASS
+
+
+def test_b08_non_exec_write_tool_with_exec_mode_ask_still_warns():
+    # B-848 flagship negative control: `tools.exec.mode` is exec-scoped and does not
+    # reach a genuinely non-exec write tool (fs_write/write/edit/fs_delete/fs_move —
+    # see `_NON_EXEC_WRITE_TOKENS`). "write" here (plus the "exec" token the mode
+    # field itself implies) must not read as gated just because tools.exec.mode is
+    # set — that would suppress a real write-capable-tool WARN the way the pre-B-644
+    # bug did in the other direction. This must NOT be conflated with "elevated"
+    # (B-848 fixed the opposite case: a bare tools.elevated.allowFrom grant IS
+    # covered by tools.exec.mode/security/ask — see test_b18_subagents_elevated_
+    # only_with_exec_gate_passes in tests/test_new_checks.py).
+    f = check_human_approval(_ctx({"tools": {"allow": ["write"], "exec": {"mode": "ask"}}}))
+    assert f.status == WARN
+
+
 # ---- PASS: destructive tool + explicit approval gate ----
 
 def test_b08_exec_mode_ask_passes():

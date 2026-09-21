@@ -61,6 +61,20 @@ def test_b46_gate_present_passes():
     assert r.status == "PASS"
 
 
+def test_b46_non_exec_write_tool_with_exec_mode_ask_still_warns():
+    # B-848 flagship negative control: a genuinely non-exec write tool ("write" —
+    # see `_NON_EXEC_WRITE_TOKENS`) is not reached by tools.exec.mode/security/ask,
+    # so a full trifecta + exec.mode='ask' must NOT be suppressed to PASS just
+    # because an unrelated exec-scoped gate happens to be set. Contrast with
+    # test_b46_gate_present_passes above, which correctly DOES PASS: "send_email"
+    # is not a write token, so the same exec gate legitimately covers it.
+    cfg = _full_trifecta()
+    cfg["agents"] = {"subagents": {"maxConcurrent": 4}}
+    cfg["tools"] = {"allow": ["fs_read", "send_email", "write"], "exec": {"mode": "ask"}}
+    r = check_multiagent_exposure(_ctx(cfg))
+    assert r.status == "WARN"
+
+
 # ---- subagents but trifecta incomplete + elevated sender delegation -> WARN ----
 def test_b46_incomplete_trifecta_passes():
     # subagents present, but no sensitive-data leg (no password, no db tools)

@@ -377,6 +377,46 @@ def test_risk07_with_approval_no_fire():
     assert not any(p.id == "RISK-07" for p in paths)
 
 
+def test_risk07_non_exec_write_tool_with_exec_mode_ask_still_fires():
+    # B-848 flagship negative control: "write" (see `_NON_EXEC_WRITE_TOKENS`) is a
+    # genuinely non-exec write tool that tools.exec.mode/security/ask does not
+    # reach, so an exec-scoped gate must not suppress RISK-07 just because it is
+    # present. This must not be conflated with "elevated", which B-848 fixed in the
+    # opposite direction (see test_risk07_elevated_only_with_exec_gate_no_fire below).
+    from clawseccheck.catalog import Finding
+    fake_b20 = Finding(
+        id="B20", title="Bootstrap writable", severity=HIGH,
+        status=FAIL, detail="test", fix="test",
+        framework="Write Integrity", scored=True,
+    )
+    cfg = {"tools": {"allow": ["write"], "exec": {"mode": "ask"}}}
+    ctx = _ctx(cfg)
+    f = _findings(ctx) + [fake_b20]
+    paths = risk_paths(ctx, f)
+    assert any(p.id == "RISK-07" for p in paths)
+
+
+def test_risk07_elevated_only_with_exec_gate_no_fire():
+    # B-848: a bare tools.elevated.allowFrom grant IS reached by tools.exec.mode/
+    # security/ask (the installed OpenClaw dist gates an elevated "full" request's
+    # approval bypass behind those same fields — bash-tools-BBKNLrRH.mjs:4085,4090),
+    # so it must not make RISK-07 fire just because "elevated" happens to be in the
+    # enabled-tools list alongside a real exec gate. This used to fire (the exact
+    # bug B-848 fixes) because "elevated" was wrongly treated the same as a
+    # genuinely non-exec write tool like "write" above.
+    from clawseccheck.catalog import Finding
+    fake_b20 = Finding(
+        id="B20", title="Bootstrap writable", severity=HIGH,
+        status=FAIL, detail="test", fix="test",
+        framework="Write Integrity", scored=True,
+    )
+    cfg = {"tools": {"elevated": {"allowFrom": ["o"]}, "exec": {"mode": "ask"}}}
+    ctx = _ctx(cfg)
+    f = _findings(ctx) + [fake_b20]
+    paths = risk_paths(ctx, f)
+    assert not any(p.id == "RISK-07" for p in paths)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule RISK-08: session cross-user + multi-user channel  -> MEDIUM
 # ──────────────────────────────────────────────────────────────────────────────
