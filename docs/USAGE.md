@@ -1779,7 +1779,7 @@ python3 audit.py --log audit.log            # also write log to a local file
     `/100` and no score-bar:
 
     ```text
-    🦞 ClawSecCheck · OpenClaw Security Audit · Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
+    🦞 ClawSecCheck · OpenClaw Security Audit · Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)
     No grade yet — 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).  ·  27 issues
     Not fully covered: no trajectory sidecar was read
     ⚠️ open CRITICAL finding — it would have capped the grade, but this run has no grade to cap.

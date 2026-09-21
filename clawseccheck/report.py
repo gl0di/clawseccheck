@@ -697,14 +697,20 @@ def _missing_layers_sentence(score: ScoreResult) -> str:
 
 
 def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
-    """``"Most urgent: CRITICAL — Lethal trifecta reachable  [B1]"``, or the all-clear
+    """``"Most urgent: CRITICAL — Lethal trifecta reachable"``, or the all-clear
     variant when there is no unsuppressed FAIL.
 
     An ungraded run has still told the reader the most important thing it knows, so
     this leads every ungraded surface — it must read as a result, never as an error.
     Selection mirrors `render_report`'s own `issues` sort (severity first), narrowed to
     FAIL only (a WARN is not "urgent" in the sense this headline means), with the
-    finding id as the tie-break for determinism.
+    finding id used ONLY as the tie-break for determinism — never printed. This
+    headline states the risk, not which check number found it (design-system.md
+    Layer 0: "never internal codes"); on `render_report` the id remains one scroll
+    away regardless of grading, in the by-subject inventory index
+    (`render_subject_inventory`, the one surface deliberately allowed to carry ids,
+    gated on `ctx` being available rather than on `score.graded`) — see this
+    function's call sites for the two callers where that is not true.
 
     B-758 item #1: a RISK-* dangerous-capability CHAIN carries its own severity —
     a property of the combination, not summed from its legs — and this report renders
@@ -740,9 +746,9 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     kind, top = _pick(fail_candidates, live_risk)
     if kind == "risk":
         return (f"Most urgent: {top.severity} — dangerous capability chain: "
-                f"{_sanitize(top.title)}  [{top.id}]")
+                f"{_sanitize(top.title)}")
     if kind == "finding":
-        return f"Most urgent: {top.severity} — {_sanitize(top.title)}  [{top.id}]"
+        return f"Most urgent: {top.severity} — {_sanitize(top.title)}"
 
     # C-426: the all-clear must not out-run the evidence. This headline leads every
     # ungraded surface, including the card, whose own "Most urgent" section lists
@@ -760,10 +766,10 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     kind, top = _pick(warns, live_risk)
     if kind == "risk":
         return (f"Nothing failed outright — most serious open item: {top.severity} — "
-                f"dangerous capability chain: {_sanitize(top.title)}  [{top.id}]")
+                f"dangerous capability chain: {_sanitize(top.title)}")
     if kind == "finding":
         return (f"Nothing failed outright — most serious open item: {top.severity} — "
-                f"{_sanitize(top.title)}  [{top.id}]")
+                f"{_sanitize(top.title)}")
     return "Nothing urgent found in what was checked."
 
 

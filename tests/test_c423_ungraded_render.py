@@ -60,7 +60,7 @@ _CLEAN = _f("B2", "some clean check", LOW, PASS)
 FINDINGS_WITH_FAIL = [_CRIT, _CLEAN]
 FINDINGS_ALL_CLEAN = [_CLEAN]
 
-EXPECTED_HEADLINE = "Most urgent: CRITICAL — Lethal trifecta reachable  [B1]"
+EXPECTED_HEADLINE = "Most urgent: CRITICAL — Lethal trifecta reachable"
 EXPECTED_ALL_CLEAR = "Nothing urgent found in what was checked."
 
 
