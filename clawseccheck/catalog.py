@@ -1363,6 +1363,24 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B388 (C-538): prose-side sibling of B160 for a DIFFERENT object class -- the
+    # current machine's hardware/OS fingerprint (CPU core count, RAM, disk, GPU,
+    # machine/compute type, kernel/uname version string, hostname) described in a
+    # skill's prose and sent to a non-first-party endpoint. Also the prose-side
+    # analogue of skillast.py's HOST_INFO_EXFIL_FLOW (C-203), which only recognizes
+    # this behaviour in bundled CODE, not natural-language onboarding instructions
+    # (CLAWSECCHECK-C-388: a real vendor sample, moltfounders.com). Always WARN,
+    # never FAIL -- a hardware fingerprint is a real tracking/targeting signal but
+    # not the credential-theft severity B160's own is_cred leg carries.
+    CheckMeta(
+        "B388",
+        "Prose-intent host/hardware-fingerprint exfiltration directive",
+        MEDIUM,
+        "hardening",
+        "Data Exfiltration / Prompt Injection",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # B161 (C-217): identity-file injection -- an override/jailbreak directive planted
     # in the agent's OWN identity/bootstrap files (SOUL.md, AGENTS.md, system-prompt
     # equivalents), distinct from B64 (generic override phrases across bootstrap +

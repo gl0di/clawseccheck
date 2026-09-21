@@ -14529,6 +14529,202 @@ def check_prose_bulk_exfil(ctx: Context) -> Finding:
     )
 
 
+# C-538: prose-intent HOST/HARDWARE-FINGERPRINT exfiltration -- a skill's prose
+# describes collecting the CURRENT machine's hardware/OS fingerprint (CPU core
+# count, RAM, disk, GPU, machine/compute type, kernel/uname version string,
+# hostname) and sending it to an external endpoint. B160 (C-210) above is the
+# prose-side sibling for bulk/PII/credential data; this is the prose-side sibling
+# of skillast.py's HOST_INFO_EXFIL_FLOW (C-203), which recognizes the same
+# behaviour only in CODE (an actual socket.gethostname()/platform.uname() call
+# reaching an outbound sink) -- a "follow these onboarding instructions" skill
+# with no bundled Python/JS at all is invisible to that AST rule (CLAWSECCHECK-
+# C-388: a real vendor sample, moltfounders.com's registration protocol, delivers
+# exactly this behaviour entirely through prose the agent executes with its own
+# tools).
+#
+# Deliberately its OWN noun class, not a widening of B160's _BULK_DATA_OBJECT_RE /
+# _BULK_CRED_OBJECT_RE: a hardware/OS fingerprint is neither bulk/PII user data nor
+# credential-shaped, so folding it into either would blur what a WARN/FAIL from
+# this check actually means. Kept WARN-grade only, never FAIL: a device
+# fingerprint is a real tracking/targeting signal but not the "attacker now has
+# the keys" severity of a credential exfil (B160's own is_cred leg).
+#
+# Reuses B160's exfil-verb + external-URL proximity gate as-is (same
+# _EXFIL_INTENT_VERB_RE/_BACKUP_TRANSPORT_VERB_RE, _EXFIL_URL_RE,
+# _EXFIL_VERB_URL_WINDOW, defensive-context/heading/export-declaration skips, and
+# the own-host allowlist) -- that gate is what keeps this check off ordinary
+# system-REQUIREMENTS documentation ("Requires: 8 CPU cores, 16GB RAM, 100GB
+# disk"), which never contains a send/export verb next to a destination URL at
+# all, regardless of how the noun class below is worded.
+#
+# The noun class itself needs two independent shapes, checked against the object
+# window between the verb and its destination (mirrors B160's obj_window):
+#   (a) a named fingerprint/profile artifact ("hardware fingerprint", "device
+#       fingerprint", "hardware profile", the real vendor field name
+#       `agentCapabilities`) -- inherently self-referential, no extra marker
+#       needed.
+#   (b) a THIS-MACHINE self-reference ("this machine", "the current machine",
+#       "your device", "this agent's host", a bare "the host") co-occurring with
+#       a concrete hardware/OS attribute term (CPU core count, RAM, disk, GPU,
+#       kernel version/uname, machine/compute type, hostname). Requiring the
+#       self-reference marker is what keeps ordinary requirements phrasing out --
+#       "Requires 8 CPU cores and 16GB RAM" states a REQUIREMENT, it never
+#       "describes the current machine".
+_HOST_FP_NAMED_OBJECT_RE = re.compile(
+    r"\b(?:hardware|device|machine|host|system)\s+fingerprint\b|"
+    r"\bhardware\s+profile\b|"
+    r"\bagentCapabilities\b",
+    re.I,
+)
+_HOST_FP_SELF_REF_RE = re.compile(
+    r"\b(?:this|the\s+current|your|the\s+user'?s|this\s+agent'?s|the\s+host'?s|local)\s+"
+    r"(?:machine|host|device|system)\b|"
+    r"\bthis\s+host\b|\bthe\s+(?:current\s+)?host\b",
+    re.I,
+)
+_HOST_FP_ATTR_TERM_RE = re.compile(
+    r"\bCPU\s+(?:logical\s+)?cores?\b|\bcore\s+count\b|"
+    r"\btotal\s+(?:RAM|memory)\b|"
+    r"\btotal\s+disk(?:\s+space)?\b|"
+    r"\bGPU\b|"
+    r"\bkernel\s+version\b|\buname\b|"
+    r"\bmachine\s+type\b|\bcompute\s+type\b|"
+    r"\boperating\s+system\s+version\b|\bOS\s+version\b|"
+    r"\bhostname\b",
+    re.I,
+)
+
+
+def _host_fingerprint_object(obj_window: str) -> bool:
+    """True when *obj_window* describes the current host's hardware/OS
+    fingerprint -- see the C-538 comment above `_HOST_FP_NAMED_OBJECT_RE`."""
+    if _HOST_FP_NAMED_OBJECT_RE.search(obj_window):
+        return True
+    return bool(
+        _HOST_FP_SELF_REF_RE.search(obj_window) and _HOST_FP_ATTR_TERM_RE.search(obj_window)
+    )
+
+
+def _prose_host_fingerprint_scan(
+    blob: str, own_host, fence_ranges: list[tuple[int, int]]
+) -> list[str]:
+    """Scan *blob* for prose-intent host/hardware-fingerprint exfiltration.
+    Returns a snippet for each verb+external-URL match that also has a
+    hardware/OS fingerprint object described nearby. Mirrors `_prose_exfil_scan`'s
+    verb/URL/defensive-context/own-host plumbing (B160/C-210) with a different
+    object-noun class -- see the C-538 comment above."""
+    hits: list[str] = []
+    last_end = -1
+    header_matches = list(_MANIFEST_HEADER_RE.finditer(blob))
+    heading_matches = list(_ANY_HEADING_RE.finditer(blob))
+    for vm in _verb_class_matches(blob, _EXFIL_INTENT_VERB_RE, _BACKUP_TRANSPORT_VERB_RE):
+        if vm.start() < last_end:
+            continue
+        if _defensive_context(blob, vm.start(), fence_ranges, header_matches=header_matches,
+                               heading_matches=heading_matches):
+            continue
+        # B-287 (mirrored from B160): `export NAME=value` / `export const x` is
+        # language syntax, not the English verb "export <data> to <dest>".
+        if _is_export_declaration(blob, vm.start()):
+            continue
+        url_window = blob[vm.end() : min(len(blob), vm.end() + _EXFIL_VERB_URL_WINDOW)]
+        um = _EXFIL_URL_RE.search(url_window)
+        if not um:
+            continue
+        url_abs_start = vm.end() + um.start()
+        # Mirrored from B160: skip a bare section-heading verb match whose URL
+        # falls outside the heading's own line (see B160's C-135 round 2/3 comment).
+        line_start = blob.rfind("\n", 0, vm.start()) + 1
+        line_end = blob.find("\n", vm.start())
+        line_end = line_end if line_end != -1 else len(blob)
+        line = blob[line_start:line_end]
+        if _ANY_HEADING_RE.match(line) and url_abs_start >= line_end:
+            continue
+        um_full = _EXFIL_URL_RE.match(blob, url_abs_start)
+        url = (um_full.group(0) if um_full else um.group(0)).rstrip(").,;:'\"")
+        if _url_matches_own_host(url, own_host):
+            continue  # first-party endpoint
+        obj_start = max(0, vm.start() - _EXFIL_OBJECT_WINDOW)
+        obj_end = vm.end() + um.end()  # um is relative to url_window, which starts at vm.end()
+        obj_window = blob[obj_start:obj_end]
+        if not _host_fingerprint_object(obj_window):
+            continue
+        last_end = obj_end
+        snippet_raw = blob[obj_start:obj_end]
+        snippet = " ".join(snippet_raw.split())
+        if len(snippet) > 140:
+            snippet = snippet[:137] + "..."
+        hits.append(snippet)
+    return hits
+
+
+def check_prose_host_fingerprint_exfil(ctx: Context) -> Finding:
+    """B388 (C-538) — a skill's prose/workflow steps describe collecting the
+    CURRENT machine's hardware/OS fingerprint (CPU core count, RAM, disk, GPU,
+    machine/compute type, kernel/uname version string, hostname) and sending it
+    to an external endpoint that is not the skill's own declared host. Prose-side
+    sibling of skillast.py's HOST_INFO_EXFIL_FLOW (C-203), which is a CODE-only
+    AST taint rule and has no equivalent when the same behaviour is described in
+    natural language: a "follow these instructions" skill has the agent execute
+    it with its own tools instead of bundled code (CLAWSECCHECK-C-388,
+    moltfounders.com).
+
+    WARN — a hardware/OS fingerprint object is described near an exfil verb +
+           external URL. Always WARN, never FAIL: a device fingerprint is a real
+           tracking/targeting signal but not the "attacker now has the keys"
+           severity of a credential exfil (see B160).
+    PASS — no prose-intent host-fingerprint exfil pattern found, or the
+           destination is the skill's own declared homepage/repo/api/endpoint
+           (first-party allowlist, reused from B-132/B160).
+    UNKNOWN — no installed skills to inspect.
+    """
+    if not ctx.installed_skills:
+        return _finding(
+            "B388",
+            UNKNOWN,
+            "No installed skills found — nothing to inspect for prose-intent "
+            "host/hardware-fingerprint exfiltration.",
+            "Run on a host where installed skills exist (~/.openclaw/skills, "
+            "workspace/skills).",
+        )
+
+    warn_ev: list[str] = []
+    for skill_name, blob in ctx.installed_skills.items():
+        norm = normalize_for_scan(blob)
+        fr = _fence_ranges(norm)
+        own_host = _skill_own_host(norm, fr)
+        for snippet in _prose_host_fingerprint_scan(norm, own_host, fr):
+            warn_ev.append(f'{skill_name}: "{snippet}"')
+
+    if warn_ev:
+        ev_summary = "; ".join(warn_ev[:4])
+        extra = f" (+{len(warn_ev) - 4} more)" if len(warn_ev) > 4 else ""
+        return _finding(
+            "B388",
+            WARN,
+            "Possible prose-intent host/hardware-fingerprint exfiltration found "
+            "— a skill describes collecting the current machine's hardware/OS "
+            "fingerprint and sending it to a non-first-party endpoint: "
+            + ev_summary + extra,
+            "Review the flagged content. Confirm the destination is a trusted, "
+            "declared endpoint (or the skill's own homepage/API/base-url) and "
+            "that reporting host hardware/OS details is a genuine, documented, "
+            "necessary feature of the skill — a hardware fingerprint can be used "
+            "to track or target this specific machine.",
+            warn_ev,
+            severity=MEDIUM,
+        )
+
+    return _finding(
+        "B388",
+        PASS,
+        "No prose-intent host/hardware-fingerprint exfiltration directives found "
+        "in installed skills.",
+        "Ensure no skill describes collecting the current machine's hardware/OS "
+        "fingerprint and sending it to an undeclared external endpoint.",
+    )
+
+
 # C-209: social-engineering / credential-phishing prose -- a skill's OWN prose instructs
 # the HUMAN READER (not the agent) to act on a fabricated urgent/authoritative pretext
 # and hand over a credential or take an out-of-band action. Distinct from B159 (targets

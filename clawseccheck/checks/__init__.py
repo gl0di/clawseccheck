@@ -703,6 +703,7 @@ from ._content import (
     check_pth_persistence,
     check_python_runtime_persist_install,
     check_prose_bulk_exfil,
+    check_prose_host_fingerprint_exfil,
     check_remote_code_dependency,
     check_self_erase_directive,
     check_self_modification_directive,
