@@ -191,14 +191,35 @@ def _isolate_local_store(tmp_path_factory):
 # PARENT HALF (here): write tests/_hermledger.SITECUSTOMIZE_SOURCE to a fresh session temp
 # dir, point CSC_HERM_LEDGER_PATH + PYTHONPATH at it so every CHILD Python process picks it
 # up via the interpreter's own sitecustomize auto-import, and exec the identical source
-# in-process too, so the parent's own filesystem calls are on the ledger as well.
+# in-process too, so the parent's own filesystem calls are captured too.
+#
+# CLAWSECCHECK-hermeticity (2026-09-21) shipped this half INERT AS A GATE, despite the
+# comment above's original claim that the parent's calls are "on the ledger as well": the
+# exec'd hook buffered events in memory and only ever flushed them via `atexit`, which
+# fires after the WHOLE pytest process exits -- i.e. after tests/test_hermeticity_gate.py's
+# comparator test had already run and passed. An in-process violation (a test calling
+# `open()`/`os.mkdir()` directly, no subprocess involved -- as opposed to the CHILD half's
+# subprocess events, which land in ledger.tsv well before the comparator runs, because the
+# child process has already exited by the time `subprocess.run`/`Popen.wait` returns to the
+# test that spawned it) never reached the same invocation's verdict. Fixed the same day:
+# `pytest_runtest_teardown` below calls the exec'd namespace's own `_csc_herm_flush` after
+# EVERY test, so by the time the comparator (itself just another test, running only after
+# every earlier test's teardown has completed) reads ledger.tsv, the parent's own
+# filesystem calls are genuinely on it -- feeding the gate, not just after-the-fact
+# forensics recovered once the process has already exited.
+# See tests/test_hermeticity_gate.py::test_parent_side_read_violation_caught_same_invocation
+# and ::test_parent_side_write_violation_caught_same_invocation for the regression tests.
 #
 # CHILD HALF: tests/_hermledger.py's module docstring -- the generated sitecustomize.py
 # installs one audit hook on a small fixed event set, buffers unique (category, path)
-# pairs in memory, and flushes once via atexit with a single append-mode write. See that
-# module for the full "what this does and does not cover" account, including why this
-# pattern is safe here despite matching a shape (sitecustomize.py + PYTHONPATH injection)
-# this project's OWN product treats as a supply-chain persistence red flag (B99/B335/B375).
+# pairs in memory, and flushes via atexit (once, at process exit) with a single
+# append-mode write; the PARENT below reuses the identical `_csc_herm_flush` but calls it
+# repeatedly (once per test) instead, which is why `_hermledger._csc_herm_flush` clears its
+# buffer after a successful write -- see that module for why. See tests/_hermledger.py's
+# module docstring for the full "what this does and does not cover" account too, including
+# why this pattern is safe here despite matching a shape (sitecustomize.py + PYTHONPATH
+# injection) this project's OWN product treats as a supply-chain persistence red flag
+# (B99/B335/B375).
 #
 # tests/test_hermeticity_gate.py is the comparison; it no-ops (skip) whenever this is off.
 def pytest_configure(config):
@@ -217,11 +238,43 @@ def pytest_configure(config):
     # sitecustomize module elsewhere on sys.path may already be cached in sys.modules from
     # interpreter startup, and a plain `import` would silently return that cached module
     # instead of ours. exec() against a private namespace has no such cache to collide with.
+    parent_ns = {"__name__": "csc_herm_parent_sitecustomize"}
     exec(  # intentional: runs the identical source written out for children, here too
         compile(_hermledger.SITECUSTOMIZE_SOURCE, str(sitecustomize_path), "exec"),
-        {"__name__": "csc_herm_parent_sitecustomize"},
+        parent_ns,
     )
+    # Stashed so `pytest_runtest_teardown` below can call the SAME function repeatedly
+    # (once per test) instead of relying solely on its `atexit` registration, which is
+    # what makes this half of the ledger usable as a gate rather than only forensics --
+    # see the parent-gating fix note above.
+    config._csc_herm_flush = parent_ns["_csc_herm_flush"]
     config._csc_herm_dir = herm_dir
+
+
+def pytest_runtest_teardown(item):
+    """Flush the PARENT half's buffered hermeticity events after every test.
+
+    CLAWSECCHECK-hermeticity's parent-gating fix (see the comment block above
+    ``pytest_configure``): the exec'd hook's own ``atexit`` registration fires only once
+    the whole pytest process exits, which is after the comparator test has already run.
+    Flushing here, after every test's teardown, means that by the time ANY later test in
+    the same invocation runs -- in particular the comparator, which is itself just another
+    test -- every earlier test's parent-side filesystem calls are already in ledger.tsv.
+
+    Flushing per test (rather than once, lazily, right before the comparator reads the
+    file) also keeps each recorded event's ``PYTEST_CURRENT_TEST`` attribution accurate:
+    a single end-of-run flush would stamp every prior test's events with whatever test
+    happened to trigger that one flush -- the comparator's own node id -- which would
+    make every parent-attributed violation across an entire run look like it came from
+    the comparator itself.
+
+    A single ``getattr`` is the only cost when the ledger is off (``config`` then has no
+    ``_csc_herm_flush`` attribute at all), keeping the "zero cost on the default `pytest
+    -q` path" property this instrument is built around.
+    """
+    flush = getattr(item.config, "_csc_herm_flush", None)
+    if flush is not None:
+        flush()
 
 
 def pytest_unconfigure(config):

@@ -13,15 +13,26 @@ own comment) rather than a silent tolerance, and a failure message that says WHY
 rule exists, not just that it broke.
 
 Two thresholds, matching the FAILURE MODE the ledger was designed against:
-  * a WRITE-shaped event outside repo/tmp is ALWAYS a hard FAIL -- no allowlist, no
-    grandfathering. There is no legitimate reason for a hermetic test to write anywhere
-    else, so `CSC_HERMETICITY_LEDGER=1` and `=strict` treat writes identically.
+  * a WRITE-shaped event outside repo/tmp that the ledger actually RECORDED is ALWAYS a
+    hard FAIL -- no allowlist, no grandfathering. There is no legitimate reason for a
+    hermetic test to write anywhere else, so `CSC_HERMETICITY_LEDGER=1` and `=strict`
+    treat a recorded write identically. Read that clause carefully: it is a guarantee
+    about the RESPONSE to an observed write, never a guarantee that every write is
+    observed -- the instrument has real, documented blind spots (see
+    ``tests/_hermledger.py``'s "WHAT THIS DOES NOT COVER"), and CLAWSECCHECK-hermeticity's
+    own launch shipped one that swallowed EVERY in-process write: the parent half only
+    flushed via `atexit`, which fires after this very test has already run and passed, so
+    an in-process `os.mkdir()` outside repo/tmp produced zero recorded violations and this
+    line was simply false for that case. Fixed the same day by conftest.py's
+    `pytest_runtest_teardown`; see
+    ``test_parent_side_write_violation_caught_same_invocation`` below for the regression
+    test.
   * a READ-shaped event outside the computed-safe categories (repo / tempfile.gettempdir
     / this interpreter's own stdlib+site-packages, computed live -- see
     ``_hermledger.classify``) and not in the allowlist is a hard FAIL only under
     `CSC_HERMETICITY_LEDGER=strict`. A plain `=1` run WARNS (prints the diff, exits 0) --
     for local investigation, same idiom as `scripts/fleet_fp_gate.py compare` reporting
-    without blocking.
+    without blocking. Same recorded-vs-observed caveat as above.
 
 This guard is NOT wired into the default `pytest -q` path (CSC_HERMETICITY_LEDGER is
 unset there) and is NOT a required CI job today -- see the two dated entries in
@@ -33,6 +44,8 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -113,14 +126,29 @@ def _real_machine_node_ids(session) -> set:
 def test_no_unexplained_paths_outside_tmp_and_repo(request):
     """The gated comparison. Skips outright when the instrument was not enabled for
     this run -- CSC_HERMETICITY_LEDGER is opt-in (conftest.pytest_configure), so a plain
-    `pytest -q` never reaches the assertions below."""
-    ledger = os.environ.get("CSC_HERM_LEDGER_PATH")
-    if not ledger or not Path(ledger).exists():
+    `pytest -q` never reaches the assertions below.
+
+    CLAWSECCHECK-hermeticity, 2026-09-21: "not enabled" used to be answered by
+    `not Path(ledger).exists()` -- i.e. by whether the ledger FILE happens to exist yet.
+    That is a different question and was sometimes false: the file is created lazily, on
+    the first flush, so an enabled run with nothing recorded yet (no test had touched an
+    audited path, or -- before the parent-gating fix -- the only violations were
+    in-process and the parent had not flushed them) skipped with a message claiming the
+    ledger was OFF when it was in fact ON with zero events. "Enabled" is answered by the
+    env var alone, which `conftest.pytest_configure` sets iff `CSC_HERMETICITY_LEDGER` was
+    set at startup; a missing file when enabled means zero events recorded so far, which
+    is a clean pass, not grounds to skip.
+    """
+    if not os.environ.get("CSC_HERMETICITY_LEDGER"):
         pytest.skip("CSC_HERMETICITY_LEDGER not enabled for this run")
+    ledger = os.environ.get("CSC_HERM_LEDGER_PATH")
 
     allow = _load_allowlist(ALLOWLIST_PATH)
     real_machine_ids = _real_machine_node_ids(request.session)
-    rows, skipped_lines = _read_ledger(Path(ledger))
+    if ledger and Path(ledger).exists():
+        rows, skipped_lines = _read_ledger(Path(ledger))
+    else:
+        rows, skipped_lines = [], 0
 
     write_violations = []
     read_violations = []
@@ -138,8 +166,11 @@ def test_no_unexplained_paths_outside_tmp_and_repo(request):
 
         token = _normalize_token(norm, child_home)
         if cat == "W":
-            # No allowlist, no grandfathering (FAILURE MODE, always) -- a hermetic
-            # test has no legitimate reason to write outside repo/tmp.
+            # No allowlist, no grandfathering (FAILURE MODE, always) for a write this
+            # ledger actually recorded -- a hermetic test has no legitimate reason to
+            # write outside repo/tmp. Says nothing about a write the instrument never
+            # saw; see the module docstring's recorded-vs-observed caveat and
+            # tests/_hermledger.py's "WHAT THIS DOES NOT COVER".
             write_violations.append((token, test_id))
             continue
         if any(fnmatch.fnmatchcase(token, pat) for pat in allow):
@@ -217,3 +248,89 @@ def test_classify_recognizes_repo_tmp_and_interpreter_roots():
     # the comparator is the one that decides whether an unclassified path is fine
     # (allowlisted) or a violation.
     assert classify("/etc/hostname", repo) == "/etc/hostname"
+
+
+# --------------------------------------------------------------------------------------
+# Regression tests for the CLAWSECCHECK-hermeticity parent-gating fix (Defect 1) --
+# always-on (no CSC_HERMETICITY_LEDGER needed to RUN them; each one turns it on itself,
+# in a child pytest invocation it fully controls), same idiom as the two sanity tests
+# above. Each spawns a REAL, separate `python -m pytest` selecting exactly one demo
+# violation from tests/test_hermeticity_demo_violations.py plus the real comparator, and
+# asserts that single invocation fails -- proving an in-process (no subprocess) filesystem
+# call is caught within the SAME run that made it, not only recoverable later from a
+# ledger file some earlier, separate process happened to flush.
+#
+# Split into two tests (read vs write) rather than one demo module doing both violations
+# together: test_no_unexplained_paths_outside_tmp_and_repo's write branch returns via
+# pytest.fail() before it ever inspects read_violations (see that function), so a single
+# invocation carrying both violations would only ever surface the WRITE failure message --
+# proving the write half works but saying nothing about the read half. Two invocations,
+# one violation each, is what actually demonstrates both.
+
+def _run_demo_gate_subprocess(demo_test_name: str, ledger_mode: str) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    # Popped, not left to whatever the OUTER run's own env happens to hold: if the
+    # outer suite itself were ever run with CSC_HERMETICITY_LEDGER set, its
+    # CSC_HERM_LEDGER_PATH would otherwise leak into this child's *startup* environment
+    # before its own conftest.pytest_configure gets a chance to overwrite it (conftest.py
+    # already documents this: an already-cached sitecustomize would win the module-cache
+    # race only for `import`, not for the exec-based install, but there is no reason to
+    # inherit a foreign ledger path here at all).
+    env.pop("CSC_HERM_LEDGER_PATH", None)
+    env["CSC_HERMETICITY_LEDGER"] = ledger_mode
+    env["CSC_HERM_DEMO"] = "1"
+    return subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "-q",
+            f"tests/test_hermeticity_demo_violations.py::{demo_test_name}",
+            "tests/test_hermeticity_gate.py::"
+            "test_no_unexplained_paths_outside_tmp_and_repo",
+        ],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+
+def test_parent_side_read_violation_caught_same_invocation():
+    """Defect 1's acceptance bar, READ half: an in-process ``open()`` outside repo/tmp
+    must fail the comparator in the SAME pytest invocation that made the call.
+
+    Before the parent-gating fix, this exact scenario (the open() demo test, then the
+    comparator, one invocation, `=strict`) exited 0 -- either the comparator SKIPPED
+    with Defect 3's false "not enabled" reason, or it ran and PASSED with zero recorded
+    violations (Defect 1), depending on whether anything else in that tiny two-test
+    invocation happened to flush first. Both are a clean exit; this asserts it is not.
+    """
+    proc = _run_demo_gate_subprocess("test_demo_inprocess_open_violation", "strict")
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0, (
+        "expected the comparator to FAIL on an in-process open() outside repo/tmp "
+        "recorded earlier in the SAME invocation; got a clean exit -- the parent-"
+        "gating fix regressed:\n" + combined
+    )
+    assert "/etc/hostname" in combined, combined
+    assert "hermeticity ledger" in combined, combined
+
+
+def test_parent_side_write_violation_caught_same_invocation():
+    """Defect 1's acceptance bar, WRITE half: an in-process ``os.mkdir()`` outside
+    repo/tmp must be a hard FAIL in the SAME invocation.
+
+    Run under plain `=1` (non-strict) deliberately, not `=strict`: Defect 2's corrected
+    claim is that a RECORDED write is a hard fail unconditionally on strict-vs-not, and
+    the read-side test above already exercises `=strict`. Before the parent-gating fix,
+    ``os.mkdir("/var/tmp/...")`` produced zero recorded violations regardless of mode --
+    this is the write half of the verifier's own two demonstration violations.
+    """
+    proc = _run_demo_gate_subprocess("test_demo_inprocess_mkdir_violation", "1")
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0, (
+        "expected the comparator to FAIL on an in-process os.mkdir() outside repo/tmp "
+        "recorded earlier in the SAME invocation, even under plain `=1` mode; got a "
+        "clean exit -- the parent-gating fix regressed:\n" + combined
+    )
+    assert "csc-herm-demo-mkdir" in combined, combined
+    assert "WRITE-shaped event" in combined, combined

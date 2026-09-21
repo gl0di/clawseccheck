@@ -109,7 +109,16 @@ if _LEDGER:
             finally:
                 os.close(fd)
         except OSError:
-            pass
+            return
+        # Cleared only after a SUCCESSFUL write, not in a `finally` -- a failed write
+        # keeps the events buffered so the next flush gets another chance instead of
+        # silently losing them. The CHILD half only ever calls this once (atexit, at
+        # process exit) so clearing here never mattered there; the PARENT half now
+        # calls it once per pytest test (conftest.py's `pytest_runtest_teardown`,
+        # CLAWSECCHECK-hermeticity's parent-gating fix) and MUST start each test with
+        # an empty buffer, or every later flush re-appends every earlier test's events
+        # too -- turning one real violation into a duplicate line per subsequent test.
+        _seen.clear()
 
     sys.addaudithook(_csc_herm_hook)
     atexit.register(_csc_herm_flush)
