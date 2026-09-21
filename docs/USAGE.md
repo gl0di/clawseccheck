@@ -1886,8 +1886,13 @@ python3 audit.py --log audit.log            # also write log to a local file
   is the wrong answer to "am I improving?". Nothing is hidden *silently*: when the window cuts
   the table, the line right above it states exactly how many rows are not printed
   (`Showing the last 30 of 4,604 run(s) — 4,574 older run(s) not shown here`), and pass
-  `--all` to print every row instead, byte-for-byte the same as this tool's output before
-  this default window existed.
+  `--all` to print every row instead — each row byte-for-byte the same as this tool printed
+  before this default window existed. The handful of sentences below the table (the
+  ungraded-runs ratio, the pass-rate-fall notes, the retention notice) were reworded in the
+  same change that added the window, because they used to say "shown above" — no longer true
+  once a hidden row could be one of the ones being counted. `--all` does not revert that
+  wording; it is a correctness fix independent of the window, not something the window
+  toggles (B-847).
   The window affects **only what is printed** — the ungraded ratio, every arrow, and the
   pass-rate-fall counts described below are always computed over the **whole** history file,
   never just the visible slice, the same way the score arrows already look past an ungraded
