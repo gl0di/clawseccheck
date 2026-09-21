@@ -2884,6 +2884,70 @@ def _is_decode_call(node: ast.AST) -> bool:
     return isinstance(f, ast.Attribute) and f.attr in _DECODE_ATTRS
 
 
+def _rebound_names(tree: ast.AST) -> "tuple[set, set]":
+    """`(names, os_attr)` -- every binding form other than a qualifying import that can
+    take a name (or, for `os_attr`, an attribute) away from `_path_module_aliases`.
+
+    B-855. `_path_module_aliases`'s own rebind check used to look only at Assign/
+    AugAssign/AnnAssign targets that were themselves a bare `ast.Name`. That missed
+    every other way Python binds a name: a for-loop target, a comprehension variable, a
+    walrus (`:=`), a `with ... as` target, a `def`/`class` name, an `except ... as`
+    name, tuple/list/starred unpacking (`path, k = "", 1`), and a second import binding
+    the same name to something else (`import evil as path` after `from os import
+    path` -- Python's last binding wins, same as a plain reassignment). Left uncaught,
+    each one let a shadowed name keep path-module standing, which
+    `_decode_signal_is_only_artifact_relative_reads` then trusted enough to skip --
+    exactly the receiver gap the pairing attack in that function's docstring depends on.
+
+    `os_attr` covers a DIFFERENT shape: `os.path = <obj>` does not rebind the name
+    `os` at all, it mutates the `.path` attribute the `viaos` reading (`X.path.join`)
+    depends on. Any assignment target `X.path = ...` where `X` is a plain name drops
+    that `X` from `viaos`, regardless of whether `X` is `os` or an alias of it.
+
+    Both sets only ever REMOVE trust (the fail-safe direction from the original
+    docstring) -- membership here can put a call back under suspicion, never exempt one.
+    Import bindings that DO match a recognized path-import pattern are handled by the
+    caller, not here, so a legitimate `from os import path` never appears in `names`.
+    """
+
+    def _targets(t: ast.AST):
+        if isinstance(t, ast.Name):
+            yield t.id
+        elif isinstance(t, (ast.Tuple, ast.List)):
+            for e in t.elts:
+                yield from _targets(e)
+        elif isinstance(t, ast.Starred):
+            yield from _targets(t.value)
+
+    names: set = set()
+    os_attr: set = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                names.update(_targets(t))
+                if (
+                    isinstance(t, ast.Attribute)
+                    and t.attr == "path"
+                    and isinstance(t.value, ast.Name)
+                ):
+                    os_attr.add(t.value.id)
+        elif isinstance(n, (ast.For, ast.AsyncFor)):
+            names.update(_targets(n.target))
+        elif isinstance(n, ast.comprehension):
+            names.update(_targets(n.target))
+        elif isinstance(n, ast.NamedExpr):
+            names.update(_targets(n.target))
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if item.optional_vars is not None:
+                    names.update(_targets(item.optional_vars))
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(n.name)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            names.add(n.name)
+    return names, os_attr
+
+
 def _path_module_aliases(tree: ast.AST) -> tuple:
     """`(direct, viaos)` — the names *tree*'s own imports bind to a path module.
 
@@ -2896,9 +2960,13 @@ def _path_module_aliases(tree: ast.AST) -> tuple:
     looking at a single import, which made a bare local variable with either name a path
     module -- the cheapest of the false cleans an adversarial pass found here. A name only
     earns membership by being bound, in this file, by an import statement.
+
+    B-855: a name earning membership via import is not enough either -- see
+    `_rebound_names` for every other way that same name can be taken back.
     """
     direct: set = set()   # names whose `.join(...)` is a path join
     viaos: set = set()    # names X where `X.path.join(...)` is a path join
+    bad_imports: set = set()  # names an UNRELATED import binds -- last binding wins
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             for a in n.names:
@@ -2910,23 +2978,36 @@ def _path_module_aliases(tree: ast.AST) -> tuple:
                     (direct if a.asname else viaos).add(a.asname or "os")
                 elif a.name == "os":
                     viaos.add(a.asname or "os")
-        elif isinstance(n, ast.ImportFrom) and n.module == "os":
-            for a in n.names:
-                if a.name == "path":
-                    direct.add(a.asname or "path")
+                else:
+                    # e.g. `import evil as path` -- binds `path` to something that is
+                    # not a path module at all.
+                    bad_imports.add(a.asname or a.name.split(".")[0])
+        elif isinstance(n, ast.ImportFrom):
+            if n.module == "os":
+                for a in n.names:
+                    if a.name == "path":
+                        direct.add(a.asname or "path")
+                    elif a.name != "*":
+                        bad_imports.add(a.asname or a.name)
+            else:
+                for a in n.names:
+                    if a.name != "*":
+                        # e.g. `from evil import x as path` -- same shadowing shape,
+                        # different module.
+                        bad_imports.add(a.asname or a.name)
 
-    # A name that is ALSO assigned somewhere in the module is not trusted: `from os
-    # import path` followed by `path = ""` leaves the join reaching a string, and the
-    # verdict has to follow the value rather than the import line. Dropping the name is
-    # the fail-safe direction -- it can only put a call back under suspicion.
-    rebound = {
-        t.id
-        for n in ast.walk(tree)
-        if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign))
-        for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
-        if isinstance(t, ast.Name)
-    }
-    return direct - rebound, viaos - rebound
+    # A name that is ALSO bound some other way anywhere in the module is not trusted:
+    # `from os import path` followed by `path = ""`, a for-loop `for path in ...`, a
+    # walrus, `def path`, `except ... as path`, tuple/list unpacking, a comprehension
+    # variable, or a second, unrelated import all leave the join reaching something
+    # that is not the module the import line promised. The verdict has to follow the
+    # value rather than the import line, and dropping the name is the fail-safe
+    # direction -- it can only put a call back under suspicion. `os.path = <obj>` is a
+    # different shape again (an attribute mutation, not a name rebind) and is dropped
+    # from `viaos` only.
+    other_rebound, os_attr_rebound = _rebound_names(tree)
+    rebound = other_rebound | bad_imports
+    return direct - rebound, viaos - (rebound | os_attr_rebound)
 
 
 def _is_path_join_call(node: ast.AST, path_aliases: "set | None" = None) -> bool:
@@ -4983,6 +5064,10 @@ def analyze_python(
         # constructor (e.g. `s = requests.Session()`), so _is_net_sink recognizes
         # `s.put(...)` the same as a literal `session.put(...)` — see _net_sink_alias_names.
         net_sink_aliases = _net_sink_alias_names(tree)
+        # B-855: computed once per file rather than re-walking `tree` at every
+        # qualifying exec/taint-sink site below — same result, `tree` does not change
+        # within this call.
+        path_aliases = _path_module_aliases(tree)
     except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
         err_type = type(exc).__name__
         return [
@@ -5060,7 +5145,7 @@ def analyze_python(
             # bare-decode signal; a real content-hiding primitive elsewhere in the
             # same expression still convicts.
             if has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
-                arg, owner_map.get(node, tree), filename, _path_module_aliases(tree)
+                arg, owner_map.get(node, tree), filename, path_aliases
             ):
                 has_decode_signal = False
             if (
@@ -5584,7 +5669,7 @@ def analyze_python(
                             ext_visible,
                             owner_map.get(node, tree),
                             filename,
-                            _path_module_aliases(tree),
+                            path_aliases,
                         )
                         for _a in _all_args
                     ):
