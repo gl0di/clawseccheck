@@ -19,7 +19,18 @@
    measured turning a real DO-NOT-INSTALL fixture into INSTALL / Danger PASS. Whole-
    comment lines are now stripped before matching.
 
-Both tests below are offline and read/write only `tmp_path` / bundled fixtures.
+3. **ROUND 2 (a C-135 reviewer broke round 1).** Stripping only comment-ONLY lines
+   left every OTHER zero-cost way to carry marker-shaped bytes wide open: an
+   inline/trailing comment on a real statement (`a = 1  # def vet_skill` — not a
+   comment-only line at all), a comment after a `;`, a marker inside a string
+   literal, or one inside a multi-line docstring. Reproduced end-to-end exactly like
+   item 2 — planting three such lines beside the real `envtools` fixture still flipped
+   DO-NOT-INSTALL to INSTALL / Danger PASS. Fixed by tokenizing each candidate source
+   with the stdlib `tokenize` module (the real Python lexer) and blanking every
+   COMMENT and STRING token before matching, which closes all four shapes in one fix
+   because none of them are actual code the genuine engine needs.
+
+Every test below is offline and reads/writes only `tmp_path` / bundled fixtures.
 """
 from __future__ import annotations
 
@@ -53,6 +64,42 @@ def _plant_comment_only_spoof(root: Path) -> None:
         "\n".join(f"# {m}" for m in _OWN_ENGINE_MARKERS) + "\n",
         encoding="utf-8",
     )
+
+
+def _plant_inline_comment_spoof(root: Path) -> None:
+    """The C-135 ROUND-2 repro: each marker trails a real, unrelated statement — NOT a
+    comment-only line, so a strip that only drops whole `#` lines misses every one."""
+    pkg = root / "clawseccheck" / "checks"
+    pkg.mkdir(parents=True)
+    lines = [f"x{i} = {i}  # {m}" for i, m in enumerate(_OWN_ENGINE_MARKERS)]
+    (pkg / "x.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _plant_semicolon_comment_spoof(root: Path) -> None:
+    """A comment after a `;`-terminated statement — still just a comment, but on a
+    line that does not start with `#` either, and not covered by a whole-line strip."""
+    pkg = root / "clawseccheck" / "checks"
+    pkg.mkdir(parents=True)
+    lines = [f"pass;  # {m}" for m in _OWN_ENGINE_MARKERS]
+    (pkg / "x.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _plant_string_literal_spoof(root: Path) -> None:
+    """Markers as ordinary string VALUES, never as real `def`/assignment statements —
+    a bare `#`-line strip does not even look at these lines."""
+    pkg = root / "clawseccheck" / "checks"
+    pkg.mkdir(parents=True)
+    lines = [f'_v{i} = "{m}"' for i, m in enumerate(_OWN_ENGINE_MARKERS)]
+    (pkg / "x.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _plant_docstring_spoof(root: Path) -> None:
+    """Markers inside a multi-line module docstring — one STRING token spanning many
+    physical lines, none of which is a `#` comment at all."""
+    pkg = root / "clawseccheck" / "checks"
+    pkg.mkdir(parents=True)
+    body = "\n".join(_OWN_ENGINE_MARKERS)
+    (pkg / "x.py").write_text(f'"""\n{body}\n"""\n', encoding="utf-8")
 
 
 # ──────────────────────────────────────────────────── item 2: the marker forgery
@@ -113,6 +160,96 @@ def test_planting_the_spoof_beside_a_real_malicious_skill_does_not_cloak_it(tmp_
     assert profile.verdict == "DO-NOT-INSTALL", (
         f"planting a 3-line comment file must not cloak a real malicious skill as "
         f"INSTALL: verdict={profile.verdict!r}"
+    )
+    assert _axis(profile, "danger").status == FAIL
+
+
+# ────────────────────────────────────── item 3 (C-135 ROUND 2): the four other shapes
+
+def test_inline_comment_markers_do_not_grant_own_source_identity(tmp_path):
+    """The exact C-135 rejection repro: markers trailing real, unrelated statements."""
+    d = tmp_path / "clawseccheck"
+    _plant_inline_comment_spoof(d)
+    assert _is_own_source(d) is False
+
+
+def test_semicolon_comment_markers_do_not_grant_own_source_identity(tmp_path):
+    d = tmp_path / "clawseccheck"
+    _plant_semicolon_comment_spoof(d)
+    assert _is_own_source(d) is False
+
+
+def test_string_literal_markers_do_not_grant_own_source_identity(tmp_path):
+    d = tmp_path / "clawseccheck"
+    _plant_string_literal_spoof(d)
+    assert _is_own_source(d) is False
+
+
+def test_docstring_markers_do_not_grant_own_source_identity(tmp_path):
+    d = tmp_path / "clawseccheck"
+    _plant_docstring_spoof(d)
+    assert _is_own_source(d) is False
+
+
+def test_mixed_string_and_code_still_recognised(tmp_path):
+    """A marker repeated inside a STRING elsewhere in the file must not blind the
+    real, uncommented occurrence — blanking strings must not go too far the other way."""
+    d = tmp_path / "clawseccheck"
+    pkg = d / "checks"
+    pkg.mkdir(parents=True)
+    lines = [f'_decoy = "{_OWN_ENGINE_MARKERS[0]}"', *_OWN_ENGINE_MARKERS]
+    (pkg / "_engine.py").write_text("\n".join(lines), encoding="utf-8")
+    assert _is_own_source(d) is True
+
+
+def test_unterminated_string_fails_closed_not_open(tmp_path):
+    """A source that does not tokenize (an unterminated triple-quoted string) must
+    contribute NO marker text — never fall back to raw, unstripped bytes. Falling
+    back to raw text would hand an attacker a trivial bypass: break tokenizing on
+    purpose, then plant forged comment markers anywhere else in the same file."""
+    d = tmp_path / "clawseccheck"
+    pkg = d / "checks"
+    pkg.mkdir(parents=True)
+    broken = "\n".join(f"# {m}" for m in _OWN_ENGINE_MARKERS) + '\nx = """unterminated\n'
+    (pkg / "x.py").write_text(broken, encoding="utf-8")
+    assert _is_own_source(d) is False
+
+
+def test_planting_the_inline_comment_spoof_beside_a_real_malicious_skill_does_not_cloak_it(
+    tmp_path,
+):
+    """End-to-end reproduction of the C-135 rejection: copy the real DO-NOT-INSTALL
+    `envtools` fixture, plant the inline-comment spoof inside it (three real
+    statements, each with a trailing comment carrying a marker — no comment-only
+    line among them), and confirm the verdict does not flip to INSTALL / Danger PASS.
+
+    This is the shape the shipped round-1 fix (whole-line `#` stripping) missed: it
+    only strips a line that STARTS with `#`, and none of these do.
+    """
+    assert _ENVTOOLS.is_dir(), "fixture layout moved; update this path"
+    target = tmp_path / "envtools"
+    shutil.copytree(_ENVTOOLS, target)
+
+    baseline = vet_skill(target)
+    baseline_profile = build_profile(baseline, str(target), "skill")
+    assert baseline_profile.verdict == "DO-NOT-INSTALL", (
+        f"fixture must be malicious before the spoof is added: {baseline_profile.verdict}"
+    )
+
+    _plant_inline_comment_spoof(target)
+    assert _is_own_source(target) is False, (
+        "the planted inline-comment file must not grant own-source identity to the "
+        "malicious tree"
+    )
+
+    finding = vet_skill(target)
+    assert _SELF_SOURCE_PHRASE not in finding.detail, (
+        f"own-source short-circuit fired on a target that is not our engine: {finding.detail!r}"
+    )
+    profile = build_profile(finding, str(target), "skill")
+    assert profile.verdict == "DO-NOT-INSTALL", (
+        f"planting three inline-commented marker lines must not cloak a real "
+        f"malicious skill as INSTALL: verdict={profile.verdict!r}"
     )
     assert _axis(profile, "danger").status == FAIL
 

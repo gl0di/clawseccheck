@@ -27,6 +27,7 @@ import tarfile
 import gzip
 import bz2
 import lzma
+import tokenize
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -3618,6 +3619,65 @@ def _config_workspace_dirs(
     return out
 
 
+def _strip_comments_and_strings(text: str) -> str:
+    """Blank out every COMMENT and STRING/docstring token in `text`, keeping the
+    original line/column layout intact so a plain substring search over the result
+    only ever sees bytes that are actually part of a statement — never prose about one.
+
+    Used by `_is_own_source` (B-846 ROUND 2, see its docstring) to stop a marker string
+    from being forged for free via an inline comment, a comment after a `;`, a string
+    literal, or a multi-line docstring. Tokenizing — the real Python lexer, via the
+    stdlib `tokenize` module — is what correctly tells a `#` inside a string from a
+    real comment, and a marker sitting inside a triple-quoted docstring from a real
+    `def`/assignment; a hand-rolled character scan for `#`/quotes would have to
+    reimplement string-literal parsing (raw strings, escapes, f-strings, triple quotes)
+    to get the same answer, and would be exactly the unsound whack-a-mole this
+    project's CLAUDE.md warns against.
+
+    Fails CLOSED, not open: source that does not tokenize cleanly (unbalanced
+    brackets/quotes) returns "" — contributing NO marker text — rather than falling
+    back to the raw, unstripped bytes. Falling back to raw text would hand an attacker
+    a trivial bypass (open an unterminated string so tokenizing fails, then place
+    forged comment markers anywhere else in the same file) and reopen the exact hole
+    this function exists to close. Our own engine sources always tokenize cleanly
+    (they compile), so this branch only ever fires on attacker-controlled or otherwise
+    malformed input.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return ""
+    grid = [list(line) for line in text.splitlines(keepends=True)]
+
+    def _blank(row: int, col: int) -> None:
+        if 1 <= row <= len(grid):
+            line = grid[row - 1]
+            if col < len(line) and line[col] not in ("\n", "\r"):
+                line[col] = " "
+
+    for tok in tokens:
+        if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+            continue
+        (srow, scol), (erow, ecol) = tok.start, tok.end
+        if srow == erow:
+            for c in range(scol, ecol):
+                _blank(srow, c)
+            continue
+        # Multi-line token (a triple-quoted string): blank from its start column to
+        # the end of its first line, every character of every line strictly between,
+        # and up to its end column on its last line.
+        first_line_len = len(grid[srow - 1]) if 1 <= srow <= len(grid) else 0
+        for c in range(scol, first_line_len):
+            _blank(srow, c)
+        for r in range(srow + 1, erow):
+            row_len = len(grid[r - 1]) if 1 <= r <= len(grid) else 0
+            for c in range(row_len):
+                _blank(r, c)
+        for c in range(ecol):
+            _blank(erow, c)
+    return "".join("".join(line) for line in grid)
+
+
 def _is_own_source(p: Path) -> bool:
     """True if `p` is ClawSecCheck's own source tree (repo root, install dir, or the
     package dir itself). A security auditor necessarily ships attack signatures and
@@ -3661,6 +3721,30 @@ def _is_own_source(p: Path) -> bool:
     all, and is the same signed/attested-identity gap the paragraph above already
     defers. Pinned by `tests/test_b846_self_source_axis_and_marker_forgery.py`.
 
+    B-846 ROUND 2 (a C-135 reviewer broke round 1): stripping only comment-ONLY lines
+    left every OTHER zero-cost way to carry marker-shaped bytes wide open — an
+    inline/trailing comment on a real statement (`a = 1  # def vet_skill` is not a
+    comment-only line at all), a marker sitting inside a string literal or a multi-line
+    docstring, or a comment following a `;`. Reproduced end-to-end from the real
+    `fixtures/bad_b335_runtime_persist_install/skills/envtools` fixture: planting three
+    such inline-commented lines (no comment-only line among them) in one otherwise-inert
+    `clawseccheck/checks/x.py` sibling flipped `vet_skill(target)` from DO-NOT-INSTALL to
+    INSTALL with Danger PASS, cloaking the genuinely malicious skill — and separately
+    erased it from `ctx.installed_skills` via this function's OTHER call site in skill
+    discovery below (reachable by the full audit and `--monitor`, not just `--vet`).
+    Fixed by tokenizing each source with the stdlib `tokenize` module — the real Python
+    lexer, not a hand-rolled `#`/quote scan — and blanking every COMMENT and STRING
+    token before matching (`_strip_comments_and_strings`, below). One general fix
+    covers inline comments, comments after a `;`, string literals, and docstrings alike,
+    because none of them are actual code the real engine needs: the genuine
+    `_SKILL_CRIT = [...]`, `def check_installed_skills(...)`, `def vet_skill(...)` are
+    real statements, never comment or string bytes. The round-1 residual above is
+    unchanged: a forger who writes three real, trivial `def`/assignment statements
+    instead of comments or strings still passes — same accepted gap, not newly opened
+    or newly closed by this round. Pinned by the inline-comment / string-literal /
+    docstring / semicolon-comment cases added to
+    `tests/test_b846_self_source_axis_and_marker_forgery.py`.
+
     C-135 residual, accepted deliberately: an own install that ships the DOCS but not the
     engine (a hand-made partial copy — `SKILL.md` + `README.md` + `docs/` under a
     `clawseccheck/` dir with no `clawseccheck/checks/`) is no longer excluded, so the
@@ -3701,23 +3785,12 @@ def _is_own_source(p: Path) -> bool:
         heads = [s.read_text(encoding="utf-8", errors="replace") for s in sources]
     except OSError:
         return False
-    # B-846: a marker string that appears ONLY inside a `#` comment costs an attacker
-    # nothing to forge — three bare comment lines (`# def check_installed_skills`,
-    # `# def vet_skill`, `# _SKILL_CRIT`) in one otherwise-empty file used to satisfy
-    # `all(m in head ...)` below and grant "own source" identity to any directory,
-    # cloaking a genuinely malicious sibling skill as ClawSecCheck itself (measured:
-    # a real DO-NOT-INSTALL fixture flipped to INSTALL / Danger PASS this way). The
-    # real engine carries every marker as actual source — `_SKILL_CRIT = [...]`,
-    # `def check_installed_skills(...)`, `def vet_skill(...)` are statements, not
-    # prose about them — so dropping whole-line comments before matching closes the
-    # forgery without narrowing genuine recognition. This is a content-shape check,
-    # not a security boundary on its own (a forger could still write three real,
-    # trivial `def`/assignment stubs instead of comments); it closes the specific,
-    # cheaply-automatable cloak this ticket reproduced.
-    head = "\n".join(
-        "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        for text in heads
-    )
+    # B-846 ROUND 2: see the class docstring. A marker that appears only inside a
+    # comment or a string/docstring literal costs an attacker nothing to forge, so
+    # `_strip_comments_and_strings` (a real tokenizer, not a `#`-only scan) blanks both
+    # before the substring match below — the real engine's markers are genuine
+    # statements and survive unchanged; forged ones never do.
+    head = "\n".join(_strip_comments_and_strings(text) for text in heads)
     return all(m in head for m in _OWN_ENGINE_MARKERS)
 
 
