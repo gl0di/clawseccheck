@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
+from pathlib import Path
 
 import pytest
 
-from clawseccheck.catalog import CRITICAL, FAIL, LOW, PASS, Finding
+from clawseccheck import audit
+from clawseccheck.catalog import BY_ID, CRITICAL, FAIL, LOW, PASS, Finding
 from clawseccheck.layers import (
     LAYER_LIVE_BEHAVIOUR,
     LAYER_LOGS_TRAJECTORIES,
@@ -172,6 +175,46 @@ def test_dashboard_ungraded_shows_headline_and_missing_layers_no_100():
     assert EXPECTED_HEADLINE in out
     assert EXPECTED_MISSING_SENTENCE in out
     assert "/100" not in out
+
+
+# ── CLAWSECCHECK headline-id-leak: 8597d39 correctly dropped the bracketed id from
+# `_urgent_headline` (voice contract), but that was the ONLY id a plain `--dashboard`
+# reader of an ungraded run ever saw — render_dashboard's own Skills/MCP detail blocks
+# only carry one when `ctx` is available AND that roster is non-empty (B-506), which a
+# real ungraded audit is not guaranteed to have: fixtures/home_vuln has neither
+# installed skills nor a configured MCP server, yet still opens a real FAIL. Threading
+# `by_id` into those blocks would have been byte-identical to the voice guard's own
+# allowed lines (same shared helper functions as render_subject_inventory), so it is
+# not blocked by TestVoiceNeverLeaksInternalCodes — but it would not have fixed this
+# fixture's dashboard at all (the blocks it would touch never render here), and it
+# reopens the budget-bound B-506 call 8597d39 deliberately declined to bundle in.
+# render_dashboard instead gets one follow-up line, unconditional on ctx/rosters,
+# pointing at the full report for the id rather than printing one.
+
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+
+_CHECK_ID_RE = re.compile(
+    r"\b(" + "|".join(re.escape(i) for i in sorted(BY_ID, key=len, reverse=True)) + r")\b"
+)
+
+
+def test_dashboard_ungraded_points_at_the_full_report_for_the_check_id():
+    ctx, findings, score = audit(home=str(_FIXTURES / "home_vuln"))
+    ungraded_score = compute(findings, ctx, ledger=_ungraded_ledger())
+    out = render_dashboard(findings, ungraded_score, ctx=ctx)
+    assert "--explain" in out
+    assert "full report" in out
+    assert not _CHECK_ID_RE.search(out), (
+        "the hint line must point at where the id lives, never print the id itself")
+
+
+def test_dashboard_all_clear_ungraded_has_no_explain_hint():
+    """Nothing is open, so there is nothing to hand `--explain` — the hint line would
+    be a pointer to nowhere."""
+    score = _ungraded_score(FINDINGS_ALL_CLEAN)
+    out = render_dashboard(FINDINGS_ALL_CLEAN, score)
+    assert EXPECTED_ALL_CLEAR in out
+    assert "--explain" not in out
 
 
 def test_monitor_line_ungraded_shows_missing_layers_no_100():
