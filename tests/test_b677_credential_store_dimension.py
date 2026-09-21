@@ -179,7 +179,7 @@ def home(tmp_path):
 def _monitor(home, store):
     res = subprocess.run(
         [sys.executable, "-m", "clawseccheck.cli", "--monitor", "--json",
-         "--home", str(home), "--data-dir", str(store)],
+         "--home", str(home), "--data-dir", str(store), "--no-deptree"],
         cwd=REPO, capture_output=True, text=True, timeout=900)
     return json.loads(res.stdout)
 

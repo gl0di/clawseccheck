@@ -54,7 +54,7 @@ def _run(tmp_path: Path, *args: str, home: str = VULN, state: str = "state"):
     import os
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", home,
-         "--data-dir", str(tmp_path / state), *args],
+         "--data-dir", str(tmp_path / state), "--no-deptree", *args],
         cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "HOME": str(fake_home)})
 

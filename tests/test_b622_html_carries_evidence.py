@@ -45,7 +45,8 @@ def _render(tmp_path, config):
     home.mkdir(exist_ok=True)
     (home / "openclaw.json").write_text(json.dumps(config), encoding="utf-8")
     out_html = tmp_path / "out.html"
-    common = ["--home", str(home), "--data-dir", str(tmp_path / "d"), "--no-history"]
+    common = ["--home", str(home), "--data-dir", str(tmp_path / "d"), "--no-history",
+              "--no-deptree"]
     # C-135 (independent, post-commit): the suite's own session-scoped $HOME redirect
     # (conftest.py's _isolate_local_store) is inherited by these subprocesses unless
     # overridden. C5 ("Native binary PATH safety") stats REAL machine paths (e.g. this

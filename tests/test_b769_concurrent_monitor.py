@@ -41,7 +41,7 @@ def _write_cfg(home: Path, cfg: dict) -> None:
 
 def _run(home: Path, store: Path, *extra: str) -> "tuple[int, str]":
     cmd = [sys.executable, "-m", "clawseccheck", "--monitor", "--home", str(home),
-           "--data-dir", str(store), *extra]
+           "--data-dir", str(store), "--no-deptree", *extra]
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(REPO))
     return r.returncode, r.stdout + r.stderr
 
@@ -77,7 +77,7 @@ def test_two_real_processes_racing_on_a_stale_baseline_do_not_duplicate_the_aler
     procs = [
         subprocess.Popen(
             [sys.executable, "-m", "clawseccheck", "--monitor",
-             "--home", str(home), "--data-dir", str(store)],
+             "--home", str(home), "--data-dir", str(store), "--no-deptree"],
             cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         for _ in range(2)

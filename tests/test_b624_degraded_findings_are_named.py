@@ -46,7 +46,7 @@ def _healthy_home(tmp_path):
 def _run(home, tmp_path, *extra):
     out = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home),
-         "--data-dir", str(tmp_path / "d"), "--no-history", *extra],
+         "--data-dir", str(tmp_path / "d"), "--no-history", "--no-deptree", *extra],
         capture_output=True, text=True,
     )
     return out.stdout

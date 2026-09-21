@@ -62,7 +62,7 @@ _ELAPSED = re.compile(r'"elapsed_s":\s*[0-9.eE+-]+')
 def _run(tmp_path: Path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--data-dir", str(tmp_path / "state"),
-         "--home", str(HOME), "--no-history", *args],
+         "--home", str(HOME), "--no-history", "--no-deptree", *args],
         cwd=REPO_ROOT, capture_output=True, text=True, input=stdin)
 
 

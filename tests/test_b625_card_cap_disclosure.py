@@ -40,7 +40,7 @@ from clawseccheck.scoring import compute
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 SAFE = FIXTURES / "home_safe"
 TRIFECTA = FIXTURES / "traj_behavioral_trifecta"  # fires T1, per test_f154_behavioral_cap.py
-BASE = ["--no-native", "--no-host", "--no-sockets", "--no-history"]
+BASE = ["--no-native", "--no-host", "--no-sockets", "--no-history", "--no-deptree"]
 
 
 def _f(fid: str, title: str, severity: str, status: str) -> Finding:
@@ -198,7 +198,8 @@ def test_a_real_fired_detector_is_visible_without_dashboard_riding(tmp_path):
     import subprocess
     import sys
     proc = subprocess.run(
-        [sys.executable, "-m", "clawseccheck", "--home", str(home), *BASE,
+        [sys.executable, "-m", "clawseccheck", "--home", str(home),
+         "--no-native", "--no-host", "--no-sockets", "--no-history", "--no-deptree",
          "--full", "--json"],
         cwd=Path(__file__).resolve().parent.parent, capture_output=True, text=True,
     )

@@ -62,7 +62,7 @@ def _fields(section: str) -> set[str]:
 def _sarif(tmp: Path, args: list[str]) -> dict:
     out = tmp / "out.sarif"
     proc = subprocess.run(
-        [sys.executable, "-m", "clawseccheck.cli", *args, "--sarif", str(out)],
+        [sys.executable, "-m", "clawseccheck.cli", *args, "--sarif", str(out), "--no-deptree"],
         capture_output=True, text=True, cwd=_ROOT, timeout=600,
     )
     assert out.exists(), f"no SARIF written for {args}: {proc.stderr[-800:]}"

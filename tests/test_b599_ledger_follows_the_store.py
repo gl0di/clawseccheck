@@ -44,7 +44,7 @@ def _run(tmp_path: Path, *args: str, store: str | None = "store"):
     fake_home.mkdir(exist_ok=True)
     extra = ["--data-dir", str(tmp_path / store)] if store else []
     return subprocess.run(
-        [sys.executable, "-m", "clawseccheck", "--home", VULN, *extra, *args],
+        [sys.executable, "-m", "clawseccheck", "--home", VULN, "--no-deptree", *extra, *args],
         cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "HOME": str(fake_home)})
 
@@ -180,7 +180,7 @@ def _analyze(home_dir, data_dir, openclaw_home):
     env["HOME"] = str(home_dir)
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--analyze-trajectory", "",
-         "--home", str(openclaw_home), "--data-dir", str(data_dir)],
+         "--home", str(openclaw_home), "--data-dir", str(data_dir), "--no-deptree"],
         cwd=REPO_ROOT, capture_output=True, text=True, env=env,
     )
     return proc.stdout + proc.stderr
