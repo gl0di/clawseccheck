@@ -45,6 +45,11 @@ packages = ["clawseccheck", "clawseccheck.checks", "clawseccheck.monitordims"]
 [tool.setuptools.dynamic]
 version = { attr = "clawseccheck.__version__" }
 
+[tool.pytest.ini_options]
+markers = [
+    "real_machine: test intentionally reads this machine's real home/fleet state",
+]
+
 [tool.ruff]
 # F-159/B347: this fixture's .py is INTENTIONALLY syntactically invalid — it is the
 # UNKNOWN-path test input for "skill source unreadable / AST cannot parse" (see

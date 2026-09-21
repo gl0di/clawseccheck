@@ -1,5 +1,7 @@
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,11 @@ from _realhome import REAL_HOME  # noqa: E402  (must follow the sys.path insert 
 # `tests/test_fixture_perm_determinism.py` asserts the pin directly against
 # `_fixtureperms` too (not through this module) -- see its own docstring.
 from _fixtureperms import pin_fixture_modes  # noqa: E402  (must follow the sys.path insert above)
+
+# CSC_HERMETICITY_LEDGER (see pytest_configure below) -- the opt-in sys.addaudithook
+# instrument. Import only the template/classifier module here; the hook itself is
+# installed conditionally in pytest_configure, never at import time.
+import _hermledger  # noqa: E402  (must follow the sys.path insert above)
 
 
 # ==========================================================================================
@@ -170,3 +177,54 @@ def _isolate_local_store(tmp_path_factory):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+# ==========================================================================================
+# HERMETICITY LEDGER -- opt-in, two halves, one sys.addaudithook (PEP 578) per process.
+#
+# Off by default: CSC_HERMETICITY_LEDGER unset means pytest_configure returns immediately
+# and nothing else in this block runs -- zero cost on the default `pytest -q` path, and
+# NOT wired into it. This is a `pytest_configure(config)` HOOK, not a fixture: it must run
+# before any module-level subprocess call, and fixtures (even session-scoped, autouse ones)
+# run per-test, too late for that.
+#
+# PARENT HALF (here): write tests/_hermledger.SITECUSTOMIZE_SOURCE to a fresh session temp
+# dir, point CSC_HERM_LEDGER_PATH + PYTHONPATH at it so every CHILD Python process picks it
+# up via the interpreter's own sitecustomize auto-import, and exec the identical source
+# in-process too, so the parent's own filesystem calls are on the ledger as well.
+#
+# CHILD HALF: tests/_hermledger.py's module docstring -- the generated sitecustomize.py
+# installs one audit hook on a small fixed event set, buffers unique (category, path)
+# pairs in memory, and flushes once via atexit with a single append-mode write. See that
+# module for the full "what this does and does not cover" account, including why this
+# pattern is safe here despite matching a shape (sitecustomize.py + PYTHONPATH injection)
+# this project's OWN product treats as a supply-chain persistence red flag (B99/B335/B375).
+#
+# tests/test_hermeticity_gate.py is the comparison; it no-ops (skip) whenever this is off.
+def pytest_configure(config):
+    if not os.environ.get("CSC_HERMETICITY_LEDGER"):
+        return
+    herm_dir = tempfile.mkdtemp(prefix="csc-herm-")
+    sitecustomize_path = Path(herm_dir) / "sitecustomize.py"
+    sitecustomize_path.write_text(_hermledger.SITECUSTOMIZE_SOURCE, encoding="utf-8")
+    ledger_path = str(Path(herm_dir) / "ledger.tsv")
+    os.environ["CSC_HERM_LEDGER_PATH"] = ledger_path
+    # Prepended (not appended): a child's own sitecustomize.py, if any, should not shadow
+    # this one -- there being none in this repo's own tests today, but PYTHONPATH order is
+    # the whole mechanism, so it is deliberate rather than incidental.
+    os.environ["PYTHONPATH"] = herm_dir + os.pathsep + os.environ.get("PYTHONPATH", "")
+    # Installed by EXEC of the exact source, not `import sitecustomize` -- a real
+    # sitecustomize module elsewhere on sys.path may already be cached in sys.modules from
+    # interpreter startup, and a plain `import` would silently return that cached module
+    # instead of ours. exec() against a private namespace has no such cache to collide with.
+    exec(  # intentional: runs the identical source written out for children, here too
+        compile(_hermledger.SITECUSTOMIZE_SOURCE, str(sitecustomize_path), "exec"),
+        {"__name__": "csc_herm_parent_sitecustomize"},
+    )
+    config._csc_herm_dir = herm_dir
+
+
+def pytest_unconfigure(config):
+    herm_dir = getattr(config, "_csc_herm_dir", None)
+    if herm_dir:
+        shutil.rmtree(herm_dir, ignore_errors=True)
