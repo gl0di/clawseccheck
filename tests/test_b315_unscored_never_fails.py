@@ -114,10 +114,18 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     architect audit — the corpus test above is what actually enforces the invariant."""
     unscored = {c.id for c in BY_ID.values() if not c.scored}
     assert {"B43", "B55", "B70", "B185", "B186", "B193", "B324", "B322", "B323", "B325"} <= unscored
-    assert len(unscored) == 98  # +3: B379/B380/B381 (host scheduled persistence,
+    assert len(unscored) == 99  # +3: B379/B380/B381 (host scheduled persistence,
     # hooks transform modules, redactor-blind secret paths) and +1: B382 (retired config
     # key) — all WARN-only/disclosure checks, added unscored like every other advisory
-    # check in this set
+    # check in this set. +1 more: B386 (F-199, gateway.nodes.allowSkills) — grouped into
+    # the same B68-B73 WARN-only config-fact block (catalog.py) and scored=False for the
+    # identical reason as its siblings. B384/B385 (F-197) do NOT add to this set: B385 is
+    # a deterministic FAIL-capable at-rest-permission check (CheckMeta.scored=True,
+    # default), and B384 follows the B55/B185/B186/B193 per-finding-override idiom —
+    # CheckMeta.scored stays True (its one narrow, C-135-vetted FAIL branch participates
+    # by default) while its WARN branch explicitly passes scored=False on that Finding
+    # alone (checks/_config.py) — see test_no_unscored_check_fails_on_the_real_corpus
+    # above for the invariant this documents rather than re-derives.
 
 
 # ── Targeted: the two downgrades (FAIL -> WARN, CheckMeta unchanged) ──────────────────
