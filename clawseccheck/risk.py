@@ -50,6 +50,7 @@ from .checks import (
     _reassembly,
     _resolve_sandbox_scope,
     _resolved_channel_nodes,
+    _sandbox_browser_enabled,
     _sandbox_has_writable_bind,
     SENSITIVE_TOOL_HINTS,
 )
@@ -570,6 +571,55 @@ def _fs_writes_contained(cfg: dict) -> bool:
       read as "no binds" (permissive) while every other unmodelled shape in this
       function fails closed; ``_sandbox_has_writable_bind`` now treats it as a
       defeater. An ABSENT ``docker`` key is unaffected (still safe).
+
+    ROUND 5 (B-641, C-135 round 4 on B-497 flagged this and explicitly left it out
+    of scope; picked up here): **FN closed -- ``sandbox.browser.binds`` is a SECOND
+    bind surface, folded in.** Grounded against the installed OpenClaw 2026.9.5
+    dist (``~/.npm-global/lib/node_modules/openclaw``, read 2026-09-21):
+    ``resolveSandboxBrowserConfig`` (dist/config-Bo2B3kKQ.mjs:85-103) resolves
+    ``browser.binds`` with the IDENTICAL concatenation and scope-discard semantics
+    as ``docker.binds`` (see ``_sandbox_browser_binds``'s docstring for the exact
+    citations), and those binds reach a REAL host mount through the SAME
+    mount-selection/``:ro``-parsing pipeline docker binds go through
+    (``ensureSandboxBrowserContainer`` -> ``resolveSandboxBrowserDockerCreateConfig``
+    -> ``prepareSandboxMountPlan``, dist/context-D_TiLPsh.mjs:254-279) whenever the
+    browser sandbox is actually enabled. So it is checked exactly like
+    ``docker.binds`` -- independently at the defaults level and, scope-permitting,
+    at each agent's own level -- via the same ``_sandbox_has_writable_bind``, now
+    parameterized with an effective ``browser_enabled``.
+
+    That parameterization is deliberate, not a shortcut: unconditionally treating
+    any declared ``browser.binds`` as a defeater would itself be a NEW false
+    positive (CLAUDE.md §2.5) on a config that declares the field but never
+    launches the browser sandbox -- ``ensureSandboxBrowser`` returns before
+    creating any container when ``!cfg.browser.enabled``
+    (dist/context-D_TiLPsh.mjs:245), so an unreached ``browser.binds`` is inert.
+    ``browser.enabled`` is therefore resolved per level with the same per-field
+    default/agent-override fallback already used for ``mode``/``workspaceAccess``/
+    ``backend`` above (``_sandbox_browser_enabled`` -- JS ``??``, so an explicit
+    ``False`` at the agent level is NOT overridden by a ``True`` default), and an
+    agent's own ``browser`` object is discarded entirely under ``scope: "shared"``
+    -- the identical gate already applied to that agent's ``docker.binds`` (both
+    read off the one ``agentBrowser``/``agentDocker`` reference OpenClaw's
+    ``resolveSandboxConfigForAgent`` scope-gates the same way), so this reuses
+    ``_resolve_sandbox_scope`` rather than adding a second scope reader.
+
+    Deliberately NOT modeled (same "narrow advisory helper" boundary
+    ``_bind_mode_is_ro`` already draws for the docker leg): whether the ``browser``
+    tool itself is allowed for a given agent (``isToolAllowed(cfg.tools,
+    "browser")``, also gates ``ensureSandboxBrowser``,
+    dist/context-D_TiLPsh.mjs:246) and whether the active sandbox backend
+    advertises browser capability (dist/context-D_TiLPsh.mjs:769-771: `backend
+    .capabilities?.browser !== true` throws). Both are already true by construction
+    at the point this leg is reached -- ``backend`` is independently required to be
+    ``"docker"`` above, the only backend the ``:ro``/mount semantics here are
+    grounded against -- and reproducing OpenClaw's own tool-allow resolution here
+    would be exactly the independently-drifting copy this module's design note (top
+    of ``checks/_shared.py``'s sandbox-bind section) already warns against. Failing
+    to model the tool-allow leg can only make this function MORE conservative (a
+    config with ``browser.enabled: true`` but no ``browser`` tool grant still reads
+    as "not contained"), never less -- consistent with this function's fail-closed-
+    on-ambiguity posture throughout.
     """
     # NOT `dig(cfg, "agents.defaults.sandbox")`: that is a bare NON-LEAF object read,
     # which test_schema_grounding.py's manifest guard cannot verify by construction
@@ -590,7 +640,8 @@ def _fs_writes_contained(cfg: dict) -> bool:
     default_backend = _resolve_sandbox_backend(default_sandbox, "docker")
     if default_backend != "docker":
         return False
-    if _sandbox_has_writable_bind(default_sandbox):
+    default_browser_enabled = _sandbox_browser_enabled(default_sandbox, False)
+    if _sandbox_has_writable_bind(default_sandbox, browser_enabled=default_browser_enabled):
         return False
     default_exec_host = dig(cfg, "tools.exec.host")
     if default_exec_host is None:
@@ -615,10 +666,13 @@ def _fs_writes_contained(cfg: dict) -> bool:
             return False
         if _resolve_sandbox_backend(agent_sandbox, default_backend) != "docker":
             return False
-        # FP2: a shared-scope agent's OWN docker.binds never reaches the
-        # container (see _resolve_sandbox_scope), so only check it otherwise.
+        # FP2: a shared-scope agent's OWN docker.binds (and, B-641, browser.binds/
+        # browser.enabled -- the same scope gate discards the whole agentBrowser
+        # object) never reaches the container (see _resolve_sandbox_scope), so
+        # only check either leg otherwise.
         if _resolve_sandbox_scope(agent_sandbox, default_sandbox) != "shared":
-            if _sandbox_has_writable_bind(agent_sandbox):
+            eff_browser_enabled = _sandbox_browser_enabled(agent_sandbox, default_browser_enabled)
+            if _sandbox_has_writable_bind(agent_sandbox, browser_enabled=eff_browser_enabled):
                 return False
     return True
 

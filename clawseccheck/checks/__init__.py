@@ -136,6 +136,8 @@ from ._shared import (
     _real_exec_enabled,
     _resolve_sandbox_scope,
     _safe_mtime,
+    _sandbox_browser_binds,
+    _sandbox_browser_enabled,
     _sandbox_docker_binds,
     _sandbox_has_writable_bind,
     SECRET_KEY_RE,
