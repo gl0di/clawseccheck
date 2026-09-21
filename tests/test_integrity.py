@@ -317,7 +317,10 @@ def test_cli_verify_self_prints_exact_cosign_verify_command(capsys):
     assert "cosign verify-blob" in out
     assert "--bundle SHA256SUMS.txt.bundle" in out
     assert "--certificate-identity-regexp" in out
-    assert "^https://github.com/gl0di/clawseccheck/" in out
+    assert (
+        r"^https://github\.com/gl0di/clawseccheck/\.github/workflows/"
+        r"clawhub-publish\.yml@refs/tags/v"
+    ) in out
     assert "--certificate-oidc-issuer" in out
     assert "https://token.actions.githubusercontent.com" in out
     # The full invocation ends on the digest file being verified, not just named earlier.

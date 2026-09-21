@@ -4074,7 +4074,11 @@ def _main(argv=None) -> int:
         lines.append("")
         lines.append("  cosign verify-blob \\")
         lines.append("    --bundle SHA256SUMS.txt.bundle \\")
-        lines.append('    --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \\')
+        lines.append(
+            '    --certificate-identity-regexp '
+            '"^https://github\\.com/gl0di/clawseccheck/\\.github/workflows/'
+            'clawhub-publish\\.yml@refs/tags/v" \\'
+        )
         lines.append("    --certificate-oidc-issuer https://token.actions.githubusercontent.com \\")
         lines.append("    SHA256SUMS.txt")
         _self_text = "\n".join(lines)
