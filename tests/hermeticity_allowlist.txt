@@ -15,6 +15,20 @@
 # $HOME entirely, e.g. resolved via $PATH -- this machine's real home). NEVER write a
 # raw '/home/<user>/...' path here; test_allowlist_file_parses_and_is_nonempty() fails
 # the build if one leaks in.
+#
+# Every entry below also carries a "Last confirmed exercised: YYYY-MM-DD via
+# `<command>`" line UNLESS every one of its patterns is on
+# tests/test_hermeticity_allowlist_staleness.py's own hardcoded _UNIVERSAL_PATTERNS set
+# (the /proc, /dev/null, /dev/urandom, /dev/random lines below) -- that guard's default
+# is "must explain," not "exempt unless flagged," and it does not trust THIS FILE's own
+# comments or section headers to decide what counts as universal: only the guard
+# module's own literal, hardcoded set does, checked against whichever comments actually
+# sit in a block regardless of their order. Extending what counts as universal means
+# editing that module's source, not this file. The guard fails the build if a marker is
+# missing, malformed, or names a tests/test_*.py file that no longer exists -- it does
+# NOT re-run the command (CSC_HERMETICITY_LEDGER is opt-in and pytest_unconfigure
+# deletes the ledger tmpdir before a normal run ends, so a live re-check is not
+# available to an always-on gate; see that module's own docstring).
 
 # ---- genuinely universal (observed on every real run, not machine-specific) --------
 #
@@ -53,12 +67,33 @@
 # conftest.py's `_stub_deptree_scan` fixture only patches the IN-PROCESS
 # `clawseccheck._deptree_scan` and cannot reach a separate subprocess -- which is the
 # reason this ledger exists at all: a parent-only audit hook recorded ZERO hits from
-# the same run this caught 6,717 of. The real fix (an env-var child-stub propagated the
-# same way this ledger propagates its own env vars, so a spawned child can force
-# `_deptree_scan`/`_host_detect` off) is scoped to branch perf/test-subprocess-deptree,
-# not this change. This entry is what keeps a strict run from failing on a violation
-# that is diagnosed and already has a fix in flight, instead of either silently
-# omitting it or blocking every PR until that branch lands.
+# the same run this caught 6,717 of.
+#
+# CORRECTED, same day. This entry originally blamed the WHOLE surface on the deptree
+# walk above and said the fix was "scoped to branch perf/test-subprocess-deptree ...
+# not this change" -- reading as "once that branch merges, this entry is obsolete." It
+# is not. A cross-branch probe measured this on the tree with that branch already
+# merged in: the deptree half IS closed there (test_b582_viewer_chain_provenance.py
+# dropped from 6,717 distinct npm-global paths to 1), but test_watch.py,
+# test_b769_concurrent_monitor.py and test_b870_journal_lock_tilde.py -- each ALREADY
+# passing --no-deptree in its own argv on that tree -- still generated 76,289 / 43,274
+# / 41,036 real npm-global reads apiece. Sampled across the subprocess-CLI files, this
+# one line fired 160,683 times over 12,497 distinct paths -- the most-exercised entry
+# in this file.
+#
+# Root cause of that second half, confirmed in clawseccheck/cli.py: `--monitor` mode
+# unconditionally calls `openclawdist.describe_install("openclaw")` -- its own
+# content-digest walk of the real npm-global install (~7,717 files / 77.8MB, for the
+# F-174 supply-chain-identity dimension) -- gated only by `if _mode == "monitor":` and
+# NEVER by `args.no_deptree`. That is a separate mechanism from deptree.py's own scan,
+# has no autouse stub covering it the way `_stub_deptree_scan` covers the in-process
+# case, and no `--no-deptree`-shaped flag reaches it at all.
+#
+# So: the deptree half of this entry's cause is fixed; the describe_install half is
+# not -- tracked as C-598. Removing this entry on the strength of the deptree branch
+# merging alone reintroduces hard strict-mode failures on the three tests named above.
+#
+# Last confirmed exercised: 2026-09-21 via `CSC_HERMETICITY_LEDGER=1 python3.12 -m pytest tests/test_watch.py tests/test_b769_concurrent_monitor.py tests/test_b870_journal_lock_tilde.py tests/test_b582_viewer_chain_provenance.py -q`
 $HOME/.npm-global/**
 
 # CLAWSECCHECK-hermeticity, 2026-09-21. Sibling of the entry above, same shape, found
@@ -76,6 +111,8 @@ $HOME/.npm-global/**
 # follow-up bug at the time this ledger was written, only recommended as one. Listed
 # here rather than left for a strict run to discover cold, so the next person to turn
 # strict mode on sees a named, reasoned violation and not a mystery.
+#
+# Last confirmed exercised: 2026-09-21 via `CSC_HERMETICITY_LEDGER=1 python3.12 -m pytest tests/test_b582_viewer_chain_provenance.py -q`
 /etc/cron.d
 /etc/cron.d/**
 /etc/cron.daily
