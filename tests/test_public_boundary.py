@@ -125,11 +125,14 @@ def _is_pruned(rel: Path) -> bool:
     return any(parts[: len(prefix)] == prefix for prefix in _PRUNED_PREFIXES)
 
 
-pytestmark = pytest.mark.skipif(
-    not WORKFLOW_PATH.exists(),
-    reason="CI workflow file not present (packaged skill ships without .github/); "
-           "the public-boundary drift guard only makes sense from the source repo.",
-)
+pytestmark = [
+    pytest.mark.mechanical,
+    pytest.mark.skipif(
+        not WORKFLOW_PATH.exists(),
+        reason="CI workflow file not present (packaged skill ships without .github/); "
+               "the public-boundary drift guard only makes sense from the source repo.",
+    ),
+]
 
 # --- internal-only markers -------------------------------------------------
 
