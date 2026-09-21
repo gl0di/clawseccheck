@@ -28,7 +28,11 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 import clawseccheck.checks as checks_mod
+
+pytestmark = pytest.mark.mechanical
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PKG = REPO_ROOT / "clawseccheck"

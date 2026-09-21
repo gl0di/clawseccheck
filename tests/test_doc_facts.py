@@ -27,9 +27,13 @@ import sys
 import sysconfig
 from pathlib import Path
 
+import pytest
+
 from clawseccheck import __released__, __version__
 from clawseccheck.behavioral import BEHAVIORAL_CHECK_IDS
 from clawseccheck.catalog import CATALOG
+
+pytestmark = pytest.mark.mechanical
 
 REPO = Path(__file__).resolve().parents[1]
 

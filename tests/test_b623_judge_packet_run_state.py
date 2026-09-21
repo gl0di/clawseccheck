@@ -32,7 +32,7 @@ REPO_ARGS = ["-m", "clawseccheck"]
 def _run_packet(home, data_dir):
     out = subprocess.run(
         [sys.executable, *REPO_ARGS, "--home", str(home), "--data-dir", str(data_dir),
-         "--no-history", "--judge-packet"],
+         "--no-history", "--no-deptree", "--judge-packet"],
         capture_output=True, text=True,
     )
     assert out.returncode == 0, out.stderr[-2000:]

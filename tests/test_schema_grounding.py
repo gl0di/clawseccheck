@@ -117,8 +117,9 @@ from pathlib import Path
 
 import pytest
 from _distgrounding import _spellings
-
 from _realhome import REAL_HOME
+
+pytestmark = pytest.mark.mechanical
 
 # The skill repo root is the parent of tests/ — in BOTH layouts (locally it is
 # <workspace>/skill/, in CI the checkout root itself). Resolve the source dir and manifest

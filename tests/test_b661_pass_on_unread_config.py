@@ -32,9 +32,13 @@ import pathlib
 import tempfile
 from collections import Counter
 
+import pytest
+
 from clawseccheck.catalog import PASS, UNKNOWN
 from clawseccheck.checks import CHECKS
 from clawseccheck.collector import Context
+
+pytestmark = pytest.mark.mechanical
 
 # The 5 checks whose PASS is legitimately independent of ctx.config — each reads a
 # DIFFERENT file under ctx.home by presence/content alone, and each carries its own

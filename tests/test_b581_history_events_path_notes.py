@@ -80,7 +80,7 @@ _NO_HISTORY_TEXT = render_trend([])
 def _run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--data-dir", str(tmp_path / "state"),
-         "--home", str(HOME), *args],
+         "--home", str(HOME), "--no-deptree", *args],
         cwd=REPO_ROOT, capture_output=True, text=True)
 
 

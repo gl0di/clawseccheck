@@ -50,7 +50,7 @@ def _a1(status: str, legs: list[str]) -> Finding:
 def _run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--data-dir", str(tmp_path / "state"),
-         "--no-history", *args],
+         "--no-history", "--no-deptree", *args],
         cwd=REPO_ROOT, capture_output=True, text=True)
 
 
