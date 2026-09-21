@@ -6201,6 +6201,203 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
     )
 
 
+_B389_COMPUTER_PLUGIN_ID = "cua-computer"
+
+
+def _b389_sandbox_mode(cfg: dict, entry) -> str:
+    """Same per-scope resolution as ``toolpolicy._sandbox_mode`` (not imported — this
+    check only needs the coarse ``== "all"`` reading B68 already uses, not the full
+    tri-state ``_sandbox_confines``/B-712 machinery): a per-agent ``sandbox.mode``
+    override, else ``agents.defaults.sandbox.mode``."""
+    scoped = entry.get("sandbox") if isinstance(entry, dict) else None
+    mode = scoped.get("mode") if isinstance(scoped, dict) else None
+    if mode is None:
+        mode = dig(cfg, "agents.defaults.sandbox.mode")
+    return mode if isinstance(mode, str) else ""
+
+
+def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
+    """B389 — the Gateway's own unmanaged-desktop `computer` control
+    route, reachable via the `computer.invoke`/`computer.status` RPC methods without
+    passing through `gateway.nodes.commands.deny` or any per-action confirmation.
+
+    Grounded against the LIVE installed dist (openclaw@2026.9.5, 2026-09-19), not the
+    schema recon or the changelog.
+
+    THE SURFACE. `method-scopes-CF6Mdynq.mjs:2954-2965` declares three new Gateway RPC
+    methods: `computer.status` (operator.read), `computer.invoke` (operator.write) and
+    `desktop.release` (operator.admin). `computer.invoke`/`computer.status`
+    (`computer-B53mi_iF.mjs:29-61`) dispatch straight to
+    `context.gatewayComputerService`, which is `createGatewayComputerService`
+    (`computer-service-B8rKHvOb.mjs`) — the Gateway process's OWN, ambient desktop
+    session, prepared without ever checking `desktop.host.enabled` (that only gates the
+    separate MANAGED-desktop branch inside `prepare()`; the plain/unmanaged path needs
+    no `desktop.host` config at all, refuting the "gated on desktop.host" half of the
+    original candidate wording).
+
+    THE GAP. `invoke()` never imports or calls `isNodeCommandAllowed`/
+    `resolveNodeCommandAllowlist` — the predicate every OTHER command-shaped route
+    (paired remote nodes, `computer-transport-CwEUIeg3.mjs:189-198`; exec approvals;
+    fs) consults, and the one that actually reads `gateway.nodes.commands.deny`
+    (`node-command-policy-5uuS2pOn.mjs:297-298`). So a config that sets
+    `gateway.nodes.commands.deny: ["computer.act"]` — believing it has closed the
+    `computer` capability everywhere — does not touch this route at all: it is not a
+    node-command invocation, it is the Gateway's own desktop. There is also no
+    per-action confirmation gate on this path (measured: no `confirm`/`approval` symbol
+    anywhere in `computer-service-B8rKHvOb.mjs`) — the only gates are the operator RPC
+    scope and `configuredProvider()` below.
+
+    WHY THIS NEVER FIRES BY ACCIDENT. `configuredProvider()`
+    (`computer-service-B8rKHvOb.mjs:110-115`) requires, as one conjunction: the plugin
+    registry's resolved `plugin.enabled === true` AND `config.plugins?.enabled !== false`
+    AND, separately, `config.plugins?.entries?.["cua-computer"]?.enabled === true` read
+    off the RAW config — an EXPLICIT entry, not merely the bundled plugin's own
+    `enabledByDefault: true` (`extensions/cua-computer/openclaw.plugin.json`) taking
+    effect with no config touch at all. So despite shipping enabled-by-default, the
+    Gateway-desktop route this check reports on requires the owner to have explicitly
+    written `plugins.entries.cua-computer.enabled: true` — the same "owner's explicit
+    act, not the shipped default" shape B350 (`gateway.terminal.enabled`) already
+    reports on, which is why this stays a WARN-only disclosure rather than a bare
+    "plugin ships enabled" alarm.
+
+    WHY IT ALSO GATES ON `toolgrant.granted('computer', scope)`. The plugin-enabled
+    condition alone only proves an AUTHENTICATED OPERATOR (Control UI, mobile, any
+    other `operator.write`-scoped RPC client — a human using an admin feature by
+    design) could drive the desktop; that is not itself a misconfiguration. What turns
+    it into a PROMPT-INJECTABLE surface is an AGENT itself holding the `computer` tool
+    (`computer-tool-w_NM7BHT.mjs:277,295` — an agent-hosted run can call
+    `computer.invoke` over the SAME Gateway RPC, via `callGatewayTool`, using its own
+    delegated authority). `computer` is an ordinary core tool id
+    (`toolgrant._CORE_TOOL_GROUPS["group:nodes"]`/`["group:openclaw"]`) but is granted
+    by NONE of the `minimal`/`coding`/`messaging` profiles — only `profile: "full"` or
+    an explicit `allow`/`alsoAllow` naming it (or the group) reaches it, so
+    `toolgrant.granted(cfg, "computer", scope)` is the right, already-vendor-validated
+    question to ask per scope (differentially re-verified for this exact tool id against
+    the live 2026.9.5 resolver via `tests/_toolgrantoracle.py`, 2026-09-19 — its own
+    committed battery does not cover `"computer"`).
+
+    WHY SANDBOX IS THE ONE CONFIG-VISIBLE MITIGATION NAMED IN THE TRIGGER, NOT ONLY IN
+    THE FIX TEXT (unlike B350). `resolveSandboxToolPolicyForAgent` is called for a
+    sandboxed session with `containedToolNames: ["computer"]`
+    (`worker-turn-execution-CxTBWFYa.mjs:112`, `workspace-result-finalize-C4Pt3pQL.mjs:626`)
+    specifically to route the agent's `computer` tool through a CONTAINED desktop rather
+    than the ambient one this check is about — so a scope proven fully sandboxed
+    (`agents.defaults.sandbox.mode`/per-agent `sandbox.mode` `== "all"`) is genuinely
+    mitigated, not merely hoped to be. Same coarse `== "all"` reading B68's composite
+    predicate already uses (not the fuller `non-main`-undecidable tri-state
+    `toolpolicy._sandbox_confines` models) — narrowing, not closing: `sandbox.mode:
+    "non-main"` is left on the WARN side rather than invented as a proof either way.
+
+    PASS    — the trigger is PROVEN false: `plugins.enabled` is explicitly `false`, or
+              `plugins.entries.cua-computer.enabled` is absent/not `True` (the shipped
+              default requires this exact opt-in), or the plugin is on but no declared
+              scope is granted `computer` while unsandboxed.
+    WARN    — `plugins.entries.cua-computer.enabled` is `True`, `plugins.enabled` is
+              not `false`, and at least one scope (global or a declared agent) is
+              granted `computer` and is not proven fully sandboxed. Names the scopes.
+    UNKNOWN — the config was not read/parseable, or `plugins`/`plugins.entries` is
+              present but not an object (Golden Rule #4 — every downstream dig()/`.get()`
+              would otherwise silently degrade to "absent").
+
+    Never FAIL: a configured-capability disclosure requiring its own explicit opt-in
+    plus an explicit tool grant is not, on config evidence alone, a proven compromise —
+    a FAIL tier needs its own independent C-135 pass first, matching B350/B358/B360's
+    own reasoning for the same Gateway-capability-disclosure shape.
+
+    DECLARED LIMIT, in the over-reporting direction only: `resolveSandboxToolPolicyForAgent`'s
+    `deny`/`allow` layers on TOP of `containedToolNames` are not modelled here (the same
+    scope this project's toolpolicy/toolgrant leaves to their own callers) — an operator
+    who additionally denies `computer` inside `tools.sandbox.tools.deny` for an
+    already-non-`all`-sandboxed scope is not read as closing it. That can only cost a
+    finding, never invent one.
+    """
+    unreadable = _config_unreadable("B389", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B389",
+            UNKNOWN,
+            "No config was read, so whether the Gateway's unmanaged-desktop `computer` "
+            "control route is reachable could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    plugins_block = cfg.get("plugins")
+    if plugins_block is not None and not isinstance(plugins_block, dict):
+        return _finding(
+            "B389",
+            UNKNOWN,
+            f"The plugins config is present but is not an object (found "
+            f"{type(plugins_block).__name__}), so whether the cua-computer plugin is "
+            "enabled could not be determined.",
+            "Fix the plugins block in openclaw.json so it is a JSON object, then "
+            "re-run the audit.",
+        )
+
+    plugins_kill_switch_off = isinstance(plugins_block, dict) and plugins_block.get("enabled") is False
+    entry = _plugins(cfg).get(_B389_COMPUTER_PLUGIN_ID)
+    entry_enabled = isinstance(entry, dict) and entry.get("enabled") is True
+
+    if plugins_kill_switch_off or not entry_enabled:
+        return _finding(
+            "B389",
+            PASS,
+            "plugins.entries.cua-computer.enabled is not true (or plugins.enabled is "
+            "false), so the Gateway's unmanaged-desktop computer.invoke/computer.status "
+            "route is not configured — it ships enabled-by-default at the plugin level, "
+            "but this specific Gateway route additionally requires an explicit "
+            "plugins.entries.cua-computer.enabled: true.",
+            "Keep it that way unless you specifically need remote/agent desktop "
+            "control; if you do, also set gateway.nodes.commands.deny with the "
+            "understanding that it does not cover this route.",
+        )
+
+    scopes = [("global", {}, _toolgrant.GLOBAL_SCOPE, False)]
+    for agent in agent_roster(cfg):
+        entry_dict = agent.entry if isinstance(agent.entry, dict) else {}
+        scopes.append((agent.path, entry_dict, agent.id, True))
+
+    warn_scopes = []
+    for label, entry_dict, grant_id, is_agent in scopes:
+        if not _toolgrant.granted(cfg, "computer", grant_id, agent=is_agent):
+            continue
+        if _b389_sandbox_mode(cfg, entry_dict) == "all":
+            continue
+        warn_scopes.append(label)
+
+    if not warn_scopes:
+        return _finding(
+            "B389",
+            PASS,
+            "plugins.entries.cua-computer.enabled is true, but no declared scope is "
+            "granted the `computer` tool while unsandboxed, so no agent can reach the "
+            "Gateway's unmanaged-desktop control route as a tool call. (An authenticated "
+            "Gateway operator could still call computer.invoke directly — that is the "
+            "feature's intended admin use, not something this check flags.)",
+            "If you later grant `computer` to an agent, also confirm that agent's "
+            "sandbox.mode is 'all' or accept that this route bypasses "
+            "gateway.nodes.commands.deny and has no per-action confirmation.",
+        )
+
+    return _finding(
+        "B389",
+        WARN,
+        "plugins.entries.cua-computer.enabled is true and the `computer` tool is "
+        f"granted, unsandboxed, at {', '.join(warn_scopes)}: an agent there can drive "
+        "the Gateway process's own unmanaged desktop session over computer.invoke, a "
+        "route that gateway.nodes.commands.deny does not gate and that carries no "
+        "per-action confirmation.",
+        "Remove the `computer` tool grant from that scope, set its sandbox.mode to "
+        "'all' (sandboxed sessions route `computer` through a contained desktop "
+        "instead), or set plugins.entries.cua-computer.enabled to false if desktop "
+        "control is not actually needed.",
+        evidence=warn_scopes,
+    )
+
+
 def check_local_model_service_command(ctx: Context) -> Finding:
     """B355 (C-408) — models.providers.<id>.localService.command auto-spawns a binary at
     provider startup, with config-chosen args/cwd/env. Grounded on the installed dist's

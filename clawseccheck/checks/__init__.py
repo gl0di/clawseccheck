@@ -359,6 +359,7 @@ from ._config import (
     check_desktop_host_password_file,
     check_effective_bind,
     check_gateway,
+    check_gateway_computer_plugin_reach,
     check_gateway_operator_terminal,
     check_gateway_rate_limit,
     check_gateway_remote_ssh_host_key_policy,
@@ -1494,6 +1495,12 @@ CHECKS = [
     # B350 — the gateway operator terminal: a PTY-backed shell carrying the gateway
     # process environment, served to Control UI and mobile clients. WARN-only.
     check_gateway_operator_terminal,
+    # B389 — the Gateway's own unmanaged-desktop `computer`
+    # control route (computer.invoke/computer.status), which bypasses
+    # gateway.nodes.commands.deny and has no per-action confirmation. WARN-only,
+    # unscored advisory; requires both the plugin's explicit opt-in and an agent
+    # scope granted `computer` while unsandboxed.
+    check_gateway_computer_plugin_reach,
     # B351 — code mode: the model is handed exec+wait over a catalog bridge instead of
     # the ordinary tool surface. Walks agents.list, which can enable it independently.
     check_code_mode_tool_surface,
