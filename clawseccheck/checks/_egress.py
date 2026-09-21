@@ -2035,6 +2035,18 @@ def check_secrets_egress_proxy(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B387", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: without this guard an unread config reads as `enabled is not True` and
+    # returns the "not enabled (the default)" PASS -- a fail-open, since the real
+    # config on that host may well have the proxy on with no allowlist. Same shape as
+    # checks/_config.py's own config_found guards.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B387", UNKNOWN,
+            "No config was read, so whether secrets.egressProxy is enabled -- and "
+            "whether its traffic allowlist is set -- could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
 
     cfg = ctx.config
     enabled = dig(cfg, "secrets.egressProxy.enabled")

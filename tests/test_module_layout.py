@@ -76,8 +76,8 @@ _EXEMPT = {
                   "`assessment_coverage()`. Over budget by 17 lines since B-558 added "
                   "`layer_coverage`. Split candidate named above; tracked debt, not a "
                   "design statement.",
-    "checks/_config.py": "~6,302 lines (restated 2026-09-18 with B382 — was ~5,743, +10% "
-                         "stale; earlier 2026-09-16, B-795 — ~5,191) — the config-hardening topic (29 checks + helpers); "
+    "checks/_config.py": "~6,986 lines (restated 2026-09-21 for the 4.3.0 wave build — "
+                         "was ~6,302, +11% stale; earlier 2026-09-18, B382 — ~5,743) — the config-hardening topic (29 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
                          "later cycle (I-022 secondary target).",
     # Restated 2026-09-04 (B-727): 5,662 -> 6,172. The tolerance is min(25%, 500 LINES),
@@ -193,7 +193,8 @@ _EXEMPT = {
                       "_content.py first, learn what the shared-machinery module wants to "
                       "look like, then decide here. That is a sequencing decision, not a "
                       "deferral for its own sake.",
-    "checks/_egress.py": "~4,736 lines (restated 2026-09-12, C-412 — was ~4,077) — the "
+    "checks/_egress.py": "~5,267 lines (restated 2026-09-21 for the 4.3.0 wave build — "
+                         "was ~4,736) — the "
                          "egress-hardening topic (proxy/TLS/SSRF/data-at-rest + "
                          "web-fetch/log checks). Crossed the budget with B178's "
                          "check_provider_baseurl (models.providers.<id>.baseUrl "
@@ -201,7 +202,8 @@ _EXEMPT = {
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~4,458 lines (restated 2026-09-13, B-672/B-663 — was ~3,932) — "
+    "checks/_shared.py": "~5,014 lines (restated 2026-09-21 for the 4.3.0 wave build — "
+                         "was ~4,458) — "
                          "the leaf every checks/_<topic> module (and "
                          "risk.py) imports from: tool-hint constants, MCP-server helpers, "
                          "and _trifecta_legs, the single shared leg definition A1 and B46 "
