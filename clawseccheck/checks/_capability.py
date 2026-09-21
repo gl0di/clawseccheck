@@ -2173,9 +2173,8 @@ def check_node_allowskills_default_on(ctx: Context) -> Finding:
         f"{spelling} -- OpenClaw's own default for this key is true, so a paired "
         "gateway node may publish skills into this setup the moment it is connected, "
         "with no operator opt-in. A pushed skill is executable surface reaching the "
-        "same content-security ring this tool audits every INSTALLED skill against "
-        "(B13 and the rest of SKILL_CONTENT_RING) -- pairing a node is not the same "
-        "act as approving what it publishes.",
+        "same content-security scanning this tool applies to every installed skill's "
+        "content -- pairing a node is not the same act as approving what it publishes.",
         fix,
         evidence=[spelling],
     )
