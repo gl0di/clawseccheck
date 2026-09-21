@@ -54,11 +54,10 @@ _EXEMPT = {
     # render_self_test_corroboration, ~180 lines) is B-300's own concern and reads/writes
     # nothing the rest of this file's trajectory-analysis code touches — a `selftest.py`
     # leaf this module imports would leave ~1,030 here with no cycle.
-    "trajaudit.py": "~1,217 lines — the --analyze-trajectory engine (analyze/render_trajectory_"
-                    "analysis) plus B-300's canary/multi-turn/redteam/dryrun self-test "
-                    "corroboration (F-194 added the last two _SELFTEST_SOURCES entries, "
-                    "+9 lines, 2026-09). Over budget by 17 lines since B-816. Split "
-                    "candidate named above; tracked debt, not a design statement.",
+    "trajaudit.py": "~1,208 lines — the --analyze-trajectory engine (analyze/render_trajectory_"
+                    "analysis) plus B-300's canary/multi-turn self-test corroboration. Over "
+                    "budget by 8 lines since B-816. Split candidate named above; tracked "
+                    "debt, not a design statement.",
     # The first NON-checks/ entry, and the only one that is not a topic module. It is here
     # because the module was already at 1,194 of 1,200 before B-558's fifth ledger-derived
     # field — six lines of headroom is not a stable state, and the next field of any kind

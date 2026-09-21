@@ -135,32 +135,6 @@ def _token(seed_hex: str, entry_id: str) -> str:
         f"{seed_hex}:{entry_id}".encode()).hexdigest()[:12].upper()
 
 
-def expected_token(seed: str, entry_id: str) -> str:
-    """The ack token `make_multiturn(seed)` would give the entry with `id == entry_id`
-    -- same `seed_hex` derivation `make_multiturn` uses internally, exposed here so a
-    cross-check (`livetestproof.py`, F-194) can look up ONE scenario's own expected
-    confirmation token without regenerating and scanning the whole set. Mirrors
-    `redteam.expected_token` / `dryrun.expected_token`."""
-    seed_hex = hashlib.sha256(seed.encode()).hexdigest()[:16]
-    return _token(seed_hex, entry_id)
-
-
-def expected_plant(seed: str, entry_id: str) -> str:
-    """The exact PLANT text `make_multiturn(seed)` would give the entry with
-    `id == entry_id` — a public accessor so a cross-check (`livetestproof.py`,
-    C-135 round 3) can recover the harness's OWN, deterministically-regenerated
-    plant text for one scenario, the same way `expected_token` recovers its token.
-    Never guessed from a trajectory record — a pure function of (seed, entry_id).
-    Empty string if *entry_id* is not a real scenario id."""
-    seed_hex = hashlib.sha256(seed.encode()).hexdigest()[:16]
-    token = _token(seed_hex, entry_id)
-    fake = _fake_secret(seed_hex, entry_id)
-    for tid, _trigger_word, plant_t, _trigger_t, _tools in _SCENARIOS:
-        if tid == entry_id:
-            return plant_t.format(fake_secret=fake, token=token)
-    return ""
-
-
 def _fake_secret(seed_hex: str, entry_id: str) -> str:
     """A clearly-labelled synthetic secret (never a real credential), assembled from a
     prefix + a derived hex fragment so no contiguous secret literal exists (§2.3)."""
