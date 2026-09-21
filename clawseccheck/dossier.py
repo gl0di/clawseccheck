@@ -459,9 +459,20 @@ def _route_axis_reasons(f, buckets: dict, *, fallback_axis: str | None) -> bool:
 def _skill_capabilities(ctx) -> tuple[bool, set]:
     """(has_executable_code, capability_families_PRESENT) for the vetted skill(s).
 
-    Reads only ctx data populated by the engine (ctx.installed_skill_py) — no re-scan of
-    disk, no checks import. Families are `skillast.CAPABILITY_FAMILIES`: network / exec /
-    write / read / cred.
+    Reads only ctx data populated by the engine (ctx.installed_skill_py/_js/_shell) — no
+    re-scan of disk, no checks import. Families are `skillast.CAPABILITY_FAMILIES`:
+    network / exec / write / read / cred.
+
+    CLAWSECCHECK-B-878: `has_code` used to ask only `installed_skill_py`, so a skill
+    bundling nothing but JS or shell answered `has_code=False` -- indistinguishable from
+    a skill with no code at all -- and the Persistence/Connections axes printed "no
+    executable code to analyze" about a directory containing exactly that (repro: a
+    `SKILL.md` plus an `a.js` running `require('child_process').exec(...)`). It now folds
+    in `installed_skill_js`/`installed_skill_shell` too, so presence is honest across every
+    language the collector reads. `families`, below, is unchanged and still Python-only —
+    `capability_families` walks a Python AST and has no JS/shell equivalent; see
+    `_skill_has_unread_language_code` for how `build_profile` keeps THAT gap from being
+    read as an affirmative PASS over content it never examined for capability presence.
 
     B-592: this used to return the union of `ctx.effect_profiles[*]["reachable_effects"]`,
     which is TAINT reachability — "did untrusted data reach this sink". The only consumer
@@ -478,11 +489,17 @@ def _skill_capabilities(ctx) -> tuple[bool, set]:
         return (False, set())
     installed = getattr(ctx, "installed_skills", None) or {}
     py_map = getattr(ctx, "installed_skill_py", None) or {}
-    has_py = any(py_map.get(name) for name in installed)
+    js_map = getattr(ctx, "installed_skill_js", None) or {}
+    sh_map = getattr(ctx, "installed_skill_shell", None) or {}
+    has_code = (
+        any(py_map.get(name) for name in installed)
+        or any(js_map.get(name) for name in installed)
+        or any(sh_map.get(name) for name in installed)
+    )
     families: set[str] = set()
     for name in installed:
         families |= capability_families(py_map.get(name))
-    return (has_py, families)
+    return (has_code, families)
 
 
 def _pool_contexts(pool) -> list:
@@ -544,6 +561,37 @@ def _pool_capabilities(pool) -> tuple[bool, set]:
         has_code = has_code or code
         families |= fams
     return (has_code, families)
+
+
+def _skill_has_unread_language_code(ctx) -> bool:
+    """True when ``ctx`` bundles JS or shell source for an installed skill -- code
+    ``_skill_capabilities.has_code`` now counts as PRESENT (CLAWSECCHECK-B-878) but whose
+    capability families this scan cannot compute: ``capability_families`` walks a Python
+    AST and has no JS/shell reader, and `analyze_javascript`/`analyze_shell` are narrow,
+    rule-shaped danger scanners (specific RCE/exfil patterns), not general network / exec /
+    write / read / cred presence detectors -- so they cannot license the affirmative
+    "no dormant or staged code detected" / "no outbound network call found" the PASS
+    wording asserts either.
+
+    Same family of defect B-628 fixed one layer up: finding code in ONE language must not
+    license an affirmative claim over code in ANOTHER the scan never opened for THIS axis.
+    ``build_profile`` folds this into the same "unmeasurable, honest reason" path as
+    ``unread_code`` (a plugin's un-dispatched loose file) rather than inventing a new
+    outcome -- both are "code is present, this scan has no reader for it here".
+    """
+    if ctx is None:
+        return False
+    installed = getattr(ctx, "installed_skills", None) or {}
+    js_map = getattr(ctx, "installed_skill_js", None) or {}
+    sh_map = getattr(ctx, "installed_skill_shell", None) or {}
+    return any(js_map.get(name) for name in installed) or any(sh_map.get(name) for name in installed)
+
+
+def _pool_has_unread_language_code(pool) -> bool:
+    """``_skill_has_unread_language_code`` folded over every Context in ``pool`` — same
+    two-source fold as ``_pool_capabilities`` (see its docstring), via ``_pool_contexts``.
+    """
+    return any(_skill_has_unread_language_code(ctx) for ctx in _pool_contexts(pool))
 
 
 def _reason_and_fix(bucket: list, axis: str, *, empty_reason: str) -> tuple[str, str]:
@@ -714,8 +762,20 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # caught it. Reading a file for dangerous patterns is not measuring its persistence or
     # its outbound surface; those are computed from bundled-skill Contexts, and a loose
     # plugin file has none.
+    # CLAWSECCHECK-B-878: same bar for a bundled skill's JS/shell — `has_code` now counts
+    # it as code present (see `_skill_capabilities`), but `capability_families` still
+    # cannot read it, so it must not be measurable either. See
+    # `_skill_has_unread_language_code` for why this is the same "code present, no reader
+    # for THIS axis" shape as `unread_code`/`danger_only_code`, not a fresh state.
+    unread_language_code = _pool_has_unread_language_code(pool)
     code_measurable = (
-        (has_code and not scan_truncated and not unread_code and not danger_only_code)
+        (
+            has_code
+            and not scan_truncated
+            and not unread_code
+            and not danger_only_code
+            and not unread_language_code
+        )
         or target_type not in ("skill", "plugin")
     )
     # Was anything actually assessed? A definite finding (PASS/WARN/FAIL) anywhere, or —
@@ -790,7 +850,8 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             reason, fix = _clean_reason(axis, families), ""
         elif status == UNKNOWN and not bucket:
             reason, fix = _unmeasurable_reason(
-                axis, truncated=scan_truncated, unanalysed=bool(unread_code),
+                axis, truncated=scan_truncated,
+                unanalysed=bool(unread_code) or unread_language_code,
                 danger_only=bool(danger_only_code), self_source=self_source,
                 assumed_encoding=assumed_encoding if prose_gap else ()), ""
         else:
@@ -943,6 +1004,11 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
       Python is analysed only inside a dispatched skill dir. A plugin shipping
       fetch-to-exec as a root-level `install.py` is opened by nobody, and the reviewer
       measured this axis printing an affirmative PASS over exactly that.
+      CLAWSECCHECK-B-878 adds a second producer of this same state: a dispatched
+      SKILL's bundled JS/shell (`_skill_has_unread_language_code`). `capability_families`
+      is Python-AST-only, so a JS- or shell-only skill has no reader for THIS axis either,
+      even though the file itself was read (has_code=True) and may already carry a Danger
+      verdict from `analyze_javascript`/`analyze_shell` four lines above.
 
     * ``danger_only`` (B-636) -- a reader now EXISTS for that Python, and it ran: the
       plugin sweep runs the AST/taint pass over .py outside a dispatched skill dir. But
