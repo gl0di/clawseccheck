@@ -3589,6 +3589,31 @@ CATALOG: list[CheckMeta] = [
         "Least Privilege / Sandbox",
         surface="agents",
     ),
+    # B393 (F-202, C-473 shortlist item 8): telemetry.enabled — name what
+    # leaves the machine when a user opts in to OpenClaw's anonymous feature-usage
+    # statistics. Re-grounded directly against the installed 2026.9.5 dist since the
+    # internal recon's descriptions map has no `telemetry` entry at all — same
+    # documented gap class as B389/B390/B391 (CLAUDE.md §4(c)). See
+    # checks/_config.py::check_telemetry_enabled for the full grounding.
+    #
+    # INFO/report only, never FAIL or WARN — settled by C-473's shortlist and
+    # re-confirmed here against the current dist: `telemetry.enabled` is disabled by
+    # default, unconditionally suppressed when DO_NOT_TRACK=1 is set in the gateway's
+    # own environment, and the vendor's own description of the payload (feature-usage
+    # counts, never messages/credentials/identifiers) is already the benign one this
+    # check quotes verbatim. There is no weakening for a static audit to flag, so this
+    # never escalates past PASS and needed no C-135 pass — there is no FAIL/WARN branch
+    # for one to adversarially test.
+    CheckMeta(
+        "B393",
+        "telemetry.enabled — name what leaves the machine when a user opts in",
+        LOW,
+        "advisory",
+        "Telemetry / Data Sharing",
+        scored=False,
+        confidence="HIGH",
+        surface="update",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

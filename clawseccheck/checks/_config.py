@@ -3838,6 +3838,115 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
     )
 
 
+# ---------- B393: telemetry.enabled disclosure (F-202) ----------
+# Re-grounded directly against the installed 2026.9.5 dist — the internal recon doc's
+# descriptions map has no `telemetry` entry at all (same documented gap class as
+# B389/B390/B391, CLAUDE.md §4(c)):
+#
+#   dist/zod-schema-DN2u5FdA.mjs:1487-1499 (TelemetryConfigShape, the actual schema):
+#     telemetry: object({
+#       enabled: boolean().optional(),       # registered label "Anonymous Feature
+#                                             # Statistics"
+#       consentedAt: string().datetime().optional(),
+#     }).strict().optional()
+#     The registered `enabled` help text (verbatim): "Shares enabled channel and
+#     provider names, plugin count, and recent session count with the daily update
+#     check. Disabled by default and always disabled when DO_NOT_TRACK=1."
+#
+#   dist/schema-CwAIqZVE.mjs:410 (the top-level `telemetry` description, verbatim):
+#     "Explicit consent for anonymous feature statistics attached to the daily update
+#     check. Feature statistics are disabled by default and never include messages,
+#     credentials, or identifiers."
+#
+#   dist/telemetry-CwSEtSer.mjs:147-154 (`resolveTelemetryStatus`, the actual runtime
+#   gate) shows the full precedence: an automated environment, the update check being
+#   disabled, or DO_NOT_TRACK=1 (each checked in that order) independently force
+#   telemetry off regardless of `telemetry.enabled` — `reason` resolves to "enabled"
+#   only once all three earlier legs are clear AND `config.telemetry?.enabled ===
+#   true`. DO_NOT_TRACK is read from `process.env` in the GATEWAY's own process
+#   (`isDoNotTrackEnabled`, :92-95) — this audit is config-only and never reads
+#   `os.environ` for a verdict about the audited host (that would answer "what is in
+#   the auditing shell's environment", not the gateway's — the same doctrine
+#   `checks/_lifecycle.py::check_update_pinning`'s own grounding note documents for
+#   `OPENCLAW_NO_AUTO_UPDATE`), so this check cannot observe that suppression and does
+#   not claim to.
+#
+#   dist/telemetry-CwSEtSer.mjs:167-195 (`prepareTelemetryPayload`, what actually goes
+#   over the wire) confirms the registered help text above is the accurate
+#   description, not marketing copy: schema version, the OpenClaw version, platform/
+#   arch, the node runtime version, the request surface, and under `features`: the
+#   configured channel ids, provider families, enabled plugin ids, an enabled-plugin
+#   count, and a count of sessions in the last 24h. No message content, no
+#   credentials, no identifiers — matching the vendor's own claim.
+#
+# WHY THIS IS INFO/DISCLOSURE-ONLY, NEVER FAIL OR WARN (CLAUDE.md §2 Golden Rule #5,
+# and C-473's shortlist verdict, re-confirmed above against the current dist):
+# telemetry is opt-in (disabled by default), unconditionally overridden off by
+# DO_NOT_TRACK, and the vendor's own description of the payload is already the benign
+# one this check quotes — feature-usage counts, never message content or secrets.
+# There is no weakening here for a static audit to judge; naming what leaves the
+# machine once an operator opts in is a transparency line for the reader, not a
+# security verdict. This never escalates past PASS, so it needed no C-135 pass: there
+# is no FAIL/WARN branch for one to adversarially test.
+def check_telemetry_enabled(ctx: Context) -> Finding:
+    """B393 (F-202) — telemetry.enabled: name what leaves the machine when a user
+    opts in to OpenClaw's anonymous feature-usage statistics.
+
+    PASS    — telemetry.enabled is not `True` (absent, `False`, or any other
+              non-`True` shape — the vendor default): nothing leaves the machine via
+              this channel. Also PASS when telemetry.enabled IS `True`, in which case
+              the detail instead *names* what the vendor's own schema says this
+              shares — a transparency line, not a verdict.
+    UNKNOWN — config unreadable/unparseable (engine-side), or no config was read at
+              all (not_applicable in that second case — nothing to disclose about a
+              host nobody looked at).
+
+    Never WARNs and never FAILs: opting in to anonymous feature statistics is not a
+    weakening a static audit can judge (Golden Rule #4) — it is disabled by default,
+    always suppressed under DO_NOT_TRACK, and the vendor's own description of the
+    payload is already the benign one this check quotes. This is a transparency line,
+    not a security verdict, so it never escalates past PASS.
+    """
+    unreadable = _config_unreadable("B393", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B393",
+            UNKNOWN,
+            "No config was read, so whether telemetry.enabled opts in to anonymous "
+            "feature-usage statistics could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    enabled = dig(cfg, "telemetry.enabled")
+    if enabled is not True:
+        return _finding(
+            "B393",
+            PASS,
+            "telemetry.enabled is not set to true (the vendor default) — no "
+            "anonymous feature-usage statistics leave this machine via this "
+            "channel.",
+            "Nothing to do.",
+            config_field_paths={"telemetry.enabled"},
+        )
+    return _finding(
+        "B393",
+        PASS,
+        "telemetry.enabled is true — anonymous feature statistics are attached to "
+        "the daily update check: enabled channel and provider names, plugin count, "
+        "and recent session count (OpenClaw's own description of the payload). "
+        "Never messages, credentials, or identifiers. Always suppressed when "
+        "DO_NOT_TRACK=1 is set in the gateway's own process environment, which this "
+        "config-only audit cannot observe.",
+        "Nothing to do — this is disclosure, not a finding. Run 'openclaw telemetry "
+        "show' to see the exact request this build would send, or 'openclaw "
+        "telemetry off' to disable it.",
+        config_field_paths={"telemetry.enabled"},
+    )
+
+
 def check_secrets(ctx: Context) -> Finding:
     cfg = ctx.config
     ev = []

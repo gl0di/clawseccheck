@@ -385,6 +385,7 @@ from ._config import (
     check_sandbox,
     check_secrets,
     check_secrets_at_rest_home,
+    check_telemetry_enabled,
     check_tls,
     check_trifecta,
     check_trustedproxy_loopback,
@@ -1620,6 +1621,7 @@ CHECKS = [
     # belongs to the full audit only, the same reasoning B105 records for itself.
     check_compiled_tool_poisoning,  # B185 — poisoned tool description already delivered to the model (F-133, RT-1)
     check_cloudworkers_prepared_pool,  # B374 — cloudWorkers 9.4 prepared-pool default-on warm reserve (C-526)
+    check_telemetry_enabled,  # B393 (F-202) — telemetry.enabled disclosure, INFO-only (never FAIL/WARN)
 ]
 
 

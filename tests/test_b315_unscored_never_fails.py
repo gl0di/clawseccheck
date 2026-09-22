@@ -114,7 +114,7 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     architect audit — the corpus test above is what actually enforces the invariant."""
     unscored = {c.id for c in BY_ID.values() if not c.scored}
     assert {"B43", "B55", "B70", "B185", "B186", "B193", "B324", "B322", "B323", "B325"} <= unscored
-    assert len(unscored) == 103  # +3: B379/B380/B381 (host scheduled persistence,
+    assert len(unscored) == 104  # +3: B379/B380/B381 (host scheduled persistence,
     # hooks transform modules, redactor-blind secret paths) and +1: B382 (retired config
     # key) — all WARN-only/disclosure checks, added unscored like every other advisory
     # check in this set. +1 more: B386 (F-199, gateway.nodes.allowSkills) — grouped into
@@ -139,7 +139,12 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     # isolation) — WARN-capped disclosure of a separate execution surface from
     # agents.defaults.sandbox.*, and its WARN fires on OpenClaw's OWN documented default
     # (isolation "none"), so scoring it would dock the grade for a vendor baseline the
-    # user never chose. Reported, never judged.
+    # user never chose. Reported, never judged. +1: B393 (F-202, C-473 shortlist item
+    # 8, telemetry.enabled disclosure) — PASS-only advisory, further than every entry
+    # above: it has no WARN branch at all, let alone a FAIL one. Telemetry is disabled
+    # by default and unconditionally suppressed under DO_NOT_TRACK, so opting in is not
+    # a weakening a static audit can judge — naming what the vendor's own schema says
+    # it shares is a transparency line, not a verdict.
 
 
 # ── Targeted: the two downgrades (FAIL -> WARN, CheckMeta unchanged) ──────────────────
