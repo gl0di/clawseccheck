@@ -343,6 +343,33 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   designed on this: no real-fleet sample of populated descriptions has been measured
   yet, so any entropy threshold today would be unvalidated. Declared as a named,
   bucket-3 blind spot rather than shipped as an unmeasured check `[CEILING]`
+- **Live plugin/config surfaces the monitor and digest do not watch** (bucket E,
+  2026-09-19 OpenClaw 9.5 triage) — five related gaps, none built as a check because each
+  is already dominated by an existing WARN-capable one or has no config-level signal at
+  all: (1) *Plugin hot reload* — `plugins.load` now applies without a process restart and
+  a `plugins.reload` RPC bypasses `reload.mode=off`; the surface this actually rides is
+  `plugins.load.paths` (where plugin CODE is loaded from), which `monitordims/_plugins.py`
+  deliberately excludes from the signature it diffs (`monitordims/_plugins.py:79` and that
+  module's own docstring — "deserves its own adversarial pass rather than a rider on this
+  one"), so swapping an already-loaded plugin's `index.js` on disk with no `openclaw.json`
+  edit moves nothing the monitor watches and reports "No new threats" across what is
+  functionally a live code change to an already-trusted plugin — the one item here with a
+  concrete file:line home; (2) *Widget CDN CSP* — an agent-rendered HTML widget's
+  script/style/font may load from several allow-listed CDN hosts under
+  `script-src 'unsafe-inline'`, while connect/img/form-action stay closed; no check reads
+  this policy; (3) *Cold storage as authoritative history* — opt-in transcript archival
+  (default off) moves rows out of the live `transcript_events`/FTS tables into
+  `agents/<id>/sessions/cold/<sha>.jsonl.zst`, a `.jsonl.zst` shape B19's at-rest sweep does
+  not look for; (4) *Retained state-DB copies* — task-delivery recovery can leave a full
+  extra copy of `openclaw.sqlite` under `state/openclaw-task-delivery-recovery-*/`, at the
+  same permissions as the original, a class-level gap alongside the pre-existing wider one
+  of unwatched database backups in general (B188 stats neither); (5) *Gateway-desktop
+  widening* — the `computer.*`/`desktop.release` RPC surface (screen/keyboard control) is
+  reachable over the Gateway route without passing through
+  `gateway.nodes.commands.deny`, gated only by the bundled `cua-computer` plugin's own
+  `enabled` flag, not by `desktop.host.enabled` as an earlier reading of this surface
+  assumed. None of these move a verdict today; recorded as a named, dated set of open
+  follow-ups rather than a silent gap `[CEILING]`
 
 ## Framework mapping (OWASP)
 
