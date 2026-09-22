@@ -73,10 +73,17 @@ def test_missing_config_is_unknown_not_false_positive():
 def test_secret_in_config_flagged_only_when_perms_loose(tmp_path):
     # tokens in config are normal; the risk is a world-readable config file
     cfg = tmp_path / "openclaw.json"
+    # C-575: fragments, not a contiguous secret-shaped literal (CLAUDE.md golden rule 3).
+    # No intermediate variable named with a sensitive word (token/key/secret/...): an
+    # assignment shaped like <sensitive-word> = "<fragment>" is itself a generic-api-key
+    # match regardless of whether the fragment is later joined to something else --
+    # measured with gitleaks 8.24.3 against an earlier draft of this line. (Careful:
+    # even a comment illustrating the exact rejected shape reproduces the flagged
+    # literal and gets caught the same way -- describe it, do not paste it.)
     cfg.write_text(
         '{"gateway":{"auth":{"mode":"token","token":"a-very-long-token-1234567890"}},'
         '"channels":{"telegram":{"accounts":{"main":'
-        '{"botToken":"1234567890abcdef1234567890"}}}}}'
+        '{"botToken":"' + "1234567890abcdef" + "1234567890" + '"}}}}}'
     )
     cfg.chmod(0o644)
     assert _by_id(audit(tmp_path)[1])["B1"].status == FAIL   # secrets + world-readable

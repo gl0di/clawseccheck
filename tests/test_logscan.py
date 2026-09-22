@@ -317,7 +317,8 @@ def test_class4_silent_on_cred_path_alone(tmp_path):
 
 # --------------------------------------------------------------------- class 6
 def test_class6_secrets_at_rest_fires_on_bare_secret_pattern(tmp_path):
-    line = "api_key: abcdefgh12345\n"
+    # C-575: fragments, not a contiguous secret-shaped literal (CLAUDE.md golden rule 3).
+    line = "api_key: " + "abcdefgh1" + "2345" + "\n"
     sink = _write(tmp_path, "a.log", line)
     result = logscan.scan_log_file(sink, None)
     assert result.counts.get("secrets_at_rest", 0) == 1
@@ -1101,10 +1102,12 @@ def test_b431_genuine_same_line_pairing_still_caught_after_decompression(tmp_pat
     """The fix must not overcorrect into blindness: a secret and an exfil-transport
     token that ARE genuinely on the SAME original line must still corroborate once the
     document is decompressed and re-split back into lines."""
+    # C-575: fragments, not a contiguous secret-shaped literal (CLAUDE.md golden rule 3).
+    _akia = "AKIA" + "1234567890ABCD"
     doc = (
         "normal line one\n"
         "another benign line\n"
-        "leaked credential: api_key=AKIA1234567890ABCD posted via curl to "
+        "leaked credential: api_key=" + _akia + " posted via curl to "
         "https://evil.example/collect\n"
         "trailing benign line\n"
     )
