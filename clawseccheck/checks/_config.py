@@ -3872,12 +3872,19 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
 #   not claim to.
 #
 #   dist/telemetry-CwSEtSer.mjs:167-195 (`prepareTelemetryPayload`, what actually goes
-#   over the wire) confirms the registered help text above is the accurate
-#   description, not marketing copy: schema version, the OpenClaw version, platform/
-#   arch, the node runtime version, the request surface, and under `features`: the
-#   configured channel ids, provider families, enabled plugin ids, an enabled-plugin
-#   count, and a count of sessions in the last 24h. No message content, no
-#   credentials, no identifiers — matching the vendor's own claim.
+#   over the wire) shows the registered help text above UNDERSTATES the payload. It
+#   says "plugin count"; the builder sends the count (`pluginsEnabled`) AND the sorted
+#   ids of every enabled publicly-known plugin (`plugins`, :181). Full payload: schema
+#   version, the OpenClaw version, platform/arch, the node runtime version, the request
+#   surface, and under `features`: channel ids, provider families, plugin ids, the
+#   enabled-plugin count, and a count of sessions in the last 24h. Channels, plugins
+#   and provider families are each filtered to publicly-known ids first
+#   (`isPubliclyKnownPluginId`, `publicChannelIds`, the built-in/official provider
+#   test at :179), so a private or custom plugin, channel or provider name is never
+#   sent. No message content, no credentials, no account or install identifier. The
+#   user-facing detail below therefore names the PAYLOAD, not the help text: a
+#   transparency line that repeats the vendor's understatement would be the one
+#   thing this check exists not to be.
 #
 # WHY THIS IS INFO/DISCLOSURE-ONLY, NEVER FAIL OR WARN (CLAUDE.md §2 Golden Rule #5,
 # and C-473's shortlist verdict, re-confirmed above against the current dist):
@@ -3895,8 +3902,9 @@ def check_telemetry_enabled(ctx: Context) -> Finding:
     PASS    — telemetry.enabled is not `True` (absent, `False`, or any other
               non-`True` shape — the vendor default): nothing leaves the machine via
               this channel. Also PASS when telemetry.enabled IS `True`, in which case
-              the detail instead *names* what the vendor's own schema says this
-              shares — a transparency line, not a verdict.
+              the detail instead *names* what the payload builder actually sends
+              (which is more than the vendor's own help text says) — a
+              transparency line, not a verdict.
     UNKNOWN — config unreadable/unparseable (engine-side), or no config was read at
               all (not_applicable in that second case — nothing to disclose about a
               host nobody looked at).
@@ -3935,9 +3943,14 @@ def check_telemetry_enabled(ctx: Context) -> Finding:
         "B393",
         PASS,
         "telemetry.enabled is true — anonymous feature statistics are attached to "
-        "the daily update check: enabled channel and provider names, plugin count, "
-        "and recent session count (OpenClaw's own description of the payload). "
-        "Never messages, credentials, or identifiers. Always suppressed when "
+        "the daily update check. As of OpenClaw 2026.9.5 that request carries: the "
+        "OpenClaw version, platform and architecture, Node version and the invoking "
+        "surface; the names of enabled channels and provider families and the ids "
+        "of enabled plugins, publicly-known ones only, so a private or custom "
+        "plugin, channel or provider name is not sent; and counts of enabled plugins "
+        "and of sessions in the last 24 hours. No message content, credentials, or "
+        "account or install identifier. OpenClaw's own help text calls the plugin "
+        "part a count; the payload also names them. Always suppressed when "
         "DO_NOT_TRACK=1 is set in the gateway's own process environment, which this "
         "config-only audit cannot observe.",
         "Nothing to do — this is disclosure, not a finding. Run 'openclaw telemetry "

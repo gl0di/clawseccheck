@@ -114,9 +114,15 @@ def test_enabled_true_passes_and_names_the_payload():
     f = _finding_direct(cfg)
     assert f.status == PASS
     assert "telemetry.enabled is true" in f.detail
-    assert "channel and provider names" in f.detail
-    assert "plugin count" in f.detail
-    assert "session count" in f.detail
+    assert "enabled channels and provider families" in f.detail
+    assert "sessions in the last 24 hours" in f.detail
+    # The vendor's help text says "plugin count"; the payload builder also sends the
+    # plugin ids (telemetry-CwSEtSer.mjs:181). Pin the part the help text leaves out,
+    # so a regression to quoting the help text instead of the payload fails here.
+    assert "ids of enabled plugins" in f.detail
+    assert "publicly-known ones only" in f.detail
+    for sent in ("OpenClaw version", "platform and architecture", "Node version"):
+        assert sent in f.detail, sent
     assert "DO_NOT_TRACK" in f.detail
     # Never claims to have observed the gateway's own env for the suppression.
     assert "cannot observe" in f.detail
@@ -188,7 +194,7 @@ def test_the_on_fixture_and_the_off_fixture_both_pass():
 def test_the_on_fixture_names_the_payload_and_the_off_fixture_does_not():
     ctx_on = collect(FIXTURES / "clean_b393_telemetry_on")
     f_on = next(fi for fi in C.run_all(ctx_on) if fi.id == "B393")
-    assert "channel and provider names" in f_on.detail
+    assert "ids of enabled plugins" in f_on.detail
 
     ctx_off = collect(FIXTURES / "clean_b393_telemetry_off")
     f_off = next(fi for fi in C.run_all(ctx_off) if fi.id == "B393")
