@@ -4494,6 +4494,24 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 #                   payload.text when payload.kind == "systemEvent"
                 #                   (both: persisted-shape-C6m3w-m0.js:100)
                 # job_id/name/enabled/payload_kind stay real, unchanged columns.
+                #
+                # C-586 (2026-09-22): a review sweep flagged that the dist's
+                # `CRON_JOB_READ_COLUMNS` list (schema-DrFXGeAf.mjs, used by the vendor's
+                # own `loadCronRows`) omits `name`, and read that as `name` having been
+                # dropped from the table on 2026.9.5. Reproduced and NOT confirmed: that
+                # constant is just the projection `loadCronRows` needs for its own
+                # config-order reconciliation (job_id/declaration_key/enabled/agent_id/
+                # payload_kind/job_json/state_json/runtime_updated_at_ms/
+                # schedule_identity/sort_order/updated_at) -- a narrower list than the
+                # table, not the table's column set. The vendor's own `CREATE TABLE
+                # cron_jobs` in `OPENCLAW_STATE_SCHEMA_SQL` (openclaw-state-db-DS2iNFy4.mjs,
+                # installed 2026.9.5) still declares `name TEXT NOT NULL`, matching this
+                # tree's own grounded, regenerated `tests/state_schema_snapshot.sql`
+                # (stamped `openclaw-version: 2026.9.5`) and its local-only re-derivation
+                # against the live dist in `tests/test_state_schema_grounding.py`. No
+                # `CRON_JOB_READ_COLUMNS`-shaped developer comment predating this one was
+                # found anywhere in this repo's history either. Watch item only, closed
+                # by reproduction -- the SELECT below is unchanged.
                 cur = conn.execute(
                     "SELECT job_id, name, enabled, payload_kind, job_json "
                     "FROM cron_jobs LIMIT ?",
