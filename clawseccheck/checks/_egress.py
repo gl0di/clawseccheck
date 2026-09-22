@@ -5317,14 +5317,53 @@ def check_attachments_ttl(ctx: Context) -> Finding:
     PASS    -- ``attachments.ttlHours`` is set to a real number (any int/float, per
                the plain ``ZodNumber`` schema -- this check does not second-guess a
                concrete operator-chosen value).
-    WARN    -- absent, ``null``, or any other non-number shape (a shape the real
+    WARN    -- at least one live channel provider is configured (so something could
+               actually stage inbound media) AND ``attachments.ttlHours`` is absent,
+               ``null``, or any other non-number shape (a shape the real
                ``ZodOptional<ZodNumber>`` schema would also refuse, so it never
                enacts a sweep either -- same idiom as B387's ``allowedHosts`` check).
                Never FAIL: an unswept disk is a data-hygiene gap the operator can act
                on at any time, not a proven compromise.
-    UNKNOWN -- config unreadable, or never read at all (B-661: a config that was
-               never actually read must not silently read as "unset", which would
-               misreport this as a real gap on a host that was simply never scanned).
+    UNKNOWN -- three distinct reasons, each preserved separately rather than
+               collapsed into one:
+                 (a) config unreadable (parse error), or
+                 (b) never read at all (B-661: a config that was never actually read
+                     must not silently read as "unset", which would misreport this as
+                     a real gap on a host that was simply never scanned), or
+                 (c) F-201 follow-up: the config WAS read completely and simply has no
+                     live channel provider configured (``channels`` absent, or only
+                     ``defaults``/non-dict entries) -- ``not_applicable`` set via
+                     ``_surface_absent``. With no channel able to receive an inbound
+                     message at all, nothing can ever be staged into OpenClaw's
+                     shared ``media/inbound`` directory in the first place, so the
+                     "staged media accumulates" risk this check warns about cannot
+                     exist yet. Grounded against the installed 2026.9.5 dist:
+                     inbound attachments from EVERY channel -- native Telegram
+                     (``resolveTelegramInboundMediaUri`` builds a
+                     ``media://inbound/<id>`` URI, ``bot-message-BoqoOw2A.mjs:521-523``)
+                     and every plugin-SDK channel alike (``saveMediaBuffer(...,
+                     "inbound")``, exposed generically to any channel plugin via
+                     ``createRuntimeChannel``, ``runtime-channel-BvaQLHei.mjs:220``) --
+                     land in that SAME shared ``media/inbound`` subdirectory, and the
+                     general sweep this check is about (``cleanOldMedia`` /
+                     ``pruneNonPlaybackMedia``, ``store-SPnAoW3B.mjs:150-165``,
+                     invoked from the server's own maintenance tick,
+                     ``server-maintenance-Cl2cKcaI.mjs:362-363``) walks every
+                     subdirectory of ``media/`` except ``playback-transcode`` and
+                     ``outgoing`` -- it is channel-agnostic, not Telegram-specific.
+                     (The one Telegram-only consumer of ``attachments.ttlHours``,
+                     ``resolveRetainedTelegramMedia`` in
+                     ``telegram-ingress-drain-factory-DbVZxBjw.mjs:3823-3937``, is a
+                     narrower reply-chain media-reuse decision, not the
+                     accumulation-preventing sweep itself.) So the deciding factor is
+                     not "which channel type", but whether ANY live channel exists to
+                     originate an inbound message at all -- the same "no channels
+                     configured" test B25/B26/B30 already use
+                     (``k != "defaults"`` filtering of ``channels.*``): individual
+                     plugins can still lag the platforms they wrap (e.g. Buzz's own
+                     docs currently disclaim media support), but that is a
+                     per-plugin feature gap, not a distinction this check can soundly
+                     enumerate and keep current -- so it is not drawn here.
     """
     unreadable = _config_unreadable("B390", ctx)
     if unreadable is not None:
@@ -5343,6 +5382,25 @@ def check_attachments_ttl(ctx: Context) -> Finding:
         )
 
     cfg = ctx.config
+
+    # F-201 follow-up: a config that WAS read completely but configures no live
+    # channel provider at all (e.g. `{}`) has no ingress path that could ever stage
+    # an inbound attachment -- the "media accumulates" risk below cannot exist yet.
+    # Same "real provider" filter as B25/B26/B30 (channels.<id> dict entries other
+    # than the `defaults` policy block).
+    providers = {
+        k: v for k, v in _channels(cfg).items() if k != "defaults" and isinstance(v, dict)
+    }
+    if not providers:
+        return _finding(
+            "B390", UNKNOWN,
+            "No channels are configured, so nothing can stage inbound media in the "
+            "first place -- attachments.ttlHours' retention sweep is not applicable.",
+            "Once a channel that can receive incoming attachments is configured, "
+            "set attachments.ttlHours to a bounded retention window.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
     ttl = dig(cfg, "attachments.ttlHours")
 
     if isinstance(ttl, (int, float)) and not isinstance(ttl, bool):

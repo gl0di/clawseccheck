@@ -3316,6 +3316,13 @@ CATALOG: list[CheckMeta] = [
     # same field, same semantics, confirmed unchanged through the installed 2026.9.5
     # dist). WARN-only: an unswept local disk is a data-hygiene gap the operator can
     # act on at any time, not a proven compromise -- no FAIL tier.
+    # F-201 follow-up: the WARN above fired on a config with NO channels configured at
+    # all, where nothing can ever stage inbound media in the first place -- broke
+    # tests/test_b472_b477_self_contradiction.py's Channels-row self-contradiction
+    # guard. Now UNKNOWN+not_applicable when no live channel provider is configured
+    # (same "real provider" filter as B25/B26/B30) -- see the check's own docstring in
+    # checks/_egress.py for the dist grounding of why this is channel-agnostic, not
+    # Telegram-only.
     CheckMeta(
         "B390",
         "attachments.ttlHours unset -- no sweep, staged media accumulates indefinitely",
