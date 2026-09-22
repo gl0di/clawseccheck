@@ -9,12 +9,18 @@ The CLI prints the detected type on stderr so machine-readable stdout stays clea
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from clawseccheck.checks import detect_vet_type
 from clawseccheck.cli import main
 
 _EMPTY_SCHEMA = {"type": "object", "additionalProperties": False}
+_SKIP_ROOT = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read bit"
+)
 
 
 def _write(p: Path, text: str) -> None:
@@ -84,6 +90,77 @@ def test_detect_configured_server_name(tmp_path):
 
 def test_detect_nonexistent_is_unknown(tmp_path):
     assert detect_vet_type(tmp_path / "missing", home=tmp_path / "nohome") == "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# C-589 (B-790): a saved web page (a lone HTML FILE) must not be labeled       #
+# 'skill' on stderr. Label only -- routing is untouched (see the CLI test     #
+# at the bottom of this section).                                             #
+# --------------------------------------------------------------------------- #
+_SAVED_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>a-skill - ClawHub</title></head>
+<body><h1>a-skill</h1><p>by someone - 1,204 downloads - MIT</p></body></html>
+"""
+
+
+def test_detect_saved_html_page_file_is_unknown_not_skill(tmp_path):
+    """'ClawHub - some-skill.html' -- the exact shape from the bug report -- must not
+    be announced as a skill."""
+    page = tmp_path / "ClawHub - some-skill.html"
+    _write(page, _SAVED_PAGE)
+    assert detect_vet_type(page) == "unknown"
+
+
+def test_detect_plain_text_file_is_still_skill(tmp_path):
+    """Clean case: a bare non-HTML file keeps its prior 'skill' label."""
+    f = tmp_path / "notes.txt"
+    _write(f, "just some plain notes, nothing HTML about them\n")
+    assert detect_vet_type(f) == "skill"
+
+
+def test_detect_skill_md_that_merely_mentions_html_is_still_skill(tmp_path):
+    """A real skill file whose prose mentions <html> once (one marker, not two) must
+    not be reclassified -- same bar `_reads_as_html` already enforces."""
+    f = tmp_path / "SKILL.md"
+    _write(f, "---\nname: x\ndescription: y\n---\nUse <html> tags in your output.")
+    assert detect_vet_type(f) == "skill"
+
+
+@_SKIP_ROOT
+def test_detect_unreadable_file_falls_back_to_skill_label(tmp_path):
+    """UNKNOWN path: a file the sniff cannot open must not be guessed either way -- it
+    keeps the prior conservative 'skill' label. vet_skill's own unreadable-file gate
+    (checks/_vet.py) answers UNKNOWN for it one call later, honestly, from having
+    actually tried to read it -- this classifier must not pre-empt that by guessing."""
+    f = tmp_path / "locked.html"
+    _write(f, _SAVED_PAGE)
+    f.chmod(0o000)
+    try:
+        assert detect_vet_type(f) == "skill"
+    finally:
+        f.chmod(0o644)
+
+
+def test_cli_vet_html_page_routes_identically_to_skill(tmp_path, capsys):
+    """The routing DoD: only the stderr LABEL changes. cli.py maps every non-plugin/
+    non-mcp label to the same skill engine (`detected if detected in ("plugin", "mcp")
+    else "skill"`), so the dossier and exit code for the new 'unknown' label must be
+    byte-identical to what --vet-skill (which skips detection and always goes straight
+    to the skill engine) already produces for the exact same target.
+    """
+    page = tmp_path / "ClawHub - some-skill.html"
+    _write(page, _SAVED_PAGE)
+
+    rc = main(["--vet", str(page)])
+    auto = capsys.readouterr()
+    assert rc == 0
+    assert "detected type: unknown" in auto.err
+    assert "detected type: skill" not in auto.err
+
+    rc2 = main(["--vet-skill", str(page)])
+    explicit = capsys.readouterr()
+    assert rc2 == rc
+    assert explicit.out == auto.out
 
 
 # --------------------------------------------------------------------------- #

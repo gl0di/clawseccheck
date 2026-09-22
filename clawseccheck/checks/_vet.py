@@ -6494,6 +6494,32 @@ def _reads_as_html(text: str) -> bool:
     return len(set(m.group(0).lower()[:5] for m in _HTML_DOC_RE.finditer(text))) >= 2
 
 
+# C-589: enough to see a real page's <!doctype>/<html>/<head>/<meta charset> cluster,
+# which real-world HTML puts at the very top of the file, without reading arbitrarily
+# far into an oversized target. Bounded and read-only, same idiom as _mcp.py's
+# `_PLUGIN_SNIFF_BYTES` magic-byte sniff.
+_HTML_SNIFF_BYTES = 65_536
+
+
+def _target_reads_as_html(p: Path) -> bool:
+    """Bounded, read-only HTML sniff of a --vet FILE target, for the label only (C-589).
+
+    Used by :func:`detect_vet_type_with_reason` so a saved web page (a lone
+    ``index.html`` / "ClawHub - <skill>.html" download, no SKILL.md, no executable
+    surface) is not announced as ``detected type: skill`` on stderr — even though the
+    dossier that follows was already an honest UNKNOWN either way, via
+    :func:`_looks_like_a_skill_package` / this same :func:`_reads_as_html` one call
+    later (see the B13 gate above). Never raises on an unreadable path: that is not
+    this helper's question to answer, and the caller's own on-disk check already ran.
+    """
+    try:
+        with open(p, "rb") as fh:
+            head = fh.read(_HTML_SNIFF_BYTES)
+    except OSError:
+        return False
+    return _reads_as_html(head.decode("utf-8", errors="replace"))
+
+
 def _looks_like_a_skill_package(p: Path, text, py, sh, js, ctx=None) -> bool:
     """Whether *p* has ANY surface that makes it assessable as a skill (B-456).
 
@@ -7165,7 +7191,19 @@ def detect_vet_type_with_reason(
             ):
                 return "mcp", None
             return "unknown", None
-        if p.is_dir() or p.is_file():
+        if p.is_dir():
+            return "skill", None
+        if p.is_file():
+            # B-790/C-589: content-sniff the label only — routing is untouched. cli.py
+            # maps every non-plugin/non-mcp classification to the same skill engine
+            # (`detected if detected in ("plugin", "mcp") else "skill"`), so 'unknown'
+            # here reaches vet_skill exactly as 'skill' did, and vet_skill's own
+            # _looks_like_a_skill_package gate was already going to answer UNKNOWN for
+            # this same target one call later. This only stops the misleading
+            # "detected type: skill" stderr line for a page that is positively
+            # identifiable as HTML — never for a real skill file.
+            if _target_reads_as_html(p):
+                return "unknown", None
             return "skill", None
         return "unknown", None
     # Not a path on disk: maybe a configured MCP server name.
