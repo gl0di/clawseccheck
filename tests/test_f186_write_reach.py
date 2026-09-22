@@ -195,12 +195,15 @@ def test_raw_agent_id_reaches_the_grant_model():
 
 
 # ------------------------------------------------------------------ an agent id spelled "global"
-# ``toolgrant.GLOBAL_SCOPE`` is the string "global", and "global" is also a LEGAL agent id.
-# The vendor gives it no special meaning (executed against the installed dist, 2026-09-19: an
-# agent with that id resolves exactly like one named ``w``, in both directions below), so a
-# roster row with that id must be asked as an AGENT. It was asked as the global scope: the
-# entry lookup was skipped, that agent's own ``tools`` block was ignored, and B55 convicted an
-# agent that cannot write (and missed one that can).
+# "global" is a LEGAL agent id, distinct from ``toolgrant.GLOBAL_SCOPE`` (CLAWSECCHECK-C-561: a
+# private sentinel type, not the string "global"). The vendor gives the id no special meaning
+# (executed against the installed dist, 2026-09-19: an agent with that id resolves exactly like
+# one named ``w``, in both directions below), so a roster row with that id must be asked with
+# its string id, never with the ``GLOBAL_SCOPE`` sentinel. Before the sentinel existed, asking
+# with the plain string "global" WAS asking with the sentinel (they were the same value) unless
+# a caller also passed a now-removed ``agent=True`` keyword — the entry lookup was skipped,
+# that agent's own ``tools`` block was ignored, and B55 convicted an agent that cannot write
+# (and missed one that can).
 
 def _rename_agent_to_global(cfg, old_id):
     """A deep copy of ``cfg`` in which the ONE list-shape agent ``old_id`` is renamed
@@ -221,7 +224,12 @@ def _rename_agent_to_global(cfg, old_id):
     return out
 
 
-def _renamed_grant_disagreements(**kw):
+def _renamed_grant_disagreements(scope_for_renamed_id="global"):
+    """Ask ``toolgrant.granted`` about the renamed agent using ``scope_for_renamed_id`` --
+    the string ``"global"`` (its real, spelled-out roster id; the correct call post-C-561)
+    by default, or the ``GLOBAL_SCOPE`` sentinel itself (simulating a caller who conflates
+    the sentinel with the string it used to equal -- the mirror-image mistake the sentinel
+    makes newly possible)."""
     bad, n = [], 0
     for label, cfg, scopes in ROWS:
         for s in scopes:
@@ -232,23 +240,28 @@ def _renamed_grant_disagreements(**kw):
                 continue
             for tool in TOOLS:
                 n += 1
-                if toolgrant.granted(renamed, tool, "global", **kw) != (tool in s["granted"]):
+                got = toolgrant.granted(renamed, tool, scope_for_renamed_id)
+                if got != (tool in s["granted"]):
                     bad.append((label, s["id"], tool))
     return bad, n
 
 
 def test_renaming_an_agent_to_global_never_changes_its_grant():
     """Metamorphic, over the whole vendor battery: only the id string changed, so the vendor
-    answer for that scope is the recorded one."""
-    bad, n = _renamed_grant_disagreements(agent=True)
+    answer for that scope is the recorded one. Asking with the plain string "global" -- its
+    real roster id -- is now, post-C-561, simply the CORRECT call: no flag is needed because
+    the sentinel and the string can never collide."""
+    bad, n = _renamed_grant_disagreements("global")
     assert n > 1000, "non-vacuity: the battery must contain many renameable agents"
     assert not bad, f"{len(bad)} disagreement(s), first: {bad[:5]}"
 
 
-def test_the_string_sentinel_alone_would_have_disagreed():
-    """Control: without ``agent=True`` the "global" spelling is the global scope again, so the
-    comparison above is not vacuous -- it bites exactly on the collision this fixes."""
-    bad, _n = _renamed_grant_disagreements()
+def test_the_global_scope_sentinel_alone_would_have_disagreed():
+    """Control: asking with the ``GLOBAL_SCOPE`` sentinel itself -- as if the renamed agent's
+    id and the global scope were still the same value -- collapses back to the pre-C-561
+    collision, so the comparison above is not vacuous. It bites exactly on conflating the
+    sentinel with the string "global" it used to equal."""
+    bad, _n = _renamed_grant_disagreements(toolgrant.GLOBAL_SCOPE)
     assert bad
 
 

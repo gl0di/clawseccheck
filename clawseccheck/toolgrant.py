@@ -151,7 +151,41 @@ import re
 
 from .collector import agent_roster, dig
 
-GLOBAL_SCOPE = "global"
+class _GlobalScope:
+    """The type of ``GLOBAL_SCOPE`` — a private sentinel, not a string, so the global scope
+    is UNSPELLABLE by any config value or copy-pasted literal (C-561).
+
+    Before this, ``GLOBAL_SCOPE`` was the plain string ``"global"``, which is also a legal
+    agent id: ``granted(cfg, tool, "global")`` for a roster row spelled ``global`` collided
+    with the global-scope query itself (F-186), and a caller holding that roster id had to
+    remember a keyword (``agent=True``) to disambiguate. A caller who forgot it got the
+    WRONG scope silently — no exception, no log line, just a resolved policy for the wrong
+    entity, with nothing short of a differential battery able to catch it.
+
+    A ``_GlobalScope`` instance has no ``__eq__`` of its own, so equality falls back to
+    identity — it is never equal to any string a config or a caller could produce.
+    Disambiguation is therefore structural, not a caller-supplied flag: ``scope is
+    GLOBAL_SCOPE`` means "the global scope"; any other value — including the string
+    ``"global"`` — means "look this id up in the agent roster", which is the CORRECT
+    reading for an agent actually named ``global`` (the vendor gives that id no special
+    meaning; it resolves exactly like one named ``w``). The ``agent: bool`` keyword
+    ``granted()`` used to carry is gone: there is no longer a flag to forget.
+
+    The one new way to get this backwards is the mirror image of the old bug: passing the
+    STRING ``"global"`` where the SENTINEL was meant (asking about the true global scope by
+    its old spelling instead of importing this constant). ``tests/
+    test_toolgrant_caller_audit.py`` AST-walks every call to ``granted`` in ``clawseccheck/``
+    and fails on exactly that literal, so a future caller cannot reintroduce either
+    direction of the collision without a test naming the offending line.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "GLOBAL_SCOPE"
+
+
+GLOBAL_SCOPE = _GlobalScope()
 
 # TOOL_NAME_ALIASES (the tool-policy-shared bundle; a Map since 2026.9.2, its three pairs
 # unchanged through openclaw@2026.9.5 — compared whole against the EXECUTED Map on 2026-09-19).
@@ -382,38 +416,43 @@ def _agent_entry_tools(cfg: dict, agent_id: str):
     return None
 
 
-def _agent_tools(cfg: dict, scope: str, agent: bool = False):
+def _agent_tools(cfg: dict, scope):
     """resolveEffectiveToolPolicy's agentTools derivation (the `agentTools` lines of
     agent-tools.policy-*.mjs, as of openclaw@2026.9.5): the
     resolved roster entry's tools, or -- ONLY when the config declares no roster at all,
     for ANY scope including GLOBAL_SCOPE -- agents.defaults.tools.
 
-    ``agent=True`` says ``scope`` is a DECLARED agent id, so the entry lookup runs even when
-    that id is literally ``"global"`` (a legal id; the vendor treats it like any other)."""
+    ``scope`` is either the ``GLOBAL_SCOPE`` sentinel (``scope is GLOBAL_SCOPE``) or a
+    declared agent id — any other value, including the string ``"global"``, a legal id the
+    vendor treats like any other. The identity check is what makes the scope unspellable:
+    no string a config can hold is ever ``is`` the sentinel object, so this branch can no
+    longer be told the wrong answer by a caller forgetting a flag (there is none to forget)."""
     tools = None
-    if agent or scope != GLOBAL_SCOPE:
+    if scope is not GLOBAL_SCOPE:
         tools = _agent_entry_tools(cfg, scope)
     if tools is None and not _has_agent_roster(cfg):
         tools = dig(cfg, "agents.defaults.tools")
     return tools
 
 
-def granted(cfg: dict, tool: str, scope: str = GLOBAL_SCOPE, *, agent: bool = False) -> bool:
-    """Is ``tool`` granted at ``scope`` ("global", or a declared agent id) by ``cfg``?
+def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE) -> bool:
+    """Is ``tool`` granted at ``scope`` (``GLOBAL_SCOPE``, or a declared agent id) by ``cfg``?
 
     The port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` — see the
     module docstring for the resolution order, the grounded tables, and what is
     deliberately not modelled (sandboxMode, extraPolicies).
 
-    ``GLOBAL_SCOPE`` is a plain string, so it collides with an agent whose id is literally
-    ``"global"``. A caller that HOLDS a declared agent id (a roster row) passes ``agent=True``
-    so that id is looked up as an agent; the vendor gives ``"global"`` no special meaning
-    (executed: an agent with that id resolves exactly like one named ``w``).
+    ``scope`` disambiguates by TYPE, not by a caller-supplied flag (C-561):
+    pass the ``GLOBAL_SCOPE`` sentinel for the global scope, or any string (a roster id)
+    otherwise — including the string ``"global"``, which the vendor treats as an ordinary
+    agent id, never the global scope (executed: an agent with that id resolves exactly like
+    one named ``w``). See ``GLOBAL_SCOPE``'s own docstring (the ``_GlobalScope`` class) for
+    why this replaced an earlier ``agent: bool`` keyword a caller could forget to pass.
     """
     if not isinstance(cfg, dict) or not cfg:
         return False
 
-    agent_tools = _agent_tools(cfg, scope, agent)
+    agent_tools = _agent_tools(cfg, scope)
     global_tools = cfg.get("tools")
 
     profile = agent_tools.get("profile") if isinstance(agent_tools, dict) else None

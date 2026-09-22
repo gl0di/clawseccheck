@@ -6355,14 +6355,14 @@ def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
             "understanding that it does not cover this route.",
         )
 
-    scopes = [("global", {}, _toolgrant.GLOBAL_SCOPE, False)]
+    scopes = [("global", {}, _toolgrant.GLOBAL_SCOPE)]
     for agent in agent_roster(cfg):
         entry_dict = agent.entry if isinstance(agent.entry, dict) else {}
-        scopes.append((agent.path, entry_dict, agent.id, True))
+        scopes.append((agent.path, entry_dict, agent.id))
 
     warn_scopes = []
-    for label, entry_dict, grant_id, is_agent in scopes:
-        if not _toolgrant.granted(cfg, "computer", grant_id, agent=is_agent):
+    for label, entry_dict, grant_id in scopes:
+        if not _toolgrant.granted(cfg, "computer", grant_id):
             continue
         if _b389_sandbox_mode(cfg, entry_dict) == "all":
             continue

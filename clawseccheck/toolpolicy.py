@@ -492,11 +492,16 @@ def _scope_rows(cfg: dict) -> list:
     declared agent. The grant id is what ``toolgrant.granted`` must be asked with: the RAW
     roster id for a declared agent (its own normaliser is two-branch and differs from this
     module's -- ``a-`` stays ``a-`` there and becomes ``a`` here, so re-normalising our name
-    would miss the entry), ``None`` for the synthesised default agent that has no roster row
-    (the caller asks the global scope). It is ``None`` and not ``GLOBAL_SCOPE`` because that
-    constant is the string ``"global"``, which is also a legal agent id -- a declared agent
-    with that id must be asked as an AGENT. ``confined_scopes`` walks the same rows, so index
-    N of its answer is scope N of this list.
+    would miss the entry), Python ``None`` for the synthesised default agent that has no
+    roster row (the caller asks the ``GLOBAL_SCOPE`` sentinel instead -- see
+    ``_write_scopes`` below). ``None`` is this module's OWN internal marker, not
+    ``toolgrant.GLOBAL_SCOPE`` itself, only so a plain ``is None`` tells "no roster row"
+    apart from "a roster row" without reaching into ``toolgrant`` -- C-561 made
+    ``GLOBAL_SCOPE`` a private sentinel TYPE (not the string ``"global"``), so storing it
+    here directly would no longer even risk the collision this docstring used to warn about;
+    ``None`` is kept anyway because it is this module's own, narrower distinction.
+    ``confined_scopes`` walks the same rows, so index N of its answer is scope N of this
+    list.
     """
     main = _default_agent_id(cfg)
     rows = [(_normalize_agent_id(agent.id), agent.entry,
@@ -536,8 +541,8 @@ def _write_scopes(cfg: dict, tools, undecided_only: bool):
             # No roster: `agents.defaults.tools` IS this scope's own tools (toolgrant reads it
             # the same way), so its byProvider/toolsBySender are that scope's unresolved layers.
             continue
-        if not any(granted(cfg, tool, GLOBAL_SCOPE if grant_id is None else grant_id,
-                           agent=grant_id is not None) for tool in tools):
+        if not any(granted(cfg, tool, GLOBAL_SCOPE if grant_id is None else grant_id)
+                   for tool in tools):
             continue
         out.append(name)
     return out

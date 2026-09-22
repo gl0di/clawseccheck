@@ -924,7 +924,7 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
         if not _entry.entry.get("tools"):
             continue
         scoped |= {t for t in _B68_FS_TOOLS
-                    if _toolgrant.granted(cfg, t, _entry.id, agent=True)}
+                    if _toolgrant.granted(cfg, t, _entry.id)}
 
     # `agents.defaults.tools` is the second DECLARED per-agent surface, and it is a scope
     # only when NO roster exists -- measured against the vendor: declared with no roster it
