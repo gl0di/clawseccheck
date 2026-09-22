@@ -132,6 +132,48 @@ def test_non_positive_or_non_integer_limits_fall_back_to_default_and_pass():
         assert _finding_direct(cfg).status == PASS, f"maxConcurrent={bogus!r} must fall back to default"
 
 
+# ---- fix (a): float-integral values (JSON `1e3`/`1000.0`) mirror Number.isInteger ----
+
+
+def test_float_integral_at_hard_ceiling_fails_same_as_int_form():
+    # `1e3` parses in Python's json module as a float, not an int -- the runtime
+    # (`Number.isInteger`) treats it identically to the literal integer 1000.
+    for value in (1e3, 1000.0):
+        cfg = {**_BASELINE, "tools": {"swarm": {"enabled": True, "maxConcurrent": value}}}
+        assert _finding_direct(cfg).status == FAIL, f"maxConcurrent={value!r} must FAIL like int 1000"
+
+
+def test_float_integral_far_past_ceiling_still_fails():
+    cfg = {**_BASELINE, "tools": {"swarm": {"enabled": True, "maxConcurrent": 999999.0}}}
+    assert _finding_direct(cfg).status == FAIL
+
+
+def test_float_integral_raised_warns_same_as_int_form():
+    cfg = {
+        **_BASELINE,
+        "tools": {"swarm": {"enabled": True, "maxConcurrent": 64.0}},
+        "channels": {"telegram": {"dmPolicy": "open"}},
+    }
+    f = _finding_direct(cfg)
+    assert f.status == WARN
+    assert any("maxConcurrent" in e for e in f.evidence)
+
+
+def test_non_integral_or_non_finite_float_still_falls_back_to_default():
+    # 1000.5 is not Number.isInteger; inf/nan are not finite. All three must still fall
+    # back to the vendor default, exactly as before this fix -- never a hidden FAIL/WARN.
+    for bogus in (1000.5, float("inf"), float("nan")):
+        cfg = {**_BASELINE, "tools": {"swarm": {"enabled": True, "maxConcurrent": bogus}}}
+        assert _finding_direct(cfg).status == PASS, f"maxConcurrent={bogus!r} must fall back to default"
+
+
+def test_bool_still_falls_back_despite_being_an_int_subclass():
+    # bool is a subclass of int in Python but is never a float, so it is untouched by
+    # the new float-integral coercion and must keep falling back, as before.
+    cfg = {**_BASELINE, "tools": {"swarm": {"enabled": True, "maxConcurrent": True}}}
+    assert _finding_direct(cfg).status == PASS
+
+
 # ---- WARN: raised above default, below the hard ceiling, untrusted channel reachable ----
 
 
@@ -187,6 +229,28 @@ def test_maxchildrenpergroup_at_hard_ceiling_fails():
 def test_disabled_scope_at_ceiling_never_fails():
     cfg = {**_BASELINE, "tools": {"swarm": {"enabled": False, "maxConcurrent": 1_000_000}}}
     assert _finding_direct(cfg).status == PASS
+
+
+# ---- fix (b): waitTimeoutSecondsMax is not an admission-control field, so its own
+# hard ceiling stays WARN-eligible (gated on reachability), never the ungated FAIL tier.
+
+
+def test_wait_timeout_at_hard_ceiling_with_no_channels_does_not_fail():
+    cfg = {**_BASELINE, "tools": {"swarm": {"enabled": True, "waitTimeoutSecondsMax": 86400}}}
+    f = _finding_direct(cfg)
+    assert f.status != FAIL
+    assert f.status == PASS
+
+
+def test_wait_timeout_at_hard_ceiling_with_untrusted_channel_still_warns():
+    cfg = {
+        **_BASELINE,
+        "tools": {"swarm": {"enabled": True, "waitTimeoutSecondsMax": 86400}},
+        "channels": {"telegram": {"dmPolicy": "open"}},
+    }
+    f = _finding_direct(cfg)
+    assert f.status == WARN
+    assert any("waitTimeoutSecondsMax" in e for e in f.evidence)
 
 
 # ---- per-agent override: merges over global, mirrors resolveSwarmConfig ----
@@ -262,6 +326,141 @@ def test_found_but_completely_empty_config_passes():
     assert f.status == PASS
 
 
+# ---- fix (d): a raised/maxed limit is moot when the gating tool (sessions_spawn /
+# agents_wait) is not even reachable under tools.profile/tools.alsoAllow ----
+
+
+def test_minimal_profile_with_maxed_maxconcurrent_does_not_fail():
+    # "minimal" grants neither sessions_spawn nor agents_wait -- maxConcurrent gates on
+    # sessions_spawn, so a maxed value here is unreachable and must not FAIL.
+    cfg = {
+        **_BASELINE,
+        "tools": {"profile": "minimal", "swarm": {"enabled": True, "maxConcurrent": 1000}},
+    }
+    f = _finding_direct(cfg)
+    assert f.status == PASS
+    assert any("maxConcurrent" in e for e in f.evidence)
+
+
+def test_minimal_profile_plus_alsoallow_sessions_spawn_fails_again():
+    # tools.alsoAllow is the schema's escape hatch: it grants sessions_spawn back on
+    # top of "minimal", so the same maxed value is reachable again and must FAIL.
+    cfg = {
+        **_BASELINE,
+        "tools": {
+            "profile": "minimal",
+            "alsoAllow": ["sessions_spawn"],
+            "swarm": {"enabled": True, "maxConcurrent": 1000},
+        },
+    }
+    f = _finding_direct(cfg)
+    assert f.status == FAIL
+
+
+def test_minimal_profile_does_not_grant_agents_wait_either():
+    cfg = {
+        **_BASELINE,
+        "tools": {
+            "profile": "minimal",
+            "swarm": {"enabled": True, "waitTimeoutSecondsMax": 86400},
+        },
+        "channels": {"telegram": {"dmPolicy": "open"}},
+    }
+    assert _finding_direct(cfg).status == PASS
+
+
+def test_messaging_profile_grants_sessions_spawn_but_not_agents_wait():
+    # sessions_spawn's profiles are ["coding","messaging"]; agents_wait's are
+    # ["coding"] only -- messaging must FAIL on a maxed maxConcurrent but not on a
+    # maxed waitTimeoutSecondsMax (dropped as unreachable there).
+    spawn_cfg = {
+        **_BASELINE,
+        "tools": {"profile": "messaging", "swarm": {"enabled": True, "maxConcurrent": 1000}},
+    }
+    assert _finding_direct(spawn_cfg).status == FAIL
+    wait_cfg = {
+        **_BASELINE,
+        "tools": {"profile": "messaging", "swarm": {"enabled": True, "waitTimeoutSecondsMax": 86400}},
+    }
+    assert _finding_direct(wait_cfg).status == PASS
+
+
+def test_full_profile_grants_both_tools():
+    cfg = {
+        **_BASELINE,
+        "tools": {"profile": "full", "swarm": {"enabled": True, "maxConcurrent": 1000}},
+    }
+    assert _finding_direct(cfg).status == FAIL
+
+
+def test_absent_profile_is_permissive_not_minimal():
+    # An absent tools.profile pushes NO policy at all (resolveCoreToolProfilePolicy:
+    # `if (!profile) return;`) -- the permissive end, same as every other
+    # profile+alsoAllow read in this codebase. It must NOT be treated as "minimal".
+    cfg = {**_BASELINE, "tools": {"swarm": {"enabled": True, "maxConcurrent": 1000}}}
+    assert _finding_direct(cfg).status == FAIL
+
+
+def test_unrecognised_profile_is_unknown_not_a_silent_pass():
+    cfg = {
+        **_BASELINE,
+        "tools": {"profile": "not-a-real-profile", "swarm": {"enabled": True, "maxConcurrent": 1000}},
+    }
+    f = _finding_direct(cfg)
+    assert f.status == UNKNOWN
+    assert any("maxConcurrent" in e for e in f.evidence)
+
+
+def test_non_string_profile_is_unknown_not_a_silent_pass():
+    cfg = {
+        **_BASELINE,
+        "tools": {"profile": 12345, "swarm": {"enabled": True, "maxConcurrent": 1000}},
+    }
+    assert _finding_direct(cfg).status == UNKNOWN
+
+
+def test_agent_scope_profile_overrides_global_for_reachability():
+    # Global grants sessions_spawn ("coding"); the researcher agent's own "minimal"
+    # profile REPLACES it for that agent's scope (per-key ?? resolution), so the
+    # agent's own maxed maxConcurrent is unreachable and must not contribute a FAIL.
+    cfg = {
+        **_BASELINE,
+        "tools": {"profile": "coding", "swarm": {"enabled": True}},
+        "agents": {
+            "defaults": {"sandbox": {"mode": "all"}},
+            "entries": {
+                "researcher": {
+                    "tools": {"profile": "minimal", "swarm": {"maxConcurrent": 1000}},
+                }
+            },
+        },
+    }
+    f = _finding_direct(cfg)
+    assert f.status == PASS
+    assert any("researcher" in e for e in f.evidence)
+
+
+def test_agent_scope_inherits_global_alsoallow_for_reachability():
+    # The agent overrides tools.profile to "minimal" but does not set its own
+    # alsoAllow, so it inherits the GLOBAL alsoAllow independently of the profile
+    # override (agentTools?.alsoAllow ?? globalTools?.alsoAllow).
+    cfg = {
+        **_BASELINE,
+        "tools": {"profile": "coding", "alsoAllow": ["sessions_spawn"], "swarm": {"enabled": True}},
+        "agents": {
+            "defaults": {"sandbox": {"mode": "all"}},
+            "entries": {
+                "researcher": {
+                    "tools": {"profile": "minimal", "swarm": {"maxConcurrent": 1000}},
+                }
+            },
+        },
+    }
+    f = _finding_direct(cfg)
+    assert f.status == FAIL
+    assert any("researcher" in e for e in f.evidence)
+
+
 # ---- UNKNOWN: config truly unreadable — distinct engine-degraded case ----
 
 
@@ -305,3 +504,86 @@ def test_b392_registered_in_audit():
 def test_full_pipeline_round_trip_matches_direct_call():
     cfg = {**_BASELINE, "tools": {"swarm": {"enabled": True, "maxConcurrent": 1000}}}
     assert _finding_via_home(cfg).status == _finding_direct(cfg).status == FAIL
+
+
+# ---- tools.allow: the other, mutually-exclusive grant shape ----
+# OpenClaw rejects allow+alsoAllow in one scope (zod-schema.agent-runtime-DQfiImgc.mjs:
+# 367-369), so a config using `tools.allow` never carries the alsoAllow escape hatch this
+# check reads. An allow-list omitting sessions_spawn plausibly makes the fan-out surface
+# unreachable -- but `tools.allow` is its own policy layer beside the profile's and this
+# check has not traced how the two combine, so it reports UNKNOWN rather than guessing
+# either way. These pin that it is neither a FAIL (the false positive) nor a silent PASS.
+
+
+def test_explicit_allow_omitting_the_spawn_tool_is_unknown_not_fail():
+    cfg = {
+        **_BASELINE,
+        "tools": {
+            "allow": ["read", "write"],
+            "swarm": {"enabled": True, "maxConcurrent": 1000},
+        },
+    }
+    f = _finding_direct(cfg)
+    assert f.status == UNKNOWN, f.detail
+    assert f.status != FAIL
+
+
+def test_explicit_allow_granting_the_spawn_tool_still_fails():
+    cfg = {
+        **_BASELINE,
+        "tools": {
+            "allow": ["read", "sessions_spawn"],
+            "swarm": {"enabled": True, "maxConcurrent": 1000},
+        },
+    }
+    assert _finding_direct(cfg).status == FAIL
+
+
+def test_empty_allow_list_does_not_suppress_the_finding():
+    """An empty list grants nothing explicitly; it must not read as "omits the tool" and
+    silently downgrade a maxed config -- that would be absence treated as safety."""
+    cfg = {
+        **_BASELINE,
+        "tools": {"allow": [], "swarm": {"enabled": True, "maxConcurrent": 1000}},
+    }
+    assert _finding_direct(cfg).status == FAIL
+
+
+def test_allow_is_resolved_per_agent_over_the_global_one():
+    cfg = {
+        **_BASELINE,
+        "tools": {"allow": ["sessions_spawn"], "swarm": {"enabled": True}},
+        "agents": {
+            "entries": {
+                "main": {
+                    "tools": {
+                        "allow": ["read"],
+                        "swarm": {"enabled": True, "maxConcurrent": 1000},
+                    }
+                }
+            }
+        },
+    }
+    f = _finding_direct(cfg)
+    assert f.status == UNKNOWN, f.detail
+
+
+def test_per_agent_allow_control_same_config_grants_the_tool_and_fails():
+    """The paired control for the test above: identical config except the agent's own
+    allow-list grants sessions_spawn. Without this pair, an UNKNOWN there could just as
+    well come from the global scope and the per-agent resolution would be untested."""
+    cfg = {
+        **_BASELINE,
+        "tools": {"allow": ["sessions_spawn"], "swarm": {"enabled": True}},
+        "agents": {
+            "entries": {
+                "main": {
+                    "tools": {
+                        "allow": ["sessions_spawn"],
+                        "swarm": {"enabled": True, "maxConcurrent": 1000},
+                    }
+                }
+            }
+        },
+    }
+    assert _finding_direct(cfg).status == FAIL
