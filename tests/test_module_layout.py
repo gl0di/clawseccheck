@@ -124,7 +124,7 @@ _EXEMPT = {
                           "own change with its own verification (byte-identical audit "
                           "output at every step, as I-022-R2 did); this entry's job is to "
                           "stop recording a non-reason as a decision.",
-    "checks/_vet.py": "~7,080 lines — the --vet entry engine (vet_skill/vet_source/"
+    "checks/_vet.py": "~7,638 lines — the --vet entry engine (vet_skill/vet_source/"
                       "detect_vet_type/check_installed_skills + SKILL_CONTENT_RING + the "
                       "shared effect/sink analysis); consumes the content ring. Restated "
                       "2026-09-07 with the shape measured rather than described: "
@@ -146,7 +146,15 @@ _EXEMPT = {
                       "So the split argument stands and is now specific: the honesty and "
                       "fence layers are what to lift out, not an arbitrary halving. Same "
                       "sequencing as checks/_content.py — that one is twice this size and "
-                      "has the simpler seam, so it goes first.",
+                      "has the simpler seam, so it goes first. "
+                      "Restated 2026-09-22 (B-857): 7,080 -> 7,638. The module had already "
+                      "drifted to 7,578 (unrestated since the count above) before this task; "
+                      "it added the ~60 lines closing a B-745 review gap — "
+                      "_B13_WINNER_ONLY_BUCKETS and its per-site pointer comments, "
+                      "explicitly declaring three late-registered B13 buckets as "
+                      "winner-only rather than leaving that undeclared. Verdict text and a "
+                      "named contract, not new detection; the split argument above is "
+                      "unchanged.",
     "checks/_host.py": "~1,779 lines — the host-monitor / incident-readiness topic "
                        "(B10/B16/B50-B54 + the attestation helpers). Sat at EXACTLY 1,200 "
                        "for a while, i.e. one line under a tripwire, and crossed it with "

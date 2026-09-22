@@ -2308,6 +2308,32 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         if cached is not None:
             return cached
 
+    # B-857: the skill a stowaway entry recorded below belongs to. `ctx.stowaway_files`
+    # is one FLAT list shared across every skill a sweep scans (collector.py's
+    # `_read_installed_skills` calls this function once per skill against the same
+    # `ctx`), and each entry used to be only the file's path RELATIVE TO ITS OWN skill
+    # dir — indistinguishable from another skill's `lib/x.node` bearing the same
+    # relative path.
+    #
+    # Deliberately `skill_dir.name` in BOTH branches (not `_note_skill_gap`'s
+    # directory-only `skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name`
+    # convention): `skill_dir` here is also, per B-152, sometimes a bare skill ARCHIVE
+    # FILE passed straight to --vet-skill, and `.name` on a file path is already that
+    # file's own basename (e.g. "malicious-skill.zip") — no ".parent" needed, and taking
+    # it would instead name the archive's CONTAINING FOLDER (e.g. "downloads"), which is
+    # not a skill at all and disagrees with the identity `_vet_resolved_skill` gives the
+    # very same target (`p.name`, checks/_vet.py). Verified: the parent-dir form printed
+    # "downloads: malicious-skill.zip::helper.bin (ELF)" for exactly that target — wrong
+    # AND redundant, since `sub_relpath` already spells out the archive as
+    # "malicious-skill.zip::helper.bin" in this path. Using `skill_dir.name` instead
+    # fixes "wrong" (it now names the archive itself, matching `_vet_resolved_skill`);
+    # it stays cosmetically redundant in that one single-archive-target shape
+    # ("malicious-skill.zip: malicious-skill.zip::helper.bin (ELF)") — accepted rather
+    # than special-cased, since the ONLY place that redundancy can occur is a single-
+    # target vet call with exactly one candidate owner, where there is nothing to
+    # actually misattribute to.
+    _stowaway_owner = skill_dir.name
+
     if skill_dir.is_file():
         # Anchor relative paths / traversal checks on the parent dir, same as
         # is_safe_tar_member expects a directory, never the archive file itself.
@@ -2626,8 +2652,17 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     # F-054: a native executable (ELF/PE/Mach-O/JVM class) bundled inside a
                     # skill is a stowaway — skills are text/config; a compiled binary the
                     # prose doesn't need has no business here. Recorded for a WARN.
+                    #
+                    # B-857: prefixed with `_stowaway_owner` — see that variable's own
+                    # comment above. Before this, a two-skill home (one with a benign
+                    # `process.dlopen()` WARN, a separate one merely bundling `tool.node`)
+                    # rendered "both: process.dlopen() ..." beside "coverage: native
+                    # executable(s) bundled in the skill ... tool.node (ELF)" with nothing
+                    # to stop a reader attributing `tool.node` to `both`. Reproduced
+                    # end-to-end in tests/test_b745_stowaway_coverage.py::
+                    # test_coverage_note_names_the_owning_skill_not_just_the_cascade_winner.
                     if sub_fmt in ("ELF", "PE", "class", "pyc", "wasm") or (sub_fmt or "").startswith("Mach-O"):
-                        ctx.stowaway_files.append(f"{sub_relpath} ({sub_fmt})")
+                        ctx.stowaway_files.append(f"{_stowaway_owner}: {sub_relpath} ({sub_fmt})")
             
             # B-538: decode ONCE, here, and carry the text forward. The manifest entry
             # below is a claim about what the readers will actually receive, so it has to

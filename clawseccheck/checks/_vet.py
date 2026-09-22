@@ -4220,6 +4220,52 @@ def _b13_verdict(
     return fx
 
 
+# B-857 (closing two DoD gaps left open by B-745's review): the C-256 census above is
+# retention-only bookkeeping — it does not by itself guarantee every bucket's fact is
+# even REACHABLE when a different bucket wins. A bucket registered into
+# `_signal_buckets` only at its own point in the cascade — after several earlier
+# `if <bucket>: return _b13_verdict(...)` branches have already had their chance to
+# return — is invisible to every one of those earlier winners: the dict simply does not
+# contain the key yet when they call `_b13_verdict`. B-746 (`path_traversal`) and B-745
+# (`_stowaway_note`, carved out of the `warnings` bucket) each fixed one instance of this
+# by registering the fact EAGERLY, before the cascade begins, so it survives into
+# `corroborating_buckets`/`evidence` regardless of which arm wins.
+#
+# The three buckets below are deliberately NOT given that treatment. Each is
+# skip-computed today precisely so an earlier, higher-priority winner (crit / high /
+# parse_error_paths, or any earlier WARN bucket) avoids paying for a scan the cascade
+# will never consult otherwise — see each bucket's own computation site. Registering
+# them eagerly would mean ALWAYS running `limit_hits_for`, the mismatch/polyglot/binary/
+# symlink/obfuscation sweep, and `warns_squat`'s per-skill edit-distance typosquat scan
+# on every audit — including the common case where crit/high already won and none of
+# that evidence is ever read. This dict is the explicit acceptance the DoD in
+# B-857 asks for: a key registered here is accepted as a WINNER-ONLY fact,
+# disclosed only when it is itself the winning arm — never when a different bucket wins
+# first. `tests/test_b857_bucket_disclosure_coverage.py` parses the real cascade source
+# and fails the build the moment a late `_signal_buckets[...] = ...` registration is
+# added (or one of these three is removed) without a matching update here, so this
+# cannot silently go stale the way the C-256 comment above already had.
+_B13_WINNER_ONLY_BUCKETS: dict[str, str] = {
+    "skill_limit_hits": (
+        "skip-computed: limit_hits_for() only needs to run once no higher-priority "
+        "bucket (crit/high/parse_error_paths) already won; making it eager would run "
+        "it on every audit for no benefit on the common case where one of those wins."
+    ),
+    "warnings": (
+        "skip-computed: the mismatch/polyglot/symlink/filename-obfuscation/binary "
+        "sweep only needs to run once every higher-priority bucket above it is known "
+        "empty. The one fact worth surfacing regardless of winner — a bundled native "
+        "executable — was already carved out into the eager `_stowaway_note` bucket "
+        "(B-745, see its own comment above); the rest of this bucket stays winner-only."
+    ),
+    "warns_squat": (
+        "skip-computed: the typosquat scan runs an edit-distance comparison against "
+        "every dependency/skill name for every skill, and only needs to run once every "
+        "earlier bucket is known empty — the same rationale as skill_limit_hits above."
+    ),
+}
+
+
 def check_installed_skills(ctx: Context) -> Finding:
     # Lazy import to avoid circular dependency: logsafe imports SECRET_PATTERNS
     # from this module, so a top-level "from .logsafe import redact" would cycle.
@@ -5118,10 +5164,16 @@ def check_installed_skills(ctx: Context) -> Finding:
     n = len(skills)
     # C-256: running census of every bucket already computed by this point in the
     # chain — see _b13_verdict's docstring above. Buckets computed lazily further
-    # down (skill_limit_hits, path_traversal, the mismatch/polyglot/binary
-    # `warnings` list, warns_squat) are registered at their own point of
-    # computation, never eagerly. ONE exception: `_skill_read_gaps` immediately
-    # below, which is deliberately eager — see its own comment.
+    # down (skill_limit_hits, the mismatch/polyglot/binary `warnings` list,
+    # warns_squat) are registered at their own point of computation, never eagerly
+    # — see `_B13_WINNER_ONLY_BUCKETS` below for why that is a kept decision, not
+    # an open gap. `_skill_read_gaps` immediately below is deliberately eager — see
+    # its own comment. So, since B-857, is `_stowaway_note` — see its own comment
+    # a little further down. And `path_traversal`, registered eagerly a little
+    # further down still, per B-746: this comment used to name it here too, which
+    # went stale the moment that move landed; corrected instead of left to drift
+    # further, per this file's own C-256/B-743 precedent for not re-attesting a
+    # number nobody re-measured.
     #
     # B-552: a skill's own unreadable-content gap must survive a DIFFERENT skill
     # winning the crit/high verdict below (crit/high `return` before
@@ -5334,6 +5386,8 @@ def check_installed_skills(ctx: Context) -> Finding:
     # an entry that cannot say which scan it truncated must not be assumed harmless), so
     # this can only ever narrow to the truth, never invent a clean PASS.
     skill_limit_hits = limit_hits_for(ctx, LIMIT_DOMAIN_SKILL)
+    # B-857: registered here, late (skip-computed) — winner-only by design, see
+    # `_B13_WINNER_ONLY_BUCKETS["skill_limit_hits"]` above for the reason.
     _signal_buckets["skill_limit_hits"] = skill_limit_hits
     if skill_limit_hits:
         # F-087: padding_anomalies is a SEPARATE, narrower channel — only the text-slice
@@ -5914,6 +5968,10 @@ def check_installed_skills(ctx: Context) -> Finding:
             "unrecognised binary file(s): " + ", ".join(ctx.binary_files[:4])
         )
 
+    # B-857: registered here, late (skip-computed) — winner-only by design, see
+    # `_B13_WINNER_ONLY_BUCKETS["warnings"]` above for the reason (the native-binary
+    # fact inside this list is the one exception: carved out into the eager
+    # `_stowaway_note` bucket by B-745, see its own comment above).
     _signal_buckets["warnings"] = warnings
     if warnings:
         return _b13_verdict(
@@ -5958,6 +6016,8 @@ def check_installed_skills(ctx: Context) -> Finding:
                 f"(possible typosquat, edit distance {d})"
             )
 
+    # B-857: registered here, late (skip-computed) — winner-only by design, see
+    # `_B13_WINNER_ONLY_BUCKETS["warns_squat"]` above for the reason.
     _signal_buckets["warns_squat"] = warns_squat
     if warns_squat:
         extra = f" (+{len(warns_squat) - 6} more)" if len(warns_squat) > 6 else ""
