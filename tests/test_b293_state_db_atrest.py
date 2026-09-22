@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -207,6 +208,144 @@ def test_readable_beats_writable_when_both_apply(tmp_path, reachable_ancestors):
     """A readable DB is the more severe finding and must win over the swap WARN."""
     ctx = _home(tmp_path, home_mode=0o755, state_mode=0o777, db_mode=0o644)
     assert check_state_db_atrest(ctx).status == FAIL
+
+
+# --------------------------------------------------------------------------------------
+# C-555: retained copies of the state database — a recovery
+# snapshot under state/**, or any file under ~/.openclaw/backups/** — are exactly as exposed
+# as their parent chain, capped at WARN (never the device-keys FAIL wording above).
+# --------------------------------------------------------------------------------------
+
+def _add_file(base: Path, rel_dir: str, name: str, *, file_mode=0o600, dir_mode=0o700) -> Path:
+    """Drop one file under ``base/rel_dir/name`` with the given file/dir modes. ``rel_dir``'s
+    own directory is chmod'ed to *dir_mode*; any parent above it (e.g. ``state/``) is left as
+    whatever ``_home()`` already set, matching how a real recovery/backup subdirectory sits
+    inside an already-built tree."""
+    d = base / rel_dir
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / name
+    # Deliberately not a real SQLite file — this check must never open it (§8).
+    f.write_bytes(b"not-a-real-sqlite-file")
+    os.chmod(f, file_mode)
+    os.chmod(d, dir_mode)
+    return f
+
+
+def test_world_readable_state_recovery_copy_is_warn_not_fail(tmp_path, reachable_ancestors):
+    """OpenClaw 9.5's ``recoverOrphanTaskDeliveryRows`` drops a full DB copy under
+    ``state/openclaw-task-delivery-recovery-*/``. A world-readable copy is a real exposure —
+    but capped at WARN, never the device-keys FAIL wording, since a copy's provenance/
+    freshness is less certain than the live DB."""
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=0o755, db_mode=0o600)
+    _add_file(ctx.home / "state", "openclaw-task-delivery-recovery-abc123", "openclaw.sqlite",
+              file_mode=0o644, dir_mode=0o755)
+    f = check_state_db_atrest(ctx)
+    assert f.status == WARN
+    assert "retained copy" in f.detail.lower()
+    assert any("openclaw-task-delivery-recovery-abc123" in e for e in f.evidence)
+
+
+def test_world_readable_backups_copy_is_warn_not_fail(tmp_path, reachable_ancestors):
+    """The other C-555 leg: a pre-repair/migration backup under ~/.openclaw/backups/** —
+    a directory B188 never looked at before this task, and distinct from F-120's
+    ``.openclaw-install-backups/**`` that B19 already covers."""
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=0o755, db_mode=0o600)
+    _add_file(ctx.home, "backups/pre-repair-2026-09-09", "openclaw.sqlite.bak",
+              file_mode=0o644, dir_mode=0o755)
+    f = check_state_db_atrest(ctx)
+    assert f.status == WARN
+    assert any("backups/pre-repair-2026-09-09" in e for e in f.evidence)
+
+
+def test_c555_positive_control_0600_copy_in_0700_chain_does_not_fire(tmp_path, reachable_ancestors):
+    """THE positive control the task calls for: a 0600 copy sealed inside a 0700 chain must
+    stay silent, exactly like the primary DB's own false-positive guard above."""
+    ctx = _home(tmp_path)  # the reference chain: 0700 home / 0700 state / 0600 db
+    _add_file(ctx.home / "state", "openclaw-task-delivery-recovery-abc123", "openclaw.sqlite",
+              file_mode=0o600, dir_mode=0o700)
+    _add_file(ctx.home, "backups/pre-repair-2026-09-09", "openclaw.sqlite.bak",
+              file_mode=0o600, dir_mode=0o700)
+    f = check_state_db_atrest(ctx)
+    assert f.status == PASS
+    assert f.pass_confidence == "verified"
+
+
+def test_c555_measured_real_shape_heartbeat_migration_backup_does_not_fire(tmp_path, reachable_ancestors):
+    """Reproduces the exact shape measured on the reference machine during this task: a
+    loose-MODE file (0664 — group-write, world-read) sitting inside a 0700 backups
+    subdirectory. The file's own bits are irrelevant because nothing can traverse down to
+    it — this is what 'a copy is exactly as exposed as its parent chain' means in practice,
+    not just for the primary DB."""
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=0o755, db_mode=0o600)
+    _add_file(ctx.home, "backups/heartbeat-migration", "main-deadbeef.md",
+              file_mode=0o664, dir_mode=0o700)
+    f = check_state_db_atrest(ctx)
+    assert f.status == PASS
+
+
+def test_c555_primary_fail_still_wins_over_copy_warn(tmp_path, reachable_ancestors):
+    """A readable primary DB is the more severe finding; an also-exposed copy must not
+    downgrade it, and the FAIL wording must stay the device-keys one, not the copy WARN."""
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=0o755, db_mode=0o644)
+    _add_file(ctx.home, "backups/pre-repair-2026-09-09", "openclaw.sqlite.bak",
+              file_mode=0o644, dir_mode=0o755)
+    f = check_state_db_atrest(ctx)
+    assert f.status == FAIL
+    assert "impersonate a paired device" in f.detail
+
+
+def test_c555_swap_vector_warn_still_wins_over_copy_warn(tmp_path, reachable_ancestors):
+    """The pre-existing swap-vector WARN (writable state/) is the more specific finding
+    about the LIVE database; an also-exposed copy must not silently replace its wording."""
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=0o777, db_mode=0o600)
+    _add_file(ctx.home, "backups/pre-repair-2026-09-09", "openclaw.sqlite.bak",
+              file_mode=0o644, dir_mode=0o755)
+    f = check_state_db_atrest(ctx)
+    assert f.status == WARN
+    assert "replace the database" in f.detail
+
+
+def test_c555_unknown_when_backups_dir_cannot_be_listed(tmp_path, reachable_ancestors, monkeypatch):
+    """Golden Rule #4: a directory this audit cannot enumerate must not read as a clean
+    PASS. Simulated rather than a real chmod-000 dir, so the test is not root-dependent."""
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=0o755, db_mode=0o600)
+    backups_dir = ctx.home / "backups"
+    backups_dir.mkdir()
+    os.chmod(backups_dir, 0o755)  # itself reachable — the UNKNOWN must actually matter
+
+    real_rglob = Path.rglob
+
+    def _boom(self, pattern):
+        if self == backups_dir:
+            raise PermissionError("simulated: cannot list backups/")
+        return real_rglob(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", _boom)
+    f = check_state_db_atrest(ctx)
+    assert f.status == UNKNOWN
+    assert "could not list" in f.detail or "cannot" in f.detail.lower()
+
+
+def test_c555_unlistable_dir_stays_pass_when_unreachable(tmp_path, monkeypatch):
+    """The other direction: if the unlistable directory is itself sealed by ~/.openclaw or a
+    parent above it, its unknown contents are moot — PASS still stands. No
+    ``reachable_ancestors`` here: the real, unpatched ancestor gate applies, and pytest's own
+    0700 tmp root seals it."""
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=0o755, db_mode=0o600)
+    backups_dir = ctx.home / "backups"
+    backups_dir.mkdir()
+    os.chmod(backups_dir, 0o755)
+
+    real_rglob = Path.rglob
+
+    def _boom(self, pattern):
+        if self == backups_dir:
+            raise PermissionError("simulated: cannot list backups/")
+        return real_rglob(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", _boom)
+    f = check_state_db_atrest(ctx)
+    assert f.status == PASS
 
 
 # --------------------------------------------------------------------------------------
