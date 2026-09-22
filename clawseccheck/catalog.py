@@ -1733,50 +1733,6 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         surface="agents",
     ),
-    # B392: tools.swarm (collector-mode subagent fan-out), re-grounded against the
-    # installed 2026.9.5 dist against an earlier shortlist reading — see
-    # checks/_agents.py::check_swarm_fanout_limits for the full citation trail.
-    # `enabled` actually defaults to true (the shortlist read "default is off" off the
-    # vendor's own UI description text, not the runtime resolver), and the resolver's
-    # own Math.min clamp means no config can reach a literally unbounded limit — the
-    # closest is a value at/past the vendor's own hard ceiling (1000 / 10,000 /
-    # 100,000 for the three admission-control fields maxConcurrent /
-    # maxChildrenPerGroup / maxTotalPerGroup). FAIL-capable on those three fields
-    # only: unlike B81's WARN-only ceiling, an explicit push to that vendor hard
-    # ceiling is treated as unambiguous on its own (no untrusted-channel gate).
-    # waitTimeoutSecondsMax is excluded from this FAIL tier (C-135 fix, F-200): its
-    # sole consumer only clamps one `agents_wait` call's timeout and neither spawns
-    # nor admits anything, so even at its own ceiling it stays in the WARN-eligible
-    # tier, gated on reachability like every other raised field.
-    #
-    # Precedent, corrected: an earlier draft of this comment cited B21/B39/B327 as
-    # "the idiom this check follows" for an ungated FAIL on a deterministic dangerous
-    # value. That citation was wrong for B39 — B39's FAIL is itself reachability-gated
-    # (checks/_agents.py::check_session_isolation only appends its FAIL evidence when
-    # dm_scope_resolved=="main" AND _external_input_channels(cfg) is non-empty), so it
-    # is not an example of an ungated idiom at all. B21 (an explicit bootstrap
-    # directive to obey untrusted tool/web output) and B327
-    # (agents.defaults.embeddedAgent.projectSettingsPolicy=="trusted") are genuine
-    # ungated-FAIL precedents, but both key off a categorical, discrete value with no
-    # ordinary benign reading. This check's three fan-out fields are a narrower fit
-    # for that idiom: they are numeric thresholds on a continuous scale, and a
-    # legitimately large deployment could deliberately configure one at the vendor's
-    # own ceiling for real throughput reasons, not just recklessness. What is not
-    # narrower is the ceiling's provenance: it is the vendor's own hard-coded maximum
-    # (Math.min(value, cap)), not a threshold this check invented, so FAIL still marks
-    # the single most extreme configuration this surface allows — just with a weaker
-    # "no benign reading" claim than B21/B327.
-    CheckMeta(
-        "B392",
-        "tools.swarm collector-mode subagent fan-out limits raised toward/past the "
-        "vendor's hard ceiling",
-        MEDIUM,
-        "hardening",
-        "Least Privilege / Subagents",
-        scored=True,
-        confidence="HIGH",
-        surface="agents",
-    ),
     CheckMeta(
         "B82",
         "Cache-trace diagnostics persist full turn transcripts to disk",
@@ -3768,7 +3724,6 @@ AST_MAP = {
     "B359": ("AST06",),  # remote-gateway SSH host-key verification delegated to OpenSSH = weak isolation (cf. B340)
     "B360": ("AST06",),  # Control-UI embed sandbox "trusted" removes origin isolation = weak isolation (cf. B330)
     "B81": ("AST03",),  # raised subagent spawn limits = over-privileged delegation (cf. B72)
-    "B392": ("AST03",),  # swarm fan-out limits at/past the vendor ceiling = over-privileged delegation (cf. B81)
     "B82": ("AST02",),  # bulk turn transcripts at rest = sensitive-data exposure (cf. C5)
     "B365": ("AST02",),  # otel content capture ships raw turns off-host = sensitive-data exposure (cf. B82)
     "B366": ("AST02",),  # memory.search.remote embeds/sends memory chunks off-host = sensitive-data exposure (cf. B82)
@@ -3926,7 +3881,6 @@ OWASP_MAP = {
     "C015": ("LLM02",),  # secrets-at-rest scan = Sensitive Info Disclosure (cf. B1)
     "B80": ("LLM10",),  # no rate limiting on an exposed auth'd gateway = Unbounded Consumption
     "B81": ("LLM06",),  # raised subagent spawn limits = Excessive Agency (cf. B72)
-    "B392": ("LLM06",),  # swarm fan-out limits at/past the vendor ceiling = Excessive Agency (cf. B81)
     "B82": ("LLM02",),  # unredacted transcripts persisted at rest = Sensitive Info Disclosure
     "B365": ("LLM02",),  # otel content capture ships raw turns off-host = Sensitive Info Disclosure
     "B366": ("LLM02",),  # memory.search.remote embeds/sends memory chunks off-host = Sensitive Info Disclosure

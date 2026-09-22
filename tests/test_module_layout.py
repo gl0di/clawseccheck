@@ -261,7 +261,7 @@ _EXEMPT = {
                              "gateway.nodes.commands dual-shape read for the "
                              "gateway.nodes.allowSkills / legacy skills.enabled rename. "
                              "A finer split is a later cycle.",
-    "checks/_agents.py": "~2,834 lines (restated 2026-09-22 for B392 — was ~2,239 on 2026-09-19/B-833, ~1,798 on 2026-09-11, ~1,358 before C-411; B392 alone added ~600, so this module is now the strongest split candidate after adjudication.py — a separate task, not this change) — "
+    "checks/_agents.py": "~2,239 lines (restated 2026-09-19, B-833 — was ~1,798 on 2026-09-11, ~1,358 before C-411) — "
                         "the multi-agent / subagent-exposure topic "
                         "(check_agent_separation, check_untrusted_context, "
                         "check_subagents_allow_agents, etc.). Crossed the budget with "

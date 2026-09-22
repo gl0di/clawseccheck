@@ -175,7 +175,6 @@ tools.message.actions.allow
 tools.message.crossContext
 tools.message.crossContext.allowAcrossProviders
 tools.profile
-tools.swarm
 tools.web
 tools.web.fetch.enabled
 tools.web.fetch.maxRedirects

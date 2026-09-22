@@ -278,7 +278,6 @@ from ._agents import (
     check_subagent_spawn_limits,
     check_subagents,
     check_subagents_allow_agents,
-    check_swarm_fanout_limits,
     check_tool_output_trust,
     check_untrusted_context,
     check_wildcard_group_ingress,
@@ -1559,7 +1558,6 @@ CHECKS = [
     # Control UI embed gets allow-same-origin (XSS in the embed reaches the operator).
     check_control_ui_embed_sandbox,
     check_subagent_spawn_limits,
-    check_swarm_fanout_limits,  # B392 (F-200) — beside B81, FAIL-capable at the vendor hard ceiling
     check_cachetrace_redaction,
     # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a
     # break-glass toggle left on in a file OpenClaw loads at startup. Both WARN-only.

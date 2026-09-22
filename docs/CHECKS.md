@@ -1505,18 +1505,6 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B392 - tools.swarm collector-mode subagent fan-out limits raised toward/past the vendor's hard ceiling
-
-- Severity: MEDIUM
-- Block: hardening
-- Framework: Least Privilege / Subagents
-- Scored: yes
-- Confidence: HIGH
-- OWASP: LLM06 Excessive Agency
-- What it checks: tools.swarm collector-mode subagent fan-out limits raised toward/past the vendor's hard ceiling
-- Remediation:
-  - none
-
 ### B82 - Cache-trace diagnostics persist full turn transcripts to disk
 
 - Severity: MEDIUM
