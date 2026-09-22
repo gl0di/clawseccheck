@@ -424,28 +424,25 @@ _EXEMPT = {
                      "detectors from the renderer would separate each verdict from the text "
                      "that discloses its own limits, which is the pairing B-245 and B-559 "
                      "both exist to keep. A finer split is a later cycle.",
-    "adjudication.py": "~2,433 lines — the judge-packet builder. Restated from ~1,920 on "
-                       "2026-09-16 by B-452: a sixth judge-packet-only evidence source "
-                       "(_keyword_gated_trigger_items, the antecedent/consequent structural "
-                       "detector for a keyword-gated hidden-trigger directive, plus its file-"
-                       "section/sentence-boundary helpers found necessary by two independent "
-                       "C-135 passes), the same shape as the pre-existing "
-                       "_recover_dropped_taint/_env_auth_kwarg_items sources — never a Finding, "
-                       "never scored, so it belongs beside its siblings rather than in "
-                       "checks/. Crossed the budget with the "
-                       "ESET H1 2026 gap-closure pass (C-361: config field-path extraction so "
-                       "the audit-path majority of findings, which cite a dig() path rather "
-                       "than a file:line, stop always hitting the contentless evidence "
-                       "fallback) and grew again with B-406 (duplicate (finding_id, target) "
-                       "verdict-entry resolution, order-independent by severity rank). "
-                       "Restated from ~1,570 on 2026-08-30 by B-689, which added the "
-                       "_CAP_LADDER constant and the comment block explaining why its "
-                       "wording is deliberately not shared with report._CAP_SIGNAL_TABLE. "
-                       "Restated from ~1,247 on 2026-08-24: it had drifted to 1,543 unnoticed "
-                       "(+24%, one point under this guard's tripwire) and B-618's cross-skill "
-                       "host attribution took it over. The guard fired for the right reason and "
-                       "the split is filed rather than waved off — restating the number without "
-                       "recording that would be the exact evasion this test exists to catch.",
+    # CLAWSECCHECK-C-455: adjudication.py (2,478 lines; the _EXEMPT reason had been
+    # restated three times since 2026-08-24 — ~1,247 -> ~1,570 -> ~1,920 -> ~2,433,
+    # each restatement filing the split rather than doing it, and the file grew again
+    # to 2,478 before this task landed) is now the `adjudication/` package below.
+    # `_verdicts.py` (803 lines) and `__init__.py` (132 lines, the aggregator) both came
+    # out under the 1,200-line budget and need no exemption; only the builder half does.
+    "adjudication/_builder.py": "~1,736 lines — the judge-packet BUILDER half of the "
+                                "C-455 split: the evidence sources (recovered taint, "
+                                "env-auth-kwarg exfil, the B-452 keyword-gated-trigger "
+                                "detector, B62 mismatches), evidence/target/host "
+                                "redaction, corroboration, and "
+                                "build_judge_packet/render_judge_packet_json. Checked "
+                                "mechanically before the split: nothing here calls into "
+                                "_verdicts.py (the dependency runs one way, verdicts -> "
+                                "builder), so the two are a leaf and a consumer, not an "
+                                "arbitrary halving. A finer split (the B-452 keyword-"
+                                "gated-trigger detector is a self-contained chunk near "
+                                "the end of this file) is a later cycle, not attempted "
+                                "here.",
 }
 
 
@@ -455,9 +452,10 @@ def _line_count(path: Path) -> int:
 
 
 def _package_py_files() -> list[Path]:
-    """Top-level package modules + the checks/ subpackage (empty until I-022 R2)."""
+    """Top-level package modules + the checks/ and adjudication/ subpackages."""
     files = sorted(PKG.glob("*.py"))
     files += sorted((PKG / "checks").glob("*.py"))
+    files += sorted((PKG / "adjudication").glob("*.py"))
     return files
 
 

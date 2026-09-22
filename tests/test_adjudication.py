@@ -1049,37 +1049,51 @@ def test_cli_judged_flag_missing_file_still_renders_report(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_adjudication_module_has_no_network_imports():
-    """adjudication.py must not import any network module.
+    """No module in the `adjudication` package may import a network module.
 
     C-284: `urllib.parse` is explicitly exempted — it is a pure string parser (no
     socket, no I/O of any kind; RFC 3986 URL splitting only), used to extract a
     hostname from a Finding's own evidence text for the judge packet's `safe_facts`.
     `urllib` (bare), `urllib.request`, and `urllib.error` (the network-capable
     submodules) stay forbidden.
+
+    C-455 split the single `adjudication.py` file into a package
+    (`_builder.py` + `_verdicts.py` + this aggregator's `__init__.py`), so
+    `find_spec(...).origin` now names only `__init__.py` — checking just that
+    file would silently stop covering the two submodules that hold almost all
+    the code. Walk every `.py` file in the package directory instead.
     """
     import ast
     import importlib.util
     spec = importlib.util.find_spec("clawseccheck.adjudication")
     assert spec is not None
-    source = Path(spec.origin).read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    assert spec.submodule_search_locations, (
+        "clawseccheck.adjudication is expected to be a package (C-455) — "
+        "spec.submodule_search_locations is empty"
+    )
+    pkg_dir = Path(spec.origin).parent
+    py_files = sorted(pkg_dir.glob("*.py"))
+    assert py_files, f"no .py files found under {pkg_dir}"
     forbidden = {"socket", "urllib", "http", "requests", "aiohttp", "httpx",
                  "ftplib", "smtplib", "imaplib", "poplib", "paramiko"}
     allowed_dotted = {"urllib.parse"}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            names = (
-                [a.name for a in node.names]
-                if isinstance(node, ast.Import)
-                else ([node.module] if node.module else [])
-            )
-            for name in names:
-                if name in allowed_dotted:
-                    continue
-                root = (name or "").split(".")[0]
-                assert root not in forbidden, (
-                    f"adjudication.py imports network module '{name}' — not allowed"
+    for py_file in py_files:
+        source = py_file.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = (
+                    [a.name for a in node.names]
+                    if isinstance(node, ast.Import)
+                    else ([node.module] if node.module else [])
                 )
+                for name in names:
+                    if name in allowed_dotted:
+                        continue
+                    root = (name or "").split(".")[0]
+                    assert root not in forbidden, (
+                        f"{py_file.name} imports network module '{name}' — not allowed"
+                    )
 
 
 def test_adjudication_not_in_public_all():
