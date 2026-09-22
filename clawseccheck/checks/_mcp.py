@@ -3426,21 +3426,41 @@ def _codex_exec_mode_from_policy(security: str, ask: str) -> str:
 
 
 def _codex_exec_policy_layer(policy, exec_block):
-    """`applyOpenClawExecPolicyLayer`: a valid `mode` wins outright (security/ask beside it
-    are ignored -- so `mode: "full"` + `ask: "always"` stays "full"); otherwise
+    """`applyOpenClawExecPolicyLayer` (`@openclaw/codex@2026.9.5
+    dist/.setup/config-CedDWjM-.mjs:38-44`, verbatim):
+
+        function applyOpenClawExecPolicyLayer(base, exec) {
+            if (!exec) return base;
+            const mode = readExecMode(exec.mode);
+            if (mode !== void 0) return {...resolveOpenClawExecPolicyForMode(mode), touched: true};
+            ...
+        }
+
+    A valid `mode` wins OUTRIGHT: the function returns straight from `resolveOpenClawExecPolicyForMode(mode)`
+    without ever touching `base` -- so `mode: "full"` + `ask: "always"` stays "full", AND a valid mode
+    wins even when `base` is a policy this audit could not resolve (an unresolved global
+    `tools.exec.security`, say). B-831 round 2: the pre-fix code checked
+    `policy == _CODEX_EXEC_UNRESOLVED` FIRST, before ever looking at `exec_block`, so a valid per-agent
+    `mode` was wrongly swallowed by an unresolved base -- exactly backwards from the vendor, which
+    never reads `base` at all on that branch. Only once `mode` is absent/invalid does an unresolved
+    base actually get read (the `security`/`ask` merge falls back to `policy[1]`/`policy[2]`), so
+    that is the only place `_CODEX_EXEC_UNRESOLVED` may still propagate from `policy` here.
     `security`/`ask` are merged over the layer below and the mode is DERIVED from them
     (`security: "allowlist"` alone is mode "allowlist", `+ ask: "on-miss"` is "ask")."""
-    if policy == _CODEX_EXEC_UNRESOLVED or not isinstance(exec_block, dict):
+    if not isinstance(exec_block, dict):
         return policy
     mode = exec_block.get("mode")
+    if mode is not None:
+        if isinstance(mode, str) and mode in _CODEX_EXEC_MODE_POLICY:
+            return (mode, *_CODEX_EXEC_MODE_POLICY[mode], True)
+        return _CODEX_EXEC_UNRESOLVED
+    if policy == _CODEX_EXEC_UNRESOLVED:
+        return _CODEX_EXEC_UNRESOLVED
     security = exec_block.get("security")
     ask = exec_block.get("ask")
-    for value, accepted in ((mode, _CODEX_EXEC_MODE_POLICY),
-                            (security, _CODEX_EXEC_SECURITIES), (ask, _CODEX_EXEC_ASKS)):
+    for value, accepted in ((security, _CODEX_EXEC_SECURITIES), (ask, _CODEX_EXEC_ASKS)):
         if value is not None and not (isinstance(value, str) and value in accepted):
             return _CODEX_EXEC_UNRESOLVED
-    if mode is not None:
-        return (mode, *_CODEX_EXEC_MODE_POLICY[mode], True)
     if security is None and ask is None:
         return policy
     security = security or policy[1]
@@ -3502,9 +3522,14 @@ def _codex_exec_approvals_floor(ctx: Context) -> "str | None":
     for label, rec in sources:
         security, ask = rec.get("security"), rec.get("ask")
         if (security is not None and security != "full") or (ask is not None and ask != "off"):
-            return (f"exec-approvals.json {label} sets security={security!r} / "
-                    f"ask={ask!r}, a floor that tightens the exec policy of the agent(s) it "
-                    "covers")
+            # B-831 round 2: only name the field(s) the record actually sets -- a field
+            # that is simply absent from exec-approvals.json is not "security=None" (that
+            # reads as a JSON `null`, which is not what happened), it is unset, so it is
+            # omitted entirely rather than printed as a Python None.
+            set_fields = [f"{name}={value!r}" for name, value in
+                          (("security", security), ("ask", ask)) if value is not None]
+            return (f"exec-approvals.json {label} sets " + " / ".join(set_fields) +
+                    ", a floor that tightens the exec policy of the agent(s) it covers")
     return None
 
 
@@ -3646,7 +3671,14 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
        B-421 grounded for memory-core (`resolvePluginActivationDecisionShared`,
        `dist/config-normalization-shared-*.mjs:82-102`): `plugins.enabled: false`,
        `"codex"` in `plugins.deny`, `entries.codex.enabled: false`, or a non-empty
-       `plugins.allow` without `"codex"` each deactivate the plugin.
+       `plugins.allow` without `"codex"` each deactivate the plugin. `deny`/`allow`/
+       `entries` are matched case-insensitively (B-831 round 2): the real gate compares
+       through `normalizePluginPolicyId` (`plugin-policy-id-C9JZrwYv.mjs:9-11`, trim +
+       lowercase, no alias table -- that is a DIFFERENT normalizer, `normalizePluginId`,
+       used elsewhere), because "`plugins.allow`, `plugins.deny`, and `plugins.entries` ...
+       are lowercase-normalized when config is normalized" per that function's own
+       comment. A missing `plugins.entries.codex` block entirely does not by itself mean
+       "not installed" either -- see the harness-reach fallback below.
     2. The effective exec mode, PER AGENT (`_codex_effective_exec_modes`: global
        `tools.exec`, then each roster agent's own, with the mode derived from
        `security`/`ask` when `mode` is absent). "deny"/"allowlist" make the app-server
@@ -3665,8 +3697,26 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     """
     cfg = ctx.config if isinstance(ctx.config, dict) else {}
     codex_entry = _plugins(cfg).get("codex")
-    if not isinstance(codex_entry, dict) or codex_entry.get("enabled") is False:
-        return "no", ["the Codex plugin is not installed/enabled (plugins.entries.codex)"], []
+    if isinstance(codex_entry, dict):
+        if codex_entry.get("enabled") is False:
+            return "no", ["the Codex plugin is not installed/enabled "
+                          "(plugins.entries.codex)"], []
+    else:
+        # B-831 round 2: NO `plugins.entries.codex` block at all does not prove the
+        # plugin is not installed. A non-bundled plugin with no entry of its own still
+        # activates on the implicit default (`resolvePluginActivationDecisionShared`
+        # returns `decision("default")` when nothing names it explicitly) whenever its
+        # manifest declares `onAgentHarnesses: ["codex"]` and a configured model would
+        # reach that harness -- this audit cannot see whether the package is actually
+        # installed, only whether a model would reach the Codex harness IF it were
+        # (`harnessruntime.codex_harness_reach`). Only when that reach is a definite
+        # "no" is "not installed/enabled" a safe reading; a "yes" (or an "unknown" this
+        # audit cannot rule out) gets the same treatment as an empty, all-implicit
+        # `config.appServer: {}` (`_codex_appserver_posture`), never a confident "no".
+        if _harness_reach(ctx).answer != _harnessruntime.YES:
+            return "no", ["the Codex plugin is not installed/enabled "
+                          "(plugins.entries.codex)"], []
+        codex_entry = {}
     plugins_cfg = cfg.get("plugins")
     blocked = (_plugin_activation_blocked(plugins_cfg, _CODEX_PLUGIN_ID)
                if isinstance(plugins_cfg, dict) else None)
@@ -3687,6 +3737,11 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     if answer == "no":
         return "no", reasons, []
     if closed:
+        # B-831 round 2 (item 3, reviewed and left as-is): a mixed roster (e.g. one
+        # agent's exec mode "full", another non-full) stays hedged to "unknown" here on
+        # purpose -- /model can move an agent onto the Codex harness at run time, so
+        # which agent actually runs it is not something a static config read can settle
+        # either way, and asserting "no" would be a false negative the moment it does.
         hedges.append(
             "the effective tools.exec mode differs between agents (" +
             ", ".join(f"{label}={m!r}" for label, m in closed[:3]) + " versus " +
@@ -6674,8 +6729,23 @@ def _plugin_activation_blocked(plugins: dict, plugin_id: str) -> "str | None":
     ``dist/config-normalization-shared-*.mjs:82-102``): ``plugins.enabled`` false,
     *plugin_id* in ``plugins.deny``, ``plugins.entries.<id>.enabled`` false, and a
     non-empty ``plugins.allow`` that omits it. Factored out of
-    ``_memory_default_owner_blocked`` unchanged (same ``.strip()`` comparison, same
-    order) so both callers share one gate.
+    ``_memory_default_owner_blocked`` unchanged (same order) so both callers share one
+    gate.
+
+    B-831 round 2: the comparison on all three of ``deny``/``entries``/``allow`` is now
+    case-insensitive (trimmed + lowercased), matching the real
+    ``normalizePluginPolicyId`` (``plugin-policy-id-C9JZrwYv.mjs:9-11``) that
+    ``resolvePluginActivationDecisionShared`` actually compares *plugin_id* against —
+    verbatim: "Canonicalizes a plugin id for comparison against ``plugins.allow``,
+    ``plugins.deny``, and ``plugins.entries``, which are lowercase-normalized when config
+    is normalized." This is deliberately a PLAIN case fold, not
+    ``_normalize_plugin_id``'s alias table (``google-gemini-cli`` -> ``google``,
+    ``config-state-BxYVV2MR.mjs:19-22``'s ``normalizePluginId``) -- that is a different
+    function for a different comparison (the B342 allow/deny CONTRADICTION check), and
+    replicating its alias table here would be fabricating a codex/memory-core alias that
+    does not exist. A case-only variant of a NON-alias id (``Memory-Core`` vs
+    ``memory-core``) is exactly the shape this leg now folds, that one still does not
+    (see ``test_b342_allow_deny_case_difference_alone_is_not_a_collision``).
 
     Not modelled, and only reachable with a plugin that owns a slot: a plugin NAMED by
     ``plugins.slots.memory``/``contextEngine`` is activated before the allowlist leg is
@@ -6684,20 +6754,22 @@ def _plugin_activation_blocked(plugins: dict, plugin_id: str) -> "str | None":
     """
     if plugins.get("enabled") is False:
         return "plugins.enabled=false"
+    norm_id = plugin_id.strip().lower()
     deny = plugins.get("deny")
     if isinstance(deny, list):
-        denied = {p.strip() for p in deny if isinstance(p, str)}
-        if plugin_id in denied:
+        denied = {p.strip().lower() for p in deny if isinstance(p, str)}
+        if norm_id in denied:
             return f"plugins.deny lists {plugin_id!r}"
     entries = plugins.get("entries")
     if isinstance(entries, dict):
-        entry = entries.get(plugin_id)
+        entry = next((v for k, v in entries.items()
+                      if isinstance(k, str) and k.strip().lower() == norm_id), None)
         if isinstance(entry, dict) and entry.get("enabled") is False:
             return f"plugins.entries.{plugin_id}.enabled=false"
     allow = plugins.get("allow")
     if isinstance(allow, list):
-        allowed = {p.strip() for p in allow if isinstance(p, str) and p.strip()}
-        if allowed and plugin_id not in allowed:
+        allowed = {p.strip().lower() for p in allow if isinstance(p, str) and p.strip()}
+        if allowed and norm_id not in allowed:
             return f"plugins.allow is set and does not list {plugin_id!r}"
     return None
 
