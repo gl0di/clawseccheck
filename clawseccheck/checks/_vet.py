@@ -6105,11 +6105,6 @@ def _run_content_ring(
     finding `skipped` (budget/deadline) uses, so the crash still shows up as data rather
     than as an empty bucket a clean-verdict predicate cannot see.
     """
-    out: list[Finding] = []
-    # B-526: coverage notes harvested off ring findings that are dropped below. Attached
-    # to the function so the caller can read them without changing the return contract
-    # this docstring pins ("only the actionable (FAIL/WARN) findings").
-    ring_coverage: list[str] = []
     seen: set[tuple[str, str]] = set()
     # F-148: the ring runs OUTSIDE run_all, so until now nothing bounded it at all.
     #
@@ -6148,24 +6143,56 @@ def _run_content_ring(
     # `check_deadline` around each member of CHECKS (a different call path, one member
     # at a time), and nothing in CHECKS calls `_run_content_ring`.
     deadline = cpu_deadline(target_budget_s)
-    skipped: list[str] = []
     own_deadline_hit = False
-    # B-485 (R1 close): names of checks that raised something other than the ring's own
-    # deadline — tracked separately from `skipped` (budget/deadline) so the coverage
-    # message below can say WHY a check didn't run, honestly, rather than blaming a
-    # crash on the budget or vice versa. See the bare `except Exception` below for why
-    # this exists and the two prior attempts (retracted, then landed by a different
-    # route) it follows.
-    crashed: list[str] = []
-    # B-724: the last ring index this loop has FULLY accounted for — appended to
-    # `skipped`/`crashed`, folded into `ring_coverage`, or added to `out` — never an
-    # index that is merely "in flight" inside a check. `last_done_idx = idx` is placed
-    # as the LAST statement on every path through the loop body, immediately before
-    # that path's `continue` (or, on the final normal-completion path, immediately
-    # before falling through to the next iteration). See the outer `except
-    # ScanBudgetExceeded` below for why this is what makes that handler's accounting
-    # correct on every CPython version, not just the one it was measured on.
-    last_done_idx = -1
+    # B-860 (closes the B-724 accepted residual — see
+    # tests/test_b724_ring_outer_guard.py): every ring index's disposition is recorded
+    # through ONE keyed write whose key (`idx`) is baked into the SAME statement as the
+    # disposition itself — never through a plain list append followed by a separate
+    # trailing bookkeeping statement.
+    #
+    # That distinction is the whole fix. The prior design tracked a scalar
+    # `last_done_idx`, bumped as the LAST statement on every path through the loop body
+    # (`out.append(fx)` THEN `last_done_idx = idx` — two independent top-level
+    # statements). Everything from `if fx.status not in (FAIL, WARN):` onward sits
+    # OUTSIDE the per-check inner `try` below (deliberately — see that comment), so a
+    # ScanBudgetExceeded attributed to THIS block's own deadline, landing in the gap
+    # between such a mutation and its trailing bump, was not caught by the inner
+    # handlers at all: it propagated to the outer `except ScanBudgetExceeded` further
+    # down, which rebuilt `skipped` from `SKILL_CONTENT_RING[last_done_idx + 1:]` — a
+    # slice that STILL STARTS AT THE JUST-COMPLETED INDEX, because its bump never ran.
+    # A check that had already landed a real FAIL in `out`, or already been filed in
+    # `crashed`, was re-listed as "did not run" — confirmed by `sys.settrace` injection
+    # immediately after each such mutation, including the crashed-check case ending up
+    # in BOTH `VET-RING-CHECK-ERROR` and the `VET-COVERAGE` skipped list at once. (This
+    # was strictly an over-reporting bug — the slice could only start too early, never
+    # too late, so a check was never silently omitted from `skipped` when it truly did
+    # not run; see the DoD note below on why the obvious opposite fix is unsound.)
+    #
+    # A dict keyed by `idx` cannot reproduce that shape: `container[idx] = value` (or
+    # `some_set.add(idx)`) is a single statement, and to any outside observer —
+    # including a signal landing on a bytecode boundary — it either has already
+    # executed (idx IS accounted for, disposition included) or it has not (idx is NOT
+    # accounted for at all). There is no state in between where the disposition exists
+    # but the accounting of it does not, so nothing downstream can rebuild a STALE
+    # "not yet accounted" view of an index that has, in fact, already been decided.
+    # Reconciliation after the loop (below the `with` block) derives every one of
+    # `out`/`crashed`/`skipped`/`ring_coverage` straight from these trackers, and
+    # anything with no entry anywhere is — genuinely, not just apparently — a check
+    # that never ran this call.
+    #
+    # One order choice is still load-bearing, for the same reason B-724 rejected moving
+    # the old bump earlier: in the "out" branch below, `out_by_idx[idx] = fx` is written
+    # BEFORE `seen.add(key)`, not after. A signal landing between them only risks
+    # `seen` missing an entry — a possible future duplicate finding not deduped this
+    # call, cosmetic — never a real FAIL/WARN vanishing. Writing `seen.add(key)` first
+    # would trade this fix's (bounded) over-report for a silent DROP of a real FAIL,
+    # which is strictly worse — the exact trade the reviewer's naive reordering made
+    # for B-724 and was rejected for.
+    out_by_idx: dict[int, Finding] = {}
+    coverage_by_idx: dict[int, list[str]] = {}
+    crashed_by_idx: dict[int, str] = {}
+    skip_by_idx: dict[int, str] = {}
+    dup_idx: set[int] = set()
     with check_deadline(target_budget_s) as own_frame:
         try:
             for idx, check in enumerate(SKILL_CONTENT_RING):
@@ -6183,41 +6210,34 @@ def _run_content_ring(
                     # continue as before) and closes the window that produced the OBSERVED
                     # 10/30 CI failure rate under load (B-394's own measurement).
                     #
-                    # B-688 / B-724: the `continue` right after `skipped.append(name)` (and,
-                    # equally, the loop's own normal iteration advance) used to be able to
-                    # escape uncaught: in CPython 3.11+'s zero-cost exception model, the jump
-                    # instruction implementing `continue` inside a `try` is covered by the
-                    # ENCLOSING block's exception-table entry, not this inner `try`'s, so a
-                    # SIGALRM landing on exactly that jump bypassed `owned_by(...)` below and
-                    # escaped the function entirely. Confirmed for real on 2026-08-29 (a
+                    # B-688 / B-724: the `continue` right after `skip_by_idx[idx] = name`
+                    # (and, equally, the loop's own normal iteration advance) can still
+                    # escape uncaught: in CPython 3.11+'s zero-cost exception model, the
+                    # jump instruction implementing `continue` inside a `try` is covered
+                    # by the ENCLOSING block's exception-table entry, not this inner
+                    # `try`'s, so a SIGALRM landing on exactly that jump bypasses
+                    # `owned_by(...)` below and would escape the function entirely if
+                    # nothing wrapped the whole loop. Confirmed for real on 2026-08-29 (a
                     # full-suite run, 17,710 tests, ~39 minutes, failed once with the
-                    # traceback naming this exact `continue`) after being reproducible only
-                    # via `sys.settrace`-timed signal injection before that.
+                    # traceback naming this exact `continue`) after being reproducible
+                    # only via `sys.settrace`-timed signal injection before that.
                     #
-                    # B-724 closes it with a SECOND, identically-gated `except
-                    # ScanBudgetExceeded` wrapping the whole `for` loop below (still inside
-                    # this same `with check_deadline(...) as own_frame:`, so `owned_by(exc,
-                    # own_frame)` is exactly as strict there as it is here — an outer
-                    # caller's own deadline still re-raises untouched). The outer handler
-                    # only had one real risk: knowing which checks it must still report as
-                    # `skipped` without either double-counting a check the inner handler (or
-                    # the loop body) already accounted for, or dropping one that never ran.
-                    # That could have meant reasoning about exactly which bytecode offset a
-                    # signal lands on — the CPython 3.11+ zero-cost model and 3.9's older
-                    # SETUP_FINALLY/POP_BLOCK model draw the covered ranges differently, so a
-                    # conclusion measured on one is not evidence for the other. `last_done_idx`
-                    # (declared above the `with`) sidesteps that entirely: it is source-level
-                    # bookkeeping, set as the LAST statement of every path through this body,
-                    # so by the time ANY loop-back instruction executes for iteration `idx` —
-                    # on any CPython version, whatever the exception table looks like — Python
-                    # has already finished running every statement lexically before it,
-                    # `last_done_idx = idx` included. The outer handler's correctness follows
-                    # from ordinary statement-execution order, not from where a signal can
-                    # land, so no version-specific bytecode audit is needed to trust it.
+                    # B-724 closed it with a SECOND, identically-gated `except
+                    # ScanBudgetExceeded` wrapping the whole `for` loop below (still
+                    # inside this same `with check_deadline(...) as own_frame:`, so
+                    # `owned_by(exc, own_frame)` is exactly as strict there as it is
+                    # here — an outer caller's own deadline still re-raises untouched).
+                    # B-860 replaced that outer handler's OWN accounting (it used to
+                    # rebuild `skipped` from a slice of `last_done_idx`) with the
+                    # dict-based bookkeeping explained above, after finding the slice
+                    # itself could mis-report: the outer handler below no longer does
+                    # any index arithmetic at all, only `own_deadline_hit` for the
+                    # message wording, and the reconciliation pass placed right after
+                    # the `with` block fills in whatever never got recorded — regardless
+                    # of exactly where the signal landed.
                     name = getattr(check, "__name__", "ring check")
                     if cpu_exceeded(deadline):
-                        skipped.append(name)
-                        last_done_idx = idx
+                        skip_by_idx[idx] = name
                         continue
                     fx = check(ctx)
                 except ScanBudgetExceeded as exc:
@@ -6225,14 +6245,14 @@ def _run_content_ring(
                         raise
                     # Our OWN hard deadline fired mid-check: this check and everything
                     # after it never got a verdict this call, so all of them count as
-                    # skipped for the coverage-gap message below. (No `last_done_idx`
-                    # update here: `break` ends the loop, so the outer handler below can
-                    # never fire again in this call — there is nothing left for it to
-                    # double-count against.)
+                    # skipped for the coverage-gap message below. Recorded per index
+                    # (not via a bulk `skipped.extend(...)` against a scalar cutoff) so
+                    # the same idx-keyed reconciliation below covers this path too.
                     own_deadline_hit = True
-                    skipped.extend(
-                        getattr(c, "__name__", "ring check") for c in SKILL_CONTENT_RING[idx:]
-                    )
+                    for i in range(idx, len(SKILL_CONTENT_RING)):
+                        skip_by_idx[i] = getattr(
+                            SKILL_CONTENT_RING[i], "__name__", "ring check"
+                        )
                     break
                 except Exception:  # noqa: BLE001 — a ring check must never break --vet
                     # B-485 (R1, closed): this used to `continue` with no `note_limit`, no
@@ -6296,8 +6316,7 @@ def _run_content_ring(
                     # UNKNOWN-only severity, same bound — so the 2026-08-08 objection is
                     # superseded by the precedent the project has since accepted for the
                     # identical underlying phenomenon, not re-litigated.
-                    crashed.append(name)
-                    last_done_idx = idx
+                    crashed_by_idx[idx] = name
                     continue
                 if fx.status not in (FAIL, WARN):
                     # B-526: the finding is dropped, its COVERAGE is not. The drop rule
@@ -6308,33 +6327,52 @@ def _run_content_ring(
                     # so without this the disclosure died here and --vet reported a clean
                     # skill with nothing said about the part it never read. The notes are
                     # collected and handed to the surviving primary by vet_skill.
-                    ring_coverage.extend(
+                    coverage_by_idx[idx] = [
                         e for e in (fx.evidence or []) if e.startswith("coverage: ")
-                    )
-                    last_done_idx = idx
+                    ]
                     continue
                 key = (fx.id, fx.detail)
                 if key in seen:
-                    last_done_idx = idx
+                    dup_idx.add(idx)
                     continue
+                out_by_idx[idx] = fx
                 seen.add(key)
-                out.append(fx)
-                last_done_idx = idx
         except ScanBudgetExceeded as exc:
             if not owned_by(exc, own_frame):
                 raise
-            # B-724: the residual landing spot the comment above describes — a signal
-            # attributed to OUR OWN deadline, arriving somewhere the inner `try` does not
-            # cover (a `continue`'s loop-back jump, the loop's own normal iteration
-            # advance, or the `for` header itself). `last_done_idx` names exactly which
-            # checks are already accounted for regardless of which of those it was, so the
-            # slice below can never double-count (an accounted check is never re-listed)
-            # or under-count (an unaccounted one is never skipped over).
+            # B-724 / B-860: the residual landing spot the comment above describes — a
+            # signal attributed to OUR OWN deadline, arriving somewhere the inner `try`
+            # does not cover (a `continue`'s loop-back jump, the loop's own normal
+            # iteration advance, the `for` header itself, or — B-860 — the gap between a
+            # branch's own mutation and a would-be trailing bookkeeping statement).
+            # Nothing further needs recording here: whatever already made it into one of
+            # the dicts/set above stays there, and the reconciliation pass right after
+            # this `with` block fills in every index that did not.
             own_deadline_hit = True
-            skipped.extend(
-                getattr(c, "__name__", "ring check")
-                for c in SKILL_CONTENT_RING[last_done_idx + 1:]
-            )
+    # Reconciliation: derive every downstream list straight from the trackers above. An
+    # index with no entry anywhere genuinely never got a verdict this call — not a check
+    # whose bookkeeping merely lagged behind an outcome that had already happened.
+    accounted = (
+        out_by_idx.keys()
+        | coverage_by_idx.keys()
+        | crashed_by_idx.keys()
+        | skip_by_idx.keys()
+        | dup_idx
+    )
+    # Indexed, not `enumerate(SKILL_CONTENT_RING)`: this reconciliation pass runs
+    # OUTSIDE the `with check_deadline(...)` block above, so re-iterating the ring here
+    # would be a second, unprotected pass over it — exactly the shape B-394/B-724 exist
+    # to avoid. `SKILL_CONTENT_RING[i]` uses plain `__getitem__`, never the ring's own
+    # `__iter__`, so it cannot re-trigger whatever made the FIRST pass's iteration
+    # itself the hazard (a custom/instrumented iterable in tests; a real interpreter
+    # signal in production) the way a second `enumerate()` over the same object could.
+    for i in range(len(SKILL_CONTENT_RING)):
+        if i not in accounted:
+            skip_by_idx[i] = getattr(SKILL_CONTENT_RING[i], "__name__", "ring check")
+    out = [out_by_idx[i] for i in sorted(out_by_idx)]
+    ring_coverage = [note for i in sorted(coverage_by_idx) for note in coverage_by_idx[i]]
+    crashed = [crashed_by_idx[i] for i in sorted(crashed_by_idx)]
+    skipped = [skip_by_idx[i] for i in sorted(skip_by_idx)]
     if skipped:
         reason = (
             f"the ring's own {target_budget_s:g}s hard scan deadline fired mid-check"
