@@ -42,6 +42,15 @@ _PINNED_FINGERPRINTS = {
     "8f274c2879548fc42fa0f0293238c8be71c11e10:tests/test_b740_plain_assignment_secret.py:stripe-access-token:141",
     "24995977c5e45bf0221ad56348cc28b79da12fd2:tests/test_logsafe.py:gcp-api-key:58",
     "24995977c5e45bf0221ad56348cc28b79da12fd2:tests/test_logsafe.py:gcp-api-key:60",
+    # C-575 split four dummy literals into runtime-assembled fragments at HEAD and dropped
+    # their value-anchored `generic-api-key` allowlist entries. The values remain in the
+    # commits that introduced them and published history is never rewritten, so each
+    # occurrence is pinned to its own commit here -- narrower than the allowlist it
+    # replaced, which exempted the value everywhere including in new code.
+    "0e23b8f7cec69e80d91e24f7f2017e2a4dab0630:tests/test_logscan.py:generic-api-key:993",
+    "d5daee01d3fe9d28bf57d713dc52695f0d7b1f7d:tests/test_logscan.py:generic-api-key:96",
+    "7d75cba4b8bddf11e1d3d45e962228356e6f84aa:tests/test_checks.py:generic-api-key:61",
+    "7d75cba4b8bddf11e1d3d45e962228356e6f84aa:tests/test_windows.py:generic-api-key:23",
 }
 
 # gitleaks allowlist keys that broaden an exemption beyond one exact, anchored value:
