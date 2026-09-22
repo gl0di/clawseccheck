@@ -1695,6 +1695,250 @@ def check_subagent_spawn_limits(ctx: Context) -> Finding:
     )
 
 
+# ---------- B392: tools.swarm collector-mode subagent fan-out ----------
+# Re-grounded directly against the installed 2026.9.5 dist — the filed task's premise
+# does NOT survive re-grounding:
+#
+#   dist/schema-CwAIqZVE.mjs:820-826 (vendor descriptions, verbatim):
+#     "tools.swarm": "Collector-mode subagent orchestration. Enabled by default; set
+#       false to opt out. Tool permissions still apply to agents_wait and swarm spawn
+#       options."
+#     "tools.swarm.enabled": "Enables collector-mode subagents and agents_wait. Default
+#       is on; set false to opt out."
+#     "tools.swarm.maxConcurrent": "Maximum concurrently running collector children per
+#       swarm group."
+#     "tools.swarm.maxChildrenPerGroup": "Maximum live collector children per swarm
+#       group."
+#     "tools.swarm.maxTotalPerGroup": "Maximum lifetime collector spawns per swarm
+#       group."
+#     "tools.swarm.waitTimeoutSecondsMax": "Maximum timeout accepted by agents_wait, in
+#       seconds."
+#
+#   dist/swarm-config-BYkyPTuH.mjs:4-34 — `resolveSwarmConfig`, the actual runtime
+#   resolver. Confirmed LIVE, not dead code: consumed by sessions-spawn-tool-CE1WiS6Q.mjs
+#   (the real spawn path — its `maxChildrenPerGroup`/`maxTotalPerGroup` feed
+#   `resolveSpawnAdmission`'s collector-admission gate) and by
+#   openclaw-tools-DIxownJF.mjs:2388 (gates whether the `agents_wait` tool is even
+#   constructed, on `.enabled`).
+#     DEFAULT_SWARM_CONFIG = {enabled: true, maxConcurrent: 8, maxChildrenPerGroup: 50,
+#       maxTotalPerGroup: 200, waitTimeoutSecondsMax: 600, defaultAgentId: ""}
+#     readBoundedPositiveInteger(value, fallback, max): a non-positive-integer raw value
+#       (absent, zero, negative, non-integer, or a JS non-number) resolves to FALLBACK
+#       (the sane default above); any positive integer is clamped via
+#       `Math.min(value, max)` — max = 1000 / 10_000 / 100_000 / 86_400 respectively.
+#       There is therefore NO config shape that resolves to a literally unbounded
+#       limit — the runtime always caps it, at worst at these vendor-hardcoded
+#       ceilings.
+#
+# This overturns BOTH halves of an earlier shortlist reading (that reading was taken
+# from the vendor's own UI-facing description text, not this resolver):
+#   1. "Default is off" is wrong — `enabled` resolves to `true` when `tools.swarm` is
+#      absent entirely. A config that never mentions swarm already has the surface
+#      live, with the sane 8/50/200/600s defaults.
+#   2. "unbounded maxConcurrent/maxChildrenPerGroup" cannot literally occur — the
+#      resolver's own `Math.min` clamp bounds every numeric field. The closest a
+#      config can get to "unbounded" is a value at or above the vendor's own hard
+#      ceiling, which resolves to that ceiling and no further.
+#
+# The check below is built on this corrected grounding, not the filed premise: PASS
+# covers the common case (swarm enabled by default or explicitly, with sane limits);
+# WARN is reserved for a limit explicitly raised above the vendor default while an
+# untrusted channel can reach the agent (the same fork-bomb/cost-exhaustion shape B81
+# already models for `agents.defaults.subagents.*`, one config surface over); FAIL is
+# reserved for a limit explicitly pushed to or past the vendor's own hard ceiling — the
+# practical maximum this surface allows, not a threshold this check invented.
+_SWARM_DEFAULTS = {
+    "maxConcurrent": 8,
+    "maxChildrenPerGroup": 50,
+    "maxTotalPerGroup": 200,
+    "waitTimeoutSecondsMax": 600,
+}
+_SWARM_CAPS = {
+    "maxConcurrent": 1000,
+    "maxChildrenPerGroup": 10000,
+    "maxTotalPerGroup": 100000,
+    "waitTimeoutSecondsMax": 86400,
+}
+
+
+def _swarm_raw(node: object) -> "dict | None":
+    """Mirror the vendor's ``normalizeRawConfig``: a bare boolean shorthand for
+    ``tools.swarm`` becomes ``{"enabled": <value>}``; a dict passes through unchanged;
+    anything else (absent, string, list, number, ...) normalizes to ``None`` (the
+    caller then treats it as ``{}``, same as the vendor's ``?? {}``)."""
+    if isinstance(node, bool):
+        return {"enabled": node}
+    if isinstance(node, dict):
+        return node
+    return None
+
+
+def _swarm_field_status(raw: dict, field: str) -> "tuple[int, str]":
+    """Resolve one bounded numeric swarm field exactly as ``readBoundedPositiveInteger``
+    does, and classify the result: ``"ok"`` (<= the vendor default), ``"raised"``
+    (> default, < the vendor's hard ceiling), or ``"maxed"`` (>= the ceiling — clamped
+    there by the runtime and no further, whatever larger value the config asked for)."""
+    value = raw.get(field)
+    default = _SWARM_DEFAULTS[field]
+    cap = _SWARM_CAPS[field]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        resolved = default
+    else:
+        resolved = min(value, cap)
+    if resolved >= cap:
+        return resolved, "maxed"
+    if resolved > default:
+        return resolved, "raised"
+    return resolved, "ok"
+
+
+def _swarm_scope_findings(label: str, raw: dict) -> "tuple[list, list]":
+    """For one resolved swarm scope (global, or one agent's override merged over
+    global) return ``(raised_evidence, maxed_evidence)`` — both empty when that scope's
+    swarm surface is disabled, or every field is at/under the vendor default."""
+    enabled = raw.get("enabled")
+    effective_enabled = enabled if isinstance(enabled, bool) else True  # vendor default
+    if not effective_enabled:
+        return [], []
+    raised: list = []
+    maxed: list = []
+    for field in _SWARM_DEFAULTS:
+        resolved, tier = _swarm_field_status(raw, field)
+        if tier == "raised":
+            raised.append(f"{label}: {field}={resolved} (default {_SWARM_DEFAULTS[field]})")
+        elif tier == "maxed":
+            maxed.append(
+                f"{label}: {field}={resolved} (vendor hard ceiling; default "
+                f"{_SWARM_DEFAULTS[field]})"
+            )
+    return raised, maxed
+
+
+def check_swarm_fanout_limits(ctx: Context) -> Finding:
+    """B392 — tools.swarm (collector-mode subagent fan-out) enabled with limits raised
+    toward, or pushed past, the vendor's own hard ceiling.
+
+    Re-grounded against the installed 2026.9.5 dist — see the module comment above for
+    the full citation trail. Corrects the filed task's premise: ``tools.swarm.enabled``
+    resolves to ``true`` by default (not off), and no config can make the numeric
+    limits literally unbounded (the resolver's own ``Math.min`` clamp bounds every
+    field at a vendor-hardcoded ceiling). This reads the RAW config value at each scope
+    — global, and each roster agent's own ``tools.swarm`` override merged over global,
+    mirroring ``resolveSwarmConfig``'s own per-agent resolution (``{...globalRaw,
+    ...agentRaw}``) — and classifies each of the four bounded fields the same way the
+    runtime resolver does.
+
+    PASS    — swarm is disabled at every scope that matters, OR every scope's fields
+              resolve to the vendor's own sane defaults. This is the COMMON case,
+              since it is also what an absent ``tools.swarm`` resolves to (the surface
+              is on by default, just at safe limits).
+    WARN    — swarm is enabled (by default or explicitly) and at least one field is
+              explicitly raised above its vendor default (but below its hard ceiling)
+              at some scope, AND an untrusted channel can reach the agent. Mirrors
+              B81's ``agents.defaults.subagents.*`` reasoning for the identical
+              fork-bomb / cost-exhaustion shape, one config surface over.
+    FAIL    — swarm is enabled (by default or explicitly) and at least one field is
+              explicitly pushed to or past its vendor-hardcoded hard ceiling at some
+              scope — the practical maximum this surface allows, and as close to the
+              "unbounded" shape the filed task worried about as this config can
+              actually get. NOT gated on an untrusted channel: pushing a config to the
+              vendor's own resource-exhaustion ceiling is an unambiguous, deliberate
+              choice on its own (mirrors B21/B39/B327's "explicit, unambiguous
+              dangerous value ⇒ FAIL regardless of reachability" idiom), not a
+              proportionate response to an ingress path that could change later.
+    UNKNOWN — config unreadable/unparseable (engine-side), or no config was read at
+              all (``not_applicable`` in that second case, mirroring B81/B391).
+    """
+    unreadable = _config_unreadable("B392", ctx)
+    if unreadable is not None:
+        return unreadable
+    # B-661-shaped guard (same as B81 above): a host with no openclaw.json at all has
+    # config_parse_error=False and ctx.config={}, so the dig() below would silently
+    # resolve to "nothing configured" and fall through to a PASS about a config nobody
+    # read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B392",
+            UNKNOWN,
+            "No config was read, so whether tools.swarm fan-out limits are raised "
+            "beyond the vendor's defaults could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    cfg = ctx.config
+    global_raw = _swarm_raw(dig(cfg, "tools.swarm")) or {}
+    raised, maxed = _swarm_scope_findings("global tools.swarm", global_raw)
+    for agent in agent_roster(cfg):
+        entry_tools = agent.entry.get("tools") if isinstance(agent.entry, dict) else None
+        agent_raw = _swarm_raw(entry_tools.get("swarm")) if isinstance(entry_tools, dict) else None
+        if agent_raw is None:
+            continue
+        merged = {**global_raw, **agent_raw}
+        name = agent.entry.get("name") or agent.id or agent.index
+        a_raised, a_maxed = _swarm_scope_findings(agent.labelled(name), merged)
+        raised += a_raised
+        maxed += a_maxed
+    if maxed:
+        return _finding(
+            "B392",
+            FAIL,
+            "tools.swarm (collector-mode subagent fan-out) is enabled with at least "
+            "one limit pushed to or past the vendor's own hard ceiling — the "
+            "practical maximum this surface allows, and as close to unbounded as "
+            "this config can get.",
+            "Lower the affected tools.swarm limit(s) toward the vendor defaults "
+            "(maxConcurrent<=8, maxChildrenPerGroup<=50, maxTotalPerGroup<=200, "
+            "waitTimeoutSecondsMax<=600), or set tools.swarm.enabled=false if "
+            "collector-mode subagents are not needed.",
+            evidence=maxed,
+            config_field_paths={
+                "tools.swarm.maxConcurrent",
+                "tools.swarm.maxChildrenPerGroup",
+                "tools.swarm.maxTotalPerGroup",
+                "tools.swarm.waitTimeoutSecondsMax",
+            },
+        )
+    if not raised:
+        return _finding(
+            "B392",
+            PASS,
+            "tools.swarm collector-mode subagent fan-out is enabled (the vendor "
+            "default when unset) with every limit at or below the vendor's own sane "
+            "defaults (maxConcurrent<=8, maxChildrenPerGroup<=50, "
+            "maxTotalPerGroup<=200, waitTimeoutSecondsMax<=600s), or disabled "
+            "outright.",
+            "No action needed. If you later raise tools.swarm.{maxConcurrent,"
+            "maxChildrenPerGroup,maxTotalPerGroup,waitTimeoutSecondsMax}, keep them "
+            "near the vendor defaults unless collector-mode fan-out is genuinely "
+            "needed at scale.",
+            config_field_paths={"tools.swarm"},
+        )
+    untrusted = _external_input_channels(cfg)
+    if not untrusted:
+        return _finding(
+            "B392",
+            PASS,
+            "tools.swarm fan-out limits are raised above the vendor defaults, but no "
+            "untrusted channel can reach the agent to trigger runaway collector "
+            "spawning.",
+            "If you later expose an untrusted channel, lower tools.swarm.{"
+            "maxConcurrent,maxChildrenPerGroup,maxTotalPerGroup,"
+            "waitTimeoutSecondsMax} back toward the vendor defaults.",
+            evidence=raised,
+        )
+    return _finding(
+        "B392",
+        WARN,
+        "tools.swarm collector-mode subagent fan-out limits are raised above the "
+        "vendor defaults while an untrusted channel can reach the agent — this "
+        "widens a fork-bomb / cost-exhaustion surface for collector-mode spawns.",
+        "Lower tools.swarm.{maxConcurrent,maxChildrenPerGroup,maxTotalPerGroup,"
+        "waitTimeoutSecondsMax} back toward the vendor defaults (8/50/200/600s), or "
+        "restrict the untrusted channels.",
+        evidence=raised + [f"untrusted channels: {', '.join(sorted(set(untrusted)))}"],
+    )
+
+
 def _disk_subagent_disclosure(ctx: Context) -> "Finding | None":
     """B-296 (DISK-5 increment 1): disk-grounded B18 disclosure for when config says NO
     subagent delegation exists but ``subagent_runs`` (the OpenClaw state DB's subagent-spawn
