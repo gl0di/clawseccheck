@@ -116,8 +116,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
-from _distgrounding import _spellings
-from _realhome import REAL_HOME
+from _distgrounding import OPENCLAW_DIST, _spellings
 
 pytestmark = pytest.mark.mechanical
 
@@ -156,10 +155,12 @@ MANIFEST_FILE = Path(__file__).resolve().parent / "grounded_schema_paths.txt"
 
 # C-249 third authority: the INSTALLED OpenClaw package. Local-only, like the recon —
 # absent in CI and on a machine without OpenClaw, where the layer skips. Read-only.
-# B-519: REAL_HOME, not Path.home(). This line happens to run at import, before the
-# suite's $HOME redirect takes effect, so Path.home() would still be correct today --
-# by accident of collection order. Stating the intent removes that dependency.
-OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+# Imported from `_distgrounding`, not hand-rolled here: it is the single reader of
+# CLAWSECCHECK-C-583's test-only CSC_OPENCLAW_DIST override, so grounding against a
+# candidate OpenClaw's extracted tarball needs no fake-$HOME symlink (see
+# `_write_dist_snapshot` below, and `tests/_distgrounding.py` for the override itself).
+# Unset, this is byte-identical to the REAL_HOME-derived path it always was (B-519:
+# REAL_HOME, not Path.home() — see `_distgrounding.py`).
 # The zod object the whole openclaw.json is parsed against. Anchoring the walk here is what
 # makes a ROOT-namespace manifest entry a checkable claim ("this is a real top-level key").
 DIST_ROOT_SCHEMA = "OpenClawSchema"
@@ -176,6 +177,12 @@ DIST_ROOT_SCHEMA = "OpenClawSchema"
 # This file records which manifest paths a real dist accepted, so the strongest authority
 # still has a voice where it cannot be present. It is generated, never hand-edited:
 #     PYTHONPATH=tests:. python3 tests/test_schema_grounding.py --write-dist-snapshot
+#
+# To re-baseline against a CANDIDATE OpenClaw before upgrading the real machine (part of
+# the upgrade protocol's re-baseline, CLAWSECCHECK-C-583): extract its tarball anywhere
+# and point CSC_OPENCLAW_DIST at its dist/ dir instead of symlinking a fake $HOME over it:
+#     CSC_OPENCLAW_DIST=/path/to/candidate/package/dist PYTHONPATH=tests:. python3 \
+#         tests/test_schema_grounding.py --write-dist-snapshot
 DIST_SNAPSHOT_FILE = Path(__file__).resolve().parent / "dist_verified_paths.txt"
 
 # Allowlist for configuration paths that are allowed even if not parsed from markdown

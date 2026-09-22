@@ -24,6 +24,7 @@ import pytest
 
 import _distgrounding
 from _distgrounding import dist_file, dist_files, dist_text, require_dist
+from _realhome import REAL_HOME
 
 TESTS_DIR = Path(__file__).resolve().parent
 
@@ -178,6 +179,76 @@ def test_the_docstring_states_that_green_means_live_not_correct():
         "disclaimer"
     )
     assert "never by a successful grep" in doc
+
+
+# ------------------------------------------------------- the test-only override (C-583)
+
+def test_openclaw_dist_root_default_matches_the_real_home_expression():
+    """Unset, `_openclaw_dist_root` must be byte-identical to the expression this module's
+    `OPENCLAW_DIST` was hard-coded to before CLAWSECCHECK-C-583."""
+    assert _distgrounding._openclaw_dist_root({}) == (
+        REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+    )
+
+
+def test_openclaw_dist_root_honours_the_test_only_override(tmp_path):
+    candidate = tmp_path / "candidate-package" / "dist"
+    resolved = _distgrounding._openclaw_dist_root(
+        {_distgrounding.DIST_OVERRIDE_ENV: str(candidate)}
+    )
+    assert resolved == candidate
+
+
+def test_openclaw_dist_root_treats_an_empty_override_as_unset():
+    """An exported-but-blanked `CSC_OPENCLAW_DIST` (left over in a shell profile) must not
+    resolve to `Path("")` — cwd — which would silently ground against whatever directory
+    happens to be current instead of falling back to the real installed dist."""
+    resolved = _distgrounding._openclaw_dist_root({_distgrounding.DIST_OVERRIDE_ENV: ""})
+    assert resolved == (
+        REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+    )
+
+
+def test_module_level_openclaw_dist_is_the_default_shaped_value():
+    """`_distgrounding.OPENCLAW_DIST` is computed once at import (like `REAL_HOME`
+    itself), from whatever environment this test run actually has — so it cannot be
+    compared to the default in CI or on a machine that legitimately exports the override.
+    What must always hold is that it is SHAPED like the locator's own default builder:
+    ending at `dist`, and equal to what `_openclaw_dist_root` returns for this same
+    environment."""
+    assert _distgrounding.OPENCLAW_DIST.name == "dist"
+    assert _distgrounding.OPENCLAW_DIST == _distgrounding._openclaw_dist_root()
+
+
+def test_test_schema_grounding_and_test_state_schema_grounding_import_the_shared_constant():
+    """The DoD's "all three files use it": the other two grounding modules must import
+    `OPENCLAW_DIST` from here rather than re-deriving it, or a future edit to one alone
+    would silently stop tracking CSC_OPENCLAW_DIST in the other."""
+    import_line_re = re.compile(r"^from _distgrounding import\b.*$", re.M)
+    for name in ("test_schema_grounding.py", "test_state_schema_grounding.py"):
+        text = (TESTS_DIR / name).read_text(encoding="utf-8")
+        import_lines = import_line_re.findall(text)
+        assert any("OPENCLAW_DIST" in line for line in import_lines), (
+            f"{name} must import OPENCLAW_DIST from _distgrounding, not compute its own "
+            f"(found: {import_lines!r})"
+        )
+
+
+def test_the_override_is_test_only_and_unread_by_the_package():
+    """CLAWSECCHECK-C-583's override steers grounding TESTS, never the shipped audit —
+    the whole point of a test-only knob is a path that never reaches a user's machine."""
+    package_dir = TESTS_DIR.parent / "clawseccheck"
+    offenders = sorted(
+        str(path.relative_to(package_dir))
+        for path in package_dir.rglob("*.py")
+        if _distgrounding.DIST_OVERRIDE_ENV in path.read_text(
+            encoding="utf-8", errors="replace"
+        )
+    )
+    assert not offenders, (
+        f"{offenders} reference {_distgrounding.DIST_OVERRIDE_ENV!r}, which must stay "
+        "test-only (CLAWSECCHECK-C-583) — clawseccheck/ must never read it."
+    )
 
 
 # --------------------------------------------------------------------- the wiring

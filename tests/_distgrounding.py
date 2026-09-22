@@ -46,16 +46,50 @@ precondition for evidence, not the evidence.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from _realhome import REAL_HOME
 
-#: The installed OpenClaw's ``dist``. ``REAL_HOME``, never ``Path.home()`` — ``conftest``
-#: redirects ``$HOME`` for the session, so ``Path.home()`` would find no dist and skip
-#: every grounding test vacuously (B-519).
-OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+#: CLAWSECCHECK-C-583. Test-only: extract a candidate OpenClaw tarball anywhere and point
+#: this at its ``dist/`` to ground against it — no fake-``$HOME`` symlink needed. This is
+#: the ONLY place that reads it: ``test_schema_grounding.py`` and
+#: ``test_state_schema_grounding.py`` both import :data:`OPENCLAW_DIST` below rather than
+#: reading the environment themselves, so there is exactly one place a future reader has
+#: to check for how the dist path can be steered — and exactly one place `clawseccheck/`
+#: would have to import from to stop being test-only, which
+#: ``test_the_override_is_test_only_and_unread_by_the_package`` (test_b728_dist_locator.py)
+#: asserts it never does.
+DIST_OVERRIDE_ENV = "CSC_OPENCLAW_DIST"
+
+
+def _openclaw_dist_root(env: "dict[str, str] | None" = None) -> Path:
+    """:data:`OPENCLAW_DIST`'s value: the real installed dist, or the test-only override.
+
+    ``env`` defaults to the real environment; a test passes a plain ``dict`` so both
+    branches are exercised without reloading this module (an env var is read once, at
+    import, like ``REAL_HOME`` itself). An override that is SET but empty (an exported,
+    blanked shell var) is treated as unset rather than resolving to ``Path("")`` — cwd —
+    which would ground against whatever directory happened to be current instead of
+    failing loudly or falling back.
+
+    ``REAL_HOME``, never ``Path.home()``, for the fallback — ``conftest`` redirects
+    ``$HOME`` for the session, so ``Path.home()`` would find no dist and skip every
+    grounding test vacuously (B-519).
+    """
+    if env is None:
+        env = os.environ
+    override = env.get(DIST_OVERRIDE_ENV)
+    if override:
+        return Path(override)
+    return REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+
+
+#: When :data:`DIST_OVERRIDE_ENV` is unset, byte-identical to the path this was hard-coded
+#: to before CLAWSECCHECK-C-583.
+OPENCLAW_DIST = _openclaw_dist_root()
 
 
 def require_dist() -> Path:
