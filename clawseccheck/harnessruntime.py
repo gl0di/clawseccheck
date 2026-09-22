@@ -407,11 +407,24 @@ def _model_value_problem(value):
 _PROVIDER_CATALOG_FIELD_RE = re.compile(r"^models\.providers\.(.+)\.models\.\d+\.(?:id|name)$")
 
 
-def _provider_catalog_field(path: str):
+def _provider_catalog_field(path: str, providers=None):
     """The raw provider key ``<p>``, as spelled in the config, when *path* is a
-    ``models.providers.<p>.models[i].id``/``.name`` leaf; else None."""
+    ``models.providers.<p>.models[i].id``/``.name`` leaf; else None.
+
+    A dot-joined path cannot distinguish a provider key containing a ``.`` from a deeper
+    nesting under a shorter key: ``models.providers.openai.extra.models.0.id`` captures
+    ``openai.extra`` either way. So the capture is accepted only when it is an ACTUAL key of
+    ``models.providers`` -- otherwise a leaf filed under provider ``openai`` could be exempted
+    as if ``openai.extra`` were an unrelated provider, which the docstring above promises
+    never happens (C-135 review of C-560). A rejected capture means no exemption, i.e. the
+    pre-C-560 behaviour: ``unknown``, never a confident ``no``."""
     m = _PROVIDER_CATALOG_FIELD_RE.match(path)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    key = m.group(1)
+    if not _is_record(providers) or key not in providers:
+        return None
+    return key
 
 
 def stray_model_signal(cfg) -> "str | None":
@@ -456,15 +469,18 @@ def stray_model_signal(cfg) -> "str | None":
       the port already reads ``<p>`` structurally for this exact subtree in ``_analyse``, so the
       skip is keyed off the SAME field the vendor itself routes through, not off ``id``/``name``
       being harmless key names in general.
-    * ``agents.list`` beside a PRESENT ``agents.entries`` key is a shape the vendor's own
-      ``collectConfiguredModelRefs``/``collectConfiguredAgentHarnessRuntimes`` never reads --
-      ``collector.agent_roster`` already encodes this (B-699: entries is chosen the instant the
-      key exists, whatever its value, and list is never consulted). Mirrored inline here (not
+    * ``agents.list`` beside an ``agents.entries`` RECORD is a shape the vendor's own
+      ``collectConfiguredModelRefs``/``collectConfiguredAgentHarnessRuntimes`` never reads, and
+      that its legacy migration deletes. Not beside a non-record ``entries`` (``null``): there
+      the migration moves ``list`` into ``entries``, so the list can still become a route --
+      see the comment at the skip below. Mirrored inline here (not
       called: ``agent_roster`` returns the roster, not a walk-skip decision) rather than walking
       it and letting an under-Codex-shaped string report a reference nothing dispatches to.
     """
     if not _is_record(cfg):
         return None
+    _models = cfg.get("models")
+    _catalog_providers = _models.get("providers") if _is_record(_models) else None
     stack = [("", cfg, 0)]
     seen = 0
     while stack:
@@ -473,10 +489,18 @@ def stray_model_signal(cfg) -> "str | None":
         if seen > _WALK_MAX_NODES or depth > _WALK_MAX_DEPTH:
             raise _Bail("the config is too large or too deep to scan for model references")
         if _is_record(node):
-            # B-699 / collector.agent_roster: once `entries` exists (whatever its value), the
-            # vendor never reads `list` beside it -- not even to decide a string inside it is
-            # Codex-free, since nothing dispatches through an unread key at all.
-            skip_ignored_list = path == "agents" and "entries" in node
+            # B-699: `list` beside `entries` is unread -- but ONLY when `entries` is a record.
+            # The runtime roster reader picks `entries` whenever it is !== undefined
+            # (agent-roster-DzcWJqlw.mjs:53-67, mirrored by collector.agent_roster), yet the
+            # vendor's own legacy migration drops `list` only when getRecord(agents.entries)
+            # is truthy (legacy-38PBEy7q.mjs:1983-1999). With `entries: null` the migration
+            # MOVES `list` INTO `entries` instead -- and a gateway start offers that repair as
+            # a single yes/no prompt (invalid-config-recovery-Dp32yq5b.mjs:16-25), after which
+            # an `openai/...` list entry runs on the Codex harness. `entries: null` is
+            # schema-invalid, so the raw-config oracle cannot see this; per this module's own
+            # rule (a migration can change the answer, so `no` may not be given over it), a
+            # non-record `entries` does not license the skip. Found by C-135 review of C-560.
+            skip_ignored_list = path == "agents" and _is_record(node.get("entries"))
             for key, value in node.items():
                 if skip_ignored_list and key == "list":
                     continue
@@ -494,7 +518,7 @@ def stray_model_signal(cfg) -> "str | None":
             for i, value in enumerate(node):
                 stack.append((f"{path}.{i}", value, depth + 1))
         elif _is_codex_qualified(node):
-            catalog_provider = _provider_catalog_field(path)
+            catalog_provider = _provider_catalog_field(path, _catalog_providers)
             if catalog_provider is None or _is_codex_provider_name(catalog_provider):
                 return (f"{path} names a model on a provider that runs the Codex harness (or is "
                         f"migrated onto it)")

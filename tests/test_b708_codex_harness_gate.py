@@ -564,10 +564,42 @@ def test_an_ignored_agents_list_beside_entries_is_not_a_route():
                       "entries": {"a": {"model": "anthropic/d"}},
                       "list": [{"model": "openai/gpt-5"}]}}
     assert _ans(cfg) == hr.NO
-    # `entries: null` still counts as present (B-699): `list` stays unread
-    cfg2 = {"agents": {"defaults": {"model": "anthropic/c"}, "entries": None,
+    # An EMPTY entries record also makes the vendor's migration delete `list`.
+    cfg2 = {"agents": {"defaults": {"model": "anthropic/c"}, "entries": {},
                        "list": [{"id": "a", "model": "openai/gpt-5"}]}}
     assert _ans(cfg2) == hr.NO
+
+
+def test_a_null_entries_does_not_license_skipping_the_list():
+    """C-135 review of C-560: this exact config was previously pinned as NO, and that was
+    the defect. The runtime roster reader treats `entries: null` as present, but the vendor's
+    legacy migration drops `list` only when `entries` is a record (legacy-38PBEy7q.mjs:
+    1983-1999); with null it MOVES the list into entries, and a gateway start offers that repair
+    as one yes/no prompt. Executed in memory by the reviewer, the migrated config sends agent
+    `a` to the Codex harness. A migration can change the answer, so `no` may not be given."""
+    for entry in ({"id": "a", "model": "openai/gpt-5"}, {"model": "openai/gpt-5"}):
+        cfg = {"agents": {"defaults": {"model": "anthropic/c"}, "entries": None,
+                          "list": [entry]}}
+        assert _ans(cfg) == hr.UNKNOWN, entry
+
+
+def test_a_catalog_label_is_exempt_only_under_a_real_provider_key():
+    """C-135 review of C-560: a dot-joined path cannot tell a dotted provider key from a
+    deeper nesting, so `models.providers.openai.extra.models.0.id` used to capture
+    `openai.extra`, read it as a non-Codex provider, and exempt a leaf filed under `openai`.
+    The capture is now accepted only when it is an actual key of `models.providers`."""
+    nested = {**_models("anthropic/c"),
+              "models": {"providers": {"openai": {"extra": {"models": [{"id": "openai/gpt-5.5"}]}}}}}
+    assert _ans(nested) == hr.UNKNOWN
+    deeper = {**_models("anthropic/c"),
+              "models": {"providers": {"lmstudio": {"models": [
+                  {"id": "local", "compat": {"models": [{"id": "openai/gpt-5.5"}]}}]}}}}
+    assert _ans(deeper) == hr.UNKNOWN
+    # Control: a provider key that genuinely contains a dot still resolves and is exempted,
+    # which is the case the greedy capture was written for.
+    dotted = {**_models("anthropic/c"),
+              "models": {"providers": {"my.proxy": {"models": [{"id": "openai/gpt-oss-20b"}]}}}}
+    assert _ans(dotted) == hr.NO
 
 
 def test_an_unignored_agents_list_control_still_refuses():
