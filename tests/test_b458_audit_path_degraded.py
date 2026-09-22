@@ -137,7 +137,7 @@ def _audit(tmp_path: Path, home: Path, *, unreadable: str | None = None) -> tupl
         [sys.executable, "-m", "clawseccheck.cli",
          "--home", str(home),
          "--data-dir", str(tmp_path / "data"),
-         "--no-history", "--exit-code", "--json"],
+         "--no-history", "--no-deptree", "--exit-code", "--json"],
         capture_output=True, text=True, timeout=300, cwd=str(_REPO_ROOT), env=env,
     )
     assert proc.stdout.strip(), f"CLI produced no JSON; stderr:\n{proc.stderr[-2000:]}"

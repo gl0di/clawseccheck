@@ -1779,8 +1779,9 @@ python3 audit.py --log audit.log            # also write log to a local file
     `/100` and no score-bar:
 
     ```text
-    🦞 ClawSecCheck · OpenClaw Security Audit · Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
+    🦞 ClawSecCheck · OpenClaw Security Audit · Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)
     No grade yet — 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).  ·  27 issues
+    For that finding's check id (needed for `--explain <id>`), see the full report — plain `clawseccheck` or `--save <path>` / `--html <path>`.
     Not fully covered: no trajectory sidecar was read
     ⚠️ open CRITICAL finding — it would have capped the grade, but this run has no grade to cap.
 
@@ -1796,7 +1797,14 @@ python3 audit.py --log audit.log            # also write log to a local file
     ```
 
     That header is what the common case looks like: `--full` closes the installed sweep,
-    so 2 of the 5 layers are still open and no letter is issued. Supply `--attest` and
+    so 2 of the 5 layers are still open and no letter is issued. The "Most urgent" clause
+    states the risk, never the check id (findings are never labelled `[B2]` in owner-facing
+    prose) — the follow-up line above points at the full report instead, since that is
+    where an ungraded run's check ids reliably live (its by-subject inventory index), and
+    this card's own Skills/MCP sections only carry one when an installed skill or
+    configured MCP server is actually implicated. That follow-up line is skipped when
+    nothing is open (`Nothing urgent found in what was checked.`) — there is no id to point
+    at. Supply `--attest` and
     `--judged-bundle` in the same command and the header carries `Grade X · NN/100`
     instead.
 
@@ -2212,7 +2220,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 872 test files and 26,268
+A security tool should be heavily tested — so it is: 891 test files and 26,675
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

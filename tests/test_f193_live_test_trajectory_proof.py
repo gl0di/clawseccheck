@@ -352,7 +352,7 @@ def _files(tmp_path: Path, bucket: dict):
 def _run_full_json(home, attest_path, bundle_path, tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home), "--full", "--json",
-         "--no-history", "--attest", attest_path, "--judged-bundle", bundle_path,
+         "--no-history", "--no-deptree", "--attest", attest_path, "--judged-bundle", bundle_path,
          "--data-dir", str(tmp_path / "data")],
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=600)
     assert proc.returncode in (0, 1), proc.stderr[-2000:]

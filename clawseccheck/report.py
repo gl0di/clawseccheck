@@ -535,6 +535,12 @@ def _cap_also_clause(extras: list[str]) -> str:
 # render_report's F-155 and F-154 ungraded paragraphs and render_dashboard's card line --
 # share the constant, so they cannot drift into three different sentences again.
 _UNGRADED_CAP_TAIL = "it would have capped the grade, but this run has no grade to cap."
+
+# CLAWSECCHECK headline-id-leak: `_urgent_headline`'s all-clear sentence, named so
+# `render_dashboard` can tell "a real FAIL/WARN backed this headline" apart from
+# "nothing was open" without re-running `_urgent_headline`'s own FAIL/WARN waterfall —
+# see render_dashboard's `_id_hint_line` use for why that distinction matters.
+_NOTHING_URGENT_SENTENCE = "Nothing urgent found in what was checked."
 _UNGRADED_CAP_TAIL_SENTENCE = _UNGRADED_CAP_TAIL[0].upper() + _UNGRADED_CAP_TAIL[1:]
 
 # B-761: the text report renders the "Highest-risk paths" attack-chain synthesis, the
@@ -697,14 +703,31 @@ def _missing_layers_sentence(score: ScoreResult) -> str:
 
 
 def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
-    """``"Most urgent: CRITICAL — Lethal trifecta reachable  [B1]"``, or the all-clear
+    """``"Most urgent: CRITICAL — Lethal trifecta reachable"``, or the all-clear
     variant when there is no unsuppressed FAIL.
 
     An ungraded run has still told the reader the most important thing it knows, so
     this leads every ungraded surface — it must read as a result, never as an error.
     Selection mirrors `render_report`'s own `issues` sort (severity first), narrowed to
     FAIL only (a WARN is not "urgent" in the sense this headline means), with the
-    finding id as the tie-break for determinism.
+    finding id used ONLY as the tie-break for determinism — never printed. This
+    headline states the risk, not which check number found it (design-system.md
+    Layer 0: "never internal codes"); on `render_report` the id remains one scroll
+    away regardless of grading, in the by-subject inventory index
+    (`render_subject_inventory`, the one surface deliberately allowed to carry ids,
+    gated on `ctx` being available rather than on `score.graded`) — see this
+    function's call sites for the two callers where that is not true.
+
+    CLAWSECCHECK headline-id-leak: `render_html` never carried a check id anywhere
+    (graded or ungraded — unaffected, pre-existing). `render_dashboard` is the real
+    gap this headline being id-free opens: its own Skills/MCP detail blocks only ever
+    carry an id when `ctx` is available AND the relevant roster is non-empty (B-506
+    kept the card off `by_id` otherwise, a budget-bound call this fix does not
+    reopen), so a plain `--dashboard` reader holding only this headline had no path
+    to a check id at all. `render_dashboard` compensates with its own follow-up
+    line (`_NOTHING_URGENT_SENTENCE` marks the one case — genuinely nothing open —
+    where that line is skipped) pointing at the full report for the id, rather than
+    printing one here.
 
     B-758 item #1: a RISK-* dangerous-capability CHAIN carries its own severity —
     a property of the combination, not summed from its legs — and this report renders
@@ -740,9 +763,9 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     kind, top = _pick(fail_candidates, live_risk)
     if kind == "risk":
         return (f"Most urgent: {top.severity} — dangerous capability chain: "
-                f"{_sanitize(top.title)}  [{top.id}]")
+                f"{_sanitize(top.title)}")
     if kind == "finding":
-        return f"Most urgent: {top.severity} — {_sanitize(top.title)}  [{top.id}]"
+        return f"Most urgent: {top.severity} — {_sanitize(top.title)}"
 
     # C-426: the all-clear must not out-run the evidence. This headline leads every
     # ungraded surface, including the card, whose own "Most urgent" section lists
@@ -760,11 +783,11 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     kind, top = _pick(warns, live_risk)
     if kind == "risk":
         return (f"Nothing failed outright — most serious open item: {top.severity} — "
-                f"dangerous capability chain: {_sanitize(top.title)}  [{top.id}]")
+                f"dangerous capability chain: {_sanitize(top.title)}")
     if kind == "finding":
         return (f"Nothing failed outright — most serious open item: {top.severity} — "
-                f"{_sanitize(top.title)}  [{top.id}]")
-    return "Nothing urgent found in what was checked."
+                f"{_sanitize(top.title)}")
+    return _NOTHING_URGENT_SENTENCE
 
 
 def _not_fully_covered_line(score: ScoreResult) -> str:
@@ -4395,10 +4418,25 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             f"  {sep}  {n_issues} {issues_word}",
         ]
     else:
+        _headline = _urgent_headline(findings, risk=risk)
         grade_lines = [
-            f"{head} {sep} {_urgent_headline(findings, risk=risk)}",
+            f"{head} {sep} {_headline}",
             f"{_missing_layers_sentence(score)}  {sep}  {n_issues} {issues_word}",
         ]
+        if _headline != _NOTHING_URGENT_SENTENCE:
+            # CLAWSECCHECK headline-id-leak: this headline states the risk, never the
+            # check id (design-system.md Layer 0), and this card's own Skills/MCP
+            # detail blocks only ever carry an id when `ctx` is available AND that
+            # roster is non-empty (B-506) — so a plain `--dashboard` reader holding
+            # only this card, on a run whose findings never touch an installed skill
+            # or configured MCP server, had no path to a check id at all. One line,
+            # no id, pointing at where the id reliably lives instead — the full text
+            # report, which carries it one scroll below its own headline regardless
+            # of grading (`_urgent_headline`'s docstring).
+            grade_lines.append(
+                "For that finding's check id (needed for `--explain <id>`), see the "
+                "full report — plain `clawseccheck` or `--save <path>` / `--html <path>`."
+            )
     _covered_line = _not_fully_covered_line(score)
     if _covered_line:
         grade_lines.append(_covered_line)

@@ -10,7 +10,7 @@ HOME = ROOT / "fixtures" / "home_safe"
 
 
 def _run(*args):
-    return subprocess.run([PY, "-m", "clawseccheck", *args],
+    return subprocess.run([PY, "-m", "clawseccheck", "--no-deptree", *args],
                           capture_output=True, text=True, cwd=ROOT)
 
 
