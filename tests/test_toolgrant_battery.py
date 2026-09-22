@@ -247,12 +247,25 @@ def _case_id(case) -> str:
     return f"{label}/{scope}/{tool}={expected}"
 
 
+def _scope_key(scope: str):
+    """The battery's JSON data spells the global scope as the plain string ``"global"``
+    (a label, not a value ``toolgrant`` understands post-CLAWSECCHECK-C-561: ``GLOBAL_SCOPE``
+    is now a private sentinel type, never that string). Every ``granted()`` call in this file
+    goes through this mapping so the battery keeps working unchanged while the module itself
+    no longer accepts the string as a spelling of the global scope. None of the corpus or
+    synthetic rows names a real roster agent literally "global" (checked when this mapping
+    was added), so this is a lossless translation of the data, not a narrowing of it — an
+    agent actually spelled "global" would need its own row keyed some other way, same as the
+    dedicated collision battery in tests/test_f186_write_reach.py already is."""
+    return toolgrant.GLOBAL_SCOPE if scope == "global" else scope
+
+
 def _mismatches(rows, tool):
     out = []
     for row in rows:
         cfg = _CONFIGS[row["label"]]
         for scope, expected in row["results"][tool].items():
-            if toolgrant.granted(cfg, tool, scope) is not expected:
+            if toolgrant.granted(cfg, tool, _scope_key(scope)) is not expected:
                 out.append(f"{row['label']}/{scope}: the vendor says {expected}")
     return out
 
@@ -260,7 +273,7 @@ def _mismatches(rows, tool):
 @pytest.mark.parametrize("label,scope,tool,expected", CASES, ids=[_case_id(c) for c in CASES])
 def test_matches_the_installed_runtime(label, scope, tool, expected):
     cfg = _CONFIGS[label]
-    assert toolgrant.granted(cfg, tool, scope) is expected
+    assert toolgrant.granted(cfg, tool, _scope_key(scope)) is expected
 
 
 @pytest.mark.parametrize("tool", EXTENDED_TOOLS)

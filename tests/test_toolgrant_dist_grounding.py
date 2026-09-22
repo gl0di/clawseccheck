@@ -206,6 +206,15 @@ def sweep(vendor):
     return dict(rows), tools, oracle.vendor_grants(rows, tools)
 
 
+def _scope_key(scope: str):
+    """The vendor grants JSON spells the global scope as the plain string ``"global"`` -- a
+    label, not a value ``toolgrant.granted`` accepts post-CLAWSECCHECK-C-561 (``GLOBAL_SCOPE``
+    is a private sentinel type now, never that string). None of ``synthetic_configs``'s
+    rosters names an agent literally "global" (checked: ids are "a"/"b"/"c" and similar), so
+    this mapping is lossless for this sweep, same as tests/test_toolgrant_battery.py's copy."""
+    return toolgrant.GLOBAL_SCOPE if scope == "global" else scope
+
+
 def _sweep_mismatches(sweep) -> list:
     configs, _, grants = sweep
     wrong = []
@@ -213,7 +222,7 @@ def _sweep_mismatches(sweep) -> list:
         cfg = configs[row["label"]]
         for tool, per_scope in row["results"].items():
             for scope, expected in per_scope.items():
-                if toolgrant.granted(cfg, tool, scope) is not expected:
+                if toolgrant.granted(cfg, tool, _scope_key(scope)) is not expected:
                     wrong.append((row["label"], scope, tool, expected))
     return wrong
 
