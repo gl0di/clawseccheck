@@ -1598,15 +1598,26 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
                 # private-network addresses the flag already opened. blockedHostnames
                 # (2026.9.1+) is checked before DNS and allow rules even with
                 # private-network access enabled (grounded: dist ssrf-policy-helpers/ssrf
-                # modules, resolveHostnamePolicyChecks), so it is the one lever that
-                # still holds for an operator who cannot turn the flag off. Only shown
-                # when the flag is the config's actual trigger (see allow_private above)
-                # -- B38/RISK-15 can also fire on browser.noSandbox alone.
+                # modules, resolveHostnamePolicyChecks). Only shown when the flag is the
+                # config's actual trigger (see allow_private above) -- B38/RISK-15 can
+                # also fire on browser.noSandbox alone.
+                #
+                # B-853: that deny-list check is HOSTNAME/IP TEXT only (installed 2026.9.5
+                # dist, ssrf-B1sxrDMt.mjs:189). shouldSkipPrivateNetworkChecks (same file,
+                # 114-115) then skips the resolved-IP check entirely while the flag is on
+                # (lines 280/330), so an attacker-chosen hostname that RESOLVES to one of
+                # the listed addresses is never checked against them -- blockedHostnames
+                # narrows this leg (it still blocks direct use of the literal names/IPs),
+                # it does not close it, so the wording must not claim it "still blocks
+                # them" while the flag stays on.
                 ". If dangerouslyAllowPrivateNetwork must stay on, also add "
                 "browser.ssrfPolicy.blockedHostnames (OpenClaw 2026.9.1 and later) naming "
                 "at least the cloud-metadata addresses — 169.254.169.254, "
-                "metadata.google.internal, 100.100.100.200 — which still blocks them "
-                "even with the flag enabled."
+                "metadata.google.internal, 100.100.100.200 — which OpenClaw still checks "
+                "by name before DNS even with the flag enabled. That only blocks a "
+                "request that names one of those hosts/IPs directly, not an "
+                "attacker-chosen hostname that resolves to one of them, so it narrows "
+                "this leg rather than closing it while the flag stays on."
                 if allow_private else "."
             )
             + " Breaking either leg breaks the chain."
