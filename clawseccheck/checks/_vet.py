@@ -603,7 +603,16 @@ def _insecure_tempfile_write_hits(
     heuristic bar (never escalated to FAIL by this rule)."""
     header_matches = _manifest_header_matches(blob)
     for m in _INSECURE_TEMPFILE_WRITE_RE.finditer(blob):
-        if _is_code_example(blob, m.start(), fence_ranges):
+        # B-525 (fence family, LEGACY site #4 of the 2026-08-28 inventory):
+        # positive control, measured through check_installed_skills() directly —
+        #
+        #     open("/tmp/output.txt", "w").write("data")
+        #         bare prose -> WARN     inside an UNANNOTATED ```fence``` -> PASS
+        #
+        # fence_needs_negation=True closes it. The existing fenced-doc test
+        # (test_tmp_write_in_fenced_doc_example_does_not_warn) keeps its trailing
+        # "Documented example above, not executed..." annotation and stays PASS.
+        if _is_code_example(blob, m.start(), fence_ranges, fence_needs_negation=True):
             continue
         if _pos_in_test_fixture_file(blob, m.start(), header_matches):
             continue
@@ -4863,8 +4872,23 @@ def check_installed_skills(ctx: Context) -> Finding:
                     "claims to fire on nearly any user action (TR1)"
                 )
                 break
+        # B-525 (fence family, LEGACY sites #5/#3/#2 of the 2026-08-28 inventory):
+        # all three loops below kept the legacy fence_needs_negation=False default,
+        # so an unannotated ```fence``` silently dropped the match. H6 is advisory-only
+        # (never drives a verdict on its own — see h6_advisory's declaration above),
+        # but a fence still hid the fact from the reader; ONION/IPURL are WARN-band.
+        # Positive controls, measured through vet_skill() directly, same shape as the
+        # cron/self-mod/daemonize flips above:
+        #
+        #     run scripts/bootstrap.sh                 bare -> H6 evidence   fenced -> dropped
+        #     http://abcdefghij234567.onion/x           bare -> WARN          fenced -> PASS
+        #     http://185.220.101.5/collect               bare -> WARN          fenced -> PASS
+        #
+        # fence_needs_negation=True closes all three. Existing fenced-example tests
+        # (test_fenced_onion_example_is_safe) keep their "For example:" annotation right
+        # before the fence, so _fence_is_annotated still matches and they stay PASS.
         for m in _SKILL_LOCAL_CHAIN_RE.finditer(blob):
-            if not _is_code_example(blob, m.start(), _fr):
+            if not _is_code_example(blob, m.start(), _fr, fence_needs_negation=True):
                 # B-544: advisory only — see h6_advisory's declaration above. Does not
                 # join warns_content, so it can never drive a WARN on its own.
                 h6_advisory.append(
@@ -4873,11 +4897,13 @@ def check_installed_skills(ctx: Context) -> Finding:
                 )
                 break
         for m in _IOC_ONION_RE.finditer(blob):
-            if not _is_code_example(blob, m.start(), _fr):
+            if not _is_code_example(blob, m.start(), _fr, fence_needs_negation=True):
                 warns_content.append(f"{name}: references a Tor .onion address ({m.group(0)})")
                 break
         for m in _IOC_IPURL_RE.finditer(blob):
-            if _is_public_ip(m.group(1)) and not _is_code_example(blob, m.start(), _fr):
+            if _is_public_ip(m.group(1)) and not _is_code_example(
+                blob, m.start(), _fr, fence_needs_negation=True
+            ):
                 warns_content.append(
                     f"{name}: hardcoded public-IP URL ({m.group(0)}) — "
                     "unusual for a legitimate skill"
