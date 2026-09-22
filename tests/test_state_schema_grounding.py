@@ -60,9 +60,20 @@ machine with the matching OpenClaw installed:
 
     PYTHONPATH=tests:. python3 tests/test_state_schema_grounding.py --write-state-snapshot
 
-`PYTHONPATH=tests` is load-bearing — `REAL_HOME` comes from `tests/_realhome.py`, because
-the suite redirects `$HOME` for the rest of the run. Hand-editing the snapshot is the
-guard writing its own evidence — regenerate it, never patch it by hand.
+`PYTHONPATH=tests` is load-bearing — `OPENCLAW_DIST` comes from `tests/_distgrounding.py`
+(which in turn reads `REAL_HOME` from `tests/_realhome.py`), because the suite redirects
+`$HOME` for the rest of the run. Hand-editing the snapshot is the guard writing its own
+evidence — regenerate it, never patch it by hand.
+
+To re-baseline against a CANDIDATE OpenClaw before upgrading the real machine
+(CLAWSECCHECK-C-583): extract its tarball anywhere and point `CSC_OPENCLAW_DIST` — read
+once, in `tests/_distgrounding.py` — at its `dist/` dir, instead of symlinking a fake
+`$HOME` over it:
+
+    CSC_OPENCLAW_DIST=/path/to/candidate/package/dist PYTHONPATH=tests:. python3 \\
+        tests/test_state_schema_grounding.py --write-state-snapshot
+
+Unset, this module's `OPENCLAW_DIST` is exactly the REAL_HOME-derived path it always was.
 """
 from __future__ import annotations
 
@@ -81,8 +92,7 @@ from pathlib import Path
 
 import pytest
 
-from _distgrounding import _JS_EXTS
-from _realhome import REAL_HOME
+from _distgrounding import OPENCLAW_DIST, _JS_EXTS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = REPO_ROOT / "tests"
@@ -92,9 +102,11 @@ DRIFT_GATE_SCRIPT = REPO_ROOT / "scripts" / "state_db_drift_gate.py"
 
 SNAPSHOT_FILE = Path(__file__).resolve().parent / "state_schema_snapshot.sql"
 
-# B-519: REAL_HOME, not Path.home() — see tests/_realhome.py. Mirrors test_schema_
-# grounding.py's OPENCLAW_DIST exactly (same installed package, same reasoning).
-OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+# Imported from `_distgrounding` (same value `test_schema_grounding.py` uses) rather than
+# hand-rolled here: it is the single reader of CLAWSECCHECK-C-583's test-only
+# CSC_OPENCLAW_DIST override (see the module docstring above and `_distgrounding.py`).
+# Unset, it is byte-identical to the REAL_HOME-derived path this used to hard-code (B-519:
+# REAL_HOME, not Path.home() — see tests/_realhome.py).
 SCHEMA_SQL_CONST_MARKER = 'const OPENCLAW_STATE_SCHEMA_SQL = "'
 
 # B-834: how the vendor spells the state-schema VERSION, oldest to newest form. Through
