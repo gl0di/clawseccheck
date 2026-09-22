@@ -1199,10 +1199,16 @@ def _b61_openclaw_names_foreign_slug(norm: str, m: re.Match[str], skill_name: st
 
     KNOWN RESIDUAL (B-286 — NARROWED, NOT CLOSED). *skill_name* is the scanned directory's
     basename (collector.py sets it from the skill dir name; _vet.py does the same for a
-    ``--vet-skill`` target), NOT the skill's declared SKILL.md ``name:``. Under a full
-    ``audit()`` of an installed skill these coincide, because OpenClaw installs a skill into
-    a directory named for its slug. Under ``--vet-skill`` pointed at an arbitrarily-named
-    staging directory they need not: a skill correctly referencing its own installed path
+    ``--vet-skill`` target), NOT the skill's declared SKILL.md ``name:``. A skill's install
+    directory basename is not guaranteed to equal either the segment it references here or
+    its own declared ``name:`` — CLAUDE.md §2.5 records a fuller ``~/.openclaw`` sweep (615
+    SKILL.md files with a parseable ``name:``) that found 62 (~1 in 10) with a directory
+    basename differing from the declared name; that is a related but different comparison
+    from the one this function makes (directory vs. the segment WRITTEN IN THE PATH), and
+    all 62 sat under plugin-bundled trees not confirmed to be walked by skill-root discovery
+    — but it refutes treating "the directory is named for its slug" as an invariant rather
+    than the common case. Under ``--vet-skill`` pointed at an arbitrarily-named staging
+    directory the mismatch is routine: a skill correctly referencing its own installed path
     ``~/.openclaw/skills/<its-real-slug>/...`` from a directory called ``staging-copy`` reads
     as foreign here.
 
@@ -1223,7 +1229,15 @@ def _b61_openclaw_names_foreign_slug(norm: str, m: re.Match[str], skill_name: st
     admits only WARN/UNKNOWN), so `check_agent_snooping`'s FAIL branch states the limit in
     its `fix` text — never in `detail`, which `baseline.fingerprint()` hashes — whenever this
     function is the ONLY reason a `.openclaw/skills`|`/memory` match wasn't skipped as
-    self-config (see the `strong_signal`/`foreign_slug` split there)."""
+    self-config (see the `strong_signal`/`foreign_slug` split there).
+
+    B-861: this function returns True for TWO shapes — a named sibling segment (this
+    docstring's residual) and a glob harvest (`skills/*/.env`, `memory/*/notes.json`,
+    handled below) — and both correctly convict. But only the named-segment shape has the
+    "own bundled module under a differently-named directory" explanation the §2.5(d)
+    disclosure text gives; a glob enumerates every installed skill's tree regardless of
+    name, which that explanation does not fit. The caller gates the disclosure on
+    `_b61_foreign_slug_is_a_named_segment` so it is not attached to a wildcard harvest."""
     pl = m.group(0).lower()
     if not (pl.endswith("/skills") or pl.endswith("/memory")):
         return False  # openclaw.json / mcp_config.json — no owner slug segment follows
@@ -1246,6 +1260,27 @@ def _b61_openclaw_names_foreign_slug(norm: str, m: re.Match[str], skill_name: st
             )
         return False  # bare `.openclaw` root (end-of-path) — the host's own tree
     return seg.group(0).split(".")[0].lower() != skill_name.lower()
+
+
+def _b61_foreign_slug_is_a_named_segment(norm: str, m: re.Match[str]) -> bool:
+    """B-861: True only when the `~/.openclaw/skills|memory` match in *m* is followed by a
+    resolvable, NAMED path segment (a slug) — as opposed to a glob wildcard (`*`, `?`, `[`)
+    or nothing at all (a bare `.openclaw` root). `_b61_openclaw_names_foreign_slug` returns
+    True for both shapes, correctly: a glob enumerates every sibling's tree, which is at
+    least as foreign as one named sibling. But the two are not equally EXPLAINABLE. The
+    named-segment case has a real innocent story — "this skill's own bundled module,
+    referenced through a directory named differently than it was installed under" (the
+    B-286 residual) — that a static scan cannot rule out. A glob harvest
+    (`skills/*/.env`, `skills/*/config.json`, `memory/*/notes.json`) has no such story: it
+    reads every installed skill's tree regardless of name, which cannot be explained as one
+    skill misnaming its own path. `check_agent_snooping` uses this to gate the B-535
+    slug-ambiguity disclosure so the "might just be your own bundled module" hedge is never
+    attached to a fleet-wide harvest, where it would be false."""
+    pl = m.group(0).lower()
+    if not (pl.endswith("/skills") or pl.endswith("/memory")):
+        return False
+    rest = norm[m.end():].lstrip("/")
+    return bool(re.match(r"[\w.-]+", rest))
 
 
 # Regex to extract `description:` from the SKILL.md frontmatter in a blob.
@@ -7767,7 +7802,16 @@ def check_agent_snooping(ctx: Context) -> Finding:
                         # genuine read of a sibling skill's tree, so disclose the limit
                         # in the FAIL's advice rather than silently asserting certainty
                         # the check doesn't have.
-                        slug_ambiguous_skills.append(skill_name)
+                        #
+                        # B-861: but ONLY for a named sibling segment — the shape the
+                        # hedge actually describes. `foreign_slug` is True for a glob
+                        # harvest too (skills/*/.env, memory/*/notes.json), and that
+                        # shape has no "own bundled module under a different name"
+                        # explanation: it reads every installed skill's tree regardless
+                        # of name, so disclosing the hedge there would tell the user to
+                        # doubt a real fleet-wide theft for a reason that doesn't apply.
+                        if _b61_foreign_slug_is_a_named_segment(norm, m):
+                            slug_ambiguous_skills.append(skill_name)
                 skill_fail = (
                     f"{skill_name}: reads foreign-agent config path "
                     f"'{path_match}' with a read/exfil verb"
