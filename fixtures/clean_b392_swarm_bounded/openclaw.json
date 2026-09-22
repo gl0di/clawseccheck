@@ -13,7 +13,7 @@
     }
   },
   "tools": {
-    "profile": "minimal",
+    "profile": "messaging",
     "swarm": {
       "enabled": true,
       "maxConcurrent": 8,

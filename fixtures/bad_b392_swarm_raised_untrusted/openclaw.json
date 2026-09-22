@@ -13,7 +13,7 @@
     }
   },
   "tools": {
-    "profile": "coding",
+    "profile": "messaging",
     "swarm": {
       "enabled": true,
       "maxConcurrent": 64,
