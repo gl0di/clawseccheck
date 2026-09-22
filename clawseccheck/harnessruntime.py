@@ -41,6 +41,71 @@ model chosen at run time (a cron payload's ``model`` override, a ``/model`` swit
 the Codex plugin's own ``appServer`` settings are invisible here. A ``no`` therefore means
 "no configured model resolves to the Codex harness", never "Codex cannot run".
 
+C-559 (2026-09-22) measured six further candidate blind spots against the installed
+OpenClaw 2026.9.5 dist and recorded one decision each -- ACCEPT throughout, because every
+surface, once actually opened, either never enters an agent turn at all or is already
+caught by an existing rule. No code changed as a result; this paragraph IS the recorded
+decision the ticket's own definition of done asks for.
+
+1. ``tools.media.models[]`` -- the modern, capability-tagged replacement for the
+   per-capability ``preferredModel`` this module already reads (real:
+   ``zod-schema.core-CZ0zDyHR.mjs:912,969-975``; the migration off the old form is
+   ``legacy-38PBEy7q.mjs``'s ``migrateModels``). The vendor's OWN
+   ``collectConfiguredModelRefs`` does not enumerate it either. Traced its execution
+   (``image-CQFbrtNB.mjs``, the capability-provider-runtime path): a single provider
+   completion for captioning or generating media, never an agent turn with tool access.
+   B333/B353 gate on tool-approval mechanics inside an agent's OWN turn; there is no tool
+   to approve on this path on any provider. ACCEPT -- out of scope by what the mechanism
+   does, not an oversight in what it enumerates.
+2. The Codex ACP adapter (``agents.entries.*.runtime = {type: "acp", acp: {agent:
+   "codex"}}`` -- real, ``acp-spawn-DBebUPRe.mjs:1077-1099``, whose own error text
+   documents exactly this shape) spawns an EXTERNAL ``codex`` CLI subprocess under the
+   ACP protocol -- a different harness from the embedded Codex app-server this module
+   answers for. ``mcp.servers.*.codex.*``, the config B333/B353 actually read, is
+   schema-described as projection metadata "in Codex app-server thread config"
+   specifically (``schema-CwAIqZVE.mjs:147-149``) -- confirmed scoped to the embedded
+   thread, not the ACP subprocess. ACCEPT -- a structurally separate mechanism, not a gap
+   in this one.
+3. Bare (non-provider-qualified) ids at ``channels.clickclack.model`` /
+   ``channels.clickclack.accounts.*.model`` and Reef's ``guard.pinnedModel`` -- both real,
+   bundled CHANNEL plugins (``extensions/clickclack``, ``extensions/reef`` in the
+   installed dist) -- are one more measured instance of the "bundled plugin reads its own
+   keys" class ``stray_model_signal`` already names below; a provider-qualified string at
+   either is already refused by that function's whole-config walk regardless of key name.
+   ``embeddedAgent.cyberFailover.model`` (``schema-CwAIqZVE.mjs:59-62``) fires only after
+   an OpenAI cyber-policy refusal, which requires that SAME agent's own primary/fallback
+   ref to already be ``openai/...`` -- a shape the ``yes``-via-implicit-OpenAI-rule branch
+   above, or the explicit-ref scan below it, already catches before the ``no`` branch
+   these PASS texts hinge on is ever reached, so a bare id here creates no new reachable
+   ``no``. ``talk.realtime.model`` is a realtime VOICE session model on a separate
+   provider path (``talk.realtime.providers.*``). ``memory.search.model``
+   (``schema-CwAIqZVE.mjs:677``) is an EMBEDDING model override -- no completion, no
+   tools, structurally incapable of an agent turn. ``tools.exec.applyPatch.allowModels``
+   (``schema-CwAIqZVE.mjs:954``) is not a model reference at all -- it is an ALLOWLIST
+   that only NARROWS which models may invoke ``apply_patch``, so it can never be the
+   thing that makes an agent run anything. ACCEPT, all four groups -- same disclosed class
+   as the plugin note below, or not a model reference to begin with.
+4. Open key space in third-party plugins: already the stated residual in
+   ``stray_model_signal``'s own docstring below ("a third-party plugin that selects a
+   model through a key with no ``model`` in its name..."). ACCEPT -- already disclosed,
+   nothing to add.
+5. Run-time selection (a cron payload's ``model`` override, a ``/model`` switch, the
+   Codex plugin's own ``appServer`` settings): already the stated residual in this
+   paragraph's own opening, above. ACCEPT -- already disclosed, nothing to add.
+6. ``OPENAI_BASE_URL`` set only in the GATEWAY's own environment, never this process's:
+   measured the two real files the vendor's own dotenv loader reads before the gateway
+   resolves any route (``dotenv-global-1I45H5ph.mjs:126-133``) -- ``<OPENCLAW_STATE_DIR or
+   ~/.openclaw>/.env`` and ``~/.config/openclaw/gateway.env`` (also named in
+   ``auth-token-source-conflict-CWrv-Qpc.mjs``'s own remediation text, so this is not a
+   one-off reading). Missing either can overclaim a ``yes`` -- the opposite, riskier
+   direction here, since a ``yes`` is what B333/B353 read as an asserted live grant --
+   when the real route was actually redirected out from under the implicit-OpenAI
+   assumption by a base-url override this process never sees. ACCEPT for now, not EXTEND:
+   reading either file is a ``collector.py``-layer concern (this module is a declared
+   leaf), the file can hold real secrets alongside the one wanted key, and this project
+   requires a dedicated C-135 adversarial pass before a new read like that ships. Recorded
+   here, with the exact paths, so that follow-up does not have to re-derive them.
+
 Leaf: imports only ``collector.agent_roster``. Not in ``__all__``, matching its siblings
 ``toolpolicy.py`` / ``toolgrant.py``.
 """
@@ -339,7 +404,9 @@ def stray_model_signal(cfg) -> "str | None":
     ``model_refs`` mirrors the vendor's own ``collectConfiguredModelRefs``, so the oracle the
     port is graded against shares its blind spots -- bundled plugins read their OWN config keys
     (``imap``'s ``accounts.<id>.model``, ``active-memory``'s ``model`` and ``modelFallback``,
-    memory-core dreaming) and hand the value to an agent turn. Two structural rules, deliberately
+    memory-core dreaming, ``clickclack``'s ``model`` / ``accounts.*.model``, Reef's
+    ``guard.pinnedModel`` -- the last two measured under C-559) and hand the value to an agent
+    turn. Two structural rules, deliberately
     not a list of plugin fields (a plugin's schema is the plugin's, and a third party's is
     unknowable):
 
@@ -444,6 +511,16 @@ def _has_params(holder) -> bool:
 
 
 def _mentions_openai_base_url(cfg, environ) -> bool:
+    """Whether ``OPENAI_BASE_URL`` is visible to THIS process: *environ* (by default
+    ``os.environ``) or ``cfg.env``. Deliberately narrower than the real gateway process's own
+    view -- the vendor's own dotenv loader also merges
+    ``<OPENCLAW_STATE_DIR or ~/.openclaw>/.env`` and ``~/.config/openclaw/gateway.env``
+    (``dotenv-global-1I45H5ph.mjs``) before it resolves any route, and this function does not
+    read either file (C-559 item 6: accepted for now, not read here -- see the module
+    docstring). Missing either can overclaim a ``yes``, never a ``no``, so it does not weaken
+    the module's own soundness contract; it is recorded because it is the opposite of that
+    contract's usual direction of concern.
+    """
     val = environ.get("OPENAI_BASE_URL")
     if isinstance(val, str) and val != "":
         return True
