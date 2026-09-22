@@ -507,6 +507,102 @@ def test_b353_a_plugin_hook_model_is_not_an_inert_pass():
     assert f.status == WARN and "does not determine" in f.detail
 
 
+# ======================================================================================
+# C-560: Rule A no longer over-refuses on a local-model catalog label or an `agents.list`
+# the vendor never reads because a sibling `entries` key is present -- each narrowed on its
+# OWN provable shape, never by trusting a key NAME alone (round 2-3 of the earlier C-135
+# passes already showed a reference can sit under any key, so that would be unsound).
+# ======================================================================================
+
+def _catalog(provider, field, value):
+    return {**_models("anthropic/c"),
+            "models": {"providers": {provider: {"models": [{field: value}]}}}}
+
+
+@pytest.mark.parametrize("field", ["id", "name"])
+@pytest.mark.parametrize("provider", ["lmstudio", "ollama", "openrouter"])
+def test_a_local_model_catalog_label_is_not_a_route(field, provider):
+    """A catalog entry's `id`/`name` labels one of THIS provider's own models -- the model
+    resolves through the provider key itself (e.g. `lmstudio/openai/gpt-oss-20b`), whatever the
+    label happens to spell."""
+    assert _ans(_catalog(provider, field, "openai/gpt-oss-20b")) == hr.NO
+    assert _ans(_catalog(provider, field, "codex/anything")) == hr.NO
+
+
+@pytest.mark.parametrize("field", ["id", "name"])
+@pytest.mark.parametrize("provider", ["openai", "codex", "codex-cli", "openai-codex", " OpenAI "])
+def test_a_catalog_label_under_a_codex_bound_provider_still_refuses(field, provider):
+    """Negative control: the skip is keyed off the PROVIDER the entry is filed under, not off
+    `id`/`name` being harmless field names in general -- under an openai/legacy-Codex provider
+    the same label shape still refuses."""
+    assert _ans(_catalog(provider, field, "openai/gpt-oss-20b")) == hr.UNKNOWN
+
+
+def test_a_catalog_label_outside_the_recognised_shape_still_refuses():
+    """Control: only the EXACT `models.providers.<p>.models[i].id`/`.name` leaf is exempt."""
+    # not inside a `models[]` array entry at all
+    cfg = {**_models("anthropic/c"),
+           "models": {"providers": {"lmstudio": {"id": "openai/gpt-oss-20b"}}}}
+    assert _ans(cfg) == hr.UNKNOWN
+    # nested one level deeper inside the catalog entry
+    cfg2 = {**_models("anthropic/c"),
+            "models": {"providers": {"lmstudio":
+                       {"models": [{"compat": {"id": "openai/gpt-oss-20b"}}]}}}}
+    assert _ans(cfg2) == hr.UNKNOWN
+    # a sibling field other than id/name inside the catalog entry
+    cfg3 = {**_models("anthropic/c"),
+            "models": {"providers": {"lmstudio":
+                       {"models": [{"description": "openai/gpt-oss-20b"}]}}}}
+    assert _ans(cfg3) == hr.UNKNOWN
+
+
+def test_an_ignored_agents_list_beside_entries_is_not_a_route():
+    """B-699 / collector.agent_roster: once `entries` exists, `list` is never consulted by the
+    vendor -- not even to decide a string inside it is Codex-free, since nothing dispatches
+    through an unread key at all."""
+    cfg = {"agents": {"defaults": {"model": "anthropic/c"},
+                      "entries": {"a": {"model": "anthropic/d"}},
+                      "list": [{"model": "openai/gpt-5"}]}}
+    assert _ans(cfg) == hr.NO
+    # `entries: null` still counts as present (B-699): `list` stays unread
+    cfg2 = {"agents": {"defaults": {"model": "anthropic/c"}, "entries": None,
+                       "list": [{"id": "a", "model": "openai/gpt-5"}]}}
+    assert _ans(cfg2) == hr.NO
+
+
+def test_an_unignored_agents_list_control_still_refuses():
+    """Negative control: when `entries` is ABSENT, `list` IS the active roster, and a stray
+    Codex-bound reference inside it -- one `model_refs` itself would not enumerate -- still
+    refuses, proving the skip is gated on `entries` being present and not a blanket exemption
+    of `agents.list`."""
+    cfg = {"agents": {"defaults": {"model": "anthropic/c"},
+                      "list": [{"id": "a", "model": "anthropic/d",
+                               "strayfield": "openai/gpt-5"}]}}
+    assert _ans(cfg) == hr.UNKNOWN
+
+
+def test_a_provider_literally_named_models_still_resolves_correctly():
+    """Regex-boundary adversarial case: a provider key spelled ``models`` (itself matching a
+    literal segment the path-matching relies on) must not confuse which segment is the
+    provider -- greedy backtracking still finds the real, rightmost catalog-field split."""
+    cfg = {**_models("anthropic/c"),
+           "models": {"providers": {"models": {"models": [{"id": "openai/gpt-oss-20b"}]}}}}
+    assert _ans(cfg) == hr.NO
+
+
+def test_a_plugins_own_agents_shaped_config_is_not_exempted():
+    """Adversarial: a THIRD-PARTY plugin's open-ended config can coincidentally nest an
+    ``agents``/``entries``/``list`` shape of its own. The ignore-list skip is anchored on the
+    REAL top-level ``agents`` path (``path == "agents"``), so a plugin's own lookalike must
+    still refuse -- trusting it would let an attacker-controlled plugin config launder a
+    Codex-bound string past Rule A by naming its own keys after the real roster shape."""
+    cfg = {**_models("anthropic/c"),
+           "plugins": {"entries": {"x": {"config": {
+               "agents": {"entries": {"z": {}}, "list": [{"model": "openai/gpt-5"}]}
+           }}}}}
+    assert _ans(cfg) == hr.UNKNOWN
+
+
 def test_no_precondition_a_known_build_inside_the_validated_window():
     assert hr.codex_harness_reach(_models("anthropic/c"), None).answer == hr.UNKNOWN
     assert hr.codex_harness_reach(_models("anthropic/c"), (2026, 9, 3)).answer == hr.UNKNOWN
