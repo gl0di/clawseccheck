@@ -5381,16 +5381,38 @@ def check_installed_skills(ctx: Context) -> Finding:
     # downgraded to UNKNOWN — it FAILs as expected.
     if parse_error_paths:
         extra = f" (+{len(parse_error_paths) - 6} more)" if len(parse_error_paths) > 6 else ""
-        return _b13_verdict(
-            HIGH,
-            UNKNOWN,
+        _detail = (
             "could not analyze "
             + "; ".join(parse_error_paths[:6])
             + extra
-            + " — parse error(s); file(s) not scanned by the AST/taint layer",
+            + " — parse error(s); file(s) not scanned by the AST/taint layer"
+        )
+        _fix = (
             "Inspect the flagged file(s) manually: a parse failure may indicate "
             "Python 2 syntax, a template, or a deliberately malformed file used "
-            "to blind the AST scanner.",
+            "to blind the AST scanner."
+        )
+        # B-864: same B-754 carve-out as the unreadable-file branch below — a confirmed
+        # archive escape found in whatever COULD be parsed must not go unmentioned just
+        # because a DIFFERENT bundled file failed to parse. Named in `detail`, not `fix`
+        # — see the unreadable-file branch's comment for why (every rendered surface
+        # unconditionally shows `detail`; `fix` can lose the "Fix (top)" slot to a
+        # co-occurring WARN).
+        if _path_traversal:
+            _detail += (
+                " — separately, a confirmed archive path traversal was ALSO found in "
+                "what could be parsed: " + "; ".join(_path_traversal[:6])
+            )
+            _fix += (
+                " Separately: this skill also contains a confirmed archive path "
+                "traversal (see detail) — treat it as dangerous regardless of what the "
+                "unparseable file turns out to hold."
+            )
+        return _b13_verdict(
+            HIGH,
+            UNKNOWN,
+            _detail,
+            _fix,
             parse_error_paths,
             _signal_buckets,
             "parse_error_paths",
@@ -5422,16 +5444,34 @@ def check_installed_skills(ctx: Context) -> Finding:
         # py-cap hit alone never populates it, so those stay the honest UNKNOWN below;
         # this WARN never happens on a genuine high-entropy oversized asset either.
         if getattr(ctx, "padding_anomalies", None):
-            return _b13_verdict(
-                HIGH,
-                WARN,
+            _detail = (
                 "Skill scanning was truncated by oversized LOW-ENTROPY padding — classic "
                 "cap-evasion (a real payload can be pushed past the "
                 f"{_MAX_BYTES_PER_SKILL // 1000}KB budget behind benign filler); content "
-                "beyond the cap was NOT scanned: " + "; ".join(ctx.padding_anomalies[:6]),
+                "beyond the cap was NOT scanned: " + "; ".join(ctx.padding_anomalies[:6])
+            )
+            _fix = (
                 "The unscanned tail is uniform filler, the shape used to hide a payload "
                 "past the analysis limit. Split the oversized file(s) and re-vet, or "
-                "inspect manually.",
+                "inspect manually."
+            )
+            # B-864: same B-754 carve-out as the unreadable-file branch below — see its
+            # comment for why this goes in `detail`, not `fix`.
+            if _path_traversal:
+                _detail += (
+                    " — separately, a confirmed archive path traversal was ALSO found in "
+                    "what could be read: " + "; ".join(_path_traversal[:6])
+                )
+                _fix += (
+                    " Separately: this skill also contains a confirmed archive path "
+                    "traversal (see detail) — treat it as dangerous regardless of what the "
+                    "padded-out tail turns out to hold."
+                )
+            return _b13_verdict(
+                HIGH,
+                WARN,
+                _detail,
+                _fix,
                 ctx.padding_anomalies,
                 _signal_buckets,
                 "skill_limit_hits",
@@ -5472,6 +5512,13 @@ def check_installed_skills(ctx: Context) -> Finding:
             # `.clawseccheckignore` entry for "coverage incomplete" must not go on silently
             # matching once the situation is no longer just an incomplete read but a
             # confirmed escape underneath it.
+            #
+            # B-864: this branch was the ONLY one of the three coverage arms named above
+            # that actually did this — `parse_error_paths` and both `skill_limit_hits`
+            # sub-arms (`padding_anomalies` WARN, and this arm's own generic sibling below)
+            # stayed silent on a confirmed traversal until this task, despite this file's
+            # own B-754/B-746 comments naming all three as the coverage arms that outrank
+            # it. Same disclosure, same rationale, at each of those three sites now.
             if _path_traversal:
                 _detail += (
                     " — separately, a confirmed archive path traversal was ALSO found in "
@@ -5515,13 +5562,31 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # nothing benign and on every hidden payload is the right trade.
                 engine_degraded=True,
             )
+        _detail = (
+            "Skill scanning was truncated / hit limits — coverage is incomplete: "
+            + "; ".join(skill_limit_hits[:6])
+        )
+        _fix = (
+            "Content beyond the size/file cap was not scanned; a payload padded past the "
+            "cap can hide there. Review the skill manually or split oversized files."
+        )
+        # B-864: same B-754 carve-out as the unreadable-file branch above — see its
+        # comment for why this goes in `detail`, not `fix`.
+        if _path_traversal:
+            _detail += (
+                " — separately, a confirmed archive path traversal was ALSO found in "
+                "what could be read: " + "; ".join(_path_traversal[:6])
+            )
+            _fix += (
+                " Separately: this skill also contains a confirmed archive path "
+                "traversal (see detail) — treat it as dangerous regardless of what the "
+                "truncated portion turns out to hold."
+            )
         return _b13_verdict(
             HIGH,
             UNKNOWN,
-            "Skill scanning was truncated / hit limits — coverage is incomplete: "
-            + "; ".join(skill_limit_hits[:6]),
-            "Content beyond the size/file cap was not scanned; a payload padded past the "
-            "cap can hide there. Review the skill manually or split oversized files.",
+            _detail,
+            _fix,
             None,
             _signal_buckets,
             "skill_limit_hits",
