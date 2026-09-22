@@ -2883,6 +2883,104 @@ def _ancestors_allow_other_access(home: Path, stop: "Path | None" = None) -> boo
 _B188_DB_NAMES = ("openclaw.sqlite", "openclaw.sqlite-wal", "openclaw.sqlite-shm")
 
 
+def _b188_collect_state_copies(
+    state_dir: Path, primary_names: "tuple[str, ...]", cap: int = 200
+) -> "tuple[list[Path], bool]":
+    """Bounded, symlink-safe scan for sqlite-shaped files under ``state/`` beyond the
+    primary DB/-wal/-shm trio ``_B188_DB_NAMES`` already covers (C-555). Exists because
+    OpenClaw's own 9.5
+    ``recoverOrphanTaskDeliveryRows`` (dist openclaw-state-db-DS2iNFy4.mjs:3868-3946) drops a
+    FULL copy of the state database under ``state/openclaw-task-delivery-recovery-*/`` at the
+    same 0600/0700 vendor-default modes as the original — a copy is exactly as exposed as its
+    parent chain, and the checks above never looked past the three fixed top-level names.
+    ``cap`` mirrors the 200-file bound ``_collect_atrest_transcripts`` uses for the same
+    reason: a pathological tree must not turn a permission check into an unbounded walk.
+
+    Returns ``(files, listing_failed)``. ``listing_failed`` is True only when the recursive
+    walk itself raised (e.g. a permission-denied subdirectory partway through), which the
+    caller turns into UNKNOWN rather than a silent PASS — Golden Rule #4: a walk that could
+    not complete is not evidence that nothing is there."""
+    out: list[Path] = []
+    if not state_dir.is_dir():
+        return out, False
+    try:
+        for f in state_dir.rglob("*.sqlite*"):
+            if len(out) >= cap:
+                break
+            try:
+                if not f.is_file() or f.is_symlink():
+                    continue
+                if f.parent == state_dir and f.name in primary_names:
+                    continue  # already covered by the primary FAIL-capable check above
+                out.append(f)
+            except OSError:
+                continue
+    except OSError:
+        return out, True
+    return sorted(out), False
+
+
+def _b188_collect_backups(home: Path, cap: int = 200) -> "tuple[list[Path], bool]":
+    """Bounded, symlink-safe scan of ``<home>/backups/**`` — OpenClaw's own pre-repair and
+    migration backup tree (C-555). Distinct from F-120's ``.openclaw-install-backups/**``
+    (covered by B19 above): measured on the reference machine, ``backups/`` holds a full
+    pre-repair ``openclaw.sqlite(.bak)`` trio AND unrelated migration snapshots (e.g.
+    ``heartbeat-migration/*.md``) side by side, so this walks every file under it rather than
+    filtering by name — any of them can be a retained copy of something sensitive, and the
+    directory is a deliberate backup location, not an incidental one. Same cap and
+    listing-failure contract as ``_b188_collect_state_copies``."""
+    out: list[Path] = []
+    backups_dir = home / "backups"
+    if not backups_dir.is_dir():
+        return out, False
+    try:
+        for f in backups_dir.rglob("*"):
+            if len(out) >= cap:
+                break
+            try:
+                if not f.is_file() or f.is_symlink():
+                    continue
+                out.append(f)
+            except OSError:
+                continue
+    except OSError:
+        return out, True
+    return sorted(out), False
+
+
+def _b188_dir_traversable_by_other(home: Path, target_dir: Path) -> bool:
+    """True when a non-owner can traverse every directory from *home* down INTO *target_dir*
+    itself (needs *target_dir*'s own o+x-or-known-shared-g+x bit too, unlike the chain-only
+    leg in ``_other_can_reach_read`` above, which stops one level short because it already
+    has a specific file to test). Used only to decide whether an un-listable directory's
+    UNKNOWN contents could actually matter — if *target_dir* is not reachable at all, its
+    contents are moot regardless of whether they could be enumerated. POSIX stat-only; never
+    raises."""
+    try:
+        rel = target_dir.relative_to(home)
+    except ValueError:
+        return False
+    chain: list[Path] = [home]
+    cur = home
+    for part in rel.parts:
+        cur = cur / part
+        chain.append(cur)
+    world_ok = True
+    group_ok = True
+    for d in chain:
+        try:
+            st = d.stat()
+        except OSError:
+            return False
+        m = st.st_mode
+        world_ok = world_ok and bool(m & 0o001)
+        grp_other = _shared._group_has_other_members(st.st_gid, st.st_uid)
+        group_ok = group_ok and bool(m & 0o010) and (grp_other is True)
+        if not world_ok and not group_ok:
+            return False
+    return True
+
+
 def check_state_db_atrest(ctx: Context) -> Finding:
     """B188 (B-293, DISK-2) — the shared state SQLite database's at-rest permissions.
 
@@ -2936,8 +3034,18 @@ def check_state_db_atrest(ctx: Context) -> Finding:
               with the whole directory chain (above and below ~/.openclaw) permitting it.
     WARN    — ``state/`` is reachable and writable by another user: they cannot read the
               secrets, but they can swap the database under the agent (mirrors B182's
-              ``swappable`` branch).
-    UNKNOWN — no state DB present, or non-POSIX (NTFS ACLs make st_mode meaningless).
+              ``swappable`` branch). ALSO WARN (C-555, never escalated to FAIL) — a
+              RETAINED COPY is reachable and readable: a recovery snapshot elsewhere under
+              ``state/**/*.sqlite*`` (e.g. OpenClaw 9.5's orphan-task-delivery-recovery
+              copy), or any file under ``~/.openclaw/backups/**`` (pre-repair/migration
+              backups). Capped at WARN rather than the device-keys FAIL wording above
+              because a copy's provenance and freshness are less certain than the live DB —
+              same ancestor-reach gate, so a 0600 copy sealed inside a 0700 chain does not
+              fire, only a group/world-readable one does.
+    UNKNOWN — no state DB present, non-POSIX (NTFS ACLs make st_mode meaningless), or a
+              subdirectory under ``state/`` or ``backups/`` could not be listed (permission
+              denied) while itself being reachable by other users — never a false PASS over
+              a walk that could not complete.
     PASS    — present and not reachable-and-readable by others. Loose in-tree modes sealed
               by a restrictive parent directory PASS with a distinct message that names the
               seal, rather than silently reading like a clean 0600 install.
@@ -2995,6 +3103,28 @@ def check_state_db_atrest(ctx: Context) -> Finding:
     ancestors_open = _ancestors_allow_other_access(ctx.home)
     writable_dir = _other_can_reach_write(ctx.home, state_dir)
 
+    # C-555: retained copies of the state database — a recovery snapshot under state/, or a
+    # file under ~/.openclaw/backups/ — are exactly as exposed as their parent chain, so this
+    # reuses the same path-aware `_other_can_reach_read` + ancestor gate as the primary DB
+    # above. Capped at WARN below regardless of what is found (never the device-keys FAIL
+    # wording): a copy's provenance and freshness are less certain than the live DB.
+    extra_files, state_listing_failed = _b188_collect_state_copies(state_dir, _B188_DB_NAMES)
+    backup_files, backups_listing_failed = _b188_collect_backups(ctx.home)
+    listing_failed = state_listing_failed or backups_listing_failed
+
+    exposed_extra: list[str] = []
+    for p in extra_files + backup_files:
+        if _other_can_reach_read(ctx.home, p):
+            try:
+                mode = p.stat().st_mode & 0o777
+            except OSError:
+                continue
+            try:
+                rel = p.relative_to(ctx.home)
+            except ValueError:
+                rel = p
+            exposed_extra.append(f"{rel} (mode {oct(mode)[-3:]}) is readable by other users")
+
     if exposed and ancestors_open:
         return _finding(
             "B188",
@@ -3032,8 +3162,48 @@ def check_state_db_atrest(ctx: Context) -> Finding:
             evidence=[f"state/ (mode {dmode}) is writable by other users"],
         )
 
+    # C-555: a retained copy (recovery snapshot or backup) is reachable and readable.
+    # WARN-only by design — never escalated to the device-keys FAIL wording above, since a
+    # copy's provenance and freshness are less certain than the live database.
+    if exposed_extra and ancestors_open:
+        joined = "; ".join(exposed_extra[:8])
+        more = f" (+{len(exposed_extra) - 8} more)" if len(exposed_extra) > 8 else ""
+        return _finding(
+            "B188",
+            WARN,
+            "A retained copy of the state database is readable by another local user: "
+            + joined + more + ". OpenClaw's own recovery snapshots (state/**) and "
+            "pre-repair/migration backups (~/.openclaw/backups/**) default to the same "
+            "0600/0700 protection as the live database, so a readable copy means that "
+            "protection slipped somewhere — and a copy can carry the same device keys and "
+            "auth tokens as the original.",
+            "Run `chmod 600` on the listed file(s) and `chmod 700` on their containing "
+            "directory. If the copy is no longer needed, delete it instead of just "
+            "tightening it.",
+            evidence=exposed_extra,
+        )
+
+    # C-555: a directory under state/ or backups/ could not be listed (permission denied)
+    # while itself being reachable by other users — an incomplete walk must not read as a
+    # clean PASS (Golden Rule #4). If it is unreachable, its unlistable contents are moot,
+    # so PASS still stands below.
+    if listing_failed and ancestors_open and (
+        _b188_dir_traversable_by_other(ctx.home, state_dir)
+        or _b188_dir_traversable_by_other(ctx.home, ctx.home / "backups")
+    ):
+        return _finding(
+            "B188",
+            UNKNOWN,
+            "state/ or ~/.openclaw/backups/ contains a subdirectory this audit could not "
+            "list (permission denied), and that directory is itself reachable by other "
+            "local users, so whether it holds an exposed copy of the state database cannot "
+            "be determined.",
+            "Check permissions on the unreadable subdirectory yourself, or run this audit "
+            "as the account that owns ~/.openclaw.",
+        )
+
     names = ", ".join(f"state/{p.name}" for p in present)
-    if (exposed or writable_dir) and not ancestors_open:
+    if (exposed or writable_dir or exposed_extra) and not ancestors_open:
         # Loose modes inside ~/.openclaw, but a directory above it (typically $HOME at 0700)
         # denies traversal to every non-owner, so nothing here is actually reachable. Not a
         # finding — but say so plainly, because the seal is one `chmod 755 ~` away from gone.
