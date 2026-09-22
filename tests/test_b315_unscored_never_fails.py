@@ -114,7 +114,7 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     architect audit — the corpus test above is what actually enforces the invariant."""
     unscored = {c.id for c in BY_ID.values() if not c.scored}
     assert {"B43", "B55", "B70", "B185", "B186", "B193", "B324", "B322", "B323", "B325"} <= unscored
-    assert len(unscored) == 102  # +3: B379/B380/B381 (host scheduled persistence,
+    assert len(unscored) == 103  # +3: B379/B380/B381 (host scheduled persistence,
     # hooks transform modules, redactor-blind secret paths) and +1: B382 (retired config
     # key) — all WARN-only/disclosure checks, added unscored like every other advisory
     # check in this set. +1 more: B386 (F-199, gateway.nodes.allowSkills) — grouped into
@@ -135,7 +135,11 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     # rounds left disclosed false-positive residuals on both of its legs, and a
     # structural prose heuristic with known gaps should not dock an A-F grade. The
     # residual is disclosed in the finding's `fix` text (never `detail`, which
-    # baseline.fingerprint() hashes).
+    # baseline.fingerprint() hashes). +1: B391 (F-198, nodeHost.workerRuns execution
+    # isolation) — WARN-capped disclosure of a separate execution surface from
+    # agents.defaults.sandbox.*, and its WARN fires on OpenClaw's OWN documented default
+    # (isolation "none"), so scoring it would dock the grade for a vendor baseline the
+    # user never chose. Reported, never judged.
 
 
 # ── Targeted: the two downgrades (FAIL -> WARN, CheckMeta unchanged) ──────────────────

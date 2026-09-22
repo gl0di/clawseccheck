@@ -24553,6 +24553,31 @@
    }
   },
   {
+   "label": "fixture:bad_b391_workerruns_unisolated",
+   "cfg": {
+    "agents": {
+     "defaults": {
+      "sandbox": {
+       "mode": "all"
+      }
+     }
+    },
+    "models": {
+     "main": {
+      "provider": "ollama/llama3"
+     }
+    },
+    "tools": {},
+    "channels": {}
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [],
+    "runtimes": []
+   }
+  },
+  {
    "label": "fixture:bad_b48_docker_trio",
    "cfg": {
     "agents": {

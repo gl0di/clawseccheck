@@ -42,7 +42,7 @@ already covered:
                                    presence-only test stayed green
     sarif.render_sarif             failCountsBySeverity high 0 (a SECOND counter beside the
                                    sound failCount)
-    adjudication._corroboration_groups   the finding dropped from its corroboration group
+    adjudication._builder._corroboration_groups   the finding dropped from its corroboration group
 
 The twenty-first, ``pipeline.run_adjudication``, was a FALSE positive, and worth recording as
 such: its ``PhaseResult`` carries ``elapsed_s``. ``monitor.snapshot`` failed the same way about
@@ -453,17 +453,36 @@ def _observe(fn, kwargs):
 
 
 def _package_modules():
-    """Every importable module in the package — DERIVED, so a new renderer joins by existing."""
+    """Every importable module in the package — DERIVED, so a new renderer joins by existing.
+
+    The subpackage list is walked, not named. It used to be the hard-coded tuple
+    ("checks", "monitordims"), which made the docstring above false for any subpackage
+    created afterwards: when C-455 split adjudication.py into a package, its modules fell
+    out of the sweep silently and `adjudication._corroboration_groups` — a consumer this
+    file names explicitly in `must_reach` — stopped being driven with no signal at all
+    until the integration run. A guard that quietly shrinks is the failure mode this whole
+    file exists to prevent, so the enumeration now recurses into whatever is actually there.
+    """
     import clawseccheck
 
     # `__main__` is excluded because IMPORTING it runs `sys.exit(main())` at module scope —
     # enumerating the package must not be able to terminate the test process.
-    names = ["clawseccheck." + m.name for m in pkgutil.iter_modules(clawseccheck.__path__)
-             if not m.name.startswith("__")]
-    for sub in ("checks", "monitordims"):
-        pkg = importlib.import_module(f"clawseccheck.{sub}")
-        names += [f"clawseccheck.{sub}.{m.name}" for m in pkgutil.iter_modules(pkg.__path__)
-                  if not m.name.startswith("__")]
+    def _walk(pkg_name, path):
+        found = []
+        for m in pkgutil.iter_modules(path):
+            if m.name.startswith("__"):
+                continue
+            dotted = f"{pkg_name}.{m.name}"
+            found.append(dotted)
+            if m.ispkg:
+                try:
+                    sub = importlib.import_module(dotted)
+                except Exception:  # pragma: no cover - an unimportable subpackage has no consumers
+                    continue
+                found += _walk(dotted, sub.__path__)
+        return found
+
+    names = _walk("clawseccheck", clawseccheck.__path__)
     out = []
     for name in sorted(set(names)):
         try:
@@ -659,7 +678,9 @@ def test_the_oracle_actually_reaches_the_headline_consumers(audit):
         "report.issue_population_line", "report._subject_summary_rows",
         "sarif.render_sarif", "pdf.render_pdf",
         "coverage.coverage", "coverage._tally",
-        "adjudication._corroboration_groups",
+        # C-455 split adjudication.py into a package; the sweep names a consumer by its
+        # OWNING module, so this moved with the callable rather than disappearing.
+        "adjudication._builder._corroboration_groups",
     }
     missing = sorted(must_reach - set(driven))
     assert not missing, (

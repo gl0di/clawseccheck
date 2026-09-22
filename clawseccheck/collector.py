@@ -240,7 +240,9 @@ _MAX_SUBAGENT_RUNS = 50
 _MAX_SUBAGENT_TASK_CHARS = 500
 # B-709: on the MODERN (payload_json column present) subagent_runs shape, the only outcome
 # signal is `$.execution.outcome.status`, and the vendor itself constrains it to exactly
-# these four values (subagent-registry.store.sqlite-B_lUfEus.js:362). Anything else --
+# these four values (subagent-registry.store.sqlite-B_lUfEus.js:362, grounded against
+# openclaw@2026.8.2 -- that bundle name is historical and no longer in the installed dist;
+# the shape this comment keys on is the column, not the version). Anything else --
 # including the key being entirely absent, which is the normal in-flight-run shape -- is
 # treated as "no outcome yet", never as a fifth value.
 _SUBAGENT_OUTCOME_STATUSES = frozenset({"ok", "error", "timeout", "unknown"})
@@ -6332,8 +6334,10 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     model`` on every run, so ``ctx.errors`` carried that line and B18 reported UNKNOWN even
     on a machine that had really spawned subagents. Grounded against the vendor's OWN
     canonical read of this table (``dist/subagent-registry.store.sqlite-B_lUfEus.js:341-351``,
-    which aliases the JSON payload straight back to the retired column names — as
-    authoritative a mapping as exists):
+    grounded against openclaw@2026.8.2 — that bundle name is historical and no longer in the
+    installed dist; the shape this keys on is the column, not the version), which aliases the
+    JSON payload straight back to the retired column names — as authoritative a mapping as
+    exists:
 
     ===================  =========================================
     old (legacy) column   MODERN payload_json JSON path
