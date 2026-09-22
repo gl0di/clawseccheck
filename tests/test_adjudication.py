@@ -1,5 +1,5 @@
 """Tests for F-113/F-114/F-115: the judge-packet builder + --judged consumer
-(clawseccheck/adjudication.py).
+(clawseccheck/adjudication/, split into _builder.py + _verdicts.py by C-455).
 
 Covers:
 - build_judge_packet() includes unsuppressed UNKNOWN findings, and unsuppressed
@@ -1717,7 +1717,7 @@ def test_the_diagnostic_never_makes_the_parse_raise(capsys):
 #
 # Root-cause note (recorded here, not just in the commit, since this is the test
 # that pins it): grounding against the source found NO code-level fan-out to
-# diverge from in the first place. _parse_verdicts (adjudication.py:576) is the
+# diverge from in the first place. _parse_verdicts (adjudication/_verdicts.py:140) is the
 # single shared funnel for all three consumers -- render_judged_json (--judged),
 # render_ignore_proposals_json (--propose-ignore) and escalate_vet_output
 # (--vet-judged) -- and every one of them consumes exactly one already-decided

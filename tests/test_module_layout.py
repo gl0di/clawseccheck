@@ -428,7 +428,7 @@ _EXEMPT = {
     # restated three times since 2026-08-24 — ~1,247 -> ~1,570 -> ~1,920 -> ~2,433,
     # each restatement filing the split rather than doing it, and the file grew again
     # to 2,478 before this task landed) is now the `adjudication/` package below.
-    # `_verdicts.py` (803 lines) and `__init__.py` (132 lines, the aggregator) both came
+    # `_verdicts.py` (804 lines) and `__init__.py` (163 lines, the aggregator) both came
     # out under the 1,200-line budget and need no exemption; only the builder half does.
     "adjudication/_builder.py": "~1,736 lines — the judge-packet BUILDER half of the "
                                 "C-455 split: the evidence sources (recovered taint, "
