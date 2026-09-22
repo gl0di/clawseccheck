@@ -1038,6 +1038,60 @@ def check_session_scope_global(ctx: Context) -> Finding:
     )
 
 
+# Grounded against the installed dist (openclaw@2026.9.5, outbound-policy-CSxk6Tec.mjs:
+# 9-25): CONTEXT_GUARDED_ACTIONS, the ONLY message actions `enforceCrossContextPolicy`
+# ever inspects. An action outside this set can never trip the cross-provider gate, no
+# matter what tools.message.crossContext.allowAcrossProviders resolves to. C-579.
+_MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS = frozenset({
+    "send", "poll", "poll-vote", "reply", "sendWithEffect", "sendAttachment",
+    "upload-file", "edit", "delete", "pin", "unpin", "thread-create",
+    "thread-reply", "topic-create", "topic-edit", "sticker",
+})
+
+# Sentinel: this scope's tools.message.actions[.allow] shape could not be read (present
+# but not an object, or `allow` present but not a list of strings) -- exclusion cannot be
+# proven. Always reads the same as "no restriction" for stand-down purposes: a stand-down
+# is FAIL-adjacent (C-135), so undeterminable never lowers severity.
+_ACTIONS_ALLOW_UNDETERMINED = object()
+
+
+def _message_actions_allow_for_scope(actions_node, allow_raw):
+    """The *this-scope-only* ``tools.message.actions.allow`` set, given the already-
+    ``dig()``-ed ``...tools.message.actions`` node and its own ``.allow`` leaf (dug
+    separately so a malformed ``actions`` object and a malformed ``allow`` value are both
+    caught, the same way the crossContext leaf already is).
+
+    Returns ``None`` when this scope expresses NO restriction of its own — absent, or
+    present but empty/blank-only after normalization. Grounded gotcha: the vendor's own
+    ``resolveAllowedMessageActions`` (``outbound-policy-*.mjs``) treats a normalized-empty
+    list exactly like unset — **every** action stays allowed, not none — so an empty
+    ``actions.allow: []`` must never be misread as "excludes everything". Returns
+    ``_ACTIONS_ALLOW_UNDETERMINED`` when the shape can't be read. Otherwise returns a
+    ``frozenset`` of the normalized action-name strings actually in effect for this scope
+    alone — falling back to a parent scope when this one is unset is the CALLER's job,
+    mirroring the vendor's per-key-wins shallow merge in
+    ``resolveAgentMessageToolsConfig``.
+    """
+    if actions_node is not None and not isinstance(actions_node, dict):
+        return _ACTIONS_ALLOW_UNDETERMINED
+    if allow_raw is None:
+        return None
+    if not isinstance(allow_raw, list) or not all(isinstance(a, str) for a in allow_raw):
+        return _ACTIONS_ALLOW_UNDETERMINED
+    normalized = {a.strip() for a in allow_raw if a.strip()}
+    return frozenset(normalized) if normalized else None
+
+
+def _message_actions_guarded_reachable(effective_allow) -> bool:
+    """False only when *effective_allow* is a concrete, resolved set that provably
+    excludes every guarded cross-context action. Unset/no-restriction (``None``) and
+    ``_ACTIONS_ALLOW_UNDETERMINED`` both read as reachable — undeterminable stays WARN,
+    never a stand-down."""
+    if effective_allow is None or effective_allow is _ACTIONS_ALLOW_UNDETERMINED:
+        return True
+    return not effective_allow.isdisjoint(_MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS)
+
+
 def check_cross_context_send(ctx: Context) -> Finding:
     """B363 (C-411, re-grounded B-833) — tools.message.crossContext.allowAcrossProviders
     (+ the per-agent override ``agents.entries.<id>.tools.message.crossContext.
@@ -1060,14 +1114,27 @@ def check_cross_context_send(ctx: Context) -> Finding:
     non-boolean value at either scope reads as UNSET on both alike: the schema is
     ``boolean().optional()`` and OpenClaw refuses to load a config that violates it. Not
     modelled, on purpose: a legacy ``allowCrossContextSend: false`` (the 2026.9.5 migration
-    deletes it, so it lands on the allow default = an unset key here) and
-    ``tools.message.actions.allow`` restricting the tool to non-guarded actions.
+    deletes it, so it lands on the allow default = an unset key here).
 
-    WARN    — some scope resolves to true: an explicit ``true`` (any build), or, on a
-              2026.9.5+ build, the global value unset/not-false (an agent with its own
-              explicit ``false`` is exempt; agents with no own value inherit the global).
-    PASS    — effectively false everywhere: explicit ``false`` globally, or unset on a
-              build known to deny.
+    **``tools.message.actions.allow`` (+ its per-agent override) IS modelled (C-579):** the
+    runtime's ``enforceCrossContextPolicy`` only ever inspects an action in
+    ``_MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS`` above — an action outside that set never
+    reaches the cross-provider gate at all, whatever ``allowAcrossProviders`` resolves to.
+    So a scope whose EFFECTIVE ``actions.allow`` (its own value, else the parent scope's —
+    the same per-key-wins shallow merge ``crossContext`` already gets) provably excludes
+    every one of those names stands that scope down. A malformed shape, or a value this
+    check cannot resolve, is undeterminable and never stands anything down (C-135: a
+    stand-down is FAIL-adjacent) — see ``_message_actions_allow_for_scope`` for the
+    empty-array gotcha this mirrors from the vendor's own resolver.
+
+    WARN    — some scope resolves to true AND that scope (or, for the global
+              unset-default case, at least one scope inheriting it) can still reach a
+              guarded action: an explicit ``true`` (any build), or, on a 2026.9.5+ build,
+              the global value unset/not-false (an agent with its own explicit ``false``
+              is exempt; agents with no own value inherit the global).
+    PASS    — effectively false everywhere (explicit ``false`` globally, or unset on a
+              build known to deny), OR every permissive scope's effective
+              ``actions.allow`` provably excludes every guarded action.
     UNKNOWN — the config was not read; crossContext is present but not an object at the
               global or an agent scope; or the global value is unset and the build (hence
               the default) could not be determined. NOT a hedged PASS.
@@ -1100,25 +1167,47 @@ def check_cross_context_send(ctx: Context) -> Finding:
     offenders: list[str] = []
     default = _cross_context_default(ctx)
     global_value = dig(cfg, "tools.message.crossContext.allowAcrossProviders")
+    global_allow = _message_actions_allow_for_scope(
+        dig(cfg, "tools.message.actions"), dig(cfg, "tools.message.actions.allow"))
     default_allow_offender = False
-    if global_value is True:
-        offenders.append("tools.message.crossContext.allowAcrossProviders")
-    elif default == "allow" and global_value is not False:
-        # Unset (or not a boolean the vendor's `!== false` would read as false) on a build
-        # whose default is ALLOW: every agent that has no value of its own inherits this.
-        default_allow_offender = True
-        offenders.append(
-            "tools.message.crossContext.allowAcrossProviders (unset — defaults to true "
-            "on OpenClaw 2026.9.5 and later)")
     malformed = False
+    agent_true_offenders: list[str] = []
+    inheriting_default_reachable = False
     for agent in agent_roster(cfg):
         agent_node = dig(agent.entry, "tools.message.crossContext")
         if agent_node is not None and not isinstance(agent_node, dict):
             malformed = True
             continue
-        if dig(agent.entry, "tools.message.crossContext.allowAcrossProviders") is True:
-            name = agent.entry.get("name") or agent.id or agent.index
-            offenders.append(f"{agent.labelled(name)}.tools.message.crossContext.allowAcrossProviders")
+        agent_allow = _message_actions_allow_for_scope(
+            dig(agent.entry, "tools.message.actions"),
+            dig(agent.entry, "tools.message.actions.allow"))
+        effective_allow = agent_allow if agent_allow is not None else global_allow
+        own_value = dig(agent.entry, "tools.message.crossContext.allowAcrossProviders")
+        if own_value is True:
+            if _message_actions_guarded_reachable(effective_allow):
+                name = agent.entry.get("name") or agent.id or agent.index
+                agent_true_offenders.append(
+                    f"{agent.labelled(name)}.tools.message.crossContext.allowAcrossProviders")
+        elif own_value is None and _message_actions_guarded_reachable(effective_allow):
+            # No crossContext value of its own: this agent inherits whatever the global
+            # default resolves to, so it can keep the default-allow bucket below alive
+            # even when the global scope's OWN actions.allow excludes every guarded action.
+            inheriting_default_reachable = True
+    if global_value is True:
+        if _message_actions_guarded_reachable(global_allow):
+            offenders.append("tools.message.crossContext.allowAcrossProviders")
+    elif default == "allow" and global_value is not False:
+        # Unset (or not a boolean the vendor's `!== false` would read as false) on a build
+        # whose default is ALLOW: every agent that has no value of its own inherits this.
+        # Stands down only when NEITHER the global scope itself NOR any inheriting agent
+        # can still reach a guarded action (C-579) -- anything undeterminable keeps this
+        # a WARN.
+        if _message_actions_guarded_reachable(global_allow) or inheriting_default_reachable:
+            default_allow_offender = True
+            offenders.append(
+                "tools.message.crossContext.allowAcrossProviders (unset — defaults to true "
+                "on OpenClaw 2026.9.5 and later)")
+    offenders.extend(agent_true_offenders)
     if offenders:
         return _finding(
             "B363",
@@ -1154,6 +1243,28 @@ def check_cross_context_send(ctx: Context) -> Finding:
             "openclaw.json, then re-run the audit.",
             config_field_paths={"tools.message.crossContext"},
         )
+    if global_value is True:
+        # Explicit true, but tools.message.actions.allow provably excludes every guarded
+        # action at the global scope: no action the tool can invoke will ever reach the
+        # cross-provider gate. Independent of `default`/build -- explicit true is already
+        # build-independent above, and so is the allowlist that gates it.
+        return _finding(
+            "B363",
+            PASS,
+            "tools.message.crossContext.allowAcrossProviders is explicitly true, but "
+            "tools.message.actions.allow restricts the message tool to "
+            f"{sorted(global_allow)}, none of which is a guarded cross-context action "
+            "(send, reply, edit, …) — no action the tool can invoke will ever reach the "
+            "cross-provider gate.",
+            "Nothing to do while the allow-list excludes every guarded action. If one is "
+            "ever added to tools.message.actions.allow, set "
+            "crossContext.allowAcrossProviders to false first.",
+            evidence=sorted(global_allow),
+            config_field_paths={
+                "tools.message.crossContext.allowAcrossProviders",
+                "tools.message.actions.allow",
+            },
+        )
     if global_value is not False and default == "unknown":
         return _finding(
             "B363",
@@ -1166,6 +1277,27 @@ def check_cross_context_send(ctx: Context) -> Finding:
             "cross-provider sends off, and is right on every build), or run the audit "
             "where the installed openclaw can be found so the build is known.",
             config_field_paths={"tools.message.crossContext.allowAcrossProviders"},
+        )
+    if default == "allow" and global_value is not False:
+        # Reached only because the guarded-reachability check above stood the WARN down:
+        # the global scope's own actions.allow excludes every guarded action, and so does
+        # every agent that inherits this default.
+        return _finding(
+            "B363",
+            PASS,
+            "tools.message.crossContext.allowAcrossProviders is unset and this OpenClaw "
+            "build defaults it to true, but tools.message.actions.allow excludes every "
+            "guarded cross-context action at the global scope and for every agent that "
+            "inherits this default, so no action that could reach the cross-provider gate "
+            "can be invoked regardless.",
+            "Nothing to do while the allow-list stays this narrow. If a guarded action is "
+            "ever added to tools.message.actions.allow, set "
+            "crossContext.allowAcrossProviders to false explicitly first.",
+            evidence=sorted(global_allow),
+            config_field_paths={
+                "tools.message.crossContext.allowAcrossProviders",
+                "tools.message.actions.allow",
+            },
         )
     if global_value is False:
         return _finding(

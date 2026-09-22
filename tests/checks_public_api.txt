@@ -26,6 +26,7 @@ SENSITIVE_TOOL_IDS
 SKILL_CONTENT_RING
 UNKNOWN
 WARN
+_ACTIONS_ALLOW_UNDETERMINED
 _AUTONOMY_RE
 _B182_ENV_OVERRIDES
 _B184_CODELOAD_ENV_VARS
@@ -54,6 +55,7 @@ _MCP_CONN_STRING_CREDENTIAL_RE
 _MCP_DATA_CAP_RE
 _MCP_FS_PKG_RE
 _MCP_INTAKE_CAP_RE
+_MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS
 _SECRET_PATH_RE
 _SKILL_CRIT
 _SKILL_HIGH
@@ -136,6 +138,8 @@ _mcp_sensitive_reason
 _mcp_server_risks
 _mcp_servers
 _mcp_value_looks_secret
+_message_actions_allow_for_scope
+_message_actions_guarded_reachable
 _negation_context
 _negation_governs_trigger
 _node_allow_skills

@@ -20,14 +20,19 @@ import pytest
 
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.checks import (
+    _ACTIONS_ALLOW_UNDETERMINED,
     _CROSS_CONTEXT_DEFAULT_ALLOW_MIN,
     _CROSS_CONTEXT_DENY_MEASURED_MIN,
+    _MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS,
     _cross_context_default,
+    _message_actions_allow_for_scope,
+    _message_actions_guarded_reachable,
     check_cross_context_send,
 )
 from clawseccheck.collector import Context
 
 _KEY = "tools.message.crossContext.allowAcrossProviders"
+_UNSET = object()  # distinguishes "field absent" from "field set to None" below
 
 
 def _cc(value):
@@ -45,6 +50,29 @@ def _agent(value=None):
 
 def _entries(**agents):
     return {"agents": {"entries": dict(agents)}}
+
+
+def _msg(cc=_UNSET, allow=_UNSET):
+    """A ``tools.message`` node (global or per-agent) with an optional crossContext
+    value and/or actions.allow list, either of which may be left OUT entirely (the
+    `_UNSET` sentinel default) rather than set to ``None`` -- callers of C-579's
+    stand-down logic need to distinguish "no actions node at all" from "actions.allow
+    explicitly empty"."""
+    message: dict = {}
+    if cc is not _UNSET:
+        message["crossContext"] = {"allowAcrossProviders": cc}
+    if allow is not _UNSET:
+        message["actions"] = {"allow": allow}
+    return message
+
+
+def _global_msg(cc=_UNSET, allow=_UNSET):
+    return {"tools": {"message": _msg(cc, allow)}}
+
+
+def _agent_msg(cc=_UNSET, allow=_UNSET):
+    message = _msg(cc, allow)
+    return {"tools": {"message": message}} if message else {}
 
 
 def _ctx(cfg, tmp_path, version=None):
@@ -291,3 +319,189 @@ class TestUnchangedGuards:
             "bad": {"tools": {"message": {"crossContext": "nope"}}},
             "w": _agent(True)}}}
         assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == WARN
+
+
+# ----------------------------------------------------------------------------------------
+# C-579: tools.message.actions.allow modelled -- B363 stands down (WARN -> PASS) only when
+# the effective allow-list PROVABLY excludes every guarded cross-context action.
+class TestActionsAllowUnit:
+    """The two pure helpers in isolation, before trusting the integration behaviour."""
+
+    def test_absent_actions_node_is_no_restriction(self):
+        assert _message_actions_allow_for_scope(None, None) is None
+
+    def test_empty_actions_object_is_no_restriction(self):
+        assert _message_actions_allow_for_scope({}, None) is None
+
+    def test_a_normalized_empty_list_is_no_restriction_not_exclude_everything(self):
+        """The vendor gotcha this module exists to mirror: resolveAllowedMessageActions
+        treats a normalized-empty list exactly like unset."""
+        assert _message_actions_allow_for_scope({"allow": []}, []) is None
+        assert _message_actions_allow_for_scope({"allow": [" ", ""]}, [" ", ""]) is None
+
+    def test_a_real_restriction_normalizes_trims_and_dedupes(self):
+        """Trims whitespace and dedupes, but never lowercases -- action names are
+        case-sensitive strings in the vendor's own normalizeUniqueStringEntries."""
+        result = _message_actions_allow_for_scope(
+            {"allow": ["send", " send ", "Send", "poll"]},
+            ["send", " send ", "Send", "poll"])
+        assert result == frozenset({"send", "Send", "poll"})
+
+    def test_actions_not_an_object_is_undetermined(self):
+        assert _message_actions_allow_for_scope("nope", None) is _ACTIONS_ALLOW_UNDETERMINED
+
+    def test_allow_not_a_list_is_undetermined(self):
+        assert _message_actions_allow_for_scope({"allow": "send"}, "send") is \
+            _ACTIONS_ALLOW_UNDETERMINED
+
+    def test_allow_with_a_non_string_entry_is_undetermined(self):
+        """Never silently drop the bad entry and reason from the rest -- a mixed list
+        does not validate against OpenClaw's own array(string()) schema either."""
+        assert _message_actions_allow_for_scope(
+            {"allow": ["reaction", 5]}, ["reaction", 5]) is _ACTIONS_ALLOW_UNDETERMINED
+
+    def test_guarded_reachable_true_for_none_and_undetermined(self):
+        assert _message_actions_guarded_reachable(None) is True
+        assert _message_actions_guarded_reachable(_ACTIONS_ALLOW_UNDETERMINED) is True
+
+    def test_guarded_reachable_false_only_when_disjoint(self):
+        assert _message_actions_guarded_reachable(frozenset({"typing", "reaction"})) is False
+        assert _message_actions_guarded_reachable(frozenset({"typing", "send"})) is True
+
+    def test_the_guarded_set_matches_the_grounded_vendor_list(self):
+        """outbound-policy-CSxk6Tec.mjs:9-25, openclaw@2026.9.5 -- CONTEXT_GUARDED_ACTIONS."""
+        assert _MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS == frozenset({
+            "send", "poll", "poll-vote", "reply", "sendWithEffect", "sendAttachment",
+            "upload-file", "edit", "delete", "pin", "unpin", "thread-create",
+            "thread-reply", "topic-create", "topic-edit", "sticker",
+        })
+
+
+class TestActionsAllowStandDown:
+    def test_empty_allow_list_does_not_stand_down_explicit_true(self, tmp_path):
+        """The empty-array gotcha, through the full check: [] must not be misread as
+        'excludes everything'."""
+        cfg = _global_msg(cc=True, allow=[])
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == WARN
+
+    def test_a_guarded_action_in_the_allow_list_does_not_stand_down(self, tmp_path):
+        cfg = _global_msg(cc=True, allow=["send"])
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == WARN
+
+    def test_explicit_true_stands_down_when_the_allow_list_excludes_every_guarded_action(
+            self, tmp_path):
+        cfg = _global_msg(cc=True, allow=["typing"])
+        f = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4"))
+        assert f.status == PASS
+        assert "explicitly true" in f.detail
+        assert "['typing']" in f.detail
+        assert f.evidence == ["typing"]
+        assert "false first" in f.fix
+
+    def test_a_malformed_actions_object_never_stands_down(self, tmp_path):
+        cfg = {"tools": {"message": {"crossContext": {"allowAcrossProviders": True},
+                                      "actions": "nope"}}}
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == WARN
+
+    def test_a_malformed_allow_value_never_stands_down(self, tmp_path):
+        cfg = _global_msg(cc=True, allow="send")
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == WARN
+
+    def test_an_allow_list_with_a_non_string_entry_never_stands_down(self, tmp_path):
+        cfg = _global_msg(cc=True, allow=["reaction", 5])
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == WARN
+
+    def test_default_allow_unset_stands_down_when_nothing_inherits_a_guarded_action(
+            self, tmp_path):
+        cfg = _global_msg(allow=["typing"])  # crossContext left unset entirely
+        f = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5"))
+        assert f.status == PASS
+        assert "excludes every guarded cross-context action" in f.detail
+        assert f.evidence == ["typing"]
+        # the prior-line build is unaffected either way (still denies by default)
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == PASS
+
+    def test_default_allow_unset_still_warns_when_an_inheriting_agent_reopens_it(
+            self, tmp_path):
+        """The global scope excludes every guarded action, but an agent that inherits
+        the unset crossContext default has its OWN actions.allow reopen one -- the
+        default-allow bucket must not stand down just because the GLOBAL leg is clean."""
+        cfg = {**_global_msg(allow=["typing"]),
+               **_entries(w={"tools": {"message": {"actions": {"allow": ["send"]}}}})}
+        f = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5"))
+        assert f.status == WARN
+        assert "unset — defaults to true" in f.detail
+
+    def test_an_agent_with_its_own_excluding_allow_list_stands_down_alone(self, tmp_path):
+        """One agent's own actions.allow excludes every guarded action; a sibling with
+        no allow-list of its own stays reachable and is the only one named."""
+        cfg = _entries(
+            quiet={"tools": {"message": {"crossContext": {"allowAcrossProviders": True},
+                                          "actions": {"allow": ["typing"]}}}},
+            loud=_agent(True),
+        )
+        f = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4"))
+        assert f.status == WARN
+        assert "loud" in f.detail and "quiet" not in f.detail
+
+    def test_an_agent_with_no_actions_node_inherits_the_global_exclusion(self, tmp_path):
+        """An agent that sets its own crossContext=true but no actions.allow of its own
+        falls back to the GLOBAL actions.allow -- same per-key-wins shallow merge the
+        crossContext leg already gets."""
+        cfg = {**_global_msg(allow=["typing"]),
+               **_entries(w=_agent(True))}
+        f = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5"))
+        assert f.status == PASS
+
+
+class TestActionsAllowMetamorphic:
+    """C-579's own requirement: adding tools.message.actions.allow must never RAISE
+    severity -- it may only stand a WARN down to PASS (when it provably excludes every
+    guarded action) or leave the verdict exactly where it was (anything undeterminable,
+    or a list that still includes a guarded action)."""
+
+    _BASELINE_WARN_CONFIGS = [
+        _global_msg(cc=True),
+        _global_msg(),  # unset, default-allow build
+        {**_entries(w=_agent(True))},
+    ]
+
+    @pytest.mark.parametrize("cfg", _BASELINE_WARN_CONFIGS)
+    def test_baseline_configs_really_are_warn_on_9_5(self, tmp_path, cfg):
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5")).status == WARN
+
+    @pytest.mark.parametrize("cfg", _BASELINE_WARN_CONFIGS)
+    def test_adding_an_excluding_allow_list_only_ever_moves_warn_to_pass(self, tmp_path, cfg):
+        # A plain dict-merge of cfg and _global_msg(...) would clobber an existing
+        # tools.message.crossContext with an empty one (both set "tools.message"),
+        # so merge recursively at the tools.message level instead.
+        merged = _deep_merge(cfg, _global_msg(allow=["typing"]))
+        status = check_cross_context_send(_ctx(merged, tmp_path, "2026.9.5")).status
+        assert status in (WARN, PASS)
+
+    @pytest.mark.parametrize("cfg", _BASELINE_WARN_CONFIGS)
+    def test_adding_a_non_excluding_allow_list_never_changes_the_verdict(self, tmp_path, cfg):
+        merged = _deep_merge(cfg, _global_msg(allow=["send"]))
+        before = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5")).status
+        after = check_cross_context_send(_ctx(merged, tmp_path, "2026.9.5")).status
+        assert before == after == WARN
+
+    @pytest.mark.parametrize("cfg", _BASELINE_WARN_CONFIGS)
+    def test_adding_an_undeterminable_allow_list_never_changes_the_verdict(self, tmp_path, cfg):
+        merged = _deep_merge(cfg, _global_msg(allow="send"))  # malformed: not a list
+        before = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5")).status
+        after = check_cross_context_send(_ctx(merged, tmp_path, "2026.9.5")).status
+        assert before == after == WARN
+
+
+def _deep_merge(a: dict, b: dict) -> dict:
+    """Small recursive dict merge for the metamorphic tests above -- *b*'s leaves win,
+    but a shared branch (``tools.message``) is merged rather than one side clobbering
+    the other's sibling keys."""
+    out = dict(a)
+    for key, value in b.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out

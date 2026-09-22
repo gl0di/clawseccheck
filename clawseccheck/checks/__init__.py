@@ -245,16 +245,20 @@ from ._shared import (  # B-666
 )
 from ._shared import (_unpolicied_open_wildcard_group_channels,)  # B-371
 from ._agents import (
+    _ACTIONS_ALLOW_UNDETERMINED,
     _B21_OBEY_RE,
     _B21_SAFE_STANCE_RE,
     _B21_SOURCE_RE,
     _B30_HISTORY_KEY,
     _B30_NAME_MATCH_KEY,
     _DELEGATION_TIER,
+    _MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS,
     _WEB_FETCH_SKILL_HINTS,
     _b21_has_trust_boundary,
     _disk_subagent_disclosure,
     _has_subagents,
+    _message_actions_allow_for_scope,
+    _message_actions_guarded_reachable,
     _reassembly,
     check_embedded_agent_project_settings_policy,
     check_agent_separation,
