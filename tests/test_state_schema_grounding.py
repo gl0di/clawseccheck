@@ -109,6 +109,17 @@ SCHEMA_SQL_CONST_MARKER = 'const OPENCLAW_STATE_SCHEMA_SQL = "'
 # rather than yielding 0, 1, 1 and 17), and the argument span of the two guards is bounded
 # (`{0,200}`; an unbounded `[^)]*` backtracked quadratically on an unterminated call -- 413 s
 # on a 5 MB line).
+#
+# KNOWN, ACCEPTED LIMIT (C-580, a later independent review): "content-version guard" and
+# "migration-version guard" match on SYNTAX (`<call> !== N`) alone, which a per-step
+# migration precondition can share -- nothing here proves the N a lone such match reports
+# describes the CURRENT schema version rather than some earlier step's target. Requiring a
+# second, distinct anchor before trusting one was considered and rejected: it would turn
+# real single-anchor states this reader must keep accepting (the pre-9.5 named-constant-only
+# era; test_state_schema_version_finds_the_anchor_in_a_nested_chunk's single migration-guard
+# case) into false failures, trading a narrow, never-yet-observed risk for a guaranteed one.
+# Pinned by test_a_lone_ambiguous_anchor_cannot_be_told_from_a_step_precondition_guard,
+# not fixed.
 _SCHEMA_VERSION_ANCHORS = (
     ("named constant (<= 2026.9.4)",
      re.compile(r"\bOPENCLAW_STATE_SCHEMA_VERSION\s*=\s*(\d+)(?![\w.])")),
@@ -230,13 +241,27 @@ def _find_state_schema_defining_js(dist_dir: Path) -> Path:
     and their digests, when they are not.
 
     SCOPE OF THAT PROOF, stated because an independent review found it narrower than the
-    sentence above reads: it covers the definitions spelled `const OPENCLAW_STATE_SCHEMA_SQL
-    = "..."` -- the spelling this module extracts. On every release 8.2 through 9.5 the
-    worker thread (`worker/worker.mjs`) also embeds the constant as a TEMPLATE literal, and
+    sentence above reads: it covers only the definitions spelled `const
+    OPENCLAW_STATE_SCHEMA_SQL = "..."` -- the spelling this module extracts.
     `config-doctor/runtime-*.js` reads the SQL from a `.sql` file the package does not ship;
-    neither is compared here. The template copy was diffed against the string copy on all six
-    releases and is byte-equal, so no wrong answer exists today, but a future divergence
-    between those spellings would not be seen by this function.
+    that one is still not compared here (it is a build-time artifact, not something a
+    running OpenClaw can open).
+
+    C-580: the worker thread (`worker/worker.mjs`) also embeds the constant, on every
+    release 8.2 through 9.5, but as a TEMPLATE literal, minified (no `const`, no spaces
+    around `=`) unlike the readable top-level chunk this function locates -- a different
+    enough spelling that folding it into THIS function's own multi-file digest comparison
+    would require every synthetic unit test below to grow a matching `worker/worker.mjs`
+    fixture just to keep constructing a valid dist. Grounded byte-equal against the
+    installed 2026.9.5 dist and diffed against the string copy on all six releases before
+    that, so no wrong answer exists today -- but "diffed once by hand" is exactly the
+    unverified claim this whole module exists to stop trusting (see the module docstring's
+    own B-710 history). `_assert_worker_template_copy_matches_primary` below is the
+    verification: a separate, explicit second half of the identity proof, called by every
+    real-dist caller of this function (`_write_state_snapshot`,
+    `_write_vendor_table_baseline`, `test_worker_template_copy_matches_the_installed_dist`)
+    but never by this function's own synthetic unit tests, whose tmp_path dists are
+    deliberately too small to carry a worker bundle.
 
     Returns the top-level `openclaw-state-db-*` chunk when there is one (the file the
     runtime's own state module lives in, and the one worth citing in a generated header),
@@ -292,6 +317,95 @@ def _extract_vendor_schema_sql(js_text: str) -> str:
     else:
         raise AssertionError("unterminated OPENCLAW_STATE_SCHEMA_SQL string literal in the dist")
     return _unescape_js_double_quoted(js_text[start:i])
+
+
+# --------------------------------------------------------------------------------------
+# C-580: the worker thread's TEMPLATE-LITERAL copy of the schema (see
+# `_find_state_schema_defining_js`'s "SCOPE OF THAT PROOF" note). A second spelling needs
+# a second extractor -- a template literal is delimited by backticks, not double quotes,
+# and (unlike a double-quoted string) may embed a real, unescaped newline directly, so it
+# needs no `\n`-unescaping to reproduce the SQL's line breaks. It can also embed a `${...}`
+# interpolation, which a double-quoted string cannot; the loop below fails loudly on one
+# rather than silently returning literal `${...}` text as if it were SQL.
+# --------------------------------------------------------------------------------------
+
+_WORKER_TEMPLATE_MARKER_RE = re.compile(r"\bOPENCLAW_STATE_SCHEMA_SQL\s*=\s*`")
+
+
+def _extract_worker_template_schema_sql(js_text: str) -> str:
+    """The unescaped SQL text of the worker thread's `OPENCLAW_STATE_SCHEMA_SQL = \\`...\\``
+    template-literal copy (`worker/worker.mjs`, grounded against the installed 2026.9.5
+    dist, where the assignment is minified: no `const`, no spaces around `=`). The regex
+    tolerates optional spacing either way, not because spacing has been observed to vary
+    on its own, but because nothing about this proof depends on it staying minified.
+
+    Reuses `_unescape_js_double_quoted` for the escape table: `\\n`/`\\t`/`\\\\`/`\\uXXXX`/
+    the JS fallback rule are the same set for a template literal as for a double-quoted
+    string (ECMA-262 11.8.6). A raw, unescaped newline needs no special handling either --
+    the unescape pass only transforms backslash-prefixed sequences and leaves it as-is.
+    """
+    m = _WORKER_TEMPLATE_MARKER_RE.search(js_text)
+    if m is None:
+        raise AssertionError(
+            f"{_WORKER_TEMPLATE_MARKER_RE.pattern!r} not found in the text -- the worker "
+            "thread no longer embeds the state schema as a template literal the way this "
+            "guard expects; re-ground it against the current bundle before trusting "
+            "anything downstream."
+        )
+    start = m.end()
+    i, n = start, len(js_text)
+    while i < n:
+        c = js_text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            break
+        if c == "$" and js_text[i:i + 2] == "${":
+            raise AssertionError(
+                "the worker template literal contains an unescaped ${...} interpolation "
+                "-- it is not a static string, so it cannot be compared as one; re-ground "
+                "the extractor before trusting anything downstream."
+            )
+        i += 1
+    else:
+        raise AssertionError("unterminated worker-thread template literal in the dist")
+    return _unescape_js_double_quoted(js_text[start:i])
+
+
+def _assert_worker_template_copy_matches_primary(dist_dir: Path, primary_sql: str) -> None:
+    """C-580: the second half of `_find_state_schema_defining_js`'s identity proof --
+    verifying, not merely asserting in a docstring, that `worker/worker.mjs`'s
+    template-literal copy of the schema is the SAME schema as *primary_sql* (the text that
+    function already proved every double-quoted definition agrees on).
+
+    Deliberately a standalone function, not folded into `_find_state_schema_defining_js`
+    itself: that function's own synthetic unit tests build tiny tmp_path dists with none
+    of the surrounding bundle layout, and requiring a `worker/worker.mjs` fixture in every
+    one of them to keep constructing a valid dist would test this proof's plumbing, not
+    its logic. Called only where a real dist -- or a synthetic stand-in built specifically
+    to exercise this function -- is already in hand.
+    """
+    worker_path = dist_dir / "worker" / "worker.mjs"
+    if not worker_path.is_file():
+        raise AssertionError(
+            f"{worker_path} does not exist -- the worker thread embedded a template-"
+            "literal copy of the state schema on every release 8.2 through 9.5; re-ground "
+            "this guard against the current bundle layout before trusting anything "
+            "downstream."
+        )
+    worker_text = worker_path.read_text(encoding="utf-8", errors="replace")
+    worker_sql = _extract_worker_template_schema_sql(worker_text)
+    if worker_sql != primary_sql:
+        # surrogatepass: matches _find_state_schema_defining_js's own digest comparison.
+        primary_digest = hashlib.sha256(primary_sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+        worker_digest = hashlib.sha256(worker_sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+        raise AssertionError(
+            f"{worker_path}'s template-literal copy of the state schema ({worker_digest}) "
+            f"does NOT match the primary definition ({primary_digest}). Byte-identical on "
+            "every release 8.2 through 9.5 until now -- decide which the runtime actually "
+            "uses before trusting a snapshot taken from either."
+        )
 
 
 def _dist_table_ddl_texts(sql_text: str) -> "dict[str, str]":
@@ -672,6 +786,9 @@ def _write_state_snapshot() -> int:
         )
     js_path = _find_state_schema_defining_js(OPENCLAW_DIST)
     sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
+    # C-580: the second half of the identity proof -- worker/worker.mjs's template-literal
+    # copy must be the SAME schema before a baseline is regenerated from either.
+    _assert_worker_template_copy_matches_primary(OPENCLAW_DIST, sql_text)
     ddl_texts = _dist_table_ddl_texts(sql_text)
     vendor_tables = set(ddl_texts)
 
@@ -1225,6 +1342,71 @@ def test_find_state_schema_defining_js_is_not_satisfied_by_the_legacy_capture_tr
         _find_state_schema_defining_js(tmp_path)
 
 
+# ---- C-580: the worker-thread template-literal copy ------------------------------------
+
+def test_extract_worker_template_schema_sql_finds_the_minified_spelling():
+    """`worker/worker.mjs` on the real dist has no `const` and no spaces around `=` --
+    the minified spelling this extractor must accept, not just a readable one."""
+    js = 'other=1,OPENCLAW_STATE_SCHEMA_SQL=`CREATE TABLE t (a TEXT);\n`,more=2'
+    assert _extract_worker_template_schema_sql(js) == "CREATE TABLE t (a TEXT);\n"
+
+
+def test_extract_worker_template_schema_sql_finds_the_spaced_spelling():
+    js = 'const OPENCLAW_STATE_SCHEMA_SQL = `CREATE TABLE t (a TEXT);`;'
+    assert _extract_worker_template_schema_sql(js) == "CREATE TABLE t (a TEXT);"
+
+
+def test_extract_worker_template_schema_sql_unescapes_like_a_js_string():
+    js = 'OPENCLAW_STATE_SCHEMA_SQL=`a\\`b\\\\c\\u0041d`'
+    assert _extract_worker_template_schema_sql(js) == "a`b\\cAd"
+
+
+def test_extract_worker_template_schema_sql_raises_when_marker_missing():
+    with pytest.raises(AssertionError, match="not found"):
+        _extract_worker_template_schema_sql("const SOMETHING_ELSE = 1;")
+
+
+def test_extract_worker_template_schema_sql_raises_when_unterminated():
+    with pytest.raises(AssertionError, match="unterminated"):
+        _extract_worker_template_schema_sql("OPENCLAW_STATE_SCHEMA_SQL=`CREATE TABLE t (a TEXT);")
+
+
+def test_extract_worker_template_schema_sql_raises_on_unescaped_interpolation():
+    """A `${...}` interpolation makes this NOT a static string -- must fail loudly rather
+    than silently including the literal `${...}` text as if it were SQL."""
+    with pytest.raises(AssertionError, match=r"\$\{\.\.\.\} interpolation"):
+        _extract_worker_template_schema_sql("OPENCLAW_STATE_SCHEMA_SQL=`CREATE TABLE ${t} (a TEXT);`")
+
+
+def test_extract_worker_template_schema_sql_tolerates_an_escaped_interpolation_marker():
+    """`\\${` is a literal `${`, not an interpolation -- the backslash-skip branch must
+    reach it before the interpolation guard does."""
+    assert (
+        _extract_worker_template_schema_sql("OPENCLAW_STATE_SCHEMA_SQL=`a\\${b}c`")
+        == "a${b}c"
+    )
+
+
+def test_assert_worker_template_copy_matches_primary_accepts_an_identical_copy(tmp_path):
+    (tmp_path / "worker").mkdir()
+    (tmp_path / "worker" / "worker.mjs").write_text(
+        "OPENCLAW_STATE_SCHEMA_SQL=`CREATE TABLE t (a TEXT);`", encoding="utf-8")
+    _assert_worker_template_copy_matches_primary(tmp_path, "CREATE TABLE t (a TEXT);")
+
+
+def test_assert_worker_template_copy_matches_primary_raises_when_it_diverges(tmp_path):
+    (tmp_path / "worker").mkdir()
+    (tmp_path / "worker" / "worker.mjs").write_text(
+        "OPENCLAW_STATE_SCHEMA_SQL=`CREATE TABLE u (b TEXT);`", encoding="utf-8")
+    with pytest.raises(AssertionError, match="does NOT match"):
+        _assert_worker_template_copy_matches_primary(tmp_path, "CREATE TABLE t (a TEXT);")
+
+
+def test_assert_worker_template_copy_matches_primary_raises_when_the_file_is_missing(tmp_path):
+    with pytest.raises(AssertionError, match="does not exist"):
+        _assert_worker_template_copy_matches_primary(tmp_path, "CREATE TABLE t (a TEXT);")
+
+
 # ---- B-834: the version reader ---------------------------------------------------------
 
 def _write_dist(root: Path, files: "dict[str, str]") -> Path:
@@ -1333,6 +1515,44 @@ def test_the_guard_anchors_do_not_backtrack_quadratically_on_an_unterminated_cal
     with pytest.raises(AssertionError, match="could not read the state-schema version"):
         _state_schema_version_from(dist)
     assert time.monotonic() - started < 10
+
+
+def test_a_lone_ambiguous_anchor_cannot_be_told_from_a_step_precondition_guard(tmp_path):
+    """C-580, documenting a known limit an independent review found and this repo is
+    choosing NOT to fix: the two `!== N` anchors ("content-version guard",
+    "migration-version guard") are matched by SYNTAX alone. A per-step migration
+    precondition -- "only run this repair step while the database is still at version
+    12" -- has the exact same shape (`readStateSchemaMigrationVersion(db) !== 12`) as the
+    real "is this the CURRENT schema version" guard, and no regex can tell them apart.
+
+    Grounded against the installed 2026.9.5 dist: today every real occurrence of every
+    surviving anchor spelling agrees on the same number (measured: {17} for all three of
+    content-version guard, migration-version guard and newer-schema error), so this is
+    harmless in practice. But if a release removed every OTHER spelling and left exactly
+    ONE occurrence of a precondition-shaped `!== N`, this function has no way to know 12
+    was never meant to describe the CURRENT version, and would return it anyway -- this
+    test proves that by construction.
+
+    The fix considered and rejected: require a second, distinct anchor NAME before
+    trusting a lone `!==` match. That would break real, legitimate single-anchor states
+    this reader must keep accepting --
+    test_state_schema_version_reads_the_named_constant_of_2026_9_4_and_earlier (the
+    pre-9.5 era genuinely had only the named-constant spelling) and
+    test_state_schema_version_finds_the_anchor_in_a_nested_chunk both construct a dist
+    with exactly one anchor firing and correctly expect a version back, not a failure.
+    Demanding corroboration trades this narrow, never-yet-observed risk for a guaranteed
+    false failure on those. So this is pinned, not patched -- see this module's own
+    docstring on the version anchors for the cross-reference."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-DS2iNFy4.mjs":
+            "function migrateFromV12(db) {\n"
+            "  if (readStateSchemaMigrationVersion(db) !== 12) return;\n"
+            "  // ... apply the v12 -> v13 repair step ...\n"
+            "}\n",
+    })
+    # Accepted, not fixed: nothing here distinguishes 12-as-a-step-precondition from
+    # 12-as-the-current-version when it is the only anchor present.
+    assert _state_schema_version_from(dist) == 12
 
 
 def test_a_lone_surrogate_in_a_definition_reaches_the_identity_check_instead_of_crashing(tmp_path):
@@ -1484,6 +1704,20 @@ def test_snapshot_matches_installed_dist_and_stamped_version():
         f"OpenClaw is {installed!r} -- a stale/faked stamp used to leave a sibling guard "
         f"green (test_schema_grounding.py's own regression). Regenerate: {REGENERATE_CMD}"
     )
+
+
+def test_worker_template_copy_matches_the_installed_dist():
+    """C-580, LOCAL-ONLY: the second half of `_find_state_schema_defining_js`'s identity
+    proof, exercised for real. That function's own docstring used to say the worker
+    thread's template-literal copy was "diffed against the string copy on all six
+    releases" -- true, but a manual diff someone ran once and wrote down is exactly the
+    kind of unverified claim this whole module exists to stop trusting (see the module
+    docstring's B-710 history: a comment claiming a fixture "cannot drift" drifted
+    anyway). This re-checks it, on THIS machine's installed OpenClaw, every run."""
+    dist_dir = _require_dist()
+    js_path = _find_state_schema_defining_js(dist_dir)
+    primary_sql = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
+    _assert_worker_template_copy_matches_primary(dist_dir, primary_sql)
 
 
 _STATE_SCHEMA_STAMP_RE = re.compile(
@@ -1672,6 +1906,9 @@ def _write_vendor_table_baseline() -> int:
         )
     js_path = _find_state_schema_defining_js(OPENCLAW_DIST)
     sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
+    # C-580: same reasoning as _write_state_snapshot -- verify the worker.mjs copy before
+    # trusting this text to build a baseline.
+    _assert_worker_template_copy_matches_primary(OPENCLAW_DIST, sql_text)
     tables = sorted(_dist_table_ddl_texts(sql_text))
     if not tables:
         raise RuntimeError(
