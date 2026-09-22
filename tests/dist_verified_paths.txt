@@ -34,6 +34,7 @@ agents.defaults.subagents.maxChildrenPerAgent
 agents.defaults.subagents.maxConcurrent
 agents.defaults.subagents.maxSpawnDepth
 agents.defaults.workspace
+attachments.ttlHours
 auth.profiles
 browser.extensionRelay.allowLegacyAuth
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork

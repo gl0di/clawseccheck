@@ -5277,3 +5277,96 @@ def check_browser_extension_relay_legacy_auth(ctx: Context) -> Finding:
         "so the relay stops accepting the legacy credential shape.",
         evidence=[f"browser.extensionRelay.allowLegacyAuth={allow_legacy!r}"],
     )
+
+
+def check_attachments_ttl(ctx: Context) -> Finding:
+    """B390 (F-201) -- attachments.ttlHours unset means no media-retention sweep.
+
+    ``attachments.ttlHours`` is a straight rename of the pre-2026.8.1
+    ``media.ttlHours`` -- same field, same semantics (compare
+    ``docs/research/openclaw-8.1-schema-removed-paths.txt:1145`` against
+    ``openclaw-8.1-schema-added-paths.txt:358``, both workspace-root recon; unchanged
+    through every schema-paths snapshot up to the installed 2026.9.5). Grounded
+    directly against the installed 2026.9.5 dist rather than the internal recon prose,
+    because that recon's descriptions map omits the ``attachments`` namespace entirely
+    (a known gap in that map -- CLAUDE.md Golden Rule #4(c)):
+
+      - Type: ``ttlHours: z.ZodOptional<z.ZodNumber>``
+        (``cli-backend.types-DEEWiHUs.d.ts:8652``, mirrored at
+        ``types-B16fzBZc.d.ts:8487``) -- a plain optional number, no enum/min/max.
+      - Vendor description (``schema-CwAIqZVE.mjs:904-905``): "Top-level retention
+        behavior shared across providers and tools that persist media... Optional
+        retention window in hours for persisted media handled by the general mtime
+        sweep. Leave unset to disable that sweep, or set values like 24 (1 day) or 168
+        (7 days) to periodically remove older staged media. Managed outgoing media
+        (chat-generated attachments) is excluded and follows its own SQLite- and
+        transcript-aware retention."
+      - Runtime sweep gate (``telegram-ingress-drain-factory-DbVZxBjw.mjs:3823``,
+        fed via that same file's line 3937, ``ttlHours: cfg.attachments?.ttlHours``):
+        ``if (params.ttlHours !== void 0 && media.savedAt + params.ttlHours * HOUR_MS
+        <= Date.now()) return;`` -- when ``ttlHours`` is unset the expiry comparison
+        never runs, so nothing is ever swept; any set number (0 included -- no
+        documented floor) makes the comparison live.
+
+    So the gap is exactly the filed task's premise: staged INCOMING media
+    (screenshots, voice notes, forwarded files landed by any channel provider)
+    accumulates on local disk indefinitely when unset. Managed OUTGOING media is
+    explicitly out of scope -- the vendor's own description excludes it -- so this
+    check's claim never extends to that surface.
+
+    PASS    -- ``attachments.ttlHours`` is set to a real number (any int/float, per
+               the plain ``ZodNumber`` schema -- this check does not second-guess a
+               concrete operator-chosen value).
+    WARN    -- absent, ``null``, or any other non-number shape (a shape the real
+               ``ZodOptional<ZodNumber>`` schema would also refuse, so it never
+               enacts a sweep either -- same idiom as B387's ``allowedHosts`` check).
+               Never FAIL: an unswept disk is a data-hygiene gap the operator can act
+               on at any time, not a proven compromise.
+    UNKNOWN -- config unreadable, or never read at all (B-661: a config that was
+               never actually read must not silently read as "unset", which would
+               misreport this as a real gap on a host that was simply never scanned).
+    """
+    unreadable = _config_unreadable("B390", ctx)
+    if unreadable is not None:
+        return unreadable
+    # B-661: an unread config (config={}, config_found=False) would otherwise dig()
+    # straight to None and read exactly like a real "unset" WARN -- the same fail-open
+    # shape B387's own B-661 guard exists to close. Report UNKNOWN instead of
+    # asserting a fact about a host that was never actually scanned.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B390", UNKNOWN,
+            "No config was read, so whether attachments.ttlHours is set could not be "
+            "determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    cfg = ctx.config
+    ttl = dig(cfg, "attachments.ttlHours")
+
+    if isinstance(ttl, (int, float)) and not isinstance(ttl, bool):
+        return _finding(
+            "B390", PASS,
+            f"attachments.ttlHours is set ({ttl!r}) — OpenClaw's general mtime sweep "
+            "periodically removes staged incoming media older than that window.",
+            "Keep attachments.ttlHours at a value that matches how long this "
+            "workload actually needs staged media (voice notes, screenshots, "
+            "forwarded files) on disk.",
+            evidence=[f"attachments.ttlHours={ttl!r}"],
+            config_field_paths=frozenset({"attachments.ttlHours"}),
+        )
+
+    return _finding(
+        "B390", WARN,
+        "attachments.ttlHours is unset, so OpenClaw's general mtime sweep for staged "
+        "media never runs — incoming attachments (screenshots, voice notes, "
+        "forwarded files) accumulate on local disk indefinitely. (Managed "
+        "outgoing/chat-generated media is unaffected — it follows its own separate "
+        "retention.)",
+        "Set attachments.ttlHours to a bounded retention window in hours (e.g. 24 "
+        "for one day, 168 for one week) so staged incoming media is periodically "
+        "swept.",
+        evidence=[f"attachments.ttlHours={ttl!r}"],
+        config_field_paths=frozenset({"attachments.ttlHours"}),
+    )
