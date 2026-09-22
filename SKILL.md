@@ -745,6 +745,9 @@ It emits, in this fixed order (F-153):
   wording adapts to whether this run earned a grade. Paste it with the rest of the card.
   Under `--compact` it condenses to a one-line pointer (`run --next for the ranked list`) —
   the compact card exists to fit a message-capped channel and has no room for the full block.
+  If this audit was pointed at a non-default `--home` and/or `--data-dir`, the commands that
+  actually read or write that state carry the same flags, so running one verbatim targets the
+  setup this audit just looked at, not `~/.openclaw`/`~/.clawseccheck`.
 
 Skills/Plugins/MCP/RISK Chains are each independently **omitted** only when there is
 genuinely nothing to show (no skills/plugins/MCP servers installed, no RISK chain
