@@ -3331,6 +3331,187 @@ def _mcp_is_per_requester(spec: dict) -> bool:
     return isinstance(oauth, dict) and oauth.get("identity") == "per-requester"
 
 
+_CODEX_POLICY_MODES = frozenset(("yolo", "guardian"))
+
+
+def _codex_policy_mode(value: object) -> "str | None":
+    """`resolvePolicyMode` (@openclaw/codex@2026.9.5, dist/.setup/config-security-*.mjs):
+    only the two literal strings survive; anything else -- including absent, since a
+    config that fails to load never reaches this check at all -- reads as unset."""
+    return value if isinstance(value, str) and value in _CODEX_POLICY_MODES else None
+
+
+def _mcp_codex_explicit_mode(spec: dict) -> "str | None":
+    """The server's own resolved codex approval mode, with NO ``?? "auto"`` default
+    folded in -- unlike `_mcp_codex_approval_mode`, which applies the caller's default.
+
+    B-831 needs the distinction: a server is "un-moded" (reachable by the appServer-level
+    `fullPermission` waiver -- see `_codex_appserver_yolo_reach`) only when NEITHER
+    spelling of `codex.defaultToolsApprovalMode` is set. An explicit `"auto"` behaves
+    identically today, but it is a different fact -- the vendor's own `??` chain
+    (`resolveProjectedMcpCodexToolApprovalMode`) stops at the first DEFINED value, before
+    `fullPermission` is even consulted, so an explicit `"auto"` is not exposed to this
+    mechanism even though its practical effect (consult the tool's annotations) is the
+    same as the un-moded fallback the vendor's OWN caller applies when nothing resolves.
+    """
+    codex = spec.get("codex") if isinstance(spec, dict) else None
+    if not isinstance(codex, dict):
+        return None
+    return (_mcp_codex_normalize_mode(codex.get("defaultToolsApprovalMode"))
+            or _mcp_codex_normalize_mode(codex.get("default_tools_approval_mode")))
+
+
+def _codex_unmoded_server_names(servers: dict) -> "list[str]":
+    """Enabled MCP servers exposed to the appServer-level auto-approve waiver (B-831).
+
+    A server is "un-moded" here -- reachable by `fullPermission` inside
+    `requiresMcpCodexToolApproval` -- when `_mcp_codex_explicit_mode` is None and it is
+    not OpenClaw's own loopback server (which already resolves to "approve"
+    unconditionally, independent of `fullPermission`; `_mcp_codex_is_loopback_server`).
+
+    A per-requester OAuth server (`_mcp_is_per_requester`) is ALWAYS included here --
+    the OPPOSITE of this check's explicit-"approve" branch above, which excludes it. Its
+    own `codex` block is architecturally unreachable there (`codex-mcp-config-*.js` builds
+    Codex's MCP config from the STATIC server half only -- this module's own grounding for
+    that exclusion), but the appServer-level waiver is fed as a caller-supplied parameter
+    to BOTH `materializeStaticMcpToolsForHarnessRunCore` and
+    `materializeRequesterScopedMcpToolsForHarnessRunCore` alike
+    (`@openclaw/codex@2026.9.5`, `dist/.setup/run-attempt-*.mjs`) -- a per-requester
+    server's operator has no config field that opts it out of this specific mechanism.
+    """
+    names: list[str] = []
+    for name, spec in sorted(servers.items()):
+        if not isinstance(spec, dict) or spec.get("enabled") is False:
+            continue
+        if _mcp_codex_is_loopback_server(name, spec):
+            continue
+        if _mcp_is_per_requester(spec):
+            names.append(str(name))
+            continue
+        if _mcp_codex_explicit_mode(spec) is None:
+            names.append(str(name))
+    return names
+
+
+def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str]]":
+    """B-831: whether the Codex plugin's OWN appServer posture pre-approves every
+    un-moded MCP server -- independent of any per-server
+    `codex.defaultToolsApprovalMode`. Returns ("yes" | "no" | "unknown", reasons).
+
+    Ground truth (docs/research/openclaw-schema-recon.md §44, workspace root, has the
+    full field-by-field citation trail): `@openclaw/codex@2026.9.5` -- a SEPARATE npm
+    package from `openclaw` core (`plugins.entries.codex.install.npmSpec`) -- resolves an
+    `appServer` object and then (`dist/.setup/config-security-*.mjs`, verbatim):
+
+        function shouldAutoApproveCodexAppServerApprovals(appServer) {
+            return appServer.networkProxy === void 0
+                && appServer.approvalPolicy === "never"
+                && appServer.sandbox === "danger-full-access";
+        }
+
+    `appServer` there is RESOLVED (defaults and `tools.exec.*` overrides already
+    applied), not the raw config. This re-derives only the parts of that resolution
+    grounded well enough to assert "yes" soundly; everything else below is either read
+    directly (when the raw config already states the resolved value, i.e. an explicit
+    field) or folded into "no"/"unknown" rather than ported, and each such fold is a
+    documented, sound-by-construction simplification -- never a source of a false "yes".
+
+    Modelled:
+
+    * `mode` (`resolvePolicyMode`) selects a preset ("yolo" is the implicit default), but
+      an explicit `approvalPolicy`/`sandbox` field overrides the preset regardless of
+      `mode` (docs: "Individual policy fields override mode") -- EXCEPT `mode:
+      "guardian"` is read here as an unconditional "no" (residual (a) below).
+    * `networkProxy` blocks the waiver only when the raw config sets
+      `networkProxy.enabled: true` -- an explicit `networkProxy: {}` or
+      `{enabled: false}` does not (`resolveCodexAppServerNetworkProxy` returns no
+      `networkProxy` key at all for anything else).
+    * `tools.exec.mode`: unset/`"full"` preserves the configured/default policy; ANY
+      other value forces guardian or makes the app-server unavailable outright
+      (`"ask"` takes the same branch as `"auto"`; `"deny"`/`"allowlist"` throw) -- read
+      as "no" for every value except unset/`"full"`.
+    * `tools.exec.ask == "always"` can force the posture via a second, independent path
+      -- read as "no" rather than modelling the `tools.exec.security` combination.
+    * `approvalsReviewer` explicit and not `"user"` signals guardian-track intent and can
+      itself force `approvalPolicy` away from `"never"` (gated on a model-capability
+      predicate this module does not model) -- read as "no".
+    * A non-`"stdio"` `appServer.transport` makes the implicit default "yolo"
+      UNCONDITIONALLY -- no local-system-requirements-file read at all -- so it needs no
+      "unknown" hedge even with nothing else set explicitly.
+
+    Residuals (documented simplifications, not oversights -- see §44 for the full
+    reasoning on why each can only ever move the verdict TOWARD "no", never fabricate a
+    "yes"):
+
+    (a) `mode: "guardian"` reads as an unconditional "no", even though an explicit
+        `approvalPolicy`/`sandbox` override can in principle reinstate YOLO underneath it
+        -- that needs the same model-capability predicate as `approvalsReviewer` above,
+        and the config would have to explicitly ask for guardian and then explicitly
+        fight it back to YOLO in the same block.
+    (b) `forceDangerFullAccessSandbox` / the model-capability-independent half of
+        `forceUserReviewer` are approximated by the `tools.exec.ask`/`approvalsReviewer`
+        bullets above rather than ported in full.
+
+    "unknown" is reserved for the one genuinely external, unobservable factor: a local
+    Codex "system requirements file" can silently withhold the implicit YOLO default and
+    select guardian instead -- reachable ONLY when the operator relies on that implicit
+    default (leaves `mode` unset AND at least one of `approvalPolicy`/`sandbox` unset,
+    on the default `"stdio"` transport).
+    """
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    plugins = _plugins(cfg)
+    codex_entry = plugins.get("codex") if isinstance(plugins, dict) else None
+    if not isinstance(codex_entry, dict) or codex_entry.get("enabled") is False:
+        return "no", ["the Codex plugin is not installed/enabled (plugins.entries.codex)"]
+
+    network_proxy = dig(codex_entry, "config.appServer.networkProxy")
+    if isinstance(network_proxy, dict) and network_proxy.get("enabled") is True:
+        return "no", ["appServer.networkProxy.enabled=true blocks the auto-approve waiver"]
+
+    reviewer = dig(codex_entry, "config.appServer.approvalsReviewer")
+    if isinstance(reviewer, str) and reviewer not in ("", "user"):
+        return "no", [f"appServer.approvalsReviewer={reviewer!r} is not the YOLO default"]
+
+    exec_mode = dig(cfg, "tools.exec.mode")
+    if exec_mode not in (None, "full"):
+        return "no", [f"tools.exec.mode={exec_mode!r} changes the Codex app-server "
+                       "approval posture (only unset or \"full\" preserves it)"]
+    if dig(cfg, "tools.exec.ask") == "always":
+        return "no", ["tools.exec.ask=\"always\" can force a guardian-reviewed posture"]
+
+    mode = _codex_policy_mode(dig(codex_entry, "config.appServer.mode"))
+    if mode == "guardian":
+        return "no", ["appServer.mode=\"guardian\""]
+
+    approval = dig(codex_entry, "config.appServer.approvalPolicy")
+    if isinstance(approval, str) and approval != "never":
+        return "no", [f"appServer.approvalPolicy={approval!r}"]
+    sandbox = dig(codex_entry, "config.appServer.sandbox")
+    if isinstance(sandbox, str) and sandbox != "danger-full-access":
+        return "no", [f"appServer.sandbox={sandbox!r}"]
+
+    reasons = [
+        f"appServer.approvalPolicy={approval!r}" if isinstance(approval, str)
+        else "appServer.approvalPolicy is unset (implicit default \"never\")",
+        f"appServer.sandbox={sandbox!r}" if isinstance(sandbox, str)
+        else "appServer.sandbox is unset (implicit default \"danger-full-access\")",
+    ]
+    if network_proxy is None:
+        reasons.append("appServer.networkProxy is unset")
+
+    transport = dig(codex_entry, "config.appServer.transport")
+    relies_on_system_default = (
+        mode is None
+        and (not isinstance(approval, str) or not isinstance(sandbox, str))
+        and transport in (None, "stdio")
+    )
+    if relies_on_system_default:
+        reasons.append("relies on the implicit default, which a local Codex system "
+                        "requirements file can silently withhold in favor of guardian")
+        return "unknown", reasons
+    return "yes", reasons
+
+
 def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
     """B353 (F-185): an MCP server set to pre-approve every one of its tools.
 
@@ -3395,6 +3576,20 @@ def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
     PASS    -- servers were inspected and none does, OR one does but no configured model
                resolves to the Codex harness (with the run-time-model caveat said aloud).
     UNKNOWN -- no MCP servers configured under `mcp.servers`.
+
+    B-831: a SECOND, independent way to reach the same "un-moded server is pre-approved"
+    outcome -- no server explicitly sets "approve", but the Codex plugin's OWN appServer
+    posture (`approvalPolicy: "never"` + `sandbox: "danger-full-access"`, the implicit
+    default) pre-approves every server that sets no approval mode of its own, including a
+    per-requester OAuth server (whose own `codex` block this mechanism's sibling above
+    never reads at all -- see `_codex_unmoded_server_names`). Checked only when the
+    explicit-"approve" branch above found nothing (`hits` is empty): that branch already
+    WARNs correctly on its own subject, and the two mechanisms only ever combine into the
+    same WARN/PASS severity, never a different one, so there is nothing this second check
+    would change about an already-WARNing verdict. See `_codex_appserver_yolo_reach` for
+    the full grounding and its own WARN/PASS/UNKNOWN split (harness reach composed with
+    the appServer reach the same way the branch above composes with the harness reach
+    alone).
     """
     # A plain `.get()` walk, not `dig()`, and for the reason B-701 used one in this module:
     # a new `dig()` path takes on a grounding obligation in tests/grounded_schema_paths.txt
@@ -3478,6 +3673,69 @@ def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
             "is inert on your setup and the setting changes nothing either way.",
             evidence=ev,
         )
+
+    # B-831: no server explicitly says "approve", but the Codex plugin's OWN appServer
+    # posture can still pre-approve every server that says nothing at all. See
+    # `_codex_appserver_yolo_reach`'s docstring for the full grounding.
+    appserver_answer, appserver_reasons = _codex_appserver_yolo_reach(ctx)
+    unmoded = _codex_unmoded_server_names(servers) if appserver_answer != "no" else []
+    if appserver_answer != "no" and unmoded:
+        ev = [f"plugins.entries.codex.config.appServer: {r}" for r in appserver_reasons[:4]]
+        ev.append("un-moded MCP server(s): " + ", ".join(unmoded[:5]))
+        reach = _harness_reach(ctx)
+        if reach.answer == _harnessruntime.NO:
+            return _finding(
+                "B353", PASS,
+                "The Codex plugin's appServer posture would pre-approve every tool on "
+                f"{len(unmoded)} un-moded MCP server(s) (" + ", ".join(unmoded[:5]) +
+                "), but no configured model resolves to the Codex app-server harness, so "
+                "the waiver is inert on this setup. " + _HARNESS_RUNTIME_CAVEAT,
+                "No action needed today. If you later route any agent to an OpenAI/Codex "
+                "model, set plugins.entries.codex.config.appServer.mode to \"guardian\" "
+                "(or approvalPolicy/sandbox individually) first, or give the affected "
+                "server(s) their own mcp.servers.<name>.codex.defaultToolsApprovalMode.",
+                evidence=ev + _harness_evidence(reach),
+            )
+        appserver_hedge = (
+            " Whether that implicit default actually applies on this host also cannot be "
+            "determined here: a local Codex system requirements file can silently replace "
+            "it with a guardian-reviewed posture instead, and this audit does not read "
+            "that file."
+        ) if appserver_answer == "unknown" else ""
+        if reach.answer == _harnessruntime.YES:
+            return _finding(
+                "B353", WARN,
+                "The Codex plugin's appServer is configured for (or defaults to) "
+                "approvalPolicy=\"never\" + sandbox=\"danger-full-access\" with no "
+                "networkProxy, which pre-approves every tool on every MCP server that sets "
+                "no approval mode of its own -- before any per-tool safety annotation is "
+                "consulted (" + ", ".join(unmoded[:5]) + "). At least one of your agents is "
+                "configured to run the Codex app-server harness, so this setting is in "
+                "play. " + _HARNESS_YES_CAVEAT + appserver_hedge,
+                "Set plugins.entries.codex.config.appServer.mode to \"guardian\" (or set "
+                "approvalPolicy to something other than \"never\" and/or sandbox to "
+                "something other than \"danger-full-access\"), or give each affected MCP "
+                "server its own mcp.servers.<name>.codex.defaultToolsApprovalMode of "
+                "\"prompt\" or \"auto\".",
+                evidence=ev + _harness_evidence(reach),
+            )
+        return _finding(
+            "B353", WARN,
+            "The Codex plugin's appServer is configured for (or defaults to) "
+            "approvalPolicy=\"never\" + sandbox=\"danger-full-access\" with no "
+            "networkProxy, which pre-approves every tool on every MCP server that sets no "
+            "approval mode of its own (" + ", ".join(unmoded[:5]) + "). WHETHER THAT IS "
+            "LIVE HERE depends on whether any of your agents runs the Codex app-server "
+            "harness, which this audit does not determine." + appserver_hedge,
+            "Set plugins.entries.codex.config.appServer.mode to \"guardian\" (or set "
+            "approvalPolicy to something other than \"never\" and/or sandbox to something "
+            "other than \"danger-full-access\"), or give each affected MCP server its own "
+            "mcp.servers.<name>.codex.defaultToolsApprovalMode of \"prompt\" or \"auto\". "
+            "If no agent runs a Codex app-server thread, this block is inert on your setup "
+            "and the setting changes nothing either way.",
+            evidence=ev,
+        )
+
     return _finding(
         "B353", PASS,
         f"None of the {len(servers)} configured MCP server(s) pre-approves the tools it "

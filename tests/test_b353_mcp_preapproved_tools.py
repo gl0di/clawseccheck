@@ -308,3 +308,184 @@ def test_the_pass_text_does_not_enumerate_reasons_it_cannot_cover(extra):
     detail = f.detail or ""
     assert "either leaves the approval mode unset" not in detail
     assert "not enumerated here" in detail
+
+
+# ======================================================================================
+# 6. B-831 — the Codex plugin's OWN appServer posture pre-approves un-moded servers
+# ======================================================================================
+#
+# A second, independent mechanism to the same effect as this check's explicit-"approve"
+# branch above: no server says "approve", but `plugins.entries.codex.config.appServer`'s
+# OWN posture (approvalPolicy="never" + sandbox="danger-full-access", the implicit
+# default) pre-approves every server that says NOTHING. Grounded against the installed
+# `@openclaw/codex@2026.9.5` plugin bundle (docs/research/openclaw-schema-recon.md §44) —
+# a separate npm package from `openclaw` core.
+
+def _codex_cfg(appserver=None, plugin_extra=None, servers=None):
+    cfg = {"mcp": {"servers": servers if servers is not None else {
+        "ops-mcp": {"command": "c"},
+    }}}
+    if appserver is not None or plugin_extra is not None:
+        entry = dict({"enabled": True}, **(plugin_extra or {}))
+        if appserver is not None:
+            entry = dict(entry, config=dict(entry.get("config", {}), appServer=appserver))
+        cfg["plugins"] = {"entries": {"codex": entry}}
+    return cfg
+
+
+def test_no_codex_plugin_is_unaffected():
+    """No `plugins.entries.codex` at all — the appServer mechanism cannot fire, and the
+    un-moded server (no codex block of its own either) is reported exactly as it always
+    was: PASS, generic wording."""
+    f = _finding(_codex_cfg())
+    assert f.status == PASS
+    assert "not enumerated here" in (f.detail or "")
+
+
+def test_a_disabled_codex_plugin_is_unaffected():
+    assert _finding(_codex_cfg(appserver={"mode": "yolo"},
+                               plugin_extra={"enabled": False})).status == PASS
+
+
+def test_explicit_yolo_mode_fires_without_needing_the_system_default_hedge():
+    """`mode: "yolo"` is an EXPLICIT operator choice — `resolveDefaultCodexAppServerPolicy`
+    (the local-system-requirements-file reader) is never even called for it, so this is a
+    definite "yes", not "unknown"."""
+    f = _finding(_codex_cfg(appserver={"mode": "yolo"}))
+    assert f.status == WARN
+    detail = f.detail or ""
+    assert "pre-approves every tool on every MCP server" in detail
+    assert "ops-mcp" in detail
+    assert "local Codex system requirements file" not in detail
+
+
+def test_explicit_approval_and_sandbox_fire_even_with_mode_unset():
+    """Both leaf fields explicit and unsafe, `mode` never mentioned at all: the explicit
+    fields win over whatever the (unread) local system requirements file would have said,
+    so this is also a definite "yes"."""
+    f = _finding(_codex_cfg(appserver={"approvalPolicy": "never",
+                                       "sandbox": "danger-full-access"}))
+    assert f.status == WARN
+    assert "local Codex system requirements file" not in (f.detail or "")
+
+
+def test_a_nonstdio_transport_skips_the_system_default_read_too():
+    """`resolveDefaultCodexAppServerPolicy` returns "yolo" unconditionally for a
+    non-"stdio" transport — no local file read at all — so this needs no hedge even
+    though nothing else is set explicitly."""
+    f = _finding(_codex_cfg(appserver={"transport": "websocket"}))
+    assert f.status == WARN
+    assert "local Codex system requirements file" not in (f.detail or "")
+
+
+def test_the_pure_implicit_default_is_unknown_not_yes():
+    """Nothing set at all (mode/approvalPolicy/sandbox all unset, default "stdio"
+    transport): the implicit YOLO default applies UNLESS a local Codex system
+    requirements file silently withholds it, which this audit cannot read."""
+    f = _finding(_codex_cfg(appserver={}))
+    assert f.status == WARN
+    assert "local Codex system requirements file" in (f.detail or "")
+
+
+@pytest.mark.parametrize("appserver", [
+    {"mode": "guardian"},
+    {"approvalPolicy": "on-request"},
+    {"sandbox": "workspace-write"},
+    {"networkProxy": {"enabled": True}},
+    {"approvalsReviewer": "auto_review"},
+], ids=["guardian-mode", "safe-approval", "safe-sandbox", "network-proxy",
+        "non-user-reviewer"])
+def test_a_safe_or_hedged_posture_never_fires(appserver):
+    """Any one of these keeps the config away from the YOLO waiver -- a safe explicit
+    value on either axis, an active network proxy, or an explicit non-"user" reviewer
+    (a simplification: this audit does not model the model-capability predicate that
+    would answer precisely, so it reads any non-"user" reviewer as guardian-track
+    intent instead)."""
+    assert _finding(_codex_cfg(appserver=appserver)).status == PASS
+
+
+@pytest.mark.parametrize("exec_mode", ["auto", "ask", "deny", "allowlist"])
+def test_every_non_full_exec_mode_blocks_it(exec_mode):
+    """Not just "auto": `resolveCodexPolicyModeForOpenClawExecMode` forces guardian for
+    "ask" exactly like "auto", and "deny"/"allowlist" make the Codex app-server
+    unavailable outright. Only unset or "full" preserves the appServer's own posture --
+    the naive reading the ticket warned against would have false-WARNed on every one of
+    these."""
+    cfg = _codex_cfg(appserver={"mode": "yolo"})
+    cfg["tools"] = {"exec": {"mode": exec_mode}}
+    assert _finding(cfg).status == PASS
+
+
+def test_exec_mode_full_does_not_block_it():
+    cfg = _codex_cfg(appserver={"mode": "yolo"})
+    cfg["tools"] = {"exec": {"mode": "full"}}
+    assert _finding(cfg).status == WARN
+
+
+def test_exec_ask_always_blocks_it():
+    cfg = _codex_cfg(appserver={"mode": "yolo"})
+    cfg["tools"] = {"exec": {"ask": "always"}}
+    assert _finding(cfg).status == PASS
+
+
+def test_a_per_requester_server_IS_exposed_here_unlike_the_explicit_branch():
+    """The opposite asymmetry from this check's explicit-"approve" branch above: a
+    per-requester OAuth server's own `codex` block is never read by the static-only Codex
+    MCP config builder either way, but the appServer-level waiver is fed as a parameter to
+    BOTH the static and the requester-scoped materializers alike -- so there is no config
+    field that opts a per-requester server out of THIS mechanism."""
+    cfg = _codex_cfg(appserver={"mode": "yolo"}, servers={"teamdocs": {
+        "url": "https://docs.example/mcp", "auth": "oauth",
+        "oauth": {"identity": "per-requester"},
+    }})
+    f = _finding(cfg)
+    assert f.status == WARN
+    assert "teamdocs" in (f.detail or "")
+
+
+def test_the_loopback_server_is_still_excluded():
+    cfg = _codex_cfg(appserver={"mode": "yolo"}, servers={"openclaw": {
+        "url": "http://127.0.0.1:8080/mcp",
+    }})
+    assert _finding(cfg).status == PASS
+
+
+def test_an_explicit_per_server_mode_of_any_kind_removes_it_from_the_unmoded_set():
+    """A server does not need to say "prompt" specifically -- ANY resolved mode (here,
+    the default-shaped "auto") takes it out of the un-moded population, because the
+    vendor's own `?? "auto"` chain never consults `fullPermission` once `mode` itself is
+    already defined."""
+    cfg = _codex_cfg(appserver={"mode": "yolo"}, servers={"ops-mcp": {
+        "command": "c", "codex": {"defaultToolsApprovalMode": "auto"},
+    }})
+    assert _finding(cfg).status == PASS
+
+
+def test_no_unmoded_servers_at_all_is_still_pass():
+    """The appServer posture is YOLO, but every server already has its own explicit mode
+    -- nothing is left exposed to THIS mechanism specifically."""
+    cfg = _codex_cfg(appserver={"mode": "yolo"}, servers={
+        "a": {"command": "c", "codex": {"defaultToolsApprovalMode": "prompt"}},
+        "b": {"command": "c", "codex": {"defaultToolsApprovalMode": "auto"}},
+    })
+    assert _finding(cfg).status == PASS
+
+
+def test_the_explicit_approve_branch_takes_priority_and_is_unaffected():
+    """When a server explicitly says "approve", this check's ORIGINAL branch already
+    WARNs correctly -- the new appServer mechanism is not additionally consulted, and the
+    wording stays exactly what it was before B-831 existed."""
+    cfg = _codex_cfg(appserver={"mode": "guardian"}, servers={
+        "ops-mcp": {"command": "c", "codex": {"defaultToolsApprovalMode": "approve"}},
+    })
+    f = _finding(cfg)
+    assert f.status == WARN
+    assert "does not mean" in (f.detail or "")
+
+
+def test_the_bad_appserver_fixture_fires_and_the_clean_one_does_not():
+    for name, expected in (("bad_b831_codex_appserver_yolo", WARN),
+                           ("clean_b831_codex_appserver_guardian", PASS)):
+        ctx = collect(FIXTURES / name)
+        ctx.installed_dist_version = MODERN
+        assert next(f for f in C.run_all(ctx) if f.id == "B353").status == expected, name
