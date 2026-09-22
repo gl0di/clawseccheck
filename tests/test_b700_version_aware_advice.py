@@ -553,6 +553,24 @@ def test_b9_absent_is_the_only_thing_that_changed_on_a_modern_build():
 #   browser.ssrfPolicy.hostnameAllowlist  -> REJECTED  unrecognized_keys@browser.ssrfPolicy
 #   browser.ssrfPolicy.zzzBogusControl    -> REJECTED  unrecognized_keys@browser.ssrfPolicy
 #   browser.ssrfPolicy.allowedHostnames   -> ACCEPTED
+#
+# CLAWSECCHECK-C-585 (2026-09-22): "only 2026.9.1 was available here" left 2026.9.2 and
+# 2026.9.3 unmeasured, even though checks/_shared.py's _RETIRED_CONFIG_KEYS gates this same
+# key at the same 2026.9.1 floor for every later build too -- the floor was right, but 9.2/9.3
+# had never actually been asked. Re-ran the identical safeParse probe (plus the same
+# bogus-key control) against the real 2026.9.2 and 2026.9.3 tarballs, extracted read-only via
+# `npm pack openclaw@2026.9.2 --offline` / `npm pack openclaw@2026.9.3 --offline` (the
+# installed dist above was never touched):
+#
+#   2026.9.2  browser.ssrfPolicy.hostnameAllowlist  -> REJECTED  unrecognized_keys@browser.ssrfPolicy
+#   2026.9.2  browser.ssrfPolicy.zzzBogusControl    -> REJECTED  unrecognized_keys@browser.ssrfPolicy
+#   2026.9.2  browser.ssrfPolicy.allowedHostnames   -> ACCEPTED
+#   2026.9.3  browser.ssrfPolicy.hostnameAllowlist  -> REJECTED  unrecognized_keys@browser.ssrfPolicy
+#   2026.9.3  browser.ssrfPolicy.zzzBogusControl    -> REJECTED  unrecognized_keys@browser.ssrfPolicy
+#   2026.9.3  browser.ssrfPolicy.allowedHostnames   -> ACCEPTED
+#
+# Same issue shape on both as 2026.9.1. The table and its 2026.9.1 floor needed no change --
+# this only replaces an assumption with a measurement.
 REJECTED_BY_2026_9_1 = {
     "browser.ssrfPolicy.hostnameAllowlist": "browser.ssrfPolicy.allowedHostnames",
 }

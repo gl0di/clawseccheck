@@ -1160,8 +1160,19 @@ def _cross_context_default(ctx) -> str:
 # and tests/test_b700_version_aware_advice.py, which owns the 8.1 and 9.3 subsets). A key the
 # vendor still accepts must not be added. Deliberately leaves out the bare `marketplaces`
 # root: only the measured leaves are listed. The min build is per key because retirement is
-# per build -- eleven keys left in 2026.8.1, the ssrf key was measured rejected on 2026.9.1
-# (8.x was not measured, so the gate is not lowered), the symlink knob left in 2026.9.3.
+# per build -- eleven keys left in 2026.8.1, the symlink knob left in 2026.9.3.
+#
+# C-585: the ssrf key's min build (2026.9.1) was correctly SET, but until
+# 2026-09-22 only 2026.9.1 itself had actually been EXECUTED (test_b700_version_aware_advice.py's
+# REJECTED_BY_2026_9_1, measured 2026-09-04) -- 2026.9.2 and 2026.9.3 were carried on the
+# assumption that a retired key stays retired, not on a measurement. Closed by extracting the
+# real 2026.9.1/9.2/9.3 tarballs (`npm pack openclaw@<ver> --offline`, read-only, the
+# installed dist untouched) and running each one's own zod root schema's
+# `safeParse({browser:{ssrfPolicy:{hostnameAllowlist:[]}}})` directly: all three reject it
+# with the same `unrecognized_keys@browser.ssrfPolicy` issue 2026.9.1 was measured with (see
+# the dated note next to REJECTED_BY_2026_9_1 in test_b700_version_aware_advice.py for the
+# full readout). The table's 2026.9.1 floor was already right; 8.x is still unmeasured, so
+# the gate's lower bound is unchanged.
 _RETIRED_CONFIG_KEYS = {
     "audit.enabled": ("logging.audit.enabled", (2026, 8, 1)),
     "gateway.nodes.allowCommands": ("gateway.nodes.commands.allow", (2026, 8, 1)),
