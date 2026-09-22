@@ -3714,6 +3714,130 @@ def check_sandbox(ctx: Context) -> Finding:
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
 
 
+# ---------- B391: nodeHost.workerRuns isolation disclosure ----------
+# Re-grounded directly against the installed 2026.9.5 dist (the internal recon doc's
+# descriptions map has no `nodeHost.workerRuns` entry at all — same documented gap class
+# as B390/attachments, CLAUDE.md §4(c)):
+#
+#   dist/schema-CwAIqZVE.mjs:892-896 (vendor descriptions, verbatim):
+#     "nodeHost.workerRuns": "Opt in to full OpenClaw worker session hosting from
+#       Gateway-managed bundles. Disabled by default."
+#     "nodeHost.workerRuns.enabled": "Allow this paired node to host sessions from exact
+#       bundles installed by its Gateway (default: false)."
+#     "nodeHost.workerRuns.isolation": "Select the worker-session process boundary: \"none\"
+#       runs directly on the node host (default); \"container\" requires a working
+#       Docker-compatible engine and never falls back to host execution."
+#     "nodeHost.workerRuns.containerImage": "Optional Node 24.16+ or 26.1+ image for
+#       container-isolated workers (default: \"node:24.19.0-slim\")."
+#
+#   dist/zod-schema-DN2u5FdA.mjs:576-580 (the actual schema, `NodeHostWorkerRunsSchema`):
+#     enabled: boolean().optional()
+#     capacity: number().int().min(1).max(NODE_WORKER_CAPACITY_MAX).optional()
+#     isolation: _enum(["none", "container"]).optional()
+#     containerImage: string().trim().min(1).optional()
+#
+# This re-grounding CONFIRMS an earlier shortlist reading three releases later (the
+# feature shipped in 2026.8.1; the installed dist here is 2026.9.5): the path, the enum,
+# and both defaults are unchanged. No FAIL-worthy shape turned up (containerImage is a
+# plain trimmed string with no host/registry validation to interrogate, and the
+# schema/defaults are identical to the originally filed gap) — this stays a "report it"
+# reading, not a promotion to a FAIL-capable check.
+#
+# WHY THIS IS A REPORT, NOT A JUDGEMENT (never FAILs, and does not WARN on the default):
+# isolation="none" is OpenClaw's OWN baseline for this setting, not a weakening a user
+# introduced — the security-relevant question ("is this host's agent execution actually
+# isolated?") is already asked by check_sandbox (B4) above, over a DIFFERENT config
+# sub-tree (agents.defaults.sandbox.*). What is missing without this check is visibility:
+# nodeHost.workerRuns governs a SEPARATE execution surface — worker sessions a paired
+# Gateway dispatches to run on THIS node, from bundles that Gateway installed, entirely
+# outside agents.defaults.sandbox — so a reader auditing "how isolated is code execution
+# on this host" previously had no line naming it at all. The WARN branch below fires only
+# once the feature is actually opted into (`enabled: true`); it is disclosure of a real,
+# active surface, not a complaint about a default nobody touched.
+def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
+    """B391 — nodeHost.workerRuns execution-isolation disclosure, beside B4 (sandbox).
+
+    PASS    — workerRuns is not enabled (absent, or `enabled` anything but `true` —
+              the vendor default), so no worker session runs on this node at all; or
+              workerRuns is enabled with `isolation: "container"` (the vendor's own
+              isolated option), disclosing the image in use.
+    WARN    — workerRuns is enabled and `isolation` resolves to anything other than
+              `"container"` (absent, `"none"`, or an unrecognized value — all three
+              collapse to the vendor's own host-execution default): worker sessions
+              dispatched by a paired Gateway then run directly on this node host, a
+              distinct surface from agents.defaults.sandbox.* and not covered by it.
+              Advisory only (CheckMeta.scored=False) — never moves the grade.
+    UNKNOWN — config unreadable/unparseable (engine-side), or no config was read at
+              all (not_applicable in that second case — nothing to disclose about a
+              host nobody looked at).
+
+    Never FAILs: workerRuns is an explicit opt-in feature for hosting OTHER nodes'
+    sessions, and its own documented default is the less-isolated option — reporting
+    that as a failure would penalize the vendor's baseline, not a user's choice.
+    """
+    unreadable = _config_unreadable("B391", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B391",
+            UNKNOWN,
+            "No config was read, so nodeHost.workerRuns could not be assessed.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    enabled = dig(cfg, "nodeHost.workerRuns.enabled")
+    if enabled is not True:
+        return _finding(
+            "B391",
+            PASS,
+            "nodeHost.workerRuns.enabled is not set to true (the vendor default), so "
+            "this node does not host worker sessions dispatched by a paired Gateway — "
+            "the isolation setting is moot.",
+            "No action needed unless you intend this node to host sessions for other "
+            "nodes; if you do enable it, review nodeHost.workerRuns.isolation first.",
+            config_field_paths={"nodeHost.workerRuns.enabled"},
+        )
+    isolation = dig(cfg, "nodeHost.workerRuns.isolation")
+    if isolation == "container":
+        container_image = dig(cfg, "nodeHost.workerRuns.containerImage")
+        image = (
+            container_image
+            if isinstance(container_image, str) and container_image.strip()
+            else "node:24.19.0-slim (vendor default)"
+        )
+        return _finding(
+            "B391",
+            PASS,
+            "nodeHost.workerRuns is enabled with isolation='container' — worker "
+            f"sessions dispatched by a paired Gateway run inside a container boundary "
+            f"(image: {image}), not directly on this node host.",
+            "Keep isolation set to 'container'; prefer a digest-pinned or "
+            "private-registry image over a mutable tag.",
+            config_field_paths={
+                "nodeHost.workerRuns.isolation",
+                "nodeHost.workerRuns.containerImage",
+            },
+        )
+    resolved = isolation if isinstance(isolation, str) and isolation else "none"
+    return _finding(
+        "B391",
+        WARN,
+        f"nodeHost.workerRuns is enabled with isolation={resolved!r} — worker sessions "
+        "dispatched by a paired Gateway run directly on this node host, with no "
+        "process boundary. 'none' is OpenClaw's own default for this setting, not a "
+        "weakening introduced by this config, but it is a distinct execution surface "
+        "from the agents.defaults.sandbox.* posture reported above and is not covered "
+        "by it.",
+        "If hosted worker sessions should not run directly on this host, set "
+        "nodeHost.workerRuns.isolation to 'container' (requires a working "
+        "Docker-compatible engine); otherwise no action is needed, since 'none' is "
+        "the documented default.",
+        config_field_paths={"nodeHost.workerRuns.isolation"},
+    )
+
+
 def check_secrets(ctx: Context) -> Finding:
     cfg = ctx.config
     ev = []
