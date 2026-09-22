@@ -150,6 +150,7 @@ skills.load.watch
 skills.workshop.allowSymlinkTargetWrites
 skills.workshop.approvalPolicy
 skills.workshop.autonomous.enabled
+telemetry.enabled
 tools.agentToAgent
 tools.agentToAgent.allow
 tools.agentToAgent.enabled

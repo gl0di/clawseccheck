@@ -148,6 +148,7 @@ skills.load.allowSymlinkTargets
 skills.load.extraDirs
 skills.load.watch
 skills.workshop.approvalPolicy
+telemetry.enabled
 tools.agentToAgent
 tools.agentToAgent.allow
 tools.agentToAgent.enabled

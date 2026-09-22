@@ -2865,6 +2865,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B393 - telemetry.enabled — name what leaves the machine when a user opts in
+
+- Severity: LOW
+- Block: advisory
+- Framework: Telemetry / Data Sharing
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: telemetry.enabled — name what leaves the machine when a user opts in
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.
