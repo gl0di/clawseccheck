@@ -85,13 +85,26 @@ _EVIDENCE_SINKS = re.compile(
 #: source — leading space included. An earlier draft matched leniently here and strictly in
 #: the staleness control, so the two disagreed and the lenient half would have excused
 #: entries the strict half said did not exist. One rule, or the registry lies.
+#: Every reason ends with the date the entry was added (all six below: 2026-08-24, commit
+#: af0fbdc) — a new entry names AND dates itself the same way; that is what the C-453 DoD
+#: means by "any genuine exclusion named and dated".
 _NOT_A_SUBJECT_NAME = {
-    ("checks/_config.py", " is on ("): "env var name — `f\"{name} is on ({path})\"`, B190",
-    ("checks/_egress.py", " is on ("): "env var name, dotenv_override(ctx, name)",
-    ("checks/_egress.py", " is set ("): "env var name from _B190_VALUE_VARS",
-    ("checks/_content.py", "<->"): "synthetic boundary label `f\"{a_name}<->{b_name}\"`",
-    ("checks/_mcp.py", "/hooks.json: "): "connector DIRECTORY name in a path, not a skill",
-    ("skillast.py", "() runs a non-literal command"): "function name (exec_name), not a skill",
+    ("checks/_config.py", " is on ("): (
+        "env var name — `f\"{name} is on ({path})\"`, B190 (2026-08-24)"
+    ),
+    ("checks/_egress.py", " is on ("): (
+        "env var name, dotenv_override(ctx, name) (2026-08-24)"
+    ),
+    ("checks/_egress.py", " is set ("): "env var name from _B190_VALUE_VARS (2026-08-24)",
+    ("checks/_content.py", "<->"): (
+        "synthetic boundary label `f\"{a_name}<->{b_name}\"` (2026-08-24)"
+    ),
+    ("checks/_mcp.py", "/hooks.json: "): (
+        "connector DIRECTORY name in a path, not a skill (2026-08-24)"
+    ),
+    ("skillast.py", "() runs a non-literal command"): (
+        "function name (exec_name), not a skill (2026-08-24)"
+    ),
 }
 
 
