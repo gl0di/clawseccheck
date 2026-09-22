@@ -15,6 +15,15 @@ the actual grammar (both quote styles, any number of entries) and a fixed vocabu
 scope-broadening keys, and fails loudly on anything it doesn't recognize instead of
 silently contributing nothing. `test_guard_catches_known_bypass_shapes` mutates a copy of
 the real config text with each reported bypass and proves the guard now rejects it.
+
+C-575: one more shape the B-841 pass missed -- a GLOBAL allowlist written as an inline
+table, `allowlist = { paths = [...] }`, instead of a `[allowlist]` header line. It binds
+to the same root `Config.Allowlist` field (confirmed against gitleaks 8.24.3 with a
+scratch secret and a scratch config: present, `leaks found: 1`; with the inline table
+prepended before `[extend]`, `no leaks found`) but the old header-only check and the
+line-anchored `paths` check both miss it, because there is no `[allowlist]` line and
+`paths` sits mid-line inside `{ ... }`, not at line start. See
+`_FORBIDDEN_BARE_ALLOWLIST_RE` and `test_guard_catches_top_level_inline_allowlist_bypass`.
 """
 import re
 from pathlib import Path
@@ -39,7 +48,28 @@ _PINNED_FINGERPRINTS = {
 # a file path, a whole commit, a stopword list, matching the entire line instead of just
 # the value, or an AND/OR combinator. None of them is ever legitimate in this file.
 _FORBIDDEN_SCOPE_KEYS = ("paths", "stopwords", "commits", "regexTarget", "condition")
-_EXPECTED_REGEX_COUNT = 7
+_EXPECTED_REGEX_COUNT = 4
+
+# C-575: gitleaks's own Config struct binds its GLOBAL allowlist to the singular TOML key
+# `allowlist` (per-rule exemptions use the plural array `[[rules.allowlists]]`, which this
+# file uses throughout and which stays legitimate). A root-level `allowlist = { ... }` --
+# TOML's inline-table form of a `[allowlist]` header, so no `[allowlist]` line ever appears
+# for a reviewer or the old header-only check to see -- reinstates the exact repo-wide
+# `paths = [...]` exemption B-828 removed. Measured against the pinned gitleaks 8.24.3: a
+# `clh_`-shaped probe in a scratch file scans as `leaks found: 1` against this config
+# unmodified, and `no leaks found` once `allowlist = { paths = ["<that file>"] }` is
+# prepended before `[extend]`. Position is load-bearing and was checked, not assumed: TOML
+# scopes bare keys to the nearest preceding table header, so the same line inserted right
+# after `[extend]`'s `useDefault = true` -- still inside the `[extend]` table -- measured as
+# an inert no-op (`leaks found: 1`, unchanged) rather than a working bypass; only a
+# pre-`[extend]` (root-scope) placement suppressed the finding. The line-anchored key checks
+# above never saw this: `paths` here sits mid-line after `allowlist = {`, not at line start.
+_FORBIDDEN_BARE_ALLOWLIST_RE = re.compile(r"\ballowlist\b\s*=", re.I)
+# C-575, optional item: the three tests/*.py exact-value exemptions (test_logscan.py x2,
+# test_checks.py x1) were dropped after their dummy literals were split into fragments at
+# the source, per CLAUDE.md golden rule 3 -- 7 - 3 = 4 remaining (3 fixtures/ + 1
+# corpus.json), none of them ours to fix (base64-in-fixture and third-party-shaped corpus
+# data, not a plain contiguous literal we authored).
 
 
 def _strip_comments(text):
@@ -159,6 +189,8 @@ def _forbidden_scope_keys(code=None):
         hits.append("[allowlist]")
     if re.search(r"^\s*\[\[allowlists\]\]", code, re.M | re.I):
         hits.append("[[allowlists]]")
+    if _FORBIDDEN_BARE_ALLOWLIST_RE.search(code):
+        hits.append("allowlist=")
     return hits
 
 
@@ -303,6 +335,25 @@ StopWords = ["AKIA"]
 )
 def test_guard_catches_known_bypass_shapes(bypass):
     mutated = CODE + bypass
+    with pytest.raises(AssertionError):
+        _assert_exemptions_are_exact(mutated)
+
+
+# C-575: a root-scope global allowlist written as an inline table instead of a
+# `[allowlist]` header. Unlike the bypasses above, this one is PREPENDED, not appended --
+# see `_FORBIDDEN_BARE_ALLOWLIST_RE`'s comment: gitleaks (measured on 8.24.3) only binds a
+# bare top-level key to the root Config before any `[table]` header opens, so an appended
+# copy would land inside the last-open table and do nothing. The guard's own check is a
+# flat text search with no position sense, so it must reject this shape wherever it
+# appears -- prepending here just keeps the test faithful to the one placement that is a
+# real, working bypass against the actual scanner, rather than a purely textual exercise.
+_BYPASS_TOP_LEVEL_INLINE_ALLOWLIST = (
+    'allowlist = { paths = ["scratch-bypass-target.py"] }\n\n'
+)
+
+
+def test_guard_catches_top_level_inline_allowlist_bypass():
+    mutated = _BYPASS_TOP_LEVEL_INLINE_ALLOWLIST + CODE
     with pytest.raises(AssertionError):
         _assert_exemptions_are_exact(mutated)
 

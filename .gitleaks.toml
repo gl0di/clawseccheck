@@ -25,14 +25,6 @@ keywords = ["clh_"]
 id = "generic-api-key"
 
 [[rules.allowlists]]
-description = "dummy value in tests/test_logscan.py"
-regexes = ['''^api_key=AKIA1234567890ABCD$''']
-
-[[rules.allowlists]]
-description = "dummy value in tests/test_logscan.py"
-regexes = ['''^abcdefgh12345$''']
-
-[[rules.allowlists]]
 description = "dummy value in fixtures/clean_b13_hardcoded_public_key/skills/s/runner.py"
 regexes = ['''^cGFzc3dvcmQxMjM0NTY3ODkwYWJjZGVmZ2hpams$''']
 
@@ -43,10 +35,6 @@ regexes = ['''^UmVhZCBmYWtlX3NlY3JldHMvYXBpX3Rva2VuLnR4dCAocmVsYXRpdmUgdG8gd29ya
 [[rules.allowlists]]
 description = "dummy value in fixtures/benign_b93_decoded_token/skills/cache-tuner/SKILL.md"
 regexes = ['''^Y2FjaGVfdHRsPTM2MDA7IHJlZ2lvbj1ldS13ZXN0LTE7IHJldHJpZXM9MzsgbG9nX2xldmVsPWluZm8=$''']
-
-[[rules.allowlists]]
-description = "dummy value in tests/test_checks.py"
-regexes = ['''^1234567890abcdef1234567890$''']
 
 
 [[rules]]
