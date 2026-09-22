@@ -785,6 +785,24 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
         return (f"Nothing failed outright — most serious open item: {top.severity} — "
                 f"dangerous capability chain: {_sanitize(top.title)}")
     if kind == "finding":
+        if top.id == "A1":
+            # B-877: A1's catalog severity is CRITICAL regardless of which of its four
+            # WARN hedges fired (thin-surface / resolved-default / substituted-dm /
+            # sensitive-data undetermined — checks/_config.py::check_trifecta), so
+            # printing "{severity} — {title}" verbatim here read as an ACTIVE CRITICAL
+            # Lethal Trifecta directly above the finding's own "Active legs 0/3: none"
+            # row — the opposite of what a WARN (vs. FAIL) means. A1 WARN never states a
+            # confirmed leg count (the same reading `_trifecta_ratio` already gives it:
+            # "?/3", never a number, on anything but PASS/FAIL) — it means the legs
+            # could not be fully determined this run. Reworded for this id only; A1's
+            # status/severity/score and the B-803/C-426 pins are untouched (Dave,
+            # 2026-09-20). A real 3-leg FAIL is a different status and never reaches this
+            # branch, so its unqualified "Most urgent: CRITICAL — …" wording is unaffected.
+            return (
+                "Nothing failed outright — most serious open item: could not determine "
+                f"whether the {_sanitize(top.title)} is active this run "
+                f"(catalog severity {top.severity} if it is — see the full report for why)"
+            )
         return (f"Nothing failed outright — most serious open item: {top.severity} — "
                 f"{_sanitize(top.title)}")
     return _NOTHING_URGENT_SENTENCE
@@ -2349,11 +2367,35 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in ACTIONABLE_STATUSES else ""
     pc = getattr(f, "pass_confidence", None)
     pass_tag = f"  ({pc.replace('_', ' ')})" if f.status == PASS and pc else ""
+    # B-877: A1 WARN (any of its four hedges — checks/_config.py::check_trifecta) means
+    # the trifecta legs could not be fully determined this run, never a confirmed active
+    # trifecta at A1's catalog CRITICAL severity — the same reading `_urgent_headline`
+    # gives it above and `_trifecta_ratio` already gives it ("?/3", not a count). Without
+    # this tag the severity dot below (still CRITICAL — untouched, Dave 2026-09-20) sat
+    # next to a bare title with no hint this is a hedge, directly above the finding's own
+    # "Active legs 0/3: none" line, which reads as "0 active" rather than "undetermined".
+    # Scoped to A1/WARN only: a real 3-leg FAIL is a different status and keeps its
+    # unqualified strong wording (the metamorphic case this fix must not touch).
+    undetermined_tag = (
+        "  (legs undetermined this run — not a confirmed active trifecta)"
+        if f.id == "A1" and f.status == WARN else ""
+    )
     # Issue lines lead with the severity dot (B-077 / Component-2 mock); PASS/UNKNOWN
     # roster lines keep the status icons via _render_finding_compact.
     lines.append(f"{_sev_token(f.severity, ascii_only=ascii_only, color=color)}  "
-                 f"{_sanitize(f.title)}{tag}{pass_tag}")
+                 f"{_sanitize(f.title)}{tag}{pass_tag}{undetermined_tag}")
     why_text = _sanitize(f.detail) if f.detail else ""
+    if f.id == "A1" and f.status == WARN and why_text:
+        # Same B-877 reasoning as the tag above, applied to the row's own "why" line:
+        # `f.detail` (unchanged — checks/_config.py owns it, and baseline.fingerprint()
+        # hashes it, so it must not move) leads with "Active legs N/3: <list or 'none'>",
+        # worded for the PASS/FAIL cases where that count is a determination. On a WARN
+        # it is a floor, not a count, so this display-only clause is prepended in front
+        # of it — never written back into `f.detail` itself.
+        why_text = (
+            "The trifecta legs could not be fully determined this run, not a confirmed "
+            "active trifecta — " + why_text
+        )
     # B-405: when the per-item --compact trim below still isn't enough to fit the
     # documented 4096-char budget on a large real config, render_dashboard retries
     # with progressively larger `why_drop_severities` sets -- dropping the why line
