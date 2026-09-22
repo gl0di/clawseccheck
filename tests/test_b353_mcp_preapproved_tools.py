@@ -21,7 +21,7 @@ from _distgrounding import dist_files
 
 import clawseccheck.checks as C
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
-from clawseccheck.collector import collect
+from clawseccheck.collector import Context, collect
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -308,3 +308,665 @@ def test_the_pass_text_does_not_enumerate_reasons_it_cannot_cover(extra):
     detail = f.detail or ""
     assert "either leaves the approval mode unset" not in detail
     assert "not enumerated here" in detail
+
+
+# ======================================================================================
+# 6. B-831 — the Codex plugin's OWN appServer posture pre-approves un-moded servers
+# ======================================================================================
+#
+# A second, independent mechanism to the same effect as this check's explicit-"approve"
+# branch above: no server says "approve", but `plugins.entries.codex.config.appServer`'s
+# OWN posture (approvalPolicy="never" + sandbox="danger-full-access", the implicit
+# default) pre-approves every server that says NOTHING. Grounded against the installed
+# `@openclaw/codex@2026.9.5` plugin bundle (docs/research/openclaw-schema-recon.md §44) —
+# a separate npm package from `openclaw` core.
+
+def _codex_cfg(appserver=None, plugin_extra=None, servers=None):
+    cfg = {"mcp": {"servers": servers if servers is not None else {
+        "ops-mcp": {"command": "c"},
+    }}}
+    if appserver is not None or plugin_extra is not None:
+        entry = dict({"enabled": True}, **(plugin_extra or {}))
+        if appserver is not None:
+            entry = dict(entry, config=dict(entry.get("config", {}), appServer=appserver))
+        cfg["plugins"] = {"entries": {"codex": entry}}
+    return cfg
+
+
+def test_no_codex_plugin_is_unaffected():
+    """No `plugins.entries.codex` at all — the appServer mechanism cannot fire, and the
+    un-moded server (no codex block of its own either) is reported exactly as it always
+    was: PASS, generic wording."""
+    f = _finding(_codex_cfg())
+    assert f.status == PASS
+    assert "not enumerated here" in (f.detail or "")
+
+
+def test_a_disabled_codex_plugin_is_unaffected():
+    assert _finding(_codex_cfg(appserver={"mode": "yolo"},
+                               plugin_extra={"enabled": False})).status == PASS
+
+
+def test_explicit_yolo_mode_fires_without_needing_the_system_default_hedge():
+    """`mode: "yolo"` is an EXPLICIT operator choice — `resolveDefaultCodexAppServerPolicy`
+    (the local-system-requirements-file reader) is never even called for it, so this is a
+    definite "yes", not "unknown"."""
+    f = _finding(_codex_cfg(appserver={"mode": "yolo"}))
+    assert f.status == WARN
+    detail = f.detail or ""
+    assert "pre-approves every tool on every MCP server" in detail
+    assert "ops-mcp" in detail
+    assert "local Codex system requirements file" not in detail
+
+
+def test_explicit_approval_and_sandbox_fire_even_with_mode_unset():
+    """Both leaf fields explicit and unsafe, `mode` never mentioned at all: the explicit
+    fields win over whatever the (unread) local system requirements file would have said,
+    so this is also a definite "yes"."""
+    f = _finding(_codex_cfg(appserver={"approvalPolicy": "never",
+                                       "sandbox": "danger-full-access"}))
+    assert f.status == WARN
+    assert "local Codex system requirements file" not in (f.detail or "")
+
+
+def test_a_nonstdio_transport_skips_the_system_default_read_too():
+    """`resolveDefaultCodexAppServerPolicy` returns "yolo" unconditionally for a
+    non-"stdio" transport — no local file read at all — so this needs no hedge even
+    though nothing else is set explicitly."""
+    f = _finding(_codex_cfg(appserver={"transport": "websocket"}))
+    assert f.status == WARN
+    assert "local Codex system requirements file" not in (f.detail or "")
+
+
+def test_the_pure_implicit_default_is_unknown_not_yes():
+    """Nothing set at all (mode/approvalPolicy/sandbox all unset, default "stdio"
+    transport): the implicit YOLO default applies UNLESS a local Codex system
+    requirements file silently withholds it, which this audit cannot read."""
+    f = _finding(_codex_cfg(appserver={}))
+    assert f.status == WARN
+    assert "local Codex system requirements file" in (f.detail or "")
+
+
+@pytest.mark.parametrize("appserver", [
+    {"mode": "guardian"},
+    {"approvalPolicy": "on-request"},
+    {"sandbox": "workspace-write"},
+    {"networkProxy": {"enabled": True}},
+], ids=["guardian-mode", "safe-approval", "safe-sandbox", "network-proxy"])
+def test_a_safe_posture_never_fires(appserver):
+    """Any one of these keeps the config away from the YOLO waiver -- a safe value on
+    either axis (explicit, or guardian's own default), or an active network proxy.
+    Vendor eval: guardian alone resolves on-request/workspace-write, network proxy
+    attaches `networkProxy`; auto=false both.
+
+    Round 1 also listed an explicit non-"user" reviewer here. That was wrong: whether it
+    changes anything depends on the model, so it is "unknown", not "no" -- see
+    `test_d6iv_a_model_backed_reviewer_is_unknown_not_no`."""
+    assert _finding(_codex_cfg(appserver=appserver)).status == PASS
+
+
+@pytest.mark.parametrize("exec_mode", ["auto", "ask", "deny", "allowlist"])
+def test_every_non_full_exec_mode_blocks_it(exec_mode):
+    """Not just "auto": `resolveCodexPolicyModeForOpenClawExecMode` forces guardian for
+    "ask" exactly like "auto", and "deny"/"allowlist" make the Codex app-server
+    unavailable outright. Only unset or "full" preserves the appServer's own posture --
+    the naive reading the ticket warned against would have false-WARNed on every one of
+    these."""
+    cfg = _codex_cfg(appserver={"mode": "yolo"})
+    cfg["tools"] = {"exec": {"mode": exec_mode}}
+    assert _finding(cfg).status == PASS
+
+
+def test_exec_mode_full_does_not_block_it():
+    cfg = _codex_cfg(appserver={"mode": "yolo"})
+    cfg["tools"] = {"exec": {"mode": "full"}}
+    assert _finding(cfg).status == WARN
+
+
+def test_exec_ask_always_blocks_it():
+    cfg = _codex_cfg(appserver={"mode": "yolo"})
+    cfg["tools"] = {"exec": {"ask": "always"}}
+    assert _finding(cfg).status == PASS
+
+
+def test_a_per_requester_server_IS_exposed_here_unlike_the_explicit_branch():
+    """The opposite asymmetry from this check's explicit-"approve" branch above: the
+    appServer-level waiver is fed to BOTH the static and the requester-scoped
+    materializers, so a per-requester OAuth server that sets NO mode of its own is exposed
+    to it. (One that sets its own mode is not -- round 1 claimed no config field could opt
+    it out, which was false; see `test_d3_a_per_requester_server_with_its_own_mode_is_
+    not_unmoded`.)"""
+    cfg = _codex_cfg(appserver={"mode": "yolo"}, servers={"teamdocs": {
+        "url": "https://docs.example/mcp", "auth": "oauth",
+        "oauth": {"identity": "per-requester"},
+    }})
+    f = _finding(cfg)
+    assert f.status == WARN
+    assert "teamdocs" in (f.detail or "")
+
+
+def test_the_loopback_server_is_still_excluded():
+    cfg = _codex_cfg(appserver={"mode": "yolo"}, servers={"openclaw": {
+        "url": "http://127.0.0.1:8080/mcp",
+    }})
+    assert _finding(cfg).status == PASS
+
+
+def test_an_explicit_per_server_mode_of_any_kind_removes_it_from_the_unmoded_set():
+    """A server does not need to say "prompt" specifically -- ANY resolved mode (here,
+    the default-shaped "auto") takes it out of the un-moded population, because the
+    vendor's own `?? "auto"` chain never consults `fullPermission` once `mode` itself is
+    already defined."""
+    cfg = _codex_cfg(appserver={"mode": "yolo"}, servers={"ops-mcp": {
+        "command": "c", "codex": {"defaultToolsApprovalMode": "auto"},
+    }})
+    assert _finding(cfg).status == PASS
+
+
+def test_no_unmoded_servers_at_all_is_still_pass():
+    """The appServer posture is YOLO, but every server already has its own explicit mode
+    -- nothing is left exposed to THIS mechanism specifically."""
+    cfg = _codex_cfg(appserver={"mode": "yolo"}, servers={
+        "a": {"command": "c", "codex": {"defaultToolsApprovalMode": "prompt"}},
+        "b": {"command": "c", "codex": {"defaultToolsApprovalMode": "auto"}},
+    })
+    assert _finding(cfg).status == PASS
+
+
+def test_the_explicit_approve_branch_takes_priority_and_is_unaffected():
+    """When a server explicitly says "approve", this check's ORIGINAL branch already
+    WARNs correctly -- the new appServer mechanism is not additionally consulted, and the
+    wording stays exactly what it was before B-831 existed."""
+    cfg = _codex_cfg(appserver={"mode": "guardian"}, servers={
+        "ops-mcp": {"command": "c", "codex": {"defaultToolsApprovalMode": "approve"}},
+    })
+    f = _finding(cfg)
+    assert f.status == WARN
+    assert "does not mean" in (f.detail or "")
+
+
+def test_the_bad_appserver_fixture_fires_and_the_clean_one_does_not():
+    for name, expected in (("bad_b831_codex_appserver_yolo", WARN),
+                           ("clean_b831_codex_appserver_guardian", PASS)):
+        ctx = collect(FIXTURES / name)
+        ctx.installed_dist_version = MODERN
+        assert next(f for f in C.run_all(ctx) if f.id == "B353").status == expected, name
+
+
+# ======================================================================================
+# 7. B-831 round 1 — the appServer fields are RESOLVED before the predicate sees them
+# ======================================================================================
+#
+# One test (or parametrized pair) per defect the targeted review found, each pinned at the
+# answer the vendor gives and paired with a control on the other side of the same line.
+# "vendor" below is the result of evaluating the installed `@openclaw/codex@2026.9.5`
+# resolvers in memory with node (`resolveOpenClawExecPolicyForCodexAppServer` ->
+# `resolveCodexAppServerRuntimeOptions` -> `shouldAutoApproveCodexAppServerApprovals`;
+# scratch HOME, no gateway, `requirementsToml: null`, model openai/gpt-5.4 unless noted).
+# Each test asserts BOTH the finding and the helper's own three-valued answer, because a
+# hedged "unknown" still WARNs and the status alone cannot tell it from a "yes".
+
+def _b831(tmp_path, cfg, approvals=None, approvals_raw=None, installed=MODERN):
+    path = tmp_path / "openclaw.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    os.chmod(path, 0o600)
+    if approvals is not None or approvals_raw is not None:
+        store = tmp_path / "exec-approvals.json"
+        store.write_text(approvals_raw if approvals_raw is not None else json.dumps(approvals),
+                         encoding="utf-8")
+        os.chmod(store, 0o600)
+    ctx = collect(tmp_path)
+    ctx.installed_dist_version = installed
+    finding = next(f for f in C.run_all(ctx) if f.id == "B353")
+    return finding, C._codex_appserver_yolo_reach(ctx)[0]
+
+
+def _yolo(**top):
+    cfg = _codex_cfg(appserver={"mode": "yolo"})
+    cfg.update(top)
+    return cfg
+
+
+# ---- defect 1: tools.exec.security / ask derive the mode when `mode` is absent --------
+
+@pytest.mark.parametrize("exec_block", [
+    {"security": "allowlist"},
+    {"security": "deny"},
+    {"security": "allowlist", "ask": "on-miss"},
+    {"ask": "always"},
+], ids=["security-allowlist", "security-deny", "allowlist-on-miss", "ask-always"])
+def test_d1_exec_security_and_ask_derive_a_non_full_mode(tmp_path, exec_block):
+    """vendor: allowlist/deny THROW (`effective tools.exec.mode=allowlist` -- the
+    app-server refuses to start); allowlist+on-miss derives "ask" -> on-request /
+    workspace-write; ask "always" alone derives "ask" -> untrusted. auto=false in all four.
+    Round 1 read only `tools.exec.mode` and WARNed on the first three."""
+    f, answer = _b831(tmp_path, _yolo(tools={"exec": exec_block}))
+    assert (f.status, answer) == (PASS, "no")
+
+
+@pytest.mark.parametrize("exec_block", [
+    {"security": "full"},
+    {"security": "full", "ask": "on-miss"},
+], ids=["security-full", "full-on-miss"])
+def test_d1_control_a_derivation_that_lands_on_full_keeps_it(tmp_path, exec_block):
+    """vendor: both derive "full" -> never / danger-full-access, auto=true. The control
+    that stops `test_d1_...` from passing on "any tools.exec.security means no"."""
+    f, answer = _b831(tmp_path, _yolo(tools={"exec": exec_block}))
+    assert (f.status, answer) == (WARN, "yes")
+
+
+# ---- defect 2: each roster agent's own tools.exec is layered over the global one -------
+
+@pytest.mark.parametrize("agents", [
+    {"entries": {"main": {"tools": {"exec": {"mode": "ask"}}}}},
+    {"list": [{"id": "main", "tools": {"exec": {"mode": "ask"}}}]},
+], ids=["agents.entries", "legacy-agents.list"])
+def test_d2_a_per_agent_exec_mode_is_layered_over_the_global_one(tmp_path, agents):
+    """vendor: execMode "ask" for agent main in BOTH roster shapes -> auto=false. Round 1
+    read only the global `tools.exec` and WARNed."""
+    f, answer = _b831(tmp_path, _yolo(agents=agents))
+    assert (f.status, answer) == (PASS, "no")
+
+
+def test_d2_control_a_per_agent_full_keeps_it(tmp_path):
+    """vendor: agent main mode "full" -> auto=true."""
+    f, answer = _b831(tmp_path, _yolo(agents={"entries": {
+        "main": {"tools": {"exec": {"mode": "full"}}}}}))
+    assert (f.status, answer) == (WARN, "yes")
+
+
+def test_d2_agents_that_disagree_are_unknown_not_no(tmp_path):
+    """vendor: as agent main (mode "ask") auto=false, as agent work (nothing set) auto=true.
+    Which of them runs the Codex harness is not something this audit decides, so the
+    honest answer is "unknown" -- and the finding says why."""
+    f, answer = _b831(tmp_path, _yolo(agents={"entries": {
+        "main": {"tools": {"exec": {"mode": "ask"}}}, "work": {}}}))
+    assert (f.status, answer) == (WARN, "unknown")
+    assert "differs between agents" in (f.detail or "")
+
+
+# ---- defect 3: a per-requester server with its own mode is not "un-moded" --------------
+
+_PER_REQUESTER = {"url": "https://docs.example/mcp", "auth": "oauth",
+                  "oauth": {"identity": "per-requester"}}
+
+
+def test_d3_a_per_requester_server_with_its_own_mode_is_not_unmoded(tmp_path):
+    """The runtime catalog sets `codexApprovalMode` from the raw server for requester-
+    scoped runtimes too (`agent-bundle-mcp-runtime.js:564`), so "prompt" still prompts and
+    `fullPermission` is never consulted. Round 1 named this server as one "that sets no
+    approval mode of its own" -- a finding that contradicted itself. Control: the same
+    server with no mode IS exposed."""
+    moded = dict(_PER_REQUESTER, codex={"defaultToolsApprovalMode": "prompt"})
+    assert C._codex_unmoded_server_names({"teamdocs": moded}) == []
+    assert C._codex_unmoded_server_names({"teamdocs": dict(_PER_REQUESTER)}) == ["teamdocs"]
+    f, _ = _b831(tmp_path, _codex_cfg(appserver={"mode": "yolo"},
+                                      servers={"teamdocs": moded}))
+    assert f.status == PASS
+    assert "teamdocs" not in (f.detail or "")
+
+
+# ---- defect 4: plugin activation (plugins.enabled / deny / allow) ----------------------
+
+@pytest.mark.parametrize("plugins_top", [
+    {"enabled": False},
+    {"deny": ["codex"]},
+    {"allow": ["telegram"]},
+], ids=["plugins-disabled", "denied", "not-in-allowlist"])
+def test_d4_a_deactivated_codex_plugin_is_no(tmp_path, plugins_top):
+    """`resolvePluginActivationDecisionShared` deactivates the plugin in all three. The
+    gate is the one B-421 already grounded for memory-core, now shared
+    (`_plugin_activation_blocked`) rather than re-implemented."""
+    cfg = _yolo()
+    cfg["plugins"].update(plugins_top)
+    f, answer = _b831(tmp_path, cfg)
+    assert (f.status, answer) == (PASS, "no")
+
+
+@pytest.mark.parametrize("plugins_top", [
+    {"enabled": True},
+    {"deny": ["telegram"]},
+    {"allow": ["codex", "telegram"]},
+], ids=["plugins-enabled", "other-denied", "in-allowlist"])
+def test_d4_control_an_activated_codex_plugin_still_fires(tmp_path, plugins_top):
+    cfg = _yolo()
+    cfg["plugins"].update(plugins_top)
+    f, answer = _b831(tmp_path, cfg)
+    assert (f.status, answer) == (WARN, "yes")
+
+
+def test_d4_the_shared_gate_answers_memory_core_exactly_as_before():
+    """The memory-core caller keeps its old boolean contract on the same four legs."""
+    assert C._memory_default_owner_blocked({"allow": ["trentclaw"]}) is True
+    assert C._memory_default_owner_blocked({"deny": [" memory-core "]}) is True
+    assert C._memory_default_owner_blocked({"entries": {"memory-core": {"enabled": False}}})
+    assert C._memory_default_owner_blocked({"allow": ["memory-core"]}) is False
+    assert C._memory_default_owner_blocked({}) is False
+
+
+# ---- defect 5: an exec-approvals floor can only tighten, so it hedges a "yes" ----------
+
+@pytest.mark.parametrize("approvals", [
+    {"version": 1, "defaults": {"security": "allowlist", "ask": "on-miss"}},
+    {"version": 1, "agents": {"main": {"security": "allowlist"}}},
+], ids=["defaults-floor", "agent-floor"])
+def test_d5_an_exec_approvals_floor_hedges_a_yes(tmp_path, approvals):
+    """vendor: defaults floor -> execMode "ask", auto=false; agent floor -> effective mode
+    allowlist, THROWS. The floor is hedged, not modelled: newer builds keep the live store
+    in their state database, which is not read, so the legacy file cannot settle a "no"."""
+    f, answer = _b831(tmp_path, _yolo(), approvals=approvals)
+    assert (f.status, answer) == (WARN, "unknown")
+    assert "exec-approvals.json" in (f.detail or "")
+
+
+@pytest.mark.parametrize("approvals", [
+    {"version": 1, "defaults": {"security": "full", "ask": "off"}},
+    {"version": 1, "defaults": {}, "agents": {}},
+], ids=["neutral-defaults", "empty-store"])
+def test_d5_control_a_store_with_no_tightening_floor_leaves_yes(tmp_path, approvals):
+    """vendor: both auto=true (`minSecurity(x, "full")` / `maxAsk(x, "off")` are x)."""
+    f, answer = _b831(tmp_path, _yolo(), approvals=approvals)
+    assert (f.status, answer) == (WARN, "yes")
+
+
+def test_d5_the_collector_reads_the_store_defaults(tmp_path):
+    (tmp_path / "exec-approvals.json").write_text(json.dumps(
+        {"version": 1, "defaults": {"security": "allowlist", "ask": 3}}), encoding="utf-8")
+    ctx = collect(tmp_path)
+    assert ctx.exec_approvals_defaults == {"security": "allowlist", "ask": None}
+
+
+def test_d5_an_unreadable_store_hedges_too(tmp_path):
+    f, answer = _b831(tmp_path, _yolo(), approvals_raw="{not json")
+    assert (f.status, answer) == (WARN, "unknown")
+
+
+# ---- defect 6: the four shapes round 1 folded into an asserted PASS ---------------------
+
+def test_d6i_a_per_agent_full_over_a_global_ask_is_live(tmp_path):
+    """vendor: global "ask" + agent main "full" -> execMode "full", auto=true."""
+    f, answer = _b831(tmp_path, _yolo(
+        tools={"exec": {"mode": "ask"}},
+        agents={"entries": {"main": {"tools": {"exec": {"mode": "full"}}}}}))
+    assert (f.status, answer) == (WARN, "yes")
+
+
+def test_d6ii_mode_wins_over_ask(tmp_path):
+    """vendor: `mode: "full"` + `ask: "always"` -> execMode "full" (a valid mode wins and
+    the ask beside it is ignored), auto=true. Control: `ask: "always"` ALONE derives "ask"
+    and is a PASS -- `test_d1_...[ask-always]`."""
+    f, answer = _b831(tmp_path, _yolo(tools={"exec": {"mode": "full", "ask": "always"}}))
+    assert (f.status, answer) == (WARN, "yes")
+
+
+def test_d6iii_guardian_that_explicitly_asks_for_never_and_full_access_is_yes(tmp_path):
+    """vendor: guardian + never + danger-full-access + reviewer "user" -> auto=true,
+    deterministically (an explicit mode skips the requirements-file default and a "user"
+    reviewer forces nothing). Round 1 read every guardian as "no"."""
+    f, answer = _b831(tmp_path, _codex_cfg(appserver={
+        "mode": "guardian", "approvalPolicy": "never", "sandbox": "danger-full-access",
+        "approvalsReviewer": "user"}))
+    assert (f.status, answer) == (WARN, "yes")
+
+
+def test_d6iii_control_the_same_without_a_user_reviewer_depends_on_the_model(tmp_path):
+    """vendor: model openai -> reviewer auto_review, auto=TRUE; model anthropic ->
+    forced on-request / workspace-write, auto=FALSE. Unknown here."""
+    f, answer = _b831(tmp_path, _codex_cfg(appserver={
+        "mode": "guardian", "approvalPolicy": "never", "sandbox": "danger-full-access"}))
+    assert (f.status, answer) == (WARN, "unknown")
+
+
+def test_d6iv_a_model_backed_reviewer_is_unknown_not_no(tmp_path):
+    """vendor: yolo + approvalsReviewer "auto_review" -> openai auto=TRUE, anthropic
+    auto=FALSE (forced on-request). Round 1 read it as "no"."""
+    f, answer = _b831(tmp_path, _codex_cfg(appserver={
+        "mode": "yolo", "approvalsReviewer": "auto_review"}))
+    assert (f.status, answer) == (WARN, "unknown")
+
+
+def test_d6iv_control_an_explicit_prompting_policy_settles_it(tmp_path):
+    """vendor: the same + approvalPolicy "on-request" -> auto=false on any model: an
+    explicit field outranks every default, and a forced policy is never "never"."""
+    f, answer = _b831(tmp_path, _codex_cfg(appserver={
+        "mode": "yolo", "approvalsReviewer": "auto_review", "approvalPolicy": "on-request"}))
+    assert (f.status, answer) == (PASS, "no")
+
+
+# ---- values this audit cannot resolve read "unknown", never "full"/"not full" -----------
+
+def test_an_unresolved_exec_value_is_unknown(tmp_path):
+    """An unresolved `${VAR}` could become any mode; round 1's reading treated it as
+    unset, i.e. "full"."""
+    f, answer = _b831(tmp_path, _yolo(tools={"exec": {"mode": "${EXEC_MODE}"}}))
+    assert (f.status, answer) == (WARN, "unknown")
+
+
+def test_an_unresolved_appserver_value_is_unknown_unless_something_else_settles_it(tmp_path):
+    f, answer = _b831(tmp_path, _codex_cfg(appserver={"mode": "${CODEX_MODE}"}))
+    assert (f.status, answer) == (WARN, "unknown")
+    f, answer = _b831(tmp_path, _codex_cfg(appserver={
+        "mode": "${CODEX_MODE}", "approvalPolicy": "on-request"}))
+    assert (f.status, answer) == (PASS, "no")
+
+
+def test_every_appserver_warn_names_the_run_time_inputs_it_cannot_read(tmp_path):
+    f, _ = _b831(tmp_path, _yolo())
+    detail = f.detail or ""
+    assert "OPENCLAW_CODEX_APP_SERVER_" in detail
+    assert "state database" in detail
+    assert "per-session permission mode" in detail
+
+
+# ======================================================================================
+# 7. B-831 ROUND 2 -- the six minor-fix defects the second targeted review found.
+# One test (or parametrized pair) per defect, each pinned at the reviewer's own repro
+# config, paired with a control on the other side of the same line, plus a mutation-style
+# check where a silent regression would otherwise slip back in unnoticed.
+# ======================================================================================
+
+from clawseccheck import harnessruntime as _hr  # noqa: E402
+
+#: The installed-build stamp the harness-reach oracle is validated on (see
+#: test_b708_codex_harness_gate.py) -- distinct from this file's own MODERN/LEGACY, which
+#: predate the harness-reach window and so always read as "unknown" reach.
+_VALIDATED = ".".join(str(x) for x in _hr.ORACLE_MAX)
+
+
+# ---- items 1 & 2: plugins.allow/deny/entries fold case, like the real activation gate --
+
+def test_b831r2_item1_an_allow_case_variant_still_activates_codex(tmp_path):
+    """Reviewer's exact repro: appServer {mode: "yolo"}, an un-moded stdio server,
+    plugins.allow=["Codex"] (case variant). The real gate compares through
+    normalizePluginPolicyId (trim + lowercase) before the allowlist membership check, so
+    "codex" IS in the folded allowlist and the plugin stays activated -> auto=true ->
+    "yes". Pre-fix, the plain `.strip()` compare missed this and read "no"."""
+    cfg = _yolo()
+    cfg["plugins"]["allow"] = ["Codex"]
+    f, answer = _b831(tmp_path, cfg)
+    assert (f.status, answer) == (WARN, "yes")
+
+
+def test_b831r2_item1_control_a_real_non_member_allowlist_still_blocks(tmp_path):
+    """Control: an allowlist that genuinely omits codex in every case stays a block."""
+    cfg = _yolo()
+    cfg["plugins"]["allow"] = ["Telegram"]
+    f, answer = _b831(tmp_path, cfg)
+    assert (f.status, answer) == (PASS, "no")
+
+
+def test_b831r2_item2_a_deny_case_variant_still_blocks_codex(tmp_path):
+    """Reviewer's exact repro: plugins.deny=["Codex"] with codex yolo. The real gate
+    lowercases deny too, so "codex" IS in the folded denylist -> blocked -> "no".
+    Pre-fix, the plain `.strip()` compare missed this and read "yes" (a false positive:
+    WARN on a setup where the plugin cannot actually run)."""
+    cfg = _yolo()
+    cfg["plugins"]["deny"] = ["Codex"]
+    f, answer = _b831(tmp_path, cfg)
+    assert (f.status, answer) == (PASS, "no")
+
+
+def test_b831r2_item2_control_a_real_non_member_denylist_does_not_block(tmp_path):
+    cfg = _yolo()
+    cfg["plugins"]["deny"] = ["Telegram"]
+    f, answer = _b831(tmp_path, cfg)
+    assert (f.status, answer) == (WARN, "yes")
+
+
+def test_b831r2_items1_2_mutation_the_helper_itself_folds_case_on_all_three_legs():
+    """Mutation check on `_plugin_activation_blocked` directly: removing the case fold
+    (back to a plain `.strip()` compare) would flip every one of these three back to the
+    pre-fix (wrong) answer."""
+    assert C._plugin_activation_blocked({"allow": ["Codex"]}, "codex") is None
+    assert (C._plugin_activation_blocked({"deny": ["Codex"]}, "codex")
+            == "plugins.deny lists 'codex'")
+    assert (C._plugin_activation_blocked({"entries": {"Codex": {"enabled": False}}}, "codex")
+            == "plugins.entries.codex.enabled=false")
+
+
+def test_b831r2_memory_core_gate_shares_the_same_fold():
+    """`_plugin_activation_blocked` is SHARED with the memory-core gate (B342/B421): this
+    is not a codex-only change. The B342 suite (test_b341_b342_plugin_advisories.py)
+    stays green because none of its existing fixtures use a case-varying deny/allow/
+    entries id for the activation gate -- only for the UNRELATED alias-based allow/deny
+    CONTRADICTION check, which `_normalize_plugin_id` still handles unchanged."""
+    assert C._memory_default_owner_blocked({"deny": ["Memory-Core"]}) is True
+    assert C._memory_default_owner_blocked({"allow": ["MEMORY-CORE"]}) is False
+
+
+# ---- item 3 (reviewed, NOT changed): a mixed roster stays a hedged "unknown" ----------
+
+def test_b831r2_item3_regression_mixed_roster_stays_unknown_not_no(tmp_path):
+    """Reviewer's exact repro: tools.exec.mode="ask"; agents.entries.main has an
+    anthropic model with its own exec "full"; agents.entries.coder has an openai model
+    and no exec override (inherits the global "ask"). Round 2 called the resulting hedge
+    defensible -- /model can move an agent onto the Codex harness at run time -- and this
+    task explicitly said do NOT change it. This is a pure regression pin."""
+    f, answer = _b831(tmp_path, _yolo(
+        tools={"exec": {"mode": "ask"}},
+        agents={"entries": {
+            "main": {"model": "anthropic/claude-x", "tools": {"exec": {"mode": "full"}}},
+            "coder": {"model": "openai/gpt-5"},
+        }}))
+    assert (f.status, answer) == (WARN, "unknown")
+    assert "differs between agents" in (f.detail or "")
+
+
+# ---- item 4: a valid per-agent tools.exec.mode wins over an unresolved global base ----
+
+def test_b831r2_item4_a_valid_agent_mode_wins_over_an_unresolved_base(tmp_path):
+    """Reviewer's exact repro: tools.exec={security: "${EXEC_SEC}"} (unresolved) +
+    agents.entries.main.tools.exec.mode="ask". The real
+    applyOpenClawExecPolicyLayer returns straight from the agent's own valid `mode`
+    without ever reading `base` -- execMode "ask" -> auto=false -> "no". Pre-fix, the
+    helper checked the unresolved base FIRST and returned "unknown" without even looking
+    at the agent's mode."""
+    f, answer = _b831(tmp_path, _yolo(
+        tools={"exec": {"security": "${EXEC_SEC}"}},
+        agents={"entries": {"main": {"tools": {"exec": {"mode": "ask"}}}}}))
+    assert (f.status, answer) == (PASS, "no")
+
+
+def test_b831r2_item4_control_no_agent_override_stays_unresolved(tmp_path):
+    """Control: with no per-agent override at all, an unresolved global base still
+    propagates as "unknown" -- the fix only lets a VALID agent mode override it, it does
+    not make an unresolved base stop mattering on its own."""
+    f, answer = _b831(tmp_path, _yolo(tools={"exec": {"security": "${EXEC_SEC}"}}))
+    assert (f.status, answer) == (WARN, "unknown")
+
+
+def test_b831r2_item4_mutation_an_invalid_agent_mode_still_reads_unresolved():
+    """Mutation check on `_codex_exec_policy_layer` directly: an agent value that is
+    PRESENT but not a real mode must still come out unresolved -- the fix must not
+    accidentally treat "any mode key present" as a free pass."""
+    assert C._codex_exec_policy_layer("?", {"mode": "not-a-real-mode"}) == "?"
+    # "ask" derives (security="allowlist", ask="on-miss") per _CODEX_EXEC_MODE_POLICY.
+    assert C._codex_exec_policy_layer("?", {"mode": "ask"}) == (
+        "ask", "allowlist", "on-miss", True)
+
+
+# ---- item 5: no plugins.entries.codex block at all, but a Codex harness is reachable --
+
+def test_b831r2_item5_no_codex_entry_with_a_reachable_harness_is_unknown(tmp_path):
+    """Reviewer's exact repro: NO plugins.entries.codex block at all, an openai model
+    (harness reach YES), one un-moded stdio server. Absence of the entry does not prove
+    the plugin is not installed -- a non-bundled plugin with no entry can still activate
+    on the implicit default -- so this must read "unknown", the same as an explicit,
+    empty appServer {}, never a confident "no"."""
+    cfg = _codex_cfg()  # no "plugins" key at all
+    cfg["agents"] = {"defaults": {"model": "openai/gpt-5"}}
+    f, answer = _b831(tmp_path, cfg, installed=_VALIDATED)
+    assert (f.status, answer) == (WARN, "unknown")
+
+
+def test_b831r2_item5_control_no_codex_entry_with_no_reachable_harness_stays_no(tmp_path):
+    """Control: the same missing entry, but no configured model would ever reach the
+    Codex harness -- nothing points to the plugin being in play at all, so "no" remains
+    the honest reading."""
+    cfg = _codex_cfg()
+    cfg["agents"] = {"defaults": {"model": "anthropic/claude-x"}}
+    f, answer = _b831(tmp_path, cfg, installed=_VALIDATED)
+    assert (f.status, answer) == (PASS, "no")
+
+
+def test_b831r2_item5_control_an_explicitly_disabled_entry_is_still_a_plain_no(tmp_path):
+    """Control: an EXPLICIT plugins.entries.codex.enabled=false is a real, stated fact --
+    unlike a missing block, harness reach must not override it back to "unknown"."""
+    cfg = _codex_cfg(plugin_extra={"enabled": False})
+    cfg["agents"] = {"defaults": {"model": "openai/gpt-5"}}
+    f, answer = _b831(tmp_path, cfg, installed=_VALIDATED)
+    assert (f.status, answer) == (PASS, "no")
+
+
+def test_b831r2_item5_mutation_matches_the_explicit_empty_appserver_answer(tmp_path):
+    """Mutation-style check: the whole point of the fix is that a missing entry (harness
+    reach YES) and an explicit, empty appServer {} must resolve identically."""
+    cfg_missing = _codex_cfg()
+    cfg_missing["agents"] = {"defaults": {"model": "openai/gpt-5"}}
+    cfg_explicit_empty = _codex_cfg(appserver={})
+    cfg_explicit_empty["agents"] = {"defaults": {"model": "openai/gpt-5"}}
+    home_a, home_b = tmp_path / "a", tmp_path / "b"
+    home_a.mkdir()
+    home_b.mkdir()
+    f1, a1 = _b831(home_a, cfg_missing, installed=_VALIDATED)
+    f2, a2 = _b831(home_b, cfg_explicit_empty, installed=_VALIDATED)
+    assert (f1.status, a1) == (f2.status, a2) == (WARN, "unknown")
+
+
+# ---- item 6: the exec-approvals hedge omits fields the record never set --------------
+
+def test_b831r2_item6_hedge_omits_a_field_that_was_never_set(tmp_path):
+    """Reviewer's exact repro: exec-approvals.json agents.work={ask: "always"} -- only
+    `ask` is actually in the record, so the hedge text must not claim "security=None": a
+    field the record never set is not the same thing as a JSON null."""
+    f, answer = _b831(tmp_path, _yolo(), approvals={
+        "version": 1, "agents": {"work": {"ask": "always"}}})
+    assert (f.status, answer) == (WARN, "unknown")
+    detail = f.detail or ""
+    assert "security=None" not in detail
+    assert "security=" not in detail
+    assert f"ask={'always'!r}" in detail
+
+
+def test_b831r2_item6_control_both_fields_set_still_names_both(tmp_path):
+    """Control: when the record genuinely sets both fields, both still appear."""
+    f, answer = _b831(tmp_path, _yolo(), approvals={
+        "version": 1, "agents": {"work": {"security": "allowlist", "ask": "always"}}})
+    assert (f.status, answer) == (WARN, "unknown")
+    detail = f.detail or ""
+    assert f"security={'allowlist'!r}" in detail
+    assert f"ask={'always'!r}" in detail
+
+
+def test_b831r2_item6_mutation_the_floor_helper_itself_omits_unset_fields():
+    """Mutation check directly on `_codex_exec_approvals_floor`: a record setting only
+    `security` must not mention `ask` either (and vice versa, covered by the repro test
+    above)."""
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.exec_approvals_found = True
+    ctx.exec_approvals_defaults = None
+    ctx.exec_approvals_grants = [{"agent_id": "work", "security": "allowlist"}]
+    reason = C._codex_exec_approvals_floor(ctx)
+    assert reason is not None
+    assert "ask=" not in reason
+    assert f"security={'allowlist'!r}" in reason

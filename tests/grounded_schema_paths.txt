@@ -191,7 +191,13 @@ update.channel
 # used against the config root (and the reverse). See CLAWSECCHECK B-251.
 relative:agentRuntime.id
 relative:config.allowPrivateNetwork
+relative:config.appServer.approvalPolicy
+relative:config.appServer.approvalsReviewer
 relative:config.appServer.command
+relative:config.appServer.mode
+relative:config.appServer.networkProxy
+relative:config.appServer.sandbox
+relative:config.appServer.transport
 relative:config.permissionMode
 relative:heartbeat
 relative:mcp.servers

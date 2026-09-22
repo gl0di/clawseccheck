@@ -873,6 +873,10 @@ class Context:
     # regardless of whether allow_always_count is 0 -- the consuming check filters.
     exec_approvals_grants: list = field(default_factory=list)
     exec_approvals_found: bool = False        # exec-approvals.json present and read
+    # B-831: the store's top-level `defaults` {security, ask} (str or None each) -- the
+    # floor OpenClaw applies to every agent the `agents` map does not override. Empty
+    # when the file is absent or has no `defaults` object.
+    exec_approvals_defaults: dict = field(default_factory=dict)
     exec_approvals_parse_error: bool = False  # present but could not be parsed/read
     # B-240 (B177): OpenClaw's OWN persisted per-plugin ClawHub trust verdict, read from
     # the installed_plugin_index.install_records_json column in the shared state SQLite DB
@@ -5537,6 +5541,12 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         if not isinstance(agents, dict):
             agents = {}
         ctx.exec_approvals_found = True
+        defaults = store.get("defaults")
+        if isinstance(defaults, dict):
+            ctx.exec_approvals_defaults = {
+                key: defaults.get(key) if isinstance(defaults.get(key), str) else None
+                for key in ("security", "ask")
+            }
         # B-657: this cap had NO disclosure at all -- unlike the byte-size cap seven
         # lines up, a store under the byte cap but with more than
         # _MAX_EXEC_APPROVALS_AGENTS agents parsed fine, and every agent past the cap

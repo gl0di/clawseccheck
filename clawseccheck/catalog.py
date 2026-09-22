@@ -494,10 +494,22 @@ CATALOG: list[CheckMeta] = [
     # keeps the original conditional wording byte for byte. The confirmed-Codex case is
     # FAIL-worthy in principle (a break-glass override in the same family as B48/B171,
     # differing only in that those are unconditionally live), but it stays WARN until a
-    # fleet has been measured and it has had its own adversarial round. Two adjacent
-    # facts are NOT modelled and are tracked separately: the Codex plugin's own
-    # `appServer` posture (approvalPolicy "never" + a danger-full-access sandbox
-    # pre-approves every un-moded server), and provider-level `agentRuntime` pins in B370.
+    # fleet has been measured and it has had its own adversarial round.
+    #
+    # B-831: the Codex plugin's OWN `appServer` posture is now modelled too, as a SECOND
+    # branch of this same check (not a new id — this is a config-level pre-approval, i.e.
+    # what the OPERATOR set, the same shape B353 already owns). `appServer.approvalPolicy
+    # === "never" && appServer.sandbox === "danger-full-access" && appServer.networkProxy
+    # === void 0` (`shouldAutoApproveCodexAppServerApprovals`, grounded against the
+    # installed `@openclaw/codex@2026.9.5` plugin bundle — a SEPARATE npm package from
+    # `openclaw` core, `dist/.setup/config-security-*.mjs`) pre-approves every MCP server
+    # that sets no `codex.defaultToolsApprovalMode` of its own — a per-requester OAuth
+    # server included by the same rule, because the OpenClaw-side runtime catalog reads
+    # its mode for both connection scopes. The appServer fields are RESOLVED before that
+    # predicate runs (plugin activation, each agent's effective tools.exec mode, the
+    # reviewer/requirements-file defaults), so the branch ports that resolution and says
+    # which input it could not see instead of guessing (B-831 round 1). Still tracked separately:
+    # provider-level `agentRuntime` pins (B370).
     CheckMeta(
         "B353",
         "MCP server pre-approves every tool for unattended runs",

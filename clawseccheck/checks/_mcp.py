@@ -30,12 +30,14 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_APPROVALS,
     LIMIT_DOMAIN_CONFIG,
     Context,
     agent_roster,
     classify_bytes,
     collect,
     dig,
+    limit_hits_for,
 )
 from ..configloader import loads_json5
 from ..scanbudget import (
@@ -3331,6 +3333,431 @@ def _mcp_is_per_requester(spec: dict) -> bool:
     return isinstance(oauth, dict) and oauth.get("identity") == "per-requester"
 
 
+_CODEX_PLUGIN_ID = "codex"
+#: `resolvePolicyMode` (@openclaw/codex@2026.9.5, dist/.setup/config-security-*.mjs).
+_CODEX_POLICY_MODES = frozenset(("yolo", "guardian"))
+
+
+def _mcp_codex_explicit_mode(spec: dict) -> "str | None":
+    """The server's own resolved codex approval mode, with NO ``?? "auto"`` default
+    folded in -- unlike `_mcp_codex_approval_mode`, which applies the caller's default.
+
+    B-831 needs the distinction: a server is "un-moded" (reachable by the appServer-level
+    `fullPermission` waiver -- see `_codex_appserver_yolo_reach`) only when NEITHER
+    spelling of `codex.defaultToolsApprovalMode` is set. An explicit `"auto"` behaves
+    identically today, but it is a different fact -- the vendor's own `??` chain
+    (`resolveProjectedMcpCodexToolApprovalMode`) stops at the first DEFINED value, before
+    `fullPermission` is even consulted, so an explicit `"auto"` is not exposed to this
+    mechanism even though its practical effect (consult the tool's annotations) is the
+    same as the un-moded fallback the vendor's OWN caller applies when nothing resolves.
+    """
+    codex = spec.get("codex") if isinstance(spec, dict) else None
+    if not isinstance(codex, dict):
+        return None
+    return (_mcp_codex_normalize_mode(codex.get("defaultToolsApprovalMode"))
+            or _mcp_codex_normalize_mode(codex.get("default_tools_approval_mode")))
+
+
+def _codex_unmoded_server_names(servers: dict) -> "list[str]":
+    """Enabled MCP servers exposed to the appServer-level auto-approve waiver (B-831).
+
+    A server is "un-moded" here -- reachable by `fullPermission` inside
+    `requiresMcpCodexToolApproval` (`mode ?? (fullPermission ? "approve" : "auto")`,
+    openclaw@2026.9.5 `dist/mcp-codex-tool-approval-*.mjs`) -- when
+    `_mcp_codex_explicit_mode` is None and it is not OpenClaw's own loopback server (which
+    already resolves to "approve" unconditionally, independent of `fullPermission`;
+    `_mcp_codex_is_loopback_server`).
+
+    A per-requester OAuth server (`_mcp_is_per_requester`) is judged by the SAME rule, not
+    included unconditionally. Its `codex` block never reaches Codex's own native MCP config
+    (the reason this check's explicit-"approve" branch skips it), but the OpenClaw-side
+    runtime catalog that feeds the waiver reads it for BOTH connection scopes: the
+    catalog entry carries `codexApprovalMode: resolveProjectedMcpCodexToolApprovalMode(
+    serverName, rawServer)` from the one loader the static and requester-scoped runtimes
+    share (`dist/agents/agent-bundle-mcp-runtime.js:463,564`), and the materializer passes
+    it on as the predicate's `mode` (`dist/agent-bundle-mcp-materialize-*.mjs:187-188`).
+    So a per-requester server with its own `"prompt"` still requires approval and
+    `fullPermission` is never consulted for it; only one with no mode of its own is
+    exposed. (B-831 round 1 included every per-requester server and so named a server
+    "that sets no approval mode of its own" while it set one.)
+    """
+    names: list[str] = []
+    for name, spec in sorted(servers.items()):
+        if not isinstance(spec, dict) or spec.get("enabled") is False:
+            continue
+        if _mcp_codex_is_loopback_server(name, spec):
+            continue
+        if _mcp_codex_explicit_mode(spec) is None:
+            names.append(str(name))
+    return names
+
+
+# B-831 round 1 fix: the OpenClaw exec policy the Codex app-server actually sees, ported
+# from `@openclaw/codex@2026.9.5` `dist/.setup/config-CedDWjM-.mjs`
+# (`resolveOpenClawExecPolicyFromConfig` / `applyOpenClawExecPolicyLayer`) and
+# openclaw@2026.9.5 `dist/exec-approvals-core-*.mjs` (`resolveExecPolicyForMode` /
+# `resolveExecModeFromPolicy`). A policy is (mode, security, ask, touched), or
+# `_CODEX_EXEC_UNRESOLVED` once any layer holds a value the vendor's readers would not
+# accept (an unresolved `${VAR}`, or a value the schema rejects) -- this audit cannot say
+# what that becomes, so it never collapses into "full" or "not full".
+_CODEX_EXEC_MODE_POLICY = {
+    "deny": ("deny", "off"),
+    "allowlist": ("allowlist", "off"),
+    "ask": ("allowlist", "on-miss"),
+    "auto": ("allowlist", "on-miss"),
+    "full": ("full", "off"),
+}
+_CODEX_EXEC_SECURITIES = frozenset(("deny", "allowlist", "full"))
+_CODEX_EXEC_ASKS = frozenset(("off", "on-miss", "always"))
+_CODEX_EXEC_UNRESOLVED = "?"
+#: `createDefaultOpenClawExecPolicy`: mode "full", NOT touched.
+_CODEX_DEFAULT_EXEC_POLICY = ("full", "full", "off", False)
+
+
+def _codex_exec_mode_from_policy(security: str, ask: str) -> str:
+    """`resolveExecModeFromPolicy` (openclaw@2026.9.5 `dist/exec-approvals-core-*.mjs`)."""
+    if security == "deny":
+        return "deny"
+    if security == "allowlist" and ask == "off":
+        return "allowlist"
+    if security == "full" and ask != "always":
+        return "full"
+    return "ask"
+
+
+def _codex_exec_policy_layer(policy, exec_block):
+    """`applyOpenClawExecPolicyLayer` (`@openclaw/codex@2026.9.5
+    dist/.setup/config-CedDWjM-.mjs:38-44`, verbatim):
+
+        function applyOpenClawExecPolicyLayer(base, exec) {
+            if (!exec) return base;
+            const mode = readExecMode(exec.mode);
+            if (mode !== void 0) return {...resolveOpenClawExecPolicyForMode(mode), touched: true};
+            ...
+        }
+
+    A valid `mode` wins OUTRIGHT: the function returns straight from `resolveOpenClawExecPolicyForMode(mode)`
+    without ever touching `base` -- so `mode: "full"` + `ask: "always"` stays "full", AND a valid mode
+    wins even when `base` is a policy this audit could not resolve (an unresolved global
+    `tools.exec.security`, say). B-831 round 2: the pre-fix code checked
+    `policy == _CODEX_EXEC_UNRESOLVED` FIRST, before ever looking at `exec_block`, so a valid per-agent
+    `mode` was wrongly swallowed by an unresolved base -- exactly backwards from the vendor, which
+    never reads `base` at all on that branch. Only once `mode` is absent/invalid does an unresolved
+    base actually get read (the `security`/`ask` merge falls back to `policy[1]`/`policy[2]`), so
+    that is the only place `_CODEX_EXEC_UNRESOLVED` may still propagate from `policy` here.
+    `security`/`ask` are merged over the layer below and the mode is DERIVED from them
+    (`security: "allowlist"` alone is mode "allowlist", `+ ask: "on-miss"` is "ask")."""
+    if not isinstance(exec_block, dict):
+        return policy
+    mode = exec_block.get("mode")
+    if mode is not None:
+        if isinstance(mode, str) and mode in _CODEX_EXEC_MODE_POLICY:
+            return (mode, *_CODEX_EXEC_MODE_POLICY[mode], True)
+        return _CODEX_EXEC_UNRESOLVED
+    if policy == _CODEX_EXEC_UNRESOLVED:
+        return _CODEX_EXEC_UNRESOLVED
+    security = exec_block.get("security")
+    ask = exec_block.get("ask")
+    for value, accepted in ((security, _CODEX_EXEC_SECURITIES), (ask, _CODEX_EXEC_ASKS)):
+        if value is not None and not (isinstance(value, str) and value in accepted):
+            return _CODEX_EXEC_UNRESOLVED
+    if security is None and ask is None:
+        return policy
+    security = security or policy[1]
+    ask = ask or policy[2]
+    return (_codex_exec_mode_from_policy(security, ask), security, ask, True)
+
+
+def _codex_effective_exec_modes(cfg: dict) -> "list[tuple[str, str | None]]":
+    """Per agent, the exec mode the Codex app-server is handed: one of the five modes,
+    None for an untouched policy (which the vendor treats exactly like "full"), or
+    `_CODEX_EXEC_UNRESOLVED`.
+
+    `resolveOpenClawExecPolicyFromConfig` layers the GLOBAL `tools.exec` and then the
+    agent's own `resolveAgentConfig(cfg, agentId).tools.exec` -- `tools: entry.tools`, the
+    roster entry itself, NOT merged with `agents.defaults`
+    (`dist/agent-scope-config-*.mjs:317-360`). With a roster, every declared agent is one
+    scope, read through `agent_roster()` so both roster shapes count; with none, the
+    global layer alone is what any run gets (`resolveAgentConfig` returns nothing for an
+    undeclared id). Session-level `execOverrides` / `permissionMode` are run-time inputs
+    this audit cannot see -- see `_CODEX_APPSERVER_RUNTIME_CAVEAT`.
+    """
+    global_policy = _codex_exec_policy_layer(_CODEX_DEFAULT_EXEC_POLICY, dig(cfg, "tools.exec"))
+    roster = agent_roster(cfg)
+    if roster:
+        scopes = [(f"{a.path}.tools.exec",
+                   _codex_exec_policy_layer(global_policy, dig(a.entry, "tools.exec")))
+                  for a in roster]
+    else:
+        scopes = [("tools.exec", global_policy)]
+    out: "list[tuple[str, str | None]]" = []
+    for label, policy in scopes:
+        if policy == _CODEX_EXEC_UNRESOLVED:
+            out.append((label, _CODEX_EXEC_UNRESOLVED))
+        else:
+            out.append((label, policy[0] if policy[3] else None))
+    return out
+
+
+def _codex_exec_approvals_floor(ctx: Context) -> "str | None":
+    """A reason the exec-approvals store the collector DID read (B-236,
+    `exec-approvals.json`) could tighten the exec policy, or None.
+
+    The vendor applies it after the config layers (`applyOpenClawExecApprovalFloors`:
+    `minSecurity` / `maxAsk`, `@openclaw/codex@2026.9.5 dist/.setup/config-CedDWjM-.mjs`),
+    so a floor can only move the mode AWAY from "full" -- it can turn a "yes" into a
+    "no", never the reverse. Which agent a per-agent entry applies to is not modelled:
+    any tightening value anywhere in the file is enough to stop a definite "yes".
+    """
+    if not getattr(ctx, "exec_approvals_found", False):
+        return None
+    if getattr(ctx, "exec_approvals_parse_error", False) or limit_hits_for(
+            ctx, LIMIT_DOMAIN_APPROVALS):
+        return ("exec-approvals.json is present but could not be read in full, and a "
+                "stricter default there would tighten the exec policy")
+    sources = [("defaults", getattr(ctx, "exec_approvals_defaults", None) or {})]
+    sources += [(f"agents.{g.get('agent_id')}", g)
+                for g in (getattr(ctx, "exec_approvals_grants", None) or [])
+                if isinstance(g, dict)]
+    for label, rec in sources:
+        security, ask = rec.get("security"), rec.get("ask")
+        if (security is not None and security != "full") or (ask is not None and ask != "off"):
+            # B-831 round 2: only name the field(s) the record actually sets -- a field
+            # that is simply absent from exec-approvals.json is not "security=None" (that
+            # reads as a JSON `null`, which is not what happened), it is unset, so it is
+            # omitted entirely rather than printed as a Python None.
+            set_fields = [f"{name}={value!r}" for name, value in
+                          (("security", security), ("ask", ask)) if value is not None]
+            return (f"exec-approvals.json {label} sets " + " / ".join(set_fields) +
+                    ", a floor that tightens the exec policy of the agent(s) it covers")
+    return None
+
+
+_CODEX_APPROVAL_POLICIES = frozenset(("never", "on-request", "on-failure", "untrusted"))
+_CODEX_SANDBOXES = frozenset(("read-only", "workspace-write", "danger-full-access"))
+_CODEX_REVIEWERS = frozenset(("user", "auto_review", "guardian_subagent"))
+_CODEX_TRANSPORTS = frozenset(("stdio", "websocket", "unix"))
+
+#: The run-time inputs `_codex_appserver_yolo_reach` cannot see, said in every WARN it
+#: produces. Each is grounded in `@openclaw/codex@2026.9.5`: the exec-approvals floors
+#: (`loadExecApprovals`, which on this build reads `state/openclaw.sqlite`'s
+#: `exec_approvals_config`, not the legacy JSON the collector reads), the
+#: `OPENCLAW_CODEX_APP_SERVER_MODE` / `_SANDBOX` / `_APPROVAL_POLICY` fallbacks in
+#: `resolveCodexAppServerRuntimeOptions`, and `applyCodexSessionPermissionPolicy`.
+_CODEX_APPSERVER_RUNTIME_CAVEAT = (
+    "(Read from openclaw.json and exec-approvals.json only: a stricter default in the "
+    "exec-approvals store newer OpenClaw builds keep in their state database instead, an "
+    "OPENCLAW_CODEX_APP_SERVER_* variable in the gateway's environment, or a per-session "
+    "permission mode can each change this posture at run time, and none of those is read "
+    "here.)"
+)
+
+
+def _codex_appserver_posture(codex_entry: dict) -> "tuple[str, list[str], list[str]]":
+    """The appServer's own posture, for an agent whose effective exec mode is unset or
+    "full" (any other mode forces or refuses it -- `_codex_appserver_yolo_reach`).
+    Returns (answer, reasons, hedges); a hedge is a plain-English reason "yes" is not
+    certain, and is present exactly when the answer is "unknown".
+
+    `resolveCodexAppServerRuntimeOptions` (`dist/.setup/config-options-*.mjs:280-360`),
+    reduced to what an unset/"full" exec mode leaves live:
+
+    * `forceUserReviewer` is true only when the model cannot use a model-backed reviewer
+      AND (`approvalsReviewer` is "auto_review"/"guardian_subagent", or `mode` is
+      "guardian" with `approvalsReviewer` not "user"). When it is true the policy is
+      forced to "on-request"/"untrusted" -- never "never" -- so the waiver is off. That
+      model predicate (`canUseCodexModelBackedApprovalsReviewerForModel`) is not modelled,
+      so in exactly those two shapes a posture that would otherwise pre-approve reads
+      "unknown", never "no" (round 1 read both as "no" -- a lost detection when the model
+      CAN use the reviewer).
+    * Otherwise nothing is forced, and an explicit `mode` means the requirements-file
+      default is never consulted: `approvalPolicy ?? (guardian ? "on-request" : "never")`
+      and `sandbox ?? (guardian ? "workspace-write" : "danger-full-access")`. So
+      `mode: "guardian"` + `approvalsReviewer: "user"` + explicit `never` +
+      `danger-full-access` DOES pre-approve (round 1 read every guardian as "no").
+    * With `mode` unset, a non-"stdio" transport defaults to YOLO unconditionally; on
+      "stdio" a local Codex system requirements file (`/etc/codex/requirements.toml`,
+      not read here) can replace the default with guardian, which matters only for the
+      field(s) the config leaves unset.
+    * `networkProxy` blocks the waiver only when `enabled === true`
+      (`resolveCodexAppServerNetworkProxy`).
+
+    A value outside the plugin schema's enums (an unresolved `${VAR}`, typically) reads
+    "unknown": this audit cannot say what it becomes.
+    """
+    fields = {
+        "mode": (dig(codex_entry, "config.appServer.mode"), _CODEX_POLICY_MODES),
+        "approvalPolicy": (dig(codex_entry, "config.appServer.approvalPolicy"),
+                           _CODEX_APPROVAL_POLICIES),
+        "sandbox": (dig(codex_entry, "config.appServer.sandbox"), _CODEX_SANDBOXES),
+        "approvalsReviewer": (dig(codex_entry, "config.appServer.approvalsReviewer"),
+                              _CODEX_REVIEWERS),
+        "transport": (dig(codex_entry, "config.appServer.transport"), _CODEX_TRANSPORTS),
+    }
+    unresolved = [name for name, (value, accepted) in fields.items()
+                  if value is not None and not (isinstance(value, str) and value in accepted)]
+    mode, approval, sandbox, reviewer, transport = (
+        None if name in unresolved else value for name, (value, _) in fields.items())
+
+    # Settled before anything unresolved can matter: each of these holds whatever `mode`,
+    # the reviewer or the requirements file turn out to be (a forced policy is never
+    # "never" either, and an explicit field outranks every default).
+    network_proxy = dig(codex_entry, "config.appServer.networkProxy")
+    if isinstance(network_proxy, dict) and network_proxy.get("enabled") is True:
+        return "no", ["appServer.networkProxy.enabled=true blocks the auto-approve waiver"], []
+    if approval is not None and approval != "never":
+        return "no", [f"appServer.approvalPolicy={approval!r}"], []
+    if sandbox is not None and sandbox != "danger-full-access":
+        return "no", [f"appServer.sandbox={sandbox!r}"], []
+    if unresolved:
+        return "unknown", [f"appServer.{n}={fields[n][0]!r}" for n in unresolved], [
+            f"appServer.{n} is {fields[n][0]!r}, which is not a value this audit can "
+            "resolve (an environment substitution, or one the plugin's own schema rejects)"
+            for n in unresolved]
+
+    guardian = mode == "guardian"
+    effective_approval = approval or ("on-request" if guardian else "never")
+    effective_sandbox = sandbox or ("workspace-write" if guardian else "danger-full-access")
+    if effective_approval != "never":
+        return "no", [f"appServer.approvalPolicy resolves to {effective_approval!r}"], []
+    if effective_sandbox != "danger-full-access":
+        return "no", [f"appServer.sandbox resolves to {effective_sandbox!r}"], []
+
+    reasons = [f"appServer.mode={mode!r}" if mode else "appServer.mode is unset"]
+    reasons.append(f"appServer.approvalPolicy={approval!r}" if approval
+                   else "appServer.approvalPolicy is unset (defaults to \"never\")")
+    reasons.append(f"appServer.sandbox={sandbox!r}" if sandbox
+                   else "appServer.sandbox is unset (defaults to \"danger-full-access\")")
+    if network_proxy is None:
+        reasons.append("appServer.networkProxy is unset")
+    hedges: list[str] = []
+    if mode is None and transport in (None, "stdio") and (approval is None or sandbox is None):
+        hedges.append(
+            "it relies on the implicit default, which a local Codex system requirements "
+            "file (not read by this audit) can silently replace with a guardian-reviewed "
+            "posture")
+    if reviewer in ("auto_review", "guardian_subagent") or (guardian and reviewer != "user"):
+        reasons.append(f"appServer.approvalsReviewer={reviewer!r}")
+        hedges.append(
+            "a model-backed approvals reviewer is requested, and if the model an agent runs "
+            "cannot use one the plugin forces an approval policy that asks instead -- "
+            "which model that is, is not determined here")
+    return ("unknown" if hedges else "yes"), reasons, hedges
+
+
+def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str]]":
+    """B-831: whether the Codex plugin's OWN appServer posture pre-approves every
+    un-moded MCP server -- independent of any per-server
+    `codex.defaultToolsApprovalMode`. Returns ("yes" | "no" | "unknown", reasons,
+    hedges); `hedges` are the plain-English reasons an answer is "unknown".
+
+    Ground truth (docs/research/openclaw-schema-recon.md §44, workspace root, has the
+    field-by-field citation trail): `@openclaw/codex@2026.9.5` -- a SEPARATE npm package
+    from `openclaw` core -- resolves an `appServer` object and then
+    (`dist/.setup/config-security-*.mjs`, verbatim):
+
+        function shouldAutoApproveCodexAppServerApprovals(appServer) {
+            return appServer.networkProxy === void 0
+                && appServer.approvalPolicy === "never"
+                && appServer.sandbox === "danger-full-access";
+        }
+
+    `appServer` there is RESOLVED, so this ports the resolution in three steps, each of
+    which may only answer "no" where the vendor provably does not pre-approve, and folds
+    whatever it cannot see into "unknown" (B-831 round 1 folded several of those into a
+    confident "no" or "yes"; each was a finding of the targeted review):
+
+    1. Plugin activation -- `_plugin_activation_blocked`, the same enabled/deny/allow gate
+       B-421 grounded for memory-core (`resolvePluginActivationDecisionShared`,
+       `dist/config-normalization-shared-*.mjs:82-102`): `plugins.enabled: false`,
+       `"codex"` in `plugins.deny`, `entries.codex.enabled: false`, or a non-empty
+       `plugins.allow` without `"codex"` each deactivate the plugin. `deny`/`allow`/
+       `entries` are matched case-insensitively (B-831 round 2): the real gate compares
+       through `normalizePluginPolicyId` (`plugin-policy-id-C9JZrwYv.mjs:9-11`, trim +
+       lowercase, no alias table -- that is a DIFFERENT normalizer, `normalizePluginId`,
+       used elsewhere), because "`plugins.allow`, `plugins.deny`, and `plugins.entries` ...
+       are lowercase-normalized when config is normalized" per that function's own
+       comment. A missing `plugins.entries.codex` block entirely does not by itself mean
+       "not installed" either -- see the harness-reach fallback below.
+    2. The effective exec mode, PER AGENT (`_codex_effective_exec_modes`: global
+       `tools.exec`, then each roster agent's own, with the mode derived from
+       `security`/`ask` when `mode` is absent). "deny"/"allowlist" make the app-server
+       refuse to start (`assertCodexAppServerAllowedForOpenClawExecMode`); "ask"/"auto"
+       force a prompting policy. Only unset/"full" leaves the appServer's own posture
+       live. Every agent non-full -> "no"; every agent full -> the posture; mixed (or an
+       unresolvable value) -> at most "unknown", because which agent runs the Codex
+       harness is not determined here.
+    3. The appServer's own fields -- `_codex_appserver_posture`.
+
+    Then a definite "yes" is lowered to "unknown" when the exec-approvals store the
+    collector read carries a floor that could tighten the mode
+    (`_codex_exec_approvals_floor`). The store newer builds keep in their state database
+    is NOT read, nor are the gateway's environment or per-session permission modes; every
+    WARN built from this says so (`_CODEX_APPSERVER_RUNTIME_CAVEAT`).
+    """
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    codex_entry = _plugins(cfg).get("codex")
+    if isinstance(codex_entry, dict):
+        if codex_entry.get("enabled") is False:
+            return "no", ["the Codex plugin is not installed/enabled "
+                          "(plugins.entries.codex)"], []
+    else:
+        # B-831 round 2: NO `plugins.entries.codex` block at all does not prove the
+        # plugin is not installed. A non-bundled plugin with no entry of its own still
+        # activates on the implicit default (`resolvePluginActivationDecisionShared`
+        # returns `decision("default")` when nothing names it explicitly) whenever its
+        # manifest declares `onAgentHarnesses: ["codex"]` and a configured model would
+        # reach that harness -- this audit cannot see whether the package is actually
+        # installed, only whether a model would reach the Codex harness IF it were
+        # (`harnessruntime.codex_harness_reach`). Only when that reach is a definite
+        # "no" is "not installed/enabled" a safe reading; a "yes" (or an "unknown" this
+        # audit cannot rule out) gets the same treatment as an empty, all-implicit
+        # `config.appServer: {}` (`_codex_appserver_posture`), never a confident "no".
+        if _harness_reach(ctx).answer != _harnessruntime.YES:
+            return "no", ["the Codex plugin is not installed/enabled "
+                          "(plugins.entries.codex)"], []
+        codex_entry = {}
+    plugins_cfg = cfg.get("plugins")
+    blocked = (_plugin_activation_blocked(plugins_cfg, _CODEX_PLUGIN_ID)
+               if isinstance(plugins_cfg, dict) else None)
+    if blocked:
+        return "no", [f"the Codex plugin is not activated ({blocked})"], []
+
+    modes = _codex_effective_exec_modes(cfg)
+    live = [label for label, m in modes if m in (None, "full")]
+    unresolved = [label for label, m in modes if m == _CODEX_EXEC_UNRESOLVED]
+    closed = [(label, m) for label, m in modes
+              if m not in (None, "full", _CODEX_EXEC_UNRESOLVED)]
+    if not live and not unresolved:
+        label, m = closed[0]
+        return "no", [f"{label}: effective exec mode {m!r} forces or refuses the Codex "
+                      "app-server's own posture (only unset or \"full\" keeps it)"], []
+
+    answer, reasons, hedges = _codex_appserver_posture(codex_entry)
+    if answer == "no":
+        return "no", reasons, []
+    if closed:
+        # B-831 round 2 (item 3, reviewed and left as-is): a mixed roster (e.g. one
+        # agent's exec mode "full", another non-full) stays hedged to "unknown" here on
+        # purpose -- /model can move an agent onto the Codex harness at run time, so
+        # which agent actually runs it is not something a static config read can settle
+        # either way, and asserting "no" would be a false negative the moment it does.
+        hedges.append(
+            "the effective tools.exec mode differs between agents (" +
+            ", ".join(f"{label}={m!r}" for label, m in closed[:3]) + " versus " +
+            ", ".join(live[:3]) + " left \"full\"), only an agent left \"full\" keeps this "
+            "posture, and which agent runs the Codex harness is not determined here")
+    if unresolved:
+        hedges.append(
+            "the tools.exec policy at " + ", ".join(unresolved[:3]) + " holds a value "
+            "this audit cannot resolve (an environment substitution, or one the schema "
+            "rejects)")
+    floor = _codex_exec_approvals_floor(ctx)
+    if floor:
+        hedges.append(floor)
+    return ("unknown" if hedges else answer), reasons, hedges
+
+
 def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
     """B353 (F-185): an MCP server set to pre-approve every one of its tools.
 
@@ -3395,6 +3822,21 @@ def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
     PASS    -- servers were inspected and none does, OR one does but no configured model
                resolves to the Codex harness (with the run-time-model caveat said aloud).
     UNKNOWN -- no MCP servers configured under `mcp.servers`.
+
+    B-831: a SECOND, independent way to reach the same "un-moded server is pre-approved"
+    outcome -- no server explicitly sets "approve", but the Codex plugin's OWN appServer
+    posture (`approvalPolicy: "never"` + `sandbox: "danger-full-access"`, the implicit
+    default) pre-approves every server that sets no approval mode of its own -- a
+    per-requester OAuth server included, by the same rule (its own mode, when it sets one,
+    still reaches the OpenClaw-side predicate -- see `_codex_unmoded_server_names`).
+    Checked only when the
+    explicit-"approve" branch above found nothing (`hits` is empty): that branch already
+    WARNs correctly on its own subject, and the two mechanisms only ever combine into the
+    same WARN/PASS severity, never a different one, so there is nothing this second check
+    would change about an already-WARNing verdict. See `_codex_appserver_yolo_reach` for
+    the full grounding and its own WARN/PASS/UNKNOWN split (harness reach composed with
+    the appServer reach the same way the branch above composes with the harness reach
+    alone).
     """
     # A plain `.get()` walk, not `dig()`, and for the reason B-701 used one in this module:
     # a new `dig()` path takes on a grounding obligation in tests/grounded_schema_paths.txt
@@ -3478,6 +3920,70 @@ def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
             "is inert on your setup and the setting changes nothing either way.",
             evidence=ev,
         )
+
+    # B-831: no server explicitly says "approve", but the Codex plugin's OWN appServer
+    # posture can still pre-approve every server that says nothing at all. See
+    # `_codex_appserver_yolo_reach`'s docstring for the full grounding.
+    appserver_answer, appserver_reasons, appserver_hedges = _codex_appserver_yolo_reach(ctx)
+    unmoded = _codex_unmoded_server_names(servers) if appserver_answer != "no" else []
+    if appserver_answer != "no" and unmoded:
+        ev = [f"plugins.entries.codex.config.appServer: {r}" for r in appserver_reasons[:6]]
+        ev.append("un-moded MCP server(s): " + ", ".join(unmoded[:5]))
+        reach = _harness_reach(ctx)
+        if reach.answer == _harnessruntime.NO:
+            return _finding(
+                "B353", PASS,
+                "The Codex plugin's appServer posture "
+                + ("would" if appserver_answer == "yes" else "may") +
+                " pre-approve every tool on "
+                f"{len(unmoded)} un-moded MCP server(s) (" + ", ".join(unmoded[:5]) +
+                "), but no configured model resolves to the Codex app-server harness, so "
+                "the waiver is inert on this setup. " + _HARNESS_RUNTIME_CAVEAT,
+                "No action needed today. If you later route any agent to an OpenAI/Codex "
+                "model, set plugins.entries.codex.config.appServer.mode to \"guardian\" "
+                "(or approvalPolicy/sandbox individually) first, or give the affected "
+                "server(s) their own mcp.servers.<name>.codex.defaultToolsApprovalMode.",
+                evidence=ev + _harness_evidence(reach),
+            )
+        appserver_hedge = (
+            " Whether that posture actually applies here also cannot be fully determined: "
+            + "; ".join(appserver_hedges) + "."
+        ) if appserver_hedges else ""
+        appserver_hedge += " " + _CODEX_APPSERVER_RUNTIME_CAVEAT
+        if reach.answer == _harnessruntime.YES:
+            return _finding(
+                "B353", WARN,
+                "The Codex plugin's appServer is configured for (or defaults to) "
+                "approvalPolicy=\"never\" + sandbox=\"danger-full-access\" with no "
+                "networkProxy, which pre-approves every tool on every MCP server that sets "
+                "no approval mode of its own -- before any per-tool safety annotation is "
+                "consulted (" + ", ".join(unmoded[:5]) + "). At least one of your agents is "
+                "configured to run the Codex app-server harness, so this setting is in "
+                "play. " + _HARNESS_YES_CAVEAT + appserver_hedge,
+                "Set plugins.entries.codex.config.appServer.mode to \"guardian\" (or set "
+                "approvalPolicy to something other than \"never\" and/or sandbox to "
+                "something other than \"danger-full-access\"), or give each affected MCP "
+                "server its own mcp.servers.<name>.codex.defaultToolsApprovalMode of "
+                "\"prompt\" or \"auto\".",
+                evidence=ev + _harness_evidence(reach),
+            )
+        return _finding(
+            "B353", WARN,
+            "The Codex plugin's appServer is configured for (or defaults to) "
+            "approvalPolicy=\"never\" + sandbox=\"danger-full-access\" with no "
+            "networkProxy, which pre-approves every tool on every MCP server that sets no "
+            "approval mode of its own (" + ", ".join(unmoded[:5]) + "). WHETHER THAT IS "
+            "LIVE HERE depends on whether any of your agents runs the Codex app-server "
+            "harness, which this audit does not determine." + appserver_hedge,
+            "Set plugins.entries.codex.config.appServer.mode to \"guardian\" (or set "
+            "approvalPolicy to something other than \"never\" and/or sandbox to something "
+            "other than \"danger-full-access\"), or give each affected MCP server its own "
+            "mcp.servers.<name>.codex.defaultToolsApprovalMode of \"prompt\" or \"auto\". "
+            "If no agent runs a Codex app-server thread, this block is inert on your setup "
+            "and the setting changes nothing either way.",
+            evidence=ev,
+        )
+
     return _finding(
         "B353", PASS,
         f"None of the {len(servers)} configured MCP server(s) pre-approves the tools it "
@@ -6209,25 +6715,63 @@ def _memory_default_owner_blocked(plugins: dict) -> bool:
 
     Only the UNSET/blank ``plugins.slots.memory`` path is gated by this helper -- an
     EXPLICITLY named owner is a separate, unaffected disclosure (B-421 ticket scope).
+    The four legs themselves live in ``_plugin_activation_blocked``, which B-831 reuses
+    for the Codex plugin.
+    """
+    return _plugin_activation_blocked(plugins, _MEMORY_SLOT_DEFAULT_OWNER) is not None
+
+
+def _plugin_activation_blocked(plugins: dict, plugin_id: str) -> "str | None":
+    """The ``plugins.*`` setting that keeps *plugin_id* from activating, or None.
+
+    The four disabling legs of ``resolvePluginActivationDecisionShared`` (grounded for
+    B-421 above, re-read for B-831 against openclaw@2026.9.5
+    ``dist/config-normalization-shared-*.mjs:82-102``): ``plugins.enabled`` false,
+    *plugin_id* in ``plugins.deny``, ``plugins.entries.<id>.enabled`` false, and a
+    non-empty ``plugins.allow`` that omits it. Factored out of
+    ``_memory_default_owner_blocked`` unchanged (same order) so both callers share one
+    gate.
+
+    B-831 round 2: the comparison on all three of ``deny``/``entries``/``allow`` is now
+    case-insensitive (trimmed + lowercased), matching the real
+    ``normalizePluginPolicyId`` (``plugin-policy-id-C9JZrwYv.mjs:9-11``) that
+    ``resolvePluginActivationDecisionShared`` actually compares *plugin_id* against —
+    verbatim: "Canonicalizes a plugin id for comparison against ``plugins.allow``,
+    ``plugins.deny``, and ``plugins.entries``, which are lowercase-normalized when config
+    is normalized." This is deliberately a PLAIN case fold, not
+    ``_normalize_plugin_id``'s alias table (``google-gemini-cli`` -> ``google``,
+    ``config-state-BxYVV2MR.mjs:19-22``'s ``normalizePluginId``) -- that is a different
+    function for a different comparison (the B342 allow/deny CONTRADICTION check), and
+    replicating its alias table here would be fabricating a codex/memory-core alias that
+    does not exist. A case-only variant of a NON-alias id (``Memory-Core`` vs
+    ``memory-core``) is exactly the shape this leg now folds, that one still does not
+    (see ``test_b342_allow_deny_case_difference_alone_is_not_a_collision``).
+
+    Not modelled, and only reachable with a plugin that owns a slot: a plugin NAMED by
+    ``plugins.slots.memory``/``contextEngine`` is activated before the allowlist leg is
+    reached. The Codex plugin declares no ``kind`` (``openclaw.plugin.json``), so it owns
+    no slot.
     """
     if plugins.get("enabled") is False:
-        return True
+        return "plugins.enabled=false"
+    norm_id = plugin_id.strip().lower()
     deny = plugins.get("deny")
     if isinstance(deny, list):
-        denied = {p.strip() for p in deny if isinstance(p, str)}
-        if _MEMORY_SLOT_DEFAULT_OWNER in denied:
-            return True
+        denied = {p.strip().lower() for p in deny if isinstance(p, str)}
+        if norm_id in denied:
+            return f"plugins.deny lists {plugin_id!r}"
     entries = plugins.get("entries")
     if isinstance(entries, dict):
-        entry = entries.get(_MEMORY_SLOT_DEFAULT_OWNER)
+        entry = next((v for k, v in entries.items()
+                      if isinstance(k, str) and k.strip().lower() == norm_id), None)
         if isinstance(entry, dict) and entry.get("enabled") is False:
-            return True
+            return f"plugins.entries.{plugin_id}.enabled=false"
     allow = plugins.get("allow")
     if isinstance(allow, list):
-        allowed = {p.strip() for p in allow if isinstance(p, str) and p.strip()}
-        if allowed and _MEMORY_SLOT_DEFAULT_OWNER not in allowed:
-            return True
-    return False
+        allowed = {p.strip().lower() for p in allow if isinstance(p, str) and p.strip()}
+        if allowed and norm_id not in allowed:
+            return f"plugins.allow is set and does not list {plugin_id!r}"
+    return None
 
 
 def check_plugin_slots_and_deny(ctx: Context) -> Finding:

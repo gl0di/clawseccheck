@@ -1555,6 +1555,48 @@ _NOT_IN_CURRENT_SCHEMA = {
         "Read off an MCP server entry (checks/_mcp.py::check_plugin_app_server_command) — same open server-defined "
         "config object as config.permissionMode above."
     ),
+    RELATIVE_PREFIX + "config.appServer.mode": (
+        "CLAWSECCHECK-B-831. Read off a plugins.entries.codex entry "
+        "(checks/_mcp.py::_codex_appserver_yolo_reach) — same open, plugin-defined "
+        "PluginEntrySchema.config bag as config.appServer.command above, so the CORE "
+        "openclaw schema has no key for it either way. Grounded instead against the "
+        "CODEX PLUGIN's OWN config, which lives in a SEPARATE npm package "
+        "(`@openclaw/codex`, not bundled in `openclaw` core — see "
+        "docs/research/openclaw-schema-recon.md §44 for the full citation trail): "
+        "`resolvePolicyMode`, dist/.setup/config-security-*.mjs, "
+        "`@openclaw/codex@2026.9.5`."
+    ),
+    RELATIVE_PREFIX + "config.appServer.approvalPolicy": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveApprovalPolicy` (dist/.setup/config-security-*.mjs) — see "
+        "docs/research/openclaw-schema-recon.md §44."
+    ),
+    RELATIVE_PREFIX + "config.appServer.sandbox": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveSandbox` (dist/.setup/config-security-*.mjs) — see "
+        "docs/research/openclaw-schema-recon.md §44."
+    ),
+    RELATIVE_PREFIX + "config.appServer.networkProxy": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveCodexAppServerNetworkProxy` (dist/.setup/config-security-*.mjs) — "
+        "see docs/research/openclaw-schema-recon.md §44."
+    ),
+    RELATIVE_PREFIX + "config.appServer.approvalsReviewer": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveApprovalsReviewer` (dist/.setup/config-security-*.mjs) — see "
+        "docs/research/openclaw-schema-recon.md §44."
+    ),
+    RELATIVE_PREFIX + "config.appServer.transport": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveTransport`/`resolveDefaultCodexAppServerPolicy` "
+        "(dist/.setup/config-security-*.mjs, dist/.setup/config-options-*.mjs) — see "
+        "docs/research/openclaw-schema-recon.md §44."
+    ),
     RELATIVE_PREFIX + "network.dangerouslyAllowPrivateNetwork": (
         "Read off a channel's node entries (checks/_config.py::check_dangerous_overrides). ChannelsSchema is "
         "`.passthrough()` (zod-schema.channels-config-ORTHga0n.js:68-78), so per-channel "
