@@ -176,6 +176,26 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal — the single file that defines the
 # exists -> THEN a row (with or without a condition) may be added. A config-conditioned
 # row is not exempt from this gate merely because it is more precise than a version-only
 # one — precision does not change what it discloses.
+#
+# Last swept: 2026-09-19 (openclaw-9.5-triage). The newest row below fixes 2026.6.6 — there
+# is simply no advisory on file past that boundary yet. `check_known_vulns`'s PASS wording,
+# "OpenClaw {version} is at or past all known-advisory fixes", is honest but easy to
+# over-read for a build like 2026.9.5, 2026.7.33 or 2026.6.33-6.35: it means "no row in
+# THIS TABLE reaches this version", not "swept and cleared as of this version". Advisories
+# keep arriving; re-sweep on every upgrade response (docs/process/OPENCLAW_UPGRADE_PROTOCOL.md
+# bucket A) and move this date forward, rather than reading an old date as still current.
+#
+# Extended-stable convention: OpenClaw's own `isExtendedStableReleaseVersion` (a final
+# release, minor 1-12, patch >= 33) marks a maintenance line that back-ports fixes onto an
+# otherwise-frozen minor and never auto-applies. This table needs no separate mechanism for
+# that line: a row already supports a per-release-line exemption through its optional 5th
+# element, `condition(config) -> bool` (C-414, tested by
+# tests/test_c414_config_conditioned_advisory.py) — read `meta.lastTouchedVersion`/the
+# resolved build inside the condition and return whether THIS release line actually carries
+# the fix. If a genuine extended-stable advisory ever needs recording, add a config-
+# conditioned row (or a plain version-only one, if the backport boundary is uniform across
+# lines) rather than inventing a second table, a new field, or a bespoke "is this
+# extended-stable" helper.
 _KNOWN_ADVISORIES: list[
     tuple[str, tuple[int, ...], str, str]
     | tuple[str, tuple[int, ...], str, str, Callable[[dict], bool]]
