@@ -167,10 +167,12 @@ def _plugin_finding(severity, status, detail, fix, ev=None) -> Finding:
 #
 # THIS LIST IS HAND-MAINTAINED AND HAS LOST THREE TIMES — the second and third entries
 # were each found by an adversarial pass, not by the tests, and the third was found by the
-# pass reviewing the fix for the second. A fourth producer will fail the same way and
-# nothing here will notice. The durable fix is a structural guard over the producers (see
-# the note in _attribute_to_bundled_skill); until it exists, treat this list as known-
-# incomplete rather than as the answer.
+# pass reviewing the fix for the second. A fourth producer would fail the same way — but
+# C-453 (tests/test_c453_evidence_prefix_conventions.py) is the structural guard over the
+# producers promised in the note in _attribute_to_bundled_skill: it reads every evidence-
+# producing f-string in the tree and reddens the commit that introduces an unlisted
+# separator, rather than waiting for the next adversarial pass to notice by hand. The list
+# stays hand-maintained — C-453 checks it for completeness, it does not replace it.
 _BUNDLED_EVIDENCE_SEPARATORS = (": ", " (", " [")
 
 
@@ -279,11 +281,13 @@ def _attribute_to_bundled_skill(f: Finding, name: str, rel_label: str) -> Findin
     "a new format is caught by what it does".
 
     The durable fix is a structural guard over the PRODUCERS — statically require the
-    literal following a name-like substitution to start with a known separator — which
+    literal following a name-like substitution to start with a known separator, which
     would have reddened all three on the day they were written, with no fixture at all.
-    That needs its own design (a naive predicate reds on 20 unrelated sites: `name + "/"`
-    path joins, `name + " is on ("` config prose), so it is tracked separately rather than
-    bolted on here.
+    That guard now exists: C-453 (tests/test_c453_evidence_prefix_conventions.py). A naive
+    version of the predicate reds on ~20 unrelated sites (`name + "/"` path joins,
+    `name + " is on ("` config prose); C-453 excuses those through a small,
+    staleness-checked exception registry rather than loosening the predicate, and imports
+    `_BUNDLED_EVIDENCE_SEPARATORS` from here so shrinking this list is what turns it red.
     """
     if rel_label != name:
         f.evidence = [
