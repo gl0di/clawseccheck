@@ -5301,12 +5301,29 @@ def check_attachments_ttl(ctx: Context) -> Finding:
         (7 days) to periodically remove older staged media. Managed outgoing media
         (chat-generated attachments) is excluded and follows its own SQLite- and
         transcript-aware retention."
-      - Runtime sweep gate (``telegram-ingress-drain-factory-DbVZxBjw.mjs:3823``,
-        fed via that same file's line 3937, ``ttlHours: cfg.attachments?.ttlHours``):
-        ``if (params.ttlHours !== void 0 && media.savedAt + params.ttlHours * HOUR_MS
-        <= Date.now()) return;`` -- when ``ttlHours`` is unset the expiry comparison
-        never runs, so nothing is ever swept; any set number (0 included -- no
-        documented floor) makes the comparison live.
+      - Runtime sweep gate (``server-maintenance-Cl2cKcaI.mjs:359-366``, the
+        server's own periodic ``runMediaMaintenance``/``runMediaCleanup`` tick,
+        confirmed invoked at line 379):
+        ``const ttlHours = params.getRuntimeConfig().attachments?.ttlHours;
+        mediaCleanupInFlight = (ttlHours !== void 0 ? cleanOldMedia(ttlHours * 60 *
+        6e4, {recursive: true, pruneEmptyDirs: true}) : pruneOutboundMedia())...`` --
+        when ``ttlHours`` is unset, ``cleanOldMedia`` (which sweeps the shared
+        ``media/inbound`` directory -- ``pruneNonPlaybackMedia``,
+        ``store-SPnAoW3B.mjs:150-165``/``208-212``, walks every subdirectory of
+        ``media/`` except ``playback-transcode``/``outgoing``) never runs at all;
+        only the unrelated, fixed-TTL ``pruneOutboundMedia()`` staging sweep runs
+        instead. Any set number (0 included -- no documented floor) makes
+        ``cleanOldMedia`` run on that interval. Neither ``cleanOldMedia`` nor
+        ``pruneNonPlaybackMedia`` reads ``attachments.ttlHours`` itself --
+        ``grep ttlHours store-SPnAoW3B.mjs`` returns nothing; the whole gating
+        conjunction lives in ``runMediaCleanup`` above, which converts hours to a
+        max-age in ms and passes it in. (An EARLIER version of this grounding cited
+        ``telegram-ingress-drain-factory-DbVZxBjw.mjs:3823`` as the gate -- that was
+        wrong. That file's ``resolveRetainedTelegramMedia`` also reads
+        ``cfg.attachments?.ttlHours`` (fed via its own line 3937), but only to decide
+        whether to reuse a cached media reference while rebuilding a Telegram reply
+        chain; it is Telegram-only and unrelated to the accumulation-preventing sweep
+        above. Do not follow that citation expecting to find the sweep.)
 
     So the gap is exactly the filed task's premise: staged INCOMING media
     (screenshots, voice notes, forwarded files landed by any channel provider)
