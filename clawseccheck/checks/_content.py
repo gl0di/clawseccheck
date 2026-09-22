@@ -8544,7 +8544,21 @@ def check_hex_private_key_exposure(ctx: Context) -> Finding:
     for name, blob in ctx.installed_skills.items():
         fence_ranges = _fence_ranges(blob)
         for m in _HEX64_VALUE_RE.finditer(blob):
-            if _is_code_example(blob, m.start(), fence_ranges):
+            # B-525 (fence family, LEGACY site #1 of the 2026-08-28 inventory —
+            # the only LEGACY site with no disclosure mechanism anywhere near it):
+            # an unannotated ```fence``` around a real exposed key must not drop the
+            # match. Measured through check_hex_private_key_exposure() directly,
+            # positive control live:
+            #
+            #     The wallet private key is 0x<64 hex>
+            #         bare prose -> WARN     inside an UNANNOTATED ```fence``` -> PASS
+            #
+            # fence_needs_negation=True closes it: the fence must now ALSO carry a
+            # negation/example marker (_fence_is_annotated), same B-097 rule already
+            # applied to the content-ring prose checks. Every existing fenced-example
+            # test for this check (test_fenced_doc_example_stays_pass) keeps its
+            # trailing "Documented example..." annotation, so it stays PASS unchanged.
+            if _is_code_example(blob, m.start(), fence_ranges, fence_needs_negation=True):
                 continue
             c_start = max(0, m.start() - _HEX64_CONTEXT_WINDOW)
             c_end = min(len(blob), m.end() + _HEX64_CONTEXT_WINDOW)
