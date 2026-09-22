@@ -106,14 +106,20 @@ def _redact_home_paths(text: str) -> str:
     First written for one caller only: the --dashboard --full "Worth a glance" card
     section (the MEDIUM/ATTESTED-confidence findings render_dashboard_findings's own
     HIGH-confidence filter deliberately excludes), because that card is explicitly
-    designed to be pasted into chat -- the rest of report/--save/--html keeps full
-    paths, correctly: those stay on the owner's own machine and a real path is exactly
-    what an owner debugging their own config needs to see. This docstring used to say
-    "applied only to" that card, describing the first caller as if it were a scope
-    limit. It is not one, and by now several callers outside this module have found
-    the same shape independently -- an error message or a finding's `detail` is
-    exactly where an operator's OS username escapes, and CLAUDE.md §8 ("No PII... in
-    logs") is not scoped to one card:
+    designed to be pasted into chat. This docstring used to say "applied only to" that
+    card, describing the first caller as if it were a scope limit, and went on to claim
+    the rest of report/--save/--html keeps full paths "correctly" because those stay on
+    the owner's own machine. That second claim held for the plain text report and
+    --save (a text file a user would grep their own username out of before pasting, a
+    different threat model from a rendered artifact handed to someone else whole) but
+    was simply wrong for --html: docs/USAGE.md groups --html with --json/--sarif/--pdf/
+    --badge as the canonical, attachable saved-report formats, and --pdf (a rendered,
+    non-tree artifact with no other username-bearing text field) already got this exact
+    fix in the same C-456 commit that covered --json, leaving --html as the one
+    surface in that group nobody had gone back to check (B-825). Several
+    callers outside this module have found the same shape independently -- an error
+    message or a finding's `detail` is exactly where an operator's OS username
+    escapes, and CLAUDE.md §8 ("No PII... in logs") is not scoped to one card:
 
     * `sarif.py`'s `_sarif_text` (B-620) wraps every string that reaches SARIF
       `results[]` -- `message.text`, `properties.evidence`,
@@ -140,6 +146,20 @@ def _redact_home_paths(text: str) -> str:
       `_finding_to_dict` directly and `json.dumps`s its own payload) and is therefore
       NOT redacted here, matching that module's own "verbatim... never mutates"
       doctrine for a forensic-preservation artifact.
+    * `render_html`'s `_finding_card` (B-825) wraps a finding's `detail` and each
+      surviving evidence row right before they are HTML-escaped -- after, not
+      instead of, the `_evidence_bullets` cap/dedup step, so the `already_shown`
+      containment check there keeps comparing like-for-like (pre-redaction) text;
+      redacting first would let a real-home path collapsed to `~` in `detail` stop
+      matching the still-raw copy of the same text in `evidence`, undoing the dedup.
+      Reproduced without this: `_username_safe_path` (checks/_shared.py) collapses a
+      path against `Path.home()`, i.e. `$HOME` -- so under a `$HOME` spoofed away
+      from the real account home it correctly declines to collapse a real-home path
+      and returns it verbatim, exactly the input this function exists to catch on
+      the way out. `--json` already caught that verbatim path here (`_sanitize_tree`
+      runs on every JSON tree unconditionally); `--html` did not, so the identical
+      `Finding.evidence` string reached the two formats looking different depending
+      solely on which one was asked for -- see tests/test_b825_html_path_redaction.py.
 
     Each caller applies this function itself, at its own render boundary, rather than
     this module reaching out to redact on their behalf -- for everything except the
@@ -6322,8 +6342,21 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         icon_char = "✕" if f.status in FAIL_WEIGHT_STATUSES else "⚠"
         card_cls = "finding is-fail" if f.status in FAIL_WEIGHT_STATUSES else "finding"
         f_title = esc(_sanitize(f.title))
+        # B-825: `detail_plain` (unredacted) stays the `already_shown` comparison key below
+        # -- evidence de-dup has to match against the SAME text `_evidence_bullets` sees, or
+        # an entry that is only a duplicate after redaction collapses two different-looking
+        # raw strings into one would slip past the check and print twice. `_redact_home_paths`
+        # is applied once, at the final display step, exactly where `_sanitize_tree` (the
+        # `--json` family) and `pdf.py`'s `_finding_block` already apply it -- composed the
+        # same way, `_redact_home_paths(_sanitize(...))`. Before this, this renderer was the
+        # one shareable/attachable surface (docs/USAGE.md groups `--html` with `--pdf`/
+        # `--sarif`/`--badge` as the "canonical, deterministic output") that skipped the
+        # second pass: a real-account-home path that `_username_safe_path` declined to
+        # collapse against a spoofed `$HOME` reached `--html` raw while `--json`'s
+        # `_sanitize_tree` and `--pdf`'s own call still caught it via the same regex, which
+        # is $HOME-independent (B-825; tests/test_b825_html_path_redaction.py).
         detail_plain = _sanitize(f.detail) if f.detail else ""
-        f_detail = esc(detail_plain)
+        f_detail = esc(_redact_home_paths(detail_plain))
         why_html = (f'<p class="finding-line"><span class="finding-key">{esc(label_why)}</span> '
                     f'{f_detail}</p>') if f.detail else ""
 
@@ -6346,9 +6379,11 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
                 f.evidence, limit=12, indent="", bullet="", already_shown=detail_plain,
             )
         ] if (f.evidence and f.status in ACTIONABLE_STATUSES) else []
+        # B-825: same final-step redaction as `f_detail` above, applied after the cap/dedup
+        # decision so `already_shown` still compares like-for-like (see the comment there).
         ev_html = ("" if not ev_rows else
                    '<ul class="finding-evidence">'
-                   + "".join(f"<li>{esc(r)}</li>" for r in ev_rows)
+                   + "".join(f"<li>{esc(_redact_home_paths(r))}</li>" for r in ev_rows)
                    + "</ul>")
 
         # B-622: the same condition the text report applies (`report.py`'s _render_finding)
