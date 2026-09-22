@@ -39,13 +39,30 @@ def test_next_version(cur, level, expected):
     (["fix: a", "docs: b"], "patch"),
     (["feat: a", "fix: b"], "minor"),
     (["feat(ci)!: drop py38"], "major"),
+    (["fix!: x"], "major"),
     (["refactor: x\n\nBREAKING CHANGE: y"], "major"),
+    (["refactor: x\n\nBREAKING-CHANGE: y"], "major"),
     (["chore: nothing notable"], "patch"),
     ([], "patch"),
     (["feat: a", "feat: b", "fix: c"], "minor"),
 ])
 def test_suggest_level(commits, expected):
     assert bump._suggest_level(commits) == expected
+
+
+def test_suggest_level_ignores_bare_prose_mention_of_breaking_change():
+    """CLAWSECCHECK-B-858: a commit body that merely *talks about* the marker must not
+    itself be read as one -- including when line-wrapping alone puts the words at the
+    start of a line, as happened in this project's own commit 33d78af. A regression to
+    the old bare-substring check (`"BREAKING CHANGE" in c`) turns this red."""
+    commits = [
+        "fix: resolve bump.py --suggest's release base against main, not HEAD\n\n"
+        "Also disclose explicitly when zero `!:`/\n"
+        "BREAKING CHANGE markers are found, rather than letting their absence\n"
+        "silently read as \"nothing breaking shipped\" -- an absent signal is not\n"
+        "a measured negative."
+    ]
+    assert bump._suggest_level(commits) == "patch"
 
 
 # ---- dev->main release-base resolution (C-493) -----------------------------
