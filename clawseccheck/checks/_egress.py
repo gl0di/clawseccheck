@@ -457,6 +457,20 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         # with neither flag ever set, and advice about "if the flag cannot be turned off"
         # would be confusing noise pointed at a flag this config never enabled. C-135
         # (independent adversarial pass) found this unconditional in the first draft.
+        #
+        # B-853: blockedHostnames is matched by HOSTNAME/IP TEXT only
+        # (resolveHostnamePolicyChecks, ssrf-B1sxrDMt.mjs:189 in the installed 2026.9.5
+        # dist, "denied before DNS"). With the private-network flag on,
+        # shouldSkipPrivateNetworkChecks (same file, lines 114-115) makes
+        # resolveHostnamePolicyChecks skip assertAllowedHostOrIpOrThrow, and
+        # resolvePinnedHostnameWithPolicy (lines 280/330) skips
+        # assertAllowedResolvedAddressesOrThrow too -- so a request naming an
+        # attacker-controlled hostname that itself RESOLVES to 169.254.169.254 is never
+        # checked against the blocked IP at all. blockedHostnames therefore blocks only a
+        # request that names one of the listed hosts/IPs directly; it does not close the
+        # resolved-IP gap the private-network flag opened. The wording below must not
+        # claim it "blocks them" (the addresses) -- only that it blocks direct use of the
+        # literal names/IPs.
         if allow_private:
             fix += (
                 " If the private-network flag cannot be turned off, an "
@@ -465,8 +479,12 @@ def check_browser_ssrf(ctx: Context) -> Finding:
                 "naming at least the cloud-metadata addresses — 169.254.169.254, "
                 "metadata.google.internal, 100.100.100.200 — OpenClaw checks that deny "
                 "list before DNS and allow rules, even with private-network access "
-                "enabled, so it is the one lever that still blocks them while the flag "
-                "stays on."
+                "enabled, so it still blocks a request that names one of those hosts or "
+                "IP literals directly. It matches by hostname/IP text only, not by the "
+                "address a name resolves to, so an attacker-chosen hostname that resolves "
+                "to one of those addresses is NOT caught by this deny list while the flag "
+                "stays on — turning dangerouslyAllowPrivateNetwork off is the only way to "
+                "block that."
             )
         return _finding(
             "B38",

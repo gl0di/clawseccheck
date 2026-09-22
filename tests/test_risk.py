@@ -1144,6 +1144,52 @@ def test_risk15_truthy_nonbool_string_no_fire():
     assert not any(p.id == "RISK-15" for p in paths), [p.id for p in paths]
 
 
+# --- B-853: the blockedHostnames lever in RISK-15's OWN fix text (not just whether
+# RISK-15 fires) must be gated on the real private-network trigger -- flag on, legacy
+# alias alone, and absent on a noSandbox-only FAIL. The earlier alias test above
+# (test_risk15_legacy_allow_private_network_alias_fires) only pinned that RISK-15
+# fires; it says nothing about what the fix text recommends, which is the exact gap
+# C-135 found twice (checks/_egress.py's own allow_private gate, and this one).
+
+def _risk15_path(cfg):
+    paths = _paths(cfg)
+    p = next((x for x in paths if x.id == "RISK-15"), None)
+    assert p is not None, [x.id for x in paths]
+    return p
+
+
+def test_risk15_fix_mentions_blockedhostnames_when_flag_on():
+    p = _risk15_path(_risk15_cfg())
+    assert "blockedHostnames" in p.fix
+
+
+def test_risk15_fix_mentions_blockedhostnames_for_legacy_alias_alone():
+    cfg = _risk15_cfg(ssrf=False)
+    cfg["browser"] = {"ssrfPolicy": {"allowPrivateNetwork": True}}
+    p = _risk15_path(cfg)
+    assert "blockedHostnames" in p.fix
+
+
+def test_risk15_fix_omits_blockedhostnames_on_nosandbox_only():
+    # Neither private-network flag is set -- B38 (and so RISK-15 via _browser_ssrf)
+    # fires on browser.noSandbox alone. blockedHostnames is a private-network-flag
+    # lever; it must not appear as noise pointed at a flag this config never enabled.
+    cfg = _risk15_cfg(ssrf=False)
+    cfg["browser"] = {"noSandbox": True}
+    p = _risk15_path(cfg)
+    assert "blockedHostnames" not in p.fix
+
+
+def test_risk15_fix_qualifies_name_only_not_resolved_ip():
+    # The fix text must disclose that blockedHostnames matches by hostname/IP text
+    # only -- an attacker-chosen hostname that resolves to a listed address is not
+    # caught by it while dangerouslyAllowPrivateNetwork stays on -- and must not claim
+    # it "still blocks them" (the addresses themselves).
+    p = _risk15_path(_risk15_cfg())
+    assert "resolves to" in p.fix
+    assert "still blocks them" not in p.fix
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule RISK-18: contextVisibility=all + cron + heartbeat -> persistent foothold
 # ──────────────────────────────────────────────────────────────────────────────
