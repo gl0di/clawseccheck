@@ -1301,14 +1301,16 @@ non-zero exit can never be read as "the artifact is there and clean".
 (`--exit-code-scheme graduated`).** By default (`--exit-code-scheme binary` — unchanged from
 every release before this flag existed), a genuine severity-tripping FAIL and a run that
 never produced a trustworthy verdict at all — a tool crash, a scan cut short by its own time
-budget, an unusable `--vet` path, or an unreadable/absent config — are the same exit code
+budget, or an unreadable/absent config — are the same exit code
 (1). A CI job reading only `$?` cannot tell "your setup has a real problem" apart from "the
 tool itself did not finish". `--exit-code-scheme graduated` reuses `--monitor`'s own 0/1/3
-convention instead of inventing a second one:
+convention instead of inventing a second one. This flag, like `--fail-on`/`--exit-code`
+themselves, has **no effect** on `--vet`/`--vet-skill`/`--vet-plugin`/`--vet-mcp`/`--advise`
+(a note on stderr says so): vet keeps its own separate contract, described below:
 
 - **0** — clean; the gate did not trip.
-- **1** — could not produce a trustworthy verdict: a crash, `ScanBudgetExceeded`, an unusable
-  `--vet` path, an unreadable/absent config, or (under `--full`) a layer that was actually
+- **1** — could not produce a trustworthy verdict: a crash, `ScanBudgetExceeded`,
+  an unreadable/absent config, or (under `--full`) a layer that was actually
   attempted and errored out.
 - **3** — a real, severity-tripping FAIL at the `--fail-on`/`--exit-code` gate.
 - **2 is never returned by this logic** — argparse itself owns exit code 2 for a usage error

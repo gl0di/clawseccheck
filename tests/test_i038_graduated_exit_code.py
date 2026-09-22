@@ -2,10 +2,18 @@
 
 By default (``binary``) ``--fail-on``/``--exit-code`` return 1 for BOTH a real
 severity-tripping FAIL and a run that could not produce a trustworthy verdict at all
-(a crash, ``ScanBudgetExceeded``, an unusable ``--vet``/``--judged`` path, or an
+(a crash, ``ScanBudgetExceeded``, an unusable ``--judged`` path, or an
 unreadable/absent config) — the two are indistinguishable by exit code alone, and that
 is unchanged by this task; it is a documented public contract (docs/USAGE.md's CI
 recipe) real CI configs may already depend on.
+
+C-563: ``--vet`` deliberately does NOT appear above. ``--vet``/``--vet-skill``/
+``--vet-plugin``/``--vet-mcp``/``--advise`` never reach ``_findings_exit_gate`` — "vet"
+carries no "exit_code"/"fail_on" entry in ``_MODE_HONORS``, so neither
+``--exit-code``/``--fail-on`` nor ``--exit-code-scheme`` has any effect on a vet
+invocation. An unassessable vet target is exit 2 (``_report_unassessable``), on a code
+path this file's gate is never asked to arbitrate; see ``tests/test_b680_vet_absent_target.py``
+and ``tests/test_b685_advise_unassessable_target.py`` for that separate contract.
 
 ``--exit-code-scheme graduated`` is a purely additive, opt-in alternative that reuses
 ``--monitor``'s own 0/1/3 convention (C-419) instead of inventing a second one:
@@ -44,6 +52,8 @@ Offline, read-only outside tmp_path, stdlib only.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -58,6 +68,9 @@ from clawseccheck.layers import STATUS_ERROR, STATUS_NOT_REACHED
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 VULN = str(FIXTURES / "home_vuln")  # 8 FAIL, 3 CRITICAL (test_b584_ci_gate.py)
 BASE = ["--no-native", "--no-history", "--ascii"]
+_REPO = Path(__file__).resolve().parent.parent
+_USAGE_MD = _REPO / "docs" / "USAGE.md"
+_CLI_FLAGS_MD = _REPO / "references" / "cli-flags.md"
 
 
 def _clean_home(tmp_path: Path, name: str = "clean_home") -> str:
@@ -327,3 +340,81 @@ def test_gate_binary_ignores_errored_layer():
     args = _Args(exit_code=True, exit_code_scheme="binary")
     score = _Score(missing_layers=(("live_behaviour", STATUS_ERROR),))
     assert _findings_exit_gate(args, [], _Ctx(), score=score) == 0
+
+
+# ---------------------------------------------------------------------------
+# C-563: --exit-code-scheme (and --exit-code/--fail-on themselves) have NO
+# effect on --vet, which keeps its own, separate 1/2 contract entirely outside
+# _findings_exit_gate (see _report_unassessable). The prior --help/docs wording
+# wrongly listed "an unusable --vet path" as part of the binary/graduated "1"
+# bucket above; measured, an unassessable --vet target is exit 2 regardless of
+# --exit-code-scheme, because "vet" mode never reaches this gate at all ("vet"
+# carries no "exit_code"/"fail_on" entry in _MODE_HONORS).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("gate_args", [[], ["--exit-code"]])
+@pytest.mark.parametrize("scheme_args", [
+    [],
+    ["--exit-code-scheme", "binary"],
+    ["--exit-code-scheme", "graduated"],
+])
+def test_vet_unassessable_target_is_always_two_regardless_of_scheme(
+    tmp_path, scheme_args, gate_args
+):
+    missing = str(tmp_path / "definitely-does-not-exist-c563")
+    rc = main(["--vet", missing] + BASE + gate_args + scheme_args)
+    assert rc == 2, (
+        "an unassessable --vet target must stay exit 2 (its own usage-error "
+        "contract) no matter what --exit-code-scheme says about the "
+        "--fail-on/--exit-code gate, which --vet never reaches"
+    )
+
+
+def test_help_exit_code_scheme_does_not_misattribute_vet_to_its_gate_bucket():
+    """--help for --exit-code-scheme must not claim an "unusable --vet path" is part of
+    the binary/graduated "1" bucket -- that bucket is _findings_exit_gate's, and --vet
+    never reaches it. Grounded against the real argparse text, not just the source
+    comment beside it."""
+    out = subprocess.run(
+        [sys.executable, str(_REPO / "audit.py"), "--help"],
+        cwd=_REPO, capture_output=True, text=True, timeout=30,
+    ).stdout
+    # The flag also appears in the usage synopsis at the top of --help; anchor on the
+    # option-list entry (its own indented "  --exit-code-scheme ..." line) so the window
+    # captures the actual help paragraph, not the one-line synopsis.
+    idx = out.find("\n  --exit-code-scheme ")
+    assert idx != -1
+    window = out[idx:idx + 1200]
+    assert "unusable" not in window.lower() or "vet" not in window.lower(), (
+        "the --exit-code-scheme help text still attributes an unusable --vet path to "
+        "this gate's own 1/3 bucket; measured, --vet exits 2 on a code path this flag "
+        "never reaches"
+    )
+    assert "no effect" in window.lower() and "vet" in window.lower(), (
+        "the --exit-code-scheme help text should say plainly that it has no effect on "
+        "--vet, which keeps its own separate contract"
+    )
+
+
+def test_docs_usage_md_does_not_bucket_unusable_vet_path_under_exit_code_scheme():
+    text = _USAGE_MD.read_text(encoding="utf-8")
+    idx = text.find("Telling a real FAIL apart from a run that could not complete")
+    assert idx != -1
+    section = text[idx:idx + 1600]
+    assert "unusable `--vet`" not in section, (
+        "docs/USAGE.md's --exit-code-scheme section still claims an unusable --vet "
+        "path is part of the binary/graduated bucket; measured, --vet exits 2 on a "
+        "code path this flag never reaches"
+    )
+
+
+def test_docs_cli_flags_md_does_not_bucket_unusable_vet_path_under_exit_code_scheme():
+    text = _CLI_FLAGS_MD.read_text(encoding="utf-8")
+    idx = text.find("--exit-code-scheme {binary,graduated}")
+    assert idx != -1
+    section = text[idx:idx + 900]
+    assert "unusable `--vet`" not in section, (
+        "references/cli-flags.md's --exit-code-scheme entry still claims an unusable "
+        "--vet path is part of the binary/graduated bucket; measured, --vet exits 2 "
+        "on a code path this flag never reaches"
+    )

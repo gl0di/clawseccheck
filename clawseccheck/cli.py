@@ -3219,6 +3219,14 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False, score=
     never resolved a ledger (a duck-typed `score`, or simply omitting the kwarg) passes
     `score=None`, which reads as "nothing errored" — the same permissive default every
     other `getattr(score, ...)` read in this module already uses.
+
+    C-563 item 2 (accepted as-is): a second-pass review flagged that this `STATUS_ERROR`-
+    only reading is a narrower "incomplete required layer" than an earlier, informally
+    approved bucket-1 wording, and that a `--full` run whose layers are `not_reached` or
+    budget-cut still gets 0 or 3 under graduated rather than 1. The review marked this
+    non-blocking and asked only that Dave confirm the reading — it did not find the
+    documented behavior (this docstring, matching the code) inaccurate. Left unchanged
+    here; see the C-563 task history for the open confirmation.
     """
     _graduated = getattr(args, "exit_code_scheme", "binary") == "graduated"
     _errored_layer = any(
@@ -3672,19 +3680,32 @@ def _main(argv=None) -> int:
     # I-038: purely additive and opt-in. `binary` (the default) is BYTE-FOR-BYTE what
     # `--fail-on`/`--exit-code` have always done, on every path that calls
     # `_findings_exit_gate` — a real threshold-tripping FAIL and a run that could not
-    # produce a trustworthy verdict at all (a crash, `ScanBudgetExceeded`, an unusable
-    # `--vet` path, or an unreadable/absent config) are both exit 1, indistinguishable
-    # to a CI/cron consumer reading only `$?`. `graduated` reuses `--monitor`'s own
+    # produce a trustworthy verdict at all (a crash, `ScanBudgetExceeded`, or an
+    # unreadable/absent config) are both exit 1, indistinguishable to a CI/cron
+    # consumer reading only `$?`. `graduated` reuses `--monitor`'s own
     # 0/1/3 convention (never 2 — argparse itself owns that code for a usage error,
     # the identical reservation `--monitor` already makes and documents) so the two
     # can be told apart: 1 stays "could not complete", 3 is the real FAIL.
+    #
+    # C-563: an "unusable --vet path" does NOT belong in either bucket above. `--vet`/
+    # `--vet-skill`/`--vet-plugin`/`--vet-mcp`/`--advise` never reach `_findings_exit_gate`
+    # at all — "vet" is not in `_MODE_HONORS`'s "exit_code"/"fail_on" set, so this flag
+    # (and `--exit-code`/`--fail-on` themselves) have no effect on a vet invocation, which
+    # keeps its own separate contract: 1 on CAUTION/DO-NOT-INSTALL, 2 when the target
+    # cannot be assessed at all (see `_report_unassessable`). The prior wording claimed an
+    # unusable --vet path was exit 1 under both schemes; measured, it is exit 2, on a code
+    # path this flag never touches.
     p.add_argument("--exit-code-scheme", choices=["binary", "graduated"], default="binary",
                    help="how --fail-on/--exit-code map a trip to a process exit code. "
                         "'binary' (default, unchanged from every release before this flag "
                         "existed): 1 on either a real FAIL or a run that could not produce "
                         "a trustworthy verdict (crash, a scan cut short by its own time "
-                        "budget, an unusable --vet path, or an unreadable/absent config) — "
-                        "the two are not distinguishable by exit code alone. 'graduated': "
+                        "budget, or an unreadable/absent config) — "
+                        "the two are not distinguishable by exit code alone. Has no effect "
+                        "on --vet/--vet-skill/--vet-plugin/--vet-mcp/--advise, which keep "
+                        "their own separate 1/2 contract (docs/USAGE.md, \"--vet's exit "
+                        "code is a separate contract\"). "
+                        "'graduated': "
                         "reuses --monitor's own convention instead — 0 clean, 1 "
                         "could-not-produce-a-trustworthy-verdict, 3 a real threshold-"
                         "tripping FAIL; 2 is never returned by this logic (argparse owns "
