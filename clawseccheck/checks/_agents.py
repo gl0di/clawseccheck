@@ -4,6 +4,7 @@ Carved verbatim out of the former single-file checks.py; no logic changes.
 Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 """
 from __future__ import annotations
+import math
 import re
 from .. import attest as _attest
 from ..catalog import (
@@ -1759,6 +1760,92 @@ _SWARM_CAPS = {
     "maxTotalPerGroup": 100000,
     "waitTimeoutSecondsMax": 86400,
 }
+# Admission-control fields only: these three feed the actual spawn/child-count gate
+# (dist/sessions-spawn-tool-CE1WiS6Q.mjs:2358 for maxConcurrent;
+# dist/subagent-spawn-ownership-C6ceClEw.mjs:195-197,336-338 for maxChildrenPerGroup /
+# maxTotalPerGroup) -- pushing one of these to its vendor ceiling is a fan-out /
+# resource-exhaustion choice on its own. waitTimeoutSecondsMax is NOT one of them: its
+# sole consumer (dist/agents-wait-tool-DSZTkgfl.mjs:194-195) only clamps how long ONE
+# `agents_wait` call blocks -- it spawns nothing and admits nothing, so it is excluded
+# here and never contributes to the FAIL ("maxed") tier; see _swarm_scope_findings.
+_SWARM_FANOUT_FIELDS = frozenset({"maxConcurrent", "maxChildrenPerGroup", "maxTotalPerGroup"})
+
+# Which tool a field's limit actually gates -- and therefore whether that field is even
+# REACHABLE, independent of what the number says. C-135 fix (d), F-200: the two shipped
+# `bad_b392_*` fixtures carried `tools.profile: "minimal"`, which grants NEITHER tool
+# below, so convicting them was a false positive -- a config that cannot invoke
+# sessions_spawn/agents_wait at all has no reachable fan-out surface for these limits
+# to raise, whatever the numbers say.
+#
+# Grounded on the installed 2026.9.5 dist, CORE_TOOL_DEFINITIONS' own `profiles` field
+# (dist/tool-catalog-BAOwO8Un.mjs:208-234): sessions_spawn's profiles are
+# ["coding","messaging"]; agents_wait's are ["coding"] only. `full` grants everything
+# (`allow: ["*"]`, tool-catalog-BAOwO8Un.mjs:494); agents_wait is ALSO gated on
+# tools.swarm.enabled separately (openclaw-tools-DIxownJF.mjs:2388) -- already covered
+# by `_swarm_scope_findings`'s own `effective_enabled` short-circuit above, so it is not
+# re-checked here. An ABSENT tools.profile pushes NO policy at all
+# (`resolveCoreToolProfilePolicy`: `if (!profile) return;`, tool-catalog-BAOwO8Un.mjs:531-532)
+# -- the PERMISSIVE end, same as every other profile+alsoAllow read already in this
+# codebase (toolpolicy.py's `_profile_policy`, behavioral.py's T3 `_t3_declared`) -- so
+# absent is treated as reachable, never as "minimal".
+#
+# tools.alsoAllow (agent-then-global, read independently of where the profile came from
+# -- mergeConfiguredSubagentAllow / resolveExplicitProfileAlsoAllow,
+# dist/agent-tools.policy-BOXZIRFn.mjs:60-61,207-209) is the schema's escape hatch that
+# ADDS a tool back on top of a profile, and is checked FIRST below.
+#
+# `tools.allow` -- the schema's OTHER, mutually-exclusive tool-grant shape (OpenClaw
+# rejects allow+alsoAllow in one scope: zod-schema.agent-runtime-DQfiImgc.mjs:367-369) --
+# is read as UNKNOWN, not as reachable and not as unreachable. A config that sets an
+# explicit allow-list omitting sessions_spawn plausibly cannot fan out at all, which
+# would make a FAIL here a false positive; but `tools.allow` arrives as its OWN policy
+# layer beside the profile's (`pickSandboxToolPolicy(params.cfg.tools)` /
+# `(params.agentTools)`, agent-tools.policy-BOXZIRFn.mjs:99-112) and this module has NOT
+# traced how those layers combine, so asserting unreachable would be a guess in the other
+# direction. Per Golden Rule #4 an undetermined surface reports UNKNOWN. Measured scope
+# (behavioral.py's T3 count): ~9 of 326 real configs use `tools.allow` at all.
+_SWARM_FIELD_TOOL = {
+    "maxConcurrent": "sessions_spawn",
+    "maxChildrenPerGroup": "sessions_spawn",
+    "maxTotalPerGroup": "sessions_spawn",
+    "waitTimeoutSecondsMax": "agents_wait",
+}
+_SWARM_TOOL_PROFILE_GRANTS = {
+    "sessions_spawn": frozenset({"coding", "messaging", "full"}),
+    "agents_wait": frozenset({"coding", "full"}),
+}
+_SWARM_KNOWN_PROFILES = frozenset({"minimal", "coding", "messaging", "full"})
+
+
+def _swarm_tool_reachable(
+    profile: object, also_allow: object, allow: object, tool_id: str
+) -> "bool | None":
+    """Can this scope's agent invoke *tool_id* (``"sessions_spawn"`` / ``"agents_wait"``)
+    at all, per ``tools.profile`` + ``tools.alsoAllow``?
+
+    Returns ``True``/``False`` when determinable, ``None`` when genuinely unknown --
+    Golden Rule #4/#5: an unrecognised or wrongly-typed ``tools.profile`` must not
+    silently read as either safe (a downgrade to PASS) or dangerous (kept as FAIL/WARN);
+    it is a real UNKNOWN, since a future/renamed profile's grants are not in
+    ``_SWARM_TOOL_PROFILE_GRANTS`` and guessing either way would be exactly the
+    fabricated-fact risk Golden Rule #4 forbids.
+
+    *profile*/*also_allow* are this scope's already-resolved
+    ``agentTools?.profile ?? globalTools?.profile`` / ``agentTools?.alsoAllow ??
+    globalTools?.alsoAllow`` values (independent per field) -- the caller resolves the
+    global halves via the grounded ``dig(cfg, "tools.profile")`` /
+    ``dig(cfg, "tools.alsoAllow")`` paths and the per-agent halves via plain dict
+    ``.get()``, the same idiom this module already uses one field over for
+    ``tools.swarm`` itself."""
+    if isinstance(also_allow, list) and tool_id in also_allow:
+        return True
+    if isinstance(allow, list) and allow and tool_id not in allow:
+        return None  # an explicit allow-list without this tool -- see the note above
+    if profile is None:
+        return True  # absent tools.profile pushes NO policy -- the permissive default
+    if not isinstance(profile, str) or profile not in _SWARM_KNOWN_PROFILES:
+        return None  # can't classify -- don't guess either direction
+    return profile in _SWARM_TOOL_PROFILE_GRANTS[tool_id]
 
 
 def _swarm_raw(node: object) -> "dict | None":
@@ -1777,10 +1864,25 @@ def _swarm_field_status(raw: dict, field: str) -> "tuple[int, str]":
     """Resolve one bounded numeric swarm field exactly as ``readBoundedPositiveInteger``
     does, and classify the result: ``"ok"`` (<= the vendor default), ``"raised"``
     (> default, < the vendor's hard ceiling), or ``"maxed"`` (>= the ceiling — clamped
-    there by the runtime and no further, whatever larger value the config asked for)."""
+    there by the runtime and no further, whatever larger value the config asked for).
+
+    JS has one numeric type, so ``resolveSwarmConfig``'s own guard is
+    ``typeof value === "number" && Number.isInteger(value)``
+    (dist/swarm-config-BYkyPTuH.mjs:17) — a JSON ``1e3`` parses there as the integer
+    ``1000``, not a float, and clamps like any other integer. Python's ``json`` module
+    instead hands us a ``float`` for ``1e3``/``1000.0``, which the old ``isinstance(...,
+    int)`` gate rejected outright, silently falling back to the default and losing the
+    finding. Mirror ``Number.isInteger`` explicitly: a finite float whose fractional
+    part is exactly zero is coerced to ``int`` before the usual checks; a non-integral
+    float (``1000.5``) or a non-finite one (``inf``/``nan``) is correctly NOT
+    ``Number.isInteger`` and still falls back to the default below. ``bool`` is a
+    Python subclass of ``int`` but is never a ``float``, so it is untouched by this and
+    still falls back via the existing ``isinstance(value, bool)`` guard."""
     value = raw.get(field)
     default = _SWARM_DEFAULTS[field]
     cap = _SWARM_CAPS[field]
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        value = int(value)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         resolved = default
     else:
@@ -1792,26 +1894,62 @@ def _swarm_field_status(raw: dict, field: str) -> "tuple[int, str]":
     return resolved, "ok"
 
 
-def _swarm_scope_findings(label: str, raw: dict) -> "tuple[list, list]":
+def _swarm_scope_findings(
+    label: str, raw: dict, profile: object, also_allow: object, allow: object
+) -> "tuple[list, list, list, list]":
     """For one resolved swarm scope (global, or one agent's override merged over
-    global) return ``(raised_evidence, maxed_evidence)`` — both empty when that scope's
-    swarm surface is disabled, or every field is at/under the vendor default."""
+    global) return ``(raised_evidence, maxed_evidence, unknown_evidence,
+    dropped_evidence)`` — all empty when that scope's swarm surface is disabled, or
+    every field is at/under the vendor default.
+
+    *profile*/*also_allow* are this scope's already-resolved ``tools.profile`` /
+    ``tools.alsoAllow`` (see ``_swarm_tool_reachable`` for the resolution contract),
+    consulted for every field that is NOT already "ok": each raised/maxed field gates
+    on a specific tool (``_SWARM_FIELD_TOOL``), and
+
+      * reachable is False  -> the field is DROPPED (into ``dropped_evidence`` only, for
+        disclosure -- it never contributes to a verdict): the config could raise it to
+        any number and the agent still could not act on it.
+      * reachable is None   -> the field goes to ``unknown_evidence``: whether it is
+        reachable could not be determined (an unrecognised/wrongly-typed
+        tools.profile), so it must not silently collapse into a PASS OR keep silently
+        contributing to a FAIL/WARN as if reachability were confirmed.
+      * reachable is True   -> the field is classified exactly as before: ``raised_evidence``
+        for the WARN-eligible tier, ``maxed_evidence`` for the ungated FAIL tier —
+        ``waitTimeoutSecondsMax`` stays out of ``maxed_evidence`` even at its own vendor
+        ceiling (see ``_SWARM_FANOUT_FIELDS``): it is not an admission-control field, so it
+        stays in the raised/WARN-eligible bucket, gated on untrusted-channel reachability
+        like every other raised field — never the ungated FAIL tier."""
     enabled = raw.get("enabled")
     effective_enabled = enabled if isinstance(enabled, bool) else True  # vendor default
     if not effective_enabled:
-        return [], []
+        return [], [], [], []
     raised: list = []
     maxed: list = []
+    unknown: list = []
+    dropped: list = []
     for field in _SWARM_DEFAULTS:
         resolved, tier = _swarm_field_status(raw, field)
-        if tier == "raised":
-            raised.append(f"{label}: {field}={resolved} (default {_SWARM_DEFAULTS[field]})")
-        elif tier == "maxed":
-            maxed.append(
-                f"{label}: {field}={resolved} (vendor hard ceiling; default "
-                f"{_SWARM_DEFAULTS[field]})"
+        if tier == "ok":
+            continue
+        note = "default" if tier == "raised" else "vendor hard ceiling; default"
+        msg = f"{label}: {field}={resolved} ({note} {_SWARM_DEFAULTS[field]})"
+        tool_id = _SWARM_FIELD_TOOL[field]
+        reachable = _swarm_tool_reachable(profile, also_allow, allow, tool_id)
+        if reachable is False:
+            dropped.append(f"{msg} -- {tool_id} is not granted at this scope, so this limit is moot")
+            continue
+        if reachable is None:
+            unknown.append(
+                f"{msg} -- whether {tool_id} is granted could not be determined "
+                f"(tools.profile={profile!r} is not a recognised profile)"
             )
-    return raised, maxed
+            continue
+        if tier == "raised" or (tier == "maxed" and field not in _SWARM_FANOUT_FIELDS):
+            raised.append(msg)
+        else:
+            maxed.append(msg)
+    return raised, maxed, unknown, dropped
 
 
 def check_swarm_fanout_limits(ctx: Context) -> Finding:
@@ -1829,25 +1967,39 @@ def check_swarm_fanout_limits(ctx: Context) -> Finding:
     runtime resolver does.
 
     PASS    — swarm is disabled at every scope that matters, OR every scope's fields
-              resolve to the vendor's own sane defaults. This is the COMMON case,
-              since it is also what an absent ``tools.swarm`` resolves to (the surface
-              is on by default, just at safe limits).
-    WARN    — swarm is enabled (by default or explicitly) and at least one field is
-              explicitly raised above its vendor default (but below its hard ceiling)
-              at some scope, AND an untrusted channel can reach the agent. Mirrors
-              B81's ``agents.defaults.subagents.*`` reasoning for the identical
-              fork-bomb / cost-exhaustion shape, one config surface over.
-    FAIL    — swarm is enabled (by default or explicitly) and at least one field is
-              explicitly pushed to or past its vendor-hardcoded hard ceiling at some
-              scope — the practical maximum this surface allows, and as close to the
+              resolve to the vendor's own sane defaults, OR every raised/maxed field's
+              gating tool (sessions_spawn / agents_wait) is confirmed NOT granted by
+              that scope's tools.profile/alsoAllow (disclosed in the detail — see
+              "dropped" below). This is the COMMON case, since it is also what an
+              absent ``tools.swarm`` resolves to (the surface is on by default, just
+              at safe limits).
+    WARN    — swarm is enabled (by default or explicitly), its gating tool IS reachable
+              at some scope, and at least one field is explicitly raised above its
+              vendor default (but below its hard ceiling), AND an untrusted channel can
+              reach the agent. Mirrors B81's ``agents.defaults.subagents.*`` reasoning
+              for the identical fork-bomb / cost-exhaustion shape, one config surface
+              over.
+    FAIL    — swarm is enabled (by default or explicitly), its gating tool IS reachable
+              at some scope, and at least one of the three admission-control fields
+              (maxConcurrent, maxChildrenPerGroup, maxTotalPerGroup — NOT
+              waitTimeoutSecondsMax, which only bounds one agents_wait call and admits
+              nothing) is explicitly pushed to or past its vendor-hardcoded hard
+              ceiling — the practical maximum this surface allows, and as close to the
               "unbounded" shape the filed task worried about as this config can
               actually get. NOT gated on an untrusted channel: pushing a config to the
               vendor's own resource-exhaustion ceiling is an unambiguous, deliberate
-              choice on its own (mirrors B21/B39/B327's "explicit, unambiguous
-              dangerous value ⇒ FAIL regardless of reachability" idiom), not a
-              proportionate response to an ingress path that could change later.
-    UNKNOWN — config unreadable/unparseable (engine-side), or no config was read at
-              all (``not_applicable`` in that second case, mirroring B81/B391).
+              choice on its own — though a narrower precedent than B21/B327's
+              categorical "no benign reading" idiom, since these are numeric
+              thresholds a legitimately large deployment could choose; see the module
+              comment in catalog.py for the corrected citation (B39 does NOT belong in
+              this list — its own FAIL is itself reachability-gated).
+    UNKNOWN — config unreadable/unparseable (engine-side); no config was read at all
+              (``not_applicable`` in that second case, mirroring B81/B391); OR a
+              raised/maxed field's gating-tool reachability could not be determined
+              because some scope's ``tools.profile`` is present but not one of
+              OpenClaw's known profile ids (Golden Rule #4/#5: absence of evidence is
+              not evidence of safety — an unrecognised profile must not silently read
+              as either safe or dangerous).
     """
     unreadable = _config_unreadable("B392", ctx)
     if unreadable is not None:
@@ -1866,39 +2018,100 @@ def check_swarm_fanout_limits(ctx: Context) -> Finding:
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     cfg = ctx.config
+    # Grounded dig() paths (both already in tests/grounded_schema_paths.txt) for the
+    # GLOBAL half of the ?? chain; the per-agent half is a plain dict .get() below, the
+    # same idiom this function already uses one field over for tools.swarm itself.
+    global_profile = dig(cfg, "tools.profile")
+    global_also_allow = dig(cfg, "tools.alsoAllow")
+    global_allow = dig(cfg, "tools.allow")
     global_raw = _swarm_raw(dig(cfg, "tools.swarm")) or {}
-    raised, maxed = _swarm_scope_findings("global tools.swarm", global_raw)
+    raised, maxed, unknown, dropped = _swarm_scope_findings(
+        "global tools.swarm", global_raw, global_profile, global_also_allow, global_allow
+    )
     for agent in agent_roster(cfg):
         entry_tools = agent.entry.get("tools") if isinstance(agent.entry, dict) else None
         agent_raw = _swarm_raw(entry_tools.get("swarm")) if isinstance(entry_tools, dict) else None
         if agent_raw is None:
             continue
         merged = {**global_raw, **agent_raw}
+        # agentTools?.profile ?? globalTools?.profile / agentTools?.alsoAllow ??
+        # globalTools?.alsoAllow -- independent per-field, agent wins only if it SETS
+        # the key at all (mirrors toolpolicy.py's _profile_policy for the same fields).
+        agent_profile = (
+            entry_tools.get("profile", global_profile)
+            if isinstance(entry_tools, dict)
+            else global_profile
+        )
+        agent_also_allow = (
+            entry_tools.get("alsoAllow", global_also_allow)
+            if isinstance(entry_tools, dict)
+            else global_also_allow
+        )
+        agent_allow = (
+            entry_tools.get("allow", global_allow)
+            if isinstance(entry_tools, dict)
+            else global_allow
+        )
         name = agent.entry.get("name") or agent.id or agent.index
-        a_raised, a_maxed = _swarm_scope_findings(agent.labelled(name), merged)
+        a_raised, a_maxed, a_unknown, a_dropped = _swarm_scope_findings(
+            agent.labelled(name), merged, agent_profile, agent_also_allow, agent_allow
+        )
         raised += a_raised
         maxed += a_maxed
+        unknown += a_unknown
+        dropped += a_dropped
     if maxed:
         return _finding(
             "B392",
             FAIL,
-            "tools.swarm (collector-mode subagent fan-out) is enabled with at least "
-            "one limit pushed to or past the vendor's own hard ceiling — the "
-            "practical maximum this surface allows, and as close to unbounded as "
-            "this config can get.",
+            "tools.swarm (collector-mode subagent fan-out) is enabled, sessions_spawn "
+            "is reachable, and at least one admission-control limit is pushed to or "
+            "past the vendor's own hard ceiling — the practical maximum this surface "
+            "allows, and as close to unbounded as this config can get.",
             "Lower the affected tools.swarm limit(s) toward the vendor defaults "
-            "(maxConcurrent<=8, maxChildrenPerGroup<=50, maxTotalPerGroup<=200, "
-            "waitTimeoutSecondsMax<=600), or set tools.swarm.enabled=false if "
-            "collector-mode subagents are not needed.",
+            "(maxConcurrent<=8, maxChildrenPerGroup<=50, maxTotalPerGroup<=200), or "
+            "set tools.swarm.enabled=false if collector-mode subagents are not "
+            "needed.",
             evidence=maxed,
             config_field_paths={
                 "tools.swarm.maxConcurrent",
                 "tools.swarm.maxChildrenPerGroup",
                 "tools.swarm.maxTotalPerGroup",
-                "tools.swarm.waitTimeoutSecondsMax",
             },
         )
+    if unknown:
+        return _finding(
+            "B392",
+            UNKNOWN,
+            "tools.swarm has at least one limit raised toward, or pushed to, its "
+            "vendor ceiling, but whether the tool it gates (sessions_spawn or "
+            "agents_wait) is actually reachable could not be determined: the scope's "
+            "tools.profile is present but is not one of OpenClaw's known profile ids "
+            "(minimal/coding/messaging/full).",
+            "Set tools.profile to a recognised value, or remove it, so reachability "
+            "can be determined; add an explicit tools.alsoAllow entry if you intend "
+            "to grant the tool regardless of profile.",
+            evidence=unknown,
+            config_field_paths={"tools.swarm", "tools.profile"},
+        )
     if not raised:
+        if dropped:
+            return _finding(
+                "B392",
+                PASS,
+                "tools.swarm has at least one limit raised toward, or pushed to, its "
+                "vendor ceiling, but the tool it gates (sessions_spawn for "
+                "maxConcurrent/maxChildrenPerGroup/maxTotalPerGroup, agents_wait for "
+                "waitTimeoutSecondsMax) is not reachable under that scope's "
+                "tools.profile/tools.alsoAllow, so the raised limit cannot actually "
+                "be acted on.",
+                "No action needed while the tool stays ungranted. If you later grant "
+                "sessions_spawn or agents_wait (a wider tools.profile, or an "
+                "explicit tools.alsoAllow), lower the raised tools.swarm limit(s) "
+                "back toward the vendor defaults first.",
+                evidence=dropped,
+                config_field_paths={"tools.swarm", "tools.profile", "tools.alsoAllow"},
+            )
         return _finding(
             "B392",
             PASS,

@@ -1740,10 +1740,32 @@ CATALOG: list[CheckMeta] = [
     # vendor's own UI description text, not the runtime resolver), and the resolver's
     # own Math.min clamp means no config can reach a literally unbounded limit — the
     # closest is a value at/past the vendor's own hard ceiling (1000 / 10,000 /
-    # 100,000 / 86,400s). FAIL-capable: unlike B81's WARN-only ceiling, an explicit
-    # push to that vendor hard ceiling is treated as unambiguous on its own (no
-    # untrusted-channel gate), the same idiom B21/B39/B327 use for a deterministic
-    # dangerous value.
+    # 100,000 for the three admission-control fields maxConcurrent /
+    # maxChildrenPerGroup / maxTotalPerGroup). FAIL-capable on those three fields
+    # only: unlike B81's WARN-only ceiling, an explicit push to that vendor hard
+    # ceiling is treated as unambiguous on its own (no untrusted-channel gate).
+    # waitTimeoutSecondsMax is excluded from this FAIL tier (C-135 fix, F-200): its
+    # sole consumer only clamps one `agents_wait` call's timeout and neither spawns
+    # nor admits anything, so even at its own ceiling it stays in the WARN-eligible
+    # tier, gated on reachability like every other raised field.
+    #
+    # Precedent, corrected: an earlier draft of this comment cited B21/B39/B327 as
+    # "the idiom this check follows" for an ungated FAIL on a deterministic dangerous
+    # value. That citation was wrong for B39 — B39's FAIL is itself reachability-gated
+    # (checks/_agents.py::check_session_isolation only appends its FAIL evidence when
+    # dm_scope_resolved=="main" AND _external_input_channels(cfg) is non-empty), so it
+    # is not an example of an ungated idiom at all. B21 (an explicit bootstrap
+    # directive to obey untrusted tool/web output) and B327
+    # (agents.defaults.embeddedAgent.projectSettingsPolicy=="trusted") are genuine
+    # ungated-FAIL precedents, but both key off a categorical, discrete value with no
+    # ordinary benign reading. This check's three fan-out fields are a narrower fit
+    # for that idiom: they are numeric thresholds on a continuous scale, and a
+    # legitimately large deployment could deliberately configure one at the vendor's
+    # own ceiling for real throughput reasons, not just recklessness. What is not
+    # narrower is the ceiling's provenance: it is the vendor's own hard-coded maximum
+    # (Math.min(value, cap)), not a threshold this check invented, so FAIL still marks
+    # the single most extreme configuration this surface allows — just with a weaker
+    # "no benign reading" claim than B21/B327.
     CheckMeta(
         "B392",
         "tools.swarm collector-mode subagent fan-out limits raised toward/past the "
