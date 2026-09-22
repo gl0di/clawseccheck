@@ -3305,17 +3305,33 @@ CATALOG: list[CheckMeta] = [
     # (schema-CwAIqZVE.mjs:904-905): "Leave unset to disable that sweep, or set values
     # like 24 (1 day) or 168 (7 days) to periodically remove older staged media.
     # Managed outgoing media (chat-generated attachments) is excluded and follows its
-    # own SQLite- and transcript-aware retention." The runtime sweep gate itself
-    # (telegram-ingress-drain-factory-DbVZxBjw.mjs:3823, fed via :3937's
-    # `ttlHours: cfg.attachments?.ttlHours`) is `params.ttlHours !== void 0 &&
-    # media.savedAt + params.ttlHours * HOUR_MS <= Date.now()` -- unset skips the
-    # expiry comparison outright, so staged incoming media (screenshots, voice notes,
-    # forwarded files) accumulates on disk with no sweep at all; any set number
-    # (0 included, no documented floor) makes the comparison live. Straight rename
+    # own SQLite- and transcript-aware retention." The runtime sweep gate itself lives
+    # in the server's own periodic maintenance tick (server-maintenance-Cl2cKcaI.mjs:
+    # 359-366, invoked at :379): `const ttlHours = params.getRuntimeConfig()
+    # .attachments?.ttlHours; mediaCleanupInFlight = (ttlHours !== void 0 ?
+    # cleanOldMedia(ttlHours * 60 * 6e4, {...}) : pruneOutboundMedia())` -- unset skips
+    # `cleanOldMedia` (which sweeps the shared media/inbound directory,
+    # store-SPnAoW3B.mjs's `pruneNonPlaybackMedia`) entirely, so staged incoming media
+    # (screenshots, voice notes, forwarded files) accumulates on disk with no sweep at
+    # all; any set number (0 included, no documented floor) makes it run on that
+    # interval. (An earlier revision of this grounding, and the original F-201 commit,
+    # wrongly cited telegram-ingress-drain-factory-DbVZxBjw.mjs:3823 as this gate --
+    # that file's `resolveRetainedTelegramMedia` also reads `attachments.ttlHours`, but
+    # only to decide whether to reuse a cached reference while rebuilding a Telegram
+    # reply chain; it is Telegram-only and is not the accumulation-preventing sweep.
+    # See the check's own docstring in checks/_egress.py for the full correction.)
+    # Straight rename
     # from the pre-8.1 `media.ttlHours` (openclaw-8.1-schema-{removed,added}-paths.txt:
     # same field, same semantics, confirmed unchanged through the installed 2026.9.5
     # dist). WARN-only: an unswept local disk is a data-hygiene gap the operator can
     # act on at any time, not a proven compromise -- no FAIL tier.
+    # F-201 follow-up: the WARN above fired on a config with NO channels configured at
+    # all, where nothing can ever stage inbound media in the first place -- broke
+    # tests/test_b472_b477_self_contradiction.py's Channels-row self-contradiction
+    # guard. Now UNKNOWN+not_applicable when no live channel provider is configured
+    # (same "real provider" filter as B25/B26/B30) -- see the check's own docstring in
+    # checks/_egress.py for the dist grounding of why this is channel-agnostic, not
+    # Telegram-only.
     CheckMeta(
         "B390",
         "attachments.ttlHours unset -- no sweep, staged media accumulates indefinitely",
