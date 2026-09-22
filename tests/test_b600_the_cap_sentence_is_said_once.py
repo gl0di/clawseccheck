@@ -32,10 +32,10 @@ from __future__ import annotations
 import copy
 import itertools
 import re
-import zlib
 
 import pytest
 
+from _pdftext import page_content_streams
 from clawseccheck.catalog import Finding
 from clawseccheck.pdf import render_pdf
 from clawseccheck.report import (
@@ -98,15 +98,18 @@ def _pdf_text(raw: bytes) -> str:
     four of the six signals while the sentence is plainly there. The sibling file
     tests/test_b600_ungraded_cap_reaches_every_surface.py still matches per line and passes
     only because its fixture produces the one short reason ("an open CRITICAL finding").
+
+    Decompression itself is `tests/_pdftext.py`'s `page_content_streams` (parsed by
+    `/Length`, not by scanning for `endstream`) -- neither of that module's own
+    string-shaped helpers fits here, though: `shown_strings` joins every Tj match with
+    "\\n" rather than a space, which reproduces the exact silent-split bug this docstring
+    describes (measured: it drops the `live` signal's TAIL the same way the old per-line
+    match did). This function's own space-join + whitespace-collapse is what a broken
+    sentence needs and stays local to this file.
     """
     out: list[str] = []
-    for stream in re.finditer(rb"stream\r?\n(.*?)endstream", raw, re.S):
-        data = stream.group(1)
-        try:
-            data = zlib.decompress(data)
-        except Exception:
-            pass
-        for tj in re.finditer(rb"\((?:\\.|[^\\()])*\)\s*Tj", data):
+    for stream in page_content_streams(raw):
+        for tj in re.finditer(rb"\((?:\\.|[^\\()])*\)\s*Tj", stream):
             parts = re.findall(rb"\((?:\\.|[^\\()])*\)", tj.group(0))
             out.append(b"".join(p[1:-1] for p in parts).decode("latin-1"))
     return " ".join(" ".join(out).split())

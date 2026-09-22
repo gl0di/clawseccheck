@@ -27,9 +27,9 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-import zlib
 from pathlib import Path
 
+from _pdftext import shown_strings
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, LOW, PASS, WARN, Finding
 from clawseccheck.report import issue_population_line, render_html
 from clawseccheck.scoring import compute
@@ -51,18 +51,8 @@ def _run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def _pdf_text(path: Path) -> list[str]:
-    raw = path.read_bytes()
-    out: list[str] = []
-    for m in re.finditer(rb"stream\r?\n(.*?)endstream", raw, re.S):
-        data = m.group(1)
-        try:
-            data = zlib.decompress(data)
-        except Exception:
-            pass
-        for tj in re.finditer(rb"\((?:\\.|[^\\()])*\)\s*Tj", data):
-            parts = re.findall(rb"\((?:\\.|[^\\()])*\)", tj.group(0))
-            out.append(b"".join(p[1:-1] for p in parts).decode("latin-1"))
-    return out
+    """Every `(...) Tj` show operand, one per list entry, in document order."""
+    return shown_strings(path.read_bytes()).split("\n")
 
 
 # ------------------------------------------------------------------ the producer
