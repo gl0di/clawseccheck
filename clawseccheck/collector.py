@@ -238,11 +238,11 @@ _MAX_SUBAGENT_RUNS = 50
 # (see its docstring), but the collector caps it independently so nothing downstream can
 # accidentally hold or print an unbounded blob.
 _MAX_SUBAGENT_TASK_CHARS = 500
-# B-709: on the MODERN (OpenClaw 2026.8.2+) subagent_runs shape, the only outcome signal is
-# `$.execution.outcome.status`, and the vendor itself constrains it to exactly these four
-# values (subagent-registry.store.sqlite-B_lUfEus.js:362). Anything else — including the
-# key being entirely absent, which is the normal in-flight-run shape — is treated as "no
-# outcome yet", never as a fifth value.
+# B-709: on the MODERN (payload_json column present) subagent_runs shape, the only outcome
+# signal is `$.execution.outcome.status`, and the vendor itself constrains it to exactly
+# these four values (subagent-registry.store.sqlite-B_lUfEus.js:362). Anything else --
+# including the key being entirely absent, which is the normal in-flight-run shape -- is
+# treated as "no outcome yet", never as a fifth value.
 _SUBAGENT_OUTCOME_STATUSES = frozenset({"ok", "error", "timeout", "unknown"})
 
 # F-134 (DISK-1, B191): OpenClaw's OWN runtime audit trail (``audit_events`` in the shared
@@ -906,7 +906,7 @@ class Context:
     # child_session_key, model, agent_dir, workspace_dir, spawn_mode, run_timeout_seconds,
     # task (capped, see _MAX_SUBAGENT_TASK_CHARS), outcome (parsed outcome_json dict, or None
     # when the run has not ended / no outcome was recorded yet), ended_reason, created_at.
-    # B-709: on the MODERN (OpenClaw 2026.8.2+) table shape, agent_dir/workspace_dir/
+    # B-709: on the MODERN (payload_json column present) table shape, agent_dir/workspace_dir/
     # spawn_mode/task are permanently None -- that schema does not carry them at all (see
     # _collect_subagent_runs's docstring). A one-time LIMIT_DOMAIN_AGENTS disclosure names
     # this per collection run; a consumer must not read the None as "no workspace recorded".
@@ -4358,7 +4358,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
 
     * LEGACY -- ``job_id``, ``name``, ``enabled``, ``delete_after_run``, ``trigger_script``,
       ``payload_kind``, ``payload_message`` columns, each holding its own scalar.
-    * MODERN (OpenClaw 2026.8.2+) -- ``delete_after_run``/``trigger_script``/
+    * MODERN (``job_json`` column present) -- ``delete_after_run``/``trigger_script``/
       ``payload_message`` no longer exist as columns; they live inside the ``job_json``
       TEXT column (``deleteAfterRun`` top-level, ``payload.script``/``payload.message``/
       ``payload.text`` depending on ``payload.kind``). ``job_id``/``name``/``enabled``/
@@ -4484,7 +4484,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 return  # no cron_jobs table at all -- same honest "not found" as before
 
             if "job_json" in columns:
-                # MODERN shape (OpenClaw 2026.8.2+). delete_after_run/trigger_script/
+                # MODERN shape (job_json column present). delete_after_run/trigger_script/
                 # payload_message no longer have their own columns -- they live inside the
                 # job_json blob, grounded against the installed dist:
                 #   deleteAfterRun  top-level bool, optional (plugin-entry-DhKN3bwq.d.ts:6380
@@ -4712,8 +4712,8 @@ def _flag_cron_store_config_mismatch(ctx: Context, jobs_json: Path) -> None:
     runtime actually uses, full stop -- no SQLite lookup can rescue that, because the
     configured store might not even be SQLite-backed. Flag it unconditionally.
     """
-    # F-183: `cron.store` left openclaw.json for the machine-owned state store in
-    # OpenClaw 2026.8.1, so reading only the config silently stopped this check firing on
+    # F-183: `cron.store` left openclaw.json for the machine-owned state store
+    # (`config_machine_state`), so reading only the config silently stopped this check firing on
     # a current build — the shadow it exists to catch would go unreported. The state value
     # wins where present; the config key remains authoritative on builds that still have
     # one, and on any machine whose state store could not be read.
@@ -4834,10 +4834,10 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     added, ran, and self-erased leaves no definition for B168 to scan, but its run trail
     survives here.
 
-    B-709: on the installed OpenClaw 2026.8.2, ``cron_run_logs`` DOES NOT EXIST AT ALL. The
-    live state DB carries a completed migration record whose id is literally
+    B-709: where the state DB carries a completed migration record whose id is literally
     ``state:cron-run-logs-to-task-runs:v1`` — the vendor naming its own destination, not an
-    inference — and cron executions now live as rows in the generic ``task_runs`` table
+    inference — ``cron_run_logs`` DOES NOT EXIST AT ALL and cron executions instead live as
+    rows in the generic ``task_runs`` table
     (``runtime = 'cron'``, also ``task_kind = 'automation_run'``). Verified empirically: a
     live ``task_runs`` row's ``source_id`` equals the ``job_id`` of a live ``cron_jobs`` row
     for the same job, so ``source_id`` is the cron job_id. Column mapping onto the SAME
@@ -4932,7 +4932,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
                 rows = cur.fetchall()
                 modern = False
             elif modern_present:
-                # MODERN successor (OpenClaw 2026.8.2+). Filtered to runtime='cron' so a
+                # MODERN successor (``task_runs`` table present). Filtered to runtime='cron' so a
                 # non-cron task_runs row (e.g. runtime='subagent') is never mistaken for a
                 # cron execution -- that would invent cron history that never happened.
                 cur = conn.execute(
@@ -4991,8 +4991,8 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
         )
 
 
-# F-183. The three machine-owned config values OpenClaw 2026.8.1 moved OUT of
-# openclaw.json and into its own state database. This is a new CATEGORY of schema change:
+# F-183. Three machine-owned config values moved OUT of openclaw.json and into the shared
+# state database's `config_machine_state` table. This is a new CATEGORY of schema change:
 # the setting did not move within the JSON, it left the JSON, so every `dig(cfg, ...)`
 # reader of these keys is looking somewhere the runtime no longer writes.
 #
@@ -5192,8 +5192,7 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
 
 def _collect_update_runs(home: Path, ctx: Context) -> None:
     """F-192: read-only collection of OpenClaw's OWN self-update ledger (`update_runs` in
-    the shared state database), new at OpenClaw 2026.9.2 (state schema `PRAGMA user_version`
-    15).
+    the shared state database), new at state schema `PRAGMA user_version` 15.
 
     Grounded against the installed dist's `OPENCLAW_STATE_SCHEMA_SQL` literal (verbatim,
     task description) -- located by SYMBOL across
@@ -5710,7 +5709,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
 
     TWO backing shapes exist, probed in this order over the SAME read-only connection:
 
-    A. (OC-82, OpenClaw 2026.8.2+) ``config_machine_state.value_json`` where
+    A. (OC-82) ``config_machine_state.value_json`` where
        ``state_key = 'plugins.installedIndex'``. The ``state-consolidation-v13``
        migration folded the whole ``installed_plugin_index`` table into this one KV row.
        Grounded against the installed dist: writer
@@ -6230,10 +6229,10 @@ def _parse_subagent_outcome(raw) -> "tuple[dict | None, bool]":
 def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
     """B-709: parse one MODERN ``subagent_runs.payload_json`` cell (the consolidated blob
     that replaced the ``model``/``run_timeout_seconds``/``outcome_json``/``ended_reason``
-    columns on OpenClaw 2026.8.2+) into a plain dict, for named-key extraction only (§8 —
-    the blob carries far more than the handful of keys this collector takes, and the same
-    state DB holds live OAuth tokens under ``authProfiles.store``/``auth.sharedStore``, so
-    it is never stored or emitted whole).
+    columns when the ``payload_json`` column is present) into a plain dict, for named-key
+    extraction only (§8 — the blob carries far more than the handful of keys this collector
+    takes, and the same state DB holds live OAuth tokens under
+    ``authProfiles.store``/``auth.sharedStore``, so it is never stored or emitted whole).
 
     Returns ``(fields, ok)``, mirroring ``_parse_subagent_outcome``'s contract but over the
     WHOLE row rather than one sub-field: ``ok`` is False ONLY when *raw* is a non-empty
@@ -6257,9 +6256,9 @@ def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
     except ValueError:
         return {}, False
     if isinstance(parsed, dict):
-        # OpenClaw 2026.9.5 stores a run whose `completionTarget` is "parent" as
-        # `{"parentCompletion": <record>}` (`bindSubagentRunRecord`), where 2026.9.4 always
-        # wrote the flat record; the vendor's own reader unwraps it first
+        # A run whose `completionTarget` is "parent" is stored wrapped as
+        # `{"parentCompletion": <record>}` (`bindSubagentRunRecord`) rather than as the flat
+        # record older rows carry; the vendor's own reader unwraps it first
         # (`subagentMetadataPayload`, and the guard in `isRecord(stored.parentCompletion) &&
         # ...completionTarget === "parent"`). Reading the top level of a wrapped row returned
         # None for model / timeout / outcome / ended_reason with no error and no disclosure
@@ -6326,7 +6325,8 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     style ``_collect_plugin_trust`` already uses, rather than letting one corrupt cell blind
     the whole disclosure to otherwise-trustworthy sibling rows).
 
-    B-709: on the installed OpenClaw 2026.8.2, the real ``subagent_runs`` columns are ONLY
+    B-709: on the MODERN shape (``payload_json`` column present, no ``model`` column), the
+    real ``subagent_runs`` columns are ONLY
     ``run_id, child_session_key, controller_session_key, requester_session_key, created_at,
     payload_json`` — the old SELECT above threw ``sqlite3.OperationalError: no such column:
     model`` on every run, so ``ctx.errors`` carried that line and B18 reported UNKNOWN even
@@ -6407,7 +6407,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
                 rows = cur.fetchall()
                 modern = False
             elif "payload_json" in columns:
-                # MODERN shape (OpenClaw 2026.8.2+). Only the real columns
+                # MODERN shape (payload_json column present). Only the real columns
                 # (child_session_key, created_at) plus the opaque payload_json blob exist;
                 # model/run_timeout_seconds/outcome_json/ended_reason are extracted from
                 # the blob per-row below (named-key extraction only, §8).
