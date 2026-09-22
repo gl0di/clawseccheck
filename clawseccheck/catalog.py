@@ -503,10 +503,13 @@ CATALOG: list[CheckMeta] = [
     # === void 0` (`shouldAutoApproveCodexAppServerApprovals`, grounded against the
     # installed `@openclaw/codex@2026.9.5` plugin bundle — a SEPARATE npm package from
     # `openclaw` core, `dist/.setup/config-security-*.mjs`) pre-approves every MCP server
-    # that sets no `codex.defaultToolsApprovalMode` of its own — including, unlike this
-    # check's explicit-"approve" branch above, a per-requester OAuth server, whose own
-    # `codex` block the static-only Codex MCP config builder never reads at all. Still
-    # tracked separately: provider-level `agentRuntime` pins (B370).
+    # that sets no `codex.defaultToolsApprovalMode` of its own — a per-requester OAuth
+    # server included by the same rule, because the OpenClaw-side runtime catalog reads
+    # its mode for both connection scopes. The appServer fields are RESOLVED before that
+    # predicate runs (plugin activation, each agent's effective tools.exec mode, the
+    # reviewer/requirements-file defaults), so the branch ports that resolution and says
+    # which input it could not see instead of guessing (B-831 round 1). Still tracked separately:
+    # provider-level `agentRuntime` pins (B370).
     CheckMeta(
         "B353",
         "MCP server pre-approves every tool for unattended runs",

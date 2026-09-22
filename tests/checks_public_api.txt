@@ -97,6 +97,8 @@ _blank_fences
 _canonical_ipv4
 _channel_has_implicit_default_account
 _check_unicode_obfuscation
+_codex_appserver_yolo_reach
+_codex_unmoded_server_names
 _credential_store_state
 _defensive_context
 _defensive_section
@@ -138,6 +140,7 @@ _mcp_sensitive_reason
 _mcp_server_risks
 _mcp_servers
 _mcp_value_looks_secret
+_memory_default_owner_blocked
 _message_actions_allow_for_scope
 _message_actions_guarded_reachable
 _negation_context
