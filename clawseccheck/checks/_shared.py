@@ -1209,6 +1209,43 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
     consulted: it records which build last SAVED the file, and a user who downgraded since
     would be told the file is invalid on a build that still reads every key. An unknown
     installed build returns ``[]`` -- silence, not a guess.
+
+    C-577 (F-184 hand-off): does a retired key behave differently when it lives inside an
+    ``$include``d fragment instead of directly in ``openclaw.json``, and does this helper
+    need to be told an ``$include`` is present? Reproduced against the installed 2026.9.5
+    dist, both live and by source:
+
+    * ``ctx.config`` (read above) is what ``collector.collect()`` gets back from
+      ``configloader.load_openclaw_config()`` -- already the fully ``$include``-resolved,
+      deep-merged dict, never the raw root file. So ``_has_key_path`` sees a retired key
+      exactly the same way whether it sits in ``openclaw.json`` or in an included fragment;
+      there is nothing for a presence flag to add here.
+    * Confirmed live against the installed CLI too: a retired key placed directly in
+      ``openclaw.json`` and the same key moved into an ``$include``d fragment both make
+      `openclaw config validate` report the file invalid with the same
+      `Unrecognized key` message -- the only difference is the vendor drops the
+      `openclaw.json:<line>` citation prefix when the key resolves from a fragment, which
+      is cosmetic (a *where*, never a *whether*). That is the schema-validity claim B382
+      actually makes, and it is untouched by the file's shape either way.
+    * There IS a real, reproduced ``$include`` asymmetry, but at a layer B382 explicitly
+      disclaims: OpenClaw's own silent startup self-heal. The installed dist's
+      `admitAutomaticConfigRepairSnapshot` (`automatic-startup-config-repair-*.mjs`) --
+      wired into the real `gateway run` bootstrap path (`pre-bootstrap-*.mjs`) -- refuses
+      to engage whenever `containsConfigIncludeDirective(snapshot.parsed)` is true or any
+      include was actually resolved, so a plain `openclaw.json` with a retired key gets
+      silently auto-migrated and the gateway starts anyway, while the identical key behind
+      an ``$include`` leaves the gateway blocked on the same invalid config `config
+      validate` reports. This grounds (for the first time -- it shipped as an unverified
+      hedge in 10d766a) the existing `fix` text below: "a config that uses $include may be
+      refused automatic repair, so run the command explicitly". It is a fact about the
+      GATEWAY, which B382's own docstring already disclaims making any claim about, so it
+      changes no verdict here. See ``tests/test_f184_retired_key_config_invalid.py`` for
+      the ``$include``-invariance regression and the dist-grounding pin.
+
+    Decision: no ``$include``-presence field is added to ``Context``. A separate, unstarted
+    piece of work also touches ``collector.py``, but in the skill-content language-routing
+    section (`_file_language`/prose-declared interpreters, ~L2995-3020) -- a different part
+    of the module from config loading, so there is no field or line to actually collide on.
     """
     installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
     cfg = getattr(ctx, "config", None)

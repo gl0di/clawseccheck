@@ -25,6 +25,7 @@ from clawseccheck.catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks._config import check_retired_config_keys_invalid
 from clawseccheck.checks._shared import _RETIRED_CONFIG_KEYS, _retired_keys_present
 from clawseccheck.collector import Context, collect
+from clawseccheck.configloader import load_openclaw_config
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 MODERN = "2026.9.4"
@@ -141,6 +142,76 @@ def test_fixtures():
         ctx.installed_dist_version = MODERN
         f = next(x for x in C.run_all(ctx) if x.id == "B382")
         assert f.status == want, (name, f.detail)
+
+
+# ------------------------------------------------------- C-577: $include invariance
+#
+# F-184 deliberately left open whether the collector needs to know an `$include` is
+# present, pending a reproduction. Answer: no. `_retired_keys_present` reads
+# `ctx.config`, which `collector.collect()` populates from
+# `configloader.load_openclaw_config()` -- already the fully `$include`-resolved,
+# deep-merged dict -- so a retired key is exactly as visible behind an `$include` as it
+# is in the root file. These tests load through the REAL configloader (not a hand-built
+# dict) so the merge itself is exercised, not just the structural-presence check.
+
+
+def _write(p, text: str) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text)
+
+
+def test_retired_key_behind_include_warns_the_same_as_direct(tmp_path):
+    _write(tmp_path / "fragment.json5", '{"commands": {"useAccessGroups": false}}')
+    _write(tmp_path / "openclaw.json", '{"$include": "./fragment.json5"}')
+    cfg = load_openclaw_config(tmp_path / "openclaw.json", root_byte_limit=5_000_000)
+    included = _run(cfg, MODERN)
+    direct = _run({"commands": {"useAccessGroups": False}}, MODERN)
+    assert included.status == direct.status == WARN
+    assert included.evidence == direct.evidence == ["commands.useAccessGroups"]
+    assert "commands.useAccessGroups" in included.detail
+
+
+def test_clean_config_behind_include_still_passes(tmp_path):
+    _write(tmp_path / "fragment.json5", '{"gateway": {"bind": "127.0.0.1"}}')
+    _write(tmp_path / "openclaw.json", '{"$include": "./fragment.json5"}')
+    cfg = load_openclaw_config(tmp_path / "openclaw.json", root_byte_limit=5_000_000)
+    f = _run(cfg, MODERN)
+    assert f.status == PASS
+    assert f.pass_confidence != "no_signal"
+
+
+def test_retired_key_as_an_include_sibling_still_warns(tmp_path):
+    # The retired key sits beside the $include directive in the root file itself, rather
+    # than inside the fragment -- the other authoring shape OpenClaw's own docs allow.
+    _write(tmp_path / "fragment.json5", '{"gateway": {"bind": "127.0.0.1"}}')
+    _write(tmp_path / "openclaw.json",
+          '{"$include": "./fragment.json5", "commands": {"useAccessGroups": false}}')
+    cfg = load_openclaw_config(tmp_path / "openclaw.json", root_byte_limit=5_000_000)
+    f = _run(cfg, MODERN)
+    assert f.status == WARN
+    assert f.evidence == ["commands.useAccessGroups"]
+
+
+# ---------------------------------------- C-577: dist grounding for the repair hedge
+#
+# `check_retired_config_keys_invalid`'s `fix` text hedges: "a config that uses $include
+# may be refused automatic repair, so run the command explicitly." That line shipped in
+# 10d766a with no citation. Pin the vendor mechanism it describes so a future dist
+# rotation that changes this behaviour is caught here rather than leaving the hedge to
+# quietly go stale: the installed build's own automatic-startup config repair refuses to
+# run whenever an `$include` is present anywhere in the config.
+
+
+def test_automatic_repair_gate_still_declines_on_include_present():
+    require_dist()
+    path = dist_file(
+        "automatic-startup-config-repair-*.mjs",
+        symbol="admitAutomaticConfigRepairSnapshot",
+        contains="admitAutomaticConfigRepairSnapshot",
+    )
+    text = path.read_text(encoding="utf-8", errors="replace")
+    assert "containsConfigIncludeDirective" in text
+    assert "includedPaths" in text
 
 
 # --------------------------------------------------- single table, two guards
