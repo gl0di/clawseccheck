@@ -36,6 +36,7 @@ agents.defaults.tools
 agents.defaults.workspace
 agents.list
 agents.subagents
+attachments.ttlHours
 audit.enabled
 auth.profiles
 browser.extensionRelay.allowLegacyAuth

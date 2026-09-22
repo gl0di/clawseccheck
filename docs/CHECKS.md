@@ -2609,6 +2609,18 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Hardening checks
 
+### B390 - attachments.ttlHours unset -- no sweep, staged media accumulates indefinitely
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Data Retention
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: attachments.ttlHours unset -- no sweep, staged media accumulates indefinitely
+- Remediation:
+  - none
+
 ### B354 - Shared skill-library / upload surface bypasses filesystem discovery
 
 - Severity: HIGH
