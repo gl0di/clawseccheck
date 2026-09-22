@@ -112,6 +112,7 @@ Leaf: imports only ``collector.agent_roster``. Not in ``__all__``, matching its 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 from .collector import agent_roster
@@ -398,6 +399,34 @@ def _model_value_problem(value):
     return "has a shape this determination does not read"
 
 
+#: Matches a leaf built ONLY by walking ``cfg["models"]["providers"][p]["models"][i]["id"/
+#: "name"]`` (the walk below dot-joins real dict keys / list indices bottom-up, so this literal
+#: shape cannot arise any other way short of a provider key containing this exact suffix as a
+#: literal substring). ``(.+)`` is greedy, so a provider key that itself contains a ``.`` still
+#: resolves to the rightmost, real ``.models.<digits>.(id|name)`` split.
+_PROVIDER_CATALOG_FIELD_RE = re.compile(r"^models\.providers\.(.+)\.models\.\d+\.(?:id|name)$")
+
+
+def _provider_catalog_field(path: str, providers=None):
+    """The raw provider key ``<p>``, as spelled in the config, when *path* is a
+    ``models.providers.<p>.models[i].id``/``.name`` leaf; else None.
+
+    A dot-joined path cannot distinguish a provider key containing a ``.`` from a deeper
+    nesting under a shorter key: ``models.providers.openai.extra.models.0.id`` captures
+    ``openai.extra`` either way. So the capture is accepted only when it is an ACTUAL key of
+    ``models.providers`` -- otherwise a leaf filed under provider ``openai`` could be exempted
+    as if ``openai.extra`` were an unrelated provider, which the docstring above promises
+    never happens (C-135 review of C-560). A rejected capture means no exemption, i.e. the
+    pre-C-560 behaviour: ``unknown``, never a confident ``no``."""
+    m = _PROVIDER_CATALOG_FIELD_RE.match(path)
+    if not m:
+        return None
+    key = m.group(1)
+    if not _is_record(providers) or key not in providers:
+        return None
+    return key
+
+
 def stray_model_signal(cfg) -> "str | None":
     """A reason ``no`` cannot be given because of a model reference ``model_refs`` never lists.
 
@@ -427,9 +456,31 @@ def stray_model_signal(cfg) -> "str | None":
 
     Over-refusing can only turn a ``no`` into ``unknown`` (the old WARN); under-refusing is the
     lying PASS this exists to prevent. Returns a path-only reason, never a value.
+
+    C-560 narrows the whole-config walk in exactly two PROVABLY-Codex-free shapes, each argued
+    on its own, neither by trusting a key NAME (round 2-3 of the earlier C-135 passes showed a
+    reference can sit under any key, so a name-based skip is unsound in general):
+
+    * ``models.providers.<p>.models[i].id``/``.name`` is a local CATALOG LABEL for one of
+      provider ``<p>``'s own models, not a route -- the model resolves through ``<p>`` itself
+      (e.g. ``lmstudio/openai/gpt-oss-20b``), and the label is free to spell anything, including
+      another provider's name, without that provider ever seeing the request. Skipped only when
+      ``<p>`` itself is not ``openai``/a legacy Codex spelling (``_is_codex_provider_name``) --
+      the port already reads ``<p>`` structurally for this exact subtree in ``_analyse``, so the
+      skip is keyed off the SAME field the vendor itself routes through, not off ``id``/``name``
+      being harmless key names in general.
+    * ``agents.list`` beside an ``agents.entries`` RECORD is a shape the vendor's own
+      ``collectConfiguredModelRefs``/``collectConfiguredAgentHarnessRuntimes`` never reads, and
+      that its legacy migration deletes. Not beside a non-record ``entries`` (``null``): there
+      the migration moves ``list`` into ``entries``, so the list can still become a route --
+      see the comment at the skip below. Mirrored inline here (not
+      called: ``agent_roster`` returns the roster, not a walk-skip decision) rather than walking
+      it and letting an under-Codex-shaped string report a reference nothing dispatches to.
     """
     if not _is_record(cfg):
         return None
+    _models = cfg.get("models")
+    _catalog_providers = _models.get("providers") if _is_record(_models) else None
     stack = [("", cfg, 0)]
     seen = 0
     while stack:
@@ -438,7 +489,21 @@ def stray_model_signal(cfg) -> "str | None":
         if seen > _WALK_MAX_NODES or depth > _WALK_MAX_DEPTH:
             raise _Bail("the config is too large or too deep to scan for model references")
         if _is_record(node):
+            # B-699: `list` beside `entries` is unread -- but ONLY when `entries` is a record.
+            # The runtime roster reader picks `entries` whenever it is !== undefined
+            # (agent-roster-DzcWJqlw.mjs:53-67, mirrored by collector.agent_roster), yet the
+            # vendor's own legacy migration drops `list` only when getRecord(agents.entries)
+            # is truthy (legacy-38PBEy7q.mjs:1983-1999). With `entries: null` the migration
+            # MOVES `list` INTO `entries` instead -- and a gateway start offers that repair as
+            # a single yes/no prompt (invalid-config-recovery-Dp32yq5b.mjs:16-25), after which
+            # an `openai/...` list entry runs on the Codex harness. `entries: null` is
+            # schema-invalid, so the raw-config oracle cannot see this; per this module's own
+            # rule (a migration can change the answer, so `no` may not be given over it), a
+            # non-record `entries` does not license the skip. Found by C-135 review of C-560.
+            skip_ignored_list = path == "agents" and _is_record(node.get("entries"))
             for key, value in node.items():
+                if skip_ignored_list and key == "list":
+                    continue
                 kp = f"{path}.{key}" if path else str(key)
                 if _is_codex_qualified(key):
                     return f"{kp} is a map key naming a model on a provider that runs the " \
@@ -453,8 +518,10 @@ def stray_model_signal(cfg) -> "str | None":
             for i, value in enumerate(node):
                 stack.append((f"{path}.{i}", value, depth + 1))
         elif _is_codex_qualified(node):
-            return (f"{path} names a model on a provider that runs the Codex harness (or is "
-                    f"migrated onto it)")
+            catalog_provider = _provider_catalog_field(path, _catalog_providers)
+            if catalog_provider is None or _is_codex_provider_name(catalog_provider):
+                return (f"{path} names a model on a provider that runs the Codex harness (or is "
+                        f"migrated onto it)")
         elif path.split(".", 1)[0] in _UNRESOLVABLE_MODEL_SCOPE and _is_codex_provider_name(node):
             return (f"{path} names a provider that runs the Codex harness (or is migrated onto "
                     f"it), which a plugin can combine with a model id from elsewhere")
