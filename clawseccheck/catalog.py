@@ -1715,6 +1715,28 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         surface="agents",
     ),
+    # B392: tools.swarm (collector-mode subagent fan-out), re-grounded against the
+    # installed 2026.9.5 dist against an earlier shortlist reading — see
+    # checks/_agents.py::check_swarm_fanout_limits for the full citation trail.
+    # `enabled` actually defaults to true (the shortlist read "default is off" off the
+    # vendor's own UI description text, not the runtime resolver), and the resolver's
+    # own Math.min clamp means no config can reach a literally unbounded limit — the
+    # closest is a value at/past the vendor's own hard ceiling (1000 / 10,000 /
+    # 100,000 / 86,400s). FAIL-capable: unlike B81's WARN-only ceiling, an explicit
+    # push to that vendor hard ceiling is treated as unambiguous on its own (no
+    # untrusted-channel gate), the same idiom B21/B39/B327 use for a deterministic
+    # dangerous value.
+    CheckMeta(
+        "B392",
+        "tools.swarm collector-mode subagent fan-out limits raised toward/past the "
+        "vendor's hard ceiling",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Subagents",
+        scored=True,
+        confidence="HIGH",
+        surface="agents",
+    ),
     CheckMeta(
         "B82",
         "Cache-trace diagnostics persist full turn transcripts to disk",
@@ -3706,6 +3728,7 @@ AST_MAP = {
     "B359": ("AST06",),  # remote-gateway SSH host-key verification delegated to OpenSSH = weak isolation (cf. B340)
     "B360": ("AST06",),  # Control-UI embed sandbox "trusted" removes origin isolation = weak isolation (cf. B330)
     "B81": ("AST03",),  # raised subagent spawn limits = over-privileged delegation (cf. B72)
+    "B392": ("AST03",),  # swarm fan-out limits at/past the vendor ceiling = over-privileged delegation (cf. B81)
     "B82": ("AST02",),  # bulk turn transcripts at rest = sensitive-data exposure (cf. C5)
     "B365": ("AST02",),  # otel content capture ships raw turns off-host = sensitive-data exposure (cf. B82)
     "B366": ("AST02",),  # memory.search.remote embeds/sends memory chunks off-host = sensitive-data exposure (cf. B82)
@@ -3863,6 +3886,7 @@ OWASP_MAP = {
     "C015": ("LLM02",),  # secrets-at-rest scan = Sensitive Info Disclosure (cf. B1)
     "B80": ("LLM10",),  # no rate limiting on an exposed auth'd gateway = Unbounded Consumption
     "B81": ("LLM06",),  # raised subagent spawn limits = Excessive Agency (cf. B72)
+    "B392": ("LLM06",),  # swarm fan-out limits at/past the vendor ceiling = Excessive Agency (cf. B81)
     "B82": ("LLM02",),  # unredacted transcripts persisted at rest = Sensitive Info Disclosure
     "B365": ("LLM02",),  # otel content capture ships raw turns off-host = Sensitive Info Disclosure
     "B366": ("LLM02",),  # memory.search.remote embeds/sends memory chunks off-host = Sensitive Info Disclosure
