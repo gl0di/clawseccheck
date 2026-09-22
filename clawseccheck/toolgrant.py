@@ -160,9 +160,7 @@ class _GlobalScope:
     with the global-scope query itself (F-186), and a caller holding that roster id had to
     remember a keyword (``agent=True``) to disambiguate. A caller who forgot it got the
     WRONG scope silently — no exception, no log line, just a resolved policy for the wrong
-    entity. That is not hypothetical: the first version of the F-186 fix missed one of the
-    (then three, now four) roster call sites because a ``grep | head`` truncated the list,
-    and a fourth caller landed the very next day with no reason to know the flag existed.
+    entity, with nothing short of a differential battery able to catch it.
 
     A ``_GlobalScope`` instance has no ``__eq__`` of its own, so equality falls back to
     identity — it is never equal to any string a config or a caller could produce.

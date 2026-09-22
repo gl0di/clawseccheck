@@ -244,12 +244,22 @@ if (cfgOf.want.includes("grants")) {
     )].sort();
     const results = {};
     for (const tool of cfgOf.tools) results[tool] = {};
-    for (const scope of ["global", ...ids]) {
-      const agentId = scope === "global" ? undefined : scope;
+    // A non-string sentinel, not the string "global": a roster id spelled "global" is legal
+    // (CLAWSECCHECK-C-561) and must be looked up by that id, never treated as the true global
+    // scope. `scope === "global"` collided the two -- a Symbol never `===` a string, so the
+    // two iterations can no longer be confused regardless of what an id is spelled.
+    const TRUE_GLOBAL = Symbol("global");
+    for (const scope of [TRUE_GLOBAL, ...ids]) {
+      const agentId = scope === TRUE_GLOBAL ? undefined : scope;
       const policies = resolveConfiguredToolPolicies({
         cfg, agentTools: agentToolsFor(cfg, agentId), agentId, sandboxMode: null,
       });
-      for (const tool of cfgOf.tools) results[tool][scope] = isToolAllowedByPolicies(tool, policies);
+      // Output key: the sentinel is still reported under the label "global" (the existing,
+      // pinned battery shape); a real roster id keeps its own string, even when that string
+      // is also "global" -- which, for that id, means the LAST write to that key is the
+      // correctly-queried roster agent's own answer, not the true global scope's.
+      const key = scope === TRUE_GLOBAL ? "global" : scope;
+      for (const tool of cfgOf.tools) results[tool][key] = isToolAllowedByPolicies(tool, policies);
     }
     rows.push({ label, agents: ids, results });
   }

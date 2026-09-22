@@ -196,6 +196,34 @@ def test_the_canvas_and_update_plan_expansions_are_outside_the_grant_predicate(v
         assert toolgrant.granted(cfg, tool) is False, (name, tool)
 
 
+def test_the_oracle_queries_a_roster_agent_literally_named_global_by_its_own_id():
+    """CLAWSECCHECK-C-561 fixed ``GLOBAL_SCOPE`` in ``toolgrant.py`` itself; this module's own
+    harness (``tests/_toolgrantoracle.py``) had the identical bug in its per-scope loop --
+    ``const agentId = scope === "global" ? undefined : scope`` -- so a roster agent spelled
+    ``global`` was never actually queried: the loop visits the string ``"global"`` twice (the
+    true global scope, then that agent's own id), both compare equal to the literal, and both
+    resolve as the global scope.
+
+    Reproduced here exactly as found: a global ``tools.allow: [write]`` plus two roster agents,
+    ``global`` and ``w``, both carrying the identical restrictive ``allow: [read]``. Before this
+    fix, that config answered ``write=True`` for ``global`` (the global scope's own answer,
+    leaking through) and ``write=False`` for ``w`` (correctly, its own) -- a mismatch between
+    two agents with identical config. Confirmed by temporarily reverting the harness fix and
+    re-running this exact probe: it printed ``{"global": True, "w": False}``. With the fix, the
+    roster id ``"global"`` is looked up by ``resolveAgentConfig`` like any other id (a Symbol
+    can never ``===`` a string), so the two agents now agree."""
+    cfg = {
+        "tools": {"allow": ["write"]},
+        "agents": {"list": [
+            {"id": "global", "tools": {"allow": ["read"]}},
+            {"id": "w", "tools": {"allow": ["read"]}},
+        ]},
+    }
+    rows = oracle.vendor_grants([("probe/global-collision", cfg)], tools=["write"])
+    results = rows[0]["results"]["write"]
+    assert results == {"global": False, "w": False}, results
+
+
 # --------------------------------------------------------------------- the whole-catalog sweep
 
 @pytest.fixture(scope="module")

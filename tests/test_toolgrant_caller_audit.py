@@ -7,10 +7,8 @@ is safe by construction against the GLOBAL_SCOPE/agent-id collision.
 also a legal agent id, so ``granted(cfg, tool, "global")`` for a roster row spelled
 ``global`` skipped the entry lookup and silently answered the wrong scope's policy (F-186).
 The fix added a keyword, ``agent=True``, that a caller HOLDING a roster id had to remember
-to pass. That patch was already caught missing a caller once: F-186's first pass used
-``grep | head`` to find every call site and silently dropped the third of three; a fourth
-call site (``checks/_config.py``'s B389 check) then landed the very next day with no reason
-for its author to know the flag existed at all.
+to pass -- a silent, easy-to-forget obligation with no exception and no log line to catch a
+lapse, on a caller surface (four roster call sites as of this writing) that keeps growing.
 
 CLAWSECCHECK-C-561 removed the flag entirely: ``GLOBAL_SCOPE`` is now a private sentinel
 TYPE (``toolgrant._GlobalScope``), not a string, so no config value or copy-pasted literal
@@ -27,7 +25,7 @@ A plain text search for ``granted(`` also matches the unrelated local variable n
 ``granted`` in ``checks/_capability.py`` (a ``set``, never called) and the word's many
 prose uses in docstrings and evidence strings, so distinguishing an actual call needs a
 parsed tree, not a regex. And a truncated sweep is exactly the failure mode that let the
-fourth caller through in the first place -- this file walks ``PKG.rglob("*.py")`` (the
+third F-186 caller go quiet in the first place -- this file walks ``PKG.rglob("*.py")`` (the
 whole package tree, no ``head``, no hand-maintained file list) and resolves each file's
 OWN import aliases for ``toolgrant``/``granted`` rather than hard-coding one spelling, so a
 call written as ``_toolgrant.granted(...)``, ``toolgrant.granted(...)`` or a bare
