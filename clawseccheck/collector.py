@@ -3923,6 +3923,62 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         and audited_home.name.startswith(".openclaw")
     ):
         roots.append((user_home / ".agents" / "skills", False))
+    # B-872: sandbox-layout awareness. Under `sandbox_exec` the state dir this run is
+    # pointed at (e.g. `$HOME/.openclaw`) has no config in it -- there is none to find,
+    # the container is empty from OpenClaw's own point of view -- but OpenClaw's REAL
+    # skill tree sits one level up, at `$HOME/skills`: a SIBLING of the state dir, never
+    # a child, so none of the home-relative `SKILL_DIRS` roots above can ever reach it
+    # (the incident this fixes: 29 real skills, 0 found, no hint the run looked in the
+    # wrong place). `ctx.sandboxed` is `collect()`'s own compound signal for exactly this
+    # shape -- the sync marker present AND no config resolvable this run -- so gating on
+    # it here means an ordinary `--home` with simply no sibling `skills/` (nothing
+    # unusual about that) never trips this. Reuses the SAME `user_home`/`audited_home`
+    # pair just resolved for the `.agents/skills` root above rather than re-deriving
+    # them, so the two sandbox-shape checks cannot drift apart.
+    #
+    # Deliberately a DISCLOSURE, never an extra root: silently folding `$HOME/skills`
+    # into this run's population would audit a directory the user never named with
+    # --home, which is the exact surprise this project refuses (Golden Rule #2). The
+    # count below is a cheap, bounded PROBE only -- `iter_discovered_skill_dirs` is the
+    # same walker every real root uses, so "sees a group layout" behaves identically,
+    # but its `limit_hits`/`unassessable` sinks are thrown away rather than fed to `ctx`:
+    # a truncation or an unreadable manifest inside a tree this run never actually
+    # scans must not contaminate this run's own coverage bookkeeping for content it
+    # never read.
+    if (
+        ctx.sandboxed
+        and user_home is not None
+        and audited_home is not None
+        and audited_home.parent == user_home
+        and audited_home.name.startswith(".openclaw")
+    ):
+        _sibling_skills = user_home / "skills"
+        if _safe_is_dir(_sibling_skills):
+            _sibling_count = sum(
+                1 for _ in _iter_discovered_skill_dirs(
+                    _sibling_skills, allow_symlink_entries=False, limit_hits=[],
+                )
+            )
+            if _sibling_count:
+                # Disclosure.subject/.detail carry no path and no "/" at all (only a
+                # bare quoted directory NAME) -- collector's own precedent
+                # (`_config_workspace_dirs`'s `workspace_outside_home` disclosure) and
+                # `tests/test_b617_disclosure_channel.py::
+                # test_no_absolute_path_reaches_any_rendered_surface`, which greps the
+                # rendered block for `os.sep`. "Re-run with --home one level up" says
+                # what to do without ever naming a directory this run did not audit.
+                note_disclosure(
+                    ctx.disclosures,
+                    "skills_beside_state_dir",
+                    "skills",
+                    f"{_sibling_count} skill "
+                    f"director{'y' if _sibling_count == 1 else 'ies'} found in a "
+                    "'skills' directory that sits beside the audited state directory, "
+                    "not inside it, so this run's --home never reached them (none "
+                    "installed vs. could not look are collapsed here today). Re-run "
+                    "with --home pointing one level up, at that directory's parent, "
+                    "to include them.",
+                )
     for cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits,
                                     disclosures=ctx.disclosures):
         roots.append((cw / "skills", False))
