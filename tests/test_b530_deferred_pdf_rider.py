@@ -52,12 +52,11 @@ Offline, read-only outside tmp_path, stdlib only.
 """
 from __future__ import annotations
 
-import re
-import zlib
 from pathlib import Path
 
 import pytest
 
+from _pdftext import shown_strings
 from clawseccheck.cli import main
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -79,16 +78,7 @@ def _pdf_text(path: Path) -> str:
     asserting the document DISCLOSES its own reduced scope is the whole point of the
     option chosen, and an assertion on the file's byte size would not be that.
     """
-    raw = path.read_bytes()
-    chunks = []
-    for m in re.finditer(rb"stream\n(.*?)\nendstream", raw, re.S):
-        try:
-            chunks.append(zlib.decompress(m.group(1)).decode("latin-1"))
-        except zlib.error:
-            continue
-    body = "\n".join(chunks)
-    literals = re.findall(r"\(((?:[^()\\]|\\.)*)\)\s*Tj", body)
-    return "\n".join(s.replace("\\(", "(").replace("\\)", ")") for s in literals)
+    return shown_strings(path.read_bytes())
 
 
 # --------------------------------------------------------------- the three riders

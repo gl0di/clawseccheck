@@ -102,11 +102,11 @@ import importlib
 import inspect
 import pkgutil
 import re
-import zlib
 from pathlib import Path
 
 import pytest
 
+from _pdftext import content_text
 from clawseccheck.catalog import FAIL_WEIGHT_STATUSES
 from clawseccheck.checks import run_all
 from clawseccheck.checks._vet import _VET_MERGE_RANK
@@ -310,13 +310,7 @@ def _pdf_text(blob: bytes) -> str:
     xref offset shifts, and a byte diff reports a hundred regions of compression noise. The
     document's actual words are what a reader sees, so those are what is compared.
     """
-    out = []
-    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", blob, re.S):
-        try:
-            out.append(zlib.decompress(m.group(1)).decode("latin-1"))
-        except zlib.error:
-            continue
-    return "\n".join(out)
+    return content_text(blob)
 
 
 #: Values that move on their own, scrubbed so a clock cannot masquerade as a verdict change.
