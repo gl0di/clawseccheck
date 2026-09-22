@@ -6351,7 +6351,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         # same way, `_redact_home_paths(_sanitize(...))`. Before this, this renderer was the
         # one shareable/attachable surface (docs/USAGE.md groups `--html` with `--pdf`/
         # `--sarif`/`--badge` as the "canonical, deterministic output") that skipped the
-        # second pass: a real-account-home path that `_username_safe_path` declined to
+        # second pass: a real-account-home path that `_username_safe_path` did not
         # collapse against a spoofed `$HOME` reached `--html` raw while `--json`'s
         # `_sanitize_tree` and `--pdf`'s own call still caught it via the same regex, which
         # is $HOME-independent (B-825; tests/test_b825_html_path_redaction.py).
