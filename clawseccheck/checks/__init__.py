@@ -378,6 +378,7 @@ from ._config import (
     check_least_privilege,
     check_local_first,
     check_local_model_service_command,
+    check_nodehost_workerruns_isolation,
     check_privileged_commands_exposure,
     check_proxy_header_forging,
     check_redactor_blind_secret_paths,
@@ -1357,6 +1358,7 @@ CHECKS = [
     check_gateway,
     check_least_privilege,
     check_sandbox,
+    check_nodehost_workerruns_isolation,  # B391 (F-198) — beside B4, advisory
     check_supply_chain,
     check_bootstrap_injection,
     check_identity_file_injection,

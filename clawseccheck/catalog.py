@@ -248,6 +248,24 @@ CATALOG: list[CheckMeta] = [
     CheckMeta(
         "B4", "Execution sandbox", HIGH, "hardening", "Least Privilege / Sandbox", surface="agents"
     ),
+    # B391: nodeHost.workerRuns.isolation, re-grounded directly against the
+    # installed 2026.9.5 dist (schema-CwAIqZVE.mjs:892-896 / zod-schema-DN2u5FdA.mjs:
+    # 576-580) since the internal recon's descriptions map has no `nodeHost.workerRuns`
+    # entry at all -- same documented gap class as B390/attachments. Confirms an
+    # earlier shortlist reading still holds three releases later: "none" is
+    # the vendor's own default, not a user-introduced weakening, so this is a report
+    # (advisory, scored=False, LOW) beside B4's sandbox checks -- see
+    # checks/_config.py::check_nodehost_workerruns_isolation for the full grounding.
+    CheckMeta(
+        "B391",
+        "Node-host worker-run execution isolation (nodeHost.workerRuns)",
+        LOW,
+        "advisory",
+        "Least Privilege / Sandbox",
+        scored=False,
+        confidence="HIGH",
+        surface="agents",
+    ),
     CheckMeta(
         "B5",
         "Plugin / skill supply-chain integrity",

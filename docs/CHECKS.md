@@ -79,6 +79,22 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `agents.defaults.sandbox.mode` = `"all"` - run exec tools in a sandbox — 'all' sandboxes every session; 'non-main' leaves the agent's own main session on the host
 
+## Advisory checks
+
+### B391 - Node-host worker-run execution isolation (nodeHost.workerRuns)
+
+- Severity: LOW
+- Block: advisory
+- Framework: Least Privilege / Sandbox
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Node-host worker-run execution isolation (nodeHost.workerRuns)
+- Remediation:
+  - none
+
+## Hardening checks
+
 ### B5 - Plugin / skill supply-chain integrity
 
 - Severity: HIGH

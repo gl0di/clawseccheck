@@ -287,6 +287,7 @@ check_monitoring
 check_multiagent_exposure
 check_node_allowskills_default_on
 check_node_denycommands_ineffective
+check_nodehost_workerruns_isolation
 check_offboarding_hygiene
 check_outbound_proxy
 check_overt_secret_exfil

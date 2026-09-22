@@ -123,6 +123,9 @@ marketplaces.sources
 memory.search.remote
 meta.lastTouchedVersion
 models.providers
+nodeHost.workerRuns.containerImage
+nodeHost.workerRuns.enabled
+nodeHost.workerRuns.isolation
 plugins.allow
 plugins.bundledDiscovery
 plugins.deny
