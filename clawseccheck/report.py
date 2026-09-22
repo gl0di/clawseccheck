@@ -6005,8 +6005,13 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
                 ctx=None, skill_sweep: dict | None = None, plugin_sweep=None,
                 live_test_vulnerable: bool = False, live_test_reason: str | None = None,
                 behavioral_fired_ids=frozenset(), ledger=None,
-                version: str | None = None) -> str:
-    actions = suggest_actions(findings, score)
+                version: str | None = None,
+                home: "str | None" = None, data_dir: "str | None" = None) -> str:
+    # B-873: forwarded verbatim to suggest_actions, same optional/None-default shape as
+    # `version` above — a caller that omits them (the public library shape; every
+    # pre-existing call, incl. adjudication.render_judged_json's internal one) gets
+    # exactly the pre-B-873 "next_actions" commands, unchanged.
+    actions = suggest_actions(findings, score, home=home, data_dir=data_dir)
     _json_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if ctx is not None else None
 
     def _finding_dict_json(f: Finding) -> dict:

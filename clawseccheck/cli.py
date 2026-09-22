@@ -274,7 +274,8 @@ _COMPACT_NEXT_POINTER = "\nWhat you can do next: run --next for the ranked list.
 
 
 def _with_next_actions(card: str, findings, score, ascii_only: bool,
-                       compact: bool = False) -> str:
+                       compact: bool = False, home: "str | None" = None,
+                       data_dir: "str | None" = None) -> str:
     """B-604: the Dashboard was the one verdict surface that offered the user nothing.
 
     `--next` (`cli.py`) and the default report both render `guide.render_next_actions`;
@@ -308,8 +309,13 @@ def _with_next_actions(card: str, findings, score, ascii_only: bool,
     for its pipeline detail ("Full pipeline detail: --save <path> or --html <path>."). The
     pointer is a fixed string on purpose: naming the top action would make its length vary
     with the finding, and the whole problem here is a budget with no room to vary.
+
+    *home*/*data_dir* (B-873): forwarded verbatim to `suggest_actions` — see its own
+    docstring. Both call sites below pass the run's real `args.home`/
+    `_effective_data_dir(args)`; the defaults here exist only so a test or a future
+    caller that omits them keeps getting the pre-B-873 default-path commands.
     """
-    actions = suggest_actions(findings, score)
+    actions = suggest_actions(findings, score, home=home, data_dir=data_dir)
     if not actions:
         return card
     if compact:
@@ -395,6 +401,16 @@ def _store_dir(args) -> Path:
 def _coverage_path(args) -> str:
     """This run's coverage/freshness ledger — beside its history, never elsewhere."""
     return str(_store_dir(args) / "coverage.json")
+
+
+def _effective_data_dir(args) -> str:
+    """The --data-dir this run actually used, resolved the same way --cron-recipe's
+    call site already does (`args.data_dir or "~/.clawseccheck"`) — a plain string for
+    display, not a resolved Path. B-873: the one other reader of this value is
+    `guide.suggest_actions`/`report.render_json`'s new `data_dir=` param, so this is the
+    single place that literal gets typed for that purpose rather than repeated at each
+    call site."""
+    return args.data_dir or "~/.clawseccheck"
 
 
 def _runs_path(args) -> str:
@@ -5463,7 +5479,9 @@ def _main(argv=None) -> int:
         # B-379: same cap-resolution gap as --percentile above — suggested next actions
         # should reflect the capped grade, not an uncapped one.
         score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
-        _emit(render_next_actions(suggest_actions(findings, score), ascii_only))
+        _emit(render_next_actions(suggest_actions(
+            findings, score, home=args.home, data_dir=_effective_data_dir(args)),
+            ascii_only))
         # B-601: advice is what this mode RENDERS, but it measured a full verdict to get
         # there. The timeline records runs, not renderings.
         _record_history_point(score, args, _live_signal, findings)
@@ -5490,7 +5508,8 @@ def _main(argv=None) -> int:
             _card = _with_next_actions(
                 render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
                                  pdf_path=pdf_written),
-                findings, score, ascii_only)
+                findings, score, ascii_only,
+                home=args.home, data_dir=_effective_data_dir(args))
             _emit_paste_instruction(pdf_written, len(_card))
             _emit(_card)
             _emit_attach_instruction(pdf_written)
@@ -5696,7 +5715,8 @@ def _main(argv=None) -> int:
                 # Reserve what _with_next_actions is about to append, so the card's own
                 # severity-ordered ladder absorbs it rather than the cap being exceeded.
                 compact_reserve=len(_COMPACT_NEXT_POINTER) if args.compact else 0),
-            findings, score, ascii_only, compact=args.compact)
+            findings, score, ascii_only, compact=args.compact,
+            home=args.home, data_dir=_effective_data_dir(args))
         _emit_paste_instruction(pdf_written, len(_card))
         _emit(_card)
         _emit_attach_instruction(pdf_written)
@@ -6493,7 +6513,8 @@ def _main(argv=None) -> int:
                            live_test_reason=live_signal.reason,
                            behavioral_fired_ids=behavioral_fired_ids,
                            ledger=layer_ledger,
-                           version=__version__)
+                           version=__version__,
+                           home=args.home, data_dir=_effective_data_dir(args))
         if full_pipeline is not None:
             # Additive merge, done here rather than by widening render_json's signature:
             # these keys belong to the pipeline, not to the audit payload, and every
@@ -6640,7 +6661,9 @@ def _main(argv=None) -> int:
             parts.append("\nnotes:\n" + "\n".join(f"  - {_sanitize(e)}" for e in ctx.errors))
         parts.append("")
         parts.append(render_next_actions(
-            suggest_actions(findings, score), ascii_only))
+            suggest_actions(findings, score, home=args.home,
+                            data_dir=_effective_data_dir(args)),
+            ascii_only))
         body = "\n".join(parts)
 
     _emit(body)

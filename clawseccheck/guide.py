@@ -9,6 +9,7 @@ Pure stdlib, no deps.
 from __future__ import annotations
 
 import json
+import shlex
 
 from dataclasses import dataclass
 
@@ -17,6 +18,60 @@ from .invocation import cmd, machine_command_prefix
 from .layers import LAYER_LIVE_BEHAVIOUR
 from .scoring import ScoreResult
 from .textnorm import asciify
+
+# B-873: the CLI's own `--home`/`--data-dir` defaults (cli.py's `--home` argparse default,
+# and the `~/.clawseccheck` literal `cli.py` already uses at its `--data-dir`-or-default
+# call sites, e.g. the --cron-recipe branch). Duplicated here rather than imported —
+# `invocation.py`/`guide.py` sit BELOW `cli.py` in the layering (see CLAUDE.md §3's
+# dependency-flow line) and must not import it. Every other module that needs one of
+# these two defaults (`__init__.py.audit`/`build_context`, `collector.collect`,
+# `history.DEFAULT_HISTORY`, …) already carries its own copy for the same reason —
+# there is no shared leaf constant to import instead.
+_DEFAULT_HOME = "~/.openclaw"
+_DEFAULT_DATA_DIR = "~/.clawseccheck"
+
+
+def _quote_cli_path(value: str) -> str:
+    """Shell-quote *value* for splicing into a printed command line.
+
+    A bare `shlex.quote` on a `~/...` string quotes the tilde too, which turns it into a
+    literal directory named `~` instead of the shell's home-expansion — the same trap
+    `invocation._display_path` documents and avoids for the same reason. Only the
+    remainder after a leading `~/` (or `~` alone) needs quoting; some other absolute or
+    relative path is quoted whole. This does not resolve or expand *value* — the caller
+    already decided this is the exact string the user typed (or the tool's own default),
+    and byte-for-byte fidelity is the point (B-873: --home/--data-dir on their own already
+    describe a location; this only makes the composed command safe to paste as one line).
+    """
+    if value == "~":
+        return value
+    if value.startswith("~/"):
+        rest = value[2:]
+        return "~/" + shlex.quote(rest) if rest else "~"
+    return shlex.quote(value)
+
+
+def _state_flags(home: "str | None", data_dir: "str | None", *,
+                  wants_home: bool, wants_data_dir: bool) -> str:
+    """The trailing `--home ...`/`--data-dir ...` fragment for one emitted command.
+
+    B-873: every "what you can do next" command used to run against the DEFAULT
+    `~/.openclaw`/`~/.clawseccheck`, even when the audit that produced the finding list
+    looked at a different `--home` and/or `--data-dir` — so the printed follow-up command
+    quietly re-targeted the user's setup. Appends a flag only when the caller says this
+    particular command actually reads or writes state gated by it (`wants_home`/
+    `wants_data_dir` — not every emitted command does, see each call site below) AND the
+    resolved value differs from the tool's own default, so a default-path run's emitted
+    text stays byte-identical to before this fix. `home`/`data_dir` of `None` means "the
+    caller did not resolve one" (every pre-existing caller of `suggest_actions`/
+    `render_json`) and is treated the same as "equals the default" — never as "differs".
+    """
+    parts = []
+    if wants_home and home is not None and home != _DEFAULT_HOME:
+        parts.append("--home " + _quote_cli_path(home))
+    if wants_data_dir and data_dir is not None and data_dir != _DEFAULT_DATA_DIR:
+        parts.append("--data-dir " + _quote_cli_path(data_dir))
+    return (" " + " ".join(parts)) if parts else ""
 
 
 @dataclass
@@ -81,11 +136,26 @@ def _surface_failed(findings: list[Finding], surface: str) -> bool:
     return False
 
 
-def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]:
+def suggest_actions(
+    findings: list[Finding],
+    score: ScoreResult,
+    *,
+    home: "str | None" = None,
+    data_dir: "str | None" = None,
+) -> list[Action]:
     """Build a list of recommended next steps from the audit result.
 
     All trigger logic is deterministic — no network, no side effects.
     Returns actions sorted by (priority, id).
+
+    *home*/*data_dir* (B-873): the `--home`/`--data-dir` THIS run was actually pointed
+    at, as the caller's own CLI flag strings (not `Path.expanduser()`d — printed back
+    verbatim, same convention `render_cron_recipe`'s `data_dir` param already uses).
+    Both default to `None`, which every pre-existing caller still gets and which reads as
+    "unresolved, add nothing" — so an old caller's output is unchanged. Each `Action`
+    below decides FOR ITSELF, via `_state_flags`'s `wants_home`/`wants_data_dir`, whether
+    its own command actually reads or writes state gated by one, the other, both or
+    neither — see the comment on each.
     """
     idx = _by_id(findings)
     actions: list[Action] = []
@@ -123,6 +193,12 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="vet_skills",
             title="Double-check your installed skills for malware",
+            # B-873: EXEMPT, explicitly (not silently skipped) — `<skill-folder>` is a
+            # placeholder for a path the user/agent supplies themselves, and vetting that
+            # folder's content does not depend on which OpenClaw `--home` or ClawSecCheck
+            # `--data-dir` is in effect (the coverage-ledger bookkeeping write under
+            # --data-dir is a side effect of running the tool, not part of the vet
+            # verdict this command exists to reproduce).
             command=cmd("--vet <skill-folder>"),
             why="Installed skills run with your agent's full permissions.",
             priority=1,
@@ -134,7 +210,12 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="setup_monitoring",
             title="Turn on ongoing monitoring so you're alerted if something changes",
-            command=cmd("--monitor"),
+            # B-873: needs BOTH. --monitor keys its baseline/journal by --data-dir alone
+            # and refuses to compare across a --home mismatch (B-781, above in this same
+            # file's history) -- printing the bare default command would either watch the
+            # wrong setup outright or trip that refusal on the very next run.
+            command=cmd("--monitor" + _state_flags(
+                home, data_dir, wants_home=True, wants_data_dir=True)),
             why="An agent with no monitoring won't warn you if it's compromised.",
             priority=3,
         ))
@@ -156,7 +237,17 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="live_test",
             title="Run a live prompt-injection test to see if your agent actually resists",
-            command=cmd("--canary   (then --dryrun / --redteam)"),
+            # B-873: --data-dir only. --canary/--dryrun/--redteam are seeded synthetic
+            # scenarios (canary.py/dryrun.py/redteam.py) that never read the audited
+            # `--home` config at all, so --home would be noise here; each still records
+            # its run to the coverage ledger under --data-dir (`_record_run("self_test",
+            # args)` in cli.py). The parenthetical "(then --dryrun / --redteam)" stays a
+            # note, not a second command, same as before this fix -- B-873's own DoD
+            # scopes the broader "make every emitted line independently runnable" guard
+            # (B-759) out of this task.
+            command=cmd("--canary" + _state_flags(
+                home, data_dir, wants_home=False, wants_data_dir=True)
+                + "   (then --dryrun / --redteam)"),
             why="Passive checks tell you the config; this tests real behavior.",
             priority=4,
         ))
@@ -175,7 +266,11 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="review_mcp",
             title="Vet your connected MCP servers for supply-chain risk",
-            command=cmd("--vet-mcp"),
+            # B-873: needs BOTH -- vet_mcp(target, home=args.home) reads the MCP server
+            # list out of the audited `--home` config, and the run is recorded to the
+            # coverage ledger under --data-dir the same as --vet/--vet-mcp's other route.
+            command=cmd("--vet-mcp" + _state_flags(
+                home, data_dir, wants_home=True, wants_data_dir=True)),
             why="MCP servers can inject prompts or reach internal services.",
             priority=5,
         ))
@@ -191,7 +286,13 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         id="track_trend",
         title=("Track your security score over time" if graded
                else "Track your posture over time"),
-        command=cmd("--trend"),
+        # B-873: --data-dir only. --trend reads history.jsonl (and prints/records
+        # against it), which --data-dir moves; --home plays no part in which rows are
+        # shown (each row already carries its own recorded `home` as metadata, and the
+        # baseline/history store is keyed by --data-dir alone -- same B-781 fact
+        # setup_monitoring's comment above cites).
+        command=cmd("--trend" + _state_flags(
+            home, data_dir, wants_home=False, wants_data_dir=True)),
         why=("See if you're getting safer or drifting." if graded else
              "Only graded runs plot on the trend — this run is recorded, not plotted. "
              "Complete all five layers to put a point on the line."),
@@ -203,7 +304,15 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         id="share_grade",
         title=("Share your grade (safe — findings stay private)" if graded
                else "Share your result (safe — findings stay private)"),
-        command=cmd("--badge grade.svg"),
+        # B-873: needs BOTH, and more than the others above -- the `why` text right below
+        # already explains that this command STARTS A FRESH AUDIT (badge export never
+        # rides the run that produced `score`; see B-586/C-428 in that text). A fresh
+        # audit means the bare command re-targets the DEFAULT --home outright, not just a
+        # side write, which is the sharpest version of this whole bug: a badge for a
+        # setup the user never asked about. --data-dir alongside it for the same reason
+        # setup_monitoring's command carries it -- this also records a history point.
+        command=cmd("--badge grade.svg" + _state_flags(
+            home, data_dir, wants_home=True, wants_data_dir=True)),
         why=(
             # C-428 follow-up: the second sentence used to be carried over verbatim from
             # the graded branch — "Only the grade + score is ever shared" two words after
