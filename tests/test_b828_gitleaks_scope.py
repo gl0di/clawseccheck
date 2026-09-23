@@ -203,6 +203,24 @@ def _forbidden_scope_keys(code=None):
     return hits
 
 
+def _rule_blocks():
+    """Split CODE into top-level [[rules]] blocks, excluding nested [[rules.allowlists]] tables."""
+    parts = re.split(r"(?m)^\[\[rules\]\]\s*$", CODE)
+    return parts[1:]  # drop the preamble before the first [[rules]]
+
+
+def _rule_ids():
+    """The declared id of each top-level [[rules]] block, in file order (dupes kept, not deduped)."""
+    ids = []
+    for block in _rule_blocks():
+        # id must be declared on the rule itself, before any nested [[rules.xxx]] table
+        head = re.split(r"(?m)^\[\[rules\.", block)[0]
+        m = re.search(r'^\s*id\s*=\s*"([^"]+)"\s*$', head, re.M)
+        if m:
+            ids.append(m.group(1))
+    return ids
+
+
 def _tok(prefix, n, alphabet="abcdefghijklmnopqrstuvwxyz0123456789"):
     return prefix + (alphabet * 3)[:n]
 
@@ -371,3 +389,48 @@ def test_guard_accepts_the_real_config_unmutated():
     # A sanity check that the mutation tests above exercise the guard logic itself
     # and not some incidental text search that would also reject well-formed input.
     _assert_exemptions_are_exact(CODE)
+
+
+def test_no_duplicate_rule_ids():
+    """CLAWSECCHECK-B-882: gitleaks resolves a repeated `[[rules]] id = "..."` as "last one
+    wins" — verified end-to-end against the pinned 8.24.3 binary — with no warning or error
+    either way, so a later block silently replaces an earlier rule's real regex/allowlist. A
+    duplicate id is always a config bug (a rename that forgot to remove the old block, or a
+    copy-paste), never an intentional shape, so it must fail loud here instead of quietly
+    turning off detection.
+    """
+    ids = _rule_ids()
+    assert ids, "expected at least one [[rules]] block in .gitleaks.toml"
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    assert not dupes, f"duplicate [[rules]] id(s) in .gitleaks.toml (later block silently shadows the earlier one): {dupes}"
+
+
+def test_duplicate_rule_ids_are_actually_detected():
+    """Positive control for test_no_duplicate_rule_ids: prove the id-extraction/dup-check
+    logic itself would fail on a real duplicate, not just pass vacuously on today's config.
+    """
+    synthetic = _strip_comments("""
+[[rules]]
+id = "example-rule"
+regex = '''foo'''
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+regexes = ['''^placeholder$''']
+
+[[rules]]
+id = "example-rule"
+regex = '''bar'''
+""")
+    parts = re.split(r"(?m)^\[\[rules\]\]\s*$", synthetic)[1:]
+    ids = []
+    for block in parts:
+        head = re.split(r"(?m)^\[\[rules\.", block)[0]
+        m = re.search(r'^\s*id\s*=\s*"([^"]+)"\s*$', head, re.M)
+        if m:
+            ids.append(m.group(1))
+    assert ids == ["example-rule", "generic-api-key", "example-rule"]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    assert dupes == ["example-rule"]
