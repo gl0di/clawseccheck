@@ -325,3 +325,72 @@ def test_a_pass_never_carries_a_hit(monkeypatch):
     f = check_dependency_tree_hooks(_Ctx(CLEAN))
     assert f.status == PASS
     assert not any("JS_" in e for e in (f.evidence or []))
+
+
+# ---------------------------------------------------------------------------
+# B-859: the dense variation-selector / IVS signal reaching this check.
+#
+# `_b349_assess_target` only special-cases signals starting with "confusable"
+# (see its own docstring) — the "dense variation-selector / invisible-alphabet
+# channel found" signal does not start with that, so before this fix it fell
+# straight into the unconditional FAIL-eligible bucket. Reproduced directly:
+# an install-time target containing nothing but an ordinary CJK-name-table
+# string with IVS selectors (localized display names, a real, unremarkable
+# shape for a build/postinstall script to embed) reached CRITICAL FAIL with
+# no discriminator of any kind. The fix lives in `textnorm._has_dense_vs_
+# supplement_channel` itself (the CJK-ideograph-base exemption), so this
+# check needs no code change of its own — these tests pin that the shared
+# fix actually reaches this consumer, not just the ones it was written next to.
+# ---------------------------------------------------------------------------
+
+_JP_NAME_KANJI = (
+    "葛辻花田中山村橋林池"
+    "梅松竹東西南北新古井"
+    "上下千百万九八七六五"
+    "四三二一青白黒赤黄緑"
+    "紫橘灰銀金銅鉄石"
+)
+
+
+def test_ivs_name_table_in_install_target_does_not_fail(tmp_path):
+    """The reported false positive (CLAWSECCHECK-B-859), reproduced then fixed
+    at the source: a benign kanji-name table with one IVS selector per
+    ideograph, embedded in an install-time target, must not FAIL."""
+    root = tmp_path / "openclaw"
+    root.mkdir()
+    (root / "package.json").write_text(json.dumps({"name": "openclaw"}))
+    names_js_literal = "".join(
+        _JP_NAME_KANJI[i % len(_JP_NAME_KANJI)] + chr(0xE0100 + i) for i in range(48)
+    )
+    # The actual Unicode characters, not a `json.dumps`/`\uXXXX`-escaped spelling of
+    # them — an escaped form is plain ASCII backslash-u text and would not exercise
+    # `obfuscation_signals` at all, which scans the raw decoded source text.
+    _pkg(root, "locale-names", {"postinstall": "node setup.js"}, {"setup.js": (
+        "// Localized display names, one IVS-tagged variant per entry.\n"
+        f'const NAMES = "{names_js_literal}";\n'
+        "module.exports = NAMES;\n"
+    )})
+    f = check_dependency_tree_hooks(_Ctx(root))
+    assert f.status == PASS, f"benign IVS name table must not FAIL; got {f.evidence}"
+
+
+def test_dense_unattached_ivs_in_install_target_still_fails(tmp_path):
+    """The other half: a dense run of Variation-Selectors-Supplement code points
+    NOT attached to a CJK base — the shape the signal exists to catch (a real
+    skill encoded tokens through exactly this channel) — must still reach
+    CRITICAL FAIL through this check. Confirms the untraced FAIL path the
+    reviewer found is real and stays live after the false-positive fix."""
+    root = tmp_path / "openclaw"
+    root.mkdir()
+    (root / "package.json").write_text(json.dumps({"name": "openclaw"}))
+    payload = "\U0001f600" + "".join(chr(0xE0100 + (i % 240)) for i in range(60))
+    # Raw Unicode characters again, for the same reason as the clean fixture above.
+    _pkg(root, "bad-locale", {"postinstall": "node setup.js"}, {"setup.js": (
+        f'const PAYLOAD = "{payload}";\n'
+        "module.exports = PAYLOAD;\n"
+    )})
+    f = check_dependency_tree_hooks(_Ctx(root))
+    assert f.status == FAIL
+    joined = "\n".join(f.evidence or [])
+    assert "bad-locale" in joined
+    assert "dense variation-selector" in joined

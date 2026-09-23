@@ -371,6 +371,130 @@ def test_vs_supplement_ordinary_skill_content_stays_quiet(tmp_path):
     assert not any(_SIGNAL_VS_SUPPLEMENT in e for e in (finding.evidence or []))
 
 
+# --------------------------------------------------------------------------- B-859: the
+# CJK-ideograph-base exemption for the IVS (Variation Selectors Supplement) sub-range.
+# The reviewer of B-646 reproduced a false positive on ordinary Japanese-name content
+# (48 IVS-tagged kanji names, nothing else unusual) and traced an UNGATED CRITICAL FAIL
+# reachable from it through B349's install-time path. These tests pin the fix: the new
+# exemption fires ONLY for a real base+selector pair, and everything else about the
+# count gate — including the corpus's own genuine attack shape (many selectors stacked
+# behind one non-ideograph anchor) — is unchanged.
+
+# 48 distinct, real CJK Unified Ideographs — common Japanese surname/place kanji —
+# each paired with its OWN Variation Selectors Supplement selector, mirroring the
+# reported false positive exactly (a name table, not a single repeated character).
+_JP_NAME_KANJI = (
+    "葛辻花田中山村橋林池"
+    "梅松竹東西南北新古井"
+    "上下千百万九八七六五"
+    "四三二一青白黒赤黄緑"
+    "紫橘灰銀金銅鉄石"
+)
+assert len(_JP_NAME_KANJI) == 48
+
+
+def _jp_names_payload(count: int = 48) -> str:
+    return "".join(
+        _JP_NAME_KANJI[i % len(_JP_NAME_KANJI)] + chr(0xE0100 + i) for i in range(count)
+    )
+
+
+def test_ivs_attached_to_cjk_base_is_excused_jp_names_shape():
+    """The reported false positive, reproduced then fixed: 48 distinct kanji, each
+    with its own IVS selector, must not raise the dense-channel signal — every
+    selector is excused because it immediately follows a real CJK ideograph."""
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(_jp_names_payload(48))
+
+
+def test_ivs_not_attached_to_cjk_base_still_fires():
+    """The corpus's own genuine positive shape, unchanged by the exemption: many
+    selectors stacked behind ONE non-ideograph anchor (an emoji) — only a selector
+    immediately following a CJK ideograph is excused, so a run stacked behind
+    something else keeps counting in full."""
+    payload = "\U0001F600" + "".join(
+        chr(0xE0100 + (i % 240)) for i in range(_VS_SUPPLEMENT_SIGNAL_MIN_COUNT)
+    )
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(payload)
+
+
+def test_ivs_stacked_behind_one_cjk_base_still_fires():
+    """A single real ideograph followed by many selectors is NOT the well-formed
+    base+selector shape this exemption recognises (only the FIRST selector directly
+    follows the ideograph; the rest follow another selector, never a CJK base) — so
+    stacking many behind one kanji does not launder a payload through the exemption.
+    Only the first of the run is excused, so the count still crosses the gate one
+    past it (+1 below tests the boundary is exact, not just "fires eventually")."""
+    payload = "葛" + "".join(
+        chr(0xE0100 + (i % 240)) for i in range(_VS_SUPPLEMENT_SIGNAL_MIN_COUNT + 1)
+    )
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(payload)
+    # One short of that boundary: 1 excused (the first) + 30 counted = 31, still quiet.
+    just_under = "葛" + "".join(
+        chr(0xE0100 + (i % 240)) for i in range(_VS_SUPPLEMENT_SIGNAL_MIN_COUNT)
+    )
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(just_under)
+
+
+def test_ivs_mixed_excused_and_unattached_only_the_unattached_count():
+    """A blend of the two shapes: only the selectors NOT attached to a CJK base
+    contribute to the gate. Twenty excused (a small name list) plus twenty
+    unattached stays under the 32 threshold; the same twenty excused plus
+    thirty-five unattached crosses it."""
+    excused_20 = "".join(
+        _JP_NAME_KANJI[i] + chr(0xE0100 + i) for i in range(20)
+    )
+    unattached_20 = "".join(chr(0xE0100 + (i % 240)) for i in range(20))
+    unattached_35 = "".join(chr(0xE0100 + (i % 240)) for i in range(35))
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(excused_20 + unattached_20)
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(excused_20 + unattached_35)
+
+
+def test_ivs_exemption_does_not_widen_to_fe00_or_hangul_filler():
+    """The exemption is scoped to the E0100-E01EF sub-range only. FE00-FE0D and the
+    Hangul fillers have no "base character" to legitimately follow, so a CJK
+    ideograph sitting in front of one of THOSE must not excuse it."""
+    fe00_after_cjk = "葛" + (chr(0xFE00) * _VS_SUPPLEMENT_SIGNAL_MIN_COUNT)
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(fe00_after_cjk)
+    hangul_after_cjk = "葛" + (chr(0x3164) * _VS_SUPPLEMENT_SIGNAL_MIN_COUNT)
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(hangul_after_cjk)
+
+
+def test_ivs_jp_names_end_to_end_through_vet_skill_stays_quiet(tmp_path):
+    """End to end through the shipped entry point, reproducing the reported shape
+    (CLAWSECCHECK-B-859): a skill bundling a benign kanji-name table with IVS
+    selectors must not raise the dense-channel signal via `vet_skill`."""
+    skill_dir = tmp_path / "jp-names-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: jp-names-skill\ndescription: A test skill\n---\n\n"
+        "# Test Skill\n\nThis is a benign skill description.\n",
+        encoding="utf-8",
+    )
+    data_dir = skill_dir / "data"
+    data_dir.mkdir()
+    (data_dir / "names.txt").write_text(_jp_names_payload(48), encoding="utf-8")
+
+    finding = vet_skill(str(skill_dir))
+    assert _SIGNAL_VS_SUPPLEMENT not in (finding.detail or "")
+    assert not any(_SIGNAL_VS_SUPPLEMENT in e for e in (finding.evidence or []))
+
+
+def test_ivs_known_residual_padding_every_selector_evades_the_gate():
+    """KNOWN LIMITATION, pinned rather than hidden (see `_has_dense_vs_supplement_
+    channel`'s own docstring): an attacker who prefixes EVERY payload-carrying
+    selector with its own plausible CJK ideograph forms well-formed IVS pairs
+    throughout and evades the gate the same way genuine content does. This is the
+    accepted trade this exemption makes — the payload still lives in WHICH selector
+    is chosen, and a per-pair exemption cannot see that. If this test starts
+    failing because the gate got stricter, that is real progress; it is not a
+    regression to "fix" back to this behaviour."""
+    padded = "".join(
+        _JP_NAME_KANJI[i % len(_JP_NAME_KANJI)] + chr(0xE0100 + (i % 240))
+        for i in range(_VS_SUPPLEMENT_SIGNAL_MIN_COUNT + 20)
+    )
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(padded)
+
+
 # --------------------------------------------------------------------------- recorded consequences
 
 def test_mongolian_vowel_separator_is_stripped_by_the_scan_normalizer():

@@ -308,12 +308,28 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   cannot again report a channel the normalizer is unable to read through. The separate
   Tag-block detector (U+E0000–U+E007F) covers that family independently. What remains is
   two named, deliberate residuals rather than one open-ended gap:
-  **(1) Tier-2 code points, still outside the class** — variation selectors U+FE00–FE0F,
-  U+2800 BRAILLE PATTERN BLANK, and U+3164 / U+FFA0 HANGUL FILLER. Each is legitimate and
-  common in its own context (U+FE0F alone is what gives a base glyph emoji presentation), so
-  a bare presence class would false-fire on ordinary emoji, Korean and Braille text across
-  every consumer at once. The sound direction is per-character excusal by surrounding script
-  context — the shape `_is_zwj_between_emoji` already uses — not a wider class.
+  **(1) Tier-2 code points, mostly no longer outside a class.** Variation selectors
+  U+FE00–FE0D (NOT FE0E/FE0F) and U+3164 / U+FFA0 HANGUL FILLER now raise a **separate**,
+  count-gated signal — "dense variation-selector / invisible-alphabet channel found"
+  (`_has_dense_vs_supplement_channel`, threshold 32) — rather than the unconditional
+  zero-width one above, because their most common real-world members have an honest
+  single-occurrence use that a bare-presence class would false-fire on. Within that
+  signal, the Variation Selectors Supplement sub-range (U+E0100–E01EF, the actual
+  invisible-alphabet payload channel — a real published skill encoded tokens through it)
+  gets one further, narrower exemption: a selector immediately following a CJK ideograph
+  base character forms a well-formed Ideographic Variation Sequence (Unicode's own
+  mechanism, real in Japanese/Chinese personal names) and is excused from the count; one
+  that is not so attached still counts fully. That exemption is deliberately narrow — it
+  answers a Unicode-structural question ("is this a real base+selector pair"), not "is
+  this the kind of text a legitimate user would write" — and knowingly leaves a residual:
+  an attacker who pads every payload selector with its own plausible CJK ideograph still
+  evades the gate, recorded next to `_has_dense_vs_supplement_channel` rather than hidden.
+  Still genuinely outside ANY class: U+FE0E/U+FE0F themselves (deliberately — pervasive in
+  ordinary emoji-presentation text) and U+2800 BRAILLE PATTERN BLANK (indistinguishable
+  from an invisible-channel member without knowing whether it sits among other Braille
+  Patterns code points). The sound direction for those two remains per-character excusal
+  by surrounding script context — the shape `_is_zwj_between_emoji` already uses — not a
+  bare presence class.
   **(2) Two FAIL-capable paths held deliberately narrower than the shared class** — the MCP
   tool-**NAME** homoglyph leg (`_B332_ZERO_WIDTH_RE`, six code points) and the two
   token-level confusable/NFKC signals (`_INVISIBLE_TOKEN_RE`, fifteen). Widening either
