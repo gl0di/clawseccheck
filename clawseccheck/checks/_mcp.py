@@ -1737,10 +1737,22 @@ def _c038_has_rtl_script(text: str) -> bool:
 # the live source instead of restating it means this file cannot go stale again the next
 # time the upstream class moves -- there is nothing left here to forget to update.
 #
-# Tier 2 (variation selectors, Braille blank, Hangul filler) is not part of
-# `_ZERO_WIDTH_CLASS_SRC` at all (different Unicode category -- see the comment above
-# `_ZERO_WIDTH_RE` in textnorm.obfuscation_signals), so it stays out here automatically,
-# same as upstream, with no separate exclusion needed.
+# Tier 2 (the deferred FE0E/FE0F + Braille-blank pair, still no signal anywhere in the
+# engine) is not part of `_ZERO_WIDTH_CLASS_SRC` at all (different Unicode category --
+# see the comment above `_ZERO_WIDTH_RE` in textnorm.obfuscation_signals), so it stays
+# out here automatically, with no separate exclusion needed.
+#
+# SCOPE GAP, left open deliberately rather than fixed here: the Variation-Selectors-
+# Supplement dense-channel signal (textnorm's separate "dense variation-selector /
+# invisible-alphabet channel found" signal, `_has_dense_vs_supplement_channel` --
+# FE00-FE0D, the Variation Selectors Supplement, and the Hangul fillers) is a THIRD,
+# independent upstream signal that this file never references at all, unlike the
+# zero-width and Tag-block classes above. A tool description hiding a payload behind
+# that channel -- the same real-world shape a published skill has used to smuggle
+# tokens behind a single emoji -- reaches no C038 finding, at any severity, however
+# dense the run. Whether the MCP tool-description surface should gain its own
+# threshold against that class, and what it should be, is an open scope question for
+# the project owner, not a defect folded in quietly alongside an unrelated fix.
 _C038_INVISIBLE_RUN_MIN = 4
 _C038_INVISIBLE_RUN_RE = re.compile(
     "[" + _ZERO_WIDTH_CLASS_SRC + "]{" + str(_C038_INVISIBLE_RUN_MIN) + ",}"

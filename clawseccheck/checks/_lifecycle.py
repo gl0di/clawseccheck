@@ -2453,7 +2453,29 @@ def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]"
     signals: list = []
     noted: list = []
     unreadable = None
-    for signal in obfuscation_signals(source):
+    # `excuse_ivs=False`: the dense variation-selector signal keeps its RAW count here.
+    # This is a second narrowing that was built and then withdrawn from this check on
+    # B-448 grounds (B-859, C-135 round 1, 2026-09-23), recorded the way that note asks.
+    # THE PULL: a benign kanji name table that tags each name with its own Ideographic
+    # Variation Sequence (ideograph + U+E0100-E01EF selector) crosses the count gate and
+    # reached CRITICAL FAIL here. textnorm gained an exemption that excuses a selector
+    # directly after a unified ideograph, and it is still the default for every WARN-tier
+    # consumer. WHY IT IS OFF HERE: a payload that puts one ideograph before each of its
+    # selectors is all well-formed pairs, so the exemption excuses every one of them. In a
+    # Chinese or Japanese file the prose is that carrier already. The reviewer's
+    # reproduction, one comment line of ordinary Chinese prose with a pseudo-random selector
+    # (8 bits) after each ideograph in a postinstall target, went FAIL -> PASS with the
+    # exemption on. The FP it would remove has never been seen in this check's population:
+    # 0 of 74,496 local npm-tree and ~/.openclaw files carry any E0100-E01EF selector at
+    # all (2026-09-23). An unobserved FP traded for a demonstrated FN in a CRITICAL check is the
+    # trade the B-448 note below refuses. Grading the IVS-shaped case UNKNOWN or a PASS
+    # note instead was also rejected: a sender can steer into either by adding ideographs,
+    # so each is the same FN wearing a different label. So a benign dense IVS name table in
+    # an install-time target still FAILs, a known, diagnosed and so far unobserved FP.
+    # Pinned both ways by tests/test_f167_deptree_hooks.py. Same bar to revisit as B-448:
+    # an install target seen carrying such a table AND a discriminator that closes the
+    # padding channel rather than only the pair shape.
+    for signal in obfuscation_signals(source, excuse_ivs=False):
         # A confusable ALONE is not evidence in source code. `obfuscation_signals` reports
         # "confusable characters folded to ASCII" for any Cyrillic or Greek text at all, so
         # an installer whose only unusual property is a non-English comment earned a
