@@ -388,6 +388,11 @@ class _FileFacts:
         # proof for that one reason (`exact_calls`' second pass).
         self.any_target = False
         self.blocked = self.star or self._blocked(module_names)
+        # B-917 locate() LEGB fallback (2.1): lazily computed and cached, since most
+        # files never take this path. `None` means "not computed yet" for the
+        # whole-file tamper flag; the per-name cache starts empty.
+        self._legb_tampers: "bool | None" = None
+        self._legb_attr_store_cache: dict = {}
 
     # ── names ──────────────────────────────────────────────────────────────────────────
 
@@ -572,6 +577,63 @@ class _FileFacts:
             child, cur = cur, self.parents.get(cur)
         return body.index(child) if cur is scope and child in body else None
 
+    def _legb_blocked(self, name: str) -> bool:
+        """Guard for `locate()`'s LEGB fallback (b917-design.md 2.1). A function-scope
+        read with no local binding may resolve through an enclosing/module scope --
+        but not when this file could later replace what that resolution depends on:
+        an attribute store `X.<name> = ...` naming this exact identifier (a plugin
+        re-pointing a module constant through some object's attribute of the same
+        name), or any of this file's own namespace-tampering spellings (`_tampers()`
+        -- reflection/monkeypatch/import-machinery access, which can rebind a
+        "module constant" by a route this resolver does not model at all). Sound over
+        precise: this only ever REFUSES a resolution, never manufactures one.
+        Lazily computed and cached -- most files never take this path."""
+        if self._legb_tampers is None:
+            self._legb_tampers = _tampers(self.tree)
+        if self._legb_tampers:
+            return True
+        if name not in self._legb_attr_store_cache:
+            self._legb_attr_store_cache[name] = any(
+                isinstance(n, ast.Attribute) and isinstance(n.ctx, (ast.Store, ast.Del))
+                and n.attr == name
+                for n in ast.walk(self.tree)
+            )
+        return self._legb_attr_store_cache[name]
+
+    def _legb_lookup(self, name: str, scope: ast.AST) -> "tuple | None":
+        """`(record, defining_scope)` for *name*, found by walking from *scope*
+        through each enclosing function scope and finally the module scope (LEGB,
+        minus class scope -- a function never sees its enclosing class's namespace,
+        matching Python's own scoping rule). No `before`: the read lives in a
+        DIFFERENT, nested scope that runs later, so *scope*'s body order does not
+        bound it -- `sole()`'s default (`before=None`) already requires exactly one,
+        unconditional, direct-body binding, which is what makes this sound.
+
+        Stops at the FIRST enclosing scope that binds *name* at all (B-917 fix
+        round 2): `sole()` returning None means either "no record here" or "a
+        record exists but is not a single, resolvable, direct-body binding" --
+        e.g. a parameter, a for/with/comprehension target, an except-as name, a
+        nested def/class, or an import. Real Python scoping makes any of those a
+        local of that scope for its ENTIRE body, so the walk must stop there --
+        never treat "sole() could not resolve it" as "this scope is free, keep
+        walking outward", or an intermediate scope's own (unresolvable) binding of
+        the same name gets skipped in favour of a further-out one it does not
+        actually shadow to. Only a scope with NO record for *name* at all lets the
+        walk continue past it. Returns None when no enclosing scope resolves
+        *name* this way (whether never bound, or blocked by an unresolvable
+        binding somewhere along the walk)."""
+        cur = scope
+        while True:
+            nxt = self.scope_of(cur)
+            if nxt is None:
+                return None
+            if self.records(nxt).get(name):
+                rec = self.sole(name, nxt)
+                return (rec, nxt) if rec is not None else None
+            if nxt is self.tree:
+                return None
+            cur = nxt
+
     def literal(self, node: ast.AST, scope: ast.AST) -> "str | None":
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value
@@ -747,6 +809,147 @@ class _FileFacts:
             seg = self.literal(s, scope)
             if seg is None or cur is None:
                 return None
+            cur = cur.join(seg)
+        return cur
+
+    # ── B-917: the shared location resolver (loader sinks / staged imports) ────────────
+
+    def locate(self, e: ast.AST, scope: ast.AST, depth: int = 0) -> "Loc | None":
+        """Where *e* points, anchored (FILE/CWD/ABS/TEMP/HOME/SYM) -- see `Loc`.
+
+        Reuses `sole()`/`dotted()`/`literal()`/the import table exactly like
+        `resolve()` above, which stays untouched: this is a pure addition, never
+        called from the B-638 proof path.
+        """
+        if depth > _MAX_DEPTH:
+            return None
+        if isinstance(e, ast.Name):
+            if e.id == "__file__":
+                return Loc("FILE", self.relparts)
+            rec = self.sole(e.id, scope, before=e)
+            found_scope = scope
+            # LEGB fallback (b917-design.md 2.1), `resolve()` deliberately lacks this:
+            # a name read inside a function with no binding in that function (and not
+            # declared global/nonlocal -- sole() already refuses those outright) is
+            # looked up in its enclosing function scopes and then the module scope.
+            # Required for the r2-D1 shape: a module constant read inside a function.
+            #
+            # Gated on "no record for e.id in *scope* at all" (B-917 fix round 2),
+            # never on "sole() returned None" alone: sole() also returns None when
+            # *scope* DOES bind the name, just not through one resolvable, direct
+            # assignment (a parameter, a for/with/comprehension target, an
+            # except-as name, ...). That binding makes the name local to *scope*
+            # for its entire body -- real Python scoping never falls back to an
+            # enclosing/module scope for it, resolvable or not. Walking past it
+            # (e.g. because a same-named module constant exists) is a false
+            # correlation: a `def load_plugin(CACHE_DIR): ... import x` whose
+            # parameter merely shares a name with an unrelated module-level
+            # `CACHE_DIR` must resolve to SYM, not to the module constant.
+            if (
+                rec is None
+                and not self._legb_blocked(e.id)
+                and not self.records(scope).get(e.id)
+            ):
+                found = self._legb_lookup(e.id, scope)
+                if found is not None:
+                    rec, found_scope = found
+            if rec is not None:
+                if rec[0] == "assign":
+                    return self.locate(rec[1], found_scope, depth + 1)
+                if rec[0] == "with":
+                    return self.locate(rec[1].context_expr, found_scope, depth + 1)
+            # Unresolvable (a parameter, several bindings, a loop/comprehension
+            # target, ...) -- still a stable identity: the SAME name in the SAME
+            # scope always resolves here the same way, so two reads of it compare
+            # DEFINITE while a DIFFERENT unresolvable name never does.
+            return Loc("SYM", (), sym=("name", id(scope), e.id))
+        if isinstance(e, ast.Attribute) and isinstance(e.ctx, ast.Load) and e.attr == "parent":
+            base = self.locate(e.value, scope, depth + 1)
+            return base.up() if base is not None else None
+        if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Div):
+            base = self.locate(e.left, scope, depth + 1)
+            if base is None:
+                return None
+            seg = self.literal(e.right, scope)
+            return base.join(seg)
+        if isinstance(e, ast.Constant) and isinstance(e.value, str):
+            return self._locate_literal(e.value)
+        if (
+            isinstance(e, ast.Subscript) and isinstance(e.value, ast.Attribute)
+            and e.value.attr == "parents" and isinstance(e.slice, ast.Constant)
+            and isinstance(e.slice.value, int) and e.slice.value >= 0
+        ):
+            base = self.locate(e.value.value, scope, depth + 1)
+            cur = base
+            for _ in range(e.slice.value + 1):
+                if cur is None:
+                    return None
+                cur = cur.up()
+            return cur
+        if not isinstance(e, ast.Call) or e.keywords or any(
+            isinstance(a, ast.Starred) for a in e.args
+        ):
+            return None
+        d = self.dotted(e.func)
+        if d:
+            if d.startswith(_OSPATH):
+                fn = d.rsplit(".", 1)[1]
+                if fn in ("dirname", "abspath", "realpath", "normpath") and len(e.args) == 1:
+                    base = self.locate(e.args[0], scope, depth + 1)
+                    return base.up() if fn == "dirname" and base is not None else base
+                if fn == "join" and e.args:
+                    return self._locate_join(e.args[0], e.args[1:], scope, depth)
+                if fn == "expanduser" and len(e.args) == 1:
+                    return Loc("HOME", ()) if self.literal(e.args[0], scope) == "~" else None
+                return None
+            if d in ("os.fspath", "builtins.str") and len(e.args) == 1:
+                return self.locate(e.args[0], scope, depth + 1)
+            if d in _PATH_CLASSES and e.args:
+                return self._locate_join(e.args[0], e.args[1:], scope, depth)
+            if d == "os.getcwd" and not e.args:
+                return Loc("CWD", ())
+            if d == "tempfile.gettempdir" and not e.args:
+                return Loc("TEMP", ())
+            if d == "pathlib.Path.home" and not e.args:
+                return Loc("HOME", ())
+            # Any other call this resolver does not model (tempfile.mkdtemp(),
+            # os.environ.get(...), input(), a remote fetch, ...) is still one
+            # identifiable expression -- see the SYM comment above.
+            return Loc("SYM", (), sym=("call", id(e)))
+        if isinstance(e.func, ast.Attribute):
+            base = self.locate(e.func.value, scope, depth + 1)
+            if base is None:
+                return None
+            attr = e.func.attr
+            if attr in ("resolve", "absolute") and not e.args:
+                return base
+            if attr == "joinpath":
+                cur = base
+                for a in e.args:
+                    seg = self.literal(a, scope)
+                    cur = cur.join(seg)
+                return cur
+            if attr == "with_name" and len(e.args) == 1:
+                name = self.literal(e.args[0], scope)
+                if not name or name in (".", "..") or "/" in name:
+                    return None
+                parent = base.up()
+                return None if parent is None else parent.join(name)
+            return None
+        return None
+
+    def _locate_literal(self, s: str) -> "Loc":
+        if s.startswith("/"):
+            return Loc("ABS", tuple(p for p in s.split("/") if p not in ("", ".")))
+        return Loc("CWD", ()).join(s)
+
+    def _locate_join(self, first: ast.AST, rest, scope: ast.AST, depth: int) -> "Loc | None":
+        base = self.locate(first, scope, depth + 1)
+        if base is None:
+            return None
+        cur = base
+        for s in rest:
+            seg = self.literal(s, scope)
             cur = cur.join(seg)
         return cur
 
@@ -1059,6 +1262,119 @@ class _FileFacts:
         return exact, covered
 
 
+# B-917: writable-by-anyone literal prefixes for the loader-sink world-writable tier
+# (T3). Deliberately narrow -- these are the shapes the ticket's own PoCs use
+# (`/tmp/...`) and the ones `tempfile.gettempdir()` resolves to on every POSIX target
+# this project supports; a bespoke writable mount is not guessable statically.
+_WRITABLE_PATH_PREFIXES = (("tmp",), ("var", "tmp"), ("dev", "shm"))
+
+
+class Loc:
+    """A statically resolved location for the B-917 loader-sink / staged-import
+    correlation, distinct from `_Path` (which `resolve()` uses for the B-638 proof
+    above and stays byte-identical here).
+
+    `anchor` is one of ``"FILE"`` (the artifact file's own directory, `parts` are
+    artifact-root-relative -- the same convention `_Path`/`resolve()` uses),
+    ``"CWD"`` (the process working directory), ``"ABS"`` (an absolute literal),
+    ``"TEMP"`` (`tempfile.gettempdir()`), ``"HOME"`` (the user's home directory), or
+    ``"SYM"`` (an expression this resolver cannot read through, but can still tell
+    apart from a DIFFERENT such expression by identity -- `sym` is the id of its
+    single reaching definition, or of the call itself when there is none to bind).
+
+    `exact` is False once a `join()` had to drop a segment it could not read as a
+    literal (an f-string suffix, a computed name): the anchor and whatever was
+    resolved so far are kept (still enough to answer "is this under a writable
+    directory"), but a caller doing exact-location correlation (B-917 section C)
+    should not trust `parts` past that point.
+    """
+
+    __slots__ = ("anchor", "parts", "sym", "exact")
+
+    def __init__(self, anchor: str, parts: tuple, sym=None, exact: bool = True) -> None:
+        self.anchor = anchor
+        self.parts = parts
+        self.sym = sym
+        self.exact = exact
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return f"Loc({self.anchor!r}, {self.parts!r}, sym={self.sym!r}, exact={self.exact!r})"
+
+    @property
+    def leaf_py(self) -> bool:
+        return bool(self.parts) and self.parts[-1].lower().endswith(".py")
+
+    @property
+    def writable(self) -> bool:
+        """Is this location under a directory anyone on the box can write to?"""
+        if self.anchor == "TEMP":
+            return True
+        if self.anchor != "ABS" or not self.parts:
+            return False
+        return any(
+            self.parts[: len(pfx)] == pfx for pfx in _WRITABLE_PATH_PREFIXES
+        )
+
+    def up(self) -> "Loc | None":
+        if not self.parts:
+            return None
+        return Loc(self.anchor, self.parts[:-1], self.sym, self.exact)
+
+    def join(self, seg: "str | None") -> "Loc":
+        """Append one literal path segment, or -- when `seg` is None (the caller
+        could not read it as a literal, e.g. an f-string) or otherwise unusable --
+        keep this location's anchor and parts as-is but mark the result inexact
+        (B-917: this is what lets `tempfile.gettempdir()` joined with an
+        f-string-named leaf still register as a writable TEMP location, matching the
+        real `_config_sync.py`-shaped malicious corpus case)."""
+        if seg is None or "\x00" in seg or "\\" in seg or ":" in seg:
+            return Loc(self.anchor, self.parts, self.sym, False)
+        if seg.startswith("/"):
+            parts = tuple(p for p in seg.split("/") if p not in ("", "."))
+            return Loc("ABS", parts, None, True)
+        parts = list(self.parts)
+        for c in seg.split("/"):
+            if c in ("", "."):
+                continue
+            if c == "..":
+                if parts:
+                    parts.pop()
+            else:
+                parts.append(c)
+        return Loc(self.anchor, tuple(parts), self.sym, self.exact)
+
+
+def loc_eq(a: "Loc | None", b: "Loc | None") -> str:
+    """``"DEFINITE"``, ``"UNDETERMINED"`` or ``"DEFINITE_NOT"`` -- B-917 section A.
+
+    Deciding a verdict from location EQUALITY rather than a one-sided "is this
+    spelling foreign" predicate is the fix for the R2/R3 churn `b917-design.md`
+    documents: a predicate over one side of a write/import pair cannot answer a
+    question about both sides.
+    """
+    if a is None or b is None:
+        return "UNDETERMINED"
+    if a.anchor == "SYM" or b.anchor == "SYM":
+        if (
+            a.anchor == "SYM" and b.anchor == "SYM"
+            and a.sym is not None and a.sym == b.sym and a.parts == b.parts
+        ):
+            return "DEFINITE"
+        return "UNDETERMINED"
+    # CWD and FILE are the one anchor pair that can be the SAME directory at run
+    # time (a script invoked from its own directory) without any static evidence
+    # either way -- so a mismatch between exactly these two is uncertain, never a
+    # confident non-match, but ONLY once the rest of the path already lines up;
+    # two different subpaths are still unrelated regardless of which of CWD/FILE
+    # either one turns out to mean.
+    cwd_file_pair = {a.anchor, b.anchor} <= {"CWD", "FILE"}
+    if a.anchor != b.anchor and not cwd_file_pair:
+        return "DEFINITE_NOT"
+    if a.parts == b.parts:
+        return "DEFINITE" if a.anchor == b.anchor else "UNDETERMINED"
+    return "DEFINITE_NOT"
+
+
 class ShippedArtifact:
     """The Python files of one artifact, as the caller analyses them (B-638).
 
@@ -1094,6 +1410,24 @@ class ShippedArtifact:
             if n is not None and n in self.sources and not n.lower().endswith(".ipynb")
         )
         self._sites: "dict | None" = None
+
+    def classify(self, relpath: str) -> str:
+        """B-917 tier T4: is *relpath* (already artifact-root-relative, as a `Loc`'s
+        FILE-anchored `parts` are) ``"analysed"`` (this scan read it as Python),
+        ``"absent"`` (provably not on disk -- see `_absent`), or
+        ``"present_unanalysed"`` (on disk, or we cannot tell, but not analysed as
+        Python -- a notebook, a non-Python file, or nothing this call can verify
+        either way)? Never raises; a caller with no filesystem to check against
+        (`root=None`) gets ``"present_unanalysed"`` for anything it does not already
+        hold as analysed source, which is the conservative (never-crit) answer."""
+        norm = _norm_relpath(relpath)
+        if norm is None:
+            return "present_unanalysed"
+        if norm in self.exec_paths:
+            return "analysed"
+        if self._absent(norm):
+            return "absent"
+        return "present_unanalysed"
 
     def exact_exec_sites(self, relpath: str, source: str) -> frozenset:
         """(lineno, col_offset) of every exec/eval call in *relpath* that provably runs
@@ -1198,3 +1532,18 @@ class ShippedArtifact:
                 ok = False
             self._root_ok = ok
         return self._root_ok
+
+
+class PathFacts(_FileFacts):
+    """A `_FileFacts` for ONE file with no shipped-artifact context (B-917) -- for a
+    caller (skillast.py's loader-sink / staged-import checks) that needs
+    `locate()`/`sole()`/`dotted()`/`literal()` on a file without an artifact to prove
+    anything against (`analyze_python`'s `artifact` kwarg is optional). Built on a
+    throwaway one-file `ShippedArtifact` so `.shipped()`/`.content()`/`exact_calls()`
+    -- irrelevant here -- simply never find a target to claim, which is the correct,
+    conservative answer when there is nothing to check membership against."""
+
+    def __init__(self, tree: ast.AST, relpath: str) -> None:
+        lone = ShippedArtifact([(relpath, "")])
+        super().__init__(tree, relpath, lone, module_names=set(),
+                          pathlib_tampered=_pathlib_tampers(tree))

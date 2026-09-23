@@ -22,9 +22,11 @@ from __future__ import annotations
 import ast
 import builtins
 import re
+import weakref
 from collections import namedtuple
 from urllib.parse import urlparse
 
+from . import shippedexec as _shippedexec
 from .scanbudget import ScanBudgetExceeded
 
 # A finding: rule id, severity ("crit" = malware-grade / FAIL-eligible on its own;
@@ -7931,6 +7933,657 @@ def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, st
     return hits
 
 
+# ── B-917: loader sinks (runpy/importlib/zipimport execute a FILE by
+# PATH, not a name reference) and staged-import correlation (a write followed by an
+# import whose search path resolves to the same location). Both reuse shippedexec's
+# shared location resolver (`_FileFacts.locate()` / `loc_eq()` -- see shippedexec.py's
+# `Loc` docstring) instead of the ad hoc, spelling-keyed predicates the pre-4.3.0
+# branch used for this ticket: the root-cause fix b917-design.md describes is that a
+# verdict must be decided by LOCATION EQUALITY between the write and the read, never
+# by whether one side's spelling "looks foreign" (a predicate over one side of a pair
+# cannot answer a question about both sides). Scoped to ONE file at a time: this pass
+# does not correlate a write in one artifact file against an import in another
+# (deviation from b917-design.md section D's "artifact-wide" cache, recorded in the
+# B-917 Pulse comment).
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+_B917_LOADER_DIRECT = frozenset({"runpy.run_path", "imp.load_source"})
+_B917_SPEC_CTOR = "importlib.util.spec_from_file_location"
+_B917_LOADER_CLASSES = frozenset({
+    "importlib.machinery.SourceFileLoader",
+    "importlib.machinery.SourcelessFileLoader",
+    "importlib.machinery.ExtensionFileLoader",
+})
+_B917_ZIP_CTOR = "zipimport.zipimporter"
+_B917_LOADER_RUN_METHODS = frozenset({"exec_module", "load_module"})
+_B917_MODULE_IMPORT_CALLS = frozenset({"importlib.import_module", "runpy.run_module"})
+# B-927: a bare (aliased-import) remote fetch `_expr_reads_remote` cannot see, because
+# it only recognises the ATTRIBUTE-call shape (`urllib.request.urlopen(...)`), not a
+# name bound by `from urllib.request import urlopen`.
+_B917_REMOTE_FUNCS = frozenset({"urllib.request.urlopen"})
+_B917_WRITE_MODE_RE = re.compile(r"^(?=.*[wax])[rwaxbt+]{1,4}$")
+
+
+def _b917_target_names(t: ast.AST):
+    """Every Name bound by an assignment/for/with TARGET (Name/Tuple/List/Starred)."""
+    if isinstance(t, ast.Name):
+        yield t.id
+    elif isinstance(t, (ast.Tuple, ast.List)):
+        for e in t.elts:
+            yield from _b917_target_names(e)
+    elif isinstance(t, ast.Starred):
+        yield from _b917_target_names(t.value)
+
+
+def _b917_remote_tainted_names(tree: ast.AST, facts: "_shippedexec._FileFacts") -> set:
+    """`_remote_fetch_tainted_names`, extended (B-917) two ways: a bare `urlopen`
+    reached through `from urllib.request import urlopen` (B-927 -- the existing
+    helper only recognises the attribute-call spelling), and one more propagation
+    hop through a `for` target iterating a tainted response's streaming reader
+    (`for chunk in r.iter_content(): ...`)."""
+    names = set(_remote_fetch_tainted_names(tree))
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    loops = [n for n in ast.walk(tree) if isinstance(n, (ast.For, ast.AsyncFor))]
+    for _ in range(6):
+        changed = False
+        for a in assigns:
+            bare_remote = any(
+                isinstance(n, ast.Call) and facts.dotted(n.func) in _B917_REMOTE_FUNCS
+                for n in ast.walk(a.value)
+            )
+            if not (bare_remote or _expr_reads_remote(a.value) or (_names_in(a.value) & names)):
+                continue
+            for t in a.targets:
+                for nm in _b917_target_names(t):
+                    if nm not in names:
+                        names.add(nm)
+                        changed = True
+        for f in loops:
+            if not (_expr_reads_remote(f.iter) or (_names_in(f.iter) & names)):
+                continue
+            for nm in _b917_target_names(f.target):
+                if nm not in names:
+                    names.add(nm)
+                    changed = True
+        if not changed:
+            break
+    return names
+
+
+def _b917_has_decode(node: ast.AST, facts) -> bool:
+    """`_subtree_has_decode`, minus its one false-positive for THIS caller:
+    `_DECODE_ATTRS` includes bare `"join"` (the `"".join(chunks)` reassembly idiom),
+    which also matches the everyday `os.path.join(...)`/`posixpath.join(...)` every
+    path expression here is built from. A path-module join is never a decode call
+    regardless of its arguments."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            if isinstance(n.func, ast.Name) and n.func.id in _DECODE_FUNCS:
+                return True
+            if (
+                isinstance(n.func, ast.Attribute) and n.func.attr in _DECODE_ATTRS
+                and not (n.func.attr == "join"
+                         and facts.dotted(n.func) in ("os.path.join", "posixpath.join"))
+            ):
+                return True
+    return _has_xor_decode(node)
+
+
+def _b917_content_tainted(node: "ast.AST | None", remote_names: set, facts) -> bool:
+    """Is *node* (a write call's content argument, or a loader's path argument)
+    remote-fetched or decode-tainted -- B-917 section D's content-source test."""
+    if node is None:
+        return False
+    if _b917_has_decode(node, facts):
+        return True
+    if _expr_reads_remote(node):
+        return True
+    if any(
+        isinstance(n, ast.Call) and facts.dotted(n.func) in _B917_REMOTE_FUNCS
+        for n in ast.walk(node)
+    ):
+        return True
+    return bool(_names_in(node) & remote_names)
+
+
+def _b917_write_mode(mode_node: "ast.AST | None", facts, scope) -> "str | None":
+    lit = facts.literal(mode_node, scope) if mode_node is not None else "r"
+    if lit is None or not _B917_WRITE_MODE_RE.match(lit):
+        return None
+    return lit
+
+
+def _b917_open_write_loc(open_call: ast.Call, facts, scope):
+    """The `Loc` a write-mode `open()`/`io.open()` call writes to, or None."""
+    if not isinstance(open_call, ast.Call) or any(
+        isinstance(a, ast.Starred) for a in open_call.args
+    ):
+        return None
+    d = facts.dotted(open_call.func)
+    if d not in ("builtins.open", "io.open"):
+        return None
+    kwargs = {k.arg: k.value for k in open_call.keywords if k.arg}
+    path_node = open_call.args[0] if open_call.args else kwargs.get("file")
+    mode_node = open_call.args[1] if len(open_call.args) > 1 else kwargs.get("mode")
+    if path_node is None or _b917_write_mode(mode_node, facts, scope) is None:
+        return None
+    return facts.locate(path_node, scope)
+
+
+def _b917_staged_writes(tree: ast.AST, facts, remote_names: set) -> list:
+    """[(node, Loc, tainted)] -- every write this file makes whose content is
+    remote-fetched or decode-tainted (B-917 section D). `node` is the write call
+    itself, kept for the eventual finding's line number."""
+    out: list = []
+
+    def add_from_handle(name: str, region: ast.AST, loc) -> None:
+        for sub in ast.walk(region):
+            if (
+                isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr in ("write", "writelines")
+                and isinstance(sub.func.value, ast.Name) and sub.func.value.id == name
+            ):
+                content = sub.args[0] if sub.args else None
+                out.append((sub, loc, _b917_content_tainted(content, remote_names, facts)))
+
+    for node in ast.walk(tree):
+        scope = facts.scope_of(node)
+        if scope is None:
+            continue
+        if (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("write", "writelines")
+            and isinstance(node.func.value, ast.Call)
+        ):
+            # inline: open(p, mode).write(data)
+            loc = _b917_open_write_loc(node.func.value, facts, scope)
+            if loc is not None:
+                content = node.args[0] if node.args else None
+                out.append((node, loc, _b917_content_tainted(content, remote_names, facts)))
+        elif isinstance(node, ast.With):
+            for item in node.items:
+                if not (
+                    isinstance(item.context_expr, ast.Call)
+                    and isinstance(item.optional_vars, ast.Name)
+                ):
+                    continue
+                loc = _b917_open_write_loc(item.context_expr, facts, scope)
+                if loc is not None:
+                    add_from_handle(item.optional_vars.id, node, loc)
+        elif (
+            isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+            and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+        ):
+            loc = _b917_open_write_loc(node.value, facts, scope)
+            if loc is not None:
+                add_from_handle(node.targets[0].id, scope, loc)
+        elif (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("write_bytes", "write_text") and not node.keywords
+        ):
+            loc = facts.locate(node.func.value, scope)
+            if loc is not None:
+                content = node.args[0] if node.args else None
+                out.append((node, loc, _b917_content_tainted(content, remote_names, facts)))
+        elif (
+            isinstance(node, ast.Call) and facts.dotted(node.func) == "shutil.copyfileobj"
+            and len(node.args) >= 2
+        ):
+            dst = node.args[1]
+            loc = None
+            if isinstance(dst, ast.Call):
+                loc = _b917_open_write_loc(dst, facts, scope)
+            elif isinstance(dst, ast.Name):
+                rec = facts.sole(dst.id, scope)
+                if rec is not None and rec[0] == "assign" and isinstance(rec[1], ast.Call):
+                    loc = _b917_open_write_loc(rec[1], facts, scope)
+            if loc is not None:
+                out.append((node, loc, _b917_content_tainted(node.args[0], remote_names, facts)))
+        elif (
+            isinstance(node, ast.Call)
+            and facts.dotted(node.func) == "urllib.request.urlretrieve"
+            and len(node.args) >= 2
+        ):
+            loc = facts.locate(node.args[1], scope)
+            if loc is not None:
+                out.append((node, loc, True))  # remote by construction
+    return out
+
+
+def _b917_reaching_call(name_expr, facts, scope, want_dotted, depth: int = 0):
+    """Follow a `sole()` chain of Name bindings to the Call it ultimately names
+    (bounded), optionally requiring `dotted(call.func) == want_dotted`."""
+    if depth > 6:
+        return None
+    if isinstance(name_expr, ast.Call):
+        call = name_expr
+    elif isinstance(name_expr, ast.Name):
+        rec = facts.sole(name_expr.id, scope)
+        if rec is None or rec[0] != "assign":
+            return None
+        return _b917_reaching_call(rec[1], facts, scope, want_dotted, depth + 1)
+    else:
+        return None
+    if want_dotted is not None and facts.dotted(call.func) != want_dotted:
+        return None
+    return call
+
+
+def _b917_loader_call(node: ast.AST, facts):
+    """(kind, path_node) for a B-917 loader-sink call, or None. `kind` is "direct"
+    (runpy.run_path / imp.load_source), "spec" (`<spec>.loader.exec_module`/
+    `.load_module` reached from a `spec_from_file_location`), "class" (the same for
+    an `importlib.machinery.*Loader` instance) or "zip" (a `zipimporter` instance)."""
+    if not isinstance(node, ast.Call):
+        return None
+    d = facts.dotted(node.func)
+    if d in _B917_LOADER_DIRECT:
+        idx = 0 if d == "runpy.run_path" else 1
+        if len(node.args) > idx and not isinstance(node.args[idx], ast.Starred):
+            return ("direct", node.args[idx])
+        return None
+    if not isinstance(node.func, ast.Attribute) or node.func.attr not in _B917_LOADER_RUN_METHODS:
+        return None
+    recv = node.func.value
+    scope = facts.scope_of(node)
+    if scope is None:
+        return None
+    if isinstance(recv, ast.Attribute) and recv.attr == "loader":
+        spec_call = _b917_reaching_call(recv.value, facts, scope, _B917_SPEC_CTOR)
+        if spec_call is not None and len(spec_call.args) > 1 and not any(
+            isinstance(a, ast.Starred) for a in spec_call.args[:2]
+        ):
+            return ("spec", spec_call.args[1])
+        return None
+    ctor_call = _b917_reaching_call(recv, facts, scope, None)
+    if ctor_call is not None:
+        cd = facts.dotted(ctor_call.func)
+        if cd in _B917_LOADER_CLASSES and len(ctor_call.args) > 1:
+            return ("class", ctor_call.args[1])
+        if cd == _B917_ZIP_CTOR and ctor_call.args:
+            return ("zip", ctor_call.args[0])
+    return None
+
+
+def _b917_attr_path(expr: "ast.AST | None") -> "str | None":
+    """Dotted name of a Name/Attribute chain, ignoring `ctx` (so a STORE target like
+    `sys.path = [...]` is recognised too, which `_FileFacts.dotted()` -- Load-only,
+    by the B-638 proof's own design -- cannot be asked). `sys`/`site` are never
+    usefully import-aliased, so no import-table lookup is needed here."""
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        base = _b917_attr_path(expr.value)
+        return f"{base}.{expr.attr}" if base else None
+    return None
+
+
+def _b917_search_dirs(tree: ast.AST, facts):
+    """(definite search-dir Locs, saw-an-unresolvable-member: bool) -- B-917 section
+    C's search set S, scoped to this one file. `FILE` (the file's own directory) is
+    added by the caller unconditionally; this only collects explicit sys.path/
+    site.addsitedir mutations."""
+    dirs: list = []
+    unknown = False
+    syspath_aliases = {
+        n.targets[0].id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and len(n.targets) == 1
+        and isinstance(n.targets[0], ast.Name) and facts.dotted(n.value) == "sys.path"
+    }
+
+    def collect_elts(value: "ast.AST | None", scope) -> None:
+        nonlocal unknown
+        if isinstance(value, (ast.List, ast.Tuple)):
+            for e in value.elts:
+                loc = facts.locate(e, scope)
+                if loc is not None:
+                    dirs.append(loc)
+                else:
+                    unknown = True
+        else:
+            unknown = True
+
+    for node in ast.walk(tree):
+        scope = facts.scope_of(node)
+        if scope is None:
+            continue
+        if isinstance(node, ast.Call):
+            d = facts.dotted(node.func)
+            if d == "sys.path.insert" and len(node.args) >= 2:
+                loc = facts.locate(node.args[1], scope)
+                if loc is not None:
+                    dirs.append(loc)
+                else:
+                    unknown = True
+            elif d in ("sys.path.append", "site.addsitedir") and node.args:
+                loc = facts.locate(node.args[0], scope)
+                if loc is not None:
+                    dirs.append(loc)
+                else:
+                    unknown = True
+            elif d == "sys.path.extend" and node.args:
+                collect_elts(node.args[0], scope)
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("insert", "append", "extend")
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in syspath_aliases
+            ):
+                unknown = True  # a real mutation, but through an alias -- not trusted
+            elif d in (
+                "sys.meta_path.insert", "sys.meta_path.append",
+                "sys.path_hooks.insert", "sys.path_hooks.append",
+            ):
+                unknown = True
+        elif (
+            isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Add)
+            and _b917_attr_path(node.target) == "sys.path"
+        ):
+            collect_elts(node.value, scope)
+        elif (
+            isinstance(node, ast.Assign) and len(node.targets) == 1
+            and _b917_attr_path(node.targets[0]) == "sys.path"
+        ):
+            elts = None
+            v = node.value
+            if isinstance(v, ast.BinOp) and isinstance(v.op, ast.Add):
+                for side in (v.left, v.right):
+                    if isinstance(side, (ast.List, ast.Tuple)):
+                        elts = side
+                        break
+            collect_elts(elts, scope)
+        elif (
+            isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Subscript)
+            and isinstance(node.targets[0].slice, ast.Slice)
+            and _b917_attr_path(node.targets[0].value) == "sys.path"
+        ):
+            collect_elts(node.value, scope)
+    return dirs, unknown
+
+
+def _b917_file_flag(tree: ast.AST, facts, dotted_names: frozenset) -> bool:
+    return any(
+        isinstance(n, ast.Call) and facts.dotted(n.func) in dotted_names
+        for n in ast.walk(tree)
+    )
+
+
+def _b917_import_sites(tree: ast.AST, facts):
+    """[(node, resolved_candidates, suffix_candidates, is_wildcard)] for every
+    import-like statement -- B-917 section C. A relative import resolves fully here
+    (no sys.path involved); an absolute/dynamic one yields path SUFFIXES the caller
+    joins with each member of the search set S."""
+    sites: list = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level:
+            base = _shippedexec.Loc("FILE", facts.relparts[:-1])
+            for _ in range(node.level - 1):
+                nxt = base.up()
+                base = nxt if nxt is not None else base
+            resolved = []
+            pkg = node.module.split(".") if node.module else []
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                b2 = base
+                for p in pkg:
+                    b2 = b2.join(p)
+                resolved.append(b2.join(alias.name + ".py"))
+                resolved.append(b2.join(alias.name + "/__init__.py"))
+            if pkg:
+                b3 = base
+                for p in pkg[:-1]:
+                    b3 = b3.join(p)
+                resolved.append(b3.join(pkg[-1] + ".py"))
+                resolved.append(b3.join(pkg[-1] + "/__init__.py"))
+            sites.append((node, resolved, [], False))
+            continue
+        if isinstance(node, ast.Import):
+            suffixes = []
+            for alias in node.names:
+                parts = alias.name.split(".")
+                for i in range(1, len(parts) + 1):
+                    prefix = "/".join(parts[:i])
+                    suffixes.append(prefix + ".py")
+                    suffixes.append(prefix + "/__init__.py")
+            sites.append((node, [], suffixes, False))
+            continue
+        if isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            parts = node.module.split(".")
+            suffixes = []
+            for i in range(1, len(parts) + 1):
+                prefix = "/".join(parts[:i])
+                suffixes.append(prefix + ".py")
+                suffixes.append(prefix + "/__init__.py")
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                sub = "/".join(parts + [alias.name])
+                suffixes.append(sub + ".py")
+                suffixes.append(sub + "/__init__.py")
+            sites.append((node, [], suffixes, False))
+            continue
+        if isinstance(node, ast.Call):
+            d = facts.dotted(node.func)
+            is_dyn = d in _B917_MODULE_IMPORT_CALLS or (
+                isinstance(node.func, ast.Name) and node.func.id == "__import__"
+            )
+            scope = facts.scope_of(node)
+            if not is_dyn or not node.args or scope is None:
+                continue
+            lit = facts.literal(node.args[0], scope)
+            if lit is None:
+                sites.append((node, [], [], True))
+                continue
+            parts = lit.split(".")
+            suffixes = []
+            for i in range(1, len(parts) + 1):
+                prefix = "/".join(parts[:i])
+                suffixes.append(prefix + ".py")
+                suffixes.append(prefix + "/__init__.py")
+            sites.append((node, [], suffixes, False))
+    return sites
+
+
+def _b917_staged_import_findings(tree: ast.AST, facts, staged: list) -> list:
+    """[(rule, severity, lineno, reason)] -- B-917 section C: correlate every
+    import-like statement's search candidates against every tainted staged write in
+    `staged`, by location equality (`shippedexec.loc_eq`)."""
+    if not staged:
+        return []
+    search_dirs, unknown_dir = _b917_search_dirs(tree, facts)
+    search_dirs = [_shippedexec.Loc("FILE", ())] + search_dirs
+    has_chdir = _b917_file_flag(tree, facts, frozenset({"os.chdir", "os.fchdir"}))
+    has_symlink = _b917_file_flag(tree, facts, frozenset({"os.symlink", "os.link"}))
+
+    def compare(a, b) -> str:
+        r = _shippedexec.loc_eq(a, b)
+        if r == "DEFINITE_NOT" and (
+            (has_chdir and (a.anchor == "CWD" or b.anchor == "CWD")) or has_symlink
+        ):
+            return "UNDETERMINED"
+        return r
+
+    out: list = []
+    tainted_py_write = any(w_tainted and w_loc.leaf_py for _, w_loc, w_tainted in staged)
+    for node, resolved, suffixes, is_wildcard in _b917_import_sites(tree, facts):
+        ln = getattr(node, "lineno", 0)
+        if is_wildcard:
+            if tainted_py_write:
+                out.append((
+                    "STAGED_IMPORT_UNRESOLVED", "info", ln,
+                    "a dynamic import whose module name is not a literal runs "
+                    "alongside a remote/decoded write to a .py file elsewhere in "
+                    "this file -- cannot confirm they are unrelated",
+                ))
+            continue
+        candidates = list(resolved)
+        for sfx in suffixes:
+            for base in search_dirs:
+                candidates.append(base.join(sfx))
+        best = "DEFINITE_NOT"
+        for _w_node, w_loc, w_tainted in staged:
+            if not w_tainted:
+                continue
+            for c in candidates:
+                r = compare(w_loc, c)
+                if r == "DEFINITE":
+                    best = "DEFINITE"
+                    break
+                if r == "UNDETERMINED" and best != "DEFINITE":
+                    best = "UNDETERMINED"
+            if best == "DEFINITE":
+                break
+        if best == "DEFINITE":
+            out.append((
+                "REMOTE_STAGED_IMPORT", "crit", ln,
+                "content fetched/decoded and written to a path this file (or a "
+                "sys.path entry it adds) then imports -- staged remote code "
+                "execution via import",
+            ))
+        elif best == "UNDETERMINED":
+            out.append((
+                "STAGED_IMPORT_UNRESOLVED", "info", ln,
+                "a remote/decoded write and this import's search path could not be "
+                "proven to name the same file, nor proven to name different ones -- "
+                "cannot confirm they are unrelated",
+            ))
+        elif unknown_dir and tainted_py_write:
+            out.append((
+                "STAGED_IMPORT_UNRESOLVED", "info", ln,
+                "this file adds an unresolvable directory to sys.path (an aliased "
+                "or computed member) while also writing remote/decoded content to "
+                "a .py file -- cannot confirm they are unrelated",
+            ))
+    return out
+
+
+# Artifact-wide staged-write cache (b917-design.md 2.3: "W is artifact-wide, cached
+# once per artifact"), keyed on the `ShippedArtifact` INSTANCE via a WeakKeyDictionary
+# so a write in one file of an artifact correlates with an import in another, an entry
+# is computed once no matter how many files that artifact's scan visits, and it can
+# never leak into a different artifact's verdict -- the key disappears with the
+# artifact object itself (b917-design.md's own Risks section, section 6).
+_B917_ARTIFACT_STAGED_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _b917_artifact_staged_writes(artifact) -> list:
+    """[(node, Loc, tainted)] for every tainted staged write in ANY file of
+    *artifact*, not just the one `_b917_findings` is currently analysing -- so the
+    O3 shape split across two files (`updater.py` writes, `main.py` imports) is
+    caught on `main.py`'s own pass. Each file's `Loc`s are already artifact-root
+    relative (the same convention a single file's own `facts.locate()` uses), so no
+    further re-basing is needed to compare across files. A sibling file that fails to
+    parse contributes no write -- it gets its own AST_UNANALYZABLE finding when (if)
+    it is itself scanned; that is a missed correlation, never a wrong one."""
+    cached = _B917_ARTIFACT_STAGED_CACHE.get(artifact)
+    if cached is not None:
+        return cached
+    out: list = []
+    for rel, src in artifact.sources.items():
+        try:
+            sib_tree = ast.parse(src)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            continue
+        sib_facts = _shippedexec._FileFacts(sib_tree, rel, artifact, set(), False)
+        sib_remote_names = _b917_remote_tainted_names(sib_tree, sib_facts)
+        out.extend(_b917_staged_writes(sib_tree, sib_facts, sib_remote_names))
+    _B917_ARTIFACT_STAGED_CACHE[artifact] = out
+    return out
+
+
+def _b917_findings(tree: ast.AST, filename: str, artifact) -> list:
+    """[(rule, severity, lineno, reason)] for B-917: loader sinks
+    (runpy/importlib/zipimport execute a FILE by PATH) and staged-import correlation
+    (a write then an import resolving to the same location). See
+    shippedexec.Loc/loc_eq and the design doc referenced by the B-917 Pulse task."""
+    facts = (
+        _shippedexec._FileFacts(tree, filename, artifact, set(), False)
+        if artifact is not None
+        else _shippedexec.PathFacts(tree, filename)
+    )
+    remote_names = _b917_remote_tainted_names(tree, facts)
+    staged = _b917_staged_writes(tree, facts, remote_names)
+    # Correlation set: this file alone with no artifact (nothing else to correlate
+    # against); every file of the artifact, including this one, when there is one.
+    correlated = staged if artifact is None else _b917_artifact_staged_writes(artifact)
+    out: list = []
+
+    for node in ast.walk(tree):
+        hit = _b917_loader_call(node, facts)
+        if hit is None:
+            continue
+        kind, path_node = hit
+        scope = facts.scope_of(node)
+        if scope is None:
+            continue
+        ln = getattr(node, "lineno", 0)
+        loc = facts.locate(path_node, scope)
+        # T1: this loader's target is DEFINITE-equal to a tainted staged write, in
+        # this file or (with an artifact) any file of it.
+        if any(
+            w_tainted and _shippedexec.loc_eq(loc, w_loc) == "DEFINITE"
+            for _, w_loc, w_tainted in correlated
+        ):
+            out.append((
+                "REMOTE_STAGED_EXEC", "crit", ln,
+                "content fetched from a remote URL or decoded is written to a path "
+                f"and that path is then loaded through {kind} evaluation -- staged "
+                "remote code execution",
+            ))
+            continue
+        # T2: the loader's PATH argument itself carries remote/decode taint.
+        if _b917_content_tainted(path_node, remote_names, facts):
+            out.append((
+                "DANGEROUS_LOADER", "crit", ln,
+                f"a {kind} loader runs a path derived from remote or decoded data "
+                "-- dynamic code execution from an untrusted location",
+            ))
+            continue
+        # T3: a world-writable location (the temp dir, or a literal under it).
+        if loc is not None and loc.writable:
+            out.append((
+                "DANGEROUS_LOADER", "crit", ln,
+                f"a {kind} loader runs a file under a world-writable directory -- "
+                "any local process can plant it there first",
+            ))
+            continue
+        # T4: an artifact was given and the target sits inside it (FILE anchor).
+        if loc is not None and loc.anchor == "FILE":
+            if artifact is None:
+                out.append(("DANGEROUS_SINK", "info", ln, f"a dynamic loader call ({kind})"))
+                continue
+            rel = "/".join(loc.parts) if loc.parts else ""
+            cls = artifact.classify(rel) if rel else "present_unanalysed"
+            if cls == "analysed":
+                out.append(("DANGEROUS_SINK", "info", ln, f"a dynamic loader call ({kind})"))
+            else:
+                out.append((
+                    "UNSHIPPED_FILE_EXEC", "info", ln,
+                    f"a {kind} loader call runs {rel or '<unresolved>'}, a path "
+                    "inside the skill that this scan did not analyse as Python (not "
+                    "shipped, or not Python) -- whatever is there at runtime runs "
+                    "as code",
+                ))
+            continue
+        # T5: everything else -- an ext-taint-only selector (param/env/argv/input/
+        # file-read/tool-result), CWD/HOME/other-ABS/SYM, or a FILE target this scan
+        # cannot classify. A question, not a verdict (Golden Rule #4): a benign
+        # `load_custom_strategy(path)` and a planted file read through the same
+        # parameter are the identical AST.
+        out.append((
+            "LOADER_TARGET_UNVERIFIED", "info", ln,
+            f"a {kind} loader call's target could not be verified as either the "
+            "skill's own shipped code or a provably safe location -- the actual "
+            "file run here is decided at runtime",
+        ))
+
+    out.extend(_b917_staged_import_findings(tree, facts, correlated))
+    return out
+
+
 def analyze_python(
     source: str,
     filename: str = "<skill>",
@@ -8647,6 +9300,14 @@ def analyze_python(
     ext_taint_map = _external_tainted_names(
         tree, func_param_taint, owner_map, parent_scope, shadow_cache
     )
+
+    # B-917: loader sinks (runpy/importlib/zipimport execute a FILE by path, not a
+    # name reference) and staged-import correlation (a write followed by an import
+    # whose search path resolves to the same location) -- see the `_b917_*` helpers
+    # above and shippedexec.Loc/loc_eq for the shared location model.
+    for _ldr_rule, _ldr_sev, _ldr_ln, _ldr_reason in _b917_findings(tree, filename, artifact):
+        add(_ldr_rule, _ldr_sev, _ldr_ln, _ldr_reason)
+
     # B-916: `ext_taint_map` only tracks NAMES bound to an external source, so a file
     # whose only external input is read straight into an exec/eval/os.system/os.popen/
     # subprocess.* sink -- no intermediate variable at all, e.g.

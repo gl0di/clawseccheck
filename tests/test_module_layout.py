@@ -63,6 +63,43 @@ _EXEMPT = {
                    "case-closure invariant and derived pattern-closure map, and "
                    "fold_pattern(). Over budget by 63 lines since CLAWSECCHECK-B-887. "
                    "Tracked debt, not a design statement.",
+    # B-917 (2026-09-23): 1,200 -> 1,461 lines. `_FileFacts` gained `locate()`/`Loc`/
+    # `loc_eq` -- a SECOND path resolver alongside `resolve()`/`_Path` (the B-638 proof,
+    # which stays byte-identical and untouched), because a loader-sink/staged-import
+    # correlation needs to know WHERE a path is anchored (FILE/CWD/ABS/TEMP/HOME/SYM),
+    # not just whether it resolves inside the artifact. `ShippedArtifact.classify()` and
+    # the `PathFacts` single-file convenience wrapper are the other two public additions.
+    # Kept in this one module rather than split out: `locate()` shares `sole()`/`dotted()`/
+    # `literal()`/the import table with `resolve()` on the same `_FileFacts` instance, and
+    # a caller (skillast.py's new pass) needs both together.
+    # Restated 2026-09-23, B-917 fix round 1 -- was ~1,461; +59 lines for the two review
+    # gaps: `locate()`'s Name branch gained the LEGB fallback b917-design.md 2.1 itself
+    # specifies (`_legb_lookup`), guarded by `_legb_blocked` (an attribute store or a
+    # `_tampers()` spelling anywhere in the file refuses the fallback rather than risk an
+    # unsound resolution) -- `resolve()` is untouched, so B-638's proof is unaffected.
+    # Restated 2026-09-23, B-917 fix round 2 -- was ~1,520; +29 lines for a single
+    # C-135 review finding (BLOCKER, introduced by fix round 1 above): the LEGB fallback
+    # gated itself on `sole() is None`, which is also true of a scope that DOES bind the
+    # name via a non-assign form (a parameter, a for/with/comprehension target, an
+    # except-as name, a nested def/class, an import) -- that binding makes the name local
+    # to the WHOLE scope in real Python, so the fallback must stop there, never walk past
+    # it into an enclosing/module scope. Both the `locate()` call site and each step of
+    # `_legb_lookup()`'s own walk now gate on "does this scope have any record for the
+    # name at all" (`records(scope).get(name)`) instead. No new helper; both sites grew a
+    # few lines of guard plus documentation of why sole()-is-None was the wrong condition.
+    "shippedexec.py": "~1,549 lines — B-638's shipped-exec containment proof "
+                       "(`resolve()`/`_Path`, untouched) plus B-917's location resolver "
+                       "(`locate()`/`Loc`/`loc_eq`, `ShippedArtifact.classify()`, "
+                       "`PathFacts`) for the loader-sink/staged-import correlation, plus "
+                       "the fix-round-1 LEGB fallback (`_legb_lookup`/`_legb_blocked`), "
+                       "plus fix-round-2's any-record scope gate on that same fallback. "
+                       "Over budget by 349 lines since B-917. Split candidate: the two "
+                       "resolvers do not share state beyond `_FileFacts` itself and could "
+                       "separate into a `locations.py` leaf; not attempted here because "
+                       "`locate()` reuses `resolve()`'s exact `sole()`/`dotted()`/"
+                       "`literal()`/import-table machinery, and the B-917 Pulse task's "
+                       "own consistency pin (locate() vs resolve() over the same sources) "
+                       "reads clearer with both on one instance.",
     # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
     # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
     # into self_test_corroboration()/render_self_test_corroboration()/
@@ -392,27 +429,24 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~11,124 lines (restated 2026-09-23, merging two concurrent growth "
-                   "lines in the same integration commit — B-830 round 2 and B-850 "
-                   "round 5 — was ~7,875 lines as of the 2026-09-16 B-643 restatement "
-                   "below. B-830 round 2 (+538) added a RecursionError guard around "
-                   "the two B-830 fold call sites (analyze_python's credential-taint "
-                   "pass, capability_families) so a pathological path-join/arithmetic "
-                   "chain falls back to ctx=None instead of crashing --vet-skill with "
-                   "no verdict, plus threading the fold context into the in-cluster "
-                   "credential classifier so a folded extension of the in-cluster "
-                   "token literal cannot misclassify as exempt — the same taint layer "
-                   "the note below already tracks, not a new parser family. B-850 "
-                   "rounds 3-5 (+1,711 combined) replaced the old B-752 token-presence "
-                   "proxy with the artifact-containment ALLOWLIST recognizer: round 4 "
-                   "(9fc20cc9) added the ambiguous-fires provenance walker backing the "
-                   "fail-closed guard's mutation-target check (~395 lines) without "
-                   "restating this entry, and round 5 wired the .__dict__/subscript-"
-                   "store gates onto that same combinator plus traced the Call "
-                   "branch's function-return/class-constructor provenance (~120 "
-                   "lines) — both still inside the same self-contained abstract-"
-                   "interpretation engine the 2026-09-16 restatement below describes, "
-                   "not a new parser family — the "
+    "skillast.py": "~11,796 lines (restated 2026-09-23, merging three concurrent growth lines from a common ~7,267-line B-643 baseline (2026-09-16): B-830 round 2, "
+                   "B-850 rounds 3-5, and B-917's build plus its two fix rounds. B-830 round 2 (+538) added a RecursionError guard around the two B-830 fold call "
+                   "sites (analyze_python's credential-taint pass, capability_families) so a pathological path-join/arithmetic chain falls back to "
+                   "ctx=None instead of crashing --vet-skill with no verdict, plus threading the fold context into the in-cluster credential classifier so a folded "
+                   "extension of the in-cluster token literal cannot misclassify as exempt — the same taint layer this note already tracks, not a new parser "
+                   "family. B-850 rounds 3-5 (+1,711 combined) replaced the old B-752 token-presence proxy with the artifact-containment ALLOWLIST recognizer: "
+                   "round 4 (9fc20cc9) added the ambiguous-fires provenance walker backing the fail-closed guard's mutation-target check (~395 lines), and round 5 "
+                   "wired the .__dict__/subscript-store gates onto that same combinator plus traced the Call branch's function-return/class-constructor "
+                   "provenance (~120 lines) — both inside the same self-contained abstract-interpretation engine, not a new parser family. B-917 (its build plus fix "
+                   "rounds 1-2, combined) added the loader-sink / staged-import correlation pass (runpy/importlib/zipimport modelled as code-execution sinks, "
+                   "plus a write-then-import location correlation reusing shippedexec's `locate()`/`loc_eq()` resolver rather than a spelling-keyed "
+                   "predicate), the artifact-wide staged-write cache (`_b917_artifact_staged_writes`, a `weakref.WeakKeyDictionary` keyed on the "
+                   "`ShippedArtifact` instance so a write in one file of an artifact correlates with an import in another without leaking across artifacts "
+                   "or re-parsing every sibling file per pass), the LEGB fallback for `locate()`'s Name branch (`_legb_lookup`, guarded by `_legb_blocked`), and "
+                   "the any-record scope gate that round 2's own C-135 review required (`records(scope).get(name)` replacing the sole()-is-None test, since a "
+                   "non-assign binding — a parameter, a for/with/comprehension target, an except-as name, a nested def/class, an import — makes a name local to "
+                   "the whole scope and must stop the fallback there). None of this adds a new "
+                   "parser family — the file's split is still along the existing "
                    "python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target). Restated "
                    "2026-09-16 (B-643), and the guard's own instruction is to reconsider "

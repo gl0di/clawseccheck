@@ -4073,6 +4073,8 @@ _B13_WINNER_SUBSIGNAL = {
     "warns_chunked_file_exec": "possible split-by-file payload loader",
     "warns_unshipped_exec": "executes a file this scan never analysed",
     "warns_artifact_unproven": "possible artifact-boundary escape (unproven path)",
+    "warns_loader_target_unverified": "loads a file from an unverified location",
+    "warns_staged_import_unresolved": "possible write-then-import of the same file",
     "warns_timebomb": "time-bomb / environment-gated code",
     "warns_shell_injection": "shell-injection-prone subprocess/os.system usage",
     "warns_insecure_tempfile": "insecure temp-file handling",
@@ -4521,6 +4523,16 @@ def check_installed_skills(ctx: Context) -> Finding:
     # positively anchors, but cannot statically bound (a runtime-computed tail
     # segment) -- never FAIL-capable, disclosed rather than silently absolved.
     warns_artifact_unproven: list[str] = []
+    # B-917: a runpy/importlib/zipimport loader whose target could not be verified as
+    # either the skill's own shipped code or a provably safe location (an ext-taint-only
+    # selector, a CWD/HOME/other-ABS/SYM target). WARN-only, same "a question, not a
+    # verdict" standing as warns_unshipped_exec just above.
+    warns_loader_target_unverified: list[str] = []
+    # B-917: a write and an import whose search path could not be proven to name the
+    # same file, nor proven to name different ones (an ambiguous SYM/CWD-vs-FILE pair,
+    # a wildcard dynamic import, or an unresolvable sys.path member) alongside a
+    # remote/decoded .py write. WARN-only.
+    warns_staged_import_unresolved: list[str] = []
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
     # B-744: OpenClaw's own credential store named alongside credential-shaped content
     # reaching an exfil sink — WARN-only, never routed through the FAIL-capable
@@ -5358,6 +5370,25 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # EXEC's guard just above).
                 if af.rule == "ARTIFACT_READ_UNPROVEN":
                     warns_artifact_unproven.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                # B-917 T5: a loader (runpy/importlib/zipimport) target that is
+                # neither proven to be the skill's own shipped code nor proven safe.
+                # WARN-grade, routed here for the identical reason UNSHIPPED_FILE_EXEC
+                # is: a benign parameterized loader and a planted-file read through the
+                # same parameter are the same AST (Golden Rule #4).
+                if af.rule == "LOADER_TARGET_UNVERIFIED":
+                    warns_loader_target_unverified.append(
+                        f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                    )
+                    continue
+                # B-917: a write/import pair whose locations could not be proven equal
+                # OR proven different. WARN-grade -- never escalated, since the two
+                # shapes behind it (an ext-taint-only selector; a CWD-vs-FILE ambiguity)
+                # are not distinguishable from source alone (b917-design.md's
+                # residual_proof).
+                if af.rule == "STAGED_IMPORT_UNRESOLVED":
+                    warns_staged_import_unresolved.append(
+                        f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                    )
                     continue
                 # Argv-list tunnel/mesh-VPN launch primitive (TUNNEL_LAUNCH_ARGV).
                 # WARN-only, HIGH severity but explicitly not
@@ -5605,6 +5636,8 @@ def check_installed_skills(ctx: Context) -> Finding:
         "warns_chunked_file_exec": warns_chunked_file_exec,
         "warns_unshipped_exec": warns_unshipped_exec,
         "warns_artifact_unproven": warns_artifact_unproven,
+        "warns_loader_target_unverified": warns_loader_target_unverified,
+        "warns_staged_import_unresolved": warns_staged_import_unresolved,
         "warns_js": warns_js,
         "warns_content": warns_content,
         "warns_notify_host": warns_notify_host,
@@ -6365,6 +6398,52 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_artifact_unproven,
             _signal_buckets,
             "warns_artifact_unproven",
+        )
+
+    # B-917: a runpy/importlib/zipimport loader call whose target is neither the
+    # skill's own shipped code nor a provably safe location -- typically a runtime
+    # parameter, an environment variable, or another value this scan cannot trace to
+    # a file. WARN, never FAIL: a benign plugin/strategy loader and a planted-file
+    # read through the identical parameter share one AST (Golden Rule #4).
+    if warns_loader_target_unverified:
+        extra = (
+            f" (+{len(warns_loader_target_unverified) - 6} more)"
+            if len(warns_loader_target_unverified) > 6 else ""
+        )
+        return _b13_verdict(
+            HIGH,
+            WARN,
+            "An installed skill loads a file from a location this scan could not "
+            "verify: " + "; ".join(warns_loader_target_unverified[:6]) + extra,
+            "The target path is not provably the skill's own shipped code and not "
+            "provably a fixed, safe location -- it is decided at run time (a "
+            "parameter, an environment variable, or similar). Confirm what supplies "
+            "it before trusting the skill with untrusted input.",
+            warns_loader_target_unverified,
+            _signal_buckets,
+            "warns_loader_target_unverified",
+        )
+
+    # B-917: a write and a same-file import whose search path could not be proven to
+    # name the same file, nor proven to name a different one. WARN, never FAIL -- see
+    # b917-design.md's residual_proof for why this ambiguity is not resolvable from
+    # source alone.
+    if warns_staged_import_unresolved:
+        extra = (
+            f" (+{len(warns_staged_import_unresolved) - 6} more)"
+            if len(warns_staged_import_unresolved) > 6 else ""
+        )
+        return _b13_verdict(
+            HIGH,
+            WARN,
+            "An installed skill writes content this scan cannot rule out as "
+            "remote/decoded, then imports a module whose location may be the same "
+            "file: " + "; ".join(warns_staged_import_unresolved[:6]) + extra,
+            "Confirm the imported module is the skill's own shipped code and not "
+            "something the skill wrote to disk first.",
+            warns_staged_import_unresolved,
+            _signal_buckets,
+            "warns_staged_import_unresolved",
         )
 
     # F-058: a dangerous sink gated on a wall-clock date or an environment variable — a
@@ -7565,6 +7644,8 @@ _AST_NEVER_FAIL_RULES = frozenset({
     "SHELL_INJECTION_RISK",      # C-199
     "CHUNKED_FILE_EXEC",         # B336 — explicitly not FAIL-capable
     "UNSHIPPED_FILE_EXEC",       # B-638 — unknown content, a question not a verdict
+    "LOADER_TARGET_UNVERIFIED",  # B-917 — unverified loader target, a question not a verdict
+    "STAGED_IMPORT_UNRESOLVED",  # B-917 — ambiguous write/import location pair
     "TUNNEL_LAUNCH_ARGV",        # B338 — explicitly not FAIL-capable
     "HARDCODED_PROVIDER_SECRET_ASSIGN",  # B-893 — explicitly not FAIL-capable
     "AST_FINDINGS_TRUNCATED",    # cap disclosure, not a verdict — see skillast.py's analyze_python
