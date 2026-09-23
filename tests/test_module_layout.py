@@ -44,6 +44,26 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
+    # B-917 (2026-09-23): 1,200 -> 1,461 lines. `_FileFacts` gained `locate()`/`Loc`/
+    # `loc_eq` -- a SECOND path resolver alongside `resolve()`/`_Path` (the B-638 proof,
+    # which stays byte-identical and untouched), because a loader-sink/staged-import
+    # correlation needs to know WHERE a path is anchored (FILE/CWD/ABS/TEMP/HOME/SYM),
+    # not just whether it resolves inside the artifact. `ShippedArtifact.classify()` and
+    # the `PathFacts` single-file convenience wrapper are the other two public additions.
+    # Kept in this one module rather than split out: `locate()` shares `sole()`/`dotted()`/
+    # `literal()`/the import table with `resolve()` on the same `_FileFacts` instance, and
+    # a caller (skillast.py's new pass) needs both together.
+    "shippedexec.py": "~1,461 lines — B-638's shipped-exec containment proof "
+                       "(`resolve()`/`_Path`, untouched) plus B-917's location resolver "
+                       "(`locate()`/`Loc`/`loc_eq`, `ShippedArtifact.classify()`, "
+                       "`PathFacts`) for the loader-sink/staged-import correlation. Over "
+                       "budget by 261 lines since B-917. Split candidate: the two "
+                       "resolvers do not share state beyond `_FileFacts` itself and could "
+                       "separate into a `locations.py` leaf; not attempted here because "
+                       "`locate()` reuses `resolve()`'s exact `sole()`/`dotted()`/"
+                       "`literal()`/import-table machinery, and the B-917 Pulse task's "
+                       "own consistency pin (locate() vs resolve() over the same sources) "
+                       "reads clearer with both on one instance.",
     # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
     # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
     # into self_test_corroboration()/render_self_test_corroboration()/
@@ -361,7 +381,13 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~8,413 lines (restated 2026-09-23, B-830 round 2 — was ~7,875; the "
+    "skillast.py": "~9,442 lines (restated 2026-09-23, B-917 — was ~8,413; the "
+                   "addition is the loader-sink / staged-import correlation pass "
+                   "(runpy/importlib/zipimport modelled as code-execution sinks, plus a "
+                   "write-then-import location correlation) that reuses shippedexec's "
+                   "`locate()`/`loc_eq()` resolver rather than a spelling-keyed predicate — "
+                   "~600 lines of new helpers plus wiring, not a new parser family). "
+                   "Restated 2026-09-23, B-830 round 2 — was ~7,875; the "
                    "addition is a RecursionError guard around the two B-830 fold call sites "
                    "(analyze_python's credential-taint pass, capability_families) so a "
                    "pathological path-join/arithmetic chain falls back to ctx=None instead "
