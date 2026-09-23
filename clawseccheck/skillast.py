@@ -4763,13 +4763,24 @@ def _containment_verdict(p, depth_known):
     depth, seen_unk = 0, p.unk
     for c in p.comps:
         if c == _CONTAINMENT_UNK:
+            # B-850 round 2: count a runtime-computed segment as exactly one level of
+            # depth -- its WORST case (a real subdirectory name, not itself a '..').
+            # Restores the pre-B-850 baseline's conviction on
+            # `join(here, os.environ.get(K, ''), '..', '..', '..', 'x.py')`: a '..'
+            # walk that still goes negative even under that generous one-level credit
+            # is a PROVEN escape regardless of what the runtime segment turns out to
+            # be, not merely an UNPROVEN one -- only "depth unknown" still downgrades.
             seen_unk = True
+            depth += 1
         elif c == "..":
             depth -= 1
             if depth < 0:
-                if seen_unk or not depth_known:
-                    return _CONTAINMENT_UNPROVEN, "a '..' walk below the root follows a runtime-computed segment"
-                return _CONTAINMENT_ESCAPES, "literal '..' segments walk out of the artifact root"
+                if not depth_known:
+                    return _CONTAINMENT_UNPROVEN, "climbs above the root and the file's depth is unknown"
+                return _CONTAINMENT_ESCAPES, (
+                    "a '..' walk climbs above the artifact root even crediting every "
+                    "runtime-computed segment as one level deep"
+                )
         else:
             depth += 1
     if seen_unk:
@@ -4783,11 +4794,120 @@ _CONTAINMENT_PATHLIB_CLASSES = {
 }
 _CONTAINMENT_OS_CONSTS = {"pardir": "..", "curdir": ".", "sep": "/", "altsep": "/"}
 _CONTAINMENT_SCOPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_CONTAINMENT_COMP_TYPES = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
 _CONTAINMENT_FOLDABLE_STR_METHODS = {
     "format", "replace", "strip", "lstrip", "rstrip", "lower", "upper",
     "removeprefix", "removesuffix", "casefold",
 }
+# B-850 round 2: a small allowlist of genuinely pure/static functions (content
+# decoders and plain char/str primitives) that `_containment_staticness` still treats
+# as 'static' -- every OTHER imported call is 'runtime' now, closing the false-ESCAPES
+# family where a benign runtime idiom (`platform.system().lower()`, `os.getenv(...)`)
+# got folded into a single 'static' opaque and then read as "a static value hidden
+# behind an unfoldable expression".
+_CONTAINMENT_PURE_FUNCS = frozenset({
+    "base64.b64decode", "base64.b64encode", "base64.b32decode", "base64.b32encode",
+    "base64.b16decode", "base64.b16encode", "base64.b85decode", "base64.b85encode",
+    "base64.a85decode", "base64.a85encode", "base64.decodebytes", "base64.encodebytes",
+    "binascii.a2b_base64", "binascii.b2a_base64", "binascii.unhexlify", "binascii.hexlify",
+    "builtins.bytes.fromhex", "builtins.chr", "builtins.ord",
+    "zlib.decompress", "zlib.compress", "gzip.decompress", "gzip.compress",
+    "bz2.decompress", "bz2.compress", "lzma.decompress", "lzma.compress",
+    "codecs.decode", "codecs.encode",
+})
+# Environment variables whose value is absolute by construction (a real filesystem
+# root the OS/shell sets up) -- a read of one of these is modelled as an absolute-path
+# SOURCE, not an ordinary runtime unknown, so `os.path.join(here, os.environ['HOME'],
+# ...)` is NOT_ANCHORED (never exempt) rather than a merely-UNPROVEN anchored read.
+_CONTAINMENT_ABS_ENV_VARS = frozenset({
+    "HOME", "TMPDIR", "TMP", "TEMP", "PWD", "USERPROFILE", "APPDATA",
+})
 _ContainmentDef = namedtuple("_ContainmentDef", "kind node extra scope")
+
+# B-850 round 2: fail-closed namespace/monkeypatch guard. A skill that rebinds
+# `__file__`, reaches into `globals`/`vars`/`locals`/`setattr`/`delattr`/`__dict__`/
+# `__builtins__`/`sys.modules`/`__code__`/`__defaults__`/`__kwdefaults__`/`__globals__`,
+# reassigns one of the trusted path primitives this very recognizer trusts (`os.path.
+# join`, `dirname`, `builtins.open`, ... -- regardless of the base object, so
+# `os.path.join = ...`, `builtins.open = ...`, and an ALIASED base like
+# `m = sys; m._MEIPASS = ...` all trip it), does `import *`, or calls `exec`/`eval` on a
+# string literal, has a namespace the static analysis cannot trust at all -- every
+# other recognizer decision in this module assumes `__file__`/`os.path.*`/`sys.*` mean
+# what they normally mean. Rather than chase each such primitive as its own bypass (six
+# C-135 rounds already did that for the blocklist this module replaced), one guard caps
+# the WHOLE file's verdict at NOT_ANCHORED -- never a silent exemption -- computed once
+# per `_ContainmentCtx` and consulted by `_containment_classify_decode`, the sole entry
+# point every public wrapper funnels through.
+_CONTAINMENT_UNSAFE_NAMES = frozenset({"globals", "vars", "locals", "setattr", "delattr"})
+_CONTAINMENT_UNSAFE_DUNDER_ATTRS = frozenset({
+    "__dict__", "__code__", "__defaults__", "__kwdefaults__", "__globals__",
+})
+_CONTAINMENT_TRUSTED_ATTRS = frozenset({
+    "join", "dirname", "abspath", "realpath", "normpath", "split", "expanduser",
+    "fspath", "getcwd", "listdir", "glob", "iglob", "rglob", "iterdir", "open",
+    "path", "_MEIPASS", "frozen",
+})
+
+
+def _containment_dunder_file_subscript_key(slice_node):
+    s = slice_node
+    if s.__class__.__name__ == "Index":  # Python <=3.8 subscript wrapper compat
+        s = s.value
+    return isinstance(s, ast.Constant) and s.value == "__file__"
+
+
+def _containment_fail_closed_reason(tree):
+    """One whole-file sweep for a namespace-rebinding/monkeypatch primitive (see the
+    comment above). Returns a short reason string, or None when the file is clean."""
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name):
+            if n.id == "__file__" and isinstance(n.ctx, (ast.Store, ast.Del)):
+                return "__file__ is reassigned or deleted"
+            if n.id == "__builtins__":
+                return "__builtins__ is referenced"
+            if n.id in _CONTAINMENT_UNSAFE_NAMES:
+                return f"{n.id}() is used"
+        elif isinstance(n, ast.Attribute):
+            if n.attr in _CONTAINMENT_UNSAFE_DUNDER_ATTRS:
+                return f".{n.attr} is used"
+            if isinstance(n.ctx, (ast.Store, ast.Del)) and n.attr in _CONTAINMENT_TRUSTED_ATTRS:
+                return f".{n.attr} is reassigned or deleted"
+            if n.attr == "modules" and isinstance(n.value, ast.Name) and n.value.id == "sys":
+                # Matched by literal identifier, not `canon` -- `sys` appearing
+                # ANYWHERE inside an assignment target's subtree (even a mere read,
+                # e.g. `sys.modules[__name__].__file__ = ...`) already makes
+                # `_imports()`'s broad rebind heuristic pop 'sys' from `canon`.
+                return "sys.modules is used"
+        elif isinstance(n, ast.alias):
+            if n.asname == "__file__":
+                return "__file__ is bound by an import alias"
+        elif isinstance(n, ast.ExceptHandler):
+            if n.name == "__file__":
+                return "__file__ is bound by an except-as target"
+        elif n.__class__.__name__ in ("MatchAs", "MatchStar"):
+            if getattr(n, "name", None) == "__file__":
+                return "__file__ is bound by a match capture"
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = n.args
+            names = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs]
+            names += [x.arg for x in (a.vararg, a.kwarg) if x]
+            if "__file__" in names:
+                return "__file__ is a function parameter"
+        elif isinstance(n, ast.Subscript):
+            if isinstance(n.ctx, (ast.Store, ast.Del)) and _containment_dunder_file_subscript_key(n.slice):
+                return "'__file__' is used as a subscript key"
+        elif isinstance(n, ast.ImportFrom):
+            if any(a.name == "*" for a in n.names):
+                return "import * is used"
+        elif isinstance(n, ast.Call):
+            if isinstance(n.func, ast.Attribute) and n.func.attr == "update" and any(
+                kw.arg == "__file__" for kw in n.keywords
+            ):
+                return "'__file__' is used as a .update() key"
+            if isinstance(n.func, ast.Name) and n.func.id in ("exec", "eval") and n.args and \
+                    isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str):
+                return f"{n.func.id}() is called with a string literal"
+    return None
 
 
 class _ContainmentCtx:
@@ -4808,6 +4928,7 @@ class _ContainmentCtx:
         self._callsites: dict = {}
         self.global_assigns: dict = {}
         self._imports()
+        self.fail_closed_reason = _containment_fail_closed_reason(tree)
         for n in ast.walk(tree):
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
                 isinstance(m, ast.Global) for m in ast.walk(n)
@@ -5051,19 +5172,22 @@ class _ContainmentReachingDefs:
     def _stmt(self, s, st):
         st = dict(st)
         if isinstance(s, ast.Assign):
+            self._walrus(s.value, st)
             self._record(s.value, st)
             for t in s.targets:
                 self._record(t, st)  # subscript/attribute targets read names
-            self._walrus(s.value, st)
             for t in s.targets:
                 self._assign_target(st, t, s.value)
         elif isinstance(s, ast.AugAssign):
+            self._walrus(s.value, st)
             self._record(s.value, st)
             if isinstance(s.target, ast.Name):
                 prior = st.get(s.target.id, frozenset())
                 self._bind(st, s.target.id, _ContainmentDef("aug", s, prior, self.scope))
         elif isinstance(s, ast.AnnAssign):
-            self._record(s.value, st)
+            if s.value is not None:
+                self._walrus(s.value, st)
+                self._record(s.value, st)
             if s.value is not None and isinstance(s.target, ast.Name):
                 self._bind(st, s.target.id, _ContainmentDef("assign", s.value, None, self.scope))
         elif isinstance(s, (ast.Import, ast.ImportFrom)):
@@ -5073,16 +5197,29 @@ class _ContainmentReachingDefs:
                     _ContainmentDef("import", a, None, self.scope),
                 )
         elif isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # Decorators/defaults evaluate in THIS scope (the body is its own scope,
+            # matching `_record`'s own special-case for these node types below) -- a
+            # walrus in either is bound here, before recording, same as everywhere
+            # else (B-850 round 2).
+            for c in getattr(s, "decorator_list", []):
+                self._walrus(c, st)
+            if hasattr(s, "args"):
+                for d in s.args.defaults:
+                    self._walrus(d, st)
+                for d in s.args.kw_defaults:
+                    if d is not None:
+                        self._walrus(d, st)
             self._record(s, st)
             self._bind(st, s.name, _ContainmentDef("def", s, None, self.scope))
         elif isinstance(s, ast.If):
-            self._record(s.test, st)
             self._walrus(s.test, st)
+            self._record(s.test, st)
             st = self._merge(self._block(s.body, st), self._block(s.orelse, st))
         elif isinstance(s, (ast.For, ast.AsyncFor, ast.While)):
             head = s.iter if isinstance(s, (ast.For, ast.AsyncFor)) else s.test
             entry = st
             for _ in range(8):  # def-site sets are finite and monotone: converges
+                self._walrus(head, entry)
                 self._record(head, entry)
                 loop = dict(entry)
                 if isinstance(s, (ast.For, ast.AsyncFor)):
@@ -5096,6 +5233,7 @@ class _ContainmentReachingDefs:
             st = self._merge(st, entry)
         elif isinstance(s, (ast.With, ast.AsyncWith)):
             for item in s.items:
+                self._walrus(item.context_expr, st)
                 self._record(item.context_expr, st)
                 if item.optional_vars is not None:
                     self._assign_target(st, item.optional_vars, item.context_expr, "with")
@@ -5113,6 +5251,7 @@ class _ContainmentReachingDefs:
             st = self._merge(*ends)
             st = self._block(s.finalbody, st)
         elif s.__class__.__name__ == "Match":
+            self._walrus(s.subject, st)
             self._record(s.subject, st)
             ends = [st]
             for case in s.cases:
@@ -5130,10 +5269,10 @@ class _ContainmentReachingDefs:
                 else:
                     self._record(t, st)
         else:
-            self._record(s, st)
             for c in ast.iter_child_nodes(s):
                 if isinstance(c, ast.expr):
                     self._walrus(c, st)
+            self._record(s, st)
         return st
 
 
@@ -5145,9 +5284,58 @@ class _ContainmentEnv:
         self.hops = [0]  # shared mutable hop counter
 
 
+def _containment_node_within(node, container):
+    return any(node is m for m in ast.walk(container))
+
+
+def _containment_comp_iters(name_node, ctx):
+    """`.iter` nodes of every enclosing comprehension generator whose `for` target
+    binds *name_node*'s id -- a comprehension is its own scope in real Python and
+    ALWAYS shadows an outer/module binding of the same name (B-850 round 2). The
+    flow-insensitive free-name fallback below cannot see this on its own:
+    `_ContainmentReachingDefs._record` deliberately treats a comprehension body as
+    opaque (its own scope), so a Name load inside one is never in `rd.uses`, and
+    without this check it fell through to the flow-insensitive module-level
+    `all_defs` -- which is how `[exec(...) for __file__ in ['/tmp/e/y.py']]` used to
+    resolve `__file__` straight to the real module-level anchor. A name used in the
+    FIRST generator's own `iter` is excluded: that one expression evaluates in the
+    ENCLOSING scope, before the comprehension's own scope exists, matching real
+    Python."""
+    name = name_node.id
+    out = []
+    n = name_node
+    parent = ctx.parent
+    while True:
+        p = parent.get(n)
+        if p is None or isinstance(p, _CONTAINMENT_SCOPES):
+            return out
+        if isinstance(p, _CONTAINMENT_COMP_TYPES):
+            value_parts = [p.elt] if hasattr(p, "elt") else [p.key, p.value]
+            eligible = (
+                any(_containment_node_within(name_node, v) for v in value_parts)
+                or any(_containment_node_within(name_node, i)
+                       for g in p.generators for i in g.ifs)
+                or any(_containment_node_within(name_node, g.iter) for g in p.generators[1:])
+            )
+            if eligible:
+                for g in p.generators:
+                    for t in ast.walk(g.target):
+                        if isinstance(t, ast.Name) and t.id == name:
+                            out.append(g.iter)
+        n = p
+
+
 def _containment_lookup(name_node, env, visited):
     ctx, rd = env.ctx, env.ctx.rd(env.scope)
     name = name_node.id
+    comp_iters = _containment_comp_iters(name_node, ctx)
+    if comp_iters:
+        # A comprehension-local binding always shadows an outer/module name of the
+        # same spelling -- resolve through its iterable, exactly like a real `for`
+        # loop target (kind "for" already means "resolve via `_containment_ev_iter`
+        # of this node"), and never fall through to the free-name/module lookup
+        # below.
+        return [(_ContainmentDef("for", it, None, env.scope), env) for it in comp_iters]
     if name in rd.local_names and id(name_node) in rd.uses:
         defs = rd.uses[id(name_node)]
         out = [(d, env) for d in defs]
@@ -5320,6 +5508,20 @@ def _containment_staticness(node, env, visited, depth=0):
     for n in ast.walk(node):
         if isinstance(n, (ast.Lambda, ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)):
             return "runtime"
+        if isinstance(n, ast.Call):
+            # B-850 round 2: only a small allowlist of genuinely pure functions stays
+            # 'static'; every OTHER *import-resolvable* call (platform.system(),
+            # os.getenv(), ...) is 'runtime' now, not 'static' (which this module's
+            # `obf` verdict reads as a static value deliberately hidden behind an
+            # unfoldable expression, i.e. ESCAPES). A call whose callee does NOT
+            # dotted-resolve at all -- a method call on a computed receiver, e.g. the
+            # `.decode()` in `base64.b64decode(x).decode()` -- is left alone here;
+            # the base64 call itself is still checked on its own turn in this same
+            # walk, and G8's "static value hidden behind base64" case must still
+            # reach the 'obf' verdict through it.
+            cd = env.ctx.canon_func(n.func, env)
+            if cd is not None and cd not in _CONTAINMENT_PURE_FUNCS:
+                return "runtime"
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
             if n.id == "__file__":
                 return "runtime"
@@ -5477,7 +5679,40 @@ def _containment_attribute(node, env, visited):
             return [] if not ctx.sys_mutated else [_ContainmentOpq("runtime", d)]
     if node.attr == "parent":
         return [_containment_dirname(v, "pathlib") for v in _containment_ev(node.value, env, visited)]
+    if d is not None:
+        # B-850 round 2: any OTHER import-bound module attribute (sys.platform,
+        # os.name, ...) is ordinary runtime state, not a literal -- was previously
+        # folded to 'static' by default and then read as an obfuscated escape.
+        return [_ContainmentOpq("runtime", f"attribute {d}")]
     return _containment_opaque(node, env, visited, f"attribute .{node.attr}")
+
+
+def _containment_env_var_root(key_node):
+    """`abs` pv for a literal env-var *key* that is absolute-by-construction (HOME,
+    TMPDIR, PWD, XDG_*, ...); None otherwise (the caller falls back to an ordinary
+    runtime unknown)."""
+    if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+        k = key_node.value
+        if k in _CONTAINMENT_ABS_ENV_VARS or k.startswith("XDG_"):
+            return _containment_pv("abs", why=f"{k} environment variable (absolute by construction)")
+    return None
+
+
+def _containment_env_get(key_node, default_node, env, visited):
+    """`os.getenv(key[, default])` / `os.environ.get(key[, default])`: the value is
+    EITHER whatever the runtime environment holds -- an absolute-path source when
+    *key* is a known absolute-by-construction variable, an ordinary runtime unknown
+    otherwise -- OR, if the variable is unset, the literal *default* (B-850 round 2:
+    previously folded to a single 'static' opaque, which could wrongly convict an
+    ordinary safe default as an obfuscated escape, or wrongly exempt a HOME/TMPDIR
+    read as a merely-UNPROVEN anchored one)."""
+    runtime = _containment_env_var_root(key_node) or _ContainmentOpq(
+        "runtime", f"{ast.unparse(key_node)[:30]} environment variable"
+    )
+    out = [runtime]
+    if default_node is not None:
+        out += _containment_ev(default_node, env, visited)
+    return out
 
 
 def _containment_subscript(node, env, visited):
@@ -5488,6 +5723,10 @@ def _containment_subscript(node, env, visited):
     const_int = isinstance(idx, ast.Constant) and isinstance(idx.value, int) and not isinstance(
         idx.value, bool)
     base = node.value
+    if ctx.canon_func(base, env) == "os.environ":
+        return [_containment_env_var_root(idx) or _ContainmentOpq(
+            "runtime", f"os.environ[{ast.unparse(idx)[:30]}]"
+        )]
     if isinstance(base, ast.Attribute) and base.attr == "parents" and const_int and idx.value >= 0:
         out = []
         for v in _containment_ev(base.value, env, visited):
@@ -5542,6 +5781,10 @@ def _containment_call(node, env, visited):  # noqa: C901 -- one recognizer dispa
     nargs = len(node.args)
     if d == "os.path.join" and nargs and not node.keywords:
         return [_containment_join(ops, "os") for ops in _containment_expand_args(node, env, visited)]
+    if d in ("os.getenv", "os.environ.get") and 1 <= nargs <= 2 and not node.keywords:
+        return _containment_env_get(
+            node.args[0], node.args[1] if nargs == 2 else None, env, visited
+        )
     if d == "os.path.dirname" and nargs == 1:
         return [_containment_dirname(v, "os") for v in _containment_ev(node.args[0], env, visited)]
     if d in ("os.path.abspath", "os.path.realpath") and nargs == 1:
@@ -5588,7 +5831,13 @@ def _containment_call(node, env, visited):  # noqa: C901 -- one recognizer dispa
             for r in _containment_ev(recv, env, visited):
                 for a in _containment_ev(node.args[0], env, visited):
                     rp = _containment_as_path(r)
-                    if isinstance(a, _ContainmentStr) and "/" not in a.s and "\\" not in a.s and rp.comps:
+                    if m == "with_name" and isinstance(a, _ContainmentStr) and a.s == "..":
+                        # B-850 round 2: with_name('..') is an up-motion, not a same-
+                        # level rename -- push a real '..' component so
+                        # _containment_verdict's depth counter sees it (GLUE would
+                        # hide it behind an ordinary-rename marker instead).
+                        out.append(_containment_push(_containment_pop(rp), [".."]))
+                    elif isinstance(a, _ContainmentStr) and "/" not in a.s and "\\" not in a.s and rp.comps:
                         out.append(_containment_push(_containment_pop(rp), [_CONTAINMENT_GLUE]))
                     else:
                         out.append(_containment_push(_containment_pop(rp), [_CONTAINMENT_UNK], unk=True))
@@ -5777,11 +6026,11 @@ def _containment_open_paths(h, ctx, env, visited=frozenset(), hops=0):
         raise _ContainmentBudget("handle hops")
     if isinstance(h, ast.Call):
         d = ctx.canon_func(h.func, env)
-        if d in ("builtins.open", "io.open"):
+        if d in ("builtins.open", "io.open", "codecs.open"):
             if h.args and not isinstance(h.args[0], ast.Starred):
                 return [(h.args[0], env)]
             for kw in h.keywords:
-                if kw.arg == "file":
+                if kw.arg == "file" or (d == "codecs.open" and kw.arg == "filename"):
                     return [(kw.value, env)]
             return None
         if isinstance(h.func, ast.Attribute) and h.func.attr == "open" and not h.args:
@@ -5819,6 +6068,8 @@ def _containment_open_paths(h, ctx, env, visited=frozenset(), hops=0):
 def _containment_classify_decode(decode_call, ctx):
     """Verdict for one `<recv>.decode(...)` call: is <recv> a read of a positively
     artifact-bounded file?"""
+    if ctx.fail_closed_reason:
+        return _CONTAINMENT_NOT_ANCHORED, f"fail-closed: {ctx.fail_closed_reason}"
     recv = decode_call.func.value
     if not (isinstance(recv, ast.Call) and isinstance(recv.func, ast.Attribute)
             and recv.func.attr in _CONTAINMENT_READ_ATTRS):
@@ -6798,6 +7049,18 @@ def analyze_python(
                         )
                         for _a in _all_args
                     ):
+                        # B394 (B-850 round 2): the exemption above covers BOUNDED
+                        # *and* UNPROVEN reads alike (never proven to escape), but
+                        # only BOUNDED is silently absolved -- an UNPROVEN read is
+                        # disclosed here the same way the direct exec()/eval() branch
+                        # already discloses it (OBFUSCATED_EXEC, above), instead of
+                        # producing zero signal at all for a shell/subprocess sink.
+                        for _a in _all_args:
+                            if _names_in(_a) & ext_visible:
+                                for _up_ln, _up_reason in _containment_unproven_decode_findings(
+                                    _a, tree, filename, path_aliases
+                                ):
+                                    add("ARTIFACT_READ_UNPROVEN", "info", _up_ln, _up_reason)
                         continue
                     # A subprocess argv-list call (shell=False, fixed program) is only
                     # argument injection, not command injection — do not escalate to crit.
