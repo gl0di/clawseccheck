@@ -442,6 +442,54 @@ def _watch_heartbeat_path(args) -> Path:
     return _store_dir(args) / "watch_heartbeat.json"
 
 
+def _watch_extra_monitor_args(args) -> "tuple[str, ...]":
+    """B-880: restate the operator's OWN audit-scope/monitor-modifier flags as argv for
+    the nested ``--monitor`` re-scan ``watch._run_monitor_once`` spawns on every
+    debounced change.
+
+    Before this, a ``--watch --no-deptree`` invocation silently dropped ``--no-deptree``
+    on every re-scan — ``_run_watch_cli`` never forwarded anything, so each nested
+    ``--monitor`` subprocess ran with bare CLI defaults regardless of what the outer
+    ``--watch`` invocation was actually asked to do (confirmed: a full, slow npm
+    dependency-tree walk on every debounced cycle even with ``--no-deptree`` given).
+
+    Scope is exactly the flags a single ``--monitor`` pass genuinely honors: the base
+    ``audit()`` scope flags (always respected, see the identical ``ctx.cli_opt_outs``
+    list built from ``audit()``'s own call site below) plus the modifiers
+    ``_MODE_HONORS["monitor"]`` declares (``--probe``/``--json``/``--exit-code``/
+    ``--fail-on``/``--judged-bundle``). Deliberately excludes every --watch-only flag
+    (``--watch-debounce``, ``--watch-status``, ``--watch-log``) and every flag
+    ``--monitor`` itself has no effect under (``--full``, ``--quiet``, ``--fast``,
+    ``--trend``, ``--badge``, ...) — forwarding those would be inert at best and
+    misleading at worst. ``--monitor``/``--verbose``/``--home``/``--state``/``--events``/
+    ``--history`` are never restated here: ``_run_monitor_once`` already appends those
+    itself, explicitly, so duplicating them here would double them up in the spawned
+    argv.
+
+    Empty by construction whenever the operator passed none of these — a `--watch` run
+    given no extra flags forwards nothing, byte-identical to the prior behavior.
+    """
+    extra: list = []
+    for flag, passed in (
+        ("--no-native", args.no_native),
+        ("--no-host", args.no_host),
+        ("--no-sockets", args.no_sockets),
+        ("--no-deptree", args.no_deptree),
+        ("--no-dist", args.no_dist),
+        ("--exhaustive", args.exhaustive),
+        ("--probe", args.probe),
+        ("--json", args.json),
+        ("--exit-code", args.exit_code),
+    ):
+        if passed:
+            extra.append(flag)
+    if args.fail_on is not None:
+        extra += ["--fail-on", args.fail_on]
+    if args.judged_bundle is not None:
+        extra += ["--judged-bundle", args.judged_bundle]
+    return tuple(extra)
+
+
 def _record_run(capability: str, args) -> None:
     """Coverage-ledger write, gated by --no-history (B-156).
 
@@ -2622,6 +2670,7 @@ def _run_watch_cli(args) -> int:
         history_path=args.history,
         heartbeat_path=_watch_heartbeat_path(args),
         debounce_s=args.watch_debounce,
+        extra_monitor_args=_watch_extra_monitor_args(args),
         stream=sys.stdout,
     )
 
