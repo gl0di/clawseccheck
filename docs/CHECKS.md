@@ -2879,6 +2879,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B395 - Installed-skill content-read coverage (independent of B13's own verdict)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / ClawHavoc
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Installed-skill content-read coverage (independent of B13's own verdict)
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

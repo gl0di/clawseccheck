@@ -178,7 +178,22 @@ def test_clean_home_is_not_degraded(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_unreadable_payload_counts_as_a_degraded_check(tmp_path):
-    """The one-line fix, measured where it is observable: through the run's score."""
+    """The one-line fix, measured where it is observable: through the run's score.
+
+    CLAWSECCHECK-B-649 fix round 1, defect 2: `degraded_count` is exactly 2 here, not
+    merely `>= 1` — `collector._note_unreadable` writes BOTH `ctx.unreadable_files`
+    (B13's own signal) AND `ctx.skill_coverage_gaps` (B395's,
+    `check_installed_skill_content_coverage`) for this identical event, so B13 and
+    B395 EACH independently reach UNKNOWN + `engine_degraded`. That is not a
+    miscount: `scoring._degraded_signal` counts FINDINGS, never subjects (its own
+    docstring says as much), and B395 exists specifically to stay independent of
+    which check id — if any — a run's cascade resolves to (see that check's own
+    docstring). Two checks truthfully reporting the same real coverage gap from their
+    own scope is the intended shape, not a bug to suppress; it costs nothing on the
+    score either way, since `DEGRADED_CHECK_CAP` is a ceiling, not additive — see
+    `test_a_confident_fail_still_outranks_the_coverage_gap` below for the case where
+    only ONE of the two checks fires and the count is exactly 1 instead.
+    """
     _, out = _audit(tmp_path, _home(tmp_path), unreadable="run.sh")
     finding = _b13(out)
     # Guard against a vacuous pass: the injection must actually have blinded the scan.
@@ -186,9 +201,10 @@ def test_unreadable_payload_counts_as_a_degraded_check(tmp_path):
     assert "could not be READ" in finding["detail"]
     assert "run.sh" in finding["detail"]
 
-    assert out["degraded_count"] >= 1, (
+    assert out["degraded_count"] == 2, (
         "an UNKNOWN caused by a file the engine could not open is engine-side "
-        "degradation; leaving degraded_count at 0 scores the run as fully assessed"
+        "degradation; B13 and B395 (CLAWSECCHECK-B-649) each independently disclose "
+        f"it, so exactly 2 is expected here, not {out['degraded_count']}"
     )
     assert out["degraded_capped"] is True
 
@@ -197,7 +213,10 @@ def test_unreadable_payload_is_reported_as_not_fully_assessed(tmp_path):
     """The user-visible half of the same fact: the run must say a check fell short."""
     _, out = _audit(tmp_path, _home(tmp_path), unreadable="run.sh")
     assert out["not_checked"], "a degraded run must disclose that a check reached no verdict"
-    assert out["undetermined"]["engine_degraded"] >= 1
+    # Exactly 2 (B13 + B395, CLAWSECCHECK-B-649 defect 2) — see the in-source note on
+    # test_unreadable_payload_counts_as_a_degraded_check above for why both legitimately
+    # fire for this one event.
+    assert out["undetermined"]["engine_degraded"] == 2
     # And it must be counted as engine-side, not as the benign "nothing here to scan".
     assert out["undetermined"]["confirmed_absent"] < out["undetermined"]["undetermined"]
 
@@ -242,7 +261,8 @@ def test_unreadable_inert_file_also_degrades_and_that_is_intended(tmp_path):
     finding = _b13(out)
     assert finding["status"] == "UNKNOWN"
     assert _INERT_NAME in finding["detail"]
-    assert out["degraded_count"] >= 1
+    # Exactly 2 (B13 + B395) -- same double-disclosure as the exfil-payload case above.
+    assert out["degraded_count"] == 2
     assert out["degraded_capped"] is True
 
 
@@ -253,21 +273,44 @@ def test_any_unreadable_member_degrades_the_run(tmp_path, target):
     home = _home(tmp_path, payload=_BENIGN, inert=True)
     _, out = _audit(tmp_path, home, unreadable=target)
     assert _b13(out)["status"] == "UNKNOWN"
-    assert out["degraded_count"] >= 1
+    # Exactly 2 (B13 + B395) in every one of these single-skill scenarios -- see
+    # test_unreadable_payload_counts_as_a_degraded_check's in-source note.
+    assert out["degraded_count"] == 2
     assert out["degraded_capped"] is True
 
 
 def test_a_confident_fail_still_outranks_the_coverage_gap(tmp_path):
     """The limit of this fix, stated so it is not mistaken for a regression.
 
-    ``check_installed_skills`` ranks a CRITICAL/HIGH FAIL above every UNKNOWN branch, so
-    a skill that is BOTH caught red-handed and partly unreadable reports the FAIL and is
-    NOT counted as degraded -- the check reached a verdict, and it is the worse one.
-    Measured: manifest blinded, exfiltrating ``run.sh`` still readable -> B13 FAIL, exit
-    1, ``degraded_count == 0``. Turning this into a degraded FAIL would trade a red gate
-    for a capped score, which is strictly weaker.
+    ``check_installed_skills`` (B13) ranks a CRITICAL/HIGH FAIL above every UNKNOWN
+    branch, so a skill that is BOTH caught red-handed and partly unreadable still
+    reports the FAIL under B13's OWN id -- the check reached a verdict, and it is the
+    worse one. B13's status/severity/exit-code are exactly what this test still pins.
+
+    CLAWSECCHECK-B-649 (route (a)): ``degraded_count`` itself is no longer pinned at 0
+    here. B395 (``check_installed_skill_content_coverage``) reads the identical
+    ``ctx.skill_coverage_gaps`` collector state B13 reads, but reports it as its OWN,
+    independently-scored Finding -- deliberately "independent of what B13 itself
+    concluded for OTHER skills" is not narrowed to "other skills only": the manifest
+    gap on THIS skill is exactly as real whether or not this same skill also FAILed via
+    a different file. Measured, this costs nothing on the grade in this fixture: B13's
+    own CRITICAL FAIL already caps the score to ``scoring.FAIL_CAPS[CRITICAL]`` (49),
+    identical to ``scoring.DEGRADED_CHECK_CAP`` (also 49), so ``degraded_capped`` stays
+    False and the score is unchanged -- only the disclosure (``degraded_count``) is
+    more honest than before. Turning B13's OWN FAIL into a degraded FAIL would still be
+    the wrong fix (trading a red gate for a capped score); that is not what happened
+    here -- B13's Finding is untouched, and a SECOND check id now separately says the
+    manifest was never read.
     """
     code, out = _audit(tmp_path, _home(tmp_path), unreadable="SKILL.md")
     assert _b13(out)["status"] == "FAIL"
     assert code == 1
-    assert out["degraded_count"] == 0
+    # Exactly 1 here (B395 only) -- unlike the UNKNOWN scenarios above, B13's own FAIL
+    # never sets engine_degraded (Finding.engine_degraded is meaningless outside
+    # status == UNKNOWN), so this is the case that pins the count at 1, not 2.
+    assert out["degraded_count"] == 1
+    assert out["degraded_capped"] is False, (
+        "B13's own CRITICAL FAIL cap must already be at least as tight as "
+        "DEGRADED_CHECK_CAP in this fixture, so B395's independent disclosure must not "
+        "move the score here"
+    )
