@@ -5805,18 +5805,27 @@ def analyze_python(
     # value split across adjacent string-literal boundaries (`"a" "b"`) still matches,
     # since Python folds those into one `ast.Constant` before this ever runs.
     #
-    # C-135 note (B-740, not a new defect): a genuine pytest/unittest file that assigns
-    # a well-known provider TEST-mode key (e.g. Stripe's own documented `sk_test_...`
-    # convention) as mock data for its own test suite fires here — measured, and
-    # reproduced identically through BOTH already-shipped call sites above
-    # (os.environ[...] = / os.getenv(..., <default>)), so this is a PRE-EXISTING,
-    # shared characteristic of `_is_hardcoded_provider_secret`, not something this call
-    # site introduces. `checks/_content.py` has a path-shape "is this a test file"
-    # carve-out for a different check (`_pos_in_test_fixture_file`), but wiring an
-    # equivalent here would mean either touching the other two call sites (changing
-    # already-shipped behavior) or importing a Layer-2 `checks/` helper into this
-    # Layer-1 leaf module (a banned reverse dependency, see CLAUDE.md's layering rule)
-    # — left as-is, flagged for a follow-up task rather than fixed unilaterally here.
+    # C-135 note (B-893, supersedes the B-740 note this replaces): the B-740 note above
+    # called the corpus's `tests/conftest.py` MOCK_* fixture shape "pre-existing,
+    # shared" with the two os.environ-entangled call sites above. That was wrong for
+    # THIS shape specifically — measured on the SkillTrustBench corpus (B-543
+    # re-measure, 2026-09-23): this plain-assignment site alone produced 32 new
+    # gold-normal FAILs (FP_TEST_FIXTURE class, `tests/conftest.py` `MOCK_*`
+    # assignments, one byte-identical template with 0 pytest-shape signals) that did
+    # NOT exist before this call site shipped in v4.2.1 — the two env-entangled sites
+    # require actual `os.environ`/`getenv` entanglement, which a plain mock assignment
+    # never has, so they never reproduced these FAILs. The 32 FAILs are new in v4.2.1,
+    # not pre-existing.
+    #
+    # Fix (Dave's D2 on B-543): this call site gets its OWN rule name,
+    # `HARDCODED_PROVIDER_SECRET_ASSIGN`, distinct from `HARDCODED_PROVIDER_SECRET`
+    # (kept unchanged on the two env-entangled sites above, which stay crit/FAIL). The
+    # routing decision — WARN for an ordinary file, evidence-only (never a verdict
+    # winner) inside a test-fixture-named file — lives downstream in
+    # `checks/_vet.py`'s B13 AST loop and `_AST_NEVER_FAIL_RULES`, keyed on the new
+    # rule name; this Layer-1 module makes no test-fixture-path judgment itself, so no
+    # Layer-2 import is needed here (the prior note's "banned reverse dependency"
+    # concern is moot once routing is name-keyed rather than path-keyed in this file).
     for node in ast.walk(tree):
         if len(out) >= _MAX_FINDINGS_PER_FILE:
             break
@@ -5835,7 +5844,7 @@ def analyze_python(
         if not _is_hardcoded_provider_secret(value_node):
             continue
         add(
-            "HARDCODED_PROVIDER_SECRET",
+            "HARDCODED_PROVIDER_SECRET_ASSIGN",
             "crit",
             getattr(node, "lineno", 0),
             f"hardcoded provider-shaped secret assigned to {target_name!r}",
