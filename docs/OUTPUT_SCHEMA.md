@@ -307,6 +307,7 @@ is unavailable.
       "tools": ["fs_read", "web_search"],
       "secrets_visible": true,
       "can_write_memory": false,
+      "write_grant_enumerable": true,
       "can_egress": true
     },
     {
@@ -336,6 +337,7 @@ is unavailable.
 | `tools` | `array[str]` | Tool names visible to this node. |
 | `secrets_visible` | `bool` | `true` if the node can read secret-bearing configuration or env vars. |
 | `can_write_memory` | `bool` | `true` if the node has write access to memory / workspace. |
+| `write_grant_enumerable` | `bool` | `main` node only (CLAWSECCHECK-B-904). `false` means `can_write_memory` could not be resolved from static config (no tools.allow/alsoAllow/profile declared) — the same condition under which check B55 reports `UNKNOWN` rather than a resolved verdict. `can_write_memory=false` alongside `write_grant_enumerable=false` is "unknown, not confirmed absent," not a settled "no." Absent on every other node kind, which have no such ambiguity. |
 | `can_egress` | `bool` | `true` if the node can make outbound network calls. |
 
 ### Edge shape
