@@ -2696,6 +2696,23 @@ _FOLDED_CRED_PATH_RE = re.compile(
     re.I,
 )
 _FOLD_UNK = "\x00"  # an unresolved path segment; never a substring of any pattern above
+# B-830 round-3 (C-135): the fold's own recursion has no depth limit of its own, so a
+# long left-deep chain -- `/`-chained BinOps, chained `.joinpath(...)` calls, or a chain
+# of single-use name-hops -- can overflow the interpreter's recursion limit well before
+# anything else in this module would. An explicit, threaded depth counter (not a
+# try/except RecursionError around the caller) bounds this: once a fold's own depth
+# exceeds this cap, it returns `None` (this algebra's existing "unresolved" value,
+# which callers already widen to _FOLD_UNK) instead of recursing further. 200 mirrors
+# CPython's own parser bracket-nesting limit, so a right-nested construct can't hide a
+# credential-bearing tail deeper than that. Returning "unknown" only ever WIDENS what a
+# fold treats as unresolved -- it can never manufacture a spurious credential-path
+# match -- and because these chains are left-deep (a chain's most-recently-appended
+# segment sits at the AST's OUTERMOST/shallowest node, with earlier segments nested
+# progressively deeper), truncating the deep prefix only discards padding, never the
+# tail that a real bypass needs recognized. See the call sites below for why the
+# three former `except RecursionError:` fallbacks (silent, undisclosed, whole-file
+# credential-detection bypasses) are gone now that overflow can't happen here.
+_FOLD_MAX_DEPTH = 200
 _PATHLIB_CLASSES = frozenset(
     {"Path", "PurePath", "PosixPath", "PurePosixPath", "WindowsPath", "PureWindowsPath"}
 )
@@ -2786,6 +2803,9 @@ class _FsFoldCtx:
         self.ctor_names = import_bound(ctor_names)
         self.pathlib_mods = import_bound(pathlib_mods)
         self.memo: dict = {}
+        # B-830 round-3: how many times a fold call hit _FOLD_MAX_DEPTH and gave up
+        # (observability only -- never consulted for a verdict; see _fold_fs_path).
+        self.truncated = 0
 
     def is_suffix_preserving(self, call: ast.Call) -> bool:
         """True for a single-argument wrapper that changes at most a leading '~'
@@ -2863,43 +2883,64 @@ def _fold_pjoin(acc: "str | None", part: str) -> str:
     return acc + ("" if acc.endswith("/") else "/") + part
 
 
-def _fold_seg(x: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset) -> "str | None":
+def _fold_seg(x: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset, depth: int = 0) -> "str | None":
     """A single path component's folded value: a string literal, a name resolved
     through its one binding site, or a nested path construction's own fold. `None`
-    when the segment can't be determined at all (the caller substitutes _FOLD_UNK)."""
+    when the segment can't be determined at all (the caller substitutes _FOLD_UNK).
+
+    B-830 round-3: *depth* bounds recursion explicitly (see _FOLD_MAX_DEPTH) instead
+    of relying on a caller's try/except RecursionError. A name-hop resolution (following
+    a variable back to its single assignment) counts as one more level of depth, same
+    as descending into a nested path-construction expression."""
+    if depth > _FOLD_MAX_DEPTH:
+        ctx.truncated += 1
+        return None
     if isinstance(x, ast.Constant) and isinstance(x.value, str):
         return x.value
     if isinstance(x, ast.Name):
         if x.id in visiting or x.id not in ctx.single or len(visiting) >= 4:
             return None
-        return _fold_seg(ctx.single[x.id], ctx, visiting | {x.id})
-    return _fold_fs_path(x, ctx, visiting)
+        return _fold_seg(ctx.single[x.id], ctx, visiting | {x.id}, depth + 1)
+    return _fold_fs_path(x, ctx, visiting, depth)
 
 
-def _fold_fs_path(node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset = frozenset()) -> "str | None":
+def _fold_fs_path(
+    node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset = frozenset(), depth: int = 0
+) -> "str | None":
     """Memoized, cycle-guarded entry point -- every subtree is folded at most once per
-    (node, visiting-set) pair."""
+    (node, visiting-set) pair.
+
+    B-830 round-3: a cached (already fully resolved) result is returned regardless of
+    the caller's current *depth* -- it required no further recursion to produce. A
+    depth-limit truncation is deliberately NEVER cached: a different, shallower call
+    site reaching the same node must still get a real answer, not a poisoned "unknown"
+    left behind by a deeper caller."""
     key = (id(node), visiting)
     if key in ctx.memo:
         return ctx.memo[key]
+    if depth > _FOLD_MAX_DEPTH:
+        ctx.truncated += 1
+        return None
     ctx.memo[key] = None  # cycle guard: a self-referential fold resolves to unknown
-    res = _fold_fs_path_uncached(node, ctx, visiting)
+    res = _fold_fs_path_uncached(node, ctx, visiting, depth)
     ctx.memo[key] = res
     return res
 
 
-def _fold_fs_path_uncached(node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset) -> "str | None":
+def _fold_fs_path_uncached(
+    node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset, depth: int = 0
+) -> "str | None":
     def seg_or_unk(x: ast.AST) -> str:
         if isinstance(x, ast.Starred):
             return _FOLD_UNK
-        s = _fold_seg(x, ctx, visiting)
+        s = _fold_seg(x, ctx, visiting, depth + 1)
         return _FOLD_UNK if s is None else s
 
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         # pathlib's `/` operator. Fold it only when at least one side is provably
         # path-shaped -- otherwise this is ordinary arithmetic, not a path join.
-        right = _fold_seg(node.right, ctx, visiting)
-        left = _fold_seg(node.left, ctx, visiting)
+        right = _fold_seg(node.right, ctx, visiting, depth + 1)
+        left = _fold_seg(node.left, ctx, visiting, depth + 1)
         left_is_path = left is not None and not isinstance(node.left, ast.Constant)
         if right is None and not left_is_path:
             return None
@@ -2918,14 +2959,14 @@ def _fold_fs_path_uncached(node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset
     # Suffix-preserving wrappers change at most a leading '~' or the outer type, never
     # the literal tail -- the tail read straight through them is exact.
     if ctx.is_suffix_preserving(node) and len(args) == 1 and not node.keywords:
-        return _fold_seg(args[0], ctx, visiting)
+        return _fold_seg(args[0], ctx, visiting, depth + 1)
     if (
         isinstance(f, ast.Attribute)
         and f.attr in ("expanduser", "absolute", "resolve")
         and not args
         and not node.keywords
     ):
-        inner = _fold_fs_path(f.value, ctx, visiting)
+        inner = _fold_fs_path(f.value, ctx, visiting, depth + 1)
         if inner is not None:
             return inner
     if isinstance(f, ast.Attribute) and f.attr == "joinpath":
@@ -5689,26 +5730,21 @@ def analyze_python(
     # _has_cred_path_const) so a credential path assembled via typed path-join
     # construction (never spelled as one literal) still pre-filters in.
     #
-    # B-830 round-2 (C-135): the fold algebra (_fold_fs_path) recurses per path
-    # segment with no depth limit of its own, so a long chain of arithmetic/`/`/
-    # `.joinpath(...)` operations -- not even necessarily malicious, an obfuscated
-    # but otherwise ordinary skill -- can overflow the interpreter's recursion limit
-    # well before anything else in this function would. That used to crash the whole
-    # --vet-skill CLI with an unhandled RecursionError and NO verdict at all. Fall
-    # back to ctx=None (literal-only credential detection -- exactly the pre-B-830
-    # behavior) rather than let the fold's own overflow take down analysis.
-    try:
-        _fsctx = _FsFoldCtx(tree)
-        _folded_cred_hit = _has_folded_cred_path(tree, _fsctx)
-    except RecursionError:
-        _fsctx = None
-        _folded_cred_hit = False
+    # B-830 round-3 (C-135): the fold algebra (_fold_fs_path/_fold_seg) now bounds its
+    # own recursion with an explicit depth counter (_FOLD_MAX_DEPTH, see its module
+    # comment) instead of relying on a try/except RecursionError here. A prior round's
+    # except-RecursionError fallback (ctx=None, literal-only credential detection) was
+    # itself a silent, undisclosed whole-file bypass: an attacker could deliberately
+    # overflow the fold with an unrelated long chain ANYWHERE else in the file (e.g. a
+    # padding arithmetic expression) and have that disable credential-path folding for
+    # every OTHER, genuinely malicious path-join elsewhere in the same file, with no
+    # UNKNOWN/degraded-engine disclosure -- strictly worse than a loud crash. With
+    # recursion now bounded inside the fold itself, an unhandled RecursionError from
+    # this call would indicate a genuinely unexpected condition and should propagate.
+    _fsctx = _FsFoldCtx(tree)
+    _folded_cred_hit = _has_folded_cred_path(tree, _fsctx)
     if _CRED_PATH_RE.search(source) or _folded_cred_hit:
-        try:
-            cred_tainted = _cred_tainted_names(tree, _fsctx)
-        except RecursionError:
-            _fsctx = None
-            cred_tainted = _cred_tainted_names(tree, None)
+        cred_tainted = _cred_tainted_names(tree, _fsctx)
         if cred_tainted:
             # B-415: names sourced PURELY from the in-cluster K8s service-account
             # token -- computed once per file, only when there's anything credential-
@@ -7182,14 +7218,12 @@ def capability_families(sources) -> set:
             tree = ast.parse(src)
         except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
             continue
-        # B-830 round-2 (C-135): same unbounded fold-recursion risk as analyze_python's
-        # credential-taint pass above -- fall back to ctx=None (literal-only credential
-        # detection) rather than let one pathological file's fold crash the whole
-        # capability scan.
-        try:
-            fams |= _capability_families_in_tree(tree, _FsFoldCtx(tree))
-        except RecursionError:
-            fams |= _capability_families_in_tree(tree, None)
+        # B-830 round-3 (C-135): the fold (_fold_fs_path/_fold_seg) now bounds its own
+        # recursion with an explicit depth counter (_FOLD_MAX_DEPTH) -- see that
+        # constant's module comment and the analyze_python call site above for why the
+        # prior except-RecursionError-here fallback (ctx=None) was itself a silent,
+        # undisclosed capability-detection bypass and has been removed.
+        fams |= _capability_families_in_tree(tree, _FsFoldCtx(tree))
     return fams
 
 
