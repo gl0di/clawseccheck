@@ -1699,6 +1699,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B394 - Artifact-relative decode-then-exec read with an unprovable (runtime-computed) path segment
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Obfuscation / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Artifact-relative decode-then-exec read with an unprovable (runtime-computed) path segment
+- Remediation:
+  - none
+
 ## Hardening checks
 
 ### B337 - Mandatory-directive shell exfil of dotfiles via curl/wget ("licensing check" pattern)
