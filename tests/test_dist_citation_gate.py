@@ -220,6 +220,109 @@ def test_a_citation_qualified_only_by_capitalized_prose_is_not_a_violation(tmp_p
     )
 
 
+# --- the prose qualifier must be a whole word (B-885, fix round 1) --------------------
+#
+# Once the qualifier went case-insensitive, `grounded per` became a SUBSTRING match of
+# the compound "schema-grounded PER-AGENT" in ``checks/_agents.py``'s ``_has_subagents``
+# docstring -- "per-agent" names what the field is, not what the claim is grounded on --
+# and that alone dropped the pair (_agents.py, zod-schema.agent-runtime-C02vY4RT.js) out
+# of the violation set with nothing in its window actually qualifying it. The lowercase
+# "grounded per-agent" had the same flaw before; these pin both.
+
+_NOT_QUALIFIERS = [
+    "B-296 round 2: also recognizes the real, schema-grounded PER-AGENT path",
+    "the schema-grounded per-agent path agents.list[i].subagents",
+    "grounded perhaps on the recon",
+]
+
+# The paired control: the same verb, followed by a word boundary that is not a hyphen,
+# must still qualify -- so the negative test above cannot pass by the alternative having
+# simply stopped matching `grounded per` at all.
+_STILL_QUALIFIERS = [
+    "Grounded per the installed dist, not the recon.",
+    "grounded per: the installed dist",
+    "Grounded against the installed dist (openclaw-Ab12Cd34.js)",
+    "grounded against\nthe installed dist",
+]
+
+
+@pytest.mark.parametrize("text", _NOT_QUALIFIERS)
+def test_a_hyphenated_or_longer_word_after_grounded_per_is_not_a_qualifier(text):
+    gate = _load_gate()
+    assert gate._QUALIFIER_RE.search(text) is None, (
+        f"{text!r} was read as a dated/grounded qualifier. 'per-agent'/'perhaps' is not "
+        "'grounded per <source>' -- accepting it lets a dead, undated bundle citation "
+        "in the same window pass as history."
+    )
+
+
+@pytest.mark.parametrize("text", _STILL_QUALIFIERS)
+def test_the_whole_word_anchor_does_not_cost_a_real_prose_qualifier(text):
+    gate = _load_gate()
+    assert gate._QUALIFIER_RE.search(text), (
+        f"{text!r} is the documented 'grounded against/per' qualifier shape, but the "
+        "word-boundary anchor refused it."
+    )
+
+
+def test_the_whole_word_anchor_bites_on_the_pattern_it_replaced():
+    """The un-anchored pattern (f3f5613) accepted every ``_NOT_QUALIFIERS`` entry, so
+    the negative test above is doing real work, not passing vacuously."""
+    retired = re.compile(
+        r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)|as of ",
+        re.IGNORECASE,
+    )
+    for text in _NOT_QUALIFIERS:
+        assert retired.search(text), text
+
+
+_PER_AGENT_MODULE = (
+    "def _has_subagents(cfg):\n"
+    "    \"\"\"True if any subagent delegation is configured.\n\n"
+    "    B-296 round 2: also recognizes the real, schema-grounded PER-AGENT\n"
+    "    path ``agents.list[i].subagents``. {verb} ``AgentEntrySchema`` (installed\n"
+    "    dist ``zod-schema.agent-runtime-Ab12Cd34.js:658-711``).\n"
+    "    \"\"\"\n"
+)
+
+
+def test_a_dead_citation_whose_only_prose_is_per_agent_is_a_violation(tmp_path):
+    """End-to-end mirror of the real ``_has_subagents`` docstring, no dist needed
+    (``dist_basenames`` is empty, so the bundle is dead): "Grounded on" is not a
+    qualifier alternative and "schema-grounded PER-AGENT" must not be one either, so the
+    pair is a violation."""
+    gate = _load_gate()
+    pkg_dir = tmp_path / "clawseccheck"
+    pkg_dir.mkdir()
+    (pkg_dir / "fake_agents.py").write_text(
+        _PER_AGENT_MODULE.format(verb="Grounded on"), encoding="utf-8"
+    )
+    violations, total = gate.scan_citations(tmp_path, dist_basenames=set())
+    assert total == 1, f"expected exactly one extracted citation, got {total}"
+    assert violations == [
+        ("clawseccheck/fake_agents.py", "zod-schema.agent-runtime-Ab12Cd34.js")
+    ], (
+        "a dead citation whose window's only 'grounded per' is the compound "
+        f"'schema-grounded PER-AGENT' was accepted as qualified: {violations}"
+    )
+
+
+def test_the_same_window_with_a_real_grounded_per_is_not_a_violation(tmp_path):
+    """Paired control for the test above: change only the verb to the documented
+    'Grounded per' shape and the identical window becomes qualified -- proving the
+    violation above comes from the PER-AGENT compound, not from the fixture being
+    unqualifiable."""
+    gate = _load_gate()
+    pkg_dir = tmp_path / "clawseccheck"
+    pkg_dir.mkdir()
+    (pkg_dir / "fake_agents.py").write_text(
+        _PER_AGENT_MODULE.format(verb="Grounded per"), encoding="utf-8"
+    )
+    violations, total = gate.scan_citations(tmp_path, dist_basenames=set())
+    assert total == 1, f"expected exactly one extracted citation, got {total}"
+    assert violations == [], violations
+
+
 def test_dist_citation_gate_passes_against_the_installed_dist():
     """Local-only: needs a real OpenClaw install to know which bundle names currently
     exist. Skips cleanly, via the gate's own ``_locate_dist()``, when none is found --

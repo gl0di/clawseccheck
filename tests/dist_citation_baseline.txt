@@ -9,8 +9,8 @@
 # re-recording removes it here; that is progress, never a failure.
 #
 # openclaw-version: 2026.9.5
-# generated: 2026-09-22
-# violations: 255
+# generated: 2026-09-23
+# violations: 256
 #
 clawseccheck/behavioral.py	server-runtime-subscriptions-OlWMLbPY.js
 clawseccheck/behavioral.py	tool-catalog-C8xbUFNe.js
@@ -34,6 +34,7 @@ clawseccheck/checks/_agents.py	context-visibility-BVlvSMUZ.js
 clawseccheck/checks/_agents.py	selection-JInn13lc.js
 clawseccheck/checks/_agents.py	sessions-D8qGY7uC.js
 clawseccheck/checks/_agents.py	subagent-registry-DexSZ4w1.js
+clawseccheck/checks/_agents.py	zod-schema.agent-runtime-C02vY4RT.js
 clawseccheck/checks/_capability.py	agent-scope-config-BxAUeF6t.js
 clawseccheck/checks/_capability.py	agent-tools-BD8WL7ny.js
 clawseccheck/checks/_capability.py	agent-tools.policy-YD9HuYgO.js

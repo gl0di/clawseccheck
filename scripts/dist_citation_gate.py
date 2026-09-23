@@ -103,8 +103,17 @@ _CITATION_RE = re.compile(
 # that shape. Global IGNORECASE is safe here: the other two alternatives
 # (`2026\.\d+\.\d+`, the `\d{4}-\d{2}-\d{2}` date) are digits/punctuation only, so case
 # folding cannot change what they match.
+#
+# `\b(?!-)` after the prose verb: without it `grounded per` is a SUBSTRING of the
+# compound "schema-grounded PER-AGENT" (checks/_agents.py, `_has_subagents`), where
+# "per-agent" is the thing being described, not a grounding source -- and that phrase
+# alone was accepting a dead, otherwise unqualified bundle citation in its window.
+# `\b` refuses a longer word ("perhaps"), `(?!-)` refuses a hyphenated compound
+# ("per-agent"). This only narrows what counts as a qualifier, so it can surface a
+# pre-existing violation, never hide one. Whether undated prose should qualify at all
+# is a separate, open question -- see the module docstring's "dated or versioned".
 _QUALIFIER_RE = re.compile(
-    r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)|as of ",
+    r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)\b(?!-)|as of ",
     re.IGNORECASE,
 )
 
