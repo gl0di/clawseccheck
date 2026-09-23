@@ -45,6 +45,7 @@ from ..textnorm import (
 from . import _shared
 from ._shared import (
     INJECTION_PATTERNS,
+    WALK_VANISHED_ERRNOS,
     _CRED_RE,
     _EXFIL_RE,
     _FM_BLOCK_BARE_RE,
@@ -64,6 +65,7 @@ from ._shared import (
     _skill_frontmatter_block,
     _username_safe_path,
     _web_fetch_enabled,
+    note_walk_gap,
 )
 
 
@@ -6133,14 +6135,15 @@ def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
     return out
 
 
-_B87_VANISHED_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
-
-
-def _b87_note_gap(gaps: dict, gate, exc: OSError) -> None:
-    """Record one B87 coverage gap, once per gate directory (first reason wins)."""
-    key = str(gate)
-    if key not in gaps:
-        gaps[key] = (Path(gate), exc.strerror or str(exc), exc.errno)
+# B-902: moved to the shared leaf so `checks/_mcp.py`'s `vet_plugin` tree sweep — which
+# hits the exact same unguarded-`is_symlink()`-on-an-unsearchable-directory shape, just
+# walking a different root — reuses this instead of forking a second copy (CLAUDE.md
+# 3.1's "helper reused by 2+ topics" rule). Aliased under the original names: nothing
+# that already imports `_B87_VANISHED_ERRNOS`/`_b87_note_gap` from this module (this
+# file's own code below, `checks/__init__.py`'s aggregator re-export, any test) needs to
+# change (§3.1-a — a name importable today stays importable).
+_B87_VANISHED_ERRNOS = WALK_VANISHED_ERRNOS
+_b87_note_gap = note_walk_gap
 
 
 def _fence_is_annotated(

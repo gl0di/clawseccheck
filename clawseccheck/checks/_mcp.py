@@ -72,8 +72,11 @@ from ._shared import (
     _numeric_version,
     _openclaw_generation,
     _plugins,
+    _username_safe_path,
     SECRET_KEY_RE,
     _surface_absent,
+    WALK_VANISHED_ERRNOS,
+    note_walk_gap,
 )
 from ._content import (
     _B63_SEND_VERB_RE,
@@ -631,10 +634,42 @@ def vet_plugin(
     # one — after the reader landed, a plugin shipping install.py printed "no executable
     # code to analyze", which is a claim about the ARTIFACT and was simply untrue.
     analysed_loose_code: list[str] = []
+    # B-902: shares B-899's root cause (checks/_content.py's `_enumerate_symlinks`) --
+    # `fp.is_symlink()` needs search (`x`) permission on `fp`'s PARENT to `lstat()` an
+    # entry inside it, so a plugin subdirectory at mode 0644 (listable, not searchable)
+    # made this raise `PermissionError` straight out of `vet_plugin()` (uncaught at the
+    # `--vet-plugin` CLI entry point), and 0000 took the quieter path: `os.walk`'s default
+    # `onerror=None` silently dropped the whole subtree, so a native-executable stowaway
+    # or embedded MCP spec placed there went unswept without a trace. Both are now
+    # recorded as a gap (`note_walk_gap`, the shared B-899 helper -- one entry per GATE
+    # directory, not per file, since a missing search bit fails identically for every
+    # entry it hides) instead of raising or vanishing, and folded into the SAME
+    # `coverage_gap_finding()` vehicle `truncated`/`js_capped`/`budget_hit` already use
+    # below -- this sweep's existing partial-scan contract, not a new one.
+    #
+    # ENOENT/ENOTDIR (`WALK_VANISHED_ERRNOS`) are not gaps: a subdirectory that simply no
+    # longer exists by the time the walk descends into it (an npm/build temp dir cleaned
+    # mid-install, a concurrent plugin re-install) hides no content, and B-899's own C-135
+    # round 1 measured a real false-UNKNOWN churn from treating "gone" the same as
+    # "present and unreadable" -- reused here rather than re-derived for the same reason.
+    #
+    # An entry `is_symlink()` cannot classify is skipped (`continue`), never treated as an
+    # ordinary file: the whole point of the `if fp.is_symlink(): continue` line below is
+    # "never open something that might be a symlink", and assuming an unverified entry is
+    # safe to open would be the one place that could be quietly defeated.
+    gaps: dict = {}
+
+    def _on_plugin_walk_error(exc: OSError) -> None:
+        if exc.errno in WALK_VANISHED_ERRNOS:
+            return
+        note_walk_gap(gaps, Path(getattr(exc, "filename", None) or root), exc)
+
     if cpu_exceeded(deadline):
         budget_hit = True
     else:
-        for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(
+            root, topdown=True, onerror=_on_plugin_walk_error, followlinks=False
+        ):
             # F-148: a pathologically wide/deep (but still-legal, non-symlink) tree can
             # make the walk itself slow well before _PLUGIN_FILE_CAP is reached.
             if cpu_exceeded(deadline):
@@ -643,7 +678,13 @@ def vet_plugin(
             dirnames[:] = sorted(d for d in dirnames if d not in _PLUGIN_SKIP_DIRS)
             for fn in sorted(filenames):
                 fp = Path(dirpath) / fn
-                if fp.is_symlink():
+                try:
+                    is_link = fp.is_symlink()
+                except OSError as exc:
+                    if exc.errno not in WALK_VANISHED_ERRNOS:
+                        note_walk_gap(gaps, Path(dirpath), exc)  # gate: parent missing `x`
+                    continue  # unclassifiable -> never trust it enough to open it
+                if is_link:
                     continue
                 # B-344: the cap test runs BEFORE the append, not after it. Tripping
                 # `truncated` while appending the Nth file claims files went unscanned
@@ -820,13 +861,13 @@ def vet_plugin(
                     f"{_PLUGIN_JS_MAX_BYTES // 1_000_000}MB scan cap — not lexically scanned"
                 )
 
-    # B-344: the CPU budget is not the only way this scan ends up partial. Two other
-    # limits truncate it, and until now each reached nothing but `notes` — human text
+    # B-344: the CPU budget is not the only way this scan ends up partial. Three other
+    # limits truncate it, and until B-344 each reached nothing but `notes` — human text
     # that lands in `evidence` but is not a Finding, so nothing about it reaches
-    # `dossier._normalize_pool` / `_AXIS_BY_ID` / `_danger_coverage_gap`. Both are fixed
-    # with the SAME `coverage_gap_finding()` factory the budget path uses below, each
-    # naming its OWN limit and no other: a report that prints a size cap on one line and
-    # a contradicting budget claim on the next is worse than one that says nothing.
+    # `dossier._normalize_pool` / `_AXIS_BY_ID` / `_danger_coverage_gap`. All three are
+    # fixed with the SAME `coverage_gap_finding()` factory the budget path uses below,
+    # each naming its OWN limit and no other: a report that prints a size cap on one line
+    # and a contradicting budget claim on the next is worse than one that says nothing.
     #
     #   * `truncated`  — the tree sweep stopped at `_PLUGIN_FILE_CAP`. The `rank` floor
     #     below did lift the verdict off PASS to UNKNOWN, but an UNKNOWN-only plugin
@@ -838,6 +879,13 @@ def vet_plugin(
     #     an oversized bundle graded a confident A/PASS/rc 0 on a file that was never
     #     read. A large minified bundle is exactly where a payload is cheapest to hide,
     #     which makes this the worse of the two.
+    #   * `gaps`  — B-902: an unreadable plugin directory (shares B-899's root cause,
+    #     checks/_content.py's `_enumerate_symlinks`). Before this fix, a subdirectory
+    #     the scanning uid could list but not search (0644) raised `PermissionError`
+    #     straight out of `vet_plugin()` — uncaught at the `--vet-plugin` CLI entry
+    #     point — and one it could not even list (0000) was silently dropped by
+    #     `os.walk`'s default `onerror=None`, so content beneath it was never swept
+    #     without a trace.
     if truncated:
         subs.append(
             coverage_gap_finding(
@@ -855,6 +903,39 @@ def vet_plugin(
                 f"plugin scan coverage is incomplete: {len(js_capped)} runtime JS/TS "
                 f"file(s) exceed the {_PLUGIN_JS_MAX_BYTES // 1_000_000}MB per-file "
                 f"lexical scan cap and were not read — {shown}{more}"
+            )
+        )
+    if gaps:
+        # B-902: a THIRD partial-scan cause, same shape as the two above -- named in its
+        # own coverage_gap_finding rather than folded into `truncated`/`js_capped` so a
+        # report never claims one limit while the actual cause was another.
+        #
+        # The gate path(s) go only in `fix`, never in `detail` -- unlike the plugin-
+        # relative `js_capped` filenames above, a gate is an absolute filesystem
+        # directory and can be host/install-path-specific; `baseline.fingerprint()`
+        # hashes only `detail` (see B-899's identical rule in checks/_content.py), so a
+        # host-specific path folded into `detail` would give every affected machine its
+        # own fingerprint and orphan a `.clawseccheckignore` entry already written
+        # against this VET-COVERAGE finding.
+        shown = []
+        for gate, reason, _err in gaps.values():
+            try:
+                shown.append(f"{gate.relative_to(root)} ({reason})")
+            except ValueError:
+                shown.append(f"{_username_safe_path(gate)} ({reason})")
+        shown.sort()
+        extra = f" (+{len(shown) - 6} more)" if len(shown) > 6 else ""
+        noun, pronoun = ("directory", "it") if len(shown) == 1 else ("directories", "them")
+        subs.append(
+            coverage_gap_finding(
+                "plugin scan coverage is incomplete: one or more plugin directories "
+                "could not be read during the tree sweep, so their contents were never "
+                "opened — any embedded MCP spec, native-executable stowaway or runtime "
+                "JS/TS file inside went unexamined",
+                fix=(
+                    f"Restore read and search permission on the unreadable {noun} (or "
+                    f"remove {pronoun}) and re-run: " + "; ".join(shown[:6]) + extra
+                ),
             )
         )
 
