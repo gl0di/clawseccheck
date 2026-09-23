@@ -41,6 +41,7 @@ from ..skillast import (
     analyze_shell,
 )
 from ..skillast import simulate_effects as _simulate_effects
+from ..shippedexec import ShippedArtifact as _ShippedArtifact
 from ..scanbudget import (
     DEFAULT_VET_TARGET_BUDGET_S,
     ScanBudgetExceeded,
@@ -3946,6 +3947,7 @@ _B13_WINNER_SUBSIGNAL = {
     "warns_telemetry_undisclosed": "possible undisclosed telemetry/data collection",
     "warns_curl_dropper": "possible staged dropper",
     "warns_chunked_file_exec": "possible split-by-file payload loader",
+    "warns_unshipped_exec": "executes a file this scan never analysed",
     "warns_timebomb": "time-bomb / environment-gated code",
     "warns_shell_injection": "shell-injection-prone subprocess/os.system usage",
     "warns_insecure_tempfile": "insecure temp-file handling",
@@ -4388,6 +4390,7 @@ def check_installed_skills(ctx: Context) -> Finding:
     # _PYTHON_TEST_SHAPE_SIGNALS the prose side uses: see the loop arm's own comment for
     # why a shape gate here would still convict the corpus's own conftest.py fixtures.
     hardcoded_secret_fixture_note: list[str] = []
+    warns_unshipped_exec: list[str] = []  # B-638: exec of an in-skill path never analysed
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
     # B-744: OpenClaw's own credential store named alongside credential-shaped content
     # reaching an exfil sink — WARN-only, never routed through the FAIL-capable
@@ -5105,8 +5108,16 @@ def check_installed_skills(ctx: Context) -> Finding:
         # the per-entry-point results into ctx.effect_profiles[name].  This is strictly
         # additive — the simulator result is NEVER used to alter crit/high/verdict.
         _skill_ep_results: list[dict] = []
+        # B-638: the skill's own file set, so an exec() of a file the skill ships is judged
+        # by where its path RESOLVES (skillast delegates to shippedexec), not by whether the
+        # path merely mentions __file__.
+        _shipped = _ShippedArtifact(
+            ctx.installed_skill_py.get(name, []),
+            root=(getattr(ctx, "installed_skill_dirs", None) or {}).get(name)
+            or getattr(ctx, "home", None),
+        )
         for relpath, src in ctx.installed_skill_py.get(name, []):
-            for af in analyze_python(src, relpath, own_host=_own_host):
+            for af in analyze_python(src, relpath, own_host=_own_host, artifact=_shipped):
                 if af.rule == "AST_UNANALYZABLE":
                     parse_error_paths.append(f"{name}: {relpath}")
                     continue
@@ -5153,6 +5164,13 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # severity label or any co-occurring cred/exfil signal.
                 if af.rule == "CHUNKED_FILE_EXEC":
                     warns_chunked_file_exec.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                    continue
+                # B-638: an exec/eval proven to run a path inside the skill whose file this
+                # scan did not analyse (not shipped, or not Python). WARN-grade, routed here
+                # BEFORE the cred/exfil fallthrough so it can never escalate: its content is
+                # unknown, which is a question, not evidence.
+                if af.rule == "UNSHIPPED_FILE_EXEC":
+                    warns_unshipped_exec.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
                 # Argv-list tunnel/mesh-VPN launch primitive (TUNNEL_LAUNCH_ARGV).
                 # WARN-only, HIGH severity but explicitly not
@@ -5358,6 +5376,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         "warns_shell_injection": warns_shell_injection,
         "warns_insecure_tempfile": warns_insecure_tempfile,
         "warns_chunked_file_exec": warns_chunked_file_exec,
+        "warns_unshipped_exec": warns_unshipped_exec,
         "warns_js": warns_js,
         "warns_content": warns_content,
         "warns_notify_host": warns_notify_host,
@@ -5980,6 +5999,31 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_chunked_file_exec,
             _signal_buckets,
             "warns_chunked_file_exec",
+        )
+
+    # B-638: an exec/eval proven to run exactly the file at a path inside the skill -- the
+    # whole file, in a namespace nothing pre-loads -- where that file is not one this scan
+    # analysed (it is missing, or not Python). The same call on a file the skill ships is
+    # no finding at all; on a path outside the skill it stays a FAIL. Here what runs is
+    # decided later, by whatever puts a file there, so it is neither proven benign nor
+    # evidence of a payload: WARN, never FAIL (Golden Rule #4).
+    if warns_unshipped_exec:
+        extra = (
+            f" (+{len(warns_unshipped_exec) - 6} more)" if len(warns_unshipped_exec) > 6 else ""
+        )
+        return _b13_verdict(
+            HIGH,
+            WARN,
+            "An installed skill executes a file this scan never analysed: "
+            + "; ".join(warns_unshipped_exec[:6])
+            + extra,
+            "The code runs a file from inside the skill's own directory, but the skill does "
+            "not ship that file as Python, so its content is decided at install or run time. "
+            "Find out what creates it; if the skill is meant to ship it, vet a copy that "
+            "includes it.",
+            warns_unshipped_exec,
+            _signal_buckets,
+            "warns_unshipped_exec",
         )
 
     # F-058: a dangerous sink gated on a wall-clock date or an environment variable — a
@@ -7179,6 +7223,7 @@ _AST_NEVER_FAIL_RULES = frozenset({
     "CONDITIONAL_SINK",          # F-058
     "SHELL_INJECTION_RISK",      # C-199
     "CHUNKED_FILE_EXEC",         # B336 — explicitly not FAIL-capable
+    "UNSHIPPED_FILE_EXEC",       # B-638 — unknown content, a question not a verdict
     "TUNNEL_LAUNCH_ARGV",        # B338 — explicitly not FAIL-capable
     "HARDCODED_PROVIDER_SECRET_ASSIGN",  # B-893 — explicitly not FAIL-capable
 })

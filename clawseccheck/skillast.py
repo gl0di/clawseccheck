@@ -1643,6 +1643,41 @@ def _call_args_tainted(node: ast.Call, tainted: set[str]) -> tuple:
     return any_tainted, direct
 
 
+def _call_args_tainted_for_exec_sink(node: ast.Call, tainted: set[str]) -> tuple:
+    """Like `_call_args_tainted`, but ALSO counts an inline external-source call sitting
+    directly in the call's own arguments -- with no intermediate variable -- as tainted,
+    the same as an already-bound tainted NAME. Scoped to the TT5 exec-sink call site only
+    (see its one call site below); TT4, SSRF and the subprocess-argv resolver keep calling
+    plain `_call_args_tainted`, unchanged.
+
+    B-916: `_call_args_tainted` intersects only the NAMES appearing in each argument
+    against `tainted`, so `exec(urlopen(u).read(), {})` -- external input read and handed
+    straight to the sink, nothing ever assigned to a variable -- has no tainted Name in it
+    and TT5 silently never fires; OBFUSCATED_EXEC only catches this shape when a
+    decode-shaped call rides along too (`.decode()` appended, or the read bound to a name
+    first turns it crit -- so the verdict was turning on spelling, not behaviour).
+    `_value_is_tainted_source` already recognizes an inline source call
+    (`_is_external_source_call`: `input()`/`open()`/any `.read()`-family method/
+    `requests.get`/`urlopen`/...), an inline `os.getenv`/`environ.get` read, and an inline
+    tool-result-shaped call, walking the WHOLE argument subtree -- exactly the source
+    vocabulary TT4/SSRF already trust once a value is ASSIGNED; this only extends that
+    same vocabulary to the no-variable case, for the exec-sink rule the ticket names.
+
+    A NAME already in `tainted` is still handled identically to `_call_args_tainted`
+    (checked first, unchanged), so this can only ever ADD a finding, never remove one.
+    """
+    any_tainted, direct = _call_args_tainted(node, tainted)
+    if any_tainted:
+        return any_tainted, direct
+    all_args = list(node.args) + [kw.value for kw in node.keywords]
+    for i, arg_node in enumerate(all_args):
+        if _value_is_tainted_source(arg_node, tainted):
+            # No intermediate variable carries the source to the sink -- that is at
+            # least as direct a flow as a bound Name in the first argument.
+            return True, i == 0
+    return False, False
+
+
 # The AST nodes that open a NEW binding scope in Python. A name bound inside one of
 # these is local to it, not to the enclosing scope, so every per-scope walk in this
 # module must stop here. Shared by `_scope_own_nodes` and `_own_bound_names` so the two
@@ -4463,6 +4498,12 @@ def _is_writable_import_path(node: ast.AST) -> bool:
 # checks/_mcp.py), a bigger change than this narrow FP fix justifies on its own. A
 # literal or env/argv-derived path (the dropper shape: `open("/tmp/x.py", "rb")`)
 # never contains `__file__` and is therefore never exempted by this proxy.
+#
+# B-638: that precise version now exists -- `shippedexec.ShippedArtifact`, passed as
+# `analyze_python(artifact=...)` by check_installed_skills, vet_plugin and the judge-packet
+# builder. When it is passed, this token proxy is NOT consulted at either exec site (it
+# absolved `join(here, os.environ["P"])`, whose absolute value discards the anchor); it
+# remains only for a caller that cannot say what the artifact holds.
 def _scope_own_assigns(scope: ast.AST) -> dict:
     """name -> RHS expr for every single-Name-target `x = <expr>` in `scope`'s own
     body (via `_scope_own_nodes`, so it does not descend into nested functions) --
@@ -4843,8 +4884,10 @@ def _exec_sink_taint_is_only_artifact_relative_decode(
     path_aliases: "tuple | None" = None,
 ) -> bool:
     """True when every TAINTED NAME `_call_args_tainted` would match inside
-    *arg_node* is explained by a decode-shaped, provably artifact-relative file
-    read (`_decode_call_reads_artifact_relative_file`) -- and nothing else.
+    *arg_node*, and every inline external-source call `_call_args_tainted_for_
+    exec_sink` (B-916) would match there instead, is explained by a decode-shaped,
+    provably artifact-relative file read (`_decode_call_reads_artifact_relative_file`)
+    -- and nothing else.
 
     B-752 (TT5 follow-up). `_external_tainted_names` treats ANY `open()`/`.read()`
     call as an external source -- right for TT5's general case, since a file
@@ -4864,9 +4907,24 @@ def _exec_sink_taint_is_only_artifact_relative_decode(
     argument actually contributes are compared against only the names the
     decode call's OWN receiver resolves to -- a name tainted for any other
     reason is not in that covered set, and the caller keeps convicting.
+
+    B-916: the SAME idiom written with no intermediate variable at all --
+    `exec(open(join(dirname(__file__), "v.py")).read().decode(), {})`, all one
+    expression -- has no tainted NAME in it whatsoever, only the inline `open()`/
+    `.read()` source call `_call_args_tainted_for_exec_sink` now also recognizes.
+    `tainted_here` alone would then be empty and the OLD early return (`if not
+    tainted_here: return False`) would wrongly convict the identical, already-benign
+    idiom merely for being spelled inline. The name-based accounting below is
+    unchanged when a name IS present; when the arg's only taint is inline, the same
+    "every decode call's receiver resolves to a shipped sibling file, and nothing
+    else contributes taint" question is instead asked of every node OUTSIDE each
+    covered receiver's own subtree -- an uncovered inline source there (a second,
+    unrelated network read alongside the legitimate one) still convicts, exactly
+    like the mixed-name case above.
     """
     tainted_here = _names_in(arg_node) & tainted
-    if not tainted_here:
+    has_inline_source = _value_is_tainted_source(arg_node, tainted)
+    if not tainted_here and not has_inline_source:
         return False
     if not _subtree_has_decode(arg_node):
         return False
@@ -4875,6 +4933,7 @@ def _exec_sink_taint_is_only_artifact_relative_decode(
     ):
         return False
     covered: "set[str]" = set()
+    covered_ids: "set[int]" = set()
     for n in ast.walk(arg_node):
         if not _is_decode_call(n) or _is_path_join_call(n, path_aliases):
             continue
@@ -4882,7 +4941,42 @@ def _exec_sink_taint_is_only_artifact_relative_decode(
         if isinstance(nf, ast.Attribute) and nf.attr == "de" + "code":
             if _decode_call_reads_artifact_relative_file(n, scope, relpath):
                 covered |= _names_in(nf.value)
-    return tainted_here <= covered
+                covered_ids |= {id(x) for x in ast.walk(nf.value)}
+    if not (tainted_here <= covered):
+        return False
+    if not has_inline_source:
+        return True
+    return not _has_uncovered_inline_source(arg_node, tainted, covered_ids)
+
+
+def _has_uncovered_inline_source(
+    arg_node: ast.AST, tainted: "set[str]", covered_ids: "set[int]"
+) -> bool:
+    """True when *arg_node* contains an inline external-source call (the same
+    vocabulary `_value_is_tainted_source` recognizes: `_is_external_source_call`,
+    `os.getenv`/`environ.get`, a tool-result-shaped call) OUTSIDE every node id in
+    *covered_ids* -- i.e. taint `_exec_sink_taint_is_only_artifact_relative_decode`'s
+    decode-receiver walk has not already vetted as an artifact-relative read.
+    Deliberately does not descend into a covered node's own subtree: the receiver's
+    own `open()`/`.read()` calls are exactly the source the caller just proved safe,
+    and re-matching them here would convict the very idiom this exemption exists for.
+    """
+    stack = [arg_node]
+    while stack:
+        n = stack.pop()
+        if id(n) in covered_ids:
+            continue
+        if isinstance(n, ast.Call):
+            f = n.func
+            if (
+                (isinstance(f, ast.Attribute) and f.attr == "getenv" and _attr_base(f.value) == "os")
+                or (isinstance(f, ast.Attribute) and f.attr == "get" and _attr_base(f.value) == "environ")
+                or _is_external_source_call(n)
+                or _is_tool_result_call(n)
+            ):
+                return True
+        stack.extend(ast.iter_child_nodes(n))
+    return False
 
 
 # F-177/B375: sitecustomize.py/usercustomize.py + PYTHONSTARTUP auto-execution
@@ -5026,7 +5120,10 @@ def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, st
 
 
 def analyze_python(
-    source: str, filename: str = "<skill>", own_host: str | None = None
+    source: str,
+    filename: str = "<skill>",
+    own_host: str | None = None,
+    artifact=None,
 ) -> list[ASTFinding]:
     """Return AST findings for one Python source string. Never raises, never executes.
 
@@ -5039,6 +5136,14 @@ def analyze_python(
     text itself), used to REWORD (not silence — self-declaration proves disclosed,
     not trustworthy) HOST_INFO_EXFIL_FLOW when a host-info value flows to the
     skill's OWN disclosed endpoint rather than an undeclared third party.
+
+    `artifact` (B-638): a `shippedexec.ShippedArtifact` over every Python file the caller
+    analyses for this artifact. With it, an exec/eval call proven to run exactly a file the
+    artifact ships (resolved path containment, not a `__file__` token) is a plain
+    DANGEROUS_SINK instead of OBFUSCATED_EXEC/TT5_CMD_INJECTION, and the older token-based
+    carve-out below is NOT consulted -- it absolved reads whose path only mentioned
+    `__file__`. Without it (a caller that cannot say what the artifact holds) behaviour is
+    exactly what it was before.
     """
     try:
         tree = ast.parse(source)
@@ -5068,6 +5173,14 @@ def analyze_python(
         # qualifying exec/taint-sink site below — same result, `tree` does not change
         # within this call.
         path_aliases = _path_module_aliases(tree)
+        # B-638: (lineno, col_offset) of exec/eval calls proven to run a shipped file, and
+        # of those whose only gap is that the in-artifact file they run is not shipped.
+        shipped_exec = (
+            artifact.exact_exec_sites(filename, source) if artifact is not None else None
+        )
+        unshipped_exec = (
+            artifact.unshipped_exec_sites(filename, source) if artifact is not None else {}
+        )
     except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
         err_type = type(exc).__name__
         return [
@@ -5139,12 +5252,32 @@ def analyze_python(
                 node, tainted, owner_map, parent_scope, shadow_cache
             )
             has_decode_signal = _subtree_has_decode(arg)
+            # B-638: the executed value is exactly a file this artifact ships -- proven by
+            # shippedexec against the artifact's own file set. Nothing is decoded, hidden
+            # or tainted in it, so it is the plain dynamic call it looks like.
+            if shipped_exec is not None and (ln, node.col_offset) in shipped_exec:
+                add("DANGEROUS_SINK", "info", ln, f"a dynamic {f.id} call")
+                continue
+            # B-638: the same proof holds except the file is not one this scan analysed --
+            # it is missing, or not Python. Its content is unknown, which is not evidence of
+            # a payload either: a WARN-grade question, never a crit (Golden Rule #4).
+            if (ln, node.col_offset) in unshipped_exec:
+                add(
+                    "UNSHIPPED_FILE_EXEC",
+                    "info",
+                    ln,
+                    f"a call to {f.id} runs {unshipped_exec[(ln, node.col_offset)]}, a path "
+                    "inside the skill that this scan did not analyse as Python (not shipped, "
+                    "or not Python) — whatever is there at runtime runs as code",
+                )
+                continue
             # B-640: `.decode("utf-8")` reading a __file__-relative sibling file (the
             # canonical setup.py idiom -- see the module comment above
             # `_scope_own_assigns`) is not obfuscation on its own. Only un-arms the
             # bare-decode signal; a real content-hiding primitive elsewhere in the
-            # same expression still convicts.
-            if has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
+            # same expression still convicts. B-638: a token proxy, so it is only
+            # consulted when the caller could not supply the artifact.
+            if shipped_exec is None and has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
                 arg, owner_map.get(node, tree), filename, path_aliases
             ):
                 has_decode_signal = False
@@ -5637,8 +5770,24 @@ def analyze_python(
     ext_taint_map = _external_tainted_names(
         tree, func_param_taint, owner_map, parent_scope, shadow_cache
     )
+    # B-916: `ext_taint_map` only tracks NAMES bound to an external source, so a file
+    # whose only external input is read straight into an exec/eval/os.system/os.popen/
+    # subprocess.* sink -- no intermediate variable at all, e.g.
+    # `exec(urlopen(u).read(), {})` -- has an EMPTY map, and this whole pass used to be
+    # skipped outright before a single call was even examined. Cheap, separate pre-scan
+    # (same style as the other one-shot `ast.walk(tree)` passes already above this one):
+    # only exec-sink calls are considered, and only their own arguments are walked.
+    _has_inline_exec_sink_source = any(
+        _is_exec_sink_call(n.func)[0]
+        and any(
+            _value_is_tainted_source(a, set())
+            for a in list(n.args) + [kw.value for kw in n.keywords]
+        )
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+    )
 
-    if ext_taint_map:
+    if ext_taint_map or _has_inline_exec_sink_source:
         for node in ast.walk(tree):
             if len(out) >= _MAX_FINDINGS_PER_FILE:
                 break
@@ -5652,7 +5801,13 @@ def analyze_python(
                 ext_visible = _tainted_names_visible(
                     node, ext_taint_map, owner_map, parent_scope, shadow_cache
                 )
-                any_t, direct = _call_args_tainted(node, ext_visible)
+                any_t, direct = _call_args_tainted_for_exec_sink(node, ext_visible)
+                # B-638: the tainted input is exactly the read of a file this artifact
+                # ships (see the OBFUSCATED_EXEC site above).
+                if any_t and shipped_exec is not None and (
+                    (ln, node.col_offset) in shipped_exec or (ln, node.col_offset) in unshipped_exec
+                ):
+                    continue
                 if any_t:
                     # B-752: a decode-shaped, provably artifact-relative file read (the
                     # setup.py idiom) is not external input merely because open()/.read()
@@ -5661,9 +5816,20 @@ def analyze_python(
                     # is explained by exactly that pattern; any other tainted name
                     # reaching the sink -- a mixed expression, a real decode primitive
                     # layered on top -- still convicts below.
+                    # B-638: a token proxy, so only when the caller had no artifact.
+                    # B-916: an arg can now also be tainted by an INLINE source call
+                    # with no name at all (see `_call_args_tainted_for_exec_sink`) --
+                    # `_exec_sink_taint_is_only_artifact_relative_decode` only explains
+                    # NAME-based taint, so an arg whose sole taint is inline must not be
+                    # waved through by the old `not (_names_in(_a) & ext_visible)`
+                    # shortcut, which was vacuously true for it (no NAME to find) before
+                    # this rule could ever see an inline-only taint to begin with.
                     _all_args = list(node.args) + [kw.value for kw in node.keywords]
-                    if _all_args and all(
-                        not (_names_in(_a) & ext_visible)
+                    if shipped_exec is None and _all_args and all(
+                        (
+                            not (_names_in(_a) & ext_visible)
+                            and not _value_is_tainted_source(_a, ext_visible)
+                        )
                         or _exec_sink_taint_is_only_artifact_relative_decode(
                             _a,
                             ext_visible,

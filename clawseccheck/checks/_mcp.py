@@ -193,7 +193,9 @@ def _reprefix_bundled_evidence(entry: str, name: str, rel_label: str) -> str:
 _PY_BUDGET_GAP = "the scan budget was reached while it was being read"
 
 
-def _scan_loose_plugin_python(source, rel, analyze_python, subs, py_signals) -> str:
+def _scan_loose_plugin_python(
+    source, rel, analyze_python, subs, py_signals, artifact=None
+) -> str:
     """Analyse one plugin Python file that no bundled-skill dispatch will reach (B-636).
 
     Returns "" when the file was analysed, or a short phrase naming why it was not — the
@@ -212,7 +214,7 @@ def _scan_loose_plugin_python(source, rel, analyze_python, subs, py_signals) -> 
     import that the rest of the file deliberately does without.
     """
     try:
-        ast_findings = analyze_python(source, rel)
+        ast_findings = analyze_python(source, rel, artifact=artifact)
     except ScanBudgetExceeded:
         return _PY_BUDGET_GAP
     unparseable = ""
@@ -378,6 +380,7 @@ def vet_plugin(
     """
     import json as _json
 
+    from ..shippedexec import ShippedArtifact as _ShippedArtifact  # noqa: PLC0415
     from ..skillast import analyze_javascript, analyze_python  # noqa: PLC0415
 
     p = Path(str(path)).expanduser()
@@ -512,6 +515,7 @@ def vet_plugin(
     # -- bundled skills -> vet_skill (the plugin-skills auto-load surface, recon §11.1)
     skill_dirs: list[Path] = []
     bundled_contexts: list = []  # B-628: each dispatched skill's engine Context
+    bundled_py: list = []  # B-638: (plugin-root-relative path, source) of bundled Python
     try:
         root_res = root.resolve()
     except OSError:
@@ -611,6 +615,8 @@ def vet_plugin(
         sctx = getattr(sf, "ctx", None)
         if sctx is not None:
             bundled_contexts.append(sctx)
+            for _srcs in (getattr(sctx, "installed_skill_py", None) or {}).values():
+                bundled_py.extend((f"{rel_label}/{r}", s) for r, s in _srcs)
         subs.append(_attribute_to_bundled_skill(sf, sd.name, rel_label))
         subs.extend(_attribute_to_bundled_skill(rf, sd.name, rel_label) for rf in ring)
 
@@ -710,6 +716,32 @@ def vet_plugin(
         return any(sd in fp.parents for sd in skill_dirs)
 
     dispatched_dirs = [d.resolve() for d in skill_dirs]
+    # B-638: read the loose plugin Python up front, so each file is analysed knowing every
+    # other one -- an exec() of a file the plugin ships is judged by where its path
+    # resolves, and that needs the whole set (shippedexec.ShippedArtifact). A file that
+    # could not be read leaves the set incomplete, and an incomplete set proves nothing:
+    # the artifact is then withheld and analyze_python behaves exactly as before.
+    loose_py: dict = {}
+    loose_complete = not truncated
+    for fp in swept:
+        if fp.suffix.lower() not in _PLUGIN_UNREAD_SOURCE_EXT:
+            continue
+        try:
+            fp_res = fp.resolve()
+            if any(fp_res == d or d in fp_res.parents for d in dispatched_dirs):
+                continue
+            if cpu_exceeded(deadline) or fp.stat().st_size > _PLUGIN_PY_MAX_BYTES:
+                loose_complete = False
+                continue
+            loose_py[str(fp.relative_to(root))] = fp.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            loose_complete = False
+    loose_artifact = (
+        _ShippedArtifact(
+            [*loose_py.items(), *bundled_py], exec_paths=list(loose_py), root=root
+        )
+        if loose_complete and loose_py else None
+    )
     for fp in swept:
         if fp.suffix.lower() in _PLUGIN_UNREAD_SOURCE_EXT:
             try:
@@ -765,15 +797,18 @@ def vet_plugin(
                             f"it exceeds the {_PLUGIN_PY_MAX_BYTES // 1_000_000}MB scan cap"
                         )
                     else:
-                        try:
-                            py_src = fp.read_text(encoding="utf-8", errors="replace")
-                        except OSError:
-                            py_src = None
+                        py_src = loose_py.get(rel)
+                        if py_src is None:
+                            try:
+                                py_src = fp.read_text(encoding="utf-8", errors="replace")
+                            except OSError:
+                                py_src = None
                         if py_src is None:
                             gap = "it could not be read"
                         else:
                             gap = _scan_loose_plugin_python(
-                                py_src, rel, analyze_python, subs, py_signals
+                                py_src, rel, analyze_python, subs, py_signals,
+                                artifact=loose_artifact,
                             )
                             if gap == _PY_BUDGET_GAP:
                                 budget_hit = True

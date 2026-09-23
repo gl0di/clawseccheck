@@ -63,6 +63,7 @@ from urllib.parse import urlparse
 from ..catalog import ACTIONABLE_STATUSES, BY_ID, UNKNOWN, WARN
 from ..logsafe import redact
 from ..sar import _VERDICT_VALUES, build_sars
+from ..shippedexec import ShippedArtifact
 from ..skillast import analyze_env_auth_kwarg_exfil, analyze_python
 from ..textnorm import normalize_for_scan
 
@@ -888,8 +889,15 @@ def _recover_dropped_taint(ctx) -> list[dict]:
     installed_py = getattr(ctx, "installed_skill_py", None) or {}
     items: list[dict] = []
     for skill_name, sources in installed_py.items():
+        # B-638: the same artifact check_installed_skills passes, so this re-run sees the
+        # same verdict for an exec() of a file the skill ships.
+        shipped = ShippedArtifact(
+            sources,
+            root=(getattr(ctx, "installed_skill_dirs", None) or {}).get(skill_name)
+            or getattr(ctx, "home", None),
+        )
         for relpath, src in sources:
-            for af in analyze_python(src, relpath):
+            for af in analyze_python(src, relpath, artifact=shipped):
                 if af.rule not in _RECOVERED_TAINT_RULES:
                     continue
                 loc = f"{relpath}:{af.lineno}"
