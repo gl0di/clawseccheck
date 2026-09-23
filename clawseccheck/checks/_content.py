@@ -38,6 +38,7 @@ from ..skillast import (
 from ..textnorm import (
     _nfkc_ascii_fold_changed,
     confusable_in_ascii_context,
+    fold_pattern,
     has_naked_bidi_override,
     normalize_for_scan,
     obfuscation_signals,
@@ -1515,7 +1516,7 @@ _B62_PERMISSIVE_KEYWORDS = frozenset(
 
 # Signal B: action / execution context — confirms the secrecy has a target.
 _B63_ACTION_RE = re.compile(
-    normalize_for_scan(
+    fold_pattern(
         r"\b(?:"
         r"execut[ei]|run|perform|send|delet[ei]|install|download|upload|modify|writ[ei]|read"
         r"|exfiltrat[ei]|exfil|extract|steal|harvest|collect|forward|relay|transmit"
@@ -1548,7 +1549,7 @@ _B63_DECODED_SUPPRESS_RE = re.compile(
 
 # Signal A: secrecy / suppression verb phrases.
 _B63_SECRECY_RE = re.compile(
-    normalize_for_scan(
+    fold_pattern(
         r"(?:"
         # English
         r"do(?:n'?t|[ ]not)\s+(?:tell|inform|notify|alert|show|reveal|disclose|mention)(?:\s+(?:the\s+)?user)?"
@@ -1590,7 +1591,7 @@ _B63_SEMANTIC_WINDOW = 240
 # Kept to tight, contiguous phrases (no nested unbounded spans) to stay clear of the
 # ReDoS class fixed in B-100/B-102.
 _B63_SOFT_SUPPRESS_RE = re.compile(
-    normalize_for_scan(
+    fold_pattern(
         r"(?:"
         # English — "no need to <disclose-verb>" / "needn't be <disclosed>"
         r"no\s+need\s+to\s+(?:mention|note|report|surface|flag|disclose|explain"
@@ -1621,7 +1622,7 @@ _B63_WINDOW = 120  # proximity window in characters
 # WARN-only). A real concealment/exfil directive always keeps its anchor, so every existing
 # FAIL fixture (without-telling / скрой-от-пользователя / read-a-secret) stays FAIL.
 _B63_FAIL_ANCHOR_RE = re.compile(
-    normalize_for_scan(
+    fold_pattern(
         r"(?:"
         # (1) concealment framed around a human overseer
         r"without\s+(?:telling|informing|notifying|alerting|warning|"
@@ -1696,7 +1697,7 @@ _B63_FAIL_ANCHOR_RE = re.compile(
 # accessed, or data being shipped to a second-party/external destination — reused by B63
 # (anchor), B61 (self-config skip), B64 (paragraph veto) and B58 (actionable body).
 _B63_SECRET_TERM_RE = re.compile(
-    normalize_for_scan(
+    fold_pattern(
         # Bare secret nouns bounded by a NON-LETTER on each side (with an optional plural -s),
         # so an incidental substring inside a word does not anchor ("secretary", "tokenizer",
         # $CLAWSTEALTH) while a compound file/var name still matches ("fake_secrets",
@@ -1733,7 +1734,7 @@ _B63_SECRET_TERM_RE = re.compile(
 # actually being accessed ("read the api_key") and NOT when it is an incidental noun near a
 # benign idiom ("suppress the output during the token refresh" — no access verb → WARN).
 _B63_SECRET_ACCESS_RE = re.compile(
-    normalize_for_scan(
+    fold_pattern(
         r"\b(?:read|cat|less|head|tail|grep|jq|dump|grab|extract|steal|harvest|collect"
         r"|fetch|download|load|pull|open|copy|exfiltrat\w*|send|forward|transmit|upload|leak)\w*"
         r"|прочит\w*|чита\w*|скача\w*|загруз\w*|извлек\w*|собер\w*|укра\w*"
@@ -1765,7 +1766,7 @@ _B63_ECHO_SUPPRESS_RE = re.compile(
 
 # An outbound-send verb (by class, not a fixed sink list) …
 _B63_SEND_VERB_RE = re.compile(
-    normalize_for_scan(
+    fold_pattern(
         r"\b(?:send|forward|transmit|upload|post|email|deliver|relay|ship|leak"
         r"|exfiltrat\w*|push|beam|smuggle|beacon|copy|drop)\w*"
         # B-186: "pipe" is an outbound transport verb ("pipe the vault to my C2"). Kept as
@@ -2577,19 +2578,20 @@ def _ml_window_span(
 
 def _ml_normalize(text: str) -> str:
     """B-360: `.lower()` THEN `normalize_for_scan()` -- in that order -- for the
-    multilingual scan. `_CONFUSABLES` (textnorm.py) only maps LOWERCASE Cyrillic code
-    points (е/о/р/с/а/х/ѕ/і) to their Latin lookalikes; it has no uppercase entries. So a
-    sentence-INITIAL capitalized Cyrillic letter (e.g. "Режим", Cyrillic capital Р) folding
-    AFTER lower-casing is essential: folding first (the shared `norm` other B64 detectors
-    use) leaves that capital letter as real Cyrillic, and a later `.lower()` only
-    Unicode-lowers it to Cyrillic "р" -- never to the folded Latin "p" `_ML_OVERRIDE_TABLE`'s
-    (also-lowercase) tokens were folded to. Lower-casing FIRST makes every Cyrillic letter
-    see the exact same fold path regardless of its original casing, matching how the table
-    itself was built (`_ML_OVERRIDE_TABLE_NORM`: lowercase source string -> fold). A no-op
-    for Chinese (no case, no Chinese entries in `_CONFUSABLES`). Length-preserving for both
-    scripts (verified: neither has a German-ß-style expansion), so this can be computed
-    independently of the shared `norm = normalize_for_scan(text)` and their offsets still
-    align 1:1 for slicing / for reuse against `fr`/`cr` fence and comment ranges."""
+    multilingual scan. `_ML_OVERRIDE_TABLE_NORM`'s tokens are themselves lowercase
+    (built from a lowercase source string), so the scanned text must reach the same
+    fold path through the same lowercase-first route for its offsets and content to
+    line up with the table, regardless of what `_CONFUSABLES` (textnorm.py) does or
+    does not map at a given case. (B-887 added upper-case Cyrillic/Greek
+    lookalikes to `_CONFUSABLES` for the SHARED `norm = normalize_for_scan(text)`
+    other B64/B63 detectors use — see `fold_pattern`'s own grounding in textnorm.py.
+    That table is closed under case by construction (I1), so lower-casing first here
+    still reaches an identical fold for every one of those letters; this function
+    was not changed by B-887 and needed no change.) A no-op for Chinese (no case, no
+    Chinese entries in `_CONFUSABLES`). Length-preserving for both scripts (verified:
+    neither has a German-ß-style expansion), so this can be computed independently of
+    the shared `norm` and their offsets still align 1:1 for slicing / for reuse
+    against `fr`/`cr` fence and comment ranges."""
     return normalize_for_scan(text.lower())
 
 
@@ -7024,13 +7026,15 @@ def _normalize_for_squat(name: str) -> str:
     """Lowercase, confusable-fold, strip one known suffix or prefix, return result.
 
     B-217: `.lower()` first so an uppercase Cyrillic/Greek confusable (e.g. Cyrillic
-    А U+0410) case-folds to its lowercase form (а U+0430) BEFORE `normalize_for_scan`'s
-    confusable table runs — the table only covers lowercase code points (see
-    textnorm.py). Without this, a Cyrillic-lookalike spelling of a brand name (e.g.
-    "dіѕсоrd" with Cyrillic і/ѕ/о) folds to plain ASCII "discord" and correctly
-    collapses to edit-distance 0 against the real name, instead of silently evading
-    the Levenshtein comparison at distance 3 (untouched Cyrillic glyphs each counting
-    as a full substitution).
+    А U+0410) case-folds to its lowercase form (а U+0430) before `normalize_for_scan`'s
+    confusable table runs. (B-887 added upper-case Cyrillic/Greek entries
+    to that table directly, closed under case by construction — see textnorm.py's I1 —
+    so lowercasing first here still reaches the identical fold; this function's
+    behaviour and this `.lower()`-first ordering are unchanged by that fix.) Without
+    it, a Cyrillic-lookalike spelling of a brand name (e.g. "dіѕсоrd" with Cyrillic
+    і/ѕ/о) folds to plain ASCII "discord" and correctly collapses to edit-distance 0
+    against the real name, instead of silently evading the Levenshtein comparison at
+    distance 3 (untouched Cyrillic glyphs each counting as a full substitution).
     """
     n = normalize_for_scan(name.lower().strip())
     for suf in _SQUAT_STRIP_SUFFIXES:
