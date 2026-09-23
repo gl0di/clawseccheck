@@ -322,23 +322,22 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~7,875 lines (restated 2026-09-16, B-643 — was ~7,267; the addition is "
-                   "two more taint-propagation node types, with/for statement bindings in "
-                   "_external_tainted_names, not a new parser family) — the "
+    "skillast.py": "~9,150 lines (restated 2026-09-23, B-850 — was ~7,875; the addition is "
+                   "the artifact-containment ALLOWLIST recognizer that replaces B-752's "
+                   "blocklist after six C-135 rejections: a self-contained abstract-"
+                   "interpretation engine (path-value algebra, reaching-definitions name "
+                   "resolution, a closed set of recognized wrapper/join/loop shapes) plus "
+                   "the new UNPROVEN-verdict WARN wiring, not a new parser family) — the "
                    "python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target). Restated "
-                   "2026-09-06 (B-752), and the guard's own instruction is to reconsider "
-                   "the split rather than bump the number, so here is where the growth "
-                   "actually came from, measured: the last ten commits touching this file "
-                   "added ~1,230 lines, of which ~1,225 landed in the PYTHON taint / "
-                   "decode / exec-sink layer and 5 in the js bucket. The shell family does "
-                   "not appear in that window at all. The three parser families are not "
-                   "growing together — one of them is the file, and the other two are "
-                   "along for the ride. That is a seam the original deferral could not "
-                   "see, and it is cheap to state: python-taint out, shell/js parsers "
-                   "left behind. Recorded because the previous restate (B-727, 5,662 -> "
-                   "6,172) logged the drift without logging its source, and a debt record "
-                   "that cannot say which half is growing cannot argue for where to cut.",
+                   "2026-09-16 (B-643), and the guard's own instruction is to reconsider "
+                   "the split rather than bump the number: the B-850 engine (constants "
+                   "through the classify_* predicates, ~700 lines) is itself a candidate "
+                   "extraction — it depends on nothing else in this module and nothing "
+                   "else in this module depends on it except the four small wrapper "
+                   "functions that call into it — deferred here for the same reason the "
+                   "python-taint layer was: this change is already large enough to review "
+                   "on its own without also moving it to a new file in the same commit.",
     # Restated 2026-09-08: 5,641 -> 6,178. The claim had already drifted ~467 lines before
     # this touch; two commits adding ~70 (a mark swap, an ungraded-state block, and the
     # credential-surface env fix — most of it the comment explaining each) crossed the

@@ -684,6 +684,7 @@ from ._content import (
     _verb_class_matches,
     _whole_text_is_defensive,
     check_agent_snooping,
+    check_artifact_read_unproven,
     check_capability_intent_mismatch,
     check_chunked_file_assembly_exec,
     check_clickfix_setup_section,

@@ -183,6 +183,7 @@ _wildcard_group_is_reachable
 check_agent_separation
 check_agent_snooping
 check_approval_bypass
+check_artifact_read_unproven
 check_attestation_mismatch
 check_audit_log
 check_audit_suppressions

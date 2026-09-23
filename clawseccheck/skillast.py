@@ -20,6 +20,7 @@ module never calls or evaluates any of them.
 from __future__ import annotations
 
 import ast
+import builtins
 import re
 from collections import namedtuple
 from urllib.parse import urlparse
@@ -4438,366 +4439,1480 @@ def _is_writable_import_path(node: ast.AST) -> bool:
 # files. `.decode("utf-8")` over a LOCAL file read is not obfuscation; it is a
 # bytes->str conversion of the artifact's own bundled content.
 #
-# Reuses the SAME proxy `_is_writable_import_path` above already accepts for sys.path:
-# presence of `__file__` anywhere in the path expression is treated as proof the path
-# resolves relative to the scanned file's own location. One hop of local-variable
-# resolution is added (`_scope_own_assigns`) because the real-world shape splits the
-# anchor across two statements -- `here = os.path.dirname(__file__)` then
-# `open(os.path.join(here, "x.py"))` -- so a single-expression check misses it
-# entirely (confirmed against this exact shape before shipping). Deliberately capped
-# at one hop, mirroring `_remote_code_load_findings`'s own one-hop discipline
-# elsewhere in this module -- a general propagation is a bigger, riskier change than
-# this narrow proxy needs.
-#
-# This is a PROXY, not the real signal, and is scoped ONLY to the OBFUSCATED_EXEC call
-# site below -- `_subtree_has_decode` itself is left untouched for its other two
-# callers (decode-composing function detection, TT4's file-tainted rule). It has no
-# way to confirm the referenced path actually stays inside the artifact being scanned
-# (`os.path.join(os.path.dirname(__file__), "..", "..", "/etc/passwd")` still passes),
-# and no way to confirm the resolved path is really a file present in the artifact at
-# all -- the caller (checks/_vet.py's `installed_skill_py`) already enumerates every
-# path in the artifact but that set is never threaded into `analyze_python()`. The
-# stronger, precise version would add an optional artifact-relpath-set parameter to
-# `analyze_python()` and check the resolved path against it -- deferred: it widens
-# `analyze_python()`'s signature and both of its call sites (checks/_vet.py,
-# checks/_mcp.py), a bigger change than this narrow FP fix justifies on its own. A
+# B-752/B-850: the original version of this carve-out treated the mere PRESENCE of a
+# `__file__` token anywhere in the path expression as proof the read stayed inside the
+# artifact -- a token-presence check an attacker satisfies as easily as an author does
+# (`os.path.join(os.path.dirname(__file__), "..", "..", "/etc/passwd")` passed it).
+# B-752 narrowed that to a blocklist (refuse a few provable escape shapes); six C-135
+# rounds on task/b-850 later, it is now the ALLOWLIST recognizer documented in the "B-
+# 850: artifact-containment ALLOWLIST recognizer" module comment above -- positively
+# prove the path is a bounded construction from `__file__` over a closed set of
+# syntactic shapes, or grant no exemption at all. It still has no way to confirm the
+# resolved path is really a file PRESENT in the artifact (the caller,
+# checks/_vet.py's `installed_skill_py`, already enumerates every path in the artifact
+# but that set is never threaded into `analyze_python()`) -- deferred, same reasoning
+# as before: it widens `analyze_python()`'s signature and both of its call sites
+# (checks/_vet.py, checks/_mcp.py), a bigger change than this carve-out needs. A
 # literal or env/argv-derived path (the dropper shape: `open("/tmp/x.py", "rb")`)
-# never contains `__file__` and is therefore never exempted by this proxy.
-def _scope_own_assigns(scope: ast.AST) -> dict:
-    """name -> RHS expr for every single-Name-target `x = <expr>` in `scope`'s own
-    body (via `_scope_own_nodes`, so it does not descend into nested functions) --
-    the one-hop lookup table `_path_expr_is_dunder_file_relative` uses."""
-    out: dict = {}
-    for n in _scope_own_nodes(scope):
-        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
-            out[n.targets[0].id] = n.value
+# never resolves to the `__file__` anchor and is therefore never exempted.
+##############################################################################
+# B-850: artifact-containment ALLOWLIST recognizer.
+#
+# Replaces B-752's blocklist verdict (`_path_expr_is_dunder_file_relative` and its
+# supporting predicates -- six C-135 rounds on task/b-850, each patch closing one
+# bypass shape while another stayed open or opened up, because a blocklist asks "does
+# a RECOGNIZED escape shape prove this leaves the artifact?" and is permissive by
+# default: an unrecognized shape gets the exemption for free). This recognizer asks
+# the opposite question -- "is this POSITIVELY a construction from the `__file__`
+# anchor that provably stays inside the artifact?" -- over a CLOSED set of syntactic
+# shapes, so an unrecognized shape gets NO exemption at all. That closes the
+# blocklist's core defect: a shape neither side had thought of used to read as safe
+# merely because a `__file__` token appeared somewhere in the expression.
+#
+# Four verdicts, worst-wins when an expression could take more than one value:
+#   BOUNDED      literal anchor-relative, provably stays inside      -> exempt
+#   UNPROVEN     anchored, but a segment is runtime-computed         -> WARN
+#                (ARTIFACT_READ_UNPROVEN, never FAIL -- checks/_vet.py's B394)
+#   ESCAPES      proven to leave the artifact, or a segment is a     -> crit stands
+#                static value hidden behind an unfoldable expression
+#                (hiding a static path IS itself the evasion signal)
+#   NOT_ANCHORED does not start at the __file__ anchor at all, or is -> crit stands
+#                a shape outside the recognized set
+#
+# Recognized shapes: an anchor (`__file__`, `dirname(...)`/`.parent`/`.parents[N]`,
+# `os.path.split(x)[0]`), a join (`os.path.join`, pathlib multi-arg constructors,
+# `.joinpath`, `/`, including starred splices from a literal list/tuple), string
+# building (`+`, f-strings without a format spec beyond `!s`, `%s`/`%d`/`%%`-only
+# %-format, `{}`/`{n}`-only str.format, `"sep".join(<literal list>)`), literal
+# folding (string methods / `.decode()` on literal operands, `os.pardir`/`os.curdir`/
+# `os.sep`), the named idioms (`getattr(sys, "_MEIPASS", A)`, `os.getcwd()`/
+# `Path.cwd()`, `.with_name`/`.with_suffix`/`.with_stem`, the `A or "."` truthiness
+# idiom), bounded loops (a literal tuple/list, `sorted`/`list`/`reversed` of one,
+# `os.listdir`, `glob`/`.glob`/`.rglob`/`.iterdir`), and one level of local-helper
+# inlining (a plain module-level `def`, no decorators/varargs/kwonly/yield/global,
+# depth <= 3) -- a function PARAMETER resolves to "runtime" PLUS every literal
+# argument an in-file call site actually passes (this can only RAISE a verdict,
+# never lower one). A `.read()`/`.readline()` receiver must resolve, through every
+# reaching definition of its name, to `open`/`io.open`/`Path.open()`.
+#
+# STRICT name resolution only: a function body resolves module-level imports,
+# module-level `def`s, and `__file__` itself -- a module-level VALUE referenced
+# inside a function (`HERE = dirname(__file__)` read inside a later `def`) stays
+# unresolved/runtime, matching this project's pre-B-850 behavior for that one case.
+# (The architect's "full mode", which also resolves module-level values inside
+# functions, was explicitly deferred as a separate follow-up.)
+#
+# Path values are tracked as components-relative-to-root plus an explicit `up`
+# counter (NOT a clamped subtraction -- that is what hid a "climb above root then
+# descend into a sibling" bypass). An absolute/home/CWD/anchor operand RESTARTS the
+# tracked path. Text concatenated with NO separator REPLACES the last component
+# (not appends -- `dirname(__file__) + "_evil/x.py"` lands in a SIBLING directory
+# with zero `..`, which append-semantics would miss entirely). `dirname()`/`.parent`
+# remove the last lexical component, including a literal `..` if present, matching
+# real filesystem semantics.
+#
+# Fail-closed budgets throughout (`_ContainmentBudget`, mirroring this module's
+# `_AnchorBudgetExhausted` discipline); any budget exhaustion, `RecursionError`, or
+# unexpected internal error is read as ESCAPES -- never a silent exemption.
+##############################################################################
+
+_CONTAINMENT_BOUNDED = "BOUNDED"
+_CONTAINMENT_UNPROVEN = "UNPROVEN"
+_CONTAINMENT_ESCAPES = "ESCAPES"
+_CONTAINMENT_NOT_ANCHORED = "NOT_ANCHORED"
+_CONTAINMENT_RANK = {
+    _CONTAINMENT_BOUNDED: 0,
+    _CONTAINMENT_UNPROVEN: 1,
+    _CONTAINMENT_ESCAPES: 2,
+    _CONTAINMENT_NOT_ANCHORED: 3,
+}
+
+_CONTAINMENT_MAX_HOPS = 64          # def-site reaching-definitions chain length
+_CONTAINMENT_MAX_WORK = 5000        # total definition evaluations per classified read
+_CONTAINMENT_MAX_ALTS = 256         # alternative fan-out (branches / call sites / IfExp)
+_CONTAINMENT_MAX_EVAL_DEPTH = 100   # expression nesting
+_CONTAINMENT_MAX_HELPER_DEPTH = 3   # nested local-helper inlining
+_CONTAINMENT_MAX_CALLSITES = 16     # in-file call sites evaluated for one parameter
+
+
+class _ContainmentBudget(Exception):
+    """Any B-850 recognizer budget exhausted. Caught once, at the top, and read as
+    ESCAPES -- fail-closed, never a silent exemption."""
+
+
+# ---- abstract path values ------------------------------------------------------
+_ContainmentStr = namedtuple("_ContainmentStr", "s")           # statically known text
+_ContainmentOpq = namedtuple("_ContainmentOpq", "kind why")    # kind: runtime|static|unrecognized
+_ContainmentSeq = namedtuple("_ContainmentSeq", "elts")        # list/tuple literal (tuple of alt-tuples)
+_ContainmentCat = namedtuple("_ContainmentCat", "pieces")      # string concat, not yet a path
+_ContainmentSafe = namedtuple("_ContainmentSafe", "")          # one real dir entry (listdir element)
+_ContainmentPV = namedtuple("_ContainmentPV", "root up comps trailing unk obf why")
+# root: anchor | abs | rel | home | cwd | unknown
+_CONTAINMENT_UNK, _CONTAINMENT_SAFE_MARK = "\x00UNK", "\x00SAFE"
+_CONTAINMENT_GLUE, _CONTAINMENT_VFILE = "\x00GLUE", "\x00VFILE"
+
+
+def _containment_pv(root, up=0, comps=(), trailing=False, unk=False, obf=False, why=""):
+    return _ContainmentPV(root, up, tuple(comps), trailing, unk, obf, why)
+
+
+def _containment_key(v):
+    if isinstance(v, (_ContainmentOpq, _ContainmentPV)):
+        return v._replace(why="")
+    return v
+
+
+def _containment_dedupe(vals):
+    seen, out = set(), []
+    for v in vals:
+        k = _containment_key(v)
+        if k not in seen:
+            seen.add(k)
+            out.append(v)
+    if len(out) > _CONTAINMENT_MAX_ALTS:
+        raise _ContainmentBudget("alternatives")
     return out
 
 
-def _path_expr_swallows_its_anchor(node: ast.AST, scope_assigns: dict) -> bool:
-    """True when a literal ABSOLUTE segment in *node* discards the `__file__` anchor.
-
-    B-752. `os.path.join` keeps only what follows its last absolute argument, so
-    ``os.path.join(os.path.dirname(__file__), "assets", "/tmp/.cache/stage2.py")``
-    resolves to ``/tmp/.cache/stage2.py`` -- measured, not reasoned -- while the AST
-    still carries a real `__file__`. A carve-out that reads the TOKEN rather than the
-    resolved path therefore absolves reading and executing an arbitrary absolute path,
-    with no traversal and no obfuscation: one extra argument.
-
-    Scoped to LITERAL segments on purpose. A computed segment could also be absolute at
-    runtime, and this says nothing about that case -- refusing on a non-literal would
-    turn every dynamically-built in-artifact path into a conviction, which is the false
-    FAIL the carve-out exists to prevent. What is claimed here is only what is provable
-    from the source text.
-
-    One hop of local assignment is resolved, matching the anchor lookup below, so a
-    segment parked in a variable first is not a bypass.
-
-    SCOPED TO ACTUAL PATH SEGMENTS, and that scoping is not cosmetic. The first version
-    of this predicate accepted any string constant anywhere in the expression, which
-    convicted two measured benign shapes outright: ``"/".join(["data", "v.py"])`` and
-    ``raw.replace("/", "_")`` -- the second being sanitising code, i.e. the change would
-    have punished the defensive habit it wants people to have. A separator is not a
-    segment. Only the arguments of a path join (``os.path.join`` / ``.joinpath``) and the
-    operands of pathlib's ``/`` are read as segments here.
-    """
-    def _absolute_literal(x: ast.AST) -> bool:
-        return isinstance(x, ast.Constant) and isinstance(x.value, str) and x.value.startswith("/")
-
-    def _segment_is_absolute(seg: ast.AST) -> bool:
-        if _absolute_literal(seg):
-            return True
-        # One hop, and only when the variable IS a literal. Asking whether its RHS
-        # merely CONTAINS an absolute-looking constant is what convicted
-        # ``name = "/".join(["data", "v.py"])`` -- a computed value whose absoluteness
-        # is not statically knowable, so nothing is claimed about it.
-        if isinstance(seg, ast.Name) and seg.id in scope_assigns:
-            return _absolute_literal(scope_assigns[seg.id])
-        return False
-
-    # The path is routinely bound first (`p = Path(__file__).parent / "/tmp/x"`) and only
-    # then opened, so the structural rules below must see the RHS too -- one hop, the same
-    # budget the anchor lookup uses. Expanding first and matching after is what keeps the
-    # two halves from disagreeing; keeping them separate is how the pathlib forms were
-    # missed on the first attempt.
-    nodes = list(ast.walk(node))
-    for n in list(nodes):
-        if isinstance(n, ast.Name) and n.id in scope_assigns:
-            nodes.extend(ast.walk(scope_assigns[n.id]))
-
-    for n in nodes:
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
-            base = n.func.value
-            is_path_join = n.func.attr == "join" and not (
-                isinstance(base, ast.Constant) and isinstance(base.value, str)
-            )
-            if (is_path_join or n.func.attr == "joinpath") and any(
-                _segment_is_absolute(a) for a in n.args
-            ):
-                return True
-        elif isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div):
-            if _segment_is_absolute(n.right):
-                return True
-    return False
+def _containment_product(alt_lists):
+    combos = [()]
+    for alts in alt_lists:
+        combos = [c + (a,) for c in combos for a in alts]
+        if len(combos) > _CONTAINMENT_MAX_ALTS:
+            raise _ContainmentBudget("alternatives")
+    return combos
 
 
-def _anchor_depth_below_root(expr: ast.AST, relpath: str, scope_assigns: dict | None = None) -> int:
-    """How many components separate the artifact root from this expression's anchor.
-
-    B-752. `..` segments only escape the artifact once they exceed the anchor's own
-    depth, so the count is meaningless without knowing where the anchor sits -- and that
-    depends on which anchor form the source used:
-
-        <root>/a/b/mod.py     `os.path.dirname(__file__)` / `Path(__file__).parent` -> 2
-                              bare `__file__`                                       -> 3
-                              `Path(__file__).parent.parent`                        -> 1
-
-    An unrecognised form falls back to the DEEPEST reading (bare `__file__`), which is
-    the permissive end: it under-convicts rather than inventing an escape. A wrong guess
-    in the other direction would be a false FAIL on a skill doing nothing wrong, and this
-    predicate exists to remove exactly that.
-    """
-    parts = [p for p in relpath.replace("\\", "/").split("/") if p not in ("", ".")]
-    file_depth = len(parts)  # <root>/a/b/mod.py -> 3
-    if file_depth == 0:
-        return 0
-
-    # The anchor is routinely parked in a local first -- `here = os.path.dirname(__file__)`
-    # then `open(os.path.join(here, ...))` -- which is the very shape the rest of this
-    # carve-out already resolves one hop for. Searching only the path expression finds no
-    # anchor form there and silently falls back to the permissive reading, which is how
-    # the first version of this function left the traversal family open. Measured, not
-    # reasoned: it was caught by testing the wired verdict, never by the helper's own
-    # unit cases, which passed the anchor in directly.
-    nodes = list(ast.walk(expr))
-    for n in list(nodes):
-        if isinstance(n, ast.Name) and scope_assigns and n.id in scope_assigns:
-            nodes.extend(ast.walk(scope_assigns[n.id]))
-
-    def _dirname_hops(call: ast.AST) -> int:
-        """How many nested `dirname(...)` wrappers sit between the call and `__file__`.
-
-        `os.path.dirname(os.path.dirname(__file__))` climbs TWO components, not one.
-        Counting it as one over-states the anchor's depth, which absolves a real escape --
-        found by the adversarial pass, in the under-convicting direction.
-        """
-        hops = 0
-        cur = call
-        while (
-            isinstance(cur, ast.Call)
-            and isinstance(cur.func, ast.Attribute)
-            and cur.func.attr == "dirname"
-            and cur.args
-        ):
-            hops += 1
-            cur = cur.args[0]
-        return hops if any(
-            isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(cur)
-        ) else 0
-
-    dirname_hops = [
-        h for h in (
-            _dirname_hops(n) for n in nodes
-            if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "dirname"
-        ) if h
-    ]
-    if dirname_hops:
-        return max(file_depth - max(dirname_hops), 0)
-
-    # `Path(__file__).parent`, `.parent.parent`, ... -- count the chain.
-    best = None
-    for n in nodes:
-        if isinstance(n, ast.Attribute) and n.attr == "parent":
-            hops, cur = 0, n
-            while isinstance(cur, ast.Attribute) and cur.attr == "parent":
-                hops += 1
-                cur = cur.value
-            if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(cur)):
-                depth = max(file_depth - hops, 0)
-                best = depth if best is None else min(best, depth)
-    if best is not None:
-        return best
-    return file_depth
+# ---- path algebra ----------------------------------------------------------------
+def _containment_split_lit(s):
+    t = s.replace("\\", "/")
+    return [c for c in t.split("/") if c not in ("", ".")], t.endswith("/")
 
 
-def _path_expr_escapes_artifact(node: ast.AST, scope_assigns: dict, relpath: str) -> bool:
-    """True when the literal `..` segments in *node* provably leave the artifact root.
+def _containment_parse_lit(s):
+    t = s.replace("\\", "/")
+    if t.startswith("/") or re.match(r"^[A-Za-z]:/", t):
+        return _containment_pv("abs", why=f"absolute literal {s[:40]!r}")
+    comps, trailing = _containment_split_lit(s)
+    return _containment_pv("rel", comps=comps, trailing=trailing, why=f"CWD-relative literal {s[:40]!r}")
 
-    SCOPED TO REAL PATH SEGMENTS, for the same reason its sibling above is, and this is
-    the third time that scoping had to be learned rather than the first. Counting every
-    string constant in the expression convicted a traversal SANITISER --
-    ``name = raw.replace("..", "_")`` and ``name = raw if ".." not in raw else "_"`` --
-    because the literal `".."` sits there as a replace argument or a comparator, not as a
-    component being joined. Both are the OWASP-recommended defence against exactly the
-    attack this predicate hunts, so counting them convicted the fix for the bug.
 
-    A segment counts when it is an argument of a path join (``os.path.join`` /
-    ``.joinpath``) or an operand of pathlib's ``/``. One hop through a local, and only
-    when the local IS a string literal -- a computed name says nothing statically.
-    """
-    def _components(x: ast.AST) -> "list[str] | None":
-        """The literal path components *x* contributes, in order, or None if unknowable."""
-        lit = None
-        if isinstance(x, ast.Constant) and isinstance(x.value, str):
-            lit = x.value
-        elif isinstance(x, ast.Name) and x.id in scope_assigns:
-            rhs = scope_assigns[x.id]
-            if isinstance(rhs, ast.Constant) and isinstance(rhs.value, str):
-                lit = rhs.value
-        if lit is None:
-            return None
-        return [p for p in lit.replace("\\", "/").split("/") if p not in ("", ".")]
+def _containment_push(p, comps, trailing=False, unk=False, obf=False):
+    return p._replace(comps=p.comps + tuple(comps), trailing=trailing,
+                       unk=p.unk or unk or _CONTAINMENT_UNK in comps, obf=p.obf or obf)
 
-    def _is_anchor(x: ast.AST) -> bool:
-        """True when *x* IS the `__file__` anchor rather than a component joined onto it.
 
-        The anchor's own position is already carried by `_anchor_depth_below_root`, so
-        pushing it again as a segment double-counts it. That is not hypothetical: doing so
-        silently cancelled one `..` and re-absolved `join(here, "..", "x.py")` from a
-        root-level file -- an escape the previous draft convicted correctly.
-        """
-        if any(isinstance(y, ast.Name) and y.id == "__file__" for y in ast.walk(x)):
-            return True
-        if isinstance(x, ast.Name) and x.id in scope_assigns:
-            return any(
-                isinstance(y, ast.Name) and y.id == "__file__"
-                for y in ast.walk(scope_assigns[x.id])
-            )
-        return False
+def _containment_as_path(v):
+    if isinstance(v, _ContainmentPV):
+        return v
+    if isinstance(v, _ContainmentStr):
+        return _containment_parse_lit(v.s)
+    if isinstance(v, _ContainmentSafe):
+        return _containment_pv("rel", comps=(_CONTAINMENT_SAFE_MARK,), why="bare directory entry (CWD-relative)")
+    if isinstance(v, _ContainmentCat):
+        return _containment_cat_to_path(v.pieces)
+    if isinstance(v, _ContainmentOpq):
+        return _containment_pv("unknown", obf=(v.kind == "static"), why=f"{v.kind}: {v.why}")
+    return _containment_pv("unknown", why="sequence used as a path")
 
-    def _ordered_segments(x: ast.AST) -> "list[str] | None":
-        """Segments of a path expression, left to right, or None when not a join shape."""
-        if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute):
-            base = x.func.value
-            is_path_join = x.func.attr == "join" and not (
-                isinstance(base, ast.Constant) and isinstance(base.value, str)
-            )
-            if is_path_join or x.func.attr == "joinpath":
-                out: "list[str]" = []
-                for a in x.args:
-                    if _is_anchor(a):
-                        continue
-                    comps = _components(a)
-                    out.extend(comps if comps is not None else ["?"])
-                return out
-        if isinstance(x, ast.BinOp) and isinstance(x.op, ast.Div):
-            left = [] if _is_anchor(x.left) else (_ordered_segments(x.left) or [])
-            comps = None if _is_anchor(x.right) else _components(x.right)
-            right = [] if _is_anchor(x.right) else (comps if comps is not None else ["?"])
-            return left + right
-        if isinstance(x, ast.Name) and x.id in scope_assigns:
-            return _ordered_segments(scope_assigns[x.id])
-        return None
 
-    segments = _ordered_segments(node)
-    if not segments:
-        return False
+def _containment_glue(base, piece):
+    """String-concatenate one more piece onto an already-rooted path (no separator
+    semantics are invented: text glued with no leading '/' REPLACES the last
+    component -- see the module comment's G3 example)."""
+    if base.root not in ("anchor", "rel"):
+        return base  # absolute/home/cwd/unknown root: the tail cannot re-anchor it
+    if isinstance(piece, _ContainmentStr):
+        t = piece.s.replace("\\", "/")
+        if t == "":
+            return base
+        if base.trailing or t.startswith("/"):
+            comps, tr = _containment_split_lit(t)
+            return _containment_push(base, comps, trailing=tr)
+        head, _, tail = t.partition("/")
+        b = _containment_pop(base, glue=True)
+        b = _containment_push(b, [_CONTAINMENT_GLUE] if head not in ("", ".") else [])
+        comps, tr = _containment_split_lit(tail) if tail else ([], False)
+        return _containment_push(b, comps, trailing=tr or t.endswith("/"))
+    if isinstance(piece, _ContainmentOpq):
+        mark = dict(obf=True) if piece.kind == "static" else dict(unk=True)
+        b = base if base.trailing else _containment_pop(base, glue=True)
+        return _containment_push(b, [_CONTAINMENT_UNK], **mark)
+    if isinstance(piece, _ContainmentSafe):
+        if base.trailing:
+            return _containment_push(base, [_CONTAINMENT_SAFE_MARK])
+        return _containment_push(_containment_pop(base, glue=True), [_CONTAINMENT_GLUE])
+    return _containment_push(base, [_CONTAINMENT_UNK], unk=True)  # a whole path embedded mid-string
 
-    # WALK the segments, never count them. `join(dirname(__file__), "assets", "..",
-    # "data", "v.py")` contains a `..` and goes nowhere: it cancels `assets` and the read
-    # stays inside the artifact. Summing raw `..` tokens convicted that -- and every
-    # net-zero variant of it, including two cancels and a single combined literal
-    # "assets/../data/v.py" -- which the adversarial pass reproduced as a regression this
-    # change had introduced. Only a walk that goes NEGATIVE has actually left the root.
-    # An unknowable segment ("?") is treated as one ordinary component: it can only push
-    # the depth up, never down, so an unknown can never manufacture an escape.
-    depth = _anchor_depth_below_root(node, relpath, scope_assigns)
-    for seg in segments:
-        if seg == "..":
+
+def _containment_cat_to_path(pieces):
+    merged = []
+    for p in pieces:
+        if isinstance(p, _ContainmentStr) and merged and isinstance(merged[-1], _ContainmentStr):
+            merged[-1] = _ContainmentStr(merged[-1].s + p.s)
+        else:
+            merged.append(p)
+    while merged and isinstance(merged[0], _ContainmentStr) and merged[0].s == "":
+        merged.pop(0)
+    if not merged:
+        return _containment_pv("rel", why="empty string")
+    first, rest = merged[0], merged[1:]
+    if isinstance(first, _ContainmentStr):
+        base = _containment_parse_lit(first.s)
+    else:
+        base = _containment_as_path(first)
+    for p in rest:
+        base = _containment_glue(base, p)
+    return base
+
+
+def _containment_pop(p, glue=False):
+    """Lexical last-component removal (os.path.dirname / pathlib .parent)."""
+    if p.root not in ("anchor", "rel"):
+        return p
+    if p.comps:
+        popped = p.comps[-1]
+        return p._replace(comps=p.comps[:-1], trailing=False, unk=p.unk or popped == _CONTAINMENT_UNK)
+    if p.root == "anchor":
+        return p._replace(up=p.up + 1, trailing=False)
+    return p  # dirname of a bare relative name is ""
+
+
+def _containment_dirname(v, style):
+    p = _containment_as_path(v)
+    if style == "os" and p.trailing and p.root in ("anchor", "rel"):
+        return p._replace(trailing=False)  # dirname('/a/b/') == '/a/b'
+    return _containment_pop(p)
+
+
+def _containment_normalize(v, absolutize):
+    p = _containment_as_path(v)
+    if p.root == "rel" and absolutize:
+        return _containment_pv("cwd", why="relative path absolutized against the CWD")
+    if p.root not in ("anchor", "rel"):
+        return p
+    out, up = [], p.up
+    seen_unk = False
+    for c in p.comps:
+        if c == _CONTAINMENT_UNK:
+            seen_unk = True
+            out.append(c)
+        elif c == ".." and not seen_unk:
+            if out:
+                out.pop()
+            elif p.root == "anchor":
+                up += 1
+            else:
+                out.append(c)
+        else:
+            out.append(c)
+    return p._replace(comps=tuple(out), up=up, trailing=False)
+
+
+def _containment_is_harmless_prefix(p):
+    return p.root in ("cwd", "rel") and not p.comps
+
+
+def _containment_join(values, style):
+    res, harmless = None, True
+    for v in values:
+        if isinstance(v, _ContainmentStr) and (v.s == "" or (style == "pathlib" and v.s == ".")):
+            if res is None:
+                res = _containment_pv("rel", why="empty leading join operand")
+            elif style == "os" and v.s == "":
+                res = res._replace(trailing=True)
+            continue
+        p = _containment_as_path(v)
+        if res is None:
+            res, harmless = p, _containment_is_harmless_prefix(p)
+            continue
+        if p.root in ("abs", "home", "cwd"):
+            res, harmless = p, _containment_is_harmless_prefix(p)   # join() discards what came before
+            continue
+        if p.root == "anchor":
+            res, harmless = p, False   # absolute: join() discards everything before it
+            continue
+        if p.root == "rel":
+            res = _containment_push(res, p.comps, trailing=p.trailing if style == "os" else False,
+                                     unk=p.unk, obf=p.obf)
+            harmless = harmless and not p.comps
+            continue
+        res = _containment_push(res, [_CONTAINMENT_UNK], unk=not p.obf, obf=p.obf)   # may be absolute
+        harmless = False
+    if res is None:
+        res = _containment_pv("rel", why="empty join")
+    return res._replace(trailing=False) if style == "pathlib" else res
+
+
+def _containment_expanduser(v):
+    p = _containment_as_path(v)
+    if p.root == "rel" and p.comps and p.comps[0].startswith("~"):
+        return _containment_pv("home", why="home-relative path")
+    return p
+
+
+def _containment_verdict(p, depth_known):
+    if p.root != "anchor":
+        return _CONTAINMENT_NOT_ANCHORED, f"root is not the __file__ anchor ({p.why or p.root})"
+    if p.obf:
+        return _CONTAINMENT_ESCAPES, "a segment is a static value hidden behind an unfoldable expression"
+    if p.up > 0:
+        if depth_known:
+            return _CONTAINMENT_ESCAPES, f"climbs {p.up} level(s) above the artifact root"
+        return _CONTAINMENT_UNPROVEN, "climbs above the file's own directory and the file's depth is unknown"
+    depth, seen_unk = 0, p.unk
+    for c in p.comps:
+        if c == _CONTAINMENT_UNK:
+            seen_unk = True
+        elif c == "..":
             depth -= 1
             if depth < 0:
-                return True
+                if seen_unk or not depth_known:
+                    return _CONTAINMENT_UNPROVEN, "a '..' walk below the root follows a runtime-computed segment"
+                return _CONTAINMENT_ESCAPES, "literal '..' segments walk out of the artifact root"
         else:
             depth += 1
-    return False
+    if seen_unk:
+        return _CONTAINMENT_UNPROVEN, "anchored, but a segment is computed at runtime"
+    return _CONTAINMENT_BOUNDED, "anchored and every segment is a literal that stays inside"
 
 
-def _path_expr_is_dunder_file_relative(
-    node: ast.AST, scope_assigns: dict, relpath: str = ""
-) -> bool:
-    """True when *node* (an open()-style path argument) is built from `__file__`,
-    directly or through one hop of local assignment resolved via *scope_assigns*.
-
-    B-752: an anchor that a literal absolute segment has already discarded is not an
-    anchor, and neither is one the `..` segments have already climbed past -- in both
-    cases the answer is False regardless of how visible `__file__` is in the expression.
-    `relpath` defaults to empty so a caller that cannot say where the file sits gets the
-    old, anchor-only behaviour rather than a guessed escape.
-    """
-    if _path_expr_swallows_its_anchor(node, scope_assigns):
-        return False
-    if relpath and _path_expr_escapes_artifact(node, scope_assigns, relpath):
-        return False
-    if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(node)):
-        return True
-    for n in ast.walk(node):
-        if isinstance(n, ast.Name) and n.id in scope_assigns:
-            rhs = scope_assigns[n.id]
-            if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(rhs)):
-                return True
-    return False
+# ---- module context: imports, scopes, reaching definitions -----------------------
+_CONTAINMENT_PATHLIB_CLASSES = {
+    "Path", "PurePath", "PosixPath", "PurePosixPath", "WindowsPath", "PureWindowsPath",
+}
+_CONTAINMENT_OS_CONSTS = {"pardir": "..", "curdir": ".", "sep": "/", "altsep": "/"}
+_CONTAINMENT_SCOPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_CONTAINMENT_FOLDABLE_STR_METHODS = {
+    "format", "replace", "strip", "lstrip", "rstrip", "lower", "upper",
+    "removeprefix", "removesuffix", "casefold",
+}
+_ContainmentDef = namedtuple("_ContainmentDef", "kind node extra scope")
 
 
-def _decode_call_reads_artifact_relative_file(
-    node: ast.Call, scope: ast.AST, relpath: str = ""
-) -> bool:
-    """True when *node* is `<expr>.decode(...)` and <expr>'s receiver chain resolves
-    to a LOCAL file opened at a `__file__`-relative path -- either the direct chain
-    `open(<path>).read().decode(...)`, or through a handle bound in *scope*'s own body
-    (`with open(<path>) as h: ... h.read().decode(...)` / `h = open(<path>); ...`).
+class _ContainmentCtx:
+    """Per-file recognizer context: parent-pointer map (for `scope_of`), import-bound
+    canonical names, and one `_ContainmentReachingDefs` per scope (built lazily). Built
+    fresh per classified read; not cached across `analyze_python()` calls."""
 
-    B-752: *relpath* is the scanned file's own path inside the artifact, which is what
-    makes "does this climb out of the artifact?" answerable at all. Every production
-    caller of `analyze_python()` already passes one; the default keeps the old behaviour
-    for a caller that cannot."""
-    receiver = node.func.value
-    scope_assigns = _scope_own_assigns(scope)
-    for n in ast.walk(receiver):
-        if (
-            _is_open_call(n)
-            and n.args
-            and _path_expr_is_dunder_file_relative(n.args[0], scope_assigns, relpath)
-        ):
-            return True
-    handle_names = {n.id for n in ast.walk(receiver) if isinstance(n, ast.Name)}
-    if not handle_names:
-        return False
-    for stmt in _scope_own_nodes(scope):
-        if isinstance(stmt, ast.With):
-            for item in stmt.items:
-                if (
-                    _is_open_call(item.context_expr)
-                    and isinstance(item.optional_vars, ast.Name)
-                    and item.optional_vars.id in handle_names
-                    and item.context_expr.args
-                    and _path_expr_is_dunder_file_relative(
-                        item.context_expr.args[0], scope_assigns, relpath
-                    )
-                ):
-                    return True
-        elif isinstance(stmt, ast.Assign) and _is_open_call(stmt.value):
-            if stmt.value.args and _path_expr_is_dunder_file_relative(
-                stmt.value.args[0], scope_assigns, relpath
+    def __init__(self, tree: ast.AST, relpath: str):
+        self.tree = tree
+        parts = [p for p in (relpath or "").replace("\\", "/").split("/") if p not in ("", ".")]
+        self.depth_known = bool(parts)
+        self.file_comps = tuple(parts) if parts else (_CONTAINMENT_VFILE,)
+        self.parent: dict = {}
+        for n in ast.walk(tree):
+            for c in ast.iter_child_nodes(n):
+                self.parent[c] = n
+        self._rd: dict = {}
+        self._callsites: dict = {}
+        self.global_assigns: dict = {}
+        self._imports()
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                isinstance(m, ast.Global) for m in ast.walk(n)
             ):
-                for t in stmt.targets:
-                    if isinstance(t, ast.Name) and t.id in handle_names:
-                        return True
-    return False
+                self.rd(n)
+
+    # ---- which names are the real modules/functions (import-bound, never rebound) ----
+    def _imports(self):
+        self.canon: dict = {}            # local name -> canonical dotted name
+        rebound: set = set()
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.asname:
+                        self.canon[a.asname] = a.name
+                    else:
+                        root = a.name.split(".")[0]
+                        self.canon[root] = root
+            elif isinstance(n, ast.ImportFrom) and n.module and not n.level:
+                for a in n.names:
+                    self.canon[a.asname or a.name] = f"{n.module}.{a.name}"
+            elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.NamedExpr)):
+                tgts = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in tgts:
+                    for m in ast.walk(t):
+                        if isinstance(m, ast.Name):
+                            rebound.add(m.id)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                rebound.add(n.name)
+                for a in (
+                    n.args.args + n.args.kwonlyargs + n.args.posonlyargs
+                    if hasattr(n, "args") else []
+                ):
+                    rebound.add(a.arg)
+            elif isinstance(n, (ast.For, ast.comprehension)):
+                for m in ast.walk(n.target):
+                    if isinstance(m, ast.Name):
+                        rebound.add(m.id)
+            elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+                for m in ast.walk(n.optional_vars):
+                    if isinstance(m, ast.Name):
+                        rebound.add(m.id)
+        for name in rebound:
+            self.canon.pop(name, None)
+        self.rebound = rebound
+        # sys mutation makes sys._MEIPASS / sys.frozen live rather than dead
+        self.sys_mutated = False
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Attribute) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                if isinstance(n.value, ast.Name) and self.canon.get(n.value.id) == "sys":
+                    self.sys_mutated = True
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in (
+                "setattr", "delattr", "vars"
+            ):
+                self.sys_mutated = True
+            if isinstance(n, ast.Attribute) and n.attr == "__dict__":
+                self.sys_mutated = True
+
+    def _import_target(self, alias):
+        par = self.parent.get(alias)
+        if isinstance(par, ast.Import):
+            return alias.name if alias.asname else alias.name.split(".")[0]
+        if isinstance(par, ast.ImportFrom) and par.module and not par.level:
+            return f"{par.module}.{alias.name}"
+        return None
+
+    def dotted(self, func, env=None):
+        """Canonical dotted name of a callee/attribute when every leg is import-bound
+        AT THIS USE SITE (reaching definitions), or an unshadowed builtin."""
+        if isinstance(func, ast.Name):
+            if env is None:
+                env = _ContainmentEnv(self, self.scope_of(func))
+            try:
+                defs = _containment_lookup(func, env, frozenset())
+            except _ContainmentBudget:
+                return None
+            if not defs:
+                return "builtins." + func.id if hasattr(builtins, func.id) else None
+            targets = set()
+            for d, _ in defs:
+                if d.kind != "import":
+                    return None
+                targets.add(self._import_target(d.node))
+            return targets.pop() if len(targets) == 1 and None not in targets else None
+        if isinstance(func, ast.Attribute):
+            base = self.dotted(func.value, env)
+            return f"{base}.{func.attr}" if base else None
+        return None
+
+    def canon_func(self, func, env=None):
+        d = self.dotted(func, env)
+        if d is None:
+            return None
+        d = re.sub(r"^(posixpath|ntpath)\.", "os.path.", d)
+        return d
+
+    # ---- scopes and reaching definitions ----
+    def scope_of(self, node):
+        n = self.parent.get(node)
+        while n is not None and not isinstance(n, _CONTAINMENT_SCOPES):
+            n = self.parent.get(n)
+        return n or self.tree
+
+    def rd(self, scope):
+        if scope not in self._rd:
+            self._rd[scope] = _ContainmentReachingDefs(scope, self)
+        return self._rd[scope]
+
+
+class _ContainmentReachingDefs:
+    """Flow-sensitive reaching definitions for ONE scope's own body.
+
+    Straight-line code resolves to the binding actually in force at the use site;
+    branches merge; a loop back-edge merges its body's bindings into the loop entry,
+    so a loop-carried rebinding shows up as a CYCLE in the def chain (-> unbounded)."""
+
+    def __init__(self, scope, ctx):
+        self.scope, self.ctx = scope, ctx
+        self.uses: dict = {}                 # id(Name Load) -> frozenset(Def)
+        self.all_defs: dict = {}             # name -> set(Def) (flow-insensitive, for free vars)
+        self.globals, self.nonlocals = set(), set()
+        self.local_names: set = set()
+        body = scope.body if isinstance(scope, (ast.Module, ast.FunctionDef,
+                                                  ast.AsyncFunctionDef, ast.ClassDef)) else [
+            ast.Return(value=scope.body)]
+        for n in self._own_nodes(body):
+            if isinstance(n, ast.Global):
+                self.globals.update(n.names)
+            elif isinstance(n, ast.Nonlocal):
+                self.nonlocals.update(n.names)
+        st: dict = {}
+        if isinstance(scope, ast.Module):
+            st["__file__"] = frozenset({_ContainmentDef("file", None, None, scope)})
+            self.local_names.add("__file__")
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = scope.args
+            for arg in a.posonlyargs + a.args + a.kwonlyargs + [x for x in (a.vararg, a.kwarg) if x]:
+                st[arg.arg] = frozenset({_ContainmentDef("param", arg, None, scope)})
+                self.local_names.add(arg.arg)
+        for n in self._own_nodes(body):
+            for t in self._bound_names(n):
+                if t not in self.globals and t not in self.nonlocals:
+                    self.local_names.add(t)
+        self._block(body, st)
+
+    def _own_nodes(self, stmts):
+        stack = list(stmts)
+        while stack:
+            n = stack.pop()
+            yield n
+            for c in ast.iter_child_nodes(n):
+                if not isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                                       ast.ClassDef)):
+                    stack.append(c)
+
+    @staticmethod
+    def _bound_names(n):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            return [n.id]
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return [n.name]
+        if isinstance(n, ast.alias):
+            return [(n.asname or n.name).split(".")[0]]
+        if isinstance(n, ast.ExceptHandler) and n.name:
+            return [n.name]
+        return []
+
+    def _bind(self, st, name, d):
+        if name in self.globals or name in self.nonlocals:
+            self.ctx.global_assigns.setdefault(name, set()).add(d)
+            return
+        st[name] = frozenset({d})
+        self.all_defs.setdefault(name, set()).add(d)
+
+    def _record(self, node, st):
+        """Record the reaching defs of every local Name load in *node* (own scope only)."""
+        if node is None:
+            return
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                if n.id in self.local_names:
+                    prev = self.uses.get(id(n), frozenset())
+                    self.uses[id(n)] = prev | st.get(n.id, frozenset())
+            if isinstance(n, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                # decorators/defaults evaluate here; bodies are their own scope
+                for c in getattr(n, "decorator_list", []):
+                    stack.append(c)
+                if hasattr(n, "args"):
+                    stack.extend(n.args.defaults)
+                    stack.extend([d for d in n.args.kw_defaults if d is not None])
+                continue
+            if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                # comprehension targets are their own scope: treat their names as opaque
+                for g in n.generators:
+                    stack.append(g.iter)
+                continue
+            stack.extend(ast.iter_child_nodes(n))
+
+    def _walrus(self, node, st):
+        if node is None:
+            return
+        for n in ast.walk(node):
+            if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+                self._bind(st, n.target.id, _ContainmentDef("assign", n.value, None, self.scope))
+
+    def _assign_target(self, st, t, value, kind="assign"):
+        if isinstance(t, ast.Name):
+            self._bind(st, t.id, _ContainmentDef(kind, value, None, self.scope))
+        elif isinstance(t, (ast.Tuple, ast.List)):
+            for i, e in enumerate(t.elts):
+                if isinstance(e, ast.Starred):
+                    for m in ast.walk(e):
+                        if isinstance(m, ast.Name) and isinstance(m.ctx, ast.Store):
+                            self._bind(st, m.id, _ContainmentDef("opaque", e, None, self.scope))
+                else:
+                    if isinstance(e, ast.Name):
+                        self._bind(
+                            st, e.id,
+                            _ContainmentDef(kind + "-unpack", value, (i, len(t.elts)), self.scope),
+                        )
+                    else:
+                        self._assign_target(st, e, None, "opaque")
+
+    @staticmethod
+    def _merge(*states):
+        out: dict = {}
+        for s in states:
+            for k, v in s.items():
+                out[k] = out.get(k, frozenset()) | v
+        return out
+
+    def _block(self, stmts, st, trace=None):
+        for s in stmts:
+            st = self._stmt(s, st)
+            if trace is not None:
+                trace.append(dict(st))
+        return st
+
+    def _stmt(self, s, st):
+        st = dict(st)
+        if isinstance(s, ast.Assign):
+            self._record(s.value, st)
+            for t in s.targets:
+                self._record(t, st)  # subscript/attribute targets read names
+            self._walrus(s.value, st)
+            for t in s.targets:
+                self._assign_target(st, t, s.value)
+        elif isinstance(s, ast.AugAssign):
+            self._record(s.value, st)
+            if isinstance(s.target, ast.Name):
+                prior = st.get(s.target.id, frozenset())
+                self._bind(st, s.target.id, _ContainmentDef("aug", s, prior, self.scope))
+        elif isinstance(s, ast.AnnAssign):
+            self._record(s.value, st)
+            if s.value is not None and isinstance(s.target, ast.Name):
+                self._bind(st, s.target.id, _ContainmentDef("assign", s.value, None, self.scope))
+        elif isinstance(s, (ast.Import, ast.ImportFrom)):
+            for a in s.names:
+                self._bind(
+                    st, (a.asname or a.name).split(".")[0],
+                    _ContainmentDef("import", a, None, self.scope),
+                )
+        elif isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            self._record(s, st)
+            self._bind(st, s.name, _ContainmentDef("def", s, None, self.scope))
+        elif isinstance(s, ast.If):
+            self._record(s.test, st)
+            self._walrus(s.test, st)
+            st = self._merge(self._block(s.body, st), self._block(s.orelse, st))
+        elif isinstance(s, (ast.For, ast.AsyncFor, ast.While)):
+            head = s.iter if isinstance(s, (ast.For, ast.AsyncFor)) else s.test
+            entry = st
+            for _ in range(8):  # def-site sets are finite and monotone: converges
+                self._record(head, entry)
+                loop = dict(entry)
+                if isinstance(s, (ast.For, ast.AsyncFor)):
+                    self._assign_target(loop, s.target, s.iter, "for")
+                after = self._block(s.body, loop)
+                nxt = self._merge(entry, after)
+                if nxt == entry:
+                    break
+                entry = nxt
+            st = self._block(s.orelse, entry)
+            st = self._merge(st, entry)
+        elif isinstance(s, (ast.With, ast.AsyncWith)):
+            for item in s.items:
+                self._record(item.context_expr, st)
+                if item.optional_vars is not None:
+                    self._assign_target(st, item.optional_vars, item.context_expr, "with")
+            st = self._block(s.body, st)
+        elif isinstance(s, ast.Try) or s.__class__.__name__ == "TryStar":
+            trace = [dict(st)]
+            body_end = self._block(s.body, st, trace)
+            anywhere = self._merge(*trace)
+            ends = [self._block(s.orelse, body_end)]
+            for h in s.handlers:
+                hs = dict(anywhere)
+                if h.name:
+                    self._bind(hs, h.name, _ContainmentDef("opaque", h, None, self.scope))
+                ends.append(self._block(h.body, hs))
+            st = self._merge(*ends)
+            st = self._block(s.finalbody, st)
+        elif s.__class__.__name__ == "Match":
+            self._record(s.subject, st)
+            ends = [st]
+            for case in s.cases:
+                cs = dict(st)
+                for m in ast.walk(case.pattern):
+                    nm = getattr(m, "name", None)
+                    if isinstance(nm, str):
+                        self._bind(cs, nm, _ContainmentDef("opaque", m, None, self.scope))
+                ends.append(self._block(case.body, cs))
+            st = self._merge(*ends)
+        elif isinstance(s, ast.Delete):
+            for t in s.targets:
+                if isinstance(t, ast.Name):
+                    st[t.id] = frozenset()
+                else:
+                    self._record(t, st)
+        else:
+            self._record(s, st)
+            for c in ast.iter_child_nodes(s):
+                if isinstance(c, ast.expr):
+                    self._walrus(c, st)
+        return st
+
+
+# ---- evaluation --------------------------------------------------------------
+class _ContainmentEnv:
+    def __init__(self, ctx, scope, params=None, depth=0, helper_stack=()):
+        self.ctx, self.scope, self.params = ctx, scope, params or {}
+        self.depth, self.helper_stack = depth, helper_stack
+        self.hops = [0]  # shared mutable hop counter
+
+
+def _containment_lookup(name_node, env, visited):
+    ctx, rd = env.ctx, env.ctx.rd(env.scope)
+    name = name_node.id
+    if name in rd.local_names and id(name_node) in rd.uses:
+        defs = rd.uses[id(name_node)]
+        out = [(d, env) for d in defs]
+        if isinstance(env.scope, ast.Module):
+            for d in ctx.global_assigns.get(name, ()):
+                genv = _ContainmentEnv(ctx, d.scope, depth=env.depth, helper_stack=env.helper_stack)
+                genv.hops = env.hops
+                out.append((d, genv))
+        return out
+    # free / global name: resolve in the lexical parent, flow-insensitively, STRICT-only
+    out = _containment_free_defs(name, env)
+    if not isinstance(env.scope, ast.Module):
+        # strict mode: a function may only borrow immutable-ish module bindings
+        out = [(d, e) if d.kind in ("import", "def", "file") else
+               (_ContainmentDef("opaque", None, None, env.scope), env) for d, e in out]
+    return out
+
+
+def _containment_free_defs(name, env):
+    ctx = env.ctx
+    scope = env.scope
+    rd = ctx.rd(scope)
+    if name in rd.globals or isinstance(scope, ast.Module):
+        target = ctx.tree
+    else:
+        target = ctx.scope_of(scope)
+        while isinstance(target, ast.ClassDef):
+            target = ctx.scope_of(target)
+    out = []
+    trd = ctx.rd(target)
+    if name in trd.local_names or isinstance(target, ast.Module):
+        denv = _ContainmentEnv(ctx, target, depth=env.depth, helper_stack=env.helper_stack)
+        denv.hops = env.hops
+        for d in trd.all_defs.get(name, ()):
+            out.append((d, denv))
+        if isinstance(target, ast.Module):
+            if name == "__file__":
+                out.append((_ContainmentDef("file", None, None, target), denv))
+            for d in ctx.global_assigns.get(name, ()):
+                genv = _ContainmentEnv(ctx, d.scope, depth=env.depth, helper_stack=env.helper_stack)
+                genv.hops = env.hops
+                out.append((d, genv))
+        if not out and not isinstance(target, ast.Module):
+            return _containment_free_defs(name, denv)
+        return out
+    return _containment_free_defs(name, _ContainmentEnv(ctx, target, depth=env.depth, helper_stack=env.helper_stack))
+
+
+def _containment_eval_def(d, denv, visited, name):
+    key = (d.kind, id(d.node), id(d.scope), name, id(denv.params) if denv.params else 0)
+    if key in visited:
+        return [_ContainmentOpq("runtime", f"'{name}' is rebound in a loop (cycle)")]
+    denv.hops[0] += 1
+    if denv.hops[0] > _CONTAINMENT_MAX_WORK:
+        raise _ContainmentBudget("total work")
+    if len(visited) >= _CONTAINMENT_MAX_HOPS:
+        raise _ContainmentBudget("name-chain hops")
+    visited = visited | {key}
+    k = d.kind
+    if k == "file":
+        return [_containment_pv("anchor", comps=denv.ctx.file_comps, why="__file__")]
+    if k == "assign":
+        return _containment_ev(d.node, denv, visited)
+    if k == "assign-unpack":
+        i, n = d.extra
+        if isinstance(d.node, (ast.Tuple, ast.List)) and len(d.node.elts) == n and not any(
+            isinstance(e, ast.Starred) for e in d.node.elts
+        ):
+            return _containment_ev(d.node.elts[i], denv, visited)
+        if isinstance(d.node, ast.Call) and denv.ctx.canon_func(d.node.func, denv) == "os.path.split" \
+                and n == 2 and i == 0 and len(d.node.args) == 1:
+            return [_containment_dirname(v, "os") for v in _containment_ev(d.node.args[0], denv, visited)]
+        return [_ContainmentOpq("runtime", "tuple-unpacked value")]
+    if k == "aug":
+        s = d.node
+        prior = []
+        for pd in d.extra:
+            prior += _containment_eval_def(pd, denv, visited, name)
+        if not d.extra:
+            return [_ContainmentOpq("runtime", "augmented assignment to an unbound name")]
+        rhs = _containment_ev(s.value, denv, visited)
+        if isinstance(s.op, ast.Add):
+            return _containment_dedupe([_containment_concat(a, b) for a in prior for b in rhs])
+        if isinstance(s.op, ast.Div):
+            return _containment_dedupe([_containment_join([a, b], "pathlib") for a in prior for b in rhs])
+        return [_ContainmentOpq("runtime", "augmented assignment")]
+    if k == "param":
+        if name in denv.params:
+            arg, cenv = denv.params[name]
+            return _containment_ev(arg, cenv, visited)
+        return [_ContainmentOpq("runtime", f"parameter '{name}'")] + _containment_callsite_args(
+            d.scope, name, denv, visited
+        )
+    if k == "for":
+        return _containment_ev_iter(d.node, denv, visited)
+    if k in ("with", "with-unpack", "for-unpack"):
+        return [_ContainmentOpq("runtime", "handle / loop-unpacked value")]
+    if k == "def":
+        return [_ContainmentOpq("unrecognized", f"function object '{name}'")]
+    return [_ContainmentOpq("unrecognized" if k == "import" else "runtime", f"{k} binding of '{name}'")]
+
+
+def _containment_callsites(fn, ctx):
+    if fn not in ctx._callsites:
+        sites = []
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for n in ast.walk(ctx.tree):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == fn.name:
+                    env = _ContainmentEnv(ctx, ctx.scope_of(n))
+                    try:
+                        defs = _containment_lookup(n.func, env, frozenset())
+                    except _ContainmentBudget:
+                        continue
+                    if any(d.kind == "def" and d.node is fn for d, _ in defs):
+                        sites.append(n)
+        ctx._callsites[fn] = sites
+    return ctx._callsites[fn]
+
+
+def _containment_callsite_args(fn, pname, denv, visited):
+    """Evaluate the argument every in-file call site passes for *pname*. Only ever ADDS
+    alternatives to the always-present runtime one, so it can raise a verdict to ESCAPES
+    (a literal call site that walks out) but never lower one."""
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or fn in denv.helper_stack:
+        return []
+    a = fn.args
+    names = [p.arg for p in a.posonlyargs + a.args]
+    out = []
+    for call in _containment_callsites(fn, denv.ctx)[:_CONTAINMENT_MAX_CALLSITES]:
+        arg = None
+        if pname in names and names.index(pname) < len(call.args):
+            arg = call.args[names.index(pname)]
+            if isinstance(arg, ast.Starred) or any(
+                isinstance(x, ast.Starred) for x in call.args[:names.index(pname)]
+            ):
+                continue
+        for kw in call.keywords:
+            if kw.arg == pname:
+                arg = kw.value
+        if arg is None:
+            continue
+        cenv = _ContainmentEnv(denv.ctx, denv.ctx.scope_of(call), helper_stack=denv.helper_stack + (fn,))
+        cenv.hops = denv.hops
+        out += _containment_ev(arg, cenv, visited)
+    return out
+
+
+def _containment_resolve_name(node, env, visited):
+    alts = []
+    for d, denv in _containment_lookup(node, env, visited):
+        alts += _containment_eval_def(d, denv, visited, node.id)
+    if not alts:
+        return [_ContainmentOpq("runtime", f"unbound name '{node.id}'")]
+    return _containment_dedupe(alts)
+
+
+def _containment_concat(a, b):
+    if isinstance(a, _ContainmentStr) and isinstance(b, _ContainmentStr):
+        return _ContainmentStr(a.s + b.s)
+    pa = a.pieces if isinstance(a, _ContainmentCat) else (a,)
+    pb = b.pieces if isinstance(b, _ContainmentCat) else (b,)
+    return _ContainmentCat(pa + pb)
+
+
+def _containment_staticness(node, env, visited, depth=0):
+    """'static' when every free input is a literal (module constants / builtins as
+    callees are fine); 'runtime' when anything comes from a parameter, env, I/O."""
+    if depth > 8:
+        return "runtime"
+    for n in ast.walk(node):
+        if isinstance(n, (ast.Lambda, ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)):
+            return "runtime"
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            if n.id == "__file__":
+                return "runtime"
+            if env.ctx.dotted(n, env) is not None and n.id not in env.ctx.rd(env.scope).local_names:
+                continue  # import-bound module / builtin
+            for d, denv in _containment_lookup(n, env, visited):
+                if d.kind == "import":
+                    continue
+                if d.kind != "assign" or _containment_staticness(d.node, denv, visited, depth + 1) != "static":
+                    return "runtime"
+            if not _containment_lookup(n, env, visited):
+                return "runtime"
+        if isinstance(n, ast.Attribute) and n.attr in ("environ", "argv", "stdin"):
+            return "runtime"
+    return "static"
+
+
+def _containment_opaque(node, env, visited, why):
+    return [_ContainmentOpq(_containment_staticness(node, env, visited), why)]
+
+
+def _containment_ev(node, env, visited=frozenset()):
+    env.depth += 1
+    try:
+        if env.depth > _CONTAINMENT_MAX_EVAL_DEPTH:
+            raise _ContainmentBudget("expression depth")
+        return _containment_dedupe(_containment_ev_dispatch(node, env, visited))
+    finally:
+        env.depth -= 1
+
+
+def _containment_ev_dispatch(node, env, visited):  # noqa: C901 -- one recognizer dispatch, see module comment
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            return [_ContainmentStr(node.value)]
+        if isinstance(node.value, bytes):
+            return [_ContainmentStr(node.value.decode("latin-1"))]
+        return [_ContainmentOpq("static", "non-string constant")]
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for v in node.values:
+            if isinstance(v, ast.Constant):
+                parts.append([_ContainmentStr(str(v.value))])
+            elif isinstance(v, ast.FormattedValue):
+                if v.conversion not in (-1, ord("s")) or v.format_spec is not None:
+                    parts.append(_containment_opaque(v.value, env, visited, "formatted with a spec/conversion"))
+                else:
+                    parts.append(_containment_ev(v.value, env, visited))
+        out = []
+        for combo in _containment_product(parts):
+            acc = _ContainmentStr("")
+            for c in combo:
+                acc = _containment_concat(acc, c)
+            out.append(acc)
+        return out
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return [_containment_concat(a, b) for a, b in _containment_product(
+            [_containment_ev(node.left, env, visited), _containment_ev(node.right, env, visited)]
+        )]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        return _containment_percent(node, env, visited)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return [_containment_join(list(c), "pathlib") for c in _containment_product(
+            [_containment_ev(node.left, env, visited), _containment_ev(node.right, env, visited)]
+        )]
+    if isinstance(node, ast.NamedExpr):
+        return _containment_ev(node.value, env, visited)
+    if isinstance(node, ast.Name):
+        return _containment_resolve_name(node, env, visited)
+    if isinstance(node, (ast.List, ast.Tuple)):
+        if any(isinstance(e, ast.Starred) for e in node.elts):
+            return [_ContainmentOpq("runtime", "starred sequence")]
+        return [_ContainmentSeq(tuple(tuple(_containment_ev(e, env, visited)) for e in node.elts))]
+    if isinstance(node, ast.IfExp):
+        if isinstance(node.test, ast.Constant):
+            return _containment_ev(node.body if node.test.value else node.orelse, env, visited)
+        return _containment_ev(node.body, env, visited) + _containment_ev(node.orelse, env, visited)
+    if isinstance(node, ast.BoolOp):
+        # `a or b` yields the first truthy operand, `a and b` the first falsy one (else
+        # the last). Truthiness is only claimed where it is certain: a non-empty literal,
+        # or an anchored path (absolute __file__ -> never ''). Anything else: both flow.
+        out = []
+        last = len(node.values) - 1
+        for i, v in enumerate(node.values):
+            alts = _containment_ev(v, env, visited)
+            if i == last:
+                return out + alts
+
+            def truthy(a):
+                if isinstance(a, _ContainmentStr):
+                    return bool(a.s)
+                if isinstance(a, _ContainmentPV) and a.root == "anchor":
+                    return True
+                return None
+
+            t = [truthy(a) for a in alts]
+            if isinstance(node.op, ast.Or):
+                out += [a for a, tv in zip(alts, t) if tv is not False]
+                if all(tv is True for tv in t):
+                    return out
+            else:
+                out += [a for a, tv in zip(alts, t) if tv is not True]
+                if all(tv is False for tv in t):
+                    return out
+        return out
+    if isinstance(node, ast.Attribute):
+        return _containment_attribute(node, env, visited)
+    if isinstance(node, ast.Subscript):
+        return _containment_subscript(node, env, visited)
+    if isinstance(node, ast.Call):
+        return _containment_call(node, env, visited)
+    return _containment_opaque(node, env, visited, f"unrecognized {type(node).__name__}")
+
+
+def _containment_percent(node, env, visited):
+    fmts = _containment_ev(node.left, env, visited)
+    if not all(isinstance(f, _ContainmentStr) for f in fmts):
+        return _containment_opaque(node, env, visited, "%-format with a computed format")
+    if isinstance(node.right, ast.Tuple):
+        args = [_containment_ev(e, env, visited) for e in node.right.elts]
+    elif isinstance(node.right, ast.Dict):
+        return _containment_opaque(node, env, visited, "%-format with a mapping")
+    else:
+        args = [_containment_ev(node.right, env, visited)]
+    out = []
+    for f in fmts:
+        toks = re.split(r"(%%|%[sd])", f.s)
+        n_ph = sum(1 for t in toks if t in ("%s", "%d"))
+        if n_ph != len(args) or re.search(r"%[^sd%]", f.s.replace("%%", "")):
+            out += _containment_opaque(node, env, visited, "%-format shape not modelled")
+            continue
+        for combo in _containment_product(args):
+            acc, k = _ContainmentStr(""), 0
+            for t in toks:
+                if t in ("%s", "%d"):
+                    acc = _containment_concat(acc, combo[k])
+                    k += 1
+                elif t == "%%":
+                    acc = _containment_concat(acc, _ContainmentStr("%"))
+                else:
+                    acc = _containment_concat(acc, _ContainmentStr(t))
+            out.append(acc)
+    return out
+
+
+def _containment_attribute(node, env, visited):
+    ctx = env.ctx
+    d = ctx.canon_func(node, env)
+    if d:
+        for mod in ("os.", "os.path."):
+            if d.startswith(mod) and d[len(mod):] in _CONTAINMENT_OS_CONSTS:
+                return [_ContainmentStr(_CONTAINMENT_OS_CONSTS[d[len(mod):]])]
+        if d in ("sys._MEIPASS", "sys.frozen"):
+            # a non-frozen interpreter raises AttributeError here: no value flows on.
+            return [] if not ctx.sys_mutated else [_ContainmentOpq("runtime", d)]
+    if node.attr == "parent":
+        return [_containment_dirname(v, "pathlib") for v in _containment_ev(node.value, env, visited)]
+    return _containment_opaque(node, env, visited, f"attribute .{node.attr}")
+
+
+def _containment_subscript(node, env, visited):
+    ctx = env.ctx
+    idx = node.slice
+    if idx.__class__.__name__ == "Index":   # Python <=3.8 subscript wrapper compat
+        idx = idx.value
+    const_int = isinstance(idx, ast.Constant) and isinstance(idx.value, int) and not isinstance(
+        idx.value, bool)
+    base = node.value
+    if isinstance(base, ast.Attribute) and base.attr == "parents" and const_int and idx.value >= 0:
+        out = []
+        for v in _containment_ev(base.value, env, visited):
+            for _ in range(idx.value + 1):
+                v = _containment_dirname(v, "pathlib")
+            out.append(v)
+        return out
+    if isinstance(base, ast.Call) and const_int and ctx.canon_func(base.func, env) == "os.path.split" \
+            and len(base.args) == 1:
+        if idx.value == 0:
+            return [_containment_dirname(v, "os") for v in _containment_ev(base.args[0], env, visited)]
+        return _containment_opaque(node, env, visited, "os.path.split()[1]")
+    if const_int:
+        out = []
+        for v in _containment_ev(base, env, visited):
+            if isinstance(v, _ContainmentSeq) and -len(v.elts) <= idx.value < len(v.elts):
+                out += list(v.elts[idx.value])
+            else:
+                return _containment_opaque(node, env, visited, "subscript")
+        return out
+    return _containment_opaque(node, env, visited, "subscript/slice")
+
+
+def _containment_expand_args(call, env, visited):
+    """Positional operands with *starred sequences spliced in. Returns a list of
+    alternative operand-lists."""
+    per = []   # list of (list of alternative operand-tuples)
+    for a in call.args:
+        if isinstance(a, ast.Starred):
+            alts = []
+            for v in _containment_ev(a.value, env, visited):
+                if isinstance(v, _ContainmentSeq):
+                    alts += [tuple(c) for c in _containment_product(list(v.elts))]
+                else:
+                    alts.append((_ContainmentOpq("runtime", "starred non-literal"),))
+            per.append(alts)
+        else:
+            per.append([(v,) for v in _containment_ev(a, env, visited)])
+    out = []
+    for combo in _containment_product(per):
+        flat = []
+        for part in combo:
+            flat += list(part)
+        out.append(flat)
+    return out
+
+
+def _containment_call(node, env, visited):  # noqa: C901 -- one recognizer dispatch, see module comment
+    ctx = env.ctx
+    f = node.func
+    d = ctx.canon_func(f, env)
+    nargs = len(node.args)
+    if d == "os.path.join" and nargs and not node.keywords:
+        return [_containment_join(ops, "os") for ops in _containment_expand_args(node, env, visited)]
+    if d == "os.path.dirname" and nargs == 1:
+        return [_containment_dirname(v, "os") for v in _containment_ev(node.args[0], env, visited)]
+    if d in ("os.path.abspath", "os.path.realpath") and nargs == 1:
+        return [_containment_normalize(v, True) for v in _containment_ev(node.args[0], env, visited)]
+    if d == "os.path.normpath" and nargs == 1:
+        return [_containment_normalize(v, False) for v in _containment_ev(node.args[0], env, visited)]
+    if d == "os.path.expanduser" and nargs == 1:
+        return [_containment_expanduser(v) for v in _containment_ev(node.args[0], env, visited)]
+    if d in ("os.fspath", "builtins.str") and nargs == 1 and not node.keywords:
+        return _containment_ev(node.args[0], env, visited)
+    if d == "os.getcwd" and nargs == 0:
+        return [_containment_pv("cwd", why="os.getcwd()")]
+    if d and d.startswith("pathlib.") and d.split(".")[-1] in _CONTAINMENT_PATHLIB_CLASSES:
+        if nargs == 0:
+            return [_containment_pv("rel", why="Path()")]
+        if nargs == 1 and not isinstance(node.args[0], ast.Starred):
+            return [_containment_join([v], "pathlib") for v in _containment_ev(node.args[0], env, visited)]
+        return [_containment_join(ops, "pathlib") for ops in _containment_expand_args(node, env, visited)]
+    if d and d.startswith("pathlib.") and d.endswith((".cwd", ".home")):
+        return [_containment_pv("cwd" if d.endswith(".cwd") else "home", why=d)]
+    if d == "builtins.getattr" and nargs == 3 and isinstance(node.args[1], ast.Constant) and \
+            node.args[1].value in ("_MEIPASS",) and ctx.dotted(node.args[0], env) == "sys":
+        # PyInstaller idiom: in a non-frozen interpreter the default is what flows.
+        if not ctx.sys_mutated:
+            return _containment_ev(node.args[2], env, visited)
+        return _containment_ev(node.args[2], env, visited) + [
+            _ContainmentOpq("runtime", "sys._MEIPASS (sys is mutated)")
+        ]
+    if isinstance(f, ast.Attribute):
+        m = f.attr
+        recv = f.value
+        if m == "joinpath":
+            recv_alts = _containment_ev(recv, env, visited)
+            return [_containment_join([r] + ops, "pathlib") for r in recv_alts
+                    for ops in _containment_expand_args(node, env, visited)]
+        if m in ("resolve", "absolute") and not node.args:
+            return [_containment_normalize(v, True) for v in _containment_ev(recv, env, visited)]
+        if m == "expanduser" and not node.args:
+            return [_containment_expanduser(v) for v in _containment_ev(recv, env, visited)]
+        if m in ("as_posix", "__fspath__") and not node.args:
+            return _containment_ev(recv, env, visited)
+        if m in ("with_name", "with_suffix", "with_stem") and nargs == 1:
+            out = []
+            for r in _containment_ev(recv, env, visited):
+                for a in _containment_ev(node.args[0], env, visited):
+                    rp = _containment_as_path(r)
+                    if isinstance(a, _ContainmentStr) and "/" not in a.s and "\\" not in a.s and rp.comps:
+                        out.append(_containment_push(_containment_pop(rp), [_CONTAINMENT_GLUE]))
+                    else:
+                        out.append(_containment_push(_containment_pop(rp), [_CONTAINMENT_UNK], unk=True))
+            return out
+        if m in ("iterdir",) and not node.args:
+            return [_containment_push(_containment_as_path(r), [_CONTAINMENT_SAFE_MARK])
+                    for r in _containment_ev(recv, env, visited)]
+        # pure str methods on literal receivers fold (e.g. '/'.join([...]), '..'.replace)
+        recv_alts = _containment_ev(recv, env, visited)
+        if recv_alts and all(isinstance(r, _ContainmentStr) for r in recv_alts):
+            if m == "join" and nargs == 1:
+                out = []
+                for r in recv_alts:
+                    for it in _containment_ev(node.args[0], env, visited):
+                        if isinstance(it, _ContainmentSeq):
+                            for combo in _containment_product(list(it.elts)):
+                                acc = _ContainmentStr("")
+                                for i, c in enumerate(combo):
+                                    acc = _containment_concat(acc, _ContainmentStr(r.s) if i else _ContainmentStr(""))
+                                    acc = _containment_concat(acc, c)
+                                out.append(acc)
+                        else:
+                            out += _containment_opaque(node, env, visited, "str.join over a computed iterable")
+                return out
+            if m == "format" and not node.keywords and not any(isinstance(a, ast.Starred) for a in node.args):
+                out = []
+                argv = [_containment_ev(a, env, visited) for a in node.args]
+                for r in recv_alts:
+                    toks = re.split(r"(\{\d*\})", r.s)
+                    if any(("{" in t or "}" in t) and not re.fullmatch(r"\{\d*\}", t)
+                           for t in toks if t):
+                        out += _containment_opaque(node, env, visited, "str.format field not modelled")
+                        continue
+                    for combo in _containment_product(argv):
+                        acc, auto = _ContainmentStr(""), 0
+                        bad = False
+                        for t in toks:
+                            if re.fullmatch(r"\{\d*\}", t):
+                                i = int(t[1:-1]) if t[1:-1] else auto
+                                auto += 1
+                                if i >= len(combo):
+                                    bad = True
+                                    break
+                                acc = _containment_concat(acc, combo[i])
+                            elif t:
+                                acc = _containment_concat(acc, _ContainmentStr(t))
+                        out += _containment_opaque(node, env, visited, "format index") if bad else [acc]
+                return out
+            if m in _CONTAINMENT_FOLDABLE_STR_METHODS or m == "decode":
+                out = []
+                for combo in _containment_product(
+                    [recv_alts] + [_containment_ev(a, env, visited) for a in node.args]
+                ):
+                    if all(isinstance(c, _ContainmentStr) for c in combo) and not node.keywords:
+                        try:
+                            if m == "decode":
+                                val = combo[0].s
+                            else:
+                                val = getattr(combo[0].s, m)(*[c.s for c in combo[1:]])
+                            if isinstance(val, str):
+                                out.append(_ContainmentStr(val))
+                                continue
+                        except Exception:  # noqa: BLE001
+                            pass
+                    out += _containment_opaque(node, env, visited, f"str.{m} not foldable")
+                return out
+    # local helper function -> inline its return value(s) (positively recognized only)
+    if isinstance(f, ast.Name):
+        inl = _containment_inline(node, env, visited)
+        if inl is not None:
+            return inl
+    return _containment_opaque(node, env, visited, f"unrecognized call {ast.unparse(f)[:40]}")
+
+
+def _containment_inline(call, env, visited):
+    defs = _containment_lookup(call.func, env, visited)
+    if len(defs) != 1 or defs[0][0].kind != "def":
+        return None
+    fn = defs[0][0].node
+    if not isinstance(fn, ast.FunctionDef) or fn.decorator_list or fn in env.helper_stack:
+        return None
+    if len(env.helper_stack) >= _CONTAINMENT_MAX_HELPER_DEPTH:
+        return None
+    a = fn.args
+    if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs:
+        return None
+    if any(isinstance(x, ast.Starred) for x in call.args) or any(k.arg is None for k in call.keywords):
+        return None
+    for n in ast.walk(fn):
+        if isinstance(n, (ast.Yield, ast.YieldFrom, ast.Global, ast.Nonlocal)):
+            return None
+    names = [p.arg for p in a.args]
+    if len(call.args) > len(names):
+        return None
+    bound = dict(zip(names, [(x, env) for x in call.args]))
+    for kw in call.keywords:
+        if kw.arg not in names or kw.arg in bound:
+            return None
+        bound[kw.arg] = (kw.value, env)
+    defenv = _ContainmentEnv(env.ctx, env.ctx.scope_of(fn))
+    for i, p in enumerate(names):
+        if p not in bound:
+            j = i - (len(names) - len(a.defaults))
+            if j < 0:
+                return None
+            bound[p] = (a.defaults[j], defenv)
+    henv = _ContainmentEnv(
+        env.ctx, fn, params=bound, depth=env.depth, helper_stack=env.helper_stack + (fn,)
+    )
+    henv.hops = env.hops
+    rets = [n for n in _ContainmentReachingDefs._own_nodes(None, fn.body) if isinstance(n, ast.Return)]
+    if not rets or any(r.value is None for r in rets):
+        return None
+    out = []
+    for r in rets:
+        out += _containment_ev(r.value, henv, visited)
+    return out
+
+
+def _containment_ev_iter(it, env, visited):
+    """Element values of a `for` loop's iterable."""
+    ctx = env.ctx
+    if isinstance(it, (ast.List, ast.Tuple, ast.Set)):
+        out = []
+        for e in it.elts:
+            if isinstance(e, ast.Starred):
+                return [_ContainmentOpq("runtime", "starred loop element")]
+            out += _containment_ev(e, env, visited)
+        return out
+    if isinstance(it, ast.Call):
+        d = ctx.canon_func(it.func, env)
+        if d in ("builtins.sorted", "builtins.reversed", "builtins.list", "builtins.tuple",
+                 "builtins.set", "builtins.frozenset") and len(it.args) == 1:
+            return _containment_ev_iter(it.args[0], env, visited)
+        if d == "os.listdir":
+            return [_ContainmentSafe()]           # names only: no separator, never '.' or '..'
+        if d in ("glob.glob", "glob.iglob") and len(it.args) == 1:
+            return _containment_ev(it.args[0], env, visited)
+        if isinstance(it.func, ast.Attribute) and it.func.attr in ("glob", "rglob") and \
+                len(it.args) == 1:
+            out = []
+            for r in _containment_ev(it.func.value, env, visited):
+                for p in _containment_ev(it.args[0], env, visited):
+                    j = _containment_join([r, p], "pathlib")
+                    out.append(_containment_push(j, [_CONTAINMENT_SAFE_MARK]) if it.func.attr == "rglob" else j)
+            return out
+        if isinstance(it.func, ast.Attribute) and it.func.attr == "iterdir" and not it.args:
+            return [_containment_push(_containment_as_path(r), [_CONTAINMENT_SAFE_MARK])
+                    for r in _containment_ev(it.func.value, env, visited)]
+    if isinstance(it, ast.Name):
+        out = []
+        for v in _containment_ev(it, env, visited):
+            if isinstance(v, _ContainmentSeq):
+                for e in v.elts:
+                    out += list(e)
+            else:
+                return [_ContainmentOpq("runtime", "loop over a computed iterable")]
+        return out
+    return [_ContainmentOpq("runtime", "loop over a computed iterable")]
+
+
+# ---- top-level predicates ---------------------------------------------------------
+_CONTAINMENT_READ_ATTRS = {"read", "readline"}
+
+
+def _containment_classify_path(node, ctx):
+    env = _ContainmentEnv(ctx, ctx.scope_of(node))
+    try:
+        alts = _containment_ev(node, env)
+        if not alts:
+            return _CONTAINMENT_NOT_ANCHORED, "no value reaches the read (every alternative is dead)"
+        worst = (_CONTAINMENT_BOUNDED, "")
+        for a in alts:
+            v = _containment_verdict(_containment_as_path(a), ctx.depth_known)
+            if _CONTAINMENT_RANK[v[0]] > _CONTAINMENT_RANK[worst[0]]:
+                worst = v
+        return worst
+    except Exception as e:  # noqa: BLE001 -- fail-closed on ANY internal error, not just Budget
+        return _CONTAINMENT_ESCAPES, f"analysis budget/error exhausted ({e}) -- fail-closed"
+
+
+def _containment_open_paths(h, ctx, env, visited=frozenset(), hops=0):
+    """Every path expression the file handle *h* may have been opened on, or None when
+    *h* is not positively a builtin open() handle."""
+    if hops > _CONTAINMENT_MAX_HOPS:
+        raise _ContainmentBudget("handle hops")
+    if isinstance(h, ast.Call):
+        d = ctx.canon_func(h.func, env)
+        if d in ("builtins.open", "io.open"):
+            if h.args and not isinstance(h.args[0], ast.Starred):
+                return [(h.args[0], env)]
+            for kw in h.keywords:
+                if kw.arg == "file":
+                    return [(kw.value, env)]
+            return None
+        if isinstance(h.func, ast.Attribute) and h.func.attr == "open" and not h.args:
+            return [(h.func.value, env)]   # Path(...).open()
+        return None
+    if isinstance(h, ast.IfExp):
+        a = _containment_open_paths(h.body, ctx, env, visited, hops + 1)
+        b = _containment_open_paths(h.orelse, ctx, env, visited, hops + 1)
+        return None if a is None or b is None else a + b
+    if isinstance(h, ast.BoolOp):
+        out = []
+        for v in h.values:
+            r = _containment_open_paths(v, ctx, env, visited, hops + 1)
+            if r is None:
+                return None
+            out += r
+        return out
+    if isinstance(h, ast.Name):
+        defs = _containment_lookup(h, env, visited)
+        if not defs:
+            return None
+        out = []
+        for d, denv in defs:
+            if d.kind in ("with", "assign") and d.node is not None:
+                r = _containment_open_paths(d.node, ctx, denv, visited, hops + 1)
+                if r is None:
+                    return None
+                out += r
+            else:
+                return None
+        return out
+    return None
+
+
+def _containment_classify_decode(decode_call, ctx):
+    """Verdict for one `<recv>.decode(...)` call: is <recv> a read of a positively
+    artifact-bounded file?"""
+    recv = decode_call.func.value
+    if not (isinstance(recv, ast.Call) and isinstance(recv.func, ast.Attribute)
+            and recv.func.attr in _CONTAINMENT_READ_ATTRS):
+        return _CONTAINMENT_NOT_ANCHORED, "decode receiver is not a recognized file read"
+    env = _ContainmentEnv(ctx, ctx.scope_of(decode_call))
+    try:
+        paths = _containment_open_paths(recv.func.value, ctx, env)
+    except Exception as e:  # noqa: BLE001 -- fail-closed on ANY internal error, not just Budget
+        return _CONTAINMENT_ESCAPES, f"handle resolution budget/error exhausted ({e})"
+    if paths is None:
+        return _CONTAINMENT_NOT_ANCHORED, "handle is not positively a builtin open() handle"
+    worst = (_CONTAINMENT_BOUNDED, "")
+    for p, penv in paths:
+        v = _containment_classify_path(p, ctx) if penv.params == {} else _containment_classify_in(p, penv)
+        if _CONTAINMENT_RANK[v[0]] > _CONTAINMENT_RANK[worst[0]]:
+            worst = v
+    return worst
+
+
+def _containment_classify_in(node, env):
+    try:
+        alts = _containment_ev(node, env)
+        worst = (_CONTAINMENT_BOUNDED, "")
+        for a in alts or [_ContainmentOpq("unrecognized", "dead")]:
+            v = _containment_verdict(_containment_as_path(a), env.ctx.depth_known)
+            if _CONTAINMENT_RANK[v[0]] > _CONTAINMENT_RANK[worst[0]]:
+                worst = v
+        return worst
+    except Exception as e:  # noqa: BLE001 -- fail-closed on ANY internal error, not just Budget
+        return _CONTAINMENT_ESCAPES, f"budget/error ({e})"
+
+
+# ---- public wrappers: the B-752/B-850 call sites below consume these -------------
+def _decode_call_artifact_verdict(
+    node: ast.Call, tree: ast.AST, relpath: str = ""
+) -> tuple[str, str]:
+    """B-850 verdict (+ reason) for one `<recv>.decode(...)` call's receiver path --
+    BOUNDED / UNPROVEN / ESCAPES / NOT_ANCHORED. See the module comment above the
+    "B-850: artifact-containment ALLOWLIST recognizer" banner for the full design."""
+    ctx = _ContainmentCtx(tree, relpath)
+    return _containment_classify_decode(node, ctx)
+
+
+def _decode_call_is_artifact_exempt(node: ast.Call, tree: ast.AST, relpath: str = "") -> bool:
+    """True when *node*'s B-850 verdict is BOUNDED or UNPROVEN -- i.e. never proven to
+    escape the artifact, so the crit this call would otherwise contribute to is excused.
+    BOUNDED is excused silently; UNPROVEN is excused too but disclosed via the
+    ARTIFACT_READ_UNPROVEN WARN emitted at the call site that classified it (see
+    `_containment_unproven_decode_findings`, called once from `analyze_python`)."""
+    verdict, _reason = _decode_call_artifact_verdict(node, tree, relpath)
+    return verdict in (_CONTAINMENT_BOUNDED, _CONTAINMENT_UNPROVEN)
+
+
+def _containment_unproven_decode_findings(
+    node: ast.AST, tree: ast.AST, relpath: str = "", path_aliases: set | None = None
+) -> list[tuple[int, str]]:
+    """(lineno, reason) for every decode-shaped call in *node* whose B-850 verdict is
+    UNPROVEN. Mirrors the same walk/skip logic as
+    `_decode_signal_is_only_artifact_relative_reads` (join()-vs-decode disambiguation,
+    the XOR bail) so the two agree on which calls are "the" decode call(s); only
+    meaningful to consult once that function has already confirmed the subtree is
+    exempt (no ESCAPES/NOT_ANCHORED present) -- used to disclose the WARN-only
+    ARTIFACT_READ_UNPROVEN finding at the same call site (B394, checks/_vet.py)."""
+    if _has_xor_decode(node):
+        return []
+    out: list[tuple[int, str]] = []
+    for n in ast.walk(node):
+        if not _is_decode_call(n) or _is_path_join_call(n, path_aliases):
+            continue
+        nf = n.func
+        if not (isinstance(nf, ast.Attribute) and nf.attr == "de" + "code"):
+            continue
+        verdict, reason = _decode_call_artifact_verdict(n, tree, relpath)
+        if verdict == _CONTAINMENT_UNPROVEN:
+            out.append((getattr(n, "lineno", 0), reason))
+    return out
 
 
 def _decode_signal_is_only_artifact_relative_reads(
-    node: ast.AST, scope: ast.AST, relpath: str = "", path_aliases: "set | None" = None
+    node: ast.AST, tree: ast.AST, relpath: str = "", path_aliases: set | None = None
 ) -> bool:
     """True when EVERY decode-shaped call `_subtree_has_decode` would match inside
-    *node* is a bare `.decode(...)` on a local sibling-file read anchored on
-    `__file__` (see `_decode_call_reads_artifact_relative_file`), and nothing
-    stronger -- a real content-hiding primitive (base64/hex/b85/zlib/... in
-    _DECODE_FUNCS), an XOR-built sequence, or a `.fromhex(...)`/`.join(...)` call --
-    is present anywhere in the subtree. False (never exempt) if no decode-shaped call
-    is found at all, so this must only be consulted when `_subtree_has_decode` is
-    already True."""
+    *node* is a bare `.decode(...)` on a local file read whose B-850 verdict
+    (`_decode_call_is_artifact_exempt`) is BOUNDED or UNPROVEN -- never proven to
+    escape the artifact -- and nothing stronger -- a real content-hiding primitive
+    (base64/hex/b85/zlib/... in _DECODE_FUNCS), an XOR-built sequence, or a
+    `.fromhex(...)`/`.join(...)` call -- is present anywhere in the subtree. False
+    (never exempt) if no decode-shaped call is found at all, so this must only be
+    consulted when `_subtree_has_decode` is already True.
+
+    `tree` (renamed from B-752's `scope`, B-850): the B-850 recognizer resolves a
+    node's lexical scope itself via its own parent-pointer map, so it needs the whole
+    module tree rather than the caller's best-guess enclosing scope.
+    """
     if _has_xor_decode(node):
         return False
     found_any = False
@@ -4830,21 +5945,22 @@ def _decode_signal_is_only_artifact_relative_reads(
             return False  # a real _DECODE_FUNCS primitive called bare, e.g. b64decode(x)
         if not (isinstance(nf, ast.Attribute) and nf.attr == "de" + "code"):
             return False  # fromhex/join, or a _DECODE_FUNCS primitive as a method
-        if not _decode_call_reads_artifact_relative_file(n, scope, relpath):
+        if not _decode_call_is_artifact_exempt(n, tree, relpath):
             return False
     return found_any
 
 
 def _exec_sink_taint_is_only_artifact_relative_decode(
     arg_node: ast.AST,
-    tainted: "set[str]",
-    scope: ast.AST,
+    tainted: set[str],
+    tree: ast.AST,
     relpath: str = "",
-    path_aliases: "tuple | None" = None,
+    path_aliases: tuple | None = None,
 ) -> bool:
     """True when every TAINTED NAME `_call_args_tainted` would match inside
-    *arg_node* is explained by a decode-shaped, provably artifact-relative file
-    read (`_decode_call_reads_artifact_relative_file`) -- and nothing else.
+    *arg_node* is explained by a decode-shaped file read the B-850 recognizer
+    exempts (`_decode_call_is_artifact_exempt` -- BOUNDED or UNPROVEN) -- and
+    nothing else.
 
     B-752 (TT5 follow-up). `_external_tainted_names` treats ANY `open()`/`.read()`
     call as an external source -- right for TT5's general case, since a file
@@ -4871,16 +5987,16 @@ def _exec_sink_taint_is_only_artifact_relative_decode(
     if not _subtree_has_decode(arg_node):
         return False
     if not _decode_signal_is_only_artifact_relative_reads(
-        arg_node, scope, relpath, path_aliases
+        arg_node, tree, relpath, path_aliases
     ):
         return False
-    covered: "set[str]" = set()
+    covered: set[str] = set()
     for n in ast.walk(arg_node):
         if not _is_decode_call(n) or _is_path_join_call(n, path_aliases):
             continue
         nf = n.func
         if isinstance(nf, ast.Attribute) and nf.attr == "de" + "code":
-            if _decode_call_reads_artifact_relative_file(n, scope, relpath):
+            if _decode_call_is_artifact_exempt(n, tree, relpath):
                 covered |= _names_in(nf.value)
     return tainted_here <= covered
 
@@ -5139,15 +6255,24 @@ def analyze_python(
                 node, tainted, owner_map, parent_scope, shadow_cache
             )
             has_decode_signal = _subtree_has_decode(arg)
-            # B-640: `.decode("utf-8")` reading a __file__-relative sibling file (the
-            # canonical setup.py idiom -- see the module comment above
-            # `_scope_own_assigns`) is not obfuscation on its own. Only un-arms the
-            # bare-decode signal; a real content-hiding primitive elsewhere in the
-            # same expression still convicts.
+            # B-640/B-850: `.decode("utf-8")` reading a __file__-relative sibling file
+            # (the canonical setup.py idiom -- see the "B-850: artifact-containment
+            # ALLOWLIST recognizer" module comment above) is not obfuscation on its
+            # own. Only un-arms the bare-decode signal; a real content-hiding primitive
+            # elsewhere in the same expression still convicts. `tree`, not a best-guess
+            # enclosing scope: the recognizer finds each node's own lexical scope
+            # itself from the whole-module parent-pointer map it builds.
             if has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
-                arg, owner_map.get(node, tree), filename, path_aliases
+                arg, tree, filename, path_aliases
             ):
                 has_decode_signal = False
+                # B394: an UNPROVEN read (anchored, but a segment is runtime-computed)
+                # is never FAIL-capable -- see checks/_vet.py's ARTIFACT_READ_UNPROVEN
+                # bucket -- but is disclosed rather than silently absolved like BOUNDED.
+                for _up_ln, _up_reason in _containment_unproven_decode_findings(
+                    arg, tree, filename, path_aliases
+                ):
+                    add("ARTIFACT_READ_UNPROVEN", "info", _up_ln, _up_reason)
             if (
                 has_decode_signal
                 or (_names_in(arg) & visible_tainted)
@@ -5667,7 +6792,7 @@ def analyze_python(
                         or _exec_sink_taint_is_only_artifact_relative_decode(
                             _a,
                             ext_visible,
-                            owner_map.get(node, tree),
+                            tree,
                             filename,
                             path_aliases,
                         )
