@@ -2200,6 +2200,38 @@ def _name_rebound_anywhere(tree: ast.AST, name: str) -> bool:
 # mutation-aware fixpoint as a pure wrapper removes any risk of a regression
 # there, at the cost of one extra small function. Confirmed to reproduce
 # proto2.py's per-case answer on all 57 harness cases.
+#
+# Fix round 1 (C-135, 2026-09-23): the tier-2 channel walk used to thread ONE
+# shared `shapes` list through the whole of `names` -- every name the walk
+# ever called an "alias" (`_b863_classify_head` returning true for its RHS)
+# was treated as pointing at the SAME evolving value, forever. That is wrong
+# the instant two tracked names DIVERGE: `x = args` truly does make `x` and
+# `args` the same object, but a LATER `args = ["sh", "-c"]` (or `x = ["ls"]`)
+# rebinds only ONE of them, and the walk kept folding every subsequent
+# mutation of EITHER name onto the single shared list regardless of which
+# object it actually touched at runtime -- a false positive when a stale
+# alias's mutation got attributed to the freshly-rebound name (reviewer's
+# side A: `x` mutated after `args` was rebound away from it, wrongly tainting
+# the NEW `args`), and a lost detection the other way around (reviewer's side
+# B: the TRACKED parameter's own later mutation got attributed to a sibling
+# alias's unrelated rebind instead, because the one shared list had just been
+# replaced wholesale by that sibling's own reassignment). Both are the same
+# root cause -- named aliases sharing one mutable list is only sound while
+# they are not yet aliases of DIFFERENT values -- so `names` (a flat set,
+# still used for pure membership tests: "is this identifier currently
+# tracked at all") is now paired with `shapes_of`, a `dict[str,
+# list[_B863Shape]]` giving every tracked name its OWN shapes-list slot.
+# Creating a new alias (`y = <H-preserving-expr-of-x>`) points `y`'s slot at
+# the SAME list object `x` already uses (true aliasing: a mutation through
+# either name is visible through the other, exactly as at runtime). A full
+# reassignment of a tracked name (`x = ["sh", "-c"]`, or any other RHS
+# `_b863_classify_assign_value` accepts) replaces ONLY that name's own dict
+# entry with a brand-new list -- every OTHER name that used to share the old
+# list keeps its own reference to that OLD list, untouched, so a later
+# mutation through either name can no longer cross-contaminate the other.
+# `_b863_classify_head` is threaded through as returning the SPECIFIC
+# resolved source name (or None) rather than a bare bool, precisely so alias
+# creation knows WHICH existing slot to share.
 _B863_HEAD_WRAP_CALLS = frozenset({"list", "tuple"})
 _B863_IDENTITY_MAP_NAMES = frozenset({"str"})
 _B863_IDENTITY_MAP_ATTRS = frozenset({"fspath", "fsdecode"})
@@ -2255,15 +2287,21 @@ def _b863_attr_is_os_identity_map(node):
 
 
 def _b863_classify_head(expr, names, tree):
-    """True if *expr* provably preserves whatever argv[0] one of `names` (the
-    tracked parameter and its plain aliases) currently has -- structural, not
-    a value simulation: every branch reduces to "does the innermost reference
-    resolve to a tracked name". Grammar: P; list(H)/tuple(H); H.copy(); H[:]
-    (a full slice only); H+X; [*H, ...]; [t for t in H] / [g(t) for t in H]
-    for a single, filterless, synchronous generator with g one of
-    str/os.fspath/os.fsdecode."""
+    """The SPECIFIC name in `names` that *expr* provably preserves argv[0]
+    of, or None if *expr* is not head-preserving at all -- structural, not a
+    value simulation: every branch reduces to "does the innermost reference
+    resolve to a tracked name, and which one". Grammar: P; list(H)/tuple(H);
+    H.copy(); H[:] (a full slice only); H+X; [*H, ...]; [t for t in H] /
+    [g(t) for t in H] for a single, filterless, synchronous generator with g
+    one of str/os.fspath/os.fsdecode.
+
+    Returning the resolved name (not a bare bool) is fix-round-1 (C-135,
+    2026-09-23): the caller needs to know WHICH existing tracked name's
+    shapes-list slot a newly-created alias should share, now that different
+    tracked names can hold DIFFERENT shapes lists after one of them diverges
+    (see the module comment above `_B863OutOfDomain`)."""
     if isinstance(expr, ast.Name):
-        return expr.id in names
+        return expr.id if expr.id in names else None
     if isinstance(expr, ast.Call):
         f = expr.func
         if (
@@ -2277,29 +2315,30 @@ def _b863_classify_head(expr, names, tree):
             return _b863_classify_head(expr.args[0], names, tree)
         if isinstance(f, ast.Attribute) and f.attr == "copy" and not expr.args and not expr.keywords:
             return _b863_classify_head(f.value, names, tree)
-        return False
+        return None
     if isinstance(expr, ast.Subscript):
         sl = expr.slice
         if isinstance(sl, ast.Slice) and sl.lower is None and sl.upper is None and sl.step is None:
             return _b863_classify_head(expr.value, names, tree)
-        return False
+        return None
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
         return _b863_classify_head(expr.left, names, tree)
     if isinstance(expr, ast.List) and expr.elts and isinstance(expr.elts[0], ast.Starred):
         return _b863_classify_head(expr.elts[0].value, names, tree)
     if isinstance(expr, (ast.ListComp, ast.GeneratorExp)):
         if len(expr.generators) != 1:
-            return False
+            return None
         gen = expr.generators[0]
         if gen.is_async or gen.ifs:
-            return False
+            return None
         if not isinstance(gen.target, ast.Name):
-            return False
-        if not _b863_classify_head(gen.iter, names, tree):
-            return False
+            return None
+        src = _b863_classify_head(gen.iter, names, tree)
+        if src is None:
+            return None
         elt = expr.elt
         if isinstance(elt, ast.Name) and elt.id == gen.target.id:
-            return True
+            return src
         if (
             isinstance(elt, ast.Call)
             and len(elt.args) == 1
@@ -2315,9 +2354,9 @@ def _b863_classify_head(expr, names, tree):
                 or _b863_attr_is_os_identity_map(elt.func)
             )
         ):
-            return True
-        return False
-    return False
+            return src
+        return None
+    return None
 
 
 def _b863_flatten_fresh(expr, names, tree):
@@ -2364,7 +2403,7 @@ def _b863_classify_assign_value(value, names, tree):
     if fresh is not None:
         a0, rest, refs = fresh
         return [_B863Shape(True, a0, rest, refs)]
-    if _b863_classify_head(value, names, tree):
+    if _b863_classify_head(value, names, tree) is not None:
         return [_B863Shape(False, None, [], False)]
     if isinstance(value, ast.IfExp):
         left = _b863_classify_assign_value(value.body, names, tree)
@@ -2471,21 +2510,49 @@ def _b863_is_isinstance_str_bytes_guard(stmt, names, tree):
     return names_ok(t.args[1])
 
 
-def _b863_process_stmts(stmts, names, tree, shapes):
+def _b863_copy_shapes_of(shapes_of):
+    """A branch-local snapshot of `shapes_of` for the `ast.If` branch-merge
+    below -- fix-round-1 (C-135, 2026-09-23): copies each UNIQUE underlying
+    shapes list exactly once (keyed by `id()`), so two names that currently
+    share one list (true aliases) still share their own, independently
+    mutable copy of it inside the branch, while two names that have already
+    diverged keep their own separate copies too. A naive per-name copy would
+    silently re-fuse already-diverged aliases back into one list."""
+    memo: dict = {}
+    out = {}
+    for name, lst in shapes_of.items():
+        key = id(lst)
+        copied = memo.get(key)
+        if copied is None:
+            copied = [_B863Shape(sh.fresh, sh.a0, sh.content, sh.refs_callsite) for sh in lst]
+            memo[key] = copied
+        out[name] = copied
+    return out
+
+
+def _b863_process_stmts(stmts, names, tree, shapes_of):
     for stmt in stmts:
-        shapes = _b863_process_one(stmt, names, tree, shapes)
-    return shapes
+        shapes_of = _b863_process_one(stmt, names, tree, shapes_of)
+    return shapes_of
 
 
-def _b863_process_one(stmt, names, tree, shapes):
+def _b863_process_one(stmt, names, tree, shapes_of):
     """Classify one statement's effect on the tracked-name set `names`
-    (mutated in place as aliases are discovered) and the current `shapes`.
-    Raises `_B863OutOfDomain(("reason", stmt))` for anything outside the
-    recognised grammar -- every branch below either returns updated shapes or
-    raises; see the module comment above `_B863OutOfDomain` for how tier 2
-    and T1c each use the reason."""
+    (mutated in place as aliases are discovered) and the current
+    `shapes_of` -- a `dict[str, list[_B863Shape]]` giving each tracked name
+    its OWN shapes-list slot (fix-round-1, C-135, 2026-09-23; see the module
+    comment above `_B863OutOfDomain` for why a single shared list is
+    unsound). Two names share the SAME list object exactly when one was
+    created as a plain alias of the other and neither has since been
+    independently reassigned; `shapes_of[name] = shapes_of[name]` mutation
+    (`.add_content`) is therefore visible through every current alias, while
+    a full reassignment (`shapes_of[name] = new_list`) affects only that one
+    name going forward. Raises `_B863OutOfDomain(("reason", stmt))` for
+    anything outside the recognised grammar -- every branch below either
+    returns the updated `shapes_of` or raises; see the module comment above
+    `_B863OutOfDomain` for how tier 2 and T1c each use the reason."""
     if _b863_is_isinstance_str_bytes_guard(stmt, names, tree):
-        return _b863_process_stmts(stmt.orelse, names, tree, shapes)
+        return _b863_process_stmts(stmt.orelse, names, tree, shapes_of)
 
     if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
         tgt = stmt.targets[0]
@@ -2494,60 +2561,68 @@ def _b863_process_one(stmt, names, tree, shapes):
                 new_shapes = _b863_classify_assign_value(stmt.value, names, tree)
                 if new_shapes is None:
                     raise _B863OutOfDomain(("bad_reassign", stmt))
-                return new_shapes
-            if _b863_classify_head(stmt.value, names, tree):
+                # Replace ONLY this name's own slot with a brand-new list --
+                # any OTHER name that used to share the old list (a stale
+                # alias of the value `tgt.id` no longer holds) keeps its own
+                # reference to that OLD list, untouched (fix-round-1).
+                shapes_of[tgt.id] = new_shapes
+                return shapes_of
+            src_name = _b863_classify_head(stmt.value, names, tree)
+            if src_name is not None:
                 names.add(tgt.id)  # new alias of the SAME tracked value
-                return shapes
+                shapes_of[tgt.id] = shapes_of[src_name]  # share the SAME list -- true aliasing
+                return shapes_of
             # target is some OTHER, unrelated name -- the RHS is free to READ
             # a tracked name (e.g. `result = subprocess.run(cmd, ...)`,
             # `msg = f"{cmd}"`); only a genuine escape (bare inside a new
             # container, or forwarded to an in-file callee) is out of domain.
             if _b863_expr_escapes(stmt.value, names, tree):
                 raise _B863OutOfDomain(("escape_into_container", stmt))
-            return shapes
+            return shapes_of
         # target is Subscript/Attribute/Tuple/List -- any tracked-name touch
         # here (the base being stored into, or the value stored) is out of
         # domain (covers `P[:] = ...`, `P[0] = ...`, `obj.attr = P`, ...).
         if _names_in(tgt) & names or _names_in(stmt.value) & names:
             raise _B863OutOfDomain(("store_target", stmt))
-        return shapes
+        return shapes_of
 
     if isinstance(stmt, ast.AugAssign):
         if isinstance(stmt.target, ast.Name) and stmt.target.id in names and isinstance(stmt.op, ast.Add):
-            for sh in shapes:
+            for sh in shapes_of[stmt.target.id]:
                 sh.add_content(stmt.value)
-            return shapes
+            return shapes_of
         if _names_in(stmt.target) & names or _names_in(stmt.value) & names:
             raise _B863OutOfDomain(("augassign", stmt))
-        return shapes
+        return shapes_of
 
     if isinstance(stmt, ast.Delete):
         for t in stmt.targets:
             if _names_in(t) & names:
                 raise _B863OutOfDomain(("delete", stmt))
-        return shapes
+        return shapes_of
 
     if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
         call = stmt.value
         f = call.func
         if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in names:
             attr = f.attr
+            receiver_shapes = shapes_of[f.value.id]
             if attr == "append" and len(call.args) == 1 and not call.keywords:
-                for sh in shapes:
+                for sh in receiver_shapes:
                     sh.add_content(call.args[0])
-                return shapes
+                return shapes_of
             if attr == "extend" and len(call.args) == 1 and not call.keywords:
                 arg = call.args[0]
                 if isinstance(arg, (ast.List, ast.Tuple)) and not (
                     arg.elts and isinstance(arg.elts[0], ast.Starred)
                 ):
-                    for sh in shapes:
+                    for sh in receiver_shapes:
                         for e in arg.elts:
                             sh.add_content(e)
                 else:
-                    for sh in shapes:
+                    for sh in receiver_shapes:
                         sh.add_content(arg)
-                return shapes
+                return shapes_of
             if attr == "insert" and len(call.args) == 2:
                 lenarg = call.args[0]
                 if (
@@ -2559,12 +2634,12 @@ def _b863_process_one(stmt, names, tree, shapes):
                     and isinstance(lenarg.args[0], ast.Name)
                     and lenarg.args[0].id in names
                 ):
-                    for sh in shapes:
+                    for sh in receiver_shapes:
                         sh.add_content(call.args[1])
-                    return shapes
+                    return shapes_of
                 raise _B863OutOfDomain(("insert_not_len", stmt))
             if attr == "copy" and not call.args and not call.keywords:
-                return shapes  # bare, discarded -- a no-op
+                return shapes_of  # bare, discarded -- a no-op
             raise _B863OutOfDomain(("other_method", stmt))
         # unbound `list.<method>(nm, ...)` / `tuple.<method>(nm, ...)`.
         if (
@@ -2596,16 +2671,16 @@ def _b863_process_one(stmt, names, tree, shapes):
                 for n in ast.walk(tree)
             ):
                 raise _B863OutOfDomain(("in_file_callee", stmt))
-        return shapes
+        return shapes_of
 
     if isinstance(stmt, ast.If):
         # A branch-merge for a tracked name touched inside a plain conditional
         # (the isinstance guard is handled above): "branch taken" (`body`,
-        # processed on its own copy of names/shapes -- ordinary reads resolve
-        # to unchanged shapes via the very same statement grammar, and an
-        # actual reassignment produces new shapes exactly as it would
+        # processed on its own copy of names/shapes_of -- ordinary reads
+        # resolve to unchanged shapes via the very same statement grammar,
+        # and an actual reassignment produces new shapes exactly as it would
         # unconditionally) and "branch not taken" (`orelse`, or the ORIGINAL
-        # shapes unchanged when there is no `orelse`) are both kept as
+        # shapes_of unchanged when there is no `orelse`) are both kept as
         # possibilities, like an IfExp's two branches. A branch-local alias
         # does not propagate past the `if` (an accepted, unexercised scope
         # limit -- see deviations).
@@ -2614,36 +2689,36 @@ def _b863_process_one(stmt, names, tree, shapes):
             or any(_names_in(s) & names for s in stmt.body)
             or any(_names_in(s) & names for s in stmt.orelse)
         ):
-            return shapes
+            return shapes_of
         if _b863_expr_escapes(stmt.test, names, tree):
             raise _B863OutOfDomain(("conditional_escape", stmt))
-        # Cost cap: each independent conditional doubles the shape count.
-        # Past this cap, stop branching and fall back to conservative
-        # out-of-domain rather than let a pathological file with many
-        # independent `if`s reach an unbounded shape count -- the same
-        # "unresolvable/unresolved stays crit" discipline `_param_argv_
-        # call_sites` itself already uses for its own cost caps.
-        if len(shapes) * 2 > _B863_MAX_SHAPES:
+        # Cost cap: each independent conditional doubles the shape count of
+        # whichever currently-tracked name has the most shapes. Past this
+        # cap, stop branching and fall back to conservative out-of-domain
+        # rather than let a pathological file with many independent `if`s
+        # reach an unbounded shape count -- the same "unresolvable/
+        # unresolved stays crit" discipline `_param_argv_call_sites` itself
+        # already uses for its own cost caps.
+        max_shapes = max((len(shapes_of[n]) for n in names), default=1)
+        if max_shapes * 2 > _B863_MAX_SHAPES:
             raise _B863OutOfDomain(("too_many_branches", stmt))
-        body_shapes = _b863_process_stmts(
-            list(stmt.body), set(names),
-            tree, [_B863Shape(sh.fresh, sh.a0, sh.content, sh.refs_callsite) for sh in shapes],
+        body_shapes_of = _b863_process_stmts(
+            list(stmt.body), set(names), tree, _b863_copy_shapes_of(shapes_of),
         )
         if stmt.orelse:
-            orelse_shapes = _b863_process_stmts(
-                list(stmt.orelse), set(names),
-                tree, [_B863Shape(sh.fresh, sh.a0, sh.content, sh.refs_callsite) for sh in shapes],
+            orelse_shapes_of = _b863_process_stmts(
+                list(stmt.orelse), set(names), tree, _b863_copy_shapes_of(shapes_of),
             )
         else:
-            orelse_shapes = shapes
-        return body_shapes + orelse_shapes
+            orelse_shapes_of = shapes_of
+        return {n: body_shapes_of[n] + orelse_shapes_of[n] for n in names}
 
     if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
         # A nested closure: descend (it can still mutate a tracked name by
         # reference) unless its OWN signature rebinds that name.
         if names & _b863_fn_bound_names(stmt):
-            return shapes
-        return _b863_process_stmts(stmt.body, names, tree, shapes)
+            return shapes_of
+        return _b863_process_stmts(stmt.body, names, tree, shapes_of)
 
     if isinstance(stmt, (ast.For, ast.AsyncFor)):
         # Iterating OVER a tracked name (`for a in cmd:`) or its `iter`
@@ -2657,18 +2732,18 @@ def _b863_process_one(stmt, names, tree, shapes):
         # used as the iterable) still refuses.
         if _b863_expr_escapes(stmt.iter, names, tree):
             raise _B863OutOfDomain(("loop_touch", stmt))
-        return _b863_process_stmts(stmt.body + stmt.orelse, names, tree, shapes)
+        return _b863_process_stmts(stmt.body + stmt.orelse, names, tree, shapes_of)
 
     if isinstance(stmt, ast.While):
         if _b863_expr_escapes(stmt.test, names, tree):
             raise _B863OutOfDomain(("loop_touch", stmt))
-        return _b863_process_stmts(stmt.body + stmt.orelse, names, tree, shapes)
+        return _b863_process_stmts(stmt.body + stmt.orelse, names, tree, shapes_of)
 
     if isinstance(stmt, (ast.With, ast.AsyncWith)):
         for item in stmt.items:
             if _b863_expr_escapes(item.context_expr, names, tree):
                 raise _B863OutOfDomain(("with_touch", stmt))
-        return _b863_process_stmts(stmt.body, names, tree, shapes)
+        return _b863_process_stmts(stmt.body, names, tree, shapes_of)
 
     if isinstance(stmt, ast.Try):
         # The try/except/else/finally bodies get the full statement grammar
@@ -2681,14 +2756,14 @@ def _b863_process_one(stmt, names, tree, shapes):
         # file`, an ngs-analysis skill's `run_probe`): both wrap their own
         # sink call in exactly this shape and were false-positive-flagged by
         # the earlier, blunt "any touch inside try -> out of domain" rule.
-        shapes = _b863_process_stmts(stmt.body, names, tree, shapes)
+        shapes_of = _b863_process_stmts(stmt.body, names, tree, shapes_of)
         for h in stmt.handlers:
             if h.type is not None and _b863_expr_escapes(h.type, names, tree):
                 raise _B863OutOfDomain(("try_touch", stmt))
-            shapes = _b863_process_stmts(h.body, names, tree, shapes)
-        shapes = _b863_process_stmts(stmt.orelse, names, tree, shapes)
-        shapes = _b863_process_stmts(stmt.finalbody, names, tree, shapes)
-        return shapes
+            shapes_of = _b863_process_stmts(h.body, names, tree, shapes_of)
+        shapes_of = _b863_process_stmts(stmt.orelse, names, tree, shapes_of)
+        shapes_of = _b863_process_stmts(stmt.finalbody, names, tree, shapes_of)
+        return shapes_of
 
     if isinstance(stmt, ast.Return):
         # A returned container (`return {"cmd": cmd, ...}`) is not an escape
@@ -2696,7 +2771,7 @@ def _b863_process_one(stmt, names, tree, shapes):
         # is (`return poison(cmd)`).
         if _b863_expr_escapes(stmt, names, tree, containers_are_escape=False):
             raise _B863OutOfDomain(("escape_into_container", stmt))
-        return shapes
+        return shapes_of
 
     if isinstance(stmt, (ast.Raise, ast.Assert)):
         # Read-only positions (an exception message, an assertion condition/
@@ -2705,19 +2780,19 @@ def _b863_process_one(stmt, names, tree, shapes):
         # (`raise RuntimeError(f"... {cmd} ...")`).
         if _b863_expr_escapes(stmt, names, tree):
             raise _B863OutOfDomain(("escape_into_container", stmt))
-        return shapes
+        return shapes_of
 
     if isinstance(stmt, ast.ClassDef):
         if _names_in(stmt) & names:
             raise _B863OutOfDomain(("classdef_touch", stmt))
-        return shapes
+        return shapes_of
 
     # Any statement kind not explicitly handled above: read-only mentions are
     # fine (the same `_b863_expr_escapes` standard as Assign-to-other-target
     # and Raise/Assert), a genuine escape still is not.
     if _b863_expr_escapes(stmt, names, tree):
         raise _B863OutOfDomain(("unhandled_stmt", stmt))
-    return shapes
+    return shapes_of
 
 
 def _b863_collect_channels(fn, param_name, tree):
@@ -2731,12 +2806,15 @@ def _b863_collect_channels(fn, param_name, tree):
     )
     if not touched_anywhere:
         return "none", None, names
-    shapes = [_B863Shape(False, None, [], False)]
+    shapes_of = {param_name: [_B863Shape(False, None, [], False)]}
     try:
-        shapes = _b863_process_stmts(fn.body, names, tree, shapes)
+        shapes_of = _b863_process_stmts(fn.body, names, tree, shapes_of)
     except _B863OutOfDomain as e:
         return "out_of_domain", e.args[0], names
-    return "shapes", shapes, names
+    # `param_name`'s OWN slot specifically -- fix-round-1 (C-135, 2026-09-23):
+    # a sibling alias diverging (its own reassignment) no longer overwrites
+    # or contaminates this one; see `_b863_process_one`'s module comment.
+    return "shapes", shapes_of[param_name], names
 
 
 def _b863_resolve_call_site(expr, tree, owner_map):
@@ -2765,11 +2843,12 @@ def _b863_resolve_call_site(expr, tree, owner_map):
                 stmts = stmts[:i]
                 break
         names = {expr.id}
-        shapes = [_B863Shape(False, None, [], False)]
+        shapes_of = {expr.id: [_B863Shape(False, None, [], False)]}
         try:
-            shapes = _b863_process_stmts(stmts, names, tree, shapes)
+            shapes_of = _b863_process_stmts(stmts, names, tree, shapes_of)
         except _B863OutOfDomain:
             return "unresolvable", None
+        shapes = shapes_of[expr.id]
         if not shapes or any(not sh.fresh or sh.refs_callsite for sh in shapes):
             return "unresolvable", None
         # A conditional (`if flag: name.append(x)`) branches `shapes` even
@@ -2851,7 +2930,8 @@ def _b863_t1c_no_escape(fn, names, tree):
     OTHER out-of-domain reason (a position-unsafe mutation, say) says nothing
     about content-independence, and tier 2 is what catches those."""
     try:
-        _b863_process_stmts(list(fn.body), set(names), tree, [_B863Shape(False, None, [], False)])
+        seed = {n: [_B863Shape(False, None, [], False)] for n in names}
+        _b863_process_stmts(list(fn.body), set(names), tree, seed)
     except _B863OutOfDomain as e:
         return e.args[0][0] not in _B863_T1C_ESCAPE_REASONS
     return True

@@ -907,6 +907,50 @@ def test_mech_nonconvergence_default_path_is_unaffected():
 
 
 # ---------------------------------------------------------------------------
+# FR1 -- fix round 1 (C-135, 2026-09-23) against fix/b-863 @ 338e9f5a: the
+# tier-2 channel walk shared ONE `shapes` list across every name `names`
+# considered an alias, so once two tracked names DIVERGED (one of them
+# reassigned to a genuinely new value while the other kept the old one), a
+# later mutation of either name got attributed to the wrong object. Fixed by
+# giving every tracked name its own shapes-list slot in a dict, sharing the
+# SAME list only between names that are still aliases of one another (see
+# `_b863_process_one`'s and `_B863Shape`'s module comments). Both cases below
+# are mutation-checked: reverting `clawseccheck/skillast.py` to the shared-
+# list model makes each go red (see `b-863-fix1.md` in the wave-20 scratch
+# directory for the mutation-check transcript).
+# ---------------------------------------------------------------------------
+
+def test_fr1_side_a_stale_alias_mutation_after_rebind_is_info():
+    """Reviewer's side-A repro (BLOCKER, introduced by 338e9f5a): `x = args`
+    aliases `x` to the wrapper's own vararg tuple-as-list; `args` is then
+    REBOUND to a fresh, fully-literal `["sh", "-c"]` (untainted on its own);
+    `x` still refers to the OLD (pre-rebind) list, so `x.append(payload)`
+    cannot reach the value `args` actually holds at the sink -- provably
+    inert. The pre-fix shared-list model folded `x`'s mutation onto the NEW
+    `args` value anyway (wrongly reporting TT5_CMD_INJECTION/crit); the call
+    site is fully literal (`sh("git", "status")`), so this must resolve
+    exactly like `INLINE` / `O1` -- info, never crit."""
+    src = _va(["args = list(args)", "x = args", "args = ['sh', '-c']", "x.append(payload)"])
+    _assert_info(src)
+
+
+def test_fr1_side_b_tracked_param_mutation_after_sibling_alias_rebind_is_crit():
+    """Reviewer's side-B repro (lost detection): `x = args` aliases `x` to
+    `args`; `x` is then rebound to an UNRELATED fresh literal (`["ls"]`,
+    never used again); `args` itself is untouched by that rebind and is then
+    genuinely mutated (`args.append(payload)`) before reaching the sink. The
+    call site (`sh("sh", "-c")`) makes the real runtime value of `args` at
+    the sink `["sh", "-c", payload]` -- genuine shell command injection. The
+    pre-fix shared-list model let `x`'s unrelated rebind clobber the ONE
+    shared list that was supposed to still represent `args`'s own untouched
+    identity, so the later `args.append(payload)` landed on the wrong
+    (fresh, non-shell `["ls"]`) shape and TT5 never fired at crit at all
+    (info instead of the correct TT5_CMD_INJECTION/crit)."""
+    src = _va(["args = list(args)", "x = args", "x = ['ls']", "args.append(payload)"], call='sh("sh", "-c")')
+    _assert_crit(src)
+
+
+# ---------------------------------------------------------------------------
 # Parametrized sanity sweep -- every case above, run twice more (with the
 # zero-based `sink=` and `sig=` combinations already covered) to confirm
 # `analyze_python` never raises on any of them, catching a crash a narrower
@@ -920,6 +964,8 @@ _ALL_MATRIX_SOURCES = [
     _va(["args = os.environ['P']"], sink="subprocess.check_output(list(args))"),
     _np(["cmd = list(cmd)", "cmd.extend(['sh', '-c', payload])"]),
     _va(["args = ['sh', '-c', payload]"]),
+    _va(["args = list(args)", "x = args", "args = ['sh', '-c']", "x.append(payload)"]),
+    _va(["args = list(args)", "x = args", "x = ['ls']", "args.append(payload)"], call='sh("sh", "-c")'),
 ]
 
 
