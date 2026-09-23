@@ -1330,6 +1330,21 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
     ``("ro", "none")`` -- see that helper's docstring for the dist grounding). Any
     other shape -- including absent/unparseable containment keys -- is NOT treated as
     contained and the chain keeps firing.
+
+    B-737: keyed on B55's STATUS alone, deliberately never on how B55 reached it --
+    there is no (and must never be a) guard here that reads B55's evidence text or
+    distinguishes a WARN backed by an explicit, operator-declared grant from one
+    B55 gives OpenClaw's own PERMISSIVE DEFAULT (no policy layer decided the scope at
+    all; see ``checks/_capability.py``'s ``_fs_scope_grants``/``toolgrant.
+    resolved_scopes``). A default-provenance grant is the SAME vendor state as an
+    id'd agent whose only ``tools`` key is settings noise (that shape already armed
+    this chain before B-737, via ``_b68_fs_tools_granted``'s truthiness test) --
+    arming this chain on it is consistent, not a widening for its own sake. An
+    evidence-string guard here was tried and reverted once already: it made three
+    configs that are the identical vendor state (an id'd agent with an inert
+    ``tools`` block, the same agent with no id, and no ``agents`` key at all) arm
+    RISK-12 on the first and not the other two, purely because of which code path
+    happened to produce the WARN.
     """
     if _finding_status(findings, "B55") not in (FAIL, WARN):
         return None

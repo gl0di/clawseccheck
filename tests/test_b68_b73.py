@@ -70,13 +70,21 @@ def test_b68_true_passes():
 
 def test_b68_fs_grants_unenumerable_unknown():
     # No tools.allow / gateway.tools.allow and no tools.profile: fs grants come from
-    # OpenClaw's runtime defaults, which static config cannot resolve. tools.fs.workspaceOnly
-    # defaults to FALSE, so claiming PASS here would be a fake clean verdict (GR#4).
+    # OpenClaw's runtime defaults, which static config cannot resolve BY THIS CHECK'S OWN
+    # allow/alsoAllow/profile model. tools.fs.workspaceOnly defaults to FALSE, so claiming
+    # PASS here would be a fake clean verdict (GR#4).
+    #
+    # CLAWSECCHECK-B-737: this used to stop at UNKNOWN because G1 (`_b68_fs_tools_granted`)
+    # is the only model this check consulted. It now falls through to `_fs_scope_grants`,
+    # which resolves the same config through `toolgrant.resolved_scopes` -- no tools policy
+    # is declared anywhere, so the single default-agent scope has `provenance="default"`,
+    # and OpenClaw's own permissive default grants every fs tool there. UNKNOWN would now
+    # be the fake-ignorance verdict, not the honest one.
     f = check_exec_applypatch_workspace(
         _ctx({"tools": {"exec": {"applyPatch": {"workspaceOnly": True}}}})
     )
-    assert f.status == UNKNOWN
-    assert "not" in f.detail and "enumerable" in f.detail
+    assert f.status == WARN, f.detail
+    assert any("permissive default" in e or "provenance=default" in e for e in f.evidence)
 
 
 def test_b68_unset_passes():

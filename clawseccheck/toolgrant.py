@@ -435,23 +435,16 @@ def _agent_tools(cfg: dict, scope):
     return tools
 
 
-def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE) -> bool:
-    """Is ``tool`` granted at ``scope`` (``GLOBAL_SCOPE``, or a declared agent id) by ``cfg``?
+def _policies(cfg: dict, scope=GLOBAL_SCOPE) -> list:
+    """The exact ``[profilePolicy, globalPolicy, agentPolicy]`` list
+    ``resolveConfiguredToolPolicies`` builds and ANDs together — split out of ``granted()``
+    (B-737) so ``policy_layers()`` can ask which of these three layers actually constrains
+    anything, without a second, driftable copy of the resolution order. ``granted()``'s
+    answers are unchanged: it is now ``all(_policy_allows(name, p) for p in _policies(...))``,
+    the same computation as before, just named.
 
-    The port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` — see the
-    module docstring for the resolution order, the grounded tables, and what is
-    deliberately not modelled (sandboxMode, extraPolicies).
-
-    ``scope`` disambiguates by TYPE, not by a caller-supplied flag (C-561):
-    pass the ``GLOBAL_SCOPE`` sentinel for the global scope, or any string (a roster id)
-    otherwise — including the string ``"global"``, which the vendor treats as an ordinary
-    agent id, never the global scope (executed: an agent with that id resolves exactly like
-    one named ``w``). See ``GLOBAL_SCOPE``'s own docstring (the ``_GlobalScope`` class) for
-    why this replaced an earlier ``agent: bool`` keyword a caller could forget to pass.
-    """
-    if not isinstance(cfg, dict) or not cfg:
-        return False
-
+    Caller's responsibility: ``cfg`` must already be a non-empty ``dict`` (``granted()`` and
+    ``policy_layers()`` both guard this before calling in)."""
     agent_tools = _agent_tools(cfg, scope)
     global_tools = cfg.get("tools")
 
@@ -473,6 +466,187 @@ def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE) -> bool:
     agent_policy = _pick_policy(agent_tools)
     if agent_policy:
         policies.append(agent_policy)
+    return policies
 
+
+def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE) -> bool:
+    """Is ``tool`` granted at ``scope`` (``GLOBAL_SCOPE``, or a declared agent id) by ``cfg``?
+
+    The port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` — see the
+    module docstring for the resolution order, the grounded tables, and what is
+    deliberately not modelled (sandboxMode, extraPolicies).
+
+    ``scope`` disambiguates by TYPE, not by a caller-supplied flag (C-561):
+    pass the ``GLOBAL_SCOPE`` sentinel for the global scope, or any string (a roster id)
+    otherwise — including the string ``"global"``, which the vendor treats as an ordinary
+    agent id, never the global scope (executed: an agent with that id resolves exactly like
+    one named ``w``). See ``GLOBAL_SCOPE``'s own docstring (the ``_GlobalScope`` class) for
+    why this replaced an earlier ``agent: bool`` keyword a caller could forget to pass.
+    """
+    if not isinstance(cfg, dict) or not cfg:
+        return False
     name = _normalize_tool_name(tool)
-    return all(_policy_allows(name, policy) for policy in policies)
+    return all(_policy_allows(name, policy) for policy in _policies(cfg, scope))
+
+
+# Layers `resolved_scopes()`/`checks/_capability.py` cannot resolve and that CAN restrict.
+# Their presence is treated as possible narrowing -- the quiet direction: it can cost a
+# finding (an UNKNOWN in place of a WARN), never invent one. Moved here from `toolpolicy.py`
+# by B-737 so there is one source of truth; `toolpolicy._OPAQUE_NARROWING_KEYS` is now an
+# alias of this tuple, not a second copy that can drift out of sync with it (the drift that
+# broke round 3 of B-737: `toolpolicy` already treated `byProvider`/`toolsBySender` as
+# possible narrowing, but the checks-layer "declared" vocabulary being fixed here did not).
+OPAQUE_NARROWING_KEYS = ("byProvider", "toolsBySender")
+
+# The three list-valued policy keys `_pick_policy`/`_policy_allows` read. Used by
+# `_block_well_formed` to reject a config whose `allow`/`alsoAllow`/`deny` is present but not
+# actually a list (`"write"`, `{}`, ...) -- a shape `granted()` itself tolerates silently (via
+# `isinstance(..., list)` guards that just drop it), but one `resolved_scopes()` must not
+# treat as "no policy" the same way it treats a genuinely absent key.
+_POLICY_LIST_KEYS = ("allow", "alsoAllow", "deny")
+
+
+def policy_layers(cfg: dict, scope=GLOBAL_SCOPE) -> list:
+    """The layers of ``_policies(cfg, scope)`` where a real, non-empty ``allow`` or ``deny``
+    value constrains anything -- B-737's provenance test, over the SAME three-layer
+    resolution order ``granted()`` ANDs together, never a fourth vocabulary of its own.
+
+    An ``allow: []`` or a ``deny: []`` is a no-op in ``_policy_allows`` (an empty allow means
+    "allow everything"; an empty deny denies nothing), so it is not counted as a layer here
+    either -- the semantic test is "would the vendor answer differently with this layer
+    removed?", not "is a key present". A profile policy built from ``alsoAllow`` alone (no
+    ``profile`` set) still counts when its merged allow list is non-empty.
+
+    Provenance is exactly "default" (``resolved_scopes``) when this list comes back empty:
+    the vendor would resolve identically with every operator-written tool-policy input
+    stripped out, so the grant this scope carries is OpenClaw's own permissive default, not
+    anything the operator declared.
+    """
+    if not isinstance(cfg, dict) or not cfg:
+        return []
+    return [
+        policy for policy in _policies(cfg, scope)
+        if _expand_groups(policy.get("allow")) or _expand_groups(policy.get("deny"))
+    ]
+
+
+def _block_well_formed(tools) -> bool:
+    """Is ``tools`` (a global, per-agent, or ``agents.defaults`` tools block) a shape
+    ``resolved_scopes()`` can reason about at all? A schema-valid config can never fail this
+    (``ToolProfileSchema`` is an enum and ``allow``/``alsoAllow``/``deny`` are arrays), so a
+    failure here means the value is unparseable by the vendor too -- the quiet UNKNOWN
+    direction, not a guess at what the operator meant."""
+    if not isinstance(tools, dict):
+        return False
+    for key in _POLICY_LIST_KEYS:
+        if key in tools and not isinstance(tools[key], list):
+            return False
+    if "profile" in tools and tools["profile"] not in _CORE_TOOL_PROFILES:
+        return False
+    return True
+
+
+class ScopeResolution:
+    """One scope the vendor actually resolves a tool policy for, plus B-737's provenance and
+    opaqueness verdicts about it. Built only by ``resolved_scopes()``.
+
+    ``label`` -- a short, human-readable name for wording a finding ("main", "ops", "default
+    agent"); ``scope`` -- the value to pass as ``toolgrant.granted(cfg, tool, scope)``'s
+    ``scope`` argument for THIS row (``GLOBAL_SCOPE``, a raw roster id, or ``""`` for an
+    id-less ``agents.list`` element -- see ``resolved_scopes``); ``own_tools`` -- this scope's
+    own ``tools`` block (or ``None``); ``entry`` -- the raw roster entry dict (``{}`` for the
+    synthesised default agent); ``provenance`` -- ``"default"`` or ``"declared"``
+    (``policy_layers(cfg, scope)`` non-empty); ``opaque`` -- true when the global or this
+    scope's own tools carry an ``OPAQUE_NARROWING_KEYS`` key."""
+
+    __slots__ = ("label", "scope", "own_tools", "entry", "provenance", "opaque")
+
+    def __init__(self, label, scope, own_tools, entry, provenance, opaque):
+        self.label = label
+        self.scope = scope
+        self.own_tools = own_tools
+        self.entry = entry
+        self.provenance = provenance
+        self.opaque = opaque
+
+    def __repr__(self) -> str:
+        return f"ScopeResolution({self.label!r}, provenance={self.provenance!r}, opaque={self.opaque!r})"
+
+
+def resolved_scopes(cfg: dict) -> "list[ScopeResolution] | None":
+    """Every scope the vendor's resolver actually resolves a tool policy for, with B-737's
+    provenance (``policy_layers``) and opaqueness (``OPAQUE_NARROWING_KEYS``) verdicts already
+    attached -- the single place ``checks/_capability.py``'s not-enumerable B55/B68 branches
+    ask "does *anything* the operator wrote decide this scope?" instead of each maintaining
+    its own syntactic "declared" vocabulary (the bug class B-737 closes; see the module's
+    ``toolgrant.py`` docstring's sibling in ``checks/_capability.py`` for the history).
+
+    **Scope set = what the vendor resolves**, never an invented one:
+
+    * A non-empty ``agent_roster(cfg)`` -- one scope per roster agent, queried by its raw id,
+      or by ``""`` for an id-less ``agents.list`` element (``_agent_entry_tools`` normalises
+      that to ``"main"`` and self-matches it, exactly as ``_agent_tools`` does for
+      ``granted()``). ``GLOBAL_SCOPE`` is never included here: a session naming no explicit
+      agent resolves to the DEFAULT roster agent (``resolveEffectiveToolPolicy``'s
+      ``sessionAgentId``), not to a policy-free global scope.
+    * An empty roster, or no roster key at all -- a single ``GLOBAL_SCOPE`` scope, whose own
+      tools are ``agents.defaults.tools`` only when ``not _has_agent_roster(cfg)`` (matching
+      ``_agent_tools`` exactly: the moment a roster key exists, even empty,
+      ``agents.defaults.tools`` is dead weight).
+
+    Returns ``None`` -- the caller keeps its base UNKNOWN, never a guess -- for any of:
+
+    * ``cfg`` is not a non-empty ``dict`` (matches ``granted()``'s own deliberate divergence);
+    * the global ``tools`` block, an agent's own ``tools`` block, or (with no roster)
+      ``agents.defaults.tools`` is present but not a well-formed policy block
+      (``_block_well_formed``: not a mapping, a list/allow/deny key that isn't a list, or a
+      ``profile`` string outside ``_CORE_TOOL_PROFILES``);
+    * two roster agents normalise (``_normalize_agent_id``) to the same id -- the vendor takes
+      the FIRST match and silently shadows the second, so which policy governs is ambiguous;
+      the quiet direction is UNKNOWN, not a guess at which one the operator meant.
+
+    A scope this function DOES return may still be **opaque** (a ``byProvider``/
+    ``toolsBySender`` layer neither this module nor ``toolgrant.granted`` models) -- callers
+    must skip those rows rather than treat their ``granted()`` answer as ground truth; this
+    function only marks them, it does not filter them out, so a caller that wants a strict
+    per-scope answer set (``checks/_capability.py``'s ``_fs_scope_grants``) does that itself.
+    """
+    if not isinstance(cfg, dict) or not cfg:
+        return None
+    if "tools" in cfg and not _block_well_formed(cfg["tools"]):
+        return None
+    global_tools = cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {}
+    global_opaque = any(key in global_tools for key in OPAQUE_NARROWING_KEYS)
+
+    roster = agent_roster(cfg)
+    rows = []
+    if roster:
+        seen_ids = set()
+        for agent in roster:
+            if not isinstance(agent.entry, dict):
+                return None
+            raw_id = agent.id if isinstance(agent.id, str) else ""
+            normalized_id = _normalize_agent_id(raw_id)
+            if normalized_id in seen_ids:
+                return None
+            seen_ids.add(normalized_id)
+            own_tools = agent.entry.get("tools")
+            if "tools" in agent.entry and not _block_well_formed(own_tools):
+                return None
+            rows.append((normalized_id, raw_id, own_tools, agent.entry))
+    else:
+        own_tools = None
+        if not _has_agent_roster(cfg):
+            own_tools = dig(cfg, "agents.defaults.tools")
+            if own_tools is not None and not _block_well_formed(own_tools):
+                return None
+        rows.append(("default agent", GLOBAL_SCOPE, own_tools, {}))
+
+    out = []
+    for label, scope, own_tools, entry in rows:
+        opaque = global_opaque or (
+            isinstance(own_tools, dict) and any(key in own_tools for key in OPAQUE_NARROWING_KEYS)
+        )
+        provenance = "declared" if policy_layers(cfg, scope) else "default"
+        out.append(ScopeResolution(label, scope, own_tools, entry, provenance, opaque))
+    return out
