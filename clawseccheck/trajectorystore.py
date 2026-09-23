@@ -1410,19 +1410,38 @@ def read_compiled_tool_descriptions(
        processed ONE DATABASE AT A TIME (never split) -- each one gets
        ``min(prior_bytes + remaining, max_content_bytes_per_db)``, i.e. as much of
        whatever is STILL in the shared pool as it can use, up to its own ceiling,
-       before the next candidate's turn. Zero-content databases (nothing accepted at
-       all yet, in the floor pass or either round) are drained FIRST, ahead of ones
-       that already hold partial content, so a database left worse-off is served first
-       when the pool cannot cover everyone; each group is otherwise processed in
-       stable order. This guarantees real progress on every call where the aggregate
-       is positive and at least one candidate still has ceiling headroom -- a database
-       still starved after the drain genuinely had a newest row bigger than whatever
-       budget was left by its own turn, so "the budget was already spent" becomes
-       accurate to within one row's worth, not the structural falsehood a fixed
-       two-round design could produce. (Round 2's own candidate collection, above, is
-       no longer restricted to ``round_num == 1`` -- a candidate still hungry AFTER
-       round 2 must also be tracked so the drain can find it; the round LOOP itself
-       still only ever runs two rounds regardless.)
+       before the next candidate's turn. This guarantees real progress on every call
+       where the aggregate is positive and at least one candidate still has ceiling
+       headroom -- a database still starved after the drain genuinely had a newest
+       row bigger than whatever budget was left by its own turn, so "the budget was
+       already spent" becomes accurate to within one row's worth, not the structural
+       falsehood a fixed two-round design could produce. (Round 2's own candidate
+       collection, above, is no longer restricted to ``round_num == 1`` -- a candidate
+       still hungry AFTER round 2 must also be tracked so the drain can find it; the
+       round LOOP itself still only ever runs two rounds regardless.)
+
+       **B-852 round 8** -- round 7's own drain ORDER was itself exploitable. Round 7
+       drained zero-content databases (nothing accepted yet, in the floor pass or
+       either round) FIRST, ahead of ones that already hold partial content, on the
+       theory that a database left worse-off should be served first when the pool
+       cannot cover everyone. But an attacker can plant many decoy databases that each
+       hold one oversized-but-cheap row -- so every decoy always lands in the
+       zero-content group, never satisfied by an equal share -- and have the drain
+       exhaust its entire remaining budget on those decoys before it ever reaches a
+       database that already PROVED (via a successful round 1/2 read) it holds real
+       content and might hold a poisoned row just beyond what those rounds read; that
+       victim is not even flagged ``dbs_budget_starved``, it reads as ordinary
+       ``dbs_read`` + ``truncated``, making this harder to notice than round 7's own
+       bug. Simply reversing the order (partial-content first) is not adversary-proof
+       either -- an attacker who also controls decoy CONTENT can give every decoy a
+       small nonzero first row too, so they land in whichever group drains first
+       regardless of which one that is. Round 8 instead drains in ``cum_bytes``
+       DESCENDING order -- the candidate with the MOST confirmed content goes first --
+       which is self-limiting: to sit at the front of the drain, an attacker's decoy
+       must spend real round-1/2 budget making its own content genuinely larger than
+       the victim's, the exact same budget the victim itself competed for, so there is
+       no way to game the ordering without paying the real cost. Ties (including the
+       common all-zero case) keep the existing stable ``round_dbs`` order.
 
        A database in group (b) that ends up in ``meta["dbs_budget_starved"]`` is NOT
        necessarily one that was never opened: two distinct cases both land there --
@@ -1652,21 +1671,35 @@ def read_compiled_tool_descriptions(
         # TIME: each one drains as much of whatever is STILL in the pool as it can
         # use (up to its own per-database ceiling) before the NEXT candidate's turn
         # -- guaranteeing real per-call progress instead of a share that can
-        # mathematically never grow. Zero-content databases (`cum_bytes` still 0 --
-        # nothing accepted at all yet, in the floor pass or either round) are
-        # drained FIRST, ahead of ones that already hold partial content, so a
-        # database left worse-off is preferred when the pool cannot cover everyone;
-        # the two groups are each otherwise processed in their existing (stable)
-        # order. A database still starved after the drain genuinely had a newest
-        # row bigger than whatever budget was left by its own turn -- "the budget
-        # was already spent" becomes accurate to within one row's worth, rather than
-        # the structural falsehood a fixed two-round design could produce (see
-        # `checks/_mcp.py`'s disclosure text, reworded this same round).
+        # mathematically never grow. B-852 round 8: drained in `cum_bytes`
+        # DESCENDING order -- the candidate that already holds the MOST confirmed
+        # content (from the floor pass or either round) goes FIRST, not the
+        # zero-content ones. A prior design drained zero-content candidates first
+        # on the theory that "worse-off first" is fairer, but that ordering is
+        # exploitable: an attacker can plant many decoy databases that each hold
+        # one oversized-but-cheap row (so every decoy lands in the zero-content
+        # group, never satisfied by an equal share) and have the drain exhaust
+        # the entire remaining budget on those decoys before it ever reaches a
+        # database that already PROVED it holds real content and might hold a
+        # poisoned row just beyond what rounds 1/2 read -- and that victim isn't
+        # even flagged `dbs_budget_starved`, it reads as ordinary
+        # `dbs_read`+`truncated`. Sorting by `cum_bytes` descending is
+        # self-limiting against that: to sit at the front of the drain, an
+        # attacker's decoy now has to spend real round-1/2 budget making its own
+        # content genuinely larger than the victim's -- the exact same budget the
+        # victim itself competed for, so there is no way to game the ordering
+        # without paying the real cost. Ties (including the common all-zero case)
+        # keep the existing (stable) `round_dbs` order -- `sorted` is stable, so
+        # no separate tie-breaking logic is needed. A database still starved after
+        # the drain genuinely had a newest row bigger than whatever budget was
+        # left by its own turn -- "the budget was already spent" becomes accurate
+        # to within one row's worth, rather than the structural falsehood a fixed
+        # two-round design could produce (see `checks/_mcp.py`'s disclosure text,
+        # reworded this same round).
         # -------------------------------------------------------------------
         if round_dbs and remaining > 0:
-            zero_content = [d for d in round_dbs if cum_bytes.get(d, 0) == 0]
-            partial_content = [d for d in round_dbs if cum_bytes.get(d, 0) != 0]
-            for db_path in zero_content + partial_content:
+            drain_order = sorted(round_dbs, key=lambda d: -cum_bytes.get(d, 0))
+            for db_path in drain_order:
                 if remaining <= 0:
                     break
                 has_floor = db_path in floor_bytes_used

@@ -1909,6 +1909,148 @@ def test_a_database_unreadable_after_an_earlier_successful_read_is_dbs_read_not_
     assert meta["truncated"] is True
 
 
+# ---------------------------------------------------------------------------
+# B-852 round 8 -- a fresh independent review found round 7's own drain ORDER
+# itself exploitable: draining zero-content databases before ones that already
+# hold PARTIAL content lets an attacker plant many decoy databases that each hold
+# one oversized-but-cheap row (never satisfied by an equal share, so every decoy
+# always lands in the zero-content group) and have the drain exhaust the ENTIRE
+# remaining budget on those decoys before it ever reaches a database that already
+# PROVED it holds real content -- via a successful round 1/2 read -- and might hold
+# a poisoned row just beyond what those rounds read. `read_compiled_tool_
+# descriptions` now drains in `cum_bytes` DESCENDING order instead -- the candidate
+# with the MOST confirmed content goes first, which is self-limiting against
+# gaming (an attacker's decoy can only sit at the front by spending the same real
+# round-1/2 budget the victim itself competed for).
+# ---------------------------------------------------------------------------
+
+
+def test_drain_phase_orders_by_confirmed_content_not_by_zero_content_first(
+    monkeypatch,
+):
+    """Reproduces the round-8 shape: a "victim" database whose NEWEST row (highest
+    rowid, read FIRST under `ORDER BY rowid DESC`) is small enough that round 1
+    admits it -- so `cum_bytes > 0` for this database going into the drain -- while
+    its OLDER row (read LAST) is the poisoned one, sized the same as every decoy's
+    single row so neither equal-share round can ever admit it either. Alongside 10
+    "decoy" databases, each holding one oversized-but-cheap row that never fits an
+    equal share (so every decoy stays at `cum_bytes == 0`), and an aggregate budget
+    sized to fully drain 5 of those 10 decoys if drained first -- exactly enough to
+    starve the victim's poisoned row under a zero-content-first drain order, but
+    nowhere near enough to matter once the victim (with its already-confirmed
+    content) is drained first instead.
+
+    The victim's own name ("b_victim") sorts BEFORE every decoy ("c_decoy_NN") in
+    plain discovery/glob order -- deliberately, so reaching the poison cannot be
+    explained as a discovery-order artifact (a stale "drain in list order" fix would
+    also pass this if the victim merely happened to sort first): only draining by
+    `cum_bytes` descending -- never raw discovery order -- explains recovering it.
+    """
+    from clawseccheck import trajectorystore
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    monkeypatch.setattr(trajectorystore, "_MAX_SQLITE_DBS", 2)
+
+    home = _home()
+    for i in range(2):
+        _add_agent_db(
+            home, f"a_floor{i}", trajectory_rows=[(f"fs{i}", 0)], include_auth=False,
+        )
+
+    def _tool(name, description="d"):
+        return [{
+            "name": name, "description": description,
+            "parameters": {"type": "object", "properties": {}},
+        }]
+
+    def _padded(tools, pad):
+        ev = _compiled_event(tools)
+        ev["data"]["systemPrompt"] = "s" * pad
+        return ev
+
+    def _at_size(tools, target_size):
+        """Pad `tools`'s systemPrompt so the event's JSON length is EXACTLY
+        `target_size` -- lets differently-named/described tool entries (the
+        poisoned one and each uniquely-named decoy) still land at an identical
+        on-disk row size, which the drain-order math below depends on."""
+        ev = _padded(tools, 0)
+        base_len = len(json.dumps(ev))
+        assert target_size >= base_len, (target_size, base_len)
+        ev["data"]["systemPrompt"] = "s" * (target_size - base_len)
+        assert len(json.dumps(ev)) == target_size
+        return ev
+
+    poisoned = _padded(_tool("weather", "bad <!-- hidden -->"), 900)
+    benign_small = _padded(_tool("lookup"), 1)
+    row_size = len(json.dumps(poisoned))
+    small_size = len(json.dumps(benign_small))
+    assert small_size < row_size
+
+    # Victim: older row (inserted first -> lowest rowid -> read LAST) is the
+    # poisoned one; newer row (inserted last -> highest rowid -> read FIRST) is the
+    # small benign one that round 1 alone can admit.
+    _add_agent_db(
+        home, "b_victim",
+        trajectory_rows=[
+            ("victim_poisoned", 0, poisoned),
+            ("victim_benign", 0, benign_small),
+        ],
+        include_auth=False,
+    )
+
+    D = 10
+    for i in range(D):
+        decoy_event = _at_size(_tool(f"decoy_tool_{i:02d}"), row_size)
+        _add_agent_db(
+            home, f"c_decoy{i:02d}",
+            trajectory_rows=[(f"ds{i}", 0, decoy_event)],
+            include_auth=False,
+        )
+
+    # 11 depth candidates total (1 victim + 10 decoys). `share1` must admit the
+    # victim's small benign row but neither round can ever admit `row_size` --
+    # calibrated the same way round 7's own test calibrates its equal-share gap.
+    n_candidates = D + 1
+    share1 = (row_size * 55) // 100
+    budget = share1 * n_candidates
+    assert small_size < share1 < row_size, (small_size, share1, row_size)
+
+    # Round 1 charges the victim only its ACTUAL bytes read (`small_size`, not the
+    # nominal `share1`) -- every decoy makes zero progress (its single row is
+    # bigger than `share1`) -- so this is what the drain phase actually starts
+    # with. Round 2 recomputes its own share over this same `remaining`, over the
+    # same still-hungry 11 candidates; also confirm it stays below `row_size` so
+    # round 2 makes no further progress either (the exact round-7 "two equal-share
+    # rounds still aren't enough" gap, reused here to reach the drain phase in the
+    # first place).
+    remaining_after_round1 = budget - small_size
+    share2 = remaining_after_round1 // n_candidates
+    assert share2 < row_size, (share2, row_size)
+
+    # Sized to fully drain exactly 5 decoys (`5 * row_size`) plus a small leftover
+    # -- comfortably short of what the victim's poisoned row still needs
+    # (`row_size` more, on top of what it already has) once 5 decoys have eaten
+    # into it under a zero-content-first order, but comfortably enough to cover
+    # the victim outright if it is drained FIRST instead.
+    drain_remaining = remaining_after_round1
+    assert row_size * 5 < drain_remaining < row_size * 6, (drain_remaining, row_size)
+    leftover_after_5_decoys = drain_remaining - row_size * 5
+    assert leftover_after_5_decoys < row_size, (leftover_after_5_decoys, row_size)
+
+    tool_defs, meta = read_compiled_tool_descriptions(
+        home,
+        max_content_bytes_per_db=row_size * 20,
+        max_content_total_bytes=budget,
+    )
+
+    names = {d["name"] for d in tool_defs}
+    # The actual regression proof: the victim's poisoned description must be
+    # recovered even though 10 zero-content decoys compete for the same drain
+    # budget and would (under a zero-content-first order) exhaust it first.
+    assert "weather" in names, (names, meta)
+    assert meta["dbs_found"] == 2 + 1 + D
+
+
 def test_scan_sqlite_event_json_is_a_lazy_generator():
     """`_scan_sqlite_event_json` must not do ANY work (open the database, run the
     query) until it is actually iterated -- constructing the generator object alone

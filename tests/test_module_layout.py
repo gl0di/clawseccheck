@@ -61,15 +61,18 @@ _EXEMPT = {
     # (`tests/test_f187_trajectory_sqlite_corroborator.py`) pinning exact source-level
     # behavior (SQL executed, table names) that a split would need to re-verify
     # byte-for-byte, the same discipline I-022-R2 used for checks.py.
-    "trajectorystore.py": "~1,745 lines — SQLite-trajectory-container corroboration "
+    "trajectorystore.py": "~1,778 lines — SQLite-trajectory-container corroboration "
                           "(corroborate()) plus the B-811/B-852 event_json content "
                           "readers (read_compiled_tool_descriptions() and its streaming "
-                          "core). Over budget by 545 lines; B-852 round 7 (2026-09-23) "
+                          "core). Over budget by 578 lines; B-852 round 7 (2026-09-23) "
                           "added the sequential DRAIN phase, a cum_yielded-preservation "
                           "guard, a dbs_read/dbs_unreadable classification fix, and the "
                           "docstring explaining all three, +137 lines net on its own. "
-                          "Split candidate named above; tracked debt, not a design "
-                          "statement.",
+                          "Round 8 (2026-09-23) then fixed the drain's own ORDER "
+                          "(cum_bytes-descending instead of zero-content-first, closing "
+                          "an exploitable priority-inversion the drain's own ordering "
+                          "left open) and documented why, +33 lines net. Split candidate "
+                          "named above; tracked debt, not a design statement.",
     # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
     # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
     # into self_test_corroboration()/render_self_test_corroboration()/
