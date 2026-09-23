@@ -4815,6 +4815,28 @@ _CONTAINMENT_PURE_FUNCS = frozenset({
     "bz2.decompress", "bz2.compress", "lzma.decompress", "lzma.compress",
     "codecs.decode", "codecs.encode",
 })
+# B-850 round 3: functions that read HOST/ENVIRONMENT state -- their result is NOT
+# determined by their (possibly-literal) arguments alone, so a call to one of these
+# always stays 'runtime' regardless of what it's given. This is narrower than "every
+# resolvable call not in PURE_FUNCS": an ordinary deterministic transform of literal
+# arguments (`''.join(reversed('lit'))`, `bytes([...]).decode()`, `urllib.parse.
+# unquote('lit')`, `json.loads('lit')`, `operator.add('a', 'b')`, `textwrap.
+# dedent('lit')`, ...) is just as foldable-in-principle as the PURE_FUNCS decoders and
+# must stay 'static' (closing the false-ESCAPES-downgraded-to-WARN regression, D1-D8) --
+# only a call that reads something OUTSIDE its own arguments (the host OS, the clock,
+# a random source, ...) may legitimately vary at runtime. A resolvable call that takes
+# NO arguments at all is always treated the same way (an environment-probe shape, e.g.
+# `os.getcwd()`), whether or not it's separately listed here.
+_CONTAINMENT_IMPURE_CALLS = frozenset({
+    "platform.system", "platform.release", "platform.machine", "platform.version",
+    "platform.platform", "platform.node", "platform.processor", "platform.uname",
+    "platform.architecture", "os.getcwd", "os.getlogin", "os.urandom",
+    "time.time", "time.time_ns", "time.localtime", "time.gmtime", "time.perf_counter",
+    "time.monotonic", "datetime.datetime.now", "datetime.date.today",
+    "uuid.uuid4", "uuid.uuid1", "socket.gethostname", "socket.getfqdn",
+    "random.random", "random.randint", "random.choice", "random.randrange",
+    "random.choices", "random.sample", "getpass.getuser",
+})
 # Environment variables whose value is absolute by construction (a real filesystem
 # root the OS/shell sets up) -- a read of one of these is modelled as an absolute-path
 # SOURCE, not an ordinary runtime unknown, so `os.path.join(here, os.environ['HOME'],
@@ -4824,13 +4846,11 @@ _CONTAINMENT_ABS_ENV_VARS = frozenset({
 })
 _ContainmentDef = namedtuple("_ContainmentDef", "kind node extra scope")
 
-# B-850 round 2: fail-closed namespace/monkeypatch guard. A skill that rebinds
+# B-850 round 2/3: fail-closed namespace/monkeypatch guard. A skill that rebinds
 # `__file__`, reaches into `globals`/`vars`/`locals`/`setattr`/`delattr`/`__dict__`/
 # `__builtins__`/`sys.modules`/`__code__`/`__defaults__`/`__kwdefaults__`/`__globals__`,
 # reassigns one of the trusted path primitives this very recognizer trusts (`os.path.
-# join`, `dirname`, `builtins.open`, ... -- regardless of the base object, so
-# `os.path.join = ...`, `builtins.open = ...`, and an ALIASED base like
-# `m = sys; m._MEIPASS = ...` all trip it), does `import *`, or calls `exec`/`eval` on a
+# join`, `dirname`, `builtins.open`, ...), does `import *`, or calls `exec`/`eval` on a
 # string literal, has a namespace the static analysis cannot trust at all -- every
 # other recognizer decision in this module assumes `__file__`/`os.path.*`/`sys.*` mean
 # what they normally mean. Rather than chase each such primitive as its own bypass (six
@@ -4838,14 +4858,40 @@ _ContainmentDef = namedtuple("_ContainmentDef", "kind node extra scope")
 # the WHOLE file's verdict at NOT_ANCHORED -- never a silent exemption -- computed once
 # per `_ContainmentCtx` and consulted by `_containment_classify_decode`, the sole entry
 # point every public wrapper funnels through.
-_CONTAINMENT_UNSAFE_NAMES = frozenset({"globals", "vars", "locals", "setattr", "delattr"})
+#
+# B-850 round 3 (C-135 rejection of 2b4d6dc2): the guard used to match by NAME SPELLING
+# -- any Store/Del of an attribute spelled `join`/`open`/`path`/... regardless of the
+# base object, and a fixed handful of bare-Name spellings (`setattr`, `globals`, ...).
+# That is what a `self.path = p` / `setattr(self, k, v)` / `self.__dict__.update(kw)`
+# false-FAIL family looks like -- entirely ordinary code, no module in sight -- AND it
+# is bypassable by any spelling the six prior rounds didn't happen to enumerate
+# (`os.path.__setattr__(...)`, `sys.modules` under an alias, `exec(compile(...))`, ...).
+# The guard is now RESOLUTION-based: a Store/Del or a setattr-family mutation only
+# fires when its TARGET actually resolves -- through the engine's own import/alias
+# tracking, extended here to also chase plain reassignment aliasing (`m = sys`) -- to a
+# sensitive namespace (`_CONTAINMENT_SENSITIVE_MODULES`, a class pulled from one of
+# them, or a module reached dynamically via `sys.modules`/`importlib`/`__import__`
+# under any alias). `self`/an arbitrary local object never resolves to one of these, so
+# it never fires; `os.path`/`sys`/`builtins`/`pathlib`, however spelled or indirected,
+# always does.
+_CONTAINMENT_SENSITIVE_MODULES = ("os", "os.path", "sys", "builtins", "pathlib")
+_CONTAINMENT_NAMESPACE_CALL_NAMES = frozenset({"globals", "vars", "locals"})
+_CONTAINMENT_NAMESPACE_MUTATORS = frozenset({"update", "clear", "pop", "popitem", "setdefault"})
+_CONTAINMENT_MUTATOR_DUNDER_ATTRS = frozenset({
+    "__setattr__", "__delattr__", "__setitem__", "__delitem__",
+})
+_CONTAINMENT_MUTATOR_NAMES = frozenset({"setattr", "delattr"})
+# `__dict__` is gated on the base-sensitivity check below (round 3: `self.__dict__.
+# update(kw)` is ordinary code); the other four are never legitimately touched on ANY
+# object in benign skill code, so they stay unconditional.
 _CONTAINMENT_UNSAFE_DUNDER_ATTRS = frozenset({
-    "__dict__", "__code__", "__defaults__", "__kwdefaults__", "__globals__",
+    "__code__", "__defaults__", "__kwdefaults__", "__globals__",
 })
 _CONTAINMENT_TRUSTED_ATTRS = frozenset({
     "join", "dirname", "abspath", "realpath", "normpath", "split", "expanduser",
     "fspath", "getcwd", "listdir", "glob", "iglob", "rglob", "iterdir", "open",
-    "path", "_MEIPASS", "frozen",
+    "path", "_MEIPASS", "frozen", "__file__", "sep", "altsep", "curdir", "pardir",
+    "parent", "__truediv__", "str",
 })
 
 
@@ -4856,28 +4902,161 @@ def _containment_dunder_file_subscript_key(slice_node):
     return isinstance(s, ast.Constant) and s.value == "__file__"
 
 
-def _containment_fail_closed_reason(tree):
+def _containment_dotted_is_sensitive(d):
+    if d is None:
+        return False
+    return any(d == m or d.startswith(m + ".") for m in _CONTAINMENT_SENSITIVE_MODULES)
+
+
+def _containment_resolve_through_assigns(ctx, node, env, depth=0):
+    """Like `ctx.dotted()`, but also chases plain reassignment aliasing (`m = sys`) --
+    `ctx.dotted()` only trusts an `import`-kind reaching definition, so an aliased base
+    like `m = sys; m._MEIPASS = ...` would otherwise resolve to None (round 3 H9/H10
+    coverage, previously gotten for free by the spelling blocklist)."""
+    if depth > 8:
+        return None
+    if isinstance(node, ast.Name):
+        d = ctx.dotted(node, env)
+        if d is not None:
+            return d
+        if node.id in ("True", "False", "None"):
+            return None
+        if env is None:
+            env = _ContainmentEnv(ctx, ctx.scope_of(node))
+        try:
+            defs = _containment_lookup(node, env, frozenset())
+        except _ContainmentBudget:
+            return None
+        targets = set()
+        for dd, denv in defs:
+            if dd.kind != "assign" or dd.node is None:
+                return None
+            r = _containment_resolve_through_assigns(ctx, dd.node, denv, depth + 1)
+            if r is None:
+                return None
+            targets.add(r)
+        return targets.pop() if len(targets) == 1 else None
+    if isinstance(node, ast.Attribute):
+        base = _containment_resolve_through_assigns(ctx, node.value, env, depth + 1)
+        return f"{base}.{node.attr}" if base else None
+    return None
+
+
+def _containment_sensitive_base(ctx, node, env=None):
+    """True if *node* resolves -- through import-aliasing, plain reassignment
+    aliasing, or dynamic `sys.modules[...]`/`importlib.import_module(...)`/
+    `__import__(...)` access under any alias -- to a sensitive namespace this
+    recognizer trusts: an imported `os`/`os.path`/`sys`/`builtins`/`pathlib` module or
+    submodule, or a class pulled from one of them. Never true for a bare `self`/
+    instance attribute or an arbitrary local object (B-850 round 3)."""
+    if node is None:
+        return False
+    if _containment_dotted_is_sensitive(_containment_resolve_through_assigns(ctx, node, env)):
+        return True
+    if isinstance(node, ast.Subscript):
+        base_d = _containment_resolve_through_assigns(ctx, node.value, env)
+        if base_d == "sys.modules":
+            return True
+        return _containment_sensitive_base(ctx, node.value, env)
+    if isinstance(node, ast.Call):
+        fd = _containment_resolve_through_assigns(ctx, node.func, env)
+        if fd in ("importlib.import_module", "builtins.__import__"):
+            return True
+    return False
+
+
+def _containment_is_namespace_call(ctx, node, env=None):
+    """True if *node* is a call to `globals()`/`vars(...)`/`locals()` (any alias) --
+    used only to gate NAMESPACE MUTATION (subscript-store, `.update()`, ...): a
+    read-only `vars(x)`/`locals()` never fires the guard on its own (B-850 round 3)."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name) and func.id in _CONTAINMENT_NAMESPACE_CALL_NAMES:
+        return True
+    fd = _containment_resolve_through_assigns(ctx, func, env)
+    return fd in {"builtins.globals", "builtins.vars", "builtins.locals"}
+
+
+def _containment_mutator_targets(ctx, call, env=None):
+    """AST nodes to sensitivity-check for a setattr/delattr/`__setattr__`/
+    `__delattr__`/`__setitem__`/`__delitem__` call, however indirected (bound-style
+    `X.__setattr__(name, value)`, unbound-via-class `Class.__setattr__(target, name,
+    value)`, or indirected through `getattr(builtins, 'setattr')(...)`) -- every
+    plausible target slot is checked rather than resolving the bound-vs-unbound
+    ambiguity, since fail-closed only needs ONE of them to be sensitive (B-850 round 3,
+    closes the G1-G19 family without a per-spelling special case)."""
+    func = call.func
+    targets = []
+    if isinstance(func, ast.Attribute) and func.attr in _CONTAINMENT_MUTATOR_DUNDER_ATTRS:
+        targets.append(func.value)
+        if call.args:
+            targets.append(call.args[0])
+        return targets
+    fd = _containment_resolve_through_assigns(ctx, func, env)
+    if (isinstance(func, ast.Name) and func.id in _CONTAINMENT_MUTATOR_NAMES) or \
+            fd in {"builtins.setattr", "builtins.delattr"}:
+        if call.args:
+            targets.append(call.args[0])
+        return targets
+    if isinstance(func, ast.Call):
+        inner_fd = _containment_resolve_through_assigns(ctx, func.func, env)
+        indirect_getattr = (isinstance(func.func, ast.Name) and func.func.id == "getattr") \
+            or inner_fd == "builtins.getattr"
+        if indirect_getattr and len(func.args) >= 2 and isinstance(func.args[1], ast.Constant) \
+                and isinstance(func.args[1].value, str) \
+                and func.args[1].value in (_CONTAINMENT_MUTATOR_DUNDER_ATTRS | _CONTAINMENT_MUTATOR_NAMES):
+            if call.args:
+                targets.append(call.args[0])
+    return targets
+
+
+def _containment_exec_eval_literal_reason(ctx, call, env=None):
+    """`exec`/`eval` (any resolvable spelling: bare name, `builtins.exec`, an aliased
+    import, ...) called with a string literal, OR with `compile(<literal>, ...)` --
+    resolution-based so `builtins.exec("...")` and `exec(compile("...", 'c', 'exec'))`
+    close the same way the bare-name/Constant-only shape already did (B-850 round 3,
+    G12/G13)."""
+    func = call.func
+    fname = func.id if isinstance(func, ast.Name) else None
+    fd = _containment_resolve_through_assigns(ctx, func, env)
+    if not ((fname in ("exec", "eval")) or fd in ("builtins.exec", "builtins.eval")) or not call.args:
+        return None
+    label = fname or fd.rsplit(".", 1)[-1]
+    arg0 = call.args[0]
+    if isinstance(arg0, ast.Constant) and isinstance(arg0.value, str):
+        return f"{label}() is called with a string literal"
+    if isinstance(arg0, ast.Call):
+        cfunc = arg0.func
+        cfd = _containment_resolve_through_assigns(ctx, cfunc, env)
+        is_compile = (isinstance(cfunc, ast.Name) and cfunc.id == "compile") or cfd == "builtins.compile"
+        if is_compile and arg0.args and isinstance(arg0.args[0], ast.Constant) \
+                and isinstance(arg0.args[0].value, str):
+            return f"{label}() is called with compile() of a string literal"
+    return None
+
+
+def _containment_fail_closed_reason(ctx):
     """One whole-file sweep for a namespace-rebinding/monkeypatch primitive (see the
     comment above). Returns a short reason string, or None when the file is clean."""
-    for n in ast.walk(tree):
+    for n in ast.walk(ctx.tree):
         if isinstance(n, ast.Name):
             if n.id == "__file__" and isinstance(n.ctx, (ast.Store, ast.Del)):
                 return "__file__ is reassigned or deleted"
             if n.id == "__builtins__":
                 return "__builtins__ is referenced"
-            if n.id in _CONTAINMENT_UNSAFE_NAMES:
-                return f"{n.id}() is used"
+            if n.id == "_getframe":
+                return "_getframe() is used"
         elif isinstance(n, ast.Attribute):
             if n.attr in _CONTAINMENT_UNSAFE_DUNDER_ATTRS:
                 return f".{n.attr} is used"
-            if isinstance(n.ctx, (ast.Store, ast.Del)) and n.attr in _CONTAINMENT_TRUSTED_ATTRS:
+            if n.attr in ("f_globals", "_getframe"):
+                return f".{n.attr} is used"
+            if n.attr == "__dict__" and _containment_sensitive_base(ctx, n.value):
+                return ".__dict__ is used on a sensitive namespace"
+            if isinstance(n.ctx, (ast.Store, ast.Del)) and n.attr in _CONTAINMENT_TRUSTED_ATTRS \
+                    and _containment_sensitive_base(ctx, n.value):
                 return f".{n.attr} is reassigned or deleted"
-            if n.attr == "modules" and isinstance(n.value, ast.Name) and n.value.id == "sys":
-                # Matched by literal identifier, not `canon` -- `sys` appearing
-                # ANYWHERE inside an assignment target's subtree (even a mere read,
-                # e.g. `sys.modules[__name__].__file__ = ...`) already makes
-                # `_imports()`'s broad rebind heuristic pop 'sys' from `canon`.
-                return "sys.modules is used"
         elif isinstance(n, ast.alias):
             if n.asname == "__file__":
                 return "__file__ is bound by an import alias"
@@ -4894,8 +5073,13 @@ def _containment_fail_closed_reason(tree):
             if "__file__" in names:
                 return "__file__ is a function parameter"
         elif isinstance(n, ast.Subscript):
-            if isinstance(n.ctx, (ast.Store, ast.Del)) and _containment_dunder_file_subscript_key(n.slice):
-                return "'__file__' is used as a subscript key"
+            if isinstance(n.ctx, (ast.Store, ast.Del)):
+                if _containment_dunder_file_subscript_key(n.slice):
+                    return "'__file__' is used as a subscript key"
+                if _containment_is_namespace_call(ctx, n.value):
+                    return "globals()/vars()/locals() namespace is mutated by subscript"
+                if _containment_sensitive_base(ctx, n.value):
+                    return "a subscript on a sensitive namespace is assigned or deleted"
         elif isinstance(n, ast.ImportFrom):
             if any(a.name == "*" for a in n.names):
                 return "import * is used"
@@ -4904,9 +5088,15 @@ def _containment_fail_closed_reason(tree):
                 kw.arg == "__file__" for kw in n.keywords
             ):
                 return "'__file__' is used as a .update() key"
-            if isinstance(n.func, ast.Name) and n.func.id in ("exec", "eval") and n.args and \
-                    isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str):
-                return f"{n.func.id}() is called with a string literal"
+            if isinstance(n.func, ast.Attribute) and n.func.attr in _CONTAINMENT_NAMESPACE_MUTATORS \
+                    and _containment_is_namespace_call(ctx, n.func.value):
+                return f"globals()/vars()/locals() namespace is mutated by .{n.func.attr}()"
+            reason = _containment_exec_eval_literal_reason(ctx, n)
+            if reason:
+                return reason
+            for t in _containment_mutator_targets(ctx, n):
+                if _containment_sensitive_base(ctx, t):
+                    return "a sensitive namespace's attribute is set/deleted dynamically"
     return None
 
 
@@ -4928,12 +5118,16 @@ class _ContainmentCtx:
         self._callsites: dict = {}
         self.global_assigns: dict = {}
         self._imports()
-        self.fail_closed_reason = _containment_fail_closed_reason(tree)
+        # B-850 round 3: warm up `global_assigns` (reaching defs for every function
+        # that declares a `global`) BEFORE the fail-closed sweep -- the sweep now
+        # resolves names via `_containment_lookup`/`dotted()` (aliasing, `sys.modules`,
+        # ...), which can itself consult `global_assigns`.
         for n in ast.walk(tree):
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
                 isinstance(m, ast.Global) for m in ast.walk(n)
             ):
                 self.rd(n)
+        self.fail_closed_reason = _containment_fail_closed_reason(self)
 
     # ---- which names are the real modules/functions (import-bound, never rebound) ----
     def _imports(self):
@@ -5103,6 +5297,27 @@ class _ContainmentReachingDefs:
         st[name] = frozenset({d})
         self.all_defs.setdefault(name, set()).add(d)
 
+    def _bind_merge(self, st, name, d):
+        """Like `_bind`, but MERGES with whatever def(s) already reach this point
+        instead of REPLACING them (B-850 round 3, W1). A walrus's execution order
+        relative to other loads/binds in the SAME statement is not always statically
+        provable -- e.g. `exec(open(os.path.join(here, 'x.py'), 'rb').read().decode(),
+        {} if (here := os.path.dirname(__file__)) else {})` evaluates the read of
+        `here` in argument 1 BEFORE the walrus in argument 2 rebinds it (Python
+        evaluates call arguments left to right), so that read must still see the OLD
+        `here`, not just the new one. Rather than model call/operator evaluation order
+        precisely, a load that might see either value sees BOTH: worst-verdict-wins
+        (`_containment_verdict`'s rank ordering) makes this sound in the fail-open
+        direction -- merging can only ADD alternatives, never hide a bad one that a
+        precise ordering would have kept, and the existing worst-case CONVICT pinned
+        tests (walrus read later in the SAME expression) stay convicted either way
+        since the malicious alternative is still in the mix."""
+        if name in self.globals or name in self.nonlocals:
+            self.ctx.global_assigns.setdefault(name, set()).add(d)
+            return
+        st[name] = st.get(name, frozenset()) | frozenset({d})
+        self.all_defs.setdefault(name, set()).add(d)
+
     def _record(self, node, st):
         """Record the reaching defs of every local Name load in *node* (own scope only)."""
         if node is None:
@@ -5132,9 +5347,50 @@ class _ContainmentReachingDefs:
     def _walrus(self, node, st):
         if node is None:
             return
-        for n in ast.walk(node):
-            if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
-                self._bind(st, n.target.id, _ContainmentDef("assign", n.value, None, self.scope))
+        self._walrus_walk(node, st)
+
+    def _walrus_walk(self, node, st):
+        """Bind every walrus in *node* that is guaranteed to run when this statement
+        runs -- MERGING each binding (never replacing, see `_bind_merge`) -- while
+        SKIPPING subtrees whose execution is genuinely deferred or unreachable, so a
+        walrus there is never treated as if it always ran (B-850 round 3, W2-W5):
+        a lambda's BODY (bound only if/when the lambda is later called -- but its
+        default values, which evaluate eagerly at def time, are still walked), a
+        generator expression's elements (lazy: only evaluated on iteration, which may
+        never happen -- only the first generator's `.iter` runs eagerly, in the
+        enclosing scope), the dead branch of a statically-constant-guarded `and`/`or`
+        short circuit, and neither branch of an `IfExp` (exactly one runs; its `test`
+        always does)."""
+        if isinstance(node, ast.NamedExpr):
+            if isinstance(node.target, ast.Name):
+                self._bind_merge(st, node.target.id, _ContainmentDef("assign", node.value, None, self.scope))
+            self._walrus_walk(node.value, st)
+            return
+        if isinstance(node, ast.Lambda):
+            for d in node.args.defaults:
+                self._walrus_walk(d, st)
+            for d in node.args.kw_defaults:
+                if d is not None:
+                    self._walrus_walk(d, st)
+            return  # .body is deferred -- never assumed to have run "now"
+        if isinstance(node, ast.GeneratorExp):
+            if node.generators:
+                self._walrus_walk(node.generators[0].iter, st)
+            return  # everything else is lazy -- only runs (if ever) on iteration
+        if isinstance(node, ast.IfExp):
+            self._walrus_walk(node.test, st)
+            return  # exactly one of body/orelse runs -- neither is guaranteed
+        if isinstance(node, ast.BoolOp):
+            is_and = isinstance(node.op, ast.And)
+            for v in node.values:
+                self._walrus_walk(v, st)
+                if isinstance(v, ast.Constant) and (
+                    (is_and and not v.value) or (not is_and and v.value)
+                ):
+                    break  # statically-proven short circuit -- later operands are dead
+            return
+        for c in ast.iter_child_nodes(node):
+            self._walrus_walk(c, st)
 
     def _assign_target(self, st, t, value, kind="assign"):
         if isinstance(t, ast.Name):
@@ -5300,14 +5556,30 @@ def _containment_comp_iters(name_node, ctx):
     resolve `__file__` straight to the real module-level anchor. A name used in the
     FIRST generator's own `iter` is excluded: that one expression evaluates in the
     ENCLOSING scope, before the comprehension's own scope exists, matching real
-    Python."""
+    Python.
+
+    A `Lambda` does NOT stop this walk (B-850 round 3, L1): `[(lambda: open(...))()
+    for open in [...]]` captures the comprehension's `open` as a FREE name inside the
+    lambda body -- the lambda only shadows names that are actually its OWN parameters.
+    Only a genuinely shadowing lambda parameter (or a real scope boundary that isn't a
+    lambda) stops the walk."""
     name = name_node.id
     out = []
     n = name_node
     parent = ctx.parent
     while True:
         p = parent.get(n)
-        if p is None or isinstance(p, _CONTAINMENT_SCOPES):
+        if p is None:
+            return out
+        if isinstance(p, ast.Lambda):
+            a = p.args
+            lambda_params = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs]
+            lambda_params += [x.arg for x in (a.vararg, a.kwarg) if x]
+            if name in lambda_params:
+                return out  # shadowed by the lambda's own parameter
+            n = p
+            continue  # free name -- keep walking up through the lambda
+        if isinstance(p, _CONTAINMENT_SCOPES):
             return out
         if isinstance(p, _CONTAINMENT_COMP_TYPES):
             value_parts = [p.elt] if hasattr(p, "elt") else [p.key, p.value]
@@ -5500,6 +5772,20 @@ def _containment_concat(a, b):
     return _ContainmentCat(pa + pb)
 
 
+def _containment_is_callee_chain_node(ctx, n):
+    """True if Attribute *n* is itself a `Call.func`, or an INTERMEDIATE link of a
+    longer dotted `Call.func` chain (e.g. the `urllib.parse` inside `urllib.parse.
+    unquote(...)`'s own callee) -- walks up through consecutive Attribute parents to
+    the chain's actual use site (B-850 round 3, staticness fix)."""
+    cur = n
+    while True:
+        par = ctx.parent.get(cur)
+        if isinstance(par, ast.Attribute) and par.value is cur:
+            cur = par
+            continue
+        return isinstance(par, ast.Call) and par.func is cur
+
+
 def _containment_staticness(node, env, visited, depth=0):
     """'static' when every free input is a literal (module constants / builtins as
     callees are fine); 'runtime' when anything comes from a parameter, env, I/O."""
@@ -5509,19 +5795,26 @@ def _containment_staticness(node, env, visited, depth=0):
         if isinstance(n, (ast.Lambda, ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)):
             return "runtime"
         if isinstance(n, ast.Call):
-            # B-850 round 2: only a small allowlist of genuinely pure functions stays
-            # 'static'; every OTHER *import-resolvable* call (platform.system(),
-            # os.getenv(), ...) is 'runtime' now, not 'static' (which this module's
-            # `obf` verdict reads as a static value deliberately hidden behind an
-            # unfoldable expression, i.e. ESCAPES). A call whose callee does NOT
-            # dotted-resolve at all -- a method call on a computed receiver, e.g. the
-            # `.decode()` in `base64.b64decode(x).decode()` -- is left alone here;
-            # the base64 call itself is still checked on its own turn in this same
-            # walk, and G8's "static value hidden behind base64" case must still
-            # reach the 'obf' verdict through it.
+            # B-850 round 2/3: a call in `_CONTAINMENT_PURE_FUNCS` never disqualifies
+            # (its own arguments are still checked on their own turn in this same
+            # walk). A call in `_CONTAINMENT_IMPURE_CALLS`, or ANY resolvable call
+            # taking zero arguments (an environment-probe shape, e.g. `platform.
+            # system()`/`os.getcwd()`) always does -- these read HOST state that isn't
+            # determined by the call's own (possibly-literal) inputs. Any OTHER
+            # resolvable call (`''.join`'s `reversed(...)`, `bytes(...)`, `str(...)`,
+            # `urllib.parse.unquote(...)`, `json.loads(...)`, `operator.add(...)`,
+            # `textwrap.dedent(...)`, ...) does NOT disqualify by itself -- it is just
+            # as foldable-in-principle as a PURE_FUNCS decoder when its own arguments
+            # are literal, and round 2's blanket "not in PURE_FUNCS -> runtime" rule
+            # wrongly downgraded that whole family from the correct static/ESCAPES
+            # verdict to a bare runtime/UNPROVEN one (D1-D8). A call whose callee does
+            # NOT dotted-resolve at all -- a method call on a computed receiver, e.g.
+            # the `.decode()` in `base64.b64decode(x).decode()` -- is left alone here
+            # either way; the base64 call itself is still checked on its own turn.
             cd = env.ctx.canon_func(n.func, env)
             if cd is not None and cd not in _CONTAINMENT_PURE_FUNCS:
-                return "runtime"
+                if cd in _CONTAINMENT_IMPURE_CALLS or not n.args:
+                    return "runtime"
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
             if n.id == "__file__":
                 return "runtime"
@@ -5534,8 +5827,29 @@ def _containment_staticness(node, env, visited, depth=0):
                     return "runtime"
             if not _containment_lookup(n, env, visited):
                 return "runtime"
-        if isinstance(n, ast.Attribute) and n.attr in ("environ", "argv", "stdin"):
-            return "runtime"
+        if isinstance(n, ast.Attribute):
+            if n.attr in ("environ", "argv", "stdin"):
+                return "runtime"
+            # B-850 round 3: any OTHER resolvable module/class attribute READ (sys.
+            # platform, sys.version_info, os.name, ...) is ordinary runtime state, not
+            # a literal -- mirrors `_containment_attribute`'s own already-correct
+            # handling of the SAME shape (round 2), which this function does not see
+            # since it is reached from a DIFFERENT caller (an f-string conversion/
+            # format-spec, or a Subscript fallback like `sys.version_info[0]`) that
+            # never goes through `_containment_attribute` at all (closes FP23/FP24). A
+            # bare CALLEE reference (`os.path.join` as `Call.func`, OR an intermediate
+            # link of one -- `urllib.parse` inside `urllib.parse.unquote(...)`'s own
+            # dotted `Call.func` chain) is excluded -- that is graded by the Call check
+            # above, not by being an Attribute.
+            if n.attr != "parent" and not _containment_is_callee_chain_node(env.ctx, n):
+                d = env.ctx.canon_func(n, env)
+                if d is not None:
+                    is_os_const = any(
+                        d.startswith(mod) and d[len(mod):] in _CONTAINMENT_OS_CONSTS
+                        for mod in ("os.", "os.path.")
+                    )
+                    if not is_os_const and d not in ("sys._MEIPASS", "sys.frozen"):
+                        return "runtime"
     return "static"
 
 
