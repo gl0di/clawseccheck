@@ -450,6 +450,24 @@ def test_sqlite_only_poisoned_description_fails(tmp_path):
     assert f.scored is True
 
 
+def test_sqlite_only_partial_readability_discloses_the_unreadable_count(tmp_path):
+    """Same disclosure gap as the mixed-host test below, for the SQLite-ONLY branch
+    (no live JSONL sidecar at all -- `corr.status == STATUS_LOCATOR_STALE`): one of
+    two per-agent SQLite databases readable, the other corrupt. Before this fix the
+    scope text named only the one database actually read, with no mention that a
+    second one was found but never opened."""
+    _write_agent_sqlite_db(tmp_path, "readable_agent", [("s1", 0, _compiled(BENIGN_TOOLS))])
+    corrupt_agent_dir = tmp_path / "agents" / "corrupt_agent" / "agent"
+    corrupt_agent_dir.mkdir(parents=True, exist_ok=True)
+    (corrupt_agent_dir / "openclaw-agent.sqlite").write_bytes(b"not a sqlite file at all")
+
+    f = _run(tmp_path)
+    assert f.status == "PASS", f.detail
+    assert "1 SQLite trajectory database(s)" in f.detail, f.detail
+    assert "(1 further database(s) found but not readable)" in f.detail, f.detail
+    assert "incomplete" in f.detail, f.detail
+
+
 def test_sqlite_is_also_consulted_while_a_live_jsonl_sidecar_exists(tmp_path):
     """B-852: a host mid-migration can have BOTH a live JSONL sidecar (STATUS_LIVE, per
     trajectorystore.corroborate()) and per-agent SQLite rows -- and both may carry
@@ -528,6 +546,32 @@ def test_mixed_host_with_unreadable_sqlite_discloses_it_in_pass_scope_text(tmp_p
     assert "JSONL session log(s)" in f.detail
     assert "SQLite" in f.detail
     assert "also checked but was not readable" in f.detail, f.detail
+
+
+def test_mixed_host_partial_sqlite_readability_discloses_the_unreadable_count(tmp_path):
+    """Follow-up review, post-B-852: this branch (`dbs_read > 0`) used to name only
+    the SQLite databases it successfully read -- a PARTIALLY-readable host (one
+    per-agent database opens fine, a second is corrupt or otherwise unreadable, e.g. a
+    schema too new for an old SQLite build, or a transient lock) silently dropped the
+    unreadable one from the disclosed scope entirely, reading as a confident,
+    fully-accounted-for scan even though real evidence sat in the database never
+    opened. Two per-agent databases: one real and readable, one deliberately corrupt.
+    """
+    jsonl_tool = [{
+        "name": "from_jsonl", "description": "Ordinary benign JSONL-sourced tool.",
+        "parameters": {"type": "object", "properties": {}},
+    }]
+    _write_trajectory(tmp_path, [_compiled(jsonl_tool)])
+    _write_agent_sqlite_db(tmp_path, "readable_agent", [("s1", 0, _compiled(BENIGN_TOOLS))])
+    corrupt_agent_dir = tmp_path / "agents" / "corrupt_agent" / "agent"
+    corrupt_agent_dir.mkdir(parents=True, exist_ok=True)
+    (corrupt_agent_dir / "openclaw-agent.sqlite").write_bytes(b"not a sqlite file at all")
+
+    f = _run(tmp_path)
+    assert f.status == "PASS", f.detail
+    assert "1 SQLite trajectory database(s)" in f.detail, f.detail
+    assert "(1 further database(s) found but not readable)" in f.detail, f.detail
+    assert "incomplete" in f.detail, f.detail
 
 
 def test_mixed_host_with_no_sqlite_db_never_touches_sqlite(tmp_path):
@@ -2084,3 +2128,67 @@ def test_sqlite_reader_reads_newest_rows_first_when_the_cap_is_hit(tmp_path, mon
     # ONE 'context.compiled' record (the newest) was ever recovered, not both.
     assert verdict.status != "FAIL", verdict.detail
     assert "1 'context.compiled' record(s)" in verdict.detail, verdict.detail
+
+
+def test_migration_copy_shape_hides_the_true_newest_record_but_still_discloses_incomplete(
+    tmp_path, monkeypatch,
+):
+    """Follow-up review, post-B-852 (known-limitation pin): `ORDER BY rowid DESC`
+    orders by "most recently WRITTEN to this database", not an absolute "newest by
+    created_at" -- and OpenClaw's own session-copy migration can make those two
+    diverge. A genuinely new/poisoned event, recorded FIRST (lowest rowid) in a
+    fresh-ish database, can later be joined by an OLDER session's rows COPIED IN
+    afterward (a real vendor migration shape) -- those copied rows land at NEW, high
+    rowids despite carrying an OLD `created_at`. `ORDER BY rowid DESC` then reads the
+    copied-in old session first, and a hit row cap can push the real newest/poisoned
+    record beyond it -- the exact shape where the RETIRED wording ("it is the OLDEST
+    records beyond that cap that were skipped, not the newest") would have been FALSE:
+    here the record skipped is NOT the oldest, it is the newest.
+
+    This pins two things: (a) the poisoned record really is missed under this shape
+    (proving the scenario is not hypothetical), and (b) the verdict still correctly
+    discloses "incomplete" using the REWORDED, recency-honest text -- the disclosure
+    itself does not depend on the retired absolute claim being true, and the verdict
+    text no longer makes that claim.
+
+    Uses a monkeypatched tiny row cap (cheaper, same plumbing as
+    `test_exhaustive_widens_the_sqlite_reader_caps_not_just_the_jsonl_ones` above)
+    rather than literally writing several MB of copied-in rows.
+    """
+    import dataclasses
+
+    from clawseccheck.checks import _mcp as _mcp_mod
+    from clawseccheck.scanbudget import DEFAULT_LIMITS
+
+    tiny_cap = dataclasses.replace(DEFAULT_LIMITS, sqlite_max_content_rows_per_db=3)
+    monkeypatch.setattr(_mcp_mod, "limits_for", lambda ctx: tiny_cap)
+
+    poisoned = [{
+        "name": "f", "description": "bad <!-- hidden -->",
+        "parameters": {"type": "object", "properties": {}},
+    }]
+    rows = [
+        # The genuinely newest event: written FIRST (so it gets the LOWEST rowid) but
+        # stamped with a recent created_at, exactly as a real current session would be.
+        ("current_session_poisoned", 0, _compiled(poisoned), 1000),
+    ]
+    # A past session's rows land AFTER it -- simulating a session-copy migration: new,
+    # high rowids, but an OLD created_at.
+    for i in range(5):
+        rows.append((f"copied_old_session_{i}", 0, _compiled(BENIGN_TOOLS), 1))
+    _write_agent_sqlite_db(tmp_path, "main", rows)
+
+    verdict = _mcp_mod.check_compiled_tool_poisoning(Context(home=tmp_path))
+
+    # The row cap (3) is smaller than the 6 rows written, and rowid DESC reads the
+    # copied-in rows (high rowid) first -- so the poisoned row (rowid 1, the LOWEST)
+    # never gets read: the migration-copy shape really does hide the true newest
+    # record, and the FAIL it would otherwise cause is genuinely lost here.
+    assert verdict.status != "FAIL", verdict.detail
+    # The disclosure still fires, using the reworded, recency-honest text.
+    assert "incomplete" in verdict.detail, verdict.detail
+    assert "most recently WRITTEN" in verdict.detail, verdict.detail
+    assert "session-copy migration" in verdict.detail, verdict.detail
+    # The retired, now-sometimes-false absolute claim must never reappear.
+    assert "it is the OLDEST records beyond that cap that were skipped, not" \
+        not in verdict.detail

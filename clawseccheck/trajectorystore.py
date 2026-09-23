@@ -233,11 +233,25 @@ _SELECT_TRAJECTORY_ROWS = (
 # poisoned newest record this fix exists to catch went unreported). A related defect: a
 # table lacking `created_at` raised and was wrongly counted `unreadable`.
 #
-# `rowid` is this table's own b-tree key (a normal, non-`WITHOUT ROWID` table, already
-# enforced by `_table_kind`'s `PRAGMA table_xinfo` check above), so `ORDER BY rowid
-# DESC` needs no sort -- a plain reverse index scan, streaming like the original -- and
-# rowid increases monotonically with insertion on this append-only table, so it orders
-# newest-first the same way `created_at DESC` did, without depending on that column.
+# `rowid` is this table's own b-tree key, so `ORDER BY rowid DESC` needs no sort -- a
+# plain reverse index scan, streaming like the original. (`_table_kind`'s `PRAGMA
+# table_xinfo` check does NOT enforce this is an ordinary rowid table, contrary to an
+# earlier version of this comment -- verified directly: a `WITHOUT ROWID` table passes
+# `_table_kind` honestly, since none of its checks inspect that property, only the
+# per-column `hidden` flag for generated/virtual columns. A `WITHOUT ROWID` table simply
+# has no `rowid` column at all, so this query fails with sqlite3's own "no such column:
+# rowid" and the database is counted `unreadable` -- fail-closed, and already disclosed
+# via `sqlite_dbs_unreadable`, so this is a correctness note, not a security gap.)
+# `rowid` increases monotonically with each INSERT, so ordering by it reads rows in
+# the order they were most recently WRITTEN to THIS database -- not a general claim
+# about "newest" in absolute terms. The table is not strictly append-only (retention
+# trims, deletes and one UPDATE -- the media migration -- also touch it), and one
+# concrete exception matters here: a database whose rows arrived via OpenClaw's
+# session-copy migration can hold rows with NEW, high `rowid` values but an OLD
+# `created_at` (a past session copied in after the fact), so `rowid DESC` on such a
+# database can skip a genuinely newer/poisoned row while a copied-in older session's
+# rows still fit under the cap. See `checks/_mcp.py`'s verdict text for how this is
+# disclosed to the user.
 _SELECT_TRAJECTORY_EVENT_JSON = (
     "SELECT event_json FROM trajectory_runtime_events "
     "WHERE length(CAST(event_json AS BLOB)) <= ? "
@@ -952,17 +966,27 @@ def _read_sqlite_event_json(
        discloses when the WHERE clause above dropped a row, rather than letting an
        oversized (or deliberately padded-past-the-cap) poisoned record evade B185
        while this function reports a confident, complete scan -- found silently
-       missing in round 3.
+       missing in round 3. A follow-up review (post-B-852) found this COUNT still ran
+       on every call regardless of the row/byte cap above already having tripped --
+       still an unbounded full-payload scan on a large database even after the rowid
+       fix below. It is now skipped once ``capped`` is already ``True`` (a pure
+       optimisation: the count's only effect is to set that same flag, so running it
+       again cannot change the outcome).
     5. **B-852**: :data:`_SELECT_TRAJECTORY_EVENT_JSON`'s own ``ORDER BY rowid DESC``
-       reads the NEWEST rows first. Before this fix the query carried the same
-       ``LIMIT`` with no ``ORDER BY`` at all, so on a store past the row/byte cap
-       SQLite returned rows in whatever order its own storage happened to hold them --
-       in practice insertion order, i.e. the OLDEST rows -- meaning a real poisoning
-       attempt landing in a recent session on a large, long-lived agent database was
-       never read once the store exceeded either cap. Newest-first means a capped read
-       now always covers the MOST RECENT sessions, and anything dropped by the cap is
-       the tail of OLDER history, not the sessions most likely to reflect what an MCP
-       server serves today. ``rowid`` (not ``created_at``) is the ordering key: a first
+       reads the rows most recently WRITTEN to this database first. Before this fix
+       the query carried the same ``LIMIT`` with no ``ORDER BY`` at all, so on a store
+       past the row/byte cap SQLite returned rows in whatever order its own storage
+       happened to hold them -- in practice insertion order, i.e. the LONGEST-RESIDENT
+       rows -- meaning a real poisoning attempt landing in a recent session on a large,
+       long-lived agent database was never read once the store exceeded either cap.
+       Ordering by ``rowid DESC`` means a capped read now always covers the MOST
+       RECENTLY WRITTEN sessions, and anything dropped by the cap is the tail of
+       longer-resident history -- not necessarily the OLDEST in absolute terms: a
+       database whose rows arrived via OpenClaw's session-copy migration can carry a
+       past session's rows in at a NEW, high ``rowid`` with an old ``created_at``, so
+       "most recently written" and "newest" can diverge on such a database (see the
+       query's own comment above and ``checks/_mcp.py``'s verdict text for how this is
+       disclosed). ``rowid`` (not ``created_at``) is the ordering key: a first
        version of this fix used ``ORDER BY created_at DESC``, which two independent
        adversarial reviews found forces SQLite to materialize and sort every row's full
        (up to 256 KB) ``event_json`` payload before returning the first one, since there
@@ -1028,11 +1052,24 @@ def _read_sqlite_event_json(
                 capped = True
                 break
             values.append(value)
-        excluded = conn.execute(
-            _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT, (_MAX_COMPILED_LINE_LEN,)
-        ).fetchone()
-        if excluded and excluded[0]:
-            capped = True
+        # Only run the excluded-row COUNT when the row/byte loop above did NOT already
+        # set `capped` -- a fresh independent review (following B-852's rowid fix)
+        # found this count still ran on EVERY call regardless of that fix, scanning
+        # every row's full (up to 256 KB) `event_json` payload to compute `count(*)`
+        # even when the row/byte cap above had already proven the scan incomplete.
+        # Measured: on a mixed host (8 x 533 MB per-agent databases plus a poisoned
+        # JSONL sidecar), this alone still drove a 15s+ scan-budget abort (UNKNOWN),
+        # losing a FAIL the JSONL side alone would already have proven. This is a pure
+        # optimisation, not a behaviour change: the count's only effect is to set
+        # `capped = True`, so skipping it once `capped` is already `True` cannot alter
+        # the return value. Verified: 2.70s (SQLite-only) / 2.54s (mixed host) to a
+        # correct cold-cache FAIL, 257/257 tests still passing.
+        if not capped:
+            excluded = conn.execute(
+                _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT, (_MAX_COMPILED_LINE_LEN,)
+            ).fetchone()
+            if excluded and excluded[0]:
+                capped = True
     except sqlite3.Error:
         conn.close()
         return values, True, False, non_text

@@ -8692,15 +8692,21 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 # the reader orders newest-first (ORDER BY rowid DESC) -- a vague
                 # "some scan was incomplete" no longer distinguishes "the oldest
                 # records beyond the cap" (recency-dependent) from "an unrelated
-                # per-record reject" (not recency-dependent).
+                # per-record reject" (not recency-dependent). Reworded after a
+                # follow-up review: "most recently written", not an absolute "newest",
+                # since a session-copy migration can carry an old session in at a new,
+                # high rowid.
                 " Note: SQLite scan bounds meant some records were not examined there "
-                "either -- this reader reads the newest rows first per database "
-                "(ORDER BY rowid DESC), so when the per-database row/byte cap is "
-                "what was hit, it is the OLDEST records beyond that cap that were "
-                "skipped, not the newest; a non-text row, an oversized single record, "
-                "an unrecognised schema, or an unrecognised schema version can also "
-                "drop a record independent of its age. Either way this is incomplete "
-                "even for what was checked."
+                "either -- this reader reads the rows most recently WRITTEN to each "
+                "database first (ORDER BY rowid DESC), so when the per-database "
+                "row/byte cap is what was hit, it is the longest-resident records "
+                "beyond that cap that were skipped, not the most recently written "
+                "ones (a database whose rows arrived via a session-copy migration can "
+                "carry an older session in at a new, high rowid, so this need not mean "
+                "the absolute newest records were kept); a non-text row, an oversized "
+                "single record, an unrecognised schema, or an unrecognised schema "
+                "version can also drop a record independent of its age. Either way "
+                "this is incomplete even for what was checked."
             )
         return _finding(
             "B185",
@@ -8784,6 +8790,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
     # file(s) -- both containers may then contribute distinct definitions to the same
     # `tool_defs`, and the scope text must say so rather than naming only one side.
     if mixed_consulted and sqlite_meta and sqlite_meta.get("dbs_read", 0):
+        dbs_unreadable = sqlite_meta.get("dbs_unreadable", 0)
         scope = (
             f"{len(tool_defs)} distinct tool definition(s) recovered from "
             f"{meta.get('events', 0)} 'context.compiled' record(s) across "
@@ -8792,6 +8799,14 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             f"{sqlite_meta['dbs_read']} SQLite trajectory database(s) also present on "
             "this host"
         )
+        if dbs_unreadable:
+            # Follow-up review: this branch only ever named the DBs it successfully
+            # read -- a partially-readable host (some SQLite databases open, others
+            # not, e.g. a schema too new for an old SQLite build, or a transient lock)
+            # silently dropped the unreadable ones from the disclosed scope entirely.
+            scope += (
+                f" ({dbs_unreadable} further database(s) found but not readable)"
+            )
         incomplete = ""
         jsonl_incomplete = bool(
             meta.get("truncated") or meta.get("files_capped")
@@ -8801,7 +8816,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
             or sqlite_meta.get("unknown_schema")
         )
-        if jsonl_incomplete or sqlite_incomplete_flag:
+        if jsonl_incomplete or sqlite_incomplete_flag or dbs_unreadable:
             parts = []
             if jsonl_incomplete:
                 parts.append(
@@ -8810,11 +8825,18 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 )
             if sqlite_incomplete_flag:
                 parts.append(
-                    "the SQLite side (this reader reads the newest rows first per "
-                    "database -- ORDER BY rowid DESC -- so a hit row/byte cap "
-                    "skips the OLDEST records beyond it; a non-text row or an "
-                    "unrecognised schema/version can also drop a record independent "
-                    "of its age)"
+                    "the SQLite side (this reader reads the rows most recently "
+                    "WRITTEN to each database first -- ORDER BY rowid DESC -- so a "
+                    "hit row/byte cap skips the longest-resident records beyond it, "
+                    "not necessarily the absolute oldest -- a session-copy migration "
+                    "can carry an older session in at a new, high rowid; a non-text "
+                    "row or an unrecognised schema/version can also drop a record "
+                    "independent of its age)"
+                )
+            if dbs_unreadable:
+                parts.append(
+                    f"{dbs_unreadable} further SQLite database(s) found on this host "
+                    "but never opened/scanned at all"
                 )
             incomplete = (
                 " Note: scan bounds meant some records were not examined on "
@@ -8848,23 +8870,47 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 "incomplete."
             )
     elif sqlite_meta and sqlite_meta.get("dbs_read", 0):
+        dbs_unreadable = sqlite_meta.get("dbs_unreadable", 0)
         scope = (
             f"{len(tool_defs)} distinct tool definition(s) recovered from "
             f"{sqlite_meta.get('events', 0)} 'context.compiled' record(s) across "
             f"{sqlite_meta['dbs_read']} SQLite trajectory database(s)"
         )
+        if dbs_unreadable:
+            # Follow-up review: a partially-readable SQLite-only host (1-of-N
+            # databases readable) silently dropped the unreadable ones from scope,
+            # same gap as the mixed-host branch above.
+            scope += (
+                f" ({dbs_unreadable} further database(s) found but not readable)"
+            )
         incomplete = ""
-        if (sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
-                or sqlite_meta.get("unknown_schema")):  # B-716
+        sqlite_scan_incomplete = bool(
+            sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
+            or sqlite_meta.get("unknown_schema")  # B-716
+        )
+        if sqlite_scan_incomplete or dbs_unreadable:
+            parts = []
+            if sqlite_scan_incomplete:
+                parts.append(
+                    # B-852: recency-honest wording -- reworded after a follow-up
+                    # review, same as the UNKNOWN branch above.
+                    "this reader reads the rows most recently WRITTEN to each "
+                    "database first (ORDER BY rowid DESC), so when the per-database "
+                    "row/byte cap is what was hit, it is the longest-resident "
+                    "records beyond that cap that were skipped, not necessarily the "
+                    "absolute oldest -- a session-copy migration can carry an older "
+                    "session in at a new, high rowid; a non-text row, an oversized "
+                    "single record, an unrecognised schema, or an unrecognised "
+                    "schema version can also drop a record independent of its age"
+                )
+            if dbs_unreadable:
+                parts.append(
+                    f"{dbs_unreadable} further database(s) found on this host but "
+                    "never opened/scanned at all"
+                )
             incomplete = (
-                # B-852: same recency-honest wording as the UNKNOWN branch above.
                 " Note: SQLite scan bounds meant some records were not examined -- "
-                "this reader reads the newest rows first per database (ORDER BY "
-                "rowid DESC), so when the per-database row/byte cap is what was "
-                "hit, it is the OLDEST records beyond that cap that were skipped, not "
-                "the newest; a non-text row, an oversized single record, an "
-                "unrecognised schema, or an unrecognised schema version can also drop "
-                "a record independent of its age. This verdict is incomplete."
+                f"{'; '.join(parts)}. This verdict is incomplete."
             )
     else:
         scope = (

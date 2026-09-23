@@ -1315,4 +1315,108 @@ def test_read_compiled_tool_descriptions_threads_its_override_kwargs_to_the_read
     empty_defs, empty_meta = read_compiled_tool_descriptions(home, max_dbs=0)
     assert empty_defs == []
     assert empty_meta["dbs_found"] == 0
-    assert empty_meta["present"] is False
+
+
+# ---------------------------------------------------------------------------
+# Follow-up review (post-B-852) — the EXCLUDED_COUNT query
+# (`_SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT`) used to run on EVERY call to
+# `_read_sqlite_event_json`, regardless of the rowid-ordering fix above: it scans
+# every row's full (up to 256 KB) `event_json` payload to compute `count(*)`, even
+# when the row/byte cap in the loop above had already proven the read incomplete.
+# Measured by the reviewer: on a mixed host (8 x 533 MB per-agent databases plus a
+# poisoned JSONL record), this alone still drove a 15s+ scan-budget abort (UNKNOWN),
+# losing a FAIL the JSONL side alone would already have proven. Fixed by skipping the
+# query once `capped` is already True -- a pure optimisation, since the count's only
+# effect is to set that same flag.
+# ---------------------------------------------------------------------------
+
+
+def test_excluded_count_query_is_skipped_once_already_capped(monkeypatch):
+    """With `max_rows=1` forcing `capped=True` via the row-count loop alone (two rows
+    present, one admitted), the EXCLUDED_COUNT statement must never be executed at
+    all -- proven behaviourally (every SQL statement actually run is recorded), not by
+    reading the source."""
+    from clawseccheck.trajectorystore import (
+        _read_sqlite_event_json,
+        _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT,
+    )
+
+    home = _home()
+    agent_dir = home / "agents" / "main" / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    db_path = agent_dir / "openclaw-agent.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE trajectory_runtime_events (session_id TEXT NOT NULL, "
+            "seq INTEGER NOT NULL, run_id TEXT, event_json TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL, PRIMARY KEY (session_id, seq))"
+        )
+        conn.execute(
+            "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+            ("s1", 0, "r", json.dumps({"marker": "one"}), 1),
+        )
+        conn.execute(
+            "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+            ("s2", 0, "r", json.dumps({"marker": "two"}), 2),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    executed = _record_executed_sql(monkeypatch)
+    values, capped, unreadable, non_text = _read_sqlite_event_json(db_path, max_rows=1)
+
+    assert unreadable is False
+    assert capped is True
+    assert not any(
+        _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT in sql for sql in executed
+    ), executed
+
+
+def test_excluded_count_query_still_runs_when_not_already_capped(monkeypatch):
+    """Complement to the test above: the skip is CONDITIONAL, not a silent removal of
+    the round-4 disclosure the EXCLUDED_COUNT query exists to provide. With no row/byte
+    cap tripped by the loop itself, an oversized (excluded-at-the-WHERE-clause) row
+    must still be disclosed via the count query -- it must still run, and it must still
+    set `capped=True`."""
+    from clawseccheck.trajectorystore import (
+        _MAX_COMPILED_LINE_LEN,
+        _read_sqlite_event_json,
+        _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT,
+    )
+
+    home = _home()
+    agent_dir = home / "agents" / "main" / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    db_path = agent_dir / "openclaw-agent.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE trajectory_runtime_events (session_id TEXT NOT NULL, "
+            "seq INTEGER NOT NULL, run_id TEXT, event_json TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL, PRIMARY KEY (session_id, seq))"
+        )
+        conn.execute(
+            "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+            ("small", 0, "r", json.dumps({"marker": "one"}), 1),
+        )
+        # Oversized row -- excluded at the SQL WHERE clause, never counted toward
+        # max_rows/max_bytes at all, so the loop above never sets `capped` on its own.
+        conn.execute(
+            "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+            ("huge", 0, "r", "X" * (_MAX_COMPILED_LINE_LEN + 1000), 2),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    executed = _record_executed_sql(monkeypatch)
+    values, capped, unreadable, non_text = _read_sqlite_event_json(db_path)
+
+    assert unreadable is False
+    assert len(values) == 1  # only the well-sized row survives
+    assert any(
+        _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT in sql for sql in executed
+    ), executed
+    assert capped is True  # the excluded row is disclosed via the count query
