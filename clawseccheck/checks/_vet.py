@@ -874,7 +874,7 @@ _CRON_PERSIST_RE = re.compile(
     re.I | re.VERBOSE,
 )
 
-# KNOWN RESIDUAL (B-534 -- NARROWED, NOT CLOSED). Three of the eleven alternatives above
+# KNOWN RESIDUAL (B-534 -- NARROWED, NOT CLOSED). Three of the ten alternatives above
 # are bare PATH mentions with no install/enable verb requirement -- Library/LaunchAgents,
 # /etc/cron.*, and the per-user systemd unit path -- unlike every other alternative, which
 # anchors on a verb (crontab -e, systemctl enable, launchctl load, @reboot). A path that is
@@ -1017,6 +1017,7 @@ def _cron_persistence_hits(
     fence_ranges: list[tuple[int, int]],
     coverage: list[str] | None = None,
     bare_path_sink: list[str] | None = None,
+    verb_anchored_sink: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """B-144/B-203: split cron/startup-persistence matches into (high_hits, warn_hits).
 
@@ -1026,6 +1027,14 @@ def _cron_persistence_hits(
     one of the three bare-path-only alternatives in ``_CRON_PERSIST_RE`` (see the
     KNOWN RESIDUAL comment above it) -- the caller uses a non-empty sink to route the
     accepted-residual disclosure into the HIGH finding's `fix` text.
+
+    B-849: *verb_anchored_sink*, same append-only idiom, the complement of
+    *bare_path_sink* -- appended to whenever a match that reaches ``high_hits`` came
+    from one of the OTHER (verb-anchored) alternatives instead. A blob can contain
+    both kinds of match (e.g. a bare-path `cp` line alongside a `launchctl load`
+    line): the caller must not disclose the bare-path residual unless this sink stays
+    empty across the whole run, or the disclosure misstates a mixed, genuinely
+    verb-anchored install as "no install/enable verb".
 
     B-203: evaluates EVERY distinct match (not just the first) — the original loop
     `break`d after the first match, so a reputable `systemctl enable tor` appearing
@@ -1128,11 +1137,15 @@ def _cron_persistence_hits(
             continue
         if label not in high_hits:
             high_hits.append(label)
-        # B-534: this specific match, not the deduplicated label, is what tells us
-        # whether a bare-path-only alternative fired -- check every contributing match,
-        # not just the first one appended to high_hits.
-        if bare_path_sink is not None and _CRON_BARE_PATH_RE.fullmatch(m.group(0)):
-            bare_path_sink.append(m.group(0))
+        # B-534/B-849: this specific match, not the deduplicated label, is what tells
+        # us whether a bare-path-only alternative fired -- check every contributing
+        # match, not just the first one appended to high_hits. Every match routes to
+        # exactly one of the two sinks: bare-path-only, or verb-anchored.
+        if _CRON_BARE_PATH_RE.fullmatch(m.group(0)):
+            if bare_path_sink is not None:
+                bare_path_sink.append(m.group(0))
+        elif verb_anchored_sink is not None:
+            verb_anchored_sink.append(m.group(0))
         # B-203: was `break` — evaluate every distinct match, not just the first.
     else:
         # Loop no longer breaks, so this runs unconditionally; the guard replicates the
@@ -4335,6 +4348,14 @@ def check_installed_skills(ctx: Context) -> Finding:
     # alternative (the accepted residual). Read at the `if high:` branch to route the
     # SS2.5(d) disclosure into that finding's `fix` text.
     _cron_bare_path_hits: list[str] = []
+    # B-849: same scope and idiom as _cron_bare_path_hits above, the complement --
+    # non-empty iff at least one HIGH cron/persistence hit across the whole run came
+    # from a verb-anchored alternative instead. The disclosure below is only accurate
+    # when EVERY contributing HIGH hit was bare-path-only, so it must additionally
+    # require this sink to be empty (a mixed run -- a bare-path hit in one place, a
+    # verb-anchored install in another, even within the same skill -- is a genuine
+    # install and must not be told "no install/enable verb").
+    _cron_verb_anchored_hits: list[str] = []
     # B-634: agent-config persistence hits (writes to an agent-context file such as
     # ~/.bashrc/CLAUDE.md/AGENTS.md — _agent_config_write_hits below), collected eagerly
     # across every skill regardless of which cascade branch below ends up winning the
@@ -4959,7 +4980,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         # _cron_persistence_hits docstring). A disclosed watchdog/monitoring job
         # down-ranks to WARN instead of HIGH.
         _cron_high, _cron_warn = _cron_persistence_hits(
-            blob, _fr, coverage_fence, _cron_bare_path_hits
+            blob, _fr, coverage_fence, _cron_bare_path_hits, _cron_verb_anchored_hits
         )
         for h in _cron_high:
             high.append(f"{name}: {h}")
@@ -5374,7 +5395,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             "Review the flagged skills' source before trusting them; prefer pinned, "
             "signed, VirusTotal-clean releases."
         )
-        if _cron_bare_path_hits:
+        if _cron_bare_path_hits and not _cron_verb_anchored_hits:
             # B-534, SS2.5(d) routing: a bare mention of one of three persistence paths
             # (Library/LaunchAgents, /etc/cron.*, a per-user systemd unit) convicts
             # identically whether the skill is installing persistence or merely reading/
@@ -5382,6 +5403,13 @@ def check_installed_skills(ctx: Context) -> Finding:
             # attempts retracted; see the comment above _CRON_PERSIST_RE). Disclosed here,
             # not in `detail` (baseline.fingerprint() hashes it), because a B13 FAIL never
             # reaches --judge-packet adjudication to catch it there instead.
+            #
+            # B-849: gated on `_cron_verb_anchored_hits` staying empty too -- a bare-path
+            # match sitting alongside a verb-anchored one (e.g. `cp x.plist
+            # ~/Library/LaunchAgents/e.plist` next to `launchctl load` for that same
+            # path, the canonical real install shape) is a genuine, unambiguous install;
+            # disclosing "no install/enable verb" there would be false, not merely
+            # imprecise.
             fix += (
                 " One or more of the cron/startup-persistence hits above matched only a "
                 "bare path mention (~/Library/LaunchAgents, /etc/cron.*, or a per-user "
