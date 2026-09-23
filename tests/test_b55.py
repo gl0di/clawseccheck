@@ -863,9 +863,11 @@ def test_b44_b55_b68_b84_all_agree_alsoallow_and_gateway_shapes():
 # adding a second, narrowing entry, so a global "minimal" + per-agent "coding" grants
 # write/edit/apply_patch to that agent even though the global layer alone grants
 # nothing. Deliberately WARN-only: this can push a verdict from PASS toward WARN, but
-# it never sets explicit_write_grant, so it cannot alone drive a FAIL -- the seven
-# still-unread narrowing layers (per-agent allow/deny, channel/group, toolsBySender,
-# byProvider) could remove the grant for that specific agent, unseen by this check.
+# it never sets explicit_write_grant, so it cannot alone drive a FAIL -- the channel/
+# group and toolsBySender layers (still unread) could remove the grant for that
+# specific agent, unseen by this check; byProvider and subagent/inherited session
+# policy are permanently unreadable from static config regardless. Per-agent
+# allow/deny/profile narrowing is no longer one of the unread layers (B-668/S3).
 
 
 def test_agent_profile_widenings_empty_with_no_agents_declared():
