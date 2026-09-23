@@ -1278,6 +1278,30 @@ an escalation of an existing one) to the standard `--vet` JSON's `findings` arra
 | `scored` | `false` — advisory, matching every other self-report-derived finding. |
 | `detail` | Prefixed `"[host-agent pre-install attestation, verdict <verdict>]"`. |
 
+**Vote-breakdown disclosure (B-406).** Same mechanism and same condition as §15's
+escalation-path disclosure, applied to this new-finding path too — this was the one
+place the parity gap survived 4e5cc77 undetected. When a verdicts entry for one of
+the three fixed ids also carries the optional `votes` object (§13) and the
+breakdown shows the panel did **not** agree unanimously, the prefix grows the same
+trailing note: `"[host-agent pre-install attestation, verdict DANGEROUS (panel
+split: 2/3 DANGEROUS)]"`. A unanimous breakdown, or no `votes` field at all, leaves
+`detail` byte-identical to before this note existed. This does not change whether a
+finding is added or what it caps at — only whether a reader can tell a disputed
+panel verdict from a unanimous one.
+
+**Repeatability limit, stated in `fix` (B-406).** These three ids are pure
+self-report answered by an external host-agent judge; ClawSecCheck's own code
+guarantees that byte-identical `(engine_output, verdicts_raw, target)` fed to
+`escalate_vet_output` twice produces byte-identical output (its own funnel,
+`_parse_verdicts`, is deterministic — see §15's duplicate-entry rule), but it
+cannot make two SEPARATE judge invocations of byte-identical skill prose agree
+with each other; that is a property of the external model, not of this parser.
+Each of these findings' `fix` text says so in one sentence, so the limit travels
+with the finding rather than living only in this doc. This is not routed through
+`detail`, because `baseline.fingerprint()` hashes `detail` for
+`.clawseccheckignore` matching, and moving disclosure there would silently orphan
+any suppression entries already written against these ids.
+
 **Residual, stated plainly:** if the host agent's pre-install read is itself
 compromised, hallucinating, or talked into a false verdict by the skill's own
 prose, the worst it can do is add a `WARN` that was not warranted, or fail to add
