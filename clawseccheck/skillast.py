@@ -7719,7 +7719,14 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                     "reads a credential file and sends it to an outbound command "
                     "(curl/wget/nc) — credential exfiltration",
                 )
-            continue
+                continue
+            # B-911: the B-415 exemption above is judged ONLY against the literal
+            # `_SH_CRED_FILE_RE` match itself (the TLS-flag path / the narrow
+            # in-cluster Authorization token) -- it says nothing about a
+            # DIFFERENT credential variable also sent on the same line. Fall
+            # through to the variable check below instead of `continue`-ing
+            # past it, so an exempt TLS path can never launder an unrelated
+            # `cred_vars` hit in the same command.
         if any(re.search(r"\$\{?" + re.escape(v) + r"\b", raw) for v in cred_vars):
             add(
                 "SHELL_CRED_EXFIL",
