@@ -300,12 +300,115 @@ def test_run_watch_collapses_a_burst_of_writes_into_one_rescan(tmp_path):
     assert hb["cycles"] == 1, "a burst inside one debounce window must be ONE re-scan"
 
 
+def test_run_watch_forwards_extra_monitor_args_into_the_nested_subprocess_argv(
+    tmp_path, monkeypatch,
+):
+    """B-880, other half: once `extra_monitor_args` reaches `run_watch`, it must reach
+    the ACTUAL spawned subprocess argv `_run_monitor_once` builds -- not be accepted and
+    silently dropped somewhere in between. (Whether `_run_watch_cli` computes and passes
+    this kwarg in the first place is covered separately above, against the CLI.)
+
+    The subprocess call is mocked -- not the real `--monitor` alert text this module's
+    other end-to-end tests deliberately exercise -- because this test's only claim is
+    about argv shape, and a real npm/native subprocess run would only make that claim
+    slower to check, never stronger.
+    """
+    home = _copy_home(tmp_path)
+    store = tmp_path / "store"
+    _seed_baseline(home, store)
+
+    captured: dict = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(argv, **_kwargs):
+        captured["argv"] = argv
+        return _FakeCompleted()
+
+    monkeypatch.setattr(watch.subprocess, "run", _fake_run)
+
+    result: dict = {}
+
+    def _runner():
+        result["rc"] = watch.run_watch(
+            home,
+            state_path=store / "state.json",
+            events_path=store / "events.jsonl",
+            history_path=store / "history.jsonl",
+            heartbeat_path=store / "watch_heartbeat.json",
+            debounce_s=0.3, select_timeout_s=0.1, poll_interval_s=0.1,
+            max_cycles=1, install_signal_handlers=False,
+            extra_monitor_args=("--no-deptree", "--fail-on", "high"),
+            stream=io.StringIO(),
+        )
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    time.sleep(0.5)  # let the watcher finish setting up its watches
+
+    cfg_path = home / "openclaw.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg["tools"]["exec"] = {"mode": "auto"}
+    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+    t.join(timeout=15)
+    assert not t.is_alive(), "run_watch did not stop after max_cycles=1"
+    assert result.get("rc") == 0
+
+    argv = captured.get("argv")
+    assert argv is not None, "the nested --monitor subprocess was never spawned"
+    assert "--no-deptree" in argv, argv
+    assert argv[argv.index("--fail-on") + 1] == "high", argv
+    # The flags _run_monitor_once already appends explicitly must never be duplicated.
+    assert argv.count("--monitor") == 1, argv
+    assert argv.count("--verbose") == 1, argv
+
+
 def test_run_watch_missing_home_directory_via_cli_returns_1(tmp_path, capsys):
     rc = main(["--watch", "--home", str(tmp_path / "does-not-exist"),
               "--data-dir", str(tmp_path / "store")])
     assert rc == 1
     err = capsys.readouterr().err
     assert "is not a directory" in err
+
+
+def test_run_watch_cli_forwards_the_operators_own_flags_into_extra_monitor_args(
+    tmp_path, monkeypatch,
+):
+    """B-880: `_run_watch_cli` (cli.py) must compute and pass `extra_monitor_args` when
+    it calls `run_watch()` -- before the fix it called `run_watch()` with no such kwarg
+    at all, so a `--watch --no-deptree` run silently ran every nested `--monitor`
+    re-scan with bare CLI defaults, dropping every flag the operator gave the outer
+    invocation (confirmed: a full npm dependency-tree walk on every debounced cycle
+    even with --no-deptree given).
+
+    This targets the exact call site the bug lived in -- `run_watch` itself is stubbed
+    out, so this never runs the (deliberately never-returning-without-a-signal) watch
+    loop. `run_watch`'s OWN contract -- that `extra_monitor_args` it receives really
+    reaches the nested subprocess argv -- is proven separately below, against the real
+    loop.
+    """
+    captured: dict = {}
+
+    def _fake_run_watch(home, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(watch, "run_watch", _fake_run_watch)
+
+    rc = main(["--watch", "--home", str(HOME_SAFE), "--data-dir", str(tmp_path / "store"),
+              "--no-deptree"])
+    assert rc == 0
+
+    extra = captured.get("extra_monitor_args")
+    assert extra is not None, "run_watch() was not called with extra_monitor_args at all"
+    assert "--no-deptree" in extra, extra
+    # Negative control: a flag NOT given on the outer invocation must not appear either --
+    # otherwise this assertion would pass even if forwarding were unconditionally "on".
+    assert "--exhaustive" not in extra, extra
 
 
 # ------------------------------------------------------- real subprocess: signals
