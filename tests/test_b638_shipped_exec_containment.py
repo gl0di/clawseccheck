@@ -69,6 +69,24 @@ def test_clean_fixture_shipped_version_exec_passes():
     assert f.status == PASS, (f.status, f.detail)
 
 
+def test_clean_fixture_split_anchor_rebind_passes():
+    """CLAWSECCHECK-B-638 fix round 1: the SAME idiom as
+    clean_b638_shipped_version_exec, but `here` is rebuilt across two straight-line
+    statements (`here = os.path.dirname(__file__)` then `here = os.path.abspath(here)`)
+    instead of one nested expression. Before this fix: FAIL -- `_FileFacts.sole()`
+    required exactly one Assign record for a name, so a name rebound twice in
+    unconditional, same-scope, straight-line code lost the proof even though the value
+    reaching the read is unambiguous."""
+    f = _b13(FIXTURES / "clean_b638_split_anchor_rebind")
+    assert f.status == PASS, (f.status, f.detail)
+
+
+def test_vet_skill_agrees_on_the_split_anchor_rebind():
+    out = vet_skill(FIXTURES / "clean_b638_split_anchor_rebind" / "skills" / "demo-packager")
+    pool = [out, *(out.ring_findings or [])]
+    assert not [f for f in pool if f.status == FAIL], [(f.id, f.detail[:120]) for f in pool]
+
+
 def test_bad_fixture_env_joined_path_fails():
     """Before this change: PASS. The `__file__` token was in the expression, so the old
     carve-out absolved a read whose last join argument comes from the environment -- and an
@@ -266,6 +284,37 @@ def test_function_scope_idiom_clears_with_locals():
     assert _crit(src) == set()
 
 
+def test_straight_line_anchor_rebind_clears():
+    """CLAWSECCHECK-B-638 fix round 1: `here` rebuilt across two straight-line, module-
+    scope statements -- `here = os.path.dirname(__file__)` then
+    `here = os.path.abspath(here)` -- must resolve exactly like the one nested
+    expression `here = os.path.abspath(os.path.dirname(__file__))`."""
+    src = (
+        "import os\n"
+        "here = os.path.dirname(__file__)\n"
+        "here = os.path.abspath(here)\n\n"
+        "about = {}\n"
+        f'with open(os.path.join(here, "demo_plugin", "__version__.py"), "r",'
+        ' encoding="utf-8") as f:\n'
+        f"    {EX}(f.read(), about)\n"
+    )
+    assert _crit(src) == set()
+
+
+def test_two_hop_path_variable_rebind_clears():
+    """The reviewer's second repro: the SAME straight-line rebind, but on the variable
+    holding the full joined path rather than the directory anchor."""
+    src = (
+        "import os\n"
+        "p = os.path.dirname(__file__)\n"
+        'p = os.path.join(p, "demo_plugin", "__version__.py")\n\n'
+        "about = {}\n"
+        f'with open(p, "r", encoding="utf-8") as f:\n'
+        f"    {EX}(f.read(), about)\n"
+    )
+    assert _crit(src) == set()
+
+
 def test_function_scope_does_not_trust_a_module_global():
     """A module global read by a function can be replaced from another file after import,
     so a function's path, handle and namespace must all be its own locals."""
@@ -300,6 +349,11 @@ ESCAPES = {
     "abs_swallow": f'with open(os.path.join(here, "assets", "/tmp/.cache/stage2.py")) as f:\n    {EX}(f.read(), about)\n',
     "traversal_out": f'with open(os.path.join(here, "..", "..", "tmp", "stage2.py")) as f:\n    {EX}(f.read(), about)\n',
     "dead_branch_anchor": f'with open(here if False else "/tmp/x.py") as f:\n    {EX}(f.read(), about)\n',
+    # CLAWSECCHECK-B-638 fix round 1: the straight-line rebind relaxation must stay a
+    # categorical rejection the moment ANY of the name's bindings crosses a branch/loop
+    # boundary -- paired controls for test_straight_line_anchor_rebind_clears.
+    "branch_rebound_anchor": f'if sys.argv[1:]:\n    here = "/tmp/x"\nwith {_OPEN}) as f:\n    {EX}(f.read(), about)\n',
+    "loop_rebound_anchor": f'for _ in range(1):\n    here = os.path.abspath(here)\nwith {_OPEN}) as f:\n    {EX}(f.read(), about)\n',
     "env_segment_inline": f'with open(os.path.join(here, os.environ["P"]), "rb") as fh:\n    {EX}(fh.read().decode(), about)\n',
     "argv_segment": f"with open(os.path.join(here, sys.argv[1])) as f:\n    {EX}(f.read(), about)\n",
     "literal_tmp": f'with open("/tmp/stage2.py") as f:\n    {EX}(f.read(), about)\n',

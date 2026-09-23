@@ -540,17 +540,37 @@ class _FileFacts:
         self._records[scope] = out
         return out
 
-    def sole(self, name: str, scope: ast.AST):
-        """The one binding of *name* in *scope* itself, or None.
-
-        A function never falls back to a module global here: after import, another file
-        can replace a module attribute that a function reads, and a local cannot."""
+    def sole(self, name: str, scope: ast.AST, before: "ast.AST | None" = None):
+        """The reaching binding of *name* in *scope*, or None.
+        One binding: unchanged (a function never falls back to a module global -- another
+        file can replace a module attribute after import, and a local cannot). Several:
+        disqualified unless *before* is given and every binding is a plain Assign that is
+        a direct, unconditional statement of *scope*'s own body (never inside a branch,
+        loop, def or class) -- then the last one before *before* in body order wins
+        (B-638: a same-scope rebind split across two lines resolves like one nested
+        expression); any boundary-crossing or non-Assign binding disqualifies outright."""
         if name == "__file__" or name in self.declared:
             return None
         recs = self.records(scope).get(name, [])
-        if len(recs) != 1 or recs[0][0] == "other":
+        if len(recs) == 1:
+            return None if recs[0][0] == "other" else recs[0]
+        if before is None or not recs or any(r[0] != "assign" for r in recs):
             return None
-        return recs[0]
+        body = getattr(scope, "body", None) or []
+        if any(self.parents.get(r[2]) is not scope or r[2] not in body for r in recs):
+            return None
+        limit = self._stmt_index(before, scope, body)
+        if limit is None:
+            return None
+        reaching = sorted((body.index(r[2]), r) for r in recs if body.index(r[2]) < limit)
+        return reaching[-1][1] if reaching else None
+
+    def _stmt_index(self, node: ast.AST, scope: ast.AST, body: list) -> "int | None":
+        """Index in *body* of the statement transitively evaluating *node*, or None."""
+        child, cur = node, self.parents.get(node)
+        while cur is not None and cur is not scope:
+            child, cur = cur, self.parents.get(cur)
+        return body.index(child) if cur is scope and child in body else None
 
     def literal(self, node: ast.AST, scope: ast.AST) -> "str | None":
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -663,7 +683,7 @@ class _FileFacts:
         if isinstance(e, ast.Name):
             if e.id == "__file__":
                 return _Path("str", self.relparts, len(self.relparts))
-            rec = self.sole(e.id, scope)
+            rec = self.sole(e.id, scope, before=e)
             if rec is None or rec[0] != "assign":
                 return None
             return self.resolve(rec[1], scope, depth + 1)
