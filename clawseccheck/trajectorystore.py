@@ -126,7 +126,8 @@ from .trajectory import (
     _COMPILED_TOOL_FIELDS,
     _compiled_tool_entry,
     _MAX_COMPILED_LINE_LEN,
-    _MAX_TOOL_DEFS,
+    _MAX_TOOL_DEFS_PER_SOURCE,
+    _MAX_TOOL_DEFS_TOTAL,
     _MAX_TOOLS_PER_EVENT,
     _SCHEMA_VERSION,
     _TRACE_SCHEMA,
@@ -998,10 +999,17 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
     ``tests/test_b185_compiled_tool_poisoning.py``'s JSONL/SQLite equivalence test.
 
     ``meta`` reports ``present`` (any db read), ``dbs_found``, ``dbs_read``,
-    ``dbs_unreadable``, ``events`` (``context.compiled`` records parsed), ``truncated``,
+    ``dbs_unreadable``, ``events`` (``context.compiled`` records parsed), ``truncated``
+    (a per-db byte/row cap, an oversized row, a per-SOURCE definition cap --
+    ``_MAX_TOOL_DEFS_PER_SOURCE``, reset for each db -- or the outer TOTAL definition
+    ceiling -- ``_MAX_TOOL_DEFS_TOTAL``, shared across all dbs -- was hit),
     ``unknown_version`` and ``non_text_rows`` (see :func:`_read_sqlite_event_json`) --
     same vocabulary as the JSONL reader's meta where they overlap, so a caller can treat
-    both uniformly for the fields both have.
+    both uniformly for the fields both have. The two-tier cap split (B-933) mirrors the
+    JSONL reader's own split EXACTLY -- see that reader's DoS-bounds comment in
+    trajectory.py for the full rationale -- and
+    ``tests/test_b185_compiled_tool_poisoning.py`` pins that the two readers still agree
+    after a cap is hit, not just when neither is.
 
     This is POST-HOC FORENSIC evidence, same limit as the JSONL reader: it reports what
     WAS sent to the model in sessions that already ran. It cannot pre-clear a live MCP
@@ -1027,6 +1035,7 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
 
     seen: set[tuple] = set()
     for db_path in dbs:
+        source_new_defs = 0  # B-933: per-source count, reset for each new db
         values, capped, unreadable, non_text = _read_sqlite_event_json(db_path)
         if unreadable:
             meta["dbs_unreadable"] += 1
@@ -1103,11 +1112,13 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
                     )
                     if key in seen:
                         continue
-                    if len(tool_defs) >= _MAX_TOOL_DEFS:
+                    if (len(tool_defs) >= _MAX_TOOL_DEFS_TOTAL
+                            or source_new_defs >= _MAX_TOOL_DEFS_PER_SOURCE):
                         meta["truncated"] = True
                         break
                     seen.add(key)
                     tool_defs.append(entry)
+                    source_new_defs += 1
 
     meta["present"] = meta["dbs_read"] > 0
     return tool_defs, meta

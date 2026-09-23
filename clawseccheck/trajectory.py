@@ -644,9 +644,26 @@ _COMPILED_TOOL_FIELDS = ("tools", "providerVisibleTools")
 # DoS bounds (B-192's OOM lesson: bound the parse, not just the walk). Real events
 # measured 40–61 KB with <=20 tools and a <=4.1 KB longest description, so these caps
 # sit far above legitimate traffic and only bite on a padded/hostile line.
+#
+# _MAX_TOOL_DEFS is two-tier (B-933): a global-only cap let one source (whichever
+# `find_trajectory_files` orders first) exhaust the whole budget before a later,
+# genuinely poisoned source was ever read — the cap check sat outside the per-file
+# loop, so `truncated=True` fired for every subsequent file while silently dropping
+# all of its defs. `_MAX_TOOL_DEFS_PER_SOURCE` resets at the top of each `for path in
+# files:` iteration so no single source can starve another. `_MAX_TOOL_DEFS_TOTAL` is
+# a separate outer ceiling kept because `--exhaustive` makes `max_files` /
+# `max_bytes_per_file` unbounded (scanbudget.py), so a per-source-only cap could still
+# retain unbounded total memory across many sources; the total ceiling bounds that
+# worst case. Real host measured (this machine, 2 agent sources): 16 distinct tool
+# defs total — both tiers sit ~100x/~1000x above real usage, no FP-avoidance concern.
+# Accepted residual: a SINGLE source with >_MAX_TOOL_DEFS_PER_SOURCE distinct defs can
+# still truncate its own late content (e.g. a poisoned def appearing after its own
+# source's cap is hit) — this narrows the B-933 attack surface, it does not eliminate
+# every truncation path.
 _MAX_COMPILED_LINE_LEN = 1_000_000
 _MAX_TOOLS_PER_EVENT = 200
-_MAX_TOOL_DEFS = 2_000
+_MAX_TOOL_DEFS_PER_SOURCE = 2_000   # unchanged value, now scoped per file/db
+_MAX_TOOL_DEFS_TOTAL = 20_000       # new outer safety ceiling (10x), see note above
 _MAX_DESC_CHARS = 20_000
 _MAX_PARAMS_PER_TOOL = 100
 
@@ -715,9 +732,11 @@ def read_compiled_tool_descriptions(
 
     ``meta`` reports ``present`` (any trajectory file found), ``files_scanned``,
     ``events`` (``context.compiled`` records parsed), ``unknown_version``, and
-    ``truncated`` (a per-file byte cap, an oversized line, or a per-scan definition cap
-    was hit — the extracted set is then incomplete, so a clean verdict on it must not
-    read as confidently complete).
+    ``truncated`` (a per-file byte cap, an oversized line, a per-SOURCE definition cap
+    — ``_MAX_TOOL_DEFS_PER_SOURCE``, reset for each file — or the outer TOTAL
+    definition ceiling — ``_MAX_TOOL_DEFS_TOTAL``, shared across all files — was hit).
+    Either way the extracted set is then incomplete, so a clean verdict on it must not
+    read as confidently complete.
 
     §8: only the named sub-fields above are read. ``systemPrompt``, ``prompt`` and
     ``messages`` — the user's own conversation — are never read or returned.
@@ -750,6 +769,7 @@ def read_compiled_tool_descriptions(
 
     seen: set[tuple] = set()
     for path in files:
+        source_new_defs = 0  # B-933: per-source count, reset for each new file
         try:
             read = 0
             with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -804,11 +824,13 @@ def read_compiled_tool_descriptions(
                             )
                             if key in seen:
                                 continue
-                            if len(tool_defs) >= _MAX_TOOL_DEFS:
+                            if (len(tool_defs) >= _MAX_TOOL_DEFS_TOTAL
+                                    or source_new_defs >= _MAX_TOOL_DEFS_PER_SOURCE):
                                 meta["truncated"] = True
                                 break
                             seen.add(key)
                             tool_defs.append(entry)
+                            source_new_defs += 1
         except OSError:
             continue
         meta["files_scanned"] += 1
