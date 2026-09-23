@@ -1120,8 +1120,8 @@ if [ "$1" = "api" ]; then
       echo "gh: Not Found (HTTP 404)" >&2
       exit 1 ;;
     lookup_fail)
-      printf '{"message":"API rate limit exceeded for installation ID 999999.","status":"403"}\n'
-      echo "gh: API rate limit exceeded for installation ID 999999. (HTTP 403)" >&2
+      printf '{"message":"API rate limit exceeded for installation ID 40401234.","status":"403"}\n'
+      echo "gh: API rate limit exceeded for installation ID 40401234. (HTTP 403)" >&2
       exit 1 ;;
   esac
 elif [ "$1" = "release" ] && [ "$2" = "view" ]; then
