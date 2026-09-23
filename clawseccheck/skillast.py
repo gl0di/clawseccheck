@@ -111,6 +111,24 @@ def _is_hardcoded_provider_secret(node: ast.AST) -> bool:
 
 _MAX_FINDINGS_PER_FILE = 25
 
+# B-907 round 2: a per-pass budget set to _MAX_FINDINGS_PER_FILE (25) itself
+# reintroduces the exact starvation it was meant to fix, whenever a single pass emits
+# MIXED severities — e.g. analyze_python's first main Call-walk loop, which emits
+# HARDCODED_PROVIDER_SECRET/OBFUSCATED_EXEC/GETATTR_INDIRECTION/DYNAMIC_IMPORT_EXEC
+# (all crit-capable) inline alongside plain DANGEROUS_SINK (info) in the SAME
+# iteration. 25 padding DANGEROUS_SINK matches early in that one loop still exhaust
+# ITS OWN budget and `break` before the loop ever reaches a later node's crit — round
+# 1's `_pass_start` snapshot only stops one pass from starving a DIFFERENT, later
+# pass; it does nothing for two rules sharing one walk. This ceiling exists ONLY to
+# stop a pathological file (already bounded by the ~1MB per-file source cap upstream)
+# from growing `out` without limit before the real enforcement runs; it is
+# deliberately far above anything a real pass legitimately produces, so it is never
+# expected to bind in practice — the actual per-file cap is enforced exactly once, by
+# severity, at `return` below (see `_ast_severity_rank`), which is what makes a mixed
+# pass safe: every genuine candidate from every pass reaches `out`, and only then does
+# crit-before-info truncation decide what survives the 25-per-file limit.
+_PASS_SAFETY_CEILING = _MAX_FINDINGS_PER_FILE * 20
+
 # Severity rank for the FINAL truncation below — higher sorts
 # first. `analyze_python`'s own emitted severities are "crit" and "info" only, but
 # this stays a proper total order (not a two-way crit/non-crit split) so a future
@@ -5102,18 +5120,31 @@ def analyze_python(
         seen.add(key)
         out.append(ASTFinding(rule, severity, lineno, reason))
 
-    # This cap (and every other `_pass_start`-relative one below)
-    # bounds what THIS pass alone may contribute, not the shared `out` total — a
-    # global `len(out) >= _MAX_FINDINGS_PER_FILE` check here previously meant an
-    # earlier pass filling `out` with low-severity noise (e.g. plain DANGEROUS_SINK
-    # info findings) made every LATER pass's loop break on its first iteration,
-    # silently dropping a real crit (TT5_CMD_INJECTION) that pass would otherwise
-    # have found. Each pass now gets its own budget; `return out` below does the
-    # actual severity-ordered enforcement of _MAX_FINDINGS_PER_FILE as a final step,
-    # so a real crit can never be starved out by an earlier pass's info findings.
+    # This ceiling (and every other `_pass_start`-relative one below) bounds what
+    # THIS pass alone may contribute, not the shared `out` total — a global
+    # `len(out) >= _MAX_FINDINGS_PER_FILE` check here previously meant an earlier
+    # pass filling `out` with low-severity noise (e.g. plain DANGEROUS_SINK info
+    # findings) made every LATER pass's loop break on its first iteration, silently
+    # dropping a real crit (TT5_CMD_INJECTION) that pass would otherwise have found
+    # (B-907 round 1).
+    #
+    # B-907 round 2: round 1's fix used `_MAX_FINDINGS_PER_FILE` (25) as each pass's
+    # OWN budget too — which reintroduces the identical starvation WITHIN this one
+    # pass, since this particular loop is not single-severity: it also emits
+    # HARDCODED_PROVIDER_SECRET / OBFUSCATED_EXEC / GETATTR_INDIRECTION /
+    # DYNAMIC_IMPORT_EXEC (all crit-capable) inline, in the same walk, alongside
+    # plain DANGEROUS_SINK (info). 25 padding DANGEROUS_SINK matches early in this
+    # loop still filled ITS OWN budget and broke before a later node's crit was ever
+    # reached. `_PASS_SAFETY_CEILING` is deliberately far above what any real pass
+    # produces (a pure DoS-safety backstop on top of the ~1MB per-file source cap
+    # upstream, not a severity budget) — every genuine candidate, crit or info, from
+    # every pass now actually reaches `out`, and `return out` below does the real
+    # enforcement of _MAX_FINDINGS_PER_FILE as a single, severity-ordered final step,
+    # so a real crit can never be starved out by lower-severity findings — from an
+    # earlier pass, OR from earlier in this same pass.
     _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
             break
         if not isinstance(node, ast.Call):
             continue
@@ -5393,7 +5424,7 @@ def analyze_python(
         env_src_tainted = _env_tainted_names(tree) | _agent_config_file_tainted_names(source, tree)
         _pass_start = len(out)
         for node in ast.walk(tree):
-            if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
+            if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
                 break
             if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                 continue
@@ -5437,7 +5468,7 @@ def analyze_python(
         host_src_tainted = _host_info_tainted_names(tree)
         _pass_start = len(out)
         for node in ast.walk(tree):
-            if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
+            if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
                 break
             if not isinstance(node, ast.Call):
                 continue
@@ -5528,7 +5559,7 @@ def analyze_python(
             telemetry_tainted = _telemetry_tainted_names(tree, collector_funcs)
             _pass_start = len(out)
             for node in ast.walk(tree):
-                if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
+                if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
                     break
                 if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                     continue
@@ -5567,7 +5598,7 @@ def analyze_python(
     # above — this is a shape check on the argv list, not a taint flow.
     _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
             break
         if not _is_curl_wget_argv_call(node):
             continue
@@ -5603,7 +5634,7 @@ def analyze_python(
     # (B338) is this rule's sole consumer and stays WARN-only by design.
     _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
             break
         if not _is_tunnel_launch_argv_call(node):
             continue
@@ -5667,14 +5698,18 @@ def analyze_python(
     )
 
     if ext_taint_map:
-        # This is the TT5/TT4/SSRF taint pass — the one whose
-        # starvation was the concrete repro (a TT5_CMD_INJECTION crit lost behind
-        # 25+ earlier DANGEROUS_SINK info findings). `_pass_start` gives it its own
-        # budget regardless of how full `out` already is; see the comment on the
-        # first `_pass_start` above.
+        # This is the TT5/TT4/SSRF taint pass — the one whose INTER-pass starvation
+        # (round 1) was the concrete repro (a TT5_CMD_INJECTION crit lost behind 25+
+        # earlier DANGEROUS_SINK info findings from the loop above). `_pass_start`
+        # gives it its own budget regardless of how full `out` already is; see the
+        # comment on the first `_pass_start` above. It is ALSO, itself, a mixed-
+        # severity pass exactly like that first loop (TT5_CMD_INJECTION crit
+        # alongside TT5_ARG_INJECTION/TT4_FILE_NET/TT_SSRF info in the same walk) —
+        # `_PASS_SAFETY_CEILING` (round 2), not `_MAX_FINDINGS_PER_FILE`, is what
+        # stops this pass's own info findings from starving its own later crit.
         _pass_start = len(out)
         for node in ast.walk(tree):
-            if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
+            if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
                 break
             if not isinstance(node, ast.Call):
                 continue
@@ -5795,7 +5830,7 @@ def analyze_python(
     # different node shape and the Call loop's control flow is continue-heavy.
     _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
             break
         if not isinstance(node, ast.Assign):
             continue
@@ -5854,7 +5889,7 @@ def analyze_python(
     # — left as-is, flagged for a follow-up task rather than fixed unilaterally here.
     _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
             break
         if isinstance(node, ast.Assign):
             if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
