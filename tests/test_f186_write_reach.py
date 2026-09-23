@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -372,8 +371,24 @@ _SANDBOXED = {"sandbox": {"mode": "all"}}
 _MAIN = {"default": True}
 
 
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_b55_for()` below, a plain helper called from many test bodies rather
+    than a fixture itself — keeps every throwaway home inside pytest's own tmp tree
+    instead of system /tmp. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
+
+
 def _b55_for(cfg):
-    home = Path(tempfile.mkdtemp(prefix="f186-"))
+    home = _TMP_PATH_FACTORY.mktemp("f186")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg), encoding="utf-8")
     os.chmod(path, 0o600)

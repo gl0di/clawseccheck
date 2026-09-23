@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import clawseccheck.checks as C
@@ -60,9 +59,9 @@ def _finding_direct(cfg: dict):
     return C.check_telemetry_enabled(_ctx(cfg))
 
 
-def _finding_via_home(cfg: dict):
+def _finding_via_home(cfg: dict, tmp_path):
     """Round-trip through collect()/run_all(), matching how the real audit invokes it."""
-    home = Path(tempfile.mkdtemp(prefix="b393-"))
+    home = tmp_path
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg), encoding="utf-8")
     os.chmod(path, 0o600)
@@ -208,6 +207,6 @@ def test_the_no_config_fixture_is_not_applicable():
     assert f.not_applicable is True
 
 
-def test_full_pipeline_round_trip_matches_direct_call():
+def test_full_pipeline_round_trip_matches_direct_call(tmp_path):
     cfg = {**_BASELINE, "telemetry": {"enabled": True}}
-    assert _finding_via_home(cfg).status == _finding_direct(cfg).status == PASS
+    assert _finding_via_home(cfg, tmp_path).status == _finding_direct(cfg).status == PASS
