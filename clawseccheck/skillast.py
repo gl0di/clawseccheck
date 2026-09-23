@@ -4463,6 +4463,12 @@ def _is_writable_import_path(node: ast.AST) -> bool:
 # checks/_mcp.py), a bigger change than this narrow FP fix justifies on its own. A
 # literal or env/argv-derived path (the dropper shape: `open("/tmp/x.py", "rb")`)
 # never contains `__file__` and is therefore never exempted by this proxy.
+#
+# B-638: that precise version now exists -- `shippedexec.ShippedArtifact`, passed as
+# `analyze_python(artifact=...)` by check_installed_skills, vet_plugin and the judge-packet
+# builder. When it is passed, this token proxy is NOT consulted at either exec site (it
+# absolved `join(here, os.environ["P"])`, whose absolute value discards the anchor); it
+# remains only for a caller that cannot say what the artifact holds.
 def _scope_own_assigns(scope: ast.AST) -> dict:
     """name -> RHS expr for every single-Name-target `x = <expr>` in `scope`'s own
     body (via `_scope_own_nodes`, so it does not descend into nested functions) --
@@ -5026,7 +5032,10 @@ def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, st
 
 
 def analyze_python(
-    source: str, filename: str = "<skill>", own_host: str | None = None
+    source: str,
+    filename: str = "<skill>",
+    own_host: str | None = None,
+    artifact=None,
 ) -> list[ASTFinding]:
     """Return AST findings for one Python source string. Never raises, never executes.
 
@@ -5039,6 +5048,14 @@ def analyze_python(
     text itself), used to REWORD (not silence — self-declaration proves disclosed,
     not trustworthy) HOST_INFO_EXFIL_FLOW when a host-info value flows to the
     skill's OWN disclosed endpoint rather than an undeclared third party.
+
+    `artifact` (B-638): a `shippedexec.ShippedArtifact` over every Python file the caller
+    analyses for this artifact. With it, an exec/eval call proven to run exactly a file the
+    artifact ships (resolved path containment, not a `__file__` token) is a plain
+    DANGEROUS_SINK instead of OBFUSCATED_EXEC/TT5_CMD_INJECTION, and the older token-based
+    carve-out below is NOT consulted -- it absolved reads whose path only mentioned
+    `__file__`. Without it (a caller that cannot say what the artifact holds) behaviour is
+    exactly what it was before.
     """
     try:
         tree = ast.parse(source)
@@ -5068,6 +5085,14 @@ def analyze_python(
         # qualifying exec/taint-sink site below — same result, `tree` does not change
         # within this call.
         path_aliases = _path_module_aliases(tree)
+        # B-638: (lineno, col_offset) of exec/eval calls proven to run a shipped file, and
+        # of those whose only gap is that the in-artifact file they run is not shipped.
+        shipped_exec = (
+            artifact.exact_exec_sites(filename, source) if artifact is not None else None
+        )
+        unshipped_exec = (
+            artifact.unshipped_exec_sites(filename, source) if artifact is not None else {}
+        )
     except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
         err_type = type(exc).__name__
         return [
@@ -5139,12 +5164,32 @@ def analyze_python(
                 node, tainted, owner_map, parent_scope, shadow_cache
             )
             has_decode_signal = _subtree_has_decode(arg)
+            # B-638: the executed value is exactly a file this artifact ships -- proven by
+            # shippedexec against the artifact's own file set. Nothing is decoded, hidden
+            # or tainted in it, so it is the plain dynamic call it looks like.
+            if shipped_exec is not None and (ln, node.col_offset) in shipped_exec:
+                add("DANGEROUS_SINK", "info", ln, f"a dynamic {f.id} call")
+                continue
+            # B-638: the same proof holds except the file is not one this scan analysed --
+            # it is missing, or not Python. Its content is unknown, which is not evidence of
+            # a payload either: a WARN-grade question, never a crit (Golden Rule #4).
+            if (ln, node.col_offset) in unshipped_exec:
+                add(
+                    "UNSHIPPED_FILE_EXEC",
+                    "info",
+                    ln,
+                    f"a call to {f.id} runs {unshipped_exec[(ln, node.col_offset)]}, a path "
+                    "inside the skill that this scan did not analyse as Python (not shipped, "
+                    "or not Python) — whatever is there at runtime runs as code",
+                )
+                continue
             # B-640: `.decode("utf-8")` reading a __file__-relative sibling file (the
             # canonical setup.py idiom -- see the module comment above
             # `_scope_own_assigns`) is not obfuscation on its own. Only un-arms the
             # bare-decode signal; a real content-hiding primitive elsewhere in the
-            # same expression still convicts.
-            if has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
+            # same expression still convicts. B-638: a token proxy, so it is only
+            # consulted when the caller could not supply the artifact.
+            if shipped_exec is None and has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
                 arg, owner_map.get(node, tree), filename, path_aliases
             ):
                 has_decode_signal = False
@@ -5653,6 +5698,12 @@ def analyze_python(
                     node, ext_taint_map, owner_map, parent_scope, shadow_cache
                 )
                 any_t, direct = _call_args_tainted(node, ext_visible)
+                # B-638: the tainted input is exactly the read of a file this artifact
+                # ships (see the OBFUSCATED_EXEC site above).
+                if any_t and shipped_exec is not None and (
+                    (ln, node.col_offset) in shipped_exec or (ln, node.col_offset) in unshipped_exec
+                ):
+                    continue
                 if any_t:
                     # B-752: a decode-shaped, provably artifact-relative file read (the
                     # setup.py idiom) is not external input merely because open()/.read()
@@ -5661,8 +5712,9 @@ def analyze_python(
                     # is explained by exactly that pattern; any other tainted name
                     # reaching the sink -- a mixed expression, a real decode primitive
                     # layered on top -- still convicts below.
+                    # B-638: a token proxy, so only when the caller had no artifact.
                     _all_args = list(node.args) + [kw.value for kw in node.keywords]
-                    if _all_args and all(
+                    if shipped_exec is None and _all_args and all(
                         not (_names_in(_a) & ext_visible)
                         or _exec_sink_taint_is_only_artifact_relative_decode(
                             _a,
