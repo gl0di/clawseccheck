@@ -15946,3 +15946,52 @@ def check_chunked_file_assembly_exec(ctx: Context) -> Finding:
         "malicious.",
         hits,
     )
+
+
+def check_artifact_read_unproven(ctx: Context) -> Finding:
+    """B394 (B-850) -- a __file__-relative decode-then-exec read the artifact-
+    containment ALLOWLIST recognizer (skillast.py) positively anchors on the scanned
+    file's own location but cannot statically bound, because a tail segment is
+    computed at runtime (an environment variable, a caller-supplied name, ...).
+    Reuses skillast.py's ARTIFACT_READ_UNPROVEN AST rule -- pure wiring, no new AST
+    logic in this module. Advisory (scored=False, never alters the static grade);
+    WARN-only, never FAIL-capable.
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _custom(
+            "B394",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skill sources to inspect for unprovable artifact-relative reads.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    hits: list[str] = []
+    for name, files in getattr(ctx, "installed_skill_py", {}).items():
+        for relpath, src in files:
+            for af in analyze_python(src, relpath):
+                if af.rule == "ARTIFACT_READ_UNPROVEN":
+                    hits.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+    if not hits:
+        return _custom(
+            "B394",
+            MEDIUM,
+            PASS,
+            "No unprovable artifact-relative reads: every __file__-relative decode-then-"
+            "exec read either stays statically provable inside the skill's own directory "
+            "or is not anchored on the skill's location at all.",
+            "Anchor a bundled file's path fully on __file__ (dirname/parent + literal "
+            "segments only); avoid computing part of the path from an environment "
+            "variable, argument, or other runtime value.",
+        )
+    extra = f" (+{len(hits) - 6} more)" if len(hits) > 6 else ""
+    return _custom(
+        "B394",
+        MEDIUM,
+        WARN,
+        "Unprovable artifact-relative read in installed skill(s): " + "; ".join(hits[:6]) + extra,
+        "A file is read relative to the skill's own location and the decoded content is "
+        "executed, but part of the path is computed at runtime so it cannot be proven to "
+        "stay inside the skill's own directory. Confirm every value that can reach that "
+        "segment is one you control.",
+        hits,
+    )

@@ -108,6 +108,7 @@ from ._content import (
     _url_matches_own_host,
     _whole_text_is_defensive,
     check_agent_snooping,
+    check_artifact_read_unproven,
     check_capability_intent_mismatch,
     check_chunked_file_assembly_exec,
     check_clickfix_setup_section,
@@ -3948,6 +3949,7 @@ _B13_WINNER_SUBSIGNAL = {
     "warns_curl_dropper": "possible staged dropper",
     "warns_chunked_file_exec": "possible split-by-file payload loader",
     "warns_unshipped_exec": "executes a file this scan never analysed",
+    "warns_artifact_unproven": "possible artifact-boundary escape (unproven path)",
     "warns_timebomb": "time-bomb / environment-gated code",
     "warns_shell_injection": "shell-injection-prone subprocess/os.system usage",
     "warns_insecure_tempfile": "insecure temp-file handling",
@@ -4391,6 +4393,10 @@ def check_installed_skills(ctx: Context) -> Finding:
     # why a shape gate here would still convict the corpus's own conftest.py fixtures.
     hardcoded_secret_fixture_note: list[str] = []
     warns_unshipped_exec: list[str] = []  # B-638: exec of an in-skill path never analysed
+    # B394: a __file__-relative decode-then-exec read the B-850 allowlist recognizer
+    # positively anchors, but cannot statically bound (a runtime-computed tail
+    # segment) -- never FAIL-capable, disclosed rather than silently absolved.
+    warns_artifact_unproven: list[str] = []
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
     # B-744: OpenClaw's own credential store named alongside credential-shaped content
     # reaching an exfil sink — WARN-only, never routed through the FAIL-capable
@@ -5172,6 +5178,16 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "UNSHIPPED_FILE_EXEC":
                     warns_unshipped_exec.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
+                # B394 (B-850): a decode-then-exec read the allowlist recognizer
+                # positively anchors on __file__ but cannot statically bound (a
+                # runtime-computed tail segment). WARN-grade only -- routed here,
+                # BEFORE the generic crit/cred-exfil fallthrough below, so this rule
+                # can never become FAIL-capable regardless of its own "info" severity
+                # label or any co-occurring cred/exfil signal (mirrors CHUNKED_FILE_
+                # EXEC's guard just above).
+                if af.rule == "ARTIFACT_READ_UNPROVEN":
+                    warns_artifact_unproven.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                    continue
                 # Argv-list tunnel/mesh-VPN launch primitive (TUNNEL_LAUNCH_ARGV).
                 # WARN-only, HIGH severity but explicitly not
                 # FAIL-capable (checks/_content.py's check_tunnel_enrollment / B338 —
@@ -5387,6 +5403,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         "warns_insecure_tempfile": warns_insecure_tempfile,
         "warns_chunked_file_exec": warns_chunked_file_exec,
         "warns_unshipped_exec": warns_unshipped_exec,
+        "warns_artifact_unproven": warns_artifact_unproven,
         "warns_js": warns_js,
         "warns_content": warns_content,
         "warns_notify_host": warns_notify_host,
@@ -6034,6 +6051,37 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_unshipped_exec,
             _signal_buckets,
             "warns_unshipped_exec",
+        )
+
+    # B394 (B-850): a decode-then-exec read the artifact-containment allowlist
+    # recognizer positively anchors on `__file__` but cannot statically bound — a
+    # runtime-computed tail segment (an env var, a caller-supplied name, ...) means
+    # the resolved path could stay inside the artifact or could leave it, and static
+    # analysis cannot tell which. WARN-first, ranked just below the chunked-loader
+    # WARN — plugin/template loaders keyed by a runtime name are the common benign
+    # shape here, but the crit this would otherwise contribute to is never silently
+    # absolved the way a fully BOUNDED read is.
+    if warns_artifact_unproven:
+        extra = (
+            f" (+{len(warns_artifact_unproven) - 6} more)"
+            if len(warns_artifact_unproven) > 6
+            else ""
+        )
+        return _b13_verdict(
+            MEDIUM,
+            WARN,
+            "Possible artifact-boundary escape (unproven path) in installed skill(s): "
+            + "; ".join(warns_artifact_unproven[:6])
+            + extra,
+            "A file is read relative to the skill's own location and the decoded content "
+            "is executed, but part of the path is computed at runtime (an environment "
+            "variable, a caller-supplied name, ...) so it cannot be proven to stay inside "
+            "the skill's own directory. Confirm every value that can reach that segment is "
+            "one you control — a plugin/template name keyed by user input or an external "
+            "source could point outside the artifact.",
+            warns_artifact_unproven,
+            _signal_buckets,
+            "warns_artifact_unproven",
         )
 
     # F-058: a dangerous sink gated on a wall-clock date or an environment variable — a
@@ -7237,6 +7285,7 @@ _AST_NEVER_FAIL_RULES = frozenset({
     "TUNNEL_LAUNCH_ARGV",        # B338 — explicitly not FAIL-capable
     "HARDCODED_PROVIDER_SECRET_ASSIGN",  # B-893 — explicitly not FAIL-capable
     "AST_FINDINGS_TRUNCATED",    # cap disclosure, not a verdict — see skillast.py's analyze_python
+    "ARTIFACT_READ_UNPROVEN",    # B394 (B-850) — explicitly not FAIL-capable
 })
 
 
@@ -8276,6 +8325,7 @@ SKILL_CONTENT_RING = (
     check_dynamic_dispatch_obfuscation,  # B91 — dynamic-dispatch sink obfuscation (F-102)
     check_unsafe_deserialization,  # B92 — unsafe deserialization sink (F-098)
     check_chunked_file_assembly_exec,  # B336 — chunked multi-file-read assembly -> exec/eval
+    check_artifact_read_unproven,  # B394 — unprovable __file__-relative decode-then-exec read (B-850)
     check_trigger_homoglyph,  # B93 — confusable characters in trigger description (F-103)
     check_lifecycle_hooks_extended,  # B94 — extended lifecycle hooks beyond postinstall (F-099)
     check_dependency_confusion,  # B95 — unpinned dep name resembling a well-known package (F-101)

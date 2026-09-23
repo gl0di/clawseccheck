@@ -1957,6 +1957,24 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B394 (B-850): a __file__-relative decode-then-exec read the artifact-containment
+    # ALLOWLIST recognizer (skillast.py) positively anchors on the scanned file's own
+    # location but cannot statically bound, because a tail segment is computed at
+    # runtime (an env var, a caller-supplied name, ...) — the recognizer's UNPROVEN
+    # verdict, as opposed to BOUNDED (silently exempt) or ESCAPES/NOT_ANCHORED (the
+    # pre-existing OBFUSCATED_EXEC/TT5_CMD_INJECTION crit stands). Reuses skillast.py's
+    # ARTIFACT_READ_UNPROVEN AST rule — pure wiring, no separate logic here. Advisory
+    # (scored=False); WARN-only, never FAIL-capable.
+    CheckMeta(
+        "B394",
+        "Artifact-relative decode-then-exec read with an unprovable (runtime-computed) path segment",
+        MEDIUM,
+        "advisory",
+        "Obfuscation / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
     # B337 (B-364): a skill's own Markdown frames a shell command as a
     # MANDATORY, pre-response checkpoint (or tells the agent not to ask the user's
     # permission), and that command reads one or more hidden dotfiles/config paths via a
@@ -3814,6 +3832,7 @@ AST_MAP = {
     "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
     "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
     "B336": ("AST01",),  # chunked file-read assembly -> exec/eval = hidden malicious code / scanner evasion (cf. B90/B91)
+    "B394": ("AST01",),  # unprovable artifact-relative decode-then-exec read = hidden malicious code / scanner evasion (cf. B336)
     "B338": ("AST01",),  # covert tunnel / mesh-VPN enrollment primitive = C2 infrastructure (cf. B13)
     "B339": ("AST01",),  # cloud instance-metadata credential fetch = active credential theft (cf. B13)
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
