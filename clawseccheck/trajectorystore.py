@@ -103,22 +103,29 @@ with one more discipline the plain count readers do not need:
     leave this function -- reused verbatim from the JSONL reader, not re-derived, so the
     two containers cannot diverge on what counts as a "delivered tool definition."
 
-Grep for ``SELECT`` in this module's source: there are exactly four literal
-CONTENT/row-content-adjacent queries whose SQL TEXT names a table. Two name
-``trajectory_runtime_events`` (:data:`_SELECT_TRAJECTORY_ROWS`,
-:data:`_SELECT_TRAJECTORY_EVENT_JSON`); the other two are :func:`_table_kind`'s own
-``sqlite_master`` lookups, added in round 2 of the same B-811 review to close the
-VIEW/virtual-table/rootpage-aliasing bypasses of "we never name the auth tables in our
-own source" (see that function's docstring). None of these four is ever written with
-an auth-table name, and none of them ever selects row CONTENT from one. **Since
-B-845 (2026-09-23)**, this is narrower than "never touches an auth table" (see the §8
-paragraph above): ``_table_kind``'s ``sqlite_master`` lookup binds a caller-supplied
-*table_name* as a PARAMETER (not written into the query text), and its
+Grep for ``SELECT`` in this module's source: there are exactly six literal queries whose
+SQL TEXT names a table. Four name ``trajectory_runtime_events``
+(:data:`_SELECT_TRAJECTORY_ROWS`, :data:`_SELECT_TRAJECTORY_EVENT_JSON`,
+:data:`_SELECT_TRAJECTORY_ROWS_EXCLUDED_COUNT`,
+:data:`_SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT` -- the last two added by round 4 of
+the same B-811 review, disclosing how many rows the length bound EXCLUDED rather than
+recovering them); the other two are :func:`_table_kind`'s own ``sqlite_master`` lookups,
+added in round 2 of the same B-811 review to close the VIEW/virtual-table/rootpage-
+aliasing bypasses of "we never name the auth tables in our own source" (see that
+function's docstring). None of these six is ever written with an auth-table name
+literal in the SQL text, and none of them ever selects row CONTENT from an auth table.
+**Since B-845 (2026-09-23)**, this is narrower than "never touches an auth table" (see
+the §8 paragraph above): ``_table_kind``'s ``sqlite_master`` lookup binds a caller-
+supplied *table_name* as a PARAMETER (not written into the query text), and its
 ``PRAGMA table_xinfo(<table_name>)`` check does interpolate it (regex-validated
-first) -- both READ SCHEMA ONLY, one column-metadata row apiece, never the table's
-own data. A fifth, table-scoped SELECT (``SELECT LENGTH(store_json) FROM
-auth_profile_store WHERE store_key = ?``) exists, but lives in ``collector.py``, not
-here -- this module's own boundary is schema verification, not that content read.
+first) -- both READ SCHEMA ONLY, one column-metadata row apiece, never the table's own
+data. On the one call path that passes ``table_name="auth_profile_store"``
+(``collector._collect_agent_auth_profile_store_presence``), those two ``sqlite_master``
+SELECTs and the sibling ``PRAGMA`` genuinely DO reference the auth table by name --
+schema only (kind/sql/rootpage/generated-column-ness), never its ROW CONTENT. A
+seventh, table-scoped SELECT (``SELECT LENGTH(store_json) FROM auth_profile_store
+WHERE store_key = ?``) exists, but lives in ``collector.py``, not here -- this module's
+own boundary is schema verification, not that content read.
 
 **What this cannot catch (constraint 4, said plainly).** Every container this reader knows
 about is residue of the SPECIFIC 8.1-era JSONL-to-SQLite migration: pointers, the import
@@ -138,9 +145,14 @@ import os
 import re
 import sqlite3
 import stat as _stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote as _urlquote
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from .trajectory import (
     _COMPILED_EVENT_TYPE,
@@ -172,6 +184,15 @@ _MAX_JSONL_BYTES_PER_FILE_FOR_DEDUP = 2_000_000
 # 40-61 KB there), so a single db is bounded the same way a single JSONL file already is.
 _MAX_SQLITE_CONTENT_ROWS_PER_DB = 3000
 _MAX_SQLITE_CONTENT_BYTES_PER_DB = 8_000_000
+# B-852 round 3: the default (unbounded) value of `read_compiled_tool_descriptions`'s
+# `max_content_total_bytes` kwarg -- see that parameter's own docstring and
+# `scanbudget.ScanLimits.sqlite_max_content_total_bytes`'s comment for why an aggregate
+# cap across ALL databases exists at all and why the DEFAULT path leaves it unbounded
+# (the default path's real total is already `max_dbs * max_content_bytes_per_db`, both
+# finite). Python-side-only (an accumulated-byte comparison, never bound into SQL), the
+# same shape `scanbudget._UNBOUNDED` already relies on for sqlite_max_dbs/
+# sqlite_max_content_bytes_per_db, so `sys.maxsize` is exactly as safe here.
+_MAX_SQLITE_CONTENT_TOTAL_BYTES = sys.maxsize
 # A real session_id is a short identifier (UUID-shaped on every observed host); this is
 # generous headroom, not a realistic size, so it never clips real data -- it exists
 # purely to bound the SAME generated-column attack _MAX_COMPILED_LINE_LEN bounds for
@@ -191,16 +212,16 @@ POINTER_SCHEMA = "openclaw-trajectory-pointer"
 TRAJECTORY_TABLE_NAME = "trajectory_runtime_events"
 
 # A literal, table-scoped SELECT. Never built by string formatting or interpolation --
-# grep for "SELECT" in this module's source: there are exactly four (this one,
-# _SELECT_TRAJECTORY_EVENT_JSON below, and _table_kind's two sqlite_master lookups),
-# none built from a variable. This one names only session_id/seq; event_json (the
-# sensitive per-record payload) is never selected here, and neither auth table's DATA
-# is ever selected anywhere in this module's source -- see _table_kind's docstring for
-# why a literal table name in OUR source is necessary but not sufficient on its own.
-# (Since B-845, 2026-09-23: _table_kind's own SCHEMA-only checks -- sqlite_master,
-# PRAGMA table_xinfo -- do run against auth_profile_store's name when a caller asks,
-# but that is column metadata, not this SELECT and not row content; see the module
-# docstring's §8 paragraph.)
+# grep for "SELECT" in this module's source: there are exactly six (this one,
+# _SELECT_TRAJECTORY_EVENT_JSON below, the two _EXCLUDED_COUNT queries further below,
+# and _table_kind's two sqlite_master lookups), none built from a variable. This one
+# names only session_id/seq; event_json (the sensitive per-record payload) is never
+# selected here, and neither auth table's DATA is ever selected anywhere in this
+# module's source -- see _table_kind's docstring for why a literal table name in OUR
+# source is necessary but not sufficient on its own. (Since B-845, 2026-09-23:
+# _table_kind's own SCHEMA-only checks -- sqlite_master, PRAGMA table_xinfo -- do run
+# against auth_profile_store's name when a caller asks, but that is column metadata,
+# not this SELECT and not row content; see the module docstring's §8 paragraph.)
 #
 # `length(CAST(session_id AS BLOB) ) <= ?` -- see _SELECT_TRAJECTORY_EVENT_JSON's own
 # comment for why the CAST matters: SQLite's `length()` on a bare TEXT value stops at
@@ -237,9 +258,46 @@ _SELECT_TRAJECTORY_ROWS = (
 # than the original finding it was meant to fix. `CAST(... AS BLOB)` makes `length()`
 # return the true byte count, embedded NULs included. The bound value is
 # _MAX_COMPILED_LINE_LEN, matching the JSONL sibling's own per-record cap.
+#
+# `ORDER BY rowid DESC` (B-852, revised by a same-task follow-up fix): this query has
+# always carried a `LIMIT`; with no ORDER BY at all (the pre-B-852 original), SQLite
+# returns rows in whatever order storage happens to hold them -- in practice OLDEST
+# first -- so a hit row/byte cap silently missed the newest sessions, exactly where a
+# real poisoning attempt would land.
+#
+# The FIRST fix used `ORDER BY created_at DESC` (mirroring `collector.py`'s
+# `task_runs`/`subagent_runs`). Two independent adversarial (C-135) reviews found that
+# REGRESSED the large-database case it meant to help: `created_at` is un-indexed and
+# shares a row with up to 256 KB of `event_json`, so SQLite must materialize and sort
+# EVERY row before returning the first one under `LIMIT` -- unbounding the previous
+# streaming read. Measured: a single 500 MB per-agent database went from 0.16s to
+# 2.6-3.0s; 8 such databases blew a 15s scan budget (16.8s, aborted UNKNOWN -- the
+# poisoned newest record this fix exists to catch went unreported). A related defect: a
+# table lacking `created_at` raised and was wrongly counted `unreadable`.
+#
+# `rowid` is this table's own b-tree key, so `ORDER BY rowid DESC` needs no sort -- a
+# plain reverse index scan, streaming like the original. (`_table_kind`'s `PRAGMA
+# table_xinfo` check does NOT enforce this is an ordinary rowid table, contrary to an
+# earlier version of this comment -- verified directly: a `WITHOUT ROWID` table passes
+# `_table_kind` honestly, since none of its checks inspect that property, only the
+# per-column `hidden` flag for generated/virtual columns. A `WITHOUT ROWID` table simply
+# has no `rowid` column at all, so this query fails with sqlite3's own "no such column:
+# rowid" and the database is counted `unreadable` -- fail-closed, and already disclosed
+# via `sqlite_dbs_unreadable`, so this is a correctness note, not a security gap.)
+# `rowid` increases monotonically with each INSERT, so ordering by it reads rows in
+# the order they were most recently WRITTEN to THIS database -- not a general claim
+# about "newest" in absolute terms. The table is not strictly append-only (retention
+# trims, deletes and one UPDATE -- the media migration -- also touch it), and one
+# concrete exception matters here: a database whose rows arrived via OpenClaw's
+# session-copy migration can hold rows with NEW, high `rowid` values but an OLD
+# `created_at` (a past session copied in after the fact), so `rowid DESC` on such a
+# database can skip a genuinely newer/poisoned row while a copied-in older session's
+# rows still fit under the cap. See `checks/_mcp.py`'s verdict text for how this is
+# disclosed to the user.
 _SELECT_TRAJECTORY_EVENT_JSON = (
     "SELECT event_json FROM trajectory_runtime_events "
-    "WHERE length(CAST(event_json AS BLOB)) <= ? LIMIT ?"
+    "WHERE length(CAST(event_json AS BLOB)) <= ? "
+    "ORDER BY rowid DESC LIMIT ?"
 )
 
 # B-811 (round 4, following round 3's adversarial review, 2026-09-15): the inverse
@@ -705,12 +763,12 @@ def _archive_entries(home: Path) -> "tuple[int, bool]":
     return count, capped
 
 
-def _sqlite_dbs(home: Path) -> "list[Path]":
+def _sqlite_dbs(home: Path, max_dbs: int = _MAX_SQLITE_DBS) -> "list[Path]":
     try:
         dbs = sorted(home.glob("agents/*/agent/openclaw-agent.sqlite"))
     except OSError:
         return []
-    return dbs[:_MAX_SQLITE_DBS]
+    return dbs[:max_dbs]
 
 
 def sqlite_db_paths(home) -> "list[Path]":
@@ -1055,9 +1113,21 @@ def corroborate(home) -> TrajectoryCorroboration:
 # ---------------------------------------------------------------------------
 
 
-def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]":
+def _read_sqlite_event_json(
+    db_path: Path,
+    max_rows: int = _MAX_SQLITE_CONTENT_ROWS_PER_DB,
+    max_bytes: int = _MAX_SQLITE_CONTENT_BYTES_PER_DB,
+) -> "tuple[list[str], bool, bool, int]":
     """``(event_json_values, capped, unreadable, non_text_rows)`` for one per-agent
     trajectory database.
+
+    ``max_rows``/``max_bytes`` (B-852) override :data:`_MAX_SQLITE_CONTENT_ROWS_PER_DB`/
+    :data:`_MAX_SQLITE_CONTENT_BYTES_PER_DB` for this call only -- the plumbing
+    :func:`read_compiled_tool_descriptions` needs so ``--exhaustive``
+    (``scanbudget.limits_for``) can widen this reader the same way it already widens
+    the JSONL sibling (``trajectory.read_compiled_tool_descriptions``'s own
+    ``max_files``/``max_bytes_per_file``), instead of this container silently staying
+    pinned to its default caps regardless of the flag.
 
     Two DoS bounds now do real work on BOTH axes, and on the underlying byte-counting
     primitive itself -- found missing/bypassable across TWO rounds of adversarial
@@ -1102,7 +1172,36 @@ def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]
        discloses when the WHERE clause above dropped a row, rather than letting an
        oversized (or deliberately padded-past-the-cap) poisoned record evade B185
        while this function reports a confident, complete scan -- found silently
-       missing in round 3.
+       missing in round 3. A follow-up review (post-B-852) found this COUNT still ran
+       on every call regardless of the row/byte cap above already having tripped --
+       still an unbounded full-payload scan on a large database even after the rowid
+       fix below. It is now skipped once ``capped`` is already ``True`` (a pure
+       optimisation: the count's only effect is to set that same flag, so running it
+       again cannot change the outcome).
+    5. **B-852**: :data:`_SELECT_TRAJECTORY_EVENT_JSON`'s own ``ORDER BY rowid DESC``
+       reads the rows most recently WRITTEN to this database first. Before this fix
+       the query carried the same ``LIMIT`` with no ``ORDER BY`` at all, so on a store
+       past the row/byte cap SQLite returned rows in whatever order its own storage
+       happened to hold them -- in practice insertion order, i.e. the LONGEST-RESIDENT
+       rows -- meaning a real poisoning attempt landing in a recent session on a large,
+       long-lived agent database was never read once the store exceeded either cap.
+       Ordering by ``rowid DESC`` means a capped read now always covers the MOST
+       RECENTLY WRITTEN sessions, and anything dropped by the cap is the tail of
+       longer-resident history -- not necessarily the OLDEST in absolute terms: a
+       database whose rows arrived via OpenClaw's session-copy migration can carry a
+       past session's rows in at a NEW, high ``rowid`` with an old ``created_at``, so
+       "most recently written" and "newest" can diverge on such a database (see the
+       query's own comment above and ``checks/_mcp.py``'s verdict text for how this is
+       disclosed). ``rowid`` (not ``created_at``) is the ordering key: a first
+       version of this fix used ``ORDER BY created_at DESC``, which two independent
+       adversarial reviews found forces SQLite to materialize and sort every row's full
+       (up to 256 KB) ``event_json`` payload before returning the first one, since there
+       is no index on ``created_at`` -- turning a bounded streaming read into an
+       unbounded one on a large database (measured: a single 500 MB per-agent database
+       went from 0.16s to 2.6-3.0s; 8 such databases blew a 15s scan budget). ``rowid``
+       is the table's own b-tree key, so ordering by it is a plain reverse index scan --
+       no sort, no materialization -- and does not depend on a ``created_at`` column
+       existing at all.
 
     ``non_text_rows`` counts rows where a column declared TEXT nonetheless stored a
     BLOB -- the one SQLite dynamic-typing shape this reader can actually observe here,
@@ -1126,59 +1225,560 @@ def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]
     padded-past-the-cap, poisoned) row, but nothing disclosed that exclusion, so a
     padded-past-the-cap poisoned description could evade B185 entirely while this
     module reported a confident, complete, non-truncated scan.
+
+    **B-852 round 3**: this is now a thin ``list(...)`` wrapper around
+    :func:`_scan_sqlite_event_json`, the streaming generator core -- so every test and
+    caller relying on this function's list-returning contract keeps it, byte-for-byte,
+    while :func:`read_compiled_tool_descriptions` (the one production caller) consumes
+    the generator directly instead, never materializing a whole database's admitted
+    rows into a list before it starts parsing them. See that generator's own docstring
+    for why the split exists.
+    """
+    stats = _SqliteEventJsonStats()
+    values = list(_scan_sqlite_event_json(db_path, max_rows, max_bytes, stats))
+    return values, stats.capped, stats.unreadable, stats.non_text
+
+
+@dataclass
+class _SqliteEventJsonStats:
+    """Mutable out-parameter for :func:`_scan_sqlite_event_json`.
+
+    A generator's normal ``return`` value is awkward to combine with ``yield`` (it only
+    surfaces via ``StopIteration.value``, which plain ``for``/``list()`` consumption
+    never sees), so the bookkeeping :func:`_read_sqlite_event_json`'s tested contract
+    needs (``capped``/``unreadable``/``non_text``) is threaded through as an object the
+    caller passes in and the generator mutates in place instead.
+    """
+
+    capped: bool = False
+    unreadable: bool = False
+    non_text: int = 0
+    # B-852 round 6: narrower than `capped` -- set ONLY when the per-call BYTE cap
+    # (`read_bytes > max_bytes`, below) is what stopped this read, never for the row
+    # COUNT cap or the excluded-row-count disclosure. `read_compiled_tool_descriptions`'s
+    # depth pass needs this specifically: whether a database is worth a SECOND,
+    # bigger-budget round is a question about whether more BYTES would help, not
+    # whether more ROWS would (a caller-chosen `max_content_rows_per_db` does not grow
+    # between rounds, so a row-count-capped database has nothing more to gain from a
+    # bigger byte share).
+    byte_capped: bool = False
+    # B-852 round 11: `len()` of the row that tripped the byte cap (0 if the byte cap
+    # never tripped). Lets `read_compiled_tool_descriptions`'s drain phase know whether
+    # a candidate's NEXT row fits in an offered share WITHOUT re-opening the database
+    # just to find out -- see that function's own docstring, "round 11" paragraph.
+    blocked_len: int = 0
+
+
+def _scan_sqlite_event_json(
+    db_path: Path,
+    max_rows: int,
+    max_bytes: int,
+    stats: "_SqliteEventJsonStats",
+) -> "Iterator[str]":
+    """Streaming core of :func:`_read_sqlite_event_json` (B-852 round 3): yields each
+    accepted ``event_json`` value for ONE per-agent trajectory database as the cursor
+    produces it, never holding more than the current row in memory here -- the row/byte
+    caps stop the READ early exactly as before, but a caller that processes each yielded
+    value immediately (:func:`read_compiled_tool_descriptions`) no longer pays for a
+    second, whole-database-sized list on top of whatever it goes on to build from the
+    content, the way returning a fully materialized list forces.
+
+    This split exists because, under ``--exhaustive``, ``max_bytes`` can legitimately be
+    tens of megabytes (see ``scanbudget.EXHAUSTIVE_LIMITS.sqlite_max_content_total_bytes``)
+    -- a single large per-agent database (measured: ~1.1 GB peak RSS for one 547 MB
+    database) used to be held in this function's own ``values`` list in full BEFORE
+    :func:`read_compiled_tool_descriptions` ever started filtering it down to the tiny
+    fraction that is actually a ``context.compiled`` record. Streaming means that filter
+    now runs per-row, during the read, so content that is not a compiled-tool record
+    never survives past the row it arrived in.
+
+    Mutates ``stats`` in place rather than returning a tuple -- see
+    :class:`_SqliteEventJsonStats`. Every acceptance/rejection decision below is
+    unchanged from the pre-round-3 inline version of this loop; only WHERE the accepted
+    values go (yielded one at a time here, versus appended to a list) is different.
     """
     conn, _kind, unreadable = _open_and_verify_table(db_path)
     if conn is None:
-        return [], False, unreadable, 0
+        stats.unreadable = unreadable
+        return
     try:
         cursor = conn.execute(
             _SELECT_TRAJECTORY_EVENT_JSON,
-            (_MAX_COMPILED_LINE_LEN, _MAX_SQLITE_CONTENT_ROWS_PER_DB + 1),
+            (_MAX_COMPILED_LINE_LEN, max_rows + 1),
         )
     except sqlite3.Error:
         conn.close()
-        return [], False, True, 0
+        stats.unreadable = True
+        return
 
-    values: list[str] = []
     read_bytes = 0
     row_count = 0
-    non_text = 0
-    capped = False
     try:
         for row in cursor:
             row_count += 1
-            if row_count > _MAX_SQLITE_CONTENT_ROWS_PER_DB:
-                capped = True
+            if row_count > max_rows:
+                stats.capped = True
                 break
             value = row[0]
             if not isinstance(value, str):
-                non_text += 1
+                stats.non_text += 1
                 continue
             read_bytes += len(value)
-            if read_bytes > _MAX_SQLITE_CONTENT_BYTES_PER_DB:
-                capped = True
+            if read_bytes > max_bytes:
+                stats.capped = True
+                stats.byte_capped = True
+                stats.blocked_len = len(value)
                 break
-            values.append(value)
-        excluded = conn.execute(
-            _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT, (_MAX_COMPILED_LINE_LEN,)
-        ).fetchone()
-        if excluded and excluded[0]:
-            capped = True
+            yield value
+        # Only run the excluded-row COUNT when the row/byte loop above did NOT already
+        # set `capped` -- a fresh independent review (following B-852's rowid fix)
+        # found this count still ran on EVERY call regardless of that fix, scanning
+        # every row's full (up to 256 KB) `event_json` payload to compute `count(*)`
+        # even when the row/byte cap above had already proven the scan incomplete.
+        # Measured: on a mixed host (8 x 533 MB per-agent databases plus a poisoned
+        # JSONL sidecar), this alone still drove a 15s+ scan-budget abort (UNKNOWN),
+        # losing a FAIL the JSONL side alone would already have proven. This is a pure
+        # optimisation, not a behaviour change: the count's only effect is to set
+        # `capped = True`, so skipping it once `capped` is already `True` cannot alter
+        # the return value. Verified: 2.70s (SQLite-only) / 2.54s (mixed host) to a
+        # correct cold-cache FAIL, 257/257 tests still passing.
+        if not stats.capped:
+            excluded = conn.execute(
+                _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT, (_MAX_COMPILED_LINE_LEN,)
+            ).fetchone()
+            if excluded and excluded[0]:
+                stats.capped = True
     except sqlite3.Error:
+        # Mirrors the pre-round-3 behaviour exactly: whatever was already yielded stays
+        # yielded (a `list(...)` caller keeps those rows, same as the old inline
+        # `values` list did), `capped` is forced True, `unreadable` stays False -- a
+        # partial read is disclosed as incomplete, not thrown away.
+        stats.capped = True
+    finally:
         conn.close()
-        return values, True, False, non_text
-    conn.close()
-    return values, capped, False, non_text
 
 
-def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
+def _read_and_process_db(
+    db_path: Path,
+    max_rows: int,
+    max_bytes: int,
+    skip_prefix_count: int,
+    seen: "set[tuple]",
+    tool_defs: "list[dict]",
+    meta: dict,
+) -> "tuple[int, _SqliteEventJsonStats, int]":
+    """Stream *db_path* through :func:`_scan_sqlite_event_json` and apply the
+    ``context.compiled`` filter/parse/tool-extraction pipeline
+    :func:`read_compiled_tool_descriptions` has always used, mutating *tool_defs*/
+    *meta* in place. Returns ``(new_bytes, stats, yielded_count)``.
+
+    *skip_prefix_count* (B-852 round 5) skips the first N values the generator yields,
+    WITHOUT charging or processing them -- the mechanism that lets
+    :func:`read_compiled_tool_descriptions`'s DEPTH pass re-run this same query with a
+    wider cap and pick up only the rows BEYOND what its own FLOOR pass already counted
+    for this database, instead of re-parsing (and double-counting ``meta["events"]``
+    for) the same prefix twice. This is a POSITIONAL skip (the Nth value the generator
+    yields, in ``ORDER BY rowid DESC`` order), never a content comparison: two
+    genuinely distinct rows that happen to carry byte-identical ``event_json`` (a real,
+    unremarkable case -- two identical padded benign events) must both still be counted
+    once each, which a "have I seen this exact string before" dedup would get wrong.
+    The generator's own ordering is deterministic for a stable underlying table (see
+    :data:`_SELECT_TRAJECTORY_EVENT_JSON`'s own ``ORDER BY rowid DESC`` comment), so a
+    second call against the SAME database with a larger ``max_rows``/``max_bytes``
+    re-yields the exact same prefix a smaller call already returned, in the same order
+    -- skipping by position is exact, not a heuristic, PROVIDED the table is not
+    concurrently rewritten between the two calls (each call opens its own transaction --
+    see :func:`_open_and_verify_table`). The real TOCTOU risk this leaves is narrower
+    than it might sound, and different in shape from the gap :func:`sqlite_session_ids`/
+    :func:`corroborate` already accept (those read the whole table in ONE call each, so
+    their risk is a schema swap mid-read, already closed by the held transaction; this
+    function's own risk is specific to being called TWICE, positionally, across two
+    SEPARATE transactions): a concurrent ``DELETE`` that removes one or more of the rows
+    THIS call already yielded -- i.e. among the newest rows, by ``rowid DESC`` order --
+    between this call returning and the NEXT call (with a wider cap) starting, would
+    shift every row after the deleted one up by one position, so the next call's
+    positional ``skip_prefix_count`` would skip the WRONG rows (either re-processing one
+    already counted, or silently skipping one never actually seen). This is real but
+    low-severity: it requires a concurrent WRITER with access to this exact database
+    file, and an attacker who already has that could simply delete the evidence
+    directly, which is strictly more effective than trying to desynchronize this one
+    positional offset.
+
+    The more REALISTIC live-agent risk in this same shape is a concurrent ``INSERT``
+    (an agent actively writing new trajectory events while this reader's two/three
+    calls span it), not a ``DELETE`` -- a live agent's own trajectory writer only ever
+    appends. A new row lands at the FRONT of the ``rowid DESC`` order, which desyncs
+    the very same positional ``skip_prefix_count`` the paragraph above describes, but
+    in the opposite direction: the net observed effect is ``meta["events"]``
+    DOUBLE-COUNTING one already-seen ``context.compiled`` record across the two calls
+    (e.g. disclosing 8 when only 6 real records exist), never SKIPPING a
+    pre-existing ("old") row outright. This is a benign double-count, not a
+    lost-detection risk -- unlike the ``DELETE`` case above, the evidence itself is not
+    gone, so a re-count inflates the disclosed total without dropping real content.
+
+    ``yielded_count`` is the TOTAL number of values the generator yielded this call
+    (whether skipped or processed) -- what the caller needs to compute the NEXT call's
+    own ``skip_prefix_count``, since a byte cap (not just a row cap) can end a read
+    before ``max_rows`` values are seen.
+    """
+    stats = _SqliteEventJsonStats()
+    new_bytes = 0
+    idx = 0
+    for raw in _scan_sqlite_event_json(db_path, max_rows, max_bytes, stats):
+        idx += 1
+        if idx <= skip_prefix_count:
+            continue
+        new_bytes += len(raw)
+        # Cheap pre-filter before the full JSON parse -- same idiom the JSONL
+        # reader uses, so most rows (the overwhelming majority are NOT
+        # context.compiled) never reach json.loads at all.
+        if f'"{_COMPILED_EVENT_TYPE}"' not in raw:
+            continue
+        # Defense in depth, SCOPED to rows that reached this line: retracted an
+        # earlier version of this comment that claimed this recheck "removes any
+        # residual doubt" full stop (round-2 adversarial review, B-811,
+        # 2026-09-15) -- that overstated it. The pre-filter above already dropped
+        # every row not containing the event-type substring, so a row whose
+        # character count only grows past _MAX_COMPILED_LINE_LEN AFTER
+        # text_factory's errors="replace" decoding (relative to what SQLite's
+        # length(CAST(...AS BLOB)) measured on the original bytes) is caught here
+        # ONLY if it also survived that pre-filter; this is not a claim about
+        # every row _SELECT_TRAJECTORY_EVENT_JSON ever returns. Still worth doing
+        # -- it costs nothing and closes the gap for the rows this function
+        # actually goes on to parse.
+        if len(raw) > _MAX_COMPILED_LINE_LEN:
+            meta["truncated"] = True
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("traceSchema") != _TRACE_SCHEMA:
+            # B-716: mirrors the JSONL reader's identical fix
+            # (trajectory.read_compiled_tool_descriptions) -- a mixed-schema SQLite
+            # row set (the same OpenClaw-upgrade-mid-session shape, now landing in
+            # the post-migration store) silently dropped records here with no
+            # disclosure before this.
+            meta["unknown_schema"] = True
+            continue
+        if rec.get("schemaVersion") != _SCHEMA_VERSION:
+            meta["unknown_version"] = True
+            continue
+        if rec.get("type") != _COMPILED_EVENT_TYPE:
+            continue
+        data = rec.get("data")
+        if not isinstance(data, dict):
+            continue
+        meta["events"] += 1
+        # §8: ONLY the tool-definition fields are touched, same as the JSONL
+        # reader -- systemPrompt/prompt/messages are never referenced here either.
+        for field in _COMPILED_TOOL_FIELDS:
+            tools = data.get(field)
+            if not isinstance(tools, list):
+                continue
+            if len(tools) > _MAX_TOOLS_PER_EVENT:
+                meta["truncated"] = True
+            for tool in tools[:_MAX_TOOLS_PER_EVENT]:
+                entry = _compiled_tool_entry(tool, field)
+                if entry is None:
+                    continue
+                key = (
+                    entry["name"], entry["description"],
+                    tuple(entry["params"]), entry["field"],
+                )
+                if key in seen:
+                    continue
+                if len(tool_defs) >= _MAX_TOOL_DEFS:
+                    meta["truncated"] = True
+                    break
+                seen.add(key)
+                tool_defs.append(entry)
+    return new_bytes, stats, idx
+
+
+def read_compiled_tool_descriptions(
+    home,
+    *,
+    max_dbs: int = _MAX_SQLITE_DBS,
+    max_content_rows_per_db: int = _MAX_SQLITE_CONTENT_ROWS_PER_DB,
+    max_content_bytes_per_db: int = _MAX_SQLITE_CONTENT_BYTES_PER_DB,
+    max_content_total_bytes: int = _MAX_SQLITE_CONTENT_TOTAL_BYTES,
+) -> "tuple[list[dict], dict]":
     """Return ``(tool_defs, meta)`` -- the tool definitions OpenClaw actually sent to the
     model, recovered from ``context.compiled`` events in the per-agent SQLite trajectory
     store. The SQLite-container sibling of ``trajectory.read_compiled_tool_descriptions()``
-    (the JSONL reader); B185 (``checks/_mcp.py``) is the only caller, and only when
-    :func:`corroborate` reports :data:`STATUS_LOCATOR_STALE` -- this function is never
-    reached on a host whose evidence is fully covered by live JSONL sidecars, narrowing
-    when the exception below actually activates, not just how it is scoped.
+    (the JSONL reader); B185 (``checks/_mcp.py``) is the only caller. It is reached
+    whenever :func:`corroborate` reports :data:`STATUS_LOCATOR_STALE` (no live JSONL
+    sidecar at all), and, since B-852, ALSO on a mixed-container host that has both a
+    live JSONL sidecar and per-agent SQLite database file(s) -- see that check's own
+    module-level comment for the two call sites and why each is gated the way it is.
+
+    ``max_dbs``/``max_content_rows_per_db``/``max_content_bytes_per_db`` (B-852) override
+    :data:`_MAX_SQLITE_DBS`/:data:`_MAX_SQLITE_CONTENT_ROWS_PER_DB`/
+    :data:`_MAX_SQLITE_CONTENT_BYTES_PER_DB` for this call, the same role ``max_files``/
+    ``max_bytes_per_file`` already play on the JSONL sibling -- so B185's own
+    ``scanbudget.limits_for(ctx)`` call can widen this container under ``--exhaustive``
+    too, instead of the SQLite side silently staying pinned to its defaults regardless
+    of the flag (the gap this task exists to close). Defaulting to the module's own
+    constants keeps every OTHER caller, and the default (non-``--exhaustive``) path,
+    byte-identical to before this parameter existed.
+
+    **B-852 round 5 -- FLOOR, then DEPTH, never the reverse.** Round 4's
+    ``max_content_total_bytes`` (below) funded EVERY byte read against the SAME shared
+    pool, floor included -- so a content-heavy database sorting alphabetically first
+    could spend the ENTIRE aggregate budget before a later database ever got its own
+    per-database floor, leaving that later database opened with a near-zero leftover
+    cap and 0 rows read, yet counted identically to a database that was genuinely fully
+    examined. A fresh independent review (following round 4) reproduced this as a real
+    false-PASS: a poisoned record as the NEWEST (and only) row of a small, alphabetically
+    LATER database went completely unread while an earlier, ordinary large database
+    silently consumed the whole 64 MiB aggregate on its own tail.
+
+    This round splits the read into two passes per call:
+
+    1. **FLOOR** -- every one of the first :data:`_MAX_SQLITE_DBS` databases (the same
+       db-count cap the DEFAULT path itself uses) is read at
+       ``min(_MAX_SQLITE_CONTENT_BYTES_PER_DB, max_content_bytes_per_db)`` bytes /
+       ``min(_MAX_SQLITE_CONTENT_ROWS_PER_DB, max_content_rows_per_db)`` rows --
+       UNCONDITIONALLY, never charged against ``max_content_total_bytes``. This mirrors
+       the DEFAULT path's own already-accepted cost ceiling exactly (its real total is
+       already ``sqlite_max_dbs * sqlite_max_content_bytes_per_db``, uncapped by any
+       aggregate check -- see :data:`scanbudget.ScanLimits.sqlite_max_content_total_bytes`'s
+       own comment), so ``--exhaustive``'s floor pass alone makes it a STRICT SUPERSET
+       of the DEFAULT path BY CONSTRUCTION -- independent of database order, size, or
+       count -- rather than hoping a shared aggregate happens to stretch far enough.
+       For the DEFAULT caller specifically, the floor equals the caller's own requested
+       per-database cap exactly, so there is structurally nothing left for pass 2 to add
+       -- this pass alone is already byte-identical to the pre-round-5 single-pass
+       behaviour there.
+    2. **DEPTH** -- funded ENTIRELY from ``max_content_total_bytes``, for (a) any
+       floor-pool database whose floor read hit its own cap AND whose caller-supplied
+       cap allows reading further, and (b) any database beyond the floor pool's
+       db-count cap (only possible when ``max_dbs`` widens past
+       :data:`_MAX_SQLITE_DBS`, i.e. ``--exhaustive``).
+
+       **B-852 round 6** -- at most TWO rounds, not one. Round 5 (above) computed the
+       fair share ONCE, against the whole candidate list, for the entire pass -- a
+       fresh independent review found that reproduces the EXACT SAME class of bug
+       round 5 itself fixed for the floor, one level up: with many candidates and few
+       of them genuinely hungry, the flat ``remaining // len(candidates)`` share is
+       diluted far below what one genuinely deep candidate needs, while the shallow
+       candidates each consume only a sliver of their own share and leave the rest
+       sitting unspent for the remainder of the round -- unspent, because a round that
+       has already finished handing out shares never revisits anyone. Measured: a
+       target database whose needed record was ~1 MB, sharing a 64 MiB aggregate with
+       enough OTHER candidates to dilute its flat share to ~958 KB, read 0 rows and was
+       still counted ``dbs_read`` -- a silent false PASS -- even though ~62 MiB of the
+       aggregate went unspent elsewhere in the very same round. Round 6 instead runs up
+       to two rounds, recomputing the share EACH round as
+       ``max(remaining // databases_left, 1)`` against THAT round's own starting
+       ``remaining`` (so whatever an earlier round's shallow candidates left unspent
+       genuinely carries forward): round 1 offers every depth candidate its flat share;
+       round 2 offers the FULL remaining budget, undiluted by any candidate that was
+       already satisfied, to only the candidates round 1 left still byte-capped AND
+       still below their own caller-supplied per-database ceiling (a candidate that hit
+       its own ceiling in round 1, or was not byte-capped at all, has nothing more to
+       productively use and is not revisited). The bytes CHARGED against
+       ``max_content_total_bytes`` never exceed it, though a database re-opened in a
+       LATER round/phase re-reads (via ``skip_prefix_count``) whatever prefix an
+       EARLIER round already accepted from it, at no further charge -- actual I/O is
+       therefore not identical to the charged total, only bounded by it. Round 2's own
+       recompute is what closes the dilution gap a SINGLE round leaves open -- when it
+       can (see round 7, below, for when two rounds still is not enough).
+
+       **B-852 round 7** -- two EQUAL-SHARE rounds are still not a guarantee. A fresh
+       independent review found that when EVERY still-hungry candidate's next row is
+       larger than ``remaining // len(candidates)``, round 2 recomputes that exact SAME
+       flat share against that exact SAME candidate set (nothing changed: `remaining`
+       didn't move, the candidate count didn't shrink) -- making ZERO progress. Worse,
+       since rows cannot be split, no NUMBER of further equal-share rounds would do any
+       better either: this is not a rounding edge case, it is fundamental to a
+       fixed-round, equal-share design. Measured: 50 floor-pool databases + 100 beyond
+       them, poison alone in one ~990 KB row of a single beyond-the-floor database,
+       64 MiB aggregate -- rounds 1+2 pulled 0 bytes of the 64 MiB (150 candidates
+       dilutes the flat share below 990 KB in round 1, and round 2's share is the
+       identical computation over the identical still-hungry set), while the
+       disclosure claimed the budget was "already spent elsewhere" -- FALSE: nothing
+       was spent, and the poisoned row would have fit the aggregate 67 times over.
+
+       Round 7 adds a THIRD, FINAL phase after the two equal-share rounds: a
+       sequential DRAIN over whatever is STILL hungry once both rounds finish,
+       processed ONE DATABASE AT A TIME (never split) -- each one gets
+       ``min(prior_bytes + remaining, max_content_bytes_per_db)``, i.e. as much of
+       whatever is STILL in the shared pool as it can use, up to its own ceiling,
+       before the next candidate's turn. This guarantees real progress on every call
+       where the aggregate is positive and at least one candidate still has ceiling
+       headroom -- a database still starved after the drain genuinely had a newest
+       row bigger than whatever budget was left by its own turn, so "the budget was
+       already spent" becomes accurate to within one row's worth, not the structural
+       falsehood a fixed two-round design could produce. (Round 2's own candidate
+       collection, above, is no longer restricted to ``round_num == 1`` -- a candidate
+       still hungry AFTER round 2 must also be tracked so the drain can find it; the
+       round LOOP itself still only ever runs two rounds regardless.)
+
+       **B-852 round 8** -- round 7's own drain ORDER was itself exploitable. Round 7
+       drained zero-content databases (nothing accepted yet, in the floor pass or
+       either round) FIRST, ahead of ones that already hold partial content, on the
+       theory that a database left worse-off should be served first when the pool
+       cannot cover everyone. But an attacker can plant many decoy databases that each
+       hold one oversized-but-cheap row -- so every decoy always lands in the
+       zero-content group, never satisfied by an equal share -- and have the drain
+       exhaust its entire remaining budget on those decoys before it ever reaches a
+       database that already PROVED (via a successful round 1/2 read) it holds real
+       content and might hold a poisoned row just beyond what those rounds read; that
+       victim is not even flagged ``dbs_budget_starved``, it reads as ordinary
+       ``dbs_read`` + ``truncated``, making this harder to notice than round 7's own
+       bug. Simply reversing the order (partial-content first) is not adversary-proof
+       either -- an attacker who also controls decoy CONTENT can give every decoy a
+       small nonzero first row too, so they land in whichever group drains first
+       regardless of which one that is. Round 8 instead drains in ``cum_bytes``
+       DESCENDING order -- the candidate with the MOST confirmed content goes first.
+       Round 8's own docstring claimed this was self-limiting and that there was "no
+       way to game the ordering without paying the real cost" -- **round 9 (below)
+       found that claim FALSE via two distinct attacks and reworded it**; read on
+       rather than trusting the superseded claim.
+
+       **B-852 round 9** -- a fresh independent review found TWO ways to make round
+       8's ``cum_bytes``-descending order pay nothing real, plus recommended a
+       structural bound (not a full fix) for the second:
+
+       *Attack A -- the free floor lead.* ``cum_bytes`` is SEEDED from
+       ``floor_bytes_used`` (the unconditional FLOOR pass, never charged against
+       ``max_content_total_bytes`` -- round 5, above). A decoy occupying one of the
+       first :data:`_MAX_SQLITE_DBS` alphabetically-sorted agent directories gets up
+       to the floor cap of ``cum_bytes`` for FREE, with zero real round-1/2 spend. If
+       that decoy's next unread row is bigger than either round ever offers it (so it
+       never earns anything beyond the free floor), it can still sort ahead of a
+       genuine ``extra_dbs`` victim whose ``cum_bytes`` reflects only real, PAID
+       round-1/2 spend -- round 8's "paying the real cost" premise silently assumed
+       every candidate's ``cum_bytes`` was earned, which is false for any floor-pool
+       candidate. **Fix:** the drain now sorts by EARNED bytes only --
+       ``cum_bytes[d] - floor_bytes_used.get(d, 0)`` -- so the free floor contribution
+       no longer buys drain priority; only genuine round-1/2 spend does.
+
+       *Attack B -- tie-break via attacker-controlled naming.* Even with no floor pool
+       involved at all (``_MAX_SQLITE_DBS == 0``, both candidates start at
+       ``cum_bytes == 0``), a decoy whose round-1 read consumes EXACTLY the same bytes
+       as the victim's still wins the drain, because ``sorted()`` is stable and falls
+       back to the pre-existing ``round_dbs`` order, which traces to
+       :func:`_sqlite_dbs`'s alphabetical directory-name sort -- fully
+       attacker-controlled, and computable from public constants alone (an attacker
+       who can plant decoys controls ``len(round_dbs)``, hence ``share = remaining //
+       len(round_dbs)``, with zero knowledge of the victim's real content). This is a
+       harder, structural problem: ANY static priority function of attacker-controlled
+       names/content is somewhat gameable given enough decoys, so round 9 did NOT
+       attempt a full re-ordering fix here, only a per-turn cap -- and round 9's own
+       cap was itself wrong; **round 10 (below) replaces it**, read on rather than
+       trusting the superseded claim.
+
+       Round 9 capped a single drain turn at
+       :data:`_SQLITE_DRAIN_TURN_BUDGET_DIVISOR`'s share (1/4) of the call's ORIGINAL
+       ``max_content_total_bytes``, computed once and never revisited. That FIXED
+       fraction of the STARTING budget stops binding the moment the pool actually left
+       at some pass is already at or below it -- an ORDINARY situation, not an exotic
+       one, once rounds 1/2 (or several earlier drain passes) have already spent most
+       of the budget. Once that happens, a single candidate with even a tiny
+       earned-byte lead can once again swallow the ENTIRE remaining pool in one turn,
+       exactly the failure round 9 claimed to have bounded away -- reproduced
+       end-to-end in ``tests/test_f187_trajectory_sqlite_corroborator.py`` with a
+       single decoy holding one extra small row.
+
+       **B-852 round 10** -- the per-turn ceiling became a per-PASS EQUAL SHARE of
+       what is actually left, recomputed fresh at the start of every pass from the
+       CURRENT ``remaining`` and the CURRENT count of still-pending candidates in that
+       pass (``max(remaining // len(drain_pending), _MAX_COMPILED_LINE_LEN)``), never a
+       fraction of the original ``max_content_total_bytes``.
+
+       **Round 10 was REJECTED by review before it went further than this repo's own
+       queue.** The unconditional ``_MAX_COMPILED_LINE_LEN`` (1 MiB) FLOOR on that
+       per-turn ceiling -- the very thing meant to guarantee forward progress -- is
+       exactly what let a single decoy with even a small earned-byte lead swallow an
+       ENTIRE thin drain pool in one turn: once the pool actually left a pass dropped
+       below that floor, the offer handed to the sort's winner was the floor itself,
+       uncapped by ``remaining``, not ``remaining // len(drain_pending)``. Round 10's own
+       text here previously claimed a decoy "cannot swallow the entire remaining pool"
+       and bounded the residual at "roughly ``pool_left // _MAX_COMPILED_LINE_LEN``
+       hungry candidates (about 67 at full 64 MiB aggregate / 1 MiB max-row scale)
+       ahead of it in the sort order" -- **both claims were FALSE**, reproduced
+       end-to-end in ``tests/test_f187_trajectory_sqlite_corroborator.py`` with a single
+       decoy and a thin pool. Do not trust them; round 11 (below) replaces round 10's
+       single-sweep drain entirely.
+
+       **B-852 round 11** -- each drain PASS now runs TWO SWEEPS instead of one:
+
+       - **Sweep A (equal share, order-independent).** Every still-pending candidate is
+         offered ``min(remaining // len(drain_pending), its own per-database headroom)``
+         bytes -- computed once from the pass's STARTING ``remaining`` and NEVER floored
+         above what the pool can cover, so the sum of every offer this sweep makes never
+         exceeds the pool, regardless of visiting order. A candidate whose NEXT known row
+         (``next_len``, tracked from whichever read most recently left it
+         ``byte_capped`` -- see :class:`_SqliteEventJsonStats`'s ``blocked_len`` and this
+         function's own ``next_len`` dict) is already bigger than its offered share is
+         marked "hungry" WITHOUT being re-opened this sweep -- no I/O is spent confirming
+         what the last read already disclosed.
+       - **Sweep B (smallest-row-first, one row each).** Every candidate still hungry
+         after sweep A is sorted by its NEXT row's known length, ASCENDING (tie-break:
+         more earned bytes first -- the same earned-bytes priority round 9 introduced,
+         which is what keeps round 9's "Attack A" closed here too -- then discovery order
+         as the final, fully deterministic tie-break). Each gets exactly ONE more row --
+         never split across two -- as long as it fits in whatever is left of the pool
+         once every candidate ahead of it in this sweep has taken its turn. Ascending
+         order means the CHEAPEST hungry candidate goes first, so sweep B stops a
+         candidate only once its own next row exceeds the ENTIRE pool remaining at that
+         point -- and every candidate after it in sort order has a row at least as large,
+         so none of them could have been served either, no matter what order the WHOLE
+         drain (not just this sweep) had visited them in.
+       - **Drop rule.** A candidate carries into the NEXT pass only if sweep B served it
+         (real progress this pass) AND it is still ``byte_capped`` afterward. Every other
+         candidate -- satisfied in sweep A, or never reached by sweep B before the pool
+         ran out -- drops permanently. This is sound because of sweep B's own ascending
+         guarantee, above: a candidate sweep B could not serve from THIS pass's pool
+         could not have been served from any SMALLER pool a later pass might offer either
+         (the pool only shrinks pass to pass), so no later pass could do better for it.
+
+       **Termination is a structural bound, not just an observed property.** The loop is
+       capped at exactly ``len(drain_pending)`` passes -- the count of candidates
+       entering the drain, snapshotted once before the loop starts -- enforced by an
+       explicit counter, independent of any finer per-pass progress argument. In
+       practice this cap is rarely approached: a pass that reaches sweep B with a
+       non-empty hungry set either satisfies every hungry candidate it serves or drops
+       everyone sweep B could not reach, so the pending set is non-increasing pass to
+       pass and strictly shrinks whenever sweep B has anyone to drop.
+
+       **Honest residual -- round 11 narrows the gaming surface, it does not close it.**
+       A candidate CAN still be starved if its next row is bigger than its OWN equal
+       share in sweep A AND enough OTHER candidates have next rows no bigger than it in
+       sweep B's order -- the attacker needs roughly
+       ``pool_left // victim's_own_row_size`` hungry candidates ahead of the victim in
+       sweep-B order, not ``pool_left // _MAX_COMPILED_LINE_LEN`` the way round 10
+       claimed (a materially HARDER bar for a small victim row, an EASIER one for a
+       large victim row -- round 10's flat 1 MiB-row assumption did not scale with the
+       actual victim's own row size). There is also a disclosed BIAS, not a flaw: sweep
+       B serves the SMALLEST hungry row first, so a BIGGER row -- e.g. one deliberately
+       padded to carry more poison payload -- is served LATER, which works AGAINST an
+       attacker trying to smuggle a large payload past a thin pool, not for one. Do not
+       read this docstring as claiming the drain is adversary-proof; round 11 closes
+       round 10's specific floor-swallow bug and re-scopes the residual to the victim's
+       own row size, it does not eliminate gaming by a sufficiently large decoy set.
+
+       A database in group (b) that ends up in ``meta["dbs_budget_starved"]`` is NOT
+       necessarily one that was never opened: two distinct cases both land there --
+       genuinely never opened at all (no round or the drain ever offered it a share
+       before the pool ran out), or opened with a non-zero share/drain allocation that
+       was still smaller than even its single newest row (opened, 0 usable bytes). See
+       that field's own note below for why either is a materially different, worse
+       claim than an ordinary per-database cap.
+
+    ``max_content_total_bytes`` (B-852 round 3, re-scoped round 5) overrides
+    :data:`_MAX_SQLITE_CONTENT_TOTAL_BYTES` -- a ceiling on the SUM of accepted
+    ``event_json`` bytes read ACROSS every database's DEPTH pass this call performs
+    (never the floor pass -- see above). Defaulting to
+    :data:`_MAX_SQLITE_CONTENT_TOTAL_BYTES` (unbounded) keeps every OTHER caller, and
+    the default (non-``--exhaustive``) path, byte-identical to before this parameter
+    existed -- the DEFAULT caller's floor already equals its own requested per-database
+    cap (see above), so it never has a DEPTH candidate regardless of this value.
 
     Mirrors the JSONL reader's own filtering and projection EXACTLY (same
     ``traceSchema``/``schemaVersion``/type gate, same ``trajectory._compiled_tool_entry()``
@@ -1187,10 +1787,27 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
     ``tests/test_b185_compiled_tool_poisoning.py``'s JSONL/SQLite equivalence test.
 
     ``meta`` reports ``present`` (any db read), ``dbs_found``, ``dbs_read``,
-    ``dbs_unreadable``, ``events`` (``context.compiled`` records parsed), ``truncated``,
-    ``unknown_version`` and ``non_text_rows`` (see :func:`_read_sqlite_event_json`) --
-    same vocabulary as the JSONL reader's meta where they overlap, so a caller can treat
-    both uniformly for the fields both have.
+    ``dbs_unreadable``, ``dbs_budget_starved``, ``events`` (``context.compiled`` records
+    parsed), ``truncated``, ``unknown_version`` and ``non_text_rows`` (see
+    :func:`_read_sqlite_event_json`) -- same vocabulary as the JSONL reader's meta where
+    they overlap, so a caller can treat both uniformly for the fields both have.
+
+    ``dbs_budget_starved`` (B-852 round 5, extended round 7) counts databases that were
+    found (``dbs_found``) but received NO read at all -- not even their newest row --
+    because the aggregate depth budget ran out before their turn (since round 7, "their
+    turn" includes the sequential DRAIN phase, so this now genuinely means the budget
+    was spent before this database's turn in EVERY phase, not just the two equal-share
+    rounds). This is a strictly WORSE claim
+    than an ordinary per-database cap hit (``truncated`` alone, which this field's
+    databases also set): an ordinary cap still reads a database's most-recently-written
+    rows first and only drops its longer-resident tail, while a budget-starved database
+    is examined not at all, its newest content included. It can only ever apply to
+    databases BEYOND the guaranteed floor pool (group (b) above) -- a floor-pool
+    database always gets its guaranteed floor read regardless of the aggregate, so it is
+    never counted here even when its OPTIONAL depth pass is skipped for the same reason;
+    that case is disclosed via ``truncated`` alone, the same as any other ordinary cap.
+    See ``checks/_mcp.py``'s own disclosure text for how the two are told apart for a
+    reader of the rendered Finding.
 
     This is POST-HOC FORENSIC evidence, same limit as the JSONL reader: it reports what
     WAS sent to the model in sessions that already ran. It cannot pre-clear a live MCP
@@ -1199,104 +1816,353 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
     §8: see the module docstring. Only ``event_json`` is ever selected from
     ``trajectory_runtime_events``; the auth tables in the same database file are never
     named anywhere in this function or module.
+
+    **B-852 round 3 -- streaming, not two-phase, PER DATABASE.** Each individual
+    database read still drives :func:`_scan_sqlite_event_json` directly (via
+    :func:`_read_and_process_db`) and applies the substring pre-filter / JSON parse /
+    tool-definition extraction to each row AS IT STREAMS off the cursor, so a
+    non-matching row's text never outlives the row it arrived in, and no single call
+    ever materializes a whole database's admitted content into a list. Round 5's
+    floor/depth split, and round 7's added DRAIN phase (both above), mean a database CAN
+    now be read MULTIPLE TIMES ACROSS SEPARATE CALLS -- the floor read, one per depth
+    round, and potentially several DRAIN PASSES, each running TWO SWEEPS (round 11: see
+    this function's own docstring, "round 11" paragraph) -- the number of passes is
+    bounded (proven, not just observed) by the count of candidates entering the drain,
+    never a fixed constant -- that is a different axis (cross-database budget
+    allocation) from what round 3 fixed (per-database memory blowup within one call),
+    and does not reintroduce it: each individual call still streams, still bounded by
+    its own ``max_bytes``. Not a fixed ceiling like round 3's per-call streaming bound:
+    round 11's own drain can, in principle, open a single database TWICE in one pass
+    (once in sweep A, once in sweep B, if sweep A's partial read leaves it still
+    hungry) -- observed open counts for a single database vary by construction and
+    scale (round 11's own fuzzing found up to five; round 12's independent review
+    fuzzing a broader parameter range found a construction reaching nine within 400
+    iterations), so no small fixed number should be trusted as a ceiling here -- the
+    only PROVEN ceiling is structural: see the drain's own pass cap
+    (``len(drain_pending)`` at entry) above.
     """
     tool_defs: list[dict] = []
     meta = {
         "present": False, "dbs_found": 0, "dbs_read": 0, "dbs_unreadable": 0,
+        "dbs_budget_starved": 0,
         "events": 0, "unknown_version": False, "unknown_schema": False,
         "truncated": False, "non_text_rows": 0,
     }
     if not isinstance(home, Path):
         return tool_defs, meta
 
-    dbs = _sqlite_dbs(home)
+    dbs = _sqlite_dbs(home, max_dbs=max_dbs)
     meta["dbs_found"] = len(dbs)
     if not dbs:
         return tool_defs, meta
 
     seen: set[tuple] = set()
-    for db_path in dbs:
-        values, capped, unreadable, non_text = _read_sqlite_event_json(db_path)
-        if unreadable:
+
+    # -----------------------------------------------------------------------
+    # PASS 1 -- FLOOR (unconditional; see this function's own docstring above).
+    # -----------------------------------------------------------------------
+    floor_dbs = dbs[:_MAX_SQLITE_DBS]
+    extra_dbs = dbs[_MAX_SQLITE_DBS:]
+    floor_bytes = min(_MAX_SQLITE_CONTENT_BYTES_PER_DB, max_content_bytes_per_db)
+    floor_rows = min(_MAX_SQLITE_CONTENT_ROWS_PER_DB, max_content_rows_per_db)
+    # Only a floor-pool database that was SUCCESSFULLY read gets an entry here --
+    # membership doubles as "this is not an `extra_dbs`-style unfloored database" in
+    # pass 2 below.
+    floor_bytes_used: "dict[Path, int]" = {}
+    floor_yielded: "dict[Path, int]" = {}
+    depth_candidates: "list[Path]" = []
+
+    for db_path in floor_dbs:
+        new_bytes, stats, yielded = _read_and_process_db(
+            db_path, floor_rows, floor_bytes, 0, seen, tool_defs, meta,
+        )
+        if stats.unreadable:
             meta["dbs_unreadable"] += 1
             continue
         meta["dbs_read"] += 1
-        if capped:
+        floor_bytes_used[db_path] = new_bytes
+        floor_yielded[db_path] = yielded
+        if stats.non_text:
+            meta["non_text_rows"] += stats.non_text
             meta["truncated"] = True
-        if non_text:
-            # A row SQLite's dynamic typing stored as non-TEXT under this TEXT-affinity
-            # column is content we could not examine -- disclosed as incomplete, same
-            # honesty rule as every other truncation cause, never silently dropped.
-            meta["non_text_rows"] += non_text
+        if stats.capped:
             meta["truncated"] = True
+            # "Wants more" iff the CALLER's own cap allows reading past the floor at
+            # all -- a caller that itself asked for <= the floor (the DEFAULT path)
+            # has nothing more to give regardless of `stats.capped`, so
+            # `depth_candidates` stays empty for it and PASS 2 below is a no-op,
+            # byte-identical to pre-round-5.
+            if (
+                max_content_bytes_per_db > floor_bytes
+                or max_content_rows_per_db > floor_rows
+            ):
+                depth_candidates.append(db_path)
 
-        for raw in values:
-            # Cheap pre-filter before the full JSON parse -- same idiom the JSONL
-            # reader uses, so most rows (the overwhelming majority are NOT
-            # context.compiled) never reach json.loads at all.
-            if f'"{_COMPILED_EVENT_TYPE}"' not in raw:
-                continue
-            # Defense in depth, SCOPED to rows that reached this line: retracted an
-            # earlier version of this comment that claimed this recheck "removes any
-            # residual doubt" full stop (round-2 adversarial review, B-811,
-            # 2026-09-15) -- that overstated it. The pre-filter above already dropped
-            # every row not containing the event-type substring, so a row whose
-            # character count only grows past _MAX_COMPILED_LINE_LEN AFTER
-            # text_factory's errors="replace" decoding (relative to what SQLite's
-            # length(CAST(...AS BLOB)) measured on the original bytes) is caught here
-            # ONLY if it also survived that pre-filter; this is not a claim about
-            # every row _SELECT_TRAJECTORY_EVENT_JSON ever returns. Still worth doing
-            # -- it costs nothing and closes the gap for the rows this function
-            # actually goes on to parse.
-            if len(raw) > _MAX_COMPILED_LINE_LEN:
-                meta["truncated"] = True
-                continue
-            try:
-                rec = json.loads(raw)
-            except ValueError:
-                continue
-            if not isinstance(rec, dict):
-                continue
-            if rec.get("traceSchema") != _TRACE_SCHEMA:
-                # B-716: mirrors the JSONL reader's identical fix
-                # (trajectory.read_compiled_tool_descriptions) -- a mixed-schema SQLite
-                # row set (the same OpenClaw-upgrade-mid-session shape, now landing in
-                # the post-migration store) silently dropped records here with no
-                # disclosure before this.
-                meta["unknown_schema"] = True
-                continue
-            if rec.get("schemaVersion") != _SCHEMA_VERSION:
-                meta["unknown_version"] = True
-                continue
-            if rec.get("type") != _COMPILED_EVENT_TYPE:
-                continue
-            data = rec.get("data")
-            if not isinstance(data, dict):
-                continue
-            meta["events"] += 1
-            # §8: ONLY the tool-definition fields are touched, same as the JSONL
-            # reader -- systemPrompt/prompt/messages are never referenced here either.
-            for field in _COMPILED_TOOL_FIELDS:
-                tools = data.get(field)
-                if not isinstance(tools, list):
+    depth_candidates.extend(extra_dbs)
+
+    # -----------------------------------------------------------------------
+    # PASS 2 -- DEPTH, funded from `max_content_total_bytes` (see this function's own
+    # docstring above for the round-6 two-round fair-share policy and why a single
+    # round is not enough). `cum_bytes`/`cum_yielded` seed from the floor pass's own
+    # figures (`floor_bytes_used`/`floor_yielded`) so a floor-pool depth candidate's
+    # round-1/round-2 cap is measured from its TRUE prior total, not from zero.
+    # `extra_attempted`/`extra_last_stats` exist only to classify `extra_dbs` (group
+    # (b) -- beyond the floor pool) exactly once, below, after both rounds have run;
+    # a floor-pool candidate never needs that classification -- it already
+    # contributed to `dbs_read`/`dbs_unreadable` in the floor pass above.
+    # -----------------------------------------------------------------------
+    cum_bytes: "dict[Path, int]" = dict(floor_bytes_used)
+    cum_yielded: "dict[Path, int]" = dict(floor_yielded)
+    extra_attempted: "set[Path]" = set()
+    extra_last_stats: "dict[Path, _SqliteEventJsonStats]" = {}
+    # B-852 round 11: tracks each still-hungry candidate's NEXT row length, as of its
+    # most recent read (round-1/2 or drain), so the drain's two-sweep pass (below) can
+    # tell whether a candidate's next row fits an offered share WITHOUT re-opening the
+    # database. Only ever consulted for a `db_path` that is still `byte_capped` --
+    # populated whenever a read leaves a database byte-capped, in both the round-1/2
+    # loop and every drain turn (`_drain_turn`, below).
+    next_len: "dict[Path, int]" = {}
+
+    if depth_candidates and max_content_total_bytes > 0:
+        remaining = max_content_total_bytes
+        round_dbs = list(depth_candidates)
+        for round_num in (1, 2):
+            if not round_dbs or remaining <= 0:
+                break
+            # Recomputed EACH round against THAT round's own starting `remaining` --
+            # never once for the whole pass -- so whatever round 1's shallow
+            # candidates did NOT need genuinely carries forward to round 2's (far
+            # fewer, so far larger) shares, instead of sitting unspent for the rest
+            # of the call the way a single, once-computed share left it.
+            share = max(remaining // len(round_dbs), 1)
+            next_round_dbs: "list[Path]" = []
+            for db_path in round_dbs:
+                if remaining <= 0:
                     continue
-                if len(tools) > _MAX_TOOLS_PER_EVENT:
+                has_floor = db_path in floor_bytes_used
+                prior_bytes = cum_bytes.get(db_path, 0)
+                this_share = min(share, remaining)
+                new_cap_bytes = min(prior_bytes + this_share, max_content_bytes_per_db)
+                if new_cap_bytes <= prior_bytes:
+                    # No headroom left for this database THIS round -- either its own
+                    # caller-supplied ceiling is already reached, or (round 2 only,
+                    # in practice) its share rounded down against an already-large
+                    # prior total. Do not (re)open it.
+                    continue
+                skip = cum_yielded.get(db_path, 0)
+                new_bytes, stats, total_yielded = _read_and_process_db(
+                    db_path, max_content_rows_per_db, new_cap_bytes, skip,
+                    seen, tool_defs, meta,
+                )
+                # Charge the ACTUAL new bytes consumed, not the nominal share --
+                # what a database did NOT need this round stays in `remaining` for
+                # the NEXT candidate in this same round, and, via round 2's
+                # from-scratch recomputed share above, for the next round too.
+                remaining -= new_bytes
+                cum_bytes[db_path] = prior_bytes + new_bytes
+                # `total_yielded` is the generator's TOTAL yield count for this call,
+                # from its very first row -- not just what this call skipped past --
+                # so it directly replaces (never adds to) the running skip offset for
+                # this database's next read. See `_read_and_process_db`'s own
+                # docstring for why. B-852 round 7: guarded on `not stats.unreadable`
+                # -- an unreadable attempt always yields `total_yielded == 0`
+                # (nothing is ever read before the open itself fails), so an
+                # unconditional overwrite here would ERASE a genuinely positive count
+                # an EARLIER, successful attempt on this same database already
+                # established, corrupting the round-7 classification fix below (which
+                # depends on `cum_yielded` reflecting whether anything was EVER
+                # successfully read, not just what the LAST attempt managed).
+                if not stats.unreadable:
+                    cum_yielded[db_path] = total_yielded
+                if stats.byte_capped:
+                    next_len[db_path] = stats.blocked_len
+                if not has_floor:
+                    extra_attempted.add(db_path)
+                    extra_last_stats[db_path] = stats
+                if stats.non_text:
+                    meta["non_text_rows"] += stats.non_text
                     meta["truncated"] = True
-                for tool in tools[:_MAX_TOOLS_PER_EVENT]:
-                    entry = _compiled_tool_entry(tool, field)
-                    if entry is None:
-                        continue
-                    key = (
-                        entry["name"], entry["description"],
-                        tuple(entry["params"]), entry["field"],
-                    )
-                    if key in seen:
-                        continue
-                    if len(tool_defs) >= _MAX_TOOL_DEFS:
-                        meta["truncated"] = True
-                        break
-                    seen.add(key)
-                    tool_defs.append(entry)
+                if stats.capped:
+                    meta["truncated"] = True
+                if (
+                    stats.byte_capped
+                    and new_cap_bytes < max_content_bytes_per_db
+                ):
+                    # Still hungry (its own byte cap is what stopped this read, not
+                    # e.g. genuinely running out of rows) AND the caller's own
+                    # per-database ceiling leaves room to grow. B-852 round 7: no
+                    # longer restricted to `round_num == 1` -- a candidate still
+                    # hungry after round 2 as well must also be tracked here, so the
+                    # DRAIN phase below (which runs after this loop ends) can find it;
+                    # the loop itself still only ever runs two rounds regardless.
+                    next_round_dbs.append(db_path)
+            round_dbs = next_round_dbs
+
+        # -------------------------------------------------------------------
+        # PASS 3 -- DRAIN (B-852 round 7; full rationale, and rounds 8-11's history,
+        # in this function's own docstring -- read the "round 11" paragraph there
+        # before touching this loop). Round 11 replaces round 10's single sweep-per-
+        # pass with TWO sweeps per pass:
+        #
+        # Sweep A (equal share, order-independent): every still-pending candidate is
+        # offered `min(remaining // len(drain_pending), its own headroom)` -- computed
+        # ONCE from this pass's starting `remaining`, so the sum of every offer this
+        # sweep makes never exceeds the pool regardless of visiting order. A candidate
+        # whose known next row (`next_len`, populated by the round-1/2 loop above and
+        # by every earlier drain turn) already exceeds its offered share is marked
+        # "hungry" WITHOUT being re-opened -- no I/O spent confirming what is already
+        # known.
+        #
+        # Sweep B (smallest-row-first, one row each): every candidate still hungry
+        # after sweep A is sorted by its next row's KNOWN length ascending (tie-break:
+        # more earned bytes first -- round 9's "Attack A" fix, unchanged -- then
+        # discovery order). Each gets exactly one more row, as long as it fits in
+        # whatever is left of the pool once every candidate ahead of it in sweep-B
+        # order has taken its turn. Ascending order means sweep B stops a candidate
+        # only once its own next row exceeds the ENTIRE pool remaining at that point --
+        # every candidate after it in sort order has a row at least as large, so none
+        # of them could have been served either, from THIS pass's pool or any smaller
+        # one a later pass might offer.
+        #
+        # Drop rule: a candidate carries into the NEXT pass only if sweep B served it
+        # AND it is still byte-capped afterward. Everyone else -- satisfied in sweep A,
+        # or never reached by sweep B before the pool ran out -- drops permanently;
+        # sound because of sweep B's own ascending guarantee, above.
+        #
+        # Termination: capped at exactly `len(drain_pending)` passes (candidates
+        # entering the drain, snapshotted once), enforced by an explicit counter below
+        # -- a structural bound, not merely an observed one.
+        # -------------------------------------------------------------------
+        drain_pending = list(round_dbs)
+        drain_index = {d: i for i, d in enumerate(drain_pending)}
+
+        def _drain_turn(db_path: Path, turn_cap_bytes: int):
+            nonlocal remaining
+            has_floor = db_path in floor_bytes_used
+            prior_bytes = cum_bytes.get(db_path, 0)
+            skip = cum_yielded.get(db_path, 0)
+            new_bytes, stats, total_yielded = _read_and_process_db(
+                db_path, max_content_rows_per_db, turn_cap_bytes, skip,
+                seen, tool_defs, meta,
+            )
+            remaining -= new_bytes
+            cum_bytes[db_path] = prior_bytes + new_bytes
+            # See the identical guard's own comment in the round loop above.
+            if not stats.unreadable:
+                cum_yielded[db_path] = total_yielded
+            if stats.byte_capped:
+                next_len[db_path] = stats.blocked_len
+            else:
+                # No longer capped -- whatever this database's next row WAS is stale;
+                # do not let a later pass consult a length that no longer applies.
+                next_len.pop(db_path, None)
+            if not has_floor:
+                extra_attempted.add(db_path)
+                extra_last_stats[db_path] = stats
+            if stats.non_text:
+                meta["non_text_rows"] += stats.non_text
+                meta["truncated"] = True
+            if stats.capped:
+                meta["truncated"] = True
+            return new_bytes, stats
+
+        max_drain_passes = len(drain_pending)
+        drain_passes = 0
+        while drain_pending and remaining > 0 and drain_passes < max_drain_passes:
+            drain_passes += 1
+            share = remaining // len(drain_pending)
+            hungry: "list[Path]" = []
+            # ---- Sweep A -- equal share, order-independent. ----
+            for db_path in drain_pending:
+                prior_bytes = cum_bytes.get(db_path, 0)
+                known = next_len.get(db_path)
+                if share <= 0 or (known is not None and known > share):
+                    if prior_bytes < max_content_bytes_per_db:
+                        hungry.append(db_path)
+                    continue
+                turn_cap_bytes = min(prior_bytes + share, max_content_bytes_per_db)
+                if turn_cap_bytes <= prior_bytes:
+                    # Already at its own caller-supplied ceiling -- nothing more this
+                    # database could productively use even if offered it.
+                    continue
+                _new_bytes, stats = _drain_turn(db_path, turn_cap_bytes)
+                if stats.byte_capped and turn_cap_bytes < max_content_bytes_per_db:
+                    hungry.append(db_path)
+            # ---- Sweep B -- exactly one more row each, smallest next row first. ----
+            hungry.sort(key=lambda d: (
+                next_len.get(d, sys.maxsize),
+                -(cum_bytes.get(d, 0) - floor_bytes_used.get(d, 0)),
+                drain_index[d],
+            ))
+            next_drain_pending: "list[Path]" = []
+            for db_path in hungry:
+                need = next_len.get(db_path)
+                if need is None or need > remaining:
+                    # Ascending order: this candidate's row, and every candidate
+                    # after it in `hungry` (rows at least as large), do not fit what
+                    # is left of the pool -- none of them can be served this pass.
+                    break
+                prior_bytes = cum_bytes.get(db_path, 0)
+                turn_cap_bytes = prior_bytes + need
+                if turn_cap_bytes > max_content_bytes_per_db:
+                    # This candidate's own per-database ceiling is narrower than its
+                    # next row -- no turn this pass (or any pass) can help it.
+                    continue
+                new_bytes, stats = _drain_turn(db_path, turn_cap_bytes)
+                if (
+                    stats.byte_capped
+                    and new_bytes > 0
+                    and turn_cap_bytes < max_content_bytes_per_db
+                ):
+                    # Sweep B served it AND it is still hungry -- worth another pass.
+                    next_drain_pending.append(db_path)
+            drain_pending = next_drain_pending
+
+    # -----------------------------------------------------------------------
+    # Classify every `extra_dbs` (group (b), beyond the floor pool) entry EXACTLY
+    # ONCE, now that both rounds above have run -- or, when `max_content_total_bytes`
+    # is <= 0 or there were no depth candidates at all, without either round ever
+    # running: `extra_attempted` then stays empty and every entry below correctly
+    # falls into `dbs_budget_starved` (never opened, for the same reason -- no
+    # budget). A floor-pool database is never touched by this loop; its own
+    # `dbs_read`/`dbs_unreadable` accounting happened in the floor pass, above.
+    # -----------------------------------------------------------------------
+    for db_path in extra_dbs:
+        if db_path not in extra_attempted:
+            # Never even opened -- the aggregate depth budget was already spent (or
+            # was <= 0 to begin with) before this database's turn.
+            meta["dbs_budget_starved"] += 1
+            meta["truncated"] = True
+            continue
+        stats = extra_last_stats[db_path]
+        if stats.unreadable:
+            # B-852 round 7: `stats` is only the LAST attempt's outcome -- a database
+            # that yielded real content in an EARLIER round/phase and only became
+            # unreadable (corrupted/deleted mid-scan) on a LATER one already has that
+            # earlier content sitting in `tool_defs`, so counting it `dbs_unreadable`
+            # ("never opened/scanned at all") was a real, reproduced inconsistency. A
+            # database only genuinely earns `dbs_unreadable` when `cum_yielded` is
+            # STILL 0 -- nothing was EVER successfully read from it, across every
+            # attempt (the round loop's own `not stats.unreadable` guard above is
+            # what keeps `cum_yielded` from being wiped by this same failed attempt).
+            if cum_yielded.get(db_path, 0) == 0:
+                meta["dbs_unreadable"] += 1
+            else:
+                meta["dbs_read"] += 1
+                meta["truncated"] = True
+            continue
+        if cum_yielded.get(db_path, 0) == 0 and stats.byte_capped:
+            # Opened, but every round's share was too small to admit even this
+            # database's single newest row -- the exact round-4-shaped false PASS a
+            # fresh independent review found this reader still capable of: `dbs_read`
+            # would otherwise have counted a database that was opened but from which
+            # NOTHING was actually read. See `dbs_budget_starved`'s own docstring
+            # paragraph above for why this is a materially different, worse claim
+            # than an ordinary per-database cap.
+            meta["dbs_budget_starved"] += 1
+            meta["truncated"] = True
+            continue
+        meta["dbs_read"] += 1
 
     meta["present"] = meta["dbs_read"] > 0
     return tool_defs, meta

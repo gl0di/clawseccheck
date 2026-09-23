@@ -44,6 +44,63 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
+    # Already 1,227 (over budget, no exemption recorded) going into B-852 round 3 --
+    # that gap predates this entry and is not this change's debt to explain away, only
+    # to stop hiding. Round 3 (2026-09-23) added ~118 lines: a total byte budget across
+    # every per-agent SQLite database in one read_compiled_tool_descriptions() call
+    # (sqlite_max_content_total_bytes, mirroring log_max_total_bytes), plus converting
+    # the per-database event_json read from a two-phase "materialize a whole database's
+    # admitted rows into a list, then filter" into a streaming generator
+    # (_scan_sqlite_event_json / _SqliteEventJsonStats) that parses each row as it
+    # arrives -- both closed a real --exhaustive regression (measured: a 10 x 547 MB
+    # mixed-host home budget-aborted UNKNOWN at 140s before this fix; 2.35s after, cold
+    # cache). Split candidate, not attempted here: the pointer/archive corroboration
+    # helpers (_pointer_files/_archive_entries/corroborate(), ~200 lines) answer a
+    # different question (WHERE evidence lives) than the event_json content readers
+    # (_read_sqlite_event_json/_scan_sqlite_event_json/read_compiled_tool_descriptions,
+    # the B-811/B-852 "read the delivered tool definitions" concern) and share little
+    # beyond the module's own DB-opening helpers -- a `trajectorycontent.py` leaf the
+    # corroborator's module could import would leave ~950 lines here with no cycle. Not
+    # done in this change: it lands mid a scoped bug-fix round, with its own tests
+    # (`tests/test_f187_trajectory_sqlite_corroborator.py`) pinning exact source-level
+    # behavior (SQL executed, table names) that a split would need to re-verify
+    # byte-for-byte, the same discipline I-022-R2 used for checks.py.
+    "trajectorystore.py": "~1,970 lines — SQLite-trajectory-container corroboration "
+                          "(corroborate()) plus the B-811/B-852 event_json content "
+                          "readers (read_compiled_tool_descriptions() and its streaming "
+                          "core). Over budget by 718 lines; B-852 round 7 (2026-09-23) "
+                          "added the sequential DRAIN phase, a cum_yielded-preservation "
+                          "guard, a dbs_read/dbs_unreadable classification fix, and the "
+                          "docstring explaining all three, +137 lines net on its own. "
+                          "Round 8 (2026-09-23) then fixed the drain's own ORDER "
+                          "(cum_bytes-descending instead of zero-content-first, closing "
+                          "an exploitable priority-inversion the drain's own ordering "
+                          "left open) and documented why, +33 lines net. Round 9 "
+                          "(2026-09-23) closed two more drain-order gaming paths a fresh "
+                          "review found in round 8's own fix -- keying the sort on "
+                          "EARNED bytes (excluding the free floor contribution) and "
+                          "capping a single drain turn to a fraction of the aggregate, "
+                          "plus multiple drain passes to still guarantee forward "
+                          "progress under that cap -- and corrected the docstring's "
+                          "prior overclaim of adversary-proofness, +103 lines net. "
+                          "Round 10 (2026-09-23) found round 9's own per-turn cap wrong "
+                          "-- a FIXED fraction of the ORIGINAL budget stops binding once "
+                          "the pool actually left a pass is already below it, a routine "
+                          "case, not an edge case -- and replaced it with a per-PASS "
+                          "equal share of what is actually left, recomputed every pass; "
+                          "removed the now-dead _SQLITE_DRAIN_TURN_BUDGET_DIVISOR "
+                          "constant and rewrote the affected docstring/comments to state "
+                          "the narrower, corrected guarantee, +37 lines net. Round 10 was "
+                          "then REJECTED by review: its unconditional 1 MiB per-turn "
+                          "floor still let a single decoy swallow an entire thin drain "
+                          "pool in one turn. Round 11 (2026-09-23) replaced the drain's "
+                          "single sweep-per-pass with two sweeps (equal-share, then "
+                          "smallest-row-first) plus a `blocked_len`/`next_len` tracking "
+                          "structure so a candidate's next row length is known without "
+                          "re-opening it, and rewrote the docstring/comments again to "
+                          "state the new guarantees and the honest residual, +52 lines "
+                          "net. Split candidate named above; tracked debt, not a design "
+                          "statement.",
     # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
     # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
     # into self_test_corroboration()/render_self_test_corroboration()/

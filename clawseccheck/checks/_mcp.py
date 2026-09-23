@@ -9271,44 +9271,64 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
     # read it too, restoring detection instead of staying permanently blind on a
     # SQLite-era install.
     #
-    # Gated on `not meta.get("present")`, not on a bare `corr.status` check: whenever
-    # JSONL sidecars exist at all (`present` True), trajectorystore.corroborate() can
-    # only ever report STATUS_LIVE -- its own decision rule puts "a live sidecar
-    # exists" first, unconditionally (trajectorystore.py's corroborate() docstring) --
-    # so this SQLite read is structurally UNREACHABLE while JSONL already answered.
-    # Narrowing the gate to this exact case also means corroborate() -- which opens
-    # every per-agent SQLite file -- is only called on hosts where JSONL genuinely
-    # found zero sidecars, not on every audit run (adversarial review, B-811,
-    # 2026-09-15: the unconditional call this gate replaces widened every SQLite-
-    # adjacent read to every host, not just SQLite-era ones).
+    # B-852: SQLite is now ALSO consulted on a MIXED host -- one with a live JSONL
+    # sidecar (`meta["present"]` True) that ALSO has per-agent SQLite database
+    # file(s). Before this fix the gate was `not meta.get("present")` alone, so a
+    # mid-migration host with both containers holding real, DIFFERENT evidence had
+    # its SQLite content silently never read: the FAIL/WARN verdict, and the PASS
+    # "scope" text, named only the JSONL side and said nothing about SQLite at all
+    # (`tests/test_b185_compiled_tool_poisoning.py`'s own
+    # `test_sqlite_is_never_consulted_while_a_live_jsonl_sidecar_exists` pinned this
+    # as the accepted behavior until this fix; renamed and re-asserted the opposite,
+    # see that test's own docstring).
     #
-    # The merge below is therefore defensive, not exercised in practice today: `seen`
-    # is always empty when this branch runs, because `tool_defs` is always empty here
-    # (see above). Kept rather than replaced with a bare assignment because it stays
-    # CORRECT if that invariant is ever loosened by a future change, at zero cost when
-    # it holds. See trajectorystore.py's module docstring §8 paragraph for the full
-    # column/row-scoping review of what read_compiled_tool_descriptions() there is and
-    # is not allowed to touch -- this call site does not re-litigate it.
+    # The two branches below still preserve the ORIGINAL cost discipline that gate
+    # existed for (adversarial review, B-811, 2026-09-15: an earlier unconditional
+    # call widened every SQLite-adjacent read to every host, not just SQLite-era
+    # ones) -- just anchored on the right predicate. `_trajectorystore.sqlite_db_paths`
+    # is a bare directory glob (no file opened, no connection made), so a JSONL-only
+    # host with zero `agents/*/agent/openclaw-agent.sqlite` files still never touches
+    # SQLite at all in EITHER branch; only a host that actually HAS a per-agent SQLite
+    # database pays for `corroborate()`/`read_compiled_tool_descriptions()` opening
+    # it. That is a closer match to "SQLite-era host" than the old "JSONL found
+    # nothing" predicate ever was -- a host can be SQLite-era AND still have live
+    # JSONL sidecars mid-migration, which is exactly the case this fix restores
+    # visibility into.
     corr = None
     sqlite_meta = None
+    mixed_consulted = False
     if not meta.get("present"):
         corr = _trajectorystore.corroborate(home)
         if corr.status == _trajectorystore.STATUS_LOCATOR_STALE:
-            sqlite_defs, sqlite_meta = _trajectorystore.read_compiled_tool_descriptions(home)
-            if sqlite_defs:
-                seen = {
-                    (e["name"], e["description"], tuple(e["params"]), e["field"])
-                    for e in tool_defs
-                }
-                for entry in sqlite_defs:
-                    key = (
-                        entry["name"], entry["description"],
-                        tuple(entry["params"]), entry["field"],
-                    )
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    tool_defs.append(entry)
+            sqlite_defs, sqlite_meta = _trajectorystore.read_compiled_tool_descriptions(
+                home, max_dbs=lim.sqlite_max_dbs,
+                max_content_rows_per_db=lim.sqlite_max_content_rows_per_db,
+                max_content_bytes_per_db=lim.sqlite_max_content_bytes_per_db,
+                max_content_total_bytes=lim.sqlite_max_content_total_bytes,
+            )
+    elif _trajectorystore.sqlite_db_paths(home):
+        mixed_consulted = True
+        sqlite_defs, sqlite_meta = _trajectorystore.read_compiled_tool_descriptions(
+            home, max_dbs=lim.sqlite_max_dbs,
+            max_content_rows_per_db=lim.sqlite_max_content_rows_per_db,
+            max_content_bytes_per_db=lim.sqlite_max_content_bytes_per_db,
+            max_content_total_bytes=lim.sqlite_max_content_total_bytes,
+        )
+
+    if sqlite_meta and sqlite_defs:
+        seen = {
+            (e["name"], e["description"], tuple(e["params"]), e["field"])
+            for e in tool_defs
+        }
+        for entry in sqlite_defs:
+            key = (
+                entry["name"], entry["description"],
+                tuple(entry["params"]), entry["field"],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            tool_defs.append(entry)
 
     if not tool_defs:
         # `corr` is guaranteed set (non-None) in every branch below: reaching them
@@ -9341,9 +9361,28 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                     "genuinely absent"
                 )
             else:
-                # JSONL sidecars exist but carry no compiled record -- independent of
-                # SQLite entirely; unchanged from before B-811.
+                # JSONL sidecars exist but carry no compiled record -- unchanged from
+                # before B-811. SQLite disclosure (if this host also has a per-agent
+                # database) is appended below, not folded in here, since it applies
+                # identically to both `why` branches above.
                 why = "the trajectory sidecars carry no 'context.compiled' record"
+            if mixed_consulted:
+                # B-852: this host ALSO has per-agent SQLite database file(s)
+                # (`mixed_consulted` is only ever True when `sqlite_db_paths(home)`
+                # found one) and it WAS checked, not silently skipped -- say so even
+                # when it too came up empty, rather than naming only JSONL.
+                sqlite_dbs_read = sqlite_meta.get("dbs_read", 0) if sqlite_meta else 0
+                if sqlite_dbs_read:
+                    why += (
+                        f"; the per-agent SQLite trajectory store was also checked "
+                        f"({sqlite_dbs_read} database(s)) and carried no recoverable "
+                        "'context.compiled' record either"
+                    )
+                else:
+                    why += (
+                        "; the per-agent SQLite trajectory store present on this "
+                        "host was also checked but was not readable"
+                    )
         elif corr.status == _trajectorystore.STATUS_LOCATOR_STALE:
             dbs_found = sqlite_meta.get("dbs_found", 0) if sqlite_meta else 0
             dbs_read = sqlite_meta.get("dbs_read", 0) if sqlite_meta else 0
@@ -9423,10 +9462,41 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             or sqlite_meta.get("unknown_schema")  # B-716
         ):
             sqlite_incomplete = (
-                " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, an "
-                "unrecognised schema, or an unrecognised schema version) meant some "
-                "records were not examined there either, so this is incomplete even "
-                "for what was checked."
+                # B-852: honest about WHICH records a hit cap actually drops, now that
+                # the reader orders newest-first (ORDER BY rowid DESC) -- a vague
+                # "some scan was incomplete" no longer distinguishes "the oldest
+                # records beyond the cap" (recency-dependent) from "an unrelated
+                # per-record reject" (not recency-dependent). Reworded after a
+                # follow-up review: "most recently written", not an absolute "newest",
+                # since a session-copy migration can carry an old session in at a new,
+                # high rowid.
+                " Note: SQLite scan bounds meant some records were not examined there "
+                "either -- this reader reads the rows most recently WRITTEN to each "
+                "database first (ORDER BY rowid DESC), so when the per-database "
+                "row/byte cap is what was hit, it is the longest-resident records "
+                "beyond that cap that were skipped, not the most recently written "
+                "ones (a database whose rows arrived via a session-copy migration can "
+                "carry an older session in at a new, high rowid, so this need not mean "
+                "the absolute newest records were kept); a non-text row, an oversized "
+                "single record, an unrecognised schema, or an unrecognised schema "
+                "version can also drop a record independent of its age. Either way "
+                "this is incomplete even for what was checked."
+            )
+        dbs_budget_starved = (
+            sqlite_meta.get("dbs_budget_starved", 0) if sqlite_meta else 0
+        )
+        if dbs_budget_starved:
+            # B-852 round 5: a DIFFERENT, worse claim than the per-database cap note
+            # above -- these databases were not merely capped short, they were never
+            # read at all (not even their newest row) because the `--exhaustive`
+            # aggregate depth budget ran out before their turn.
+            sqlite_incomplete += (
+                f" {dbs_budget_starved} further SQLite database(s) were found but "
+                "never read at all -- the `--exhaustive` aggregate depth budget was "
+                "used up (what remained by their turn was smaller than even their "
+                "newest record), so unlike the per-database cap above, it is these "
+                "databases' NEWEST rows, not just their longer-resident tail, that "
+                "went unexamined."
             )
         return _finding(
             "B185",
@@ -9502,26 +9572,177 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                     )
                     break
 
-    # B-811 (rewritten after adversarial review, 2026-09-15): `tool_defs` here comes
-    # from EXACTLY ONE container, never both -- the gate above only ever consults
-    # SQLite when `not meta.get("present")`, so a JSONL-and-SQLite "union" can never
-    # actually happen today (the earlier version of this code implied it could; that
-    # implication was false and is retracted, not just reworded). Two plain branches,
-    # matching the two states that are actually reachable, rather than a generalized
-    # "join whichever sources contributed" that only ever has one member.
-    if sqlite_meta and sqlite_meta.get("dbs_read", 0):
+    # B-811 (rewritten after adversarial review, 2026-09-15; re-rewritten B-852):
+    # `tool_defs` came from EXACTLY ONE container under the ORIGINAL gate (SQLite was
+    # only ever consulted when `not meta.get("present")`), so the two branches below
+    # used to be exhaustive. B-852 added a THIRD, real case: `mixed_consulted` is True
+    # on a host with a live JSONL sidecar that ALSO has per-agent SQLite database
+    # file(s) -- both containers may then contribute distinct definitions to the same
+    # `tool_defs`, and the scope text must say so rather than naming only one side.
+    if mixed_consulted and sqlite_meta and sqlite_meta.get("dbs_read", 0):
+        dbs_unreadable = sqlite_meta.get("dbs_unreadable", 0)
+        dbs_budget_starved = sqlite_meta.get("dbs_budget_starved", 0)
+        scope = (
+            f"{len(tool_defs)} distinct tool definition(s) recovered from "
+            f"{meta.get('events', 0)} 'context.compiled' record(s) across "
+            f"{meta.get('files_scanned', 0)} JSONL session log(s), PLUS "
+            f"{sqlite_meta.get('events', 0)} more 'context.compiled' record(s) across "
+            f"{sqlite_meta['dbs_read']} SQLite trajectory database(s) also present on "
+            "this host"
+        )
+        if dbs_unreadable:
+            # Follow-up review: this branch only ever named the DBs it successfully
+            # read -- a partially-readable host (some SQLite databases open, others
+            # not, e.g. a schema too new for an old SQLite build, or a transient lock)
+            # silently dropped the unreadable ones from the disclosed scope entirely.
+            scope += (
+                f" ({dbs_unreadable} further database(s) found but not readable)"
+            )
+        if dbs_budget_starved:
+            # B-852 round 5: distinct from `dbs_unreadable` -- these databases were
+            # never opened at all, not because they were corrupt/locked, but because
+            # the `--exhaustive` aggregate depth budget ran out before their turn.
+            scope += (
+                f" ({dbs_budget_starved} further database(s) found but never read at "
+                "all -- the exhaustive aggregate depth budget was used up, what "
+                "remained was smaller than even their newest record)"
+            )
+        incomplete = ""
+        jsonl_incomplete = bool(
+            meta.get("truncated") or meta.get("files_capped")
+            or meta.get("unknown_version") or meta.get("unknown_schema")
+        )
+        sqlite_incomplete_flag = bool(
+            sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
+            or sqlite_meta.get("unknown_schema")
+        )
+        if jsonl_incomplete or sqlite_incomplete_flag or dbs_unreadable or dbs_budget_starved:
+            parts = []
+            if jsonl_incomplete:
+                parts.append(
+                    "the JSONL side (a per-file byte/count cap, an oversized line, or "
+                    "an unrecognised schema/version)"
+                )
+            if sqlite_incomplete_flag:
+                parts.append(
+                    "the SQLite side (this reader reads the rows most recently "
+                    "WRITTEN to each database first -- ORDER BY rowid DESC -- so a "
+                    "hit row/byte cap skips the longest-resident records beyond it, "
+                    "not necessarily the absolute oldest -- a session-copy migration "
+                    "can carry an older session in at a new, high rowid; a non-text "
+                    "row or an unrecognised schema/version can also drop a record "
+                    "independent of its age)"
+                )
+            if dbs_unreadable:
+                parts.append(
+                    f"{dbs_unreadable} further SQLite database(s) found on this host "
+                    "but never opened/scanned at all"
+                )
+            if dbs_budget_starved:
+                # B-852 round 5: the opposite recency claim from the SQLite-side note
+                # above -- these databases' NEWEST rows, not just a longer-resident
+                # tail, went unexamined, because they were never read at all.
+                parts.append(
+                    f"{dbs_budget_starved} further SQLite database(s) found on this "
+                    "host but never read at all (the exhaustive aggregate depth "
+                    "budget was used up -- what remained by their turn was smaller "
+                    "than even their newest record -- so their newest rows, not just "
+                    "a longer-resident tail, went unexamined)"
+                )
+            incomplete = (
+                " Note: scan bounds meant some records were not examined on "
+                f"{' and '.join(parts)}, so this verdict is incomplete."
+            )
+    elif mixed_consulted and sqlite_meta and sqlite_meta.get("dbs_unreadable", 0):
+        # B-852: a mixed host (live JSONL sidecar PLUS per-agent SQLite database
+        # file(s)) where every found SQLite database was unreadable/corrupt
+        # (`dbs_found > dbs_read`, i.e. `dbs_unreadable` is non-empty and `dbs_read` is
+        # 0, so the first branch above did not fire). Before this fix that silently
+        # fell through to the plain JSONL-only `scope` text in the final `else` below,
+        # with no mention that SQLite was found and consulted at all -- the same
+        # disclosure gap the `not tool_defs` / UNKNOWN leg above already closed
+        # (`"...was also checked but was not readable"`); PASS/WARN/FAIL need the same
+        # honesty, not just UNKNOWN.
+        scope = (
+            f"{len(tool_defs)} distinct tool definition(s) recovered from "
+            f"{meta.get('events', 0)} 'context.compiled' record(s) across "
+            f"{meta.get('files_scanned', 0)} JSONL session log(s); the per-agent "
+            f"SQLite trajectory store also present on this host "
+            f"({sqlite_meta['dbs_unreadable']} database(s)) was also checked but was "
+            "not readable"
+        )
+        incomplete = ""
+        if (meta.get("truncated") or meta.get("files_capped")
+                or meta.get("unknown_version") or meta.get("unknown_schema")):
+            incomplete = (
+                " Note: scan bounds (per-file byte cap, per-file count cap, an "
+                "oversized line, an unrecognised schema, or an unrecognised schema "
+                "version) meant some records were not examined, so this verdict is "
+                "incomplete."
+            )
+    elif sqlite_meta and sqlite_meta.get("dbs_read", 0):
+        dbs_unreadable = sqlite_meta.get("dbs_unreadable", 0)
+        dbs_budget_starved = sqlite_meta.get("dbs_budget_starved", 0)
         scope = (
             f"{len(tool_defs)} distinct tool definition(s) recovered from "
             f"{sqlite_meta.get('events', 0)} 'context.compiled' record(s) across "
             f"{sqlite_meta['dbs_read']} SQLite trajectory database(s)"
         )
+        if dbs_unreadable:
+            # Follow-up review: a partially-readable SQLite-only host (1-of-N
+            # databases readable) silently dropped the unreadable ones from scope,
+            # same gap as the mixed-host branch above.
+            scope += (
+                f" ({dbs_unreadable} further database(s) found but not readable)"
+            )
+        if dbs_budget_starved:
+            # B-852 round 5: distinct from `dbs_unreadable` -- never opened at all
+            # because the exhaustive aggregate depth budget ran out, not because the
+            # database was corrupt/locked.
+            scope += (
+                f" ({dbs_budget_starved} further database(s) found but never read at "
+                "all -- the exhaustive aggregate depth budget was used up, what "
+                "remained was smaller than even their newest record)"
+            )
         incomplete = ""
-        if (sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
-                or sqlite_meta.get("unknown_schema")):  # B-716
+        sqlite_scan_incomplete = bool(
+            sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
+            or sqlite_meta.get("unknown_schema")  # B-716
+        )
+        if sqlite_scan_incomplete or dbs_unreadable or dbs_budget_starved:
+            parts = []
+            if sqlite_scan_incomplete:
+                parts.append(
+                    # B-852: recency-honest wording -- reworded after a follow-up
+                    # review, same as the UNKNOWN branch above.
+                    "this reader reads the rows most recently WRITTEN to each "
+                    "database first (ORDER BY rowid DESC), so when the per-database "
+                    "row/byte cap is what was hit, it is the longest-resident "
+                    "records beyond that cap that were skipped, not necessarily the "
+                    "absolute oldest -- a session-copy migration can carry an older "
+                    "session in at a new, high rowid; a non-text row, an oversized "
+                    "single record, an unrecognised schema, or an unrecognised "
+                    "schema version can also drop a record independent of its age"
+                )
+            if dbs_unreadable:
+                parts.append(
+                    f"{dbs_unreadable} further database(s) found on this host but "
+                    "never opened/scanned at all"
+                )
+            if dbs_budget_starved:
+                # B-852 round 5: the opposite recency claim from the note above --
+                # these databases' NEWEST rows, not just a longer-resident tail, went
+                # unexamined, because they were never read at all.
+                parts.append(
+                    f"{dbs_budget_starved} further database(s) found on this host but "
+                    "never read at all (the exhaustive aggregate depth budget was "
+                    "used up -- what remained by their turn was smaller than even "
+                    "their newest record -- so their newest rows, not just a "
+                    "longer-resident tail, went unexamined)"
+                )
             incomplete = (
-                " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, an "
-                "unrecognised schema, or an unrecognised schema version) meant some "
-                "records were not examined, so this verdict is incomplete."
+                " Note: SQLite scan bounds meant some records were not examined -- "
+                f"{'; '.join(parts)}. This verdict is incomplete."
             )
     else:
         scope = (
