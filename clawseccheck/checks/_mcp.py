@@ -2218,7 +2218,8 @@ def _vet_mcp_tool_poisoning(name: str, spec: dict) -> tuple[list[str], list[str]
                 suspicious.append(
                     f"{name}/{tool_name}: tool description contains a SYSTEM: "
                     "turn-header immediately followed by a placeholder token "
-                    "(ambiguous -- format documentation vs a forged header; B-358)"
+                    "(ambiguous -- format documentation vs a forged header; "
+                    "PLACEHOLDER-SYSTEM-HEADER)"
                 )
             else:
                 dangerous.append(

@@ -512,7 +512,7 @@ _MISSING_LEG_ACTIVATORS = {
     "untrusted input": (
         "a non-owner channel (channels.<name>.dmPolicy/groupPolicy in "
         "open/allowlist/paired), an unpolicied, unrestricted channels.<name>.groups[\"*\"] "
-        "entry (B-297/B-371), an input tool (tools.allow: web/email/imap/rss/fetch), "
+        "entry (OPEN-WILDCARD-GROUP), an input tool (tools.allow: web/email/imap/rss/fetch), "
         "or tools.web.fetch.enabled"
     ),
     "sensitive data": (

@@ -3525,7 +3525,7 @@ def _main(argv=None) -> int:
     p.add_argument("--watch-log", action="store_true",
                    help="print the Agent Watch event journal (timeline of what changed)")
     p.add_argument("--watch", action="store_true",
-                   help="continuous watch mode (C-517): stay running, and re-run "
+                   help="continuous watch mode (CONTINUOUS-WATCH): stay running, and re-run "
                         "--monitor --verbose automatically on a relevant filesystem "
                         "change under --home (debounced) — real-time inotify on Linux, "
                         "a bounded stat-poll fallback elsewhere; see "
@@ -3572,17 +3572,17 @@ def _main(argv=None) -> int:
                         "(recorded in the pack as monitor_events_source) — never rotates "
                         "or deletes anything itself")
     p.add_argument("--incident-open", action="store_true", dest="incident_open",
-                   help="C-520: open a PERSISTED incident record (status=open) linked to "
+                   help="INCIDENT-LIFECYCLE: open a PERSISTED incident record (status=open) linked to "
                         "this run's actionable findings, a best-effort PID when one of them "
                         "names one, and the current --events journal position — stored under "
                         "--data-dir, never in the audited home. Refuses if nothing actionable "
                         "was found this run")
     p.add_argument("--incident-mark", nargs=2, metavar=("ID", "STATUS"), dest="incident_mark",
-                   help="C-520: transition a --incident-open record's status. STATUS is one "
+                   help="INCIDENT-LIFECYCLE: transition a --incident-open record's status. STATUS is one "
                         "of open/investigating/mitigated/closed — forward moves one step at "
                         "a time, backward moves freely (mirrors Pulse's own task lifecycle)")
     p.add_argument("--incident-show", metavar="ID", dest="incident_show",
-                   help="C-520: print one incident record's current status, transition "
+                   help="INCIDENT-LIFECYCLE: print one incident record's current status, transition "
                         "history, and the live --monitor timeline since it opened")
     p.add_argument("--analyze-trajectory", nargs="?", const="", default=None, metavar="PATH",
                    dest="analyze_trajectory",
@@ -3662,7 +3662,7 @@ def _main(argv=None) -> int:
                         "--full shape, for CI runs the deep phases are too slow for. The "
                         "judge packet is still emitted; it re-runs no check and is free")
     p.add_argument("--exhaustive", action="store_true",
-                   help="F-164: raise the trajectory-file / log-sink / per-line scan caps "
+                   help="EXHAUSTIVE-SCAN-CAPS: raise the trajectory-file / log-sink / per-line scan caps "
                         "instead of today's interactive-fast defaults, and scan the full "
                         "byte range of over-length log lines via overlapping windows instead "
                         "of only their head/tail. Applies to B164/B180, which run on every "

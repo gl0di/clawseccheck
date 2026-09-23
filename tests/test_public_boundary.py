@@ -437,7 +437,9 @@ def test_tests_carry_no_operator_identity() -> None:
 #: (`B-306`, `F-154`, `I-025`, `C-080`, ...). This is deliberately narrower than the
 #: `_MARKERS` "Pulse task-ID" pattern above — it has no `CLAWSECCHECK-` prefix, so it
 #: reads as ambiguous shorthand rather than an unmistakable tracker reference. It is
-#: the shape CLAWSECCHECK-B-785 found leaking into rendered finding/help text.
+#: the shape CLAWSECCHECK-B-785 found leaking into rendered finding/help text, and the
+#: shape CLAWSECCHECK-B-896 found again in a handful of files B-785's own recon never
+#: enumerated (`checks/_config.py`, `checks/_mcp.py`, `checks/_vet.py`, `cli.py`).
 #:
 #: Deliberately does NOT require the prefix a *check* id uses (`B55`, `C038`, `T1`,
 #: `B191` — letter directly against the digits, no hyphen) and does NOT match
@@ -446,27 +448,16 @@ def test_tests_carry_no_operator_identity() -> None:
 #: both directions directly against the regex rather than trusting this comment.
 _BARE_TRACKER_ID_RE = re.compile(r"\b[A-Z]-\d{2,4}\b")
 
-#: Files this guard actually scans. NOT the whole shipped tree: `_MARKERS` above scans
-#: raw line text (including comments), which the codebase's own commenting convention
-#: fills with bare ids like `# B-520: ...` or `(C-013)` at roughly one in ten lines of
-#: `catalog.py` alone (measured: an unscoped line-based bare-id scan produces ~6900
-#: matches across the shipped tree, essentially all in comments). Comments never ship
-#: as rendered output, so scanning them here would not be "extending" this guard, it
-#: would be breaking it with noise. The only sound way to catch the real defect (a bare
-#: id inside a STRING that reaches a user) is to parse each file and look at its string
-#: literals only, skipping docstrings (source-only, same carve-out CLAWSECCHECK-B-785's
-#: own audit used) — see `_bare_tracker_ids_in_string_literals` below.
-#:
-#: Scoped to the three modules CLAWSECCHECK-B-785 actually cleaned (the stable
-#: "cap exception" / "Config visibility" labels in `report.py`, the trajectory-replay
-#: detail text in `pipeline.py`, and the judge-packet schema comment in
-#: `adjudication/_builder.py`) rather than the whole tree: a same-shape AST sweep run
-#: during that task also found 9 pre-existing bare ids elsewhere (`checks/_config.py`,
-#: `checks/_mcp.py`, `checks/_vet.py`, `cli.py`) that were outside its scope and are
-#: not touched by it — tracked separately as CLAWSECCHECK-B-896. Asserting a tree-wide
-#: "zero bare ids in rendered strings" here would just fail on B-896's own backlog, not
-#: catch a new regression. Widen this tuple to the full shipped `.py` set once B-896
-#: lands.
+#: CLAWSECCHECK-B-896 widened this guard to the whole shipped tree. It used to be
+#: scoped to the three files CLAWSECCHECK-B-785 renamed away from this shape
+#: (the stable "cap exception" / "Config visibility" labels in `report.py`, the
+#: trajectory-replay detail text in `pipeline.py`, and the judge-packet schema
+#: comment in `adjudication/_builder.py`), with a temporary exclusion for those
+#: three files while `fix/b-785` (commit 6805c2da) was not yet merged. That branch
+#: has since landed on this integration branch and all three files were verified
+#: clean of the bare-id shape at merge time (2026-09-23) -- so the exclusion named
+#: in B-896's own docstring instruction ("drop this exclusion the moment fix/b-785
+#: lands") is dropped here rather than carried forward as dead code.
 _CAP_EXCEPTION_MODULES = (
     "clawseccheck/report.py",
     "clawseccheck/pipeline.py",
@@ -478,7 +469,7 @@ def _docstring_node_ids(tree: ast.AST) -> set[int]:
     """`id()` of every string-literal node that is a docstring (first statement of a
     module/class/function body) — source-only documentation, never reached by a
     renderer. Same "docstrings/comments need no action" carve-out CLAWSECCHECK-B-785's
-    own exhaustive-grep audit used when classifying its 23 raw hits.
+    own exhaustive-grep audit used when classifying its raw hits.
     """
     ids: set[int] = set()
     for node in ast.walk(tree):
@@ -501,7 +492,7 @@ def _bare_tracker_ids_in_string_literals(path: Path) -> list[tuple[int, str]]:
     non-docstring string literal (including an f-string's literal chunks — those are
     plain `ast.Constant` string nodes too, nested under `JoinedStr`, so a flat
     `ast.walk` finds them with no special-casing). Comments are invisible to `ast`
-    entirely, so they never reach this scan — see `_CAP_EXCEPTION_MODULES` above for
+    entirely, so they never reach this scan — see `_CAP_EXCEPTION_MODULES`'s comment above for
     why that is the point, not a gap.
     """
     text = path.read_text(encoding="utf-8")
@@ -528,34 +519,41 @@ def test_bare_tracker_id_pattern_matches_the_shape_it_targets() -> None:
 
 
 def test_bare_tracker_id_pattern_ignores_check_ids_and_risk_ids() -> None:
-    """Pin the negative direction the task called out by name: a *check* id (no
-    hyphen: `B55`, `C038`, `T1`, `B191`) and a `RISK-NN` combinational-chain id (the
-    hyphen sits after "K", not after a lone letter, so `\\b` never anchors there) must
-    never trip this guard — both are legitimate, on-purpose stable identifiers this
-    project already renders on purpose, not tracker-shaped leaks."""
+    """Pin the negative direction: a *check* id (no hyphen: `B55`, `C038`, `T1`,
+    `B191`) and a `RISK-NN` combinational-chain id (the hyphen sits after "K", not
+    after a lone letter, so `\\b` never anchors there) must never trip this guard —
+    both are legitimate, on-purpose stable identifiers this project already renders
+    on purpose, not tracker-shaped leaks."""
     for sample in ("B55", "C038", "T1", "B191", "RISK-01", "RISK-12", "RISK-NN"):
         assert not _BARE_TRACKER_ID_RE.search(sample), sample
 
 
 def test_no_bare_tracker_ids_in_cap_exception_labels() -> None:
-    """The regression guard CLAWSECCHECK-B-785 asked for: no bare tracker-id shape may
-    sit inside a rendered string literal in the cap-exception-label modules that task
-    renamed away from that shape (`RUNTIME-CAP`/`LIVE-TEST-CAP`/`BEHAVIORAL-CAP`/
-    `CONFIG-BLIND`/`CONFIG-SANDBOX`). Fails with file, line and the exact id matched so
-    a future re-introduction (e.g. a new cap mechanism labelled straight after its own
-    ticket number, the way these four originally were) is trivial to find.
+    """No bare tracker-id shape may sit inside a rendered string literal anywhere in
+    the shipped `.py` tree (the same set `_shipped_md_and_py_files()` scans for the
+    marker guard above, filtered to `.py`) — this is the tree-wide widening
+    CLAWSECCHECK-B-896 was filed to do, once CLAWSECCHECK-B-785's own narrower version
+    of this guard (3 files: the cap-exception-label modules it renamed away from this
+    shape — `RUNTIME-CAP`/`LIVE-TEST-CAP`/`BEHAVIORAL-CAP`/`CONFIG-BLIND`/
+    `CONFIG-SANDBOX`) had already landed the AST machinery this reuses.
 
-    Scope: see `_CAP_EXCEPTION_MODULES` above for why this is 3 files, not the whole
-    shipped tree, and CLAWSECCHECK-B-896 for the pre-existing leaks elsewhere that
-    scope deliberately excludes.
+    Fails with file, line and the exact id matched so a future re-introduction (e.g. a
+    new cap mechanism labelled straight after its own ticket number, the way the
+    original five originally were) is trivial to find.
+
+    `_CAP_EXCEPTION_MODULES` above names the three files CLAWSECCHECK-B-785 already
+    cleaned by hand before this guard existed; they are scanned like every other
+    shipped file here, not excluded — verified clean at merge time.
     """
     failures: list[str] = []
-    for rel in _CAP_EXCEPTION_MODULES:
-        path = REPO_ROOT / rel
+    for path in _shipped_md_and_py_files():
+        if path.suffix != ".py":
+            continue
+        rel = str(path.relative_to(REPO_ROOT))
         for lineno, matched in _bare_tracker_ids_in_string_literals(path):
             failures.append(f"{rel}:{lineno}: bare tracker id {matched!r} in a rendered string")
     assert not failures, (
         "Bare Pulse-CID-shaped id(s) leaked into rendered text — rename to a "
-        "descriptive, non-tracker-shaped label (CLAWSECCHECK-B-785):\n"
+        "descriptive, non-tracker-shaped label (CLAWSECCHECK-B-896):\n"
         + "\n".join(failures)
     )
