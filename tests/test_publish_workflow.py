@@ -2244,3 +2244,186 @@ def test_decide_release_action_truth_table(
         f"[{case_id}] fail_job: expected {expected_fail!r}, got "
         f"{outputs.get('fail_job')!r}."
     )
+
+
+# ---------------------------------------------------------------------------------
+# B-838: the signed release assets exist only on the runner and inside this one job.
+# If a step downstream of signing fails — the ClawHub publish itself, or "Create
+# GitHub Release" — nothing preserved them, and once ClawHub has accepted the
+# version a re-run cannot regenerate them ("Preflight — confirm the CURRENT version
+# is not already published" hard-fails first, before staging or signing run again).
+# A workflow-artifact upload right after the bundle verifies is the recovery path;
+# the two duplicate-version preflights must name it instead of leaving the operator
+# to rediscover this from scratch.
+# ---------------------------------------------------------------------------------
+
+
+def test_signed_assets_are_uploaded_as_a_recovery_artifact_before_publish() -> None:
+    """The recovery artifact must exist, carry both signed files, and land before
+    the real (non dry-run) ClawHub publish — otherwise a failure IN that publish
+    step, not just downstream of it, would still lose the bytes."""
+    steps = _steps()
+    names = [_step_name(s) for s in steps]
+    verify_i = _step_index(names, "Verify the signed bundle with the documented command")
+    upload_i = _step_index(names, "Upload signed release assets")
+    assert upload_i == verify_i + 1, (
+        "the recovery-artifact upload must be the step immediately after the bundle "
+        "is verified, so nothing between signing and this upload can lose the bytes"
+    )
+
+    body = "\n".join(text for _, text in steps[upload_i])
+    assert "uses: actions/upload-artifact@" in body, (
+        "the recovery-artifact step must use actions/upload-artifact, not a "
+        "hand-rolled upload"
+    )
+    assert "SHA256SUMS.txt" in body and "SHA256SUMS.txt.bundle" in body, (
+        "the recovery artifact must carry BOTH signed files — one alone cannot be "
+        "verified with the documented cosign command"
+    )
+    assert "if-no-files-found: error" in body, (
+        "a missing signed file here must fail the step loudly, not silently ship an "
+        "empty or partial recovery artifact"
+    )
+    assert "${{ steps.ver.outputs.version }}" in body, (
+        "the artifact name must carry the version being released, so a human can "
+        "find the right one among many workflow runs"
+    )
+
+    upload_line = min(ln for ln, _ in steps[upload_i])
+    assert upload_line < _real_publish_invocation()["line"], (
+        "the recovery artifact must be uploaded BEFORE the real ClawHub publish, so "
+        "it exists even if the publish step itself is what fails"
+    )
+
+
+def test_current_version_preflight_names_the_recovery_command() -> None:
+    """The 'already published' hard-fail is not always an accidental re-trigger.
+
+    It is also exactly the state left behind when an earlier run's GitHub Release
+    step failed after that run's ClawHub publish succeeded — and this preflight is
+    precisely what stops a bare re-run from reaching signing again. Its error must
+    name the recovery artifact and the manual command, not just gesture at "a human
+    must resolve this".
+    """
+    block = _step_shell_block(
+        "Preflight — confirm the CURRENT version is not already published"
+    )
+    assert "already published on ClawHub" in block
+    assert "signed-release-assets-${VER}" in block, (
+        "the error must name the actual recovery-artifact naming pattern from the "
+        "upload step, not a vague pointer"
+    )
+    assert "gh release create" in block and "SHA256SUMS.txt.bundle" in block, (
+        "the error must give the literal recovery command, not just a doc pointer"
+    )
+    assert "docs/RELEASING.md" in block
+
+
+def test_previous_release_gate_flags_a_missing_github_release_even_when_live() -> None:
+    """Before this fix, CODE=200 short-circuited straight to 'fine, exit 0' without
+    ever checking whether the PREVIOUS release's GitHub Release exists — so the
+    exact state B-838 documents (published to ClawHub, GitHub Release step failed)
+    was reported identically to a completely healthy previous release. The two must
+    now be told apart, without turning this into a hard failure for the CURRENT
+    release: an older release's missing GitHub Release is not this run's fault to
+    fix.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    live_branch_start = text.index('if [ "$CODE" = "200" ]; then')
+    # Bound the slice to just the CODE=200 branch so these assertions cannot be
+    # satisfied by the unrelated `gh release view` call in the 404 trichotomy below
+    # (already covered by test_previous_release_gate_separates_never_released_from_
+    # never_surfaced).
+    trichotomy_start = text.index("A 404 has THREE causes")
+    branch = text[live_branch_start:trichotomy_start]
+
+    assert 'gh release view "v${PREV}"' in branch, (
+        "the CODE=200 branch must itself check for the previous release's GitHub "
+        "Release before declaring the previous release fine"
+    )
+    assert "::warning::" in branch, (
+        "a previous release that is live on ClawHub but missing its GitHub Release "
+        "must be surfaced, not silently folded into the healthy case"
+    )
+    assert "NOT the never-published case" in branch, (
+        "the warning must say this is a DIFFERENT state from the 404 trichotomy "
+        "below, not a rediscovery of it"
+    )
+    assert "exit 1" not in branch, (
+        "the CODE=200 branch must stay non-fatal for the CURRENT release — an "
+        "older release's missing GitHub Release is not this run's failure to fix"
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_previous_release_gate_shell_warns_on_live_but_unreleased_previous(
+    tmp_path,
+) -> None:
+    """Exercise the real shell: ClawHub 200 for PREV + no GitHub Release for PREV
+    must warn and still exit 0 (never block the CURRENT release)."""
+    block = _step_shell_block(
+        "Preflight — confirm the PREVIOUS release actually surfaced on ClawHub"
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "CHANGELOG.md").write_text(
+        "## [2.0.0]\n- current\n\n## [1.0.0]\n- previous\n", encoding="utf-8"
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # curl always answers 200 (PREV is live on ClawHub).
+    (bindir / "curl").write_text(
+        "#!/bin/bash\necho -n 200\nexit 0\n", encoding="utf-8"
+    )
+    # gh: `release view` fails (no GitHub Release for PREV); anything else succeeds.
+    (bindir / "gh").write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "release" ] && [ "$2" = "view" ]; then exit 1; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    for f in bindir.iterdir():
+        f.chmod(0o755)
+    env = dict(
+        os.environ,
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        GITHUB_REPOSITORY="owner/repo",
+        GH_TOKEN="x",
+        SKIP_CHECK="false",
+    )
+    proc = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", block],
+        cwd=str(work), capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 0, (
+        f"must exit 0 (never block the current release): stdout={proc.stdout!r} "
+        f"stderr={proc.stderr!r}"
+    )
+    assert "::warning::" in proc.stdout, proc.stdout
+    assert "1.0.0" in proc.stdout
+
+
+def test_releasing_doc_no_longer_claims_a_bare_rerun_always_recovers() -> None:
+    """docs/RELEASING.md's own recovery section used to tell a maintainer to
+    "re-run the workflow ... so it verifies (or recreates) the release cleanly"
+    with no caveat — which is false once ClawHub already has the version: the
+    "not already published" preflight hard-fails every such re-run before it can
+    reach staging or signing again. The doc must say so, and must describe the
+    actual recovery (the signed-assets workflow artifact).
+    """
+    text = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+    rerun_idx = text.index("re-run the workflow")
+    caveat_idx = text.index("does NOT recover this once ClawHub")
+    assert rerun_idx < caveat_idx, (
+        "the re-run instruction must be immediately qualified by the caveat that it "
+        "does not work once ClawHub already has the version"
+    )
+    assert "No GitHub Release, but ClawHub already has it" in text, (
+        "the doc must have a dedicated recovery section for this exact state, named "
+        "the way the workflow's own error messages point to it"
+    )
+    assert "signed-release-assets-X.Y.Z" in text, (
+        "the doc must name the actual recovery-artifact naming pattern, not just "
+        "gesture at 'the workflow artifact'"
+    )
+    assert "90-day retention" in text

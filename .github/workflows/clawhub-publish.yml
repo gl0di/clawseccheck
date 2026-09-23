@@ -294,7 +294,25 @@ jobs:
           # before this becomes a hard release-blocking failure.
           CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 2 "$API")" || CODE="000"
           if [ "$CODE" = "200" ]; then
-            echo "Previous release ${PREV} is live on ClawHub."
+            # B-838: live-on-ClawHub is not by itself "fully fine" — it is also the
+            # exact state left behind when a PAST run's GitHub Release step failed or
+            # never ran after that run's own ClawHub publish succeeded. Distinguish it
+            # from the ordinary case instead of reporting one blanket "fine" for both:
+            # this is never fatal for the CURRENT release (the older release is not
+            # this run's problem to fix), but it must not read as fully healthy either.
+            if gh release view "v${PREV}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "Previous release ${PREV} is live on ClawHub and its GitHub Release exists."
+            else
+              echo "::warning::Previous release ${PREV} is live on ClawHub but has NO" \
+                   "GitHub Release attached, so its signed SHA256SUMS.txt/.bundle are not" \
+                   "durably recorded anywhere. This is NOT the never-published case below" \
+                   "— ClawHub already has ${PREV} — it is the recovery gap B-838 documents." \
+                   "If that release run still retains its signed-release-assets-${PREV}" \
+                   "workflow artifact (90-day retention), attach it by hand: gh release" \
+                   "create v${PREV} SHA256SUMS.txt SHA256SUMS.txt.bundle (downloaded from" \
+                   "that run). See docs/RELEASING.md, No GitHub Release but ClawHub" \
+                   "already has it."
+            fi
             exit 0
           fi
 
@@ -538,7 +556,14 @@ jobs:
           CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 2 \
             "https://clawhub.ai/api/v1/skills/clawseccheck/versions/${VER}")"
           if [ "$CODE" = "200" ]; then
-            echo "::error::Version ${VER} is already published on ClawHub — nothing to do."
+            echo "::error::Version ${VER} is already published on ClawHub — nothing to do." \
+                 "If this is not an accidental re-trigger but the aftermath of an earlier" \
+                 "run whose GitHub Release step failed or never ran, this preflight cannot" \
+                 "be bypassed to reach signing again — download that earlier run's" \
+                 "signed-release-assets-${VER} artifact from its Summary page and finish" \
+                 "the release by hand: gh release create v${VER} SHA256SUMS.txt" \
+                 "SHA256SUMS.txt.bundle (see docs/RELEASING.md, No GitHub Release but" \
+                 "ClawHub already has it)."
             exit 1
           fi
 
@@ -739,6 +764,32 @@ jobs:
             exit 1
           fi
           echo "Bundle verified."
+
+      - name: Upload signed release assets (recovery artifact)
+        # B-838: SHA256SUMS.txt and its cosign bundle are produced and consumed
+        # entirely inside this job — nothing preserves them if a step further down
+        # (the ClawHub publish itself, or "Create GitHub Release") fails. Once ClawHub
+        # has accepted this version, a re-run of this whole workflow cannot regenerate
+        # them: "Preflight — confirm the CURRENT version is not already published"
+        # above would hard-fail before staging/signing ever runs again, and cosign's
+        # identity check pins THIS workflow on a tag ref, so a human cannot reproduce
+        # a valid signature locally either. Uploading the already-verified bytes as a
+        # workflow artifact — after they verify, but still before the ClawHub publish
+        # that this run's later failure could follow — means they survive that failure
+        # regardless of what breaks next. Recovery: download the
+        # "signed-release-assets-<version>" artifact from this run's Summary page and
+        # attach it by hand (`gh release create`/`gh release upload`) — see
+        # docs/RELEASING.md's "No GitHub Release, but ClawHub already has it" section.
+        # if-no-files-found: error so a staging/naming mistake here fails loudly
+        # instead of silently shipping an empty recovery artifact.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: signed-release-assets-${{ steps.ver.outputs.version }}
+          path: |
+            SHA256SUMS.txt
+            SHA256SUMS.txt.bundle
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Probe pre-publish liveness
         # C-368: classifies (never gates) whether this version was ALREADY live on
