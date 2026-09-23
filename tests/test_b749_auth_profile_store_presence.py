@@ -499,10 +499,15 @@ class TestPerAgentConsumersStayConsistent:
 # --------------------------------------------------------- CLAWSECCHECK-B-845 follow-up
 # (2026-09-23) — the two blocking defects an independent C-135 review found in the
 # per-agent reader above: an unbounded hang, and a silent scan-coverage gap. Recorded as
-# a Pulse comment on the task, dated 2026-09-23T06:12; both fixes reuse existing
-# machinery (`trajectorystore._open_and_verify_table`/`_table_kind`,
-# `trajectorystore.sqlite_db_paths_capped`) rather than adding new detection logic, so
-# this follow-up does not need a fresh full C-135 pass of its own.
+# a Pulse comment on the task, dated 2026-09-23T06:12. That review round's own fixes
+# reused existing machinery (`trajectorystore._open_and_verify_table`/`_table_kind`,
+# `trajectorystore.sqlite_db_paths_capped`), which is WHY the earlier version of this
+# comment claimed no fresh C-135 pass was needed -- but round 2's own review turned up a
+# SECOND, structurally different hang (a planted FIFO, at both the main DB path and a
+# `-journal` sidecar path -- see `TestAgentAuthProfileStoreFifoGuard` below) plus a
+# never-wired disclosure gap in the cap hedge, in that SAME "reuses existing machinery"
+# code. So "reuses existing machinery" is not, on its own, evidence a change needs no
+# adversarial pass -- every round on this bug has needed one, including this one.
 
 
 def _plant_recursive_view_auth_profile_store(tmp_path: Path, name: str = "h") -> Path:
@@ -513,6 +518,21 @@ def _plant_recursive_view_auth_profile_store(tmp_path: Path, name: str = "h") ->
     Real OpenClaw never writes a VIEW here (grounded: every write path this table's own
     row-key comment cites goes through a `CREATE TABLE`), so this is a hostile/corrupt
     object, not a real shape — the fix must refuse to query it, not hedge it away.
+
+    `store_key` is `'k' || x` (`'k1'`, `'k2'`, `'k3'`, ...), NOT the constant
+    `'primary'` an earlier version of this fixture used. That earlier version returned
+    instantly even against the ORIGINAL, unfixed reader (round 1): the real query this
+    module runs is `SELECT LENGTH(store_json) FROM auth_profile_store WHERE store_key =
+    'primary'`, and SQLite evaluates a recursive CTE lazily, row at a time -- with a
+    constant `store_key`, the WHERE clause is satisfied by the FIRST row the view ever
+    emits, so `.fetchone()` returns after one step regardless of whether the reader does
+    any schema verification at all. That made the fixture unable to tell a fixed reader
+    from a vulnerable one -- it passed either way. With `store_key` genuinely varying
+    per row, `store_key = 'primary'` never matches ANY row the view can ever produce,
+    so an unfixed reader must keep pulling rows forever looking for a match that does
+    not exist -- a real, reproduced hang (verified against a pre-fix build of this
+    reader before this fixture was accepted), not just an infinite view definition that
+    happens not to be exercised.
     """
     home = tmp_path / name
     home.mkdir(parents=True)
@@ -525,7 +545,7 @@ def _plant_recursive_view_auth_profile_store(tmp_path: Path, name: str = "h") ->
         conn.execute(
             "CREATE VIEW auth_profile_store AS "
             "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt) "
-            "SELECT 'primary' AS store_key, CAST(x AS TEXT) AS store_json FROM cnt"
+            "SELECT 'k' || x AS store_key, CAST(x AS TEXT) AS store_json FROM cnt"
         )
         conn.commit()
     finally:
@@ -644,3 +664,129 @@ class TestAgentDatabaseCapDisclosure:
         finding = check_trifecta(ctx)
         assert finding.status == WARN, finding.detail
         assert "not every agent" not in finding.detail
+
+    def test_the_finding_discloses_capped_even_when_nothing_found_among_checked_agents(
+        self, tmp_path
+    ):
+        """B-845 round 3 BLOCKING fix. A C-135 review found the ORIGINAL wiring only
+        ever read `agent_auth_profile_store_capped` from INSIDE the
+        `agent_auth_store_present` branch -- so a home with real material ONLY in the
+        one agent database past the cap (every database the sweep actually checks
+        holds nothing but the empty-store shell) read as a clean, unhedged PASS: since
+        nothing was FOUND among the checked agents, the whole disclosure branch never
+        ran, silently dropping the fact that 51 agent databases existed and only 50
+        were ever looked at.
+
+        `_MAX_SQLITE_DBS` (50) agents sorted first (`agent-000`..`agent-049`) each get
+        only the empty-store shape; the 51st (`agent-050`), sorting LAST and excluded
+        by the cap, is the ONLY one holding real material -- reproducing the exact gap
+        the review reported, deterministically (`sqlite_db_paths` sorts and truncates,
+        so which agent the cap drops is not left to chance here).
+        """
+        home = tmp_path / "h"
+        home.mkdir(parents=True)
+        (home / "openclaw.json").write_text(json.dumps(CFG))
+        os.chmod(home / "openclaw.json", 0o600)
+        empty_payload = json.dumps({"version": 1, "profiles": {}}, separators=(",", ":"))
+        real_payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("P")}
+        }})
+        for i in range(_MAX_SQLITE_DBS):
+            agent_dir = home / "agents" / f"agent-{i:03d}" / "agent"
+            _make_agent_auth_db(agent_dir, empty_payload)
+        agent_dir = home / "agents" / f"agent-{_MAX_SQLITE_DBS:03d}" / "agent"
+        _make_agent_auth_db(agent_dir, real_payload)
+
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_capped is True
+        # Nothing FOUND among the 50 agents the sweep actually checked -- each of
+        # those only ever holds the empty-store shell, so the largest length observed
+        # across them is exactly that shell's own length.
+        assert ctx.agent_auth_profile_store_length == len(empty_payload)
+
+        finding = check_trifecta(ctx)
+        assert finding.status == WARN, finding.detail
+        assert "not every agent" in finding.detail
+        # The "at least one agent's own ... holds more than an empty shell" sentence
+        # must NOT fire here -- nothing was found among the checked agents, only the
+        # capped sweep itself is the reason this WARNs.
+        assert "holds more than an empty shell" not in finding.detail
+
+
+# --------------------------------------------------------------- FIFO / sidecar guard
+
+
+class TestAgentAuthProfileStoreFifoGuard:
+    """B-845 round 3 BLOCKING fix: a second, structurally different hang from the
+    recursive-VIEW one above, found in the SAME code path by the SAME C-135 review.
+
+    A database path -- or one of the sidecar paths SQLite itself consults before this
+    module's own schema verification ever runs (`-journal`, `-wal`, `-shm`) -- that is
+    a FIFO, not a regular file, blocks in `sqlite3.connect`/the very first
+    `sqlite_master` read: SQLite blocks reading (or checking for) a FIFO with no
+    writer on the other end. This closed the SAME `_open_and_verify_table` path the
+    recursive-VIEW fix reuses, but earlier: `_table_kind`'s own `sqlite_master` read
+    never gets a chance to refuse anything, because SQLite checks for a hot journal
+    sidecar BEFORE that read even starts.
+
+    Reused the SAME bounded daemon-thread pattern as
+    `TestAgentAuthProfileStoreHangGuard` above, for the same reason: if this ever
+    regresses, these tests fail in a few seconds, not by hanging the whole suite.
+    """
+
+    def _collect_bounded(self, home: Path, timeout: float = 10.0) -> "tuple[object, float]":
+        result: dict = {}
+
+        def _run():
+            result["ctx"] = collect(home)
+
+        thread = threading.Thread(target=_run, daemon=True)
+        started = time.monotonic()
+        thread.start()
+        thread.join(timeout=timeout)
+        elapsed = time.monotonic() - started
+        assert not thread.is_alive(), (
+            f"collect() did not return within {timeout:.0f}s -- the exact hang "
+            "this fix closes"
+        )
+        return result["ctx"], elapsed
+
+    def test_main_path_fifo_does_not_hang_collect(self, tmp_path):
+        """`mkfifo` at the main database path itself -- the DB path IS the FIFO."""
+        home = tmp_path / "h"
+        home.mkdir(parents=True)
+        (home / "openclaw.json").write_text(json.dumps(CFG))
+        os.chmod(home / "openclaw.json", 0o600)
+        agent_dir = home / "agents" / "main" / "agent"
+        agent_dir.mkdir(parents=True)
+        os.mkfifo(agent_dir / "openclaw-agent.sqlite")
+
+        ctx, elapsed = self._collect_bounded(home)
+        assert elapsed < 10, f"collect() took {elapsed:.1f}s -- expected a few seconds"
+        # Behaves like "could not read this store" -- same honest UNDETERMINED every
+        # other unreadable-table case in this reader already reports.
+        assert ctx.agent_auth_profile_store_read is False
+        assert ctx.agent_auth_profile_store_length is None
+
+    def test_journal_sidecar_fifo_does_not_hang_collect(self, tmp_path):
+        """A genuine, regular database (with a real, readable `auth_profile_store`
+        table) plus a FIFO at its `-journal` SIDECAR path -- SQLite checks for a hot
+        journal at the very FIRST `sqlite_master` read, before `_table_kind`'s own
+        schema verification runs at all, so this hangs even earlier than the
+        main-path case above.
+        """
+        home = tmp_path / "h"
+        home.mkdir(parents=True)
+        (home / "openclaw.json").write_text(json.dumps(CFG))
+        os.chmod(home / "openclaw.json", 0o600)
+        agent_dir = home / "agents" / "main" / "agent"
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("Q")}
+        }})
+        _make_agent_auth_db(agent_dir, payload)
+        os.mkfifo(str(agent_dir / "openclaw-agent.sqlite") + "-journal")
+
+        ctx, elapsed = self._collect_bounded(home)
+        assert elapsed < 10, f"collect() took {elapsed:.1f}s -- expected a few seconds"
+        assert ctx.agent_auth_profile_store_read is False
+        assert ctx.agent_auth_profile_store_length is None

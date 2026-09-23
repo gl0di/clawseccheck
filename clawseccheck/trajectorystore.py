@@ -59,11 +59,21 @@ recon doc, which predates this migration):
 **§8 -- this is a read of a genuinely new surface.** The SAME per-agent database that
 holds ``trajectory_runtime_events`` also holds ``auth_profile_store`` / ``auth_profile_state``
 -- LIVE OAuth tokens, measured present in both real per-agent databases on a live host
-alongside this table. Every function in this module touches ``trajectory_runtime_events``
-and nothing else: one hardcoded table name (:data:`TRAJECTORY_TABLE_NAME`), never a table
-built from a variable, never ``SELECT *``. Pointer files and archive filenames are read
-for NAMES and COUNTS only -- a pointer's own ``sessionId``/``runtimeFile`` fields, never
-anything past that tiny envelope; an archive entry's filename, never its content.
+alongside this table. Every function in this module that reads a table's ROW CONTENT
+touches ``trajectory_runtime_events`` and nothing else: one hardcoded table name
+(:data:`TRAJECTORY_TABLE_NAME`), never a table built from a variable, never
+``SELECT *``. **Updated for B-845 (2026-09-23):** :func:`_open_and_verify_table` /
+:func:`_table_kind` now accept a caller-supplied *table_name*, and
+``collector._collect_agent_auth_profile_store_presence`` passes ``auth_profile_store``
+-- so this module's SCHEMA-verification queries (``sqlite_master`` lookups, ``PRAGMA
+table_xinfo``) do, at that caller's request, ask about the auth table's own column
+metadata (kind/sql/rootpage/generated-column-ness). They never select, and this
+module's source never contains a query for, that table's ROW CONTENT
+(``store_json``) -- see :func:`_open_and_verify_table`'s own docstring for the reason
+this reuse exists rather than a second, unreviewed copy of the same schema checks.
+Pointer files and archive filenames are read for NAMES and COUNTS only -- a pointer's
+own ``sessionId``/``runtimeFile`` fields, never anything past that tiny envelope; an
+archive entry's filename, never its content.
 
 ``corroborate()``/``sqlite_db_paths()``/``sqlite_session_ids()`` additionally never read
 ``event_json`` at all -- one literal, never-interpolated SELECT
@@ -93,13 +103,22 @@ with one more discipline the plain count readers do not need:
     leave this function -- reused verbatim from the JSONL reader, not re-derived, so the
     two containers cannot diverge on what counts as a "delivered tool definition."
 
-Grep for ``SELECT`` in this module's source: there are now exactly four literal queries.
-Two name ``trajectory_runtime_events`` (:data:`_SELECT_TRAJECTORY_ROWS`,
+Grep for ``SELECT`` in this module's source: there are exactly four literal
+CONTENT/row-content-adjacent queries whose SQL TEXT names a table. Two name
+``trajectory_runtime_events`` (:data:`_SELECT_TRAJECTORY_ROWS`,
 :data:`_SELECT_TRAJECTORY_EVENT_JSON`); the other two are :func:`_table_kind`'s own
 ``sqlite_master`` lookups, added in round 2 of the same B-811 review to close the
 VIEW/virtual-table/rootpage-aliasing bypasses of "we never name the auth tables in our
-own source" (see that function's docstring). None of the four ever names either auth
-table.
+own source" (see that function's docstring). None of these four is ever written with
+an auth-table name, and none of them ever selects row CONTENT from one. **Since
+B-845 (2026-09-23)**, this is narrower than "never touches an auth table" (see the §8
+paragraph above): ``_table_kind``'s ``sqlite_master`` lookup binds a caller-supplied
+*table_name* as a PARAMETER (not written into the query text), and its
+``PRAGMA table_xinfo(<table_name>)`` check does interpolate it (regex-validated
+first) -- both READ SCHEMA ONLY, one column-metadata row apiece, never the table's
+own data. A fifth, table-scoped SELECT (``SELECT LENGTH(store_json) FROM
+auth_profile_store WHERE store_key = ?``) exists, but lives in ``collector.py``, not
+here -- this module's own boundary is schema verification, not that content read.
 
 **What this cannot catch (constraint 4, said plainly).** Every container this reader knows
 about is residue of the SPECIFIC 8.1-era JSONL-to-SQLite migration: pointers, the import
@@ -115,8 +134,10 @@ to it). Read-only, offline, bounded. Never imports ``checks/`` or anything above
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import stat as _stat
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote as _urlquote
@@ -173,9 +194,13 @@ TRAJECTORY_TABLE_NAME = "trajectory_runtime_events"
 # grep for "SELECT" in this module's source: there are exactly four (this one,
 # _SELECT_TRAJECTORY_EVENT_JSON below, and _table_kind's two sqlite_master lookups),
 # none built from a variable. This one names only session_id/seq; event_json (the
-# sensitive per-record payload) is never selected here, and neither auth table is ever
-# named anywhere in this module's source -- see _table_kind's docstring for why a
-# literal table name in OUR source is necessary but not sufficient on its own.
+# sensitive per-record payload) is never selected here, and neither auth table's DATA
+# is ever selected anywhere in this module's source -- see _table_kind's docstring for
+# why a literal table name in OUR source is necessary but not sufficient on its own.
+# (Since B-845, 2026-09-23: _table_kind's own SCHEMA-only checks -- sqlite_master,
+# PRAGMA table_xinfo -- do run against auth_profile_store's name when a caller asks,
+# but that is column metadata, not this SELECT and not row content; see the module
+# docstring's §8 paragraph.)
 #
 # `length(CAST(session_id AS BLOB) ) <= ?` -- see _SELECT_TRAJECTORY_EVENT_JSON's own
 # comment for why the CAST matters: SQLite's `length()` on a bare TEXT value stops at
@@ -289,6 +314,69 @@ class TrajectoryCorroboration:
 # pre-existing ``_read_sqlite_db`` this module shipped before B-811.
 # ---------------------------------------------------------------------------
 
+# B-845 (round 3, 2026-09-23): the suffixes SQLite itself may open alongside the main
+# database file before this reader's own query ever runs. A rollback-journal read
+# checks for a hot ``-journal`` sidecar FIRST, at the very first ``sqlite_master`` read
+# (see ``_table_kind``) -- before this module's own schema-verification logic gets a
+# chance to refuse anything -- so a non-regular object at any of these paths can hang
+# `sqlite3.connect`/the first read the same way a non-regular MAIN path can. ``-wal``/
+# ``-shm`` are WAL mode's equivalents; checked for the same reason even though this
+# reader always forces ``PRAGMA query_only`` rather than deliberately opening in WAL.
+_SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
+
+
+def _refuse_non_regular_sqlite_paths(db_path: Path) -> None:
+    """Refuse to open *db_path* if it, or any sidecar SQLite itself may consult
+    (``-journal``/``-wal``/``-shm``), is not an ordinary regular file.
+
+    B-845 (round 3, 2026-09-23): a C-135 review planted a FIFO at the main DB path
+    (``mkfifo .../openclaw-agent.sqlite``) and, separately, at a real DB's
+    ``-journal`` sidecar path -- both hung this module's readers forever, because
+    SQLite blocks on ``open()``/``read()`` of a FIFO with no writer, and it checks for
+    a hot journal at the FIRST ``sqlite_master`` lookup, before this module's own
+    schema verification (``_table_kind``) ever runs. `sqlite3.connect`'s own
+    ``mode=ro`` URI parameter does not refuse a FIFO -- it only forbids CREATING a new
+    file -- so this check has to happen before ``sqlite3.connect`` is ever called, not
+    as an option passed to it.
+
+    A missing sidecar is normal (most databases have no hot journal/WAL/SHM file at
+    any given moment) and is silently skipped, same as a missing main path -- an
+    absent object cannot hang anything. Anything present that is NOT a regular file
+    (a FIFO, a device node, a directory, a socket) raises
+    ``sqlite3.OperationalError``, the same exception type a genuine open/schema
+    failure already raises here, so ``_open_and_verify_table``'s existing
+    ``except sqlite3.Error`` catches this the same way it catches any other unreadable
+    database -- no new plumbing needed downstream. Any OTHER ``OSError`` from
+    ``os.stat`` (permission denied, a path component that is not a directory, ...)
+    is treated the same way: refuse rather than risk passing an unknown object
+    straight to SQLite.
+
+    **Documented residual (TOCTOU), not fixed here**: nothing stops a live attacker
+    from swapping a regular file for a FIFO in the window between this check and the
+    ``sqlite3.connect`` call right after it. Stdlib ``sqlite3`` gives no atomic
+    "open only if regular" primitive (unlike ``os.open`` with ``O_NOFOLLOW``, which
+    guards a different attack -- symlinks, not FIFOs/device nodes), so closing this
+    race would need a non-stdlib dependency or platform-specific syscalls, both out of
+    scope for a stdlib-only tool. This narrows the window from "unbounded hang on any
+    request" to "requires racing this exact stat-then-open gap", it does not close it.
+    """
+    candidates = [db_path] + [
+        Path(str(db_path) + suffix) for suffix in _SQLITE_SIDECAR_SUFFIXES
+    ]
+    for candidate in candidates:
+        try:
+            st = os.stat(candidate)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise sqlite3.OperationalError(
+                f"could not verify {candidate} before opening it: {exc}"
+            ) from exc
+        if not _stat.S_ISREG(st.st_mode):
+            raise sqlite3.OperationalError(
+                f"{candidate} exists but is not a regular file -- refusing to open it"
+            )
+
 
 def _open_readonly(db_path: Path) -> "sqlite3.Connection":
     """One hardened way to open a per-agent trajectory database read-only.
@@ -309,7 +397,13 @@ def _open_readonly(db_path: Path) -> "sqlite3.Connection":
       malformed row (whether hostile or merely corrupt) discarded every row already
       read in the same call, not just itself -- an attacker-cheap way to blind an
       entire database's worth of real evidence.
+    - Refuses (:func:`_refuse_non_regular_sqlite_paths`) to even attempt opening a
+      main path or ``-journal``/``-wal``/``-shm`` sidecar that is not an ordinary
+      regular file -- BEFORE ``sqlite3.connect`` is called, since that call itself is
+      where a planted FIFO hangs (B-845, round 3, 2026-09-23; see that function's own
+      docstring for the two reproductions this closes).
     """
+    _refuse_non_regular_sqlite_paths(db_path)
     conn = sqlite3.connect(f"file:{_urlquote(db_path.as_posix(), safe='/')}?mode=ro", uri=True)
     conn.text_factory = lambda b: b.decode("utf-8", errors="replace")
     # A short, bounded wait rather than an immediate "database is locked" error --
@@ -432,13 +526,17 @@ def _table_kind(conn: "sqlite3.Connection", table_name: str) -> str:
     guarantee -- it narrows the render surface, it does not claim to close it.
     """
     # `PRAGMA table_xinfo(<name>)` below has no bound-parameter form in SQLite's own
-    # grammar -- a pragma's target is a literal/identifier, not an expression -- so
-    # this function's own single caller (:func:`_open_and_verify_table`) always passes
-    # the hardcoded :data:`TRAJECTORY_TABLE_NAME` constant, never anything else. This
-    # check is defense-in-depth against a FUTURE caller passing something else: only a
-    # plain SQL identifier (letters/digits/underscore, not digit-leading) may reach the
-    # f-string below, closing the interpolation off from anything that could smuggle
-    # SQL syntax through the pragma target position.
+    # grammar -- a pragma's target is a literal/identifier, not an expression. This
+    # function's own single caller (:func:`_open_and_verify_table`) originally always
+    # passed the hardcoded :data:`TRAJECTORY_TABLE_NAME` constant; since B-845
+    # (2026-09-23) that caller's own *table_name* is a parameter too, passed through
+    # from ITS caller (`collector._collect_agent_auth_profile_store_presence`, for
+    # ``auth_profile_store``) -- still never anything this module's own source
+    # interpolates from untrusted input, but no longer a single hardcoded literal
+    # either. The check below stays regardless: only a plain SQL identifier
+    # (letters/digits/underscore, not digit-leading) may reach the f-string further
+    # down, closing the interpolation off from anything that could smuggle SQL syntax
+    # through the pragma target position, whichever table name it was called with.
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name):
         return "other"
     try:
@@ -653,8 +751,10 @@ def _open_and_verify_table(
 
     - ``(conn, "table", False)`` -- the connection is open, inside an explicit
       transaction, and the caller may now run its own bounded query against
-      :data:`TRAJECTORY_TABLE_NAME`. The caller owns closing ``conn`` (which also ends
-      the transaction; nothing to commit, this module is read-only throughout).
+      *table_name* (:data:`TRAJECTORY_TABLE_NAME` for this module's own two
+      trajectory-table readers; whatever table name the caller passed in otherwise --
+      see the B-845 paragraph above). The caller owns closing ``conn`` (which also
+      ends the transaction; nothing to commit, this module is read-only throughout).
     - ``(None, "absent", False)`` -- the table genuinely does not exist yet; not
       unreadable, just nothing to read (``conn`` already closed).
     - ``(None, "other", True)`` -- refused: present but not a real table (the

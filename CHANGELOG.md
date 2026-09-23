@@ -30,6 +30,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   and treated as unreadable rather than read. And a home with more agent databases than
   the per-run scan cap now has A1 say so in the same sentence, instead of a sweep that
   stopped short reading as if it had checked everyone.
+- Two further defects in the same per-agent code path, found by a follow-up review:
+  (1) the scan-cap disclosure above only ever fired from inside the "material found"
+  sentence, so a capped sweep in which nothing was found among the agents actually
+  checked — including the exact shape that motivated the cap disclosure, real material
+  sitting only in an agent past the cap — silently read as a clean, unhedged PASS; it
+  now hedges (WARN) on its own whenever the sweep was capped, independent of whether
+  anything was found. (2) a database path, or one of the sidecar paths SQLite itself
+  consults before this reader's own schema check ever runs (`-journal`, `-wal`,
+  `-shm`), that is a FIFO rather than a regular file hung the collector the same way
+  the VIEW case above once did — reachable not only through a full audit but through
+  `--retest`, `--vet-all`, and the plugin sweep, all of which call the collector
+  without ever running the checks that would otherwise surface the VIEW fix. The
+  reader now refuses to open anything whose main path or sidecars are not ordinary
+  regular files, before ever calling into SQLite.
 
 ## [4.2.1] — 2026-09-18
 

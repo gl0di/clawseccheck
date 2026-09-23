@@ -4952,13 +4952,18 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
         if conn is None:
             # `_kind == "absent"` (unreadable=False) is not corrupt -- same honest
             # UNDETERMINED-for-THIS-db as the shared-store sibling. `unreadable=True`
-            # covers both a real open/schema error AND -- the hang this fix closes --
-            # `auth_profile_store` resolving to something other than a real table; either
-            # way this db is skipped, other agents' own databases are still tried below.
+            # covers several distinct causes -- a genuine open/lock-timeout failure, a
+            # non-regular main/sidecar path refused before open (B-845, round 3), AND
+            # `auth_profile_store` resolving to something other than a real table (the
+            # hang this fix closes) -- so the message below stays generic rather than
+            # naming only the VIEW/non-table case (B-845, round 3: a prior wording said
+            # "did not resolve to a real table" for every one of these, which is simply
+            # false for a plain open failure or a lock timeout). Either way this db is
+            # skipped, other agents' own databases are still tried below.
             if unreadable:
                 ctx.errors.append(
                     f"could not read agent auth-profile store presence from {db_path}: "
-                    "auth_profile_store did not resolve to a real table"
+                    "the database could not be read"
                 )
             continue
 

@@ -921,8 +921,12 @@ _REGISTRY: "dict[str, _Entry]" = {
     # per-agent-DB reasoning. (The recursive-VIEW hang-guard fixture right above it uses
     # `CREATE VIEW`, not `CREATE TABLE`, so it is outside this extractor's surface --
     # confirmed by re-running `test_every_state_ddl_in_the_tree_is_registered` after
-    # adding it: no new unregistered site appeared for that fixture.)
-    "tests/test_b749_auth_profile_store_presence.py:586": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # adding it: no new unregistered site appeared for that fixture.) Shifted 586->606
+    # by the round-3 review-response's own docstring/comment additions above it (the
+    # widened VIEW-fixture docstring, the C-135-status comment, the new stat-guard
+    # commentary) -- same DDL, key renamed to match; the FIFO-guard tests added in the
+    # same change reuse this same helper rather than any new literal DDL.
+    "tests/test_b749_auth_profile_store_presence.py:606": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
 
     # ---- trajectory_runtime_events (F-187, per-agent DB, different file) ----
     # B-813/B-811: plain-string-literal copies of test_f187's own f-string DDL (invisible
