@@ -8710,6 +8710,21 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 "version can also drop a record independent of its age. Either way "
                 "this is incomplete even for what was checked."
             )
+        dbs_budget_starved = (
+            sqlite_meta.get("dbs_budget_starved", 0) if sqlite_meta else 0
+        )
+        if dbs_budget_starved:
+            # B-852 round 5: a DIFFERENT, worse claim than the per-database cap note
+            # above -- these databases were not merely capped short, they were never
+            # read at all (not even their newest row) because the `--exhaustive`
+            # aggregate depth budget ran out before their turn.
+            sqlite_incomplete += (
+                f" {dbs_budget_starved} further SQLite database(s) were found but "
+                "never read at all -- the `--exhaustive` aggregate depth budget was "
+                "already spent on other databases before their turn, so unlike the "
+                "per-database cap above, it is these databases' NEWEST rows, not just "
+                "their longer-resident tail, that went unexamined."
+            )
         return _finding(
             "B185",
             UNKNOWN,
@@ -8793,6 +8808,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
     # `tool_defs`, and the scope text must say so rather than naming only one side.
     if mixed_consulted and sqlite_meta and sqlite_meta.get("dbs_read", 0):
         dbs_unreadable = sqlite_meta.get("dbs_unreadable", 0)
+        dbs_budget_starved = sqlite_meta.get("dbs_budget_starved", 0)
         scope = (
             f"{len(tool_defs)} distinct tool definition(s) recovered from "
             f"{meta.get('events', 0)} 'context.compiled' record(s) across "
@@ -8809,6 +8825,15 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             scope += (
                 f" ({dbs_unreadable} further database(s) found but not readable)"
             )
+        if dbs_budget_starved:
+            # B-852 round 5: distinct from `dbs_unreadable` -- these databases were
+            # never opened at all, not because they were corrupt/locked, but because
+            # the `--exhaustive` aggregate depth budget ran out before their turn.
+            scope += (
+                f" ({dbs_budget_starved} further database(s) found but never read at "
+                "all -- the exhaustive aggregate depth budget was already spent "
+                "elsewhere)"
+            )
         incomplete = ""
         jsonl_incomplete = bool(
             meta.get("truncated") or meta.get("files_capped")
@@ -8818,7 +8843,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
             or sqlite_meta.get("unknown_schema")
         )
-        if jsonl_incomplete or sqlite_incomplete_flag or dbs_unreadable:
+        if jsonl_incomplete or sqlite_incomplete_flag or dbs_unreadable or dbs_budget_starved:
             parts = []
             if jsonl_incomplete:
                 parts.append(
@@ -8839,6 +8864,16 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 parts.append(
                     f"{dbs_unreadable} further SQLite database(s) found on this host "
                     "but never opened/scanned at all"
+                )
+            if dbs_budget_starved:
+                # B-852 round 5: the opposite recency claim from the SQLite-side note
+                # above -- these databases' NEWEST rows, not just a longer-resident
+                # tail, went unexamined, because they were never read at all.
+                parts.append(
+                    f"{dbs_budget_starved} further SQLite database(s) found on this "
+                    "host but never read at all (the exhaustive aggregate depth "
+                    "budget was already spent before their turn, so their newest "
+                    "rows -- not just a longer-resident tail -- went unexamined)"
                 )
             incomplete = (
                 " Note: scan bounds meant some records were not examined on "
@@ -8873,6 +8908,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             )
     elif sqlite_meta and sqlite_meta.get("dbs_read", 0):
         dbs_unreadable = sqlite_meta.get("dbs_unreadable", 0)
+        dbs_budget_starved = sqlite_meta.get("dbs_budget_starved", 0)
         scope = (
             f"{len(tool_defs)} distinct tool definition(s) recovered from "
             f"{sqlite_meta.get('events', 0)} 'context.compiled' record(s) across "
@@ -8885,12 +8921,21 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             scope += (
                 f" ({dbs_unreadable} further database(s) found but not readable)"
             )
+        if dbs_budget_starved:
+            # B-852 round 5: distinct from `dbs_unreadable` -- never opened at all
+            # because the exhaustive aggregate depth budget ran out, not because the
+            # database was corrupt/locked.
+            scope += (
+                f" ({dbs_budget_starved} further database(s) found but never read at "
+                "all -- the exhaustive aggregate depth budget was already spent "
+                "elsewhere)"
+            )
         incomplete = ""
         sqlite_scan_incomplete = bool(
             sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
             or sqlite_meta.get("unknown_schema")  # B-716
         )
-        if sqlite_scan_incomplete or dbs_unreadable:
+        if sqlite_scan_incomplete or dbs_unreadable or dbs_budget_starved:
             parts = []
             if sqlite_scan_incomplete:
                 parts.append(
@@ -8909,6 +8954,16 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 parts.append(
                     f"{dbs_unreadable} further database(s) found on this host but "
                     "never opened/scanned at all"
+                )
+            if dbs_budget_starved:
+                # B-852 round 5: the opposite recency claim from the note above --
+                # these databases' NEWEST rows, not just a longer-resident tail, went
+                # unexamined, because they were never read at all.
+                parts.append(
+                    f"{dbs_budget_starved} further database(s) found on this host but "
+                    "never read at all (the exhaustive aggregate depth budget was "
+                    "already spent before their turn, so their newest rows -- not "
+                    "just a longer-resident tail -- went unexamined)"
                 )
             incomplete = (
                 " Note: SQLite scan bounds meant some records were not examined -- "

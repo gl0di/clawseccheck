@@ -1438,33 +1438,117 @@ def test_excluded_count_query_still_runs_when_not_already_capped(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_max_content_total_bytes_stops_opening_further_databases_once_spent():
-    """Three databases, one row each of an identical, exactly-measured size. A total
-    budget equal to EXACTLY one row's worth must admit database 0's row and then stop
-    the loop BEFORE OPENING database 1 or 2 at all -- proven via `dbs_read`/`dbs_found`
-    diverging, not just via the returned tool definitions (this event is not even a
-    'context.compiled' record, so it would never produce one anyway; this test is about
-    which databases get OPENED, not what gets parsed out of them)."""
-    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+# ---------------------------------------------------------------------------
+# B-852 round 5 -- a fresh independent review found round 4's aggregate byte budget
+# (above) funded a database's per-database FLOOR from the SAME shared pool, so a
+# content-heavy database sorting alphabetically first could drain the ENTIRE
+# aggregate before a later database ever got its own guaranteed floor -- opening it
+# with a near-zero leftover cap, reading 0 rows, and silently counting it the same as
+# a database that was genuinely fully examined (`test_max_content_total_bytes_stops_
+# opening_further_databases_once_spent`, replaced below, pinned exactly this as the
+# expected behaviour). `read_compiled_tool_descriptions` now reads every database's
+# own per-database floor UNCONDITIONALLY (never charged against
+# `max_content_total_bytes`), and spends the aggregate ONLY on going deeper than that
+# floor, breadth-first across every database that still wants more.
+# ---------------------------------------------------------------------------
 
-    home = _home()
-    event = {"type": "tool.result", "output": "y" * 4000}
-    row_len = len(json.dumps(event))
-    for i in range(3):
-        _add_agent_db(
-            home, f"agent{i}", trajectory_rows=[(f"s{i}", 0, event)], include_auth=False,
-        )
 
-    _, meta = read_compiled_tool_descriptions(
-        home,
-        max_content_bytes_per_db=10 * row_len,   # generous -- never the binding cap
-        max_content_total_bytes=row_len,          # exactly one database's content
+def test_depth_budget_reaches_every_hungry_database_not_just_the_first():
+    """Replaces `test_max_content_total_bytes_stops_opening_further_databases_once_
+    spent`: that test's own premise -- a tiny aggregate budget stopping a LATER
+    database from being opened AT ALL -- was round 4's actual bug, not a guarantee to
+    preserve. This proves the fix at the `read_compiled_tool_descriptions` accounting
+    level (the end-to-end check-level proof lives in
+    `tests/test_b185_compiled_tool_poisoning.py`'s own h2/h10-shaped tests): two
+    databases whose per-database floor read is capped (so both WANT more content),
+    with UNEVEN row sizes across them -- an exact-row-length setup does not exercise
+    real allocation behaviour, since a single row's own size interacts non-trivially
+    with whatever leftover cap it is offered (see `_read_and_process_db`'s own
+    docstring). A marker planted as each database's own oldest (and therefore
+    depth-pass-only) row must be recovered from BOTH databases, not just whichever
+    sorts alphabetically first -- the exact shape round 4 got wrong.
+    """
+    from clawseccheck.trajectorystore import (
+        _MAX_SQLITE_CONTENT_BYTES_PER_DB,
+        read_compiled_tool_descriptions,
     )
 
+    home = _home()
+
+    def _filler(pad):
+        return {"type": "tool.result", "output": "y" * pad}
+
+    def _marker(name, pad):
+        return {
+            "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+            "type": "context.compiled",
+            "data": {
+                "systemPrompt": "s" * pad, "prompt": "p", "imagesCount": 0,
+                "tools": [{
+                    "name": name, "description": "d",
+                    "parameters": {"type": "object", "properties": {}},
+                }],
+                "messages": [],
+            },
+        }
+
+    def _build(agent, filler_pad, marker_name, marker_pad):
+        filler_len = len(json.dumps(_filler(filler_pad)))
+        # Enough filler rows to use up JUST UNDER the real per-database floor, so the
+        # marker -- inserted FIRST (lowest rowid, read LAST under `ORDER BY rowid
+        # DESC`) -- is excluded from the floor pass and only reachable in the depth
+        # pass.
+        filler_count = _MAX_SQLITE_CONTENT_BYTES_PER_DB // filler_len
+        rows = [("marker", 0, _marker(marker_name, marker_pad), 0)]
+        rows += [
+            (f"f{i}", 0, _filler(filler_pad), i + 1) for i in range(filler_count)
+        ]
+        _add_agent_db(home, agent, trajectory_rows=rows, include_auth=False)
+        return len(json.dumps(_marker(marker_name, marker_pad)))
+
+    # UNEVEN row sizes across the two hungry databases -- 900 KB filler for the first
+    # (sorts first alphabetically), 700 KB filler for the second.
+    marker_len_a = _build("agent0", 900_000, "agent0_depth_tool", 900_000)
+    marker_len_b = _build("agent1", 700_000, "agent1_depth_tool", 700_000)
+
+    # A third, small database that fits entirely under the floor -- nothing more to
+    # give, included to keep the fixture realistic (not every database in a real
+    # fleet is capped).
+    _add_agent_db(
+        home, "agent2",
+        trajectory_rows=[
+            ("s0", 0, _filler(300_000), 0), ("s1", 1, _filler(300_000), 1),
+        ],
+        include_auth=False,
+    )
+
+    # Aggregate depth budget: comfortably more than either marker row alone, but far
+    # less than what UNRESTRICTED depth for both hungry databases would want -- the
+    # exact shape round 4 got wrong (it would have spent the whole amount on
+    # `agent0`, alphabetically first, before `agent1` ever got a turn).
+    aggregate = 2 * max(marker_len_a, marker_len_b) + 200_000
+
+    tool_defs, meta = read_compiled_tool_descriptions(
+        home,
+        # Headroom above the real per-database floor -- the DEPTH ceiling, not the
+        # floor itself (that stays the module's own _MAX_SQLITE_CONTENT_BYTES_PER_DB
+        # regardless of this value; see that parameter's own docstring).
+        max_content_bytes_per_db=_MAX_SQLITE_CONTENT_BYTES_PER_DB * 10,
+        max_content_total_bytes=aggregate,
+    )
+
+    names = {d["name"] for d in tool_defs}
+    # The actual regression proof, asserted FIRST (deliberately, so a pre-round-5
+    # build fails on this behavioural assertion, not on the `dbs_budget_starved` key
+    # below, which did not exist yet): BOTH markers recovered, not just the
+    # alphabetically-first database's -- proving the depth budget reached both hungry
+    # databases, breadth-first, rather than being drained entirely by the first.
+    assert "agent0_depth_tool" in names, names
+    assert "agent1_depth_tool" in names, names
     assert meta["dbs_found"] == 3
-    assert meta["dbs_read"] == 1
+    assert meta["dbs_read"] == 3          # the FLOOR guarantee: every database opened
     assert meta["dbs_unreadable"] == 0
-    assert meta["truncated"] is True
+    assert meta["dbs_budget_starved"] == 0
 
 
 def test_max_content_total_bytes_default_is_unbounded():

@@ -2192,3 +2192,176 @@ def test_migration_copy_shape_hides_the_true_newest_record_but_still_discloses_i
     # The retired, now-sometimes-false absolute claim must never reappear.
     assert "it is the OLDEST records beyond that cap that were skipped, not" \
         not in verdict.detail
+
+
+# ---------------------------------------------------------------------------
+# B-852 round 5 -- round 4's aggregate byte budget (`sqlite_max_content_total_bytes`)
+# funded a database's per-database FLOOR from the SAME shared pool, so an ordinary,
+# content-heavy database sorting alphabetically first could drain the entire
+# aggregate before a later, alphabetically-later database ever got its OWN
+# per-database floor -- leaving it opened with a near-zero leftover cap, 0 rows read,
+# and silently counted the same as a database that was genuinely fully examined. A
+# fresh independent review reproduced this as a real false-PASS on realistic,
+# ordinary-scale data (not an extreme/contrived scale).
+# ---------------------------------------------------------------------------
+
+
+def test_exhaustive_floor_guarantee_fixes_the_aggregate_starvation_false_pass(
+    tmp_path, monkeypatch,
+):
+    """Reproduces the round-4 false-PASS shape: "main" (sorts first alphabetically)
+    holds ordinary content that comfortably exceeds the per-database floor; "work"
+    (sorts second) holds exactly ONE compiled record -- the poisoned one -- as its
+    only (and therefore newest) row. Under the round-4 algorithm, "main" alone could
+    spend the entire aggregate budget, leaving "work" opened with a near-zero leftover
+    cap and 0 rows read -- silently missing the poison. Round 5's fix guarantees every
+    database its own per-database floor UNCONDITIONALLY, funding only the DEPTH beyond
+    it from the aggregate -- so "work" must always be read regardless of what "main"
+    consumed.
+
+    Uses a small custom per-database floor/aggregate (the same monkeypatched-`limits_
+    for` idiom `test_exhaustive_widens_the_sqlite_reader_caps_not_just_the_jsonl_ones`
+    above uses) rather than literal megabytes of fixture data -- `read_compiled_tool_
+    descriptions`'s floor is `min(_MAX_SQLITE_CONTENT_BYTES_PER_DB, max_content_bytes_
+    per_db)`, so a small custom `max_content_bytes_per_db` exercises the EXACT SAME
+    code path as the real 8 MB constant, just proportionally scaled down.
+    """
+    import dataclasses
+
+    from clawseccheck.checks import _mcp as _mcp_mod
+    from clawseccheck.scanbudget import EXHAUSTIVE_LIMITS
+
+    # Calibrated (not arbitrary): with 437-byte filler rows, "main"'s floor read
+    # admits exactly 4 of them (1748 bytes) before the 5th would exceed the 2000-byte
+    # floor. The aggregate (1800) is deliberately smaller than the floor itself and
+    # only ~50 bytes above what "main" consumes -- under round 4 (which funded a
+    # database's FLOOR from this same shared pool) that leaves "work" a leftover cap
+    # far smaller than its own 387-byte poisoned row, so round 4 misses it; round 5's
+    # unconditional floor does not depend on this leftover at all.
+    tiny_exhaustive = dataclasses.replace(
+        EXHAUSTIVE_LIMITS,
+        sqlite_max_content_bytes_per_db=2_000,
+        sqlite_max_content_total_bytes=1_800,
+    )
+    monkeypatch.setattr(_mcp_mod, "limits_for", lambda ctx: tiny_exhaustive)
+
+    # "main": ordinary content, comfortably past the tiny 2000-byte floor -- the
+    # database round 4's bug let drain the whole (also tiny) aggregate.
+    main_rows = [
+        (f"s{i}", 0, {"type": "tool.result", "output": "y" * 400}, i)
+        for i in range(10)
+    ]
+    _write_agent_sqlite_db(tmp_path, "main", main_rows)
+
+    # "work": exactly one compiled record -- the poisoned one -- as its only row.
+    poisoned = [{
+        "name": "weather", "description": "bad <!-- hidden -->",
+        "parameters": {"type": "object", "properties": {}},
+    }]
+    _write_agent_sqlite_db(tmp_path, "work", [("s0", 0, _compiled(poisoned), 100)])
+
+    ctx = Context(home=tmp_path)
+    ctx.exhaustive = True
+    verdict = _mcp_mod.check_compiled_tool_poisoning(ctx)
+
+    assert verdict.status == "FAIL", verdict.detail
+
+
+def test_exhaustive_recovers_a_superset_of_default_across_several_home_shapes(
+    tmp_path_factory, monkeypatch,
+):
+    """Property-style proof (test requirement 2, B-852 round 5): `--exhaustive`'s
+    recovered tool definitions must always be a SUPERSET of the DEFAULT path's, across
+    several different home shapes (varying database count, varying sizes) -- i.e. any
+    poisoning finding the DEFAULT path would FAIL on, `--exhaustive` must also FAIL on.
+    Uses the same small custom floor/aggregate idiom as the test above, varied per
+    shape.
+    """
+    import dataclasses
+
+    from clawseccheck.checks import _mcp as _mcp_mod
+    from clawseccheck.scanbudget import DEFAULT_LIMITS, EXHAUSTIVE_LIMITS
+
+    def _tool(name, pad=0):
+        return [{
+            "name": name, "description": "d" * (1 + pad),
+            "parameters": {"type": "object", "properties": {}},
+        }]
+
+    shapes = [
+        # (db_count, rows_per_db, filler_size)
+        (1, 3, 200),
+        (2, 5, 300),
+        (5, 4, 250),
+        (8, 6, 150),
+    ]
+    for shape_index, (db_count, rows_per_db, filler_size) in enumerate(shapes):
+        home = tmp_path_factory.mktemp(f"superset_shape_{shape_index}")
+        for a in range(db_count):
+            rows = [
+                (f"s{i}", 0, {"type": "tool.result", "output": "y" * filler_size}, i)
+                for i in range(rows_per_db)
+            ]
+            # One distinguishing compiled record per database, its own unique tool
+            # name, as the NEWEST row.
+            rows.append((
+                "marker", 0,
+                _compiled(_tool(f"agent{a}_tool_{shape_index}")),
+                rows_per_db + 1,
+            ))
+            _write_agent_sqlite_db(home, f"agent{a}", rows)
+
+        tiny_default = dataclasses.replace(
+            DEFAULT_LIMITS,
+            sqlite_max_content_bytes_per_db=500,
+            sqlite_max_content_rows_per_db=2,
+        )
+        tiny_exhaustive = dataclasses.replace(
+            EXHAUSTIVE_LIMITS,
+            sqlite_max_content_bytes_per_db=5_000,
+            sqlite_max_content_rows_per_db=20,
+            sqlite_max_content_total_bytes=3_000,
+        )
+
+        def _fake_limits_for(ctx, _d=tiny_default, _e=tiny_exhaustive):
+            return _e if getattr(ctx, "exhaustive", False) else _d
+
+        monkeypatch.setattr(_mcp_mod, "limits_for", _fake_limits_for)
+
+        default_verdict = _mcp_mod.check_compiled_tool_poisoning(Context(home=home))
+        ctx = Context(home=home)
+        ctx.exhaustive = True
+        exhaustive_verdict = _mcp_mod.check_compiled_tool_poisoning(ctx)
+
+        # None of these fixtures plant an actual poisoned description (both verdicts
+        # stay non-FAIL) -- the superset property under test is at the
+        # `read_compiled_tool_descriptions` recovery level, checked directly below,
+        # not at the verdict level (which only differs when a poisoned description is
+        # actually missed by one side and not the other -- the scenario the two tests
+        # above already cover end-to-end).
+        assert default_verdict.status != "FAIL", (shape_index, default_verdict.detail)
+        assert exhaustive_verdict.status != "FAIL", (shape_index, exhaustive_verdict.detail)
+
+        from clawseccheck.trajectorystore import (
+            read_compiled_tool_descriptions as _sqlite_reader,
+        )
+
+        default_defs, _ = _sqlite_reader(
+            home,
+            max_dbs=tiny_default.sqlite_max_dbs,
+            max_content_rows_per_db=tiny_default.sqlite_max_content_rows_per_db,
+            max_content_bytes_per_db=tiny_default.sqlite_max_content_bytes_per_db,
+            max_content_total_bytes=tiny_default.sqlite_max_content_total_bytes,
+        )
+        exhaustive_defs, _ = _sqlite_reader(
+            home,
+            max_dbs=tiny_exhaustive.sqlite_max_dbs,
+            max_content_rows_per_db=tiny_exhaustive.sqlite_max_content_rows_per_db,
+            max_content_bytes_per_db=tiny_exhaustive.sqlite_max_content_bytes_per_db,
+            max_content_total_bytes=tiny_exhaustive.sqlite_max_content_total_bytes,
+        )
+        default_names = {d["name"] for d in default_defs}
+        exhaustive_names = {d["name"] for d in exhaustive_defs}
+        assert default_names <= exhaustive_names, (
+            shape_index, default_names, exhaustive_names,
+        )
