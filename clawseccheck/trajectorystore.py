@@ -1642,11 +1642,12 @@ def read_compiled_tool_descriptions(
     its own ``max_bytes``. Not a fixed ceiling like round 3's per-call streaming bound:
     round 11's own drain can, in principle, open a single database TWICE in one pass
     (once in sweep A, once in sweep B, if sweep A's partial read leaves it still
-    hungry) -- measured at up to FIVE opens of a single database across several
-    adversarial constructions at production-like scale (80-100+ depth candidates, deep
-    cheap-row reservoirs) during this round's own verification; no fuzzing run found a
-    construction exceeding that, but the only PROVEN ceiling is structural, not this
-    number -- see the drain's own pass cap (``len(drain_pending)`` at entry) above.
+    hungry) -- observed open counts for a single database vary by construction and
+    scale (round 11's own fuzzing found up to five; round 12's independent review
+    fuzzing a broader parameter range found a construction reaching nine within 400
+    iterations), so no small fixed number should be trusted as a ceiling here -- the
+    only PROVEN ceiling is structural: see the drain's own pass cap
+    (``len(drain_pending)`` at entry) above.
     """
     tool_defs: list[dict] = []
     meta = {
