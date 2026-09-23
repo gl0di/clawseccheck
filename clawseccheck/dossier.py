@@ -27,6 +27,8 @@ Honesty rules (project law §2.4 / §5):
 """
 from __future__ import annotations
 
+import ast
+
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from pathlib import Path
@@ -594,6 +596,71 @@ def _pool_has_unread_language_code(pool) -> bool:
     return any(_skill_has_unread_language_code(ctx) for ctx in _pool_contexts(pool))
 
 
+def _declared_file_bars_measurability(relpath: str, lang: str, source: str) -> bool:
+    """B-612: whether ONE declared file (``read_skill_declared``'s ``(relpath, lang,
+    source)``) is itself enough to withdraw a Persistence/Connections PASS this scan
+    cannot back.
+
+    Content-gated, not content-blind — the first cut of this predicate (retracted after
+    measurement, see B-612's fix-round-1/round-2 history) returned True
+    for ANY declared file, so a benign decoy named in one line of prose — config with one
+    interpolation call, an English word matching an interpreter's name — dropped a clean
+    skill's axes from PASS to UNKNOWN for no reason a reader could see. The bar here is
+    exactly the one already applied to a REAL bundled file of the same language:
+
+    * Python: it must PARSE (``ast.parse``) and have a non-empty
+      ``capability_families`` result over ITS OWN bytes alone — the same predicate
+      ``_skill_capabilities`` applies to every ``.py`` file already. Python that does not
+      parse, or that parses with no capability family (an INI-ish config, a docstring, a
+      constant table), bars nothing — the same as a real ``.py`` file in that shape would.
+    * sh/js: it must be "verified" — its OWN ``#!`` independently names the same
+      language the prose declared (``checks/_vet.py``'s same bar for routing a crit hit to
+      `crit` instead of `warns_declared_unverified`). Mere presence then bars
+      measurability, same as ``_skill_has_unread_language_code`` already does for a real
+      bundled ``.sh``/``.js`` file — B-878's bar, not a new one. An UNVERIFIED sh/js
+      declared file (no shebang of its own, the common shape) cannot be confirmed to be
+      code in that language at all, so it bars nothing; it can still add a WARN-grade B13
+      finding (`warns_declared_unverified`), but a finding this scan cannot even confirm
+      is code must not also claim to have measured its behavior.
+    """
+    if lang == "py":
+        try:
+            ast.parse(source)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            return False
+        return bool(capability_families([(relpath, source)]))
+    if lang in ("sh", "js"):
+        from .collector import _shebang_language  # noqa: PLC0415
+
+        return _shebang_language(source) == lang
+    return False
+
+
+def _pool_has_declared_code(pool) -> bool:
+    """B-612: True when any installed skill in ``pool`` carries a file that only its
+    SKILL.md declares as code (``ctx.installed_skill_declared``, collector's
+    ``read_skill_declared``) AND whose own content clears the bar in
+    ``_declared_file_bars_measurability`` above.
+
+    That file was read by B13's danger pass and by nothing that measures these two axes,
+    so a qualifying one bars measurability exactly as ``danger_only_code`` does (B-636): it
+    can move an axis from PASS to an honest UNKNOWN, never the other way. Without this, a
+    skill bundling one clean ``helper.py`` plus a declared ``bin/sync`` printed "no
+    outbound network call found in the analysed code" -- and ``bin/sync`` was analysed
+    code. Content-gated (not "any declared file at all") so that a benign decoy named in
+    one line of prose cannot, by itself, turn an honest PASS into an UNKNOWN — the exact
+    trade a content-blind version of this predicate made and had retracted.
+    """
+    for ctx in _pool_contexts(pool):
+        installed = getattr(ctx, "installed_skills", None) or {}
+        declared = getattr(ctx, "installed_skill_declared", None) or {}
+        for name in installed:
+            for relpath, lang, source in declared.get(name) or []:
+                if _declared_file_bars_measurability(relpath, lang, source):
+                    return True
+    return False
+
+
 def _reason_and_fix(bucket: list, axis: str, *, empty_reason: str) -> tuple[str, str]:
     worst = _worst(bucket)
     # B-160: "SKILL_ARCHIVE_PATH_TRAVERSAL" carries a real detail/fix like FAIL does —
@@ -768,6 +835,8 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # `_skill_has_unread_language_code` for why this is the same "code present, no reader
     # for THIS axis" shape as `unread_code`/`danger_only_code`, not a fresh state.
     unread_language_code = _pool_has_unread_language_code(pool)
+    # B-612: a file only SKILL.md declares as code — read for danger, never measured here.
+    declared_code = _pool_has_declared_code(pool)
     code_measurable = (
         (
             has_code
@@ -775,6 +844,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             and not unread_code
             and not danger_only_code
             and not unread_language_code
+            and not declared_code
         )
         or target_type not in ("skill", "plugin")
     )
@@ -859,6 +929,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
                 axis, truncated=scan_truncated,
                 unanalysed=bool(unread_code) or unread_language_code,
                 danger_only=bool(danger_only_code), self_source=self_source,
+                declared_only=declared_code,
                 assumed_encoding=assumed_encoding if prose_gap else ()), ""
         else:
             reason, fix = _reason_and_fix(bucket, axis, empty_reason=_clean_reason(axis, families))
@@ -1006,7 +1077,7 @@ def _self_source_danger_reason() -> str:
 
 def _unmeasurable_reason(axis: str, *, truncated: bool = False,
                         unanalysed: bool = False, danger_only: bool = False,
-                        self_source: bool = False,
+                        self_source: bool = False, declared_only: bool = False,
                         assumed_encoding: tuple = ()) -> str:
     """Why an axis could not be measured -- and the six reasons are not one reason.
 
@@ -1090,6 +1161,16 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
             return ("code outside the declared skills was read for dangerous patterns "
                     "only, so its staged / persistent behavior was not separately measured")
         return "code outside the declared skills was read for dangerous patterns only"
+    if declared_only:
+        # B-612: after `danger_only` for the same reason `danger_only` follows
+        # `unanalysed` — the more specific statement of what was not read wins.
+        head = ("a bundled file that only SKILL.md declares as code was read for "
+                "dangerous patterns only, so ")
+        if axis == "connections":
+            return head + "the outbound surface was not measured"
+        if axis == "persistence":
+            return head + "staged / persistent behavior was not measured"
+        return head + "this was not measured"
     if self_source:
         tail = {
             "connections": "so the outbound surface was not measured",
