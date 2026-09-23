@@ -2861,12 +2861,19 @@ CATALOG: list[CheckMeta] = [
     # CWgFGnm0.js, installed-plugin-index-records-C_n191FN.js, types.openclaw-CXjMEWAQ.d.ts,
     # clawhub-install-trust-DdnykQnp.js) and against the real file
     # (~/.openclaw/state/openclaw.sqlite: table present, schema matches exactly). FAIL only
-    # on the unambiguous "blocked" disposition (OpenClaw's own moderation explicitly
-    # blocked the install); WARN on any other non-clean disposition ("review-required",
-    # "review-recommended", or a future value) and on clawhubTrustPending/Stale (an
-    # unverified/outdated verdict). UNKNOWN when the state DB, the index row, or the
-    # column is absent/locked/unreadable (Golden Rule #4) -- never a fake PASS. Read-only
-    # (file:...?mode=ro + PRAGMA query_only=1), never writes to the shared state DB.
+    # on the unambiguous "blocked" disposition -- OpenClaw's own persisted install-record
+    # store, not a user-typed string (a four-literal enum). C-479 FOLLOW-UP, EXECUTED
+    # against the installed dist (see check_plugin_clawhub_trust's docstring in
+    # checks/_mcp.py): the live ClawHub-download install path can never persist "blocked"
+    # to a record at all -- it returns before the record-builder is ever called -- so the
+    # one reachable route to a FAIL-qualifying record is a retired
+    # plugins.installs.<id>.clawhubTrustDisposition config record imported by a doctor or
+    # startup config-repair pass, not a live moderation verdict on this install. WARN on
+    # any other non-clean disposition ("review-required", "review-recommended", or a future
+    # value) and on clawhubTrustPending/Stale (an unverified/outdated verdict). UNKNOWN when
+    # the state DB, the index row, or the column is absent/locked/unreadable (Golden Rule
+    # #4) -- never a fake PASS. Read-only (file:...?mode=ro + PRAGMA query_only=1), never
+    # writes to the shared state DB.
     CheckMeta(
         "B177",
         "OpenClaw's own persisted ClawHub trust verdict for an installed plugin",

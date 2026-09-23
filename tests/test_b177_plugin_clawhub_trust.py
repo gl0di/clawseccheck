@@ -468,6 +468,28 @@ def test_unidentifiable_index_entry_does_not_license_a_downgrade(tmp_path):
     assert any("ghost" in e and "blocked" in e for e in r.evidence)
 
 
+def test_fail_fix_text_does_not_claim_a_live_moderation_verdict(tmp_path):
+    """C-479 FOLLOW-UP (2026-09-13, EXECUTED against the real installed
+    openclaw@2026.9.4 dist -- see check_plugin_clawhub_trust's docstring): the live
+    ClawHub-download install path can never persist "blocked" to an install record --
+    it returns before the record-builder is ever called. The one reachable route to a
+    FAIL-qualifying "blocked" record is a retired
+    plugins.installs.<id>.clawhubTrustDisposition config record imported by a doctor or
+    startup config-repair pass, not a live moderation verdict on this install. The FAIL
+    fix text must say so -- and must no longer claim "OpenClaw's own moderation
+    decision" (the framing this replaced, which read as a recent/live block)."""
+    home = _make_home(tmp_path, {
+        "evil-plugin": {"clawhubTrustDisposition": "blocked"},
+    })
+    r = check_plugin_clawhub_trust(collect(home))
+    assert r.status == FAIL
+    assert "moderation decision" not in r.fix
+    assert "config record" in r.fix
+    assert "doctor" in r.fix
+    assert "config-repair" in r.fix
+    assert "openclaw.json" in r.fix
+
+
 def test_mixed_installed_and_orphaned_blocked_fails_naming_the_installed_one(tmp_path):
     """One blocked-and-installed + one blocked-and-orphaned -> FAIL (the installed one
     still qualifies on its own), and the FAIL evidence names the installed one with
