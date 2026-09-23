@@ -442,7 +442,7 @@ pipx install git+https://github.com/gl0di/clawseccheck             # or track th
 clawseccheck                         # audits ~/.openclaw by default
 clawseccheck --json                  # machine-readable result
 clawseccheck --sarif results.sarif   # SARIF 2.1.0 for GitHub Code Scanning
-clawseccheck --html report.html      # standalone HTML report (private)
+clawseccheck --html report.html      # standalone HTML report (private; folds home paths like --json/--pdf)
 clawseccheck --pdf report.pdf        # complete audit as a paginated PDF (attach into chat)
 clawseccheck --exhaustive            # raise the scan caps: slower, maximum coverage
 clawseccheck --fail-on high          # CI gate: exit 1 if an unsuppressed FAIL at/above HIGH exists

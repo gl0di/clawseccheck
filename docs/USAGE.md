@@ -186,6 +186,11 @@ channel. The **canonical, deterministic output is always a saved file**: `--save
 (or attach as a real file, in the badge/PDF case), use the saved file, not the chat paste. On a
 phone/mobile chat client specifically, prefer `--pdf` over `--html` — most mobile clients hand an
 HTML attachment over as a download, while a PDF opens inline in the client's own viewer.
+Choosing between them is about format and mobile rendering, not exposure risk: `--json`,
+`--pdf`, and `--html` all fold a leading account-home path to `~` before writing, the same
+protection the shareable card above already gets — `--html` is still labelled "owner view"
+below because nothing about it is trimmed or de-branded for a wider audience the way the
+card and `--badge` are, not because it is less redacted than `--pdf`.
 
 **`--pdf` given with no PATH picks the one place OpenClaw can attach from.** OpenClaw parses a
 `MEDIA:<path>` directive off the agent's own reply and turns it into a real attachment, but only
@@ -1587,7 +1592,7 @@ python3 audit.py --canary                   # active prompt-injection self-test 
 python3 audit.py --redteam                   # a multi-scenario adversarial payload suite (incl. tool-poisoning, MCP-response injection, memory-poisoning, multi-agent, approval-bypass, dirty-to-exfil)
 python3 audit.py --dryrun                     # runtime behavioral test (fake secret + fake tools; sources: email, web, MCP response, memory, subagent)
 python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
-python3 audit.py --html report.html         # standalone HTML report (private — owner view)
+python3 audit.py --html report.html         # standalone HTML report (private — owner view; folds home paths the same as --json/--pdf)
 python3 audit.py --pdf report.pdf           # complete audit as a paginated PDF — attach the file; never a link; name the path only if you cannot attach
 python3 audit.py --verify-self               # SHA-256 of ClawSecCheck's own source (anti-tamper)
 python3 audit.py --trend                     # print local score trend (stored in ~/.clawseccheck/history.jsonl)
