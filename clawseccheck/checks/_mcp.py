@@ -8532,6 +8532,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 home, max_dbs=lim.sqlite_max_dbs,
                 max_content_rows_per_db=lim.sqlite_max_content_rows_per_db,
                 max_content_bytes_per_db=lim.sqlite_max_content_bytes_per_db,
+                max_content_total_bytes=lim.sqlite_max_content_total_bytes,
             )
     elif _trajectorystore.sqlite_db_paths(home):
         mixed_consulted = True
@@ -8539,6 +8540,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             home, max_dbs=lim.sqlite_max_dbs,
             max_content_rows_per_db=lim.sqlite_max_content_rows_per_db,
             max_content_bytes_per_db=lim.sqlite_max_content_bytes_per_db,
+            max_content_total_bytes=lim.sqlite_max_content_total_bytes,
         )
 
     if sqlite_meta and sqlite_defs:

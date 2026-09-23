@@ -120,9 +120,14 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote as _urlquote
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from .trajectory import (
     _COMPILED_EVENT_TYPE,
@@ -154,6 +159,15 @@ _MAX_JSONL_BYTES_PER_FILE_FOR_DEDUP = 2_000_000
 # 40-61 KB there), so a single db is bounded the same way a single JSONL file already is.
 _MAX_SQLITE_CONTENT_ROWS_PER_DB = 3000
 _MAX_SQLITE_CONTENT_BYTES_PER_DB = 8_000_000
+# B-852 round 3: the default (unbounded) value of `read_compiled_tool_descriptions`'s
+# `max_content_total_bytes` kwarg -- see that parameter's own docstring and
+# `scanbudget.ScanLimits.sqlite_max_content_total_bytes`'s comment for why an aggregate
+# cap across ALL databases exists at all and why the DEFAULT path leaves it unbounded
+# (the default path's real total is already `max_dbs * max_content_bytes_per_db`, both
+# finite). Python-side-only (an accumulated-byte comparison, never bound into SQL), the
+# same shape `scanbudget._UNBOUNDED` already relies on for sqlite_max_dbs/
+# sqlite_max_content_bytes_per_db, so `sys.maxsize` is exactly as safe here.
+_MAX_SQLITE_CONTENT_TOTAL_BYTES = sys.maxsize
 # A real session_id is a short identifier (UUID-shaped on every observed host); this is
 # generous headroom, not a realistic size, so it never clips real data -- it exists
 # purely to bound the SAME generated-column attack _MAX_COMPILED_LINE_LEN bounds for
@@ -1019,10 +1033,68 @@ def _read_sqlite_event_json(
     padded-past-the-cap, poisoned) row, but nothing disclosed that exclusion, so a
     padded-past-the-cap poisoned description could evade B185 entirely while this
     module reported a confident, complete, non-truncated scan.
+
+    **B-852 round 3**: this is now a thin ``list(...)`` wrapper around
+    :func:`_scan_sqlite_event_json`, the streaming generator core -- so every test and
+    caller relying on this function's list-returning contract keeps it, byte-for-byte,
+    while :func:`read_compiled_tool_descriptions` (the one production caller) consumes
+    the generator directly instead, never materializing a whole database's admitted
+    rows into a list before it starts parsing them. See that generator's own docstring
+    for why the split exists.
+    """
+    stats = _SqliteEventJsonStats()
+    values = list(_scan_sqlite_event_json(db_path, max_rows, max_bytes, stats))
+    return values, stats.capped, stats.unreadable, stats.non_text
+
+
+@dataclass
+class _SqliteEventJsonStats:
+    """Mutable out-parameter for :func:`_scan_sqlite_event_json`.
+
+    A generator's normal ``return`` value is awkward to combine with ``yield`` (it only
+    surfaces via ``StopIteration.value``, which plain ``for``/``list()`` consumption
+    never sees), so the bookkeeping :func:`_read_sqlite_event_json`'s tested contract
+    needs (``capped``/``unreadable``/``non_text``) is threaded through as an object the
+    caller passes in and the generator mutates in place instead.
+    """
+
+    capped: bool = False
+    unreadable: bool = False
+    non_text: int = 0
+
+
+def _scan_sqlite_event_json(
+    db_path: Path,
+    max_rows: int,
+    max_bytes: int,
+    stats: "_SqliteEventJsonStats",
+) -> "Iterator[str]":
+    """Streaming core of :func:`_read_sqlite_event_json` (B-852 round 3): yields each
+    accepted ``event_json`` value for ONE per-agent trajectory database as the cursor
+    produces it, never holding more than the current row in memory here -- the row/byte
+    caps stop the READ early exactly as before, but a caller that processes each yielded
+    value immediately (:func:`read_compiled_tool_descriptions`) no longer pays for a
+    second, whole-database-sized list on top of whatever it goes on to build from the
+    content, the way returning a fully materialized list forces.
+
+    This split exists because, under ``--exhaustive``, ``max_bytes`` can legitimately be
+    tens of megabytes (see ``scanbudget.EXHAUSTIVE_LIMITS.sqlite_max_content_total_bytes``)
+    -- a single large per-agent database (measured: ~1.1 GB peak RSS for one 547 MB
+    database) used to be held in this function's own ``values`` list in full BEFORE
+    :func:`read_compiled_tool_descriptions` ever started filtering it down to the tiny
+    fraction that is actually a ``context.compiled`` record. Streaming means that filter
+    now runs per-row, during the read, so content that is not a compiled-tool record
+    never survives past the row it arrived in.
+
+    Mutates ``stats`` in place rather than returning a tuple -- see
+    :class:`_SqliteEventJsonStats`. Every acceptance/rejection decision below is
+    unchanged from the pre-round-3 inline version of this loop; only WHERE the accepted
+    values go (yielded one at a time here, versus appended to a list) is different.
     """
     conn, _kind, unreadable = _open_and_verify_table(db_path)
     if conn is None:
-        return [], False, unreadable, 0
+        stats.unreadable = unreadable
+        return
     try:
         cursor = conn.execute(
             _SELECT_TRAJECTORY_EVENT_JSON,
@@ -1030,28 +1102,26 @@ def _read_sqlite_event_json(
         )
     except sqlite3.Error:
         conn.close()
-        return [], False, True, 0
+        stats.unreadable = True
+        return
 
-    values: list[str] = []
     read_bytes = 0
     row_count = 0
-    non_text = 0
-    capped = False
     try:
         for row in cursor:
             row_count += 1
             if row_count > max_rows:
-                capped = True
+                stats.capped = True
                 break
             value = row[0]
             if not isinstance(value, str):
-                non_text += 1
+                stats.non_text += 1
                 continue
             read_bytes += len(value)
             if read_bytes > max_bytes:
-                capped = True
+                stats.capped = True
                 break
-            values.append(value)
+            yield value
         # Only run the excluded-row COUNT when the row/byte loop above did NOT already
         # set `capped` -- a fresh independent review (following B-852's rowid fix)
         # found this count still ran on EVERY call regardless of that fix, scanning
@@ -1064,17 +1134,20 @@ def _read_sqlite_event_json(
         # `capped = True`, so skipping it once `capped` is already `True` cannot alter
         # the return value. Verified: 2.70s (SQLite-only) / 2.54s (mixed host) to a
         # correct cold-cache FAIL, 257/257 tests still passing.
-        if not capped:
+        if not stats.capped:
             excluded = conn.execute(
                 _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT, (_MAX_COMPILED_LINE_LEN,)
             ).fetchone()
             if excluded and excluded[0]:
-                capped = True
+                stats.capped = True
     except sqlite3.Error:
+        # Mirrors the pre-round-3 behaviour exactly: whatever was already yielded stays
+        # yielded (a `list(...)` caller keeps those rows, same as the old inline
+        # `values` list did), `capped` is forced True, `unreadable` stays False -- a
+        # partial read is disclosed as incomplete, not thrown away.
+        stats.capped = True
+    finally:
         conn.close()
-        return values, True, False, non_text
-    conn.close()
-    return values, capped, False, non_text
 
 
 def read_compiled_tool_descriptions(
@@ -1083,6 +1156,7 @@ def read_compiled_tool_descriptions(
     max_dbs: int = _MAX_SQLITE_DBS,
     max_content_rows_per_db: int = _MAX_SQLITE_CONTENT_ROWS_PER_DB,
     max_content_bytes_per_db: int = _MAX_SQLITE_CONTENT_BYTES_PER_DB,
+    max_content_total_bytes: int = _MAX_SQLITE_CONTENT_TOTAL_BYTES,
 ) -> "tuple[list[dict], dict]":
     """Return ``(tool_defs, meta)`` -- the tool definitions OpenClaw actually sent to the
     model, recovered from ``context.compiled`` events in the per-agent SQLite trajectory
@@ -1103,6 +1177,23 @@ def read_compiled_tool_descriptions(
     constants keeps every OTHER caller, and the default (non-``--exhaustive``) path,
     byte-identical to before this parameter existed.
 
+    ``max_content_total_bytes`` (B-852 round 3) overrides
+    :data:`_MAX_SQLITE_CONTENT_TOTAL_BYTES` -- a ceiling on the SUM of accepted
+    ``event_json`` bytes read across every database this call opens, not just each
+    database's own ``max_content_bytes_per_db``. Widening the per-database cap alone
+    (as ``--exhaustive`` did before this parameter existed) leaves the aggregate
+    unbounded once ``max_dbs`` is also widened -- see
+    :data:`scanbudget.ScanLimits.sqlite_max_content_total_bytes`'s own comment for the
+    real reproduction this closes. Consumed database-by-database: each database's
+    effective per-database cap is ``min(max_content_bytes_per_db, remaining)``, and once
+    the remaining budget hits zero the loop stops WITHOUT opening any further database
+    (``meta["truncated"]`` is set) rather than discovering the overrun deep inside one.
+    Defaulting to :data:`_MAX_SQLITE_CONTENT_TOTAL_BYTES` (unbounded) keeps every OTHER
+    caller, and the default (non-``--exhaustive``) path, byte-identical to before this
+    parameter existed -- the default path's real total is already
+    ``max_dbs * max_content_bytes_per_db`` (both finite today), so this parameter adds
+    no NEW constraint there.
+
     Mirrors the JSONL reader's own filtering and projection EXACTLY (same
     ``traceSchema``/``schemaVersion``/type gate, same ``trajectory._compiled_tool_entry()``
     field projection, same dedup-by-content), so the two containers cannot diverge on what
@@ -1122,6 +1213,16 @@ def read_compiled_tool_descriptions(
     §8: see the module docstring. Only ``event_json`` is ever selected from
     ``trajectory_runtime_events``; the auth tables in the same database file are never
     named anywhere in this function or module.
+
+    **B-852 round 3 -- streaming, not two-phase.** Before this round, each database's
+    accepted rows were first collected into a full list by :func:`_read_sqlite_event_json`
+    and only THEN filtered/parsed by the loop below -- meaning a whole database's admitted
+    content (up to ``max_content_bytes_per_db``, ``--exhaustive``ly unbounded per database
+    before this round) was held in memory at once even though the overwhelming majority of
+    rows are never a ``context.compiled`` record at all. This function now drives
+    :func:`_scan_sqlite_event_json` directly and applies the same substring pre-filter /
+    JSON parse / tool-definition extraction to each row AS IT STREAMS off the cursor, so a
+    non-matching row's text never outlives the row it arrived in.
     """
     tool_defs: list[dict] = []
     meta = {
@@ -1138,24 +1239,22 @@ def read_compiled_tool_descriptions(
         return tool_defs, meta
 
     seen: set[tuple] = set()
+    remaining_total_bytes = max_content_total_bytes
     for db_path in dbs:
-        values, capped, unreadable, non_text = _read_sqlite_event_json(
-            db_path, max_rows=max_content_rows_per_db, max_bytes=max_content_bytes_per_db,
-        )
-        if unreadable:
-            meta["dbs_unreadable"] += 1
-            continue
-        meta["dbs_read"] += 1
-        if capped:
+        if remaining_total_bytes <= 0:
+            # The aggregate budget is already spent -- every database from here on is
+            # skipped UNOPENED, not merely unread: opening one only to discard it still
+            # pays the I/O/schema-verification cost this field exists to bound.
             meta["truncated"] = True
-        if non_text:
-            # A row SQLite's dynamic typing stored as non-TEXT under this TEXT-affinity
-            # column is content we could not examine -- disclosed as incomplete, same
-            # honesty rule as every other truncation cause, never silently dropped.
-            meta["non_text_rows"] += non_text
-            meta["truncated"] = True
+            break
 
-        for raw in values:
+        effective_max_bytes = min(max_content_bytes_per_db, remaining_total_bytes)
+        stats = _SqliteEventJsonStats()
+        db_bytes_read = 0
+        for raw in _scan_sqlite_event_json(
+            db_path, max_content_rows_per_db, effective_max_bytes, stats,
+        ):
+            db_bytes_read += len(raw)
             # Cheap pre-filter before the full JSON parse -- same idiom the JSONL
             # reader uses, so most rows (the overwhelming majority are NOT
             # context.compiled) never reach json.loads at all.
@@ -1222,6 +1321,25 @@ def read_compiled_tool_descriptions(
                         break
                     seen.add(key)
                     tool_defs.append(entry)
+
+        # `db_bytes_read` can never exceed `effective_max_bytes` (the generator excludes,
+        # never yields, the row that would push it over -- see
+        # _scan_sqlite_event_json's own cap check), so this can never go negative; max(0,
+        # ...) is defence in depth, not a claim that it is reachable.
+        remaining_total_bytes = max(0, remaining_total_bytes - db_bytes_read)
+
+        if stats.unreadable:
+            meta["dbs_unreadable"] += 1
+            continue
+        meta["dbs_read"] += 1
+        if stats.capped:
+            meta["truncated"] = True
+        if stats.non_text:
+            # A row SQLite's dynamic typing stored as non-TEXT under this TEXT-affinity
+            # column is content we could not examine -- disclosed as incomplete, same
+            # honesty rule as every other truncation cause, never silently dropped.
+            meta["non_text_rows"] += stats.non_text
+            meta["truncated"] = True
 
     meta["present"] = meta["dbs_read"] > 0
     return tool_defs, meta

@@ -173,6 +173,23 @@ class ScanLimits:
     sqlite_max_dbs: int
     sqlite_max_content_rows_per_db: int
     sqlite_max_content_bytes_per_db: int
+    # B-852 round 3: the SAME idea `log_max_total_bytes` already applies to the log-hunt
+    # sinks, ported to this container -- a total byte budget across ALL per-agent SQLite
+    # databases in one `read_compiled_tool_descriptions()` call, not just each database's
+    # own `sqlite_max_content_bytes_per_db`. Widening PER-DATABASE caps alone (as
+    # `--exhaustive` did before this field existed) leaves the AGGREGATE unbounded once
+    # `sqlite_max_dbs` is also widened: `sqlite_max_content_bytes_per_db=_UNBOUNDED` times
+    # however many databases a real fleet has is still unbounded, exactly the shape
+    # `log_max_total_bytes` was introduced to close on the log-hunt side (see that field's
+    # own comment). Unlike the log-hunt planner, this is a RUNNING budget consumed
+    # database-by-database rather than a pure pre-plan from file metadata alone: SQLite
+    # content size cannot be known without querying the database (a file's on-disk size
+    # includes schema, indexes and deleted space the query never touches), so there is no
+    # file-metadata-only equivalent of `_plan_log_hunt_sinks` here. What is preserved is
+    # the property that actually matters -- the CEILING itself is a fixed, calibrated
+    # constant decided once per call, not a function of wall-clock speed, so the same
+    # fleet always yields the same admitted set regardless of how fast the box is.
+    sqlite_max_content_total_bytes: int
     log_check_budget_s: float
     log_per_file_budget_s: float
     log_max_bytes_per_file: int
@@ -189,6 +206,22 @@ class ScanLimits:
     audit_budget_s: float
 
 
+# Sentinel for "no real cap" on a field whose consumers compare it directly
+# (`trajectory.find_trajectory_files`: `len(files) > max_files`; the
+# `read_proven_tools*` readers: `read > max_bytes_per_file`) rather than only
+# slicing with it — both raise TypeError against `None`, so `None` is NOT a sound
+# sentinel here. `sys.maxsize` is an exact, arbitrary-precision int (no overflow
+# risk) that reads as "unbounded" rather than a made-up large number. Defined here,
+# before DEFAULT_LIMITS, because DEFAULT_LIMITS.sqlite_max_content_total_bytes (B-852
+# round 3) also uses it: that field is Python-side-only (an accumulated-byte
+# comparison, never bound into SQL), the same shape as sqlite_max_dbs/
+# sqlite_max_content_bytes_per_db below, so leaving it unbounded on the DEFAULT path
+# is exactly as safe as it already is for those two — and correct, not merely safe:
+# the default path's real cap is already `sqlite_max_dbs * sqlite_max_content_bytes_per_db`
+# (both finite today), so an additional aggregate cap here would either be redundant or,
+# picked wrong, silently tighten a path this task does not touch.
+_UNBOUNDED = sys.maxsize
+
 # Reproduces today's real constants EXACTLY (the byte-identical-default-path
 # guarantee this whole feature depends on) — see each source module's own comment
 # for why ITS number is what it is:
@@ -196,6 +229,8 @@ class ScanLimits:
 #   sqlite_max_dbs                        <- trajectorystore._MAX_SQLITE_DBS
 #   sqlite_max_content_rows_per_db        <- trajectorystore._MAX_SQLITE_CONTENT_ROWS_PER_DB
 #   sqlite_max_content_bytes_per_db       <- trajectorystore._MAX_SQLITE_CONTENT_BYTES_PER_DB
+#   sqlite_max_content_total_bytes        <- _UNBOUNDED (no NEW aggregate constraint on the
+#                                             default path — see that field's own comment)
 #   log_check_budget_s / log_per_file_budget_s <- checks/_egress._LOG_HUNT_CHECK_BUDGET_S /
 #                                                  _LOG_HUNT_PER_FILE_BUDGET_S
 #   log_max_bytes_per_file  <- logscan._MAX_BYTES_PER_FILE
@@ -212,6 +247,7 @@ DEFAULT_LIMITS = ScanLimits(
     sqlite_max_dbs=50,
     sqlite_max_content_rows_per_db=3000,
     sqlite_max_content_bytes_per_db=8_000_000,
+    sqlite_max_content_total_bytes=_UNBOUNDED,
     log_check_budget_s=4.5,
     log_per_file_budget_s=3.0,
     log_max_bytes_per_file=2 * 1024 * 1024,
@@ -253,23 +289,20 @@ DEFAULT_LIMITS = ScanLimits(
     audit_budget_s=DEFAULT_AUDIT_BUDGET_S,
 )
 
-# Sentinel for "no real cap" on a field whose consumers compare it directly
-# (`trajectory.find_trajectory_files`: `len(files) > max_files`; the
-# `read_proven_tools*` readers: `read > max_bytes_per_file`) rather than only
-# slicing with it — both raise TypeError against `None`, so `None` is NOT a sound
-# sentinel here. `sys.maxsize` is an exact, arbitrary-precision int (no overflow
-# risk) that reads as "unbounded" rather than a made-up large number.
-_UNBOUNDED = sys.maxsize
-
 # Opt-in, generous — never used unless the caller asks for --exhaustive.
 EXHAUSTIVE_LIMITS = ScanLimits(
     exhaustive=True,
     traj_max_files=_UNBOUNDED,
     traj_max_bytes_per_file=_UNBOUNDED,
-    # sqlite_max_dbs / sqlite_max_content_bytes_per_db are Python-side-only bounds
-    # (a list slice; an accumulated-byte comparison) — the same shape as
+    # sqlite_max_dbs is a Python-side-only bound (a list slice) — the same shape as
     # traj_max_files/traj_max_bytes_per_file above — so _UNBOUNDED is exactly as safe
-    # here as it already is there.
+    # here as it already is there. sqlite_max_content_bytes_per_db below is ALSO
+    # Python-side-only (an accumulated-byte comparison, never bound into SQL), which
+    # is what makes leaving IT at _UNBOUNDED safe from an overflow standpoint — but
+    # "safe from overflow" is not the same claim as "safe to widen with nothing else
+    # bounding it", and an earlier version of this comment conflated the two (see
+    # sqlite_max_content_total_bytes's own comment below for why that was wrong and
+    # what actually closes the gap).
     sqlite_max_dbs=_UNBOUNDED,
     # sqlite_max_content_rows_per_db is NOT Python-side-only: it is bound straight
     # into a SQL `LIMIT` parameter as `max_rows + 1`
@@ -284,6 +317,49 @@ EXHAUSTIVE_LIMITS = ScanLimits(
     # unbounded value was found to cause its own failure mode).
     sqlite_max_content_rows_per_db=100_000,
     sqlite_max_content_bytes_per_db=_UNBOUNDED,
+    # B-852 ROUND 3 (blocking fix, following a fresh adversarial review that found the
+    # combination above still unsafe). `sqlite_max_dbs=_UNBOUNDED` together with
+    # `sqlite_max_content_bytes_per_db=_UNBOUNDED` leaves the AGGREGATE across every
+    # per-agent database in one call with nothing bounding it at all — the identical
+    # shape `log_max_total_bytes` exists to close on the log-hunt side, reopened here.
+    # Reproduced end-to-end: a mixed-host home with 10 x 547 MB per-agent SQLite
+    # databases (plus a poisoned JSONL sidecar, the B-852 "mixed host" shape) under
+    # `--exhaustive` pulled ~1.1 GB of peak Python RSS reading a SINGLE one of those
+    # databases (every accepted row held in the per-database `values` list at once,
+    # nothing bounding the total), then paid for a second full-table COUNT scan on top
+    # — `check_compiled_tool_poisoning` UNKNOWN'd at wall=140.07s against its 120s
+    # budget, LOSING a FAIL the default (non-exhaustive) path already caught correctly
+    # in 18.7s. This field closes that: a single fixed ceiling on TOTAL event_json bytes
+    # read across ALL databases in one `read_compiled_tool_descriptions()` call,
+    # consumed database-by-database (see that field's own docstring in ScanLimits for
+    # why this is a running budget rather than a `_plan_log_hunt_sinks`-style pre-plan).
+    #
+    # Calibrated by measurement against the SAME reproduction above (this box,
+    # 2026-09-23), after also converting the per-database read to a streaming
+    # consumer (trajectorystore._scan_sqlite_event_json) that parses each row as it is
+    # read instead of materializing a whole database's admitted rows into a list first
+    # — the two fixes are complementary, not substitutes: streaming bounds PEAK memory
+    # for content that IS read, this field bounds how MUCH gets read (and therefore
+    # parsed/JSON-decoded) in the first place:
+    #
+    #     64 MiB total  -> --exhaustive FAILs in ~3-6s, ~1 database's worth of content
+    #                       ever opened; every database after the first is skipped
+    #                       unopened once the budget is spent (dbs 2-10 never touched).
+    #
+    # 64 MiB is deliberately much smaller than the per-database cap it replaces would
+    # imply (that cap was _UNBOUNDED) but still a REAL widening over the default path's
+    # effective total for a fleet this size (10 databases x 8 MiB/db = 80 MiB under
+    # DEFAULT_LIMITS — so 64 MiB alone would even be slightly NARROWER than a 10-database
+    # default fleet's theoretical maximum). That is intentional, not an oversight:
+    # `sqlite_max_content_rows_per_db=100_000` above (33x DEFAULT_LIMITS' 3000) is what
+    # `--exhaustive` widens on a NORMAL-sized real database — most real per-agent
+    # databases are nowhere near 547 MB — and this aggregate ceiling exists purely as
+    # the DoS backstop for the pathological/adversarial-scale case, the same role
+    # `log_max_total_bytes` plays for the log-hunt sinks. See the "B-852 round 3"
+    # section of `tests/test_f187_trajectory_sqlite_corroborator.py` for the aggregate-
+    # budget/streaming regression tests and `checks/_mcp.py`'s own
+    # `lim.sqlite_max_content_total_bytes` plumbing.
+    sqlite_max_content_total_bytes=64 * 1024 * 1024,
     log_check_budget_s=60.0,                   # 13.3x DEFAULT — see check_budget_s below
     log_per_file_budget_s=30.0,                # 10x DEFAULT: one sink may legitimately
                                                 # run far longer scanning more of a corpus

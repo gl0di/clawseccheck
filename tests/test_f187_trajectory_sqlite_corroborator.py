@@ -13,6 +13,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.behavioral import analyze, analysis_incompleteness, render_behavioral_analysis
 from clawseccheck.collector import Context
 from clawseccheck.trajectorystore import (
@@ -1315,6 +1317,7 @@ def test_read_compiled_tool_descriptions_threads_its_override_kwargs_to_the_read
     empty_defs, empty_meta = read_compiled_tool_descriptions(home, max_dbs=0)
     assert empty_defs == []
     assert empty_meta["dbs_found"] == 0
+    assert empty_meta["present"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1420,3 +1423,139 @@ def test_excluded_count_query_still_runs_when_not_already_capped(monkeypatch):
         _SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT in sql for sql in executed
     ), executed
     assert capped is True  # the excluded row is disclosed via the count query
+
+
+# ---------------------------------------------------------------------------
+# B-852 round 3 — a total byte budget across ALL per-agent databases in one
+# read_compiled_tool_descriptions() call, plus converting the per-database read from a
+# two-phase "materialize the whole admitted list, then filter" into a streaming
+# generator that parses each row as it arrives. Closes a real --exhaustive regression:
+# `sqlite_max_dbs`/`sqlite_max_content_bytes_per_db` both went unbounded under
+# EXHAUSTIVE_LIMITS, so nothing capped the AGGREGATE once a fleet had more than one
+# large per-agent database (measured: a 10 x 547 MB mixed-host home budget-aborted
+# UNKNOWN at wall=140.07s against the 120s --exhaustive ceiling; 2.35s cold-cache after
+# this fix).
+# ---------------------------------------------------------------------------
+
+
+def test_max_content_total_bytes_stops_opening_further_databases_once_spent():
+    """Three databases, one row each of an identical, exactly-measured size. A total
+    budget equal to EXACTLY one row's worth must admit database 0's row and then stop
+    the loop BEFORE OPENING database 1 or 2 at all -- proven via `dbs_read`/`dbs_found`
+    diverging, not just via the returned tool definitions (this event is not even a
+    'context.compiled' record, so it would never produce one anyway; this test is about
+    which databases get OPENED, not what gets parsed out of them)."""
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    home = _home()
+    event = {"type": "tool.result", "output": "y" * 4000}
+    row_len = len(json.dumps(event))
+    for i in range(3):
+        _add_agent_db(
+            home, f"agent{i}", trajectory_rows=[(f"s{i}", 0, event)], include_auth=False,
+        )
+
+    _, meta = read_compiled_tool_descriptions(
+        home,
+        max_content_bytes_per_db=10 * row_len,   # generous -- never the binding cap
+        max_content_total_bytes=row_len,          # exactly one database's content
+    )
+
+    assert meta["dbs_found"] == 3
+    assert meta["dbs_read"] == 1
+    assert meta["dbs_unreadable"] == 0
+    assert meta["truncated"] is True
+
+
+def test_max_content_total_bytes_default_is_unbounded():
+    """No `max_content_total_bytes` argument at all (every existing caller, and the
+    DEFAULT --i.e. non-exhaustive-- audit path) must behave exactly as before this
+    parameter existed: every database is opened and read, nothing is truncated by this
+    new cap."""
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    home = _home()
+    event = {"type": "tool.result", "output": "y" * 4000}
+    for i in range(3):
+        _add_agent_db(
+            home, f"agent{i}", trajectory_rows=[(f"s{i}", 0, event)], include_auth=False,
+        )
+
+    _, meta = read_compiled_tool_descriptions(home)
+
+    assert meta["dbs_found"] == 3
+    assert meta["dbs_read"] == 3
+    assert meta["truncated"] is False
+
+
+def test_scan_sqlite_event_json_is_a_lazy_generator():
+    """`_scan_sqlite_event_json` must not do ANY work (open the database, run the
+    query) until it is actually iterated -- constructing the generator object alone
+    must be a no-op. This is the structural half of the streaming claim: a caller that
+    never iterates never pays any cost at all, and one that iterates pays per-row, not
+    per-database."""
+    import types
+
+    from clawseccheck.trajectorystore import _scan_sqlite_event_json, _SqliteEventJsonStats
+
+    home = _home()
+    db_path = _add_agent_db(
+        home, "main", trajectory_rows=[("s", 0, {"type": "tool.call"})], include_auth=False,
+    )
+
+    stats = _SqliteEventJsonStats()
+    gen = _scan_sqlite_event_json(db_path, 10, 10_000, stats)
+    assert isinstance(gen, types.GeneratorType)
+    # Nothing has been read yet -- the database was never even opened.
+    assert stats.capped is False
+    assert stats.unreadable is False
+
+    values = list(gen)
+    assert len(values) == 1
+    assert stats.unreadable is False
+
+
+def test_streaming_reader_does_not_materialize_the_whole_admitted_set_in_memory():
+    """Peak-RSS proxy for the round-3 memory fix (same idiom as
+    `tests/test_logscan.py`'s decompression-bomb RSS check), at a scale that runs in
+    well under a second rather than needing the full 547 MB reproduction: ~30 rows of
+    ~200 KB each (~6 MB total admitted content), every one an ordinary event (never
+    'context.compiled', so none is retained in `tool_defs` either) -- before round 3,
+    ALL of it was held in one per-database `values` list at once before any filtering
+    ran. RSS growth is bounded well below the admitted content size, proving no
+    whole-database-sized list survives the read.
+    """
+    resource = pytest.importorskip("resource")
+
+    home = _home()
+    row_count = 30
+    pad_len = 200_000
+    rows = [
+        (f"s{i}", 0, {"type": "tool.result", "output": "z" * pad_len})
+        for i in range(row_count)
+    ]
+    _add_agent_db(home, "main", trajectory_rows=rows, include_auth=False)
+
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    tool_defs, meta = read_compiled_tool_descriptions(
+        home,
+        max_content_bytes_per_db=50_000_000,
+        max_content_total_bytes=50_000_000,
+    )
+    after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    assert meta["dbs_read"] == 1
+    assert meta["truncated"] is False
+    assert tool_defs == []  # none of these rows is a 'context.compiled' record
+
+    grew_kb = after - before
+    admitted_kb = (row_count * pad_len) // 1024
+    # Generous ceiling: a third of the admitted content. A pre-round-3 two-phase read
+    # would hold the ENTIRE admitted set (all ~6 MB) in one list at once, well over
+    # this; streaming should cost a small, roughly row-sized amount instead.
+    assert grew_kb < admitted_kb // 3, (
+        f"RSS grew {grew_kb} KB reading {admitted_kb} KB of admitted content "
+        "-- looks like the whole set is still being materialized at once"
+    )

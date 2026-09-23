@@ -40,6 +40,34 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
+    # Already 1,227 (over budget, no exemption recorded) going into B-852 round 3 --
+    # that gap predates this entry and is not this change's debt to explain away, only
+    # to stop hiding. Round 3 (2026-09-23) added ~118 lines: a total byte budget across
+    # every per-agent SQLite database in one read_compiled_tool_descriptions() call
+    # (sqlite_max_content_total_bytes, mirroring log_max_total_bytes), plus converting
+    # the per-database event_json read from a two-phase "materialize a whole database's
+    # admitted rows into a list, then filter" into a streaming generator
+    # (_scan_sqlite_event_json / _SqliteEventJsonStats) that parses each row as it
+    # arrives -- both closed a real --exhaustive regression (measured: a 10 x 547 MB
+    # mixed-host home budget-aborted UNKNOWN at 140s before this fix; 2.35s after, cold
+    # cache). Split candidate, not attempted here: the pointer/archive corroboration
+    # helpers (_pointer_files/_archive_entries/corroborate(), ~200 lines) answer a
+    # different question (WHERE evidence lives) than the event_json content readers
+    # (_read_sqlite_event_json/_scan_sqlite_event_json/read_compiled_tool_descriptions,
+    # the B-811/B-852 "read the delivered tool definitions" concern) and share little
+    # beyond the module's own DB-opening helpers -- a `trajectorycontent.py` leaf the
+    # corroborator's module could import would leave ~950 lines here with no cycle. Not
+    # done in this change: it lands mid a scoped bug-fix round, with its own tests
+    # (`tests/test_f187_trajectory_sqlite_corroborator.py`) pinning exact source-level
+    # behavior (SQL executed, table names) that a split would need to re-verify
+    # byte-for-byte, the same discipline I-022-R2 used for checks.py.
+    "trajectorystore.py": "~1,345 lines — SQLite-trajectory-container corroboration "
+                          "(corroborate()) plus the B-811/B-852 event_json content "
+                          "readers (read_compiled_tool_descriptions() and its streaming "
+                          "core). Over budget by 145 lines; 27 predate B-852 round 3, "
+                          "the rest is this round's aggregate-byte-budget + streaming "
+                          "fix. Split candidate named above; tracked debt, not a design "
+                          "statement.",
     # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
     # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
     # into self_test_corroboration()/render_self_test_corroboration()/
