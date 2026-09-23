@@ -157,6 +157,69 @@ def test_baseline_file_parses_to_a_nonempty_pair_list():
     assert len(pairs) > 0, "baseline is empty -- compare() would pass vacuously"
 
 
+# --- qualifier case-insensitivity (B-885) ---------------------------------------------
+#
+# `_QUALIFIER_RE` had no `re.IGNORECASE`, so a citation qualified ONLY by a
+# sentence-initial "Grounded against ..."/"Grounded per ..."/"As of ..." (capital G/A --
+# the natural shape for prose that opens a sentence or a docstring) was read as
+# UNQUALIFIED. Observed for real in ``collector.py``'s ``_collect_subagent_runs``
+# docstring, which carried exactly that capitalized phrase and was only accepted by
+# coincidence (an unrelated version token happened to sit in the same window); when that
+# token was later removed, the citation would have become a spurious NEW violation.
+# Always-on, no dist needed.
+
+_QUALIFIED_PROSE = [
+    "Grounded against the vendor's OWN canonical read of the state DB.",
+    "Grounded per the installed dist, not the recon.",
+    "As of 2026-09-22 this still resolves.",
+]
+
+
+@pytest.mark.parametrize("text", _QUALIFIED_PROSE)
+def test_qualifier_regex_matches_sentence_initial_capitalized_prose(text):
+    gate = _load_gate()
+    assert gate._QUALIFIER_RE.search(text), (
+        f"{text!r} carries a sentence-initial qualifier but _QUALIFIER_RE did not match "
+        "it -- a capitalized 'Grounded against'/'Grounded per'/'As of' at a sentence "
+        "start must be recognized the same as its lowercase mid-sentence form."
+    )
+
+
+def test_qualifier_case_insensitivity_bites_on_the_pattern_it_replaced():
+    """Without this, the test above could pass against a pattern that was already
+    case-agnostic. Reproduce the retired (no-``re.IGNORECASE``) regex and show it MISSES
+    the sentence-initial capitalized phrase -- so the fix is doing real work."""
+    retired = re.compile(
+        r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)|as of "
+    )
+    assert retired.search("Grounded against the vendor's OWN canonical read.") is None
+    assert retired.search("Grounded per the installed dist, not the recon.") is None
+
+
+def test_a_citation_qualified_only_by_capitalized_prose_is_not_a_violation(tmp_path):
+    """End-to-end, no dist needed (``dist_basenames`` is the empty set, so the bundle is
+    always dead): ``scan_citations`` must not flag a dead citation whose ONLY qualifier
+    in its window is sentence-initial capitalized prose, mirroring the real
+    ``collector.py`` docstring this bug was filed over."""
+    gate = _load_gate()
+    repo_root = tmp_path
+    pkg_dir = repo_root / "clawseccheck"
+    pkg_dir.mkdir()
+    (pkg_dir / "fake_module.py").write_text(
+        "def f():\n"
+        "    \"\"\"Grounded against the vendor's OWN canonical read of the state DB.\n\n"
+        "    some-bundle-Ab12Cd34.js is cited here.\n"
+        "    \"\"\"\n",
+        encoding="utf-8",
+    )
+    violations, total = gate.scan_citations(repo_root, dist_basenames=set())
+    assert total == 1, f"expected exactly one extracted citation, got {total}"
+    assert violations == [], (
+        f"a citation qualified only by sentence-initial capitalized prose was flagged "
+        f"as unqualified: {violations}"
+    )
+
+
 def test_dist_citation_gate_passes_against_the_installed_dist():
     """Local-only: needs a real OpenClaw install to know which bundle names currently
     exist. Skips cleanly, via the gate's own ``_locate_dist()``, when none is found --

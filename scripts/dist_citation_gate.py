@@ -96,8 +96,16 @@ _CITATION_RE = re.compile(
 # ("grounded against openclaw@2026.7.1-2 (2026-07-25)", "as of 2026-08-26", a bare
 # "2026-08-06" nearby) and a gate that only recognized one shape would flag correct,
 # already-dated prose as a violation.
+#
+# IGNORECASE (B-885): the "grounded (?:against|per)"/"as of " alternatives are prose,
+# and prose is capitalized at a sentence start -- "Grounded against the vendor's OWN
+# canonical read..." (collector.py's `_collect_subagent_runs` docstring) is exactly
+# that shape. Global IGNORECASE is safe here: the other two alternatives
+# (`2026\.\d+\.\d+`, the `\d{4}-\d{2}-\d{2}` date) are digits/punctuation only, so case
+# folding cannot change what they match.
 _QUALIFIER_RE = re.compile(
-    r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)|as of "
+    r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)|as of ",
+    re.IGNORECASE,
 )
 
 # Window around a citation searched for a qualifier: 12 lines back, 4 forward. Back-
