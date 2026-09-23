@@ -309,6 +309,17 @@ def _open_readonly(db_path: Path) -> "sqlite3.Connection":
       malformed row (whether hostile or merely corrupt) discarded every row already
       read in the same call, not just itself -- an attacker-cheap way to blind an
       entire database's worth of real evidence.
+
+    B-909: this ``mode=ro`` open still creates (or, if they already exist, rewrites)
+    the database's ``-shm``/``-wal`` WAL sidecars -- a property of SQLite's WAL
+    protocol itself, not something ``mode=ro``/``query_only`` can suppress. Deliberately
+    NOT ``immutable=1``: that would stop the sidecar write, but only by bypassing the
+    WAL entirely, which makes any row committed to the WAL but not yet checkpointed back
+    into the main file invisible to this reader -- silently wrong evidence during the
+    exact case this module exists to observe (an agent actively writing new trajectory
+    rows). See SECURITY_MODEL.md's "Allowed behavior" section for the full writeup and
+    ``tests/test_b909_wal_sidecar_creation.py`` for both the sidecar-creation repro and
+    the ``immutable=1`` rejection, demonstrated.
     """
     conn = sqlite3.connect(f"file:{_urlquote(db_path.as_posix(), safe='/')}?mode=ro", uri=True)
     conn.text_factory = lambda b: b.decode("utf-8", errors="replace")
