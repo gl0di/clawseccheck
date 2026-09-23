@@ -6,6 +6,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import base64
 import binascii
+import bisect
 import html
 import ipaddress
 import json
@@ -6618,13 +6619,26 @@ def fence_suppression_note(label: str, match_file, fence_file) -> str:
 
 
 def _in_fence(pos: int, ranges: list[tuple[int, int]]) -> bool:
-    """Return True when *pos* falls inside any of the precomputed fence ranges."""
-    for start, end in ranges:
-        if start <= pos < end:
-            return True
-        if start > pos:
-            break  # ranges are ordered by start position
-    return False
+    """Return True when *pos* falls inside any of the precomputed fence ranges.
+
+    B-960: `ranges` (from `_fence_ranges`) is sorted by start and non-overlapping, so
+    a caller scanning the same blob's many regex matches once each hit this with a
+    linear scan from index 0 every time -- measured at 26k+ calls / ~1.1s of a
+    3.9s `check_installed_skills()` run on a 1MB/2200-fence adversarial blob.
+    Replaced with `bisect.bisect_right`, mirroring the `(start, len(blob))`
+    tuple-sort idiom `checks/_vet.py`'s `_runtime_fetch_block` already uses for the
+    same "span containing pos" lookup: `(pos, float("inf"))` sorts after every range
+    whose start <= pos (the `float("inf")` second element resolves the start == pos
+    tie the same way regardless of that range's own end, without needing the caller
+    to pass len(blob) in), so `bisect_right(...) - 1` is the index of the last range
+    that could possibly contain *pos* -- O(log n) instead of O(n), same semantics."""
+    if not ranges:
+        return False
+    i = bisect.bisect_right(ranges, (pos, float("inf"))) - 1
+    if i < 0:
+        return False
+    start, end = ranges[i]
+    return start <= pos < end
 
 
 def _inline_code_ranges(text: str) -> list[tuple[int, int]]:
