@@ -790,3 +790,62 @@ class TestAgentAuthProfileStoreFifoGuard:
         assert elapsed < 10, f"collect() took {elapsed:.1f}s -- expected a few seconds"
         assert ctx.agent_auth_profile_store_read is False
         assert ctx.agent_auth_profile_store_length is None
+
+    def test_symlinked_main_db_with_target_journal_fifo_does_not_hang_collect(
+        self, tmp_path
+    ):
+        """Round 4 BLOCKING fix. The main DB path is a RELATIVE SYMLINK to a real,
+        regular database (`x.db`) in the SAME directory; the FIFO is planted at the
+        TARGET's own `-journal` sidecar name (`x.db-journal`), never the symlink's own
+        (`openclaw-agent.sqlite-journal`). SQLite resolves the symlink to its target
+        before it ever looks for a hot journal, so this is the sidecar name that
+        actually matters -- the round-3 guard, which only ever built sidecar names
+        from the path AS GIVEN, never looked here, and hung the same way the round-3
+        repros did.
+        """
+        home = tmp_path / "h"
+        home.mkdir(parents=True)
+        (home / "openclaw.json").write_text(json.dumps(CFG))
+        os.chmod(home / "openclaw.json", 0o600)
+        agent_dir = home / "agents" / "main" / "agent"
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("R")}
+        }})
+        _make_agent_auth_db(agent_dir, payload)
+        symlink_path = agent_dir / "openclaw-agent.sqlite"
+        target_path = agent_dir / "x.db"
+        symlink_path.rename(target_path)
+        os.symlink("x.db", symlink_path)  # relative symlink, same directory
+        os.mkfifo(str(target_path) + "-journal")
+
+        ctx, elapsed = self._collect_bounded(home)
+        assert elapsed < 10, f"collect() took {elapsed:.1f}s -- expected a few seconds"
+        assert ctx.agent_auth_profile_store_read is False
+        assert ctx.agent_auth_profile_store_length is None
+
+    def test_symlinked_main_db_without_fifo_reads_successfully(self, tmp_path):
+        """Positive control for the round-4 fix: a symlink to a genuine regular DB
+        with NO FIFO anywhere (neither at the symlink's own sidecar names nor the
+        target's) must still read successfully and produce a WARN -- the new
+        realpath-based check must not itself become a new false refusal.
+        """
+        home = tmp_path / "h"
+        home.mkdir(parents=True)
+        (home / "openclaw.json").write_text(json.dumps(CFG))
+        os.chmod(home / "openclaw.json", 0o600)
+        agent_dir = home / "agents" / "main" / "agent"
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("S")}
+        }})
+        _make_agent_auth_db(agent_dir, payload)
+        symlink_path = agent_dir / "openclaw-agent.sqlite"
+        target_path = agent_dir / "x.db"
+        symlink_path.rename(target_path)
+        os.symlink("x.db", symlink_path)
+
+        ctx, elapsed = self._collect_bounded(home)
+        assert elapsed < 10, f"collect() took {elapsed:.1f}s -- expected a few seconds"
+        assert ctx.agent_auth_profile_store_read is True
+        assert ctx.agent_auth_profile_store_length == len(payload)
+        finding = check_trifecta(ctx)
+        assert finding.status == WARN, finding.detail

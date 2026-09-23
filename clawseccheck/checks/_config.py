@@ -4299,8 +4299,8 @@ def check_trifecta(ctx: Context) -> Finding:
                     f" empty shell ({agent_auth_store_length} bytes in its"
                     " agents/<agent-id>/agent/openclaw-agent.sqlite auth_profile_store"
                     f" table, vs. OpenClaw's own {_AUTH_PROFILE_STORE_EMPTY_BYTES}-byte"
-                    " empty-store shape), and this scan only looked at the"
-                    " credentials/ directory and the shared state database"
+                    " empty-store shape), and the sensitive-data leg is only ever"
+                    " raised from files under credentials/, not from either database"
                 )
             if agent_auth_capped:
                 # B-845 (round 3, 2026-09-23): a STANDALONE clause, not folded into

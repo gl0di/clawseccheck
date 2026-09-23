@@ -351,18 +351,46 @@ def _refuse_non_regular_sqlite_paths(db_path: Path) -> None:
     is treated the same way: refuse rather than risk passing an unknown object
     straight to SQLite.
 
+    **Round 4 (2026-09-23): the given path can be a SYMLINK to a real database
+    elsewhere.** The checks above only ever look at sidecar names built from
+    *db_path* AS GIVEN (``str(db_path) + "-journal"``, etc.). But SQLite itself
+    resolves a symlinked main path to its TARGET before it ever looks for a hot
+    journal/WAL/SHM sidecar -- it checks for those next to the REAL file, not next to
+    the symlink. A symlink at the given path pointing at an otherwise-legitimate
+    regular database, combined with a FIFO planted at the TARGET's own ``-journal``
+    path, passed every check above (the symlink itself, stat'd via the default
+    ``os.stat`` this function already uses, resolves through to the target and
+    reports a regular file; only the WRONG set of sidecar names was ever checked)
+    and hung the exact same ``_table_kind`` ``sqlite_master`` read the round-3 fix
+    already guards. Reproduced end-to-end through ``collect()`` on
+    py3.9/3.12/3.14 (B-845, round 4). Closed by additionally resolving
+    *db_path* with ``os.path.realpath`` and, when that differs from the given path,
+    repeating the identical stat check against the resolved path and ITS OWN sidecar
+    names -- both sets of checks stay (the given-path check is not made redundant by
+    the realpath one: it also covers a hostile object planted directly at the
+    symlink's own would-be sidecar name, which SQLite itself never consults through
+    this symlink but is cheap insurance against a future caller that might). A
+    dangling/broken symlink's realpath simply fails the subsequent ``os.stat`` with
+    ``FileNotFoundError``, which this function already treats as "missing sidecar,
+    not an error" -- no special-casing needed.
+
     **Documented residual (TOCTOU), not fixed here**: nothing stops a live attacker
     from swapping a regular file for a FIFO in the window between this check and the
-    ``sqlite3.connect`` call right after it. Stdlib ``sqlite3`` gives no atomic
-    "open only if regular" primitive (unlike ``os.open`` with ``O_NOFOLLOW``, which
-    guards a different attack -- symlinks, not FIFOs/device nodes), so closing this
-    race would need a non-stdlib dependency or platform-specific syscalls, both out of
-    scope for a stdlib-only tool. This narrows the window from "unbounded hang on any
+    ``sqlite3.connect`` call right after it. This is not closed by this guard; closing
+    it would need a bounded-wait pattern around the actual open itself (e.g. running
+    the open-and-query in a daemon thread and joining it with a time limit from the
+    caller) -- achievable with stdlib-only tooling, but out of scope for this fix (a
+    separate follow-up task). This narrows the window from "unbounded hang on any
     request" to "requires racing this exact stat-then-open gap", it does not close it.
     """
     candidates = [db_path] + [
         Path(str(db_path) + suffix) for suffix in _SQLITE_SIDECAR_SUFFIXES
     ]
+    real_path = Path(os.path.realpath(db_path))
+    if real_path != db_path:
+        candidates += [real_path] + [
+            Path(str(real_path) + suffix) for suffix in _SQLITE_SIDECAR_SUFFIXES
+        ]
     for candidate in candidates:
         try:
             st = os.stat(candidate)
@@ -399,9 +427,10 @@ def _open_readonly(db_path: Path) -> "sqlite3.Connection":
       entire database's worth of real evidence.
     - Refuses (:func:`_refuse_non_regular_sqlite_paths`) to even attempt opening a
       main path or ``-journal``/``-wal``/``-shm`` sidecar that is not an ordinary
-      regular file -- BEFORE ``sqlite3.connect`` is called, since that call itself is
-      where a planted FIFO hangs (B-845, round 3, 2026-09-23; see that function's own
-      docstring for the two reproductions this closes).
+      regular file -- including the sidecars of a symlinked main path's own TARGET
+      (round 4) -- BEFORE ``sqlite3.connect`` is called, since that call itself is
+      where a planted FIFO hangs (B-845, rounds 3-4, 2026-09-23; see that function's
+      own docstring for the three reproductions this closes).
     """
     _refuse_non_regular_sqlite_paths(db_path)
     conn = sqlite3.connect(f"file:{_urlquote(db_path.as_posix(), safe='/')}?mode=ro", uri=True)
