@@ -2637,8 +2637,340 @@ def _is_agent_config_open_call(node: ast.AST) -> bool:
     return False
 
 
-def _has_cred_path_const(node: ast.AST) -> bool:
-    """True if the subtree contains a string constant naming a credential file."""
+# ===================== B-830: root-independent credential-path folding =====================
+# Three gates close the "assemble the path, don't spell it" bypass of _CRED_PATH_RE's
+# literal scan (`Path.home().joinpath('.aws', 'credentials')`, `os.path.join(os.path.
+# expanduser('~'), '.aws', 'credentials')`, ...), without turning every path-join call
+# into a credential finding:
+#
+#   Gate V (_FOLDED_CRED_PATH_RE) -- a CLOSED set of exactly 6 root-independent
+#   credential-FILENAME patterns a fold may assert on its own: it is a proper subset of
+#   _CRED_PATH_RE (which stays unchanged below, for the direct/literal scan) and
+#   deliberately excludes the generic "secrets?" pattern and any single-token filename.
+#   Folding a bare "secrets" segment onto an opaque, caller-controlled root would convict
+#   a legitimate secrets-manager client for doing exactly what it should
+#   (os.path.join(mount_point, "secrets", app_name)) -- that shape must stay clean.
+#
+#   Gate S (_FsFoldCtx.is_* / is_typed_path_join) -- what counts as a path-join "by
+#   construction": pathlib's `/` operator and constructors (TYPED -- bound by an import,
+#   like _path_module_aliases already requires for os.path.join elsewhere in this
+#   module), `.joinpath(...)` on ANY receiver (the method name alone is the signal),
+#   typed os.path.join/posixpath.join/ntpath.join, "/".join([...])/os.sep.join(...), and
+#   a narrow Tier B fallback: an untyped/unverified bare `join(...)` or `x.join(...)`
+#   called with 2+ positional args and no keywords. str.join takes exactly one
+#   (iterable) argument, so a 2+-arg call spelled `join` cannot be a string join --
+#   Tier B exists so a trivial aliasing trick (`os = os`, `op = os.path`,
+#   `self.h.joinpath(...)`) that defeats the TYPED check still doesn't defeat detection
+#   outright; it only forces the fold's root to stay opaque (no re-rooting trust).
+#
+#   Gate A (_fold_fs_path) -- the value-folding algebra itself: known string segments
+#   fold exactly; any segment that can't be determined folds to the sentinel _FOLD_UNK,
+#   which never appears in any Gate-V alternative, so it can only ever WIDEN a fold's
+#   candidate span, never complete a credential-filename match by itself. A bare Name
+#   folds through its bound value only when it is bound EXACTLY ONCE in the whole file
+#   via a single-target Assign/AnnAssign (depth-capped, cycle-guarded) -- otherwise it's
+#   unknown. `.expanduser()`/`.absolute()`/`.resolve()` and a suffix-preserving `str()`/
+#   `os.fspath()` pass their argument/receiver through unchanged.
+_FOLDED_CRED_PATH_RE = re.compile(
+    r"\.ssh/id_[a-z0-9_]+(?![a-z0-9_]|\.pub\b|-cert\.pub\b)"  # private keys only, never .pub/-cert.pub
+    r"|\.aws/credentials"
+    # `config.json` (not just `.docker/config`, the way _CRED_PATH_RE's laxer substring
+    # scan reads below): the Docker CLI's real credentials file is ~/.docker/config.json
+    # -- "config" with no extension isn't a file Docker ever writes there, so requiring
+    # the exact real filename keeps this closed, fold-only set precise, the same
+    # precision principle as the id_*/.pub exclusion above. _CRED_PATH_RE's broader
+    # prefix stays fine for the literal/direct scan, where a substring match against raw
+    # source text already needs the real ".json" text to be present somewhere nearby to
+    # read as this path at all.
+    r"|\.docker/config\.json"
+    r"|\.kube/config"
+    r"|\.config/gcloud"
+    r"|/proc/(?:self|\d+)/environ",
+    re.I,
+)
+_FOLD_UNK = "\x00"  # an unresolved path segment; never a substring of any pattern above
+_PATHLIB_CLASSES = frozenset(
+    {"Path", "PurePath", "PosixPath", "PurePosixPath", "WindowsPath", "PureWindowsPath"}
+)
+_PATH_JOIN_MODULES = frozenset({"os.path", "posixpath", "ntpath"})
+
+
+def _binding_site_counts(tree: ast.AST) -> "tuple[dict, dict]":
+    """`(counts, simple)` for *tree*: how many times each name is BOUND anywhere (any
+    binding form -- assignment, parameter, def/class, import, except-as, global/
+    nonlocal, match-capture), and the RHS of every simple single-name Assign/AnnAssign
+    target (last write wins per name in this dict; the caller keeps only the subset
+    whose `counts` is exactly 1, so a name assigned more than once is never treated as
+    resolvable through this map)."""
+    counts: dict = {}
+    simple: dict = {}
+
+    def bump(name: str) -> None:
+        counts[name] = counts.get(name, 0) + 1
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            bump(n.id)
+        elif isinstance(n, ast.arg):
+            bump(n.arg)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bump(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                if a.name != "*":
+                    bump(a.asname or a.name.split(".")[0])
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            bump(n.name)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            for nm in n.names:
+                # A global/nonlocal name's real value lives outside this scope, so it
+                # must never be treated as a resolvable single-site binding even if
+                # this is its only local occurrence -- force the count above 1.
+                counts[nm] = counts.get(nm, 0) + 2
+        elif _MATCH_BIND_NODES and isinstance(n, _MATCH_BIND_NODES) and n.name:
+            bump(n.name)
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    simple[t.id] = n.value
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.value is not None:
+            simple[n.target.id] = n.value
+    return counts, simple
+
+
+class _FsFoldCtx:
+    """Per-file context for `_fold_fs_path`, built once per tree and threaded through
+    every fold call: which names are bound to a path module / pathlib class / typed
+    join function, and which simple single-assignment names may be resolved by value."""
+
+    def __init__(self, tree: ast.AST):
+        self.path_aliases = _path_module_aliases(tree)
+        counts, simple = _binding_site_counts(tree)
+        self.single = {k: v for k, v in simple.items() if counts.get(k, 0) == 1}
+        # Every name bound ANYWHERE in the file, by any binding form. File-wide, not
+        # scope-aware (matches `ctx.single`'s own fail-safe granularity) -- a shadow
+        # anywhere in the file only ever makes a fold MORE conservative, never less.
+        self.shadowed = set(counts)
+
+        join_funcs, expanduser_funcs, ctor_names, pathlib_mods = set(), set(), set(), set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.module in _PATH_JOIN_MODULES:
+                for a in n.names:
+                    if a.name == "join":
+                        join_funcs.add(a.asname or a.name)
+                    elif a.name == "expanduser":
+                        expanduser_funcs.add(a.asname or a.name)
+            elif isinstance(n, ast.ImportFrom) and n.module == "pathlib":
+                for a in n.names:
+                    if a.name in _PATHLIB_CLASSES:
+                        ctor_names.add(a.asname or a.name)
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.name == "pathlib":
+                        pathlib_mods.add(a.asname or "pathlib")
+
+        # A name earns membership only by being bound EXACTLY ONCE, by its qualifying
+        # import -- a name bound any other way too (fail-safe direction) is untyped.
+        def import_bound(names: set) -> set:
+            return {nm for nm in names if counts.get(nm, 0) == 1}
+
+        self.join_funcs = import_bound(join_funcs)
+        self.expanduser_funcs = import_bound(expanduser_funcs)
+        self.ctor_names = import_bound(ctor_names)
+        self.pathlib_mods = import_bound(pathlib_mods)
+        self.memo: dict = {}
+
+    def is_suffix_preserving(self, call: ast.Call) -> bool:
+        """True for a single-argument wrapper that changes at most a leading '~'
+        (expanduser) or the outer type (str()/os.fspath()), never the literal tail --
+        so folding may recurse straight into its one argument."""
+        f = call.func
+        if isinstance(f, ast.Name):
+            if f.id in self.expanduser_funcs:
+                return True
+            # Bare str(...) is trusted as an identity wrapper only when `str` is never
+            # rebound anywhere in the file (as a parameter, import, assignment, ...).
+            return f.id == "str" and f.id not in self.shadowed
+        if isinstance(f, ast.Attribute) and f.attr in ("expanduser", "fspath"):
+            b = f.value
+            direct, viaos = self.path_aliases
+            if f.attr == "expanduser":
+                if isinstance(b, ast.Name) and b.id in direct:
+                    return True
+                return (
+                    isinstance(b, ast.Attribute)
+                    and b.attr == "path"
+                    and isinstance(b.value, ast.Name)
+                    and b.value.id in viaos
+                )
+            return isinstance(b, ast.Name) and b.id in viaos  # os.fspath(...)
+        return False
+
+    def is_pathlib_ctor(self, f: ast.AST, visiting: frozenset = frozenset()) -> bool:
+        if isinstance(f, ast.Name):
+            if f.id in self.ctor_names:
+                return True
+            rhs = self.single.get(f.id)
+            if rhs is not None and f.id not in visiting and len(visiting) < 4:
+                return self.is_pathlib_ctor(rhs, visiting | {f.id})
+            return False
+        return (
+            isinstance(f, ast.Attribute)
+            and f.attr in _PATHLIB_CLASSES
+            and isinstance(f.value, ast.Name)
+            and f.value.id in self.pathlib_mods
+        )
+
+    def is_typed_path_join(self, call: ast.Call) -> bool:
+        f = call.func
+        if isinstance(f, ast.Name):
+            return f.id in self.join_funcs
+        return _is_path_join_call(call, self.path_aliases)
+
+    def is_slash_sep(self, x: ast.AST, visiting: frozenset = frozenset()) -> bool:
+        if isinstance(x, ast.Constant):
+            return x.value == "/"
+        if isinstance(x, ast.Attribute) and x.attr == "sep":
+            b = x.value
+            direct, viaos = self.path_aliases
+            if isinstance(b, ast.Name) and (b.id in viaos or b.id in direct):
+                return True
+            return (
+                isinstance(b, ast.Attribute)
+                and b.attr == "path"
+                and isinstance(b.value, ast.Name)
+                and b.value.id in viaos
+            )
+        if isinstance(x, ast.Name) and x.id in self.single and x.id not in visiting:
+            return self.is_slash_sep(self.single[x.id], visiting | {x.id})
+        return False
+
+
+def _fold_pjoin(acc: "str | None", part: str) -> str:
+    """posixpath.join / pathlib `/` semantics: a later absolute component re-roots the
+    accumulator instead of appending to it."""
+    if acc is None or acc == "":
+        return part
+    if part.startswith("/"):
+        return part
+    return acc + ("" if acc.endswith("/") else "/") + part
+
+
+def _fold_seg(x: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset) -> "str | None":
+    """A single path component's folded value: a string literal, a name resolved
+    through its one binding site, or a nested path construction's own fold. `None`
+    when the segment can't be determined at all (the caller substitutes _FOLD_UNK)."""
+    if isinstance(x, ast.Constant) and isinstance(x.value, str):
+        return x.value
+    if isinstance(x, ast.Name):
+        if x.id in visiting or x.id not in ctx.single or len(visiting) >= 4:
+            return None
+        return _fold_seg(ctx.single[x.id], ctx, visiting | {x.id})
+    return _fold_fs_path(x, ctx, visiting)
+
+
+def _fold_fs_path(node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset = frozenset()) -> "str | None":
+    """Memoized, cycle-guarded entry point -- every subtree is folded at most once per
+    (node, visiting-set) pair."""
+    key = (id(node), visiting)
+    if key in ctx.memo:
+        return ctx.memo[key]
+    ctx.memo[key] = None  # cycle guard: a self-referential fold resolves to unknown
+    res = _fold_fs_path_uncached(node, ctx, visiting)
+    ctx.memo[key] = res
+    return res
+
+
+def _fold_fs_path_uncached(node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset) -> "str | None":
+    def seg_or_unk(x: ast.AST) -> str:
+        if isinstance(x, ast.Starred):
+            return _FOLD_UNK
+        s = _fold_seg(x, ctx, visiting)
+        return _FOLD_UNK if s is None else s
+
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        # pathlib's `/` operator. Fold it only when at least one side is provably
+        # path-shaped -- otherwise this is ordinary arithmetic, not a path join.
+        right = _fold_seg(node.right, ctx, visiting)
+        left = _fold_seg(node.left, ctx, visiting)
+        left_is_path = left is not None and not isinstance(node.left, ast.Constant)
+        if right is None and not left_is_path:
+            return None
+        return _fold_pjoin(_FOLD_UNK if left is None else left, _FOLD_UNK if right is None else right)
+
+    if not isinstance(node, ast.Call):
+        return None
+    f = node.func
+    args = []
+    for a in node.args:  # splice a literal *[...] so join(*[a, b]) reads like join(a, b)
+        if isinstance(a, ast.Starred) and isinstance(a.value, (ast.List, ast.Tuple)):
+            args.extend(a.value.elts)
+        else:
+            args.append(a)
+
+    # Suffix-preserving wrappers change at most a leading '~' or the outer type, never
+    # the literal tail -- the tail read straight through them is exact.
+    if ctx.is_suffix_preserving(node) and len(args) == 1 and not node.keywords:
+        return _fold_seg(args[0], ctx, visiting)
+    if (
+        isinstance(f, ast.Attribute)
+        and f.attr in ("expanduser", "absolute", "resolve")
+        and not args
+        and not node.keywords
+    ):
+        inner = _fold_fs_path(f.value, ctx, visiting)
+        if inner is not None:
+            return inner
+    if isinstance(f, ast.Attribute) and f.attr == "joinpath":
+        # Gate S: `.joinpath(...)` counts on ANY receiver -- the method name alone is
+        # the signal; an unresolved receiver just folds to _FOLD_UNK.
+        acc = seg_or_unk(f.value)
+        for a in args:
+            acc = _fold_pjoin(acc, seg_or_unk(a))
+        return acc
+    if ctx.is_pathlib_ctor(f) and args:
+        acc = None
+        for a in args:
+            acc = _fold_pjoin(acc, seg_or_unk(a))
+        return acc
+    if args and ctx.is_typed_path_join(node):
+        acc = None
+        for a in args:
+            acc = _fold_pjoin(acc, seg_or_unk(a))
+        return acc
+    if isinstance(f, ast.Name) and f.id == "join" and len(args) >= 2 and not node.keywords:
+        # Tier B: an unverified bare `join(...)` name called with 2+ positional args --
+        # str.join is unary, so this cannot be a string join. Root forced opaque since
+        # the join semantics (and thus re-rooting) aren't proven.
+        return _FOLD_UNK + "".join("/" + seg_or_unk(a) for a in args)
+    if isinstance(f, ast.Attribute) and f.attr == "join":
+        recv = f.value
+        if len(args) == 1 and isinstance(args[0], (ast.List, ast.Tuple)) and ctx.is_slash_sep(recv):
+            return "/".join(seg_or_unk(e) for e in args[0].elts)
+        if (
+            len(args) >= 2
+            and not node.keywords
+            and not (isinstance(recv, ast.Constant) and isinstance(recv.value, (str, bytes)))
+        ):
+            # Tier B, attribute form (`x.join(a, b, ...)`) -- same reasoning as above.
+            return _FOLD_UNK + "".join("/" + seg_or_unk(a) for a in args)
+    return None
+
+
+def _has_folded_cred_path(node: ast.AST, ctx: "_FsFoldCtx") -> bool:
+    """True if any subtree of *node* folds to a value containing one of the closed
+    Gate-V credential-filename patterns (see the module comment above)."""
+    for n in ast.walk(node):
+        fs = _fold_fs_path(n, ctx)
+        if fs and _FOLDED_CRED_PATH_RE.search(fs):
+            return True
+    return False
+
+
+def _has_cred_path_const(node: ast.AST, ctx: "_FsFoldCtx | None" = None) -> bool:
+    """True if the subtree contains a string constant naming a credential file, OR --
+    when *ctx* is given -- a root-independent credential path assembled via typed
+    path-join construction (B-830; see the Gate V/S/A block above)."""
     for n in ast.walk(node):
         if (
             isinstance(n, ast.Constant)
@@ -2646,7 +2978,7 @@ def _has_cred_path_const(node: ast.AST) -> bool:
             and _CRED_PATH_RE.search(n.value)
         ):
             return True
-    return False
+    return ctx is not None and _has_folded_cred_path(node, ctx)
 
 
 # B-422 follow-up (C-348 adversarial re-review): base-gating put/patch/request on the
@@ -2722,14 +3054,14 @@ def _is_net_sink(func: ast.AST, net_sink_aliases: frozenset[str] = frozenset()) 
     return False
 
 
-def _cred_tainted_names(tree: ast.AST) -> set[str]:
+def _cred_tainted_names(tree: ast.AST, ctx: "_FsFoldCtx | None" = None) -> set[str]:
     """Names whose value derives from reading a credential file (transitively)."""
     tainted: set[str] = set()
     assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
     for _ in range(4):  # small fixpoint for multi-step flows (p = path; k = open(p).read())
         changed = False
         for a in assigns:
-            if _has_cred_path_const(a.value) or (_names_in(a.value) & tainted):
+            if _has_cred_path_const(a.value, ctx) or (_names_in(a.value) & tainted):
                 for t in a.targets:
                     if isinstance(t, ast.Name) and t.id not in tainted:
                         tainted.add(t.id)
@@ -5330,9 +5662,13 @@ def analyze_python(
                 continue
 
     # Taint: credential-FILE contents reaching a network sink (read secret -> send out).
-    # Cheap pre-filter on the raw source so the propagation runs only when relevant.
-    if _CRED_PATH_RE.search(source):
-        cred_tainted = _cred_tainted_names(tree)
+    # Cheap pre-filter on the raw source so the propagation runs only when relevant --
+    # widened by B-830 with a root-independent fold (see the Gate V/S/A block above
+    # _has_cred_path_const) so a credential path assembled via typed path-join
+    # construction (never spelled as one literal) still pre-filters in.
+    _fsctx = _FsFoldCtx(tree)
+    if _CRED_PATH_RE.search(source) or _has_folded_cred_path(tree, _fsctx):
+        cred_tainted = _cred_tainted_names(tree, _fsctx)
         if cred_tainted:
             # B-415: names sourced PURELY from the in-cluster K8s service-account
             # token -- computed once per file, only when there's anything credential-
@@ -6732,7 +7068,7 @@ def _imported_sink_names(tree: ast.AST) -> tuple:
     return net_names, exec_names
 
 
-def _capability_families_in_tree(tree: ast.AST) -> set:
+def _capability_families_in_tree(tree: ast.AST, ctx: "_FsFoldCtx | None" = None) -> set:
     fams: set = set()
     # Same alias resolution the engine's own rules use (B-422/C-348): without it
     # `s = socket.socket(); s.connect(...)` and `sess = requests.Session(); sess.put(...)`
@@ -6772,7 +7108,7 @@ def _capability_families_in_tree(tree: ast.AST) -> set:
             fams.add("write")
         if name in _CAP_PATHLIB_READ_ATTRS:
             fams.add("read")
-        if _has_cred_path_const(node):
+        if _has_cred_path_const(node, ctx):
             fams.add("cred")
     return fams
 
@@ -6806,7 +7142,7 @@ def capability_families(sources) -> set:
             tree = ast.parse(src)
         except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
             continue
-        fams |= _capability_families_in_tree(tree)
+        fams |= _capability_families_in_tree(tree, _FsFoldCtx(tree))
     return fams
 
 
