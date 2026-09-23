@@ -213,8 +213,11 @@ def test_hardcoded_secret_survives_dangerous_sink_flood():
     function) must survive an earlier pass filling `out` first."""
     result = analyze_python(_BAD_SECRET_BEHIND_FLOOD, "flood2.py")
     rules = _rules(result)
-    assert "HARDCODED_PROVIDER_SECRET" in rules
-    hit = next(f for f in result if f.rule == "HARDCODED_PROVIDER_SECRET")
+    # The plain-assignment shape carries its own rule name since the test-fixture
+    # carve-out split it from the env-entangled sites; it is still emitted as crit
+    # here (the WARN routing happens in checks/_vet.py), so it must outrank the flood.
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in rules
+    hit = next(f for f in result if f.rule == "HARDCODED_PROVIDER_SECRET_ASSIGN")
     assert hit.severity == "crit"
 
 
@@ -491,7 +494,7 @@ def test_file_under_cap_is_unchanged():
     # HARDCODED_PROVIDER_SECRET (crit, from the last plain-assignment pass) in this
     # source — under the cap, that pre-existing discovery order must survive
     # untouched, i.e. NOT severity-sorted.
-    assert rules.index("DANGEROUS_SINK") < rules.index("HARDCODED_PROVIDER_SECRET")
+    assert rules.index("DANGEROUS_SINK") < rules.index("HARDCODED_PROVIDER_SECRET_ASSIGN")
 
 
 def test_unanalyzable_source_untouched_by_truncation_logic():
