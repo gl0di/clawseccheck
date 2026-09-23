@@ -159,7 +159,10 @@ from .trajectory import (
     _COMPILED_TOOL_FIELDS,
     _compiled_tool_entry,
     _MAX_COMPILED_LINE_LEN,
-    _MAX_TOOL_DEFS,
+    _MAX_ROUND_ROBIN_SOURCES,
+    _MAX_TOOL_DEFS_PER_SOURCE,
+    _MAX_TOOL_DEFS_ROUND_QUOTA,
+    _MAX_TOOL_DEFS_TOTAL,
     _MAX_TOOLS_PER_EVENT,
     _SCHEMA_VERSION,
     _TRACE_SCHEMA,
@@ -1358,68 +1361,94 @@ def _scan_sqlite_event_json(
         conn.close()
 
 
-def _read_and_process_db(
+def _read_and_collect_db(
     db_path: Path,
     max_rows: int,
     max_bytes: int,
     skip_prefix_count: int,
-    seen: "set[tuple]",
-    tool_defs: "list[dict]",
-    meta: dict,
+    values: "list[str]",
 ) -> "tuple[int, _SqliteEventJsonStats, int]":
-    """Stream *db_path* through :func:`_scan_sqlite_event_json` and apply the
-    ``context.compiled`` filter/parse/tool-extraction pipeline
-    :func:`read_compiled_tool_descriptions` has always used, mutating *tool_defs*/
-    *meta* in place. Returns ``(new_bytes, stats, yielded_count)``.
+    """Stream *db_path* through :func:`_scan_sqlite_event_json`, appending each newly
+    accepted raw ``event_json`` value to *values* (mutated in place, across possibly
+    several calls for the same database -- see ``skip_prefix_count`` below). Returns
+    ``(new_bytes, stats, yielded_count)``.
+
+    **B-933 merge -- extraction moved out of this function.** Before the B-933 merge,
+    this function (then named ``_read_and_process_db``) applied the ``context.compiled``
+    filter/parse/tool-extraction pipeline INLINE, as each row streamed off the cursor,
+    appending accepted tool-definition entries directly into a SHARED, cross-database
+    ``tool_defs`` list gated by a single global cap. That inline design is exactly what
+    let one database's content exhaust the whole definition cap before a later database
+    was ever examined (B-933's starvation bug) -- fixing it required decoupling "how
+    many raw bytes get READ from this database" (this function's only remaining job,
+    entirely B-852's concern: the floor/depth/drain fairness this function is called
+    from below) from "which of the ALREADY-READ rows' definitions get KEPT" (now
+    :func:`_iter_db_tool_candidates`, run once per database from that database's own
+    entry in :data:`db_values`, AFTER every database's byte-fair read has finished,
+    through the same quota-bounded round-robin driver
+    ``trajectory.read_compiled_tool_descriptions`` already uses for the JSONL sidecar --
+    see :func:`read_compiled_tool_descriptions`'s own docstring for the fairness
+    argument). This mirrors ``trajectory._read_sqlite_event_json``'s own layering
+    exactly: a plain accepted-values list in, a lazy per-value generator
+    (:func:`_iter_db_tool_candidates`) out, with zero SQLite-specific extraction logic
+    duplicated in the round-robin driver itself. The BYTE read stays exactly as bounded
+    as it was before this split -- :func:`_scan_sqlite_event_json`'s own cursor is still
+    iterated lazily, never ``.fetchall()``'d -- only WHERE an accepted row's value is
+    held changed: appended to *values* here, instead of being immediately parsed into a
+    small dict and, past the old (pre-B-933) global cap, mostly discarded. See this
+    module's own :func:`read_compiled_tool_descriptions` docstring, "round 3" paragraph,
+    for what that means for peak memory.
 
     *skip_prefix_count* (B-852 round 5) skips the first N values the generator yields,
     WITHOUT charging or processing them -- the mechanism that lets
     :func:`read_compiled_tool_descriptions`'s DEPTH pass re-run this same query with a
     wider cap and pick up only the rows BEYOND what its own FLOOR pass already counted
-    for this database, instead of re-parsing (and double-counting ``meta["events"]``
-    for) the same prefix twice. This is a POSITIONAL skip (the Nth value the generator
-    yields, in ``ORDER BY rowid DESC`` order), never a content comparison: two
-    genuinely distinct rows that happen to carry byte-identical ``event_json`` (a real,
-    unremarkable case -- two identical padded benign events) must both still be counted
-    once each, which a "have I seen this exact string before" dedup would get wrong.
-    The generator's own ordering is deterministic for a stable underlying table (see
-    :data:`_SELECT_TRAJECTORY_EVENT_JSON`'s own ``ORDER BY rowid DESC`` comment), so a
-    second call against the SAME database with a larger ``max_rows``/``max_bytes``
-    re-yields the exact same prefix a smaller call already returned, in the same order
-    -- skipping by position is exact, not a heuristic, PROVIDED the table is not
-    concurrently rewritten between the two calls (each call opens its own transaction --
-    see :func:`_open_and_verify_table`). The real TOCTOU risk this leaves is narrower
-    than it might sound, and different in shape from the gap :func:`sqlite_session_ids`/
-    :func:`corroborate` already accept (those read the whole table in ONE call each, so
-    their risk is a schema swap mid-read, already closed by the held transaction; this
-    function's own risk is specific to being called TWICE, positionally, across two
-    SEPARATE transactions): a concurrent ``DELETE`` that removes one or more of the rows
-    THIS call already yielded -- i.e. among the newest rows, by ``rowid DESC`` order --
-    between this call returning and the NEXT call (with a wider cap) starting, would
-    shift every row after the deleted one up by one position, so the next call's
-    positional ``skip_prefix_count`` would skip the WRONG rows (either re-processing one
-    already counted, or silently skipping one never actually seen). This is real but
-    low-severity: it requires a concurrent WRITER with access to this exact database
-    file, and an attacker who already has that could simply delete the evidence
-    directly, which is strictly more effective than trying to desynchronize this one
-    positional offset.
+    for this database, instead of re-collecting (and double-counting, once
+    :func:`_iter_db_tool_candidates` parses it) the same prefix twice. This is a
+    POSITIONAL skip (the Nth value the generator yields, in ``ORDER BY rowid DESC``
+    order), never a content comparison: two genuinely distinct rows that happen to carry
+    byte-identical ``event_json`` (a real, unremarkable case -- two identical padded
+    benign events) must both still be counted once each, which a "have I seen this exact
+    string before" dedup would get wrong. The generator's own ordering is deterministic
+    for a stable underlying table (see :data:`_SELECT_TRAJECTORY_EVENT_JSON`'s own
+    ``ORDER BY rowid DESC`` comment), so a second call against the SAME database with a
+    larger ``max_rows``/``max_bytes`` re-yields the exact same prefix a smaller call
+    already returned, in the same order -- skipping by position is exact, not a
+    heuristic, PROVIDED the table is not concurrently rewritten between the two calls
+    (each call opens its own transaction -- see :func:`_open_and_verify_table`). The
+    real TOCTOU risk this leaves is narrower than it might sound, and different in shape
+    from the gap :func:`sqlite_session_ids`/:func:`corroborate` already accept (those
+    read the whole table in ONE call each, so their risk is a schema swap mid-read,
+    already closed by the held transaction; this function's own risk is specific to
+    being called TWICE, positionally, across two SEPARATE transactions): a concurrent
+    ``DELETE`` that removes one or more of the rows THIS call already yielded -- i.e.
+    among the newest rows, by ``rowid DESC`` order -- between this call returning and the
+    NEXT call (with a wider cap) starting, would shift every row after the deleted one
+    up by one position, so the next call's positional ``skip_prefix_count`` would skip
+    the WRONG rows (either re-processing one already counted, or silently skipping one
+    never actually seen). This is real but low-severity: it requires a concurrent WRITER
+    with access to this exact database file, and an attacker who already has that could
+    simply delete the evidence directly, which is strictly more effective than trying to
+    desynchronize this one positional offset.
 
     The more REALISTIC live-agent risk in this same shape is a concurrent ``INSERT``
     (an agent actively writing new trajectory events while this reader's two/three
     calls span it), not a ``DELETE`` -- a live agent's own trajectory writer only ever
     appends. A new row lands at the FRONT of the ``rowid DESC`` order, which desyncs
     the very same positional ``skip_prefix_count`` the paragraph above describes, but
-    in the opposite direction: the net observed effect is ``meta["events"]``
-    DOUBLE-COUNTING one already-seen ``context.compiled`` record across the two calls
-    (e.g. disclosing 8 when only 6 real records exist), never SKIPPING a
-    pre-existing ("old") row outright. This is a benign double-count, not a
-    lost-detection risk -- unlike the ``DELETE`` case above, the evidence itself is not
-    gone, so a re-count inflates the disclosed total without dropping real content.
+    in the opposite direction: the net observed effect is *values* carrying one
+    already-seen raw row TWICE across the two calls -- once :func:`_iter_db_tool_
+    candidates` parses it, ``meta["events"]`` DOUBLE-COUNTS one already-seen
+    ``context.compiled`` record (e.g. disclosing 8 when only 6 real records exist),
+    never SKIPPING a pre-existing ("old") row outright. This is a benign double-count,
+    not a lost-detection risk -- unlike the ``DELETE`` case above, the evidence itself
+    is not gone, so a re-count inflates the disclosed total without dropping real
+    content.
 
     ``yielded_count`` is the TOTAL number of values the generator yielded this call
-    (whether skipped or processed) -- what the caller needs to compute the NEXT call's
-    own ``skip_prefix_count``, since a byte cap (not just a row cap) can end a read
-    before ``max_rows`` values are seen.
+    (whether skipped or newly appended) -- what the caller needs to compute the NEXT
+    call's own ``skip_prefix_count``, since a byte cap (not just a row cap) can end a
+    read before ``max_rows`` values are seen.
     """
     stats = _SqliteEventJsonStats()
     new_bytes = 0
@@ -1429,23 +1458,30 @@ def _read_and_process_db(
         if idx <= skip_prefix_count:
             continue
         new_bytes += len(raw)
-        # Cheap pre-filter before the full JSON parse -- same idiom the JSONL
-        # reader uses, so most rows (the overwhelming majority are NOT
-        # context.compiled) never reach json.loads at all.
+        values.append(raw)
+    return new_bytes, stats, idx
+
+
+def _iter_db_tool_candidates(values: "list[str]", meta: dict):
+    """Yield each candidate tool-definition dict found in *values* -- the accepted
+    ``event_json`` rows for ONE db, accumulated across every floor/depth/drain pass
+    :func:`read_compiled_tool_descriptions` ran for it (see :func:`_read_and_collect_db`
+    and that function's own docstring for why extraction is no longer inline there).
+
+    Extracted from ``read_compiled_tool_descriptions`` (B-933 round 2), the SQLite
+    mirror of ``trajectory._iter_source_tool_candidates`` -- same division of labor:
+    this generator owns parsing/gating and ``meta[...]`` disclosure; the caller (the
+    round-robin driver) owns cross-source dedup (``seen``) and both def-count caps. No
+    change to the byte/row-fair READ itself (B-852's floor/depth/drain system, entirely
+    unmodified by this split) -- those bytes are already accepted, unconditionally with
+    respect to any definition-count cap, before this generator is ever constructed.
+    """
+    for raw in values:
+        # Cheap pre-filter before the full JSON parse -- same idiom the JSONL reader
+        # uses, so most rows (the overwhelming majority are NOT context.compiled)
+        # never reach json.loads at all.
         if f'"{_COMPILED_EVENT_TYPE}"' not in raw:
             continue
-        # Defense in depth, SCOPED to rows that reached this line: retracted an
-        # earlier version of this comment that claimed this recheck "removes any
-        # residual doubt" full stop (round-2 adversarial review, B-811,
-        # 2026-09-15) -- that overstated it. The pre-filter above already dropped
-        # every row not containing the event-type substring, so a row whose
-        # character count only grows past _MAX_COMPILED_LINE_LEN AFTER
-        # text_factory's errors="replace" decoding (relative to what SQLite's
-        # length(CAST(...AS BLOB)) measured on the original bytes) is caught here
-        # ONLY if it also survived that pre-filter; this is not a claim about
-        # every row _SELECT_TRAJECTORY_EVENT_JSON ever returns. Still worth doing
-        # -- it costs nothing and closes the gap for the rows this function
-        # actually goes on to parse.
         if len(raw) > _MAX_COMPILED_LINE_LEN:
             meta["truncated"] = True
             continue
@@ -1484,18 +1520,7 @@ def _read_and_process_db(
                 entry = _compiled_tool_entry(tool, field)
                 if entry is None:
                     continue
-                key = (
-                    entry["name"], entry["description"],
-                    tuple(entry["params"]), entry["field"],
-                )
-                if key in seen:
-                    continue
-                if len(tool_defs) >= _MAX_TOOL_DEFS:
-                    meta["truncated"] = True
-                    break
-                seen.add(key)
-                tool_defs.append(entry)
-    return new_bytes, stats, idx
+                yield entry
 
 
 def read_compiled_tool_descriptions(
@@ -1788,9 +1813,30 @@ def read_compiled_tool_descriptions(
 
     ``meta`` reports ``present`` (any db read), ``dbs_found``, ``dbs_read``,
     ``dbs_unreadable``, ``dbs_budget_starved``, ``events`` (``context.compiled`` records
-    parsed), ``truncated``, ``unknown_version`` and ``non_text_rows`` (see
-    :func:`_read_sqlite_event_json`) -- same vocabulary as the JSONL reader's meta where
-    they overlap, so a caller can treat both uniformly for the fields both have.
+    parsed), ``truncated`` (a per-db byte/row cap, an oversized row, a budget-starved db
+    -- see ``dbs_budget_starved`` below -- a per-SOURCE definition cap --
+    ``_MAX_TOOL_DEFS_PER_SOURCE``, reset for each db -- or the outer TOTAL definition
+    ceiling -- ``_MAX_TOOL_DEFS_TOTAL``, shared across all dbs -- was hit),
+    ``unknown_version`` and ``non_text_rows`` (see :func:`_scan_sqlite_event_json`) --
+    same vocabulary as the JSONL reader's meta where they overlap, so a caller can treat
+    both uniformly for the fields both have. The two-tier definition-cap split (B-933)
+    mirrors the JSONL reader's own split EXACTLY -- see that reader's DoS-bounds comment
+    in ``trajectory.py`` for the full rationale -- and
+    ``tests/test_b185_compiled_tool_poisoning.py`` pins that the two readers still agree
+    after a cap is hit, not just when neither is. ``dbs_read``/``dbs_unreadable``/
+    ``dbs_budget_starved``/``non_text_rows`` are computed ENTIRELY by the byte-fair
+    floor/depth/drain read below (B-852, unmodified by the B-933 merge) -- what actually
+    got read from disk. Definition extraction across the databases that WERE read then
+    runs through the same quota-bounded ROUND-ROBIN driver the JSONL reader uses (B-933
+    round 2, see ``_MAX_TOOL_DEFS_ROUND_QUOTA`` in ``trajectory.py``), fed from each
+    database's own accepted rows (:data:`db_values`, populated by the floor/depth/drain
+    read) rather than from one unconditional whole-db read the way the JSONL reader's
+    per-file generator is -- so no group of decoy dbs can exhaust the TOTAL definition
+    ceiling before a later db's definitions are ever considered, AND (independently,
+    B-852) no single content-heavy db can exhaust the aggregate BYTE budget before a
+    later db is ever read at all. These are two SEPARATE fairness guarantees at two
+    different stages of this function, closing two different starvation shapes -- see
+    the "round 3" paragraph below for exactly where the boundary between them now sits.
 
     ``dbs_budget_starved`` (B-852 round 5, extended round 7) counts databases that were
     found (``dbs_found``) but received NO read at all -- not even their newest row --
@@ -1807,7 +1853,10 @@ def read_compiled_tool_descriptions(
     never counted here even when its OPTIONAL depth pass is skipped for the same reason;
     that case is disclosed via ``truncated`` alone, the same as any other ordinary cap.
     See ``checks/_mcp.py``'s own disclosure text for how the two are told apart for a
-    reader of the rendered Finding.
+    reader of the rendered Finding. This is entirely orthogonal to the definition-count
+    caps above -- a database can be ``dbs_budget_starved`` (a pure byte-read fairness
+    outcome) with no bearing on whether OTHER, successfully-read databases go on to lose
+    definitions to the round-robin driver's own caps, and vice versa.
 
     This is POST-HOC FORENSIC evidence, same limit as the JSONL reader: it reports what
     WAS sent to the model in sessions that already ran. It cannot pre-clear a live MCP
@@ -1819,11 +1868,23 @@ def read_compiled_tool_descriptions(
 
     **B-852 round 3 -- streaming, not two-phase, PER DATABASE.** Each individual
     database read still drives :func:`_scan_sqlite_event_json` directly (via
-    :func:`_read_and_process_db`) and applies the substring pre-filter / JSON parse /
-    tool-definition extraction to each row AS IT STREAMS off the cursor, so a
-    non-matching row's text never outlives the row it arrived in, and no single call
-    ever materializes a whole database's admitted content into a list. Round 5's
-    floor/depth split, and round 7's added DRAIN phase (both above), mean a database CAN
+    :func:`_read_and_collect_db`), so a rejected/oversized row's text never outlives the
+    row it arrived in (the cursor is iterated lazily, never ``.fetchall()``'d), and no
+    single call ever materializes more than one row's own text at a time while reading.
+    **B-933 merge note:** what this paragraph originally described as the SAME call also
+    applying "the substring pre-filter / JSON parse / tool-definition extraction to each
+    row AS IT STREAMS" is no longer true -- extraction now happens once per database,
+    lazily, in :func:`_iter_db_tool_candidates`, AFTER every floor/depth/drain pass for
+    that database has finished (see :func:`_read_and_collect_db`'s own docstring for
+    why). This means a database's accepted rows are held as a plain list of raw strings
+    (:data:`db_values`) for the remainder of this call, rather than being converted
+    immediately into small parsed dicts and, past the old (pre-B-933) global definition
+    cap, mostly discarded -- a real, but still BOUNDED, increase in peak memory for a
+    heavily-capped call: ``db_values[db_path]`` is bounded by the exact same
+    per-database/aggregate byte caps this function has always enforced, just held as
+    strings a little longer, never the unbounded whole-database materialization round 3
+    itself fixed. Round 5's floor/depth split, and round 7's added DRAIN phase (both
+    above), mean a database CAN
     now be read MULTIPLE TIMES ACROSS SEPARATE CALLS -- the floor read, one per depth
     round, and potentially several DRAIN PASSES, each running TWO SWEEPS (round 11: see
     this function's own docstring, "round 11" paragraph) -- the number of passes is
@@ -1858,6 +1919,15 @@ def read_compiled_tool_descriptions(
 
     seen: set[tuple] = set()
 
+    # Per-database accepted event_json values, accumulated across every floor/depth/
+    # drain pass below (B-933 merge) -- fed to the round-robin definition-extraction
+    # driver, at the very end of this function, once every database's byte-fair read
+    # has finished. One entry per db found, even a db never actually read (stays an
+    # empty list -- a generator over an empty list is exactly as cheap as never
+    # constructing it: an immediate StopIteration on the round-robin driver's first
+    # `next()` call).
+    db_values: "dict[Path, list[str]]" = {db_path: [] for db_path in dbs}
+
     # -----------------------------------------------------------------------
     # PASS 1 -- FLOOR (unconditional; see this function's own docstring above).
     # -----------------------------------------------------------------------
@@ -1873,8 +1943,8 @@ def read_compiled_tool_descriptions(
     depth_candidates: "list[Path]" = []
 
     for db_path in floor_dbs:
-        new_bytes, stats, yielded = _read_and_process_db(
-            db_path, floor_rows, floor_bytes, 0, seen, tool_defs, meta,
+        new_bytes, stats, yielded = _read_and_collect_db(
+            db_path, floor_rows, floor_bytes, 0, db_values[db_path],
         )
         if stats.unreadable:
             meta["dbs_unreadable"] += 1
@@ -1950,9 +2020,9 @@ def read_compiled_tool_descriptions(
                     # prior total. Do not (re)open it.
                     continue
                 skip = cum_yielded.get(db_path, 0)
-                new_bytes, stats, total_yielded = _read_and_process_db(
+                new_bytes, stats, total_yielded = _read_and_collect_db(
                     db_path, max_content_rows_per_db, new_cap_bytes, skip,
-                    seen, tool_defs, meta,
+                    db_values[db_path],
                 )
                 # Charge the ACTUAL new bytes consumed, not the nominal share --
                 # what a database did NOT need this round stays in `remaining` for
@@ -1963,7 +2033,7 @@ def read_compiled_tool_descriptions(
                 # `total_yielded` is the generator's TOTAL yield count for this call,
                 # from its very first row -- not just what this call skipped past --
                 # so it directly replaces (never adds to) the running skip offset for
-                # this database's next read. See `_read_and_process_db`'s own
+                # this database's next read. See `_read_and_collect_db`'s own
                 # docstring for why. B-852 round 7: guarded on `not stats.unreadable`
                 # -- an unreadable attempt always yields `total_yielded == 0`
                 # (nothing is ever read before the open itself fails), so an
@@ -2041,9 +2111,9 @@ def read_compiled_tool_descriptions(
             has_floor = db_path in floor_bytes_used
             prior_bytes = cum_bytes.get(db_path, 0)
             skip = cum_yielded.get(db_path, 0)
-            new_bytes, stats, total_yielded = _read_and_process_db(
+            new_bytes, stats, total_yielded = _read_and_collect_db(
                 db_path, max_content_rows_per_db, turn_cap_bytes, skip,
-                seen, tool_defs, meta,
+                db_values[db_path],
             )
             remaining -= new_bytes
             cum_bytes[db_path] = prior_bytes + new_bytes
@@ -2139,7 +2209,7 @@ def read_compiled_tool_descriptions(
             # B-852 round 7: `stats` is only the LAST attempt's outcome -- a database
             # that yielded real content in an EARLIER round/phase and only became
             # unreadable (corrupted/deleted mid-scan) on a LATER one already has that
-            # earlier content sitting in `tool_defs`, so counting it `dbs_unreadable`
+            # earlier content sitting in `db_values`, so counting it `dbs_unreadable`
             # ("never opened/scanned at all") was a real, reproduced inconsistency. A
             # database only genuinely earns `dbs_unreadable` when `cum_yielded` is
             # STILL 0 -- nothing was EVER successfully read from it, across every
@@ -2163,6 +2233,92 @@ def read_compiled_tool_descriptions(
             meta["truncated"] = True
             continue
         meta["dbs_read"] += 1
+
+    # -----------------------------------------------------------------------
+    # DEFINITION EXTRACTION -- quota-bounded ROUND-ROBIN across every database's own
+    # accepted rows (B-933; see this function's own docstring above). Every db found
+    # has an entry in `db_values` (empty for one never read, or read to zero matching
+    # rows), so this stage never needs to know which of the above three passes -- or
+    # none of them -- is what actually populated it. Mirrors
+    # `trajectory.read_compiled_tool_descriptions`'s own round-robin driver
+    # EXACTLY -- see that function's DoS-bounds comment (`_MAX_TOOL_DEFS_ROUND_QUOTA`
+    # et al, in trajectory.py) for the full starvation rationale; kept in lock-step so
+    # the two readers cannot silently diverge on fairness policy.
+    #
+    # Unlike the JSONL reader (where `max_files` stays bounded even under
+    # `--exhaustive`'s `scanbudget` widening, per that reader's own "structurally
+    # unreachable today" comment), `max_dbs` HERE can be widened to fully unbounded
+    # under `--exhaustive` (`scanbudget.EXHAUSTIVE_LIMITS.sqlite_max_dbs`) -- B-852's
+    # own `max_dbs` parameter, which did not exist when B-933 first wrote this driver
+    # for the JSONL side. So the `overflow` tail below, sequential and per-source
+    # capped, IS a reachable path here under `--exhaustive` with a large enough
+    # fleet, not just "kept for parity" the way it is on the JSONL side.
+    # -----------------------------------------------------------------------
+    readable = list(dbs)
+    fair_group, overflow = readable[:_MAX_ROUND_ROBIN_SOURCES], readable[_MAX_ROUND_ROBIN_SOURCES:]
+    gens = {s: _iter_db_tool_candidates(db_values[s], meta) for s in fair_group}
+    source_new_defs = {s: 0 for s in fair_group}
+    done: set = set()
+    n, round_num = len(fair_group), 0
+    while (gens.keys() - done) and len(tool_defs) < _MAX_TOOL_DEFS_TOTAL:
+        progressed = False
+        order = fair_group[round_num % n:] + fair_group[:round_num % n] if n else []
+        for s in order:
+            if s in done:
+                continue
+            if len(tool_defs) >= _MAX_TOOL_DEFS_TOTAL:
+                break
+            quota_used = 0
+            while quota_used < _MAX_TOOL_DEFS_ROUND_QUOTA and len(tool_defs) < _MAX_TOOL_DEFS_TOTAL:
+                if source_new_defs[s] >= _MAX_TOOL_DEFS_PER_SOURCE:
+                    meta["truncated"] = True
+                    done.add(s)
+                    break
+                try:
+                    entry = next(gens[s])
+                except StopIteration:
+                    done.add(s)
+                    break
+                key = (
+                    entry["name"], entry["description"],
+                    tuple(entry["params"]), entry["field"],
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                tool_defs.append(entry)
+                source_new_defs[s] += 1
+                quota_used += 1
+                progressed = True
+        round_num += 1
+        if not progressed:
+            break
+    if gens.keys() - done:
+        meta["truncated"] = True
+
+    # Beyond the fair-share guarantee (see this function's own note above for why
+    # this tail IS reachable here, unlike on the JSONL side): the round-1-era
+    # strictly-sequential per-source scan, verbatim, reusing the same generator so
+    # the two never diverge on parsing/gating.
+    for db_path in overflow:
+        source_new_defs_overflow = 0
+        for entry in _iter_db_tool_candidates(db_values[db_path], meta):
+            key = (
+                entry["name"], entry["description"],
+                tuple(entry["params"]), entry["field"],
+            )
+            if key in seen:
+                continue
+            if (len(tool_defs) >= _MAX_TOOL_DEFS_TOTAL
+                    or source_new_defs_overflow >= _MAX_TOOL_DEFS_PER_SOURCE):
+                meta["truncated"] = True
+                continue
+            seen.add(key)
+            tool_defs.append(entry)
+            source_new_defs_overflow += 1
+
+    meta["present"] = meta["dbs_read"] > 0
+    return tool_defs, meta
 
     meta["present"] = meta["dbs_read"] > 0
     return tool_defs, meta

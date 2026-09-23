@@ -1030,8 +1030,9 @@ _REGISTRY: "dict[str, _Entry]" = {
     # _write_agent_sqlite_db()'s own `auth_secret=` branch (the isolation test for the
     # new event_json-reading reader) -- same per-agent-DB reasoning as the two above.
     # Re-verified 2026-09-23: had drifted (114->119), same pre-existing-staleness note
-    # as test_f187's pair above.
-    "tests/test_b185_compiled_tool_poisoning.py:119": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # as test_f187's pair above. Re-verified again same day (119->120, B-933 merge
+    # added lines earlier in the file).
+    "tests/test_b185_compiled_tool_poisoning.py:120": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # B-811 (adversarial review, 2026-09-15): two more, each a standalone fixture (not
     # via _add_agent_db) in a test proving _table_kind refuses a VIEW named
     # trajectory_runtime_events that reads FROM this table -- same per-agent-DB
@@ -1055,8 +1056,9 @@ _REGISTRY: "dict[str, _Entry]" = {
     # standalone (not via _plant_generated_column_bypass, which lives in the sibling
     # test file) for the CHECK-level end-to-end test. Re-verified 2026-09-23: had
     # drifted (513->631) when B-852's own new mixed-host/partial-readability tests
-    # landed earlier in this file.
-    "tests/test_b185_compiled_tool_poisoning.py:631": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # landed earlier in this file. Re-verified again same day (631->667, B-933 merge
+    # added lines earlier in the file).
+    "tests/test_b185_compiled_tool_poisoning.py:667": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # CLAWSECCHECK-B-845: two more, in `_agent_home()`'s own `agent_auth_store_json=`
     # branch and its standalone second-agent fixture -- same DDL text (copied verbatim
     # from test_f187's own `_add_agent_db()`), same per-agent-DB reasoning. Shifted
@@ -1082,8 +1084,9 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b294_cron_run_logs.py:62": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
     # B-811 (Option A) shifted this line (91->101) by extending _write_agent_sqlite_db()
     # to accept a real event dict per row -- same DDL, key renamed to match.
-    # Re-verified 2026-09-23: had drifted again (101->105).
-    "tests/test_b185_compiled_tool_poisoning.py:105": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    # Re-verified 2026-09-23: had drifted again (101->105). Re-verified again same day
+    # (105->106, B-933 merge added an import line earlier in the file).
+    "tests/test_b185_compiled_tool_poisoning.py:106": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
     # B-811 (adversarial review, 2026-09-15): two standalone fixtures (not via
     # _add_agent_db) in the DoS-bound regression tests -- same DDL, same reasoning.
     # Re-verified 2026-09-23: both had drifted (920->936, 970->986).

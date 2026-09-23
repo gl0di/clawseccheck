@@ -1463,7 +1463,7 @@ def test_depth_budget_reaches_every_hungry_database_not_just_the_first():
     databases whose per-database floor read is capped (so both WANT more content),
     with UNEVEN row sizes across them -- an exact-row-length setup does not exercise
     real allocation behaviour, since a single row's own size interacts non-trivially
-    with whatever leftover cap it is offered (see `_read_and_process_db`'s own
+    with whatever leftover cap it is offered (see `_read_and_collect_db`'s own
     docstring). A marker planted as each database's own oldest (and therefore
     depth-pass-only) row must be recovered from BOTH databases, not just whichever
     sorts alphabetically first -- the exact shape round 4 got wrong.
@@ -1825,7 +1825,7 @@ def test_a_database_unreadable_after_an_earlier_successful_read_is_dbs_read_not_
     inconsistency a fresh independent review found. Also proves the earlier content
     itself survives: `tool_defs` still carries the tool recovered before the failure.
 
-    Simulates the failure by wrapping `_read_and_process_db`: the FIRST call for the
+    Simulates the failure by wrapping `_read_and_collect_db`: the FIRST call for the
     one database in this fixture delegates to the real implementation (a genuine
     partial read that hits its own aggregate-funded byte cap after yielding one real
     row, so it stays a depth candidate for round 2); every call after that returns
@@ -1872,22 +1872,22 @@ def test_a_database_unreadable_after_an_earlier_successful_read_is_dbs_read_not_
     )
 
     call_count = {"n": 0}
-    real_read_and_process_db = trajectorystore._read_and_process_db
+    real_read_and_collect_db = trajectorystore._read_and_collect_db
 
     def _fails_after_first_call(
-        db_path, max_rows, max_bytes, skip_prefix_count, seen, tool_defs, meta,
+        db_path, max_rows, max_bytes, skip_prefix_count, values,
     ):
         call_count["n"] += 1
         if call_count["n"] == 1:
-            return real_read_and_process_db(
-                db_path, max_rows, max_bytes, skip_prefix_count, seen, tool_defs, meta,
+            return real_read_and_collect_db(
+                db_path, max_rows, max_bytes, skip_prefix_count, values,
             )
         stats = _SqliteEventJsonStats()
         stats.unreadable = True
         return 0, stats, 0
 
     monkeypatch.setattr(
-        trajectorystore, "_read_and_process_db", _fails_after_first_call,
+        trajectorystore, "_read_and_collect_db", _fails_after_first_call,
     )
 
     tool_defs, meta = read_compiled_tool_descriptions(
