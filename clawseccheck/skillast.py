@@ -111,6 +111,45 @@ def _is_hardcoded_provider_secret(node: ast.AST) -> bool:
 
 _MAX_FINDINGS_PER_FILE = 25
 
+# B-907 round 3: rounds 1 and 2 each gave every finding-collection loop below its own
+# early-break — first at `_MAX_FINDINGS_PER_FILE` itself (round 1), then at a 20x
+# "safety ceiling" (round 2) — so an earlier pass's (or an earlier node's, in a pass
+# that mixes severities) info findings could not stop a later crit from being
+# collected at all. Both rounds were still an early-break INSIDE the walk, gated on a
+# finite candidate count, and two independent C-135 adversarial reviews each showed
+# that any such finite ceiling is reachable by a padding-only attacker as long as the
+# ceiling's node count fits inside the ~1MB per-file source cap upstream (round 1's
+# reviewer: 25 padding calls broke round 1; round 2's reviewer: 500 padding calls
+# broke round 2 — a bigger number, not a structural fix). No finite per-pass ceiling
+# closes the vulnerability class; only removing the early-break does. There is
+# therefore NO per-pass ceiling of any kind below — every loop runs to completion over
+# `ast.walk(tree)` and every genuine candidate, crit or info, from every pass reaches
+# `out`. Two things make that safe:
+#   1. `analyze_python` runs strictly inside its caller's existing per-check wall-clock
+#      deadline (`scanbudget.check_deadline`, backed by `SIGALRM` on POSIX — see
+#      `checks/__init__.py`'s `run_all` dispatch and `checks/_vet.py`'s content-ring
+#      call, both of which already wrap every `analyze_python` call site). That
+#      deadline can interrupt mid-loop regardless of which pass is running, so it is
+#      the actual DoS backstop — not a per-pass candidate count.
+#   2. The per-file cap is enforced exactly once, by SEVERITY, at `return` below (see
+#      `_ast_severity_rank`): crit sorts ahead of info, `sorted` is stable so
+#      discovery order survives within one severity, and one slot is reserved for an
+#      `AST_FINDINGS_TRUNCATED` disclosure when anything was actually cut. That is
+#      unchanged from round 2 and was already correct.
+
+# Severity rank for the FINAL truncation below — higher sorts
+# first. `analyze_python`'s own emitted severities are "crit" and "info" only, but
+# this stays a proper total order (not a two-way crit/non-crit split) so a future
+# severity slots in without a second place to update. Anything unrecognized ranks
+# below "unknown" rather than raising, so a typo'd/new severity degrades to "gets
+# truncated first", never to "silently outranks a known one".
+_AST_SEVERITY_RANK = {"crit": 3, "warn": 2, "info": 1, "unknown": 0}
+
+
+def _ast_severity_rank(severity: str) -> int:
+    return _AST_SEVERITY_RANK.get(severity, -1)
+
+
 # B-192: EffectSimulator.State.reached_sinks grows without bound across nested
 # branches/loops (each simulate_if/simulate_loop merge duplicates the same sink
 # reached via different paths). A deeply-nested-but-tiny skill can drive this past
@@ -5202,9 +5241,24 @@ def analyze_python(
         seen.add(key)
         out.append(ASTFinding(rule, severity, lineno, reason))
 
+    # B-907 round 1 gated this loop (and every other one below) on a shared, global
+    # `len(out) >= _MAX_FINDINGS_PER_FILE` — an earlier pass filling `out` with
+    # low-severity noise made every LATER pass's loop break on its first iteration,
+    # silently dropping a real crit (TT5_CMD_INJECTION) that pass would otherwise have
+    # found. Round 2 gave each pass its own `_MAX_FINDINGS_PER_FILE`-sized budget,
+    # which reintroduced the identical starvation WITHIN this one pass, since it is
+    # not single-severity: it also emits HARDCODED_PROVIDER_SECRET / OBFUSCATED_EXEC /
+    # GETATTR_INDIRECTION / DYNAMIC_IMPORT_EXEC (all crit-capable) inline, in the same
+    # walk, alongside plain DANGEROUS_SINK (info) — 25 padding DANGEROUS_SINK matches
+    # early in this loop still filled that budget and broke before a later node's crit
+    # was ever reached. Round 2's fix of raising the ceiling to 20x only raised the
+    # padding count an attacker needs, so round 3 removes the per-pass ceiling
+    # entirely (see the module-level comment above `_MAX_FINDINGS_PER_FILE`): this
+    # loop now runs to completion over every node, and the final severity-ordered
+    # truncation at `return` below is the sole place `_MAX_FINDINGS_PER_FILE` is
+    # enforced, so a real crit can never be starved out by a lower-severity finding —
+    # from an earlier pass, or from earlier in this same pass.
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
-            break
         if not isinstance(node, ast.Call):
             continue
         f = node.func
@@ -5502,8 +5556,6 @@ def analyze_python(
     if "environ" in source or "getenv" in source or _AGENT_CONFIG_PATH_RE.search(source):
         env_src_tainted = _env_tainted_names(tree) | _agent_config_file_tainted_names(source, tree)
         for node in ast.walk(tree):
-            if len(out) >= _MAX_FINDINGS_PER_FILE:
-                break
             if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                 continue
             # Only a BODY / URL / params position counts. A secret in headers=/auth= is the
@@ -5545,8 +5597,6 @@ def analyze_python(
     if _HOST_INFO_SIGNAL_RE.search(source):
         host_src_tainted = _host_info_tainted_names(tree)
         for node in ast.walk(tree):
-            if len(out) >= _MAX_FINDINGS_PER_FILE:
-                break
             if not isinstance(node, ast.Call):
                 continue
             ln = getattr(node, "lineno", 0)
@@ -5635,8 +5685,6 @@ def analyze_python(
         if collector_funcs:
             telemetry_tainted = _telemetry_tainted_names(tree, collector_funcs)
             for node in ast.walk(tree):
-                if len(out) >= _MAX_FINDINGS_PER_FILE:
-                    break
                 if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                     continue
                 arg_subtrees = [
@@ -5673,8 +5721,6 @@ def analyze_python(
     # match (the URL is typically a variable too). Checked independently of the loops
     # above — this is a shape check on the argv list, not a taint flow.
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
-            break
         if not _is_curl_wget_argv_call(node):
             continue
         out_path = _curl_dropper_output_path(node)
@@ -5708,8 +5754,6 @@ def analyze_python(
     # regardless of this severity label; checks/_content.py's check_tunnel_enrollment
     # (B338) is this rule's sole consumer and stays WARN-only by design.
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
-            break
         if not _is_tunnel_launch_argv_call(node):
             continue
         prog_elts = _argv_str_elts(node.args[0])
@@ -5788,9 +5832,16 @@ def analyze_python(
     )
 
     if ext_taint_map or _has_inline_exec_sink_source:
+        # This is the TT5/TT4/SSRF taint pass — the one whose INTER-pass starvation
+        # (round 1) was the concrete repro (a TT5_CMD_INJECTION crit lost behind 25+
+        # earlier DANGEROUS_SINK info findings from the loop above). It is ALSO,
+        # itself, a mixed-severity pass exactly like the first loop above
+        # (TT5_CMD_INJECTION crit alongside TT5_ARG_INJECTION/TT4_FILE_NET/TT_SSRF
+        # info in the same walk), so — per the module-level comment above
+        # `_MAX_FINDINGS_PER_FILE` (round 3) — it has no per-pass ceiling of its own
+        # either; every candidate reaches `out` and the final severity-ordered
+        # truncation at `return` is the sole enforcement point.
         for node in ast.walk(tree):
-            if len(out) >= _MAX_FINDINGS_PER_FILE:
-                break
             if not isinstance(node, ast.Call):
                 continue
             ln = getattr(node, "lineno", 0)
@@ -5926,8 +5977,6 @@ def analyze_python(
     # loop (rather than folding into the ast.Call walk above) since Assign is a
     # different node shape and the Call loop's control flow is continue-heavy.
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
-            break
         if not isinstance(node, ast.Assign):
             continue
         if len(node.targets) != 1:
@@ -5993,8 +6042,6 @@ def analyze_python(
     # Layer-2 import is needed here (the prior note's "banned reverse dependency"
     # concern is moot once routing is name-keyed rather than path-keyed in this file).
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
-            break
         if isinstance(node, ast.Assign):
             if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
                 continue
@@ -6038,7 +6085,31 @@ def analyze_python(
                 "install (mechanism B)",
             )
 
-    return out
+    if len(out) <= _MAX_FINDINGS_PER_FILE:
+        return out
+
+    # More candidates survived the per-PASS budgets above than the
+    # per-FILE cap allows overall. Truncate by SEVERITY, never by discovery order — a
+    # crit a later pass found must outrank an earlier pass's info findings, not lose to
+    # them just because that pass ran first and filled `out` first. `sorted` is stable,
+    # so within one severity, findings keep the discovery order they already had —
+    # deterministic, not an artifact of dict/set iteration order. One slot is reserved
+    # for an explicit disclosure finding, so a capped file reads as visibly incomplete
+    # (never silently "clean beyond what was reported") while the return value still
+    # honors `len(out) <= _MAX_FINDINGS_PER_FILE` for every caller of this function.
+    kept = sorted(out, key=lambda f: -_ast_severity_rank(f.severity))[: _MAX_FINDINGS_PER_FILE - 1]
+    suppressed = len(out) - len(kept)
+    kept.append(
+        ASTFinding(
+            "AST_FINDINGS_TRUNCATED",
+            "info",
+            0,
+            f"{suppressed} additional lower-priority AST/taint finding(s) suppressed by "
+            f"the per-file cap ({_MAX_FINDINGS_PER_FILE}) — this file's findings are "
+            "incomplete; crit findings are kept ahead of info ones",
+        )
+    )
+    return kept
 
 
 # B-190: a secret placed in headers=/auth=/cert= is deliberately excluded from
