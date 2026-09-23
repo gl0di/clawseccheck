@@ -25,7 +25,12 @@ degrades every input it does not model to ``unknown``:
   ``openai/gpt-5.6-sol`` on the validated build, so the vendor's own collector returning
   ``[]`` for such a config is not "no" -- it is the default-model trap.
 * ``unknown`` -- everything else, including any build older than the one this was
-  validated on, an unknown build, and any shape it does not recognise.
+  validated on, an unknown build, and any shape it does not recognise. This also covers a
+  config shape a KNOWN legacy migration rewrites before the harness ever resolves it (a
+  ``models.providers.codex``/``openai-codex`` block, or ``agents.entries: null`` beside a
+  populated ``agents.list``): the oracle this port is graded against reads the config AS
+  WRITTEN, never the migrated one, so it agrees with a ``no`` that the migrated config would
+  not earn. See ``_LEGACY_CODEX_PROVIDER_BLOCK_IDS`` below.
 
 VALIDATED DIFFERENTIALLY, not by reading. ``tests/_harnessoracle.py`` executes the
 installed OpenClaw's own ``collectConfiguredAgentHarnessRuntimes`` /
@@ -162,6 +167,18 @@ _DEFAULT_RUNTIMES = (None, "auto", "default")
 #: given over one. Matched on the provider alone, after the same trim + lowercase the vendor
 #: applies.
 _LEGACY_CODEX_PROVIDERS = frozenset(("codex", "codex-cli", "openai-codex"))
+
+#: Provider spellings the vendor's OWN provider-BLOCK migration recognises as a whole
+#: ``models.providers.<id>`` entry to move (``migrateLegacyOpenAICodexProvider`` /
+#: ``config/legacy-codex-provider.ts``: ``LEGACY_CODEX_PROVIDER_IDS``, executed against the
+#: installed dist 2026.9.5). Narrower than ``_LEGACY_CODEX_PROVIDERS`` above on purpose:
+#: that set is for a REF STRING's provider half (``codex/gpt-5.5``); this one is a bare
+#: ``models.providers.codex`` / ``models.providers.openai-codex`` BLOCK, which the migration
+#: moves to ``models.providers.openai`` and stamps each of its models with
+#: ``agentRuntime: {id: "codex"}`` -- something no ``_pin`` call here ever sees, because
+#: the provider itself (not an ``agentRuntime`` field) is what marks it. "codex-cli" is not
+#: in this table; it is only a legacy REF-string alias.
+_LEGACY_CODEX_PROVIDER_BLOCK_IDS = frozenset(("codex", "openai-codex"))
 
 
 @dataclass(frozen=True)
@@ -628,6 +645,26 @@ def _analyse(cfg, environ) -> HarnessReach:
         raise _Bail("agents.list is not an array")
     roster = agent_roster(cfg)
 
+    # A shape a KNOWN legacy migration rewrites before the harness is ever resolved. The
+    # oracle this port is graded against never sees the migration, so it can agree with a
+    # `no` the migrated config would not earn -- refuse the `no` and say why (B-883).
+    migration_reasons: "list[str]" = []
+    # ``entries`` present but null is schema-VALID on its own ("no entries"); a populated
+    # ``list`` beside it is what makes the pair schema-invalid AS WRITTEN. The runtime (and
+    # this port's `agent_roster`) then never consults `list` -- the KEY alone decides. But
+    # the vendor's OWN migration visitor (`visitAgentEntries`, shared by many doctor
+    # migrations) falls back to `list` whenever `entries` is not a record, null included,
+    # so an `agentRuntime` pin sitting inside that `list` is invisible to this port even
+    # though the migration would read and rewrite it.
+    if "entries" in agents and agents.get("entries") is None \
+            and isinstance(agents.get("list"), list) \
+            and any(_is_record(e) for e in agents["list"]):
+        migration_reasons.append(
+            "agents.entries is null alongside a populated agents.list; OpenClaw's own "
+            "config migration falls back to agents.list when agents.entries is null, but "
+            "this determination's roster does not, so a runtime pin inside agents.list is "
+            "invisible to it")
+
     pins: "list[tuple[str, str]]" = []
     wholeagent: "list[str]" = []
     openai_provider_cfg = False
@@ -645,6 +682,12 @@ def _analyse(cfg, environ) -> HarnessReach:
             continue
         if not _is_record(pval):
             raise _Bail(f"models.providers.{pname} is not an object")
+        if norm in _LEGACY_CODEX_PROVIDER_BLOCK_IDS:
+            migration_reasons.append(
+                f"models.providers.{pname} is a legacy Codex provider id; OpenClaw's own "
+                f"config migration moves it to models.providers.openai and stamps each of "
+                f"its models with a codex runtime pin, which this determination does not "
+                f"simulate")
         _pin(pval, f"models.providers.{pname}", pins)
         pm = pval.get("models")
         if pm is not None and not isinstance(pm, list):
@@ -750,6 +793,8 @@ def _analyse(cfg, environ) -> HarnessReach:
     stray = stray_model_signal(cfg)
     if stray:
         return HarnessReach(UNKNOWN, (stray,))
+    if migration_reasons:
+        return HarnessReach(UNKNOWN, tuple(migration_reasons))
     return HarnessReach(NO, tuple(p for p, _ in starts[:5]))
 
 

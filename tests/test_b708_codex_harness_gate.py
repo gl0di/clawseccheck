@@ -677,6 +677,80 @@ def test_an_openai_default_that_every_agent_overrides_is_not_yes():
 
 
 # ======================================================================================
+# 3.5 B-883 -- a config shape a KNOWN OpenClaw legacy migration rewrites before the harness
+#     is resolved. The runtime-collector oracle this port is graded against reads the config
+#     AS WRITTEN, never the migrated one, so it agrees with a `no` the migrated config would
+#     not earn. Both shapes below were confirmed against the installed dist 2026.9.5's
+#     ``legacy-config-migrations.runtime.models-*.mjs`` (``migrateLegacyOpenAICodexProvider``,
+#     ``LEGACY_CODEX_PROVIDER_IDS``) and ``legacy-config-record-shared.ts``
+#     (``visitAgentEntries``), not simulated -- neither is executed here (no vendor JS).
+# ======================================================================================
+
+@pytest.mark.parametrize("provider_id", ["codex", "openai-codex", " Codex ", "OpenAI-Codex",
+                                         "OPENAI-CODEX"])
+def test_b883_a_legacy_codex_provider_block_is_never_a_no(provider_id):
+    """``models.providers.codex`` / ``.openai-codex`` is moved to ``models.providers.openai``
+    by the vendor's doctor migration, and every model under it is stamped with an
+    ``agentRuntime: {id: "codex"}`` pin -- something no ``_pin`` call here ever sees, because
+    the PROVIDER itself (not an ``agentRuntime`` field) is what marks the block."""
+    cfg = {**_models("anthropic/c"),
+           "models": {"providers": {provider_id: {"models": [{"id": "gpt-5.5"}]}}}}
+    got = hr.codex_harness_reach(cfg, _V, environ={})
+    assert got.answer == hr.UNKNOWN
+    assert "legacy Codex provider id" in got.reasons[0]
+    # a bare provider block with no `models` array is still the same legacy id
+    assert _ans({**_models("anthropic/c"),
+                "models": {"providers": {provider_id: {}}}}) == hr.UNKNOWN
+
+
+def test_b883_legacy_codex_provider_block_control_stays_no():
+    """Control for the test above: an ordinary provider key, and specifically ``codex-cli``
+    (a legacy REF-string alias, never a recognised ``models.providers.<id>`` BLOCK id per the
+    vendor's ``LEGACY_CODEX_PROVIDER_IDS``), keep the definite `no`. Pins the table's exact
+    boundary -- widening it to ``_LEGACY_CODEX_PROVIDERS`` (which includes "codex-cli") would
+    break this."""
+    assert _ans({**_models("anthropic/c"),
+                "models": {"providers": {"anthropic": {"models": [{"id": "x"}]}}}}) == hr.NO
+    assert _ans({**_models("anthropic/c"),
+                "models": {"providers": {"codex-cli": {"models": [{"id": "x"}]}}}}) == hr.NO
+
+
+def test_b883_entries_null_beside_a_populated_list_is_never_a_no():
+    """``agents.entries: null`` is schema-valid alone ("no entries"); a populated
+    ``agents.list`` beside it is what makes the pair schema-invalid AS WRITTEN. The runtime
+    (and this port's roster) then never consults ``list`` -- the KEY alone decides. But the
+    vendor's own migration visitor (``visitAgentEntries``, shared by many doctor migrations)
+    falls back to ``list`` whenever ``entries`` is not a record, null included, so a pin (or
+    any other migration-relevant field) sitting inside that ``list`` is invisible here."""
+    cfg = {"agents": {"defaults": {"model": "anthropic/c"}, "entries": None,
+                      "list": [{"agentRuntime": {"id": "codex"}}]}}
+    got = hr.codex_harness_reach(cfg, _V, environ={})
+    assert got.answer == hr.UNKNOWN
+    assert "agents.entries is null" in got.reasons[0]
+    # an ordinary model ref hidden the same way is just as invisible to the roster, and just
+    # as reachable by the migration's fallback visitor
+    ordinary = {"agents": {"defaults": {"model": "anthropic/c"}, "entries": None,
+                           "list": [{"model": "openai/gpt-5"}]}}
+    assert _ans(ordinary) == hr.UNKNOWN
+
+
+def test_b883_entries_null_control_stays_no_without_a_populated_record_list():
+    """Mutation check on both halves of the B-883 guard: no ``list`` key, an empty ``list``,
+    and a ``list`` with no record entries all keep the definite `no` -- there is nothing a
+    migration's visitor could find to rewrite. Deleting the ``isinstance(..., list)`` guard
+    or the ``any(_is_record(e) ...)`` guard turns exactly one of these red."""
+    base_model = {"model": "anthropic/c"}
+    assert _ans({"agents": {"defaults": base_model, "entries": None}}) == hr.NO
+    assert _ans({"agents": {"defaults": base_model, "entries": None, "list": []}}) == hr.NO
+    assert _ans({"agents": {"defaults": base_model, "entries": None,
+                            "list": ["not-a-record", 5, None]}}) == hr.NO
+    # an EMPTY (but present) `entries` record is a real record, so the vendor's own visitor
+    # returns early on it and never reads `list` either -- unaffected by this guard
+    assert _ans({"agents": {"defaults": base_model, "entries": {},
+                            "list": [{"agentRuntime": {"id": "codex"}}]}}) == hr.NO
+
+
+# ======================================================================================
 # 4. Tool-name truncation no longer corrupts the toolFilter reachability gate
 # ======================================================================================
 
