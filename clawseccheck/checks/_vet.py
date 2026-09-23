@@ -84,6 +84,7 @@ from ._content import (
     _EXFIL_RE,
     _IOC_ONION_RE,
     _KNOWN_NAMES,
+    _ambiguous_example_suppression,
     _b62_classify_category,
     _b62_extract_declaration,
     _b63_decoded_actionable,
@@ -1111,6 +1112,21 @@ def _cron_persistence_hits(
                         "a cron/startup persistence pattern", _mf, _ff
                     )
                     + f": {m.group(0)[:80]}"
+                )
+            # B-886: the bare-prose leg's AMBIGUOUS ring — a do-not/example marker
+            # that structurally MIGHT refer to this match, with no sound static way
+            # to tell that from an unrelated one nearby (design's proof). This moves
+            # no verdict (_is_code_example already suppressed it either way); it only
+            # names the limit instead of leaving the reader with silence.
+            elif (
+                coverage is not None
+                and _ambiguous_example_suppression(blob, m.start(), fence_ranges)
+                and not _pos_in_test_fixture_file(blob, m.start(), _header_matches)
+            ):
+                coverage.append(
+                    "coverage: a cron/startup persistence pattern was not assessed: "
+                    "it follows a do-not/example note that may or may not refer to "
+                    f"it: {m.group(0)[:80]}"
                 )
             continue
         # B-199: attack-shaped cron content inside the skill's OWN test fixture is not
