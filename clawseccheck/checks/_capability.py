@@ -1556,8 +1556,12 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # `toolgrant.granted` resolves the per-scope grant (profile / allow / alsoAllow / deny,
     # agent replaces global) and `confined_scopes` the per-scope confinement;
     # `unconfined_write_scopes` is their conjunction, asked with THIS check's own write-tool
-    # list so no third list of names exists. What it still cannot read -- byProvider,
-    # toolsBySender, per-channel tools -- is treated as possible narrowing (quiet direction).
+    # list so no third list of names exists. What it still cannot read in a scope's OWN tools
+    # block -- byProvider, toolsBySender -- is treated as possible narrowing (quiet direction).
+    # A per-channel/per-group tools block is NOT: it is not read at all, because it narrows
+    # only the group turns of one provider -- never a DM, never another provider -- so it
+    # cannot be credited to a scope (toolpolicy's "STILL OPEN" note). A config whose group
+    # block really removes write therefore keeps this FAIL: the loud direction, left open.
     fs_confined = _fs_reads_are_confined(cfg)
     # Which unconfined scopes are demonstrably granted a write tool. Consumed at the FAIL
     # escalation below, NOT here: an empty list must never be read as confinement (see there).

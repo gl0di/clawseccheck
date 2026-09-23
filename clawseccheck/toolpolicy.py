@@ -88,18 +88,55 @@ list that just appended one entry per declared channel would silently answer a D
 unsound question ("does ANY channel anywhere narrow write") instead of the one this module
 actually needs ("does THIS agent's effective policy get narrowed").
 
-Left undone, deliberately, rather than shipped as a partial fix that reads as complete:
-porting the plugin-hook shape (Discord's ``guilds``/``channels`` nesting specifically)
-without first finding and reading its own resolver would be exactly the kind of
-schema-inferred, unexecuted guess this task's own instructions forbid. This needs its own
-scoped follow-up: (a) locate and read the channel-plugin ``groups.resolveToolPolicy`` hook
-for at least Discord (the provider C-484's recovered paths named) to ground the
-guild/channel-nesting shape rather than inferring it from ``resolveChannelGroupToolsPolicy``
-alone; (b) design an agent-channel attribution model sound enough that a channel's
-narrowing is only ever credited to a scope it can actually gate; (c) differential-validate
-against the dist the way B-666/B-670 were. ``_OPAQUE_NARROWING_KEYS`` is unchanged — the
-gap is the scope enumeration lacking a channel dimension at all, not a key this module
-already visits and mishandles, exactly as the task's own developer comment concluded.
+STILL OPEN — and the ROUTING model named above is the wrong axis (re-read and partly
+executed against the installed openclaw@2026.9.5, 2026-09-23). An attempt to credit a
+per-channel block to the DEFAULT agent's scope whenever no route binding is declared
+(with no matching binding ``resolveAgentRoute`` does fall back to the default agent) was
+built, reviewed and reverted: it turned three real FAILs into WARNs. Knowing which AGENT a
+message reaches is not the question, because the vendor applies the block per TURN, not
+per agent:
+
+* ``resolveGroupToolPolicyOutcome`` takes group ids ONLY from the server-built session key
+  (a caller-supplied group id the key does not name is dropped) and returns no policy when
+  there are none — so a DM turn gets no group policy at all (executed: an open-DM turn
+  resolved to no policy beside a ``groups["*"]`` block that denied the write family), and
+  a group block on one provider never reaches another provider's turn.
+* inside ``resolveScopeToolsPolicy`` a specific group's own ``tools`` (or a matching
+  ``toolsBySender`` entry) REPLACES the ``groups["*"]`` answer instead of stacking on it,
+  and ``tools: {}`` still counts as an answer — ``pickSandboxToolPolicy({})`` is undefined,
+  so that group gets no narrowing at all (executed). A block's presence proves nothing;
+  only its resolved allow/deny, over every node and sender entry, could.
+
+So the only sound shape is per INGRESS: drop an open channel from B55's ``open_ch`` only
+when its DM ingress is not open and every group turn on every account resolves to a policy
+that removes each write tool. Even that is not shippable today, for three reasons found on
+the way (none reachable from the schema):
+
+1. provider hooks: of the channel plugins the npm package bundles, only Telegram declares
+   a ``groups.resolveToolPolicy`` hook (``resolveTelegramGroupToolPolicy`` → the same
+   shared ``buildChannelGroupsScopeTree``/``resolveScopeToolsPolicy`` tree), and it passes
+   no ``access.toolPolicy`` for group turns. Most others — Discord (whose
+   ``guilds.<id>.channels.<id>`` nesting is the shape that opened this), Slack, WhatsApp,
+   Signal and more — are excluded from the package (``"!dist/extensions/<name>/**"``), and
+   a plugin's ``access.toolPolicy`` REPLACES the config group policy outright
+   (``conversationPolicy ?? resolveGroupToolPolicy(...)`` in
+   ``resolveRequesterToolPolicies``), so no config reading can bound those providers.
+2. ``session.groupScope: "main"`` — or a binding's ``session.groupScope: "main"`` — makes
+   ``buildAgentPeerSessionKey`` put group turns in the agent's MAIN session key, which
+   names no group, so no group policy applies to any group (executed).
+3. laundering: ``sessions_send`` is not an owner-only tool and
+   ``tools.sessions.visibility`` defaults to ``"all"``, so a narrowed group turn can inject
+   a turn into a session with no group policy (read, not executed — that needs a running
+   gateway). ``sessions_spawn`` is not such a path: the tool builder hands a spawned child
+   the parent's explicit denylist (group policy included) and, under a restrictive allow,
+   its effective allowlist. Closing this needs a vetted list of which tools can start an
+   unnarrowed turn, which no vendor port provides.
+
+Until those are resolved, the config's channel blocks stay unread here and a config whose
+group block really does remove write keeps its FAIL — the loud direction, never a missed
+one. ``tests/test_b726_channel_tools_narrowing.py`` pins the three shapes the reverted
+attempt got wrong. ``_OPAQUE_NARROWING_KEYS`` is unchanged: the gap is a missing
+per-ingress model, not a key this module visits and mishandles.
 
 THE WRITE QUESTION (F-186) is not answered by the read stack above -- its profile and alias
 tables are read-specific. ``unconfined_write_scopes`` composes ``confined_scopes`` with
