@@ -7,6 +7,7 @@ Moved verbatim from the former single-file checks.py; no logic changes.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import ipaddress
 import os
@@ -48,6 +49,42 @@ from .. import openclawdist as _openclawdist
 
 def _is_posix() -> bool:
     return os.name == "posix"
+
+
+# Errnos meaning "the path is simply gone", not "permission denied" -- a build/pytest/npm
+# temp dir being cleaned, a git checkout, a concurrent (re)install. `os.walk`'s default
+# `onerror=None` already treats these the same as every other scandir failure (silent
+# skip, no verdict impact); a caller that wants to fail closed on a real permission gap
+# WITHOUT counting a merely-vanished path against the scan filters `exc.errno` against
+# this set before recording anything. First introduced for B-899 (checks/_content.py's
+# B87 symlink-escape sweep, `_enumerate_symlinks`/`_symlink_scan_roots`); reused verbatim
+# by B-902 (checks/_mcp.py's `vet_plugin` tree sweep) rather than re-derived, per this
+# package's "helper reused by 2+ topics belongs in the shared leaf" rule (CLAUDE.md 3.1).
+WALK_VANISHED_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
+
+
+def note_walk_gap(gaps: dict, gate, exc: OSError) -> None:
+    """Record one filesystem-walk coverage gap, keyed on *gate* -- the directory whose
+    permission stopped the walk (for an `os.walk` `onerror` callback, the directory it
+    could not list; for a per-entry `is_symlink()`/`lstat()` failure, that entry's
+    PARENT -- the one missing the search bit). First reason wins: a directory missing
+    `x` fails identically for every entry it hides, so one recorded reason speaks for
+    all of them instead of repeating the same fact once per file.
+
+    Callers are expected to have already screened *exc* against
+    `WALK_VANISHED_ERRNOS` (a vanished path is not a gap at all -- see that constant's
+    docstring) before calling this; this function itself records unconditionally
+    whatever it is handed, so it stays a plain recorder with no policy of its own.
+
+    `gaps` maps ``str(gate) -> (gate, reason, errno)``. What a caller DOES with a
+    non-empty `gaps` is its own Finding's contract to define -- B-899 splits each gap
+    into graded (`engine_degraded`) vs. merely disclosed via its own uid/ownership
+    rule; B-902 folds every recorded gap into a single `coverage_gap_finding()`, the
+    same way it already does for its `truncated`/`budget_hit` partial-scan causes.
+    """
+    key = str(gate)
+    if key not in gaps:
+        gaps[key] = (Path(gate), exc.strerror or str(exc), exc.errno)
 
 
 def _username_safe_path(path) -> str:
