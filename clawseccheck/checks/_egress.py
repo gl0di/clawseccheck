@@ -4053,7 +4053,8 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     from ..logscan import scan_log_file, summarize_truncation  # noqa: PLC0415
     from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
-    sinks = discover_log_sinks(ctx)
+    unreadable_sinks: list = []
+    sinks = discover_log_sinks(ctx, unreadable_sinks)
 
     # B-817: this discovery has no notion of the SQLite-backed trajectory store
     # (trajectorystore.py) — a `kind="trajectory"` sink here is a JSONL sidecar only.
@@ -4077,14 +4078,28 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             )
 
     if not sinks:
+        # B-913: an unreadable source dir (e.g. a `chmod 000` workspace's memory/) is a
+        # distinct fact from "nothing configured" — name it rather than letting the
+        # reader assume there is genuinely no log corpus.
+        unreadable_note = (
+            f" Could not read: {'; '.join(unreadable_sinks[:8])}"
+            f"{f' (+{len(unreadable_sinks) - 8} more)' if len(unreadable_sinks) > 8 else ''}."
+            if unreadable_sinks
+            else ""
+        )
         return _finding(
             "B164",
             UNKNOWN,
             "No agent log/transcript sinks found (no logging.file, cacheTrace, trajectory "
             "sidecar, session transcript, config-audit log, memory file, or install backup) "
-            f"— nothing to content-scan.{sqlite_trajectory_disclosure}",
+            f"— nothing to content-scan.{sqlite_trajectory_disclosure}{unreadable_note}",
             "Enable OpenClaw's default trajectory sidecar (on by default) and/or "
-            "logging.file so a future run has a log corpus to threat-hunt.",
+            "logging.file so a future run has a log corpus to threat-hunt."
+            + (
+                " Fix permissions on the listed unreadable path(s) and re-run."
+                if unreadable_sinks
+                else ""
+            ),
         )
 
     # C-221: cross-artifact correlation — a skill NAMING a high-specificity IOC (a known

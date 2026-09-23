@@ -26,9 +26,12 @@ from ..collector import (
     BOOTSTRAP_FILES,
     LIMIT_DOMAIN_CONFIG,
     LIMIT_DOMAIN_ENV,
+    LIMIT_DOMAIN_SKILL,
     SKILL_DIRS,
     Context,
     _AUTH_PROFILE_STORE_EMPTY_BYTES,  # B-749
+    _safe_is_dir,  # B-913
+    _safe_is_file,  # B-913
     agent_roster,
     dig,
     env_evidence_readable,
@@ -600,9 +603,26 @@ def _c015_is_generated_plugin_model_catalog(parts: tuple, text: str) -> bool:
 # DURING the walk via `prune_dir`/`keep_file`, so excluded material never consumes the
 # budget, and `capped` is threaded through so the caller can disclose a genuine
 # truncation instead of reading a partial scan as a complete one.
-def _c015_candidate_files(ctx: Context, capped: list | None = None) -> list[Path]:
+def _c015_candidate_files(
+    ctx: Context, capped: list | None = None, unreadable: list | None = None,
+) -> list[Path]:
+    """*unreadable*, when given, collects the SKILL_DIRS skip-root(s) whose existence
+    could not be confirmed (B-913: a `chmod 000` ancestor — e.g. the workspace dir or
+    `.agents` — raises `PermissionError` on `.exists()`, which used to escape
+    uncaught). Computed ONCE up front (skip_roots is a handful of fixed candidates)
+    rather than per candidate file, both for cost and so a single unreadable root is
+    recorded once, not once per file examined.
+    """
     skip_roots = [(ctx.home / rel).resolve() for rel in SKILL_DIRS]
     skill_dir_parts = tuple(Path(rel).parts for rel in SKILL_DIRS)
+
+    skip_roots_existing: list[Path] = []
+    for root in skip_roots:
+        errs_before = len(ctx.errors)
+        if _safe_is_dir(root, ctx, what=f"skill directory '{root}'", domain=LIMIT_DOMAIN_SKILL):
+            skip_roots_existing.append(root)
+        elif unreadable is not None and len(ctx.errors) > errs_before:
+            unreadable.append(str(root))
 
     def _prune(rel_parts: tuple) -> bool:
         if _c015_is_codex_plugin_doc_cache(rel_parts):
@@ -610,15 +630,13 @@ def _c015_candidate_files(ctx: Context, capped: list | None = None) -> list[Path
         return any(rel_parts[: len(root)] == root for root in skill_dir_parts)
 
     def _keep_file(path: Path) -> bool:
-        if not path.is_file():
+        if not _safe_is_file(path, ctx, what=f"'{path}'"):
             return False
         try:
             resolved = path.resolve()
         except OSError:
             resolved = path
-        if any(
-            resolved == root or root in resolved.parents for root in skip_roots if root.exists()
-        ):
+        if any(resolved == root or root in resolved.parents for root in skip_roots_existing):
             return False
         if _c015_is_codex_plugin_doc_cache(resolved.parts):
             return False
@@ -4065,7 +4083,8 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
     only — secret values are never echoed.
     """
     capped: list = []
-    candidates = _c015_candidate_files(ctx, capped)
+    unreadable_skip_roots: list = []
+    candidates = _c015_candidate_files(ctx, capped, unreadable_skip_roots)
     scan_capped = bool(capped)
     if not candidates:
         return _finding(
@@ -4124,6 +4143,28 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             detail,
             "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens.",
             evidence=shown,
+        )
+
+    if unreadable_skip_roots:
+        # B-913: an ancestor of one of the installed-skill roots (e.g. the workspace
+        # dir, or `.agents`) is not traversable, so this scan could not even confirm
+        # whether that root exists to exclude it — a permission-denied subtree that
+        # used to raise PermissionError uncaught. No secret-shaped value was found in
+        # what WAS read, but that is not a clean bill of health over a home this scan
+        # could not fully see (Golden Rule #4).
+        joined = "; ".join(unreadable_skip_roots[:8])
+        extra = (
+            f" (+{len(unreadable_skip_roots) - 8} more)"
+            if len(unreadable_skip_roots) > 8
+            else ""
+        )
+        return _finding(
+            "C015",
+            UNKNOWN,
+            f"Could not read the following path(s), so secrets-at-rest coverage is "
+            f"incomplete: {joined}{extra}.",
+            "Run as a user that can traverse the listed path(s), or fix their "
+            "permissions, then re-run.",
         )
 
     if scan_capped:
