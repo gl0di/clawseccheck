@@ -309,14 +309,19 @@ jobs:
 
           # B-851: only a genuine 404 means "not on ClawHub". Every other non-200 code —
           # 000 (curl never got a response at all: DNS/TLS/connect failure survives the
-          # --retry above), 5xx, 429 — means the REGISTRY LOOKUP itself failed, which says
-          # nothing about whether ${PREV} was ever published. Folding those into "404" used
-          # to blame the release for what was actually a registry outage or transient blip.
+          # --retry above), 5xx, 429, and equally a 3xx or any other 4xx (301/403/410: the
+          # registry answered, but not with the 200/404 this gate knows how to read) — means the
+          # REGISTRY LOOKUP itself failed, which says nothing about whether ${PREV} was
+          # ever published. Folding those into "404" used to blame the release for what
+          # was actually a registry outage or transient blip. The message says "unexpected
+          # response", not "could not reach": for everything but 000 the registry WAS
+          # reached, and telling the operator otherwise points them at the network.
           if [ "$CODE" != "404" ]; then
-            echo "::error::Could not reach the ClawHub registry to check previous release" \
-                 "${PREV} (HTTP ${CODE}) — this is a registry lookup failure, not a verdict" \
-                 "on ${PREV}. Re-run this job (a genuine transient blip already gets 3" \
-                 "retries above); investigate ClawHub reachability if it keeps happening."
+            echo "::error::Unexpected ClawHub registry response (HTTP ${CODE}; 000 means no" \
+                 "response arrived at all) while checking previous release ${PREV}. Only a" \
+                 "404 says a version is missing, so this is a registry lookup failure, not a" \
+                 "verdict on ${PREV}. Re-run this job (transient errors already got 3 retries" \
+                 "above); if it persists, investigate ClawHub reachability or an API change."
             exit 1
           fi
 

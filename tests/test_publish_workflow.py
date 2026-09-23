@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import textwrap
 from pathlib import Path
+from typing import List, NamedTuple
 
 import pytest
 
@@ -1088,49 +1089,97 @@ _PREV_RELEASE_GATE_STEP = (
     "Preflight — confirm the PREVIOUS release actually surfaced on ClawHub"
 )
 
-# Stub gh for the previous-release gate tests below. Mode is selected by $GH_STUB_MODE:
-# "not_found" emits gh's own genuine not-found signals — the literal "HTTP 404" that
-# `gh api` formats an HTTP error as, and the literal "release not found" error that
-# `gh release view` raises specifically (and only) when the release genuinely doesn't
-# exist. "lookup_fail" emits an unrelated failure (rate limit / network) that contains
-# neither signal, on both calls — the shape a real `gh` failure takes that must NOT be
-# read as "tag/release absent" (CLAWSECCHECK-B-851).
+# Stub gh for the previous-release gate tests below. The gate makes two gh calls and
+# each gets its OWN mode — $GH_TAG_MODE drives `gh api .../git/ref/tags/v<PREV>`,
+# $GH_REL_MODE drives `gh release view`. An earlier stub failed both calls at once, so
+# either not-found discriminator alone satisfied every test: reverting just the tag
+# grep, or just the release grep, left the suite green (CLAWSECCHECK-B-851 review).
+# Each mode is one of:
+#   ok          — the call succeeds: exit 0 with a plausible stdout body.
+#   not_found   — gh's own genuine not-found signal, in the shape the installed gh
+#                 2.86.0 prints it. `gh api` renders an HTTP error through its "gh: %s"
+#                 and "%s (HTTP %d)" format strings, so a missing ref is exactly
+#                 `gh: Not Found (HTTP 404)` on stderr, with the JSON error body on
+#                 stdout. `gh release view` raises the literal "release not found"
+#                 only when the release genuinely does not exist.
+#   lookup_fail — a failure that is NOT a not-found: a rate limit, in each command's
+#                 real error shape. It deliberately still carries an HTTP status (403),
+#                 so a discriminator loosened to "any HTTP error" is caught too.
+# Every invocation is appended to $GH_CALL_LOG so a test can prove the stub was
+# actually reached. An unrecognised mode exits 98, and _run_previous_release_gate
+# rejects unknown modes up front, so a typo can never pass as a lookup failure.
 _GH_LOOKUP_STUB = r"""#!/bin/bash
+printf '%s\n' "$*" >> "$GH_CALL_LOG"
 if [ "$1" = "api" ]; then
-  case "$GH_STUB_MODE" in
+  case "$GH_TAG_MODE" in
+    ok)
+      printf '{"ref":"refs/tags/v9.9.8","object":{"type":"commit"}}\n'
+      exit 0 ;;
     not_found)
-      echo "HTTP 404: Not Found (https://api.github.com/$2)" >&2
+      printf '{"message":"Not Found","status":"404"}\n'
+      echo "gh: Not Found (HTTP 404)" >&2
       exit 1 ;;
     lookup_fail)
-      echo "gh: API rate limit exceeded for installation ID 999999." >&2
+      printf '{"message":"API rate limit exceeded for installation ID 999999.","status":"403"}\n'
+      echo "gh: API rate limit exceeded for installation ID 999999. (HTTP 403)" >&2
       exit 1 ;;
   esac
 elif [ "$1" = "release" ] && [ "$2" = "view" ]; then
-  case "$GH_STUB_MODE" in
+  case "$GH_REL_MODE" in
+    ok)
+      printf 'title:\tv9.9.8\ntag:\tv9.9.8\ndraft:\tfalse\n'
+      exit 0 ;;
     not_found)
       echo "release not found" >&2
       exit 1 ;;
     lookup_fail)
-      echo "gh: API rate limit exceeded for installation ID 999999." >&2
+      echo "HTTP 403: API rate limit exceeded for installation ID 999999. (https://api.github.com/repos/owner/repo/releases/tags/v9.9.8)" >&2
       exit 1 ;;
   esac
 fi
-exit 99
+echo "gh stub: unrecognised call or mode: $*" >&2
+exit 98
 """
+
+_GH_MODES = ("ok", "not_found", "lookup_fail")
+
+# One marker per verdict the gate can write after a real 404. Each is a fragment of that
+# verdict's own ::error:: line and of no other, so asserting "exactly one of these is
+# present" pins which branch ran, not merely that the job failed.
+_GATE_VERDICTS = {
+    "registry_lookup_fail": "Unexpected ClawHub registry response",
+    "gh_lookup_fail": "the gh CLI lookup itself failed",
+    "never_released": "that version was never released",
+    "no_gh_release": "is tagged but has no GitHub Release",
+    "never_surfaced": "published and never surfaced",
+}
+
+
+class _GateRun(NamedTuple):
+    proc: subprocess.CompletedProcess
+    gh_calls: List[str]
+    clawhub_calls: List[str]
 
 
 def _run_previous_release_gate(
-    tmp_path, curl_code: str, gh_mode: str
-) -> subprocess.CompletedProcess:
-    """Run the REAL previous-release gate shell against stub curl/gh binaries.
+    tmp_path, curl_code: str, tag_mode: str, rel_mode: str
+) -> _GateRun:
+    """Run the REAL previous-release gate shell against stub curl/gh/clawhub binaries.
 
     Same pattern as _run_verify_step / _run_create_step: the literal `run: |` body is
     extracted from the workflow (via _step_shell_block, itself the same extraction
-    idiom as _preflight_shell_block/_size_guard_shell_block) and executed verbatim, so
-    what's under test is the real workflow shell, not a paraphrase that could quietly
-    stop matching (CLAWSECCHECK-B-440). The block already opens with its own
+    idiom as _preflight_shell_block/_size_guard_shell_block) and executed, so what's
+    under test is the real workflow shell, not a paraphrase that could quietly stop
+    matching (CLAWSECCHECK-B-440). The block already opens with its own
     `set -euo pipefail`, so it needs no extra bash flags here.
+
+    One deliberate, narrow rewrite: the never-surfaced branch auto-diagnoses into
+    hard-coded `/tmp/scandl.txt` and `/tmp/scanrep`, and tests must write nothing
+    outside tmp_path, so every `/tmp/` is relocated into tmp_path before the run.
+    `clawhub` is stubbed for EVERY run, not only the never-surfaced one: the real
+    CLI may be on the developer's PATH, and reaching it would be a network call.
     """
+    assert tag_mode in _GH_MODES and rel_mode in _GH_MODES, (tag_mode, rel_mode)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     # -o /dev/null discards the body and -w '%{http_code}' writes only the code to
@@ -1143,6 +1192,12 @@ def _run_previous_release_gate(
         "#!/bin/bash\nprintf '%s' \"$CURL_STUB_CODE\"\nexit 0\n", encoding="utf-8",
     )
     (bindir / "gh").write_text(_GH_LOOKUP_STUB, encoding="utf-8")
+    # Records the call and fails without output, which sends the gate down its
+    # "could not download the stored scan report" arm and on to its final `exit 1`.
+    (bindir / "clawhub").write_text(
+        "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$CLAWHUB_CALL_LOG\"\nexit 1\n",
+        encoding="utf-8",
+    )
     for f in bindir.iterdir():
         f.chmod(0o755)
 
@@ -1153,104 +1208,177 @@ def _run_previous_release_gate(
         "## [9.9.8] - 2026-09-15\n- previous\n",
         encoding="utf-8",
     )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    gh_log = tmp_path / "gh-calls.log"
+    clawhub_log = tmp_path / "clawhub-calls.log"
+
+    script = _step_shell_block(_PREV_RELEASE_GATE_STEP)
+    assert script.count("/tmp") == script.count("/tmp/"), (
+        "The gate uses a bare /tmp path the relocation below would miss."
+    )
+    script = script.replace("/tmp/", f"{scratch}/")
 
     env = dict(
         os.environ,
         PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
         CURL_STUB_CODE=curl_code,
-        GH_STUB_MODE=gh_mode,
+        GH_TAG_MODE=tag_mode,
+        GH_REL_MODE=rel_mode,
+        GH_CALL_LOG=str(gh_log),
+        CLAWHUB_CALL_LOG=str(clawhub_log),
         GITHUB_REPOSITORY="owner/repo",
         GH_TOKEN="x",
         SKIP_CHECK="false",
     )
-    return subprocess.run(
-        ["bash", "-c", _step_shell_block(_PREV_RELEASE_GATE_STEP)],
+    proc = subprocess.run(
+        ["bash", "-c", script],
         cwd=str(work), capture_output=True, text=True, env=env,
     )
 
+    def _calls(log):
+        return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+    return _GateRun(proc, _calls(gh_log), _calls(clawhub_log))
+
+
+def _verdicts_in(stdout: str) -> List[str]:
+    return [name for name, marker in _GATE_VERDICTS.items() if marker in stdout]
+
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
-@pytest.mark.parametrize("curl_code", ["000", "503"])
+def test_previous_release_gate_passes_when_the_previous_release_is_live(tmp_path) -> None:
+    """Control for the tests below: the harness can produce a PASS, not only failures.
+
+    A 200 from ClawHub is the gate's single exit-0 path. If the stubs or the script
+    extraction were broken so that every run failed, every "must fail with verdict X"
+    test below could still pass for the wrong reason; this one would not.
+    """
+    run = _run_previous_release_gate(tmp_path, "200", tag_mode="ok", rel_mode="ok")
+    assert run.proc.returncode == 0, f"stdout: {run.proc.stdout!r}\nstderr: {run.proc.stderr!r}"
+    assert "Previous release 9.9.8 is live on ClawHub." in run.proc.stdout
+    assert _verdicts_in(run.proc.stdout) == []
+    assert run.gh_calls == [] and run.clawhub_calls == [], (
+        "A live previous release needs no tag/release lookup and no scan diagnosis."
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize("curl_code", ["000", "503", "429", "403", "410", "301"])
 def test_previous_release_gate_treats_non_404_registry_response_as_lookup_failure(
     tmp_path, curl_code,
 ) -> None:
-    """A 000 (unreachable) or 5xx ClawHub response is a lookup failure, not a verdict.
+    """Any registry answer other than 200/404 is a lookup failure, not a verdict.
 
-    Before B-851 this gate only tested `CODE = "200"`; anything else — including a
-    total transport failure (000) or a server error (503) — fell into the same
-    "published and never surfaced" branch as a genuine 404, blaming the release for
-    what is actually a registry outage or lookup failure.
+    Before B-851 this gate only tested `CODE = "200"`; anything else — a total
+    transport failure (000), a server error (503), a rate limit (429), or a 3xx/4xx the
+    registry answered with (301/403/410) — fell into the same branches as a genuine
+    404. The tag and release are both stubbed as existing, which is the original
+    reproduction: a tagged, released version plus a registry blip printed "published
+    and never surfaced", blaming the release for the registry.
+
+    The message must also not claim the registry was unreachable: for every code but
+    000 it answered, and "could not reach" sends the operator to debug the network.
     """
-    proc = _run_previous_release_gate(tmp_path, curl_code=curl_code, gh_mode="not_found")
-    assert proc.returncode != 0, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
-    assert "registry lookup failure" in proc.stdout, (
-        f"Expected a registry-lookup-failure message for HTTP {curl_code}.\n"
-        f"stdout: {proc.stdout!r}"
+    run = _run_previous_release_gate(tmp_path, curl_code, tag_mode="ok", rel_mode="ok")
+    out = run.proc.stdout
+    assert run.proc.returncode == 1, f"stdout: {out!r}\nstderr: {run.proc.stderr!r}"
+    assert _verdicts_in(out) == ["registry_lookup_fail"], (
+        f"HTTP {curl_code} must produce only the registry-lookup-failure verdict.\n"
+        f"stdout: {out!r}"
     )
-    assert "published and never surfaced" not in proc.stdout, (
-        f"A {curl_code} registry response must not be reported as 'never surfaced' — "
-        f"that response never confirmed the release is genuinely missing.\n"
-        f"stdout: {proc.stdout!r}"
+    assert f"Unexpected ClawHub registry response (HTTP {curl_code};" in out, out
+    assert "registry lookup failure, not a" in out, out
+    assert "Could not reach" not in out, (
+        f"HTTP {curl_code}: the registry was reached (or, for 000, the message already "
+        f"says no response arrived); 'could not reach' misdirects the operator.\n{out!r}"
     )
-    assert "was never released" not in proc.stdout, (
-        f"A {curl_code} registry response must not be reported as 'never released' "
-        f"either — the gh tag/release checks are never even reached on a non-404.\n"
-        f"stdout: {proc.stdout!r}"
+    assert run.gh_calls == [] and run.clawhub_calls == [], (
+        "A non-404 registry answer must stop the gate before any tag/release lookup."
     )
+
+
+# Every combination of the two gh lookups behind a real registry 404, with the verdict
+# the gate must write. A lookup failure on EITHER call outranks every other answer: a
+# half-known state is not a verdict. Otherwise the tag is consulted first, because §6
+# tags before publishing — no tag means no release attempt was ever made, whatever a
+# (draft) release object says; then the GitHub Release, which only the publish path
+# creates.
+_GH_MATRIX = [
+    ("ok", "ok", "never_surfaced"),
+    ("ok", "not_found", "no_gh_release"),
+    ("ok", "lookup_fail", "gh_lookup_fail"),
+    ("not_found", "ok", "never_released"),
+    ("not_found", "not_found", "never_released"),
+    ("not_found", "lookup_fail", "gh_lookup_fail"),
+    ("lookup_fail", "ok", "gh_lookup_fail"),
+    ("lookup_fail", "not_found", "gh_lookup_fail"),
+    ("lookup_fail", "lookup_fail", "gh_lookup_fail"),
+]
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
-def test_previous_release_gate_treats_gh_failure_as_lookup_failure_not_never_released(
-    tmp_path,
+@pytest.mark.parametrize(
+    "tag_mode,rel_mode,expected", _GH_MATRIX,
+    ids=[f"tag_{t}-rel_{r}" for t, r, _ in _GH_MATRIX],
+)
+def test_previous_release_gate_verdict_after_a_real_404(
+    tmp_path, tag_mode, rel_mode, expected,
 ) -> None:
-    """A `gh` rate-limit/network failure must not be misread as "tag/release absent".
+    """Behind a genuine 404, each gh lookup outcome must land on its own verdict.
 
-    Sending gh's stderr to /dev/null used to make a transient gh failure look
-    identical to a genuine not-found: both came back as a non-zero exit. That told
-    the operator their CHANGELOG was out of sync with reality when the real cause was
-    a transient gh failure, not a missing tag/release.
+    Driving the two calls independently is what makes each discriminator testable on
+    its own (CLAWSECCHECK-B-851):
+    - tag rate-limited + release present must be a lookup failure. With the tag
+      grep loosened to match any error, it read as "no tag v9.9.8 exists — that
+      version was never released ... Do NOT reach for skip_previous_release_check",
+      the exact misdiagnosis this task was filed for.
+    - tag 404 + release rate-limited pins the release grep the same way.
+    - tag + release present is the gate's main true positive, "published and never
+      surfaced", and the only path that runs the scan diagnosis.
     """
-    proc = _run_previous_release_gate(tmp_path, curl_code="404", gh_mode="lookup_fail")
-    assert proc.returncode != 0, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
-    assert "lookup failure, not a verdict" in proc.stdout, (
-        f"Expected a gh-lookup-failure message when gh itself fails on both calls.\n"
-        f"stdout: {proc.stdout!r}"
-    )
-    assert "was never released" not in proc.stdout, (
-        f"A gh lookup failure must not be reported as 'never released'.\n"
-        f"stdout: {proc.stdout!r}"
-    )
-    assert "published and never surfaced" not in proc.stdout, (
-        f"A gh lookup failure must not be reported as 'never surfaced'.\n"
-        f"stdout: {proc.stdout!r}"
+    run = _run_previous_release_gate(tmp_path, "404", tag_mode, rel_mode)
+    out = run.proc.stdout
+    assert run.proc.returncode == 1, f"stdout: {out!r}\nstderr: {run.proc.stderr!r}"
+    assert _verdicts_in(out) == [expected], (
+        f"tag={tag_mode}, release={rel_mode}: expected only the {expected!r} verdict, "
+        f"got {_verdicts_in(out)!r}.\nstdout: {out!r}\nstderr: {run.proc.stderr!r}"
     )
 
+    # Both lookups actually reached the stub, in the gate's order — so every verdict
+    # above was computed from these modes, not from a call that never happened.
+    assert len(run.gh_calls) == 2, run.gh_calls
+    assert run.gh_calls[0] == "api repos/owner/repo/git/ref/tags/v9.9.8", run.gh_calls
+    assert run.gh_calls[1] == "release view v9.9.8 --repo owner/repo", run.gh_calls
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
-def test_previous_release_gate_still_reports_a_genuinely_never_released_version(
-    tmp_path,
-) -> None:
-    """Regression guard: the true-positive path must still fire correctly.
+    # A lookup failure names the call that failed, with gh's own error, and only that one.
+    assert ("tag check: " in out) == (tag_mode == "lookup_fail"), out
+    assert ("release check: " in out) == (rel_mode == "lookup_fail"), out
+    if expected == "gh_lookup_fail":
+        assert "API rate limit exceeded" in out, out
 
-    curl gets a real 404 and gh gives its own genuine not-found signals for both the
-    tag and the release lookups — the gate must still say "was never released", not
-    get swallowed by the new lookup-failure branches this fix adds.
+    # Only a version that was tagged, released and still 404s gets its stored scan
+    # report pulled; every other verdict already explains the 404.
+    if expected == "never_surfaced":
+        assert run.clawhub_calls == ["scan download clawseccheck --version 9.9.8"], (
+            run.clawhub_calls
+        )
+    else:
+        assert run.clawhub_calls == [], run.clawhub_calls
+
+
+def test_previous_release_gate_stub_speaks_the_gh_formats_the_gate_cites() -> None:
+    """The gh stub's not-found strings must be the ones the workflow says it verified.
+
+    The gate's discriminators are greps for gh's own not-found text, and the workflow
+    comment records the exact strings they were grounded against. If the stub drifts
+    from them, the matrix above tests a gh that does not exist — which is how an
+    earlier stub came to emit a 404 format the workflow had already retracted.
     """
-    proc = _run_previous_release_gate(tmp_path, curl_code="404", gh_mode="not_found")
-    assert proc.returncode != 0, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
-    assert "was never released" in proc.stdout, (
-        f"A genuinely untagged previous version must still be reported as 'never "
-        f"released' — this is the pre-existing true-positive path and must not "
-        f"regress.\nstdout: {proc.stdout!r}"
-    )
-    assert "registry lookup failure" not in proc.stdout, (
-        f"A genuine 404 must not be reported as a registry lookup failure.\n"
-        f"stdout: {proc.stdout!r}"
-    )
-    assert "lookup failure, not a verdict" not in proc.stdout, (
-        f"A genuine gh not-found must not be reported as a gh lookup failure.\n"
-        f"stdout: {proc.stdout!r}"
-    )
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    for real in ("gh: Not Found (HTTP 404)", "release not found"):
+        assert f"`{real}`" in text, f"The workflow no longer cites gh's {real!r} format."
+        assert real in _GH_LOOKUP_STUB, f"The gh stub does not emit {real!r}."
 
 
 def test_publish_workflow_post_publish_check_is_warn_only() -> None:
