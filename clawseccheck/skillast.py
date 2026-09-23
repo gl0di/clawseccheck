@@ -2232,6 +2232,25 @@ def _name_rebound_anywhere(tree: ast.AST, name: str) -> bool:
 # `_b863_classify_head` is threaded through as returning the SPECIFIC
 # resolved source name (or None) rather than a bare bool, precisely so alias
 # creation knows WHICH existing slot to share.
+#
+# Fix round 2 (C-135, 2026-09-23): round 1 gave every tracked name its own
+# `shapes_of[...]` slot, but `_b863_classify_assign_value` -- the function
+# that computes what a REASSIGNMENT's own new slot should hold -- still
+# manufactured a brand-new, unrelated blank `_B863Shape` whenever the RHS was
+# a bare already-tracked Name or a `_b863_classify_head`-resolved expression,
+# instead of reading the resolved name's OWN, already-correct `shapes_of[...]`
+# entry. That is unsound the instant the resolved name still shares a
+# `_B863Shape` object with a THIRD, still-live alias: `args = ["ls"] if
+# len(payload) > 3 else args` re-evaluates the CURRENT `args` in its `else`
+# arm, which at runtime is the exact object a prior `x = args` still aliases;
+# fabricating a fresh blank shape there detaches that arm from `x`, so a
+# later `x.append(payload)` becomes invisible to it (lost detection). Fixed:
+# `_b863_classify_assign_value` now takes `shapes_of` and both branches
+# return `list(shapes_of[resolved_name])` -- a new list wrapper (so a later
+# full reassignment of `tgt.id` alone still only replaces `tgt.id`'s own dict
+# entry) around the SAME `_B863Shape` object(s), preserving true aliasing for
+# any name that still shares one. See `_b863_classify_assign_value`'s own
+# docstring for the detailed trace.
 _B863_HEAD_WRAP_CALLS = frozenset({"list", "tuple"})
 _B863_IDENTITY_MAP_NAMES = frozenset({"str"})
 _B863_IDENTITY_MAP_ATTRS = frozenset({"fspath", "fsdecode"})
@@ -2392,29 +2411,58 @@ def _b863_flatten_fresh(expr, names, tree):
     return None
 
 
-def _b863_classify_assign_value(value, names, tree):
+def _b863_classify_assign_value(value, names, tree, shapes_of):
     """Classify an Assign/reassign RHS into a list of `_B863Shape` (usually
     one; two for an IfExp / `or`-join whose branches are each H or F), or
     None if it fits neither grammar -- the caller treats None as out of
-    domain."""
+    domain.
+
+    Fix round 2 (C-135, 2026-09-23): the bare-Name and `_b863_classify_head`
+    branches used to return a brand-new BLANK shape (`_B863Shape(False, None,
+    [], False)`) whenever the RHS was itself a tracked name (self-reassign,
+    e.g. `args = list(args)`) or resolved head-preservingly to one (e.g.
+    `args = x`) -- discarding whatever that resolved name's OWN current
+    `shapes_of[...]` entry already held, including any `_B863Shape` object it
+    shares by true aliasing with a still-live sibling name. That is the exact
+    root cause of this round's regression: in `args = ["ls"] if len(payload)
+    > 3 else args`, the IfExp's `else` arm is the bare Name `args`, and at
+    runtime that arm literally re-evaluates the CURRENT `args` -- the same
+    object `x` (aliased earlier via `x = args`) still refers to. Returning a
+    fresh blank shape there manufactures a NEW `_B863Shape` object with no
+    relationship to `shapes_of['x']`, so the later `x.append(payload)`
+    mutates an object the reassigned `args`'s else-branch shape can no longer
+    see, and the finding is lost. Both branches now return
+    `list(shapes_of[resolved_name])` instead: a fresh LIST wrapper (so a full
+    reassignment of `tgt.id` afterwards replaces only `tgt.id`'s own dict
+    entry, per the fix-round-1 invariant above) around the SAME `_B863Shape`
+    object(s) `resolved_name` currently holds -- so a later mutation through
+    any name still sharing one of those objects (by true aliasing, per
+    `_b863_process_one`'s alias-creation branch) is visible wherever that
+    object is reachable, exactly as at runtime. Since `shapes_of[value.id]`
+    is read from the CALLER's still-current state (the caller only replaces
+    `shapes_of[tgt.id]` with our return value AFTER we return), the
+    self-reassign case (`resolved_name == tgt.id`) correctly sees the
+    PRE-reassignment shapes -- RHS evaluation happens before the store, same
+    as Python's own assignment semantics."""
     if isinstance(value, ast.Name) and value.id in names:
-        return [_B863Shape(False, None, [], False)]
+        return list(shapes_of[value.id])
     fresh = _b863_flatten_fresh(value, names, tree)
     if fresh is not None:
         a0, rest, refs = fresh
         return [_B863Shape(True, a0, rest, refs)]
-    if _b863_classify_head(value, names, tree) is not None:
-        return [_B863Shape(False, None, [], False)]
+    head_src = _b863_classify_head(value, names, tree)
+    if head_src is not None:
+        return list(shapes_of[head_src])
     if isinstance(value, ast.IfExp):
-        left = _b863_classify_assign_value(value.body, names, tree)
-        right = _b863_classify_assign_value(value.orelse, names, tree)
+        left = _b863_classify_assign_value(value.body, names, tree, shapes_of)
+        right = _b863_classify_assign_value(value.orelse, names, tree, shapes_of)
         if left is None or right is None:
             return None
         return left + right
     if isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or):
         shapes = []
         for v in value.values:
-            s = _b863_classify_assign_value(v, names, tree)
+            s = _b863_classify_assign_value(v, names, tree, shapes_of)
             if s is None:
                 return None
             shapes.extend(s)
@@ -2558,7 +2606,7 @@ def _b863_process_one(stmt, names, tree, shapes_of):
         tgt = stmt.targets[0]
         if isinstance(tgt, ast.Name):
             if tgt.id in names:
-                new_shapes = _b863_classify_assign_value(stmt.value, names, tree)
+                new_shapes = _b863_classify_assign_value(stmt.value, names, tree, shapes_of)
                 if new_shapes is None:
                     raise _B863OutOfDomain(("bad_reassign", stmt))
                 # Replace ONLY this name's own slot with a brand-new list --

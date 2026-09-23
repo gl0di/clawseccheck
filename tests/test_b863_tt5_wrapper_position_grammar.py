@@ -951,6 +951,98 @@ def test_fr1_side_b_tracked_param_mutation_after_sibling_alias_rebind_is_crit():
 
 
 # ---------------------------------------------------------------------------
+# FR2 -- fix round 2 (C-135, 2026-09-23) against fix/b-863 @ 4c46d6c9: round
+# 1 gave every tracked name its own `shapes_of[...]` slot, but
+# `_b863_classify_assign_value` still MANUFACTURED a brand-new, unrelated
+# blank shape for a reassignment whose RHS was itself a bare already-tracked
+# Name or a `_b863_classify_head`-resolved expression, instead of reading
+# that resolved name's own current `shapes_of[...]` entry -- so a reassign
+# that (at runtime) re-evaluates a name STILL aliased by a third, live name
+# silently detached from it in the analysis. Fixed by threading `shapes_of`
+# through and returning `list(shapes_of[resolved_name])` (see
+# `_b863_classify_assign_value`'s own docstring and the module comment above
+# `_B863OutOfDomain`). Mutation-checked: reverting `skillast.py` to the
+# fix-round-1 version makes `test_fr2_ternary_selfref_stale_alias_mutation...`
+# go red (see `b863-fix2.md` in the wave-20 scratch directory).
+# ---------------------------------------------------------------------------
+
+def test_fr2_ternary_selfref_stale_alias_mutation_is_crit():
+    """Reviewer's round-2 repro (BLOCKER, introduced by 4c46d6c9): `x = args`
+    aliases `x` to the wrapper's own vararg tuple-as-list; `args` is then
+    reassigned to an IfExp whose `else` arm is the bare Name `args` itself --
+    at runtime that arm re-evaluates the CURRENT `args`, i.e. the exact
+    object `x` still refers to (the ternary's `then` arm, a fresh `['ls']`,
+    is only taken on the OTHER path). `x.append(payload)` afterwards mutates
+    that shared object, so on the `len(payload) <= 3` path `args` ends up
+    `['sh', '-c', payload]` at the sink -- genuine shell command injection.
+    The fix-round-1 code fabricated a fresh, unrelated blank shape for the
+    `else` arm (since it is a bare already-tracked Name), detaching it from
+    `x`'s later mutation and losing the finding entirely (info instead of
+    the correct TT5_CMD_INJECTION/crit)."""
+    src = _va(
+        ["args = list(args)", "x = args", "args = ['ls'] if len(payload) > 3 else args", "x.append(payload)"],
+        call='sh("sh", "-c")',
+    )
+    _assert_crit(src)
+
+
+def test_fr2_augassign_after_full_literal_divergence_is_info():
+    """Control for the fix above, so it does not overreach: `args` is
+    reassigned to a fresh, fully-literal `['ls']` (a plain Assign, not an
+    IfExp `else`-arm self-reference) -- a genuine, unconditional divergence.
+    `x` is now a stale reference to the OLD (pre-rebind) list; `x += [
+    payload]` (AugAssign, in-place list extend) mutates that stale object,
+    never the NEW `args`. Must stay info: the fix must not make EVERY later
+    mutation of a former alias retroactively visible to a name that has
+    since diverged via an ordinary (non-self-referential) reassign -- only
+    an alias-creation or a resolved self-reference should ever share a
+    `_B863Shape` object."""
+    src = _va(
+        ["args = list(args)", "x = args", "args = ['ls']", "x += [payload]"],
+        call='sh("sh", "-c")',
+    )
+    _assert_info(src)
+
+
+def test_fr2_if_else_alias_lost_past_branch_merge_pinned_to_current_pre_existing_gap():
+    """Reviewer's round-2 side-B finding (lost detection, NOT fixed by this
+    round -- filed as CLAWSECCHECK-B-967 for 4.3.1): a name (`y`) first
+    discovered as an alias INSIDE one arm of an `ast.If` is dropped once the
+    branch-merge completes (`_b863_process_one`'s `ast.If` handling only
+    re-threads names that were already tracked BEFORE the `if`), so the
+    post-if `y.append(payload)` matches no tracked receiver and is a silent
+    no-op even though, at runtime, the `else` arm's `y = x` truly aliases
+    the ORIGINAL `args` object that `args` itself still refers to on that
+    same path (the `if` arm reassigns `args` to a new `['ls']`, but the
+    `else` arm never touches `args` at all). Real value at the sink on the
+    `else` path: `['sh', '-c', payload]` -- should be
+    TT5_CMD_INJECTION/crit. This is a DIFFERENT root cause from this round's
+    fix (branch-merge alias re-threading, not reassignment-value
+    classification) and hits a different function
+    (`_b863_process_one`'s `ast.If` branch, not
+    `_b863_classify_assign_value`); confirmed NOT touched by this round's
+    change (both before and after this round's fix give the same info
+    verdict here). Pinned rather than asserted-and-xfailed so the suite
+    stays green, per this file's own convention for CLAWSECCHECK-B-940/941
+    above."""
+    src = _va(
+        [
+            "import random",
+            "args = list(args)",
+            "x = args",
+            "if random.random() > 0.5:",
+            "    args = ['ls']",
+            "    y = args",
+            "else:",
+            "    y = x",
+            "y.append(payload)",
+        ],
+        call='sh("sh", "-c")',
+    )
+    _assert_info(src)  # NOT the real reachable crit on the else-path -- see docstring; CLAWSECCHECK-B-967
+
+
+# ---------------------------------------------------------------------------
 # Parametrized sanity sweep -- every case above, run twice more (with the
 # zero-based `sink=` and `sig=` combinations already covered) to confirm
 # `analyze_python` never raises on any of them, catching a crash a narrower
@@ -966,6 +1058,11 @@ _ALL_MATRIX_SOURCES = [
     _va(["args = ['sh', '-c', payload]"]),
     _va(["args = list(args)", "x = args", "args = ['sh', '-c']", "x.append(payload)"]),
     _va(["args = list(args)", "x = args", "x = ['ls']", "args.append(payload)"], call='sh("sh", "-c")'),
+    _va(
+        ["args = list(args)", "x = args", "args = ['ls'] if len(payload) > 3 else args", "x.append(payload)"],
+        call='sh("sh", "-c")',
+    ),
+    _va(["args = list(args)", "x = args", "args = ['ls']", "x += [payload]"], call='sh("sh", "-c")'),
 ]
 
 
