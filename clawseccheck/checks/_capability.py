@@ -969,6 +969,145 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     return sorted((granted - view.denied) | scoped), True
 
 
+class _FsScopeGrants(NamedTuple):
+    """Per-scope fs-tool grant resolution for B55/B68's NOT-ENUMERABLE branch (B-737).
+
+    Split by PROVENANCE, never by scope identity: ``default_tools``/``declared_tools`` are the
+    union of tools any non-opaque, non-confined scope of that provenance grants;
+    ``default_scopes``/``declared_scopes``/``opaque_scopes`` are those scopes' labels, for
+    wording only. ``inert_defaults_tools`` is true when ``agents.defaults.tools`` is set beside
+    a declared roster key, where the vendor ignores it entirely (``toolscope_case9``) -- kept
+    separate so a finding can say so without implying "nothing declared".
+    """
+
+    default_tools: frozenset
+    declared_tools: frozenset
+    default_scopes: "tuple[str, ...]"
+    declared_scopes: "tuple[str, ...]"
+    opaque_scopes: "tuple[str, ...]"
+    inert_defaults_tools: bool
+
+
+def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsScopeGrants | None":
+    """B-737: resolves ``family``'s per-scope grant over every scope ``toolgrant.
+    resolved_scopes`` says the vendor actually resolves, for B55/B68's NOT-ENUMERABLE branch
+    ONLY -- ``_b68_fs_tools_granted`` (G1, above) already resolves every shape it covers, and
+    this function runs only on ITS residual (``not enumerable``), so the two can never
+    double-count the same grant.
+
+    This replaces three earlier, independently-drifting predicates for "does the operator's
+    tool policy decide this scope" (a hand-written declared-keys list, and a ``toolgrant``
+    query at ``GLOBAL_SCOPE`` that stopped being a real session scope once a roster existed)
+    with one semantic test: ``toolgrant.resolved_scopes``'s ``provenance``, which asks whether
+    any operator-written policy LAYER (``toolgrant.policy_layers``) constrains the scope the
+    vendor actually resolves, not whether some hand-chosen set of config keys is present. See
+    the ``toolgrant.py`` module docstring's ``resolved_scopes`` for the full grounding.
+
+    Returns ``None`` when ``resolved_scopes`` itself returns ``None`` (an empty/malformed
+    config, an unparseable tools block, or two roster agents that normalize to the same id) --
+    the caller keeps its base UNKNOWN, never a guess. A non-``None`` result with both tool sets
+    empty (no non-opaque, non-confined scope grants anything in ``family``) is likewise read as
+    "nothing found" by both callers.
+
+    ``confinement=True`` (B68 only) additionally skips a scope whose OWN
+    ``tools.fs.workspaceOnly`` (falling back to the global value) is ``True``, or whose sandbox
+    mode (the scope's own roster entry, falling back to ``agents.defaults.sandbox.mode``) is
+    ``"all"`` -- the vendor's own per-context fsUnguarded composite
+    (``context.tools?.fs?.workspaceOnly ?? cfg.tools?.fs?.workspaceOnly``,
+    ``audit.nondeep.runtime``), asked PER SCOPE instead of only at the global scope B68's own
+    G1 path (and the global short-circuit above it) already read.
+    """
+    scopes = _toolgrant.resolved_scopes(cfg)
+    if scopes is None:
+        return None
+
+    inert_defaults_tools = bool(dig(cfg, "agents.defaults.tools")) and _toolgrant._has_agent_roster(cfg)
+
+    default_tools: set = set()
+    declared_tools: set = set()
+    default_scopes: list = []
+    declared_scopes: list = []
+    opaque_scopes: list = []
+    for scope in scopes:
+        if scope.opaque:
+            opaque_scopes.append(scope.label)
+            continue
+        if confinement:
+            own_fs = scope.own_tools.get("fs") if isinstance(scope.own_tools, dict) else None
+            workspace_only = own_fs.get("workspaceOnly") if isinstance(own_fs, dict) else None
+            if workspace_only is None:
+                workspace_only = dig(cfg, "tools.fs.workspaceOnly")
+            # Reuses `toolpolicy._sandbox_mode` (own entry's `sandbox.mode`, falling back to
+            # `agents.defaults.sandbox.mode`) rather than a second `dig(entry, "sandbox.mode")`
+            # -- that helper already reads the per-entry field directly (not through `dig()`,
+            # so it carries no `relative:` schema-grounding manifest entry of its own to
+            # duplicate), and is the SAME resolution `_sandbox_confines`/`confined_scopes`
+            # already use for this identical question elsewhere in this codebase.
+            sandbox_mode = _toolpolicy._sandbox_mode(cfg, scope.entry)
+            if workspace_only is True or sandbox_mode == "all":
+                continue
+        got = {tool for tool in family if _toolgrant.granted(cfg, tool, scope.scope)}
+        if not got:
+            continue
+        if scope.provenance == "default":
+            default_tools |= got
+            default_scopes.append(scope.label)
+        else:
+            declared_tools |= got
+            declared_scopes.append(scope.label)
+
+    return _FsScopeGrants(
+        frozenset(default_tools),
+        frozenset(declared_tools),
+        tuple(default_scopes),
+        tuple(declared_scopes),
+        tuple(opaque_scopes),
+        inert_defaults_tools,
+    )
+
+
+def _b737_provenance(result: "_FsScopeGrants") -> str:
+    """"default", "declared" or "mixed" -- which of `result`'s two tool sets is non-empty.
+    Only ever called after confirming at least one of them is (both callers check that
+    before keeping a non-``None`` `scope_grants`), so this never needs a third "neither"
+    answer."""
+    if result.default_tools and result.declared_tools:
+        return "mixed"
+    return "default" if result.default_tools else "declared"
+
+
+def _b737_provenance_sentences(result: "_FsScopeGrants") -> list:
+    """The wording B-737's design mandates for a finding driven by `_fs_scope_grants`:
+    name the specific scopes and tools a provenance applies to, never "declared anywhere"
+    or "every agent" -- that would overstate a `default`/`mixed` result to every scope when
+    only some of them are default, and understate a `declared` result by implying no policy
+    applies. A `mixed` result gets both sentences, one per provenance."""
+    out: list = []
+    if result.default_scopes:
+        out.append(
+            f"No tool policy restricts {', '.join(result.default_scopes)}: OpenClaw's "
+            f"permissive default grants {', '.join(sorted(result.default_tools))}."
+        )
+    if result.declared_scopes:
+        out.append(
+            f"The tool policy that applies to {', '.join(result.declared_scopes)} still "
+            f"grants {', '.join(sorted(result.declared_tools))}."
+        )
+    if result.inert_defaults_tools:
+        out.append(
+            "agents.defaults.tools is set but ignored: OpenClaw drops it entirely once a "
+            "roster (agents.entries / agents.list) is declared, even an empty one."
+        )
+    if result.opaque_scopes:
+        out.append(
+            "Not assessed for "
+            + ", ".join(result.opaque_scopes)
+            + ": a byProvider/toolsBySender tool-policy layer there is not readable from "
+            "static config."
+        )
+    return out
+
+
 def _b55_write_tools_granted(
     cfg: dict,
 ) -> "tuple[list[str], bool, _ToolPolicyView, frozenset]":
@@ -1125,6 +1264,34 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
 
     granted, enumerable = _b68_fs_tools_granted(cfg)
     if not enumerable:
+        # B-737: same residual as B55's (see its own comment) -- ask `toolgrant.
+        # resolved_scopes` per scope instead of G1's syntactic "declared" vocabulary.
+        # `confinement=True` also skips a scope that OpenClaw itself confines
+        # (`tools.fs.workspaceOnly` / `sandbox.mode="all"`, own value or falling back
+        # to the global/defaults one) -- the same composite the global short-circuit
+        # above this function already reads at global scope only.
+        scope_grants = _fs_scope_grants(cfg, _B68_FS_TOOLS, confinement=True)
+        if scope_grants is not None and (scope_grants.default_tools or scope_grants.declared_tools):
+            tools = sorted(scope_grants.default_tools | scope_grants.declared_tools)
+            provenance = _b737_provenance(scope_grants)
+            evidence = [
+                f"filesystem tools granted ({', '.join(tools)}) by OpenClaw's own "
+                f"tool-policy resolution, provenance={provenance}",
+                f"agents.defaults.sandbox.mode={sandbox_mode!r} (not 'all')",
+            ] + _b737_provenance_sentences(scope_grants)
+            return _finding(
+                "B68",
+                WARN,
+                f"Filesystem tools are granted ({', '.join(tools)}), the sandbox does "
+                f"not contain all agents (agents.defaults.sandbox.mode={sandbox_mode!r}"
+                "), and tools.fs.workspaceOnly is unset for at least one scope — its "
+                "default is false, so file tools may read, write or delete anywhere "
+                "the agent process can reach.",
+                "Set tools.fs.workspaceOnly to true (per scope if needed), or set "
+                "agents.defaults.sandbox.mode to 'all' so filesystem access is "
+                "contained.",
+                evidence=evidence,
+            )
         return _finding(
             "B68",
             UNKNOWN,
@@ -1435,6 +1602,23 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     write_tools, enumerable, view, legacy_write = _b55_write_tools_granted(cfg)
     widenings = _agent_profile_widenings(cfg)
 
+    # B-737: G1 (`_b68_fs_tools_granted`, via `_b55_write_tools_granted`) already resolves
+    # every shape it covers; this residual asks `toolgrant.resolved_scopes` -- per SCOPE,
+    # over the vendor's own policy layers -- instead of guessing from a syntactic "declared"
+    # vocabulary (see `toolgrant.py`'s and `_fs_scope_grants`'s docstrings for why the three
+    # earlier predicates here drifted). `scope_grants` stays `None` unless this residual is
+    # what supplied `write_tools` below, so every later branch can tell whether it is
+    # reasoning about a G1 grant (unchanged) or a B-737 per-scope one (needs provenance
+    # wording) purely from `scope_grants is not None`.
+    scope_grants = None
+    if not enumerable:
+        scope_grants = _fs_scope_grants(cfg, _B55_FS_WRITE_TOOLS & set(_B68_FS_TOOLS))
+        if scope_grants is not None and (scope_grants.default_tools or scope_grants.declared_tools):
+            write_tools = sorted(scope_grants.default_tools | scope_grants.declared_tools)
+            enumerable = True
+        else:
+            scope_grants = None
+
     if not enumerable:
         return _finding(
             "B55",
@@ -1622,6 +1806,24 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # all; a declared-but-not-open channel downgrades to WARN even when gated.
     if not open_ch:
         ext_ch = _external_input_channels(cfg)
+        # B-737 (Dave's ruling): a grant that is only OpenClaw's permissive DEFAULT (no
+        # operator policy layer decided it, `provenance` "default" or "mixed") never gets
+        # the gated-and-no-ingress PASS below, even though it would look identical to a
+        # genuinely narrow, operator-declared grant otherwise. A default grant is stricter
+        # than an explicit one BY DESIGN here: an explicit grant reflects a decision this
+        # check can point at, a default one reflects the absence of one.
+        if gated and not ext_ch and scope_grants is not None and scope_grants.default_tools:
+            return _finding(
+                "B55",
+                WARN,
+                f"Filesystem-write tool granted ({label}) by OpenClaw's own permissive "
+                f"default, not by any operator-written tool policy. No ingress channel "
+                f"is declared, and an approval gate (tools.exec.mode) is set, but the "
+                f"grant itself was never decided by config.",
+                "Declare tools.allow (or tools.profile) explicitly so this grant is an "
+                "operator decision, not the platform default.",
+                evidence=[f"write tool granted: {label}"] + _b737_provenance_sentences(scope_grants),
+            )
         if gated and not ext_ch:
             return _finding(
                 "B55",
@@ -1632,6 +1834,13 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 evidence=[f"write tool granted: {label}"],
             )
         if gated and ext_ch:
+            evidence = [
+                f"write tool granted: {label}",
+                f"declared, not-open, untrusted-content channel(s): {', '.join(ext_ch)}",
+                "approval gate present (tools.exec.mode) but not write-specific",
+            ]
+            if scope_grants is not None:
+                evidence += _b737_provenance_sentences(scope_grants)
             return _finding(
                 "B55",
                 WARN,
@@ -1641,11 +1850,7 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 f"gate (tools.exec.mode) — it doesn't scope write-capable tools.",
                 "Lock the channel(s) to 'owner' (or 'disabled'); tools.exec.mode='ask' "
                 "alone does not clear this — it doesn't scope write-capable tools.",
-                evidence=[
-                    f"write tool granted: {label}",
-                    f"declared, not-open, untrusted-content channel(s): {', '.join(ext_ch)}",
-                    "approval gate present (tools.exec.mode) but not write-specific",
-                ],
+                evidence=evidence,
             )
     else:
         ev = [
@@ -1667,6 +1872,8 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 "(tools.fs.workspaceOnly or a fully-sandboxed session, resolved per agent) "
                 "-- not arbitrary write reach"
             )
+            if scope_grants is not None:
+                ev += _b737_provenance_sentences(scope_grants)
             return _finding(
                 "B55",
                 WARN,
@@ -1678,6 +1885,28 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 evidence=ev,
             )
         if not explicit_write_grant:
+            # B-737: a grant this check only knows about via `scope_grants` (the
+            # not-enumerable residual) is, by construction, never an explicit global
+            # write/edit/apply_patch grant and never a per-agent tools.profile widening
+            # (`widenings` is guaranteed empty here -- see the comment where `scope_grants`
+            # is computed above). The two branches below both assume a specific OTHER
+            # mechanism produced the grant (a widening, or tools.alsoAllow's implicit
+            # wildcard); neither is true here, so provenance wording replaces them instead
+            # of running underneath a caption that describes a mechanism that didn't fire.
+            if scope_grants is not None:
+                ev += _b737_provenance_sentences(scope_grants)
+                return _finding(
+                    "B55",
+                    WARN,
+                    f"Filesystem-write capability ({label}) is reachable by untrusted "
+                    f"senders, but the grant was resolved only for the not-enumerable "
+                    f"residual (OpenClaw's own per-scope tool-policy resolution, not this "
+                    f"check's own allow/alsoAllow/profile model), so this stays WARN "
+                    f"pending confirmation of real intent.",
+                    "Declare tools.allow (or tools.profile) explicitly so the intended "
+                    "grant is unambiguous, and lock the open channel(s) to 'allowlist'.",
+                    evidence=ev,
+                )
             if widenings:
                 global_profile = dig(cfg, "tools.profile")
                 widen_desc = (
@@ -1796,6 +2025,12 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             scored=True,
         )
 
+    _bottom_ev = [
+        f"write tool granted: {label}",
+        "no approval gate (tools.exec.mode is not deny/allowlist/ask/auto)",
+    ]
+    if scope_grants is not None:
+        _bottom_ev += _b737_provenance_sentences(scope_grants)
     return _finding(
         "B55",
         WARN,
@@ -1803,10 +2038,7 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
         f"open-ingress channel was found to prove broader reach either way.",
         "Scope it: set tools.exec.mode='ask' (or 'deny'/'allowlist') so write-capable "
         "tools require approval.",
-        evidence=[
-            f"write tool granted: {label}",
-            "no approval gate (tools.exec.mode is not deny/allowlist/ask/auto)",
-        ],
+        evidence=_bottom_ev,
     )
 
 

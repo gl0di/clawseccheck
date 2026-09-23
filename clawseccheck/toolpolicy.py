@@ -156,6 +156,14 @@ import re
 from .collector import agent_roster, dig
 from .toolgrant import GLOBAL_SCOPE, granted
 
+# B-737: an alias, not a second copy. This module's own `_OPAQUE_NARROWING_KEYS` used to be a
+# separate literal tuple that happened to match `toolgrant`'s -- until it didn't: round 3 of
+# B-737 found `checks/_capability.py` keying on its OWN, narrower "declared" key set while this
+# module already treated `byProvider`/`toolsBySender` as possible narrowing, and nothing forced
+# the two to agree. `toolgrant.OPAQUE_NARROWING_KEYS` is now the one place either module reads
+# this tuple from.
+from .toolgrant import OPAQUE_NARROWING_KEYS as _OPAQUE_NARROWING_KEYS
+
 # ``TOOL_NAME_ALIASES`` (dist tool-policy-*.js). Nothing aliases TO "read", so this
 # matters here only so an aliased entry in allow/deny normalizes the way the dist
 # normalizes it before the glob match.
@@ -515,11 +523,6 @@ def _sandbox_confines(cfg: dict, agent_id: str, entry) -> "bool | None":
     if mode in ("", _SANDBOX_OFF):
         return False
     return None
-
-
-# Layers this module does not resolve and that CAN restrict. Their presence is treated as
-# possible narrowing, which is the quiet direction: it can cost a finding, never invent one.
-_OPAQUE_NARROWING_KEYS = ("byProvider", "toolsBySender")
 
 
 def _scope_rows(cfg: dict) -> list:
