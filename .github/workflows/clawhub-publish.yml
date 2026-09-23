@@ -269,6 +269,15 @@ jobs:
         # investigate a publishing incident that had not happened. A 404 alone cannot tell
         # the two apart, so the tag is consulted before the verdict is written: no tag means
         # we never attempted to publish it, which is a wrong CHANGELOG, not a lost release.
+        #
+        # B-851 open item 4 — declined: reading PREV from the registry's own `latestVersion`
+        # instead of CHANGELOG.md's second entry was considered and rejected. It would make
+        # this gate circular — it exists to verify the registry is telling the truth, so
+        # asking the registry which version to check trusts the very thing under test, and a
+        # registry outage would make the gate silently check nothing rather than fail loudly.
+        # CHANGELOG.md also has an independent correctness pin (test_version_coherence.py)
+        # that the registry has no equivalent of. Staying with the CHANGELOG keeps the design;
+        # this task only fixes the gate's failure-attribution, not its version source.
         env:
           SKIP_CHECK: ${{ inputs.skip_previous_release_check }}
           GH_TOKEN: ${{ github.token }}
@@ -298,21 +307,77 @@ jobs:
             exit 0
           fi
 
-          # A 404 has THREE causes, not two, and they want different answers. The tag says
-          # whether a release was attempted; the GitHub Release says whether that attempt
-          # got as far as producing signed artifacts, which this job only does on the
-          # publish path. v4.2.0 is the worked example of the middle case: tagged, the job
-          # failed at this very step, so nothing was ever uploaded — calling that "lost in
-          # the registry" would send someone hunting for a version ClawHub never saw.
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${PREV}" >/dev/null 2>&1; then
-            PREV_TAGGED=true
-          else
-            PREV_TAGGED=false
+          # B-851: only a genuine 404 means "not on ClawHub". Every other non-200 code —
+          # 000 (curl never got a response at all: DNS/TLS/connect failure survives the
+          # --retry above), 5xx, 429, and equally a 3xx or any other 4xx (301/403/410: the
+          # registry answered, but not with the 200/404 this gate knows how to read) — means the
+          # REGISTRY LOOKUP itself failed, which says nothing about whether ${PREV} was
+          # ever published. Folding those into "404" used to blame the release for what
+          # was actually a registry outage or transient blip. The message says "unexpected
+          # response", not "could not reach": for everything but 000 the registry WAS
+          # reached, and telling the operator otherwise points them at the network.
+          if [ "$CODE" != "404" ]; then
+            echo "::error::Unexpected ClawHub registry response (HTTP ${CODE}; 000 means no" \
+                 "response arrived at all) while checking previous release ${PREV}. Only a" \
+                 "404 says a version is missing, so this is a registry lookup failure, not a" \
+                 "verdict on ${PREV}. Re-run this job (transient errors already got 3 retries" \
+                 "above); if it persists, investigate ClawHub reachability or an API change."
+            exit 1
           fi
-          if gh release view "v${PREV}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            PREV_RELEASED=true
+
+          # From here CODE is a real 404, so the release genuinely is not visible on
+          # ClawHub. That 404 has THREE causes, not two, and they want different answers.
+          # The tag says whether a release was attempted; the GitHub Release says whether
+          # that attempt got as far as producing signed artifacts, which this job only does
+          # on the publish path. v4.2.0 is the worked example of the middle case: tagged,
+          # the job failed at this very step, so nothing was ever uploaded — calling that
+          # "lost in the registry" would send someone hunting for a version ClawHub never
+          # saw.
+          #
+          # B-851: `gh`'s own exit code alone doesn't distinguish "genuinely not found"
+          # from "the lookup itself failed" (rate limit, network, auth) — both come back
+          # non-zero, and discarding stderr to /dev/null used to make them indistinguishable.
+          # Capture stderr and read gh's own not-found signal instead: verified directly
+          # against installed `gh` (2.86.0) rather than assumed from its docs — `gh api` on a
+          # missing ref prints exactly `gh: Not Found (HTTP 404)` to stderr and exits 1, so a
+          # genuine 404 always contains the literal substring "HTTP 404" (a rate limit comes
+          # back as a distinct message with no such substring, e.g. "gh: API rate limit
+          # exceeded..."); `gh release view` on a missing release prints exactly
+          # `release not found` and exits 1 — specifically, and only, when the release
+          # genuinely doesn't exist. Anything else (a rate-limit or network message) is a
+          # lookup failure, not a "does not exist" verdict.
+          if ! TAG_ERR="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${PREV}" 2>&1)"; then
+            if printf '%s' "$TAG_ERR" | grep -q 'HTTP 404'; then
+              PREV_TAGGED=false
+              TAG_LOOKUP_FAILED=false
+            else
+              PREV_TAGGED=false
+              TAG_LOOKUP_FAILED=true
+            fi
           else
-            PREV_RELEASED=false
+            PREV_TAGGED=true
+            TAG_LOOKUP_FAILED=false
+          fi
+          if ! RELEASE_ERR="$(gh release view "v${PREV}" --repo "${GITHUB_REPOSITORY}" 2>&1)"; then
+            if printf '%s' "$RELEASE_ERR" | grep -qi 'release not found'; then
+              PREV_RELEASED=false
+              RELEASE_LOOKUP_FAILED=false
+            else
+              PREV_RELEASED=false
+              RELEASE_LOOKUP_FAILED=true
+            fi
+          else
+            PREV_RELEASED=true
+            RELEASE_LOOKUP_FAILED=false
+          fi
+
+          if [ "$TAG_LOOKUP_FAILED" = "true" ] || [ "$RELEASE_LOOKUP_FAILED" = "true" ]; then
+            echo "::error::Could not determine whether v${PREV} was tagged or released —" \
+                 "the gh CLI lookup itself failed (rate limit, network, or auth issue), not" \
+                 "a confirmed absence. This is a lookup failure, not a verdict on ${PREV}:"
+            [ "$TAG_LOOKUP_FAILED" = "true" ] && echo "  tag check: ${TAG_ERR}"
+            [ "$RELEASE_LOOKUP_FAILED" = "true" ] && echo "  release check: ${RELEASE_ERR}"
+            exit 1
           fi
 
           if [ "$PREV_TAGGED" = "false" ]; then
