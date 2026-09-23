@@ -158,6 +158,52 @@ def test_unparseable_python_is_disclosed_not_silently_clean(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# B-830 round-6: AST_FOLD_TRUNCATED must not drag a clean plugin down to WARN
+# ---------------------------------------------------------------------------
+
+# A deep, credential-free `.joinpath()` chain -- long enough to exceed the fold's own
+# _FOLD_MAX_DEPTH (200) recursion cap, so `analyze_python` emits exactly one finding:
+# AST_FOLD_TRUNCATED (severity "unknown", never fail-capable, see skillast.py's own
+# comment on that finding). No dangerous construct, no credential-shaped path, no
+# network sink -- a real, benign file that merely happens to build a long path.
+_FOLD_TRUNCATION_ONLY_PY = (
+    "from pathlib import Path\n"
+    "p = Path.home()" + ".joinpath('pad')" * 250 + "\n"
+)
+
+
+def test_the_truncation_fixture_triggers_exactly_one_ast_fold_truncated_finding():
+    """Non-vacuity: if this body ever stops tripping the depth cap (or starts tripping
+    something else too), the test below would no longer isolate the defect it pins."""
+    from clawseccheck.skillast import analyze_python
+
+    findings = analyze_python(_FOLD_TRUNCATION_ONLY_PY, "install.py")
+    assert [f.rule for f in findings] == ["AST_FOLD_TRUNCATED"]
+
+
+def test_fold_truncation_alone_does_not_floor_a_plugin_to_warn(tmp_path):
+    """B-830 round-6, defect 2: `_scan_loose_plugin_python` (checks/_mcp.py) bucketed
+    every non-AST_UNANALYZABLE, non-fail-capable AST finding into `py_signals` with no
+    rule-specific filtering, unlike the bundled-skill path (checks/_vet.py), which
+    special-cases each non-fail-capable rule individually. `py_signals` floors the
+    plugin's verdict at WARN (see the B-636 comment at the merge-rank call site), so
+    AST_FOLD_TRUNCATED -- a pure coverage-disclosure note, deliberately given severity
+    "unknown" so it can never drive a FAIL -- was misread as a security signal in this
+    one consumer, dragging an otherwise-clean plugin down to WARN on a note that
+    carries no finding of its own. A plugin whose ONLY Python content is the deep,
+    benign chain above must come back exactly as clean as a plugin shipping no Python
+    at all -- the same "identical verdict for identical danger" control methodology
+    `test_the_control_plugin_with_no_python_stays_clean` uses, since this fixture's
+    manifest independently draws its own (unrelated) supply-chain WARN either way."""
+    control = vet_plugin(_plugin(tmp_path / "control"))
+    out = vet_plugin(_plugin(tmp_path / "fold_trunc", py_at="install.py",
+                              py_body=_FOLD_TRUNCATION_ONLY_PY))
+    assert out.status == control.status, f"status={out.status} — {out.detail[:200]}"
+    assert _danger(out).status == PASS, _danger(out).reason
+    assert not any("path/value fold" in e for e in (out.evidence or [])), out.evidence
+
+
+# ---------------------------------------------------------------------------
 # The axes must not swap one false sentence for another
 # ---------------------------------------------------------------------------
 

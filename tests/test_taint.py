@@ -501,6 +501,82 @@ def test_no_fold_truncation_disclosure_for_a_shallow_file():
     assert "AST_FOLD_TRUNCATED" not in _rules(src)
 
 
+# ---------------------------------------------------------------------------
+# B-830 round-6 (C-135 follow-up review of round-5's fix, WITH a performance
+# measurement this time): round-5 (commit 6eeafce5, "stop caching a truncated B-830
+# fold result") closed the round-4 cache-poisoning bug correctly by DELETING a
+# truncated node's cache entry outright -- but that forces every ancestor between the
+# truncation point and the root to recompute whenever `ast.walk` later visits them
+# directly, since `_has_folded_cred_path` folds every subtree of the file through the
+# SAME shared `ctx.memo`. Measured directly against `_fold_fs_path`/
+# `_has_folded_cred_path` (isolating the fold algebra from unrelated passes like taint
+# tracking, which have their own, separately-scoped complexity): a single very long
+# `.joinpath()` chain already tracks close to the target O(n * _FOLD_MAX_DEPTH) on this
+# machine even before round-6 (both round-5 and round-6 grow near-linearly there, since
+# every node in a strictly monotonic chain needs its own depth=0 resolution exactly
+# once regardless of caching strategy) -- but a SHARED sub-expression referenced by
+# name from many call sites at varying depths is where round-5's unconditional delete
+# actually costs: every reference re-triggers a full recompute of the shared node's
+# already-truncated subtree from scratch, while round-6 (below) computes it once and
+# reuses the cached, equally-truncated answer for every equal-or-deeper reference.
+#
+# The fix (see `_fold_fs_path`'s own docstring in clawseccheck/skillast.py): cache the
+# result TOGETHER WITH the depth budget (`_FOLD_MAX_DEPTH - depth`) available when it
+# was computed. A cache hit is trusted only when the caller's OWN remaining budget is
+# no better than that -- a caller with MORE budget (most importantly a depth=0 direct
+# `ast.walk` visit, which always has the maximum) might resolve further, so it
+# recomputes; a caller with the same or less budget could not have done any better
+# either, so the cached (possibly truncated) answer stands. A fully-resolved (never
+# truncated) result is cached unconditionally, valid at any depth, exactly matching
+# round-3's original invariant.
+# ---------------------------------------------------------------------------
+
+
+def _shared_deep_base_src(depth: int, refs: int) -> str:
+    """`base` is a single `.joinpath()` chain *depth* levels long (well past
+    _FOLD_MAX_DEPTH), referenced BY NAME from *refs* separate statements -- each
+    resolution of `base` (through the single-assignment name-hop in `_fold_seg`) hits
+    the SAME `(id(node), visiting)` memo key, at a slightly different depth each time.
+    """
+    chain = "A" + ".joinpath('p')" * depth
+    lines = [f"base = {chain}"]
+    lines += [f"y{i} = base.joinpath('r{i}')" for i in range(refs)]
+    return "from pathlib import Path\nimport requests\n" + "\n".join(lines) + "\n"
+
+
+def test_shared_deep_base_referenced_many_times_does_not_blow_up_wall_clock():
+    # Defect 1's regression pin: round-5's delete-on-truncation approach pays a full
+    # ~_FOLD_MAX_DEPTH-deep recompute of `base`'s chain for EVERY one of the `refs`
+    # references (each one deletes-and-recomputes the shared node's cache entry all
+    # over again); round-6 computes `base`'s (truncated) fold once and reuses it for
+    # every subsequent reference, since none of them has a better remaining budget
+    # than the first. A generous ceiling (not a tight bound, to stay non-flaky under
+    # load) that round-5's own shape could not have met at this ref count -- measured
+    # directly against this exact construction (depth=300, refs=2000) before this fix:
+    # ~2.3s. After: ~0.2s.
+    import time
+
+    src = _shared_deep_base_src(depth=300, refs=2000)
+    t0 = time.time()
+    rules = _rules(src)
+    dt = time.time() - t0
+    assert "AST_FOLD_TRUNCATED" in rules
+    assert dt < 1.5, f"fold of a shared, repeatedly-referenced deep base took {dt:.2f}s"
+
+
+def test_shared_deep_base_credential_reference_still_detected_alongside_reuse():
+    # Correctness companion to the performance test above: interleave the exact
+    # round-4/5 bypass shape (a credential-bearing joinpath call wrapped exactly 200
+    # levels inside an outer wrapper -- see `_wrapped_cred_join_src`) among many OTHER
+    # shared-name references to a separate, unrelated deep base, so the round-6 cache
+    # is genuinely busy (many entries, many budget comparisons in flight) while the
+    # n=200 boundary detection is exercised -- confirming the reuse optimization above
+    # never interferes with the underlying security fix it sits next to.
+    noise = _shared_deep_base_src(depth=250, refs=300)
+    src = noise + "\n" + _wrapped_cred_join_src(200)
+    assert "CRED_EXFIL_FLOW" in _rules(src)
+
+
 def test_deep_fold_chain_vet_skill_cli_end_to_end(tmp_path, capsys):
     # Same repro as immediately above, driven through the real --vet-skill CLI
     # entry point (clawseccheck.cli.main), not the analyze_python()/vet_skill()

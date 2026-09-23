@@ -2713,6 +2713,12 @@ _FOLD_UNK = "\x00"  # an unresolved path segment; never a substring of any patte
 # three former `except RecursionError:` fallbacks (silent, undisclosed, whole-file
 # credential-detection bypasses) are gone now that overflow can't happen here.
 _FOLD_MAX_DEPTH = 200
+# B-830 round-6 (C-135 follow-up review of round-5's fix, with a performance
+# measurement this time): a private sentinel distinguishing "this key's fold is
+# currently being computed, on this same call stack" (the cycle guard) from a real
+# cached `(result, budget)` pair -- see `_fold_fs_path`'s docstring for why a plain
+# `None` can no longer double as the cycle-guard value.
+_FOLD_IN_PROGRESS = object()
 _PATHLIB_CLASSES = frozenset(
     {"Path", "PurePath", "PosixPath", "PurePosixPath", "WindowsPath", "PureWindowsPath"}
 )
@@ -2895,9 +2901,9 @@ def _fold_seg(x: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset, depth: int = 0
 
     B-830 round-4: this function keeps NO memo of its own -- a Constant folds directly,
     a Name-hop recurses straight into `_fold_seg` again (never cached), and every other
-    node falls through to `_fold_fs_path`, which owns `ctx.memo` and the truncation-
-    poisoning guard (see its own docstring). So the round-4 no-cache-on-truncation fix
-    belongs solely there; there is no second, parallel cache here to poison."""
+    node falls through to `_fold_fs_path`, which owns `ctx.memo` and the budget-aware
+    truncation guard (see its own docstring, updated round-6). So that guard belongs
+    solely there; there is no second, parallel cache here to poison."""
     if depth > _FOLD_MAX_DEPTH:
         ctx.truncated += 1
         return None
@@ -2914,7 +2920,7 @@ def _fold_fs_path(
     node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset = frozenset(), depth: int = 0
 ) -> "str | None":
     """Memoized, cycle-guarded entry point -- every subtree is folded at most once per
-    (node, visiting-set) pair.
+    (node, visiting-set) pair *at a given-or-worse depth budget* -- see round-6 below.
 
     B-830 round-3: a cached (already fully resolved) result is returned regardless of
     the caller's current *depth* -- it required no further recursion to produce. A
@@ -2932,29 +2938,56 @@ def _fold_fs_path(
     a DEEP descendant of an unrelated outer wrapper (~200 levels of padding) poisoned
     its own cache entry -- then the SAME node, reached later as its own shallow
     top-level walk target (where it would normally resolve cleanly), got the poisoned
-    entry back instead of a fresh recompute. `ctx.truncated` (see _FsFoldCtx) is the
-    exact signal for this: if it increased while computing *this* node's uncached
-    result, truncation happened somewhere in its subtree and the result must not be
-    cached -- delete the cycle-guard placeholder instead, forcing a different/shallower
-    call path that reaches this node to recompute rather than trust a poisoned answer."""
+    entry back instead of a fresh recompute.
+
+    B-830 round-5 fixed that by simply deleting a truncated subtree's cache entry
+    instead of writing it. Correct, but a severe quadratic performance regression (a
+    fresh independent C-135 review, round-6): `ast.walk` visits EVERY node of the file
+    directly, and for a long chain (a padded `.joinpath()` chain, a right-nested `/`
+    chain, ...) every node along it ends up past the depth cap from *some* call site,
+    so round-5 never lets any of them cache -- each direct `ast.walk` visit re-walks
+    its own ~_FOLD_MAX_DEPTH-deep subtree from scratch, and does so again for every
+    other node whose own re-walk passes back through it, compounding.
+
+    B-830 round-6 (this fix): cache the result TOGETHER WITH the depth budget that was
+    available when it was computed (`_FOLD_MAX_DEPTH - depth` -- how much further this
+    call was allowed to recurse). A cache hit is trusted only when the NEW caller's own
+    remaining budget is no BETTER than the budget the entry was computed under: a
+    caller with less-or-equal budget could not have resolved any further either, so the
+    cached (possibly truncated) answer is still the best available. A caller with MORE
+    remaining budget than the cached entry had -- most importantly `ast.walk`'s own
+    direct, depth=0 visits, which always carry the maximum possible budget -- might
+    resolve further, so it recomputes instead of trusting a shallower answer. This
+    reopens exactly the round-4 bug fix (a poisoned deep-descendant result can never
+    survive to be handed back to that same node's own depth=0 walk target) while
+    letting every node that is only ever reached at similar-or-deeper positions keep
+    its cached answer -- restoring close-to-linear memoized behavior for the common
+    case instead of round-5's always-recompute. A result that finished with NO
+    truncation anywhere in its own subtree (`budget=None` below) is exact regardless of
+    depth -- exactly round-3's original "fully resolved, cache unconditionally" case --
+    and is never invalidated by a shallower caller's larger budget, which also avoids
+    round-5's needless recompute of subtrees that were never actually truncated."""
     key = (id(node), visiting)
-    if key in ctx.memo:
-        return ctx.memo[key]
+    entry = ctx.memo.get(key)
+    if entry is not None:
+        if entry is _FOLD_IN_PROGRESS:
+            return None  # cycle guard: a self-referential fold resolves to unknown
+        cached_res, cached_budget = entry
+        if cached_budget is None:
+            return cached_res  # exact: no truncation contributed, valid at any depth
+        if (_FOLD_MAX_DEPTH - depth) <= cached_budget:
+            return cached_res
+        # This caller's remaining budget is strictly BETTER than what produced the
+        # cached entry -- it might resolve further where that computation truncated.
+        # Fall through and recompute rather than trust the shallower-budget answer.
     if depth > _FOLD_MAX_DEPTH:
         ctx.truncated += 1
         return None
-    ctx.memo[key] = None  # cycle guard: a self-referential fold resolves to unknown
+    ctx.memo[key] = _FOLD_IN_PROGRESS  # cycle guard
     before = ctx.truncated
     res = _fold_fs_path_uncached(node, ctx, visiting, depth)
-    if ctx.truncated != before:
-        # A depth truncation happened somewhere inside this subtree's own computation
-        # -- *res* is built on at least one _FOLD_UNK that a shallower/different call
-        # reaching this same node might resolve for real. Never let that stand as this
-        # node's cached answer: drop the cycle-guard placeholder so the next caller
-        # recomputes from scratch instead of reading a poisoned result.
-        del ctx.memo[key]
-        return res
-    ctx.memo[key] = res
+    budget = None if ctx.truncated == before else (_FOLD_MAX_DEPTH - depth)
+    ctx.memo[key] = (res, budget)
     return res
 
 
