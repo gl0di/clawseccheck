@@ -14,6 +14,20 @@ grepping the dist by hand.
     python3 scripts/dist_citation_gate.py record   # freeze the CURRENT violation set
     python3 scripts/dist_citation_gate.py compare  # fail on any NEW one (default)
 
+WHAT COUNTS AS "QUALIFIED" -- ANCHOR ONLY (B-890)
+---------------------------------------------------
+A citation is qualified -- correct as history -- ONLY when its surrounding window
+carries a literal DATE (``YYYY-MM-DD``) or VERSION (``2026.N.N``) anchor. Nothing else
+counts. Dave ruled this explicitly (B-890, 2026-09-23, option (a) of two offered): the
+gate REQUIRES a date or version, and the prose that customarily precedes one --
+"grounded against", "grounded per", "as of" -- is only the POINTER to where the anchor
+sits, never a substitute for it. Two prior rounds (B-885) tried accepting that prose on
+its own and kept surfacing new leaks in the same family (a substring coincidence with
+no leading boundary, a Unicode-hyphen variant slipping past an ASCII-only exclusion, a
+Unicode-aware case fold matching a long-s lookalike) -- see ``_QUALIFIER_RE``'s comment
+for the specifics. Removing the prose branch entirely closes that whole family by
+construction instead of patching it a fourth time.
+
 WHY THE FIX IS THE CITATION CONVENTION, NOT REWRITING 538 STRINGS
 -------------------------------------------------------------------
 538 unqualified violations already exist across 24 files, and hand-fixing all of them
@@ -90,31 +104,49 @@ _CITATION_RE = re.compile(
     r"[A-Za-z0-9._-]+-[A-Za-z0-9_-]{8,}\.(?:js|d\.ts|mjs)(?![A-Za-z0-9])"
 )
 
-# A citation is "qualified" -- correct AS HISTORY -- when a dated or versioned anchor
-# appears in the surrounding block. Deliberately permissive (OR of four shapes) because
-# the existing convention in this tree already uses all four inconsistently
-# ("grounded against openclaw@2026.7.1-2 (2026-07-25)", "as of 2026-08-26", a bare
-# "2026-08-06" nearby) and a gate that only recognized one shape would flag correct,
-# already-dated prose as a violation.
+# A citation is "qualified" -- correct AS HISTORY -- ONLY when a DATED or VERSIONED
+# anchor (a bare `2026.N.N` or `YYYY-MM-DD`) appears in the surrounding block. Nothing
+# else counts, by Dave's ruling (B-890, 2026-09-23, option (a) of two offered): the
+# gate REQUIRES an actual date/version, full stop.
 #
-# IGNORECASE (B-885): the "grounded (?:against|per)"/"as of " alternatives are prose,
-# and prose is capitalized at a sentence start -- "Grounded against the vendor's OWN
-# canonical read..." (collector.py's `_collect_subagent_runs` docstring) is exactly
-# that shape. Global IGNORECASE is safe here: the other two alternatives
-# (`2026\.\d+\.\d+`, the `\d{4}-\d{2}-\d{2}` date) are digits/punctuation only, so case
-# folding cannot change what they match.
+# The prose verbs "grounded against", "grounded per", "as of" are NOT alternatives
+# here and never will be added back as one. In the tree's own convention they are only
+# the POINTER that leads a reader to the anchor -- "grounded against openclaw@2026.7.1-2
+# (2026-07-25)" -- never the anchor itself; a bare "Grounded against the recon" with no
+# date beside it is not history, it is an unfalsifiable claim about the present. B-885
+# tried accepting the prose verbs on their own (case-insensitively, then with a
+# `\b(?!-)` word-boundary patch after "per-agent" false-qualified through the first
+# version), and each patch round surfaced a NEW leak in the same family rather than
+# closing it:
+#   * leading-edge substring coincidences with no boundary check BEFORE the verb --
+#     "an alias of" contains the literal substring "as of" (`...ali-AS OF-...`), and
+#     "ungrounded against" contains the literal substring "grounded against"; both
+#     false-qualified a dead citation sharing their window.
+#   * the trailing `(?!-)` guard only excludes the ASCII hyphen U+002D, so
+#     "per‑agent" (U+2011 NON-BREAKING HYPHEN) or "per‐agent" (U+2010 HYPHEN)
+#     slips past it exactly like the ASCII "per-agent" case it was written to catch.
+#   * `re.IGNORECASE` on a `str` pattern is Unicode-aware case folding, not an
+#     ASCII upper/lower flip: "aﬅ of" and "aſ of" (U+017F LATIN SMALL LETTER
+#     LONG S) fold to "as of" under it, so a citation could be "qualified" by a
+#     visually-similar non-ASCII lookalike a reader would never type on purpose.
+# Rather than chase a fourth patch for a fourth member of the same leak family, B-890
+# removes the whole prose branch: an anchor-only pattern has no verb to leak through,
+# so the substring-coincidence, hyphen-variant and case-folding classes are closed by
+# construction, not by one more lookahead. See `tests/test_dist_citation_gate.py`'s
+# "anchor-only (B-890)" section for the pinned regression cases (including a mutation
+# check that reverting this to the old OR-of-four pattern makes them fail).
 #
-# `\b(?!-)` after the prose verb: without it `grounded per` is a SUBSTRING of the
-# compound "schema-grounded PER-AGENT" (checks/_agents.py, `_has_subagents`), where
-# "per-agent" is the thing being described, not a grounding source -- and that phrase
-# alone was accepting a dead, otherwise unqualified bundle citation in its window.
-# `\b` refuses a longer word ("perhaps"), `(?!-)` refuses a hyphenated compound
-# ("per-agent"). This only narrows what counts as a qualifier, so it can surface a
-# pre-existing violation, never hide one. Whether undated prose should qualify at all
-# is a separate, open question -- see the module docstring's "dated or versioned".
+# `re.ASCII`, not `re.IGNORECASE`: both alternatives left are digits/punctuation only,
+# so no letter-case folding is needed at all -- but `\d` on a bare `str` pattern is
+# Unicode-aware too (it matches non-ASCII decimal digits like U+FF10-U+FF19 FULLWIDTH
+# DIGIT ZERO-NINE, or Arabic-Indic digits), and `re.ASCII` is what pins it to plain
+# `0`-`9` so a lookalike digit sequence can't be typo-squatted into a fake anchor
+# either. Belt-and-braces: nothing in this pattern currently needs it to differ from
+# the default, but it costs nothing and forecloses the same class of bug the prose
+# removal above was for.
 _QUALIFIER_RE = re.compile(
-    r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)\b(?!-)|as of ",
-    re.IGNORECASE,
+    r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}",
+    re.ASCII,
 )
 
 # Window around a citation searched for a qualifier: 12 lines back, 4 forward. Back-
@@ -319,9 +351,11 @@ def _run(baseline_path: Path, repo_root: Path, *, record: bool):
     if new:
         print(
             f"\nBLOCKED: {len(new)} new unqualified stale dist citation(s). Add a live "
-            "bundle filename, or a date/version qualifier ('grounded against "
-            "openclaw@X.Y.Z (YYYY-MM-DD)', 'as of YYYY-MM-DD', or a bare YYYY-MM-DD / "
-            "2026.N.N nearby) if the citation is meant as history."
+            "bundle filename, or a dated/versioned anchor nearby -- a bare YYYY-MM-DD "
+            "date or a 2026.N.N version, e.g. 'grounded against openclaw@X.Y.Z "
+            "(YYYY-MM-DD)' or 'as of YYYY-MM-DD' -- if the citation is meant as "
+            "history. The prose alone ('grounded against'/'grounded per'/'as of' with "
+            "no date or version beside it) does not qualify (B-890)."
         )
         return EXIT_NEW_VIOLATION
 

@@ -29,6 +29,14 @@ because nothing actually read the stamp." ``_header_field``/the header-stamp tes
 mirror that module's own fix, deliberately duplicated rather than shared -- the sibling
 module keeps its own copy the same way, and a one-regex helper is not worth a new shared
 module for two callers.
+
+B-890: the qualifier is anchor-only now (a literal date or version), the prose verbs
+("grounded against"/"grounded per"/"as of") having been retired after a C-135 round-2
+review kept surfacing new leaks in that family -- see ``scripts/dist_citation_gate.py``'s
+own module docstring and its ``_QUALIFIER_RE`` comment for the full history. The tests
+below keep the retired B-885 patterns around as mutation-check controls (each negative
+test has a paired "bites on the retired pattern" test proving it would have wrongly
+qualified under the old design), then pin the current anchor-only contract.
 """
 from __future__ import annotations
 
@@ -157,38 +165,22 @@ def test_baseline_file_parses_to_a_nonempty_pair_list():
     assert len(pairs) > 0, "baseline is empty -- compare() would pass vacuously"
 
 
-# --- qualifier case-insensitivity (B-885) ---------------------------------------------
+# --- qualifier history: B-885 (case-insensitive prose) --------------------------------
 #
-# `_QUALIFIER_RE` had no `re.IGNORECASE`, so a citation qualified ONLY by a
-# sentence-initial "Grounded against ..."/"Grounded per ..."/"As of ..." (capital G/A --
-# the natural shape for prose that opens a sentence or a docstring) was read as
-# UNQUALIFIED. Observed for real in ``collector.py``'s ``_collect_subagent_runs``
-# docstring, which carried exactly that capitalized phrase and was only accepted by
-# coincidence (an unrelated version token happened to sit in the same window); when that
-# token was later removed, the citation would have become a spurious NEW violation.
+# B-885 made the qualifier prose ("grounded against"/"grounded per"/"as of") match
+# case-insensitively so a capitalized sentence-initial phrase -- "Grounded against the
+# vendor's OWN canonical read..." (collector.py's `_collect_subagent_runs` docstring) --
+# would qualify the same as its lowercase mid-sentence form; it also anchored
+# `grounded per` with `\b(?!-)` so the compound "schema-grounded PER-AGENT" in
+# checks/_agents.py stopped false-qualifying through a bare substring match. Both fixes
+# are reproduced below as "retired pattern" controls only -- B-890 (next section)
+# retires the prose branch entirely, so neither fix is live in `_QUALIFIER_RE` anymore.
 # Always-on, no dist needed.
 
-_QUALIFIED_PROSE = [
-    "Grounded against the vendor's OWN canonical read of the state DB.",
-    "Grounded per the installed dist, not the recon.",
-    "As of 2026-09-22 this still resolves.",
-]
-
-
-@pytest.mark.parametrize("text", _QUALIFIED_PROSE)
-def test_qualifier_regex_matches_sentence_initial_capitalized_prose(text):
-    gate = _load_gate()
-    assert gate._QUALIFIER_RE.search(text), (
-        f"{text!r} carries a sentence-initial qualifier but _QUALIFIER_RE did not match "
-        "it -- a capitalized 'Grounded against'/'Grounded per'/'As of' at a sentence "
-        "start must be recognized the same as its lowercase mid-sentence form."
-    )
-
-
 def test_qualifier_case_insensitivity_bites_on_the_pattern_it_replaced():
-    """Without this, the test above could pass against a pattern that was already
-    case-agnostic. Reproduce the retired (no-``re.IGNORECASE``) regex and show it MISSES
-    the sentence-initial capitalized phrase -- so the fix is doing real work."""
+    """Reproduce the pre-B885 (no-``re.IGNORECASE``) regex and show it MISSES the
+    sentence-initial capitalized phrase -- documents that B-885's fix, before B-890
+    retired the whole prose branch, was doing real work at the time."""
     retired = re.compile(
         r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)|as of "
     )
@@ -196,54 +188,130 @@ def test_qualifier_case_insensitivity_bites_on_the_pattern_it_replaced():
     assert retired.search("Grounded per the installed dist, not the recon.") is None
 
 
-def test_a_citation_qualified_only_by_capitalized_prose_is_not_a_violation(tmp_path):
-    """End-to-end, no dist needed (``dist_basenames`` is the empty set, so the bundle is
-    always dead): ``scan_citations`` must not flag a dead citation whose ONLY qualifier
-    in its window is sentence-initial capitalized prose, mirroring the real
-    ``collector.py`` docstring this bug was filed over."""
-    gate = _load_gate()
-    repo_root = tmp_path
-    pkg_dir = repo_root / "clawseccheck"
-    pkg_dir.mkdir()
-    (pkg_dir / "fake_module.py").write_text(
-        "def f():\n"
-        "    \"\"\"Grounded against the vendor's OWN canonical read of the state DB.\n\n"
-        "    some-bundle-Ab12Cd34.js is cited here.\n"
-        "    \"\"\"\n",
-        encoding="utf-8",
+def test_the_whole_word_anchor_bites_on_the_pattern_it_replaced():
+    """The un-anchored B-885-round-1 pattern (f3f5613) accepted the PER-AGENT compound
+    below; documents that the round-2 `\\b(?!-)` anchor was doing real work at the time,
+    before B-890 retired the whole prose branch."""
+    unanchored = re.compile(
+        r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)|as of ",
+        re.IGNORECASE,
     )
-    violations, total = gate.scan_citations(repo_root, dist_basenames=set())
-    assert total == 1, f"expected exactly one extracted citation, got {total}"
-    assert violations == [], (
-        f"a citation qualified only by sentence-initial capitalized prose was flagged "
-        f"as unqualified: {violations}"
+    assert unanchored.search(
+        "the schema-grounded per-agent path agents.list[i].subagents"
     )
 
 
-# --- the prose qualifier must be a whole word (B-885, fix round 1) --------------------
+# --- qualifier contract: anchor-only (B-890) -------------------------------------------
 #
-# Once the qualifier went case-insensitive, `grounded per` became a SUBSTRING match of
-# the compound "schema-grounded PER-AGENT" in ``checks/_agents.py``'s ``_has_subagents``
-# docstring -- "per-agent" names what the field is, not what the claim is grounded on --
-# and that alone dropped the pair (_agents.py, zod-schema.agent-runtime-C02vY4RT.js) out
-# of the violation set with nothing in its window actually qualifying it. The lowercase
-# "grounded per-agent" had the same flaw before; these pin both.
+# Dave's ruling (B-890, 2026-09-23): the gate REQUIRES an actual dated (`YYYY-MM-DD`) or
+# versioned (`2026.N.N`) anchor in the citation's window. The prose verbs are retired
+# from `_QUALIFIER_RE` entirely -- in this tree's own convention they are only ever the
+# POINTER to an anchor ("grounded against openclaw@2026.7.1-2 (2026-07-25)"), never a
+# substitute for one. This was chosen over patching the prose matcher a fourth time: a
+# round-2 C-135 review of the B-885 fix found the approach kept leaking one member of
+# the same family per patch (see the three sections below for each one, with a
+# mutation-check control proving the retired B-885 pattern would have wrongly qualified
+# it). Retiring the branch closes the whole family by construction -- no verb left to
+# leak through -- rather than by a fifth lookahead.
+
+_DATED_OR_VERSIONED = [
+    "As of 2026-09-22 this still resolves.",
+    "grounded against openclaw@2026.7.1-2 (2026-07-25)",
+    "nothing but a bare 2026.9.5 nearby",
+    "nothing but a bare 2026-09-22 nearby",
+]
+
+_UNDATED_PROSE_ONLY = [
+    "Grounded against the vendor's OWN canonical read of the state DB.",
+    "Grounded per the installed dist, not the recon.",
+    "grounded per: the installed dist",
+    "grounded against\nthe installed dist",
+    "as of ",
+]
+
+
+@pytest.mark.parametrize("text", _DATED_OR_VERSIONED)
+def test_a_dated_or_versioned_window_is_qualified(text):
+    gate = _load_gate()
+    assert gate._QUALIFIER_RE.search(text), (
+        f"{text!r} carries a literal date or version but _QUALIFIER_RE did not match it."
+    )
+
+
+@pytest.mark.parametrize("text", _UNDATED_PROSE_ONLY)
+def test_undated_prose_only_is_not_qualified(text):
+    """B-890: the prose verbs no longer qualify on their own -- a window carrying prose
+    but no date/version anchor must NOT qualify, even the exact sentence-initial
+    capitalized shape B-885 (f3f5613) was written to accept."""
+    gate = _load_gate()
+    assert gate._QUALIFIER_RE.search(text) is None, (
+        f"{text!r} has no date/version anchor but _QUALIFIER_RE matched it -- prose "
+        "alone must not qualify a citation as history (B-890)."
+    )
+
+
+def test_undated_prose_only_bites_on_the_b885_pattern_it_replaced():
+    """Mutation check: the B-885 pattern (9a6f123, the state this branch is stacked on)
+    DID accept every ``_UNDATED_PROSE_ONLY`` entry -- so the negative test above is
+    doing real work, not passing against a prose alternative that had already stopped
+    matching anything."""
+    retired = re.compile(
+        r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)\b(?!-)|as of ",
+        re.IGNORECASE,
+    )
+    for text in _UNDATED_PROSE_ONLY:
+        assert retired.search(text), text
+
+
+# --- leading-edge substring coincidences (B-885 C-135 round 2) ------------------------
+#
+# Neither prose verb had a boundary check on its LEADING edge, so it qualified wherever
+# it occurred as a plain substring inside a longer, unrelated word: "an alias of"
+# contains the literal substring "as of"; "ungrounded against" contains the literal
+# substring "grounded against". Both would have false-qualified a dead, otherwise-
+# unqualified citation sharing their window.
+
+_LEADING_EDGE_COINCIDENCES = [
+    "an alias of the real field",
+    "this config is ungrounded against the schema",
+]
+
+
+@pytest.mark.parametrize("text", _LEADING_EDGE_COINCIDENCES)
+def test_leading_edge_coincidence_is_not_qualified(text):
+    gate = _load_gate()
+    assert gate._QUALIFIER_RE.search(text) is None, (
+        f"{text!r} was read as qualified -- it contains the substring 'as of' or "
+        "'grounded against' inside an unrelated word, not the prose qualifier itself."
+    )
+
+
+def test_leading_edge_coincidence_bites_on_the_b885_pattern_it_replaced():
+    retired = re.compile(
+        r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)\b(?!-)|as of ",
+        re.IGNORECASE,
+    )
+    for text in _LEADING_EDGE_COINCIDENCES:
+        assert retired.search(text), text
+
+
+# --- per-agent, ASCII and Unicode hyphen variants (B-885 C-135 round 2) ---------------
+#
+# `(?!-)` only ever excluded the ASCII hyphen U+002D. A Unicode hyphen variant right
+# after "per" -- U+2010 HYPHEN or U+2011 NON-BREAKING HYPHEN -- slipped past the same
+# guard exactly like the ASCII "per-agent" shape it was written to catch.
 
 _NOT_QUALIFIERS = [
     "B-296 round 2: also recognizes the real, schema-grounded PER-AGENT path",
     "the schema-grounded per-agent path agents.list[i].subagents",
     "grounded perhaps on the recon",
+    "the schema-grounded per‐agent path",   # U+2010 HYPHEN
+    "the schema-grounded per‑agent path",   # U+2011 NON-BREAKING HYPHEN
 ]
 
-# The paired control: the same verb, followed by a word boundary that is not a hyphen,
-# must still qualify -- so the negative test above cannot pass by the alternative having
-# simply stopped matching `grounded per` at all.
-_STILL_QUALIFIERS = [
-    "Grounded per the installed dist, not the recon.",
-    "grounded per: the installed dist",
-    "Grounded against the installed dist (openclaw-Ab12Cd34.js)",
-    "grounded against\nthe installed dist",
-]
+# The last two entries above are the Unicode-hyphen variants; the ASCII-anchored B-885
+# pattern still accepted them (see the mutation check below).
+_UNICODE_HYPHEN_VARIANTS = _NOT_QUALIFIERS[-2:]
 
 
 @pytest.mark.parametrize("text", _NOT_QUALIFIERS)
@@ -256,24 +324,50 @@ def test_a_hyphenated_or_longer_word_after_grounded_per_is_not_a_qualifier(text)
     )
 
 
-@pytest.mark.parametrize("text", _STILL_QUALIFIERS)
-def test_the_whole_word_anchor_does_not_cost_a_real_prose_qualifier(text):
-    gate = _load_gate()
-    assert gate._QUALIFIER_RE.search(text), (
-        f"{text!r} is the documented 'grounded against/per' qualifier shape, but the "
-        "word-boundary anchor refused it."
-    )
-
-
-def test_the_whole_word_anchor_bites_on_the_pattern_it_replaced():
-    """The un-anchored pattern (f3f5613) accepted every ``_NOT_QUALIFIERS`` entry, so
-    the negative test above is doing real work, not passing vacuously."""
-    retired = re.compile(
+def test_ascii_hyphen_guard_bites_on_the_pattern_it_replaced():
+    """The un-anchored B-885-round-1 pattern (f3f5613) accepted every ``_NOT_QUALIFIERS``
+    entry."""
+    unanchored = re.compile(
         r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)|as of ",
         re.IGNORECASE,
     )
     for text in _NOT_QUALIFIERS:
-        assert retired.search(text), text
+        assert unanchored.search(text), text
+
+
+def test_unicode_hyphen_variant_bites_on_the_ascii_only_pattern_it_replaced():
+    """The ASCII-only ``(?!-)`` from B-885 round 2 (9a6f123) still accepted a Unicode
+    hyphen right after 'per' -- so this negative test entry is doing real work, not
+    passing against a lookahead that already excluded it."""
+    ascii_hyphen_only = re.compile(
+        r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)\b(?!-)|as of ",
+        re.IGNORECASE,
+    )
+    for text in _UNICODE_HYPHEN_VARIANTS:
+        assert ascii_hyphen_only.search(text), text
+
+
+# --- Unicode case folding: long s (B-885 C-135 round 2) -------------------------------
+#
+# `re.IGNORECASE` on a `str` pattern is Unicode-aware case folding, not an ASCII
+# upper/lower flip: U+017F LATIN SMALL LETTER LONG S folds to "s" under it, so
+# "aſ of" ("aſ of") reads as "as of" to a case-insensitive prose match -- a
+# visually similar, non-ASCII lookalike a reader would never type on purpose.
+
+def test_long_s_lookalike_is_not_qualified():
+    gate = _load_gate()
+    text = "aſ of the installed dist"
+    assert gate._QUALIFIER_RE.search(text) is None, (
+        f"{text!r} (long-s lookalike of 'as of') was read as qualified."
+    )
+
+
+def test_long_s_lookalike_bites_on_the_b885_pattern_it_replaced():
+    retired = re.compile(
+        r"2026\.\d+\.\d+|\d{4}-\d{2}-\d{2}|grounded (?:against|per)\b(?!-)|as of ",
+        re.IGNORECASE,
+    )
+    assert retired.search("aſ of the installed dist")
 
 
 _PER_AGENT_MODULE = (
@@ -307,17 +401,41 @@ def test_a_dead_citation_whose_only_prose_is_per_agent_is_a_violation(tmp_path):
     )
 
 
-def test_the_same_window_with_a_real_grounded_per_is_not_a_violation(tmp_path):
-    """Paired control for the test above: change only the verb to the documented
-    'Grounded per' shape and the identical window becomes qualified -- proving the
-    violation above comes from the PER-AGENT compound, not from the fixture being
-    unqualifiable."""
+def test_grounded_per_without_a_date_is_still_a_violation(tmp_path):
+    """B-890 flips this B-885 fixture's expected outcome (it used to become qualified
+    here -- see git history of this test module): the documented 'Grounded per' verb no
+    longer qualifies a citation on its own, so the identical window is STILL a
+    violation without a date/version anchor."""
     gate = _load_gate()
     pkg_dir = tmp_path / "clawseccheck"
     pkg_dir.mkdir()
     (pkg_dir / "fake_agents.py").write_text(
         _PER_AGENT_MODULE.format(verb="Grounded per"), encoding="utf-8"
     )
+    violations, total = gate.scan_citations(tmp_path, dist_basenames=set())
+    assert total == 1, f"expected exactly one extracted citation, got {total}"
+    assert violations == [
+        ("clawseccheck/fake_agents.py", "zod-schema.agent-runtime-Ab12Cd34.js")
+    ], violations
+
+
+def test_the_same_window_qualifies_once_a_real_date_is_added(tmp_path):
+    """Paired control for the test above: add a literal date next to the citation and
+    the identical window becomes qualified -- proving `scan_citations` responds to an
+    actual anchor, not to the grounding verb."""
+    gate = _load_gate()
+    pkg_dir = tmp_path / "clawseccheck"
+    pkg_dir.mkdir()
+    dated_module = (
+        "def _has_subagents(cfg):\n"
+        "    \"\"\"True if any subagent delegation is configured.\n\n"
+        "    B-296 round 2: also recognizes the real, schema-grounded PER-AGENT\n"
+        "    path ``agents.list[i].subagents``. Grounded per ``AgentEntrySchema``\n"
+        "    (installed dist ``zod-schema.agent-runtime-Ab12Cd34.js:658-711``,\n"
+        "    2026-09-22).\n"
+        "    \"\"\"\n"
+    )
+    (pkg_dir / "fake_agents.py").write_text(dated_module, encoding="utf-8")
     violations, total = gate.scan_citations(tmp_path, dist_basenames=set())
     assert total == 1, f"expected exactly one extracted citation, got {total}"
     assert violations == [], violations
