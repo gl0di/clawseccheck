@@ -304,9 +304,10 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   config parsing `[CEILING]`
 - **Hidden channel built from an invisible character outside the detected class** —
   `textnorm.obfuscation_signals` raises its "zero-width / invisible characters found" signal
-  for **twenty** code points (U+00AD soft hyphen, U+180E, U+200B–200D, U+2060–2064,
-  U+206A–206F, U+FEFF, U+FFF9–FFFB), and `normalize_for_scan` strips that same set plus the
-  nine bidi controls — **29** in all. Both halves derive from one source, so the detector
+  for **sixty-one** code points (U+00AD soft hyphen, U+180E, U+200B–200D, U+2060–2064,
+  U+206A–206F, U+FEFF, U+FFF9–FFFB, and further Cf-property members added by the B-450 sweep),
+  and `normalize_for_scan` strips that same set plus the nine bidi controls — **70** in all.
+  Both halves derive from one source, so the detector
   cannot again report a channel the normalizer is unable to read through. The separate
   Tag-block detector (U+E0000–U+E007F) covers that family independently. What remains is
   two named, deliberate residuals rather than one open-ended gap:
