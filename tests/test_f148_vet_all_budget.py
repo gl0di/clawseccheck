@@ -18,6 +18,7 @@ Tests are offline, write nothing outside tmp_path, and never sleep — budget
 exhaustion is driven by monkeypatching ``clawseccheck.cli.budget_exceeded``
 (the same predicate ``vet_all`` calls), not by a real clock delay.
 """
+import json
 from pathlib import Path
 
 import clawseccheck.cli as cli
@@ -231,3 +232,107 @@ def test_scan_budget_exceeded_from_vet_skill_is_not_swallowed_as_safe(
 
     assert rc != 0, "a deadline was swallowed into a successful sweep"
     assert "0 safe" in out, f"a timed-out skill was counted safe:\n{out}"
+
+
+# ---------------------------------------------------------------------------
+# B-937: a plain-Exception crash (not ScanBudgetExceeded) must also flip the
+# sweep's return code, the same way the sibling ScanBudgetExceeded arm above
+# already does.
+# ---------------------------------------------------------------------------
+
+
+def test_plain_exception_from_vet_skill_flips_exit_code_nonzero(
+    tmp_path, capsys, monkeypatch
+):
+    """A skill whose vet_skill() call raises a plain (non-budget) exception is
+    correctly tagged UNKNOWN and reported by name -- that part already worked. But
+    until now it never set `sweep.truncated`, so `vet_all`'s return-code check
+    (`if sweep.truncated: return 1`) fell through to `sweep.worst`, which every
+    OTHER, cleanly-scanned skill left at "PASS" -- so a sweep that never actually
+    assessed this target still returned 0. Mirrors the confirmed repro: one
+    crashing skill, everything else clean, exit code must not be 0.
+    """
+    _make_skill(tmp_path, "crashy")
+
+    def _boom(_p):
+        raise RuntimeError("engine error")
+
+    monkeypatch.setattr(cli, "vet_skill", _boom)
+
+    rc = cli.vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+
+    assert rc == 1, f"a crashed skill was swallowed into a successful sweep (rc={rc})"
+    assert "error vetting crashy" in out
+
+
+def test_plain_exception_does_not_abort_the_rest_of_the_sweep(
+    tmp_path, capsys, monkeypatch
+):
+    """One skill's engine crash must not stop the sweep from reaching its siblings
+    -- the bare `except Exception` around the per-skill vet_skill() call exists
+    precisely so one bad target can't unwind the whole loop."""
+    _make_skill(tmp_path, "crashy")
+    _make_skill(tmp_path, "clean")
+
+    real_vet_skill = cli.vet_skill
+
+    def _boom(p):
+        if "crashy" in str(p):
+            raise RuntimeError("engine error")
+        return real_vet_skill(p)
+
+    monkeypatch.setattr(cli, "vet_skill", _boom)
+
+    rc = cli.vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "=== clean ===" in out, "the crash aborted the rest of the sweep"
+    assert "error vetting crashy" in out
+
+
+def test_plain_exception_leaves_the_tally_and_json_shape_unchanged(
+    tmp_path, capsys, monkeypatch
+):
+    """Regression guard: the B-937 fix only touches `sweep.truncated` in the bare
+    `except Exception` branch. It must not change the printed tally numbers or the
+    JSON `skills`/`notScanned` shape -- those are owned by SkillSweep.counts() /
+    not_scanned(), untouched here. (The crashed skill's row is bucketed "UNKNOWN"
+    by the pre-existing tally arithmetic; excluding UNKNOWN from the "safe" count
+    is a separate, not-yet-landed fix and out of scope for this change -- this test
+    pins today's actual tally text so it doesn't silently drift.)
+    """
+    _make_skill(tmp_path, "crashy")
+
+    def _boom(_p):
+        raise RuntimeError("engine error")
+
+    monkeypatch.setattr(cli, "vet_skill", _boom)
+
+    rc = cli.vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "1 skill(s) checked" in out
+    assert "0 suspicious | 0 dangerous" in out
+
+    monkeypatch.setattr(cli, "vet_skill", _boom)
+    rc_json = cli.vet_all(tmp_path, ascii_only=True, json_output=True)
+    doc = json.loads(capsys.readouterr().out)
+    assert rc_json == 1
+    assert doc["complete"] is False, "a crashed target must not read as a complete sweep"
+    assert doc["skills"] == []
+    assert doc["notScanned"] == []
+
+
+def test_all_clean_sweep_with_no_crashes_still_returns_zero(tmp_path, capsys):
+    """Control: nothing about the B-937 fix should affect an ordinary, fully-clean
+    sweep -- it must still return 0."""
+    _make_skill(tmp_path, "alpha")
+    _make_skill(tmp_path, "beta")
+
+    rc = cli.vet_all(tmp_path, ascii_only=True)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "2 skill(s) checked | 2 safe | 0 suspicious | 0 dangerous" in out
