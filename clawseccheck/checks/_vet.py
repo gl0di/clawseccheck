@@ -4265,7 +4265,8 @@ _B13_WINNER_ONLY_BUCKETS: dict[str, str] = {
         "sweep only needs to run once every higher-priority bucket above it is known "
         "empty. The one fact worth surfacing regardless of winner — a bundled native "
         "executable — was already carved out into the eager `_stowaway_note` bucket "
-        "(B-745, see its own comment above); the rest of this bucket stays winner-only."
+        "(STOWAWAY-CARVEOUT, see its own comment above); the rest of this bucket stays "
+        "winner-only."
     ),
     "warns_squat": (
         "skip-computed: the typosquat scan runs an edit-distance comparison against "
