@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from clawseccheck.checks import (
+    FAIL,
     PASS,
     WARN,
     check_artifact_read_unproven,
@@ -675,11 +676,27 @@ def test_tt5_bounded_read_still_stays_fully_silent():
 # ---------------------------------------------------------------------------------
 
 
-def test_b13_bad_artifact_read_unproven_is_warn_not_fail():
+def test_b13_bad_artifact_read_unproven_stays_fail_when_artifact_is_known():
+    """Corrected during the integration/4.3.0 merge with task/b-638 (which this branch
+    predates): `check_installed_skills` always builds and passes a real
+    `shippedexec.ShippedArtifact` (see checks/_vet.py's `_shipped`). B-638's own,
+    separately adversarially-reviewed policy is that once a real artifact is known,
+    the decode-signal recognizer is a fallback for a caller that CANNOT supply one --
+    not a second exemption path alongside it -- so an unresolvable runtime segment
+    (env-derived, same as `test_b638_shipped_exec_containment.py`'s
+    `test_plugin_env_joined_path_fails` / `ESCAPES["env_segment_inline"]`) gets no
+    heuristic benefit of the doubt through this pipeline and OBFUSCATED_EXEC's crit
+    stands -- confirmed by briefly dropping that gate during this merge: it flipped
+    this fixture to WARN, but also flipped five existing, already-shipped B-638 tests
+    from PASS to FAIL, which is what pins the gate as deliberate rather than an
+    oversight. The WARN-only, never-FAIL ARTIFACT_READ_UNPROVEN guarantee this file's
+    corpus above pins holds for a caller with NO artifact at all (`_tt5_findings`
+    above calls `analyze_python` without one) and for the standalone
+    `check_artifact_read_unproven` content-ring check just below, which is
+    artifact-blind by design."""
     ctx = collect(FIXTURES / "bad_b394_artifact_read_unproven")
     f = check_installed_skills(ctx)
-    assert f.status == WARN
-    assert f.severity == "MEDIUM"
+    assert f.status == FAIL
 
 
 def test_b13_clean_bounded_plugin_read_stays_pass():

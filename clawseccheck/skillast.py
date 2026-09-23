@@ -8106,7 +8106,16 @@ def analyze_python(
             # enclosing scope: the recognizer finds each node's own lexical scope
             # itself from the whole-module parent-pointer map it builds. B-638: a
             # recognizer, not the precise ShippedArtifact proof, so it is only
-            # consulted when the caller could not supply the artifact.
+            # consulted when the caller could not supply the artifact -- a caller that
+            # can (check_installed_skills, vet_plugin, vet_skill) gets NO heuristic
+            # exemption for anything shippedexec itself could not resolve; that
+            # stricter no-exemption-with-known-artifact policy is B-638's own, measured
+            # against `test_b638_shipped_exec_containment.py`'s ESCAPES cases
+            # (`env_segment_inline`, `lossy_decode`) and its
+            # test_plugin_env_joined_path_fails/test_bad_fixture_env_joined_path_fails
+            # -- all five broke when this gate was briefly dropped during the B-850
+            # merge, confirming it is deliberate, adversarially-reviewed behavior, not
+            # an oversight the recognizer should override.
             if shipped_exec is None and has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
                 arg, tree, filename, path_aliases
             ):
@@ -8691,7 +8700,9 @@ def analyze_python(
                     # is explained by exactly that pattern; any other tainted name
                     # reaching the sink -- a mixed expression, a real decode primitive
                     # layered on top -- still convicts below.
-                    # B-638: a token proxy, so only when the caller had no artifact.
+                    # B-638: a token proxy, so only when the caller had no artifact --
+                    # see the OBFUSCATED_EXEC site's merge note above for why this gate
+                    # stays even with the B-850 recognizer behind it.
                     # B-916: an arg can now also be tainted by an INLINE source call
                     # with no name at all (see `_call_args_tainted_for_exec_sink`) --
                     # `_exec_sink_taint_is_only_artifact_relative_decode` only explains
