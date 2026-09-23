@@ -5112,6 +5112,16 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # wiring template), so this rule has no B13-facing bucket at all.
                 if af.rule == "TUNNEL_LAUNCH_ARGV":
                     continue
+                # analyze_python's own per-file cap disclosure —
+                # "N more findings suppressed" — is metadata about the scan, not a
+                # verdict about the skill. Routed here, BEFORE the generic crit/
+                # cred-exfil fallthrough (same guard shape as CHUNKED_FILE_EXEC/
+                # TUNNEL_LAUNCH_ARGV just above), so it can never bleed into this
+                # function's own FAIL or `high` (cred-exfil) bucket — an unrelated
+                # cred-exfil signal elsewhere in the same skill must not make a
+                # scan-completeness note read as more exfil evidence.
+                if af.rule == "AST_FINDINGS_TRUNCATED":
+                    continue
                 loc = f"{relpath}:{af.lineno}"
                 # B-636: the same predicate checks/_mcp.py asks. Equivalent here by
                 # construction — every rule in _AST_NEVER_FAIL_RULES has already
@@ -6818,6 +6828,7 @@ _AST_NEVER_FAIL_RULES = frozenset({
     "SHELL_INJECTION_RISK",      # C-199
     "CHUNKED_FILE_EXEC",         # B336 — explicitly not FAIL-capable
     "TUNNEL_LAUNCH_ARGV",        # B338 — explicitly not FAIL-capable
+    "AST_FINDINGS_TRUNCATED",    # cap disclosure, not a verdict — see skillast.py's analyze_python
 })
 
 

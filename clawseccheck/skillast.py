@@ -111,6 +111,19 @@ def _is_hardcoded_provider_secret(node: ast.AST) -> bool:
 
 _MAX_FINDINGS_PER_FILE = 25
 
+# Severity rank for the FINAL truncation below — higher sorts
+# first. `analyze_python`'s own emitted severities are "crit" and "info" only, but
+# this stays a proper total order (not a two-way crit/non-crit split) so a future
+# severity slots in without a second place to update. Anything unrecognized ranks
+# below "unknown" rather than raising, so a typo'd/new severity degrades to "gets
+# truncated first", never to "silently outranks a known one".
+_AST_SEVERITY_RANK = {"crit": 3, "warn": 2, "info": 1, "unknown": 0}
+
+
+def _ast_severity_rank(severity: str) -> int:
+    return _AST_SEVERITY_RANK.get(severity, -1)
+
+
 # B-192: EffectSimulator.State.reached_sinks grows without bound across nested
 # branches/loops (each simulate_if/simulate_loop merge duplicates the same sink
 # reached via different paths). A deeply-nested-but-tiny skill can drive this past
@@ -5089,8 +5102,18 @@ def analyze_python(
         seen.add(key)
         out.append(ASTFinding(rule, severity, lineno, reason))
 
+    # This cap (and every other `_pass_start`-relative one below)
+    # bounds what THIS pass alone may contribute, not the shared `out` total — a
+    # global `len(out) >= _MAX_FINDINGS_PER_FILE` check here previously meant an
+    # earlier pass filling `out` with low-severity noise (e.g. plain DANGEROUS_SINK
+    # info findings) made every LATER pass's loop break on its first iteration,
+    # silently dropping a real crit (TT5_CMD_INJECTION) that pass would otherwise
+    # have found. Each pass now gets its own budget; `return out` below does the
+    # actual severity-ordered enforcement of _MAX_FINDINGS_PER_FILE as a final step,
+    # so a real crit can never be starved out by an earlier pass's info findings.
+    _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
             break
         if not isinstance(node, ast.Call):
             continue
@@ -5368,8 +5391,9 @@ def analyze_python(
     # env read that feeds a local sink, or an unrelated network call, never fires.
     if "environ" in source or "getenv" in source or _AGENT_CONFIG_PATH_RE.search(source):
         env_src_tainted = _env_tainted_names(tree) | _agent_config_file_tainted_names(source, tree)
+        _pass_start = len(out)
         for node in ast.walk(tree):
-            if len(out) >= _MAX_FINDINGS_PER_FILE:
+            if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
                 break
             if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                 continue
@@ -5411,8 +5435,9 @@ def analyze_python(
     #     same rationale as ENV_EXFIL_FLOW (crash-reporters/telemetry are dual-use).
     if _HOST_INFO_SIGNAL_RE.search(source):
         host_src_tainted = _host_info_tainted_names(tree)
+        _pass_start = len(out)
         for node in ast.walk(tree):
-            if len(out) >= _MAX_FINDINGS_PER_FILE:
+            if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
                 break
             if not isinstance(node, ast.Call):
                 continue
@@ -5501,8 +5526,9 @@ def analyze_python(
         collector_funcs = _telemetry_collector_funcnames(tree)
         if collector_funcs:
             telemetry_tainted = _telemetry_tainted_names(tree, collector_funcs)
+            _pass_start = len(out)
             for node in ast.walk(tree):
-                if len(out) >= _MAX_FINDINGS_PER_FILE:
+                if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
                     break
                 if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                     continue
@@ -5539,8 +5565,9 @@ def analyze_python(
     # script into a writable/tmp-like path, with no literal pipe for B100's regex to
     # match (the URL is typically a variable too). Checked independently of the loops
     # above — this is a shape check on the argv list, not a taint flow.
+    _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
             break
         if not _is_curl_wget_argv_call(node):
             continue
@@ -5574,8 +5601,9 @@ def analyze_python(
     # (mirrors CHUNKED_FILE_EXEC's guard), so it can never become FAIL-capable there
     # regardless of this severity label; checks/_content.py's check_tunnel_enrollment
     # (B338) is this rule's sole consumer and stays WARN-only by design.
+    _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
             break
         if not _is_tunnel_launch_argv_call(node):
             continue
@@ -5639,8 +5667,14 @@ def analyze_python(
     )
 
     if ext_taint_map:
+        # This is the TT5/TT4/SSRF taint pass — the one whose
+        # starvation was the concrete repro (a TT5_CMD_INJECTION crit lost behind
+        # 25+ earlier DANGEROUS_SINK info findings). `_pass_start` gives it its own
+        # budget regardless of how full `out` already is; see the comment on the
+        # first `_pass_start` above.
+        _pass_start = len(out)
         for node in ast.walk(tree):
-            if len(out) >= _MAX_FINDINGS_PER_FILE:
+            if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
                 break
             if not isinstance(node, ast.Call):
                 continue
@@ -5759,8 +5793,9 @@ def analyze_python(
     # overwrite of an env var with a hardcoded provider-shaped token. A separate small
     # loop (rather than folding into the ast.Call walk above) since Assign is a
     # different node shape and the Call loop's control flow is continue-heavy.
+    _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
             break
         if not isinstance(node, ast.Assign):
             continue
@@ -5817,8 +5852,9 @@ def analyze_python(
     # already-shipped behavior) or importing a Layer-2 `checks/` helper into this
     # Layer-1 leaf module (a banned reverse dependency, see CLAUDE.md's layering rule)
     # — left as-is, flagged for a follow-up task rather than fixed unilaterally here.
+    _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) >= _MAX_FINDINGS_PER_FILE:
+        if len(out) - _pass_start >= _MAX_FINDINGS_PER_FILE:
             break
         if isinstance(node, ast.Assign):
             if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
@@ -5863,7 +5899,31 @@ def analyze_python(
                 "install (mechanism B)",
             )
 
-    return out
+    if len(out) <= _MAX_FINDINGS_PER_FILE:
+        return out
+
+    # More candidates survived the per-PASS budgets above than the
+    # per-FILE cap allows overall. Truncate by SEVERITY, never by discovery order — a
+    # crit a later pass found must outrank an earlier pass's info findings, not lose to
+    # them just because that pass ran first and filled `out` first. `sorted` is stable,
+    # so within one severity, findings keep the discovery order they already had —
+    # deterministic, not an artifact of dict/set iteration order. One slot is reserved
+    # for an explicit disclosure finding, so a capped file reads as visibly incomplete
+    # (never silently "clean beyond what was reported") while the return value still
+    # honors `len(out) <= _MAX_FINDINGS_PER_FILE` for every caller of this function.
+    kept = sorted(out, key=lambda f: -_ast_severity_rank(f.severity))[: _MAX_FINDINGS_PER_FILE - 1]
+    suppressed = len(out) - len(kept)
+    kept.append(
+        ASTFinding(
+            "AST_FINDINGS_TRUNCATED",
+            "info",
+            0,
+            f"{suppressed} additional lower-priority AST/taint finding(s) suppressed by "
+            f"the per-file cap ({_MAX_FINDINGS_PER_FILE}) — this file's findings are "
+            "incomplete; crit findings are kept ahead of info ones",
+        )
+    )
+    return kept
 
 
 # B-190: a secret placed in headers=/auth=/cert= is deliberately excluded from
