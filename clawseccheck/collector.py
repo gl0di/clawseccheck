@@ -980,6 +980,10 @@ class Context:
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     installed_skill_shell: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .sh/.bash
     installed_skill_js: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .js/.ts
+    # B-612: skill name -> [(relpath, language, source)] for files only a SKILL.md names
+    # with an interpreter (`read_skill_declared`). FINDINGS ONLY: read by B13's danger pass
+    # and nothing else — never folded into the three lists above, which coverage reads.
+    installed_skill_declared: dict = field(default_factory=dict)
     # skill name -> that skill's own resolved directory (the dir containing its SKILL.md).
     # F-131: lets a per-skill Context be scoped to JUST that skill (mirrors vet_skill's
     # Context(home=<skill dir>)) instead of the whole OpenClaw home, so home-wide-walking
@@ -3126,17 +3130,16 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
 # transit and a benign file gains one by accident.
 #
 # WHAT THIS DELIBERATELY DOES NOT CLOSE (independent C-135, 2026-08-23). A file
-# with NEITHER an extension nor a shebang is still collected by nothing, and
-# skills name the interpreter in SKILL.md prose (`Run `python3 bin/lint``), so
-# that shape is the common one, not the exotic one. Measured: a bundled
-# `bin/lint` that reads ~/.openclaw/credentials.json and posts it to a remote
-# host still renders INSTALL with Danger PASS. The same holds for a payload
-# given a data suffix (`setup.json` carrying `#!/bin/bash`), which the
-# _NON_CODE_SUFFIXES gate below excludes before the shebang is read. Both are
-# exactly as invisible as they were before this change — neither is a regression
-# — and both are B-612, which routes on the interpreter the SKILL.md names.
-# `tests/test_b548_language_by_content.py` pins both as open, so this fix cannot
-# be read as broader than it is.
+# with NEITHER an extension nor a shebang is still claimed by none of these three
+# readers, and neither is a payload given a data suffix (`setup.json` carrying
+# `#!/bin/bash`), which the _NON_CODE_SUFFIXES gate below excludes before the
+# shebang is read. Neither was a regression. When the skill's own SKILL.md runs such
+# a file with a named interpreter (`python3 bin/lint`, `bash scripts/setup.json`),
+# B-612's `read_skill_declared` below now hands it to B13's danger pass — for
+# FINDINGS ONLY, never into these three readers' lists, which is what keeps it from
+# touching coverage (see that block for why the distinction is the whole design). A
+# file nothing declares at all stays unread, and
+# `tests/test_b548_language_by_content.py` still pins that as open.
 #
 # A DISCLOSURE ARM WAS BUILT HERE AND RETRACTED, same review. It recorded a
 # `note_limit` for a shebang naming an interpreter we do not parse (perl, ruby).
@@ -3350,6 +3353,265 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
             "js content beyond the cap was NOT scanned",
         )
 
+    return out
+
+
+# ── B-612: a file whose language only the skill's SKILL.md declares ──────────
+# `bin/lint` with no extension and no `#!`, which SKILL.md tells the agent to run as
+# `python3 bin/lint`, is claimed by none of the three readers above. Measured before
+# this: the same credential-exfil bytes read CAUTION as `bin/lint.py`, CAUTION with a
+# shebang, and INSTALL / Danger PASS bare.
+#
+# THE CONTRACT, and the only reason this route is allowed to exist: a prose-declared
+# file is analysed for FINDINGS ONLY, never for COVERAGE. It is returned here, in its
+# own list, and deliberately NOT added to `installed_skill_py/_shell/_js`. Those three
+# lists are what every coverage predicate reads — `dossier._skill_capabilities`
+# (`has_code` / capability families), `_skill_has_unread_language_code`, the effect
+# simulator behind `ctx.effect_profiles`, and every content-ring check's code pass —
+# so none of them sees a declared file AS CODE (its text still reaches the prose scan,
+# exactly as before), and nothing a declared file contains can move a Persistence /
+# Connections axis from UNKNOWN to PASS. Two consumers, both one-directional: B13's
+# per-file danger pass (`checks/_vet.py::check_installed_skills`), which can only ADD a
+# FAIL/WARN finding, and `dossier._pool_has_declared_code`, which can only WITHDRAW an
+# axis PASS the scan cannot back. A declared Python file that fails to parse is not a
+# parse error there — that carries verdict weight (`engine_degraded`, B-485) and the
+# baseline never read the file — it is disclosed as evidence and nothing else.
+#
+# Why that contract and not the one B-612 was filed with. Routing on the declared
+# interpreter was built and retracted after seven C-135 rounds (2026-08-23), on one
+# decisive measurement: a benign decoy config named in one line of prose moved a real
+# exfiltrator's two coverage axes from honest UNKNOWN to PASS, because the route fed
+# the coverage lists. Every premise tried for telling an invocation from a mention
+# (adjacency, code spans, `ast.parse` success, AST node types) was refuted, and none
+# is needed here: whatever a declared file makes this scanner say, the SAME bytes
+# shipped as `bin/lint.py` already make it say, plus coverage. An attacker gains
+# nothing from this route they did not have by adding a `.py` suffix, and a benign
+# skill pays only what it would pay for naming that file `.py`.
+#
+# What the prose must say, stated as tokens rather than grammar: an interpreter token
+# (`python3`, `/usr/bin/python3`, `pypy3`, `bash`, `sh`, `node`, `deno run`, …) handed
+# a path — as its script argument after its own flags, on stdin (`< path`), or from a
+# `cat path |` — that names a file THIS collection already holds as text. Nothing is
+# ever opened from a prose path: it is looked up in the collected set, so
+# `python3 ../../etc/x` and `/etc/x` cannot reach a read. `-m` / `-c` / `-e` mean the
+# program is a module or a string, and route nothing.
+#
+# Measured reach, the FP bound the task asked for (2026-09-23, 7,203 skill dirs: the
+# fixtures, the author's ~/.openclaw, OpenClaw's bundled skills, SkillTrustBench, peer
+# corpora): 14,906 prose invocations resolve to a bundled file, a reader above already
+# claims every one of them by extension (8 under a different interpreter than the prose
+# names — never re-routed), and ZERO route here (the `*_b612_*` fixture
+# pair added with this route is the only exception). So on every measured target this
+# list is empty and nothing moves; it exists for the shape the corpus does not contain
+# and an attacker can write in one line.
+#
+# A data suffix (`_NON_CODE_SUFFIXES`) is the second shape B-612 filed: `bash
+# scripts/setup.json` over a file carrying `#!/bin/bash`. It is routed only when the
+# file's OWN `#!` names the same language as the prose — two independent statements
+# agreeing — so `the node package.json` routes nothing, and B-548's `README.md`-
+# opening-with-`#!` argument does not arise (that heading names no interpreter).
+# A word, a `<placeholder>/…` path (kept whole, see below), or one of the shell
+# operators the extractor has to see: `|`, `||`, `&&`, `;` end a command, `<` feeds stdin.
+# Backticks, quotes, brackets, parens and commas are pure separators.
+_DECLARED_TOKEN_RE = re.compile(
+    r"\|\||&&|<[\w-]+>[^\s`'\"()\[\],;|&<>]*|[|;<]|[^\s`'\"()\[\],;|&<>]+"
+)
+_DECLARED_SEPARATORS = frozenset({"|", "||", "&&", ";"})
+_DECLARED_PY_STEM_RE = re.compile(r"(?:python|pypy)(?:[0-9]+(?:\.[0-9]+)*)?")
+# `bash -euo pipefail x`: a clustered short-flag group ending in `o` takes an argument.
+_DECLARED_SH_OPT_CLUSTER_RE = re.compile(r"[-+][A-Za-z]*[oO]")
+_DECLARED_NODE_STEMS = frozenset({"node", "nodejs", "bun", "tsx", "ts-node"})
+_DECLARED_FAMILY_LANG = {"py": "py", "sh": "sh", "node": "js", "deno": "js"}
+# Per interpreter family, because the same letter means different things: `-O` is an
+# optimisation switch to python3 and takes an argument in bash; `-c` is a program string
+# to python3 and a config FILE to deno.
+#   no_file — the program is an argument string or a module, so there is no file to route
+#   stdin   — the program is read from stdin; later words are its arguments
+#   arg     — the flag consumes the next word, which is therefore not the script
+_DECLARED_FLAGS = {
+    "py": {
+        "no_file": frozenset({"-c", "-m"}),
+        "stdin": frozenset({"-"}),
+        "arg": frozenset({"-W", "-X", "--check-hash-based-pycs"}),
+    },
+    "sh": {
+        "no_file": frozenset({"-c"}),
+        "stdin": frozenset({"-", "-s"}),
+        "arg": frozenset({"-o", "-O", "+o", "+O"}),
+    },
+    "node": {
+        "no_file": frozenset({"-e", "-p", "--eval", "--print"}),
+        "stdin": frozenset({"-"}),
+        "arg": frozenset({
+            "-r", "--require", "--import", "--loader", "--experimental-loader",
+            "-C", "--conditions", "--env-file", "--title",
+        }),
+    },
+    "deno": {
+        "no_file": frozenset({"eval", "repl"}),
+        "stdin": frozenset({"-"}),
+        "arg": frozenset({
+            "-c", "--config", "--import-map", "--lock", "--cert", "--location",
+            "--seed", "-L", "--log-level",
+        }),
+    },
+}
+_DECLARED_NEVER_A_FILE = frozenset({"-h", "--help", "-V", "--version"})
+# How SKILL.md files say "relative to this skill", counted across the author's installed
+# fleet, OpenClaw's bundled skills and SkillTrustBench: `{baseDir}/` 3,168, `<skill_dir>/`
+# 123, `<skill-dir>/` 115, `$SKILL_DIR/` 97, `${CLAUDE_SKILL_DIR}/` 41. `{{x}}/` is the
+# same shape in template syntax and costs nothing to accept.
+_DECLARED_PLACEHOLDER_RE = re.compile(
+    r"(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\{\{?\s*[A-Za-z_][\w-]*\s*\}?\}|<[\w-]+>)/"
+)
+_DECLARED_MAX_FLAGS = 6
+
+
+def _declared_family(token: str) -> str | None:
+    """The interpreter family a token names ("py"/"sh"/"node"/"deno"), or None."""
+    stem = token.rsplit("/", 1)[-1].lower()
+    if _DECLARED_PY_STEM_RE.fullmatch(stem):
+        return "py"
+    if stem in _SHEBANG_SH_STEMS:
+        return "sh"
+    if stem in _DECLARED_NODE_STEMS:
+        return "node"
+    if stem == "deno":
+        return "deno"
+    return None
+
+
+def _declared_invocations(manifest: str) -> list[tuple[str, str]]:
+    """(language, path-token) for every file *manifest* hands an interpreter to run.
+
+    Three forms: the script argument (`python3 [flags] bin/lint`), stdin redirection
+    (`python3 < bin/lint`, `bash -s < install`), and a `cat` piped into an interpreter
+    that was given no script (`cat bin/lint | python3`). Token-based on purpose:
+    backticks, quotes, brackets and parens are separators, so `` `python3 bin/lint` ``,
+    `CMD ["python3", "bin/lint"]` and `$(which python3) bin/lint` all yield their path.
+    Whether the path names a real bundled file is the caller's question, not this one's.
+    """
+    out: list[tuple[str, str]] = []
+    for line in manifest.replace("\\\r\n", " ").replace("\\\n", " ").splitlines():
+        toks = _DECLARED_TOKEN_RE.findall(line)
+        n = len(toks)
+        for i, tok in enumerate(toks):
+            fam = _declared_family(tok)
+            if fam is None:
+                continue
+            table = _DECLARED_FLAGS[fam]
+            lang = _DECLARED_FAMILY_LANG[fam]
+            end = next((k for k in range(i + 1, n) if toks[k] in _DECLARED_SEPARATORS), n)
+            j = i + 1
+            if fam in ("node", "deno") and j < end and toks[j] == "run":
+                j += 1  # `deno run x.ts` / `bun run x`
+            stdin = no_file = False
+            flags = 0
+            while j < end and flags < _DECLARED_MAX_FLAGS:
+                t = toks[j]
+                if t in table["no_file"] or t in _DECLARED_NEVER_A_FILE:
+                    no_file = True
+                    break
+                if t in table["stdin"]:
+                    stdin = True
+                    break
+                if not t.startswith(("-", "+")) or t == "+":
+                    break
+                flags += 1
+                takes_arg = t in table["arg"] or (
+                    fam == "sh" and _DECLARED_SH_OPT_CLUSTER_RE.fullmatch(t)
+                )
+                j += 2 if takes_arg else 1
+            if no_file:
+                continue
+            if not stdin and j < end and toks[j] != "<" and not toks[j].startswith(("-", "+")):
+                out.append((lang, toks[j]))
+                continue
+            # No script argument: the interpreter reads its program from stdin.
+            lt = next((k for k in range(i + 1, end) if toks[k] == "<"), None)
+            if lt is not None and lt + 1 < end and toks[lt + 1] != "<":  # `<<EOF` is inline
+                out.append((lang, toks[lt + 1]))
+            elif i >= 3 and toks[i - 1] == "|" and toks[i - 3] == "cat":
+                out.append((lang, toks[i - 2]))
+    return out
+
+
+def _declared_relpath(token: str, base: str, known) -> str | None:
+    """The collected relpath *token* names relative to the manifest's dir, or None.
+
+    Lookup only — the result must already be a key of *known*. Absolute paths, `~`,
+    and any `..` / `.` / empty component are refused before the lookup.
+    """
+    m = _DECLARED_PLACEHOLDER_RE.match(token)
+    if m:
+        token = token[m.end():]
+    while token.startswith("./"):
+        token = token[2:]
+    for cand in (token, token.rstrip(".:!?")):
+        if not cand or cand.startswith(("/", "~")) or "\\" in cand:
+            continue
+        if any(part in ("", ".", "..") for part in cand.split("/")):
+            continue
+        rel = base + cand
+        if rel in known:
+            return rel
+    return None
+
+
+def read_skill_declared(
+    skill_dir: Path, ctx: Context | None = None
+) -> list[tuple[str, str, str]]:
+    """B-612: (relpath, language, source) for each bundled file that NO extension or
+    shebang claims but a SKILL.md in this skill runs with a named interpreter.
+
+    FINDINGS ONLY (see the block comment above): callers must never fold this into
+    `installed_skill_py/_shell/_js` or any coverage predicate.
+
+    Capped like `read_skill_python`, and recorded the same way when the cap cuts a
+    declared file off (B-074): a silent cap would let named decoys ahead of the payload
+    buy back the INSTALL this route exists to remove. Measured, that is defence in depth
+    at today's constants — padding big enough to reach this cap also overflows the text
+    blob's own 1 MB cap (`_MAX_BYTES_PER_SKILL`), and the 500-file walk leaves at most
+    499 declared candidates, so an existing limit hit already fires; this one keeps the
+    route honest on its own terms if those constants ever move apart. A limit hit can
+    only move the verdict toward UNKNOWN — the direction the contract allows — and it is
+    what the same bytes named `.py` would have produced.
+    """
+    collected = collect_skill_files(skill_dir, ctx)
+    known = {
+        item["relpath"]: item for item in collected if item["classification"] == "TEXT"
+    }
+    wanted: dict[tuple[str, str], None] = {}
+    for rel, item in known.items():
+        leaf = rel.rsplit("/", 1)[-1].rsplit("::", 1)[-1]
+        if leaf.lower() != "skill.md":
+            continue
+        base = rel[: len(rel) - len(leaf)]
+        for lang, token in _declared_invocations(_collected_text(item)):
+            target = _declared_relpath(token, base, known)
+            if target is not None:
+                wanted[(target, lang)] = None
+    out: list[tuple[str, str, str]] = []
+    total = 0
+    truncated = False
+    for target, lang in wanted:
+        text = _collected_text(known[target])
+        if _file_language(target, text) is not None:
+            continue  # a reader above already owns it — never analyse a file twice
+        if target.lower().endswith(_NON_CODE_SUFFIXES) and _shebang_language(text) != lang:
+            continue
+        if total >= _MAX_PY_BYTES_PER_SKILL or len(out) >= _MAX_FILES_PER_SKILL:
+            truncated = True
+            break
+        out.append((target, lang, text))
+        total += len(text)
+    if truncated and ctx is not None:
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+            f"declared-script scan of skill '{skill_dir.name}' hit the "
+            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
+            "files its SKILL.md runs beyond the cap were NOT analyzed",
+        )
     return out
 
 
@@ -4176,6 +4438,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 ctx.installed_skill_py[key] = read_skill_python(target, ctx)
                 ctx.installed_skill_shell[key] = read_skill_shell(target, ctx)
                 ctx.installed_skill_js[key] = read_skill_js(target, ctx)
+                ctx.installed_skill_declared[key] = read_skill_declared(target, ctx)
                 ctx.installed_skill_dirs[key] = target
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")

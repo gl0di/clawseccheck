@@ -33,6 +33,8 @@ from ..collector import (
     read_skill_python,
     read_skill_shell,
     read_skill_js,
+    read_skill_declared,
+    _shebang_language,
 )
 from ..skillast import (
     analyze_javascript,
@@ -3942,6 +3944,7 @@ def _powershell_encoded_payloads(blob: str) -> list[str]:
 # `_is_borderline` admits UNKNOWN and WARN only, so a label for them could never be read,
 # and a table entry nothing can reach is a claim nothing checks.
 _B13_WINNER_SUBSIGNAL = {
+    "warns_declared_unverified": "possible script only SKILL.md declares, unverified",
     "warns_install_curl": "installer/setup fetch",
     "warns_env_exfil": "possible secret exfiltration",
     "warns_host_exfil": "possible covert telemetry",
@@ -4445,6 +4448,20 @@ def check_installed_skills(ctx: Context) -> Finding:
     # is one rule: a disclosure must not move a verdict, a grade, or a finding id
     # (the same contract C-358 states for NPM_DEPTREE_SKILL_COVERAGE_NOTE).
     coverage_fence: list[str] = []
+    # B-612: a file only SKILL.md declares as Python that did not parse. Same carve-out as
+    # `coverage_fence` above (a "_"-prefixed key: evidence only, never a winner, never a
+    # corroborating signal, never `detail`). NOT `parse_error_paths`: that one sets
+    # `engine_degraded` and moves the verdict, and the baseline never read this file at
+    # all — so the honest move is to say it was not analysed, not to grade the skill for it.
+    declared_unparsed: list[str] = []
+    # B-612: a crit-grade hit inside a declared sh/js file whose OWN bytes cannot be
+    # confirmed to be code in that language (no shebang of its own — the common shape,
+    # since read_skill_declared only lets a data-suffixed file through when its shebang
+    # already agrees). `bash -n` accepts an ordinary English sentence (rc=0, measured)
+    # and the stdlib has no JS parser, so "is this really a script" is not decidable here
+    # — and neither is "is the SKILL.md line an instruction or a mention". WARN-capped,
+    # never crit/FAIL: see the ranked-first WARN branch below and CLAUDE.md §2.5's R1.
+    warns_declared_unverified: list[str] = []
     # B-556: destination hosts backing the "crit" bucket's "paste / exfiltration host"
     # label below, so adjudication.py can be handed a real destination instead of
     # `safe_facts: {}`. See Finding.destination_hosts.
@@ -4499,12 +4516,15 @@ def check_installed_skills(ctx: Context) -> Finding:
     install_curl_skills: set = set()
     notify_skills: set = set()
     named_exfil_skills: set = set()
+    # B-618: same idiom — which skills fed the unverified-declared-script WARN bucket.
+    declared_unverified_skills: set = set()
     for name, blob in skills.items():
         _warns_js_len0 = len(warns_js)
         _crit_len0 = len(crit)
         _install_curl_len0 = len(warns_install_curl)
         _notify_len0 = len(warns_notify_host)
         _named_exfil_len0 = len(warns_named_exfil_host)
+        _declared_unverified_len0 = len(warns_declared_unverified)
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
         _fr = _fence_ranges(blob)
@@ -5112,16 +5132,37 @@ def check_installed_skills(ctx: Context) -> Finding:
         _skill_ep_results: list[dict] = []
         # B-638: the skill's own file set, so an exec() of a file the skill ships is judged
         # by where its path RESOLVES (skillast delegates to shippedexec), not by whether the
-        # path merely mentions __file__.
+        # path merely mentions __file__. Deliberately built from installed_skill_py ONLY —
+        # a declared file (B-612 below) never enters that list, so a declared file's own
+        # self-referential exec() idiom is NOT exempted by this artifact; it falls to
+        # shippedexec's WARN-grade "unshipped" branch instead of a false clean pass, which
+        # is the direction B-612's contract allows.
         _shipped = _ShippedArtifact(
             ctx.installed_skill_py.get(name, []),
             root=(getattr(ctx, "installed_skill_dirs", None) or {}).get(name)
             or getattr(ctx, "home", None),
         )
-        for relpath, src in ctx.installed_skill_py.get(name, []):
+        # B-612: files only this skill's SKILL.md runs with a named interpreter
+        # (collector.read_skill_declared). FINDINGS ONLY, and the three `_declared`
+        # guards below are the whole contract: no parse-error record (it carries verdict
+        # weight and the baseline never read the file), no effect simulation (that feeds
+        # ctx.effect_profiles, i.e. coverage and B62), no cross-file package pass. Every
+        # finding rule is routed exactly as it is for a `.py`/`.sh`/`.js` file — same
+        # `own_host`, same `artifact` — so the same bytes reach the same bucket under
+        # either name.
+        _declared = (getattr(ctx, "installed_skill_declared", None) or {}).get(name, [])
+        _py_files = [(r, s, False) for r, s in ctx.installed_skill_py.get(name, [])]
+        _py_files += [(r, s, True) for r, lang, s in _declared if lang == "py"]
+        for relpath, src, _is_declared in _py_files:
             for af in analyze_python(src, relpath, own_host=_own_host, artifact=_shipped):
                 if af.rule == "AST_UNANALYZABLE":
-                    parse_error_paths.append(f"{name}: {relpath}")
+                    if not _is_declared:
+                        parse_error_paths.append(f"{name}: {relpath}")
+                    else:
+                        declared_unparsed.append(
+                            f"coverage: {name}: {relpath} is run by SKILL.md as Python but "
+                            "did not parse as Python, so no dangerous-pattern check reached it"
+                        )
                     continue
                 # F-049: env/agent-config secret -> network sink. WARN-grade (never an
                 # automatic FAIL); collected separately from the crit/info verdict path.
@@ -5263,6 +5304,8 @@ def check_installed_skills(ctx: Context) -> Finding:
                     crit.append(f"{name}: {af.reason} ({loc})")
                 elif cred_exfil_signal:
                     high.append(f"{name}: {af.reason} ({loc})")
+            if _is_declared:
+                continue  # B-612: never effect_profiles — see the `_declared` comment above
             # simulate_effects never raises; guard here too in case of future
             # refactors or mocking in tests.
             #
@@ -5294,21 +5337,46 @@ def check_installed_skills(ctx: Context) -> Finding:
         for af in analyze_python_package(ctx.installed_skill_py.get(name, [])):
             crit.append(f"{name}: {af.reason}")
         # F-050: bundled shell (.sh/.bash/.zsh) semantic pass — cred-file read -> outbound
-        # exfil, or download piped into a non-shell interpreter. Both are crit -> FAIL.
-        for relpath, src in ctx.installed_skill_shell.get(name, []):
+        # exfil, or download piped into a non-shell interpreter. Both are crit -> FAIL for
+        # a real .sh/.bash/.zsh file or a declared file whose OWN shebang independently
+        # names sh (B-612 "verified" — two statements agreeing). A declared file with no
+        # shebang of its own cannot be confirmed to be shell at all (`bash -n` accepts
+        # English, measured) — same crit hit there is capped at WARN, in
+        # `warns_declared_unverified`, never `crit`/FAIL. See that bucket's comment below.
+        _sh_files = [(r, s, True) for r, s in ctx.installed_skill_shell.get(name, [])]
+        _sh_files += [
+            (r, s, _shebang_language(s) == "sh") for r, lang, s in _declared if lang == "sh"
+        ]
+        for relpath, src, _verified in _sh_files:
             for af in analyze_shell(src, relpath):
-                crit.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                if _verified:
+                    crit.append(msg)
+                else:
+                    warns_declared_unverified.append(msg)
         # F-064: bundled JS/TS (.js/.ts/.mjs/.cjs) lexical pass. eval-of-decoded and
         # remote fetch-then-exec are crit -> FAIL; every other rule is warn -> the JS WARN
         # bucket below. B-743: this comment used to enumerate the warn rules as two, which
         # went stale the moment JS_NATIVE_DLOPEN was added and is how the bucket's fixed
         # advice drifted out of truth unnoticed. Stated as the RULE now, not as a list —
         # `_JS_WARN_REMEDIATION` is the list, and a test keeps it complete.
-        for relpath, src in ctx.installed_skill_js.get(name, []):
+        #
+        # B-612: same "verified" split as shell above — a declared file's OWN shebang has
+        # to independently name js/node before a crit-grade JS hit can reach `crit`/FAIL.
+        # A non-crit JS rule is already WARN-grade (`warns_js`), so it carries no false-FAIL
+        # risk and is left exactly where a real .js file's hit would land, verified or not.
+        _js_files = [(r, s, True) for r, s in ctx.installed_skill_js.get(name, [])]
+        _js_files += [
+            (r, s, _shebang_language(s) == "js") for r, lang, s in _declared if lang == "js"
+        ]
+        for relpath, src, _verified in _js_files:
             for af in analyze_javascript(src, relpath):
                 msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
                 if af.severity == "crit":
-                    crit.append(msg)
+                    if _verified:
+                        crit.append(msg)
+                    else:
+                        warns_declared_unverified.append(msg)
                 else:
                     warns_js.append(msg)
                     warns_js_rules.add(af.rule)
@@ -5316,6 +5384,8 @@ def check_installed_skills(ctx: Context) -> Finding:
         # actually grew during its own iteration. Structural, not text-parsed.
         if len(warns_js) > _warns_js_len0:
             js_skills.add(name)
+        if len(warns_declared_unverified) > _declared_unverified_len0:
+            declared_unverified_skills.add(name)
         if len(crit) > _crit_len0:
             crit_skills.add(name)
         if len(warns_install_curl) > _install_curl_len0:
@@ -5389,6 +5459,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         "crit": crit,
         "high": high,
         "parse_error_paths": parse_error_paths,
+        "warns_declared_unverified": warns_declared_unverified,
         "warns_install_curl": warns_install_curl,
         "warns_env_exfil": warns_env_exfil,
         "warns_host_exfil": warns_host_exfil,
@@ -5422,6 +5493,8 @@ def check_installed_skills(ctx: Context) -> Finding:
         "_skill_read_gaps": _skill_read_gaps,
         # B-745: same carve-out — see _stowaway_note's declaration above.
         "_stowaway_note": _stowaway_note,
+        # B-612: same carve-out — see declared_unparsed's declaration above.
+        "_declared_unparsed": declared_unparsed,
         # B-634: NOT a coverage-string bucket like its underscore-prefixed siblings above
         # — see _B13_PERSISTENCE_AXIS_KEY's and _b13_verdict's own comments. Registered
         # under the shared constant so `_b13_verdict` reads exactly what is written here.
@@ -5876,6 +5949,39 @@ def check_installed_skills(ctx: Context) -> Finding:
             None,
             _signal_buckets,
             "path_traversal",
+        )
+
+    # B-612 (CLAUDE.md §2.5 residual R1): a crit-grade hit in a declared sh/js file whose
+    # own bytes carry no shebang, so nothing here can confirm it is really code in that
+    # language rather than an ordinary document, or that the manifest's line is an
+    # instruction to run it rather than a mention of it. Neither fact is decidable by
+    # static analysis (`bash -n` accepts English, measured rc=0; the stdlib has no JS
+    # parser), so this is capped at WARN and ranked FIRST among the WARN buckets — every
+    # other WARN below rests on code this scan COULD confirm was code; this one does not,
+    # and that gap outranks any of their signals. It can never win a FAIL/crit — the
+    # verified branches above already take that path when the file's own bytes back it —
+    # so this bucket is the accepted, disclosed residual, not an escalation route.
+    if warns_declared_unverified:
+        extra = (
+            f" (+{len(warns_declared_unverified) - 6} more)"
+            if len(warns_declared_unverified) > 6
+            else ""
+        )
+        return _b13_verdict(
+            HIGH,
+            WARN,
+            "A file only SKILL.md declares as a script in installed skill(s) matched a "
+            "dangerous pattern: " + "; ".join(warns_declared_unverified[:6]) + extra,
+            "This finding comes from a bundled file with no shebang and no code "
+            "extension of its own — only the skill's SKILL.md names it, next to an "
+            "interpreter, in prose. Two things could not be confirmed from that alone: "
+            "whether the file is really a script in that language rather than an "
+            "ordinary document, and whether the SKILL.md line is an instruction to run "
+            "it rather than just a mention of it. Open the file and read it yourself "
+            "before trusting or dismissing this finding.",
+            warns_declared_unverified,
+            _signal_buckets,
+            "warns_declared_unverified",
         )
 
     # F-097: install-doc curl|bash / remote-fetch — capability, not malice. WARN, not FAIL.
@@ -7509,6 +7615,7 @@ def _vet_resolved_skill(p: Path) -> Finding:
         py_sources = read_skill_python(p, ctx)
         shell_sources = read_skill_shell(p, ctx)
         js_sources = read_skill_js(p, ctx)
+        declared_sources = read_skill_declared(p, ctx)
     elif p.is_file():
         # B-152: route a bare file target through the SAME archive-aware collection
         # the directory branch above uses (collect_skill_files -> decompress_and_
@@ -7534,6 +7641,7 @@ def _vet_resolved_skill(p: Path) -> Finding:
         py_sources = read_skill_python(p, ctx)
         shell_sources = read_skill_shell(p, ctx)
         js_sources = read_skill_js(p, ctx)
+        declared_sources = read_skill_declared(p, ctx)
     else:
         finding = _custom(
             "B13",
@@ -7576,6 +7684,9 @@ def _vet_resolved_skill(p: Path) -> Finding:
     ctx.installed_skill_py = {name or "skill": py_sources}
     ctx.installed_skill_shell = {name or "skill": shell_sources}
     ctx.installed_skill_js = {name or "skill": js_sources}
+    # B-612: findings only — deliberately NOT passed to _looks_like_a_skill_package above
+    # nor merged into the three lists, which coverage reads. See read_skill_declared.
+    ctx.installed_skill_declared = {name or "skill": declared_sources}
     # B-394: vet_skill is meant to be one of this exception's "designated per-target
     # handler[s]" (cli.main's own docstring names "the vet dispatch sites" as such) —
     # the CLI's bare `f = vet_skill(...)` call sites (--vet/--advise on one target) own

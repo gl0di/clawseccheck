@@ -434,7 +434,7 @@ _EXEMPT = {
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~7,542 lines (restated 2026-09-17 — was ~6,951) — the read-only "
+    "collector.py": "~8,254 lines (restated 2026-09-23 — was ~7,542) — the read-only "
                     "collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
@@ -460,7 +460,13 @@ _EXEMPT = {
                     "~5,907 against a real 6,034 before that change. A threshold bills the "
                     "growth to whoever crosses the line, not to whoever accumulated it, so "
                     "the commit a staleness guard fires on is rarely the commit that caused "
-                    "most of the drift.",
+                    "most of the drift. FIFTH growth (+263, B-612): `read_skill_declared` — "
+                    "a file only a skill's SKILL.md names with an interpreter, collected for "
+                    "B13's danger pass alone, kept out of the three coverage lists on purpose "
+                    "(the seven-round retraction history is why). That is a fourth candidate "
+                    "seam, and the leaf-most one of the four: it depends on nothing else this "
+                    "file collects and nothing else depends on it, unlike the byte-format and "
+                    "state-DB seams above.",
     "cli.py": "~6,489 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "

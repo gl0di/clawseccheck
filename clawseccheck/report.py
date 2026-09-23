@@ -2666,6 +2666,7 @@ def _skill_inventory(ctx) -> list[dict]:
     py_map = getattr(ctx, "installed_skill_py", None) or {}
     sh_map = getattr(ctx, "installed_skill_shell", None) or {}
     js_map = getattr(ctx, "installed_skill_js", None) or {}
+    declared_map = getattr(ctx, "installed_skill_declared", None) or {}
     dir_map = getattr(ctx, "installed_skill_dirs", None) or {}
     out: list[dict] = []
     # One check-sized cooperative budget for the WHOLE per-skill loop (mirrors run_all
@@ -2683,6 +2684,9 @@ def _skill_inventory(ctx) -> list[dict]:
         skill_ctx.installed_skill_py = {name: py_map.get(name, [])}
         skill_ctx.installed_skill_shell = {name: sh_map.get(name, [])}
         skill_ctx.installed_skill_js = {name: js_map.get(name, [])}
+        # B-612: without this the row reads a declared-file finding the full audit's own
+        # B13 already reported — the same bytes, two answers on one screen.
+        skill_ctx.installed_skill_declared = {name: declared_map.get(name, [])}
         # B-751: carry this skill's archive-traversal violations across the same bridge
         # B-551 built for coverage gaps. Without it the cascade in check_installed_skills
         # cannot see the escape and falls through to the next arm, so the row for a skill
