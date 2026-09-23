@@ -3955,6 +3955,7 @@ _B13_WINNER_SUBSIGNAL = {
     "warns_named_exfil_host": "paste/transfer host named, with nothing reaching it",
     "persist_warn": "possible persistence/daemonize pattern",
     "warns_local_exfil": "possible local-sink secret exposure",
+    "warns_hardcoded_secret_assign": "hardcoded provider-shaped secret",
     "warns_openclaw_cred": "possible OpenClaw credential-store exfiltration reference",
     "warns_unpinned": "unpinned dependencies",
     "warns_squat": "possible typosquat name(s)",
@@ -4374,6 +4375,19 @@ def check_installed_skills(ctx: Context) -> Finding:
     warns_shell_injection: list[str] = []  # C-199: subprocess/os.system shell-injection-prone shape
     warns_insecure_tempfile: list[str] = []  # C-199: hardcoded predictable /tmp write (CWE-377)
     warns_chunked_file_exec: list[str] = []  # B336: chunked multi-file-read helper -> exec/eval
+    # B-893 (D2 on B-543): skillast.py's HARDCODED_PROVIDER_SECRET_ASSIGN — a plain
+    # `NAME = "<provider-shaped-literal>"` assignment, outside a test-fixture-named
+    # file. WARN-only (never FAIL-capable — see _AST_NEVER_FAIL_RULES below); the two
+    # env-entangled HARDCODED_PROVIDER_SECRET call sites (os.getenv/os.environ) are a
+    # different rule name and stay on the generic crit/FAIL path untouched.
+    warns_hardcoded_secret_assign: list[str] = []
+    # B-893: same underlying rule, but the file's OWN basename matches
+    # _TEST_FIXTURE_BASENAME_RE (test_*.py / *_test.py / conftest.py / JS spec). Never a
+    # verdict winner — advisory only, same carve-out as h6_advisory below. Deliberately
+    # basename-only, not the shape-gated _pos_in_test_fixture_file/
+    # _PYTHON_TEST_SHAPE_SIGNALS the prose side uses: see the loop arm's own comment for
+    # why a shape gate here would still convict the corpus's own conftest.py fixtures.
+    hardcoded_secret_fixture_note: list[str] = []
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
     # B-744: OpenClaw's own credential store named alongside credential-shaped content
     # reaching an exfil sink — WARN-only, never routed through the FAIL-capable
@@ -5153,6 +5167,53 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # wiring template), so this rule has no B13-facing bucket at all.
                 if af.rule == "TUNNEL_LAUNCH_ARGV":
                     continue
+                # B-893 (Dave's D2 ruling on B-543): skillast.py's
+                # HARDCODED_PROVIDER_SECRET_ASSIGN — a plain `NAME = "<provider-shaped
+                # -literal>"` module/function/class-level assignment, distinct from the
+                # two env-entangled HARDCODED_PROVIDER_SECRET call sites (os.getenv(...,
+                # <secret>) / os.environ[...] = <secret>), which are a different rule
+                # name and fall through unchanged to the generic crit/FAIL path below.
+                # A shipped key is the author's own hygiene issue, not DO-NOT-INSTALL
+                # harm to the installing user, so this shape never FAILs (see
+                # _AST_NEVER_FAIL_RULES below) — WARN in an ordinary file, evidence-only
+                # (never a verdict winner) when the file's own basename says it is a
+                # test fixture.
+                #
+                # Deliberately _TEST_FIXTURE_BASENAME_RE (basename-only), NOT the
+                # shape-gated _pos_in_test_fixture_file/_PYTHON_TEST_SHAPE_SIGNALS pair
+                # the prose side uses (:1174-1330). That gate exists because ITS false
+                # negative is a live attack: a forged "# file: test_x.py" heading can
+                # hide a real payload inside an unrelated file's prose, so the prose
+                # side additionally demands real pytest/unittest shape before trusting
+                # the name. Here the file is not a synthetic marker inside a text blob
+                # — it is the AST loop's own `relpath`, the scanner's real path for a
+                # real bundled Python file — so there is nothing to forge; the only
+                # question is whether the false negative this trades away is a live
+                # attack or an author's own leaked test key. Measured on the B-543
+                # corpus: every one of the 33 gold-normal `tests/conftest.py` hits is a
+                # single byte-identical template with ZERO of the 7
+                # _PYTHON_TEST_SHAPE_SIGNALS (no `def test_`, no `assert`, no
+                # `import pytest` — just `MOCK_* = "..."` lines), so a shape gate here
+                # would still convict every one of them; basename alone is the
+                # deliberate, documented choice. A real live key in a file whose
+                # basename does NOT match (e.g. `scripts/deploy.py`) is unaffected and
+                # still WARNs. This trade-off is disclosed in the WARN finding's `fix`
+                # text below, never in `detail` (CLAUDE.md §2.5/B-555 — `detail` is
+                # what `baseline.fingerprint()` hashes, and moving disclosure text
+                # there would orphan every `.clawseccheckignore` entry already written
+                # against it).
+                if af.rule == "HARDCODED_PROVIDER_SECRET_ASSIGN":
+                    if _TEST_FIXTURE_BASENAME_RE.match(Path(relpath).name):
+                        hardcoded_secret_fixture_note.append(
+                            f"{name}: {af.reason} ({relpath}:{af.lineno}) — a "
+                            "test-fixture-named file, carried as evidence only, "
+                            "never counted toward the verdict"
+                        )
+                    else:
+                        warns_hardcoded_secret_assign.append(
+                            f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                        )
+                    continue
                 loc = f"{relpath}:{af.lineno}"
                 # B-636: the same predicate checks/_mcp.py asks. Equivalent here by
                 # construction — every rule in _AST_NEVER_FAIL_RULES has already
@@ -5303,6 +5364,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         "warns_named_exfil_host": warns_named_exfil_host,
         "persist_warn": _persist_warn,
         "warns_local_exfil": warns_local_exfil,
+        "warns_hardcoded_secret_assign": warns_hardcoded_secret_assign,
         "warns_openclaw_cred": warns_openclaw_cred,
         "warns_unpinned": warns_unpinned,
         # Reserved (leading underscore): carried to _b13_verdict as EVIDENCE, never
@@ -5311,6 +5373,9 @@ def check_installed_skills(ctx: Context) -> Finding:
         # B-544: same carve-out, for the H6 advisory — see h6_advisory's declaration
         # above. Never a winner (nothing calls _b13_verdict with this key).
         "_h6_advisory": h6_advisory,
+        # B-893: same carve-out — see hardcoded_secret_fixture_note's declaration
+        # above. Never a winner (nothing calls _b13_verdict with this key).
+        "_hardcoded_secret_fixture_note": hardcoded_secret_fixture_note,
         # B-552: same carve-out — see _skill_read_gaps' declaration above.
         "_skill_read_gaps": _skill_read_gaps,
         # B-745: same carve-out — see _stowaway_note's declaration above.
@@ -6104,6 +6169,39 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_local_exfil,
             _signal_buckets,
             "warns_local_exfil",
+        )
+
+    # B-893 (Dave's D2 ruling on B-543): a plain-assignment hardcoded provider-shaped
+    # secret (skillast.py's HARDCODED_PROVIDER_SECRET_ASSIGN) outside a test-fixture-
+    # named file. WARN-only — see the AST loop arm above for why this shape never
+    # FAILs even though the two env-entangled call sites of the same underlying
+    # `_is_hardcoded_provider_secret` predicate still do. Ranked directly below its
+    # F-023 local-sink sibling: both are "a secret is present" signals that stop short
+    # of proving exfiltration. Only reached when no CRIT/HIGH pattern and no
+    # warns_local_exfil fired.
+    if warns_hardcoded_secret_assign:
+        extra = (
+            f" (+{len(warns_hardcoded_secret_assign) - 6} more)"
+            if len(warns_hardcoded_secret_assign) > 6
+            else ""
+        )
+        return _b13_verdict(
+            HIGH,
+            WARN,
+            "Hardcoded provider-shaped secret in installed skill(s): "
+            + "; ".join(warns_hardcoded_secret_assign[:6])
+            + extra,
+            "A skill assigns a live-shaped provider secret (e.g. a Stripe/OpenAI-style "
+            "API key) directly to a plain variable. Remove the literal and load it from "
+            "an environment variable or a secret store instead — a key checked into a "
+            "skill's own source ships with the skill to everyone who installs it. (A "
+            "test-fixture-named file with the same shape is not flagged here at all — "
+            "only its own basename, not its body shape, is checked, so an author's "
+            "mock/test key in a genuinely test-named file is treated as the author's "
+            "own hygiene rather than a signal.)",
+            warns_hardcoded_secret_assign,
+            _signal_buckets,
+            "warns_hardcoded_secret_assign",
         )
 
     # B-744: OpenClaw's own credential store — WARN-only (never FAIL). Ranked directly
@@ -7082,6 +7180,7 @@ _AST_NEVER_FAIL_RULES = frozenset({
     "SHELL_INJECTION_RISK",      # C-199
     "CHUNKED_FILE_EXEC",         # B336 — explicitly not FAIL-capable
     "TUNNEL_LAUNCH_ARGV",        # B338 — explicitly not FAIL-capable
+    "HARDCODED_PROVIDER_SECRET_ASSIGN",  # B-893 — explicitly not FAIL-capable
 })
 
 
