@@ -1724,6 +1724,191 @@ def test_depth_pass_second_round_reaches_a_genuinely_deep_floor_pool_database(
     assert meta["dbs_budget_starved"] == 0  # floor-pool databases are never starved
 
 
+# ---------------------------------------------------------------------------
+# B-852 round 7 -- a fresh independent review found round 6's own two-round design
+# (above) still fails whenever EVERY still-hungry candidate's next row is larger than
+# an even share of what's left: round 2 recomputes the EXACT SAME flat share over the
+# EXACT SAME still-hungry candidate set as round 1 (nothing moved: `remaining` didn't
+# shrink, the candidate count didn't shrink), making ZERO progress -- and since rows
+# cannot be split, no NUMBER of further equal-share rounds would do any better either.
+# `read_compiled_tool_descriptions` now adds a third, sequential DRAIN phase after the
+# two equal-share rounds that processes whatever is still hungry ONE DATABASE AT A
+# TIME, guaranteeing real progress instead of a share that can mathematically never
+# grow.
+# ---------------------------------------------------------------------------
+
+
+def test_drain_phase_reaches_databases_two_equal_share_rounds_structurally_cannot(
+    monkeypatch,
+):
+    """Reproduces the round-7 shape at a tractable scale (the review's own real repro
+    was 50 floor + 100 extra databases / 64 MiB): 10 databases beyond a small floor
+    pool, each holding a single compiled-tool row padded to the SAME size -- large
+    enough that an even share of the aggregate (`budget // 10`) can NEVER admit even
+    ONE of them, in EITHER equal-share round (round 2 recomputes the identical share
+    over the identical still-hungry set, since none of the 10 makes any progress in
+    round 1 to shrink either `remaining` or the candidate count). Before the drain
+    phase existed, this shape read 0 of the 10 -- including the marker planted as the
+    FIRST (alphabetically) extra database's own row -- while leaving most of the
+    aggregate unspent. The budget is deliberately sized to admit exactly
+    `floor(budget / row_size)` of the 10 when drained ONE AT A TIME, so this also
+    proves the drain stops once genuinely exhausted, not that it magically reads
+    everyone regardless of budget.
+    """
+    from clawseccheck import trajectorystore
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    monkeypatch.setattr(trajectorystore, "_MAX_SQLITE_DBS", 2)
+
+    home = _home()
+    for i in range(2):
+        _add_agent_db(
+            home, f"a_floor{i}", trajectory_rows=[(f"fs{i}", 0)], include_auth=False,
+        )
+
+    def _marker(name, pad):
+        ev = _compiled_event([{
+            "name": name, "description": "d",
+            "parameters": {"type": "object", "properties": {}},
+        }])
+        ev["data"]["systemPrompt"] = "s" * pad
+        return ev
+
+    K = 10
+    row_size = None
+    for i in range(K):
+        name = f"b852_round7_drain_marker_{i:02d}"
+        event = _marker(name, 900)
+        this_len = len(json.dumps(event))
+        row_size = row_size or this_len
+        assert this_len == row_size, "every extra row must be the same size"
+        _add_agent_db(
+            home, f"b_extra{i:02d}",
+            trajectory_rows=[(f"es{i}", 0, event)],
+            include_auth=False,
+        )
+
+    # Aggregate budget: `budget // K` is far below `row_size` (so BOTH equal-share
+    # rounds make ZERO progress against any of the 10 -- the exact structural gap
+    # round 7 exists to close), while the budget still comfortably covers
+    # `floor(budget / row_size)` databases drained ONE AT A TIME.
+    budget = row_size * 5 + 50
+    assert budget // K < row_size, (budget, K, row_size)
+
+    tool_defs, meta = read_compiled_tool_descriptions(
+        home,
+        max_content_bytes_per_db=row_size * 10,
+        max_content_total_bytes=budget,
+    )
+
+    names = {d["name"] for d in tool_defs}
+    # The actual regression proof, asserted first: the FIRST extra database's marker
+    # (drained first -- every candidate here starts at zero content, so drain order is
+    # the stable list order) must be recovered -- a pre-round-7 build recovers NONE of
+    # the 10, no matter which one is checked.
+    assert "b852_round7_drain_marker_00" in names, (names, meta)
+    assert len(names) == 5, (names, meta)
+    assert meta["dbs_found"] == 12
+    assert meta["dbs_unreadable"] == 0
+    assert meta["dbs_read"] == 2 + 5           # 2 floor-pool + 5 drained
+    assert meta["dbs_budget_starved"] == 5     # the remaining 5 never got a byte
+
+
+def test_a_database_unreadable_after_an_earlier_successful_read_is_dbs_read_not_dbs_unreadable(
+    monkeypatch,
+):
+    """B-852 round 7 classification fix: a database that DID yield real content on an
+    earlier attempt, then turns unreadable (corrupted/deleted) before its NEXT turn
+    (round 2, or the drain), must be classified `dbs_read` (with `truncated` set) --
+    its earlier content is genuinely sitting in `tool_defs`, so counting it
+    `dbs_unreadable` ("never opened/scanned at all") was a real, reproduced
+    inconsistency a fresh independent review found. Also proves the earlier content
+    itself survives: `tool_defs` still carries the tool recovered before the failure.
+
+    Simulates the failure by wrapping `_read_and_process_db`: the FIRST call for the
+    one database in this fixture delegates to the real implementation (a genuine
+    partial read that hits its own aggregate-funded byte cap after yielding one real
+    row, so it stays a depth candidate for round 2); every call after that returns
+    exactly what an unreadable database returns, without touching the real database
+    file at all -- deterministic, no actual on-disk corruption needed.
+    """
+    from clawseccheck import trajectorystore
+    from clawseccheck.trajectorystore import (
+        _SqliteEventJsonStats,
+        read_compiled_tool_descriptions,
+    )
+
+    monkeypatch.setattr(trajectorystore, "_MAX_SQLITE_DBS", 0)  # every db is "extra"
+
+    home = _home()
+
+    def _filler(pad):
+        return {"type": "tool.result", "output": "y" * pad}
+
+    def _marker(name, pad):
+        ev = _compiled_event([{
+            "name": name, "description": "d",
+            "parameters": {"type": "object", "properties": {}},
+        }])
+        ev["data"]["systemPrompt"] = "s" * pad
+        return ev
+
+    # Newest row first (ORDER BY rowid DESC): the marker, small enough to fit under
+    # the round-1 cap on its own. Older row: filler, large enough that the SAME
+    # round-1 cap (this database is the only depth candidate, so its round-1 cap is
+    # the WHOLE aggregate) still cannot admit it -- a genuine byte-cap hit, with the
+    # marker already recovered before it.
+    _add_agent_db(
+        home, "only_db",
+        trajectory_rows=[
+            # Inserted FIRST -> lowest rowid -> read LAST under `ORDER BY rowid DESC`
+            # (same convention `test_depth_budget_reaches_every_hungry_database_not_
+            # just_the_first` above uses).
+            ("filler", 0, _filler(5_000), 0),
+            # Inserted LAST -> highest rowid -> read FIRST.
+            ("marker", 0, _marker("recovered_before_failure", 10), 1),
+        ],
+        include_auth=False,
+    )
+
+    call_count = {"n": 0}
+    real_read_and_process_db = trajectorystore._read_and_process_db
+
+    def _fails_after_first_call(
+        db_path, max_rows, max_bytes, skip_prefix_count, seen, tool_defs, meta,
+    ):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return real_read_and_process_db(
+                db_path, max_rows, max_bytes, skip_prefix_count, seen, tool_defs, meta,
+            )
+        stats = _SqliteEventJsonStats()
+        stats.unreadable = True
+        return 0, stats, 0
+
+    monkeypatch.setattr(
+        trajectorystore, "_read_and_process_db", _fails_after_first_call,
+    )
+
+    tool_defs, meta = read_compiled_tool_descriptions(
+        home,
+        max_content_bytes_per_db=10_000_000,
+        max_content_total_bytes=1_000,  # < marker + filler combined -> a real cap hit
+    )
+
+    names = {d["name"] for d in tool_defs}
+    # The actual regression proof: content read BEFORE the failure survives, and the
+    # database is classified `dbs_read` (its content is real), never `dbs_unreadable`
+    # (which would falsely claim nothing was ever recovered from it).
+    assert "recovered_before_failure" in names, (names, meta)
+    assert call_count["n"] >= 2, "the mock must actually be reached a second time"
+    assert meta["dbs_found"] == 1
+    assert meta["dbs_read"] == 1
+    assert meta["dbs_unreadable"] == 0
+    assert meta["dbs_budget_starved"] == 0
+    assert meta["truncated"] is True
+
+
 def test_scan_sqlite_event_json_is_a_lazy_generator():
     """`_scan_sqlite_event_json` must not do ANY work (open the database, run the
     query) until it is actually iterated -- constructing the generator object alone

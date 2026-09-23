@@ -8721,9 +8721,10 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             sqlite_incomplete += (
                 f" {dbs_budget_starved} further SQLite database(s) were found but "
                 "never read at all -- the `--exhaustive` aggregate depth budget was "
-                "already spent on other databases before their turn, so unlike the "
-                "per-database cap above, it is these databases' NEWEST rows, not just "
-                "their longer-resident tail, that went unexamined."
+                "used up (what remained by their turn was smaller than even their "
+                "newest record), so unlike the per-database cap above, it is these "
+                "databases' NEWEST rows, not just their longer-resident tail, that "
+                "went unexamined."
             )
         return _finding(
             "B185",
@@ -8831,8 +8832,8 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             # the `--exhaustive` aggregate depth budget ran out before their turn.
             scope += (
                 f" ({dbs_budget_starved} further database(s) found but never read at "
-                "all -- the exhaustive aggregate depth budget was already spent "
-                "elsewhere)"
+                "all -- the exhaustive aggregate depth budget was used up, what "
+                "remained was smaller than even their newest record)"
             )
         incomplete = ""
         jsonl_incomplete = bool(
@@ -8872,8 +8873,9 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 parts.append(
                     f"{dbs_budget_starved} further SQLite database(s) found on this "
                     "host but never read at all (the exhaustive aggregate depth "
-                    "budget was already spent before their turn, so their newest "
-                    "rows -- not just a longer-resident tail -- went unexamined)"
+                    "budget was used up -- what remained by their turn was smaller "
+                    "than even their newest record -- so their newest rows, not just "
+                    "a longer-resident tail, went unexamined)"
                 )
             incomplete = (
                 " Note: scan bounds meant some records were not examined on "
@@ -8927,8 +8929,8 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             # database was corrupt/locked.
             scope += (
                 f" ({dbs_budget_starved} further database(s) found but never read at "
-                "all -- the exhaustive aggregate depth budget was already spent "
-                "elsewhere)"
+                "all -- the exhaustive aggregate depth budget was used up, what "
+                "remained was smaller than even their newest record)"
             )
         incomplete = ""
         sqlite_scan_incomplete = bool(
@@ -8962,8 +8964,9 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 parts.append(
                     f"{dbs_budget_starved} further database(s) found on this host but "
                     "never read at all (the exhaustive aggregate depth budget was "
-                    "already spent before their turn, so their newest rows -- not "
-                    "just a longer-resident tail -- went unexamined)"
+                    "used up -- what remained by their turn was smaller than even "
+                    "their newest record -- so their newest rows, not just a "
+                    "longer-resident tail, went unexamined)"
                 )
             incomplete = (
                 " Note: SQLite scan bounds meant some records were not examined -- "

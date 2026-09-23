@@ -2368,6 +2368,92 @@ def test_exhaustive_recovers_a_superset_of_default_across_several_home_shapes(
 
 
 # ---------------------------------------------------------------------------
+# B-852 round 7 -- a fresh independent review found round 6's own two-round design
+# (above) still fails whenever EVERY still-hungry candidate's next row is bigger than
+# an even share of what's left: round 2 recomputes the EXACT SAME flat share over the
+# EXACT SAME still-hungry candidate set round 1 already tried, making ZERO progress --
+# and since rows cannot be split, no NUMBER of further equal-share rounds helps
+# either. `read_compiled_tool_descriptions` now adds a third, sequential DRAIN phase
+# after the two equal-share rounds, processing whatever is still hungry ONE DATABASE
+# AT A TIME (see `tests/test_f187_trajectory_sqlite_corroborator.py`'s own round-7
+# tests for the unit-level regression). This is the check-level positive control: a
+# poisoned description planted where two equal-share rounds structurally cannot reach
+# it must still FAIL.
+# ---------------------------------------------------------------------------
+
+
+def test_drain_phase_reaches_a_poisoned_database_two_equal_share_rounds_structurally_miss(
+    tmp_path, monkeypatch,
+):
+    """Scaled-down version of the review's own real repro (50 floor + 100 extra
+    databases, poison alone in one ~990 KB extra row, 64 MiB aggregate): 10 databases
+    beyond a small floor pool, each holding a single compiled-tool row of the SAME
+    size -- large enough that an even share of the aggregate (`budget // 10`) can
+    NEVER admit even ONE of them, in EITHER equal-share round. The poisoned
+    description is planted as the FIRST (alphabetically) database beyond the floor
+    pool, which the drain phase reads first (every candidate here starts at zero
+    content, so drain order is the stable list order): a pre-round-7 build never reads
+    it at all -- rounds 1+2 both compute a share far below the row size, over the same
+    10-candidate set, making zero progress -- and PASSes; the fix must FAIL.
+    """
+    import dataclasses
+
+    from clawseccheck import trajectorystore as trajectorystore_mod
+    from clawseccheck.checks import _mcp as _mcp_mod
+    from clawseccheck.scanbudget import EXHAUSTIVE_LIMITS
+
+    monkeypatch.setattr(trajectorystore_mod, "_MAX_SQLITE_DBS", 2)
+
+    for i in range(2):
+        _write_agent_sqlite_db(tmp_path, f"a_floor{i}", [(f"fs{i}", 0)])
+
+    def _padded(tools, pad):
+        ev = _compiled(tools)
+        ev["data"]["systemPrompt"] = "s" * pad
+        return ev
+
+    poisoned = [{
+        "name": "weather", "description": "bad <!-- hidden -->",
+        "parameters": {"type": "object", "properties": {}},
+    }]
+    benign = [{
+        "name": "lookup", "description": "d",
+        "parameters": {"type": "object", "properties": {}},
+    }]
+
+    K = 10
+    row_size = 0
+    for i in range(K):
+        tools = poisoned if i == 0 else benign
+        event = _padded(tools, 900)
+        # The poisoned/benign descriptions differ slightly in length -- `row_size`
+        # tracks the LARGEST of the two so the budget below is sized against the
+        # worst case (an even share must fail to admit EITHER shape).
+        row_size = max(row_size, len(json.dumps(event)))
+        _write_agent_sqlite_db(tmp_path, f"b_extra{i:02d}", [(f"es{i}", 0, event)])
+
+    # `budget // K` is far below `row_size` (equal-share is structurally 0 for every
+    # candidate, in either round), while the budget itself is far more than one row
+    # needs -- the exact false-PASS shape round 7 exists to close.
+    budget = row_size * 5 + 50
+    assert budget // K < row_size, (budget, K, row_size)
+
+    tiny_exhaustive = dataclasses.replace(
+        EXHAUSTIVE_LIMITS,
+        sqlite_max_dbs=1000,
+        sqlite_max_content_bytes_per_db=row_size * 10,
+        sqlite_max_content_total_bytes=budget,
+    )
+    monkeypatch.setattr(_mcp_mod, "limits_for", lambda ctx: tiny_exhaustive)
+
+    ctx = Context(home=tmp_path)
+    ctx.exhaustive = True
+    verdict = _mcp_mod.check_compiled_tool_poisoning(ctx)
+
+    assert verdict.status == "FAIL", verdict.detail
+
+
+# ---------------------------------------------------------------------------
 # B-852 round 6 -- `dbs_budget_starved` (round 5's own disclosure field) could
 # structurally never become non-zero against a real budget, because round 5's depth
 # pass always handed every candidate a non-zero flat share regardless of how many
