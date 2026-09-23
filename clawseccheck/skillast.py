@@ -4887,9 +4887,17 @@ _CONTAINMENT_MUTATOR_DUNDER_ATTRS = frozenset({
     "__setattr__", "__delattr__", "__setitem__", "__delitem__",
 })
 _CONTAINMENT_MUTATOR_NAMES = frozenset({"setattr", "delattr"})
-# `__dict__` is gated on the base-sensitivity check below (round 3: `self.__dict__.
-# update(kw)` is ordinary code); the other four are never legitimately touched on ANY
-# object in benign skill code, so they stay unconditional.
+# `__dict__` and a subscript-store are gated on the same fail-closed
+# `_containment_mutation_base_is_risky` combinator as the attribute Store/Del and
+# setattr/delattr mutator-target gates below (round 5, C-135 rejection of 9fc20cc9:
+# round 4 flipped those two gates to the ambiguous-fires combinator but left these two
+# on the narrower `_containment_sensitive_base`, which only fires on FULL resolution and
+# has no fallback for an unresolvable target like a function parameter or a cross-method
+# `self.attr` -- reopening the exact G1/G2/G3 shapes round 4 supposedly closed, just
+# spelled with `.__dict__[...]`/`[...]` instead of plain `attr = value`). `self`/an
+# ordinary local still never fires (round 3: `self.__dict__.update(kw)` is ordinary
+# code); the other four dunder attrs are never legitimately touched on ANY object in
+# benign skill code, so they stay unconditional.
 _CONTAINMENT_UNSAFE_DUNDER_ATTRS = frozenset({
     "__code__", "__defaults__", "__kwdefaults__", "__globals__",
 })
@@ -5179,7 +5187,7 @@ def _containment_fail_closed_reason(ctx):
                 return f".{n.attr} is used"
             if n.attr in ("f_globals", "_getframe"):
                 return f".{n.attr} is used"
-            if n.attr == "__dict__" and _containment_sensitive_base(ctx, n.value):
+            if n.attr == "__dict__" and _containment_mutation_base_is_risky(ctx, n.value):
                 return ".__dict__ is used on a sensitive namespace"
             if isinstance(n.ctx, (ast.Store, ast.Del)) and n.attr in _CONTAINMENT_TRUSTED_ATTRS \
                     and _containment_mutation_base_is_risky(ctx, n.value):
@@ -5205,7 +5213,7 @@ def _containment_fail_closed_reason(ctx):
                     return "'__file__' is used as a subscript key"
                 if _containment_is_namespace_call(ctx, n.value):
                     return "globals()/vars()/locals() namespace is mutated by subscript"
-                if _containment_sensitive_base(ctx, n.value):
+                if _containment_mutation_base_is_risky(ctx, n.value):
                     return "a subscript on a sensitive namespace is assigned or deleted"
         elif isinstance(n, ast.ImportFrom):
             if any(a.name == "*" for a in n.names):
@@ -5854,6 +5862,25 @@ def _containment_callsites(fn, ctx):
     return ctx._callsites[fn]
 
 
+def _containment_own_returns(fn):
+    """`ast.Return` nodes belonging to *fn* itself, not any nested function/lambda/
+    class -- same own-scope walk shape as `_ContainmentReachingDefs._own_nodes`, used
+    to trace what a called function's result actually is (B-850 round 5, G4: the
+    provenance walker's `Call` branch used to never look at what a user-defined
+    function's own `return` evaluates to)."""
+    out = []
+    stack = list(fn.body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, ast.Return):
+            out.append(n)
+            continue
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(n))
+    return out
+
+
 def _containment_provenance_defs(name_node, env):
     """Like `_containment_lookup`, but returns the RAW reaching defs for a free/
     global name WITHOUT the STRICT-mode kind rewrite to 'opaque' (B-850 round 4,
@@ -5918,22 +5945,22 @@ _CONTAINMENT_PROVENANCE_MAX_DEPTH = 6
 _CONTAINMENT_TRIVIALLY_SAFE_TYPES = (ast.Constant, ast.JoinedStr, ast.FormattedValue, ast.Lambda)
 
 
-def _containment_self_attr_is_safe(ctx, node, env, visited, depth):
-    """*node* is `<receiver>.<attr>` (e.g. `self.mod`) -- safe UNLESS some
-    assignment `<receiver>.<attr> = <value>` anywhere in the enclosing class
-    fully resolves its <value> to a sensitive dotted name (B-850 round 4, H5).
-    Deliberately narrower than `_containment_target_is_safe`'s general
-    ambiguous-fires rule: an unresolved/opaque RHS (a constructor parameter, a
-    computed value, ...) stays SAFE here -- only a PROVEN-sensitive assignment
-    convicts -- so the common `self.<anything> = <ordinary value>` shape
-    (FP1-FP11) never regresses just because the whole class isn't traceable.
-    (AugAssign-to-attribute, e.g. `self.mod += os.path`, is not chased -- an
-    accepted, narrow residual for a shape no real skill writes.)"""
-    attr = node.attr
-    receiver_scope = ctx.scope_of(node.value)
-    class_node = ctx.parent.get(receiver_scope)
-    if not isinstance(class_node, ast.ClassDef):
-        return False
+def _containment_class_attr_is_safe(ctx, class_node, attr):
+    """True unless some assignment `<receiver>.<attr> = <value>` anywhere in
+    *class_node*'s own methods fully resolves its <value> to a sensitive dotted
+    name. Shared (B-850 round 5, G5) between `_containment_self_attr_is_safe`
+    (accessed via self/receiver-param, from INSIDE the class -- B-850 round 4,
+    H5) and an access on an instance obtained from a traced constructor call,
+    from OUTSIDE the class (`w = Wrapper(); w.mod.join = ...` is the same shape
+    as H5's `self.mod...`, one method over -- H5's fix only covered the
+    inside-the-class case). Deliberately narrower than
+    `_containment_target_is_safe`'s general ambiguous-fires rule: an
+    unresolved/opaque RHS (a constructor parameter, a computed value, ...) stays
+    SAFE here -- only a PROVEN-sensitive assignment convicts -- so the common
+    `self.<anything> = <ordinary value>` shape (FP1-FP11) never regresses just
+    because the whole class isn't traceable. (AugAssign-to-attribute, e.g.
+    `self.mod += os.path`, is not chased -- an accepted, narrow residual for a
+    shape no real skill writes.)"""
     for meth in class_node.body:
         if not isinstance(meth, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -5963,13 +5990,43 @@ def _containment_self_attr_is_safe(ctx, node, env, visited, depth):
     return True
 
 
+def _containment_self_attr_is_safe(ctx, node, env, visited, depth):
+    """*node* is `<receiver>.<attr>` (e.g. `self.mod`) -- resolves the enclosing
+    class and delegates the actual per-attribute check to
+    `_containment_class_attr_is_safe` (B-850 round 4, H5; refactored round 5 to
+    share that check with the external-access case, G5)."""
+    receiver_scope = ctx.scope_of(node.value)
+    class_node = ctx.parent.get(receiver_scope)
+    if not isinstance(class_node, ast.ClassDef):
+        return False
+    return _containment_class_attr_is_safe(ctx, class_node, node.attr)
+
+
 def _containment_param_is_safe(ctx, dd, denv, visited, depth):
     """A non-receiver parameter is safe only when EVERY in-file call site passes
     it a provably-safe value -- zero discoverable call sites (or more than the
     evaluated-callsite budget) is treated as ambiguous, not safe (B-850 round 4,
     H2: `def mutate(mod): mod.join = ...; mutate(os.path)` must fire; a
     parameter with no traceable call site fires for the same reason -- a
-    fail-closed guard can't positively vouch for a value it never saw)."""
+    fail-closed guard can't positively vouch for a value it never saw).
+
+    KNOWN FP, deliberately NOT fixed here (B-850 round 5, reviewed and deferred):
+    `names` only covers `posonlyargs`/`args`, so a reaching-def for a `*args`/
+    `**kwargs` COLLECTOR PARAMETER ITSELF (not one of its unpacked elements,
+    e.g. `def f(*args): args[0].path = x`) always falls through the `arg is
+    None` check below and is treated as not-safe -- a real false-positive on
+    ordinary code. The obvious one-line fix (append `vararg`/`kwarg` to `names`)
+    is UNSOUND, not just cosmetic: it maps the collector name to `call.args[0]`
+    positionally, so for a multi-argument call it only vouches for the FIRST
+    excess positional and silently stops looking at the rest -- verified live:
+    `def f(*args): args[1].join = ...; f('benign', os.path)` goes CLEAN under
+    that patch (the `_ContainmentDef` for `args[1]` is `os.path`, a real bypass)
+    because `args[0]` alone was checked. Soundly fixing this needs collecting
+    ALL excess positional/keyword args across every call site and requiring
+    them ALL safe (the same `all(...)` shape as the List/Tuple-literal branch
+    of `_containment_target_is_safe`, not a single-index lookup here) -- out of
+    scope for this round; the FP stays an accepted, understood residual until a
+    round budgeted for that rewrite."""
     fn = dd.scope
     if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return False
@@ -6018,6 +6075,68 @@ def _containment_def_is_safe(ctx, dd, denv, visited, depth):
     # none of these are further traceable to a proof of safety here -- ambiguous,
     # so the fail-closed default (not safe) applies (B-850 round 4).
     return False
+
+
+def _containment_resolve_constructed_class(ctx, node, env):
+    """*node* resolves -- through `_containment_resolve_value_node`'s bounded
+    plain-reassignment chase -- to a call that constructs a locally-defined
+    class: returns that class's ClassDef, or None when *node* isn't resolvable
+    this way (an unresolved/ambiguous chain, or a callee that isn't a bare Name
+    bound to exactly one in-file ClassDef -- an imported/builtin/dynamic
+    constructor keeps the generic Attribute-branch fallback below) (B-850 round
+    5, G5)."""
+    base_node, base_env = _containment_resolve_value_node(ctx, node, env)
+    if not isinstance(base_node, ast.Call) or not isinstance(base_node.func, ast.Name):
+        return None
+    if base_env is None:
+        base_env = _ContainmentEnv(ctx, ctx.scope_of(base_node.func))
+    try:
+        defs = _containment_provenance_defs(base_node.func, base_env)
+    except _ContainmentBudget:
+        return None
+    if len(defs) != 1:
+        return None
+    dd, _ = defs[0]
+    return dd.node if dd.kind == "def" and isinstance(dd.node, ast.ClassDef) else None
+
+
+def _containment_call_result_is_safe(ctx, call, env, visited, depth):
+    """The `_containment_target_is_safe` Call branch's fallback once the callee
+    doesn't resolve to a dotted import path (B-850 round 5, G4): a call to a
+    user-defined FUNCTION in this file has its `return` expression(s) -- via
+    `_containment_own_returns`, so a nested def's own `return` is never
+    attributed to the outer one -- traced with the SAME ambiguous-fires
+    provenance walker, sharing its depth budget; ALL of them must resolve safe
+    (a bare `return` / falling off the end contributes nothing, since that
+    path's result is just `None`). A call that constructs a locally-defined
+    CLASS is deliberately NOT traced here -- `ast.Call` alone doesn't know which
+    attribute will later be read off the instance, so that case is handled by
+    the Attribute branch instead (`_containment_resolve_constructed_class` /
+    `_containment_class_attr_is_safe`), which does. Anything else -- a builtin,
+    an imported function, a dynamic/opaque callee, or an ambiguous in-file
+    resolution -- keeps the pre-round-5 behavior (safe): this round closes the
+    two callees that were resolvable but never inspected, not opaque calls in
+    general (a much larger, unreviewed FP-risk surface change)."""
+    if not isinstance(call.func, ast.Name):
+        return True
+    if env is None:
+        env = _ContainmentEnv(ctx, ctx.scope_of(call.func))
+    try:
+        defs = _containment_provenance_defs(call.func, env)
+    except _ContainmentBudget:
+        return True
+    if len(defs) != 1:
+        return True
+    dd, _ = defs[0]
+    if dd.kind != "def" or not isinstance(dd.node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return True
+    fn = dd.node
+    returns = [r.value for r in _containment_own_returns(fn) if r.value is not None]
+    if not returns:
+        return True
+    fenv = _ContainmentEnv(ctx, fn, depth=env.depth, helper_stack=env.helper_stack)
+    fenv.hops = env.hops
+    return all(_containment_target_is_safe(ctx, r, fenv, visited, depth + 1) for r in returns)
 
 
 def _containment_target_is_safe(ctx, node, env=None, visited=None, depth=0):
@@ -6070,6 +6189,14 @@ def _containment_target_is_safe(ctx, node, env=None, visited=None, depth=0):
     if isinstance(node, ast.Attribute):
         if isinstance(node.value, ast.Name) and _containment_is_receiver_param(ctx, node.value):
             return _containment_self_attr_is_safe(ctx, node, env, visited, depth)
+        # B-850 round 5 (G5): before falling back to "is the WHOLE base object
+        # safe" (which discards *which* attribute is being read), check whether
+        # the base resolves to a traced constructor call for a locally-defined
+        # class -- if so, use that class's own per-attribute safety, the exact
+        # same check `self.<attr>` gets from inside the class.
+        class_node = _containment_resolve_constructed_class(ctx, node.value, env)
+        if class_node is not None:
+            return _containment_class_attr_is_safe(ctx, class_node, node.attr)
         return _containment_target_is_safe(ctx, node.value, env, visited, depth + 1)
     if isinstance(node, ast.Dict):
         return all(
@@ -6090,7 +6217,14 @@ def _containment_target_is_safe(ctx, node, env=None, visited=None, depth=0):
         # surface (functools.partial(setattr, ...) is caught earlier and more
         # precisely by `_containment_partial_setattr_target`, not here).
         callee_d = _containment_resolve_through_assigns(ctx, node.func, env)
-        return not (callee_d is not None and _containment_dotted_is_sensitive(callee_d))
+        if callee_d is not None:
+            return not _containment_dotted_is_sensitive(callee_d)
+        # B-850 round 5 (G4): an UNRESOLVED callee used to be waved through as
+        # safe unconditionally -- correct for a genuinely opaque callee (a
+        # builtin, an imported function, a dynamic call: still safe, unchanged
+        # below), but wrong for a callee that IS resolvable because it's a
+        # function/class defined right here in the file -- trace it instead.
+        return _containment_call_result_is_safe(ctx, node, env, visited, depth)
     return False
 
 

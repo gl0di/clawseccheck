@@ -818,6 +818,82 @@ def test_r4_fail_closed_on_ambiguous_or_deeper_resolution_convicts(case_id, relp
     assert _verdict(src, relpath) == "convict", case_id
 
 
+# ---------------------------------------------------------------------------------
+# B-850 round 5 (C-135 rejection of 9fc20cc9): round 4 flipped the attribute Store/Del
+# gate and the setattr/delattr mutator-target gate to the ambiguous-fires
+# `_containment_mutation_base_is_risky` combinator, but left the `.__dict__` gate and
+# the subscript-store gate on the narrower `_containment_sensitive_base` -- so the
+# exact same H1/H2/H5 shapes slipped through when spelled with `.__dict__[...]`/`[...]`
+# instead of plain `attr = value` (G1-G3). Separately, `_containment_target_is_safe`'s
+# own `Call` branch never inspected what a called function/constructor actually
+# returns/binds -- an in-file function call or class-constructor call always fell
+# through to "safe" because neither is import-resolvable by name (G4/G5). Both fixed:
+# the two gates now share the same combinator as their siblings, and the `Call`
+# branch traces a user-defined function's own `return` expression(s)
+# (`_containment_call_result_is_safe`) and a traced constructor's class for the
+# SPECIFIC attribute later accessed on the instance, from outside the class too
+# (`_containment_resolve_constructed_class`/`_containment_class_attr_is_safe`, which
+# now also backs `_containment_self_attr_is_safe`'s inside-the-class case).
+# ---------------------------------------------------------------------------------
+_R5_GUARD_RESOLUTION_CASES = [
+    ("R5G1-dict-dunder-mutation-via-parameter", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "def mutate(mod):\n    mod.__dict__['join'] = lambda *args: '/tmp/evil.py'\n"
+         "mutate(os.path)\n")),
+    ("R5G2-dict-dunder-mutation-cross-method-self", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "class Wrapper:\n    def __init__(self):\n        self.mod = os.path\n"
+         "    def bad(self):\n        self.mod.__dict__['join'] = lambda *args: '/tmp/evil.py'\n"
+         "Wrapper().bad()\n")),
+    ("R5G3-sysmodules-subscript-store-via-parameter", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "class _FakeOsPath:\n    def join(self, *a):\n        return '/tmp/evil.py'\n"
+         "def clobber(m):\n    m['os'] = _FakeOsPath()\n"
+         "clobber(sys.modules)\n")),
+    ("R5G4-function-return-indirection", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "def get_target():\n    return os.path\n"
+         "get_target().join = lambda *args: '/tmp/evil.py'\n")),
+    ("R5G5-external-instance-attribute-mutation", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "class Wrapper:\n    def __init__(self):\n        self.mod = os.path\n"
+         "w = Wrapper()\n"
+         "w.mod.join = lambda *args: '/tmp/evil.py'\n")),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _R5_GUARD_RESOLUTION_CASES)
+def test_r5_dict_subscript_and_call_branch_provenance_convicts(case_id, relpath, src):
+    assert _verdict(src, relpath) == "convict", case_id
+
+
+def test_r5_ordinary_attribute_mutation_via_traced_constructor_stays_clean():
+    # B-850 round 5: `_containment_resolve_constructed_class` must not turn an
+    # ordinary "construct a plain object, mutate an ordinary-looking attribute"
+    # idiom into a new false positive -- the constructed class's own __init__
+    # never binds the attribute to anything import-derived, so it stays exempt
+    # the same way `self.path = p` does from inside the class (FP1-FP11).
+    src = (
+        _rd("os.path.join(here, 'v.py')", H)
+        + "class Store:\n    def __init__(self, p):\n        self.path = p\n"
+        "s = Store('ordinary')\n"
+        "s.path = 'still ordinary'\n"
+    )
+    assert _verdict(src, "pkg/mod.py") == "clean"
+
+
+def test_r5_function_returning_a_constant_stays_clean():
+    # B-850 round 5: a traced in-file function whose every return is trivially
+    # safe (a constant/None) must not become a new false positive just because
+    # its callee is now inspected instead of waved through.
+    src = (
+        _rd("os.path.join(here, 'v.py')", H)
+        + "def get_value():\n    return 'ordinary'\n"
+        "get_value().join = 'x'\n"
+    )
+    assert _verdict(src, "pkg/mod.py") == "clean"
+
+
 def test_r4_secrets_choice_matches_random_choice_staticness():
     # B-850 round 4: secrets.* reads host randomness exactly like random.* does --
     # secrets.choice(['v.py', '../../../tmp/evil.py']) was missing from
