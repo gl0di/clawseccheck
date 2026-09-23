@@ -88,57 +88,55 @@ list that just appended one entry per declared channel would silently answer a D
 unsound question ("does ANY channel anywhere narrow write") instead of the one this module
 actually needs ("does THIS agent's effective policy get narrowed").
 
-PARTIALLY RESOLVED (executed against the installed openclaw@2026.9.5, 2026-09-23) — steps
-(a) and (b) above, but not the way this docstring first framed them. Step (a), "locate and
-read the Discord-specific plugin hook", cannot be executed on this machine, on ANY machine
-this project's own hard constraints allow: ``openclaw``'s own ``package.json`` ships
-``"!dist/extensions/discord/**"`` in its ``files`` list, and no ``discord``-named module
-exists anywhere under the installed ``dist/`` — the Discord channel plugin is not bundled
-into the npm package at all, and installing one to make it readable is exactly the
-mutating step this project forbids. Telegram's own hook stands in as "another
-representative provider" instead (it IS bundled — ``channel-6-*.mjs``,
-``groups: { resolveToolPolicy: resolveTelegramGroupToolPolicy }``): read directly, it
-parses ITS OWN ``chatId``/``topicId`` shape and then delegates to the very same shared,
-provider-agnostic ``resolveScopeToolsPolicy``/``buildChannelGroupsScopeTree``
-(``group-policy-*.mjs``) that the generic ``resolveChannelGroupToolsPolicy`` fallback cited
-above also calls. That is the answer to a narrower question this docstring hadn't
-separated out: a per-provider hook's own job is only to resolve ITS channel's group/topic
-KEY down to a node; it never decides which AGENT the resolved node's policy applies to.
+STILL OPEN — and the ROUTING model named above is the wrong axis (re-read and partly
+executed against the installed openclaw@2026.9.5, 2026-09-23). An attempt to credit a
+per-channel block to the DEFAULT agent's scope whenever no route binding is declared
+(with no matching binding ``resolveAgentRoute`` does fall back to the default agent) was
+built, reviewed and reverted: it turned three real FAILs into WARNs. Knowing which AGENT a
+message reaches is not the question, because the vendor applies the block per TURN, not
+per agent:
 
-Attribution — step (b) — turned out to live one layer further out, in routing that is not
-provider-specific at all. ``resolveAgentRoute`` (``resolve-route-*.mjs``) reads one config
-array, ``cfg.bindings`` (``RouteBindingSchema``/``AcpBindingSchema``, ``zod-schema-*.mjs``:
-each entry ``{agentId, match: {channel, accountId?, peer?, guildId?, teamId?, roles?}}``),
-and picks the target agent by a fixed precedence — peer, the peer's parent, a peer
-wildcard, guild+roles, guild, team, account, channel-wide, then a caller-supplied DEFAULT.
-Confirmed by reading it end to end AND by EXECUTING it in memory (a pure function; no
-gateway, no state) over both bound and unbound channels, guilds, roles and providers: with
-NO ``cfg.bindings`` entry — or only ``acp``-typed ones, which ``isRouteBinding``
-(``bindings-CI-O7TMQ.mjs``) excludes from routing, and a LEGACY entry with no ``type`` at
-all, which it correctly still counts as a route — every branch above requires a matching
-binding, so every case with none resolved to the DEFAULT agent regardless of channel,
-account, guild, peer or role. ``resolveTelegramAccountOwnerAgentId``
-(``account-owner-*.mjs``), which reads from its name like a second, independent
-per-account binding, turned out to just BE ``resolveAgentRoute`` called with only
-``channel``/``accountId`` — there is no bypass mechanism outside ``cfg.bindings``.
+* ``resolveGroupToolPolicyOutcome`` takes group ids ONLY from the server-built session key
+  (a caller-supplied group id the key does not name is dropped) and returns no policy when
+  there are none — so a DM turn gets no group policy at all (executed: an open-DM turn
+  resolved to no policy beside a ``groups["*"]`` block that denied the write family), and
+  a group block on one provider never reaches another provider's turn.
+* inside ``resolveScopeToolsPolicy`` a specific group's own ``tools`` (or a matching
+  ``toolsBySender`` entry) REPLACES the ``groups["*"]`` answer instead of stacking on it,
+  and ``tools: {}`` still counts as an answer — ``pickSandboxToolPolicy({})`` is undefined,
+  so that group gets no narrowing at all (executed). A block's presence proves nothing;
+  only its resolved allow/deny, over every node and sender entry, could.
 
-So the sound model step (b) asked for, for the common case: with no route binding declared
-anywhere (an empty/absent ``cfg.bindings``, or one holding only ``acp`` entries), every
-per-channel/per-group ``tools``/``toolsBySender`` block on every provider and account can
-be credited to exactly one scope — the DEFAULT agent, this module's own
-``_default_agent_id`` — because that is provably the only agent any such message can ever
-reach. ``declares_channel_tools_narrowing``/``_has_route_binding`` below implement exactly
-that narrow, provably-sound slice, consumed by ``_write_scopes``. The moment a route
-binding exists, attribution genuinely needs the FULL precedence just traced — which scope
-answers can vary by guild, by peer, and by the sender's roles AT MESSAGE TIME, none of
-which a static scan can settle — and porting that remains real, undone work; a config
-with any route binding leaves this exclusion off and keeps the pre-existing quiet-direction
-answer (a possible missed WARN downgrade, never an invented one). Measured 2026-09-23: no
-corpus fixture and this machine's own real config declare a route binding at all, so today
-the blast radius of leaving that half undecided is zero. ``_OPAQUE_NARROWING_KEYS`` is
-unchanged — this gap was the scope enumeration lacking a channel dimension at all, not a
-key this module already visits and mishandles, exactly as the task's own developer comment
-concluded.
+So the only sound shape is per INGRESS: drop an open channel from B55's ``open_ch`` only
+when its DM ingress is not open and every group turn on every account resolves to a policy
+that removes each write tool. Even that is not shippable today, for three reasons found on
+the way (none reachable from the schema):
+
+1. provider hooks: of the channel plugins the npm package bundles, only Telegram declares
+   a ``groups.resolveToolPolicy`` hook (``resolveTelegramGroupToolPolicy`` → the same
+   shared ``buildChannelGroupsScopeTree``/``resolveScopeToolsPolicy`` tree), and it passes
+   no ``access.toolPolicy`` for group turns. Most others — Discord (whose
+   ``guilds.<id>.channels.<id>`` nesting is the shape that opened this), Slack, WhatsApp,
+   Signal and more — are excluded from the package (``"!dist/extensions/<name>/**"``), and
+   a plugin's ``access.toolPolicy`` REPLACES the config group policy outright
+   (``conversationPolicy ?? resolveGroupToolPolicy(...)`` in
+   ``resolveRequesterToolPolicies``), so no config reading can bound those providers.
+2. ``session.groupScope: "main"`` — or a binding's ``session.groupScope: "main"`` — makes
+   ``buildAgentPeerSessionKey`` put group turns in the agent's MAIN session key, which
+   names no group, so no group policy applies to any group (executed).
+3. laundering: ``sessions_send`` is not an owner-only tool and
+   ``tools.sessions.visibility`` defaults to ``"all"``, so a narrowed group turn can inject
+   a turn into a session with no group policy (read, not executed — that needs a running
+   gateway). ``sessions_spawn`` is not such a path: the tool builder hands a spawned child
+   the parent's explicit denylist (group policy included) and, under a restrictive allow,
+   its effective allowlist. Closing this needs a vetted list of which tools can start an
+   unnarrowed turn, which no vendor port provides.
+
+Until those are resolved, the config's channel blocks stay unread here and a config whose
+group block really does remove write keeps its FAIL — the loud direction, never a missed
+one. ``tests/test_b726_channel_tools_narrowing.py`` pins the three shapes the reverted
+attempt got wrong. ``_OPAQUE_NARROWING_KEYS`` is unchanged: the gap is a missing
+per-ingress model, not a key this module visits and mishandles.
 
 THE WRITE QUESTION (F-186) is not answered by the read stack above -- its profile and alias
 tables are read-specific. ``unconfined_write_scopes`` composes ``confined_scopes`` with
@@ -556,108 +554,12 @@ def _has_opaque_narrowing(entry) -> bool:
     return isinstance(tools, dict) and any(k in tools for k in _OPAQUE_NARROWING_KEYS)
 
 
-# ------------------------------------------------------------- channel narrowing (B-726)
-# See the SCOPE docstring's "PARTIALLY RESOLVED" paragraphs above for how these two were
-# grounded (executed dist reads: resolveAgentRoute, resolveTelegramGroupToolPolicy,
-# isRouteBinding). Kept separate from _has_opaque_narrowing on purpose: that one answers
-# "does THIS scope's OWN entry carry a layer we can't resolve"; these answer a config-wide
-# question -- "does the config declare a per-channel block at all, and is there any
-# declared ROUTING that could send it somewhere other than the default agent" -- that
-# _write_scopes below asks once per config, not once per scope.
-
-# The two schema shapes C-484's schema-walk actually recovered, plus the flatter
-# `groups.<id>` shape `resolveChannelGroups`/`resolveTelegramGroupToolPolicy` read (proven
-# reachable above; Discord's own `guilds.<id>.channels.<id>` literal keys are taken on
-# C-484's own schema-walk authority -- the plugin that declares them is not installed here
-# to re-verify, per the module docstring above).
-_CHANNEL_NARROWING_KEYS = ("tools", "toolsBySender")
-
-
-def _channel_node_narrows(node) -> bool:
-    return isinstance(node, dict) and any(k in node for k in _CHANNEL_NARROWING_KEYS)
-
-
-def declares_channel_tools_narrowing(cfg: dict) -> bool:
-    """Does this config declare ANY per-channel/per-group ``tools``/``toolsBySender`` block?
-
-    Walks ``channels.<provider>.groups.<id>`` and ``channels.<provider>.accounts.<id>.
-    groups.<id>`` (the generic, flat shape every provider's own hook eventually resolves
-    down to -- confirmed for Telegram, see the module docstring) plus
-    ``channels.<provider>.accounts.<id>.guilds.<id>.channels.<id>`` (Discord's own nesting,
-    the exact six paths C-484's schema-walk recovered). Provider-agnostic on purpose: which
-    provider declared the block does not change the routing question ``_has_route_binding``
-    below answers, so this only needs to know THAT one exists, never where.
-
-    Not a security verdict on its own -- a narrowing block only ever REMOVES a grant, so
-    finding one here can only ever justify excluding a scope from
-    ``unconfined_write_scopes``, never including one it would not otherwise reach.
-    """
-    channels = cfg.get("channels") if isinstance(cfg, dict) else None
-    if not isinstance(channels, dict):
-        return False
-    for provider_cfg in channels.values():
-        if not isinstance(provider_cfg, dict):
-            continue
-        groups = provider_cfg.get("groups")
-        if isinstance(groups, dict) and any(_channel_node_narrows(g) for g in groups.values()):
-            return True
-        accounts = provider_cfg.get("accounts")
-        if not isinstance(accounts, dict):
-            continue
-        for account in accounts.values():
-            if not isinstance(account, dict):
-                continue
-            acct_groups = account.get("groups")
-            if isinstance(acct_groups, dict) and any(
-                    _channel_node_narrows(g) for g in acct_groups.values()):
-                return True
-            guilds = account.get("guilds")
-            if not isinstance(guilds, dict):
-                continue
-            for guild in guilds.values():
-                if not isinstance(guild, dict):
-                    continue
-                guild_channels = guild.get("channels")
-                if isinstance(guild_channels, dict) and any(
-                        _channel_node_narrows(c) for c in guild_channels.values()):
-                    return True
-    return False
-
-
-def _has_route_binding(cfg: dict) -> bool:
-    """Does this config declare a channel-ROUTING binding (``resolveAgentRoute`` reads it)?
-
-    ``isRouteBinding`` (dist ``bindings-CI-O7TMQ.mjs``): ``binding.type === "acp" ? "acp" :
-    "route"`` -- so a binding is a route unless its ``type`` is LITERALLY ``"acp"``. A
-    legacy binding with no ``type`` field at all is a route binding too (confirmed by
-    executing ``resolveAgentRoute`` with one: it matched exactly like an explicit
-    ``type: "route"`` entry). An ``acp``-typed entry binds a conversation to an agent for a
-    different purpose (ACP sessions) and does not participate in ``resolveAgentRoute`` at
-    all -- confirmed the same way: an ``acp``-only ``cfg.bindings`` still routed to the
-    caller's default agent for an unrelated guild.
-    """
-    bindings = cfg.get("bindings") if isinstance(cfg, dict) else None
-    if not isinstance(bindings, list):
-        return False
-    return any(isinstance(b, dict) and b.get("type") != "acp" for b in bindings)
-
-
 def _write_scopes(cfg: dict, tools, undecided_only: bool):
     if not isinstance(cfg, dict) or not cfg:
         return None
     confined = confined_scopes(cfg)
     if confined is None:
         return None
-    main = _default_agent_id(cfg)
-    # B-726: with no route binding declared, EVERY per-channel/per-group tools block on
-    # EVERY provider and account can only ever reach the default agent (see
-    # _has_route_binding / declares_channel_tools_narrowing and the module docstring for
-    # the executed proof) -- so it is sound to credit it to that one scope. With a route
-    # binding declared, attribution needs the full binding-precedence matcher this module
-    # does not port; left undecided (quiet direction) rather than guessed.
-    channel_narrows_default = (
-        not _has_route_binding(cfg) and declares_channel_tools_narrowing(cfg)
-    )
     out = []
     for is_confined, (name, entry, grant_id) in zip(confined, _scope_rows(cfg)):
         # `is True`, not truthiness: `confined_scopes` yields None for a scope the config does
@@ -670,8 +572,6 @@ def _write_scopes(cfg: dict, tools, undecided_only: bool):
         if undecided_only and is_confined is not None:
             continue
         if _has_opaque_narrowing(entry):
-            continue
-        if name == main and channel_narrows_default:
             continue
         if grant_id is None and _has_opaque_narrowing(
                 {"tools": dig(cfg, "agents.defaults.tools")}):
@@ -704,11 +604,7 @@ def unconfined_write_scopes(cfg: dict, tools):
 
     A scope whose own tools carry ``byProvider``/``toolsBySender`` is left out: those layers
     can remove a grant and are not resolved here, and the quiet direction may cost a
-    finding but never invents one. B-726: the DEFAULT agent's scope is left out the same
-    way when the config declares a per-channel/per-group ``tools``/``toolsBySender`` block
-    and no route binding -- the one case ``resolveAgentRoute`` proves always reaches it (see
-    ``_has_route_binding`` / ``declares_channel_tools_narrowing``). Returns scope NAMES
-    (this module's normalised form).
+    finding but never invents one. Returns scope NAMES (this module's normalised form).
     """
     return _write_scopes(cfg, tools, undecided_only=False)
 
