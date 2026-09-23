@@ -388,6 +388,34 @@ def test_extra_idless_unknown_profile_is_unknown_malformed():
     assert toolgrant.resolved_scopes(cfg) is None
 
 
+@pytest.mark.parametrize(
+    "profile_value",
+    [["x"], {"x": 1}],
+    ids=["list_valued_profile", "dict_valued_profile"],
+)
+def test_extra_idless_unhashable_profile_is_unknown_not_a_crash(profile_value):
+    """Review finding (B-737 fix round 1, BLOCKER): an id-less `agents.list` entry whose
+    own `tools.profile` is unhashable (a list or a dict, not a malformed-but-hashable
+    string like "Messaging") used to raise `TypeError: unhashable type` out of
+    `_block_well_formed`'s `tools["profile"] not in _CORE_TOOL_PROFILES` membership test
+    -- `run_all`'s per-check isolation (B-101) caught it and degraded B55/B68 to
+    `ERR:check_fs_write_exposure` / `ERR:check_exec_applypatch_workspace` (UNKNOWN,
+    scored=False, engine_degraded=True), and the 'B55'/'B68' ids were absent from the
+    findings list entirely -- not even a plain UNKNOWN under their own ids. Same quiet
+    direction as every other malformed shape here: UNKNOWN under B55/B68, no ERR, no
+    engine degradation, matching base (pre-B-737) behaviour for this exact config."""
+    cfg = {"agents": {"list": [{"tools": {"profile": profile_value}}]}}
+    assert toolgrant.resolved_scopes(cfg) is None
+    ctx = _ctx(cfg)
+    findings = run_all(ctx)
+    by_id = {f.id: f for f in findings}
+    assert "B55" in by_id and "B68" in by_id
+    assert by_id["B55"].status == UNKNOWN
+    assert by_id["B68"].status == UNKNOWN
+    assert not any(f.id.startswith("ERR") for f in findings)
+    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+
+
 def test_extra_idd_unknown_profile_pre_existing_g1_quirk_unaffected():
     """Pre-existing G1 behaviour (design's own note: file for 4.3.1, low): a named agent
     with a SCHEMA-INVALID `tools.profile` resolves the profile to nothing (unrecognised
@@ -420,6 +448,17 @@ def test_resolved_scopes_malformed_variants_return_none():
     assert toolgrant.resolved_scopes({"tools": {"allow": {}}}) is None
     assert toolgrant.resolved_scopes({"tools": {"profile": "Coding"}}) is None
     assert toolgrant.resolved_scopes({}) is None
+
+
+@pytest.mark.parametrize("bad_profile", [["x"], {"x": 1}])
+def test_resolved_scopes_unhashable_profile_returns_none_not_raise(bad_profile):
+    # Review finding (fix round 1): an unhashable `profile` (list/dict) must take the
+    # same None/UNKNOWN direction as a hashable-but-unrecognised one ("Coding" above),
+    # never raise `TypeError: unhashable type` out of the `in _CORE_TOOL_PROFILES` test.
+    assert toolgrant.resolved_scopes({"tools": {"profile": bad_profile}}) is None
+    assert toolgrant.resolved_scopes(
+        {"agents": {"list": [{"tools": {"profile": bad_profile}}]}}
+    ) is None
 
 
 def test_resolved_scopes_duplicate_normalized_id_returns_none():

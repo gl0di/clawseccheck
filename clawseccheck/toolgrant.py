@@ -541,8 +541,14 @@ def _block_well_formed(tools) -> bool:
     for key in _POLICY_LIST_KEYS:
         if key in tools and not isinstance(tools[key], list):
             return False
-    if "profile" in tools and tools["profile"] not in _CORE_TOOL_PROFILES:
-        return False
+    if "profile" in tools:
+        profile = tools["profile"]
+        # An unhashable `profile` (a list or dict, same as a malformed `allow`/`deny`
+        # above) must take the same quiet-UNKNOWN direction, not raise -- `in` against
+        # the `_CORE_TOOL_PROFILES` dict below requires a hashable key. Mirrors the
+        # isinstance(str) guard `_profile_policy` already uses for the same field.
+        if not isinstance(profile, str) or profile not in _CORE_TOOL_PROFILES:
+            return False
     return True
 
 
