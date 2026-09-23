@@ -11510,7 +11510,21 @@ def _sh_loop_regions(kw: str, text: str) -> list:
     matching V), in which case it is that rebinding's offset: text at/after a rebinding
     is no longer V's loop-seeded value. **Fails closed**: any `do`/`done` imbalance
     anywhere in the file (a stray `done)` case label, an unmatched `do`) returns `[]`
-    for the WHOLE file rather than guessing a pairing."""
+    for the WHOLE file rather than guessing a pairing.
+
+    KNOWN LIMITATION (B-957, filed for 4.3.1, not fixed by B-894): the
+    fail-closed blast radius is FILE-WIDE and needs no adversarial intent to trigger —
+    an entirely ordinary, unrelated `case "$X" in ...; done) ...;; esac` state block
+    ANYWHERE ELSE in the same file (using "done" as an everyday status/state label, a
+    common non-adversarial shell idiom) unbalances the same stack and silences every
+    loop-based SHELL_CRED_EXFIL finding in the whole file, not just near that block.
+    `test_adv_case_label_done_paren_does_not_mispair_fails_closed` in
+    `tests/test_b894_shell_loop_cred_taint.py` pins the narrower case (the label sits
+    next to the loop under test); `test_adv_unrelated_case_done_label_elsewhere_...`
+    pins this broader, unrelated-code-elsewhere shape. There is no small sound fix at
+    this lexical-regex layer: a bare `done)` case label is genuinely ambiguous with a
+    real subshell wrapping a loop (`(for f in a; do ...; done)`), so telling them apart
+    needs case/esac-aware structural do/done tracking, not a regex tweak."""
     pairs: dict = {}
     stack: list = []
     for dm in _SH_LOOP_DO_DONE_RE.finditer(kw):
@@ -11600,12 +11614,39 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # 1. DIRECT: a file_words-seeded V referenced on an outbound line inside its own
     #    body — substitute each candidate word in for every in-region $V on that raw
     #    line, then run the UNCHANGED literal rule on the result.
+    #
+    # B-894 fix round 1 (review finding 1, BLOCKER): `ref.finditer(text, bs,
+    # cut)` yields one match PER REFERENCE to V, and every match on the same physical
+    # line needs the identical `line_span`/`outbound`/`spans` work — the substitution
+    # result depends only on the line, never on which particular reference started the
+    # lookup. The original code redid that whole-line work once per reference instead
+    # of once per line, so a line with N references to V cost O(N * line_length): a
+    # single bundled shell file with ~6,000+ same-line references to a credential-bound
+    # loop variable drove `check_installed_skills`'s 15 s per-check budget
+    # (`checks/__init__.py`'s `run_all`) into `ScanBudgetExceeded`, collapsing the
+    # WHOLE audit's shell-analysis findings (SHELL_CRED_EXFIL, F-050, F-056, F-064) to
+    # UNKNOWN — not just for the offending file. `ref.finditer` yields matches in
+    # increasing offset order, so once a line's span `[a, b)` is known via `line_span`,
+    # every later match with `start() < b` is on that SAME line and is skipped by a
+    # plain integer comparison (`last_b`) — never another `rfind`/`find` scan, and never
+    # another `outbound`/`spans` recomputation. That keeps `line_span`, `outbound` and
+    # the candidate-word substitution to exactly one run per physical line touched by V,
+    # regardless of how many times V is referenced on it — the same one-scan-per-line
+    # cost as every other check in `analyze_shell`, including the pre-existing literal
+    # SHELL_CRED_EXFIL checks. This changes the DIRECT role's own complexity only: the
+    # substituted text and verdict for a given line are unchanged, because the
+    # deduped computation is byte-for-byte the same work the per-reference loop used to
+    # repeat.
     for var, file_words, _read_words, bs, cut, _be in regions:
         if not file_words:
             continue
         ref = _sh_loop_ref_re(var)
+        last_b = None
         for rm in ref.finditer(text, bs, cut):
+            if last_b is not None and rm.start() < last_b:
+                continue
             a, b = line_span(rm.start())
+            last_b = b
             raw = masked[a:b]
             if not outbound(raw):
                 continue
