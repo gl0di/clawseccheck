@@ -185,10 +185,16 @@ def test_render_trend_contains_dates_and_grades(tmp_path):
 
 
 def test_render_trend_unicode_arrows():
+    # B-695: a bare {date, score, grade} dict carries no home/raw_scope/raw_ver, so it is
+    # never comparable to anything (see the legacy-row tests below) -- these three rows
+    # add matching subject fields so the up/down comparison under test actually fires.
     rows = [
-        {"date": "2026-06-15", "score": 72, "grade": "C"},
-        {"date": "2026-06-17", "score": 81, "grade": "B"},
-        {"date": "2026-06-19", "score": 70, "grade": "C"},
+        {"date": "2026-06-15", "score": 72, "grade": "C", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
+        {"date": "2026-06-17", "score": 81, "grade": "B", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
+        {"date": "2026-06-19", "score": 70, "grade": "C", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
     ]
     out = render_trend(rows, ascii_only=False)
     assert "▲" in out   # score went up
@@ -197,9 +203,12 @@ def test_render_trend_unicode_arrows():
 
 def test_render_trend_ascii_only_no_unicode():
     rows = [
-        {"date": "2026-06-15", "score": 72, "grade": "C"},
-        {"date": "2026-06-17", "score": 81, "grade": "B"},
-        {"date": "2026-06-19", "score": 70, "grade": "C"},
+        {"date": "2026-06-15", "score": 72, "grade": "C", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
+        {"date": "2026-06-17", "score": 81, "grade": "B", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
+        {"date": "2026-06-19", "score": 70, "grade": "C", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
     ]
     out = render_trend(rows, ascii_only=True)
     assert "^" in out    # up
@@ -211,31 +220,42 @@ def test_render_trend_ascii_only_no_unicode():
 
 
 def test_render_trend_flat_arrow_on_equal_score():
+    """B-695: the FIRST row has no predecessor (blank, no claim); the SECOND is a
+    real comparison -- equal score, same subject -- so it earns the flat glyph."""
     rows = [
-        {"date": "2026-06-15", "score": 80, "grade": "B"},
-        {"date": "2026-06-17", "score": 80, "grade": "B"},
+        {"date": "2026-06-15", "score": 80, "grade": "B", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
+        {"date": "2026-06-17", "score": 80, "grade": "B", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
     ]
     out = render_trend(rows, ascii_only=False)
-    # first row uses flat arrow; second row is also flat (equal score)
-    assert "·" in out
+    lines = [ln for ln in out.splitlines() if ln.startswith("2026-")]
+    assert "80    [audit]" in lines[0], lines[0]     # first row: no predecessor, blank
+    assert "80  ·  [audit]" in lines[1], lines[1]    # second row: comparable, equal -> flat
 
 
 def test_render_trend_ascii_flat_arrow_on_equal_score():
     rows = [
-        {"date": "2026-06-15", "score": 80, "grade": "B"},
-        {"date": "2026-06-17", "score": 80, "grade": "B"},
+        {"date": "2026-06-15", "score": 80, "grade": "B", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
+        {"date": "2026-06-17", "score": 80, "grade": "B", "source": "audit",
+         "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"},
     ]
     out = render_trend(rows, ascii_only=True)
-    assert "=" in out
+    lines = [ln for ln in out.splitlines() if ln.startswith("2026-")]
+    assert "80    [audit]" in lines[0], lines[0]
+    assert "80  =  [audit]" in lines[1], lines[1]
 
 
-def test_render_trend_first_row_always_flat(tmp_path):
-    """The very first entry always shows the flat arrow (no previous to compare)."""
+def test_render_trend_first_row_makes_no_claim(tmp_path):
+    """B-695: the very first entry has no predecessor to compare against, so its arrow
+    renders BLANK -- not the flat glyph, which would claim a standstill nothing measured."""
     rows = [{"date": "2026-06-19", "score": 90, "grade": "A"}]
     out_unicode = render_trend(rows, ascii_only=False)
     out_ascii = render_trend(rows, ascii_only=True)
-    assert "·" in out_unicode
-    assert "=" in out_ascii
+    # Blank means the row line is identical either way -- there is no glyph to fold.
+    assert out_unicode.splitlines()[-1] == "2026-06-19  A  90    [legacy]"
+    assert out_ascii.splitlines()[-1] == "2026-06-19  A  90    [legacy]"
 
 
 def test_render_trend_single_entry_full(tmp_path):
