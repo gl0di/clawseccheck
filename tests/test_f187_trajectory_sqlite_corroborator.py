@@ -1572,6 +1572,158 @@ def test_max_content_total_bytes_default_is_unbounded():
     assert meta["truncated"] is False
 
 
+# ---------------------------------------------------------------------------
+# B-852 round 6 -- a fresh independent review found round 5's DEPTH pass (above) still
+# computed its fair share ONCE for the whole pass, against the FULL candidate list --
+# reproducing the exact class of bug round 5 itself fixed for the FLOOR, one level up:
+# with many candidates and few of them genuinely hungry, the flat share is diluted far
+# below what one genuinely deep candidate needs, even though the aggregate has plenty
+# left once the shallow candidates are accounted for. `read_compiled_tool_descriptions`
+# now runs up to two rounds, recomputing the share each round against that round's own
+# `remaining`, so what a shallow candidate did not need genuinely reaches a still-hungry
+# one in round 2.
+# ---------------------------------------------------------------------------
+
+
+def test_depth_pass_second_round_reaches_a_diluted_extra_database(monkeypatch):
+    """Reproduces the round-5 false-PASS shape, one level up from the floor: MANY
+    databases beyond the floor pool (`extra_dbs`, group (b)) share one aggregate depth
+    budget. A single, once-computed flat share (round 5's design) divides the aggregate
+    by candidate COUNT alone, with no regard for how much any one candidate actually
+    needs -- 19 trivially small extra databases and 1 (sorted last) carrying a single,
+    real `context.compiled` record padded to ~400 KB dilute a 1 MB aggregate down to a
+    ~50 KB flat share, well under what the padded record needs. Round 5's design would
+    still open that database (a non-zero share), admit 0 bytes, and count it
+    `dbs_read` regardless -- a silent false PASS the reviewer measured directly.
+    Round 6's second round, funded from what the 19 shallow candidates left genuinely
+    unspent, must recover it.
+
+    Monkeypatches `_MAX_SQLITE_DBS` down to a tractable floor-pool size (3, standing in
+    for the real 50) per this file's own precedent for exceeding this same constant
+    tractably (`test_sqlite_dbs_honors_a_narrower_max_dbs_override` above).
+    """
+    from clawseccheck import trajectorystore
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    monkeypatch.setattr(trajectorystore, "_MAX_SQLITE_DBS", 3)
+
+    home = _home()
+    for i in range(3):
+        _add_agent_db(
+            home, f"a_floor{i}", trajectory_rows=[(f"fs{i}", 0)], include_auth=False,
+        )
+    # 19 trivially small databases beyond the floor pool -- each dilutes the flat
+    # share a little further without ever needing much of it.
+    for i in range(19):
+        _add_agent_db(
+            home, f"b_extra{i:02d}",
+            trajectory_rows=[(f"es{i}", 0, {"type": "tool.call"})],
+            include_auth=False,
+        )
+    # The 20th (sorts last): a single, real compiled-tool record padded well past any
+    # diluted flat share, but comfortably under `_MAX_COMPILED_LINE_LEN`.
+    poisoned_event = _compiled_event([{
+        "name": "b852_round6_diluted_marker", "description": "d",
+        "parameters": {"type": "object", "properties": {}},
+    }])
+    poisoned_event["data"]["systemPrompt"] = "x" * 400_000
+    _add_agent_db(
+        home, "b_extra19",
+        trajectory_rows=[("padded_session", 0, poisoned_event)],
+        include_auth=False,
+    )
+
+    tool_defs, meta = read_compiled_tool_descriptions(
+        home,
+        max_content_bytes_per_db=10_000_000,
+        max_content_total_bytes=1_000_000,
+    )
+
+    names = {d["name"] for d in tool_defs}
+    # The actual regression proof: a pre-round-6 build never recovers this record at
+    # all (the diluted flat share never admits it in the single round it gets).
+    assert "b852_round6_diluted_marker" in names, (names, meta)
+    assert meta["dbs_found"] == 23
+    assert meta["dbs_unreadable"] == 0
+
+
+def test_depth_pass_second_round_reaches_a_genuinely_deep_floor_pool_database(
+    monkeypatch,
+):
+    """Reproduces round 5's OWN known-and-accepted-as-honest limitation (its docstring's
+    "database in group (b)" language, and `test_depth_budget_reaches_every_hungry_
+    database_not_just_the_first` above) at a scale where it is no longer merely
+    honestly disclosed but a genuine, avoidable miss: ONE floor-pool database needs a
+    LOT more depth (proportional stand-in for the reviewer's real ~11 MB case) while
+    NINE OTHER floor-pool databases each need only a LITTLE more. Round 5's single,
+    once-computed flat share divides the aggregate evenly across all ten regardless,
+    so the one genuinely deep database never gets more than its flat tenth even though
+    the nine shallow ones leave most of the aggregate unspent. Round 6's second round,
+    funded from that genuine leftover, must reach it.
+
+    Monkeypatches `_MAX_SQLITE_CONTENT_BYTES_PER_DB` (the floor itself) down to a
+    tractable size, same idiom `test_depth_budget_reaches_every_hungry_database_not_
+    just_the_first` above uses via `max_content_bytes_per_db` -- except THIS test needs
+    the floor small enough that nine ordinary databases fit it cheaply, so the module
+    CONSTANT itself (not just the caller-supplied ceiling) is patched down.
+    """
+    from clawseccheck import trajectorystore
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    monkeypatch.setattr(trajectorystore, "_MAX_SQLITE_DBS", 10)
+    monkeypatch.setattr(trajectorystore, "_MAX_SQLITE_CONTENT_BYTES_PER_DB", 3_000)
+
+    def _filler(pad):
+        return {"type": "tool.result", "output": "y" * pad}
+
+    def _marker(name, pad):
+        ev = _compiled_event([{
+            "name": name, "description": "d",
+            "parameters": {"type": "object", "properties": {}},
+        }])
+        ev["data"]["systemPrompt"] = "s" * pad
+        return ev
+
+    def _build(agent, filler_target_bytes, marker_name=None):
+        filler_len = len(json.dumps(_filler(100)))
+        filler_count = filler_target_bytes // filler_len
+        rows = []
+        if marker_name:
+            # Inserted FIRST -> lowest rowid -> read LAST under `ORDER BY rowid DESC`,
+            # i.e. only reachable once the cap grows past every filler row below.
+            rows.append((marker_name, 0, _marker(marker_name, 200), 0))
+        rows += [
+            (f"f{i}", 0, _filler(100), i + 1) for i in range(filler_count)
+        ]
+        _add_agent_db(home, agent, trajectory_rows=rows, include_auth=False)
+
+    home = _home()
+    # 9 shallow floor-pool databases: just past the 3,000-byte floor (one filler row's
+    # worth beyond it) -- a flat depth share easily covers each on its own.
+    for i in range(9):
+        _build(f"shallow{i}", filler_target_bytes=3_150)
+    # 1 deep floor-pool database: needs ~22 KB of filler read past the floor before its
+    # marker (the oldest row) is ever reached -- far more than a flat tenth of the
+    # aggregate below.
+    _build("deep0", filler_target_bytes=22_000, marker_name="deep_floor_pool_marker")
+
+    tool_defs, meta = read_compiled_tool_descriptions(
+        home,
+        max_content_bytes_per_db=200_000,
+        max_content_total_bytes=26_000,
+    )
+
+    names = {d["name"] for d in tool_defs}
+    # The actual regression proof: a pre-round-6 build spends only a flat 1/10th of
+    # the aggregate on "deep0" (round 5's own single-round policy), never enough to
+    # reach a marker ~22 KB deep, even though the nine shallow databases leave most of
+    # the aggregate unspent.
+    assert "deep_floor_pool_marker" in names, (names, meta)
+    assert meta["dbs_found"] == 10
+    assert meta["dbs_unreadable"] == 0
+    assert meta["dbs_budget_starved"] == 0  # floor-pool databases are never starved
+
+
 def test_scan_sqlite_event_json_is_a_lazy_generator():
     """`_scan_sqlite_event_json` must not do ANY work (open the database, run the
     query) until it is actually iterated -- constructing the generator object alone

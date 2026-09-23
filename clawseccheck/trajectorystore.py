@@ -1061,6 +1061,15 @@ class _SqliteEventJsonStats:
     capped: bool = False
     unreadable: bool = False
     non_text: int = 0
+    # B-852 round 6: narrower than `capped` -- set ONLY when the per-call BYTE cap
+    # (`read_bytes > max_bytes`, below) is what stopped this read, never for the row
+    # COUNT cap or the excluded-row-count disclosure. `read_compiled_tool_descriptions`'s
+    # depth pass needs this specifically: whether a database is worth a SECOND,
+    # bigger-budget round is a question about whether more BYTES would help, not
+    # whether more ROWS would (a caller-chosen `max_content_rows_per_db` does not grow
+    # between rounds, so a row-count-capped database has nothing more to gain from a
+    # bigger byte share).
+    byte_capped: bool = False
 
 
 def _scan_sqlite_event_json(
@@ -1120,6 +1129,7 @@ def _scan_sqlite_event_json(
             read_bytes += len(value)
             if read_bytes > max_bytes:
                 stats.capped = True
+                stats.byte_capped = True
                 break
             yield value
         # Only run the excluded-row COUNT when the row/byte loop above did NOT already
@@ -1180,10 +1190,21 @@ def _read_and_process_db(
     re-yields the exact same prefix a smaller call already returned, in the same order
     -- skipping by position is exact, not a heuristic, PROVIDED the table is not
     concurrently rewritten between the two calls (each call opens its own transaction --
-    see :func:`_open_and_verify_table` -- so this is the same already-accepted,
-    already-documented gap between two separate reads of the same file that
-    :func:`sqlite_session_ids`/:func:`corroborate` already have, not a new one this
-    function introduces).
+    see :func:`_open_and_verify_table`). The real TOCTOU risk this leaves is narrower
+    than it might sound, and different in shape from the gap :func:`sqlite_session_ids`/
+    :func:`corroborate` already accept (those read the whole table in ONE call each, so
+    their risk is a schema swap mid-read, already closed by the held transaction; this
+    function's own risk is specific to being called TWICE, positionally, across two
+    SEPARATE transactions): a concurrent ``DELETE`` that removes one or more of the rows
+    THIS call already yielded -- i.e. among the newest rows, by ``rowid DESC`` order --
+    between this call returning and the NEXT call (with a wider cap) starting, would
+    shift every row after the deleted one up by one position, so the next call's
+    positional ``skip_prefix_count`` would skip the WRONG rows (either re-processing one
+    already counted, or silently skipping one never actually seen). This is real but
+    low-severity: it requires a concurrent WRITER with access to this exact database
+    file, and an attacker who already has that could simply delete the evidence
+    directly, which is strictly more effective than trying to desynchronize this one
+    positional offset.
 
     ``yielded_count`` is the TOTAL number of values the generator yielded this call
     (whether skipped or processed) -- what the caller needs to compute the NEXT call's
@@ -1326,19 +1347,37 @@ def read_compiled_tool_descriptions(
        floor-pool database whose floor read hit its own cap AND whose caller-supplied
        cap allows reading further, and (b) any database beyond the floor pool's
        db-count cap (only possible when ``max_dbs`` widens past
-       :data:`_MAX_SQLITE_DBS`, i.e. ``--exhaustive``). A single fair-share round, not
-       iterative water-filling: every candidate gets at most
-       ``remaining // len(candidates)`` additional bytes, computed once against that
-       round's starting ``remaining`` -- deliberately simple and provably bounded (at
-       most one extra read per candidate, total extra I/O never exceeds
-       ``max_content_total_bytes``) rather than chasing a perfectly fair reallocation of
-       one database's unused share to its siblings. What this closes is round 4's
-       actual defect: draining the WHOLE aggregate on the alphabetically-first database
-       before any other database gets a look-in past its floor. A database in group (b)
-       that ends up with a zero share is skipped UNOPENED (never merely opened-then-
-       empty) and counted in the new ``meta["dbs_budget_starved"]`` -- see that field's
-       own note below for why this is a materially different, worse claim than an
-       ordinary per-database cap.
+       :data:`_MAX_SQLITE_DBS`, i.e. ``--exhaustive``).
+
+       **B-852 round 6** -- at most TWO rounds, not one. Round 5 (above) computed the
+       fair share ONCE, against the whole candidate list, for the entire pass -- a
+       fresh independent review found that reproduces the EXACT SAME class of bug
+       round 5 itself fixed for the floor, one level up: with many candidates and few
+       of them genuinely hungry, the flat ``remaining // len(candidates)`` share is
+       diluted far below what one genuinely deep candidate needs, while the shallow
+       candidates each consume only a sliver of their own share and leave the rest
+       sitting unspent for the remainder of the round -- unspent, because a round that
+       has already finished handing out shares never revisits anyone. Measured: a
+       target database whose needed record was ~1 MB, sharing a 64 MiB aggregate with
+       enough OTHER candidates to dilute its flat share to ~958 KB, read 0 rows and was
+       still counted ``dbs_read`` -- a silent false PASS -- even though ~62 MiB of the
+       aggregate went unspent elsewhere in the very same round. Round 6 instead runs up
+       to two rounds, recomputing the share EACH round as
+       ``max(remaining // databases_left, 1)`` against THAT round's own starting
+       ``remaining`` (so whatever an earlier round's shallow candidates left unspent
+       genuinely carries forward): round 1 offers every depth candidate its flat share;
+       round 2 offers the FULL remaining budget, undiluted by any candidate that was
+       already satisfied, to only the candidates round 1 left still byte-capped AND
+       still below their own caller-supplied per-database ceiling (a candidate that hit
+       its own ceiling in round 1, or was not byte-capped at all, has nothing more to
+       productively use and is not revisited). Still deliberately simple and provably
+       bounded -- at most two reads per candidate, total extra I/O never exceeds
+       ``max_content_total_bytes`` -- rather than genuine iterative water-filling, but
+       the second round is exactly what closes the dilution gap a single round leaves
+       open. A database in group (b) that never gets a productive share in EITHER round
+       is skipped UNOPENED (never merely opened-then-empty) and counted in the new
+       ``meta["dbs_budget_starved"]`` -- see that field's own note below for why this
+       is a materially different, worse claim than an ordinary per-database cap.
 
     ``max_content_total_bytes`` (B-852 round 3, re-scoped round 5) overrides
     :data:`_MAX_SQLITE_CONTENT_TOTAL_BYTES` -- a ceiling on the SUM of accepted
@@ -1455,49 +1494,115 @@ def read_compiled_tool_descriptions(
 
     # -----------------------------------------------------------------------
     # PASS 2 -- DEPTH, funded from `max_content_total_bytes` (see this function's own
-    # docstring above for the single-round fair-share policy and why it is enough).
+    # docstring above for the round-6 two-round fair-share policy and why a single
+    # round is not enough). `cum_bytes`/`cum_yielded` seed from the floor pass's own
+    # figures (`floor_bytes_used`/`floor_yielded`) so a floor-pool depth candidate's
+    # round-1/round-2 cap is measured from its TRUE prior total, not from zero.
+    # `extra_attempted`/`extra_last_stats` exist only to classify `extra_dbs` (group
+    # (b) -- beyond the floor pool) exactly once, below, after both rounds have run;
+    # a floor-pool candidate never needs that classification -- it already
+    # contributed to `dbs_read`/`dbs_unreadable` in the floor pass above.
     # -----------------------------------------------------------------------
+    cum_bytes: "dict[Path, int]" = dict(floor_bytes_used)
+    cum_yielded: "dict[Path, int]" = dict(floor_yielded)
+    extra_attempted: "set[Path]" = set()
+    extra_last_stats: "dict[Path, _SqliteEventJsonStats]" = {}
+
     if depth_candidates and max_content_total_bytes > 0:
         remaining = max_content_total_bytes
-        share = max(remaining // len(depth_candidates), 1)
-        for db_path in depth_candidates:
-            has_floor = db_path in floor_bytes_used
-            if remaining <= 0:
-                if not has_floor:
-                    # An `extra_dbs` entry that never got ANY read at all -- see
-                    # `dbs_budget_starved`'s own docstring paragraph above.
-                    meta["dbs_budget_starved"] += 1
-                meta["truncated"] = True
-                continue
-            prior_bytes = floor_bytes_used.get(db_path, 0)
-            this_share = min(share, remaining)
-            new_cap_bytes = min(prior_bytes + this_share, max_content_bytes_per_db)
-            if new_cap_bytes <= prior_bytes:
-                if not has_floor:
-                    meta["dbs_budget_starved"] += 1
-                meta["truncated"] = True
-                continue
-            skip = floor_yielded.get(db_path, 0)
-            new_bytes, stats, _yielded = _read_and_process_db(
-                db_path, max_content_rows_per_db, new_cap_bytes, skip,
-                seen, tool_defs, meta,
-            )
-            # Charge the ACTUAL new bytes consumed, not the nominal share -- a
-            # database that needed less than its share leaves the true leftover for
-            # whichever candidate is next in THIS round (see the docstring's own
-            # "single fair-share round" note for why this is intentionally not a
-            # second, iterative redistribution round).
-            remaining -= new_bytes
-            if not has_floor:
-                if stats.unreadable:
-                    meta["dbs_unreadable"] += 1
+        round_dbs = list(depth_candidates)
+        for round_num in (1, 2):
+            if not round_dbs or remaining <= 0:
+                break
+            # Recomputed EACH round against THAT round's own starting `remaining` --
+            # never once for the whole pass -- so whatever round 1's shallow
+            # candidates did NOT need genuinely carries forward to round 2's (far
+            # fewer, so far larger) shares, instead of sitting unspent for the rest
+            # of the call the way a single, once-computed share left it.
+            share = max(remaining // len(round_dbs), 1)
+            next_round_dbs: "list[Path]" = []
+            for db_path in round_dbs:
+                if remaining <= 0:
                     continue
-                meta["dbs_read"] += 1
-            if stats.non_text:
-                meta["non_text_rows"] += stats.non_text
-                meta["truncated"] = True
-            if stats.capped:
-                meta["truncated"] = True
+                has_floor = db_path in floor_bytes_used
+                prior_bytes = cum_bytes.get(db_path, 0)
+                this_share = min(share, remaining)
+                new_cap_bytes = min(prior_bytes + this_share, max_content_bytes_per_db)
+                if new_cap_bytes <= prior_bytes:
+                    # No headroom left for this database THIS round -- either its own
+                    # caller-supplied ceiling is already reached, or (round 2 only,
+                    # in practice) its share rounded down against an already-large
+                    # prior total. Do not (re)open it.
+                    continue
+                skip = cum_yielded.get(db_path, 0)
+                new_bytes, stats, total_yielded = _read_and_process_db(
+                    db_path, max_content_rows_per_db, new_cap_bytes, skip,
+                    seen, tool_defs, meta,
+                )
+                # Charge the ACTUAL new bytes consumed, not the nominal share --
+                # what a database did NOT need this round stays in `remaining` for
+                # the NEXT candidate in this same round, and, via round 2's
+                # from-scratch recomputed share above, for the next round too.
+                remaining -= new_bytes
+                cum_bytes[db_path] = prior_bytes + new_bytes
+                # `total_yielded` is the generator's TOTAL yield count for this call,
+                # from its very first row -- not just what this call skipped past --
+                # so it directly replaces (never adds to) the running skip offset for
+                # this database's next read. See `_read_and_process_db`'s own
+                # docstring for why.
+                cum_yielded[db_path] = total_yielded
+                if not has_floor:
+                    extra_attempted.add(db_path)
+                    extra_last_stats[db_path] = stats
+                if stats.non_text:
+                    meta["non_text_rows"] += stats.non_text
+                    meta["truncated"] = True
+                if stats.capped:
+                    meta["truncated"] = True
+                if (
+                    round_num == 1
+                    and stats.byte_capped
+                    and new_cap_bytes < max_content_bytes_per_db
+                ):
+                    # Still hungry (its own byte cap is what stopped this read, not
+                    # e.g. genuinely running out of rows) AND the caller's own
+                    # per-database ceiling leaves room to grow -- the ONLY databases
+                    # round 2 spends anything further on.
+                    next_round_dbs.append(db_path)
+            round_dbs = next_round_dbs
+
+    # -----------------------------------------------------------------------
+    # Classify every `extra_dbs` (group (b), beyond the floor pool) entry EXACTLY
+    # ONCE, now that both rounds above have run -- or, when `max_content_total_bytes`
+    # is <= 0 or there were no depth candidates at all, without either round ever
+    # running: `extra_attempted` then stays empty and every entry below correctly
+    # falls into `dbs_budget_starved` (never opened, for the same reason -- no
+    # budget). A floor-pool database is never touched by this loop; its own
+    # `dbs_read`/`dbs_unreadable` accounting happened in the floor pass, above.
+    # -----------------------------------------------------------------------
+    for db_path in extra_dbs:
+        if db_path not in extra_attempted:
+            # Never even opened -- the aggregate depth budget was already spent (or
+            # was <= 0 to begin with) before this database's turn.
+            meta["dbs_budget_starved"] += 1
+            meta["truncated"] = True
+            continue
+        stats = extra_last_stats[db_path]
+        if stats.unreadable:
+            meta["dbs_unreadable"] += 1
+            continue
+        if cum_yielded.get(db_path, 0) == 0 and stats.byte_capped:
+            # Opened, but every round's share was too small to admit even this
+            # database's single newest row -- the exact round-4-shaped false PASS a
+            # fresh independent review found this reader still capable of: `dbs_read`
+            # would otherwise have counted a database that was opened but from which
+            # NOTHING was actually read. See `dbs_budget_starved`'s own docstring
+            # paragraph above for why this is a materially different, worse claim
+            # than an ordinary per-database cap.
+            meta["dbs_budget_starved"] += 1
+            meta["truncated"] = True
+            continue
+        meta["dbs_read"] += 1
 
     meta["present"] = meta["dbs_read"] > 0
     return tool_defs, meta

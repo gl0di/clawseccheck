@@ -2365,3 +2365,110 @@ def test_exhaustive_recovers_a_superset_of_default_across_several_home_shapes(
         assert default_names <= exhaustive_names, (
             shape_index, default_names, exhaustive_names,
         )
+
+
+# ---------------------------------------------------------------------------
+# B-852 round 6 -- `dbs_budget_starved` (round 5's own disclosure field) could
+# structurally never become non-zero against a real budget, because round 5's depth
+# pass always handed every candidate a non-zero flat share regardless of how many
+# there were (see `tests/test_f187_trajectory_sqlite_corroborator.py`'s own round-6
+# tests for the unit-level regression) -- so every one of the five disclosure text
+# blocks in `checks/_mcp.py` that read this field, below, was dead code. Forcing the
+# aggregate depth budget to exactly 0 makes every beyond-the-floor-pool database
+# provably starved (never even opened, let alone read), independent of round 6's
+# multi-round allocation logic -- proving the DISCLOSURE, not the allocation (that is
+# what the two tests above already prove).
+# ---------------------------------------------------------------------------
+
+
+def _write_budget_starved_home(tmp_path, monkeypatch, *, floor_event):
+    """A home with a monkeypatched 2-database floor pool (`a_floor0`/`a_floor1`) plus
+    3 databases beyond it (`b_extra0..2`), and the depth budget forced to exactly 0 --
+    so the 3 beyond-the-floor databases are provably NEVER opened at all
+    (`dbs_budget_starved`), regardless of what they contain. `floor_event`, planted as
+    the sole row of `a_floor0` (the one floor-pool database whose content actually
+    matters), decides which disclosure branch the check reaches: a real BENIGN
+    `context.compiled` record reaches the PASS branch; a plain placeholder (no
+    recoverable record on either side) reaches the UNKNOWN branch.
+    """
+    import dataclasses
+
+    from clawseccheck import trajectorystore as trajectorystore_mod
+    from clawseccheck.checks import _mcp as _mcp_mod
+    from clawseccheck.scanbudget import EXHAUSTIVE_LIMITS
+
+    monkeypatch.setattr(trajectorystore_mod, "_MAX_SQLITE_DBS", 2)
+
+    starved_limits = dataclasses.replace(
+        EXHAUSTIVE_LIMITS, sqlite_max_dbs=1000, sqlite_max_content_total_bytes=0,
+    )
+    monkeypatch.setattr(_mcp_mod, "limits_for", lambda ctx: starved_limits)
+
+    _write_agent_sqlite_db(tmp_path, "a_floor0", [("s0", 0, floor_event)])
+    _write_agent_sqlite_db(tmp_path, "a_floor1", [("s1", 0, _PLACEHOLDER_EVENT)])
+    for i in range(3):
+        _write_agent_sqlite_db(
+            tmp_path, f"b_extra{i}", [(f"es{i}", 0, _PLACEHOLDER_EVENT)],
+        )
+
+
+def test_budget_starved_dbs_disclosed_honestly_in_the_pass_branch(tmp_path, monkeypatch):
+    """PASS-branch coverage (test requirement 3): the one floor-pool database whose
+    content matters carries a real, BENIGN compiled-tool record (so the verdict has no
+    fails/warns and reaches PASS), while 3 databases beyond the floor pool are provably
+    never opened at all (the aggregate depth budget is forced to 0). Before this fix,
+    `dbs_budget_starved` could never be non-zero here at all (dead code); this proves
+    it now is, at both the reader level and the rendered Finding, and that the PASS
+    text uses the correct, "never read at all" wording for it -- a materially
+    different, worse claim than an ordinary per-database cap.
+    """
+    from clawseccheck.checks import _mcp as _mcp_mod
+    from clawseccheck.trajectorystore import (
+        read_compiled_tool_descriptions as _sqlite_reader,
+    )
+
+    floor_event = _compiled(BENIGN_TOOLS)
+    _write_budget_starved_home(tmp_path, monkeypatch, floor_event=floor_event)
+
+    # Reader-level sanity check first -- the check-level assertions below must not
+    # rest on prose matching alone.
+    _, meta = _sqlite_reader(
+        tmp_path, max_dbs=1000, max_content_bytes_per_db=8_000_000,
+        max_content_total_bytes=0,
+    )
+    assert meta["dbs_found"] == 5, meta
+    assert meta["dbs_read"] == 2, meta
+    assert meta["dbs_budget_starved"] == 3, meta
+
+    verdict = _mcp_mod.check_compiled_tool_poisoning(Context(home=tmp_path))
+
+    assert verdict.status == "PASS", verdict.detail
+    assert "3 further database(s) found but never read at all" in verdict.detail, (
+        verdict.detail
+    )
+
+
+def test_budget_starved_dbs_disclosed_honestly_in_the_unknown_branch(
+    tmp_path, monkeypatch,
+):
+    """UNKNOWN-branch coverage (test requirement 3), complementing the PASS-branch test
+    above: the one floor-pool database whose content matters carries no recoverable
+    'context.compiled' record at all (a plain placeholder event, same as its floor-pool
+    sibling), so the check has nothing to render a verdict on and returns UNKNOWN --
+    while, again, the 3 databases beyond the floor pool are provably never opened at
+    all. The UNKNOWN Finding's own disclosure text must use the same "never read at
+    all" wording, not the unrelated per-database-cap "longest-resident records"
+    phrasing (which describes an ordinary truncation of a database that WAS opened,
+    not one that never was).
+    """
+    from clawseccheck.checks import _mcp as _mcp_mod
+
+    _write_budget_starved_home(tmp_path, monkeypatch, floor_event=_PLACEHOLDER_EVENT)
+
+    verdict = _mcp_mod.check_compiled_tool_poisoning(Context(home=tmp_path))
+
+    assert verdict.status == "UNKNOWN", verdict.detail
+    assert "3 further SQLite database(s) were found but" in verdict.detail, (
+        verdict.detail
+    )
+    assert "never read at all" in verdict.detail, verdict.detail
