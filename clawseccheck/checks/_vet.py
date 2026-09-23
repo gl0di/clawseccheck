@@ -6219,43 +6219,81 @@ def check_installed_skills(ctx: Context) -> Finding:
 # B13's cascade before it ever reaches that arm, so nothing outranks the FAIL and B395
 # used to read `gaps` (still empty here) and PASS.
 #
-# The two prefixes matched below are the LITERAL, code-controlled text
-# `iter_discovered_skill_dirs` writes for exactly these two `OSError` sites — never
-# attacker content; only the trailing directory name and OS `strerror` vary. This is
-# deliberately narrower than "any `LIMIT_DOMAIN_SKILL` hit": the sibling
-# `"exceeded the {N}-directory cap"` message is a benign COUNT cap (B-549, this same
-# module's `check_installed_skills`, measured 2,100 ordinary readable empty
+# B-649 fix round 2: a skill ROOT that discovery never even got to WALK — the
+# `_safe_is_dir(base, ctx, what=..., domain=LIMIT_DOMAIN_SKILL)` stat in collector's
+# own roots loop (an `extraDirs` entry, the bundled-skills override, or the
+# plugin-skills root, each one code-controlled, never attacker content) failing with
+# `EACCES` because an ANCESTOR directory is unreadable (e.g. the configured root's
+# *parent* is `chmod 000`) — has exactly the same blind spot one level higher: the
+# root is skipped with only a "could not check ..." limit hit, `iter_discovered_skill_dirs`
+# never runs over it at all, and nothing downstream of `iterdir()`/`is_file()` ever
+# gets a chance to notice. Three call sites, three literal `what=` prefixes, matched
+# below the same way: the general roots loop's `f"skill root '{base}'"`, the
+# `OPENCLAW_BUNDLED_SKILLS_DIR` override's `f"bundled skills root '{_override}'"`, and
+# the plugin-skills root's own bare `f"'{plugin_skills}'"` (no distinguishing prefix,
+# so its marker is the bare `"could not check '"` — verified not to also match either
+# of the other two, which both insert a word between "check" and the opening quote).
+#
+# The prefixes matched below are the LITERAL, code-controlled text these five `OSError`
+# sites write — never attacker content; only the trailing directory name/path and OS
+# `strerror` vary. This is deliberately narrower than "any `LIMIT_DOMAIN_SKILL` hit":
+# the sibling `"exceeded the {N}-directory cap"` message is a benign COUNT cap (B-549,
+# this same module's `check_installed_skills`, measured 2,100 ordinary readable empty
 # directories tripping it on a healthy machine with zero real gap) and must never be
 # read as a coverage gap, and `_iter_skill_dirs_guarded`'s own top-level "stopped
 # early" catch-all is deliberately left unmatched too — it fires on any `OSError` the
-# generator itself does not already turn into one of the two specific messages below,
-# so folding it in here would reintroduce exactly the un-diagnosed "any limit means
-# incomplete" shape B-549 retracted.
-_SKILL_DISCOVERY_READ_FAILURE_MARKERS = ("could not read '", "could not list '")
+# generator itself does not already turn into one of the two specific discovery-walk
+# messages, so folding it in here would reintroduce exactly the un-diagnosed "any
+# limit means incomplete" shape B-549 retracted.
+_SKILL_DISCOVERY_READ_FAILURE_MARKERS = (
+    "could not read '",
+    "could not list '",
+    "could not check skill root '",
+    "could not check bundled skills root '",
+    "could not check '",
+)
 _QUOTED_PATH_RE = re.compile(r"'([^']+)'")
 
 
 def _skill_discovery_read_failures(ctx: Context) -> list[str]:
-    """`LIMIT_DOMAIN_SKILL` limit hits that mean a skill-shaped directory itself could
-    not be read or listed — see the comment on `_SKILL_DISCOVERY_READ_FAILURE_MARKERS`
-    directly above for why only these two shapes qualify."""
-    return [
-        hit for hit in limit_hits_for(ctx, LIMIT_DOMAIN_SKILL)
-        if any(marker in hit for marker in _SKILL_DISCOVERY_READ_FAILURE_MARKERS)
-    ]
+    """`LIMIT_DOMAIN_SKILL` limit hits that mean a skill-shaped directory (or a skill
+    ROOT discovery could not even walk — B-649 round 2) could not be read, listed, or
+    stat'd — see the comment on `_SKILL_DISCOVERY_READ_FAILURE_MARKERS` directly above
+    for why only these shapes qualify.
+
+    De-duplicated (order-preserving): `collector._read_installed_skills`'s roots loop
+    can record the identical "could not check skill root '<path>' ..." hit twice in one
+    run for the same unreadable root, and a duplicate must not double the reported
+    subject/gap count."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for hit in limit_hits_for(ctx, LIMIT_DOMAIN_SKILL):
+        if hit in seen:
+            continue
+        if any(marker in hit for marker in _SKILL_DISCOVERY_READ_FAILURE_MARKERS):
+            seen.add(hit)
+            out.append(hit)
+    return out
 
 
 def _discovery_gap_label(message: str) -> str:
     """A short subject label for a discovery read-failure message, for the same
     comma-joined "shown" list `check_installed_skill_content_coverage` already builds
-    from `gaps` keys — e.g. `"black/SKILL.md"` / `"black/"` -> `"black"`."""
+    from `gaps` keys — e.g. `"black/SKILL.md"` / `"black/"` -> `"black"`.
+
+    B-649 round 2: a root-stat failure quotes the full configured path (e.g. an
+    `extraDirs` entry, or the bundled/plugin skills root) rather than a bare relative
+    name — reduced to `Path(...).name` so an absolute path never reaches a rendered
+    finding (the same discipline collector's own `skills_beside_state_dir` disclosure
+    follows: a bare directory name, never a path)."""
     match = _QUOTED_PATH_RE.search(message)
     if not match:
         return message
     path = match.group(1)
     if path.endswith("/SKILL.md"):
         path = path[: -len("/SKILL.md")]
-    return path.rstrip("/") or path
+    path = path.rstrip("/") or path
+    return Path(path).name or path
 
 
 def check_installed_skill_content_coverage(ctx: Context) -> Finding:
@@ -6357,10 +6395,22 @@ def check_installed_skill_content_coverage(ctx: Context) -> Finding:
     shown = ", ".join(shown_names + shown_discovery)
     extra_n = subject_count - len(shown_names) - len(shown_discovery)
     extra = f" (+{extra_n} more)" if extra_n > 0 else ""
+    # B-649 round 2 (wording): a `discovery_failures` subject was never entered, so
+    # nothing here confirmed it holds a skill at all (the `.cache`-at-000 case beside a
+    # readable skill: a container, not an installed skill) — calling it an "installed
+    # skill directory" asserts an identity discovery never established. `names` (from
+    # `ctx.skill_coverage_gaps`) ARE confirmed installed skills with their own
+    # unreadable content, so that phrasing stays exact when only they are present.
+    if names and discovery_labels:
+        _kind = "installed skill or skill-root"
+    elif discovery_labels:
+        _kind = "skill-root"
+    else:
+        _kind = "installed skill"
     return _finding(
         "B395",
         UNKNOWN,
-        f"{len(entries)} content-read gap(s) across {subject_count} installed skill "
+        f"{len(entries)} content-read gap(s) across {subject_count} {_kind} "
         f"director{'y' if subject_count == 1 else 'ies'} could not be assessed this run "
         "— unreadable content, independent of whatever check_installed_skills (B13) "
         f"itself concluded for OTHER skills: {shown}{extra}. This is not the same as "
