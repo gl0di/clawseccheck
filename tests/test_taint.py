@@ -427,6 +427,80 @@ def test_deep_fold_chain_does_not_crash_and_credential_flow_still_detected():
     assert "AST_UNANALYZABLE" not in rules
 
 
+# ---------------------------------------------------------------------------
+# B-830 round 4 (C-135 follow-up review of round 3's depth cap): round 3's own
+# claim -- "a depth-limit truncation is deliberately NEVER cached" -- only held for
+# the top-level `depth > _FOLD_MAX_DEPTH` check in `_fold_fs_path` itself. It did NOT
+# hold for a node folded at depth <= _FOLD_MAX_DEPTH whose CHILDREN recurse past the
+# cap: that node's own result (built from an all-truncated/_FOLD_UNK subtree) still
+# got written to the shared `ctx.memo` under its OWN (id(node), visiting) key.
+#
+# `_has_folded_cred_path` walks EVERY subtree of the file through ast.walk() (root
+# node first) and shares ONE `ctx.memo` across the whole walk. Wrapping a credential-
+# bearing `.joinpath('.aws', 'credentials')` call as the RECEIVER of ~200 further
+# outer `.joinpath(...)` calls means that inner call is first reached as a deep
+# descendant while folding the outer (root) expression -- at exactly the depth where
+# ITS OWN constant args ('.aws', 'credentials') get pushed past _FOLD_MAX_DEPTH and
+# truncate to _FOLD_UNK, poisoning its cached result. `ast.walk` later visits that
+# same inner call AGAIN, directly, as its own shallow top-level target -- where it
+# would normally resolve cleanly -- but the (id(node), frozenset()) memo key is
+# already poisoned, so the poisoned answer is returned instead of a fresh resolve,
+# and CRED_EXFIL_FLOW is silently missed. Unlike the round-3 padding tests above, the
+# credential join here is NESTED INSIDE the outer wrapper (not accompanied by
+# unrelated padding elsewhere, and not itself the outermost/shallowest node with
+# padding underneath it) -- that exact shape is what exercises this cache-poisoning
+# path; neither of the round-3 shapes does.
+#
+# Verified as a genuine positive control before the round-4 fix: 199 and 201 wraps
+# both still detect correctly (proving this isn't a generic fold-depth flake), while
+# exactly 200 wraps evades detection -- a precise, attacker-tunable boundary.
+# ---------------------------------------------------------------------------
+
+
+def _wrapped_cred_join_src(n: int) -> str:
+    pad_chain = "".join(f".joinpath('pad{i}')" for i in range(n))
+    return (
+        "from pathlib import Path\nimport requests\n"
+        f"p = Path.home().joinpath('.aws', 'credentials'){pad_chain}\n" + _EVIL_SINK
+    )
+
+
+def test_cred_join_nested_200_levels_inside_outer_wrapper_still_detected():
+    # The exact bypass shape: the credential-bearing joinpath call sits 200 levels
+    # DEEP as the receiver of an outer wrapper chain (BFS-order cache poisoning, see
+    # the block comment above) -- must still fire after the round-4 fix.
+    assert "CRED_EXFIL_FLOW" in _rules(_wrapped_cred_join_src(200))
+
+
+def test_cred_join_nested_199_and_201_levels_still_detected():
+    # The boundary either side of the precise bypass depth -- pins that the fix
+    # doesn't just get lucky at 200 specifically, and (as a regression signature)
+    # that 199/201 never broke to begin with.
+    assert "CRED_EXFIL_FLOW" in _rules(_wrapped_cred_join_src(199))
+    assert "CRED_EXFIL_FLOW" in _rules(_wrapped_cred_join_src(201))
+
+
+def test_fold_truncation_is_disclosed_as_an_ast_finding():
+    # B-830 round 4 (secondary): ctx.truncated (see _FsFoldCtx) used to be write-only
+    # observability, never surfaced. A file whose fold genuinely hits the depth cap
+    # must now carry a disclosure finding -- distinct from AST_UNANALYZABLE, which
+    # means "parse failed, nothing in this file was analyzed" (this file WAS parsed
+    # and analyzed; only part of one expression's fold was truncated).
+    rules = _rules(_wrapped_cred_join_src(200))
+    assert "AST_FOLD_TRUNCATED" in rules
+    assert "AST_UNANALYZABLE" not in rules
+
+
+def test_no_fold_truncation_disclosure_for_a_shallow_file():
+    # Negative control: an ordinary, shallow credential-exfil file never hits the
+    # depth cap and must never carry the truncation-disclosure finding.
+    src = (
+        "from pathlib import Path\nimport requests\n"
+        "p = Path.home().joinpath('.aws', 'credentials')\n" + _EVIL_SINK
+    )
+    assert "AST_FOLD_TRUNCATED" not in _rules(src)
+
+
 def test_deep_fold_chain_vet_skill_cli_end_to_end(tmp_path, capsys):
     # Same repro as immediately above, driven through the real --vet-skill CLI
     # entry point (clawseccheck.cli.main), not the analyze_python()/vet_skill()

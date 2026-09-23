@@ -2891,7 +2891,13 @@ def _fold_seg(x: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset, depth: int = 0
     B-830 round-3: *depth* bounds recursion explicitly (see _FOLD_MAX_DEPTH) instead
     of relying on a caller's try/except RecursionError. A name-hop resolution (following
     a variable back to its single assignment) counts as one more level of depth, same
-    as descending into a nested path-construction expression."""
+    as descending into a nested path-construction expression.
+
+    B-830 round-4: this function keeps NO memo of its own -- a Constant folds directly,
+    a Name-hop recurses straight into `_fold_seg` again (never cached), and every other
+    node falls through to `_fold_fs_path`, which owns `ctx.memo` and the truncation-
+    poisoning guard (see its own docstring). So the round-4 no-cache-on-truncation fix
+    belongs solely there; there is no second, parallel cache here to poison."""
     if depth > _FOLD_MAX_DEPTH:
         ctx.truncated += 1
         return None
@@ -2914,7 +2920,23 @@ def _fold_fs_path(
     the caller's current *depth* -- it required no further recursion to produce. A
     depth-limit truncation is deliberately NEVER cached: a different, shallower call
     site reaching the same node must still get a real answer, not a poisoned "unknown"
-    left behind by a deeper caller."""
+    left behind by a deeper caller.
+
+    B-830 round-4 (C-135 follow-up review of round-3): round-3's "never cached" claim
+    above only held for THIS call's OWN `depth > _FOLD_MAX_DEPTH` check -- it did not
+    hold for a node folded at depth <= _FOLD_MAX_DEPTH whose CHILDREN recurse past the
+    cap. That node's own result -- built from an all-truncated (_FOLD_UNK) subtree --
+    still got written to `ctx.memo` under its OWN (id(node), visiting) key. Since
+    `_has_folded_cred_path` folds every subtree of the same file through ONE shared
+    `ctx.memo` (via `ast.walk`, root-first), a credential-bearing node reached first as
+    a DEEP descendant of an unrelated outer wrapper (~200 levels of padding) poisoned
+    its own cache entry -- then the SAME node, reached later as its own shallow
+    top-level walk target (where it would normally resolve cleanly), got the poisoned
+    entry back instead of a fresh recompute. `ctx.truncated` (see _FsFoldCtx) is the
+    exact signal for this: if it increased while computing *this* node's uncached
+    result, truncation happened somewhere in its subtree and the result must not be
+    cached -- delete the cycle-guard placeholder instead, forcing a different/shallower
+    call path that reaches this node to recompute rather than trust a poisoned answer."""
     key = (id(node), visiting)
     if key in ctx.memo:
         return ctx.memo[key]
@@ -2922,7 +2944,16 @@ def _fold_fs_path(
         ctx.truncated += 1
         return None
     ctx.memo[key] = None  # cycle guard: a self-referential fold resolves to unknown
+    before = ctx.truncated
     res = _fold_fs_path_uncached(node, ctx, visiting, depth)
+    if ctx.truncated != before:
+        # A depth truncation happened somewhere inside this subtree's own computation
+        # -- *res* is built on at least one _FOLD_UNK that a shallower/different call
+        # reaching this same node might resolve for real. Never let that stand as this
+        # node's cached answer: drop the cycle-guard placeholder so the next caller
+        # recomputes from scratch instead of reading a poisoned result.
+        del ctx.memo[key]
+        return res
     ctx.memo[key] = res
     return res
 
@@ -5770,6 +5801,30 @@ def analyze_python(
                     getattr(node, "lineno", 0),
                     "credential-file contents flow into a network sink (read secret -> send out)",
                 )
+
+    # B-830 round-4: ctx.truncated (see _FsFoldCtx.__init__) counts how many fold calls
+    # hit _FOLD_MAX_DEPTH and gave up on their own subtree -- round-3 added the counter
+    # but left it write-only (observability that nobody observed), which is exactly the
+    # "silent, undisclosed... never a fake PASS/FAIL, report UNKNOWN instead" gap this
+    # module's own doctrine forbids elsewhere. Disclosed here in the same SHAPE
+    # AST_UNANALYZABLE uses (per-file ASTFinding, severity "unknown", lineno 0) but
+    # under its own rule id -- deliberately NOT folded into AST_UNANALYZABLE itself:
+    # that rule means "parse failed, nothing in this file was analyzed" and several
+    # callers (checks/_content.py, checks/_vet.py, checks/_lifecycle.py,
+    # checks/_mcp.py) key on that exact string to route a file to their "unreadable"
+    # bucket. A fold truncation means the opposite -- the file parsed and was analyzed,
+    # only one or more deeply-nested path/value expressions exceeded the recursion cap
+    # -- so reusing AST_UNANALYZABLE would misrepresent a mostly-covered file as
+    # entirely unreadable to every one of those consumers.
+    if _fsctx.truncated:
+        add(
+            "AST_FOLD_TRUNCATED",
+            "unknown",
+            0,
+            f"{filename}: {_fsctx.truncated} path/value fold(s) in this file exceeded "
+            "the recursion depth cap and were left unresolved -- coverage of deeply-"
+            "nested path construction is incomplete for this file",
+        )
 
     # F-049: env-var / agent-config secret reaching a network sink (SkillSpector E2 env
     # harvesting + E1 external transmission).  Severity is "info" and the checks engine routes it
