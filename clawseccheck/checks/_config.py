@@ -4569,7 +4569,41 @@ def check_trifecta(ctx: Context) -> Finding:
             and auth_store_length is not None
             and auth_store_length > _AUTH_PROFILE_STORE_EMPTY_BYTES
         )
-        if reach or store["incomplete"] or config_blind or auth_store_present:
+        # B-845: the SAME hedge, for a PER-AGENT auth store
+        # (agents/<agent-id>/agent/openclaw-agent.sqlite, table auth_profile_store) --
+        # a different file from the shared state DB above, grounded against the
+        # installed dist (2026.9.5) to hold real credentials on its own: a home with an
+        # empty credentials/ directory AND an empty-or-absent shared-store row can still
+        # have real material sitting in an agent's own database, which the two checks
+        # above are both blind to. Deliberately the SAME hedge, not a leg-raising signal
+        # — see the auth_store_present comment above; the same "not yet resolved whether
+        # a non-empty row always means a usable credential" reasoning applies here too.
+        agent_auth_store_length = getattr(ctx, "agent_auth_profile_store_length", None)
+        agent_auth_store_present = (
+            getattr(ctx, "agent_auth_profile_store_read", False)
+            and agent_auth_store_length is not None
+            and agent_auth_store_length > _AUTH_PROFILE_STORE_EMPTY_BYTES
+        )
+        # B-845 (round 3, 2026-09-23): a C-135 review found the capped flag was read
+        # ONLY inside the `agent_auth_store_present` sentence below -- so a home with
+        # MORE agent databases than the sweep's own cap allows, where none of the
+        # first `_MAX_SQLITE_DBS` checked happened to hold real material, read as a
+        # confident, unhedged PASS: `agent_auth_store_present` was False (nothing
+        # FOUND among the ones actually checked), so the whole `if` never fired and
+        # the fact that the sweep stopped short of every agent was silently dropped.
+        # Folded into the hedge condition itself so a capped-but-empty-so-far sweep
+        # hedges on its own, independent of whether `agent_auth_store_present` is
+        # True -- the same "a partial sweep is not the same fact as an exhaustive
+        # one" discipline `store["incomplete"]` already gets above.
+        agent_auth_capped = getattr(ctx, "agent_auth_profile_store_capped", False)
+        if (
+            reach
+            or store["incomplete"]
+            or config_blind
+            or auth_store_present
+            or agent_auth_store_present
+            or agent_auth_capped
+        ):
             why = []
             if reach:
                 # B-712: when one of these scopes is `sandbox.mode: "non-main"`, whether it
@@ -4598,6 +4632,31 @@ def check_trifecta(ctx: Context) -> Finding:
                     " config_machine_state['authProfiles.store'], vs. OpenClaw's own"
                     f" {_AUTH_PROFILE_STORE_EMPTY_BYTES}-byte empty-store shape), and"
                     " this scan only looked at the credentials/ directory on disk"
+                )
+            if agent_auth_store_present:
+                why.append(
+                    "at least one agent's own auth-profile store holds more than an"
+                    f" empty shell ({agent_auth_store_length} bytes in its"
+                    " agents/<agent-id>/agent/openclaw-agent.sqlite auth_profile_store"
+                    f" table, vs. OpenClaw's own {_AUTH_PROFILE_STORE_EMPTY_BYTES}-byte"
+                    " empty-store shape), and the sensitive-data leg is only ever"
+                    " raised from files under credentials/, not from either database"
+                )
+            if agent_auth_capped:
+                # B-845 (round 3, 2026-09-23): a STANDALONE clause, not folded into
+                # the `agent_auth_store_present` sentence above -- it needs to fire
+                # even when nothing was FOUND among the agent databases this scan did
+                # manage to check (see the hedge-condition comment above for why: the
+                # original wiring only ever read this flag from inside the "present"
+                # branch, so a capped-but-nothing-found sweep silently dropped the
+                # disclosure entirely). Matches how the C015 secrets-at-rest scan
+                # discloses its own walk cap rather than letting a partial sweep read
+                # as an exhaustive one.
+                why.append(
+                    "more per-agent databases exist under"
+                    " agents/*/agent/openclaw-agent.sqlite than this scan's cap"
+                    " allows, so not every agent's own auth-profile store could be"
+                    " checked"
                 )
             if config_blind:
                 why.append(
@@ -4628,6 +4687,18 @@ def check_trifecta(ctx: Context) -> Finding:
                     " this host holds a real, usable credential (this audit only sees"
                     " its byte length, never its value) and treat this leg as ON if"
                     " it does."
+                    if auth_store_present
+                    else "Check whether any agent's own auth_profile_store table"
+                    " (agents/<agent-id>/agent/openclaw-agent.sqlite) on this host"
+                    " holds a real, usable credential (this audit only sees its byte"
+                    " length, never its value) and treat this leg as ON if it does."
+                    if agent_auth_store_present
+                    else "This host has more per-agent databases under"
+                    " agents/*/agent/openclaw-agent.sqlite than this scan's cap"
+                    " allows, so its per-agent auth-profile store sweep did not cover"
+                    " all of them; check the remaining agents' own auth_profile_store"
+                    " tables by hand and treat this leg as ON if any hold a real,"
+                    " usable credential."
                 ),
                 evidence=active,
             )

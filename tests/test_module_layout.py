@@ -80,6 +80,26 @@ _EXEMPT = {
                   "`assessment_coverage()`. Over budget by 17 lines since B-558 added "
                   "`layer_coverage`. Split candidate named above; tracked debt, not a "
                   "design statement.",
+    # CLAWSECCHECK-B-845, round 3 (2026-09-23): 1,208 -> 1,251 lines. The FIFO/sidecar
+    # stat-guard this round adds (`_refuse_non_regular_sqlite_paths`, wired into
+    # `_open_readonly`) closes a second hang in the same per-agent auth-profile-store
+    # code path the previous round's VIEW-refusal fix closed — same module, because
+    # both guard the exact same call site (`_open_and_verify_table` -> `_open_readonly`)
+    # every reader in this file already shares; a second module would just be this
+    # function with an import cycle back to its only caller. Over budget by 51 lines.
+    # Split candidate, not attempted here: the F-187 corroboration/rendering surface
+    # (`corroborate`, `TrajectoryCorroboration`, the pointer/archive readers, ~350
+    # lines) reads none of the per-table-schema-verification internals
+    # (`_open_readonly`/`_table_kind`/`_open_and_verify_table`) beyond calling them —
+    # a `trajectoryschema.py` leaf holding just the schema-verification layer would
+    # leave ~900 lines here with no cycle, but is a larger change than this fix.
+    "trajectorystore.py": "~1,251 lines — per-agent SQLite trajectory-container reading "
+                          "(F-187 corroboration) plus, since B-845, the shared "
+                          "schema-verification/hardened-open layer "
+                          "(`_open_readonly`/`_table_kind`/`_open_and_verify_table`) a "
+                          "second table (`auth_profile_store`) now reuses. Over budget "
+                          "by 51 lines since the round-3 FIFO/sidecar stat guard. Split "
+                          "candidate named above; tracked debt, not a design statement.",
     "checks/_config.py": "~6,986 lines (restated 2026-09-21 for the 4.3.0 wave build — "
                          "was ~6,302, +11% stale; earlier 2026-09-18, B382 — ~5,743) — the config-hardening topic (29 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
