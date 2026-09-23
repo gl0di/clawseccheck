@@ -4836,6 +4836,12 @@ _CONTAINMENT_IMPURE_CALLS = frozenset({
     "uuid.uuid4", "uuid.uuid1", "socket.gethostname", "socket.getfqdn",
     "random.random", "random.randint", "random.choice", "random.randrange",
     "random.choices", "random.sample", "getpass.getuser",
+    # B-850 round 4: secrets.* is semantically identical to random.* here (a
+    # host-randomness read, not a pure function of its literal arguments) --
+    # secrets.choice(['a.py', 'b.py']) was wrongly folded 'static' (ESCAPES)
+    # instead of 'runtime' (UNPROVEN) purely because it wasn't spelled random.*.
+    "secrets.choice", "secrets.randbelow", "secrets.randbits",
+    "secrets.token_bytes", "secrets.token_hex", "secrets.token_urlsafe",
 })
 # Environment variables whose value is absolute by construction (a real filesystem
 # root the OS/shell sets up) -- a read of one of these is modelled as an absolute-path
@@ -4908,6 +4914,60 @@ def _containment_dotted_is_sensitive(d):
     return any(d == m or d.startswith(m + ".") for m in _CONTAINMENT_SENSITIVE_MODULES)
 
 
+def _containment_static_subscript_key(slice_node):
+    """A literal str/int subscript key -- Python <=3.8 wraps it in `ast.Index`.
+    None (not a static key) for a variable, a slice, an f-string, ... (B-850 round 4,
+    H3/H7/H9)."""
+    s = slice_node
+    if s.__class__.__name__ == "Index":  # Python <=3.8 subscript wrapper compat
+        s = s.value
+    if isinstance(s, ast.Constant) and isinstance(s.value, (str, int)) and not isinstance(s.value, bool):
+        return s.value
+    return None
+
+
+def _containment_container_literal_element(base_node, key):
+    """The AST node bound to *key* inside a Dict/List/Tuple LITERAL -- None when
+    *base_node* isn't one of these, the key isn't found (Dict), the index is out of
+    range, or a `*spread` element makes the position no longer static (List/Tuple)
+    (B-850 round 4, H3/H7/H9)."""
+    if isinstance(base_node, ast.Dict):
+        for k, v in zip(base_node.keys, base_node.values):
+            if k is not None and isinstance(k, ast.Constant) and k.value == key:
+                return v
+        return None
+    if isinstance(base_node, (ast.List, ast.Tuple)) and isinstance(key, int):
+        elts = base_node.elts
+        if any(isinstance(e, ast.Starred) for e in elts):
+            return None
+        idx = key if key >= 0 else key + len(elts)
+        return elts[idx] if 0 <= idx < len(elts) else None
+    return None
+
+
+def _containment_resolve_value_node(ctx, node, env, depth=0):
+    """Resolve a Name down to the AST node of its bound VALUE by chasing only
+    unambiguous single-reaching-def 'assign' bindings -- unlike
+    `_containment_resolve_through_assigns` (which folds an already-dotted chain
+    into a STRING), this keeps the raw node so a container LITERAL (Dict/List/
+    Tuple) can be matched against a static subscript key one level up (B-850
+    round 4, H3/H7/H9)."""
+    if depth > 8 or not isinstance(node, ast.Name):
+        return node, env
+    if env is None:
+        env = _ContainmentEnv(ctx, ctx.scope_of(node))
+    try:
+        defs = _containment_lookup(node, env, frozenset())
+    except _ContainmentBudget:
+        return None, None
+    if len(defs) != 1:
+        return None, None
+    dd, denv = defs[0]
+    if dd.kind != "assign" or dd.node is None:
+        return None, None
+    return _containment_resolve_value_node(ctx, dd.node, denv, depth + 1)
+
+
 def _containment_resolve_through_assigns(ctx, node, env, depth=0):
     """Like `ctx.dotted()`, but also chases plain reassignment aliasing (`m = sys`) --
     `ctx.dotted()` only trusts an `import`-kind reaching definition, so an aliased base
@@ -4929,9 +4989,24 @@ def _containment_resolve_through_assigns(ctx, node, env, depth=0):
             return None
         targets = set()
         for dd, denv in defs:
-            if dd.kind != "assign" or dd.node is None:
+            if dd.kind == "assign" and dd.node is not None:
+                r = _containment_resolve_through_assigns(ctx, dd.node, denv, depth + 1)
+            elif dd.kind == "assign-unpack" and dd.node is not None:
+                # B-850 round 4 (H6): `a, b = os.path, sys` binds `a` to element 0
+                # of the RHS tuple/list -- only when the shape is fully static (a
+                # literal Tuple/List of the same arity, no `*spread`); round 3's
+                # resolver only accepted plain "assign", so this fell through as
+                # unresolved (fail-OPEN -- see `_containment_target_is_safe` for
+                # the round-4 fail-closed side of an unresolved target).
+                i, n = dd.extra
+                if isinstance(dd.node, (ast.Tuple, ast.List)) and len(dd.node.elts) == n and not any(
+                    isinstance(e, ast.Starred) for e in dd.node.elts
+                ):
+                    r = _containment_resolve_through_assigns(ctx, dd.node.elts[i], denv, depth + 1)
+                else:
+                    return None
+            else:
                 return None
-            r = _containment_resolve_through_assigns(ctx, dd.node, denv, depth + 1)
             if r is None:
                 return None
             targets.add(r)
@@ -4939,6 +5014,19 @@ def _containment_resolve_through_assigns(ctx, node, env, depth=0):
     if isinstance(node, ast.Attribute):
         base = _containment_resolve_through_assigns(ctx, node.value, env, depth + 1)
         return f"{base}.{node.attr}" if base else None
+    if isinstance(node, ast.Subscript):
+        # B-850 round 4 (H3/H7/H9): `mods["p"]`/`mods[0]` where `mods` resolves to
+        # a Dict/List/Tuple LITERAL and the key/index is itself static -- match the
+        # element and keep chasing through it. A dynamic key, a non-literal
+        # container, or an out-of-range/starred index is simply unresolved here.
+        key = _containment_static_subscript_key(node.slice)
+        if key is None:
+            return None
+        base_node, base_env = _containment_resolve_value_node(ctx, node.value, env, depth + 1)
+        elt = _containment_container_literal_element(base_node, key)
+        if elt is None:
+            return None
+        return _containment_resolve_through_assigns(ctx, elt, base_env, depth + 1)
     return None
 
 
@@ -4978,14 +5066,49 @@ def _containment_is_namespace_call(ctx, node, env=None):
     return fd in {"builtins.globals", "builtins.vars", "builtins.locals"}
 
 
+def _containment_partial_setattr_target(ctx, func, env=None):
+    """*func* is a bare Name whose single unambiguous reaching definition is
+    `functools.partial(setattr|delattr, X, ...)` (any resolvable spelling of
+    `functools.partial`/`partial`, `setattr`/`delattr`) -- returns X, the node to
+    sensitivity-check, since a later call through that name (`setter('join', v)`)
+    is exactly `setattr(X, 'join', v)`. None when *func* isn't shaped like this
+    (B-850 round 4, H4/H14)."""
+    if not isinstance(func, ast.Name):
+        return None
+    if env is None:
+        env = _ContainmentEnv(ctx, ctx.scope_of(func))
+    try:
+        defs = _containment_lookup(func, env, frozenset())
+    except _ContainmentBudget:
+        return None
+    if len(defs) != 1:
+        return None
+    dd, denv = defs[0]
+    if dd.kind != "assign" or not isinstance(dd.node, ast.Call):
+        return None
+    call = dd.node
+    fd = _containment_resolve_through_assigns(ctx, call.func, denv)
+    if fd not in ("functools.partial", "functools.partialmethod") or not call.args:
+        return None
+    first = call.args[0]
+    first_fd = _containment_resolve_through_assigns(ctx, first, denv)
+    is_setattr_like = (isinstance(first, ast.Name) and first.id in _CONTAINMENT_MUTATOR_NAMES) \
+        or first_fd in {"builtins.setattr", "builtins.delattr"}
+    if not is_setattr_like or len(call.args) < 2:
+        return None
+    return call.args[1]
+
+
 def _containment_mutator_targets(ctx, call, env=None):
     """AST nodes to sensitivity-check for a setattr/delattr/`__setattr__`/
     `__delattr__`/`__setitem__`/`__delitem__` call, however indirected (bound-style
     `X.__setattr__(name, value)`, unbound-via-class `Class.__setattr__(target, name,
-    value)`, or indirected through `getattr(builtins, 'setattr')(...)`) -- every
-    plausible target slot is checked rather than resolving the bound-vs-unbound
-    ambiguity, since fail-closed only needs ONE of them to be sensitive (B-850 round 3,
-    closes the G1-G19 family without a per-spelling special case)."""
+    value)`, indirected through `getattr(builtins, 'setattr')(...)`, or through a
+    `functools.partial(setattr, X)` alias called later -- B-850 round 4, H4/H14)
+    -- every plausible target slot is checked rather than resolving the
+    bound-vs-unbound ambiguity, since fail-closed only needs ONE of them to be
+    sensitive (B-850 round 3, closes the G1-G19 family without a per-spelling
+    special case)."""
     func = call.func
     targets = []
     if isinstance(func, ast.Attribute) and func.attr in _CONTAINMENT_MUTATOR_DUNDER_ATTRS:
@@ -5008,6 +5131,10 @@ def _containment_mutator_targets(ctx, call, env=None):
                 and func.args[1].value in (_CONTAINMENT_MUTATOR_DUNDER_ATTRS | _CONTAINMENT_MUTATOR_NAMES):
             if call.args:
                 targets.append(call.args[0])
+        return targets
+    partial_target = _containment_partial_setattr_target(ctx, func, env)
+    if partial_target is not None:
+        targets.append(partial_target)
     return targets
 
 
@@ -5055,7 +5182,7 @@ def _containment_fail_closed_reason(ctx):
             if n.attr == "__dict__" and _containment_sensitive_base(ctx, n.value):
                 return ".__dict__ is used on a sensitive namespace"
             if isinstance(n.ctx, (ast.Store, ast.Del)) and n.attr in _CONTAINMENT_TRUSTED_ATTRS \
-                    and _containment_sensitive_base(ctx, n.value):
+                    and _containment_mutation_base_is_risky(ctx, n.value):
                 return f".{n.attr} is reassigned or deleted"
         elif isinstance(n, ast.alias):
             if n.asname == "__file__":
@@ -5095,7 +5222,7 @@ def _containment_fail_closed_reason(ctx):
             if reason:
                 return reason
             for t in _containment_mutator_targets(ctx, n):
-                if _containment_sensitive_base(ctx, t):
+                if _containment_mutation_base_is_risky(ctx, t):
                     return "a sensitive namespace's attribute is set/deleted dynamically"
     return None
 
@@ -5725,6 +5852,258 @@ def _containment_callsites(fn, ctx):
                         sites.append(n)
         ctx._callsites[fn] = sites
     return ctx._callsites[fn]
+
+
+def _containment_provenance_defs(name_node, env):
+    """Like `_containment_lookup`, but returns the RAW reaching defs for a free/
+    global name WITHOUT the STRICT-mode kind rewrite to 'opaque' (B-850 round 4,
+    H1). `_containment_lookup`'s strict rewrite exists to answer 'is this the
+    value NOW, from inside a function that can't trust a module-level rebind' --
+    a different question from provenance tracing's 'could this value EVER be
+    import-derived', which needs the real originating kind (an 'assign' from
+    `os.path` is exactly what must not be waved through as safe merely because a
+    function borrows it as a free variable)."""
+    ctx, rd = env.ctx, env.ctx.rd(env.scope)
+    name = name_node.id
+    comp_iters = _containment_comp_iters(name_node, ctx)
+    if comp_iters:
+        return [(_ContainmentDef("for", it, None, env.scope), env) for it in comp_iters]
+    if name in rd.local_names and id(name_node) in rd.uses:
+        defs = rd.uses[id(name_node)]
+        out = [(d, env) for d in defs]
+        if isinstance(env.scope, ast.Module):
+            for d in ctx.global_assigns.get(name, ()):
+                genv = _ContainmentEnv(ctx, d.scope, depth=env.depth, helper_stack=env.helper_stack)
+                genv.hops = env.hops
+                out.append((d, genv))
+        return out
+    return _containment_free_defs(name, env)
+
+
+def _containment_is_receiver_param(ctx, node):
+    """True if *node* (a Name, Load ctx) is the RECEIVER parameter (self/cls,
+    however spelled) of the method it's used in -- structurally, the first
+    positional parameter of a FunctionDef/AsyncFunctionDef that is itself a
+    direct child of a ClassDef body, not a @staticmethod, and STILL bound to
+    that original parameter at this use site (never a local rebind like
+    `self = os.path`). This binding is never a value-aliasing target the way an
+    ordinary parameter is -- it denotes 'this instance' -- so provenance tracing
+    on it is meaningless and it is always treated as safe (B-850 round 4),
+    preserving round 3's FP2/FP3 (`setattr(self, k, v)`/`self.__dict__.update
+    (kw)`) exemption while an ordinary explicit parameter (H2's `mod`) still
+    gets full call-site provenance tracing below."""
+    if not isinstance(node, ast.Name):
+        return False
+    scope = ctx.scope_of(node)
+    if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    owner = ctx.parent.get(scope)
+    if not isinstance(owner, ast.ClassDef):
+        return False
+    decorators = {d.id for d in scope.decorator_list if isinstance(d, ast.Name)}
+    decorators |= {d.attr for d in scope.decorator_list if isinstance(d, ast.Attribute)}
+    if "staticmethod" in decorators:
+        return False
+    a = scope.args
+    positional = a.posonlyargs + a.args
+    if not positional or positional[0].arg != node.id:
+        return False
+    rd = ctx.rd(scope)
+    if id(node) in rd.uses:
+        return {d.kind for d in rd.uses[id(node)]} == {"param"}
+    return True
+
+
+_CONTAINMENT_PROVENANCE_MAX_DEPTH = 6
+_CONTAINMENT_TRIVIALLY_SAFE_TYPES = (ast.Constant, ast.JoinedStr, ast.FormattedValue, ast.Lambda)
+
+
+def _containment_self_attr_is_safe(ctx, node, env, visited, depth):
+    """*node* is `<receiver>.<attr>` (e.g. `self.mod`) -- safe UNLESS some
+    assignment `<receiver>.<attr> = <value>` anywhere in the enclosing class
+    fully resolves its <value> to a sensitive dotted name (B-850 round 4, H5).
+    Deliberately narrower than `_containment_target_is_safe`'s general
+    ambiguous-fires rule: an unresolved/opaque RHS (a constructor parameter, a
+    computed value, ...) stays SAFE here -- only a PROVEN-sensitive assignment
+    convicts -- so the common `self.<anything> = <ordinary value>` shape
+    (FP1-FP11) never regresses just because the whole class isn't traceable.
+    (AugAssign-to-attribute, e.g. `self.mod += os.path`, is not chased -- an
+    accepted, narrow residual for a shape no real skill writes.)"""
+    attr = node.attr
+    receiver_scope = ctx.scope_of(node.value)
+    class_node = ctx.parent.get(receiver_scope)
+    if not isinstance(class_node, ast.ClassDef):
+        return False
+    for meth in class_node.body:
+        if not isinstance(meth, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        margs = meth.args.posonlyargs + meth.args.args
+        if not margs:
+            continue
+        recv_name = margs[0].arg
+        for n in ast.walk(meth):
+            if not (
+                isinstance(n, ast.Attribute) and n.attr == attr
+                and isinstance(n.ctx, ast.Store)
+                and isinstance(n.value, ast.Name) and n.value.id == recv_name
+            ):
+                continue
+            assign = ctx.parent.get(n)
+            value = None
+            if isinstance(assign, ast.Assign) and any(n is t for t in assign.targets):
+                value = assign.value
+            elif isinstance(assign, ast.AnnAssign) and assign.target is n:
+                value = assign.value
+            if value is None:
+                continue
+            menv = _ContainmentEnv(ctx, meth)
+            resolved = _containment_resolve_through_assigns(ctx, value, menv)
+            if resolved is not None and _containment_dotted_is_sensitive(resolved):
+                return False
+    return True
+
+
+def _containment_param_is_safe(ctx, dd, denv, visited, depth):
+    """A non-receiver parameter is safe only when EVERY in-file call site passes
+    it a provably-safe value -- zero discoverable call sites (or more than the
+    evaluated-callsite budget) is treated as ambiguous, not safe (B-850 round 4,
+    H2: `def mutate(mod): mod.join = ...; mutate(os.path)` must fire; a
+    parameter with no traceable call site fires for the same reason -- a
+    fail-closed guard can't positively vouch for a value it never saw)."""
+    fn = dd.scope
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    pname = dd.node.arg if isinstance(dd.node, ast.arg) else None
+    if pname is None:
+        return False
+    sites = _containment_callsites(fn, ctx)
+    if not sites or len(sites) > _CONTAINMENT_MAX_CALLSITES:
+        return False
+    a = fn.args
+    names = [p.arg for p in a.posonlyargs + a.args]
+    for call in sites:
+        arg = None
+        if pname in names:
+            idx = names.index(pname)
+            if any(isinstance(x, ast.Starred) for x in call.args[:idx + 1]):
+                return False
+            if idx < len(call.args):
+                arg = call.args[idx]
+        for kw in call.keywords:
+            if kw.arg == pname:
+                arg = kw.value
+            elif kw.arg is None:
+                return False  # **kwargs splice at the call site -- can't be sure
+        if arg is None:
+            return False  # relies on a default / not determinable -- ambiguous
+        cenv = _ContainmentEnv(ctx, ctx.scope_of(call), depth=denv.depth, helper_stack=denv.helper_stack)
+        if not _containment_target_is_safe(ctx, arg, cenv, visited, depth + 1):
+            return False
+    return True
+
+
+def _containment_def_is_safe(ctx, dd, denv, visited, depth):
+    if dd.kind == "assign":
+        return _containment_target_is_safe(ctx, dd.node, denv, visited, depth + 1)
+    if dd.kind == "assign-unpack":
+        i, n = dd.extra
+        if isinstance(dd.node, (ast.Tuple, ast.List)) and len(dd.node.elts) == n and not any(
+            isinstance(e, ast.Starred) for e in dd.node.elts
+        ):
+            return _containment_target_is_safe(ctx, dd.node.elts[i], denv, visited, depth + 1)
+        return False
+    if dd.kind == "param":
+        return _containment_param_is_safe(ctx, dd, denv, visited, depth)
+    # "for"/"for-unpack"/"with"/"with-unpack"/"aug"/"def"/"file"/"import"/"opaque":
+    # none of these are further traceable to a proof of safety here -- ambiguous,
+    # so the fail-closed default (not safe) applies (B-850 round 4).
+    return False
+
+
+def _containment_target_is_safe(ctx, node, env=None, visited=None, depth=0):
+    """True only when *node* is PROVABLY never import/sensitive-derived -- the
+    exemption side of the round-4 fail-closed flip (C-135 rejection of
+    e4041ebb: a resolution-based guard that can't positively PROVE a target
+    sensitive was silently exempting it -- backwards for something called
+    fail-closed). Anything this can't fully trace to a safe origin (a parameter
+    with no discoverable call site, an opaque def, budget exhaustion, an
+    unresolvable container/subscript, ...) returns False -- the guard fires on
+    an ambiguous target, not just a proven-sensitive one. `self`/an ordinary
+    local whose whole reachable definition chain never touches an import stays
+    exempt (protects the FP1-FP11 self.path=p / setattr(self, k, v) family from
+    B-850 round 3): the distinguishing signal is whether the VALUE being
+    assigned is import-derived, never the attribute/variable's own name."""
+    if depth > _CONTAINMENT_PROVENANCE_MAX_DEPTH:
+        return False
+    if node is None:
+        return True
+    if visited is None:
+        visited = set()
+    key = id(node)
+    if key in visited:
+        return False
+    visited = visited | {key}
+
+    # Try FULL resolution first: a proven-sensitive dotted name is not safe; any
+    # OTHER fully-resolved dotted name (e.g. a plain `import json; j = json`) is
+    # conclusively safe outright, no further structural walk needed.
+    resolved = _containment_resolve_through_assigns(ctx, node, env)
+    if resolved is not None:
+        return not _containment_dotted_is_sensitive(resolved)
+
+    if isinstance(node, _CONTAINMENT_TRIVIALLY_SAFE_TYPES):
+        return True
+    if isinstance(node, ast.Name):
+        if node.id in ("True", "False", "None"):
+            return True
+        if _containment_is_receiver_param(ctx, node):
+            return True
+        if env is None:
+            env = _ContainmentEnv(ctx, ctx.scope_of(node))
+        try:
+            defs = _containment_provenance_defs(node, env)
+        except _ContainmentBudget:
+            return False
+        if not defs:
+            return False
+        return all(_containment_def_is_safe(ctx, dd, denv, visited, depth) for dd, denv in defs)
+    if isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Name) and _containment_is_receiver_param(ctx, node.value):
+            return _containment_self_attr_is_safe(ctx, node, env, visited, depth)
+        return _containment_target_is_safe(ctx, node.value, env, visited, depth + 1)
+    if isinstance(node, ast.Dict):
+        return all(
+            _containment_target_is_safe(ctx, v, env, visited, depth + 1)
+            for v in node.values if v is not None
+        )
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return all(_containment_target_is_safe(ctx, e, env, visited, depth + 1) for e in node.elts)
+    if isinstance(node, (ast.Subscript, ast.Starred)):
+        return _containment_target_is_safe(ctx, node.value, env, visited, depth + 1)
+    if isinstance(node, ast.Call):
+        # A call result is safe unless its OWN callee resolves to a sensitive
+        # dotted name (e.g. `pathlib.Path(...)`); an ordinary constructor/helper
+        # call whose callee isn't itself import-sensitive is presumed to build an
+        # ordinary local value, not a live alias into a sensitive namespace --
+        # narrower than the general ambiguous-fires rule, to keep the very common
+        # "parameter holds a constructed object" shape from becoming a new FP
+        # surface (functools.partial(setattr, ...) is caught earlier and more
+        # precisely by `_containment_partial_setattr_target`, not here).
+        callee_d = _containment_resolve_through_assigns(ctx, node.func, env)
+        return not (callee_d is not None and _containment_dotted_is_sensitive(callee_d))
+    return False
+
+
+def _containment_mutation_base_is_risky(ctx, node, env=None):
+    """Fail-closed combinator for a mutation TARGET's base object (B-850 round 4,
+    C-135 rejection of e4041ebb): fires when `_containment_sensitive_base` can
+    positively resolve it to a sensitive namespace, OR when it can't be PROVEN
+    safe either -- flips the prior fail-open default on an unresolvable target
+    (H1/H2/H5) while `_containment_target_is_safe`'s receiver/self-attr/
+    call-site handling keeps the FP1-FP11 family exempt."""
+    if _containment_sensitive_base(ctx, node, env):
+        return True
+    return not _containment_target_is_safe(ctx, node, env)
 
 
 def _containment_callsite_args(fn, pname, denv, visited):

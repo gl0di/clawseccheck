@@ -765,6 +765,73 @@ def test_resolution_based_guard_convicts(case_id, relpath, src):
     assert _verdict(src, relpath) == "convict", case_id
 
 
+# ---------------------------------------------------------------------------------
+# B-850 round 4 (C-135 rejection of e4041ebb): round 3's resolution-based guard
+# fired only when a mutation target FULLY resolved to a sensitive namespace --
+# backwards for something called "fail-closed", since it silently exempted anything
+# it couldn't resolve one hop past a bare Name/Attribute chain. Now: full resolution
+# reaches deeper (assign-unpack/H6, a Dict/List container element/H3, a
+# functools.partial(setattr, ...) indirection/H4), AND a target that STILL can't be
+# resolved is no longer waved through -- it fires unless
+# `_containment_target_is_safe` can PROVE it never touches an import anywhere in
+# its reachable definition chain (H1/H1b/H2/H5). The self.path=p / setattr(self, k,
+# v) exemption (FP1-FP11, round 3) is unaffected: the distinguishing signal stays
+# whether the VALUE assigned is import-derived, never the attribute's spelling --
+# see `test_ordinary_attribute_mutation_on_a_non_sensitive_base_stays_clean` above,
+# re-run against this round's code with no changes needed.
+# ---------------------------------------------------------------------------------
+_R4_GUARD_RESOLUTION_CASES = [
+    ("R4H1-module-alias-mutated-in-function", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "a = os.path\ndef f():\n    a.join = lambda *args: '/tmp/evil.py'\nf()\n")),
+    ("R4H1b-module-alias-realiased-in-function", "pkg/mod.py",
+     # the reviewer's own additional find: a SECOND hop (`b = a`) inside the
+     # function before the mutation, not just a direct free-var mutation.
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "a = os.path\ndef f():\n    b = a\n    b.join = lambda *args: '/tmp/evil.py'\nf()\n")),
+    ("R4H2-alias-via-parameter", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "def mutate(mod):\n    mod.join = lambda *args: '/tmp/evil.py'\nmutate(os.path)\n")),
+    ("R4H3-dict-container-indirection", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "mods = {'p': os.path}\nmods['p'].join = lambda *args: '/tmp/evil.py'\n")),
+    ("R4H3b-list-container-indirection", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "mods = [os.path]\nmods[0].join = lambda *args: '/tmp/evil.py'\n")),
+    ("R4H4-functools-partial-setattr", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "import functools\nsetter = functools.partial(setattr, os.path)\n"
+         "setter('join', lambda *args: '/tmp/evil.py')\n")),
+    ("R4H5-self-attribute-cross-method", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "class Wrapper:\n    def __init__(self):\n        self.mod = os.path\n"
+         "    def bad(self):\n        self.mod.join = lambda *args: '/tmp/evil.py'\n"
+         "Wrapper().bad()\n")),
+    ("R4H6-tuple-unpack-alias", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "a, b = os.path, sys\na.join = lambda *args: '/tmp/evil.py'\n")),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _R4_GUARD_RESOLUTION_CASES)
+def test_r4_fail_closed_on_ambiguous_or_deeper_resolution_convicts(case_id, relpath, src):
+    assert _verdict(src, relpath) == "convict", case_id
+
+
+def test_r4_secrets_choice_matches_random_choice_staticness():
+    # B-850 round 4: secrets.* reads host randomness exactly like random.* does --
+    # secrets.choice(['v.py', '../../../tmp/evil.py']) was missing from
+    # _CONTAINMENT_IMPURE_CALLS, so it wrongly folded 'static' (crit ESCAPES)
+    # instead of 'runtime' (WARN-only ARTIFACT_READ_UNPROVEN, matching what
+    # random.choice already gets for the identical shape).
+    src = (
+        HDR + "import secrets\n" + H
+        + 'with open(os.path.join(here, secrets.choice(["v.py", "../../../tmp/evil.py"])), "rb") as fh:\n'
+        '    exec(fh.read().decode("utf-8"), {})\n'
+    )
+    assert _verdict(src, "pkg/mod.py") == "warn"
+
+
 def test_lambda_in_comprehension_captures_the_comprehension_shadow():
     # B-850 round 3 (L1): `_containment_comp_iters` used to stop at a `Lambda` --
     # `[(lambda: open(...))() for open in [...]]` shadows the builtin `open` inside the
