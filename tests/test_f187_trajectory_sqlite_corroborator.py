@@ -2051,6 +2051,266 @@ def test_drain_phase_orders_by_confirmed_content_not_by_zero_content_first(
     assert meta["dbs_found"] == 2 + 1 + D
 
 
+# ---------------------------------------------------------------------------
+# B-852 round 9 -- a fresh independent review found round 8's own drain-order fix
+# (above) itself gameable two ways: (Attack A) a floor-pool decoy's `cum_bytes` is
+# SEEDED from the FREE floor pass, so it can out-rank a genuine `extra_dbs` victim
+# without earning anything real; (Attack B) even with no floor pool involved, a decoy
+# that TIES the victim's `cum_bytes` still wins via `sorted()`'s stable fallback to
+# attacker-controlled discovery order, and -- win or lose the tie-break -- nothing
+# bounded how much of the pool a SINGLE drain turn could take. `read_compiled_tool_
+# descriptions` now (1) sorts the drain by EARNED bytes (`cum_bytes` minus the free
+# floor contribution), closing Attack A, and (2) caps a single drain turn at
+# `_SQLITE_DRAIN_TURN_BUDGET_DIVISOR`'s share of the aggregate, bounding (never
+# eliminating) Attack B's blast radius.
+# ---------------------------------------------------------------------------
+
+
+def test_drain_phase_keys_on_earned_bytes_not_the_free_floor_lead(monkeypatch):
+    """B-852 round 9, Attack A: `cum_bytes` is seeded from `floor_bytes_used` -- the
+    unconditional floor pass, never charged against `max_content_total_bytes` -- so a
+    decoy sitting in the FLOOR pool gets a free `cum_bytes` lead with ZERO real
+    round-1/2 spend. If that decoy's own content beyond the floor boundary never fits
+    an equal-share round either (so it earns nothing further there), round 8's own
+    `cum_bytes`-descending order still let it out-rank a genuine `extra_dbs` victim
+    whose `cum_bytes` is 100% real, PAID spend -- and, once it won the drain's first
+    turn, its own (comfortably larger) stash let it consume the turn's entire
+    allotment before the victim ever got one. Keying the drain on EARNED bytes
+    (`cum_bytes` minus the free floor contribution) instead closes this: the free
+    floor no longer buys priority, so the victim (real spend > 0) now outranks the
+    decoy (real spend == 0) regardless of the decoy's free floor lead.
+
+    Positive control (hand-verified against round 8's own `sorted(round_dbs, key=
+    lambda d: -cum_bytes.get(d, 0))` + single uncapped drain pass): under that
+    formula, `a_floorlead` (`cum_bytes == 500`, all free floor) ranks ahead of
+    `b_victim` (`cum_bytes` a small real round-1 read), drains first, and its 10 x
+    900-byte reservoir consumes enough of the shared pool that nothing remains for
+    the victim's 900-byte poisoned row afterward -- this test fails against that
+    formula and passes only once the sort excludes the free floor contribution.
+    """
+    from clawseccheck import trajectorystore
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    monkeypatch.setattr(trajectorystore, "_MAX_SQLITE_DBS", 1)
+    FLOOR = 500
+    monkeypatch.setattr(trajectorystore, "_MAX_SQLITE_CONTENT_BYTES_PER_DB", FLOOR)
+
+    home = _home()
+
+    def _filler(pad):
+        return {"type": "tool.result", "output": "y" * pad}
+
+    def _filler_len(pad):
+        return len(json.dumps(_filler(pad)))
+
+    def _filler_at_size(target_size):
+        base_len = _filler_len(0)
+        assert target_size >= base_len, (target_size, base_len)
+        return _filler(target_size - base_len)
+
+    def _tool(name):
+        return [{
+            "name": name, "description": "d",
+            "parameters": {"type": "object", "properties": {}},
+        }]
+
+    def _padded(tools, pad):
+        ev = _compiled_event(tools)
+        ev["data"]["systemPrompt"] = "s" * pad
+        return ev
+
+    def _at_size(tools, target_size):
+        ev = _padded(tools, 0)
+        base_len = len(json.dumps(ev))
+        assert target_size >= base_len, (target_size, base_len)
+        ev["data"]["systemPrompt"] = "s" * (target_size - base_len)
+        assert len(json.dumps(ev)) == target_size
+        return ev
+
+    marker = _at_size(_tool("weather"), 900)
+    row_size = len(json.dumps(marker))
+    filler_row = _filler_at_size(row_size)
+
+    # a_floorlead: occupies the sole floor slot (`_MAX_SQLITE_DBS=1`). Newest rows
+    # (highest rowid, read FIRST) are cheap filler summing past the 500-byte floor --
+    # the floor pass caps out there, `floor_bytes_used == 500`, all of it FREE. Oldest
+    # rows (lowest rowid, read LAST -- i.e. only reachable once the floor pass and both
+    # equal-share rounds are behind it) are 10 x `row_size` filler rows: individually
+    # too big for any equal-share round (so this database earns NOTHING further there
+    # either), but collectively far more than what one drain turn should ever grant a
+    # single candidate.
+    floor_filler_len = _filler_len(80)
+    floor_filler_rows = (FLOOR // floor_filler_len) + 2  # comfortably past the floor
+    reservoir_rows = 10
+    rows = [
+        (f"res{i}", 0, filler_row) for i in range(reservoir_rows)  # lowest rowids
+    ] + [
+        (f"floorfill{i}", 0, _filler(80)) for i in range(floor_filler_rows)  # highest
+    ]
+    _add_agent_db(home, "a_floorlead", trajectory_rows=rows, include_auth=False)
+
+    # b_victim: beyond the floor pool. Newest row (highest rowid, read FIRST) is small
+    # enough that round 1 alone admits it -- real, earned spend. Oldest row (read
+    # LAST) is the poisoned one, sized identically to a_floorlead's reservoir rows.
+    benign_small = _padded(_tool("lookup"), 1)
+    small_size = len(json.dumps(benign_small))
+    _add_agent_db(
+        home, "b_victim",
+        trajectory_rows=[("victim_poisoned", 0, marker), ("victim_benign", 0, benign_small)],
+        include_auth=False,
+    )
+
+    # Three spacers: dilute round 1/2's equal share below `row_size`, same role the
+    # earlier drain tests' decoys play, without needing a_floorlead's own content to
+    # double as both the free-lead AND the dilution mechanism.
+    for i in range(3):
+        _add_agent_db(
+            home, f"c_spacer{i}",
+            trajectory_rows=[(f"sp{i}", 0, filler_row)],
+            include_auth=False,
+        )
+
+    # 5 depth candidates total: a_floorlead + b_victim + 3 spacers. `share1` must
+    # clear `small_size` (so the victim's benign row is admitted) but stay under
+    # `row_size` (so nothing else -- a_floorlead's reservoir, the victim's poison, or
+    # any spacer -- is ever admitted by an equal-share round); the resulting
+    # aggregate still clears `_SQLITE_DRAIN_TURN_BUDGET_DIVISOR` x `row_size`, wide
+    # enough that a single drain turn can admit one full `row_size` row.
+    n_candidates = 5
+    share1 = (row_size * 90) // 100
+    budget = share1 * n_candidates
+    assert small_size < share1 < row_size, (small_size, share1, row_size)
+    assert row_size < budget // 4, (row_size, budget)
+
+    tool_defs, meta = read_compiled_tool_descriptions(
+        home,
+        max_content_bytes_per_db=row_size * 1000,
+        max_content_total_bytes=budget,
+    )
+
+    names = {d["name"] for d in tool_defs}
+    # The actual regression proof: the victim's poisoned row must be recovered even
+    # though a_floorlead's free floor lead would have put it FIRST in the drain under
+    # the pre-round-9 `cum_bytes`-descending order, with enough of its own stashed
+    # content to have consumed the drain turn's entire allotment alone.
+    assert "weather" in names, (names, meta)
+    assert meta["dbs_found"] == 1 + 1 + 3
+
+
+def test_drain_turn_is_capped_at_a_fraction_of_the_aggregate_not_the_whole_pool(
+    monkeypatch,
+):
+    """B-852 round 9, the per-turn blast-radius bound: even a candidate that wins the
+    drain's sort/tie-break must not be able to consume the ENTIRE remaining pool in
+    its first turn. `a_hungry` (sorts first -- every candidate here ties at 0 earned
+    bytes, so the drain falls back to the same stable `round_dbs` order
+    `test_drain_phase_reaches_databases_two_equal_share_rounds_structurally_cannot`
+    above relies on -- with an effectively unlimited reservoir, far more than the
+    whole aggregate) is now capped at `max_content_total_bytes //
+    _SQLITE_DRAIN_TURN_BUDGET_DIVISOR` bytes on its first turn; `b_modest` (sorts
+    second, exactly one row's worth of real content) must still be reached and
+    recovered in the SAME pass, right after `a_hungry`'s capped turn -- proof the cap
+    left the majority of the pool for whoever is next, rather than the sort's winner
+    alone exhausting it.
+
+    Positive control (hand-verified against round 8's own single, uncapped drain
+    pass -- `new_cap_bytes = min(prior_bytes + remaining, max_content_bytes_per_db)`):
+    `a_hungry`'s reservoir is deliberately sized (10 x `row_size`, ~2.2x the whole
+    aggregate) to consume enough of the pool in one uncapped turn that `b_modest`'s
+    900-byte marker no longer fits what is left -- this test fails against that
+    formula and passes only once a single turn's consumption is bounded.
+    """
+    from clawseccheck import trajectorystore
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    monkeypatch.setattr(trajectorystore, "_MAX_SQLITE_DBS", 0)  # no floor pool at all
+
+    home = _home()
+
+    def _filler(pad):
+        return {"type": "tool.result", "output": "y" * pad}
+
+    def _filler_len(pad):
+        return len(json.dumps(_filler(pad)))
+
+    def _filler_at_size(target_size):
+        base_len = _filler_len(0)
+        assert target_size >= base_len, (target_size, base_len)
+        return _filler(target_size - base_len)
+
+    def _tool(name):
+        return [{
+            "name": name, "description": "d",
+            "parameters": {"type": "object", "properties": {}},
+        }]
+
+    def _at_size(tools, target_size):
+        ev = _compiled_event(tools)
+        ev["data"]["systemPrompt"] = ""
+        base_len = len(json.dumps(ev))
+        assert target_size >= base_len, (target_size, base_len)
+        ev["data"]["systemPrompt"] = "s" * (target_size - base_len)
+        assert len(json.dumps(ev)) == target_size
+        return ev
+
+    marker = _at_size(_tool("weather"), 900)
+    row_size = len(json.dumps(marker))
+    filler_row = _filler_at_size(row_size)
+    assert len(json.dumps(filler_row)) == row_size
+
+    # a_hungry: sorts FIRST (alphabetically -- every candidate here ties at 0 earned
+    # bytes). Ten `row_size`-sized filler rows -- ~2.2x the whole aggregate below --
+    # so a single turn bounded only by `remaining`/its own per-database ceiling
+    # (round 8's own formula) could swallow the entire pool by itself.
+    reservoir_rows = 10
+    _add_agent_db(
+        home, "a_hungry",
+        trajectory_rows=[(f"r{i}", 0, filler_row) for i in range(reservoir_rows)],
+        include_auth=False,
+    )
+    # b_modest: sorts SECOND (same 0-earned tie, next in stable order). Exactly one
+    # real row -- recovering it proves a_hungry's turn left the majority of the pool
+    # behind rather than exhausting it.
+    _add_agent_db(
+        home, "b_modest", trajectory_rows=[("m", 0, marker)], include_auth=False,
+    )
+    # Three spacers: dilute round 1/2's equal share below `row_size`, same role as
+    # the earlier drain tests' decoys, each a single `row_size` row that never
+    # advances there either.
+    for i in range(3):
+        _add_agent_db(
+            home, f"c_spacer{i}",
+            trajectory_rows=[(f"sp{i}", 0, filler_row)],
+            include_auth=False,
+        )
+
+    # 5 depth candidates total. `share1` (recomputed identically each round, since
+    # nothing here ever advances in an equal-share round) must stay under `row_size`
+    # -- so nothing is admitted in rounds 1/2 and every candidate reaches the drain
+    # tied at 0 earned bytes -- while the resulting aggregate still clears
+    # `_SQLITE_DRAIN_TURN_BUDGET_DIVISOR` x `row_size`, so the per-turn cap (not
+    # `remaining` itself) is what binds a_hungry's first turn.
+    n_candidates = 5
+    share1 = (row_size * 90) // 100
+    budget = share1 * n_candidates
+    ceiling = budget // 4
+    assert share1 < row_size, (share1, row_size)
+    assert row_size < ceiling < 2 * row_size, (row_size, ceiling)
+
+    tool_defs, meta = read_compiled_tool_descriptions(
+        home,
+        max_content_bytes_per_db=row_size * 1000,
+        max_content_total_bytes=budget,
+    )
+
+    names = {d["name"] for d in tool_defs}
+    # The actual regression proof: b_modest's marker is recovered even though
+    # a_hungry -- sorting first, with a reservoir far larger than the whole
+    # aggregate -- got the first turn in the drain.
+    assert "weather" in names, (names, meta)
+    assert meta["dbs_found"] == 1 + 1 + 3
+
+
 def test_scan_sqlite_event_json_is_a_lazy_generator():
     """`_scan_sqlite_event_json` must not do ANY work (open the database, run the
     query) until it is actually iterated -- constructing the generator object alone
