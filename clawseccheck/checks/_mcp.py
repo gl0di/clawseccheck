@@ -4969,17 +4969,22 @@ def _b332_finding_from_surfaces(surfaces: list) -> Finding:
 #   `check_mcp_host_sanitizer_gap` — mirrors the same idiom `_merge_mcp_tool_surface`
 #   already uses for this exact field.
 #
-#   SECONDARY 5 (accepted limitation, documented rather than fixed — reviewer's own
-#   call, textnorm.py is shared and out of scope for this check's fix): an UPPERCASE
-#   Cyrillic/Greek homoglyph of "Ignore" (e.g. U+0406 'І' or U+0399 'Ι' +
-#   "gnore all previous instructions") is not caught. `textnorm.normalize_for_scan`
-#   folds lowercase confusables to ASCII but leaves uppercase Cyrillic/Greek unfolded,
-#   and `obfuscation_signals()` reports nothing for it either, so there is no fallback
-#   signal at all. Fullwidth-character and zero-width-space obfuscation ARE correctly
-#   caught (both go through the same normalization/signal pipeline and DO fire).
-#   Fixing this properly belongs in `textnorm.py` (shared by every check that calls
-#   `normalize_for_scan`/`obfuscation_signals`), not as a B331-local patch that would
-#   diverge from every other consumer's confusable-folding behavior.
+#   SECONDARY 5 (CLOSED by B-887 — was an accepted limitation): an
+#   UPPERCASE Cyrillic/Greek homoglyph of "Ignore" (e.g. U+0406 'І' or U+0399 'Ι' +
+#   "gnore all previous instructions") used to slip past `_b331_authority_hit`
+#   because `textnorm.normalize_for_scan` folded lowercase confusables to ASCII but
+#   left uppercase Cyrillic/Greek unfolded. B-887 closed the gap in `textnorm.py`
+#   itself (shared by every check that calls `normalize_for_scan`/
+#   `obfuscation_signals`) by adding the upper-case lookalikes to `_CONFUSABLES` —
+#   `norm = normalize_for_scan(description)` above now folds 'І'/'Ι' straight to
+#   ASCII "I", so `_B331_AUTHORITY_BASE_RE` (a plain ASCII pattern, needs no
+#   `fold_pattern` widening) matches it like any other "Ignore ..." phrase. See
+#   `tests/test_b331_mcp_host_sanitizer_gap.py`'s former known-gap pin, now inverted
+#   to assert the FAIL. Fullwidth-character and zero-width-space obfuscation were
+#   already correctly caught before this fix too (both go through the same
+#   normalization/signal pipeline and DO fire) — this closes the one gap that
+#   remained, without a B331-local patch that would have diverged from every other
+#   consumer's confusable-folding behavior.
 #
 #   SECONDARY 6 — several injection families were entirely uncovered: markup-style
 #   role/system tag wrapping (`<system>...</system>`, `[INST]...[/INST]` — the task

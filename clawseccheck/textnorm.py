@@ -243,6 +243,16 @@ _INVISIBLE_TOKEN_RE = re.compile(
 #   Cyrillic small а U+0430, е U+0435, о U+043E, р U+0440, с U+0441,
 #   х U+0445, ѕ U+0455, і U+0456 (Ukrainian/Belarusian і)
 #   Greek letters: ο (omicron) U+03BF, α U+03B1
+#
+# B-887: capitals ADDED for every lowercase entry above whose case-fold is itself
+# a Latin lookalike. NOT added: lowercase у→y -- not needed here, and it would
+# re-fold every Russian evidence snippet containing у (fixtures / users'
+# .clawseccheckignore), an unannounced change out of scope for this fix (4.3.1).
+# See I1 below for why the table must stay closed under case, and `fold_pattern`
+# further down for capital-only lookalikes (lowercase not itself a confusable,
+# e.g. Cyrillic К/к) -- those need PATTERN-side closure, not a table entry here
+# (a table entry would re-fold real lowercase Cyrillic/Greek prose the same way
+# lowercase у→y would; see `_ML_OVERRIDE_TABLE_NORM` in checks/_content.py).
 # ---------------------------------------------------------------------------
 _CONFUSABLES: dict[int, str] = {
     # Cyrillic confusables
@@ -254,10 +264,97 @@ _CONFUSABLES: dict[int, str] = {
     0x0445: "x",   # Cyrillic small х → ASCII x
     0x0455: "s",   # Cyrillic small ѕ → ASCII s
     0x0456: "i",   # Cyrillic/Ukrainian і → ASCII i
+    # Cyrillic capitals (B-887) -- Ѕ/І are the upper-case of a lowercase entry
+    # already above; the rest (А/В/Е/К/М/Н/О/Р/С/Т/У/Х/Ј) have no lowercase table
+    # entry of their own -- see _PATTERN_CASE_CLOSURE below for how patterns still
+    # match THEIR lowercase lookalikes (в/к/м/н/т/у/ј) under case.
+    0x0410: "A",   # Cyrillic capital А → ASCII A
+    0x0412: "B",   # Cyrillic capital В → ASCII B
+    0x0415: "E",   # Cyrillic capital Е → ASCII E
+    0x041A: "K",   # Cyrillic capital К → ASCII K
+    0x041C: "M",   # Cyrillic capital М → ASCII M
+    0x041D: "H",   # Cyrillic capital Н → ASCII H
+    0x041E: "O",   # Cyrillic capital О → ASCII O
+    0x0420: "P",   # Cyrillic capital Р → ASCII P
+    0x0421: "C",   # Cyrillic capital С → ASCII C
+    0x0422: "T",   # Cyrillic capital Т → ASCII T
+    0x0423: "Y",   # Cyrillic capital У → ASCII Y
+    0x0425: "X",   # Cyrillic capital Х → ASCII X
+    0x0405: "S",   # Cyrillic capital Ѕ → ASCII S
+    0x0406: "I",   # Cyrillic capital І (Ukrainian/Belarusian) → ASCII I
+    0x0408: "J",   # Cyrillic capital Ј (Je, Serbian/Macedonian) → ASCII J
     # Greek confusables
     0x03B1: "a",   # Greek small α → ASCII a
     0x03BF: "o",   # Greek small ο (omicron) → ASCII o
+    # Greek capitals (B-887)
+    0x0391: "A",   # Greek capital Α (Alpha) → ASCII A
+    0x0392: "B",   # Greek capital Β (Beta) → ASCII B
+    0x0395: "E",   # Greek capital Ε (Epsilon) → ASCII E
+    0x0396: "Z",   # Greek capital Ζ (Zeta) → ASCII Z
+    0x0397: "H",   # Greek capital Η (Eta) → ASCII H
+    0x0399: "I",   # Greek capital Ι (Iota) → ASCII I
+    0x039A: "K",   # Greek capital Κ (Kappa) → ASCII K
+    0x039C: "M",   # Greek capital Μ (Mu) → ASCII M
+    0x039D: "N",   # Greek capital Ν (Nu) → ASCII N
+    0x039F: "O",   # Greek capital Ο (Omicron) → ASCII O
+    0x03A1: "P",   # Greek capital Ρ (Rho) → ASCII P
+    0x03A4: "T",   # Greek capital Τ (Tau) → ASCII T
+    0x03A5: "Y",   # Greek capital Υ (Upsilon) → ASCII Y
+    0x03A7: "X",   # Greek capital Χ (Chi) → ASCII X
 }
+
+# ---------------------------------------------------------------------------
+# I1 (B-887): upper-closure invariant, next to the Hebrew guard below. A regex
+# compiled from this table under re.I (`fold_pattern`) can only trust T(x) and
+# T(upper(x)) to be re.I-equivalent if the table is closed under case: every
+# lowercase key whose upper() is also a key must map case-equivalently, and
+# vice versa. This is exactly the invariant B-887's three prior rounds each
+# broke (capitals on one script only, or via a second, independently-
+# normalised haystack). Capital-only entries with no lowercase counterpart
+# (e.g. Cyrillic К) can't be checked here -- see _PATTERN_CASE_CLOSURE below.
+# ---------------------------------------------------------------------------
+for _cp, _latin in _CONFUSABLES.items():
+    _ch = chr(_cp)
+    if _ch.islower() and len(_ch.upper()) == 1 and _ch.upper() != _ch:
+        _up_cp = ord(_ch.upper())
+        if _up_cp in _CONFUSABLES:
+            assert _CONFUSABLES[_up_cp] == _latin.upper(), (
+                f"textnorm._CONFUSABLES case-closure broken: "
+                f"{_ch!r} -> {_latin!r} but {_ch.upper()!r} -> "
+                f"{_CONFUSABLES[_up_cp]!r} (expected {_latin.upper()!r})"
+            )
+    if _ch.isupper() and len(_ch.lower()) == 1 and _ch.lower() != _ch:
+        _lo_cp = ord(_ch.lower())
+        if _lo_cp in _CONFUSABLES:
+            assert _CONFUSABLES[_lo_cp] == _latin.lower(), (
+                f"textnorm._CONFUSABLES case-closure broken: "
+                f"{_ch!r} -> {_latin!r} but {_ch.lower()!r} -> "
+                f"{_CONFUSABLES[_lo_cp]!r} (expected {_latin.lower()!r})"
+            )
+del _cp, _latin, _ch
+
+# ---------------------------------------------------------------------------
+# I2 (B-887): DERIVED pattern-side case-closure map, not a hand-maintained
+# vocabulary. Keyed by the LOWERCASE Cyrillic/Greek letter itself (not ASCII) --
+# for every table entry whose key is a capital with no lowercase counterpart in
+# the table (adding one here would re-fold genuine lowercase prose -- see
+# above), record that capital's OWN lowercase glyph -> its ASCII fold target.
+# `fold_pattern` uses this to widen a literal Cyrillic/Greek letter already
+# sitting in a PATTERN's own Russian/Greek alternative (e.g. "тайно"'s literal
+# т) so it also matches whatever that letter folds to when text capitalizes it
+# (a sentence-initial "Тайно" folds its capital Т straight to ASCII "T", which
+# the pattern's un-folded lowercase т cannot re.I-match on its own). E.g. only
+# capital К is a table key, lowercase к is not, so this yields {"к": "k"}:
+# wherever pattern source has literal Cyrillic "к", also match ASCII "k"/"K".
+# ---------------------------------------------------------------------------
+_PATTERN_CASE_CLOSURE: dict[str, str] = {
+    chr(_cp).lower(): _latin.lower()
+    for _cp, _latin in _CONFUSABLES.items()
+    if chr(_cp).isupper()
+    and len(chr(_cp).lower()) == 1
+    and ord(chr(_cp).lower()) not in _CONFUSABLES
+}
+
 # Build a str.translate table from the dict.
 _CONFUSABLES_TABLE = str.maketrans(_CONFUSABLES)
 
@@ -1100,3 +1197,67 @@ def asciify(text: str) -> str:
     substitute it BEFORE calling this, exactly as they already do. This is the
     backstop, not the first line."""
     return text.translate(ASCII_MAP).encode("ascii", "replace").decode("ascii")
+
+
+def fold_pattern(src: str) -> str:
+    """`normalize_for_scan(src)` plus pattern-side case-closure (B-887).
+
+    Every English/Russian B63-family regex is a pattern SOURCE compiled under
+    re.I. Text-side folding (`normalize_for_scan`, applied to the haystack)
+    already makes a pattern letter x match a text confusable whenever x or
+    upper(x) is a `_CONFUSABLES` key (I1 keeps those case-equivalent). It
+    cannot cover a CAPITAL-ONLY lookalike (lowercase not itself a key, e.g.
+    Cyrillic К) without folding genuine lowercase prose too -- so that half is
+    closed on the PATTERN instead, via `_PATTERN_CASE_CLOSURE`: each closure
+    letter `x` in *src* becomes the class `[x<alt>]`, which re.I then also
+    matches as `X`/`<ALT>`. One haystack (`norm`), one offset space, no
+    call-site change anywhere this replaces a plain `normalize_for_scan(...)`.
+
+    A backslash escape passes through untouched. Outside a class, `x` becomes
+    `[x<alt>]`. Inside an existing class, `x` stays put and `<alt>` is appended
+    just before the closing `]` (never spliced in mid-class, which could turn
+    `[а-я]` into a bogus range) -- so `[а-я]` survives as `[а-яy]`. A leading
+    `^` or `]` right after `[` is copied through before closure scanning, so
+    `[^...]` / `[]...]` keep their special first member.
+
+    Byte-identical to `normalize_for_scan` for any source with no closure-key
+    letters -- every English-only pattern is untouched.
+    """
+    src = normalize_for_scan(src)
+    out: list[str] = []
+    i, n, in_class = 0, len(src), False
+    pending: list[str] = []
+    while i < n:
+        ch = src[i]
+        if ch == "\\" and i + 1 < n:
+            out.append(src[i : i + 2])
+            i += 2
+            continue
+        if not in_class and ch == "[":
+            in_class, pending = True, []
+            out.append(ch)
+            i += 1
+            if i < n and src[i] == "^":
+                out.append("^")
+                i += 1
+            if i < n and src[i] == "]":
+                out.append("]")
+                i += 1
+            continue
+        if in_class and ch == "]":
+            out.extend(pending)
+            out.append("]")
+            in_class = False
+            i += 1
+            continue
+        alt = _PATTERN_CASE_CLOSURE.get(ch)
+        if alt is None:
+            out.append(ch)
+        elif in_class:
+            out.append(ch)
+            if alt not in pending:
+                pending.append(alt)
+        else:
+            out.append("[" + ch + alt + "]")
+        i += 1
+    return "".join(out)

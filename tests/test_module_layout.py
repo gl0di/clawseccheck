@@ -44,6 +44,25 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
+    # CLAWSECCHECK-B-887 (2026-09-23): 1,102 -> 1,263 lines (net +161). Closes the
+    # case-fold gap that let three prior rounds each break the invariant that a
+    # re.I-compiled pattern's confusable fold must commute with case: capital
+    # Cyrillic/Greek lookalikes added to _CONFUSABLES (14 code points, mirroring
+    # existing lowercase entries), the I1 upper-closure assert that keeps the table
+    # honest, the derived _PATTERN_CASE_CLOSURE map for capital-only lookalikes, and
+    # `fold_pattern()` — the single function every B63-family regex now compiles
+    # through instead of `normalize_for_scan`. Over budget by 56 lines; not trimmed
+    # because the added comments are the proof-of-invariant documentation the design
+    # review asked for (three retracted prior attempts are exactly what this module's
+    # own docstrings warn the next editor away from repeating) — shortening them to
+    # slip under the cap would remove the reasoning, not the risk. Split candidate:
+    # none identified — this is one cohesive de-obfuscation table plus its two
+    # derived closure structures, and splitting the invariant assert from the table
+    # it guards would just relocate the coupling, not remove it.
+    "textnorm.py": "~1,263 lines — the confusable-fold table (_CONFUSABLES), its "
+                   "case-closure invariant and derived pattern-closure map, and "
+                   "fold_pattern(). Over budget by 63 lines since CLAWSECCHECK-B-887. "
+                   "Tracked debt, not a design statement.",
     # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
     # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
     # into self_test_corroboration()/render_self_test_corroboration()/
