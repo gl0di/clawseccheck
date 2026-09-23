@@ -148,6 +148,10 @@ def run_oracle(cases: "list[dict]") -> "list[dict]":
             f"{p.name} no longer exports {_WANT[k]} — re-ground the oracle; do NOT rebind "
             f"by letter. Exports: {sorted(ex)}")
         aliases[_WANT[k]] = ex[_WANT[k]]
+    # tempfile.mkdtemp, not tmp_path: this module doubles as a standalone CLI
+    # (`python3.12 tests/_harnessoracle.py --write`, see __main__ below) run OUTSIDE
+    # pytest to regenerate the pinned battery, so no tmp_path/tmp_path_factory fixture
+    # is available here. Self-cleaning via the try/finally shutil.rmtree below either way.
     work = Path(tempfile.mkdtemp(prefix="hr-oracle-"))
     try:
         (work / "run.mjs").write_text(_SCRIPT, encoding="utf-8")

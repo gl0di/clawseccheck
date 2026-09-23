@@ -31,13 +31,29 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
 from pathlib import Path
+
+import pytest
 
 from clawseccheck.catalog import REMEDIATION
 from clawseccheck.checks import run_all
 from clawseccheck.collector import collect
 from clawseccheck.risk import risk_paths
+
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_fires_risk03()` below, a plain helper called from multiple test
+    bodies rather than a fixture itself — keeps every throwaway home inside pytest's
+    own tmp tree instead of system /tmp. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -61,7 +77,7 @@ _RECOMMENDS = re.compile(
 
 
 def _fires_risk03(cfg: dict) -> bool:
-    home = Path(tempfile.mkdtemp(prefix="b738-"))
+    home = _TMP_PATH_FACTORY.mktemp("b738")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg))
     os.chmod(path, 0o600)

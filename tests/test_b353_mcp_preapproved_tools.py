@@ -13,7 +13,6 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -28,9 +27,25 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 MODERN = "2026.8.1"
 LEGACY = "2026.7.1-2"
 
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_finding()` below, a plain helper called from ~30 test bodies rather
+    than a fixture itself — keeps every throwaway home inside pytest's own tmp tree
+    instead of system /tmp, without threading tmp_path_factory through every one of
+    those call sites. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
+
 
 def _finding(cfg, installed=MODERN):
-    home = Path(tempfile.mkdtemp(prefix="b353-"))
+    home = _TMP_PATH_FACTORY.mktemp("b353")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg), encoding="utf-8")
     os.chmod(path, 0o600)
@@ -147,7 +162,7 @@ def test_the_legacy_top_level_shape_is_not_reported():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no node on this machine")
-def test_the_three_exclusions_are_what_the_schema_actually_says():
+def test_the_three_exclusions_are_what_the_schema_actually_says(tmp_path):
     """The exclusions above rest on measured schema behaviour, so measure it — including a
     BOGUS-KEY CONTROL, because an ACCEPTED result on a passthrough object proves nothing
     (the upgrade protocol's own rule, learned from `gateway.tls`).
@@ -175,7 +190,7 @@ console.log(JSON.stringify({
   legacyTop: ok({mcpServers:{s:{command:"c"}}}),
 }));
 """
-    work = Path(tempfile.mkdtemp(prefix="b353-schema-"))
+    work = tmp_path
     (work / "p.mjs").write_text(script, encoding="utf-8")
     found = None
     for candidate in hits:

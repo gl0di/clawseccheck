@@ -19,7 +19,6 @@ Re-grounds a filed task's own hypothesis and finds it backwards on two points:
 """
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import clawseccheck.checks as C
@@ -41,9 +40,9 @@ def _finding_direct(cfg: dict):
     return C.check_secrets_egress_proxy(_ctx(cfg))
 
 
-def _finding_via_home(cfg: dict):
+def _finding_via_home(cfg: dict, tmp_path):
     """Round-trip through collect()/run_all(), matching how the real audit invokes it."""
-    home = Path(tempfile.mkdtemp(prefix="b387-"))
+    home = tmp_path
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg), encoding="utf-8")
     os.chmod(path, 0o600)
@@ -184,6 +183,6 @@ def test_the_bad_fixture_fires_and_the_clean_one_does_not():
         assert f.status == expected, name
 
 
-def test_full_pipeline_round_trip_matches_direct_call():
+def test_full_pipeline_round_trip_matches_direct_call(tmp_path):
     cfg = {"secrets": {"egressProxy": {"enabled": True}}}
-    assert _finding_via_home(cfg).status == _finding_direct(cfg).status == WARN
+    assert _finding_via_home(cfg, tmp_path).status == _finding_direct(cfg).status == WARN

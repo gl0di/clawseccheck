@@ -11,8 +11,6 @@ The port itself is validated in ``test_harnessruntime_battery.py`` /
 """
 import json
 import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -20,6 +18,21 @@ import clawseccheck.checks as C
 from clawseccheck import harnessruntime as hr
 from clawseccheck.catalog import PASS, WARN
 from clawseccheck.collector import collect
+
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_run()` below (and the two standalone call sites further down), plain
+    helpers/tests called/run many times rather than fixtures themselves — keeps every
+    throwaway home inside pytest's own tmp tree instead of system /tmp. Mirrors
+    `_oracle_scratch` in tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
 
 #: Derived from the port's own window, not written out: a re-baseline moves it (2026.9.4 ->
 #: 2026.9.5 did, because the vendor's answers changed), and a literal here would silently go
@@ -49,7 +62,7 @@ def _cfg(base, *parts):
 
 
 def _run(cfg, check_id, installed=VALIDATED):
-    home = Path(tempfile.mkdtemp(prefix="b708-"))
+    home = _TMP_PATH_FACTORY.mktemp("b708")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg), encoding="utf-8")
     os.chmod(path, 0o600)
@@ -119,7 +132,7 @@ def test_b353_below_the_validated_build_never_gates():
 
 
 def test_b353_hermetic_run_with_no_known_build_stays_unknown():
-    home = Path(tempfile.mkdtemp(prefix="b708-"))
+    home = _TMP_PATH_FACTORY.mktemp("b708")
     p = home / "openclaw.json"
     p.write_text(json.dumps(_cfg(_APPROVE, _models())), encoding="utf-8")
     os.chmod(p, 0o600)
@@ -135,7 +148,7 @@ def test_a_config_stamp_at_the_floor_counts_but_an_older_one_does_not():
     for stamp, expect in ((VALIDATED, PASS), ("2026.9.9", WARN), ("2026.7.1", WARN),
                           ("2026.8.2", WARN)):
         cfg = _cfg(base, {"meta": {"lastTouchedVersion": stamp}})
-        home = Path(tempfile.mkdtemp(prefix="b708-"))
+        home = _TMP_PATH_FACTORY.mktemp("b708")
         p = home / "openclaw.json"
         p.write_text(json.dumps(cfg), encoding="utf-8")
         os.chmod(p, 0o600)

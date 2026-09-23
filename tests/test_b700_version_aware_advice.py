@@ -25,7 +25,6 @@ cries wolf gets weakened until it means nothing.
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -64,9 +63,24 @@ _QUALIFIERS = ("2026.8.1", "2026.7")
 _MODERN = "2026.8.1"
 _LEGACY = "2026.7.1-2"
 
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_findings()`/`_risk_paths()` below, plain helpers called from many
+    test bodies rather than fixtures themselves — keeps every throwaway home inside
+    pytest's own tmp tree instead of system /tmp. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
+
 
 def _findings(cfg: dict, installed):
-    home = Path(tempfile.mkdtemp(prefix="b700-"))
+    home = _TMP_PATH_FACTORY.mktemp("b700")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg))
     os.chmod(path, 0o600)
@@ -594,7 +608,7 @@ _RISK_CONFIGS = [
 
 def _risk_paths(cfg: dict, installed):
     from clawseccheck.risk import risk_paths
-    home = Path(tempfile.mkdtemp(prefix="b714-"))
+    home = _TMP_PATH_FACTORY.mktemp("b714")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg))
     os.chmod(path, 0o600)

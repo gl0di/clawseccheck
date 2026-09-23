@@ -10,7 +10,6 @@ OAuth-bearing tables that share its one per-agent database file.
 """
 import json
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -27,13 +26,28 @@ from clawseccheck.trajectorystore import (
 
 SECRET = "oauth-refresh-token-that-must-never-be-read"
 
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_home()` below, a plain helper called from ~25 test bodies rather
+    than a fixture itself — keeps every throwaway home inside pytest's own tmp tree
+    instead of system /tmp. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
+
 
 # ---------------------------------------------------------------------------
 # fixture builders
 # ---------------------------------------------------------------------------
 
 def _home(tmp_root=None) -> Path:
-    home = Path(tmp_root) if tmp_root else Path(tempfile.mkdtemp(prefix="f187-"))
+    home = Path(tmp_root) if tmp_root else _TMP_PATH_FACTORY.mktemp("f187")
     (home / "openclaw.json").write_text("{}", encoding="utf-8")
     return home
 
