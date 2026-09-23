@@ -388,6 +388,11 @@ class _FileFacts:
         # proof for that one reason (`exact_calls`' second pass).
         self.any_target = False
         self.blocked = self.star or self._blocked(module_names)
+        # B-917 locate() LEGB fallback (2.1): lazily computed and cached, since most
+        # files never take this path. `None` means "not computed yet" for the
+        # whole-file tamper flag; the per-name cache starts empty.
+        self._legb_tampers: "bool | None" = None
+        self._legb_attr_store_cache: dict = {}
 
     # ── names ──────────────────────────────────────────────────────────────────────────
 
@@ -571,6 +576,50 @@ class _FileFacts:
         while cur is not None and cur is not scope:
             child, cur = cur, self.parents.get(cur)
         return body.index(child) if cur is scope and child in body else None
+
+    def _legb_blocked(self, name: str) -> bool:
+        """Guard for `locate()`'s LEGB fallback (b917-design.md 2.1). A function-scope
+        read with no local binding may resolve through an enclosing/module scope --
+        but not when this file could later replace what that resolution depends on:
+        an attribute store `X.<name> = ...` naming this exact identifier (a plugin
+        re-pointing a module constant through some object's attribute of the same
+        name), or any of this file's own namespace-tampering spellings (`_tampers()`
+        -- reflection/monkeypatch/import-machinery access, which can rebind a
+        "module constant" by a route this resolver does not model at all). Sound over
+        precise: this only ever REFUSES a resolution, never manufactures one.
+        Lazily computed and cached -- most files never take this path."""
+        if self._legb_tampers is None:
+            self._legb_tampers = _tampers(self.tree)
+        if self._legb_tampers:
+            return True
+        if name not in self._legb_attr_store_cache:
+            self._legb_attr_store_cache[name] = any(
+                isinstance(n, ast.Attribute) and isinstance(n.ctx, (ast.Store, ast.Del))
+                and n.attr == name
+                for n in ast.walk(self.tree)
+            )
+        return self._legb_attr_store_cache[name]
+
+    def _legb_lookup(self, name: str, scope: ast.AST) -> "tuple | None":
+        """`(record, defining_scope)` for *name*, found by walking from *scope*
+        through each enclosing function scope and finally the module scope (LEGB,
+        minus class scope -- a function never sees its enclosing class's namespace,
+        matching Python's own scoping rule). No `before`: the read lives in a
+        DIFFERENT, nested scope that runs later, so *scope*'s body order does not
+        bound it -- `sole()`'s default (`before=None`) already requires exactly one,
+        unconditional, direct-body binding, which is what makes this sound. Returns
+        None when no enclosing scope binds *name* this way."""
+        cur = scope
+        while True:
+            nxt = self.scope_of(cur)
+            if nxt is None:
+                return None
+            rec = self.sole(name, nxt)
+            if rec is not None:
+                return rec, nxt
+            if nxt is self.tree:
+                return None
+            cur = nxt
 
     def literal(self, node: ast.AST, scope: ast.AST) -> "str | None":
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -765,11 +814,21 @@ class _FileFacts:
             if e.id == "__file__":
                 return Loc("FILE", self.relparts)
             rec = self.sole(e.id, scope, before=e)
+            found_scope = scope
+            # LEGB fallback (b917-design.md 2.1), `resolve()` deliberately lacks this:
+            # a name read inside a function with no binding in that function (and not
+            # declared global/nonlocal -- sole() already refuses those outright) is
+            # looked up in its enclosing function scopes and then the module scope.
+            # Required for the r2-D1 shape: a module constant read inside a function.
+            if rec is None and not self._legb_blocked(e.id):
+                found = self._legb_lookup(e.id, scope)
+                if found is not None:
+                    rec, found_scope = found
             if rec is not None:
                 if rec[0] == "assign":
-                    return self.locate(rec[1], scope, depth + 1)
+                    return self.locate(rec[1], found_scope, depth + 1)
                 if rec[0] == "with":
-                    return self.locate(rec[1].context_expr, scope, depth + 1)
+                    return self.locate(rec[1].context_expr, found_scope, depth + 1)
             # Unresolvable (a parameter, several bindings, a loop/comprehension
             # target, ...) -- still a stable identity: the SAME name in the SAME
             # scope always resolves here the same way, so two reads of it compare

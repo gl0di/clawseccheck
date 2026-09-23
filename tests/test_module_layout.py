@@ -53,11 +53,17 @@ _EXEMPT = {
     # Kept in this one module rather than split out: `locate()` shares `sole()`/`dotted()`/
     # `literal()`/the import table with `resolve()` on the same `_FileFacts` instance, and
     # a caller (skillast.py's new pass) needs both together.
-    "shippedexec.py": "~1,461 lines — B-638's shipped-exec containment proof "
+    # Restated 2026-09-23, B-917 fix round 1 -- was ~1,461; +59 lines for the two review
+    # gaps: `locate()`'s Name branch gained the LEGB fallback b917-design.md 2.1 itself
+    # specifies (`_legb_lookup`), guarded by `_legb_blocked` (an attribute store or a
+    # `_tampers()` spelling anywhere in the file refuses the fallback rather than risk an
+    # unsound resolution) -- `resolve()` is untouched, so B-638's proof is unaffected.
+    "shippedexec.py": "~1,520 lines — B-638's shipped-exec containment proof "
                        "(`resolve()`/`_Path`, untouched) plus B-917's location resolver "
                        "(`locate()`/`Loc`/`loc_eq`, `ShippedArtifact.classify()`, "
-                       "`PathFacts`) for the loader-sink/staged-import correlation. Over "
-                       "budget by 261 lines since B-917. Split candidate: the two "
+                       "`PathFacts`) for the loader-sink/staged-import correlation, plus "
+                       "the fix-round-1 LEGB fallback (`_legb_lookup`/`_legb_blocked`). "
+                       "Over budget by 320 lines since B-917. Split candidate: the two "
                        "resolvers do not share state beyond `_FileFacts` itself and could "
                        "separate into a `locations.py` leaf; not attempted here because "
                        "`locate()` reuses `resolve()`'s exact `sole()`/`dotted()`/"
@@ -381,7 +387,15 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~9,442 lines (restated 2026-09-23, B-917 — was ~8,413; the "
+    "skillast.py": "~9,481 lines (restated 2026-09-23, B-917 fix round 1 — was ~9,442; "
+                   "the addition is the artifact-wide staged-write cache "
+                   "(`_b917_artifact_staged_writes`, a `weakref.WeakKeyDictionary` keyed "
+                   "on the `ShippedArtifact` instance so a write in one file of an "
+                   "artifact correlates with an import in another, per b917-design.md "
+                   "2.3, without leaking across artifacts or re-parsing every sibling "
+                   "file on every one of its own files' passes — not a new parser "
+                   "family). "
+                   "Restated 2026-09-23, B-917 — was ~8,413; the "
                    "addition is the loader-sink / staged-import correlation pass "
                    "(runpy/importlib/zipimport modelled as code-execution sinks, plus a "
                    "write-then-import location correlation) that reuses shippedexec's "

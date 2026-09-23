@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import re
+import weakref
 from collections import namedtuple
 from urllib.parse import urlparse
 
@@ -6177,6 +6178,40 @@ def _b917_staged_import_findings(tree: ast.AST, facts, staged: list) -> list:
     return out
 
 
+# Artifact-wide staged-write cache (b917-design.md 2.3: "W is artifact-wide, cached
+# once per artifact"), keyed on the `ShippedArtifact` INSTANCE via a WeakKeyDictionary
+# so a write in one file of an artifact correlates with an import in another, an entry
+# is computed once no matter how many files that artifact's scan visits, and it can
+# never leak into a different artifact's verdict -- the key disappears with the
+# artifact object itself (b917-design.md's own Risks section, section 6).
+_B917_ARTIFACT_STAGED_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _b917_artifact_staged_writes(artifact) -> list:
+    """[(node, Loc, tainted)] for every tainted staged write in ANY file of
+    *artifact*, not just the one `_b917_findings` is currently analysing -- so the
+    O3 shape split across two files (`updater.py` writes, `main.py` imports) is
+    caught on `main.py`'s own pass. Each file's `Loc`s are already artifact-root
+    relative (the same convention a single file's own `facts.locate()` uses), so no
+    further re-basing is needed to compare across files. A sibling file that fails to
+    parse contributes no write -- it gets its own AST_UNANALYZABLE finding when (if)
+    it is itself scanned; that is a missed correlation, never a wrong one."""
+    cached = _B917_ARTIFACT_STAGED_CACHE.get(artifact)
+    if cached is not None:
+        return cached
+    out: list = []
+    for rel, src in artifact.sources.items():
+        try:
+            sib_tree = ast.parse(src)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            continue
+        sib_facts = _shippedexec._FileFacts(sib_tree, rel, artifact, set(), False)
+        sib_remote_names = _b917_remote_tainted_names(sib_tree, sib_facts)
+        out.extend(_b917_staged_writes(sib_tree, sib_facts, sib_remote_names))
+    _B917_ARTIFACT_STAGED_CACHE[artifact] = out
+    return out
+
+
 def _b917_findings(tree: ast.AST, filename: str, artifact) -> list:
     """[(rule, severity, lineno, reason)] for B-917: loader sinks
     (runpy/importlib/zipimport execute a FILE by PATH) and staged-import correlation
@@ -6189,6 +6224,9 @@ def _b917_findings(tree: ast.AST, filename: str, artifact) -> list:
     )
     remote_names = _b917_remote_tainted_names(tree, facts)
     staged = _b917_staged_writes(tree, facts, remote_names)
+    # Correlation set: this file alone with no artifact (nothing else to correlate
+    # against); every file of the artifact, including this one, when there is one.
+    correlated = staged if artifact is None else _b917_artifact_staged_writes(artifact)
     out: list = []
 
     for node in ast.walk(tree):
@@ -6201,10 +6239,11 @@ def _b917_findings(tree: ast.AST, filename: str, artifact) -> list:
             continue
         ln = getattr(node, "lineno", 0)
         loc = facts.locate(path_node, scope)
-        # T1: this loader's target is DEFINITE-equal to a tainted staged write.
+        # T1: this loader's target is DEFINITE-equal to a tainted staged write, in
+        # this file or (with an artifact) any file of it.
         if any(
             w_tainted and _shippedexec.loc_eq(loc, w_loc) == "DEFINITE"
-            for _, w_loc, w_tainted in staged
+            for _, w_loc, w_tainted in correlated
         ):
             out.append((
                 "REMOTE_STAGED_EXEC", "crit", ln,
@@ -6259,7 +6298,7 @@ def _b917_findings(tree: ast.AST, filename: str, artifact) -> list:
             "file run here is decided at runtime",
         ))
 
-    out.extend(_b917_staged_import_findings(tree, facts, staged))
+    out.extend(_b917_staged_import_findings(tree, facts, correlated))
     return out
 
 
