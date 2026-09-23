@@ -1619,7 +1619,7 @@ def _capability_graph(ctx) -> dict:
     # legacy-alias fallback -- rather than re-deriving a second, divergent model here.
     # `_enabled_tools` itself is untouched: every OTHER caller (exec/input/egress
     # hints) keeps reading exactly what it read before.
-    write_tools, _write_enumerable, _view, _legacy_write = _b55_write_tools_granted(cfg)
+    write_tools, write_enumerable, _view, _legacy_write = _b55_write_tools_granted(cfg)
     main_tools = sorted({t for t in _enabled_tools(cfg)} | set(write_tools))
     # B-730: the credential term read `(ctx.home / "credentials").is_dir()` -- the
     # directory-existence test B-666 disproved and replaced in A1's leg. The store is
@@ -1707,6 +1707,36 @@ def _capability_graph(ctx) -> dict:
             main_access = agent_sandbox.get("workspaceAccess")
         break
     main_write = bool(write_tools or main_access == "rw")
+    # B-904: `write_enumerable` (renamed from the discarded `_write_enumerable` above)
+    # is the SAME flag `check_fs_write_exposure` (B55) itself branches on for its own
+    # UNKNOWN verdict (`if not enumerable: return UNKNOWN`, checks/_capability.py). On
+    # a config with no tools policy declared anywhere, `write_tools` resolves empty
+    # AND `write_enumerable` is False -- B55 reports UNKNOWN ("cannot be assessed"),
+    # but this graph was collapsing that same uncertainty to a flat
+    # `can_write_memory=False`, i.e. a confident "no" the underlying check never
+    # claimed. That is the B-503 divergence class recurring one level down: not a
+    # FAIL-vs-False disagreement (B-503, already fixed by unioning in
+    # `_b55_write_tools_granted` above) but an UNKNOWN-vs-False one.
+    #
+    # Not fixed by re-deriving a resolution: there is no OpenClaw-permissive-default
+    # write-grant model in this codebase for the graph to union in (no
+    # `_permissive_default_fs_tools` or equivalent exists here — grep confirms it, and
+    # `git log --all` traces the one function of that shape to an unmerged branch,
+    # commit 8aaaee72 on `fix/b-737`, which sits behind ~170 unrelated files' worth of
+    # unmerged history and cannot be cherry-picked in isolation for this fix). Nor is
+    # `can_write_memory` itself widened to a tri-state: it is a documented `bool` field
+    # (docs/OUTPUT_SCHEMA.md §5) that dozens of existing tests assert with strict
+    # `is True`/`is False`, so silently changing its value space would be its own,
+    # separately-reviewed breaking change.
+    #
+    # Instead: surface the SAME enumerability signal B55 already keys its own verdict
+    # on, as an additive sibling field on the `main` node only (the one node this
+    # ambiguity applies to — subagent/mcp/input nodes derive `can_write_memory` from
+    # data that is always fully known). A reader who sees
+    # `can_write_memory=False, write_grant_enumerable=False` now gets the same
+    # "we genuinely don't know" signal B55's UNKNOWN carries, instead of a false
+    # certainty — without the graph claiming to know a resolution it does not have.
+    main_write_enumerable = write_enumerable or main_write
     main_egress = bool(
         any(_hint([t], OUTBOUND_TOOL_HINTS) for t in main_tools)
         or dig(cfg, "tools.elevated.allowFrom")
@@ -1729,6 +1759,7 @@ def _capability_graph(ctx) -> dict:
         "tools": main_tools,
         "secrets_visible": main_secrets,
         "can_write_memory": main_write,
+        "write_grant_enumerable": main_write_enumerable,
         "can_egress": main_egress,
     })
     if input_surfaces:
@@ -1795,12 +1826,19 @@ def _capability_graph_lines(ctx) -> list[str]:
         # strip terminal-control sequences so they can't spoof/erase the terminal (B-164).
         label = _sanitize(str(node["label"]))
         tools = _sanitize(", ".join(node["tools"])) if node["tools"] else "none"
-        lines.append(
+        line = (
             f"- {label} ({node['kind']}): tools={tools}; "
             f"secrets_visible={_bool_word(node['secrets_visible'])}; "
             f"can_write_memory={_bool_word(node['can_write_memory'])}; "
             f"can_egress={_bool_word(node['can_egress'])}"
         )
+        # B-904: only the `main` node carries `write_grant_enumerable`; flag it in the
+        # text render exactly when it is False, so a reader sees the same "we cannot
+        # actually tell" uncertainty B55 reports as UNKNOWN for the identical config
+        # shape, instead of reading `can_write_memory=no` as a settled answer.
+        if node.get("write_grant_enumerable") is False:
+            line += "; write_grant_enumerable=no (not resolvable from static config; see B55)"
+        lines.append(line)
     if graph["edges"]:
         lines.append("flow: input -> main -> subagents -> MCP -> fs/network")
     return lines
