@@ -1070,6 +1070,11 @@ class _SqliteEventJsonStats:
     # between rounds, so a row-count-capped database has nothing more to gain from a
     # bigger byte share).
     byte_capped: bool = False
+    # B-852 round 11: `len()` of the row that tripped the byte cap (0 if the byte cap
+    # never tripped). Lets `read_compiled_tool_descriptions`'s drain phase know whether
+    # a candidate's NEXT row fits in an offered share WITHOUT re-opening the database
+    # just to find out -- see that function's own docstring, "round 11" paragraph.
+    blocked_len: int = 0
 
 
 def _scan_sqlite_event_json(
@@ -1130,6 +1135,7 @@ def _scan_sqlite_event_json(
             if read_bytes > max_bytes:
                 stats.capped = True
                 stats.byte_capped = True
+                stats.blocked_len = len(value)
                 break
             yield value
         # Only run the excluded-row COUNT when the row/byte loop above did NOT already
@@ -1487,43 +1493,83 @@ def read_compiled_tool_descriptions(
        end-to-end in ``tests/test_f187_trajectory_sqlite_corroborator.py`` with a
        single decoy holding one extra small row.
 
-       **B-852 round 10** -- the per-turn ceiling is now a per-PASS EQUAL SHARE of
+       **B-852 round 10** -- the per-turn ceiling became a per-PASS EQUAL SHARE of
        what is actually left, recomputed fresh at the start of every pass from the
        CURRENT ``remaining`` and the CURRENT count of still-pending candidates in that
        pass (``max(remaining // len(drain_pending), _MAX_COMPILED_LINE_LEN)``), never a
-       fraction of the original ``max_content_total_bytes``. Two cases hold instead of
-       round 9's flat "at most a quarter" claim:
+       fraction of the original ``max_content_total_bytes``.
 
-       - When the pool left at a pass's start is at least
-         ``len(drain_pending) * _MAX_COMPILED_LINE_LEN``, every still-pending candidate
-         that pass gets an EQUAL offer and the offers sum to at most the pool -- the
-         sort order has no effect on the outcome for that pass.
-       - Otherwise (the pool is thin relative to the pending count), a turn is capped
-         at roughly one maximal row's worth (``_MAX_COMPILED_LINE_LEN``) instead. A
-         row cannot be split, so starving a specific candidate then requires
-         roughly ``pool_left // _MAX_COMPILED_LINE_LEN`` hungry candidates ahead of it
-         in the sort order (about 67 at full 64 MiB aggregate / 1 MiB max-row scale) --
-         a real, narrower residual, not something round 10 closes to zero.
+       **Round 10 was REJECTED by review before it went further than this repo's own
+       queue.** The unconditional ``_MAX_COMPILED_LINE_LEN`` (1 MiB) FLOOR on that
+       per-turn ceiling -- the very thing meant to guarantee forward progress -- is
+       exactly what let a single decoy with even a small earned-byte lead swallow an
+       ENTIRE thin drain pool in one turn: once the pool actually left a pass dropped
+       below that floor, the offer handed to the sort's winner was the floor itself,
+       uncapped by ``remaining``, not ``remaining // len(drain_pending)``. Round 10's own
+       text here previously claimed a decoy "cannot swallow the entire remaining pool"
+       and bounded the residual at "roughly ``pool_left // _MAX_COMPILED_LINE_LEN``
+       hungry candidates (about 67 at full 64 MiB aggregate / 1 MiB max-row scale)
+       ahead of it in the sort order" -- **both claims were FALSE**, reproduced
+       end-to-end in ``tests/test_f187_trajectory_sqlite_corroborator.py`` with a single
+       decoy and a thin pool. Do not trust them; round 11 (below) replaces round 10's
+       single-sweep drain entirely.
 
-       Because a capped turn can still leave a genuinely hungry candidate capped, the
-       drain keeps running MULTIPLE passes (not one): each pass re-sorts by earned
-       bytes, recomputes the share, and gives every still-hungry candidate another
-       turn, until either the budget is exhausted, no candidate has headroom left, or
-       (the round-7 guard, generalized) a WHOLE pass admits zero new bytes across every
-       candidate it attempted -- which can only happen when every remaining candidate's
-       next row is bigger than what its turn offered, and a candidate that made zero
-       progress on its turn is never re-queued for the next pass (see the drain loop's
-       own comment), so a pass that admits nothing leaves no candidate behind to retry.
+       **B-852 round 11** -- each drain PASS now runs TWO SWEEPS instead of one:
 
-       **This does not make the ordering adversary-proof, and round 10 does not close
-       that gap either.** When decoys outnumber the pool row-for-row, no fixed
-       per-turn split protects the victim, and the winning order can be earned through
-       CONTENT (a small, legitimate-looking earned-byte lead), not only through
-       directory naming -- describing this purely as "naming-based gaming" (round 9's
-       framing) was incomplete; Attack A and Attack B above both showed the win can
-       come from either axis. Do not read this docstring as claiming the drain is
-       adversary-proof; round 10 narrows the blast radius relative to a shrinking
-       pool, it does not eliminate the gaming.
+       - **Sweep A (equal share, order-independent).** Every still-pending candidate is
+         offered ``min(remaining // len(drain_pending), its own per-database headroom)``
+         bytes -- computed once from the pass's STARTING ``remaining`` and NEVER floored
+         above what the pool can cover, so the sum of every offer this sweep makes never
+         exceeds the pool, regardless of visiting order. A candidate whose NEXT known row
+         (``next_len``, tracked from whichever read most recently left it
+         ``byte_capped`` -- see :class:`_SqliteEventJsonStats`'s ``blocked_len`` and this
+         function's own ``next_len`` dict) is already bigger than its offered share is
+         marked "hungry" WITHOUT being re-opened this sweep -- no I/O is spent confirming
+         what the last read already disclosed.
+       - **Sweep B (smallest-row-first, one row each).** Every candidate still hungry
+         after sweep A is sorted by its NEXT row's known length, ASCENDING (tie-break:
+         more earned bytes first -- the same earned-bytes priority round 9 introduced,
+         which is what keeps round 9's "Attack A" closed here too -- then discovery order
+         as the final, fully deterministic tie-break). Each gets exactly ONE more row --
+         never split across two -- as long as it fits in whatever is left of the pool
+         once every candidate ahead of it in this sweep has taken its turn. Ascending
+         order means the CHEAPEST hungry candidate goes first, so sweep B stops a
+         candidate only once its own next row exceeds the ENTIRE pool remaining at that
+         point -- and every candidate after it in sort order has a row at least as large,
+         so none of them could have been served either, no matter what order the WHOLE
+         drain (not just this sweep) had visited them in.
+       - **Drop rule.** A candidate carries into the NEXT pass only if sweep B served it
+         (real progress this pass) AND it is still ``byte_capped`` afterward. Every other
+         candidate -- satisfied in sweep A, or never reached by sweep B before the pool
+         ran out -- drops permanently. This is sound because of sweep B's own ascending
+         guarantee, above: a candidate sweep B could not serve from THIS pass's pool
+         could not have been served from any SMALLER pool a later pass might offer either
+         (the pool only shrinks pass to pass), so no later pass could do better for it.
+
+       **Termination is a structural bound, not just an observed property.** The loop is
+       capped at exactly ``len(drain_pending)`` passes -- the count of candidates
+       entering the drain, snapshotted once before the loop starts -- enforced by an
+       explicit counter, independent of any finer per-pass progress argument. In
+       practice this cap is rarely approached: a pass that reaches sweep B with a
+       non-empty hungry set either satisfies every hungry candidate it serves or drops
+       everyone sweep B could not reach, so the pending set is non-increasing pass to
+       pass and strictly shrinks whenever sweep B has anyone to drop.
+
+       **Honest residual -- round 11 narrows the gaming surface, it does not close it.**
+       A candidate CAN still be starved if its next row is bigger than its OWN equal
+       share in sweep A AND enough OTHER candidates have next rows no bigger than it in
+       sweep B's order -- the attacker needs roughly
+       ``pool_left // victim's_own_row_size`` hungry candidates ahead of the victim in
+       sweep-B order, not ``pool_left // _MAX_COMPILED_LINE_LEN`` the way round 10
+       claimed (a materially HARDER bar for a small victim row, an EASIER one for a
+       large victim row -- round 10's flat 1 MiB-row assumption did not scale with the
+       actual victim's own row size). There is also a disclosed BIAS, not a flaw: sweep
+       B serves the SMALLEST hungry row first, so a BIGGER row -- e.g. one deliberately
+       padded to carry more poison payload -- is served LATER, which works AGAINST an
+       attacker trying to smuggle a large payload past a thin pool, not for one. Do not
+       read this docstring as claiming the drain is adversary-proof; round 11 closes
+       round 10's specific floor-swallow bug and re-scopes the residual to the victim's
+       own row size, it does not eliminate gaming by a sufficiently large decoy set.
 
        A database in group (b) that ends up in ``meta["dbs_budget_starved"]`` is NOT
        necessarily one that was never opened: two distinct cases both land there --
@@ -1587,14 +1633,20 @@ def read_compiled_tool_descriptions(
     ever materializes a whole database's admitted content into a list. Round 5's
     floor/depth split, and round 7's added DRAIN phase (both above), mean a database CAN
     now be read MULTIPLE TIMES ACROSS SEPARATE CALLS -- the floor read, one per depth
-    round, and potentially several DRAIN PASSES (round 10: each pass that still finds a
-    candidate hungry re-opens it, and the number of passes is bounded only by the
-    zero-progress termination guard, not a fixed count) -- that is a different axis
-    (cross-database budget allocation) from what round 3 fixed (per-database memory
-    blowup within one call), and does not reintroduce it: each individual call still
-    streams, still bounded by its own ``max_bytes``. Not a fixed ceiling like round 3's
-    per-call streaming bound: measured at up to FIVE opens of a single database at
-    production scale in some scenarios, and there is no static cap on that count.
+    round, and potentially several DRAIN PASSES, each running TWO SWEEPS (round 11: see
+    this function's own docstring, "round 11" paragraph) -- the number of passes is
+    bounded (proven, not just observed) by the count of candidates entering the drain,
+    never a fixed constant -- that is a different axis (cross-database budget
+    allocation) from what round 3 fixed (per-database memory blowup within one call),
+    and does not reintroduce it: each individual call still streams, still bounded by
+    its own ``max_bytes``. Not a fixed ceiling like round 3's per-call streaming bound:
+    round 11's own drain can, in principle, open a single database TWICE in one pass
+    (once in sweep A, once in sweep B, if sweep A's partial read leaves it still
+    hungry) -- measured at up to FIVE opens of a single database across several
+    adversarial constructions at production-like scale (80-100+ depth candidates, deep
+    cheap-row reservoirs) during this round's own verification; no fuzzing run found a
+    construction exceeding that, but the only PROVEN ceiling is structural, not this
+    number -- see the drain's own pass cap (``len(drain_pending)`` at entry) above.
     """
     tool_defs: list[dict] = []
     meta = {
@@ -1670,6 +1722,13 @@ def read_compiled_tool_descriptions(
     cum_yielded: "dict[Path, int]" = dict(floor_yielded)
     extra_attempted: "set[Path]" = set()
     extra_last_stats: "dict[Path, _SqliteEventJsonStats]" = {}
+    # B-852 round 11: tracks each still-hungry candidate's NEXT row length, as of its
+    # most recent read (round-1/2 or drain), so the drain's two-sweep pass (below) can
+    # tell whether a candidate's next row fits an offered share WITHOUT re-opening the
+    # database. Only ever consulted for a `db_path` that is still `byte_capped` --
+    # populated whenever a read leaves a database byte-capped, in both the round-1/2
+    # loop and every drain turn (`_drain_turn`, below).
+    next_len: "dict[Path, int]" = {}
 
     if depth_candidates and max_content_total_bytes > 0:
         remaining = max_content_total_bytes
@@ -1722,6 +1781,8 @@ def read_compiled_tool_descriptions(
                 # successfully read, not just what the LAST attempt managed).
                 if not stats.unreadable:
                     cum_yielded[db_path] = total_yielded
+                if stats.byte_capped:
+                    next_len[db_path] = stats.blocked_len
                 if not has_floor:
                     extra_attempted.add(db_path)
                     extra_last_stats[db_path] = stats
@@ -1745,127 +1806,123 @@ def read_compiled_tool_descriptions(
             round_dbs = next_round_dbs
 
         # -------------------------------------------------------------------
-        # PASS 3 -- DRAIN (B-852 round 7; see this function's own docstring for the
-        # full rationale, extended rounds 8-9). Rounds 1/2 above split `remaining`
-        # EVENLY across every still-hungry candidate, each round -- when EVERY
-        # still-hungry candidate's next row is bigger than that even share,
-        # recomputing the SAME flat share over the SAME candidate set in round 2
-        # makes ZERO progress, and since rows cannot be split, no NUMBER of further
-        # equal-share rounds would do any better -- this is not an off-by-one, it is
-        # fundamental to a fixed-round, equal-share design. The drain gives up on
-        # splitting evenly and instead processes whatever is STILL hungry ONE
-        # DATABASE AT A TIME.
+        # PASS 3 -- DRAIN (B-852 round 7; full rationale, and rounds 8-11's history,
+        # in this function's own docstring -- read the "round 11" paragraph there
+        # before touching this loop). Round 11 replaces round 10's single sweep-per-
+        # pass with TWO sweeps per pass:
         #
-        # Sort key (round 9): EARNED bytes only -- `cum_bytes - floor_bytes_used`,
-        # excluding the FLOOR pass's free, unconditional contribution. Round 8 sorted
-        # by raw `cum_bytes` descending on the theory that reaching the front of the
-        # drain costs an attacker real round-1/2 spend -- but `cum_bytes` also
-        # includes the floor pass's free per-database allotment (round 5, never
-        # charged against this budget), so a floor-pool decoy that earned NOTHING in
-        # rounds 1/2 could still outrank a genuine `extra_dbs` victim whose
-        # `cum_bytes` is 100% real spend. Keying on earned bytes closes that: the
-        # free floor no longer buys drain priority.
+        # Sweep A (equal share, order-independent): every still-pending candidate is
+        # offered `min(remaining // len(drain_pending), its own headroom)` -- computed
+        # ONCE from this pass's starting `remaining`, so the sum of every offer this
+        # sweep makes never exceeds the pool regardless of visiting order. A candidate
+        # whose known next row (`next_len`, populated by the round-1/2 loop above and
+        # by every earlier drain turn) already exceeds its offered share is marked
+        # "hungry" WITHOUT being re-opened -- no I/O spent confirming what is already
+        # known.
         #
-        # Per-turn cap (round 9, corrected round 10): each candidate's turn is capped
-        # at an EQUAL SHARE of whatever pool is actually left THIS PASS --
-        # `remaining // len(drain_pending)`, recomputed fresh every pass -- not just
-        # its own per-database ceiling, so even a candidate that WINS the sort/tie-break
-        # (round 8's residual gaming, see the docstring's "Attack B") cannot swallow
-        # the entire remaining pool in a single turn. Round 9's original cap used a
-        # FIXED fraction of the call's ORIGINAL aggregate instead; that stopped
-        # binding once the pool actually left a pass was already at or below that
-        # fixed fraction (the routine case once earlier rounds/passes had already
-        # spent most of the budget), letting a single earned-byte-lead candidate
-        # swallow the whole remaining pool again -- round 10 fixes this by keying the
-        # share off the CURRENT `remaining`, not the original total. Floored at
-        # `_MAX_COMPILED_LINE_LEN` so the share never drops below one maximal row's
-        # worth (otherwise a share of e.g. 0 would starve every candidate every pass).
-        # Because a capped turn can still leave a genuinely hungry candidate capped,
-        # the drain keeps looping over MULTIPLE PASSES: each pass re-sorts (by earned
-        # bytes), recomputes the share, and gives every still-hungry candidate one
-        # more turn, until the budget is exhausted, no candidate has headroom, or a
-        # WHOLE pass reads zero new bytes (the round-7 zero-progress guard,
-        # generalized -- a pass that admits nothing cannot be helped by another pass,
-        # since `remaining` cannot grow and a zero-progress candidate is never
-        # re-added to the next pass's pending set, below).
+        # Sweep B (smallest-row-first, one row each): every candidate still hungry
+        # after sweep A is sorted by its next row's KNOWN length ascending (tie-break:
+        # more earned bytes first -- round 9's "Attack A" fix, unchanged -- then
+        # discovery order). Each gets exactly one more row, as long as it fits in
+        # whatever is left of the pool once every candidate ahead of it in sweep-B
+        # order has taken its turn. Ascending order means sweep B stops a candidate
+        # only once its own next row exceeds the ENTIRE pool remaining at that point --
+        # every candidate after it in sort order has a row at least as large, so none
+        # of them could have been served either, from THIS pass's pool or any smaller
+        # one a later pass might offer.
+        #
+        # Drop rule: a candidate carries into the NEXT pass only if sweep B served it
+        # AND it is still byte-capped afterward. Everyone else -- satisfied in sweep A,
+        # or never reached by sweep B before the pool ran out -- drops permanently;
+        # sound because of sweep B's own ascending guarantee, above.
+        #
+        # Termination: capped at exactly `len(drain_pending)` passes (candidates
+        # entering the drain, snapshotted once), enforced by an explicit counter below
+        # -- a structural bound, not merely an observed one.
         # -------------------------------------------------------------------
         drain_pending = list(round_dbs)
-        while drain_pending and remaining > 0:
-            # B-852 round 10: recomputed fresh every pass from the CURRENT `remaining`
-            # and the CURRENT pending count -- see this function's own docstring,
-            # "round 10" paragraph, for why a FIXED fraction of the starting budget
-            # (round 9's `_SQLITE_DRAIN_TURN_BUDGET_DIVISOR`, since removed) stops
-            # binding once the pool actually left this pass is already below it.
-            drain_turn_ceiling = max(
-                remaining // len(drain_pending), _MAX_COMPILED_LINE_LEN,
+        drain_index = {d: i for i, d in enumerate(drain_pending)}
+
+        def _drain_turn(db_path: Path, turn_cap_bytes: int):
+            nonlocal remaining
+            has_floor = db_path in floor_bytes_used
+            prior_bytes = cum_bytes.get(db_path, 0)
+            skip = cum_yielded.get(db_path, 0)
+            new_bytes, stats, total_yielded = _read_and_process_db(
+                db_path, max_content_rows_per_db, turn_cap_bytes, skip,
+                seen, tool_defs, meta,
             )
-            drain_order = sorted(
-                drain_pending,
-                key=lambda d: -(cum_bytes.get(d, 0) - floor_bytes_used.get(d, 0)),
-            )
-            next_drain_pending: "list[Path]" = []
-            pass_progress = 0
-            for db_path in drain_order:
-                if remaining <= 0:
-                    break
-                has_floor = db_path in floor_bytes_used
+            remaining -= new_bytes
+            cum_bytes[db_path] = prior_bytes + new_bytes
+            # See the identical guard's own comment in the round loop above.
+            if not stats.unreadable:
+                cum_yielded[db_path] = total_yielded
+            if stats.byte_capped:
+                next_len[db_path] = stats.blocked_len
+            else:
+                # No longer capped -- whatever this database's next row WAS is stale;
+                # do not let a later pass consult a length that no longer applies.
+                next_len.pop(db_path, None)
+            if not has_floor:
+                extra_attempted.add(db_path)
+                extra_last_stats[db_path] = stats
+            if stats.non_text:
+                meta["non_text_rows"] += stats.non_text
+                meta["truncated"] = True
+            if stats.capped:
+                meta["truncated"] = True
+            return new_bytes, stats
+
+        max_drain_passes = len(drain_pending)
+        drain_passes = 0
+        while drain_pending and remaining > 0 and drain_passes < max_drain_passes:
+            drain_passes += 1
+            share = remaining // len(drain_pending)
+            hungry: "list[Path]" = []
+            # ---- Sweep A -- equal share, order-independent. ----
+            for db_path in drain_pending:
                 prior_bytes = cum_bytes.get(db_path, 0)
-                turn_cap_bytes = min(
-                    prior_bytes + remaining,
-                    prior_bytes + drain_turn_ceiling,
-                    max_content_bytes_per_db,
-                )
+                known = next_len.get(db_path)
+                if share <= 0 or (known is not None and known > share):
+                    if prior_bytes < max_content_bytes_per_db:
+                        hungry.append(db_path)
+                    continue
+                turn_cap_bytes = min(prior_bytes + share, max_content_bytes_per_db)
                 if turn_cap_bytes <= prior_bytes:
                     # Already at its own caller-supplied ceiling -- nothing more this
                     # database could productively use even if offered it.
                     continue
-                skip = cum_yielded.get(db_path, 0)
-                new_bytes, stats, total_yielded = _read_and_process_db(
-                    db_path, max_content_rows_per_db, turn_cap_bytes, skip,
-                    seen, tool_defs, meta,
-                )
-                remaining -= new_bytes
-                cum_bytes[db_path] = prior_bytes + new_bytes
-                pass_progress += new_bytes
-                # See the identical guard's own comment in the round loop above.
-                if not stats.unreadable:
-                    cum_yielded[db_path] = total_yielded
-                if not has_floor:
-                    extra_attempted.add(db_path)
-                    extra_last_stats[db_path] = stats
-                if stats.non_text:
-                    meta["non_text_rows"] += stats.non_text
-                    meta["truncated"] = True
-                if stats.capped:
-                    meta["truncated"] = True
+                _new_bytes, stats = _drain_turn(db_path, turn_cap_bytes)
+                if stats.byte_capped and turn_cap_bytes < max_content_bytes_per_db:
+                    hungry.append(db_path)
+            # ---- Sweep B -- exactly one more row each, smallest next row first. ----
+            hungry.sort(key=lambda d: (
+                next_len.get(d, sys.maxsize),
+                -(cum_bytes.get(d, 0) - floor_bytes_used.get(d, 0)),
+                drain_index[d],
+            ))
+            next_drain_pending: "list[Path]" = []
+            for db_path in hungry:
+                need = next_len.get(db_path)
+                if need is None or need > remaining:
+                    # Ascending order: this candidate's row, and every candidate
+                    # after it in `hungry` (rows at least as large), do not fit what
+                    # is left of the pool -- none of them can be served this pass.
+                    break
+                prior_bytes = cum_bytes.get(db_path, 0)
+                turn_cap_bytes = prior_bytes + need
+                if turn_cap_bytes > max_content_bytes_per_db:
+                    # This candidate's own per-database ceiling is narrower than its
+                    # next row -- no turn this pass (or any pass) can help it.
+                    continue
+                new_bytes, stats = _drain_turn(db_path, turn_cap_bytes)
                 if (
                     stats.byte_capped
                     and new_bytes > 0
                     and turn_cap_bytes < max_content_bytes_per_db
                 ):
-                    # Still hungry AND this turn made real progress -- worth another
-                    # turn in the next pass. A candidate that made ZERO progress this
-                    # turn (its next row is bigger than what this turn offered) is NOT
-                    # retried and is permanently dropped from this drain: it is simply
-                    # never added to `next_drain_pending` below, so it gets no later
-                    # pass at all (round 10: unlike round 9, `drain_turn_ceiling` is no
-                    # longer guaranteed non-increasing pass-to-pass -- it tracks
-                    # `remaining // len(drain_pending)`, and `len(drain_pending)` can
-                    # shrink faster than `remaining` -- so this drop no longer rests on
-                    # "a later turn could not do any better"; it rests on the loop
-                    # structure itself never offering one).
+                    # Sweep B served it AND it is still hungry -- worth another pass.
                     next_drain_pending.append(db_path)
-            if pass_progress <= 0:
-                # No candidate in this pass advanced at all -- every remaining
-                # candidate's next row exceeded what its turn offered. This already
-                # guarantees `next_drain_pending` is empty (a candidate is re-queued
-                # above only when its OWN turn made positive progress), so the `while
-                # drain_pending` check would stop the loop on its own next iteration
-                # regardless -- this break is an explicit, redundant-but-harmless stop,
-                # not a dependency: it does not rest on `drain_turn_ceiling` being
-                # non-increasing (round 10 no longer guarantees that), only on "nobody
-                # advanced this pass, so nobody is left to retry."
-                break
             drain_pending = next_drain_pending
 
     # -----------------------------------------------------------------------

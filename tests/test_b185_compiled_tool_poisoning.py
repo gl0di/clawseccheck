@@ -2412,6 +2412,25 @@ def test_drain_phase_reaches_a_poisoned_database_two_equal_share_rounds_structur
         ev["data"]["systemPrompt"] = "s" * pad
         return ev
 
+    def _padded_to(tools, target_len):
+        # B-852 round 11: pads *tools* to EXACTLY `target_len` bytes (not just a fixed
+        # `pad` count) -- round 11's drain sweep B sorts hungry candidates by NEXT ROW
+        # LENGTH ascending, so a poisoned row even a few bytes longer than its benign
+        # siblings is no longer structurally equivalent to them: it would sort LAST and
+        # get served (or dropped) differently than a same-size row would, exercising a
+        # different code path than this test's own name describes ("structurally
+        # miss" -- the equal-share rounds making zero progress regardless of order,
+        # not sweep B's size-based ordering). Padding every row to the SAME length
+        # keeps this test about the equal-share-rounds' structural miss, not about
+        # sweep B's (correct, and separately tested) size-ordering behavior.
+        ev = _compiled(tools)
+        ev["data"]["systemPrompt"] = ""
+        base_len = len(json.dumps(ev))
+        pad = max(0, target_len - base_len)
+        ev["data"]["systemPrompt"] = "s" * pad
+        assert len(json.dumps(ev)) == target_len, (len(json.dumps(ev)), target_len)
+        return ev
+
     poisoned = [{
         "name": "weather", "description": "bad <!-- hidden -->",
         "parameters": {"type": "object", "properties": {}},
@@ -2422,14 +2441,15 @@ def test_drain_phase_reaches_a_poisoned_database_two_equal_share_rounds_structur
     }]
 
     K = 10
-    row_size = 0
+    poisoned_event = _padded(poisoned, 900)
+    row_size = len(json.dumps(poisoned_event))
     for i in range(K):
-        tools = poisoned if i == 0 else benign
-        event = _padded(tools, 900)
-        # The poisoned/benign descriptions differ slightly in length -- `row_size`
-        # tracks the LARGEST of the two so the budget below is sized against the
-        # worst case (an even share must fail to admit EITHER shape).
-        row_size = max(row_size, len(json.dumps(event)))
+        # Every row -- poisoned and benign alike -- is padded to the EXACT SAME
+        # `row_size` (see `_padded_to`'s own comment above): round 11's drain sweep B
+        # sorts hungry candidates by next-row length, so a size difference between the
+        # poisoned and benign rows would make sweep B's ordering (not the equal-share
+        # rounds' structural miss this test targets) decide the outcome.
+        event = poisoned_event if i == 0 else _padded_to(benign, row_size)
         _write_agent_sqlite_db(tmp_path, f"b_extra{i:02d}", [(f"es{i}", 0, event)])
 
     # `budget // K` is far below `row_size` (equal-share is structurally 0 for every

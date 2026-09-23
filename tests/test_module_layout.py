@@ -61,7 +61,7 @@ _EXEMPT = {
     # (`tests/test_f187_trajectory_sqlite_corroborator.py`) pinning exact source-level
     # behavior (SQL executed, table names) that a split would need to re-verify
     # byte-for-byte, the same discipline I-022-R2 used for checks.py.
-    "trajectorystore.py": "~1,918 lines — SQLite-trajectory-container corroboration "
+    "trajectorystore.py": "~1,970 lines — SQLite-trajectory-container corroboration "
                           "(corroborate()) plus the B-811/B-852 event_json content "
                           "readers (read_compiled_tool_descriptions() and its streaming "
                           "core). Over budget by 718 lines; B-852 round 7 (2026-09-23) "
@@ -86,8 +86,17 @@ _EXEMPT = {
                           "equal share of what is actually left, recomputed every pass; "
                           "removed the now-dead _SQLITE_DRAIN_TURN_BUDGET_DIVISOR "
                           "constant and rewrote the affected docstring/comments to state "
-                          "the narrower, corrected guarantee, +37 lines net. Split "
-                          "candidate named above; tracked debt, not a design statement.",
+                          "the narrower, corrected guarantee, +37 lines net. Round 10 was "
+                          "then REJECTED by review: its unconditional 1 MiB per-turn "
+                          "floor still let a single decoy swallow an entire thin drain "
+                          "pool in one turn. Round 11 (2026-09-23) replaced the drain's "
+                          "single sweep-per-pass with two sweeps (equal-share, then "
+                          "smallest-row-first) plus a `blocked_len`/`next_len` tracking "
+                          "structure so a candidate's next row length is known without "
+                          "re-opening it, and rewrote the docstring/comments again to "
+                          "state the new guarantees and the honest residual, +52 lines "
+                          "net. Split candidate named above; tracked debt, not a design "
+                          "statement.",
     # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
     # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
     # into self_test_corroboration()/render_self_test_corroboration()/
