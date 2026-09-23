@@ -80,7 +80,7 @@ def _add_agent_db(home: Path, agent: str, *, trajectory_rows=(), include_auth=Tr
     real event -- B-811's ``read_compiled_tool_descriptions()`` tests need this to
     exercise real content, not just presence -- or ``(session_id, seq, event_dict,
     created_at)`` (B-852) to control this row's own ``created_at`` explicitly, for the
-    ``ORDER BY created_at DESC`` reader tests. Defaults to ``0`` for every row, same as
+    ``ORDER BY rowid DESC`` reader tests. Defaults to ``0`` for every row, same as
     before this fourth element existed.
     """
     agent_dir = home / "agents" / agent / "agent"
@@ -352,9 +352,16 @@ def test_the_query_names_only_the_trajectory_table_and_binds_its_limit():
     assert _SELECT_TRAJECTORY_EVENT_JSON == (
         # B-852: newest rows first, so a hit LIMIT reads the most recent sessions
         # rather than whichever rows the table's own storage order happened to hold.
+        # `ORDER BY rowid DESC`, not `created_at` -- two independent adversarial
+        # reviews found ordering by `created_at` (an un-indexed column sharing a row
+        # with up to 256 KB of `event_json`) forces SQLite to materialize and sort
+        # every row's full payload before returning the first one, turning the
+        # bounded streaming read unbounded on a large database. `rowid` is this
+        # table's own b-tree key, so ordering by it is a plain reverse index scan --
+        # no sort -- and does not depend on a `created_at` column existing at all.
         "SELECT event_json FROM trajectory_runtime_events "
         "WHERE length(CAST(event_json AS BLOB)) <= ? "
-        "ORDER BY created_at DESC LIMIT ?"
+        "ORDER BY rowid DESC LIMIT ?"
     )
     assert _SELECT_TRAJECTORY_ROWS_EXCLUDED_COUNT == (
         "SELECT count(*) FROM trajectory_runtime_events "
@@ -1140,9 +1147,14 @@ def test_read_sqlite_event_json_reads_newest_row_first_when_capped():
     its own storage happened to hold them -- in practice insertion order, i.e. the
     OLDEST rows first, for a plain sequential set of INSERTs like this fixture builds.
     With `max_rows=1` forcing the cap, the single value returned must be the row with
-    the LARGEST `created_at` ("new"), never the smallest ("old") -- this fails exactly
-    the way it would have before the `ORDER BY created_at DESC` fix, which returned
-    "old" here (the first-inserted row).
+    the LARGEST `rowid`/`created_at` ("new", inserted second), never the smallest
+    ("old") -- this fails exactly the way it would have before the `ORDER BY rowid
+    DESC` fix, which returned "old" here (the first-inserted row). (A first version of
+    this fix used `ORDER BY created_at DESC` instead of `rowid`; two independent
+    adversarial reviews found that regresses performance/correctness on a large
+    database -- see `_SELECT_TRAJECTORY_EVENT_JSON`'s own comment -- so it was
+    replaced with `rowid`, which this fixture's insertion order (old first, new
+    second) still exercises identically.)
     """
     from clawseccheck.trajectorystore import _read_sqlite_event_json
 
@@ -1177,6 +1189,70 @@ def test_read_sqlite_event_json_reads_newest_row_first_when_capped():
     assert capped is True
     assert len(values) == 1
     assert json.loads(values[0])["marker"] == "new"
+
+
+# ---------------------------------------------------------------------------
+# B-852 follow-up — `ORDER BY created_at DESC` (the first version of the item-1 fix
+# above) turned out to regress performance/correctness on a large database: two
+# independent adversarial (C-135) reviews measured a single 500 MB per-agent database
+# going from 0.16s to 2.6-3.0s, and 8 such databases blowing through the check's 15s
+# wall-clock scan budget entirely (aborted as UNKNOWN -- meaning a poisoned newest
+# record was never reported, the opposite of the intended fix). The root cause:
+# `created_at` has no index, and shares a row with up to 256 KB of `event_json`, so
+# SQLite must materialize and sort every row's full payload before it can return the
+# first one under `LIMIT`. `ORDER BY rowid DESC` replaces it -- `rowid` is the table's
+# own b-tree key, so this is a plain reverse index scan, no sort, no materialization.
+# ---------------------------------------------------------------------------
+
+
+def test_event_json_query_plan_has_no_sort_step():
+    """A direct, deterministic proxy for the measured 500 MB/2.6-3.0s regression,
+    without needing an actual large database: `EXPLAIN QUERY PLAN` on
+    `_SELECT_TRAJECTORY_EVENT_JSON` must show a plain scan and NOTHING that
+    materializes/sorts rows (SQLite reports that as `USE TEMP B-TREE FOR ORDER BY`).
+    Run the SAME query with `ORDER BY created_at DESC` substituted back in (the
+    regressed, first-attempt fix) to prove this is a real, checkable difference in
+    THIS SQLite build, not a query the optimizer would have avoided sorting for
+    anyway -- if that substitution ever stopped needing a sort too, this assertion
+    would need re-examining, not just the `rowid` one.
+    """
+    from clawseccheck.trajectorystore import _MAX_COMPILED_LINE_LEN, _SELECT_TRAJECTORY_EVENT_JSON
+
+    assert "ORDER BY rowid DESC" in _SELECT_TRAJECTORY_EVENT_JSON
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            "CREATE TABLE trajectory_runtime_events (session_id TEXT NOT NULL, "
+            "seq INTEGER NOT NULL, run_id TEXT, event_json TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL, PRIMARY KEY (session_id, seq))"
+        )
+        for i in range(5):
+            conn.execute(
+                "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+                (f"s{i}", 0, "r", json.dumps({"i": i}), i),
+            )
+        conn.commit()
+
+        rowid_plan = conn.execute(
+            f"EXPLAIN QUERY PLAN {_SELECT_TRAJECTORY_EVENT_JSON}",
+            (_MAX_COMPILED_LINE_LEN, 10),
+        ).fetchall()
+        rowid_plan_text = " ".join(row[-1] for row in rowid_plan)
+        assert "B-TREE" not in rowid_plan_text.upper(), rowid_plan
+
+        regressed_query = _SELECT_TRAJECTORY_EVENT_JSON.replace(
+            "ORDER BY rowid DESC", "ORDER BY created_at DESC"
+        )
+        assert regressed_query != _SELECT_TRAJECTORY_EVENT_JSON  # substitution took
+        created_at_plan = conn.execute(
+            f"EXPLAIN QUERY PLAN {regressed_query}",
+            (_MAX_COMPILED_LINE_LEN, 10),
+        ).fetchall()
+        created_at_plan_text = " ".join(row[-1] for row in created_at_plan)
+        assert "USE TEMP B-TREE FOR ORDER BY" in created_at_plan_text, created_at_plan
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

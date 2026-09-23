@@ -8689,13 +8689,13 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
         ):
             sqlite_incomplete = (
                 # B-852: honest about WHICH records a hit cap actually drops, now that
-                # the reader orders newest-first (ORDER BY created_at DESC) -- a vague
+                # the reader orders newest-first (ORDER BY rowid DESC) -- a vague
                 # "some scan was incomplete" no longer distinguishes "the oldest
                 # records beyond the cap" (recency-dependent) from "an unrelated
                 # per-record reject" (not recency-dependent).
                 " Note: SQLite scan bounds meant some records were not examined there "
                 "either -- this reader reads the newest rows first per database "
-                "(ORDER BY created_at DESC), so when the per-database row/byte cap is "
+                "(ORDER BY rowid DESC), so when the per-database row/byte cap is "
                 "what was hit, it is the OLDEST records beyond that cap that were "
                 "skipped, not the newest; a non-text row, an oversized single record, "
                 "an unrecognised schema, or an unrecognised schema version can also "
@@ -8811,7 +8811,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             if sqlite_incomplete_flag:
                 parts.append(
                     "the SQLite side (this reader reads the newest rows first per "
-                    "database -- ORDER BY created_at DESC -- so a hit row/byte cap "
+                    "database -- ORDER BY rowid DESC -- so a hit row/byte cap "
                     "skips the OLDEST records beyond it; a non-text row or an "
                     "unrecognised schema/version can also drop a record independent "
                     "of its age)"
@@ -8819,6 +8819,33 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             incomplete = (
                 " Note: scan bounds meant some records were not examined on "
                 f"{' and '.join(parts)}, so this verdict is incomplete."
+            )
+    elif mixed_consulted and sqlite_meta and sqlite_meta.get("dbs_unreadable", 0):
+        # B-852: a mixed host (live JSONL sidecar PLUS per-agent SQLite database
+        # file(s)) where every found SQLite database was unreadable/corrupt
+        # (`dbs_found > dbs_read`, i.e. `dbs_unreadable` is non-empty and `dbs_read` is
+        # 0, so the first branch above did not fire). Before this fix that silently
+        # fell through to the plain JSONL-only `scope` text in the final `else` below,
+        # with no mention that SQLite was found and consulted at all -- the same
+        # disclosure gap the `not tool_defs` / UNKNOWN leg above already closed
+        # (`"...was also checked but was not readable"`); PASS/WARN/FAIL need the same
+        # honesty, not just UNKNOWN.
+        scope = (
+            f"{len(tool_defs)} distinct tool definition(s) recovered from "
+            f"{meta.get('events', 0)} 'context.compiled' record(s) across "
+            f"{meta.get('files_scanned', 0)} JSONL session log(s); the per-agent "
+            f"SQLite trajectory store also present on this host "
+            f"({sqlite_meta['dbs_unreadable']} database(s)) was also checked but was "
+            "not readable"
+        )
+        incomplete = ""
+        if (meta.get("truncated") or meta.get("files_capped")
+                or meta.get("unknown_version") or meta.get("unknown_schema")):
+            incomplete = (
+                " Note: scan bounds (per-file byte cap, per-file count cap, an "
+                "oversized line, an unrecognised schema, or an unrecognised schema "
+                "version) meant some records were not examined, so this verdict is "
+                "incomplete."
             )
     elif sqlite_meta and sqlite_meta.get("dbs_read", 0):
         scope = (
@@ -8833,7 +8860,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 # B-852: same recency-honest wording as the UNKNOWN branch above.
                 " Note: SQLite scan bounds meant some records were not examined -- "
                 "this reader reads the newest rows first per database (ORDER BY "
-                "created_at DESC), so when the per-database row/byte cap is what was "
+                "rowid DESC), so when the per-database row/byte cap is what was "
                 "hit, it is the OLDEST records beyond that cap that were skipped, not "
                 "the newest; a non-text row, an oversized single record, an "
                 "unrecognised schema, or an unrecognised schema version can also drop "

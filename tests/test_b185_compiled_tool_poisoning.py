@@ -89,7 +89,7 @@ def _write_agent_sqlite_db(home, agent, session_row_pairs, *, auth_secret: str |
     record built with ``_compiled()``) for Option A's content-reading tests, or
     ``(session_id, seq, event_dict, created_at)`` (B-852) to control this row's own
     ``created_at`` explicitly — e.g. to build an OLDEST-vs-NEWEST fixture for the
-    ``ORDER BY created_at DESC`` reader test. Defaults to ``0`` for every row, same as
+    ``ORDER BY rowid DESC`` reader test. Defaults to ``0`` for every row, same as
     before this fourth element existed.
 
     ``auth_secret``, when given, ALSO creates `auth_profile_store` in the SAME db file
@@ -502,6 +502,32 @@ def test_sqlite_side_of_a_mixed_host_catches_a_poisoned_description_jsonl_missed
     f = _run(tmp_path)
     assert f.status == "FAIL", f.detail
     assert any("hidden HTML/markdown comment" in e for e in f.evidence), f.evidence
+
+
+def test_mixed_host_with_unreadable_sqlite_discloses_it_in_pass_scope_text(tmp_path):
+    """B-852 follow-up: on a mixed host (live JSONL sidecar PLUS a per-agent SQLite
+    database file that exists but is corrupt/unreadable -- `dbs_found > dbs_read`,
+    i.e. `sqlite_meta["dbs_unreadable"]` non-empty), the PASS/WARN/FAIL scope text
+    used to silently fall through to plain JSONL-only wording, with no mention that a
+    SQLite database was found and consulted at all. Only the `not tool_defs` UNKNOWN
+    leg disclosed this ("...was also checked but was not readable"); PASS/WARN/FAIL
+    need the same honesty, since `tool_defs` is non-empty here (JSONL alone supplied
+    it) and this verdict is a real PASS, not UNKNOWN."""
+    jsonl_tool = [{
+        "name": "from_jsonl", "description": "Ordinary benign JSONL-sourced tool.",
+        "parameters": {"type": "object", "properties": {}},
+    }]
+    _write_trajectory(tmp_path, [_compiled(jsonl_tool)])
+    agent_dir = tmp_path / "agents" / "main" / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "openclaw-agent.sqlite").write_bytes(b"not a sqlite file at all")
+
+    f = _run(tmp_path)
+    assert f.status == "PASS", f.detail
+    assert "1 distinct tool definition(s)" in f.detail
+    assert "JSONL session log(s)" in f.detail
+    assert "SQLite" in f.detail
+    assert "also checked but was not readable" in f.detail, f.detail
 
 
 def test_mixed_host_with_no_sqlite_db_never_touches_sqlite(tmp_path):
@@ -2006,8 +2032,9 @@ def test_exhaustive_widens_the_sqlite_reader_caps_not_just_the_jsonl_ones(tmp_pa
         "name": "f", "description": "bad <!-- hidden -->",
         "parameters": {"type": "object", "properties": {}},
     }]
-    # "old" (created_at=1) is the row the tiny default cap (1 row) must NOT reach,
-    # since ORDER BY created_at DESC always keeps "new" (created_at=2) first.
+    # "old" (created_at=1, inserted first -- so also the lower rowid) is the row the
+    # tiny default cap (1 row) must NOT reach, since ORDER BY rowid DESC always keeps
+    # "new" (created_at=2, inserted second -- the higher rowid) first.
     _write_agent_sqlite_db(tmp_path, "main", [
         ("old", 0, _compiled(poisoned), 1),
         ("new", 0, _compiled(BENIGN_TOOLS), 2),
@@ -2026,12 +2053,14 @@ def test_sqlite_reader_reads_newest_rows_first_when_the_cap_is_hit(tmp_path, mon
     """B-852 item 1, at the check/plumbing level (the unit-level equivalent lives in
     tests/test_f187_trajectory_sqlite_corroborator.py against `_read_sqlite_event_json`
     directly): with the per-database row cap forced to 1, only the row with the
-    LARGEST `created_at` may ever be read -- an old poisoned row must be MISSED (not
-    the newest benign one), proving the reader prioritizes recency, not insertion
-    order. Reverting the `ORDER BY created_at DESC` fix makes this flaky-to-failing
-    depending on SQLite's incidental storage order, which for a plain sequential
-    insert is oldest-first -- i.e. it would consistently regress to reading "old"
-    instead of "new" and this test would catch that as a status flip.
+    LARGEST `rowid` (== the largest `created_at` in this fixture, since rows are
+    inserted in chronological order) may ever be read -- an old poisoned row must be
+    MISSED (not the newest benign one), proving the reader prioritizes recency, not
+    insertion order. Reverting the `ORDER BY rowid DESC` fix (to no `ORDER BY` at all,
+    the pre-B-852 state) makes this flaky-to-failing depending on SQLite's incidental
+    storage order, which for a plain sequential insert is oldest-first -- i.e. it would
+    consistently regress to reading "old" instead of "new" and this test would catch
+    that as a status flip.
     """
     import dataclasses
 

@@ -217,23 +217,31 @@ _SELECT_TRAJECTORY_ROWS = (
 # return the true byte count, embedded NULs included. The bound value is
 # _MAX_COMPILED_LINE_LEN, matching the JSONL sibling's own per-record cap.
 #
-# `ORDER BY created_at DESC` (B-852): this query has always carried a `LIMIT`, and
-# without an ORDER BY SQLite is free to return rows in whatever order its own storage
-# happens to hold them -- in practice the table's natural (rowid/insertion) order, i.e.
-# OLDEST first. On a store past the row cap (`_MAX_SQLITE_CONTENT_ROWS_PER_DB`, 3000
-# rows) or the byte cap (`_MAX_SQLITE_CONTENT_BYTES_PER_DB`, 8 MB) this silently read
-# the OLDEST 3000 rows / oldest bytes' worth of a large agent database and never reached
-# the newest sessions at all -- exactly where a real poisoning attempt would land, since
-# it is the most recent MCP handshake, not the oldest one, that reflects what a server is
-# serving TODAY. `created_at` (INTEGER, populated on every real insert -- see this
-# module's docstring's container list) is this table's own timestamp column, the same
-# one `collector.py`'s sibling readers already order by (`ORDER BY created_at DESC LIMIT
-# ?`, e.g. `task_runs`/`subagent_runs`) -- reused here for the same reason: it is the
-# one column this schema actually offers that means "when this row was written".
+# `ORDER BY rowid DESC` (B-852, revised by a same-task follow-up fix): this query has
+# always carried a `LIMIT`; with no ORDER BY at all (the pre-B-852 original), SQLite
+# returns rows in whatever order storage happens to hold them -- in practice OLDEST
+# first -- so a hit row/byte cap silently missed the newest sessions, exactly where a
+# real poisoning attempt would land.
+#
+# The FIRST fix used `ORDER BY created_at DESC` (mirroring `collector.py`'s
+# `task_runs`/`subagent_runs`). Two independent adversarial (C-135) reviews found that
+# REGRESSED the large-database case it meant to help: `created_at` is un-indexed and
+# shares a row with up to 256 KB of `event_json`, so SQLite must materialize and sort
+# EVERY row before returning the first one under `LIMIT` -- unbounding the previous
+# streaming read. Measured: a single 500 MB per-agent database went from 0.16s to
+# 2.6-3.0s; 8 such databases blew a 15s scan budget (16.8s, aborted UNKNOWN -- the
+# poisoned newest record this fix exists to catch went unreported). A related defect: a
+# table lacking `created_at` raised and was wrongly counted `unreadable`.
+#
+# `rowid` is this table's own b-tree key (a normal, non-`WITHOUT ROWID` table, already
+# enforced by `_table_kind`'s `PRAGMA table_xinfo` check above), so `ORDER BY rowid
+# DESC` needs no sort -- a plain reverse index scan, streaming like the original -- and
+# rowid increases monotonically with insertion on this append-only table, so it orders
+# newest-first the same way `created_at DESC` did, without depending on that column.
 _SELECT_TRAJECTORY_EVENT_JSON = (
     "SELECT event_json FROM trajectory_runtime_events "
     "WHERE length(CAST(event_json AS BLOB)) <= ? "
-    "ORDER BY created_at DESC LIMIT ?"
+    "ORDER BY rowid DESC LIMIT ?"
 )
 
 # B-811 (round 4, following round 3's adversarial review, 2026-09-15): the inverse
@@ -945,8 +953,8 @@ def _read_sqlite_event_json(
        oversized (or deliberately padded-past-the-cap) poisoned record evade B185
        while this function reports a confident, complete scan -- found silently
        missing in round 3.
-    5. **B-852**: :data:`_SELECT_TRAJECTORY_EVENT_JSON`'s own ``ORDER BY created_at
-       DESC`` reads the NEWEST rows first. Before this fix the query carried the same
+    5. **B-852**: :data:`_SELECT_TRAJECTORY_EVENT_JSON`'s own ``ORDER BY rowid DESC``
+       reads the NEWEST rows first. Before this fix the query carried the same
        ``LIMIT`` with no ``ORDER BY`` at all, so on a store past the row/byte cap
        SQLite returned rows in whatever order its own storage happened to hold them --
        in practice insertion order, i.e. the OLDEST rows -- meaning a real poisoning
@@ -954,7 +962,16 @@ def _read_sqlite_event_json(
        never read once the store exceeded either cap. Newest-first means a capped read
        now always covers the MOST RECENT sessions, and anything dropped by the cap is
        the tail of OLDER history, not the sessions most likely to reflect what an MCP
-       server serves today.
+       server serves today. ``rowid`` (not ``created_at``) is the ordering key: a first
+       version of this fix used ``ORDER BY created_at DESC``, which two independent
+       adversarial reviews found forces SQLite to materialize and sort every row's full
+       (up to 256 KB) ``event_json`` payload before returning the first one, since there
+       is no index on ``created_at`` -- turning a bounded streaming read into an
+       unbounded one on a large database (measured: a single 500 MB per-agent database
+       went from 0.16s to 2.6-3.0s; 8 such databases blew a 15s scan budget). ``rowid``
+       is the table's own b-tree key, so ordering by it is a plain reverse index scan --
+       no sort, no materialization -- and does not depend on a ``created_at`` column
+       existing at all.
 
     ``non_text_rows`` counts rows where a column declared TEXT nonetheless stored a
     BLOB -- the one SQLite dynamic-typing shape this reader can actually observe here,
