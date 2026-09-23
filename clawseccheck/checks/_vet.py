@@ -65,6 +65,7 @@ from ._shared import (
     _MANIFEST_HEADER_RE,
     _SENTENCE_BREAK_RE,
     _custom,
+    _finding,
     _is_own_source,
     _is_public_ip,
     _mcp_servers,
@@ -6202,6 +6203,81 @@ def check_installed_skills(ctx: Context) -> Finding:
         # Still evidence-only: `status` stays PASS and is never revised.
         [n for key, bucket in _signal_buckets.items() if key.startswith("_")
          for n in bucket] + [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
+    )
+
+
+def check_installed_skill_content_coverage(ctx: Context) -> Finding:
+    """B395 (re-IDed from B383 during the integration/4.3.0 port — B383 was already
+    taken on this base): per-skill content-read coverage, scored INDEPENDENTLY of
+    whatever `check_installed_skills` (B13) itself concludes for this run.
+
+    `check_installed_skills` iterates every installed skill and emits exactly ONE
+    Finding for the whole run — its cascade `return`s as soon as any single skill wins
+    a crit/high verdict (see that function's own `if crit:`/`if high:` branches, above).
+    When that happens, a DIFFERENT skill's own unreadable file
+    (`ctx.skill_coverage_gaps`, populated per-subject by collector's `_note_skill_gap`)
+    never gets its own UNKNOWN Finding that run — it only rides along as evidence text
+    on the FAILing skill's Finding (the `_skill_read_gaps` bucket B13 folds into
+    `fx.evidence`, never into `status`/`engine_degraded`). `scoring._degraded_signal`
+    gates on `f.status == UNKNOWN and f.engine_degraded` (deliberately, per that
+    function's own docstring — see also `Finding.engine_degraded`, catalog.py), so a
+    HIGH/CRITICAL FAIL on skill A silently absorbed skill B's coverage gap out of
+    `scoring.DEGRADED_CHECK_CAP` — the run's score never reflected that part of the
+    installed-skill surface was never actually read.
+
+    This check reads the exact same `ctx.skill_coverage_gaps` collector state B13
+    already reads (no second parsing path), but reports it as its OWN PASS/UNKNOWN,
+    computed independently of which skill — if any — wins B13's cascade this run. It
+    deliberately never routes through B13's own id: `Finding.engine_degraded`'s
+    docstring says the flag is meaningless outside `status == UNKNOWN`, so a FAIL
+    finding (B13's own crit/high branches) must never carry it — the fix is a second,
+    independently-scored check id (route (a) from the task's own analysis), not a
+    change to B13's FAIL branches or to `_degraded_signal`'s gate semantics.
+
+    PASS when at least one skill was actually scanned and none has a recorded coverage
+    gap this run (identical subject to B13's own "clean" case — every installed skill's
+    content was actually readable). UNKNOWN + `engine_degraded=True` when a gap was
+    recorded, naming every affected skill: an engine-side gap (content present but
+    unreadable). UNKNOWN with `engine_degraded` left at its default `False` when no
+    skill was found to scan at all — a plain "nothing to check" absence, matching
+    B13's own "No installed third-party skills found" branch (B-661: a PASS here would
+    otherwise assert "readable" about a population of zero, which is the same fail-open
+    shape B-661 catalogued — a config-derived fact asserted about a subject that was
+    never actually read).
+    """
+    gaps: dict = getattr(ctx, "skill_coverage_gaps", None) or {}
+    if not ctx.installed_skills:
+        return _finding(
+            "B395",
+            UNKNOWN,
+            "No installed third-party skills found to inspect — there is no "
+            "installed-skill content-read coverage to report.",
+            "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).",
+        )
+    if not gaps:
+        return _finding(
+            "B395",
+            PASS,
+            "Every installed skill's content was readable this run — no per-skill "
+            "coverage gap recorded.",
+            "Keep installing only skills whose source you've reviewed — trust no one.",
+        )
+    names = sorted(gaps)
+    entries = [f"{name}: {entry}" for name in names for entry in gaps[name]]
+    shown = ", ".join(names[:6])
+    extra = f" (+{len(names) - 6} more)" if len(names) > 6 else ""
+    return _finding(
+        "B395",
+        UNKNOWN,
+        f"{len(entries)} content-read gap(s) across {len(names)} installed skill "
+        f"director{'y' if len(names) == 1 else 'ies'} could not be assessed this run "
+        "— unreadable content, independent of whatever check_installed_skills (B13) "
+        f"itself concluded for OTHER skills: {shown}{extra}. This is not the same as "
+        "clean content.",
+        "Make each flagged path a readable regular file and re-run; an installed "
+        "skill's unreadable content is not evidence that it is safe.",
+        entries,
+        engine_degraded=True,
     )
 
 

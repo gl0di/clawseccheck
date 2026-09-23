@@ -3626,6 +3626,33 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="update",
     ),
+    # B395 (ported from an earlier feature branch that used B383 — taken on this base
+    # by an unrelated check at line ~671, browser.extensionRelay.allowLegacyAuth — so
+    # re-IDed during the integration/4.3.0 port; B392/B394 are reserved by other
+    # in-flight work): a per-skill content-read coverage gap, scored
+    # INDEPENDENTLY of whatever check_installed_skills (B13) itself concludes for the
+    # run. B13 emits exactly ONE Finding for the whole run -- its cascade `return`s as
+    # soon as any skill wins a crit/high verdict, so a DIFFERENT skill's own unreadable
+    # file (`ctx.skill_coverage_gaps`, collector.py) never reaches its own UNKNOWN/
+    # engine_degraded Finding that run: it only rides along as evidence text on
+    # whichever OTHER skill's Finding won. `scoring._degraded_signal` gates on
+    # `f.status == UNKNOWN and f.engine_degraded`, so a FAILing skill silently ate a
+    # sibling skill's coverage gap out of the score. This check reads the exact same
+    # `ctx.skill_coverage_gaps` collector state B13 already reads, but reports it as
+    # its own PASS/UNKNOWN independent of which skill (if any) wins B13's cascade --
+    # never `engine_degraded=True` on a FAIL, which `Finding.engine_degraded`'s own
+    # docstring says is meaningless outside `status == UNKNOWN` (the route B13's own
+    # unreadable-file branch already takes, see check_installed_skills). HIGH/hardening/
+    # scored, mirroring B13's own severity and surface for the identical subject.
+    CheckMeta(
+        "B395",
+        "Installed-skill content-read coverage (independent of B13's own verdict)",
+        HIGH,
+        "hardening",
+        "Supply Chain / ClawHavoc",
+        confidence="HIGH",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

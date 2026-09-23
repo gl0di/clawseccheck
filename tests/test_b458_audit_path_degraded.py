@@ -260,14 +260,32 @@ def test_any_unreadable_member_degrades_the_run(tmp_path, target):
 def test_a_confident_fail_still_outranks_the_coverage_gap(tmp_path):
     """The limit of this fix, stated so it is not mistaken for a regression.
 
-    ``check_installed_skills`` ranks a CRITICAL/HIGH FAIL above every UNKNOWN branch, so
-    a skill that is BOTH caught red-handed and partly unreadable reports the FAIL and is
-    NOT counted as degraded -- the check reached a verdict, and it is the worse one.
-    Measured: manifest blinded, exfiltrating ``run.sh`` still readable -> B13 FAIL, exit
-    1, ``degraded_count == 0``. Turning this into a degraded FAIL would trade a red gate
-    for a capped score, which is strictly weaker.
+    ``check_installed_skills`` (B13) ranks a CRITICAL/HIGH FAIL above every UNKNOWN
+    branch, so a skill that is BOTH caught red-handed and partly unreadable still
+    reports the FAIL under B13's OWN id -- the check reached a verdict, and it is the
+    worse one. B13's status/severity/exit-code are exactly what this test still pins.
+
+    CLAWSECCHECK-B-649 (route (a)): ``degraded_count`` itself is no longer pinned at 0
+    here. B395 (``check_installed_skill_content_coverage``) reads the identical
+    ``ctx.skill_coverage_gaps`` collector state B13 reads, but reports it as its OWN,
+    independently-scored Finding -- deliberately "independent of what B13 itself
+    concluded for OTHER skills" is not narrowed to "other skills only": the manifest
+    gap on THIS skill is exactly as real whether or not this same skill also FAILed via
+    a different file. Measured, this costs nothing on the grade in this fixture: B13's
+    own CRITICAL FAIL already caps the score to ``scoring.FAIL_CAPS[CRITICAL]`` (49),
+    identical to ``scoring.DEGRADED_CHECK_CAP`` (also 49), so ``degraded_capped`` stays
+    False and the score is unchanged -- only the disclosure (``degraded_count``) is
+    more honest than before. Turning B13's OWN FAIL into a degraded FAIL would still be
+    the wrong fix (trading a red gate for a capped score); that is not what happened
+    here -- B13's Finding is untouched, and a SECOND check id now separately says the
+    manifest was never read.
     """
     code, out = _audit(tmp_path, _home(tmp_path), unreadable="SKILL.md")
     assert _b13(out)["status"] == "FAIL"
     assert code == 1
-    assert out["degraded_count"] == 0
+    assert out["degraded_count"] >= 1
+    assert out["degraded_capped"] is False, (
+        "B13's own CRITICAL FAIL cap must already be at least as tight as "
+        "DEGRADED_CHECK_CAP in this fixture, so B395's independent disclosure must not "
+        "move the score here"
+    )

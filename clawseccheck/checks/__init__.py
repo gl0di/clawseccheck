@@ -799,6 +799,7 @@ from ._vet import (
     _skill_own_host,
     _skill_tool_overgrant,
     _url_matches_own_host,
+    check_installed_skill_content_coverage,
     check_installed_skills,
     detect_vet_type,
     detect_vet_type_with_reason,
@@ -1382,6 +1383,7 @@ CHECKS = [
     check_tls,
     check_local_first,
     check_installed_skills,
+    check_installed_skill_content_coverage,  # B395 — per-skill coverage gap, scored independently of B13
     check_egress,
     check_egress_inventory,
     check_mcp,
