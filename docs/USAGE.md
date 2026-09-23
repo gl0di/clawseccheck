@@ -1922,21 +1922,37 @@ python3 audit.py --log audit.log            # also write log to a local file
   A version of this tool older than 4.0 silently omits such rows from its own `--trend` rather
   than showing them; the rows themselves are intact and re-appear on a current build.
 
+  **The arrow on a GRADED row is itself a claim, not just decoration on its score and
+  letter — a claim that the run being compared against is the same subject.** It renders
+  **blank** — no glyph at all, never the flat one — in two cases: the first graded row in the
+  store, which has no predecessor to claim anything against; and any later graded row whose
+  predecessor does not pass the same comparability gate the pass-rate footnote below already
+  used — a different agent `home`, a different build of this tool, a different set of checks,
+  a `test`/`dev`-tagged predecessor, or a predecessor recorded before this gate existed at all
+  (it carries no subject info to compare, which counts as **not** comparable rather than as
+  agreement — the identical "presence before equality" rule the footnote applies). A store
+  holding only such legacy rows renders every arrow blank; a line under the table names the
+  count once and says plainly that this self-heals — the arrow returns on its own, with no
+  rewrite of what is already on disk, as soon as two comparable graded runs land back to back.
+  No new symbol was added for this: the existing arrow set (`▲▼·` / `^v=`) is unchanged, and
+  the fix withholds the character rather than inventing a different one.
+
   The arrow answers "did the **letter** move", and an open FAIL pins the score at a floor —
-  so it can read flat across a run that got materially worse. Each graded row therefore also
-  records the **uncapped pass-rate**, the check set behind it and the build that produced it,
-  and any row where that figure FELL is marked `(pass-rate fell 92 -> 74)`, whether or not the
-  letter moved with it, with a line under the table saying what it means. Which line depends on
-  the score's own direction: a run that kept or raised its score is the case the mark exists
-  for, and is explained as a score pinned at a cap by an open FAIL; a run whose score fell too
-  is counted separately and simply told that both measures fell, because the pinned-score
-  wording would contradict the down arrow on that row's own line. Only a fall is
-  ever stated: the figure is a rounded percentage, so a small real regression can leave it
-  standing still, and "pass-rate unchanged" would be the same false reassurance one step down.
-  When two rows cannot be lined up — one of them predates this field, or they were recorded for
-  a different agent home, under a different version of this tool, or over a different set of
-  checks — the comparison is skipped and counted, never guessed. Rows recorded before this
-  existed simply say so once and stop as soon as two comparable runs are on file.
+  so it can read flat across a run that got materially worse, on a pair the arrow itself
+  already considers comparable. Each graded row therefore also records the **uncapped
+  pass-rate**, the check set behind it and the build that produced it, and any row where that
+  figure FELL is marked `(pass-rate fell 92 -> 74)`, whether or not the letter moved with it,
+  with a line under the table saying what it means. Which line depends on the score's own
+  direction: a run that kept or raised its score is the case the mark exists for, and is
+  explained as a score pinned at a cap by an open FAIL; a run whose score fell too is counted
+  separately and simply told that both measures fell, because the pinned-score wording would
+  contradict the down arrow on that row's own line. Only a fall is ever stated: the figure is
+  a rounded percentage, so a small real regression can leave it standing still, and "pass-rate
+  unchanged" would be the same false reassurance one step down. This footnote uses the
+  identical comparability gate the arrow itself now does, so a pair the arrow already left
+  blank is, separately, also counted here as "not compared" rather than guessed at. Rows
+  recorded before this existed simply say so once and stop as soon as two comparable runs are
+  on file.
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,
   no telemetry. A run with no score is never ranked on its own number: it names the layers still to
   close, then ranks your most recent *complete* check from local history instead, labelled with

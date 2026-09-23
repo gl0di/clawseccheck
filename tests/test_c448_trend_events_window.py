@@ -73,11 +73,19 @@ def test_a_history_at_or_under_the_window_gets_no_disclosure_line():
     assert len(shown_lines) == DEFAULT_TREND_WINDOW
 
 
+def _with_subject(row: dict) -> dict:
+    """B-695: `_row()`'s default home/raw_scope/raw_ver are None -- not comparable to
+    anything (see `test_pinned_and_compounded_fall_counts_are_not_narrowed_by_the_window`,
+    which already does this for the same reason). Tests that need a real arrow, not a
+    blank one, route their rows through this."""
+    return {**row, "home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"}
+
+
 def test_a_windowed_rows_arrow_still_compares_against_a_row_outside_the_window():
     """The arrow on the FIRST visible row must reflect the true previous graded row,
     even though that row itself is never printed."""
-    rows = [_row(i, score=10) for i in range(40)]  # rows 0..39, all score 10
-    rows[39] = _row(39, score=99)  # only the newest row differs
+    rows = [_with_subject(_row(i, score=10)) for i in range(40)]  # rows 0..39, all score 10
+    rows[39] = _with_subject(_row(39, score=99))  # only the newest row differs
     out = render_trend(rows, window=1)  # show only the single newest row
     line = next(ln for ln in out.splitlines() if ln.startswith("2026-"))
     assert "▲" in line, f"expected an up arrow comparing against the hidden prior row: {line}"
@@ -186,16 +194,23 @@ def test_events_all_reproduces_pre_c448_output_byte_for_byte_with_retention_mark
     assert out == _EVENTS_PRE_C448_GOLDEN
 
 
-# Captured the same way, from clawseccheck.history.render_trend on b0057c8^.
+# Captured the same way, from clawseccheck.history.render_trend on b0057c8^ -- with the
+# arrow column blanked by hand for B-695 (landed after C-448, not before it): `_row()`'s
+# shape carries no home/raw_scope/raw_ver, so none of these ten rows is comparable to its
+# predecessor any more, and the flat glyph the pre-C-448 code printed on every one of them
+# (score is 70 throughout) is exactly the claim B-695 stopped this renderer from making.
+# This golden is still about C-448 -- it pins that the WINDOW change left these lines
+# alone -- so it is kept in step with B-695 rather than read as contradicting it.
 _TREND_PRE_C448_ROW_LINES = [
-    f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}T10:00:{i % 60:02d}  C  70  ·  [audit]"
+    f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}T10:00:{i % 60:02d}  C  70    [audit]"
     for i in range(10)
 ]
 
 
 def test_trend_all_row_lines_match_pre_c448_output_byte_for_byte():
     """The per-row lines themselves are untouched by C-448 (only the trailing
-    lines.append() is gated on the window) — pin that against the real old output."""
+    lines.append() is gated on the window) — pin that against the real old output,
+    adjusted for B-695's later, separate and intentional change to the arrow column."""
     rows = [_row(i) for i in range(10)]
     out = render_trend(rows, window=None)
     row_lines = [ln for ln in out.splitlines() if ln.startswith("2026-")]
