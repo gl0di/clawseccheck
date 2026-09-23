@@ -7719,27 +7719,71 @@ def _attach_ring_coverage(fx: Finding, ctx: Context) -> None:
 _PLUGIN_MANIFEST = "openclaw.plugin.json"
 
 
+def _locate_plugin_root_or_reason(p: Path) -> "tuple[Path | None, str | None]":
+    """:func:`_locate_plugin_root`, plus WHY a resolution failure means "could not
+    tell" rather than "confidently not a plugin".
+
+    Returns ``(root, None)`` when a root was found, or when the answer is a genuine
+    "no plugin here" with nothing left unexamined. Returns ``(None, reason)`` when an
+    ``OSError`` cut the search short — e.g. a plugin root the scanning uid can list but
+    not search (EACCES resolving a child of *p*) — so *p*'s plugin-ness was never
+    actually determined.
+
+    B-921: ``Path.is_file()``/``is_dir()`` only ignore ENOENT/ENOTDIR/EBADF/ELOOP
+    internally (see ``pathlib._ignore_error``, and B-680's identical note on
+    ``Path.exists()`` a few lines up in this module) — EACCES is not in that set, so a
+    plugin root at mode 0000 made ``(p / _PLUGIN_MANIFEST).is_file()`` raise
+    ``PermissionError`` straight out of this function and both its reachable callers
+    (``checks/_mcp.py``'s ``vet_plugin()`` and its ``_npm_projects_plugin_ids()``
+    wrapper-dir sweep), with no dossier — the same crash shape B-899/B-902 closed for
+    the tree-sweep case. Confirmed live against the two Python versions this repo's CI
+    actually pins (3.9, 3.12): stat-ing *p* itself never raises (mode 0000 on *p* only
+    blocks searching INTO it — resolving *p* needs search permission on *p*'s PARENT,
+    not on *p*), but stat-ing anything inside *p* does. Every ``is_file()``/``is_dir()``
+    call in the resolution is guarded here, not just the one the repro hits: a caller
+    with a different unsearchable ancestor (e.g. the npm wrapper directory itself, one
+    level up from the plugin root under it) hits the identical failure shape one level
+    higher.
+
+    A caller that only wants the ``Path | None`` contract keeps using
+    :func:`_locate_plugin_root` below. ``vet_plugin`` — the one caller whose verdict is
+    scored — calls this directly instead: collapsing "permission denied" into the same
+    ``None`` as "genuinely absent" would classify an unreadable root under B-399's
+    weaker ``engine_degraded=False`` ("nothing was ever there to examine"), when it is
+    actually the worst-case "cannot rule out a CRITICAL" shape that flag exists to
+    catch — an attacker-controlled root made deliberately unreadable must not score
+    *more* leniently than one the engine never had to look past.
+    """
+    try:
+        if p.is_file() and p.name == _PLUGIN_MANIFEST:
+            return p.parent, None
+        if not p.is_dir():
+            return None, None
+        if (p / _PLUGIN_MANIFEST).is_file():
+            return p, None
+        nm = p / "node_modules"
+        if nm.is_dir():
+            hits = sorted(nm.glob("*/" + _PLUGIN_MANIFEST)) + sorted(
+                nm.glob("@*/*/" + _PLUGIN_MANIFEST)
+            )
+            if len(hits) == 1:
+                return hits[0].parent, None
+    except OSError as exc:
+        return None, (exc.strerror or str(exc))
+    return None, None
+
+
 def _locate_plugin_root(p: Path) -> Path | None:
     """Resolve the plugin package root (the dir carrying openclaw.plugin.json).
 
     Accepts the root itself, the manifest file, or a host wrapper project dir
     (~/.openclaw/npm/projects/<pkg>-<hash>__openclaw-generation__…/) whose real plugin
     lives under node_modules/<pkg> or node_modules/@scope/<pkg> (recon §11.1).
+
+    B-921: never raises — see :func:`_locate_plugin_root_or_reason` for why a caller
+    whose verdict is scored should call that instead of this thin wrapper.
     """
-    if p.is_file() and p.name == _PLUGIN_MANIFEST:
-        return p.parent
-    if not p.is_dir():
-        return None
-    if (p / _PLUGIN_MANIFEST).is_file():
-        return p
-    nm = p / "node_modules"
-    if nm.is_dir():
-        hits = sorted(nm.glob("*/" + _PLUGIN_MANIFEST)) + sorted(
-            nm.glob("@*/*/" + _PLUGIN_MANIFEST)
-        )
-        if len(hits) == 1:
-            return hits[0].parent
-    return None
+    return _locate_plugin_root_or_reason(p)[0]
 
 
 def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str:

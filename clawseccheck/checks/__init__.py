@@ -792,6 +792,7 @@ from ._vet import (
     _in_example_context,
     _local_sink_exfil_hits,
     _locate_plugin_root,
+    _locate_plugin_root_or_reason,
     _parse_source_target,
     _powershell_encoded_payloads,
     _run_content_ring,

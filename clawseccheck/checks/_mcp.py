@@ -96,6 +96,7 @@ from ._vet import (
     ast_finding_is_fail_capable,
     _decoded_payloads,
     _locate_plugin_root,
+    _locate_plugin_root_or_reason,
     coverage_gap_finding,
     vet_skill,
 )
@@ -145,7 +146,7 @@ _PLUGIN_PY_MAX_BYTES = 2_000_000
 _VET_RANK_STATUS = {3: FAIL, 2: WARN, 1: UNKNOWN, 0: PASS}
 
 
-def _plugin_finding(severity, status, detail, fix, ev=None) -> Finding:
+def _plugin_finding(severity, status, detail, fix, ev=None, engine_degraded=False) -> Finding:
     return Finding(
         "PLUGIN-VET",
         "Plugin pre-install vet",
@@ -156,6 +157,7 @@ def _plugin_finding(severity, status, detail, fix, ev=None) -> Finding:
         "Plugin Trust",
         False,
         ev or [],
+        engine_degraded=engine_degraded,
     )
 
 
@@ -406,8 +408,29 @@ def vet_plugin(
             f"no plugin found at {p}",
             f"Point --vet-plugin at a plugin root (a dir carrying {_PLUGIN_MANIFEST}).",
         )
-    root = _locate_plugin_root(p)
+    root, _unreadable_reason = _locate_plugin_root_or_reason(p)
     if root is None:
+        if _unreadable_reason is not None:
+            # B-921: an OSError (typically EACCES on a directory the scanning uid can
+            # list but not search) cut the plugin-root resolution short -- this is NOT
+            # a confident "no plugin here", so it must not fold into the sibling
+            # UNKNOWN below, which IS one (engine_degraded defaults False there,
+            # meaning "genuinely absent, nothing to examine"). engine_degraded=True
+            # here floors this the same worst-case way a crashed/timed-out check
+            # would (scoring.DEGRADED_CHECK_CAP), so a plugin root made unreadable
+            # scores no more leniently than one the engine actually got to inspect.
+            # The path goes only in `fix`, never in `detail` -- baseline.fingerprint()
+            # hashes `detail` (B-899's identical rule), and a host-specific path there
+            # would give every affected machine its own fingerprint and orphan any
+            # .clawseccheckignore entry already written against this UNKNOWN.
+            return _plugin_finding(
+                HIGH,
+                UNKNOWN,
+                f"could not determine whether this is a plugin: {_unreadable_reason}",
+                f"Restore read and search (x) permission on {p} (or its unreadable "
+                "subdirectory) and re-run.",
+                engine_degraded=True,
+            )
         return _plugin_finding(
             HIGH,
             UNKNOWN,
