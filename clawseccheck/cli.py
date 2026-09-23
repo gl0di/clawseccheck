@@ -792,9 +792,32 @@ class SkillSweep:
         """Tally buckets. Unscanned targets get their OWN buckets and are kept out
         of ``safe`` — folding them in (as ``total - fails - warns`` would, since
         they are neither FAIL nor WARN) is exactly the reassuring-but-false number
-        Golden Rule #4 forbids."""
+        Golden Rule #4 forbids.
+
+        B-888: ``unknown`` is its own bucket for the same reason —
+        the bare ``except Exception`` around ``vet_skill(...)`` above (when a
+        skill's own analysis raises mid-scan, most commonly an uncaught exception
+        in an AST-walking helper) appends the row as status ``"UNKNOWN"``, which
+        used to fall through this arithmetic uncounted: neither FAIL-weight, nor
+        WARN, nor TRUNCATED, so the old ``total - fails - warns - truncated``
+        silently counted it as safe — a skill the engine could not even assess
+        printed as "no known issue". A legitimate ``vet_skill()`` return whose OWN
+        status is UNKNOWN (an engine-degraded coverage gap that
+        ``_vet_coverage_incomplete`` recognises) is already demoted to
+        ``"TRUNCATED"`` before it ever reaches ``rows`` — see the demotion right
+        after that helper's call site above — so an UNKNOWN row seen here is,
+        today, always the crash-exception path. Bucketed separately from
+        ``truncated`` rather than folded into it: a crash means the engine could
+        not assess the skill AT ALL (no partial result), which is a different
+        claim from "assessed part of it before a cap/budget cut it short" —
+        conflating the two would mislabel which one happened, the same reason
+        B-888's ``crashed_skills`` cascade arm in
+        ``checks/_vet.py:check_installed_skills`` keeps that bucket separate from
+        ``parse_error_paths`` rather than folding into it.
+        """
         scanned = [r for r in self.rows if r[1] != "SKIPPED"]
         truncated_n = sum(1 for _n, s, _e in scanned if s == "TRUNCATED")
+        unknown_n = sum(1 for _n, s, _e in scanned if s == "UNKNOWN")
         fails = sum(1 for _n, s, _e in scanned if s in _SWEEP_FAIL_STATUSES)
         warns = sum(1 for _n, s, _e in scanned if s == "WARN")
         total = len(scanned)
@@ -803,14 +826,25 @@ class SkillSweep:
             "fails": fails,
             "warns": warns,
             "truncated": truncated_n,
+            "unknown": unknown_n,
             "skipped": len(self.rows) - total,
-            "safe": total - fails - warns - truncated_n,
+            "safe": total - fails - warns - truncated_n - unknown_n,
         }
 
     def not_scanned(self) -> list[str]:
         """Every target this sweep cannot vouch for, named. No silent caps here —
-        the narrative print may elide with "(+N more)", this may not."""
-        return [n for n, s, _e in self.rows if s in ("SKIPPED", "TRUNCATED")]
+        the narrative print may elide with "(+N more)", this may not.
+
+        B-888: "UNKNOWN" (a skill whose own scan raised mid-analysis —
+        see ``counts()``'s docstring) belongs here for the same reason SKIPPED and
+        TRUNCATED already do: the sweep reached no verdict for that target. Every
+        consumer built on this list to derive a "scanned" count —
+        ``coverage.py:_sweep_coverage`` (``scanned = total - len(not_scanned())``)
+        and ``pipeline.py``'s ledger — inherited the identical "crashed skill counted
+        as covered" gap ``counts()['safe']`` had, for the identical reason: an
+        UNKNOWN row fell through every named exclusion.
+        """
+        return [n for n, s, _e in self.rows if s in ("SKIPPED", "TRUNCATED", "UNKNOWN")]
 
 
 def _discovery_gap_note(reasons: list[str]) -> str:
@@ -1156,11 +1190,18 @@ def _sweep_summary_lines(sweep: SkillSweep, ascii_only: bool = False) -> list[st
     # problem (it is neither FAIL nor WARN either) and gets the same treatment —
     # it stays in "skill(s) checked" (it WAS attempted, unlike a SKIPPED row) but
     # is subtracted out of "safe" via its own named bucket.
+    # B-888: a skill whose own scan raised (row status "UNKNOWN", the
+    # bare `except Exception` branch above) is the same shape of problem again —
+    # named and subtracted out of "safe" via its own bucket, same as truncated/
+    # skipped just above, rather than silently landing in "safe" the way
+    # `total - fails - warns - truncated` alone used to.
     c = sweep.counts()
     tally = (f"\n  {c['total']} skill(s) checked | {c['safe']} safe | "
              f"{c['warns']} suspicious | {c['fails']} dangerous")
     if c["truncated"]:
         tally += f" | {c['truncated']} partially scanned"
+    if c["unknown"]:
+        tally += f" | {c['unknown']} could not be analyzed (engine error)"
     if c["skipped"]:
         tally += f" | {c['skipped']} not scanned (budget exceeded)"
     lines.append(tally)
@@ -1195,6 +1236,10 @@ def _sweep_quiet_line(sweep: SkillSweep) -> str:
             f"{c['fails']} dangerous, {c['warns']} suspicious, {c['safe']} no known issue")
     if c["truncated"]:
         line += f", {c['truncated']} partially scanned"
+    if c["unknown"]:
+        # B-888: see _sweep_summary_lines's identical arm — a crashed
+        # skill's row is UNKNOWN, not safe.
+        line += f", {c['unknown']} could not be analyzed (engine error)"
     if c["skipped"]:
         line += f", {c['skipped']} not scanned (budget exceeded)"
     line += "."

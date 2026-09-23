@@ -307,8 +307,9 @@ def _sweep_coverage(sweep, *, skip_reason: str | None = None) -> dict:
     never finished (SKIPPED/TRUNCATED) — the same "no silent gaps" counting
     ``SkillSweep`` itself already uses (``counts()['total'] + counts()['skipped']``,
     since ``counts()['total']`` there already excludes SKIPPED rows). "scanned"
-    excludes BOTH SKIPPED and TRUNCATED (``sweep.not_scanned()`` names both) — a
-    partially scanned target is not claimed fully covered."""
+    excludes SKIPPED, TRUNCATED, and (B-888) UNKNOWN — a skill whose
+    own scan raised mid-analysis — since ``sweep.not_scanned()`` now names all
+    three: a partially scanned OR crashed target is not claimed fully covered."""
     if sweep is None:
         # B-473: the note must name the reason THIS run skipped the sweep. "needs --full"
         # was printed verbatim on `--full --fast` runs — telling the operator to pass the
