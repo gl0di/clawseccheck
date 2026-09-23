@@ -65,7 +65,7 @@ def _run(*args: str, tmp_path: Path):
     import os
     home_args = [] if "--home" in args else ["--home", SAFE]
     return subprocess.run(
-        [sys.executable, "-m", "clawseccheck", "--no-deptree", *home_args, *args],
+        [sys.executable, "-m", "clawseccheck", "--no-deptree", "--no-host", *home_args, *args],
         cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "HOME": str(fake_home)},
     )

@@ -55,7 +55,7 @@ def _blind_home(tmp_path: Path) -> str:
 def _full_json(home: str, data_dir: Path) -> dict:
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", home, "--full", "--json",
-         "--data-dir", str(data_dir), "--no-history", "--no-deptree"],
+         "--data-dir", str(data_dir), "--no-history", "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=600)
     assert proc.returncode in (0, 1), proc.stderr[-2000:]
     return json.loads(proc.stdout)

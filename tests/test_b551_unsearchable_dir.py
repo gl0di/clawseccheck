@@ -126,7 +126,7 @@ def test_the_audit_count_matches_the_disk(tmp_path, unlock):
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home),
          "--data-dir", str(tmp_path / "state"), "--json", "--no-history",
-         "--no-deptree"],
+         "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True)
     d = json.loads(proc.stdout)
 
@@ -150,7 +150,7 @@ def test_no_absolute_path_escapes_into_the_report(tmp_path, unlock):
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home),
          "--data-dir", str(tmp_path / "state"), "--json", "--no-history",
-         "--no-deptree"],
+         "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True)
     d = json.loads(proc.stdout)
 
@@ -185,7 +185,7 @@ def test_the_inventory_row_does_not_stamp_the_unread_skill_clean(tmp_path, unloc
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home),
          "--data-dir", str(tmp_path / "state"), "--json", "--no-history",
-         "--no-deptree"],
+         "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True)
     d = json.loads(proc.stdout)
 

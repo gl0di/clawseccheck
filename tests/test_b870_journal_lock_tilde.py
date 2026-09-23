@@ -67,7 +67,7 @@ def _env(fake_home: Path) -> dict:
 
 def _run(openclaw_home: Path, cwd: Path, env: dict) -> "tuple[int, str]":
     cmd = [sys.executable, "-m", "clawseccheck", "--home", str(openclaw_home),
-           "--monitor", "--no-native", "--no-deptree"]
+           "--monitor", "--no-native", "--no-deptree", "--no-host"]
     r = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
@@ -137,7 +137,7 @@ def test_concurrent_bare_monitor_from_different_cwds_still_serializes(tmp_path):
     _write_cfg(openclaw_home, cfg)
 
     cmd = [sys.executable, "-m", "clawseccheck", "--home", str(openclaw_home),
-           "--monitor", "--no-native", "--no-deptree"]
+           "--monitor", "--no-native", "--no-deptree", "--no-host"]
     procs = [
         subprocess.Popen(cmd, cwd=str(cwd), env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)

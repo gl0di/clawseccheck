@@ -55,7 +55,7 @@ def _run(tmp_path: Path, obj) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", VULN, "--dashboard", "--full",
          "--judged-bundle", str(bundle),
-         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree"],
+         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True)
 
 

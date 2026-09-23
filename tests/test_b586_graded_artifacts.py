@@ -48,14 +48,14 @@ def _complete_check(tmp_path: Path, *extra: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", SAFE, "--dashboard", "--full",
          "--attest", str(attest), "--judged-bundle", str(bundle),
-         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", *extra],
+         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host", *extra],
         cwd=REPO_ROOT, capture_output=True, text=True)
 
 
 def _run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", SAFE,
-         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", *args],
+         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host", *args],
         cwd=REPO_ROOT, capture_output=True, text=True)
 
 
