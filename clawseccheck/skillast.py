@@ -2812,6 +2812,14 @@ class _FsFoldCtx:
         # B-830 round-3: how many times a fold call hit _FOLD_MAX_DEPTH and gave up
         # (observability only -- never consulted for a verdict; see _fold_fs_path).
         self.truncated = 0
+        # B-830 round-7: how many times a fold call REUSED a cache entry that was
+        # itself computed under a truncated (non-None) budget. Deliberately separate
+        # from `self.truncated` -- that counter feeds the disclosed AST_FOLD_TRUNCATED
+        # count and must stay an exact count of genuine depth-cap truncations, not of
+        # cache-reuse events. See `_fold_fs_path`'s docstring for why both counters
+        # must be consulted together when deciding whether a result is cacheable as
+        # budget=None ("exact").
+        self.inexact = 0
 
     def is_suffix_preserving(self, call: ast.Call) -> bool:
         """True for a single-argument wrapper that changes at most a leading '~'
@@ -2966,7 +2974,26 @@ def _fold_fs_path(
     truncation anywhere in its own subtree (`budget=None` below) is exact regardless of
     depth -- exactly round-3's original "fully resolved, cache unconditionally" case --
     and is never invalidated by a shallower caller's larger budget, which also avoids
-    round-5's needless recompute of subtrees that were never actually truncated."""
+    round-5's needless recompute of subtrees that were never actually truncated.
+
+    B-830 round-7 (C-135 follow-up review of round-6): round-6's `budget=None` check
+    above only looked at `ctx.truncated` -- whether THIS call's own subtree hit the
+    depth cap directly. It missed the case where this call's subtree instead REUSED a
+    cached entry from a sibling/descendant call that was itself truncated (the
+    `cached_budget is not None` branch above): reusing a truncated answer makes this
+    node's own result just as non-exhaustive as computing a truncation directly, but
+    nothing marked it so, and it could be cached as `budget=None` ("exact at any
+    depth") regardless. A later, shallower call reaching the SAME node directly then
+    got that wrongly-exact cached answer back instead of a real recompute -- the same
+    memoization-poisoning shape round-4 fixed, reopened through cache reuse instead of
+    direct truncation. Fixed by tracking cache-reuse-of-a-truncated-entry in a second,
+    separate counter (`ctx.inexact` -- deliberately not folded into `ctx.truncated`,
+    which must stay an exact count of genuine depth-cap events for the disclosed
+    AST_FOLD_TRUNCATED finding) and consulting BOTH counters when deciding
+    cacheability: `budget=None` is only assigned when NEITHER counter moved during
+    this call's own computation -- i.e. no truncation happened anywhere in this node's
+    computation, INCLUDING no reuse of any depth-limited (budget is not None) cached
+    entry anywhere below it, whether reached directly or transitively."""
     key = (id(node), visiting)
     entry = ctx.memo.get(key)
     if entry is not None:
@@ -2976,6 +3003,11 @@ def _fold_fs_path(
         if cached_budget is None:
             return cached_res  # exact: no truncation contributed, valid at any depth
         if (_FOLD_MAX_DEPTH - depth) <= cached_budget:
+            # B-830 round-7: this call is REUSING a cache entry that was itself
+            # computed under a truncated budget -- mark it, so this call's own
+            # result (if cached by an enclosing caller) is never mistaken for
+            # exact. See `ctx.inexact` and the docstring above.
+            ctx.inexact += 1
             return cached_res
         # This caller's remaining budget is strictly BETTER than what produced the
         # cached entry -- it might resolve further where that computation truncated.
@@ -2984,9 +3016,9 @@ def _fold_fs_path(
         ctx.truncated += 1
         return None
     ctx.memo[key] = _FOLD_IN_PROGRESS  # cycle guard
-    before = ctx.truncated
+    before = ctx.truncated + ctx.inexact
     res = _fold_fs_path_uncached(node, ctx, visiting, depth)
-    budget = None if ctx.truncated == before else (_FOLD_MAX_DEPTH - depth)
+    budget = None if (ctx.truncated + ctx.inexact) == before else (_FOLD_MAX_DEPTH - depth)
     ctx.memo[key] = (res, budget)
     return res
 

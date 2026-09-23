@@ -6,6 +6,7 @@ deterministic.
 """
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS
@@ -594,3 +595,172 @@ def test_deep_fold_chain_vet_skill_cli_end_to_end(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "DO-NOT-INSTALL" in out
+
+
+# ---------------------------------------------------------------------------
+# B-830 round-7 (C-135 follow-up review of round-6's budget-aware cache): round-6
+# fixed the round-5 performance regression by trusting a cached (node, budget) entry
+# whenever a NEW caller's own remaining budget is no better than the budget the entry
+# was computed under -- but round-6 only ever marked a node's OWN cache entry
+# non-exact (`budget != None`) when THAT node's own computation directly hit the
+# `depth > _FOLD_MAX_DEPTH` cap (`ctx.truncated` moved). It never marked a node
+# non-exact for merely REUSING an already-truncated cached entry one of its children
+# returned -- so a node built entirely out of a reused, truncated sub-result could
+# still get cached as `budget=None` ("exact, valid at ANY depth"), and `budget=None`
+# entries are trusted UNCONDITIONALLY (see `_fold_fs_path`'s cache-hit branch) --
+# never re-examined against a later caller's remaining budget the way a finite budget
+# is. That reopens exactly round-4's memoization-poisoning bug through a new path:
+# once a node's memo entry is wrongly `None`, NO later call -- however much budget it
+# has -- ever gets a chance to recompute it, so a real credential-exfiltration flow
+# can go permanently undetected.
+#
+# The fix: a second counter, `ctx.inexact` (see `_FsFoldCtx.__init__`), incremented
+# every time a cache-hit REUSES an entry that was itself computed under a truncated
+# (non-None) budget. A node's own result is now cached as `budget=None` only when
+# NEITHER `ctx.truncated` NOR `ctx.inexact` moved during its own uncached computation
+# -- i.e. nothing anywhere in its subtree, whether computed directly or reused from
+# cache, was ever truncated.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_chain(base: str, n: int) -> str:
+    return base + ".resolve()" * n
+
+
+def _joinpath_chain(base: str, seg: str, n: int) -> str:
+    return base + f".joinpath('{seg}')" * n
+
+
+def test_round7_resolve_chain_seed_reuse_still_detects_cred_exfil():
+    # The exact repro from the round-7 review: `aws_dir` is a shared name whose own
+    # fold requires a deep `.resolve()` chain. `cache` references `aws_dir` first,
+    # 100 `.joinpath()` levels deep -- deep enough that resolving `aws_dir` through
+    # THAT reference truncates, seeding a truncated cache entry for `aws_dir`'s own
+    # RHS node. `p` -- the real credential path -- references the SAME `aws_dir` name,
+    # also deep enough to reuse (not recompute) that truncated entry. Pre-round-7, the
+    # node built from that reuse got wrongly cached as "exact", and a later, separate
+    # direct walk-visit of that same node trusted the wrong entry instead of
+    # recomputing -- silently missing CRED_EXFIL_FLOW. Verified as a genuine positive
+    # control: False on 234baf9f (round-6), True after the round-7 fix.
+    src = (
+        "from pathlib import Path\nimport requests\n"
+        "aws_dir = " + _resolve_chain("Path.home().joinpath('.aws')", 150) + "\n"
+        "cache = " + _joinpath_chain("aws_dir", "cache", 100) + "\n"
+        "p = " + _joinpath_chain("aws_dir.joinpath('credentials')", "x", 100) + "\n"
+        + _EVIL_SINK
+    )
+    assert "CRED_EXFIL_FLOW" in _rules(src)
+
+
+def test_round7_resolve_chain_without_seed_is_unaffected():
+    # Sanity control for the repro above: with the `cache = ...` seed line removed,
+    # nothing reuses a truncated cache entry, so detection must already succeed on
+    # BOTH round-6 and the round-7 fix -- this pins that the fix doesn't depend on
+    # removing the seed reference, only on correctly propagating "inexact" through it.
+    src = (
+        "from pathlib import Path\nimport requests\n"
+        "aws_dir = " + _resolve_chain("Path.home().joinpath('.aws')", 150) + "\n"
+        "p = " + _joinpath_chain("aws_dir.joinpath('credentials')", "x", 100) + "\n"
+        + _EVIL_SINK
+    )
+    assert "CRED_EXFIL_FLOW" in _rules(src)
+
+
+def _seeded_joinpath_src(seed_pad: int, cred_x_pad: int, resolve_n: int = 150) -> str:
+    """Same shape as the `.resolve()` repro above, but the decoy (`seed`) and the real
+    credential reference (`p`) both reach the shared `aws_dir` name purely through
+    `.joinpath()` padding (no `.resolve()` involved in the padding itself) -- a
+    structurally different AST shape exercising the same cache-reuse path."""
+    return (
+        "from pathlib import Path\nimport requests\n"
+        "aws_dir = " + _resolve_chain("Path.home().joinpath('.aws')", resolve_n) + "\n"
+        "seed = " + _joinpath_chain("aws_dir", "decoy", seed_pad) + "\n"
+        "p = " + _joinpath_chain("aws_dir.joinpath('credentials')", "x", cred_x_pad) + "\n"
+        + _EVIL_SINK
+    )
+
+
+def test_round7_joinpath_seed_depth_boundary_k_minus1_k_k_plus1_still_detects():
+    # `p`'s own reference to `aws_dir` sits at depth k = cred_x_pad + 1 (the
+    # `.joinpath('credentials')` wrap) + 1 (the name-hop) = 101. The seed's own
+    # reference sits at depth seed_pad + 1. Reuse (the buggy path) triggers whenever
+    # the seed's depth is <= k -- i.e. seed_pad <= k - 1 = 100. Swept across the exact
+    # boundary (seed one shallower than, equal to, and one deeper than the reference):
+    # seed_pad=100 (k-1) and seed_pad=101 (k) both reuse and must still detect after
+    # the fix; seed_pad=102 (k+1) never reuses and was never broken (regression
+    # signature, included for completeness alongside the two true positive controls).
+    # Verified: seed_pad=100/101 are False on 234baf9f, True after the fix;
+    # seed_pad=102 is True on both.
+    for seed_pad in (100, 101, 102):
+        src = _seeded_joinpath_src(seed_pad, cred_x_pad=100)
+        assert "CRED_EXFIL_FLOW" in _rules(src), f"seed_pad={seed_pad}"
+
+
+def _node_at_depth(root: ast.AST, hops: int) -> ast.AST:
+    """Drill inward from a `.joinpath(...)` chain's outermost Call `hops` levels,
+    through each call's receiver (`.func.value`) -- the same "one level per nested
+    path-construction expression" traversal `_fold_fs_path` itself performs."""
+    n = root
+    for _ in range(hops):
+        n = n.func.value
+    return n
+
+
+def _find_assign_value(tree: ast.AST, name: str) -> ast.AST:
+    for n in ast.walk(tree):
+        if (
+            isinstance(n, ast.Assign)
+            and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name)
+            and n.targets[0].id == name
+        ):
+            return n.value
+    raise AssertionError(f"no top-level assignment to {name!r}")
+
+
+def test_round7_cached_fold_matches_a_fresh_fold_of_the_same_node(monkeypatch):
+    # Direct differential test on the fold algebra itself (skillast._fold_fs_path),
+    # not just the higher-level rule outcome above: for several representative
+    # seed/reference depth relationships -- run at a deliberately SHRUNKEN
+    # _FOLD_MAX_DEPTH so near-cap conditions are easy to construct -- the value a
+    # REALISTIC full-file walk leaves cached for the credential-bearing node
+    # (`aws_dir.joinpath('credentials')`, reached by drilling `cred_x_pad` levels in
+    # from `p`'s own root) must match what a completely FRESH fold of that exact same
+    # node computes in isolation (a brand-new context, no prior cache pollution at
+    # all). A mismatch means the walk left a stale, less-resolved result cached under
+    # a `budget=None` ("exact") entry that a fresh computation would have resolved
+    # further -- exactly the round-7 bug. Verified as a genuine positive control at
+    # each case below: mismatched on 234baf9f, matching after the round-7 fix.
+    import clawseccheck.skillast as skillast
+
+    monkeypatch.setattr(skillast, "_FOLD_MAX_DEPTH", 20)
+    cases = [
+        (10, 10, 15),  # seed_pad, cred_x_pad, resolve_n -- seed depth == reference depth
+        (9, 10, 15),  # seed one shallower than the reference (still reuses: seed <= k)
+        (10, 10, 16),  # a slightly deeper base chain, same padding relationship
+    ]
+    for seed_pad, cred_x_pad, resolve_n in cases:
+        src = _seeded_joinpath_src(seed_pad, cred_x_pad, resolve_n)
+        tree = ast.parse(src)
+        p_rhs = _find_assign_value(tree, "p")
+        target = _node_at_depth(p_rhs, cred_x_pad)  # drills all the way to `aws_dir.joinpath('credentials')`
+
+        # The realistic path: fold every node in the file through ONE shared ctx,
+        # exactly as `_has_folded_cred_path` does, then read back what got left
+        # cached for `target`.
+        ctx = skillast._FsFoldCtx(tree)
+        for n in ast.walk(tree):
+            skillast._fold_fs_path(n, ctx)
+        entry = ctx.memo.get((id(target), frozenset()))
+        assert entry is not None, (seed_pad, cred_x_pad, resolve_n)
+        cached_res, _cached_budget = entry
+
+        # The ideal path: fold ONLY `target`, from a completely empty context -- no
+        # other node's computation has had a chance to pollute anything.
+        fresh_ctx = skillast._FsFoldCtx(tree)
+        fresh_res = skillast._fold_fs_path(target, fresh_ctx, frozenset(), 0)
+
+        assert cached_res == fresh_res, (
+            f"seed_pad={seed_pad} cred_x_pad={cred_x_pad} resolve_n={resolve_n}: "
+            f"cached={cached_res!r} fresh={fresh_res!r}"
+        )
