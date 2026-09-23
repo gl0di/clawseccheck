@@ -630,17 +630,17 @@ def run_behavioral(ctx, *, ascii_only: bool = False,
         detail = ("trajectory replay complete — an INCIDENT SIGNAL was found in the "
                   "trajectory incident analysis below (that signal itself is advisory "
                   "only; a fired behavioral detector above it may separately have "
-                  "capped the grade — see F-154).")
+                  "capped the grade — see BEHAVIORAL-CAP).")
         quiet_line = ("behavioural replay complete — INCIDENT SIGNAL found (advisory). "
                      "Full detail: --analyze-trajectory.")
     elif incompleteness_reason is not None:
         detail = (f"trajectory replay found nothing to replay: {incompleteness_reason}; "
-                  "this replay itself never scores a FAIL (F-154).")
+                  "this replay itself never scores a FAIL (BEHAVIORAL-CAP).")
         quiet_line = (f"behavioural replay found nothing to replay: "
                      f"{incompleteness_reason}.")
     else:
         detail = ("trajectory replay complete — a fired behavioral detector may have "
-                  "capped the grade (F-154); this replay itself never scores a FAIL.")
+                  "capped the grade (BEHAVIORAL-CAP); this replay itself never scores a FAIL.")
         quiet_line = ("behavioural replay complete (advisory). Full detail: --behavioral "
                      "/ --analyze-trajectory.")
 

@@ -178,7 +178,7 @@ class TestReportRendering:
             "(capped from 79 - a live injection-test scenario reported VULNERABLE "
             "(redteam:PI-01))"
         ) in out
-        assert "Live-test exception (F-155): this run's grade WAS capped" in out
+        assert "Live-test exception (LIVE-TEST-CAP): this run's grade WAS capped" in out
         assert "redteam:PI-01" in out
 
     def test_html_no_new_text_when_not_capped(self):
@@ -378,8 +378,8 @@ class TestCliEndToEnd:
         # WAS capped" framing is reworded rather than suppressed (C-423): the fact
         # that a VULNERABLE verdict was submitted is stated whether or not a grade
         # was issued.
-        assert "Live-test exception (F-155)" not in out
-        assert "Live-test result (F-155): a submitted VULNERABLE verdict" in out
+        assert "Live-test exception (LIVE-TEST-CAP)" not in out
+        assert "Live-test result (LIVE-TEST-CAP): a submitted VULNERABLE verdict" in out
         # B-600 follow-up: see the sibling note in test_f154_behavioral_cap.py. The
         # paragraph above keeps its framing; the cap sentence is now said once, by the
         # cascade line, with rank. The pinned invariant -- an ungraded run still states
