@@ -20,6 +20,7 @@ module never calls or evaluates any of them.
 from __future__ import annotations
 
 import ast
+import bisect
 import builtins
 import re
 import weakref
@@ -10715,10 +10716,27 @@ _SH_PIPE_INTERP_RE = re.compile(
 # input (e.g. a 40KB identifier run has no '=' and previously backtracked at every start
 # → quadratic). A real credential-read assignment line is short, so the bounds (128-char
 # var, 256-char gaps) never clip a genuine match.
+#
+# B-894: this vocabulary is factored into its own fragment, `_SH_CRED_READ_PATH_SRC`,
+# shared with the loop-variable taint reader below (`_SH_LOOP_READ_PATH_RE` is built
+# from the same fragment) — the `_CRED_NAME_WORDS` precedent. A path added here is a
+# path the loop-hop reader also recognizes, and vice versa, so the two forms cannot
+# drift apart the way the discarded fix/b-894 rounds let the loop form outrun this one
+# (R-3 in the design note above `analyze_shell`). The `.claude|.codex|.gemini/mcp.json`
+# alternative is the recon-grounded foreign-agent MCP config vocabulary B61
+# (`_B61_CONFIG_PATH_RE`, `checks/_content.py`) already treats as a credential store;
+# the tight `mcp\.json` form is used (not B61's looser `config(?:\.json)?`) because B61
+# itself notes the `.claude/config-partial.yml` ambiguity. `_SH_CRED_FILE_RE` above is
+# deliberately NOT touched by this addition (it already has its own, wider vocabulary).
+_SH_CRED_READ_PATH_SRC = (
+    r"\.ssh/id_|id_rsa|id_ed25519|\.aws/credentials|\.netrc|keychain|wallet\.dat|"
+    r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/|"
+    r"\.(?:claude|codex|gemini)/mcp\.json\b"
+)
+_SH_CRED_READ_PATH_RE = re.compile(_SH_CRED_READ_PATH_SRC, re.I)
 _SH_CRED_ASSIGN_RE = re.compile(
     r"(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=[^\n]{0,256}?(?:cat|less|head|tail|<)\s*[^\n]{0,256}?"
-    r"(?:\.ssh/id_|id_rsa|id_ed25519|\.aws/credentials|\.netrc|keychain|wallet\.dat|"
-    r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/)",
+    r"(?:" + _SH_CRED_READ_PATH_SRC + r")",
     re.I,
 )
 
@@ -11197,6 +11215,493 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
     return found
 
 
+# --- B-894: loop-variable credential taint ------------------------------------------
+# SHELL_CRED_EXFIL above reads credential-shaped PATHS and VARIABLE NAMES on a single
+# raw line. Neither sees a `for V in <words>; do BODY; done` loop: V is never a path
+# literal on the sink line, and no `_SH_CRED_ASSIGN_RE`-shaped assignment names it
+# directly. case_01341/case_03412 (AR_AGENT_RECON) read `~/.claude/mcp.json` this way.
+#
+# B-894 replaces three superseded fix/b-894 rounds (d98481ae, 57a42d93,
+# 3ac8dc1b) that each built a new, general straight-line dataflow engine and each
+# introduced a fresh false positive the next C-135 review found (two sources of truth
+# for "is V credential-bound", the loop variable's scope modeled file-wide instead of
+# as the loop body, the loop form seeded from a WIDER vocabulary than the literal rule
+# it generalizes, and a header seeded from inside string/heredoc text).
+#
+# INVARIANT (pinned by tests/test_b894_shell_loop_cred_taint.py): a
+# `for V in <literal words>; do BODY; done` loop is sugar for BODY repeated with V
+# replaced by each word. This engine adds ONLY what the UNCHANGED literal rules above
+# (`_SH_CRED_FILE_RE` / `_SH_CRED_ASSIGN_RE` / `_sh_cred_match_is_incluster_auth_only`)
+# would convict on that unrolled text, and is NEVER broader than them — every role below
+# uses exactly the literal rule's own vocabulary and exemption for that role. There is
+# no independent taint model for V itself: no seeded dict, no fallback, no "which of two
+# states wins" question. V is covered structurally, by loop-body region, and nothing
+# else. A reviewer repro is therefore either an invariant violation (a bug here, fix
+# it) or it FAILs identically in its literal twin (the literal rule's own pre-existing
+# behavior, not this one's — filed separately, e.g. B-934/935/936).
+#
+# Deliberately out of scope (FN; the literal analogue is also PASS or out of scope, so
+# nothing regresses): a reference to V after `done` (including the "break" idiom), a
+# second hop (`local X=$(cat "$V"); D="$D$X"`), `printf -v`, `eval`, base64, arrays,
+# `while read`, `select`, tmpfiles, `$(for …)` capture, and a helper function defined
+# above the loop and called after it (X's taint is positional, not call-graph aware).
+# Any file whose `do`/`done` structure does not balance (a stray `done)` case label, an
+# unmatched `do`) is skipped ENTIRELY — fails closed to PASS, never a guess.
+#
+# Vocabulary alignment (design §2.5): `_SH_CRED_READ_PATH_RE` (defined next to
+# `_SH_CRED_ASSIGN_RE` above) is the literal hop rule's own vocabulary, now including
+# the recon-grounded foreign-agent MCP configs (`~/.claude/mcp.json` etc.) B61 already
+# treats as credential stores. The generic `_SH_CRED_FILE_RE` `.config/<app>/`
+# alternative is deliberately NOT part of this vocabulary: replacing `claw` with any
+# other app name in that alternative produces an indistinguishable, benign own-app
+# config-backup shape (`for f in ~/.config/myapp/*.json; do D="$D$(cat "$f")"; done;
+# curl --data "$D" https://own/backup`), and the destination is not an input to this
+# scanner — so no rule can convict on that signal without convicting the benign
+# backup too. Both stay PASS under this design.
+_SH_LOOP_CONTINUATION_RE = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
+# A heredoc body is not code that runs as a `for` loop in THIS shell — it is either
+# inert data, or (if later fed to a shell) a CHILD shell's code, same reasoning as
+# `bash -c '…'` below. Blanking it here, on the un-masked text, closes the branch's
+# heredoc residual (a loop header written only inside a heredoc body must never seed).
+_SH_LOOP_HEREDOC_RE = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+
+
+def _sh_loop_join_continuations(text: str) -> str:
+    """Same-length join of `\\`-newline continuations (2 spaces for the 2 characters
+    removed), so every offset — and so every LINE NUMBER against the original text —
+    computed against the joined result is still valid against the pre-join text."""
+    return _SH_LOOP_CONTINUATION_RE.sub(lambda m: m.group(1) + "  ", text)
+
+
+def _sh_loop_blank_heredocs(text: str) -> str:
+    """Blank every heredoc BODY line (through its delimiter line) to spaces, same
+    length, same line count. `<<-WORD` also strips leading tabs before comparing to the
+    delimiter, matching the shell's own `<<-` semantics."""
+    lines = text.split("\n")
+    out = []
+    pending: list = []
+    for ln in lines:
+        if pending:
+            strip_tabs, delim = pending[0]
+            probe = ln.lstrip("\t") if strip_tabs else ln
+            out.append(" " * len(ln))
+            if probe == delim:
+                pending.pop(0)
+            continue
+        out.append(ln)
+        for m in _SH_LOOP_HEREDOC_RE.finditer(ln):
+            pending.append((m.group(1) == "-", m.group(3)))
+    return "\n".join(out)
+
+
+def _sh_loop_code_mask(text: str) -> str:
+    """Blank literal text inside `'…'`/`"…"` (never code inside a nested `$(…)` or
+    backtick substitution) and inline `#` comments, same length. Used ONLY to locate
+    loop/bind/do-done STRUCTURE below — values and references are always read from the
+    un-masked `text`, never from this result. A `for` keyword sitting inside a quoted
+    string (`bash -c "for f in …"`) is blanked here along with the rest of that string's
+    text, so it is structurally invisible to the loop-header search — this is what
+    keeps a header written only inside string text (a child shell's own code) from
+    seeding, with no special-cased lookbehind needed."""
+    out = list(text)
+    stack: list = []  # "'", '"', "(" (a `$(` or a `"..."`-nested `$(`), "`"
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        top = stack[-1] if stack else ""
+        if c == "\n":
+            i += 1
+            continue
+        if top == "'":
+            if c == "'":
+                stack.pop()
+            else:
+                out[i] = " "
+            i += 1
+            continue
+        if c == "\\":
+            if top == '"':
+                out[i] = " "
+                if i + 1 < n and text[i + 1] != "\n":
+                    out[i + 1] = " "
+            i += 2
+            continue
+        if top == '"':
+            if c == '"':
+                stack.pop()
+            elif c == "$" and text.startswith("(", i + 1):
+                stack.append("(")
+                i += 2
+                continue
+            elif c == "`":
+                stack.append("`")
+            else:
+                out[i] = " "
+            i += 1
+            continue
+        # code context: top-level, or inside "(" / "`"
+        if c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
+            j = text.find("\n", i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if c in "'\"":
+            stack.append(c)
+        elif c == "`":
+            if top == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+        elif c == "$" and text.startswith("(", i + 1):
+            stack.append("(")
+            i += 2
+            continue
+        elif c == "(":
+            stack.append("(")
+        elif c == ")" and top == "(":
+            stack.pop()
+        i += 1
+    return "".join(out)
+
+
+_SH_LOOP_CMD_POS = (
+    r"(?:(?<=[\n;&|(){])|^)[ \t]*(?:(?:then|do|else|elif|if|while|until|time|!)[ \t]+)*"
+)
+# No quote/backtick in the lookbehind: `kw` (the code-masked text below) already blanks
+# quoted text, so a `for` written inside a string is simply not there to match.
+_SH_LOOP_HEAD_RE = re.compile(
+    _SH_LOOP_CMD_POS + r"for[ \t]+(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})[ \t]+in(?=[ \t;\n]|$)"
+)
+_SH_LOOP_SEG_END_RE = re.compile(r"[;\n]")
+_SH_LOOP_DO_RE = re.compile(r"\s*do\b")
+_SH_LOOP_DO_DONE_RE = re.compile(r"(?:(?<=[\n;&|(){])|^)[ \t]*(?P<kw>do|done)(?=[\s;&|)]|$)")
+# Rebindings that end V's (or X's) prior state: `read`/`unset`/`mapfile`/`readarray`
+# (their own argument list is scanned for identifiers), `printf -v NAME`, a nested
+# `for NAME in`, a bare `local/declare/typeset NAME` (no `=`), and any ordinary
+# `NAME=`/`NAME+=` assignment (optionally `local/export/declare/typeset/readonly`
+# prefixed).
+_SH_LOOP_BIND_RE = re.compile(
+    _SH_LOOP_CMD_POS + r"(?:"
+    r"(?:[A-Za-z_][A-Za-z0-9_]{0,127}=\S*[ \t]+)*(?P<cmd>read|unset|mapfile|readarray)\b(?P<args>[^\n;&|]*)"
+    r"|printf[ \t]+-v[ \t]+(?P<pv>[A-Za-z_][A-Za-z0-9_]{0,127})"
+    r"|for[ \t]+(?P<fv>[A-Za-z_][A-Za-z0-9_]{0,127})[ \t]+in\b"
+    r"|(?:local|declare|typeset)(?:[ \t]+-[A-Za-z]+)*[ \t]+(?P<dv>[A-Za-z_][A-Za-z0-9_]{0,127})(?=[ \t]*(?:[;\n&|]|$))"
+    r"|(?:(?P<decl>local|export|declare|typeset|readonly)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?"
+    r"(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})(?P<op>\+?=)"
+    r")"
+)
+_SH_LOOP_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+# A reader substitution inside an assignment's VALUE: `$(cat "$V")`, `` `cat "$V"` ``,
+# `$(< "$V")` — command-position `[path/]cat|head|tail|less`, the literal
+# `_SH_CRED_ASSIGN_RE`'s own reader vocabulary (cat|less|head|tail|<).
+_SH_LOOP_SUBST_READ_RE = re.compile(
+    r"(?:\$\(|`)[ \t]*(?:sudo[ \t]+)?(?:(?:[\w./-]*/)?(?:cat|head|tail|less)\b|<)"
+    r"(?P<args>[^)`|;\n]{0,2048})"
+)
+# The PIPE role's own reader: `cat|head|tail "$V"` streamed to STDOUT (no redirect), at
+# command position — deliberately narrower than `_SH_LOOP_SUBST_READ_RE` (no `less`, no
+# bare `<`, neither of which streams to stdout the same way).
+_SH_LOOP_STDOUT_READ_RE = re.compile(
+    _SH_LOOP_CMD_POS + r"(?:sudo[ \t]+)?(?:[\w./-]*/)?(?:cat|head|tail)\b(?P<args>[^\n;&|)]{0,2048})"
+)
+_SH_LOOP_PIPE_AFTER_DONE_RE = re.compile(r"[ \t]*\|(?!\|)(?P<pipe>[^\n;]*)")
+
+
+def _sh_loop_ref_re(name: str):
+    return re.compile(r"\$\{?" + re.escape(name) + r"\b\}?")
+
+
+def _sh_loop_word_end(text: str, start: int) -> int:
+    """End offset of the shell word starting at *start* (an assignment's value):
+    quotes, `$(…)`, `${…}` and backticks nest; unquoted whitespace or a separator ends
+    it. Never crosses a newline, so a call is always bounded by its own line."""
+    stop = text.find("\n", start)
+    stop = len(text) if stop == -1 else stop
+    stack: list = []
+    i = start
+    while i < stop:
+        c = text[i]
+        top = stack[-1] if stack else ""
+        if c == "\\" and top != "'":
+            i += 2
+            continue
+        if top in ("'", "`", "{"):
+            if c == {"'": "'", "`": "`", "{": "}"}[top]:
+                stack.pop()
+        elif top == '"':
+            if c == '"':
+                stack.pop()
+            elif c == "`" or (c == "$" and text.startswith("(", i + 1)):
+                stack.append(c if c == "`" else "(")
+                i += c == "$"
+        elif c in "'\"`":
+            stack.append(c)
+        elif c == "$" and text.startswith(("(", "{"), i + 1):
+            stack.append(text[i + 1])
+            i += 1
+        elif c == "(":
+            stack.append("(")
+        elif c == ")":
+            if not stack:
+                return i
+            stack.pop()
+        elif not stack and c in " \t;&|<>":
+            return i
+        i += 1
+    return min(i, stop)
+
+
+def _sh_loop_bound_names(m) -> list:
+    if m.group("cmd"):
+        return [t for t in m.group("args").split() if _SH_LOOP_IDENT_RE.fullmatch(t)]
+    for g in ("pv", "fv", "dv", "var"):
+        if m.group(g):
+            return [m.group(g)]
+    return []
+
+
+def _sh_loop_blank_word_subs(seg: str) -> str:
+    """Blank every balanced ``$(...)``/backtick command substitution in a `for`-loop
+    word-list segment, same length. A plain whitespace `.split()` cannot tell a
+    substitution's own internal whitespace from a real word boundary — `$(ls
+    ~/.ssh/id_*)` splits into two tokens, and the second, `~/.ssh/id_*)`, is not itself
+    prefixed with `$(` or a backtick, so a per-token "skip if it contains `$(`" check
+    (as a naive read of the design's word-skip rule) misses it and leaks a credential-
+    shaped fragment into the word list. Blanking the whole substitution here first, so
+    it contributes no tokens at all, is what keeps a `$(...)`-built word list at PASS
+    (documented FN — the words are unknown until the substitution actually runs)."""
+    out = list(seg)
+    i, n = 0, len(seg)
+    while i < n:
+        c = seg[i]
+        if c == "$" and seg.startswith("(", i + 1):
+            depth = 1
+            j = i + 2
+            while j < n and depth:
+                if seg[j] == "(":
+                    depth += 1
+                elif seg[j] == ")":
+                    depth -= 1
+                j += 1
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if c == "`":
+            j = seg.find("`", i + 1)
+            j = n if j == -1 else j + 1
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _sh_loop_regions(kw: str, text: str) -> list:
+    """Every `for V in <words>; do … done` loop whose word list holds at least one
+    credential-shaped word, as `(var, file_words, read_words, body_start, cut_end,
+    body_end)`. `file_words`/`read_words` are the loop words matching, respectively,
+    `_SH_CRED_FILE_RE` (the DIRECT/PIPE roles' vocabulary) and `_SH_CRED_READ_PATH_RE`
+    (the HOP role's vocabulary — the literal `_SH_CRED_ASSIGN_RE` reader vocabulary).
+    `cut_end` is `body_end` unless V is rebound inside its own body (`_SH_LOOP_BIND_RE`
+    matching V), in which case it is that rebinding's offset: text at/after a rebinding
+    is no longer V's loop-seeded value. **Fails closed**: any `do`/`done` imbalance
+    anywhere in the file (a stray `done)` case label, an unmatched `do`) returns `[]`
+    for the WHOLE file rather than guessing a pairing."""
+    pairs: dict = {}
+    stack: list = []
+    for dm in _SH_LOOP_DO_DONE_RE.finditer(kw):
+        if dm.group("kw") == "do":
+            stack.append(dm.end("kw"))
+        else:
+            if not stack:
+                return []
+            pairs[stack.pop()] = dm.start("kw")
+    if stack:
+        return []
+    seg_ends = [m.start() for m in _SH_LOOP_SEG_END_RE.finditer(kw)]
+    out = []
+    for m in _SH_LOOP_HEAD_RE.finditer(kw):
+        k = bisect.bisect_left(seg_ends, m.end())
+        end = seg_ends[k] if k < len(seg_ends) else len(kw)
+        do = _SH_LOOP_DO_RE.match(kw, end + 1 if end < len(kw) and kw[end] == ";" else end)
+        if do is None:
+            continue
+        body_start = do.end()
+        if body_start not in pairs:
+            continue
+        body_end = pairs[body_start]
+        file_words: set = set()
+        read_words: set = set()
+        for w in _sh_loop_blank_word_subs(text[m.end() : end]).split():
+            w = w.replace('"', "").replace("'", "")
+            if _SH_CRED_FILE_RE.search(w):
+                file_words.add(w)
+            if _SH_CRED_READ_PATH_RE.search(w):
+                read_words.add(w)
+        if not (file_words or read_words):
+            continue
+        var = m.group("var")
+        cut = body_end
+        for b in _SH_LOOP_BIND_RE.finditer(kw, body_start, body_end):
+            if var in _sh_loop_bound_names(b):
+                cut = b.start()
+                break
+        out.append((var, frozenset(file_words), frozenset(read_words), body_start, cut, body_end))
+    return out
+
+
+def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
+    """B-894: 1-indexed lines where a `for`-loop-bound credential should make
+    SHELL_CRED_EXFIL fire, ON TOP OF (never in place of) the existing literal checks in
+    `analyze_shell`. Returns `(direct_or_pipe_lines, hop_lines)` — kept separate so the
+    caller can report each with the same message its literal twin uses. Three roles,
+    each exactly the corresponding literal rule applied to the loop unrolled onto its
+    words (see the design note above this section):
+
+      DIRECT — a `file_words` reference inside V's own body, on an outbound line,
+        substituted in and re-checked with the UNCHANGED `_SH_CRED_FILE_RE` /
+        `_sh_cred_match_is_incluster_auth_only` (so B-415's TLS/in-cluster exemption
+        applies identically to the loop form). Reported in `direct_or_pipe_lines`.
+      HOP — an in-body assignment `X=`/`X+=` whose value reads a `read_words`-seeded V
+        (`$(cat "$V")` etc.); X then carries that taint at every later offset up to its
+        next non-accumulating rebinding, checked the same way the literal `cred_vars`
+        branch is (no B-415 exemption — the hop vocabulary has no TLS/k8s alternative).
+        Reported in `hop_lines`.
+      PIPE — the body streams a `read_words`-seeded V to stdout (`cat "$V"`, no `>`),
+        and the matching `done` is piped into an outbound command; reported on `done`,
+        in `direct_or_pipe_lines`.
+
+    Returns `(set(), set())` (never raises) on any input, including one with no seeded
+    loop, an unbalanced `do`/`done`, or a heavily padded/degenerate word list.
+    """
+    text = _sh_loop_blank_heredocs(_sh_loop_join_continuations(masked))
+    kw = _sh_loop_code_mask(text)
+    regions = _sh_loop_regions(kw, text)
+    if not regions:
+        return set(), set()
+    direct_hits: set = set()
+    hop_hits: set = set()
+
+    def line_of(off: int) -> int:
+        return masked.count("\n", 0, off) + 1
+
+    def line_span(off: int):
+        a = masked.rfind("\n", 0, off) + 1
+        b = masked.find("\n", off)
+        return a, (len(masked) if b == -1 else b)
+
+    def outbound(line: str) -> bool:
+        return bool(_SH_OUTBOUND_RE.search(line) or _sh_bare_nc_invocation(line))
+
+    # 1. DIRECT: a file_words-seeded V referenced on an outbound line inside its own
+    #    body — substitute each candidate word in for every in-region $V on that raw
+    #    line, then run the UNCHANGED literal rule on the result.
+    for var, file_words, _read_words, bs, cut, _be in regions:
+        if not file_words:
+            continue
+        ref = _sh_loop_ref_re(var)
+        for rm in ref.finditer(text, bs, cut):
+            a, b = line_span(rm.start())
+            raw = masked[a:b]
+            if not outbound(raw):
+                continue
+            spans = [
+                (x.start() - a, x.end() - a) for x in ref.finditer(text, max(a, bs), min(b, cut))
+            ]
+            for w in sorted(file_words):
+                pieces, last = [], 0
+                for s0, e0 in spans:
+                    pieces.append(raw[last:s0])
+                    pieces.append(w)
+                    last = e0
+                pieces.append(raw[last:])
+                sub = "".join(pieces)
+                if _SH_CRED_FILE_RE.search(sub) and not _sh_cred_match_is_incluster_auth_only(
+                    sub, masked
+                ):
+                    direct_hits.add(line_of(rm.start()))
+                    break
+
+    # 2. HOP: X=... $(cat "$V") ... inside V's body, V read_words-seeded -> X carries
+    #    that taint positionally (one hop; nothing hops a second time from X).
+    events: dict = {}
+    hop_names: set = set()
+    binds = []
+    for b in _SH_LOOP_BIND_RE.finditer(kw):
+        names = _sh_loop_bound_names(b)
+        if not names:
+            continue
+        if b.group("var") and b.group("op"):
+            vend = _sh_loop_word_end(text, b.end())
+            binds.append((vend, b.group("var"), b.group("op"), text[b.end() : vend], b.start()))
+        else:
+            for nm in names:
+                binds.append((b.end(), nm, "clear", "", b.start()))
+    for vend, name, op, val, bstart in binds:
+        hop: set = set()
+        if op != "clear":
+            for var, _fw, read_words, bs, cut, _be in regions:
+                if not read_words or not (bs <= bstart < cut):
+                    continue
+                for sm in _SH_LOOP_SUBST_READ_RE.finditer(val):
+                    if _sh_loop_ref_re(var).search(sm.group("args")):
+                        hop |= read_words
+        if hop:
+            hop_names.add(name)
+        events.setdefault(name, []).append((vend, op, frozenset(hop), val))
+    state_hist: dict = {}
+    for name in hop_names:
+        evs = sorted(events[name], key=lambda e: e[0])
+        offs, taints = [], []
+        cur: frozenset = frozenset()
+        for off, op, hop, val in evs:
+            if op == "clear":
+                cur = frozenset()
+            else:
+                keep = op == "+=" or bool(_sh_loop_ref_re(name).search(val))
+                cur = frozenset(hop | (cur if keep else frozenset()))
+            offs.append(off)
+            taints.append(cur)
+        state_hist[name] = (offs, taints)
+    if state_hist:
+        pos = 0
+        for raw in masked.split("\n"):
+            i = masked.count("\n", 0, pos) + 1
+            if outbound(raw):
+                for name, (offs, taints) in state_hist.items():
+                    for rm in _sh_loop_ref_re(name).finditer(text, pos, pos + len(raw)):
+                        k = bisect.bisect_right(offs, rm.start())
+                        if k and taints[k - 1]:
+                            hop_hits.add(i)
+            pos += len(raw) + 1
+
+    # 3. PIPE: `done | <outbound>`, body streams a read_words-seeded V to stdout.
+    for var, _fw, read_words, bs, cut, be in regions:
+        if not read_words:
+            continue
+        ref = _sh_loop_ref_re(var)
+        streams = False
+        for sm in _SH_LOOP_STDOUT_READ_RE.finditer(kw, bs, cut):
+            a0, a1 = sm.start("args"), sm.end("args")
+            if ref.search(text[a0:a1]) and ">" not in kw[a0:a1]:
+                streams = True
+                break
+        if not streams:
+            continue
+        done_end = be + 4  # len("done")
+        pm = _SH_LOOP_PIPE_AFTER_DONE_RE.match(text, done_end)
+        if not pm:
+            continue
+        pipe = re.split(r"&&|\|\|", pm.group("pipe"))[0]
+        if _SH_OUTBOUND_RE.search(pipe) or _sh_bare_nc_invocation(pipe):
+            direct_hits.add(line_of(be))
+    return direct_hits, hop_hits
+
+
 def _sh_mask_comments(source: str) -> str:
     """Blank whole-line shell comments while preserving line numbers, so a documented
     'curl ... | sh' example in a comment can't fire."""
@@ -11287,6 +11792,12 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             )
 
     cred_vars = {m.group("var") for m in _SH_CRED_ASSIGN_RE.finditer(masked)}
+    # B-894: loop-unrolled counterparts of the two checks below — see the design note
+    # above `_sh_mask_comments`. `loop_direct_lines` is the DIRECT/PIPE roles (the
+    # `_SH_CRED_FILE_RE` sink-line vocabulary, same message/exemption as the block right
+    # below); `loop_hop_lines` is the HOP role (joins `cred_vars`, same message, no
+    # exemption — matches how `cred_vars` itself gets none).
+    loop_direct_lines, loop_hop_lines = _sh_loop_cred_exfil_lines(source, masked)
     for i, raw in enumerate(masked.splitlines(), 1):
         # B-430: same OR pattern as above — see _sh_bare_nc_invocation's docstring.
         if not (_SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw)):
@@ -11311,7 +11822,17 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             # through to the variable check below instead of `continue`-ing
             # past it, so an exempt TLS path can never launder an unrelated
             # `cred_vars` hit in the same command.
-        if any(re.search(r"\$\{?" + re.escape(v) + r"\b", raw) for v in cred_vars):
+        if i in loop_direct_lines:
+            add(
+                "SHELL_CRED_EXFIL",
+                "crit",
+                i,
+                "reads a credential file and sends it to an outbound command "
+                "(curl/wget/nc) — credential exfiltration",
+            )
+        if any(re.search(r"\$\{?" + re.escape(v) + r"\b", raw) for v in cred_vars) or (
+            i in loop_hop_lines
+        ):
             add(
                 "SHELL_CRED_EXFIL",
                 "crit",
