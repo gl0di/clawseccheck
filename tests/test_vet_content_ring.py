@@ -75,6 +75,11 @@ _RING_EXEMPT = {
     "check_supply_chain",       # B5 (B-362) — supply-chain/plugin-config posture check;
     # reads ctx.installed_skills only to gate its not_applicable flag (whether the disk
     # skill corpus is empty and completely walked), never to scan skill content itself.
+    "check_installed_skill_content_coverage",  # B395 — scores the FULL audit's
+    # installed-skill read coverage independently of which skill wins B13's cascade.
+    # Under --vet there is one target and vet_skill() already reports its unread
+    # content through B13's own unreadable arm (UNKNOWN + engine_degraded) and the
+    # dossier's Coverage axis; a ring copy would count the same gap twice.
     "check_skill_library_reachability",  # B354 (B-725) — matched on "installed_skill"
     # appearing only in its own DOCSTRING PROSE (naming _read_installed_skills, the
     # filesystem walker this check's whole point is that it is NOT on). The function body
