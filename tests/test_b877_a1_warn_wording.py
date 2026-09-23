@@ -209,7 +209,7 @@ def test_the_real_finding_from_a_blind_run_gets_the_reworded_headline_and_row(tm
 def _run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--data-dir", str(tmp_path / "state"),
-         "--no-history", "--no-deptree", "--no-color", *args],
+         "--no-history", "--no-deptree", "--no-host", "--no-color", *args],
         cwd=REPO_ROOT, capture_output=True, text=True)
 
 

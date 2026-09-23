@@ -434,7 +434,7 @@ def test_watch_subprocess_exits_cleanly_on_signal(tmp_path, sig):
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "clawseccheck", "--watch", "--home", str(home),
-         "--data-dir", str(store), "--watch-debounce", "0.3", "--no-deptree"],
+         "--data-dir", str(store), "--watch-debounce", "0.3", "--no-deptree", "--no-host"],
         cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:
@@ -472,7 +472,7 @@ def test_watch_status_cli_alive_then_stopped(tmp_path, capsys):
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "clawseccheck", "--watch", "--home", str(home),
-         "--data-dir", str(store), "--watch-debounce", "0.3", "--no-deptree"],
+         "--data-dir", str(store), "--watch-debounce", "0.3", "--no-deptree", "--no-host"],
         cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:

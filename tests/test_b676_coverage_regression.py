@@ -216,7 +216,7 @@ def test_the_signature_is_taken_before_the_arm_runs():
 def _run(home, store, *extra):
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck.cli", "--monitor", "--json",
-         "--home", str(home), "--data-dir", str(store), "--no-deptree", *extra],
+         "--home", str(home), "--data-dir", str(store), "--no-deptree", "--no-host", *extra],
         cwd=REPO, capture_output=True, text=True,
     )
 
@@ -279,7 +279,7 @@ def test_a_real_coverage_loss_reaches_the_exit_code(home, tmp_path):
 
     res = subprocess.run(
         [sys.executable, "-m", "clawseccheck.cli", "--monitor", "--json",
-         "--home", str(home), "--data-dir", str(store), "--no-deptree",
+         "--home", str(home), "--data-dir", str(store), "--no-deptree", "--no-host",
          "--exit-code", "--fail-on", "medium"],
         cwd=REPO, capture_output=True, text=True)
     payload = json.loads(res.stdout)

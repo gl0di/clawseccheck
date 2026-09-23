@@ -52,7 +52,7 @@ _GATES = [["--exit-code"], ["--fail-on", "high"], ["--fail-on", "critical"]]
 def _run(tmp_path: Path, home: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", home,
-         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", *args],
+         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host", *args],
         cwd=REPO_ROOT, capture_output=True, text=True)
 
 

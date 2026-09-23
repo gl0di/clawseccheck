@@ -185,7 +185,7 @@ def _audit_json(home: Path, tmp_path: Path) -> dict:
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home),
          "--data-dir", str(tmp_path / "state"), "--json", "--no-history",
-         "--no-deptree"],
+         "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True,
     )
     return json.loads(proc.stdout)

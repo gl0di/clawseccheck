@@ -44,7 +44,7 @@ def _run(tmp_path: Path, *args: str, store: str = "state"):
     fake_home.mkdir(exist_ok=True)
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", VULN, "--no-history",
-         "--data-dir", str(tmp_path / store), "--no-deptree", *args],
+         "--data-dir", str(tmp_path / store), "--no-deptree", "--no-host", *args],
         cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "HOME": str(fake_home)})
 

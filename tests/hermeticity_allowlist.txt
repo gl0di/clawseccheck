@@ -96,36 +96,37 @@
 # Last confirmed exercised: 2026-09-21 via `CSC_HERMETICITY_LEDGER=1 python3.12 -m pytest tests/test_watch.py tests/test_b769_concurrent_monitor.py tests/test_b870_journal_lock_tilde.py tests/test_b582_viewer_chain_provenance.py -q`
 $HOME/.npm-global/**
 
-# CLAWSECCHECK-hermeticity, 2026-09-21. Sibling of the entry above, same shape, found
-# while building this ledger and NOT previously documented: `_stub_host_detect` also
-# only patches the in-process `clawseccheck._host_detect` and does not cross into a
-# subprocess, so the same CLI end-to-end tests make real, absolute-path host-posture
-# reads (the /proc/<pid>/fd reads from the same probe are already covered by the
-# /proc/** entries above). First run of this ledger against
-# tests/test_b582_viewer_chain_provenance.py found the actual surface is wider than
-# cron alone -- systemd unit dirs and the firewall (ufw/nftables) config this box
-# happens to have -- so the entries below are what was EMPIRICALLY OBSERVED on one real
-# run, not a guess at hostpersist.py's probe list; a future run surfacing a path not
-# listed here means the probe grew, not that this entry was wrong. Unlike the deptree
-# entry, no fix branch exists yet for this one -- it has not been filed as its own
-# follow-up bug at the time this ledger was written, only recommended as one. Listed
-# here rather than left for a strict run to discover cold, so the next person to turn
-# strict mode on sees a named, reasoned violation and not a mystery.
+# CLAWSECCHECK-B-881, 2026-09-21 through 2026-09-23. Sibling of the entry above, same
+# shape, found while building this ledger: `_stub_host_detect` also only patches the
+# in-process `clawseccheck._host_detect` and does not cross into a subprocess, so the
+# same CLI end-to-end tests made real, absolute-path host-posture reads (cron, systemd
+# unit dirs, and the firewall (ufw/nftables) config this box happened to have).
 #
-# Last confirmed exercised: 2026-09-21 via `CSC_HERMETICITY_LEDGER=1 python3.12 -m pytest tests/test_b582_viewer_chain_provenance.py -q`
-/etc/cron.d
-/etc/cron.d/**
-/etc/cron.daily
-/etc/cron.daily/**
-/etc/cron.hourly
-/etc/cron.hourly/**
-/etc/cron.monthly
-/etc/cron.monthly/**
-/etc/cron.weekly
-/etc/cron.weekly/**
-/etc/crontab
-/etc/default/ufw
-/etc/nftables.conf
-/etc/systemd/system
-/etc/systemd/system/**
-/etc/ufw/ufw.conf
+# CLOSED, 2026-09-23. Unlike the deptree entry above (whose --monitor-mode residual is
+# a SEPARATE, still-open mechanism -- `describe_install()` called directly by cli.py,
+# never gated by any flag at all -- tracked as C-598), host-posture reads only ever
+# happen through checks/_host.py's ordinary check functions inside audit()'s own
+# registry, which the pre-existing `--no-host` flag (`cli.py`'s
+# `include_host=not args.no_host`) already gated correctly at all three call sites --
+# it simply was not being PASSED by the affected tests. Fixed by adding `--no-host`
+# to every subprocess CLI spawn on the audit path (the same 47 files/55 call sites
+# that already carry `--no-deptree`, plus two this fix's own static guard caught that
+# the initial pass missed: tests/test_b870_journal_lock_tilde.py and
+# tests/test_b877_a1_warn_wording.py, both of which already carried --no-deptree but
+# not --no-host). Durably enforced going forward by
+# tests/test_subprocess_host_hermeticity.py (mirrors
+# tests/test_subprocess_deptree_hermeticity.py's static AST guard, sharing its engine
+# via tests/_subprocess_argv.py) rather than left to a future strict hermeticity run to
+# rediscover cold.
+#
+# Verified removed, 2026-09-23 via `CSC_HERMETICITY_LEDGER=strict python3.12 -m pytest
+# tests/test_b582_viewer_chain_provenance.py tests/test_hermeticity_gate.py -q` with
+# these patterns already deleted: zero READ-shaped hits for any of
+# /etc/cron.d, /etc/cron.daily, /etc/cron.hourly, /etc/cron.monthly, /etc/cron.weekly,
+# /etc/crontab, /etc/default/ufw, /etc/nftables.conf, /etc/systemd/system,
+# /etc/ufw/ufw.conf (down from the surface this entry used to document), and
+# test_no_unexplained_paths_outside_tmp_and_repo passes under `=strict` rather than
+# only warning under `=1`. If a future hostpersist.py probe reintroduces one of these
+# paths (or a new one) from a subprocess spawn missing --no-host,
+# test_subprocess_host_hermeticity.py fails first, loudly, naming the exact call site
+# -- re-diagnose there rather than re-adding a blanket allowlist entry here.

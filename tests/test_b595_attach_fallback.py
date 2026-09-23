@@ -40,7 +40,7 @@ VULN = str(REPO_ROOT / "fixtures" / "home_vuln")
 def _run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", VULN,
-         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", *args],
+         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host", *args],
         cwd=REPO_ROOT, capture_output=True, text=True)
 
 
