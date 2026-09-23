@@ -177,7 +177,11 @@ def test_dangling_link_is_unknown(tmp_path):
     skill = _mk_skill(tmp_path / "skills")
     os.symlink(skill / "does-not-exist", skill / "broken")
 
-    assert check_symlink_escape(Context(home=skill)).status == UNKNOWN
+    f = check_symlink_escape(Context(home=skill))
+    assert f.status == UNKNOWN
+    # Control for the B-899 round-1 gap-only case below: a REAL broken link keeps the
+    # broken-link remediation lead-in.
+    assert f.fix.startswith("Fix or remove broken links")
 
 
 @posix_only
@@ -402,3 +406,193 @@ def test_healthy_root_is_unaffected_by_the_guard(tmp_path):
     f = check_symlink_escape(Context(home=home))
     assert f.status == PASS
     assert f.engine_degraded is False
+
+
+# ---- B-899 C-135 round 1: the reviewer's three defects --------------------------------
+#
+# Round 1's fix (commit 70c006eb) turned every walk/stat failure into a graded,
+# engine_degraded gap. The review found that treatment too blunt in one direction (a
+# vanished temp dir, or a benign directory this uid cannot reach anyway, should not cost
+# the run) and too loose in another (a pre-existing defect: an unreadable SKILL_DIRS base
+# was silently dropped instead of degrading). This block pins the corrected rule.
+
+
+@posix_only
+def test_vanished_subdir_during_walk_is_pass_not_degraded(tmp_path, monkeypatch):
+    """A subdirectory that disappears between os.walk listing its parent and descending
+    into it (a build/pytest/npm temp dir being cleaned, a git checkout) must NOT count as
+    a coverage gap: it existed when listed and is gone now, and a directory that no
+    longer exists cannot hide a symlink. Before this rule a churn thread doing exactly
+    this flipped a clean home to UNKNOWN + engine_degraded (DEGRADED_CHECK_CAP) in 158 of
+    200 runs, with remediation text naming a path that no longer existed."""
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="clean")
+    victim = sk / "tmp_build"
+    victim.mkdir()  # left empty: os.rmdir needs no scandir of its own (shutil.rmtree would)
+    real_scandir = os.scandir
+
+    def flaky_scandir(path="."):
+        if isinstance(path, (str, os.PathLike)) and os.fspath(path) == os.fspath(victim):
+            os.rmdir(victim)  # gone by the time we look
+            raise FileNotFoundError(2, "No such file or directory", str(victim))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", flaky_scandir)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == PASS
+    assert f.engine_degraded is False
+
+
+@posix_only
+def test_swapped_in_symlink_on_vanished_path_is_still_assessed(tmp_path, monkeypatch):
+    """The one thing a vanished path CAN still be: a symlink put in its place between the
+    listing and the descent. That must land on the verdict (here, a sensitive escape),
+    never be silently dropped alongside the ordinary ENOENT case above."""
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".ssh").mkdir(parents=True)
+    (fakehome / ".ssh" / "id_rsa").write_text("x", encoding="utf-8")
+
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="clean")
+    victim = sk / "swapped"
+    victim.mkdir()  # left empty: removed with plain rmdir below, no nested scandir
+    real_scandir = os.scandir
+
+    def flaky_scandir(path="."):
+        if isinstance(path, (str, os.PathLike)) and os.fspath(path) == os.fspath(victim):
+            os.rmdir(victim)
+            os.symlink(fakehome / ".ssh", victim)
+            raise NotADirectoryError(20, "Not a directory", str(victim))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", flaky_scandir)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == FAIL
+    assert any(".ssh" in e for e in f.evidence)
+
+
+@posix_only
+@root_skip
+def test_own_unsearchable_workspace_dir_is_still_graded(tmp_path, unlock):
+    """A non-skill workspace directory this uid OWNS but chmod'd unsearchable is not a
+    real barrier -- the owner can chmod it back at will -- so it stays a graded
+    engine_degraded gap, not a free disclosure. Contrast with the foreign-owned case
+    below."""
+    home = tmp_path / "openclaw"
+    _mk_skill(home / "workspace" / "skills", name="clean")
+    data = home / "workspace" / "proj" / "data"
+    data.mkdir(parents=True)
+    data.chmod(0o000)
+    unlock(data)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
+
+
+@posix_only
+@root_skip
+def test_benign_foreign_owned_workspace_dir_is_disclosed_not_graded(tmp_path, monkeypatch, unlock):
+    """A benign, foreign-owned, unsearchable workspace data directory (the real-world
+    shape: a Docker volume such as postgres data owned by uid 999, mode 0700) must not
+    fail the whole scan. A same-uid agent cannot traverse a directory it cannot search
+    either, so a foreign-owned one without search permission hides no link the agent
+    could follow -- disclose it in `fix`, but PASS. Before this rule one such directory
+    took a healthy home's score from 98/A to 49/F (degraded_capped).
+
+    An unprivileged test cannot really chown to another uid, so `_b87_uid_of` -- a
+    deliberate seam -- is monkeypatched to report the directory as foreign-owned; the
+    chmod 0o000 is real, so the actual OS permission check (condition 5) is not faked."""
+    import clawseccheck.checks._content as content_mod
+
+    home = tmp_path / "openclaw"
+    _mk_skill(home / "workspace" / "skills", name="clean")
+    pgdata = home / "workspace" / "proj" / "pgdata"
+    pgdata.mkdir(parents=True)
+    pgdata.chmod(0o000)
+    unlock(pgdata)
+
+    real_uid_of = content_mod._b87_uid_of
+
+    def fake_uid_of(path):
+        if os.fspath(path) == os.fspath(pgdata):
+            return (real_uid_of(path) or 0) + 1  # anything other than our own euid
+        return real_uid_of(path)
+
+    monkeypatch.setattr(content_mod, "_b87_uid_of", fake_uid_of)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == PASS
+    assert f.engine_degraded is False
+    assert "pgdata" in f.fix
+    assert "pgdata" not in f.detail
+
+
+@posix_only
+@root_skip
+def test_unreadable_skills_base_0000_is_unknown_not_a_lost_detection_pass(tmp_path, unlock):
+    """Pre-existing lost-detection defect, same root cause, fixed here: an unreadable
+    SKILL_DIRS base (e.g. ~/.openclaw/skills at mode 0000) used to have its
+    `base.iterdir()` OSError swallowed by `_symlink_scan_roots`'s bare
+    `except OSError: continue`, dropping the whole skills tree silently and reporting
+    PASS on a home whose skills were never listed -- even with a real escape symlink
+    inside (skills/evil/keys -> ~/.ssh). A skills root is skill content by definition, so
+    the gap must be graded: UNKNOWN + engine_degraded, never a false PASS."""
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".ssh").mkdir(parents=True)
+    (fakehome / ".ssh" / "id_rsa").write_text("x", encoding="utf-8")
+
+    home = tmp_path / "openclaw"
+    evil = home / "skills" / "evil"
+    evil.mkdir(parents=True)
+    os.symlink(fakehome / ".ssh", evil / "keys")
+    (home / "workspace").mkdir(parents=True)  # an ordinary sibling root, per the report
+
+    skills = home / "skills"
+    skills.chmod(0o000)
+    unlock(skills)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
+
+
+@posix_only
+@root_skip
+def test_unreadable_skills_base_0111_is_also_unknown(tmp_path, unlock):
+    """Same defect, the other permission shape from the report: 0111 (search-only, no
+    read) lets `is_dir()`/`is_symlink()` on the base succeed but `iterdir()` fail."""
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".ssh").mkdir(parents=True)
+    (fakehome / ".ssh" / "id_rsa").write_text("x", encoding="utf-8")
+
+    home = tmp_path / "openclaw"
+    evil = home / "skills" / "evil"
+    evil.mkdir(parents=True)
+    os.symlink(fakehome / ".ssh", evil / "keys")
+
+    skills = home / "skills"
+    skills.chmod(0o111)
+    unlock(skills)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
+
+
+@posix_only
+@root_skip
+def test_gap_only_unknown_drops_the_broken_link_prefix(tmp_path, unlock):
+    """When the only UNKNOWN reason is a coverage gap (no actual broken/dangling link
+    anywhere in the run), the fix text must not open with the broken-link remediation --
+    there is no broken link to fix or remove, only an unreadable directory."""
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="onlyzzz")
+    sk.chmod(0o644)
+    unlock(sk)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == UNKNOWN
+    assert not f.fix.startswith("Fix or remove broken links"), f.fix
