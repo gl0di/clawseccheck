@@ -607,16 +607,29 @@ class _FileFacts:
         matching Python's own scoping rule). No `before`: the read lives in a
         DIFFERENT, nested scope that runs later, so *scope*'s body order does not
         bound it -- `sole()`'s default (`before=None`) already requires exactly one,
-        unconditional, direct-body binding, which is what makes this sound. Returns
-        None when no enclosing scope binds *name* this way."""
+        unconditional, direct-body binding, which is what makes this sound.
+
+        Stops at the FIRST enclosing scope that binds *name* at all (B-917 fix
+        round 2): `sole()` returning None means either "no record here" or "a
+        record exists but is not a single, resolvable, direct-body binding" --
+        e.g. a parameter, a for/with/comprehension target, an except-as name, a
+        nested def/class, or an import. Real Python scoping makes any of those a
+        local of that scope for its ENTIRE body, so the walk must stop there --
+        never treat "sole() could not resolve it" as "this scope is free, keep
+        walking outward", or an intermediate scope's own (unresolvable) binding of
+        the same name gets skipped in favour of a further-out one it does not
+        actually shadow to. Only a scope with NO record for *name* at all lets the
+        walk continue past it. Returns None when no enclosing scope resolves
+        *name* this way (whether never bound, or blocked by an unresolvable
+        binding somewhere along the walk)."""
         cur = scope
         while True:
             nxt = self.scope_of(cur)
             if nxt is None:
                 return None
-            rec = self.sole(name, nxt)
-            if rec is not None:
-                return rec, nxt
+            if self.records(nxt).get(name):
+                rec = self.sole(name, nxt)
+                return (rec, nxt) if rec is not None else None
             if nxt is self.tree:
                 return None
             cur = nxt
@@ -820,7 +833,23 @@ class _FileFacts:
             # declared global/nonlocal -- sole() already refuses those outright) is
             # looked up in its enclosing function scopes and then the module scope.
             # Required for the r2-D1 shape: a module constant read inside a function.
-            if rec is None and not self._legb_blocked(e.id):
+            #
+            # Gated on "no record for e.id in *scope* at all" (B-917 fix round 2),
+            # never on "sole() returned None" alone: sole() also returns None when
+            # *scope* DOES bind the name, just not through one resolvable, direct
+            # assignment (a parameter, a for/with/comprehension target, an
+            # except-as name, ...). That binding makes the name local to *scope*
+            # for its entire body -- real Python scoping never falls back to an
+            # enclosing/module scope for it, resolvable or not. Walking past it
+            # (e.g. because a same-named module constant exists) is a false
+            # correlation: a `def load_plugin(CACHE_DIR): ... import x` whose
+            # parameter merely shares a name with an unrelated module-level
+            # `CACHE_DIR` must resolve to SYM, not to the module constant.
+            if (
+                rec is None
+                and not self._legb_blocked(e.id)
+                and not self.records(scope).get(e.id)
+            ):
                 found = self._legb_lookup(e.id, scope)
                 if found is not None:
                     rec, found_scope = found

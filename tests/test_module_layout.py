@@ -58,12 +58,23 @@ _EXEMPT = {
     # specifies (`_legb_lookup`), guarded by `_legb_blocked` (an attribute store or a
     # `_tampers()` spelling anywhere in the file refuses the fallback rather than risk an
     # unsound resolution) -- `resolve()` is untouched, so B-638's proof is unaffected.
-    "shippedexec.py": "~1,520 lines — B-638's shipped-exec containment proof "
+    # Restated 2026-09-23, B-917 fix round 2 -- was ~1,520; +29 lines for a single
+    # C-135 review finding (BLOCKER, introduced by fix round 1 above): the LEGB fallback
+    # gated itself on `sole() is None`, which is also true of a scope that DOES bind the
+    # name via a non-assign form (a parameter, a for/with/comprehension target, an
+    # except-as name, a nested def/class, an import) -- that binding makes the name local
+    # to the WHOLE scope in real Python, so the fallback must stop there, never walk past
+    # it into an enclosing/module scope. Both the `locate()` call site and each step of
+    # `_legb_lookup()`'s own walk now gate on "does this scope have any record for the
+    # name at all" (`records(scope).get(name)`) instead. No new helper; both sites grew a
+    # few lines of guard plus documentation of why sole()-is-None was the wrong condition.
+    "shippedexec.py": "~1,549 lines — B-638's shipped-exec containment proof "
                        "(`resolve()`/`_Path`, untouched) plus B-917's location resolver "
                        "(`locate()`/`Loc`/`loc_eq`, `ShippedArtifact.classify()`, "
                        "`PathFacts`) for the loader-sink/staged-import correlation, plus "
-                       "the fix-round-1 LEGB fallback (`_legb_lookup`/`_legb_blocked`). "
-                       "Over budget by 320 lines since B-917. Split candidate: the two "
+                       "the fix-round-1 LEGB fallback (`_legb_lookup`/`_legb_blocked`), "
+                       "plus fix-round-2's any-record scope gate on that same fallback. "
+                       "Over budget by 349 lines since B-917. Split candidate: the two "
                        "resolvers do not share state beyond `_FileFacts` itself and could "
                        "separate into a `locations.py` leaf; not attempted here because "
                        "`locate()` reuses `resolve()`'s exact `sole()`/`dotted()`/"
