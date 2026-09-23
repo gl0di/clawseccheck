@@ -1,6 +1,14 @@
-"""B-886 — the full 60-case repro/regression matrix `_example_governance`'s design
-was built and measured against (see the architect's design notes for CLAWSECCHECK
-B-886; not shipped — this file stands on its own).
+"""B-886 — the full repro/regression matrix `_example_governance`'s design was
+built and measured against (see the architect's design notes for CLAWSECCHECK
+B-886; not shipped — this file stands on its own). The first 60 rows are the
+architect's own matrix; fix round 1 appended 9 more after C-135 review found the
+r2A aside-bridge only recognized a flush-left PROSE aside, not any other single
+non-list block kind (a GFM alert blockquote, a heading, a table — same
+author-numbered-walkthrough shape): 6 positive repros (3 ordered + 3 bullet, the
+latter landing "ambiguous" like `bullet-aside-resume`), 2 negative controls (a
+different list after the aside must not bridge; two asides in a row must not
+either), plus one row pinning a separate, pre-existing, NOT-fixed-here false
+negative (CLAWSECCHECK-B-962).
 
 Every earlier attempt at this bug (a flat `_NEGATION_WINDOW` lookback, then a single
 `_SENTENCE_BREAK_RE`-scoped window) forced a false-positive/false-negative trade,
@@ -107,11 +115,43 @@ CASES = [
     ("F10-example-heading-after-fence", FENCE + "\n*Note on the above.*\n\n---\n\n## Example 3: Service restart\n", False, "ambiguous"),
     ("F11-eg-paren-heading-before-fence", "## Setup (e.g. Linux)\n\n" + FENCE, True, "live"),
     ("blockquote", "> Do not run the following on a shared host:\n> " + CRON + ".\n", False, "example"),
+    # CLAWSECCHECK-B-886 fix round 1, finding 1 (BLOCKER false positive): the
+    # r2A-style ordered-walkthrough aside bridge only recognized a flush-left
+    # PROSE aside between two same-identity items. Any other single block kind
+    # interleaved the identical way (a GFM alert blockquote, a heading, a table)
+    # hit the walk's unconditional `break` and dropped every item after it out of
+    # the colon-disclaimer's governance, same author-numbering shape as `r2A`.
+    ("r2A-quote-aside", "Do not run these steps in production:\n\n1. First step.\n\n> [!NOTE]\n> Only for staging.\n\n2. " + CRON + "\n", False, "example"),
+    ("r2A-heading-aside", "Do not run these steps in production:\n\n1. First step.\n\n#### Note\n\n2. " + CRON + "\n", False, "example"),
+    ("r2A-table-aside", "Do not run these steps in production:\n\n1. First step.\n\n| A | B |\n|---|---|\n| x | y |\n\n2. " + CRON + "\n", False, "example"),
+    # Same bug, but the resumed list is a BULLET run, matching `bullet-aside-resume`'s
+    # existing "ambig, then stop" treatment (a repeated bullet char is a weaker
+    # continuity signal than an author's own next number) — just with the aside
+    # spelled as a quote/heading/table instead of flush prose.
+    ("bullet-aside-resume-quote", "Do not run them:\n\n- Print the directory.\n\n> [!NOTE]\n> skip if configured.\n\n- " + CRON + ".\n", False, "ambiguous"),
+    ("bullet-aside-resume-heading", "Do not run them:\n\n- Print the directory.\n\n#### Note\n\n- " + CRON + ".\n", False, "ambiguous"),
+    ("bullet-aside-resume-table", "Do not run them:\n\n- Print the directory.\n\n| A | B |\n|---|---|\n\n- " + CRON + ".\n", False, "ambiguous"),
+    # Negative controls for the same generalization: it must stay a SINGLE
+    # interleaved block of ANY ONE non-list kind, with the SAME list-identity
+    # continuity test as before — not "skip past any number of asides" and not
+    # "any list resumes it".
+    ("heading-aside-then-different-list", "Do not run these steps in production:\n\n1. First step.\n\n#### Setup\n\n- " + CRON + "\n", True, "live"),
+    ("two-asides-in-a-row-no-bridge", "Do not run these steps in production:\n\n1. First step.\n\n#### Note\n\n> another note\n\n2. " + CRON + "\n", True, "live"),
+    # CLAWSECCHECK-B-886 fix round 1, finding 2 (B_lost_detection, pre-existing,
+    # NOT fixed here — filed as CLAWSECCHECK-B-962 for 4.3.1): `_example_paren_close`
+    # only scans for the closing `)` on the marker's own line, so a parenthetical
+    # that wraps to a second line never finds its close, and the trailing colon on
+    # line 2 is misread as the "e.g." aside's own colon-intro instead of the outer
+    # "Setup steps (...)" sentence's. Base (integration/4.3.0) has this exact gap
+    # too — pinned here as a known, tracked limitation, not a regression, so a
+    # future change to this engine does not silently re-widen or re-narrow it
+    # without this test noticing.
+    ("b962-paren-wraps-line-known-limit", "Setup steps (e.g. see\nthe uname output):\n\n1. " + CRON + "\n", False, "example"),
 ]
 
 _IDS = [c[0] for c in CASES]
 assert len(_IDS) == len(set(_IDS)), "duplicate case id in the B-886 matrix"
-assert len(CASES) == 60, f"expected all 60 matrix rows, found {len(CASES)}"
+assert len(CASES) == 69, f"expected all 69 matrix rows (60 architect + 9 fix-round-1), found {len(CASES)}"
 
 
 def _ctx(body: str) -> Context:

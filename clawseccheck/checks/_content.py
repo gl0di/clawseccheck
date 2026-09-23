@@ -7206,8 +7206,10 @@ def _example_next_block_regions(
                 s2, e2 = _example_item_extent(lines, nk)  # loose restart: plausible only
                 ambig.append(_example_span(lines, s2, e2))
             break
-        if nd[0] == "prose" and lines.indent(nk) == 0:
-            # one interleaved flush-left aside paragraph between items
+        if nd[0] in ("prose", "heading", "quote", "table") and lines.indent(nk) == 0:
+            # one interleaved flush-left aside block (a paragraph, heading, quote
+            # or table run) between items — same author-numbering continuity test
+            # as the list-identity walk above, whatever kind the aside itself is
             _, as_, ae = _example_block_of(lines, nk)
             nk2 = ae
             while nk2 < n and lines.kind(nk2)[0] == "blank":
