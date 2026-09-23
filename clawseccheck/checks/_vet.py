@@ -4715,10 +4715,29 @@ def check_installed_skills(ctx: Context) -> Finding:
                     and not _url_host_is_local("http://" + host)
                     and h not in _RESERVED_EXAMPLE_DOMAINS
                 ):
-                    coverage_fence.append(
-                        f"coverage: {name}: a pipe-to-shell from {host} sits in a fence"
-                        " carrying no marker we recognise, so it was not assessed"
-                    )
+                    # B-884: when `host` is itself a bare public IPv4 literal, the exact
+                    # same "https?://<ip>" text is also what `_IOC_IPURL_RE` below
+                    # matches — and that loop's `fence_needs_negation=True` (B-525) means
+                    # an unannotated fence no longer suppresses IT, so this same fence
+                    # reliably produces a separate "hardcoded public-IP URL" WARN even
+                    # though the pipe-to-shell EXECUTION shape stays unassessed here. The
+                    # flat "so it was not assessed" wording read as contradicting that
+                    # WARN (same evidence, two notes that looked like they disagreed) —
+                    # name the two questions as different ones instead of restating
+                    # "not assessed" next to a WARN about the identical text.
+                    if _is_public_ip(host):
+                        coverage_fence.append(
+                            f"coverage: {name}: this fence's pipe-to-shell EXECUTION "
+                            f"(no marker we recognise) was not assessed — a different "
+                            f"question from the bare public-IP URL ({host}) itself, "
+                            "which is scored separately, above"
+                        )
+                    else:
+                        coverage_fence.append(
+                            f"coverage: {name}: a pipe-to-shell from {host} sits in a "
+                            "fence carrying no marker we recognise, so it was not "
+                            "assessed"
+                        )
                 continue
             msg = f"{name}: pipe-to-shell from non-reputable host {host}"
             # C-259 (D5, docs/design/severity-separability.md): measured net-correct,
@@ -7164,7 +7183,26 @@ def _vet_resolved_skill(p: Path) -> Finding:
             "before every content-security check had run"
         )]
     if ring:
-        pool = [finding, *ring]
+        # B-884: `finding` (B13's own base verdict) is listed first, so `max()` — which
+        # keeps the FIRST element it sees on a tie, never a later one — always favored it
+        # over any ring finding at the same `_VET_MERGE_RANK`. That is right when B13's
+        # winner is one of its more specific buckets (shell-injection, time-bomb, a named
+        # exfil host, ...), each of which already names a concrete behavior. It is wrong
+        # for B13's OWN softest, catch-all bucket — "warns_content" (F-051/F-060/F-062:
+        # broad activation trigger / bundled-script delegation / Tor-onion or hardcoded-IP
+        # reference; see that bucket's cascade comment: "individually weak, worth a human
+        # glance") — where a tied ring finding is, by construction, a dedicated check
+        # naming one specific behavior (e.g. B100's ClickFix paste-into-terminal finding),
+        # strictly more actionable than B13's generic label on the same evidence. Scoped
+        # to that one bucket via its unique `sub_signals` label so every other B13 winner
+        # keeps today's tie-break unchanged — this flips which finding a tie resolves to,
+        # never a finding's own status/severity.
+        _b13_is_soft_content_signal = (
+            finding.id == "B13"
+            and finding.status == WARN
+            and finding.sub_signals == frozenset({_B13_WINNER_SUBSIGNAL["warns_content"]})
+        )
+        pool = [*ring, finding] if _b13_is_soft_content_signal else [finding, *ring]
         primary = max(pool, key=lambda fx: _VET_MERGE_RANK.get(fx.status, 0))
         primary.ring_findings = [
             fx
