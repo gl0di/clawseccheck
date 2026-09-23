@@ -7602,11 +7602,19 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
               installed plugin carries ClawHub trust data at all — that reflects
               absence of a bad verdict, not a positive clean scan for those installs).
 
-    WHY "blocked" JUSTIFIES A FAIL (C-479). The concern this answers: if only a
-    hand-edited config could produce ``clawhubTrustDisposition: "blocked"``, a FAIL would
-    be disproportionate — we would be reacting to a string the user typed. Grounded
-    against the installed dist, it is written by OpenClaw's own install path, from
-    ``params.assessment.disposition``:
+    WHY "blocked" JUSTIFIES A FAIL (C-479; this paragraph is conformed to the verified
+    mechanism established by (1) and (2a) below, not the other way around). The concern
+    this answers: if "blocked" were a freely-typed config string, a FAIL would be
+    disproportionate — we would be reacting to a string the user typed, not a verdict.
+    Two separate facts ground the answer.
+
+    First, the SHAPE: ``clawhubTrustDisposition`` is not a free-text field. It is a
+    four-literal enum (``PluginInstallRecordShape``), and the only function that ever
+    computes "blocked" for it is OpenClaw's own ``assessClawHubTrust``/
+    ``isBlockingClawHubTrust``, keyed exclusively off a registry-sourced trigger — a
+    download block, a malicious scan status, a moderation state of
+    blocked/quarantined/revoked, or a ``scan:malicious``/``static:malicious`` reason
+    token:
 
         function assessClawHubTrust(trust) {
             if (riskReasons.length === 0 && notices.length === 0) return {disposition: "clean"};
@@ -7625,10 +7633,18 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             });
         }
 
-    Every one of those four triggers is sourced from the REGISTRY's verdict — a download
-    block, a malicious scan status, a moderation state of blocked/quarantined/revoked, or
-    a ``scan:malicious``/``static:malicious`` reason token. So a FAIL here reports the
-    registry's own malicious verdict on an installed plugin, not a user-authored string.
+    That ladder is where the value CONCEPTUALLY comes from — no code path ever writes an
+    arbitrary string into this field. It is NOT, however, a description of how "blocked"
+    reaches the persisted install record this check actually reads: per (1) below, the
+    live ClawHub-download install path that runs this exact computation can never persist
+    "blocked" to an install record — it returns before the record-builder is ever called.
+    Per (2a) below, the one reachable route to a persisted "blocked" record is a retired
+    ``plugins.installs.<id>.clawhubTrustDisposition: "blocked"`` config record surviving
+    into a config-repair import — i.e. OpenClaw's own persisted install-record store,
+    still typed to the enum above (so it cannot hold an arbitrary string), but not a live
+    registry verdict computed for THIS install. A FAIL here reports that persisted
+    OpenClaw-owned record, not a user-authored free-text string — that is what still
+    holds — but it is not evidence of an in-progress or recent live ClawHub block.
 
     The ladder is also why the WARN branch is written as "any non-clean, non-blocked
     value" rather than an enumeration: the disposition set is exactly four today, and a
@@ -7684,13 +7700,17 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     executing — the write path opens the real config file and the real state DB
     under an exclusive lease with no override, so running it for real would mutate
     this machine's actual OpenClaw install) ``importShippedPluginInstallConfigForDoctor``
-    in ``plugin-registry-migration-<hash>.mjs`` shows it is invoked
-    UNCONDITIONALLY on every ``openclaw doctor`` run (the call is gated only on
+    in ``plugin-registry-migration-<hash>.mjs`` shows the call is gated only on
     ``inspectShippedPluginInstallConfigRecords(...).status === "valid"``, never on
-    ``--fix``/``--yes``/``shouldRepair``) and copies each config-authored record
+    ``--fix``/``--yes``/``shouldRepair`` — and it copies each config-authored record
     into the persisted install index for any plugin id NOT ALREADY present there
-    (``if (!persisted || !Object.hasOwn(persisted, pluginId))``). So the reachable
-    route for a FAIL-qualifying "blocked" record is the retired
+    (``if (!persisted || !Object.hasOwn(persisted, pluginId))``). This importer is not
+    reachable from ``openclaw doctor`` alone: at least one other caller invokes it too —
+    ``automatic-startup-config-repair-<hash>.mjs`` (its own gateway-startup config-repair
+    path) also calls ``importShippedPluginInstallConfigForDoctor`` unconditionally under
+    the same status-gate, so the route runs on at least every ``openclaw doctor`` pass
+    and every startup config-repair pass, and possibly other unaudited callers of the
+    same exported symbol. So the reachable route for a FAIL-qualifying "blocked" record is the retired
     ``plugins.installs`` config key surviving into a ``doctor`` run, not a live
     ClawHub verdict — the FAIL is still correct (it is still OpenClaw's own
     persisted record, per the ladder above), just reached by a different door than
@@ -7854,8 +7874,13 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             "OpenClaw's own ClawHub trust verdict marks installed plugin(s) as "
             f"'blocked': {'; '.join(ev)}{extra}.",
             "Uninstall or replace the blocked plugin(s) immediately — this is not a "
-            "heuristic, it is OpenClaw's own moderation decision. Do not override or "
-            "acknowledge the verdict without independently re-verifying provenance.",
+            "heuristic, it is a 'blocked' verdict persisted in OpenClaw's own "
+            "install-record store. On OpenClaw 2026.9.5, no live ClawHub scan can write "
+            "this value; the only known route into it is a retired "
+            "plugins.installs.<id>.clawhubTrustDisposition config record imported by a "
+            "doctor or startup config-repair pass, so also check openclaw.json (and its "
+            "history) for that record. Do not override or acknowledge the verdict "
+            "without independently re-verifying provenance.",
             evidence=ev,
         )
 
