@@ -5991,23 +5991,42 @@ def _containment_class_attr_is_safe(ctx, class_node, attr, visited=None, depth=0
     in a PARENT's `__init__`, read/mutated off a CHILD instance one level of
     inheritance removed (`class Wrapper(Base): pass`), found nothing in the
     child's own (empty) body and fell through to True -- the exact H5/G5 shape
-    reopened one hop away. Now: a base that resolves (via
-    `_containment_resolve_base_class`) to an in-file ClassDef is recursed into
-    for the SAME attribute, transitively, bounded by
-    `_CONTAINMENT_MRO_MAX_DEPTH` and the `visited` cycle guard (a class can't
-    syntactically inherit from itself in valid Python, but resolution here is
-    purely static/AST-based -- `class A(A):` resolves the free name `A` right
-    back to itself, so the guard matters). An UNRESOLVABLE base (imported from
-    elsewhere, a dynamic/computed base, more than one candidate, budget
-    exhaustion, ...) is treated as OPAQUE and makes the result conservative
-    (not safe) rather than silently proving nothing about the attribute --
-    consistent with this whole recognizer's fail-closed-on-ambiguity design
-    (round 4 onward). The sole exception is `object` -- the implicit base of
-    every class, or an explicit `class Foo(object):` -- which is NOT opaque: a
-    class with no bases, or only `object`, behaves exactly as before this
-    round (own body only, True if nothing sensitive found there). That keeps
-    the ordinary, no-inheritance case (the overwhelming majority of real
-    skills) from regressing just because SOME base is present in the AST."""
+    reopened one hop away. Round 6 fixed that by walking `class_node.bases`
+    too: a base that resolves (via `_containment_resolve_base_class`) to an
+    in-file ClassDef is recursed into for the SAME attribute, transitively,
+    bounded by `_CONTAINMENT_MRO_MAX_DEPTH` and the `visited` cycle guard (a
+    class can't syntactically inherit from itself in valid Python, but
+    resolution here is purely static/AST-based -- `class A(A):` resolves the
+    free name `A` right back to itself, so the guard matters).
+
+    B-850 round 7 (C-135 rejection of the round-6 commit): round 6 ALSO made an
+    unresolvable base (imported from elsewhere, a dynamic/computed base, more
+    than one candidate) OR a depth-budget exhaustion flip the WHOLE function's
+    result to not-safe -- confirmed live to convict ordinary code with no
+    sensitive assignment anywhere: `class ConfigDict(dict): ...` or `class
+    Base(Exception): ...` where every `self.<attr> = <value>` in the entire
+    resolvable hierarchy is a plain literal, purely because `dict`/`Exception`
+    themselves don't resolve to an in-file `ClassDef`; likewise a benign chain
+    that happens to be `_CONTAINMENT_MRO_MAX_DEPTH` or more levels deep flipped
+    to not-safe purely because the budget ran out before the walk finished, not
+    because anything sensitive was found. That conflates "couldn't finish
+    proving safe" with "proven unsafe" -- this function's own contract (the
+    paragraph above) is narrower than that: only a PROVEN-sensitive assignment
+    convicts. Now: an unresolvable base or an exhausted depth budget contributes
+    NO INFORMATION -- it's skipped, exactly like any other base this walker
+    can't see into, and the function returns True once every RESOLVABLE base
+    (plus the class's own body) came back with nothing sensitive. `object` --
+    the implicit base of every class, or an explicit `class Foo(object):` --
+    was never opaque in the first place and is unaffected: a class with no
+    bases, or only `object`, still behaves exactly as before round 6 (own body
+    only). This is a deliberate, narrower trade-off, not a compromise: a
+    sensitive assignment deliberately hidden behind a genuinely unresolvable
+    base (imported from another file, dynamic, or more than
+    `_CONTAINMENT_MRO_MAX_DEPTH` levels deep) can again go undetected -- but
+    that is the SAME single-file-analysis boundary this whole recognizer
+    already accepts everywhere else (an unresolved RHS is safe-by-design per
+    the paragraph above), not a new category of gap, and it is far narrower
+    than "any class with any out-of-file base whatsoever."""
     if visited is None:
         visited = set()
     if id(class_node) in visited:
@@ -6041,20 +6060,21 @@ def _containment_class_attr_is_safe(ctx, class_node, attr, visited=None, depth=0
             if resolved is not None and _containment_dotted_is_sensitive(resolved):
                 return False
 
-    opaque = False
     for b in class_node.bases:
         if isinstance(b, ast.Name) and b.id == "object":
-            continue  # the universal implicit base -- not opaque, contributes nothing
+            continue  # the universal implicit base -- contributes nothing
         if depth >= _CONTAINMENT_MRO_MAX_DEPTH:
-            opaque = True  # budget exhausted with a real base still unwalked
+            # Budget exhausted with a real base still unwalked -- no information
+            # about it either way, not proof of a sensitive assignment (round 7).
             continue
         base_class = _containment_resolve_base_class(ctx, b, class_node)
         if base_class is None:
-            opaque = True  # imported / dynamic / ambiguous base -- can't vouch for it
+            # Imported / dynamic / ambiguous base -- can't see into it, but "can't
+            # see" isn't "proven sensitive" (round 7): contributes no information.
             continue
         if not _containment_class_attr_is_safe(ctx, base_class, attr, visited, depth + 1):
             return False
-    return not opaque
+    return True
 
 
 def _containment_self_attr_is_safe(ctx, node, env, visited, depth):

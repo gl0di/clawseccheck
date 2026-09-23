@@ -970,10 +970,16 @@ def test_str_join_reversed_hidden_escape_convicts():
 # Attribute branch of `_containment_target_is_safe` via
 # `_containment_resolve_constructed_class` (outside-the-class via a traced
 # constructor). Now: a base that resolves to an in-file ClassDef is recursed into
-# transitively; an unresolvable base (imported, dynamic, ambiguous, ...) is OPAQUE
-# and makes the result conservative (not safe) rather than silently proving nothing
-# -- except `object` (implicit or explicit), which is not opaque and changes nothing
-# about the ordinary no-inheritance case.
+# transitively, bounded by a depth budget and a visited-class cycle guard.
+#
+# Round 7 (C-135 rejection of the round-6 commit) corrected an overreach: round 6
+# treated an unresolvable base (imported, dynamic, ambiguous) OR an exhausted depth
+# budget as making the WHOLE result not-safe -- convicting ordinary code (a `dict`/
+# `Exception` subclass, a benign chain deeper than the budget) with nothing sensitive
+# anywhere. Now an unresolvable base or exhausted budget contributes NO information
+# and is skipped; the result is True once every RESOLVABLE base (plus the class's own
+# body) came back clean -- `object` (implicit or explicit) was never opaque and is
+# unaffected either way. See `test_r7_*` below for the clean-control pins.
 # ---------------------------------------------------------------------------------
 _R6_MRO_CONVICT_CASES = [
     ("R6A-external-instance-attribute-via-subclass", "pkg/mod.py",
@@ -1056,11 +1062,17 @@ def test_r6_multi_level_inheritance_convicts():
     assert _verdict(src, "pkg/mod.py") == "convict"
 
 
-def test_r6_unresolvable_imported_base_is_opaque_and_convicts():
-    # An unresolvable base (imported from elsewhere) must make the result
-    # conservative (not safe), not silently prove the attribute clean just because
-    # the resolvable part of the hierarchy (the subclass's own empty body) found
-    # nothing.
+def test_r7_unresolvable_imported_base_contributes_no_information_and_stays_clean():
+    # B-850 round 7 (C-135 rejection of round 6): an unresolvable base (imported
+    # from elsewhere) used to flip the WHOLE result to not-safe -- convicting this
+    # even though nothing sensitive is ever proven anywhere reachable. Now it
+    # contributes NO information (same as any other base this walker can't see
+    # into) and the resolvable part of the hierarchy (the subclass's own empty-of-
+    # `self.name=` body) proves nothing sensitive, so this stays clean. This is the
+    # accepted, narrower residual round 7 deliberately reopens: a sensitive
+    # assignment truly hidden behind a genuinely unresolvable base would go
+    # undetected -- the same single-file-analysis boundary this whole recognizer
+    # already accepts everywhere else, not a new category of gap.
     src = _rd(
         "os.path.join(here, 'v.py')",
         H + "from some_external_module import ExternalBase\n"
@@ -1068,7 +1080,70 @@ def test_r6_unresolvable_imported_base_is_opaque_and_convicts():
         "    def bad(self):\n        self.name.join = lambda *args: '/tmp/evil.py'\n"
         "Wrapper().bad()\n",
     )
-    assert _verdict(src, "pkg/mod.py") == "convict"
+    assert _verdict(src, "pkg/mod.py") == "clean"
+
+
+# ---------------------------------------------------------------------------------
+# Round 7 (C-135 rejection of the round-6 MRO-walk commit): round 6's opaque-base
+# handling set a flag on ANY unresolvable base (or an exhausted depth budget) that
+# flipped the WHOLE function's result to not-safe, regardless of what the class's
+# own (and every RESOLVABLE ancestor's) body actually contained. Confirmed live to
+# convict ordinary code -- a `dict`/`Exception` subclass, or a purely benign chain
+# deep enough to exhaust the depth budget -- purely because "couldn't finish
+# proving safe" was conflated with "proven unsafe". These are the FPX2/FPX3/deep-
+# chain clean-controls pinning the correction: an unresolvable base or an
+# exhausted budget now contributes NO information, and the function returns True
+# once every RESOLVABLE base (plus the class's own body) came back clean.
+# ---------------------------------------------------------------------------------
+def test_r7_dict_subclass_with_ordinary_literal_assignment_stays_clean():
+    # `dict` is a stdlib base that never resolves to an in-file ClassDef -- it must
+    # NOT make the whole class opaque-and-unsafe when every actual assignment in
+    # the resolvable hierarchy is a plain string literal.
+    src = _rd(
+        "os.path.join(here, 'v.py')",
+        H + "class ConfigDict(dict):\n"
+        "    def __init__(self, config):\n        self.config = config\n"
+        "class C:\n    pass\n"
+        "cd = ConfigDict(C())\n"
+        "cd.config.path = '/new/path'\n",
+    )
+    assert _verdict(src, "pkg/mod.py") == "clean"
+
+
+def test_r7_exception_subclass_with_ordinary_literal_assignment_stays_clean():
+    # Same shape as the dict-subclass control, with `Exception` as the unresolvable
+    # stdlib base and the sensitive-shaped assignment reached through a self-attr
+    # mutation instead of an externally-constructed instance.
+    src = _rd(
+        "os.path.join(here, 'v.py')",
+        H + "class Base(Exception):\n"
+        "    def __init__(self, err):\n        self.err = err\n"
+        "    def bad(self):\n        self.err.path = '/new/path'\n"
+        "class E:\n    pass\n"
+        "Base(E()).bad()\n",
+    )
+    assert _verdict(src, "pkg/mod.py") == "clean"
+
+
+def test_r7_benign_chain_deeper_than_the_mro_budget_stays_clean():
+    # A purely benign inheritance chain -- every `self.<attr> = <value>` a plain
+    # string literal, nothing sensitive anywhere -- must stay clean regardless of
+    # how deep it goes, even past `_CONTAINMENT_MRO_MAX_DEPTH`: running out of
+    # walk budget is "no information", not "proven unsafe". 9 levels deliberately
+    # exceeds the depth-6 budget.
+    levels = 9
+    body = []
+    prev = "object"
+    for i in range(levels):
+        name = f"Level{i}"
+        body.append(
+            f"class {name}({prev}):\n    def __init__(self):\n        self.name = 'level{i}'\n"
+        )
+        prev = name
+    body.append(f"x = {prev}()\n")
+    body.append("x.name = 'still ordinary'\n")
+    src = _rd("os.path.join(here, 'v.py')", H + "".join(body))
+    assert _verdict(src, "pkg/mod.py") == "clean"
 
 
 def test_r6_self_referential_base_does_not_infinite_recurse():
