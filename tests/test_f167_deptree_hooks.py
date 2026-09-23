@@ -332,15 +332,15 @@ def test_a_pass_never_carries_a_hit(monkeypatch):
 #
 # `_b349_assess_target` only special-cases signals starting with "confusable"
 # (see its own docstring) — the "dense variation-selector / invisible-alphabet
-# channel found" signal does not start with that, so before this fix it fell
-# straight into the unconditional FAIL-eligible bucket. Reproduced directly:
-# an install-time target containing nothing but an ordinary CJK-name-table
-# string with IVS selectors (localized display names, a real, unremarkable
-# shape for a build/postinstall script to embed) reached CRITICAL FAIL with
-# no discriminator of any kind. The fix lives in `textnorm._has_dense_vs_
-# supplement_channel` itself (the CJK-ideograph-base exemption), so this
-# check needs no code change of its own — these tests pin that the shared
-# fix actually reaches this consumer, not just the ones it was written next to.
+# channel found" signal is FAIL-eligible here. textnorm excuses a Variation-
+# Selectors-Supplement selector that follows a unified ideograph (a well-formed
+# Ideographic Variation Sequence) for its WARN-tier consumers, but this check
+# calls `obfuscation_signals(..., excuse_ivs=False)` and keeps the raw count:
+# the C-135 pass showed a payload with an ideograph before every selector
+# evades the exemption, and in Chinese or Japanese prose that carrier is free.
+# Same trade the B-448 note in `_b349_assess_target` refuses. So these pin BOTH
+# directions: the evasion still FAILs, and the benign name table still FAILs
+# too (a known, so-far-unobserved FP, recorded next to the code).
 # ---------------------------------------------------------------------------
 
 _JP_NAME_KANJI = (
@@ -351,27 +351,69 @@ _JP_NAME_KANJI = (
     "紫橘灰銀金銅鉄石"
 )
 
+# Ordinary Chinese prose (written for this test): every character is a unified
+# ideograph, so a selector after each one is a well-formed IVS pair.
+_ZH_PROSE = (
+    "今天天气很好我们一起去公园散步看看花草树木然后回家吃饭晚上读书写字休息"
+    "这个工具用来安装依赖文件并且检查版本是否正确如果有问题请联系维护人员谢谢大家的支持与帮助"
+    "明天继续工作"
+)
 
-def test_ivs_name_table_in_install_target_does_not_fail(tmp_path):
-    """The reported false positive (CLAWSECCHECK-B-859), reproduced then fixed
-    at the source: a benign kanji-name table with one IVS selector per
-    ideograph, embedded in an install-time target, must not FAIL."""
+
+def _install_target(tmp_path, name: str, body: str):
+    """An OpenClaw tree whose one dependency runs `node setup.js` at postinstall.
+    *body* is written as raw Unicode characters, not a `\\uXXXX`-escaped spelling —
+    an escaped form is plain ASCII and would not exercise `obfuscation_signals`."""
     root = tmp_path / "openclaw"
     root.mkdir()
     (root / "package.json").write_text(json.dumps({"name": "openclaw"}))
-    names_js_literal = "".join(
+    _pkg(root, name, {"postinstall": "node setup.js"}, {"setup.js": body})
+    return root
+
+
+def test_ivs_padded_prose_payload_in_install_target_fails(tmp_path):
+    """C-135 round 1 reproduction: one comment line of ordinary Chinese prose with a
+    pseudo-random selector (8 bits) after each ideograph. With textnorm's default IVS
+    exemption this went FAIL -> PASS; B349 must keep the raw count and FAIL it."""
+    payload = "".join(c + chr(0xE0100 + (i * 37 % 240)) for i, c in enumerate(_ZH_PROSE))
+    root = _install_target(tmp_path, "zh-setup", f"// {payload}\nmodule.exports = 1;\n")
+    f = check_dependency_tree_hooks(_Ctx(root))
+    assert f.status == FAIL
+    joined = "\n".join(f.evidence or [])
+    assert "zh-setup" in joined
+    assert "dense variation-selector" in joined
+
+
+def test_plain_chinese_prose_in_install_target_passes(tmp_path):
+    """Paired control: the same prose with no selectors is ordinary i18n text."""
+    root = _install_target(tmp_path, "zh-setup", f"// {_ZH_PROSE}\nmodule.exports = 1;\n")
+    assert check_dependency_tree_hooks(_Ctx(root)).status == PASS
+
+
+def test_ivs_name_table_in_install_target_still_fails_known_fp(tmp_path):
+    """The B-859 report, deliberately NOT fixed in this check: a benign kanji-name
+    table with one IVS selector per name reaches CRITICAL FAIL, because the only
+    static discriminator (is each selector after an ideograph?) is exactly what the
+    padded payload above satisfies. Recorded in `_b349_assess_target` as a known FP,
+    never observed in this check's population. If a discriminator that closes the
+    padding channel ever lands, this may flip to PASS — but only together with the
+    padded-payload test above still failing."""
+    names = "".join(
         _JP_NAME_KANJI[i % len(_JP_NAME_KANJI)] + chr(0xE0100 + i) for i in range(48)
     )
-    # The actual Unicode characters, not a `json.dumps`/`\uXXXX`-escaped spelling of
-    # them — an escaped form is plain ASCII backslash-u text and would not exercise
-    # `obfuscation_signals` at all, which scans the raw decoded source text.
-    _pkg(root, "locale-names", {"postinstall": "node setup.js"}, {"setup.js": (
+    root = _install_target(tmp_path, "locale-names", (
         "// Localized display names, one IVS-tagged variant per entry.\n"
-        f'const NAMES = "{names_js_literal}";\n'
+        f'const NAMES = "{names}";\n'
         "module.exports = NAMES;\n"
-    )})
-    f = check_dependency_tree_hooks(_Ctx(root))
-    assert f.status == PASS, f"benign IVS name table must not FAIL; got {f.evidence}"
+    ))
+    assert check_dependency_tree_hooks(_Ctx(root)).status == FAIL
+
+
+def test_ivs_name_table_under_the_gate_in_install_target_passes(tmp_path):
+    """Paired control: the same kind of table one pair short of the count gate."""
+    names = "".join(_JP_NAME_KANJI[i] + chr(0xE0100 + i) for i in range(31))
+    root = _install_target(tmp_path, "locale-names", f'const NAMES = "{names}";\n')
+    assert check_dependency_tree_hooks(_Ctx(root)).status == PASS
 
 
 def test_dense_unattached_ivs_in_install_target_still_fails(tmp_path):
@@ -379,7 +421,7 @@ def test_dense_unattached_ivs_in_install_target_still_fails(tmp_path):
     NOT attached to a CJK base — the shape the signal exists to catch (a real
     skill encoded tokens through exactly this channel) — must still reach
     CRITICAL FAIL through this check. Confirms the untraced FAIL path the
-    reviewer found is real and stays live after the false-positive fix."""
+    reviewer found is real and stays live."""
     root = tmp_path / "openclaw"
     root.mkdir()
     (root / "package.json").write_text(json.dumps({"name": "openclaw"}))

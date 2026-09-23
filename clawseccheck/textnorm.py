@@ -137,7 +137,9 @@ _BIDI_MARK_SRC = (
 #                  U+FE0F), the two presentation selectors that are
 #                  legitimate and PERVASIVE in ordinary emoji-using text (see
 #                  the Tier 2 comment inside obfuscation_signals). FE00-FE0D
-#                  have no comparable everyday use.
+#                  have no comparable everyday use (FE00-FE06 do have
+#                  standardized base characters, just far rarer -- see
+#                  _has_dense_vs_supplement_channel).
 #   U+E0100-E01EF: Variation Selectors Supplement -- a 240-symbol invisible
 #                  alphabet (~8 bits/code point) dense enough to carry a real
 #                  payload, published and in live use (a real skill encodes
@@ -707,41 +709,53 @@ _VS_SUPPLEMENT_RE = re.compile("[" + _VS_SUPPLEMENT_CLASS_SRC + "]")
 _VS_SUPPLEMENT_SIGNAL_MIN_COUNT = 32
 
 # B-859: an Ideographic Variation Sequence (IVS) is Unicode's OWN mechanism for
-# selecting a glyph variant of the CJK ideograph immediately before it — the
-# Ideographic Variation Database registers exactly these base+selector pairs,
-# and Japanese/Chinese personal-name kanji are the dominant real-world user (a
-# family name rendered with one specific stroke variant). Reproduced directly
-# (B-859): a benign list of 48 IVS-tagged kanji names — ordinary
-# content, nothing else unusual — tripped the raw count gate below at WARN
-# (B58) and, worse, reached an UNGATED CRITICAL FAIL through B349's install-
-# time path (`checks/_lifecycle.py`'s `_b349_assess_target` only special-cases
-# signals starting with "confusable"; this signal string does not, so it had
-# no discriminator of any kind).
+# selecting a glyph variant of the ideograph immediately before it. UTS #37
+# section 2 defines one as exactly two code points: a base "with the Ideographic
+# property that is not canonically nor compatibly decomposable", then a selector
+# in U+E0100-E01EF. Japanese personal and place names are a real use (a family
+# name printed with one specific stroke variant). Reproduced (B-859): a benign
+# list of 48 IVS-tagged kanji names tripped the raw count gate below at WARN
+# (B58) and reached CRITICAL FAIL through B349's install-time path.
 #
-# These ranges cover the CJK ideograph blocks the IVD actually registers bases
-# from: CJK Unified Ideographs + Extension A, CJK Compatibility Ideographs,
-# and the supplementary-plane Extensions B-G plus the Compatibility Ideographs
-# Supplement. Not a new, independent Unicode claim — it is the same ideograph
-# population Unicode's own IVD collections (Adobe-Japan1, Hanyo-Denshi, MOJIKIBAN)
-# attach variation sequences to.
-_CJK_IDEOGRAPH_BASE_RANGES = (
-    (0x3400, 0x4DBF),    # CJK Unified Ideographs Extension A
-    (0x4E00, 0x9FFF),    # CJK Unified Ideographs
-    (0xF900, 0xFAFF),    # CJK Compatibility Ideographs
-    (0x20000, 0x2EBEF),  # CJK Unified Ideographs Extensions B-F (contiguous span)
-    (0x2F800, 0x2FA1F),  # CJK Compatibility Ideographs Supplement
-    (0x30000, 0x3134F),  # CJK Unified Ideographs Extension G
-)
+# The base test is Unicode's Unified_Ideograph set, taken from the UCD that
+# ships with the running Python rather than a hand-typed block table: every
+# assigned "CJK UNIFIED IDEOGRAPH-XXXX" plus the twelve code points in the CJK
+# Compatibility Ideographs BLOCK that are nonetheless unified ideographs (they
+# carry Unified_Ideograph=Yes and no decomposition, unlike their neighbours).
+# Verified on Python 3.12 (UCD 15.0.0): this set is 97,058 code points, the same
+# count Perl's Unicode::UCD 15.0 `prop_invlist("Unified_Ideograph")` returns.
+# It is deliberately NARROWER than what UTS #37 allows as a base:
+#   * the ~1,000 CJK compatibility ideographs (U+F900-FAFF minus the twelve,
+#     U+2F800-2FA1F) are excluded, correctly -- each is canonically
+#     decomposable, so UTS #37 rules it out as a base;
+#   * unassigned code points inside the CJK blocks (category Cn, e.g. U+2A6E0,
+#     U+2EBE5) have no name and are excluded -- nothing can be a base yet;
+#   * other Ideographic, non-decomposable scripts (Tangut, Nushu, Khitan Small
+#     Script, U+3006/U+3007 and the Hangzhou numerals) are excluded by choice.
+#     Excusing fewer selectors only ever counts more of them, so the cost of
+#     that choice is a WARN on dense IVS text in those scripts, never a
+#     missed payload.
+# Python-version edge: a unified ideograph added to Unicode after the running
+# interpreter's UCD (Python 3.9 ships UCD 13.0.0) has no name there and is not
+# excused -- again the counting-more direction.
+_UNIFIED_IDEOGRAPHS_IN_COMPAT_BLOCK = frozenset({
+    0xFA0E, 0xFA0F, 0xFA11, 0xFA13, 0xFA14, 0xFA1F,
+    0xFA21, 0xFA23, 0xFA24, 0xFA27, 0xFA28, 0xFA29,
+})
+_IVS_SELECTOR_LO = 0xE0100
+_IVS_SELECTOR_HI = 0xE01EF
 
 
-def _is_cjk_ideograph_base(cp: int) -> bool:
-    """True for a code point in one of the CJK ideograph blocks a real
-    Ideographic Variation Sequence is built on (see `_CJK_IDEOGRAPH_BASE_RANGES`
-    just above for which blocks and why)."""
-    return any(lo <= cp <= hi for lo, hi in _CJK_IDEOGRAPH_BASE_RANGES)
+def _is_ivs_base(ch: str) -> bool:
+    """True when *ch* is a unified ideograph -- the base an Ideographic Variation
+    Sequence is built on (see the comment above for the exact set and why it is
+    narrower than UTS #37 allows)."""
+    if ord(ch) in _UNIFIED_IDEOGRAPHS_IN_COMPAT_BLOCK:
+        return True
+    return unicodedata.name(ch, "").startswith("CJK UNIFIED IDEOGRAPH-")
 
 
-def _has_dense_vs_supplement_channel(text: str) -> bool:
+def _has_dense_vs_supplement_channel(text: str, *, excuse_ivs: bool = True) -> bool:
     """True when *text* carries enough Variation-Selector-Supplement-class
     characters (see `_VS_SUPPLEMENT_CLASS_SRC`) to look like a deliberate
     invisible-alphabet channel rather than one or two incidental occurrences
@@ -761,56 +775,85 @@ def _has_dense_vs_supplement_channel(text: str) -> bool:
     a DIFFERENT class — see its own module comment for why the two must not
     be merged).
 
-    ONE per-character exemption, added by B-859 (the rest of the class still
-    gets none, for the reason given below): an E0100-E01EF selector is
-    excused from the count when it immediately follows a CJK ideograph base
-    character (`_is_cjk_ideograph_base`) — i.e. only when it forms a
-    well-formed Ideographic Variation Sequence. This is not a "flanking
-    check" of the kind the module previously ruled out for this class (a
-    per-character excusal that answers "is this occurrence doing its real
-    Unicode job", the same shape `_is_zwj_between_emoji` and
-    `_is_mongolian_flanked_180e` already use above) — it is narrower than
-    that: it excuses the SELECTOR only, never the base, and only for the
-    specific sub-range (E0100-E01EF) that Unicode itself pairs with a
-    preceding ideograph. FE00-FE0D and the two Hangul fillers get no
-    exemption at all — neither has a "base character" to legitimately follow
-    — and an E0100-E01EF selector that is NOT immediately preceded by a CJK
-    ideograph (an isolated run, or one stacked behind a non-ideograph such as
-    the corpus's own genuine positive, hundreds of selectors behind ONE
-    emoji) keeps counting exactly as before.
+    ONE per-character exemption, added by B-859 and applied only when
+    *excuse_ivs* is true (the default): an E0100-E01EF selector is excused
+    from the count when the character immediately before it is a unified
+    ideograph (`_is_ivs_base`), i.e. when the pair is a well-formed
+    Ideographic Variation Sequence. It excuses the SELECTOR only, never the
+    base. An E0100-E01EF selector NOT directly after a unified ideograph (an
+    isolated run, or a stack behind one anchor such as the corpus's genuine
+    positive, hundreds of selectors behind ONE emoji) keeps counting.
 
-    KNOWN RESIDUAL, stated rather than hidden: an attacker who pads EVERY
-    payload-carrying selector with its own plausible CJK ideograph —
-    base1+selector1+base2+selector2+... — forms well-formed IVS pairs
-    throughout and evades this gate the same way genuine content does; the
-    payload still lives in WHICH selector is chosen, and this discriminator
-    cannot see that. That costs the attacker one real CJK code point per
-    payload symbol (not a free run) and was not observed in the 338,751-file
-    corpus this class is grounded against (B-646). Closing it further needs
-    either the actual IVD base+selector registry (no stdlib source for one)
-    or accepting genuine CJK-heavy content as the false positive again —
-    left as a residual for the adversarial (C-135) pass, not silently
-    declared solved.
+    FE00-FE0D get no exemption, but NOT because they have no legitimate
+    base. Unicode's StandardizedVariants.txt (18.0.0) registers FE00-FE06
+    after real base characters: FE00-FE02 after CJK unified ideographs (the
+    CJK-compatibility-ideograph variation sequences), FE00-FE02 after math
+    symbols and mathematical script letters, FE00 after Myanmar, Phags-pa
+    and Manichaean letters, FE00-FE06 after Egyptian hieroglyphs (rotations).
+    It lists no sequence for FE07-FE0D. So a dense run of those standardized
+    sequences is a real benign shape this count gate cannot tell from a
+    payload. Observed, not hypothetical: HTML's named character references
+    have twenty math-symbol + FE00 entries (`&caps;`, `&lvertneqq;`, ...; the
+    `character-entities` npm package lists exactly twenty), an entity table
+    carries them, and a bundle that embeds the table more than once can cross
+    the gate (OpenClaw 2026.9.5's bundled imap
+    extension carries 34 in one 3 MB file -- above the 1 MB per-file skill
+    read cap, so no consumer reads it today). Left un-excused on purpose:
+    each extra excused shape is another carrier an attacker can pad with,
+    and none of these has been seen at gate density in a file a consumer
+    actually reads. The Hangul fillers are a jamo placeholder with no
+    preceding base, so there is no pair to excuse.
+
+    KNOWN RESIDUAL OF THE EXEMPTION, and why B349 opts out of it. Placing a
+    unified ideograph before EVERY payload selector (base1+selector1+
+    base2+selector2...) makes every pair well-formed, so the exemption
+    excuses all of them; the payload still lives in WHICH selector is chosen,
+    and a per-pair test cannot see that. The carrier is free in any Chinese
+    or Japanese file: ordinary prose already supplies one ideograph per
+    payload symbol, so nothing visible is added. The exemption therefore
+    trades a demonstrated false negative for a false positive that has never
+    been observed (0 of 74,496 local npm-tree and ~/.openclaw files carry any
+    E0100-E01EF selector at all, measured 2026-09-23). That trade is tolerable
+    only where this signal is advisory. B58 and the other consumers only
+    WARN on it, so they keep the default. B349 can spend a CRITICAL FAIL on
+    it, so `checks/_lifecycle.py` calls with ``excuse_ivs=False`` and keeps
+    the raw count -- the same trade B-448 refused there for the zero-width
+    class (see the note next to `_b349_assess_target`).
+    Closing the residual for the advisory consumers would need the IVD
+    base+selector registry (not in the stdlib) or giving up the exemption.
+
+    Cost: the class count comes from one C-level ``findall``. Text under the
+    gate returns there; the exemption only ever LOWERS the count, so it can
+    never lift such text over it. Only text at or above the gate walks its
+    matches, and it stops as soon as the gate is reached.
     """
-    count = 0
-    prev_cp: "int | None" = None
-    for ch in text:
-        cp = ord(ch)
-        if _VS_SUPPLEMENT_RE.match(ch):
-            excused = (
-                0xE0100 <= cp <= 0xE01EF
-                and prev_cp is not None
-                and _is_cjk_ideograph_base(prev_cp)
-            )
-            if not excused:
-                count += 1
-        prev_cp = cp
-    return count >= _VS_SUPPLEMENT_SIGNAL_MIN_COUNT
+    if len(_VS_SUPPLEMENT_RE.findall(text)) < _VS_SUPPLEMENT_SIGNAL_MIN_COUNT:
+        return False
+    if not excuse_ivs:
+        return True
+    counted = 0
+    for m in _VS_SUPPLEMENT_RE.finditer(text):
+        pos = m.start()
+        if (
+            _IVS_SELECTOR_LO <= ord(text[pos]) <= _IVS_SELECTOR_HI
+            and pos > 0
+            and _is_ivs_base(text[pos - 1])
+        ):
+            continue
+        counted += 1
+        if counted >= _VS_SUPPLEMENT_SIGNAL_MIN_COUNT:
+            return True
+    return False
 
 
-def obfuscation_signals(text: str) -> list[str]:
+def obfuscation_signals(text: str, *, excuse_ivs: bool = True) -> list[str]:
     """Return human-readable evidence strings for each class of de-obfuscation
     that *changed* the text.  Returns an empty list when the text is clean.
+
+    *excuse_ivs* is passed through to `_has_dense_vs_supplement_channel`: a
+    caller that can spend a FAIL on the dense-channel signal passes False so
+    well-formed Ideographic Variation Sequences still count (B-859 -- see that
+    function's docstring for the residual the default exemption leaves open).
 
     Signal categories (all checked independently):
       - "zero-width / invisible characters found" — invisible chars stripped
@@ -907,17 +950,20 @@ def obfuscation_signals(text: str) -> list[str]:
     #   an honest single-occurrence use, and the payload this class exists to
     #   catch needs many symbols to carry anything, so a count gate is the
     #   sound direction the paragraph above asks for -- applied at the class
-    #   level for FE00-FE0D and the Hangul fillers, which have no "base
-    #   character" to legitimately follow, so no per-character exemption
-    #   applies to them: the payload lives in WHICH selector is chosen, not in
-    #   a split, so stripping it reveals nothing to check for THOSE members.
+    #   level for FE00-FE0D and the Hangul fillers. FE00-FE06 DO have
+    #   standardized base characters (CJK unified ideographs, math symbols,
+    #   Myanmar, Egyptian hieroglyphs, ...), so a dense run of real standardized
+    #   sequences is a known benign shape the count gate cannot separate from a
+    #   payload; they are counted anyway, for the reason recorded in
+    #   `_has_dense_vs_supplement_channel`'s docstring.
     #   B-859 ADDS ONE NARROW per-character exemption on top of the count gate,
     #   for the E0100-E01EF sub-range only: a selector immediately following a
-    #   CJK ideograph base forms a well-formed Ideographic Variation Sequence
-    #   (Unicode's own mechanism, real in Japanese/Chinese personal names) and
-    #   is excused from the count; one that is not so attached still counts.
-    #   See `_has_dense_vs_supplement_channel`'s own docstring for the full
-    #   reasoning and the residual it knowingly leaves open.
+    #   unified ideograph forms a well-formed Ideographic Variation Sequence
+    #   (Unicode's own mechanism, real in Japanese personal names) and is
+    #   excused from the count; one that is not so attached still counts. The
+    #   exemption is on by default and OFF for B349 (`excuse_ivs=False`),
+    #   because padding each payload selector with an ideograph evades it for
+    #   free in Chinese or Japanese text. See the helper's docstring.
     # ------------------------------------------------------------------------
     # B-490: both bodies now come from the module-level sources above, so the
     # signal and the stripper cannot drift apart again (they did, for 14 members).
@@ -937,7 +983,7 @@ def obfuscation_signals(text: str) -> list[str]:
         signals.append("bidi-override / embedding controls found")
     if _has_suspicious_tag_run(text):
         signals.append("Unicode Tag-block characters found")
-    if _has_dense_vs_supplement_channel(text):
+    if _has_dense_vs_supplement_channel(text, excuse_ivs=excuse_ivs):
         signals.append("dense variation-selector / invisible-alphabet channel found")
 
     # Check whether confusable folding would change the NFKC-normalized text.
