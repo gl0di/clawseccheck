@@ -147,7 +147,8 @@ def test_no_paragraph_carries_its_own_copy_of_the_sentence():
     for active in _ALL_COMBINATIONS:
         out = render_report(_FINDINGS, _ungraded(active))
         strays = [ln.strip() for ln in out.splitlines()
-                  if _COMMON in ln and ("(I-025)" in ln or "(F-155)" in ln or "(F-154)" in ln)]
+                  if _COMMON in ln and ("(RUNTIME-CAP)" in ln or "(LIVE-TEST-CAP)" in ln
+                                        or "(BEHAVIORAL-CAP)" in ln)]
         assert not strays, (sorted(active), strays)
 
 

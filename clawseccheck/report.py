@@ -3521,7 +3521,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # treatment the cap sentence and the "Why N/100" line already get above.
     if getattr(score, "graded", True):
         lines.append(
-            "Runtime exception (I-025): a trajectory-indicator match MAY CAP this grade"
+            "Runtime exception (RUNTIME-CAP): a trajectory-indicator match MAY CAP this grade"
             " (never raise it) — every other capability-vs-runtime corroboration still"
             " cannot move the grade at all; the behavioral verb-sequence/audit-trail layer"
             " below has a separate exception of its own."
@@ -3545,7 +3545,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 # ordering the card, the HTML and the PDF print. This paragraph keeps its
                 # own framing and its reason phrase; a private copy of the shared sentence
                 # is what made 56 of the 64 signal combinations say it two to four times.
-                "Runtime signal (I-025): a trajectory-indicator match fired — "
+                "Runtime signal (RUNTIME-CAP): a trajectory-indicator match fired — "
                 f"{_runtime_cap_phrase(score.runtime_cap_reason)}."
             )
     # F-155: a SECOND exception to "this grade never reflects runtime behaviour" — a
@@ -3564,7 +3564,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         _live_phrase = _live_injection_cap_phrase(score.live_injection_cap_reason)
         if getattr(score, "graded", True):
             lines.append(
-                "Live-test exception (F-155): this run's grade WAS capped by a submitted "
+                "Live-test exception (LIVE-TEST-CAP): this run's grade WAS capped by a submitted "
                 f"VULNERABLE verdict — {_live_phrase}."
                 " RESISTANT or no submission would have changed nothing."
             )
@@ -3572,7 +3572,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
             # C-423: a submitted VULNERABLE verdict is the single most serious thing this
             # report can carry. It is stated whether or not a grade was issued.
             lines.append(
-                "Live-test result (F-155): a submitted VULNERABLE verdict — "
+                "Live-test result (LIVE-TEST-CAP): a submitted VULNERABLE verdict — "
                 # B-600 follow-up: the tail sentence deliberately does NOT live here.
                 # The cascade line above already states the cap ONCE, with rank (which
                 # signal led, which merely also fired) — the same sentence and the same
@@ -3595,13 +3595,13 @@ def render_report(findings: list[Finding], score: ScoreResult,
         _beh_phrase = _behavioral_cap_phrase(score.behavioral_cap_reason)
         if getattr(score, "graded", True):
             lines.append(
-                "Behavioral exception (F-154): this run's grade WAS capped by a fired "
+                "Behavioral exception (BEHAVIORAL-CAP): this run's grade WAS capped by a fired "
                 f"behavioral detector — {_beh_phrase}."
                 " A clean --behavioral/--full replay would have changed nothing."
             )
         else:
             lines.append(
-                "Behavioral result (F-154): a behavioral detector fired — "
+                "Behavioral result (BEHAVIORAL-CAP): a behavioral detector fired — "
                 # B-600 follow-up: the tail sentence deliberately does NOT live here.
                 # The cascade line above already states the cap ONCE, with rank (which
                 # signal led, which merely also fired) — the same sentence and the same
@@ -3622,16 +3622,16 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # The graded branch below gets this from `_cap_primary_reason_text`; the ungraded
         # branch was written flat and said the unreadable thing in both cases.
         if _sandbox_config_blind(ctx, score):
-            lines.append(f"Config visibility (B-776): {_SANDBOX_BLIND_SENTENCE}")
+            lines.append(f"Config visibility (CONFIG-SANDBOX): {_SANDBOX_BLIND_SENTENCE}")
         elif getattr(score, "config_blind_reason", None) == "absent":
             lines.append(
-                "Config visibility (B-306): no OpenClaw config found in this home, so"
+                "Config visibility (CONFIG-BLIND): no OpenClaw config found in this home, so"
                 " config-derived checks degraded to UNKNOWN. Point --home at the"
                 " directory that holds your openclaw.json and re-run."
             )
         else:
             lines.append(
-                "Config visibility (B-306): openclaw.json could not be read/parsed this run,"
+                "Config visibility (CONFIG-BLIND): openclaw.json could not be read/parsed this run,"
                 " so config-derived checks degraded to UNKNOWN. Fix openclaw.json (valid"
                 " JSON, owner-readable) and re-run."
             )
@@ -3640,10 +3640,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # "absent" from "unreadable" — both said "could not be read/parsed", which is
         # simply untrue when nothing was ever found. The sandboxed case needs its own
         # wording regardless, so it is checked first rather than folded into that gap.
-        lines.append(f"Config visibility (B-776): {_SANDBOX_BLIND_SENTENCE}")
+        lines.append(f"Config visibility (CONFIG-SANDBOX): {_SANDBOX_BLIND_SENTENCE}")
     elif score.config_blind_capped:
         lines.append(
-            "Config visibility (B-306): openclaw.json could not be read/parsed this run, so"
+            "Config visibility (CONFIG-BLIND): openclaw.json could not be read/parsed this run, so"
             " this grade was hard-capped rather than let a config-derived check's honest"
             " UNKNOWN quietly raise it. Fix openclaw.json (valid JSON, owner-readable) and"
             " re-run for a real verdict."

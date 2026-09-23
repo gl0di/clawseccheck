@@ -1499,7 +1499,7 @@ def build_bundle_template() -> dict:
                 "seed": (
                     "the --seed you passed to the harness. Without one the verdict still "
                     "caps THIS run but is never written to history/trend/baseline, because "
-                    "an unseeded token is not reproducible (F-155)."
+                    "an unseeded token is not reproducible (LIVE-TEST-CAP)."
                 ),
                 # F-193: optional. A canary verdict is cross-checked against this
                 # agent's own local trajectory log when one is readable — omit this
