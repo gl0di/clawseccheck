@@ -9,8 +9,8 @@
 # re-recording removes it here; that is progress, never a failure.
 #
 # openclaw-version: 2026.9.5
-# generated: 2026-09-19
-# violations: 284
+# generated: 2026-09-23
+# violations: 290
 #
 clawseccheck/behavioral.py	server-runtime-subscriptions-OlWMLbPY.js
 clawseccheck/behavioral.py	tool-catalog-C8xbUFNe.js
@@ -18,16 +18,19 @@ clawseccheck/behavioral.py	tool-policy-Cm3NCEHp.js
 clawseccheck/behavioral.py	zod-schema.agent-runtime-C02vY4RT.js
 clawseccheck/catalog.py	agent-tool-result-middleware-loader-BsZPH_qG.js
 clawseccheck/catalog.py	audit-UjVvFwCi.js
+clawseccheck/catalog.py	audit.nondeep.runtime-C3y1Q5Fi.js
 clawseccheck/catalog.py	bundled-dir-BQFrcRIS.js
 clawseccheck/catalog.py	bundled-dir-DKbeVv7V.js
 clawseccheck/catalog.py	clawhub-install-trust-DdnykQnp.js
 clawseccheck/catalog.py	code-mode-D5mNEiYV.js
+clawseccheck/catalog.py	configured-pV8SaeM2.js
 clawseccheck/catalog.py	env-DNgUBPBb.js
 clawseccheck/catalog.py	exec-approvals-BIKWP8_V.js
 clawseccheck/catalog.py	install-policy-Barp1EUw.js
 clawseccheck/catalog.py	installed-plugin-index-N4jxqS0-.js
 clawseccheck/catalog.py	installed-plugin-index-records-C_n191FN.js
 clawseccheck/catalog.py	run-attempt-CXZNKJ6y.js
+clawseccheck/catalog.py	schema-DRyO1XBt.js
 clawseccheck/catalog.py	selection-JInn13lc.js
 clawseccheck/catalog.py	service-audit-bKq3tdW1.js
 clawseccheck/catalog.py	status-WbH6V7lU.js
@@ -126,6 +129,7 @@ clawseccheck/checks/_lifecycle.py	bash-tools-DHyGpWCr.js
 clawseccheck/checks/_lifecycle.py	clawhub-DxyvW6TD.js
 clawseccheck/checks/_lifecycle.py	device-pairing-Dw7KWdQ7.js
 clawseccheck/checks/_lifecycle.py	dotenv-eb21SB3p.js
+clawseccheck/checks/_lifecycle.py	exec-approvals-BIKWP8_V.js
 clawseccheck/checks/_lifecycle.py	exec-safe-bin-runtime-policy-BXwdBwWP.js
 clawseccheck/checks/_lifecycle.py	exec-safe-bin-trust-BiuDT-_9.js
 clawseccheck/checks/_lifecycle.py	get-reply-OTG64ybi.js
@@ -133,6 +137,7 @@ clawseccheck/checks/_lifecycle.py	host-env-security-CWC2ZCy4.js
 clawseccheck/checks/_lifecycle.py	install-policy-Barp1EUw.js
 clawseccheck/checks/_lifecycle.py	node-cli-DSAz3X0B.js
 clawseccheck/checks/_lifecycle.py	official-external-plugin-catalog-ph3rbXr3.js
+clawseccheck/checks/_lifecycle.py	paths-BMBAvkNf.js
 clawseccheck/checks/_lifecycle.py	permissions-sY2quqHz.js
 clawseccheck/checks/_lifecycle.py	plugins-cli.runtime-I7nPMOsg.js
 clawseccheck/checks/_lifecycle.py	schema-DRyO1XBt.js
@@ -220,6 +225,7 @@ clawseccheck/collector.py	jobs-qB_gTO89.js
 clawseccheck/collector.py	normalize-BMkddmz2.js
 clawseccheck/collector.py	openclaw-state-db-DzSsA9Ji.js
 clawseccheck/collector.py	paths-BMBAvkNf.js
+clawseccheck/collector.py	plugin-entry-DhKN3bwq.d.ts
 clawseccheck/collector.py	run-log-DIhrTrSU.js
 clawseccheck/collector.py	schema-DRyO1XBt.js
 clawseccheck/collector.py	server-cron-Cwg2hJro.js
