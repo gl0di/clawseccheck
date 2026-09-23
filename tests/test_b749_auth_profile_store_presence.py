@@ -44,6 +44,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 from clawseccheck.catalog import PASS, WARN
@@ -55,6 +57,7 @@ from clawseccheck.collector import (
 )
 from clawseccheck.report import _capability_graph
 from clawseccheck.risk import risk_paths
+from clawseccheck.trajectorystore import _MAX_SQLITE_DBS, sqlite_db_paths_capped
 
 # Isolates the sensitive-data leg exactly like test_b730_sensitive_data_model_agreement's
 # own CFG: untrusted-input and outbound are both held ON by construction so ONLY the
@@ -491,3 +494,153 @@ class TestPerAgentConsumersStayConsistent:
         assert _a1_leg(ctx) is False
         assert _risk02_present(ctx) is False
         assert _graph_main_secrets(ctx) is False
+
+
+# --------------------------------------------------------- CLAWSECCHECK-B-845 follow-up
+# (2026-09-23) — the two blocking defects an independent C-135 review found in the
+# per-agent reader above: an unbounded hang, and a silent scan-coverage gap. Recorded as
+# a Pulse comment on the task, dated 2026-09-23T06:12; both fixes reuse existing
+# machinery (`trajectorystore._open_and_verify_table`/`_table_kind`,
+# `trajectorystore.sqlite_db_paths_capped`) rather than adding new detection logic, so
+# this follow-up does not need a fresh full C-135 pass of its own.
+
+
+def _plant_recursive_view_auth_profile_store(tmp_path: Path, name: str = "h") -> Path:
+    """A home whose ONLY per-agent database has `auth_profile_store` defined as a
+    recursive VIEW — the exact pathological object the C-135 rejection reproduced: a
+    plain `SELECT ... FROM auth_profile_store` against this file never terminates on its
+    own, because the view body is an infinite `WITH RECURSIVE` generator with no LIMIT.
+    Real OpenClaw never writes a VIEW here (grounded: every write path this table's own
+    row-key comment cites goes through a `CREATE TABLE`), so this is a hostile/corrupt
+    object, not a real shape — the fix must refuse to query it, not hedge it away.
+    """
+    home = tmp_path / name
+    home.mkdir(parents=True)
+    (home / "openclaw.json").write_text(json.dumps(CFG))
+    os.chmod(home / "openclaw.json", 0o600)
+    agent_dir = home / "agents" / "main" / "agent"
+    agent_dir.mkdir(parents=True)
+    conn = sqlite3.connect(agent_dir / "openclaw-agent.sqlite")
+    try:
+        conn.execute(
+            "CREATE VIEW auth_profile_store AS "
+            "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt) "
+            "SELECT 'primary' AS store_key, CAST(x AS TEXT) AS store_json FROM cnt"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return home
+
+
+class TestAgentAuthProfileStoreHangGuard:
+    """A hostile per-agent database whose `auth_profile_store` is actually a recursive
+    VIEW hung `collect()` forever before this fix — the C-135 reviewer measured it
+    killed at both 25s and 90s timeouts, because the reader opened the connection
+    directly and issued an unbounded `SELECT ... FROM auth_profile_store` against a view
+    body with no row bound. Reusing `trajectorystore._open_and_verify_table`/
+    `_table_kind` refuses the VIEW from its `sqlite_master.type` alone, before the view
+    body is ever evaluated — so this closes the hang without weakening detection
+    (OpenClaw's own runtime never reads through a VIEW here either).
+
+    Run in a daemon thread with a bounded `join()`, not a bare call: if this ever
+    regresses, THIS test fails in a few seconds instead of hanging the whole suite the
+    way the reviewer's own run did.
+    """
+
+    def test_a_recursive_view_does_not_hang_collect(self, tmp_path):
+        home = _plant_recursive_view_auth_profile_store(tmp_path)
+        result: dict = {}
+
+        def _run():
+            result["ctx"] = collect(home)
+
+        thread = threading.Thread(target=_run, daemon=True)
+        started = time.monotonic()
+        thread.start()
+        thread.join(timeout=10)
+        elapsed = time.monotonic() - started
+
+        assert not thread.is_alive(), (
+            "collect() did not return within 10s against a recursive-VIEW "
+            "auth_profile_store -- the exact hang this fix closes"
+        )
+        assert elapsed < 10, f"collect() took {elapsed:.1f}s -- expected a few seconds"
+
+        ctx = result["ctx"]
+        # Behaves like "could not read this store", not like a partial/successful read:
+        # the same honest UNDETERMINED every other unreadable-table case in this reader
+        # already reports (see `_collect_agent_auth_profile_store_presence`).
+        assert ctx.agent_auth_profile_store_read is False
+        assert ctx.agent_auth_profile_store_length is None
+
+
+# ------------------------------------------------------------------- cap disclosure
+
+
+def _make_agent_auth_db(agent_dir: Path, payload: str) -> None:
+    agent_dir.mkdir(parents=True)
+    con = sqlite3.connect(agent_dir / "openclaw-agent.sqlite")
+    try:
+        con.execute(
+            "CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, "
+            "store_json TEXT NOT NULL, updated_at INTEGER NOT NULL)"
+        )
+        con.execute(
+            "INSERT INTO auth_profile_store VALUES (?,?,?)",
+            ("primary", payload, 0),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+class TestAgentDatabaseCapDisclosure:
+    """The per-agent DB discovery (`trajectorystore.sqlite_db_paths`) silently caps at
+    `_MAX_SQLITE_DBS` -- before this fix, a home with more agents than that read as an
+    exhaustive sweep with nothing saying otherwise. `_MAX_SQLITE_DBS + 1` agents (all
+    holding the SAME real material, so which ones the cap keeps is irrelevant to whether
+    the hedge fires) reproduces the gap deterministically.
+    """
+
+    def _many_agent_home(self, tmp_path: Path, count: int) -> tuple[Path, str]:
+        home = tmp_path / "h"
+        home.mkdir(parents=True)
+        (home / "openclaw.json").write_text(json.dumps(CFG))
+        os.chmod(home / "openclaw.json", 0o600)
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("N")}
+        }})
+        for i in range(count):
+            agent_dir = home / "agents" / f"agent-{i:03d}" / "agent"
+            _make_agent_auth_db(agent_dir, payload)
+        return home, payload
+
+    def test_sqlite_db_paths_capped_reports_the_overflow(self, tmp_path):
+        """Unit-level check of the new trajectorystore helper on its own, independent
+        of the collector/check wiring below."""
+        home, _payload = self._many_agent_home(tmp_path, _MAX_SQLITE_DBS + 1)
+        assert sqlite_db_paths_capped(home) is True
+
+    def test_sqlite_db_paths_capped_is_false_under_the_cap(self, tmp_path):
+        home, _payload = self._many_agent_home(tmp_path, _MAX_SQLITE_DBS)
+        assert sqlite_db_paths_capped(home) is False
+
+    def test_the_finding_discloses_not_every_agent_was_checked(self, tmp_path):
+        home, _payload = self._many_agent_home(tmp_path, _MAX_SQLITE_DBS + 1)
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_capped is True
+        assert ctx.agent_auth_profile_store_read is True
+        finding = check_trifecta(ctx)
+        assert finding.status == WARN, finding.detail
+        assert "not every agent" in finding.detail
+
+    def test_no_disclosure_when_every_agent_fits_under_the_cap(self, tmp_path):
+        """Regression control: the disclosure clause must not fire when nothing was
+        actually capped."""
+        home, _payload = self._many_agent_home(tmp_path, _MAX_SQLITE_DBS)
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_capped is False
+        finding = check_trifecta(ctx)
+        assert finding.status == WARN, finding.detail
+        assert "not every agent" not in finding.detail

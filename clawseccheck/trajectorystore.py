@@ -578,6 +578,31 @@ def sqlite_db_paths(home) -> "list[Path]":
     return _sqlite_dbs(home)
 
 
+def sqlite_db_paths_capped(home) -> bool:
+    """True when MORE per-agent trajectory databases exist under *home* than
+    :func:`sqlite_db_paths` returns -- i.e. :data:`_MAX_SQLITE_DBS` was hit and the list
+    every caller of that function iterates is a truncated sample, not the whole roster.
+
+    B-845: added because nothing previously disclosed this. A second,
+    independent glob of the exact same pattern :func:`_sqlite_dbs` uses -- kept separate
+    from that function's existing list-only contract (and its three current callers,
+    :func:`corroborate`, :func:`sqlite_session_ids`, and the compiled-tool-definitions
+    reader) rather than changing what any of them return, so this is purely additive.
+    The glob itself only lists file paths (no file is opened), so a second pass costs
+    the same as the first and is not a new DoS surface.
+
+    Returns ``False`` (never raises) for a non-``Path`` *home* or any glob error, same
+    contract as every reader in this module.
+    """
+    if not isinstance(home, Path):
+        return False
+    try:
+        found = list(home.glob("agents/*/agent/openclaw-agent.sqlite"))
+    except OSError:
+        return False
+    return len(found) > _MAX_SQLITE_DBS
+
+
 def sqlite_session_ids(home) -> "frozenset[str]":
     """The set of ``session_id`` values present in every readable per-agent trajectory
     database under *home*. Reuses :func:`_read_sqlite_db` verbatim — no new SQL, no
@@ -604,12 +629,25 @@ def sqlite_session_ids(home) -> "frozenset[str]":
     return frozenset(ids)
 
 
-def _open_and_verify_table(db_path: Path) -> "tuple[sqlite3.Connection | None, str, bool]":
-    """Open *db_path* read-only, start a transaction, and verify
-    :data:`TRAJECTORY_TABLE_NAME` resolves to a real TABLE -- the shared preamble
-    every reader in this module needs (see :func:`_table_kind`'s docstring for what
-    "real table" means and why "never named in our own source" is not sufficient on
-    its own).
+def _open_and_verify_table(
+    db_path: Path, table_name: str = TRAJECTORY_TABLE_NAME
+) -> "tuple[sqlite3.Connection | None, str, bool]":
+    """Open *db_path* read-only, start a transaction, and verify *table_name* resolves
+    to a real TABLE -- the shared preamble every reader in this module needs (see
+    :func:`_table_kind`'s docstring for what "real table" means and why "never named in
+    our own source" is not sufficient on its own).
+
+    *table_name* defaults to :data:`TRAJECTORY_TABLE_NAME` so every caller that predates
+    this parameter (both call sites in this module, below) is unaffected. B-845
+    (2026-09-23) is the first caller to pass a DIFFERENT table:
+    ``collector._collect_agent_auth_profile_store_presence`` queries ``auth_profile_store``
+    in the SAME per-agent database file this module already reads, and a planted recursive
+    VIEW named ``auth_profile_store`` hung that reader forever (no bound on a VIEW body,
+    unlike a real table's row/byte caps) because it opened the connection directly instead
+    of going through this function's schema verification first. Reusing this function --
+    not a second copy of :func:`_table_kind`'s four rounds of adversarial-review fixes --
+    is what closes that hang: the SAME VIEW/virtual-table/rootpage-alias/generated-column
+    refusal this module's own trajectory-table reads already get, for a second table name.
 
     Returns ``(conn, kind, unreadable)``:
 
@@ -643,7 +681,7 @@ def _open_and_verify_table(db_path: Path) -> "tuple[sqlite3.Connection | None, s
     try:
         conn.execute("BEGIN")
         conn.execute("PRAGMA query_only = 1")
-        kind = _table_kind(conn, TRAJECTORY_TABLE_NAME)
+        kind = _table_kind(conn, table_name)
     except sqlite3.Error:
         conn.close()
         return None, "other", True

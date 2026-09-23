@@ -911,9 +911,18 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b185_compiled_tool_poisoning.py:513": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # CLAWSECCHECK-B-845: two more, in `_agent_home()`'s own `agent_auth_store_json=`
     # branch and its standalone second-agent fixture -- same DDL text (copied verbatim
-    # from test_f187's own `_add_agent_db()`), same per-agent-DB reasoning.
-    "tests/test_b749_auth_profile_store_presence.py:354": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
-    "tests/test_b749_auth_profile_store_presence.py:459": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # from test_f187's own `_add_agent_db()`), same per-agent-DB reasoning. Shifted
+    # 354->357, 459->462 by the C-135-rejection follow-up's new imports (threading/time/
+    # trajectorystore) above them -- same DDL, keys renamed to match.
+    "tests/test_b749_auth_profile_store_presence.py:357": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:462": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # CLAWSECCHECK-B-845 follow-up (2026-09-23): a third, `_make_agent_auth_db()`'s own
+    # helper -- the cap-disclosure test's fixture builder -- same DDL text again, same
+    # per-agent-DB reasoning. (The recursive-VIEW hang-guard fixture right above it uses
+    # `CREATE VIEW`, not `CREATE TABLE`, so it is outside this extractor's surface --
+    # confirmed by re-running `test_every_state_ddl_in_the_tree_is_registered` after
+    # adding it: no new unregistered site appeared for that fixture.)
+    "tests/test_b749_auth_profile_store_presence.py:586": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
 
     # ---- trajectory_runtime_events (F-187, per-agent DB, different file) ----
     # B-813/B-811: plain-string-literal copies of test_f187's own f-string DDL (invisible
@@ -938,7 +947,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_f192_update_runs.py:30": _Entry(MODERN),
 }
 
-assert len(_REGISTRY) == 56, f"registry has {len(_REGISTRY)} entries, expected 56"
+assert len(_REGISTRY) == 57, f"registry has {len(_REGISTRY)} entries, expected 57"
 
 
 # ========================================================================================

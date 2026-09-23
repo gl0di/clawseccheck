@@ -4229,7 +4229,7 @@ def check_trifecta(ctx: Context) -> Finding:
             and auth_store_length is not None
             and auth_store_length > _AUTH_PROFILE_STORE_EMPTY_BYTES
         )
-        # CLAWSECCHECK-B-845: the SAME hedge, for a PER-AGENT auth store
+        # B-845: the SAME hedge, for a PER-AGENT auth store
         # (agents/<agent-id>/agent/openclaw-agent.sqlite, table auth_profile_store) --
         # a different file from the shared state DB above, grounded against the
         # installed dist (2026.9.5) to hold real credentials on its own: a home with an
@@ -4281,13 +4281,27 @@ def check_trifecta(ctx: Context) -> Finding:
                     " this scan only looked at the credentials/ directory on disk"
                 )
             if agent_auth_store_present:
+                # B-845 (follow-up, 2026-09-23): when the per-agent sweep
+                # itself was incomplete (more agent databases exist than
+                # `trajectorystore._MAX_SQLITE_DBS` allows — see
+                # `collector._collect_agent_auth_profile_store_presence`), say so in the
+                # SAME sentence, matching how the C015 secrets-at-rest scan discloses its
+                # own walk cap rather than letting a partial sweep read as an exhaustive
+                # one.
+                capped_note = (
+                    "; more per-agent databases exist under"
+                    " agents/*/agent/openclaw-agent.sqlite than this scan's cap allows,"
+                    " so not every agent's own store was checked"
+                    if getattr(ctx, "agent_auth_profile_store_capped", False)
+                    else ""
+                )
                 why.append(
                     "at least one agent's own auth-profile store holds more than an"
                     f" empty shell ({agent_auth_store_length} bytes in its"
                     " agents/<agent-id>/agent/openclaw-agent.sqlite auth_profile_store"
                     f" table, vs. OpenClaw's own {_AUTH_PROFILE_STORE_EMPTY_BYTES}-byte"
                     " empty-store shape), and this scan only looked at the"
-                    " credentials/ directory and the shared state database"
+                    f" credentials/ directory and the shared state database{capped_note}"
                 )
             if config_blind:
                 why.append(

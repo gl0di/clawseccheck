@@ -3,6 +3,34 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A1 now also hedges when credentials live in an agent's own database, not only the
+  shared state store — and this moves A1's fingerprint on any real config where the
+  shared-store hedge already fires.** OpenClaw persists some credentials into each
+  agent's own `agents/<agent-id>/agent/openclaw-agent.sqlite` (`auth_profile_store`), a
+  different file from the shared `state/openclaw.sqlite` row A1 already hedged on. A
+  home whose only auth material sits in a per-agent table previously read as a clean,
+  unhedged PASS on the sensitive-data leg; it now WARNs the same way the shared-store
+  case already did. On a config where BOTH hedges fire together, the new per-agent
+  clause is appended to the SAME `detail` sentence the shared-store hedge already
+  produces — so a `.clawseccheckignore` fingerprint suppression written against that
+  exact wording (`A1:<hash>`) stops matching and the finding reappears (measured on one
+  real config: `A1:e8a56f94` moved to `A1:6401f3cd`). Bare-id entries (`A1` with no
+  hash) are unaffected. Re-suppress from the new output if that was intentional, and
+  check `--show-suppressed` after upgrading — nothing in a normal run flags a
+  suppression that has gone dead.
+- The per-agent reader above is now bounded and honest about its own coverage. A
+  malformed per-agent database — `auth_profile_store` defined as a VIEW rather than a
+  real table, for instance — previously made the collector hang indefinitely, because
+  the reader queried it directly instead of verifying its schema first the way the
+  trajectory-table readers in the same file already do; it is now refused the same way,
+  and treated as unreadable rather than read. And a home with more agent databases than
+  the per-run scan cap now has A1 say so in the same sentence, instead of a sweep that
+  stopped short reading as if it had checked everyone.
+
 ## [4.2.1] — 2026-09-18
 
 **Trajectory evidence on a current OpenClaw install was still going missing in places

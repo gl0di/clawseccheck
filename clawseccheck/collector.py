@@ -30,7 +30,6 @@ import lzma
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote as _urlquote
 from .configloader import (
     ConfigLoadError as _ConfigLoadError,
     load_openclaw_config as _load_openclaw_config,
@@ -42,14 +41,17 @@ from .skilldiscovery import (
     iter_discovered_skill_dirs as _iter_discovered_skill_dirs,
 )
 from .textnorm import normalize_for_scan, obfuscation_signals
-# CLAWSECCHECK-B-845: bounded, reviewed discovery of per-agent trajectory-database
+# B-845: bounded, reviewed discovery of per-agent trajectory-database
 # paths (`agents/<agent-id>/agent/openclaw-agent.sqlite`) -- reused, not
-# re-implemented, so this reader shares trajectorystore's own `_MAX_SQLITE_DBS` cap
-# and glob-error handling rather than carrying a second copy of either. A sibling
-# Layer-1 leaf (see CLAUDE.md §3's dependency map); trajectorystore.py never imports
-# collector, so this is a one-way edge, not a cycle. Only the path LIST is reused --
-# opening and querying the database stays entirely in this file, matching every other
-# sqlite reader here.
+# re-implemented, so this reader shares trajectorystore's own `_MAX_SQLITE_DBS` cap,
+# its cap-disclosure (`sqlite_db_paths_capped`, follow-up), and its glob-error handling
+# rather than carrying a second copy of any of them. A sibling Layer-1 leaf (see CLAUDE.md
+# §3's dependency map); trajectorystore.py never imports collector, so this is a one-way
+# edge, not a cycle. The follow-up review that closed a hang here (a planted recursive
+# VIEW named `auth_profile_store`) also reuses trajectorystore's own schema verification
+# (`_open_and_verify_table`/`_table_kind`) rather than opening the connection directly --
+# only the actual SELECT query stays local to this file, matching every other sqlite
+# reader here.
 from . import trajectorystore as _trajectorystore
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
@@ -778,7 +780,7 @@ class Context:
     # themselves. See `_collect_auth_profile_store_presence`.
     auth_profile_store_read: bool = False
     auth_profile_store_length: int | None = None
-    # CLAWSECCHECK-B-845: the SAME presence-only signal, for the PER-AGENT database
+    # B-845: the SAME presence-only signal, for the PER-AGENT database
     # (`agents/<agent-id>/agent/openclaw-agent.sqlite`, table `auth_profile_store`) --
     # grounded against the installed dist (2026.9.5: sqlite-Cp6HSWY4.mjs) to be a
     # DIFFERENT store from `authProfiles.store` above, not a duplicate of it: the shared
@@ -794,6 +796,15 @@ class Context:
     # to know which agent. See `_collect_agent_auth_profile_store_presence`.
     agent_auth_profile_store_read: bool = False
     agent_auth_profile_store_length: int | None = None
+    # B-845 (follow-up, 2026-09-23): True when more per-agent trajectory
+    # databases exist under `agents/*/agent/openclaw-agent.sqlite` than
+    # `trajectorystore._MAX_SQLITE_DBS` allows -- i.e. `sqlite_db_paths` returned a
+    # truncated sample, so at least one agent's own auth-profile store was never
+    # checked. Disclosed by `checks/_config.py::check_trifecta` alongside the hedge
+    # above so a home that WARNs on real per-agent material also says the sweep was
+    # incomplete, rather than reading as an exhaustive check of every agent. See
+    # `_collect_agent_auth_profile_store_presence`.
+    agent_auth_profile_store_capped: bool = False
     # F-192: OpenClaw's own self-update ledger (`update_runs` in the state DB, new at
     # 2026.9.2). Three fields, same "could not look" / "looked, nothing there" /
     # "looked, found data" distinction as `config_machine_state` / `_read` / its error
@@ -4861,7 +4872,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
         ctx.auth_profile_store_length = int(row[0])
 
 
-# CLAWSECCHECK-B-845: the row key every real read/write of the per-agent store uses.
+# B-845: the row key every real read/write of the per-agent store uses.
 # Grounded against the installed dist (2026.9.5, sqlite-Cp6HSWY4.mjs): `PRIMARY_ROW_KEY
 # = "primary"`, and every one of `readPersistedAuthProfileStoreRaw` /
 # `writePersistedAuthProfileStoreRaw` / `deletePersistedAuthProfileStoreRaw`'s non-shared
@@ -4873,7 +4884,7 @@ _AGENT_AUTH_PROFILE_STORE_ROW_KEY = "primary"
 
 
 def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None:
-    """CLAWSECCHECK-B-845: does any agent's OWN auth-profile store hold more than an
+    """B-845: does any agent's OWN auth-profile store hold more than an
     empty shell?
 
     `_collect_auth_profile_store_presence` (above) only ever asked the SHARED state
@@ -4903,38 +4914,66 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
     this key -- the same "looked, nothing there" vs. "could not look" distinction the
     shared-store sibling and every other reader in this file already draws.
 
-    Opened READ-ONLY (`file:...?mode=ro` + `PRAGMA query_only = 1`), with the database
-    path URL-quoted before being embedded in the `file:` URI: an agent id is a path
-    COMPONENT this reader does not control, and an unquoted `?`/`%2f` inside one could
-    otherwise splice its own query parameter ahead of the trailing `?mode=ro` and defeat
-    it -- the exact injection `trajectorystore._open_readonly`'s own docstring documents
-    for this same `agents/<id>/agent/` path shape (found in that module's B-811
-    adversarial review). A database that cannot be opened, or a database predating this
-    table, is skipped rather than treated as a global failure -- one hostile or corrupt
-    per-agent database must not blind this reader to every other agent's own store.
+    Opened READ-ONLY and schema-verified via `trajectorystore._open_and_verify_table`
+    (reused, not reimplemented) before this function ever queries `auth_profile_store`:
+    that function's `_open_readonly` URL-quotes the database path before embedding it in
+    the `file:` URI (an agent id is a path COMPONENT this reader does not control, and an
+    unquoted `?`/`%2f` inside one could otherwise splice its own query parameter ahead of
+    the trailing `?mode=ro` and defeat it), and its `_table_kind` check refuses to query
+    `auth_profile_store` at all unless the file's OWN `sqlite_master` schema says it is a
+    genuine table -- not a VIEW, a virtual table, a rootpage-aliased row, or a table with
+    a `GENERATED ALWAYS AS` column on `store_json`.
+
+    B-845 (follow-up, 2026-09-23): a first version of this function opened
+    the database directly (`sqlite3.connect(...)`) and issued the SELECT below without
+    that verification. A hostile `agents/<id>/agent/openclaw-agent.sqlite` whose
+    `auth_profile_store` is actually a `CREATE VIEW ... AS WITH RECURSIVE ...` hung this
+    function -- and therefore `collect()` -- forever, because a recursive VIEW body has no
+    row/byte bound the way a real table's SELECT does. Reusing `_open_and_verify_table`
+    closes this the same way `trajectorystore.py`'s own trajectory-table readers already
+    close it for `trajectory_runtime_events`: the VIEW is refused before any row is ever
+    fetched from it, so this behaves like "could not read this store" (the same
+    `continue`-and-move-on path a genuinely unreadable or absent table already took), not
+    like a hang. A database that cannot be opened, whose `auth_profile_store` does not
+    resolve to a real table, or that predates the table entirely, is skipped rather than
+    treated as a global failure -- one hostile or corrupt per-agent database must not
+    blind this reader to every other agent's own store.
+
+    Also sets `ctx.agent_auth_profile_store_capped` (B-845 follow-up) when
+    `trajectorystore.sqlite_db_paths` under-counts the real number of per-agent databases
+    because more than its own `_MAX_SQLITE_DBS` cap exist -- so a caller knows the sweep
+    below is a bounded sample, not an exhaustive one.
     """
+    ctx.agent_auth_profile_store_capped = _trajectorystore.sqlite_db_paths_capped(home)
     for db_path in _trajectorystore.sqlite_db_paths(home):
-        try:
-            conn = sqlite3.connect(
-                f"file:{_urlquote(db_path.as_posix(), safe='/')}?mode=ro", uri=True
-            )
-            try:
-                conn.execute("PRAGMA query_only = 1")
-                row = conn.execute(
-                    "SELECT LENGTH(store_json) FROM auth_profile_store WHERE store_key = ?",
-                    (_AGENT_AUTH_PROFILE_STORE_ROW_KEY,),
-                ).fetchone()
-            finally:
-                conn.close()
-        except sqlite3.Error as exc:
-            # A per-agent DB predating this table is not a corrupt store -- same honest
-            # UNDETERMINED-for-THIS-db as the shared-store sibling; other agents' own
-            # databases are still tried below.
-            if "no such table" not in str(exc).lower():
+        conn, _kind, unreadable = _trajectorystore._open_and_verify_table(
+            db_path, table_name="auth_profile_store"
+        )
+        if conn is None:
+            # `_kind == "absent"` (unreadable=False) is not corrupt -- same honest
+            # UNDETERMINED-for-THIS-db as the shared-store sibling. `unreadable=True`
+            # covers both a real open/schema error AND -- the hang this fix closes --
+            # `auth_profile_store` resolving to something other than a real table; either
+            # way this db is skipped, other agents' own databases are still tried below.
+            if unreadable:
                 ctx.errors.append(
-                    f"could not read agent auth-profile store presence from {db_path}: {exc}"
+                    f"could not read agent auth-profile store presence from {db_path}: "
+                    "auth_profile_store did not resolve to a real table"
                 )
             continue
+
+        try:
+            row = conn.execute(
+                "SELECT LENGTH(store_json) FROM auth_profile_store WHERE store_key = ?",
+                (_AGENT_AUTH_PROFILE_STORE_ROW_KEY,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            ctx.errors.append(
+                f"could not read agent auth-profile store presence from {db_path}: {exc}"
+            )
+            continue
+        finally:
+            conn.close()
 
         ctx.agent_auth_profile_store_read = True
         if row is not None and row[0] is not None:
