@@ -25,7 +25,9 @@ flag but one only reads and reports. Its permitted operations are:
   data-at-rest exposure (B19).
 - **Read**, beyond config and bootstrap markdown, a bounded set of other OpenClaw-home
   artifacts needed for specific checks: the cron job store (JSON and, where present,
-  its SQLite tables), the two global OpenClaw dotenv files, OpenClaw-related systemd
+  its SQLite tables — see the B-704 note under "Capability surface / least privilege"
+  below for the one documented side effect a WAL-mode read of that database causes), the
+  two global OpenClaw dotenv files, OpenClaw-related systemd
   user-unit `Environment=`/`EnvironmentFile=` lines, session/audit log files (including,
   where the runtime has migrated to it, the per-agent SQLite `trajectory_runtime_events`
   table — opened `mode=ro`, one literal `SELECT session_id, seq ...`, never another
@@ -165,6 +167,32 @@ doing — so a reviewer can check the claim against the code rather than take it
   the socket scan (`--no-sockets`), and the npm dependency-tree walk (`--no-deptree`) — are
   each bounded by their own module and enumerated above. Nothing under any of these paths is
   ever opened for writing.
+- **One named, precisely-scoped exception to that (B-704): the state database's `-shm`
+  sidecar moves on every run, and this tool cannot prevent it.** Every reader of
+  `state/openclaw.sqlite` (`_collect_cron`, `_collect_cron_run_logs`,
+  `_collect_plugin_trust`, `_collect_audit_events`, `_collect_config_machine_state`, and
+  every other `collector.py` function that opens this database) connects
+  `file:...?mode=ro` plus `PRAGMA query_only = 1` — as read-only an open as SQLite's
+  Python API offers. But when that database is in WAL mode (as OpenClaw's own runtime
+  keeps it, since a live writer connection is what makes the sidecars exist on a running
+  box at all), opening it for reading still rewrites the WAL index's `-shm`
+  (shared-memory) sidecar as an unavoidable consequence of negotiating that shared
+  memory layout with the other connection — a property of SQLite's WAL implementation
+  itself, not a write any collector function issues, and not something a `mode=ro` URI or
+  `PRAGMA query_only` can suppress. Measured end-to-end
+  (`tests/test_b704_state_db_shm_sidecar.py`, a full `collect()` run against a real
+  WAL-mode fixture): `openclaw.sqlite` and `openclaw.sqlite-wal` are byte-identical
+  before and after; `openclaw.sqlite-shm` stays the same size (32768 bytes — a single WAL
+  index page) but its content hash and modification time change. Two fixes were
+  considered and rejected: opening with `immutable=1` would stop the rewrite, but that
+  flag tells SQLite the file can never change while OpenClaw's own process may be
+  actively writing it — undefined behavior against a live database, traded for a cosmetic
+  win. Copying the ~5.9MB database to a temp file before every collector read would avoid
+  touching the original file at all, but at a real per-run I/O cost for a side effect that
+  discloses nothing: the WAL index holds page-mapping metadata, not row content. So this
+  is disclosed rather than "fixed": a host-integrity/FIM monitor watching
+  `~/.openclaw/state/` will see `openclaw.sqlite-shm`'s mtime and hash move on every audit
+  run, by design, and that is not evidence of tampering.
 - **Stdlib-only, zero runtime dependencies.** There is no third-party package in the
   import graph of the shipped engine — nothing to audit in a dependency tree, nothing
   that can be substituted by a poisoned transitive package.
