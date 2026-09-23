@@ -6206,6 +6206,58 @@ def check_installed_skills(ctx: Context) -> Finding:
     )
 
 
+# B-649 fix round 1, defect 3: a skill ROOT that a `dig`/discovery walk
+# could not even ENTER (chmod 000 denies `iterdir()`; a mode missing the execute bit
+# denies `is_file()` on its own `SKILL.md`) never reaches `_note_skill_gap`/
+# `_note_unreadable_manifest` at all — `iter_discovered_skill_dirs`
+# (skilldiscovery.py) `continue`s past it with only a bare, domain-tagged
+# `limit_hits` string (`"skill discovery could not read '<name>/SKILL.md': ..."` or
+# `"...could not list '<name>/': ..."`). Below this check's own PASS branch that meant
+# a loud FAIL on a readable sibling could win the run while this directory's own
+# unsearchable content was never mentioned anywhere in a status — B13 says "coverage
+# is incomplete" whenever this is the ONLY issue found, but the FAIL sibling pre-empts
+# B13's cascade before it ever reaches that arm, so nothing outranks the FAIL and B395
+# used to read `gaps` (still empty here) and PASS.
+#
+# The two prefixes matched below are the LITERAL, code-controlled text
+# `iter_discovered_skill_dirs` writes for exactly these two `OSError` sites — never
+# attacker content; only the trailing directory name and OS `strerror` vary. This is
+# deliberately narrower than "any `LIMIT_DOMAIN_SKILL` hit": the sibling
+# `"exceeded the {N}-directory cap"` message is a benign COUNT cap (B-549, this same
+# module's `check_installed_skills`, measured 2,100 ordinary readable empty
+# directories tripping it on a healthy machine with zero real gap) and must never be
+# read as a coverage gap, and `_iter_skill_dirs_guarded`'s own top-level "stopped
+# early" catch-all is deliberately left unmatched too — it fires on any `OSError` the
+# generator itself does not already turn into one of the two specific messages below,
+# so folding it in here would reintroduce exactly the un-diagnosed "any limit means
+# incomplete" shape B-549 retracted.
+_SKILL_DISCOVERY_READ_FAILURE_MARKERS = ("could not read '", "could not list '")
+_QUOTED_PATH_RE = re.compile(r"'([^']+)'")
+
+
+def _skill_discovery_read_failures(ctx: Context) -> list[str]:
+    """`LIMIT_DOMAIN_SKILL` limit hits that mean a skill-shaped directory itself could
+    not be read or listed — see the comment on `_SKILL_DISCOVERY_READ_FAILURE_MARKERS`
+    directly above for why only these two shapes qualify."""
+    return [
+        hit for hit in limit_hits_for(ctx, LIMIT_DOMAIN_SKILL)
+        if any(marker in hit for marker in _SKILL_DISCOVERY_READ_FAILURE_MARKERS)
+    ]
+
+
+def _discovery_gap_label(message: str) -> str:
+    """A short subject label for a discovery read-failure message, for the same
+    comma-joined "shown" list `check_installed_skill_content_coverage` already builds
+    from `gaps` keys — e.g. `"black/SKILL.md"` / `"black/"` -> `"black"`."""
+    match = _QUOTED_PATH_RE.search(message)
+    if not match:
+        return message
+    path = match.group(1)
+    if path.endswith("/SKILL.md"):
+        path = path[: -len("/SKILL.md")]
+    return path.rstrip("/") or path
+
+
 def check_installed_skill_content_coverage(ctx: Context) -> Finding:
     """B395 (re-IDed from B383 during the integration/4.3.0 port — B383 was already
     taken on this base): per-skill content-read coverage, scored INDEPENDENTLY of
@@ -6234,27 +6286,60 @@ def check_installed_skill_content_coverage(ctx: Context) -> Finding:
     independently-scored check id (route (a) from the task's own analysis), not a
     change to B13's FAIL branches or to `_degraded_signal`'s gate semantics.
 
-    PASS when at least one skill was actually scanned and none has a recorded coverage
-    gap this run (identical subject to B13's own "clean" case — every installed skill's
-    content was actually readable). UNKNOWN + `engine_degraded=True` when a gap was
-    recorded, naming every affected skill: an engine-side gap (content present but
-    unreadable). UNKNOWN with `engine_degraded` left at its default `False` when no
-    skill was found to scan at all — a plain "nothing to check" absence, matching
-    B13's own "No installed third-party skills found" branch (B-661: a PASS here would
-    otherwise assert "readable" about a population of zero, which is the same fail-open
-    shape B-661 catalogued — a config-derived fact asserted about a subject that was
-    never actually read).
+    PASS only when at least one skill was actually scanned, none has a recorded
+    coverage gap this run, AND discovery itself never hit an unsearchable skill-shaped
+    directory (identical subject to B13's own "clean" case — every installed skill's
+    content was actually readable). UNKNOWN + `engine_degraded=True` when either a
+    per-skill gap or a discovery-time read failure was recorded, naming every affected
+    subject: an engine-side gap (content present but unreadable, or a whole directory
+    discovery could not even enter). UNKNOWN with `engine_degraded` left at its
+    default `False` only when NEITHER kind of gap was recorded AND no skill was found
+    to scan at all — a plain "nothing to check" absence, matching B13's own "No
+    installed third-party skills found" branch (B-661: a PASS here would otherwise
+    assert "readable" about a population of zero, which is the same fail-open shape
+    B-661 catalogued — a config-derived fact asserted about a subject that was never
+    actually read).
+
+    B-649 fix round 1, defect 1: a recorded gap is checked BEFORE
+    `not ctx.installed_skills` — the reverse order let a home whose ONLY skill-shaped
+    directory has a broken manifest (`ctx.installed_skills` empty, but
+    `ctx.skill_coverage_gaps` non-empty via `_note_unreadable_manifest`) fall into the
+    "nothing to check" UNKNOWN instead of the degraded one, contradicting B13's own
+    "could not be assessed... not the same as having no skills installed" wording for
+    the identical state.
+
+    B-649 fix round 1, defect 2 (reproduced and deliberately left as-is, not patched
+    over — the exact count is pinned by `tests/test_b458_audit_path_degraded.py`
+    instead): a single unreadable file inside one
+    installed skill makes BOTH this check and B13 independently go UNKNOWN +
+    `engine_degraded` — `collector._note_unreadable`/`_note_unreadable_manifest`
+    always write to `ctx.unreadable_files` (B13's own signal) AND
+    `ctx.skill_coverage_gaps` (this check's signal) for the identical event, since
+    each is a real, structural collector-state fact and `scoring._degraded_signal`
+    counts FINDINGS, never subjects (its own docstring: "no finding is ever
+    double-counted" — i.e. per-finding, not per-fact). Re-coupling this check to
+    B13's own verdict to suppress the second count was tried and rejected: the whole
+    reason B395 exists (see the second paragraph above) is to stay independent of
+    which skill wins B13's cascade, and "was this same gap already reported by B13
+    this run" is exactly the kind of B13-verdict inspection that would defeat that.
+    The two Findings agreeing is not evidence of a miscount; it is two independently
+    -scored checks each truthfully reporting the same real coverage gap from their own
+    scope. This never moves the score beyond what a single degraded Finding already
+    caps it to (`DEGRADED_CHECK_CAP` is a ceiling, not additive), so the cost is
+    disclosure-only (`degraded_count` reads 2 instead of 1) — pinned exactly, not
+    loosely, by `tests/test_b458_audit_path_degraded.py`.
     """
     gaps: dict = getattr(ctx, "skill_coverage_gaps", None) or {}
-    if not ctx.installed_skills:
-        return _finding(
-            "B395",
-            UNKNOWN,
-            "No installed third-party skills found to inspect — there is no "
-            "installed-skill content-read coverage to report.",
-            "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).",
-        )
-    if not gaps:
+    discovery_failures = _skill_discovery_read_failures(ctx)
+    if not gaps and not discovery_failures:
+        if not ctx.installed_skills:
+            return _finding(
+                "B395",
+                UNKNOWN,
+                "No installed third-party skills found to inspect — there is no "
+                "installed-skill content-read coverage to report.",
+                "Run on the host where installed skills live (~/.openclaw/skills, workspace/skills).",
+            )
         return _finding(
             "B395",
             PASS,
@@ -6264,13 +6349,19 @@ def check_installed_skill_content_coverage(ctx: Context) -> Finding:
         )
     names = sorted(gaps)
     entries = [f"{name}: {entry}" for name in names for entry in gaps[name]]
-    shown = ", ".join(names[:6])
-    extra = f" (+{len(names) - 6} more)" if len(names) > 6 else ""
+    entries.extend(discovery_failures)
+    discovery_labels = [_discovery_gap_label(hit) for hit in discovery_failures]
+    subject_count = len(names) + len(discovery_labels)
+    shown_names = names[:6]
+    shown_discovery = discovery_labels[: max(0, 6 - len(shown_names))]
+    shown = ", ".join(shown_names + shown_discovery)
+    extra_n = subject_count - len(shown_names) - len(shown_discovery)
+    extra = f" (+{extra_n} more)" if extra_n > 0 else ""
     return _finding(
         "B395",
         UNKNOWN,
-        f"{len(entries)} content-read gap(s) across {len(names)} installed skill "
-        f"director{'y' if len(names) == 1 else 'ies'} could not be assessed this run "
+        f"{len(entries)} content-read gap(s) across {subject_count} installed skill "
+        f"director{'y' if subject_count == 1 else 'ies'} could not be assessed this run "
         "— unreadable content, independent of whatever check_installed_skills (B13) "
         f"itself concluded for OTHER skills: {shown}{extra}. This is not the same as "
         "clean content.",
