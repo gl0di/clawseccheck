@@ -6153,18 +6153,20 @@ def _fence_is_annotated(
     blob: str, pos: int, fence_ranges: list[tuple[int, int]], margin: int = 160
 ) -> bool:
     """True when the fence containing *pos* is annotated as a documented example — a
-    negation/example marker in the ~160 chars just before the fence opens or just after
-    it closes (e.g. 'Example prompt injection:', '# Bad:', "Don't do this."). A bare,
-    unannotated fence is NOT a documented example (B-097)."""
-    for start, end in fence_ranges:
-        if start <= pos < end:
-            surrounding = blob[max(0, start - margin):start] + "\n" + blob[end:end + margin]
-            return bool(
-                _NEGATION_RE.search(surrounding) or _FENCE_ANNOTATION_RE.search(surrounding)
-            )
-        if start > pos:
-            break
-    return False
+    negation/example marker near the fence (e.g. 'Example prompt injection:', '# Bad:',
+    "Don't do this."). A bare, unannotated fence is NOT a documented example (B-097).
+
+    B-886 fence leg: redefined through `_example_fence_governance` so this,
+    `_fence_only_suppression` and `_is_code_example`'s own fence branch all agree on
+    the same evidence and the same per-marker, per-class scoping — an unrelated
+    marker two blocks up (or in an earlier list item) no longer counts as
+    "annotated" just because it fell within a flat lookback window. *margin* is kept
+    for signature compatibility; the governed margins are the same +-160 chars base
+    used (see the module comment above `_example_fence_governance`)."""
+    del margin
+    if not _in_fence(pos, fence_ranges):
+        return False
+    return _example_governance(blob, pos, fence_ranges, fence_needs_negation=True) != _EXAMPLE_LIVE
 
 
 def _fence_ranges(blob: str) -> list[tuple[int, int]]:
@@ -6877,11 +6879,10 @@ def _is_code_example(
     """Return True when the match at *pos* is clearly a documented example, not a live
     instruction.  Returns False (keep the finding) when in doubt.
 
-    Criteria:
-    - The _NEGATION_WINDOW chars before the position contain a negation / example
-      marker (e.g. "do not", "e.g.", "# warning:", "avoid running").
-    - OR the position falls inside a precomputed Markdown fence range — UNLESS
-      *fence_needs_negation* is True.
+    B-886: a thin wrapper over `_example_governance` — see that function's docstring
+    for the three-ring design this replaced a single flat lookback with. The contract
+    is unchanged: True suppresses (an "example" or "ambiguous" governance), False
+    keeps the finding live.
 
     B-097: content-ring prose checks (B59/B64/B65/B74) pass fence_needs_negation=True,
     so a bare ```fence``` no longer dampens on its own — the fenced position must ALSO
@@ -6890,23 +6891,624 @@ def _is_code_example(
     preserves the legacy behaviour for callers whose bad fixtures hide the payload
     inside a fence and rely on other signals to catch it.
     """
-    if _negation_context(blob, pos):
-        return True
-    if not _in_fence(pos, fence_ranges):
-        return False
-    if fence_needs_negation:
-        # B-097: a bare fence no longer dampens — the fence must be ANNOTATED as an
-        # example (a marker in the lines just before/after it), else a live directive
-        # hidden in an unannotated ```fence``` stays a finding.
-        return _fence_is_annotated(blob, pos, fence_ranges)
-    return True
+    return (
+        _example_governance(blob, pos, fence_ranges, fence_needs_negation=fence_needs_negation)
+        != _EXAMPLE_LIVE
+    )
+
+
+# ===========================================================================
+# B-886: three-ring governance for _is_code_example's bare-prose leg.
+#
+# Every earlier attempt at this bug (a flat _NEGATION_WINDOW lookback, then a
+# single _SENTENCE_BREAK_RE-scoped window) forced a false-positive/false-negative
+# trade, because each shared three assumptions this design drops:
+#
+#   (a) ONE SCOPE FOR THREE MARKER CLASSES. _NEGATION_RE mixes markers that refer
+#       to different things: an INLINE aside ("e.g.", "for example") refers to its
+#       own clause; a PROHIBITION ("do not", "never run") refers to its clause and,
+#       when it introduces one, the next block; a LABEL ("# bad", "what not to do")
+#       refers to what it heads. A flat window is always too wide for one class or
+#       too narrow for the other.
+#   (b) NEAREST MARKER WINS. The right rule is "any marker whose scope contains
+#       *pos*" — a narrow marker that happens to sit closer must not hide a wide
+#       disclaimer further up, or the reverse.
+#   (c) MARKDOWN READ AS TYPOGRAPHY, WITH NO LIST IDENTITY. What decides "does this
+#       disclaimer's list reach that item" is CommonMark list identity — the bullet
+#       character or ordered delimiter, plus the author's own numbering — not "any
+#       list-marker line reached across a blank line".
+#
+# _example_governance replaces the single is_code_example boolean with three rings:
+# "example" (STRONG — an annotation a reader would call unambiguous), "ambiguous"
+# (a disclaimer that MIGHT refer to *pos*, but telling it apart from an unrelated
+# one needs co-reference resolution this repository built and withdrew three times
+# over real-fleet false FAILs — see B-886's design notes), and "live"
+# (nothing governs *pos*). `_is_code_example` keeps exactly today's boolean
+# (`!= "live"`) at all 31 call sites, so this can only turn a base-suppressed match
+# live, never the reverse (measured: zero new suppressions across fixtures/, the
+# real fleet and SkillTrustBench). `_ambiguous_example_suppression` additionally
+# exposes the "ambiguous" ring so one site — `_vet._cron_persistence_hits` — can
+# disclose a suppression instead of staying silent about it.
+# ===========================================================================
+
+_EXAMPLE_STRONG = "example"
+_EXAMPLE_AMBIGUOUS = "ambiguous"
+_EXAMPLE_LIVE = "live"
+
+_EXAMPLE_FENCE_LINE_RE = re.compile(r"[^\S\n]{0,3}(?:```|~~~)")
+_EXAMPLE_HEADING_LINE_RE = re.compile(r"[^\S\n]{0,3}#{1,6}(?:[^\S\n]|$)")
+_EXAMPLE_QUOTE_LINE_RE = re.compile(r"[^\S\n]*>")
+_EXAMPLE_TABLE_LINE_RE = re.compile(r"[^\S\n]*\|")
+# A list item's marker: CommonMark bullets (-*+), four non-CommonMark unicode
+# bullets seen on the real fleet (U+2022 U+25E6 U+25AA U+2023), or an ordered
+# marker (1-9 digits + '.'/')'), each followed by required whitespace and then
+# non-whitespace content — a bare "- " with nothing after it is not an item.
+_EXAMPLE_LIST_LINE_RE = re.compile(
+    r"([^\S\n]*)(?:([-*+•◦▪‣])|(\d{1,9})([.)]))[^\S\n]+\S"
+)
+_EXAMPLE_BLOCK_START_KINDS = ("blank", "fence", "heading", "list", "table")
+
+
+class _ExampleLines:
+    """A one-pass, memoized per-line model of a blob: line boundaries, indent, and
+    block kind (blank/fence/heading/quote/table/list-with-identity/prose). Built
+    once per blob (see `_example_lines_for`'s 1-entry cache) and reused by every
+    marker/position pair `_example_governance` evaluates against it — the cost
+    stays linear in the number of markers, not quadratic in blob length."""
+
+    __slots__ = ("blob", "starts", "ends", "_kinds")
+
+    def __init__(self, blob: str) -> None:
+        self.blob = blob
+        starts: list[int] = []
+        ends: list[int] = []
+        i, n = 0, len(blob)
+        while True:
+            j = blob.find("\n", i)
+            if j == -1:
+                starts.append(i)
+                ends.append(n)
+                break
+            starts.append(i)
+            ends.append(j)
+            i = j + 1
+            if i > n:
+                break
+        self.starts = starts
+        self.ends = ends
+        self._kinds: dict[int, tuple] = {}
+
+    def __len__(self) -> int:
+        return len(self.starts)
+
+    def text(self, k: int) -> str:
+        return self.blob[self.starts[k]:self.ends[k]]
+
+    def index_of(self, pos: int) -> int:
+        return max(0, bisect.bisect_right(self.starts, pos) - 1)
+
+    def indent(self, k: int) -> int:
+        t = self.text(k)
+        return len(t) - len(t.lstrip(" \t"))
+
+    def kind(self, k: int) -> tuple:
+        cached = self._kinds.get(k)
+        if cached is not None:
+            return cached
+        t = self.text(k)
+        if not t.strip():
+            r: tuple = ("blank",)
+        elif _EXAMPLE_FENCE_LINE_RE.match(t):
+            r = ("fence",)
+        elif _EXAMPLE_HEADING_LINE_RE.match(t):
+            r = ("heading",)
+        elif _EXAMPLE_QUOTE_LINE_RE.match(t):
+            r = ("quote",)
+        else:
+            m = _EXAMPLE_LIST_LINE_RE.match(t)
+            if m:
+                ind = len(m.group(1).expandtabs(4))
+                if m.group(2):
+                    r = ("list", ind, "bullet", m.group(2), None)
+                else:
+                    r = ("list", ind, "ordered", m.group(4), int(m.group(3)))
+            elif _EXAMPLE_TABLE_LINE_RE.match(t):
+                r = ("table",)
+            else:
+                r = ("prose",)
+        self._kinds[k] = r
+        return r
+
+
+# Cost stays linear (design invariant 4): one _ExampleLines model per blob, held in
+# a 1-entry identity cache, not rebuilt per marker/position pair. B-284 measured an
+# unbounded per-call walk at 6.3s over a 4,000-item list; this cache plus the
+# bounded walks below (_example_item_extent's blank-run skip, _example_clause_end's
+# line-at-a-time scan) keep tests/test_scanner_dos_harness.py green.
+_EXAMPLE_LINES_CACHE: list = [None, None]  # [blob, _ExampleLines(blob)]
+
+
+def _example_lines_for(blob: str) -> "_ExampleLines":
+    if _EXAMPLE_LINES_CACHE[0] is not blob:
+        _EXAMPLE_LINES_CACHE[0] = blob
+        _EXAMPLE_LINES_CACHE[1] = _ExampleLines(blob)
+    return _EXAMPLE_LINES_CACHE[1]
+
+
+def _example_is_inline(marker_text: str) -> bool:
+    """The marker's class, taken from the matched text only (no new vocabulary):
+    INLINE is "for example"/"e.g."; every other _NEGATION_RE alternative is a
+    disclaimer (a prohibition or a label)."""
+    t = marker_text.lower()
+    return t.startswith("for") or t.startswith("e.g")
+
+
+def _example_paren_close(
+    lines: "_ExampleLines", m_start: int, m_end: int
+) -> int | None:
+    """Offset of the ')' closing a parenthesis that encloses the marker on its own
+    line (plain bracket matching, no vocabulary); None when the marker is not
+    parenthesised. Without this, "Setup steps (e.g. on Linux):" would hand its
+    trailing colon to the "e.g." aside instead of to "Setup steps"."""
+    blob = lines.blob
+    k = lines.index_of(m_start)
+    depth = 0
+    for ch in blob[lines.starts[k]:m_start]:
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+    if not depth:
+        return None
+    i, n = m_end, lines.ends[k]
+    while i < n:
+        ch = blob[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _example_clause_end(
+    lines: "_ExampleLines", m_end: int, m_start: int | None = None, inline: bool = False
+) -> int:
+    """First clause boundary at/after *m_end*: a sentence break (searched on the
+    UNTRUNCATED blob — the fix for a false negative on "AutoModel.from_pretrained("
+    truncating mid-call), the close of a parenthesis enclosing the marker, or the
+    end of a line whose next line opens a new block. An INLINE marker's clause
+    additionally ends at a soft-wrapped line whose next line starts a new,
+    unpunctuated (capitalised) sentence rather than a continuation."""
+    blob = lines.blob
+    sb = _SENTENCE_BREAK_RE.search(blob, m_end)
+    best = sb.start() if sb else len(blob)
+    if m_start is not None:
+        pc = _example_paren_close(lines, m_start, m_end)
+        if pc is not None:
+            best = min(best, pc)
+    k = lines.index_of(m_end)
+    while k + 1 < len(lines) and lines.starts[k + 1] <= best:
+        nxt_kind = lines.kind(k + 1)[0]
+        cur_kind = lines.kind(k)[0]
+        if nxt_kind in _EXAMPLE_BLOCK_START_KINDS or (nxt_kind == "quote" and cur_kind != "quote"):
+            best = min(best, lines.ends[k])
+            break
+        if inline and nxt_kind == "prose":
+            first = lines.text(k + 1).lstrip()[:1]
+            if first.isupper():
+                best = min(best, lines.ends[k])
+                break
+        k += 1
+    return best
+
+
+def _example_item_extent(lines: "_ExampleLines", k: int) -> tuple[int, int]:
+    """[start, end) line range of the list item opened at line *k*: lazy prose
+    continuations, deeper-indented lines, and a blank line followed by
+    deeper-indented content (CommonMark loose-item content)."""
+    ind = lines.kind(k)[1]
+    e = k + 1
+    n = len(lines)
+    while e < n:
+        kd = lines.kind(e)
+        if kd[0] == "blank":
+            f = e
+            while f < n and lines.kind(f)[0] == "blank":
+                f += 1
+            if f < n and lines.indent(f) > ind and lines.kind(f)[0] != "blank":
+                e = f
+                continue
+            break
+        if lines.indent(e) > ind:
+            e += 1
+            continue
+        if kd[0] == "prose" and lines.kind(e - 1)[0] != "blank":
+            e += 1  # lazy continuation
+            continue
+        break
+    return k, e
+
+
+def _example_block_of(lines: "_ExampleLines", k: int) -> tuple[str, int, int]:
+    """(kind, first_line, end_line_exclusive) of the block containing line *k*: a
+    list item (with its continuations/nested content), a heading line, a quote or
+    table run, or a paragraph."""
+    n = len(lines)
+    j = k
+    while j >= 0:
+        kj = lines.kind(j)
+        if kj[0] == "list":
+            s, e = _example_item_extent(lines, j)
+            if s <= k < e:
+                return ("item", s, e)
+            break
+        if kj[0] == "blank" and not (j < k and lines.indent(k) > 0):
+            break
+        if kj[0] in ("heading", "fence", "table"):
+            break
+        j -= 1
+    kd = lines.kind(k)[0]
+    if kd == "heading":
+        return ("heading", k, k + 1)
+    if kd in ("table", "quote"):
+        s = k
+        while s - 1 >= 0 and lines.kind(s - 1)[0] == kd:
+            s -= 1
+        e = k + 1
+        while e < n and lines.kind(e)[0] == kd:
+            e += 1
+        return (kd, s, e)
+    s = k
+    while s - 1 >= 0 and lines.kind(s - 1)[0] == "prose":
+        s -= 1
+    e = k + 1
+    while e < n and lines.kind(e)[0] == "prose":
+        e += 1
+    return ("para", s, e)
+
+
+def _example_span(lines: "_ExampleLines", s: int, e: int) -> tuple[int, int]:
+    if e - 1 < len(lines):
+        return (lines.starts[s], lines.ends[e - 1] + 1)
+    return (lines.starts[s], len(lines.blob))
+
+
+def _example_next_block_regions(
+    lines: "_ExampleLines", after: int
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Regions governed by an intro block ending at line *after*, for a marker whose
+    own paragraph ends in a colon (`colon_intro`): (strong_spans, ambig_spans). A
+    heading or fence right after the intro governs nothing. A non-list block is
+    entirely strong. A list is walked by IDENTITY — bullet char, or ordered
+    delimiter plus the author's own numbering — never "any list-marker line", which
+    is the defect every earlier round shared (see the module comment above)."""
+    n = len(lines)
+    k = after
+    while k < n and lines.kind(k)[0] == "blank":
+        k += 1
+    if k >= n:
+        return [], []
+    kd = lines.kind(k)
+    if kd[0] in ("heading", "fence"):
+        return [], []
+    if kd[0] != "list":
+        _, s, e = _example_block_of(lines, k)
+        return [_example_span(lines, s, e)], []
+    strong: list[tuple[int, int]] = []
+    ambig: list[tuple[int, int]] = []
+    ident = kd
+    cur = k
+    while True:
+        s, e = _example_item_extent(lines, cur)
+        strong.append(_example_span(lines, s, e))
+        nk = e
+        while nk < n and lines.kind(nk)[0] == "blank":
+            nk += 1
+        if nk >= n:
+            break
+        nd = lines.kind(nk)
+        if nd[0] == "list" and nd[1] == ident[1] and nd[2] == ident[2] and nd[3] == ident[3]:
+            if nd[2] == "bullet" or nd[4] == ident[4] + 1:
+                ident, cur = nd, nk
+                continue
+            if nd[4] == ident[4]:  # lazy renumbering: CommonMark keeps it one list
+                if nk == e:  # tight: unambiguous continuation
+                    ident, cur = nd, nk
+                    continue
+                s2, e2 = _example_item_extent(lines, nk)  # loose restart: plausible only
+                ambig.append(_example_span(lines, s2, e2))
+            break
+        if nd[0] in ("prose", "heading", "quote", "table") and lines.indent(nk) == 0:
+            # one interleaved flush-left aside block (a paragraph, heading, quote
+            # or table run) between items — same author-numbering continuity test
+            # as the list-identity walk above, whatever kind the aside itself is
+            _, as_, ae = _example_block_of(lines, nk)
+            nk2 = ae
+            while nk2 < n and lines.kind(nk2)[0] == "blank":
+                nk2 += 1
+            if nk2 < n:
+                nd2 = lines.kind(nk2)
+                if (
+                    nd2[0] == "list"
+                    and nd2[1] == ident[1]
+                    and nd2[2] == ident[2]
+                    and nd2[3] == ident[3]
+                ):
+                    if nd2[2] == "ordered" and nd2[4] == ident[4] + 1:
+                        ambig.append(_example_span(lines, as_, ae))
+                        ident, cur = nd2, nk2
+                        continue
+                    if nd2[2] == "bullet":
+                        ambig.append(_example_span(lines, as_, ae))
+                        s3, e3 = _example_item_extent(lines, nk2)
+                        ambig.append(_example_span(lines, s3, e3))
+                        break  # resumed run is plausible-only; stop the strong walk
+            break
+        break
+    return strong, ambig
+
+
+def _example_pos_in_spans(spans: list[tuple[int, int]], pos: int) -> bool:
+    return any(a <= pos < b for a, b in spans)
+
+
+def _example_marker_governance(
+    lines: "_ExampleLines", m_start: int, m_end: int, pos: int, inline: bool
+) -> str:
+    """Governance of the single marker [m_start, m_end) over *pos*. Returns
+    _EXAMPLE_STRONG, _EXAMPLE_AMBIGUOUS or _EXAMPLE_LIVE."""
+    blob = lines.blob
+    clause_end = _example_clause_end(lines, m_end, m_start, inline)
+    if pos < clause_end:
+        return _EXAMPLE_STRONG
+    km = lines.index_of(m_start)
+    bkind, bs, be = _example_block_of(lines, km)
+    if bkind == "heading":
+        if inline:
+            return _EXAMPLE_LIVE  # an "e.g." in a heading annotates its own phrase only
+        k = bs + 1
+        while k < len(lines) and lines.kind(k)[0] != "heading":
+            k += 1
+        boundary = lines.starts[k] if k < len(lines) else len(blob)
+        return _EXAMPLE_AMBIGUOUS if pos < boundary else _EXAMPLE_LIVE
+    b_lo, b_hi = _example_span(lines, bs, be)
+    # The marker's own paragraph: from its line to the first line that opens a new
+    # block. For a list item this is its FIRST paragraph only — deeper-nested
+    # content is not part of the intro a trailing colon could be labelling.
+    pk = km
+    while (
+        pk + 1 < be
+        and lines.kind(pk + 1)[0] not in _EXAMPLE_BLOCK_START_KINDS + ("quote",)
+        and lines.indent(pk + 1) <= (lines.indent(bs) if bkind == "item" else 10**6)
+    ):
+        pk += 1
+    if bkind == "item":
+        pk = km
+        while pk + 1 < be and lines.kind(pk + 1)[0] == "prose":
+            pk += 1
+    block_text = blob[m_start:lines.ends[pk]].rstrip()
+    colon_at = m_start + len(block_text) - 1
+    colon_intro = block_text.endswith(":") and colon_at >= m_end and clause_end >= colon_at
+    if b_lo <= pos < b_hi:
+        if bkind == "item" and colon_intro:
+            return _EXAMPLE_STRONG  # the item's own nested content under "...:"
+        return _EXAMPLE_LIVE if inline else _EXAMPLE_AMBIGUOUS
+    if bkind == "item":
+        return _EXAMPLE_LIVE  # an item never governs a sibling or anything after its list
+    strong, ambig = _example_next_block_regions(lines, be)
+    if colon_intro:
+        if _example_pos_in_spans(strong, pos):
+            return _EXAMPLE_STRONG
+        if _example_pos_in_spans(ambig, pos):
+            return _EXAMPLE_AMBIGUOUS
+        return _EXAMPLE_LIVE
+    if not inline and (_example_pos_in_spans(strong, pos) or _example_pos_in_spans(ambig, pos)):
+        return _EXAMPLE_AMBIGUOUS
+    return _EXAMPLE_LIVE
+
+
+def _example_governance(
+    blob: str,
+    pos: int,
+    fence_ranges: list[tuple[int, int]],
+    *,
+    fence_needs_negation: bool = False,
+) -> str:
+    """Return _EXAMPLE_STRONG / _EXAMPLE_AMBIGUOUS / _EXAMPLE_LIVE for the match at
+    *pos* — see the B-886 module comment above `_is_code_example` for the design.
+
+    A fenced *pos* is governed by `_example_fence_governance` (the B-886 fence leg,
+    a second and independently-revertable mechanism — see that function's docstring).
+    """
+    if _in_fence(pos, fence_ranges):
+        return _example_fence_governance(blob, pos, fence_ranges, fence_needs_negation)
+    window_start = max(0, pos - _NEGATION_WINDOW)
+    lines: _ExampleLines | None = None
+    best = _EXAMPLE_LIVE
+    for m in _NEGATION_RE.finditer(blob[window_start:pos]):
+        if lines is None:
+            lines = _example_lines_for(blob)
+        governance = _example_marker_governance(
+            lines,
+            window_start + m.start(),
+            window_start + m.end(),
+            pos,
+            _example_is_inline(m.group(0)),
+        )
+        if governance == _EXAMPLE_STRONG:
+            return _EXAMPLE_STRONG
+        if governance == _EXAMPLE_AMBIGUOUS:
+            best = _EXAMPLE_AMBIGUOUS
+    return best
+
+
+def _ambiguous_example_suppression(
+    blob: str, pos: int, fence_ranges: list[tuple[int, int]]
+) -> bool:
+    """True when the match at *pos* is suppressed by `_is_code_example` ONLY via the
+    _EXAMPLE_AMBIGUOUS ring — a disclaimer that structurally MIGHT refer to *pos*,
+    with no sound static way to tell that from an unrelated disclaimer nearby (see
+    the B-886 design's proof). Never changes a verdict: `_is_code_example` already
+    treats _EXAMPLE_AMBIGUOUS the same as _EXAMPLE_STRONG (suppressed) everywhere,
+    so reading this predicate cannot move a FAIL/WARN/PASS status or a fingerprint.
+    It exists so a caller that ALREADY has a B-526-style `coverage` sink can name
+    the limit instead of staying silent about it — see
+    `_vet._cron_persistence_hits`'s use of it, the one call site the reported bug is
+    about.
+
+    Always asks with `fence_needs_negation=True` — the one caller this predicate
+    exists for already applies that same B-097/B-525 rule to its own
+    `_is_code_example` check (a bare fence must not dampen the cron detector on its
+    own), and a bare-prose *pos* (the shape the reported bug and its residual are
+    both about) ignores the flag entirely, so this is a no-op there."""
+    return (
+        _example_governance(blob, pos, fence_ranges, fence_needs_negation=True)
+        == _EXAMPLE_AMBIGUOUS
+    )
+
+
+# ===========================================================================
+# B-886 fence leg (second, independently-revertable commit). The same flat-window
+# defect the bare-prose leg above closes also reached FENCED payloads, through a
+# second mechanism: base counted a fenced match as annotated when ANY
+# `_NEGATION_RE` marker sat in the 200 chars before *pos* (regardless of whether it
+# was inside the SAME fence or two blocks further up the document), or any
+# `_NEGATION_RE`/`_FENCE_ANNOTATION_RE` hit sat within +-160 chars of the fence
+# itself. Reproduced on the reported shape:
+#
+#     "Format the OS string (e.g. the uname -a output) as one line.\n\n"
+#     "```bash\n(crontab -l; echo '@reboot ~/.helper/sync.sh') | crontab -\n```"
+#
+# -- the "(e.g. ...)" aside's OWN clause ends at "one line.", but the flat window
+# let it reach into the fence anyway and drop a live cron/@reboot payload.
+#
+# `_example_fence_governance` applies the SAME per-marker, per-class governance as
+# the bare-prose leg to the candidates base's own evidence would have found: a
+# marker inside the fence itself (self-annotation, e.g. "# bad example: ...") stays
+# STRONG unconditionally, as base; a marker in the block immediately before/after
+# the fence is STRONG only when its own clause ends in a colon that introduces the
+# fence, LIVE when it is parenthesised (an aside about something else), otherwise
+# AMBIGUOUS; a marker one block further up, or on a nearby heading line, is
+# AMBIGUOUS for a disclaimer and LIVE for an inline aside. `fence_needs_negation`
+# still means what it always did (B-097): False -> the fence alone suppresses,
+# unchanged; True -> the fence must ALSO carry a marker whose governance is not
+# LIVE. Candidates are exactly base's own evidence (invariant 2): the design can
+# only turn a base-suppressed fenced match live, never manufacture new suppression.
+# ===========================================================================
+
+
+def _example_fence_of(
+    pos: int, fence_ranges: list[tuple[int, int]]
+) -> tuple[int, int] | None:
+    for start, end in fence_ranges:
+        if start <= pos < end:
+            return (start, end)
+    return None
+
+
+def _example_fence_marker_governance(
+    lines: "_ExampleLines", m_start: int, m_end: int, fence: tuple[int, int], inline: bool
+) -> str:
+    """Governance of a single marker candidate outside fence *fence* over a position
+    inside it. See the module comment above for the rules this implements."""
+    fence_start, fence_end = fence
+    fence_line = lines.index_of(fence_start)
+    if lines.kind(lines.index_of(m_start))[0] == "heading":
+        # A heading near a fence ("## Example 3: Service restart") plausibly labels
+        # the document's examples; base counted it. A parenthesised aside inside a
+        # heading does not (it is about something else on that same line).
+        return _EXAMPLE_LIVE if _example_paren_close(lines, m_start, m_end) is not None else _EXAMPLE_AMBIGUOUS
+    if m_start < fence_start:
+        bkind, bs, be = _example_block_of(lines, lines.index_of(m_start))
+        nk = be
+        while nk < len(lines) and lines.kind(nk)[0] == "blank":
+            nk += 1
+        if nk == fence_line:
+            # The block right before the fence (blank lines only in between).
+            clause_end = _example_clause_end(lines, m_end, m_start, inline)
+            paren_close = _example_paren_close(lines, m_start, m_end)
+            text = lines.blob[m_start:lines.ends[be - 1]].rstrip()
+            colon_at = m_start + len(text) - 1
+            if text.endswith(":") and colon_at >= m_end and clause_end >= colon_at:
+                return _EXAMPLE_STRONG
+            if paren_close is not None:
+                return _EXAMPLE_LIVE
+            return _EXAMPLE_AMBIGUOUS
+        # One block further up: plausible only, and only for a disclaimer — an
+        # inline aside that far away never introduces the fence.
+        k2 = be
+        while k2 < len(lines) and lines.kind(k2)[0] == "blank":
+            k2 += 1
+        if k2 < len(lines) and not inline:
+            _, b2s, b2e = _example_block_of(lines, k2)
+            n2 = b2e
+            while n2 < len(lines) and lines.kind(n2)[0] == "blank":
+                n2 += 1
+            if n2 == fence_line:
+                return _EXAMPLE_AMBIGUOUS
+        return _EXAMPLE_LIVE
+    # After the fence.
+    close_line = lines.index_of(max(fence_start, fence_end - 1))
+    nk = close_line + 1
+    while nk < len(lines) and lines.kind(nk)[0] == "blank":
+        nk += 1
+    _, bs, _be = _example_block_of(lines, lines.index_of(m_start))
+    if bs == nk:
+        return _EXAMPLE_LIVE if _example_paren_close(lines, m_start, m_end) is not None else _EXAMPLE_AMBIGUOUS
+    return _EXAMPLE_LIVE
+
+
+def _example_fence_governance(
+    blob: str, pos: int, fence_ranges: list[tuple[int, int]], fence_needs_negation: bool
+) -> str:
+    """Governance of the fenced match at *pos*. `fence_needs_negation=False` keeps
+    the legacy B-097 default: the fence alone suppresses, unconditionally STRONG."""
+    fence = _example_fence_of(pos, fence_ranges)
+    if not fence_needs_negation:
+        return _EXAMPLE_STRONG
+    fence_start, fence_end = fence
+    window_start = max(0, pos - _NEGATION_WINDOW)
+    candidates: list[tuple[int, int, bool]] = []
+    for m in _NEGATION_RE.finditer(blob[window_start:pos]):
+        a = window_start + m.start()
+        if a >= fence_start:
+            return _EXAMPLE_STRONG  # self-annotated inside the fence: base semantics
+        candidates.append((a, window_start + m.end(), _example_is_inline(m.group(0))))
+    margin_lo = max(0, fence_start - 160)
+    for regex, forced_inline in ((_NEGATION_RE, None), (_FENCE_ANNOTATION_RE, True)):
+        for m in regex.finditer(blob[margin_lo:fence_start]):
+            candidates.append((
+                margin_lo + m.start(), margin_lo + m.end(),
+                forced_inline if forced_inline is not None else _example_is_inline(m.group(0)),
+            ))
+        for m in regex.finditer(blob[fence_end:fence_end + 160]):
+            candidates.append((
+                fence_end + m.start(), fence_end + m.end(),
+                forced_inline if forced_inline is not None else _example_is_inline(m.group(0)),
+            ))
+    if not candidates:
+        return _EXAMPLE_LIVE
+    lines = _example_lines_for(blob)
+    best = _EXAMPLE_LIVE
+    for a, b, inline in candidates:
+        governance = _example_fence_marker_governance(lines, a, b, fence, inline)
+        if governance == _EXAMPLE_STRONG:
+            return _EXAMPLE_STRONG
+        if governance == _EXAMPLE_AMBIGUOUS:
+            best = _EXAMPLE_AMBIGUOUS
+    return best
 
 
 def _fence_only_suppression(
     blob: str, pos: int, fence_ranges: list[tuple[int, int]]
 ) -> bool:
     """True when the ONLY thing suppressing the match at *pos* is a bare, unannotated
-    Markdown fence.
+    Markdown fence — i.e. `_is_code_example` would say False (live) here under the
+    stricter B-097 `fence_needs_negation=True` rule, even though *pos* is suppressed
+    under whatever rule the caller actually used.
 
     B-526. A FAIL-capable check may not let an author-written fence silently DROP a
     match — the skill's author chooses where fences open, so "inside a fence" is a
@@ -6914,31 +7516,22 @@ def _fence_only_suppression(
     site DEMOTE instead: the match becomes a WARN the reader can see, rather than
     nothing at all.
 
-    Deliberately narrow, and each exclusion is an older signal this does not override:
-
-    * a negation / example marker in the lookback (``_negation_context``) — the author
-      labelled it as documentation in prose, which is what every content-ring check has
-      always honoured;
-    * not in a fence at all — then nothing was suppressed and the caller already has a
-      live finding;
-    * an ANNOTATED fence (``_fence_is_annotated``) — B-097's rule already demands that
-      second marker at the sites it governs, and where the benign population writes it
-      anyway, demanding it costs nothing.
-
-    So this returns True only for the bare case, which is precisely the population
-    B-526 measured: 16 of the 31 ``_is_code_example`` call sites are both FAIL-capable
-    and bare-fence.
+    B-886 fence leg: redefined through `_example_fence_governance` (forcing
+    `fence_needs_negation=True`, matching `_is_code_example`'s own B-097 sites), so
+    `_fence_is_annotated`, `_fence_only_suppression` and `_is_code_example`'s fence
+    branch all agree on the same three-ring evidence. Equivalent to the old flat
+    formula under the old flat evidence; the difference is exactly the same
+    unrelated-marker fix as the bare-prose leg — an unrelated marker near a bare
+    fence no longer hides this coverage note either.
 
     **It cannot make a finding disappear.** It is a pure predicate, read only AFTER
     ``_is_code_example`` has already said "suppressed"; every match that fires today
     still fires. That monotonicity is the whole reason this shape survived where three
     earlier attempts did not — all of them edited fence RANGES, which re-pairs the
     document and moves suppression in both directions."""
-    if _negation_context(blob, pos):
-        return False
     if not _in_fence(pos, fence_ranges):
         return False
-    return not _fence_is_annotated(blob, pos, fence_ranges)
+    return _example_governance(blob, pos, fence_ranges, fence_needs_negation=True) == _EXAMPLE_LIVE
 
 
 def _levenshtein(a: str, b: str) -> int:
