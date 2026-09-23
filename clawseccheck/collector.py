@@ -6017,6 +6017,18 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     ``walk_dir_safely(state_dir)`` + filename-match pattern ``_collect_cron`` already uses
     for the same file (symlink-safe, path-escape-safe).
 
+    B-909: this ``mode=ro`` open still creates (or, if they already exist, rewrites) the
+    state DB's ``-shm``/``-wal`` WAL sidecars -- a property of SQLite's WAL protocol
+    itself, shared by every ``mode=ro`` opener of this file in this module (not specific
+    to this reader), and not something ``mode=ro``/``query_only`` can suppress.
+    Deliberately NOT ``immutable=1``: it does stop the sidecar write, but only by
+    bypassing the WAL entirely, which makes any row committed to the WAL but not yet
+    checkpointed back into the main file invisible -- silently wrong evidence during the
+    common case this audit exists to observe (OpenClaw actively running and writing to
+    this exact database). See SECURITY_MODEL.md's "Allowed behavior" section for the
+    full writeup and ``tests/test_b909_wal_sidecar_creation.py`` for the repro and the
+    ``immutable=1`` rejection, demonstrated.
+
     ``ctx.plugin_trust_found`` / ``ctx.plugin_index_found`` stay False when the state DB,
     the table, or the index row is absent — a consuming check reports UNKNOWN, never a fake
     PASS (Golden Rule #4). ``ctx.plugin_trust_parse_error`` / ``ctx.plugin_index_parse_error``

@@ -514,6 +514,17 @@ def _open_readonly(db_path: Path) -> "sqlite3.Connection":
       (round 4) -- BEFORE ``sqlite3.connect`` is called, since that call itself is
       where a planted FIFO hangs (B-845, rounds 3-4, 2026-09-23; see that function's
       own docstring for the three reproductions this closes).
+
+    B-909: this ``mode=ro`` open still creates (or, if they already exist, rewrites)
+    the database's ``-shm``/``-wal`` WAL sidecars -- a property of SQLite's WAL
+    protocol itself, not something ``mode=ro``/``query_only`` can suppress. Deliberately
+    NOT ``immutable=1``: that would stop the sidecar write, but only by bypassing the
+    WAL entirely, which makes any row committed to the WAL but not yet checkpointed back
+    into the main file invisible to this reader -- silently wrong evidence during the
+    exact case this module exists to observe (an agent actively writing new trajectory
+    rows). See SECURITY_MODEL.md's "Allowed behavior" section for the full writeup and
+    ``tests/test_b909_wal_sidecar_creation.py`` for both the sidecar-creation repro and
+    the ``immutable=1`` rejection, demonstrated.
     """
     _refuse_non_regular_sqlite_paths(db_path)
     conn = sqlite3.connect(f"file:{_urlquote(db_path.as_posix(), safe='/')}?mode=ro", uri=True)
