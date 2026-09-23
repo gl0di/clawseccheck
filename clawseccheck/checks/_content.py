@@ -6151,18 +6151,20 @@ def _fence_is_annotated(
     blob: str, pos: int, fence_ranges: list[tuple[int, int]], margin: int = 160
 ) -> bool:
     """True when the fence containing *pos* is annotated as a documented example — a
-    negation/example marker in the ~160 chars just before the fence opens or just after
-    it closes (e.g. 'Example prompt injection:', '# Bad:', "Don't do this."). A bare,
-    unannotated fence is NOT a documented example (B-097)."""
-    for start, end in fence_ranges:
-        if start <= pos < end:
-            surrounding = blob[max(0, start - margin):start] + "\n" + blob[end:end + margin]
-            return bool(
-                _NEGATION_RE.search(surrounding) or _FENCE_ANNOTATION_RE.search(surrounding)
-            )
-        if start > pos:
-            break
-    return False
+    negation/example marker near the fence (e.g. 'Example prompt injection:', '# Bad:',
+    "Don't do this."). A bare, unannotated fence is NOT a documented example (B-097).
+
+    B-886 fence leg: redefined through `_example_fence_governance` so this,
+    `_fence_only_suppression` and `_is_code_example`'s own fence branch all agree on
+    the same evidence and the same per-marker, per-class scoping — an unrelated
+    marker two blocks up (or in an earlier list item) no longer counts as
+    "annotated" just because it fell within a flat lookback window. *margin* is kept
+    for signature compatibility; the governed margins are the same +-160 chars base
+    used (see the module comment above `_example_fence_governance`)."""
+    del margin
+    if not _in_fence(pos, fence_ranges):
+        return False
+    return _example_governance(blob, pos, fence_ranges, fence_needs_negation=True) != _EXAMPLE_LIVE
 
 
 def _fence_ranges(blob: str) -> list[tuple[int, int]]:
@@ -7301,17 +7303,11 @@ def _example_governance(
     """Return _EXAMPLE_STRONG / _EXAMPLE_AMBIGUOUS / _EXAMPLE_LIVE for the match at
     *pos* — see the B-886 module comment above `_is_code_example` for the design.
 
-    A fenced *pos* keeps exactly base's own fence-leg semantics (`_negation_context`
-    then, if `fence_needs_negation`, `_fence_is_annotated`) — the fence leg gets its
-    own governance in a separate, independently-revertable commit (B-886 fence leg;
-    see `_example_fence_governance`). This function's docstring is updated there.
+    A fenced *pos* is governed by `_example_fence_governance` (the B-886 fence leg,
+    a second and independently-revertable mechanism — see that function's docstring).
     """
     if _in_fence(pos, fence_ranges):
-        if _negation_context(blob, pos):
-            return _EXAMPLE_STRONG
-        if fence_needs_negation:
-            return _EXAMPLE_STRONG if _fence_is_annotated(blob, pos, fence_ranges) else _EXAMPLE_LIVE
-        return _EXAMPLE_STRONG
+        return _example_fence_governance(blob, pos, fence_ranges, fence_needs_negation)
     window_start = max(0, pos - _NEGATION_WINDOW)
     lines: _ExampleLines | None = None
     best = _EXAMPLE_LIVE
@@ -7344,15 +7340,158 @@ def _ambiguous_example_suppression(
     It exists so a caller that ALREADY has a B-526-style `coverage` sink can name
     the limit instead of staying silent about it — see
     `_vet._cron_persistence_hits`'s use of it, the one call site the reported bug is
-    about."""
-    return _example_governance(blob, pos, fence_ranges) == _EXAMPLE_AMBIGUOUS
+    about.
+
+    Always asks with `fence_needs_negation=True` — the one caller this predicate
+    exists for already applies that same B-097/B-525 rule to its own
+    `_is_code_example` check (a bare fence must not dampen the cron detector on its
+    own), and a bare-prose *pos* (the shape the reported bug and its residual are
+    both about) ignores the flag entirely, so this is a no-op there."""
+    return (
+        _example_governance(blob, pos, fence_ranges, fence_needs_negation=True)
+        == _EXAMPLE_AMBIGUOUS
+    )
+
+
+# ===========================================================================
+# B-886 fence leg (second, independently-revertable commit). The same flat-window
+# defect the bare-prose leg above closes also reached FENCED payloads, through a
+# second mechanism: base counted a fenced match as annotated when ANY
+# `_NEGATION_RE` marker sat in the 200 chars before *pos* (regardless of whether it
+# was inside the SAME fence or two blocks further up the document), or any
+# `_NEGATION_RE`/`_FENCE_ANNOTATION_RE` hit sat within +-160 chars of the fence
+# itself. Reproduced on the reported shape:
+#
+#     "Format the OS string (e.g. the uname -a output) as one line.\n\n"
+#     "```bash\n(crontab -l; echo '@reboot ~/.helper/sync.sh') | crontab -\n```"
+#
+# -- the "(e.g. ...)" aside's OWN clause ends at "one line.", but the flat window
+# let it reach into the fence anyway and drop a live cron/@reboot payload.
+#
+# `_example_fence_governance` applies the SAME per-marker, per-class governance as
+# the bare-prose leg to the candidates base's own evidence would have found: a
+# marker inside the fence itself (self-annotation, e.g. "# bad example: ...") stays
+# STRONG unconditionally, as base; a marker in the block immediately before/after
+# the fence is STRONG only when its own clause ends in a colon that introduces the
+# fence, LIVE when it is parenthesised (an aside about something else), otherwise
+# AMBIGUOUS; a marker one block further up, or on a nearby heading line, is
+# AMBIGUOUS for a disclaimer and LIVE for an inline aside. `fence_needs_negation`
+# still means what it always did (B-097): False -> the fence alone suppresses,
+# unchanged; True -> the fence must ALSO carry a marker whose governance is not
+# LIVE. Candidates are exactly base's own evidence (invariant 2): the design can
+# only turn a base-suppressed fenced match live, never manufacture new suppression.
+# ===========================================================================
+
+
+def _example_fence_of(
+    pos: int, fence_ranges: list[tuple[int, int]]
+) -> tuple[int, int] | None:
+    for start, end in fence_ranges:
+        if start <= pos < end:
+            return (start, end)
+    return None
+
+
+def _example_fence_marker_governance(
+    lines: "_ExampleLines", m_start: int, m_end: int, fence: tuple[int, int], inline: bool
+) -> str:
+    """Governance of a single marker candidate outside fence *fence* over a position
+    inside it. See the module comment above for the rules this implements."""
+    fence_start, fence_end = fence
+    fence_line = lines.index_of(fence_start)
+    if lines.kind(lines.index_of(m_start))[0] == "heading":
+        # A heading near a fence ("## Example 3: Service restart") plausibly labels
+        # the document's examples; base counted it. A parenthesised aside inside a
+        # heading does not (it is about something else on that same line).
+        return _EXAMPLE_LIVE if _example_paren_close(lines, m_start, m_end) is not None else _EXAMPLE_AMBIGUOUS
+    if m_start < fence_start:
+        bkind, bs, be = _example_block_of(lines, lines.index_of(m_start))
+        nk = be
+        while nk < len(lines) and lines.kind(nk)[0] == "blank":
+            nk += 1
+        if nk == fence_line:
+            # The block right before the fence (blank lines only in between).
+            clause_end = _example_clause_end(lines, m_end, m_start, inline)
+            paren_close = _example_paren_close(lines, m_start, m_end)
+            text = lines.blob[m_start:lines.ends[be - 1]].rstrip()
+            colon_at = m_start + len(text) - 1
+            if text.endswith(":") and colon_at >= m_end and clause_end >= colon_at:
+                return _EXAMPLE_STRONG
+            if paren_close is not None:
+                return _EXAMPLE_LIVE
+            return _EXAMPLE_AMBIGUOUS
+        # One block further up: plausible only, and only for a disclaimer — an
+        # inline aside that far away never introduces the fence.
+        k2 = be
+        while k2 < len(lines) and lines.kind(k2)[0] == "blank":
+            k2 += 1
+        if k2 < len(lines) and not inline:
+            _, b2s, b2e = _example_block_of(lines, k2)
+            n2 = b2e
+            while n2 < len(lines) and lines.kind(n2)[0] == "blank":
+                n2 += 1
+            if n2 == fence_line:
+                return _EXAMPLE_AMBIGUOUS
+        return _EXAMPLE_LIVE
+    # After the fence.
+    close_line = lines.index_of(max(fence_start, fence_end - 1))
+    nk = close_line + 1
+    while nk < len(lines) and lines.kind(nk)[0] == "blank":
+        nk += 1
+    _, bs, _be = _example_block_of(lines, lines.index_of(m_start))
+    if bs == nk:
+        return _EXAMPLE_LIVE if _example_paren_close(lines, m_start, m_end) is not None else _EXAMPLE_AMBIGUOUS
+    return _EXAMPLE_LIVE
+
+
+def _example_fence_governance(
+    blob: str, pos: int, fence_ranges: list[tuple[int, int]], fence_needs_negation: bool
+) -> str:
+    """Governance of the fenced match at *pos*. `fence_needs_negation=False` keeps
+    the legacy B-097 default: the fence alone suppresses, unconditionally STRONG."""
+    fence = _example_fence_of(pos, fence_ranges)
+    if not fence_needs_negation:
+        return _EXAMPLE_STRONG
+    fence_start, fence_end = fence
+    window_start = max(0, pos - _NEGATION_WINDOW)
+    candidates: list[tuple[int, int, bool]] = []
+    for m in _NEGATION_RE.finditer(blob[window_start:pos]):
+        a = window_start + m.start()
+        if a >= fence_start:
+            return _EXAMPLE_STRONG  # self-annotated inside the fence: base semantics
+        candidates.append((a, window_start + m.end(), _example_is_inline(m.group(0))))
+    margin_lo = max(0, fence_start - 160)
+    for regex, forced_inline in ((_NEGATION_RE, None), (_FENCE_ANNOTATION_RE, True)):
+        for m in regex.finditer(blob[margin_lo:fence_start]):
+            candidates.append((
+                margin_lo + m.start(), margin_lo + m.end(),
+                forced_inline if forced_inline is not None else _example_is_inline(m.group(0)),
+            ))
+        for m in regex.finditer(blob[fence_end:fence_end + 160]):
+            candidates.append((
+                fence_end + m.start(), fence_end + m.end(),
+                forced_inline if forced_inline is not None else _example_is_inline(m.group(0)),
+            ))
+    if not candidates:
+        return _EXAMPLE_LIVE
+    lines = _example_lines_for(blob)
+    best = _EXAMPLE_LIVE
+    for a, b, inline in candidates:
+        governance = _example_fence_marker_governance(lines, a, b, fence, inline)
+        if governance == _EXAMPLE_STRONG:
+            return _EXAMPLE_STRONG
+        if governance == _EXAMPLE_AMBIGUOUS:
+            best = _EXAMPLE_AMBIGUOUS
+    return best
 
 
 def _fence_only_suppression(
     blob: str, pos: int, fence_ranges: list[tuple[int, int]]
 ) -> bool:
     """True when the ONLY thing suppressing the match at *pos* is a bare, unannotated
-    Markdown fence.
+    Markdown fence — i.e. `_is_code_example` would say False (live) here under the
+    stricter B-097 `fence_needs_negation=True` rule, even though *pos* is suppressed
+    under whatever rule the caller actually used.
 
     B-526. A FAIL-capable check may not let an author-written fence silently DROP a
     match — the skill's author chooses where fences open, so "inside a fence" is a
@@ -7360,31 +7499,22 @@ def _fence_only_suppression(
     site DEMOTE instead: the match becomes a WARN the reader can see, rather than
     nothing at all.
 
-    Deliberately narrow, and each exclusion is an older signal this does not override:
-
-    * a negation / example marker in the lookback (``_negation_context``) — the author
-      labelled it as documentation in prose, which is what every content-ring check has
-      always honoured;
-    * not in a fence at all — then nothing was suppressed and the caller already has a
-      live finding;
-    * an ANNOTATED fence (``_fence_is_annotated``) — B-097's rule already demands that
-      second marker at the sites it governs, and where the benign population writes it
-      anyway, demanding it costs nothing.
-
-    So this returns True only for the bare case, which is precisely the population
-    B-526 measured: 16 of the 31 ``_is_code_example`` call sites are both FAIL-capable
-    and bare-fence.
+    B-886 fence leg: redefined through `_example_fence_governance` (forcing
+    `fence_needs_negation=True`, matching `_is_code_example`'s own B-097 sites), so
+    `_fence_is_annotated`, `_fence_only_suppression` and `_is_code_example`'s fence
+    branch all agree on the same three-ring evidence. Equivalent to the old flat
+    formula under the old flat evidence; the difference is exactly the same
+    unrelated-marker fix as the bare-prose leg — an unrelated marker near a bare
+    fence no longer hides this coverage note either.
 
     **It cannot make a finding disappear.** It is a pure predicate, read only AFTER
     ``_is_code_example`` has already said "suppressed"; every match that fires today
     still fires. That monotonicity is the whole reason this shape survived where three
     earlier attempts did not — all of them edited fence RANGES, which re-pairs the
     document and moves suppression in both directions."""
-    if _negation_context(blob, pos):
-        return False
     if not _in_fence(pos, fence_ranges):
         return False
-    return not _fence_is_annotated(blob, pos, fence_ranges)
+    return _example_governance(blob, pos, fence_ranges, fence_needs_negation=True) == _EXAMPLE_LIVE
 
 
 def _levenshtein(a: str, b: str) -> int:
