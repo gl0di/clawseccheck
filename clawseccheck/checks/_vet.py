@@ -4493,11 +4493,6 @@ def check_installed_skills(ctx: Context) -> Finding:
             for m in rx.finditer(blob):
                 if not _is_code_example(blob, m.start(), _fr):
                     crit.append(f"{name}: {label}")
-                    # B-556: keyed by skill so the destination can never be attributed to
-                    # a different skill than the one it came from — see the declaration
-                    # above for the two-skill misattribution this prevents.
-                    if rx is _KNOWN_EXFIL_HOST_RE:
-                        crit_hosts_by_skill.setdefault(name, set()).add(m.group(0))
                     break  # one finding per label per skill is enough
                 if _fenced_only_pos is None and _fence_only_suppression(
                     blob, m.start(), _fr
