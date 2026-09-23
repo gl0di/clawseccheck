@@ -1283,18 +1283,40 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     TIGHT `tools.elevated.allowFrom` happened to also be set, even though that field
     cannot scope write-tool reachability either. Removed from both directions.
 
-    Known, deliberately UNFIXED gap #1 in this same pass (documented rather than silently
-    left, and filed as a follow-up, B-409): OpenClaw resolves the EFFECTIVE tool set
+    Gap #1, kept current rather than treated as a one-time snapshot (originally written
+    during B-395; the composition problem it describes is real, but which layers this
+    check actually reads has moved since): OpenClaw resolves the EFFECTIVE tool set
     through up to 8 composable policy layers (global allow/deny, per-agent allow/deny,
     byProvider ×2, channel/group tools, toolsBySender, subagent/inherited session
     policy — each AND-ed via `policies.every(...)`, `tool-policy-match-*.js:32-34`, so
     each of THESE layers can only further NARROW the set; per-agent `tools.profile` is
-    the one exception and is covered separately as gap #4 below). This check reads only
-    the global `tools.allow`/`tools.alsoAllow`/`tools.profile` layer for these eight. A
-    narrower per-agent-allow, per-channel, or per-sender policy that actually removes
-    the write tool from the agent reachable through an open channel is invisible here
-    and can still produce a false FAIL. Closing this needs a real multi-layer policy
-    composer, not a one-line patch — out of scope for this pass.
+    the one exception and is covered separately as gap #4 below).
+
+    RESOLVED since this was first written: per-agent `tools.allow`/`tools.deny`/
+    `tools.profile` narrowing is no longer invisible here. The `_toolgrant.granted()`
+    per-scope query in `_b68_fs_tools_granted` above (the B-668/S3 migration) consults
+    every roster entry that declares its own `tools` block through the same ported
+    vendor resolver `toolgrant.py` uses, and unions the result in as `scoped` — so this
+    check now reads the global layer AND the per-agent layer, not the global layer alone.
+
+    STILL OPEN, and not this check's job to close: the channel/group-scoped tools
+    policy (`channels.<provider>.groups.<id>.tools` / `.direct.tools`) and the
+    sender-keyed `toolsBySender` layer are both part of what OpenClaw's real resolver
+    calls `extraPolicies` — `toolgrant.granted()` never receives them (see its own "NOT
+    MODELLED" section), and nothing here maps a reachable channel back to the specific
+    agent bound to it. A channel- or sender-scoped policy that actually removes the
+    write tool from the agent reachable through that specific open channel is therefore
+    still invisible here and can still produce a false FAIL. This is live, separately
+    tracked work on the channel-attribution problem, not an abandoned gap — it stays
+    named here until it lands.
+
+    PERMANENT, not a follow-up: `byProvider` (keyed on the model provider/model id
+    actually selected at request time — `resolveProviderToolPolicyEntry` reads
+    `params.modelProvider`/`params.modelId`, neither of which static config carries)
+    and subagent/inherited session policy (pure runtime session state, never present in
+    config at all) cannot be resolved by a static scanner in principle, no matter how
+    much more of this composer gets built. They are recorded here as a structural limit
+    of a config-reading approach, not as unfinished work a future pass could finish.
 
     Gap #2 (B-410) is now CLOSED: `gated` (`tools.exec.mode` having an approval-gate
     value) used to clear `not open_ch` straight to PASS, even though this same
@@ -1335,9 +1357,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     missed WARN. This is now unioned in via `_agent_profile_widenings` (see
     `_b68_fs_tools_granted`), and can only ever push a verdict from PASS toward WARN
     here — it deliberately never sets `explicit_write_grant` below, so it cannot alone
-    drive a FAIL: the seven still-open narrowing layers in gap #1 could still remove
-    the write tool for that specific agent/channel/sender combination, which this
-    static check still cannot see.
+    drive a FAIL: the channel/sender narrowing layers gap #1 still can't see (plus the
+    two permanently-unreadable byProvider/subagent layers) could still remove the write
+    tool for that specific agent/channel/sender combination.
 
     Gap #5 (global tools.profile + global tools.alsoAllow under a widening) is now
     also CLOSED. Previously documented here as "STILL OPEN": when a global
@@ -1383,8 +1405,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
               static check, so it stays the "ambiguous" WARN case rather than FAIL, OR
               reachable by a proven-open channel, unconfined, but the ONLY grant signal
               is a per-agent tools.profile WIDENING (B-409) with no explicit global
-              grant -- deliberately never a FAIL, for the same "seven still-unread
-              narrowing layers" reason gap #4 above gives.
+              grant -- deliberately never a FAIL, for the same reason gap #4 above
+              gives: the channel/sender layers (plus the two permanently-unreadable
+              ones) could still narrow it away unseen by this static check.
     FAIL    — an EXPLICIT write tool grant (a literal write/edit/apply_patch/"*"/
               "group:fs" token, or a powerful tools.profile) AND reachable by a
               PROVEN-open channel, not confined, gated or not. scored=True.
@@ -1478,9 +1501,10 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # widening is ALSO in play (B-409 C-135 round 2's confirmed false-FAIL territory —
     # test_b409_c135_exact_repro_no_longer_fails / _multi_token_deny_variant). That
     # round found the true effective grant under a widening carries MORE uncertainty
-    # than the bare global layer alone: seven still-unread narrowing layers (per-agent
-    # allow/deny, channel/group, toolsBySender, byProvider) could remove it for that
-    # agent unseen by this static check, so it stays the "traces to a per-agent
+    # than the bare global layer alone: the channel/group and toolsBySender layers
+    # (still unread) — plus byProvider and subagent/inherited session policy
+    # (permanently unreadable from static config) — could remove it for that agent
+    # unseen by this static check, so it stays the "traces to a per-agent
     # tools.profile" WARN below rather than jumping straight to FAIL. This disjunct is
     # scoped to the BARE GLOBAL case B-736's own repro is ("no agents at all... so no
     # per-agent resolution is involved") — exactly where no such extra layer exists to
@@ -1661,9 +1685,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                     f"grant traces to a per-agent tools.profile that {widen_desc}: "
                     + ", ".join(f'{path}="{profile}"' for path, profile in widenings)
                     + " -- not an explicit global write/edit/apply_patch grant, and "
-                    "the seven still-unread narrowing layers (per-agent allow/deny, "
-                    "channel/group, toolsBySender, byProvider) could remove it for "
-                    "this agent unseen by this static check"
+                    "the channel/group, toolsBySender, and byProvider layers this "
+                    "static check still can't read could remove it for this agent "
+                    "unseen here"
                 )
                 return _finding(
                     "B55",
