@@ -909,6 +909,11 @@ _REGISTRY: "dict[str, _Entry]" = {
     # standalone (not via _plant_generated_column_bypass, which lives in the sibling
     # test file) for the CHECK-level end-to-end test.
     "tests/test_b185_compiled_tool_poisoning.py:513": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # CLAWSECCHECK-B-845: two more, in `_agent_home()`'s own `agent_auth_store_json=`
+    # branch and its standalone second-agent fixture -- same DDL text (copied verbatim
+    # from test_f187's own `_add_agent_db()`), same per-agent-DB reasoning.
+    "tests/test_b749_auth_profile_store_presence.py:354": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:459": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
 
     # ---- trajectory_runtime_events (F-187, per-agent DB, different file) ----
     # B-813/B-811: plain-string-literal copies of test_f187's own f-string DDL (invisible
@@ -933,7 +938,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_f192_update_runs.py:30": _Entry(MODERN),
 }
 
-assert len(_REGISTRY) == 54, f"registry has {len(_REGISTRY)} entries, expected 54"
+assert len(_REGISTRY) == 56, f"registry has {len(_REGISTRY)} entries, expected 56"
 
 
 # ========================================================================================
@@ -1594,6 +1599,37 @@ _RETIRED_TABLES_STILL_READ = {
     "installed_plugin_index": _INSTALLED_PLUGIN_INDEX_RETIRED,
 }
 
+# CLAWSECCHECK-B-845: a THIRD, honestly-named exemption -- not a member of
+# _RETIRED_TABLES_STILL_READ, because these tables are neither retired NOR absent from
+# the vendor: they are live, current vendor tables that simply live in a DIFFERENT
+# SQLite file (agents/<agent-id>/agent/openclaw-agent.sqlite, the per-agent database)
+# than the one this baseline enumerates (state/openclaw.sqlite, the shared database).
+# `_AUTH_PROFILE_TABLES_DIFFERENT_DB` above already carries this exact reasoning for the
+# TEST-DDL side of this file; this is its CODE-side counterpart, needed for the first
+# time now that collector.py issues a literal `SELECT ... FROM auth_profile_store`
+# against the per-agent database (grounded against the installed dist, 2026.9.5:
+# sqlite-Cp6HSWY4.mjs -- see collector._collect_agent_auth_profile_store_presence's own
+# docstring).
+#
+# trajectorystore.py's own per-agent-DB reads (`trajectory_runtime_events`) are
+# deliberately NOT listed here: that module binds its SQL through a module-level
+# constant (`_SELECT_TRAJECTORY_ROWS`) rather than a literal string at the
+# `.execute()` call site, so `_clawseccheck_read_tables()`'s AST extractor (anchored on
+# `.execute()` arguments -- see scripts/state_db_drift_gate.py's own docstring) does not
+# see it at all. That is a known, narrow extraction gap in a DIFFERENT script, not
+# something this registration should paper over by imitating it -- registering a table
+# the extractor cannot even find would assert nothing.
+_DIFFERENT_DB_TABLES_STILL_READ = {
+    "auth_profile_store": (
+        "auth_profile_store (CLAWSECCHECK-B-845) lives in the PER-AGENT database "
+        "(agents/<agent-id>/agent/openclaw-agent.sqlite), never in the shared state "
+        "database (state/openclaw.sqlite) this baseline enumerates -- a different "
+        "SQLite file this baseline's generator never visits, so its absence from the "
+        "baseline is not drift. Live and current (grounded against the installed "
+        "dist, 2026.9.5), not retired."
+    ),
+}
+
 # B-811: a SEPARATE, honestly-named exemption from _RETIRED_TABLES_STILL_READ, not a
 # member of it -- `sqlite_master` was never a vendor APPLICATION table to begin with,
 # so calling it "retired" would be a false claim about something that was never true.
@@ -1738,14 +1774,16 @@ def test_every_state_table_clawseccheck_reads_is_declared_by_the_vendor():
     _, names = _read_vendor_table_baseline()
     unknown = sorted(
         _clawseccheck_read_tables() - set(names) - set(_RETIRED_TABLES_STILL_READ)
-        - _SQLITE_BUILTIN_CATALOG_TABLES
+        - _SQLITE_BUILTIN_CATALOG_TABLES - set(_DIFFERENT_DB_TABLES_STILL_READ)
     )
     assert not unknown, (
         f"clawseccheck/ SELECTs from table(s) the vendor schema does not declare: "
         f"{unknown}. Either the vendor retired them -- register them in "
         f"_RETIRED_TABLES_STILL_READ with the evidence -- or it is a SQLite built-in "
         f"system table (register it in _SQLITE_BUILTIN_CATALOG_TABLES instead) -- or "
-        f"the reader is misspelled."
+        f"it is a live table in a DIFFERENT sqlite file than this baseline enumerates "
+        f"(register it in _DIFFERENT_DB_TABLES_STILL_READ instead) -- or the reader is "
+        f"misspelled."
     )
 
 
@@ -1763,6 +1801,26 @@ def test_retired_tables_are_absent_from_the_vendor_baseline():
         f"registered as retired but present in the current vendor schema: {resurrected}. "
         "The disproof text for each is now false -- drop the registration and treat the "
         "table as live."
+    )
+
+
+def test_different_db_tables_are_genuinely_absent_from_the_shared_vendor_baseline():
+    """CLAWSECCHECK-B-845's analogue of the retired-table re-grounding above.
+
+    _DIFFERENT_DB_TABLES_STILL_READ asserts each table lives in the PER-AGENT database,
+    never the shared one this baseline enumerates. If a future OpenClaw release folded
+    one of these into the shared state DB too, its name would start appearing in
+    `names` here -- not a failure by itself (the table would simply also be reachable
+    the ordinary way), but a signal that the "different DB, not modelled here" reasoning
+    in the registration's own text is now incomplete and should be revisited.
+    """
+    _, names = _read_vendor_table_baseline()
+    also_shared = sorted(set(_DIFFERENT_DB_TABLES_STILL_READ) & set(names))
+    assert not also_shared, (
+        f"registered as per-agent-DB-only but ALSO present in the shared vendor "
+        f"schema: {also_shared}. The 'never in the shared state database' claim in "
+        f"the registration's own text is now stale -- re-read the current dist and "
+        f"update or drop the registration."
     )
 
 

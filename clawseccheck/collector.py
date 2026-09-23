@@ -30,6 +30,7 @@ import lzma
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote as _urlquote
 from .configloader import (
     ConfigLoadError as _ConfigLoadError,
     load_openclaw_config as _load_openclaw_config,
@@ -41,6 +42,15 @@ from .skilldiscovery import (
     iter_discovered_skill_dirs as _iter_discovered_skill_dirs,
 )
 from .textnorm import normalize_for_scan, obfuscation_signals
+# CLAWSECCHECK-B-845: bounded, reviewed discovery of per-agent trajectory-database
+# paths (`agents/<agent-id>/agent/openclaw-agent.sqlite`) -- reused, not
+# re-implemented, so this reader shares trajectorystore's own `_MAX_SQLITE_DBS` cap
+# and glob-error handling rather than carrying a second copy of either. A sibling
+# Layer-1 leaf (see CLAUDE.md §3's dependency map); trajectorystore.py never imports
+# collector, so this is a one-way edge, not a cycle. Only the path LIST is reused --
+# opening and querying the database stays entirely in this file, matching every other
+# sqlite reader here.
+from . import trajectorystore as _trajectorystore
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
 # The native `openclaw security audit` does not inspect these files; checks
@@ -768,6 +778,22 @@ class Context:
     # themselves. See `_collect_auth_profile_store_presence`.
     auth_profile_store_read: bool = False
     auth_profile_store_length: int | None = None
+    # CLAWSECCHECK-B-845: the SAME presence-only signal, for the PER-AGENT database
+    # (`agents/<agent-id>/agent/openclaw-agent.sqlite`, table `auth_profile_store`) --
+    # grounded against the installed dist (2026.9.5: sqlite-Cp6HSWY4.mjs) to be a
+    # DIFFERENT store from `authProfiles.store` above, not a duplicate of it: the shared
+    # state DB's `config_machine_state["authProfiles.store"]` row and each agent's own
+    # `auth_profile_store` table are written by the same `writePersistedAuthProfileStoreRaw`
+    # dispatcher but land in different files depending on `agentDir`/`database`, and a home
+    # can hold real material in the per-agent table while the shared row is absent or
+    # empty. Same three-state disclosure as `auth_profile_store_read`/`_length` above, but
+    # aggregated across every per-agent DB found: `_read` True once at least one per-agent
+    # database was opened and queried; `_length` holds the LARGEST row length seen across
+    # all of them (None if every queried database had no row) -- enough for the caller to
+    # decide "at least one agent's store holds more than the empty shell" without needing
+    # to know which agent. See `_collect_agent_auth_profile_store_presence`.
+    agent_auth_profile_store_read: bool = False
+    agent_auth_profile_store_length: int | None = None
     # F-192: OpenClaw's own self-update ledger (`update_runs` in the state DB, new at
     # 2026.9.2). Three fields, same "could not look" / "looked, nothing there" /
     # "looked, found data" distinction as `config_machine_state` / `_read` / its error
@@ -4835,6 +4861,91 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
         ctx.auth_profile_store_length = int(row[0])
 
 
+# CLAWSECCHECK-B-845: the row key every real read/write of the per-agent store uses.
+# Grounded against the installed dist (2026.9.5, sqlite-Cp6HSWY4.mjs): `PRIMARY_ROW_KEY
+# = "primary"`, and every one of `readPersistedAuthProfileStoreRaw` /
+# `writePersistedAuthProfileStoreRaw` / `deletePersistedAuthProfileStoreRaw`'s non-shared
+# branches binds `.where("store_key", "=", PRIMARY_ROW_KEY)` / upserts with
+# `store_key: PRIMARY_ROW_KEY` -- the table holds at most one row that the runtime itself
+# ever reads. Binding this literal (never SELECT *) keeps the same "never fetch the value,
+# only its length" discipline `_AUTH_PROFILE_STORE_KEY` above already established.
+_AGENT_AUTH_PROFILE_STORE_ROW_KEY = "primary"
+
+
+def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None:
+    """CLAWSECCHECK-B-845: does any agent's OWN auth-profile store hold more than an
+    empty shell?
+
+    `_collect_auth_profile_store_presence` (above) only ever asked the SHARED state
+    database (`state/openclaw.sqlite`) about `config_machine_state["authProfiles.store"]`.
+    OpenClaw ALSO persists credentials directly into each agent's own database
+    (`agents/<agent-id>/agent/openclaw-agent.sqlite`, table `auth_profile_store`) --
+    grounded against the installed dist (2026.9.5, sqlite-Cp6HSWY4.mjs): both are written
+    through the same `writePersistedAuthProfileStoreRaw` dispatcher, which picks the
+    per-agent table whenever the save is not for the shared/main store. A home with an
+    empty `credentials/` directory AND an empty-or-absent shared-store row can still hold
+    real, usable credentials in an agent's own database -- reproduced directly: an
+    otherwise-clean home with a single non-empty per-agent `auth_profile_store` row read
+    as a confident, unhedged PASS before this function existed.
+
+    Same length-only discipline as the shared-store sibling: `LENGTH(store_json)` is
+    selected, never `store_json` itself, so the secret payload never reaches this
+    process. `_AGENT_AUTH_PROFILE_STORE_ROW_KEY` is bound as a parameter, never
+    interpolated, and there is no ``SELECT *``.
+
+    Iterates every per-agent database `trajectorystore.sqlite_db_paths` finds (bounded by
+    that function's own `_MAX_SQLITE_DBS` cap, so this reader inherits the same ceiling
+    rather than adding a second one) and aggregates across all of them: `_read` is True
+    once at least one database was opened and queried at all (independent of whether it
+    held a row); `_length` holds the LARGEST row length observed across every database
+    queried, so one agent with real material is not hidden behind another agent's empty
+    or absent row. `_length` stays None only when every database queried had no row for
+    this key -- the same "looked, nothing there" vs. "could not look" distinction the
+    shared-store sibling and every other reader in this file already draws.
+
+    Opened READ-ONLY (`file:...?mode=ro` + `PRAGMA query_only = 1`), with the database
+    path URL-quoted before being embedded in the `file:` URI: an agent id is a path
+    COMPONENT this reader does not control, and an unquoted `?`/`%2f` inside one could
+    otherwise splice its own query parameter ahead of the trailing `?mode=ro` and defeat
+    it -- the exact injection `trajectorystore._open_readonly`'s own docstring documents
+    for this same `agents/<id>/agent/` path shape (found in that module's B-811
+    adversarial review). A database that cannot be opened, or a database predating this
+    table, is skipped rather than treated as a global failure -- one hostile or corrupt
+    per-agent database must not blind this reader to every other agent's own store.
+    """
+    for db_path in _trajectorystore.sqlite_db_paths(home):
+        try:
+            conn = sqlite3.connect(
+                f"file:{_urlquote(db_path.as_posix(), safe='/')}?mode=ro", uri=True
+            )
+            try:
+                conn.execute("PRAGMA query_only = 1")
+                row = conn.execute(
+                    "SELECT LENGTH(store_json) FROM auth_profile_store WHERE store_key = ?",
+                    (_AGENT_AUTH_PROFILE_STORE_ROW_KEY,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            # A per-agent DB predating this table is not a corrupt store -- same honest
+            # UNDETERMINED-for-THIS-db as the shared-store sibling; other agents' own
+            # databases are still tried below.
+            if "no such table" not in str(exc).lower():
+                ctx.errors.append(
+                    f"could not read agent auth-profile store presence from {db_path}: {exc}"
+                )
+            continue
+
+        ctx.agent_auth_profile_store_read = True
+        if row is not None and row[0] is not None:
+            length = int(row[0])
+            if (
+                ctx.agent_auth_profile_store_length is None
+                or length > ctx.agent_auth_profile_store_length
+            ):
+                ctx.agent_auth_profile_store_length = length
+
+
 def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     """Read the allowlisted rows of ``config_machine_state`` into ``ctx``.
 
@@ -7530,6 +7641,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     # F-183: before _collect_cron -- its cron.store shadow check reads this.
     _collect_config_machine_state(home, ctx)
     _collect_auth_profile_store_presence(home, ctx)  # B-749: length-only, never the value
+    _collect_agent_auth_profile_store_presence(home, ctx)  # B-845: same, per-agent DBs
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)

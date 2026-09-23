@@ -31,8 +31,13 @@ true the first time). ``json.dumps({"version": 1, "profiles": {}}, separators=("
 reproduces the same 27 bytes Node's ``JSON.stringify`` writes -- pinned below so a value AT
 that length (freshly-initialized, still empty) does not hedge, only a value ABOVE it does.
 
-No independent C-135 pass was performed on this change -- flagged explicitly in the Pulse
-comment landing it. This file is the implementer's own test suite, not adversarial review.
+No independent C-135 pass was performed on the ORIGINAL B-749 change (the shared-store
+hedge above) -- flagged explicitly in the Pulse comment landing it, and this file was, at
+that point, the implementer's own test suite, not adversarial review. CLAWSECCHECK-B-845
+(the ``TestPerAgentAuthProfileStore*`` classes below) extends the SAME hedge to a second,
+per-agent auth-material source and is, for the same reason, likewise NOT independently
+C-135-reviewed yet -- this is a security-relevant verdict-adjacent change (A1's
+sensitive-data leg) and needs that pass before merge, same as the change it extends.
 """
 from __future__ import annotations
 
@@ -300,6 +305,187 @@ class TestConsumersStayConsistent:
             "anthropic:default": {"type": "api_key", "key": _token("F")}
         }})
         home = _home(tmp_path, "h", auth_store_json=payload)
+        ctx = collect(home)
+        assert check_trifecta(ctx).status == WARN
+        assert _a1_leg(ctx) is False
+        assert _risk02_present(ctx) is False
+        assert _graph_main_secrets(ctx) is False
+
+
+# ------------------------------------------------------------- CLAWSECCHECK-B-845
+# per-agent auth material (agents/<agent-id>/agent/openclaw-agent.sqlite,
+# table auth_profile_store) -- a THIRD source, distinct from both the on-disk
+# credentials/ scan (B-666) and the shared-state-DB authProfiles.store row (B-749)
+# above. The task's own reproduction: empty credentials/, no shared-DB row, but a
+# real row in an agent's OWN database -- before this fix, a confident, unhedged PASS.
+
+
+def _agent_home(
+    tmp_path: Path,
+    name: str,
+    agent: str = "main",
+    *,
+    cfg: dict = CFG,
+    credentials: bool = False,
+    agent_auth_store_json: str | None = None,
+) -> Path:
+    """A home whose only auth-adjacent material (if any) sits in one agent's own
+    database — no shared `state/openclaw.sqlite` at all, so `auth_profile_store_read`
+    stays False by construction and only the NEW per-agent fields can move.
+    `agent_auth_store_json`, if given, seeds exactly one row
+    (`store_key='primary'`, matching the real runtime's own `PRIMARY_ROW_KEY`,
+    grounded against the installed dist, 2026.9.5: sqlite-Cp6HSWY4.mjs) in
+    `agents/<agent>/agent/openclaw-agent.sqlite`.
+    """
+    home = tmp_path / name
+    home.mkdir(parents=True)
+    (home / "openclaw.json").write_text(json.dumps(cfg))
+    os.chmod(home / "openclaw.json", 0o600)
+    if credentials:
+        store = home / "credentials"
+        store.mkdir()
+        (store / "telegram-allow.json").write_text('{"allow": []}')
+    if agent_auth_store_json is not None:
+        agent_dir = home / "agents" / agent / "agent"
+        agent_dir.mkdir(parents=True)
+        con = sqlite3.connect(agent_dir / "openclaw-agent.sqlite")
+        try:
+            con.execute(
+                "CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, "
+                "store_json TEXT NOT NULL, updated_at INTEGER NOT NULL)"
+            )
+            con.execute(
+                "INSERT INTO auth_profile_store VALUES (?,?,?)",
+                ("primary", agent_auth_store_json, 0),
+            )
+            con.commit()
+        finally:
+            con.close()
+    return home
+
+
+class TestPerAgentAuthProfileStoreReader:
+    """`_collect_agent_auth_profile_store_presence` in isolation: same three-state
+    disclosure and length-only discipline as the shared-store reader, on a completely
+    separate database file."""
+
+    def test_no_agent_db_at_all_is_undetermined(self, tmp_path):
+        home = _agent_home(tmp_path, "h")
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_read is False
+        assert ctx.agent_auth_profile_store_length is None
+
+    def test_a_present_per_agent_row_is_measured_by_length_only(self, tmp_path):
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("G")}
+        }})
+        home = _agent_home(tmp_path, "h", agent_auth_store_json=payload)
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_read is True
+        assert ctx.agent_auth_profile_store_length == len(payload)
+        # No shared state DB exists in this fixture at all -- the shared-store fields
+        # must stay at their undetermined default, not be accidentally set by the new
+        # per-agent reader.
+        assert ctx.auth_profile_store_read is False
+        assert ctx.auth_profile_store_length is None
+
+    def test_the_secret_value_never_reaches_ctx_errors_or_config_machine_state(self, tmp_path):
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("J")}
+        }})
+        home = _agent_home(tmp_path, "h", agent_auth_store_json=payload)
+        ctx = collect(home)
+        assert "authProfiles.store" not in ctx.config_machine_state
+        assert payload not in " ".join(ctx.errors)
+        assert ctx.agent_auth_profile_store_length == len(payload)
+
+
+class TestA1HedgesOnPerAgentAuthMaterial:
+    def test_the_b845_reported_defect_now_hedges(self, tmp_path):
+        """The task's own reproduction: empty credentials/, no shared-DB row, real
+        material ONLY in an agent's own database. Before this fix, `check_trifecta`
+        reported a clean, unhedged PASS over a home that really does hold auth
+        material — the false PASS CLAWSECCHECK-B-845 exists to close."""
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("K")}
+        }})
+        home = _agent_home(
+            tmp_path, "h", credentials=True, agent_auth_store_json=payload
+        )
+        ctx = collect(home)
+        finding = check_trifecta(ctx)
+        assert finding.status == WARN, finding.detail
+        assert "Cannot determine from config: sensitive data" in finding.detail
+        assert "auth_profile_store" in finding.detail
+        assert "auth_profile_store" in finding.fix
+
+    def test_no_agent_db_at_all_stays_a_clean_pass(self, tmp_path):
+        """The B-730 regression control, re-verified with this second reader wired
+        in: a home with no per-agent database (or none reachable) must not start
+        hedging just because the new signal exists."""
+        home = _agent_home(tmp_path, "h", credentials=True)
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_read is False
+        finding = check_trifecta(ctx)
+        assert finding.status == PASS, finding.detail
+
+    def test_an_empty_initialized_per_agent_store_does_not_hedge(self, tmp_path):
+        """Same B-730 control in its sharpest form, for the per-agent source: a row
+        EXISTS but holds exactly the vendor's own empty shape (grounded: the per-agent
+        write path reuses the SAME `buildPersistedAuthProfileSecretsStore` the shared
+        path does) — must stay a clean PASS."""
+        home = _agent_home(
+            tmp_path, "h", credentials=True, agent_auth_store_json=_EMPTY_STORE_JSON
+        )
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_length == _AUTH_PROFILE_STORE_EMPTY_BYTES
+        finding = check_trifecta(ctx)
+        assert finding.status == PASS, finding.detail
+
+    def test_a_second_agent_with_real_material_is_not_hidden_by_the_first(self, tmp_path):
+        """Two agents, only the SECOND holds real material — the aggregation must not
+        let the first agent's empty row win."""
+        home = _agent_home(
+            tmp_path, "h", agent="main", agent_auth_store_json=_EMPTY_STORE_JSON
+        )
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("L")}
+        }})
+        agent_dir = home / "agents" / "second" / "agent"
+        agent_dir.mkdir(parents=True)
+        con = sqlite3.connect(agent_dir / "openclaw-agent.sqlite")
+        try:
+            con.execute(
+                "CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, "
+                "store_json TEXT NOT NULL, updated_at INTEGER NOT NULL)"
+            )
+            con.execute(
+                "INSERT INTO auth_profile_store VALUES (?,?,?)",
+                ("primary", payload, 0),
+            )
+            con.commit()
+        finally:
+            con.close()
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_length == len(payload)
+        finding = check_trifecta(ctx)
+        assert finding.status == WARN, finding.detail
+
+
+class TestPerAgentConsumersStayConsistent:
+    """Same asymmetry as `TestConsumersStayConsistent` above, for the new per-agent
+    signal: it hedges A1 but must never move the boolean leg RISK-02/the capability
+    graph read."""
+
+    def test_agent_auth_material_hedges_a1_but_leaves_the_chain_and_graph_off(
+        self, tmp_path
+    ):
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("M")}
+        }})
+        home = _agent_home(
+            tmp_path, "h", credentials=True, agent_auth_store_json=payload
+        )
         ctx = collect(home)
         assert check_trifecta(ctx).status == WARN
         assert _a1_leg(ctx) is False

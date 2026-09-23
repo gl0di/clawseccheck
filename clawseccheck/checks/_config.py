@@ -4229,7 +4229,28 @@ def check_trifecta(ctx: Context) -> Finding:
             and auth_store_length is not None
             and auth_store_length > _AUTH_PROFILE_STORE_EMPTY_BYTES
         )
-        if reach or store["incomplete"] or config_blind or auth_store_present:
+        # CLAWSECCHECK-B-845: the SAME hedge, for a PER-AGENT auth store
+        # (agents/<agent-id>/agent/openclaw-agent.sqlite, table auth_profile_store) --
+        # a different file from the shared state DB above, grounded against the
+        # installed dist (2026.9.5) to hold real credentials on its own: a home with an
+        # empty credentials/ directory AND an empty-or-absent shared-store row can still
+        # have real material sitting in an agent's own database, which the two checks
+        # above are both blind to. Deliberately the SAME hedge, not a leg-raising signal
+        # — see the auth_store_present comment above; the same "not yet resolved whether
+        # a non-empty row always means a usable credential" reasoning applies here too.
+        agent_auth_store_length = getattr(ctx, "agent_auth_profile_store_length", None)
+        agent_auth_store_present = (
+            getattr(ctx, "agent_auth_profile_store_read", False)
+            and agent_auth_store_length is not None
+            and agent_auth_store_length > _AUTH_PROFILE_STORE_EMPTY_BYTES
+        )
+        if (
+            reach
+            or store["incomplete"]
+            or config_blind
+            or auth_store_present
+            or agent_auth_store_present
+        ):
             why = []
             if reach:
                 # B-712: when one of these scopes is `sandbox.mode: "non-main"`, whether it
@@ -4258,6 +4279,15 @@ def check_trifecta(ctx: Context) -> Finding:
                     " config_machine_state['authProfiles.store'], vs. OpenClaw's own"
                     f" {_AUTH_PROFILE_STORE_EMPTY_BYTES}-byte empty-store shape), and"
                     " this scan only looked at the credentials/ directory on disk"
+                )
+            if agent_auth_store_present:
+                why.append(
+                    "at least one agent's own auth-profile store holds more than an"
+                    f" empty shell ({agent_auth_store_length} bytes in its"
+                    " agents/<agent-id>/agent/openclaw-agent.sqlite auth_profile_store"
+                    f" table, vs. OpenClaw's own {_AUTH_PROFILE_STORE_EMPTY_BYTES}-byte"
+                    " empty-store shape), and this scan only looked at the"
+                    " credentials/ directory and the shared state database"
                 )
             if config_blind:
                 why.append(
@@ -4288,6 +4318,11 @@ def check_trifecta(ctx: Context) -> Finding:
                     " this host holds a real, usable credential (this audit only sees"
                     " its byte length, never its value) and treat this leg as ON if"
                     " it does."
+                    if auth_store_present
+                    else "Check whether any agent's own auth_profile_store table"
+                    " (agents/<agent-id>/agent/openclaw-agent.sqlite) on this host"
+                    " holds a real, usable credential (this audit only sees its byte"
+                    " length, never its value) and treat this leg as ON if it does."
                 ),
                 evidence=active,
             )
