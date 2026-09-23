@@ -44,63 +44,6 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
-    # Already 1,227 (over budget, no exemption recorded) going into B-852 round 3 --
-    # that gap predates this entry and is not this change's debt to explain away, only
-    # to stop hiding. Round 3 (2026-09-23) added ~118 lines: a total byte budget across
-    # every per-agent SQLite database in one read_compiled_tool_descriptions() call
-    # (sqlite_max_content_total_bytes, mirroring log_max_total_bytes), plus converting
-    # the per-database event_json read from a two-phase "materialize a whole database's
-    # admitted rows into a list, then filter" into a streaming generator
-    # (_scan_sqlite_event_json / _SqliteEventJsonStats) that parses each row as it
-    # arrives -- both closed a real --exhaustive regression (measured: a 10 x 547 MB
-    # mixed-host home budget-aborted UNKNOWN at 140s before this fix; 2.35s after, cold
-    # cache). Split candidate, not attempted here: the pointer/archive corroboration
-    # helpers (_pointer_files/_archive_entries/corroborate(), ~200 lines) answer a
-    # different question (WHERE evidence lives) than the event_json content readers
-    # (_read_sqlite_event_json/_scan_sqlite_event_json/read_compiled_tool_descriptions,
-    # the B-811/B-852 "read the delivered tool definitions" concern) and share little
-    # beyond the module's own DB-opening helpers -- a `trajectorycontent.py` leaf the
-    # corroborator's module could import would leave ~950 lines here with no cycle. Not
-    # done in this change: it lands mid a scoped bug-fix round, with its own tests
-    # (`tests/test_f187_trajectory_sqlite_corroborator.py`) pinning exact source-level
-    # behavior (SQL executed, table names) that a split would need to re-verify
-    # byte-for-byte, the same discipline I-022-R2 used for checks.py.
-    "trajectorystore.py": "~1,970 lines — SQLite-trajectory-container corroboration "
-                          "(corroborate()) plus the B-811/B-852 event_json content "
-                          "readers (read_compiled_tool_descriptions() and its streaming "
-                          "core). Over budget by 718 lines; B-852 round 7 (2026-09-23) "
-                          "added the sequential DRAIN phase, a cum_yielded-preservation "
-                          "guard, a dbs_read/dbs_unreadable classification fix, and the "
-                          "docstring explaining all three, +137 lines net on its own. "
-                          "Round 8 (2026-09-23) then fixed the drain's own ORDER "
-                          "(cum_bytes-descending instead of zero-content-first, closing "
-                          "an exploitable priority-inversion the drain's own ordering "
-                          "left open) and documented why, +33 lines net. Round 9 "
-                          "(2026-09-23) closed two more drain-order gaming paths a fresh "
-                          "review found in round 8's own fix -- keying the sort on "
-                          "EARNED bytes (excluding the free floor contribution) and "
-                          "capping a single drain turn to a fraction of the aggregate, "
-                          "plus multiple drain passes to still guarantee forward "
-                          "progress under that cap -- and corrected the docstring's "
-                          "prior overclaim of adversary-proofness, +103 lines net. "
-                          "Round 10 (2026-09-23) found round 9's own per-turn cap wrong "
-                          "-- a FIXED fraction of the ORIGINAL budget stops binding once "
-                          "the pool actually left a pass is already below it, a routine "
-                          "case, not an edge case -- and replaced it with a per-PASS "
-                          "equal share of what is actually left, recomputed every pass; "
-                          "removed the now-dead _SQLITE_DRAIN_TURN_BUDGET_DIVISOR "
-                          "constant and rewrote the affected docstring/comments to state "
-                          "the narrower, corrected guarantee, +37 lines net. Round 10 was "
-                          "then REJECTED by review: its unconditional 1 MiB per-turn "
-                          "floor still let a single decoy swallow an entire thin drain "
-                          "pool in one turn. Round 11 (2026-09-23) replaced the drain's "
-                          "single sweep-per-pass with two sweeps (equal-share, then "
-                          "smallest-row-first) plus a `blocked_len`/`next_len` tracking "
-                          "structure so a candidate's next row length is known without "
-                          "re-opening it, and rewrote the docstring/comments again to "
-                          "state the new guarantees and the honest residual, +52 lines "
-                          "net. Split candidate named above; tracked debt, not a design "
-                          "statement.",
     # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
     # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
     # into self_test_corroboration()/render_self_test_corroboration()/
@@ -137,26 +80,35 @@ _EXEMPT = {
                   "`assessment_coverage()`. Over budget by 17 lines since B-558 added "
                   "`layer_coverage`. Split candidate named above; tracked debt, not a "
                   "design statement.",
-    # CLAWSECCHECK-B-845, round 3 (2026-09-23): 1,208 -> 1,251 lines. The FIFO/sidecar
-    # stat-guard this round adds (`_refuse_non_regular_sqlite_paths`, wired into
-    # `_open_readonly`) closes a second hang in the same per-agent auth-profile-store
-    # code path the previous round's VIEW-refusal fix closed — same module, because
-    # both guard the exact same call site (`_open_and_verify_table` -> `_open_readonly`)
-    # every reader in this file already shares; a second module would just be this
-    # function with an import cycle back to its only caller. Over budget by 51 lines.
-    # Split candidate, not attempted here: the F-187 corroboration/rendering surface
-    # (`corroborate`, `TrajectoryCorroboration`, the pointer/archive readers, ~350
-    # lines) reads none of the per-table-schema-verification internals
-    # (`_open_readonly`/`_table_kind`/`_open_and_verify_table`) beyond calling them —
-    # a `trajectoryschema.py` leaf holding just the schema-verification layer would
-    # leave ~900 lines here with no cycle, but is a larger change than this fix.
-    "trajectorystore.py": "~1,251 lines — per-agent SQLite trajectory-container reading "
-                          "(F-187 corroboration) plus, since B-845, the shared "
-                          "schema-verification/hardened-open layer "
-                          "(`_open_readonly`/`_table_kind`/`_open_and_verify_table`) a "
-                          "second table (`auth_profile_store`) now reuses. Over budget "
-                          "by 51 lines since the round-3 FIFO/sidecar stat guard. Split "
-                          "candidate named above; tracked debt, not a design statement.",
+    # Restated 2026-09-23 for the task/b-852 -> integration/4.3.0 merge: two independent
+    # per-branch entries had each gone stale in isolation, neither seeing the other's
+    # growth. B-852's own lineage (rounds 3, 7-11) reached ~1,970 lines (over budget by
+    # 718) via a total cross-database byte budget for read_compiled_tool_descriptions(),
+    # the sequential SQLite content-drain phase, and that drain's own
+    # ordering/fairness fixes (cum_bytes-descending, EARNED-bytes keying, a per-pass
+    # equal-share cap replacing a fixed-fraction one, then a two-sweep
+    # equal-share-then-smallest-first pass) — see git history for that lineage's own
+    # entry text before this restatement. CLAWSECCHECK-B-845's own lineage (round 3)
+    # reached ~1,251 lines (over budget by 51) via the FIFO/sidecar stat-guard
+    # (`_refuse_non_regular_sqlite_paths`, wired into `_open_readonly`) closing a hang
+    # in the same per-agent auth-profile-store code path its own VIEW-refusal fix
+    # closed. Merging both branches' code into one file lands at the actual combined
+    # total below — restating the count, not excusing new debt.
+    "trajectorystore.py": "~2,168 lines — SQLite-trajectory-container corroboration "
+                          "(corroborate()), the B-811/B-852 event_json content readers "
+                          "(read_compiled_tool_descriptions() and its streaming/drain "
+                          "core), and the shared schema-verification/hardened-open "
+                          "layer (`_open_readonly`/`_table_kind`/"
+                          "`_open_and_verify_table`) a second table "
+                          "(`auth_profile_store`) now reuses. Over budget by 968 lines. "
+                          "Split candidates, neither attempted here (mid-merge is not "
+                          "the moment to also restructure the module): a "
+                          "`trajectorycontent.py` leaf for the event_json content "
+                          "readers (~950 lines would remain, per B-852's own analysis), "
+                          "or a `trajectoryschema.py` leaf for just the "
+                          "schema-verification layer (~900 lines would remain, per "
+                          "B-845's own analysis) — either narrows this file with no "
+                          "import cycle.",
     "checks/_config.py": "~6,986 lines (restated 2026-09-21 for the 4.3.0 wave build — "
                          "was ~6,302, +11% stale; earlier 2026-09-18, B382 — ~5,743) — the config-hardening topic (29 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
