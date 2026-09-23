@@ -26,6 +26,8 @@ from ..collector import (
     LIMIT_DOMAIN_BOOTSTRAP,
     LIMIT_DOMAIN_CONFIG,
     Context,
+    _safe_is_dir,  # B-913
+    _safe_is_file,  # B-913
     agent_roster,
     dig,
     limit_hits_for,
@@ -1221,13 +1223,27 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
         (cw.name or "workspace", cw)
         for cw in _config_workspace_dirs(ctx.home, ctx.config)
     ]
+    # B-913: a workspace dir made non-traversable (`chmod 000`) raises PermissionError
+    # on `(ws_dir / fname).is_file()` — needs +x on ws_dir itself, unlike `ws_dir.is_dir()`
+    # a few lines up, which only needs +x on ws_dir's PARENT and so does not raise here.
+    # `_safe_is_file` turns that into a disclosed miss instead of an uncaught crash;
+    # `unreadable_scan_dirs` remembers WHICH dir so the final UNKNOWN can name it,
+    # rather than falling through to the generic "no bootstrap files found" message.
+    unreadable_scan_dirs: list[str] = []
     for ws, ws_dir in scan_dirs:
-        if not ws_dir.is_dir():
+        if not _safe_is_dir(ws_dir, ctx, what=f"workspace dir '{ws_dir}'"):
             continue
         prefix = f"{ws}/" if ws else ""
-        has_critical_here = any((ws_dir / f).is_file() for f in _CRITICAL_BOOTSTRAP)
-        has_any_here = has_critical_here or any((ws_dir / f).is_file() for f in _SOFT_BOOTSTRAP)
+        errs_before = len(ctx.errors)
+        has_critical_here = any(
+            _safe_is_file(ws_dir / f, ctx, what=f"'{ws_dir / f}'") for f in _CRITICAL_BOOTSTRAP
+        )
+        has_any_here = has_critical_here or any(
+            _safe_is_file(ws_dir / f, ctx, what=f"'{ws_dir / f}'") for f in _SOFT_BOOTSTRAP
+        )
         if not has_any_here:
+            if len(ctx.errors) > errs_before:
+                unreadable_scan_dirs.append(prefix.rstrip("/") or ".")
             continue
 
         found_any = True
@@ -1267,6 +1283,23 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
             found_any = True
 
     if not found_any:
+        if unreadable_scan_dirs:
+            joined = "; ".join(unreadable_scan_dirs[:8])
+            extra = (
+                f" (+{len(unreadable_scan_dirs) - 8} more)"
+                if len(unreadable_scan_dirs) > 8
+                else ""
+            )
+            return _finding(
+                "B20",
+                UNKNOWN,
+                "Could not read the following workspace director"
+                f"{'y' if len(unreadable_scan_dirs) == 1 else 'ies'} to check for "
+                f"bootstrap files: {joined}{extra}.",
+                "Fix permissions on the listed directory/directories (this process "
+                "needs execute/traverse access) and re-run, or declare their real "
+                "paths via `--attest` (paths.bootstrap).",
+            )
         return _finding(
             "B20",
             UNKNOWN,
@@ -3249,15 +3282,31 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
     from ..logscan import scan_log_file, summarize_truncation  # noqa: PLC0415
     from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
-    memory_sinks = [s for s in discover_log_sinks(ctx) if s.kind == "memory"]
+    unreadable_sinks: list = []
+    memory_sinks = [
+        s for s in discover_log_sinks(ctx, unreadable_sinks) if s.kind == "memory"
+    ]
     if not memory_sinks:
+        # B-913: a workspace dir the collector could not even traverse (e.g.
+        # `chmod 000`) is a distinct fact from "no memory dir configured" — name it.
+        unreadable_note = (
+            f" Could not read: {'; '.join(unreadable_sinks[:8])}"
+            f"{f' (+{len(unreadable_sinks) - 8} more)' if len(unreadable_sinks) > 8 else ''}."
+            if unreadable_sinks
+            else ""
+        )
         return _finding(
             "B180",
             UNKNOWN,
             "No agent memory files found (no <workspace>/memory/** content) — nothing to "
-            "content-scan for a re-consumption injection risk.",
+            f"content-scan for a re-consumption injection risk.{unreadable_note}",
             "No action needed unless the agent uses persistent memory; if it does, a "
-            "future run will pick it up automatically.",
+            "future run will pick it up automatically."
+            + (
+                " Fix permissions on the listed unreadable path(s) and re-run."
+                if unreadable_sinks
+                else ""
+            ),
         )
 
     corroborated: dict[str, set] = {}
@@ -4982,9 +5031,18 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
 
     lock_paths: list[Path] = []
     seen: set = set()
+    # B-913: a workspace dir made non-traversable (`chmod 000`) raises PermissionError
+    # on the bare `p.is_file()` this used to call directly — routed through
+    # `_safe_is_file` so it degrades to a disclosed miss instead of an uncaught crash.
+    # `unreadable_ancestor` remembers which lock.json path(s) could not even be
+    # checked, so a permission problem is never silently reported as "no lock file".
+    unreadable_ancestor: list[str] = []
     for rel in [""] + list(WORKSPACE_DIRS):
         p = ctx.home / rel / ".clawhub" / "lock.json"
-        if not p.is_file():
+        errs_before = len(ctx.errors)
+        if not _safe_is_file(p, ctx, what=f"'{p}'"):
+            if len(ctx.errors) > errs_before:
+                unreadable_ancestor.append(str(p))
             continue
         try:
             real = p.resolve()
@@ -4996,6 +5054,22 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
         lock_paths.append(p)
 
     if not lock_paths:
+        if unreadable_ancestor:
+            joined = "; ".join(unreadable_ancestor[:8])
+            extra = (
+                f" (+{len(unreadable_ancestor) - 8} more)"
+                if len(unreadable_ancestor) > 8
+                else ""
+            )
+            return _finding(
+                "B135",
+                UNKNOWN,
+                f"Could not check for .clawhub/lock.json under: {joined}{extra} — "
+                "whether any ClawHub-installed skill has a failed-verification record "
+                "could not be determined.",
+                "Fix permissions on the listed path(s) (or their parent workspace "
+                "dir) and re-run.",
+            )
         return _finding(
             "B135",
             PASS,
@@ -6288,9 +6362,19 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 )
 
     seen: set = set()
+    # B-913: a workspace dir made non-traversable (`chmod 000`) raises PermissionError
+    # on the bare `lock.is_file()` this used to call directly — routed through
+    # `_safe_is_file` so it degrades to a disclosed miss instead of an uncaught crash.
+    # `unreadable_lock_paths` remembers which lock.json path(s) could not even be
+    # checked, so a permission problem is never silently folded into "nothing to
+    # reconcile here".
+    unreadable_lock_paths: list[str] = []
     for rel in [""] + list(WORKSPACE_DIRS):
         lock = ctx.home / rel / ".clawhub" / "lock.json"
-        if not lock.is_file():
+        errs_before = len(ctx.errors)
+        if not _safe_is_file(lock, ctx, what=f"'{lock}'"):
+            if len(ctx.errors) > errs_before:
+                unreadable_lock_paths.append(str(lock))
             continue
         try:
             data = _json.loads(lock.read_text(encoding="utf-8", errors="replace"))
@@ -6318,6 +6402,22 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 )
 
     if not missing:
+        if unreadable_lock_paths:
+            joined = "; ".join(unreadable_lock_paths[:8])
+            extra = (
+                f" (+{len(unreadable_lock_paths) - 8} more)"
+                if len(unreadable_lock_paths) > 8
+                else ""
+            )
+            return _finding(
+                "B158",
+                UNKNOWN,
+                "Could not check the following ClawHub lock file(s) for declared "
+                f"skill-load sources: {joined}{extra} — reconciliation against disk "
+                "is incomplete.",
+                "Fix permissions on the listed path(s) (or their parent workspace "
+                "dir) and re-run.",
+            )
         return _finding(
             "B158",
             PASS,
@@ -6327,11 +6427,18 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
         )
 
     extra = f" (+{len(missing) - 6} more)" if len(missing) > 6 else ""
+    detail = (
+        "Declared skill-load source(s) not present on disk — unaudited; if one materializes it "
+        "enters the auto-load surface unscanned: " + "; ".join(missing[:6]) + extra
+    )
+    if unreadable_lock_paths:
+        detail += (
+            " Additionally, could not check: " + "; ".join(unreadable_lock_paths[:4]) + "."
+        )
     return _finding(
         "B158",
         WARN,
-        "Declared skill-load source(s) not present on disk — unaudited; if one materializes it "
-        "enters the auto-load surface unscanned: " + "; ".join(missing[:6]) + extra,
+        detail,
         "Remove the stale declaration, or install the skill/plugin so ClawSecCheck can scan it "
         "before it auto-loads.",
         evidence=missing,
