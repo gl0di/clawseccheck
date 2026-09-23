@@ -829,6 +829,98 @@ def test_b933_total_ceiling_still_bounds_many_sources(tmp_path, monkeypatch):
     assert meta["truncated"] is True
 
 
+# ---------------------------------------------------------------------------
+# B-933 round 2 — C-135 review of round 1 found the OUTER TOTAL ceiling reopens the
+# SAME starvation shape one level up: enough individually-under-cap decoy sources can
+# still exhaust `_MAX_TOOL_DEFS_TOTAL` before a later victim source is ever read (11
+# decoys x 2,000 defs each = 22,000 > 20,000, reachable well within DEFAULT limits).
+# Fixed by replacing the strictly-sequential per-source scan with a quota-bounded
+# round-robin driver so every source gets a fair, bounded turn before the shared
+# ceiling can be exhausted.
+# ---------------------------------------------------------------------------
+
+
+def test_b933_round2_eleven_decoy_sources_do_not_starve_the_twelfth_sqlite(tmp_path):
+    """The round-2 repro: 11 decoy SQLite databases, each individually under
+    `_MAX_TOOL_DEFS_PER_SOURCE` (2,000 distinct benign defs apiece — 22,000 total,
+    over `_MAX_TOOL_DEFS_TOTAL`), must not prevent a 12th, later database's genuinely
+    poisoned tool definition from ever being examined. Each decoy uses a DISTINCT name
+    prefix so cross-source dedup cannot collapse 11 decoys down to one source's worth
+    of unique content (which would fail to reproduce the bug at all). "decoyNN" sorts
+    before "zzz_victim" in `_sqlite_dbs`'s own `sorted(home.glob(...))` ordering, so
+    every decoy is visited before the victim."""
+    for i in range(11):
+        events = _many_tools_as_events(f"decoy{i}", 2000)
+        rows = [(f"s{j}", j, ev) for j, ev in enumerate(events)]
+        _write_agent_sqlite_db(tmp_path, f"decoy{i:02d}", rows)
+    _write_agent_sqlite_db(tmp_path, "zzz_victim", [("s1", 0, _compiled(_POISONED_TOOLS))])
+
+    f = _run(tmp_path)
+    assert f.status == "FAIL", f.detail
+    assert any("hidden HTML/markdown comment" in e for e in f.evidence), f.evidence
+
+
+def test_b933_round2_eleven_decoy_sources_do_not_starve_the_twelfth_jsonl(tmp_path):
+    """JSONL mirror of the SQLite repro above: `find_trajectory_files` orders
+    NEWEST-first, so 11 decoy files with newer mtimes than the victim's are all
+    visited before it — the shape B-933 names as independently exploitable (an
+    attacker just needs decoy files with newer mtimes than the victim's)."""
+    now = 2_000_000_000.0  # fixed reference point, not time.time() -- deterministic
+    victim_path = _write_trajectory(
+        tmp_path, [_compiled(_POISONED_TOOLS)], agent="victim", session="v",
+    )
+    os.utime(victim_path, (now - 1000, now - 1000))
+    for i in range(11):
+        events = _many_tools_as_events(f"decoy{i}", 2000)
+        decoy_path = _write_trajectory(
+            tmp_path, events, agent=f"decoy{i}", session=f"d{i}",
+        )
+        os.utime(decoy_path, (now - i, now - i))  # all newer than the victim
+
+    f = _run(tmp_path)
+    assert f.status == "FAIL", f.detail
+    assert any("hidden HTML/markdown comment" in e for e in f.evidence), f.evidence
+
+
+def test_b933_round2_fifty_tiny_decoy_sources_scale_cleanly(tmp_path):
+    """Scalability smoke test: `_MAX_SQLITE_DBS`'s own ceiling (50) worth of tiny,
+    single-def sources must not raise or hang under the round-robin driver. Not a
+    wall-clock assertion (that would be flaky) -- just "the audit completes and every
+    def is still recovered, nothing is dropped at this small a scale"."""
+    from clawseccheck import trajectorystore as ts
+
+    for i in range(50):
+        _write_agent_sqlite_db(
+            tmp_path, f"src{i:02d}",
+            [(f"s{i}", 0, _compiled(_many_tools(f"tool{i}", 1)))],
+        )
+
+    defs, meta = ts.read_compiled_tool_descriptions(tmp_path)
+    assert len(defs) == 50
+    assert meta["dbs_read"] == 50
+    assert meta["truncated"] is False
+
+    f = _run(tmp_path)
+    assert f.status == "PASS", f.detail
+
+
+def test_b933_round2_round_robin_output_is_deterministic(tmp_path):
+    """Round-robin introduces a new potential source of nondeterminism (interleaving
+    across sources) the old strictly-sequential reader never had. Pin that running the
+    same input twice produces byte-identical tool-def output and ordering."""
+    from clawseccheck import trajectorystore as ts
+
+    for i in range(5):
+        events = _many_tools_as_events(f"src{i}", 250)
+        rows = [(f"s{j}", j, ev) for j, ev in enumerate(events)]
+        _write_agent_sqlite_db(tmp_path, f"src{i:02d}", rows)
+
+    defs1, _ = ts.read_compiled_tool_descriptions(tmp_path)
+    defs2, _ = ts.read_compiled_tool_descriptions(tmp_path)
+    assert defs1 == defs2
+    assert json.dumps(defs1) == json.dumps(defs2)
+
+
 def test_unknown_when_trajectory_has_no_compiled_record(tmp_path):
     rec = dict(
         TRACE, type="tool.call", ts="1", seq=1, data={"name": "bash", "arguments": {}}

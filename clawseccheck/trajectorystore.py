@@ -126,7 +126,9 @@ from .trajectory import (
     _COMPILED_TOOL_FIELDS,
     _compiled_tool_entry,
     _MAX_COMPILED_LINE_LEN,
+    _MAX_ROUND_ROBIN_SOURCES,
     _MAX_TOOL_DEFS_PER_SOURCE,
+    _MAX_TOOL_DEFS_ROUND_QUOTA,
     _MAX_TOOL_DEFS_TOTAL,
     _MAX_TOOLS_PER_EVENT,
     _SCHEMA_VERSION,
@@ -983,6 +985,62 @@ def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]
     return values, capped, False, non_text
 
 
+def _iter_db_tool_candidates(values: "list[str]", meta: dict):
+    """Yield each candidate tool-definition dict found in *values* -- the already
+    materialized ``event_json`` rows for ONE db, as returned by
+    :func:`_read_sqlite_event_json`.
+
+    Extracted from ``read_compiled_tool_descriptions`` (B-933 round 2), the SQLite
+    mirror of ``trajectory._iter_source_tool_candidates`` -- same division of labor:
+    this generator owns parsing/gating and ``meta[...]`` disclosure; the caller (the
+    round-robin driver) owns cross-source dedup (``seen``) and both def-count caps.
+    No change to :func:`_read_sqlite_event_json` itself or its own per-db byte/row
+    caps -- those already ran, unconditionally, before this generator is ever
+    constructed.
+    """
+    for raw in values:
+        # Cheap pre-filter before the full JSON parse -- same idiom the JSONL reader
+        # uses, so most rows (the overwhelming majority are NOT context.compiled)
+        # never reach json.loads at all.
+        if f'"{_COMPILED_EVENT_TYPE}"' not in raw:
+            continue
+        if len(raw) > _MAX_COMPILED_LINE_LEN:
+            meta["truncated"] = True
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("traceSchema") != _TRACE_SCHEMA:
+            # B-716: mirrors the JSONL reader's identical fix.
+            meta["unknown_schema"] = True
+            continue
+        if rec.get("schemaVersion") != _SCHEMA_VERSION:
+            meta["unknown_version"] = True
+            continue
+        if rec.get("type") != _COMPILED_EVENT_TYPE:
+            continue
+        data = rec.get("data")
+        if not isinstance(data, dict):
+            continue
+        meta["events"] += 1
+        # §8: ONLY the tool-definition fields are touched, same as the JSONL reader --
+        # systemPrompt/prompt/messages are never referenced here either.
+        for field in _COMPILED_TOOL_FIELDS:
+            tools = data.get(field)
+            if not isinstance(tools, list):
+                continue
+            if len(tools) > _MAX_TOOLS_PER_EVENT:
+                meta["truncated"] = True
+            for tool in tools[:_MAX_TOOLS_PER_EVENT]:
+                entry = _compiled_tool_entry(tool, field)
+                if entry is None:
+                    continue
+                yield entry
+
+
 def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
     """Return ``(tool_defs, meta)`` -- the tool definitions OpenClaw actually sent to the
     model, recovered from ``context.compiled`` events in the per-agent SQLite trajectory
@@ -1009,7 +1067,12 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
     JSONL reader's own split EXACTLY -- see that reader's DoS-bounds comment in
     trajectory.py for the full rationale -- and
     ``tests/test_b185_compiled_tool_poisoning.py`` pins that the two readers still agree
-    after a cap is hit, not just when neither is.
+    after a cap is hit, not just when neither is. ``dbs_read``/``dbs_unreadable`` are
+    computed by an UNCONDITIONAL first pass over every db (unchanged from before B-933
+    round 2); definition extraction across the readable dbs then runs through the same
+    quota-bounded ROUND-ROBIN driver as the JSONL reader (B-933 round 2, see
+    ``_MAX_TOOL_DEFS_ROUND_QUOTA`` in trajectory.py), so no group of decoy dbs can
+    exhaust the TOTAL ceiling before a later db is ever examined.
 
     This is POST-HOC FORENSIC evidence, same limit as the JSONL reader: it reports what
     WAS sent to the model in sessions that already ran. It cannot pre-clear a live MCP
@@ -1034,8 +1097,13 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
         return tool_defs, meta
 
     seen: set[tuple] = set()
+
+    # Unconditional first pass, UNCHANGED from before B-933 round 2: every db's rows
+    # are read and its own per-db byte/row caps applied regardless of what the
+    # round-robin driver below goes on to keep -- `dbs_read`/`dbs_unreadable`/
+    # `non_text_rows` must reflect what was actually READ, not what was extracted.
+    db_values: dict = {}
     for db_path in dbs:
-        source_new_defs = 0  # B-933: per-source count, reset for each new db
         values, capped, unreadable, non_text = _read_sqlite_event_json(db_path)
         if unreadable:
             meta["dbs_unreadable"] += 1
@@ -1049,76 +1117,72 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
             # honesty rule as every other truncation cause, never silently dropped.
             meta["non_text_rows"] += non_text
             meta["truncated"] = True
+        db_values[db_path] = values
 
-        for raw in values:
-            # Cheap pre-filter before the full JSON parse -- same idiom the JSONL
-            # reader uses, so most rows (the overwhelming majority are NOT
-            # context.compiled) never reach json.loads at all.
-            if f'"{_COMPILED_EVENT_TYPE}"' not in raw:
+    # B-933 round 2: round-robin across the readable dbs instead of draining them
+    # strictly sequentially -- mirrors trajectory.py's JSONL driver exactly (see the
+    # DoS-bounds comment above `_MAX_TOOL_DEFS_ROUND_QUOTA` there).
+    readable = list(db_values.keys())
+    fair_group, overflow = readable[:_MAX_ROUND_ROBIN_SOURCES], readable[_MAX_ROUND_ROBIN_SOURCES:]
+    gens = {s: _iter_db_tool_candidates(db_values[s], meta) for s in fair_group}
+    source_new_defs = {s: 0 for s in fair_group}
+    done: set = set()
+    n, round_num = len(fair_group), 0
+    while (gens.keys() - done) and len(tool_defs) < _MAX_TOOL_DEFS_TOTAL:
+        progressed = False
+        order = fair_group[round_num % n:] + fair_group[:round_num % n] if n else []
+        for s in order:
+            if s in done:
                 continue
-            # Defense in depth, SCOPED to rows that reached this line: retracted an
-            # earlier version of this comment that claimed this recheck "removes any
-            # residual doubt" full stop (round-2 adversarial review, B-811,
-            # 2026-09-15) -- that overstated it. The pre-filter above already dropped
-            # every row not containing the event-type substring, so a row whose
-            # character count only grows past _MAX_COMPILED_LINE_LEN AFTER
-            # text_factory's errors="replace" decoding (relative to what SQLite's
-            # length(CAST(...AS BLOB)) measured on the original bytes) is caught here
-            # ONLY if it also survived that pre-filter; this is not a claim about
-            # every row _SELECT_TRAJECTORY_EVENT_JSON ever returns. Still worth doing
-            # -- it costs nothing and closes the gap for the rows this function
-            # actually goes on to parse.
-            if len(raw) > _MAX_COMPILED_LINE_LEN:
+            if len(tool_defs) >= _MAX_TOOL_DEFS_TOTAL:
+                break
+            quota_used = 0
+            while quota_used < _MAX_TOOL_DEFS_ROUND_QUOTA and len(tool_defs) < _MAX_TOOL_DEFS_TOTAL:
+                if source_new_defs[s] >= _MAX_TOOL_DEFS_PER_SOURCE:
+                    meta["truncated"] = True
+                    done.add(s)
+                    break
+                try:
+                    entry = next(gens[s])
+                except StopIteration:
+                    done.add(s)
+                    break
+                key = (
+                    entry["name"], entry["description"],
+                    tuple(entry["params"]), entry["field"],
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                tool_defs.append(entry)
+                source_new_defs[s] += 1
+                quota_used += 1
+                progressed = True
+        round_num += 1
+        if not progressed:
+            break
+    if gens.keys() - done:
+        meta["truncated"] = True
+
+    # Beyond the fair-share guarantee -- structurally unreachable today since
+    # `_MAX_SQLITE_DBS` (50) < `_MAX_ROUND_ROBIN_SOURCES` (200), kept only for parity
+    # with the JSONL reader's own tail.
+    for db_path in overflow:
+        source_new_defs_overflow = 0
+        for entry in _iter_db_tool_candidates(db_values[db_path], meta):
+            key = (
+                entry["name"], entry["description"],
+                tuple(entry["params"]), entry["field"],
+            )
+            if key in seen:
+                continue
+            if (len(tool_defs) >= _MAX_TOOL_DEFS_TOTAL
+                    or source_new_defs_overflow >= _MAX_TOOL_DEFS_PER_SOURCE):
                 meta["truncated"] = True
                 continue
-            try:
-                rec = json.loads(raw)
-            except ValueError:
-                continue
-            if not isinstance(rec, dict):
-                continue
-            if rec.get("traceSchema") != _TRACE_SCHEMA:
-                # B-716: mirrors the JSONL reader's identical fix
-                # (trajectory.read_compiled_tool_descriptions) -- a mixed-schema SQLite
-                # row set (the same OpenClaw-upgrade-mid-session shape, now landing in
-                # the post-migration store) silently dropped records here with no
-                # disclosure before this.
-                meta["unknown_schema"] = True
-                continue
-            if rec.get("schemaVersion") != _SCHEMA_VERSION:
-                meta["unknown_version"] = True
-                continue
-            if rec.get("type") != _COMPILED_EVENT_TYPE:
-                continue
-            data = rec.get("data")
-            if not isinstance(data, dict):
-                continue
-            meta["events"] += 1
-            # §8: ONLY the tool-definition fields are touched, same as the JSONL
-            # reader -- systemPrompt/prompt/messages are never referenced here either.
-            for field in _COMPILED_TOOL_FIELDS:
-                tools = data.get(field)
-                if not isinstance(tools, list):
-                    continue
-                if len(tools) > _MAX_TOOLS_PER_EVENT:
-                    meta["truncated"] = True
-                for tool in tools[:_MAX_TOOLS_PER_EVENT]:
-                    entry = _compiled_tool_entry(tool, field)
-                    if entry is None:
-                        continue
-                    key = (
-                        entry["name"], entry["description"],
-                        tuple(entry["params"]), entry["field"],
-                    )
-                    if key in seen:
-                        continue
-                    if (len(tool_defs) >= _MAX_TOOL_DEFS_TOTAL
-                            or source_new_defs >= _MAX_TOOL_DEFS_PER_SOURCE):
-                        meta["truncated"] = True
-                        break
-                    seen.add(key)
-                    tool_defs.append(entry)
-                    source_new_defs += 1
+            seen.add(key)
+            tool_defs.append(entry)
+            source_new_defs_overflow += 1
 
     meta["present"] = meta["dbs_read"] > 0
     return tool_defs, meta
