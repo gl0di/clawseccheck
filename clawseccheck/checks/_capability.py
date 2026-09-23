@@ -1533,7 +1533,11 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # agent replaces global) and `confined_scopes` the per-scope confinement;
     # `unconfined_write_scopes` is their conjunction, asked with THIS check's own write-tool
     # list so no third list of names exists. What it still cannot read -- byProvider,
-    # toolsBySender, per-channel tools -- is treated as possible narrowing (quiet direction).
+    # toolsBySender, and (B-726) a per-channel/group tools block on a config that ALSO
+    # declares a route binding -- is treated as possible narrowing (quiet direction). A
+    # per-channel/group block on a config with no route binding IS read now: it can only
+    # ever reach the default agent (`resolveAgentRoute`'s own fallback), so that scope is
+    # excluded the same way.
     fs_confined = _fs_reads_are_confined(cfg)
     # Which unconfined scopes are demonstrably granted a write tool. Consumed at the FAIL
     # escalation below, NOT here: an empty list must never be read as confinement (see there).
