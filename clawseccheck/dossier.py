@@ -38,7 +38,7 @@ from .catalog import (
 )
 
 from .scoring import grade_for
-from .skillast import capability_families
+from .skillast import analyze_javascript, analyze_shell, capability_families
 
 #: B-755: 'a definite verdict of any kind'. Derived, so a status added to the FAIL cascade
 #: counts as an assessment without an edit here.
@@ -601,27 +601,24 @@ def _declared_file_bars_measurability(relpath: str, lang: str, source: str) -> b
     source)``) is itself enough to withdraw a Persistence/Connections PASS this scan
     cannot back.
 
-    Content-gated, not content-blind — the first cut of this predicate (retracted after
-    measurement, see B-612's fix-round-1/round-2 history) returned True
-    for ANY declared file, so a benign decoy named in one line of prose — config with one
-    interpolation call, an English word matching an interpreter's name — dropped a clean
-    skill's axes from PASS to UNKNOWN for no reason a reader could see. The bar here is
-    exactly the one already applied to a REAL bundled file of the same language:
+    Content-gated, not content-blind — the first cut (retracted, see B-612's fix-round
+    history) returned True for ANY declared file, so a benign decoy named in one line of
+    prose dropped a clean skill's axes from PASS to UNKNOWN for no visible reason. The bar
+    is the one already applied to a REAL bundled file of the same language:
 
-    * Python: it must PARSE (``ast.parse``) and have a non-empty
-      ``capability_families`` result over ITS OWN bytes alone — the same predicate
-      ``_skill_capabilities`` applies to every ``.py`` file already. Python that does not
-      parse, or that parses with no capability family (an INI-ish config, a docstring, a
-      constant table), bars nothing — the same as a real ``.py`` file in that shape would.
-    * sh/js: it must be "verified" — its OWN ``#!`` independently names the same
-      language the prose declared (``checks/_vet.py``'s same bar for routing a crit hit to
-      `crit` instead of `warns_declared_unverified`). Mere presence then bars
-      measurability, same as ``_skill_has_unread_language_code`` already does for a real
-      bundled ``.sh``/``.js`` file — B-878's bar, not a new one. An UNVERIFIED sh/js
-      declared file (no shebang of its own, the common shape) cannot be confirmed to be
-      code in that language at all, so it bars nothing; it can still add a WARN-grade B13
-      finding (`warns_declared_unverified`), but a finding this scan cannot even confirm
-      is code must not also claim to have measured its behavior.
+    * Python: it must PARSE (``ast.parse``) and have a non-empty ``capability_families``
+      result over ITS OWN bytes — the same predicate ``_skill_capabilities`` applies to
+      every ``.py`` file already. Non-parsing, or parsing with no capability family
+      (an INI-ish config, a docstring), bars nothing, same as a real ``.py`` would.
+    * sh/js: either its OWN ``#!`` independently names the declared language
+      ("verified" — B-878's existing bar for a real bundled ``.sh``/``.js``); OR
+      ``analyze_shell``/``analyze_javascript`` itself flags the file's OWN bytes,
+      verified or not (fix-round-1: an unverified file that trips a rule already
+      contributes a `warns_declared_unverified` WARN on the danger axis — see
+      ``checks/_vet.py``'s declared loop — so a Persistence/Connections PASS over bytes
+      this scan just read for danger would contradict that WARN in the same report; the
+      first cut fired on "verified" alone and missed this). Neither verified nor
+      analyzer-flagged bars nothing — nothing here read anything to contradict.
     """
     if lang == "py":
         try:
@@ -632,7 +629,10 @@ def _declared_file_bars_measurability(relpath: str, lang: str, source: str) -> b
     if lang in ("sh", "js"):
         from .collector import _shebang_language  # noqa: PLC0415
 
-        return _shebang_language(source) == lang
+        if _shebang_language(source) == lang:
+            return True
+        analyzer = analyze_shell if lang == "sh" else analyze_javascript
+        return bool(analyzer(source, relpath))
     return False
 
 

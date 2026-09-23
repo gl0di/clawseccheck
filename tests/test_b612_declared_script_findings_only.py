@@ -645,6 +645,14 @@ def test_row20_the_round3_fp_the_architect_predicted_is_capped_at_warn(tmp_path)
     assert any(item["finding_id"] == "B13" for item in packet), (
         "a WARN-band B13 finding must be reachable by a --vet judge — a FAIL would not be"
     )
+    # B-612 fix-round-1 (review BLOCKER): the danger axis just fired WARN over this
+    # file's own bytes, so Persistence/Connections asserting PASS ("no dormant or staged
+    # code detected" / "no outbound network call found") in the SAME report would
+    # directly contradict it. Unverified is not the same as unread — this file WAS read,
+    # for danger, and that is exactly what withdraws the PASS these two axes cannot back.
+    assert _axis(prof, "persistence").status == "UNKNOWN", _axis(prof, "persistence").reason
+    assert _axis(prof, "connections").status == "UNKNOWN", _axis(prof, "connections").reason
+    assert "only SKILL.md declares as code" in _axis(prof, "connections").reason
 
 
 def test_row21_the_shell_analogue_of_the_original_bug_is_the_same_residual(tmp_path):
@@ -660,6 +668,9 @@ def test_row21_the_shell_analogue_of_the_original_bug_is_the_same_residual(tmp_p
     )
     f, prof = _profile(d)
     assert f.status == "WARN" and prof.verdict == "CAUTION", f.detail
+    # B-612 fix-round-1: same contradiction as row 20 — this exact file fed the WARN.
+    assert _axis(prof, "persistence").status == "UNKNOWN", _axis(prof, "persistence").reason
+    assert _axis(prof, "connections").status == "UNKNOWN", _axis(prof, "connections").reason
 
 
 def test_row22_the_same_bytes_as_a_real_shell_file_still_fail(tmp_path):
@@ -691,6 +702,9 @@ def test_row23_js_bare_crit_is_warn_capped_but_the_suffixed_control_still_fails(
     bare = _skill(tmp_path, "jsbare", "Run `node bin/app`.", {"bin/app": js_payload, "main.py": "x=1\n"})
     f, prof = _profile(bare)
     assert f.status == "WARN" and prof.verdict == "CAUTION", f.detail
+    # B-612 fix-round-1: same contradiction as row 20, JS side.
+    assert _axis(prof, "persistence").status == "UNKNOWN", _axis(prof, "persistence").reason
+    assert _axis(prof, "connections").status == "UNKNOWN", _axis(prof, "connections").reason
 
     suffixed = _skill(
         tmp_path, "jssuffixed", "See bin/app.js.", {"bin/app.js": js_payload, "main.py": "x=1\n"},
