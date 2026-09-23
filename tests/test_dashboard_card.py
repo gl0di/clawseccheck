@@ -19,8 +19,8 @@ from clawseccheck.checks._mcp import PluginSweep
 from clawseccheck.cli import _COMPACT_NEXT_POINTER, _with_next_actions, main
 from clawseccheck.collector import Context
 from clawseccheck.report import (
-    _glance_qualifying_findings, _plugins_inventory_lines, _sev_token, _worth_a_glance_lines,
-    render_dashboard, render_dashboard_findings,
+    _empty_inventory, _glance_qualifying_findings, _plugins_inventory_lines, _sev_token,
+    _worth_a_glance_lines, render_dashboard, render_dashboard_findings, render_subject_inventory,
 )
 from clawseccheck.scoring import compute
 
@@ -468,6 +468,109 @@ class TestWorthAGlanceRedactsHomePaths:
         score = compute(findings)
         out = render_dashboard(findings, score, full=True)
         assert not _ABS_PATH_RE.search(out), out
+
+
+# ─── B-892: the --dashboard --full tail block never leaks a home path either ───
+#
+# Plugins/MCP/Behavioural/Second-opinion sit in the exact same "--dashboard --full"
+# chat card the class above pins -- _worth_a_glance_lines redacts itself just below
+# this tail block, in that SAME card, for the identical "pasted into chat" reason.
+# Confirmed live producers of an absolute path reaching one of these four blocks:
+# checks/_config.py's B1/B11 `chmod 700 {ctx.home}` fix suggestion, and
+# checks/_egress.py's B82 evidence line. render_subject_inventory (the plain --full
+# TEXT report) is the regression guard: Plugins/MCP are the two blocks it shares
+# with render_dashboard via the SAME line renderers, and it must stay UNREDACTED for
+# identical inputs -- real paths are exactly what an owner reading their own machine's
+# report needs, and the fix belongs at render_dashboard's own render boundary, not
+# inside the shared renderers.
+
+class _TailBlockPhase:
+    """Minimal duck-typed pipeline.PhaseResult stand-in — same shape
+    test_f153_dashboard_full.py's own _Phase uses (only .ran/.detail/.lines read)."""
+
+    def __init__(self, detail, lines=None, ran=True):
+        self.detail = detail
+        self.lines = lines or []
+        self.ran = ran
+
+
+class TestTailBlockRedactsHomePaths:
+    _HOME_PATH = "/home/dave/.openclaw/plugins/bad-plugin"
+
+    def _findings(self):
+        return [Finding(id="B2", title="title B2", severity=CRITICAL, status=FAIL,
+                        detail="detail B2", fix="fix B2", framework="Test")]
+
+    def _plugin_sweep(self):
+        bad = Finding(id="MCP-VET", title="title MCP-VET", severity=CRITICAL, status=FAIL,
+                     detail=f"plugin cache at {self._HOME_PATH} is world-writable",
+                     fix="fix it", framework="Test")
+        return PluginSweep(
+            home_dir=Path("/x"), checked_dirs=[Path("/x/state")],
+            rows=[("bad-plugin", FAIL, 1)],
+            findings=[("bad-plugin", bad)],
+        )
+
+    def _mcp_inv(self):
+        inv = _empty_inventory()
+        inv["mcp"] = [{"name": "srv", "verdict": FAIL,
+                       "reasons": [f"config at {self._HOME_PATH} is group-writable"]}]
+        inv["plugins"] = {"scanned": True, "rows": []}
+        return inv
+
+    def test_plugins_block_redacted(self):
+        findings = self._findings()
+        score = compute(findings)
+        out = render_dashboard(findings, score, full=True, plugin_sweep=self._plugin_sweep())
+        assert "· Plugins ·" in out
+        assert not _ABS_PATH_RE.search(out), out
+        assert "~/.openclaw/plugins/bad-plugin" in out
+
+    def test_behavioural_block_redacted(self):
+        findings = self._findings()
+        score = compute(findings)
+        out = render_dashboard(
+            findings, score, full=True,
+            behavioral=_TailBlockPhase(f"cache-trace sink at {self._HOME_PATH}."))
+        assert "· Behavioural ·" in out
+        assert not _ABS_PATH_RE.search(out), out
+        assert "~/.openclaw/plugins/bad-plugin" in out
+
+    def test_second_opinion_block_redacted(self):
+        findings = self._findings()
+        score = compute(findings)
+        out = render_dashboard(
+            findings, score, full=True,
+            adjudication=_TailBlockPhase(f"1 item judged, evidence at {self._HOME_PATH}."))
+        assert "· Second opinion (advisory) ·" in out
+        assert not _ABS_PATH_RE.search(out), out
+        assert "~/.openclaw/plugins/bad-plugin" in out
+
+    def test_mcp_block_redacted(self, monkeypatch):
+        from clawseccheck import report as report_mod  # noqa: PLC0415
+        monkeypatch.setattr(report_mod, "build_inventory", lambda *a, **k: self._mcp_inv())
+        findings = self._findings()
+        score = compute(findings)
+        out = render_dashboard(findings, score, full=True, ctx=object())
+        assert "· MCP ·" in out
+        assert not _ABS_PATH_RE.search(out), out
+        assert "~/.openclaw/plugins/bad-plugin" in out
+
+    def test_plain_full_report_stays_unredacted_for_plugins_and_mcp(self, monkeypatch):
+        """The critical regression guard: render_subject_inventory shares
+        _plugins_inventory_lines/_mcp_inventory_lines with render_dashboard, and must
+        keep the real path -- this is the plain local --full text report, the owner's
+        own machine, no chat-paste risk. If this ever redacted too, the fix leaked
+        into the wrong renderer."""
+        from clawseccheck import report as report_mod  # noqa: PLC0415
+        monkeypatch.setattr(report_mod, "build_inventory", lambda *a, **k: self._mcp_inv())
+        findings = self._findings()
+        ctx = Context(home=Path("/nonexistent"))
+        ctx.config = {}
+        out = render_subject_inventory(findings, ctx, ascii_only=False,
+                                       plugin_sweep=self._plugin_sweep())
+        assert "srv" in out and "group-writable" in out  # the MCP block actually rendered
+        assert self._HOME_PATH in out
 
 
 # ─── B-381 #4: --compact must actually fit the Telegram ~4096-char budget ────

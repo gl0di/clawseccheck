@@ -160,6 +160,22 @@ def _redact_home_paths(text: str) -> str:
       runs on every JSON tree unconditionally); `--html` did not, so the identical
       `Finding.evidence` string reached the two formats looking different depending
       solely on which one was asked for -- see tests/test_b825_html_path_redaction.py.
+    * `render_dashboard`'s own `tail_block` assembly (B-892) wraps every line of the
+      Plugins/MCP/Behavioural/Second-opinion blocks right before they are joined into
+      the `--dashboard --full` chat card -- the SAME card `_worth_a_glance_lines`
+      redacts itself for, just below it in that card's own tail. Those four blocks'
+      line renderers (`_plugins_inventory_lines`, `_mcp_inventory_lines`,
+      `_behavioral_block_lines`, `_second_opinion_lines`) do NOT redact themselves,
+      same choice `_sanitize_tree`'s siblings above already made: they are shared with
+      the plain-text `--full` report (`render_subject_inventory`), which stays
+      unredacted by design (the owner's own machine). Folding inside the shared
+      renderer would have redacted the terminal report too; folding here, at the
+      chat-card-only render boundary, does not. Confirmed live producers:
+      `checks/_config.py`'s B1/B11 fixes (an absolute `chmod 700 {ctx.home}`
+      suggestion) and `checks/_egress.py`'s B82 evidence. Mirrors `pdf.py`'s
+      `_pipeline_block` (B-866), which applies the identical fold at the PDF's own
+      render boundary for the same four blocks (plus four more PDF-only blocks) --
+      see that function's docstring.
 
     Each caller applies this function itself, at its own render boundary, rather than
     this module reaching out to redact on their behalf -- for everything except the
@@ -4636,14 +4652,29 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # omitted when there is genuinely nothing to show for it (see the docstring).
     # None of these depend on why_drop_severities, so they're computed once, outside
     # the budget-retry loop below.
+    # B-892: this tail block is the SAME "--dashboard --full" chat card
+    # `_worth_a_glance_lines` redacts itself for below (see that function's own
+    # docstring: "this card is explicitly designed to be pasted into chat"), so the
+    # four blocks below get the identical `_redact_home_paths` fold, applied here at
+    # this render boundary rather than inside `_plugins_inventory_lines` /
+    # `_mcp_inventory_lines` / `_behavioral_block_lines` / `_second_opinion_lines`
+    # themselves -- those renderers are shared with the plain-text `--full` report
+    # (`render_subject_inventory`), which stays unredacted by design (the owner's own
+    # machine -- see `_redact_home_paths`'s own docstring). Confirmed producers of an
+    # absolute path reaching these blocks: checks/_config.py's B1/B11 fixes (a
+    # `chmod 700 {ctx.home}` suggestion) and checks/_egress.py's B82 evidence.
+    # `_risk_chain_lines`/`_coverage_lines`/coverage-page lines below are untouched --
+    # out of scope for B-892, no confirmed path-bearing producer traced to them.
     tail_block = ""
     plugin_lines = _plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only, compact=compact)
     if plugin_lines:
-        tail_block += "\n" + f"{sep} Plugins {sep}" + "\n" + "\n".join(plugin_lines) + "\n"
+        tail_block += ("\n" + f"{sep} Plugins {sep}" + "\n"
+               + "\n".join(_redact_home_paths(ln) for ln in plugin_lines) + "\n")
 
     if inv is not None and inv["mcp"]:
         mcp_lines = _mcp_inventory_lines(inv, ascii_only=ascii_only, compact=compact)
-        tail_block += "\n" + f"{sep} MCP {sep}" + "\n" + "\n".join(mcp_lines) + "\n"
+        tail_block += ("\n" + f"{sep} MCP {sep}" + "\n"
+               + "\n".join(_redact_home_paths(ln) for ln in mcp_lines) + "\n")
 
     risk_lines = _risk_chain_lines(risk or [], ascii_only=ascii_only, compact=compact)
     if risk_lines:
@@ -4651,12 +4682,13 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
 
     behavioral_lines = _behavioral_block_lines(behavioral, ascii_only=ascii_only)
     if behavioral_lines:
-        tail_block += "\n" + f"{sep} Behavioural {sep}" + "\n" + "\n".join(behavioral_lines) + "\n"
+        tail_block += ("\n" + f"{sep} Behavioural {sep}" + "\n"
+               + "\n".join(_redact_home_paths(ln) for ln in behavioral_lines) + "\n")
 
     second_opinion_lines = _second_opinion_lines(adjudication, ascii_only=ascii_only)
     if second_opinion_lines:
         tail_block += ("\n" + f"{sep} Second opinion (advisory) {sep}" + "\n"
-               + "\n".join(second_opinion_lines) + "\n")
+               + "\n".join(_redact_home_paths(ln) for ln in second_opinion_lines) + "\n")
 
     coverage_lines = _coverage_lines(findings, ascii_only=ascii_only)
     if coverage_lines:
