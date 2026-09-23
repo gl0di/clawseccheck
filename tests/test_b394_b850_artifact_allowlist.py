@@ -957,3 +957,129 @@ def test_str_join_reversed_hidden_escape_convicts():
     # runtime/UNPROVEN WARN instead of the correct static/ESCAPES conviction.
     src = _rd("os.path.join(here, ''.join(reversed('yp.x/pmt/../../..')))", H)
     assert _verdict(src, "pkg/mod.py") == "convict"
+
+
+# ---------------------------------------------------------------------------------
+# B-850 round 6 (C-135 rejection of 92de73e4): `_containment_class_attr_is_safe`
+# walked ONLY `class_node.body` -- the resolved class's OWN methods -- and never
+# `class_node.bases`. So `self.mod = os.path` set in a PARENT's `__init__`, read off
+# a CHILD instance/self one level of inheritance removed, found nothing in the
+# child's own (possibly empty) body and fell through to True -- the exact H5/G5 shape
+# (round 4/5) reopened one hop away. Both call sites into this function share the
+# blind spot: `_containment_self_attr_is_safe` (inside-the-class via `self`) and the
+# Attribute branch of `_containment_target_is_safe` via
+# `_containment_resolve_constructed_class` (outside-the-class via a traced
+# constructor). Now: a base that resolves to an in-file ClassDef is recursed into
+# transitively; an unresolvable base (imported, dynamic, ambiguous, ...) is OPAQUE
+# and makes the result conservative (not safe) rather than silently proving nothing
+# -- except `object` (implicit or explicit), which is not opaque and changes nothing
+# about the ordinary no-inheritance case.
+# ---------------------------------------------------------------------------------
+_R6_MRO_CONVICT_CASES = [
+    ("R6A-external-instance-attribute-via-subclass", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "class Base:\n    def __init__(self):\n        self.mod = os.path\n"
+         "class Wrapper(Base):\n    pass\n"
+         "w = Wrapper()\n"
+         "w.mod.join = lambda *args: '/tmp/evil.py'\n")),
+    ("R6B-self-attribute-via-subclass-method-no-init-override", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "class Base:\n    def __init__(self):\n        self.mod = os.path\n"
+         "class Wrapper(Base):\n    def bad(self):\n        self.mod.join = lambda *args: '/tmp/evil.py'\n"
+         "Wrapper().bad()\n")),
+    ("R6C-self-attribute-via-subclass-with-super-init", "pkg/mod.py",
+     _rd("os.path.join(os.path.dirname(__file__), 'x.py')",
+         "class Base:\n    def __init__(self):\n        self.mod = os.path\n"
+         "class Wrapper(Base):\n"
+         "    def __init__(self):\n        super().__init__()\n"
+         "    def bad(self):\n        self.mod.join = lambda *args: '/tmp/evil.py'\n"
+         "Wrapper().bad()\n")),
+]
+
+
+@pytest.mark.parametrize("case_id,relpath,src", _R6_MRO_CONVICT_CASES)
+def test_r6_inherited_sensitive_attribute_convicts(case_id, relpath, src):
+    assert _verdict(src, relpath) == "convict", case_id
+
+
+def test_r6_ordinary_inheritance_with_no_sensitive_attribute_stays_clean():
+    # Control for the R6 fix: an unrelated base class whose hierarchy never sets
+    # anything import-derived must stay clean -- the opaque-base-is-conservative
+    # rule must not turn EVERY class with ANY base into a conviction.
+    src = (
+        _rd("os.path.join(here, 'v.py')", H)
+        + "class Base:\n    def __init__(self):\n        self.name = 'base'\n"
+        "class Wrapper(Base):\n    def bad(self):\n        self.name = 'still ordinary'\n"
+        "Wrapper().bad()\n"
+    )
+    assert _verdict(src, "pkg/mod.py") == "clean"
+
+
+def test_r6_resolvable_empty_subclass_body_stays_clean():
+    # A subclass that adds nothing (`class Wrapper(Base): pass`) must walk Base's
+    # own body precisely, not just wave the whole hierarchy through as unsafe: when
+    # Base itself has no sensitive attribute either, the access stays clean.
+    src = (
+        _rd("os.path.join(here, 'v.py')", H)
+        + "class Base:\n    def __init__(self):\n        self.name = 'base'\n"
+        "class Wrapper(Base):\n    pass\n"
+        "w = Wrapper()\n"
+        "w.name = 'still ordinary'\n"
+    )
+    assert _verdict(src, "pkg/mod.py") == "clean"
+
+
+def test_r6_explicit_object_base_behaves_like_no_bases():
+    # `object` (implicit or explicit) is NOT an opaque base -- `class Store(object):`
+    # must behave exactly like `class Store:` (FP1's shape), not fail-closed just
+    # because `bases` is non-empty.
+    src = (
+        _rd("os.path.join(here, 'v.py')", H)
+        + "class Store(object):\n    def __init__(self, p):\n        self.path = p\n"
+        "s = Store('ordinary')\n"
+        "s.path = 'still ordinary'\n"
+    )
+    assert _verdict(src, "pkg/mod.py") == "clean"
+
+
+def test_r6_multi_level_inheritance_convicts():
+    # The MRO walk must be transitive, not just one hop: a sensitive attribute set
+    # two levels up (grandparent) must still convict through an empty parent.
+    src = _rd(
+        "os.path.join(os.path.dirname(__file__), 'x.py')",
+        "class Grandparent:\n    def __init__(self):\n        self.mod = os.path\n"
+        "class Parent(Grandparent):\n    pass\n"
+        "class Wrapper(Parent):\n"
+        "    def bad(self):\n        self.mod.join = lambda *args: '/tmp/evil.py'\n"
+        "Wrapper().bad()\n",
+    )
+    assert _verdict(src, "pkg/mod.py") == "convict"
+
+
+def test_r6_unresolvable_imported_base_is_opaque_and_convicts():
+    # An unresolvable base (imported from elsewhere) must make the result
+    # conservative (not safe), not silently prove the attribute clean just because
+    # the resolvable part of the hierarchy (the subclass's own empty body) found
+    # nothing.
+    src = _rd(
+        "os.path.join(here, 'v.py')",
+        H + "from some_external_module import ExternalBase\n"
+        "class Wrapper(ExternalBase):\n"
+        "    def bad(self):\n        self.name.join = lambda *args: '/tmp/evil.py'\n"
+        "Wrapper().bad()\n",
+    )
+    assert _verdict(src, "pkg/mod.py") == "convict"
+
+
+def test_r6_self_referential_base_does_not_infinite_recurse():
+    # A syntactically-pathological (runtime-invalid) `class A(A):` must not hang or
+    # crash the analyzer -- the `visited` cycle guard in
+    # `_containment_class_attr_is_safe` treats a repeated class node as opaque
+    # rather than recursing forever, so the mutation target stays fail-closed
+    # (convict), not an infinite loop or a stack overflow.
+    src = _rd(
+        "os.path.join(here, 'v.py')",
+        H + "class A(A):\n"
+        "    def bad(self):\n        self.name.join = lambda *args: '/tmp/evil.py'\n",
+    )
+    assert _verdict(src, "pkg/mod.py") == "convict"

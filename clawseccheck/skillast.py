@@ -5943,24 +5943,77 @@ def _containment_is_receiver_param(ctx, node):
 
 _CONTAINMENT_PROVENANCE_MAX_DEPTH = 6
 _CONTAINMENT_TRIVIALLY_SAFE_TYPES = (ast.Constant, ast.JoinedStr, ast.FormattedValue, ast.Lambda)
+_CONTAINMENT_MRO_MAX_DEPTH = 6
 
 
-def _containment_class_attr_is_safe(ctx, class_node, attr):
+def _containment_resolve_base_class(ctx, base_node, class_node):
+    """One element of `class_node.bases` resolved to an in-file `ClassDef`, or
+    None when it isn't a bare `ast.Name` bound to EXACTLY one in-file class def
+    (an imported base, a dynamic/computed base, an ambiguous/multi-candidate
+    binding, budget exhaustion, ...) -- same "opaque base stays out of scope,
+    never resolved" philosophy as `_containment_resolve_constructed_class`
+    (B-850 round 6). Evaluated in the scope ENCLOSING *class_node* (where the
+    `class Foo(Bar):` statement itself lives), not inside the class body --
+    bases can't see the class's own not-yet-created namespace."""
+    if not isinstance(base_node, ast.Name):
+        return None
+    env = _ContainmentEnv(ctx, ctx.scope_of(class_node))
+    try:
+        defs = _containment_provenance_defs(base_node, env)
+    except _ContainmentBudget:
+        return None
+    class_defs = [dd for dd, _ in defs if dd.kind == "def" and isinstance(dd.node, ast.ClassDef)]
+    if len(defs) != 1 or len(class_defs) != 1:
+        return None
+    return class_defs[0].node
+
+
+def _containment_class_attr_is_safe(ctx, class_node, attr, visited=None, depth=0):
     """True unless some assignment `<receiver>.<attr> = <value>` anywhere in
-    *class_node*'s own methods fully resolves its <value> to a sensitive dotted
-    name. Shared (B-850 round 5, G5) between `_containment_self_attr_is_safe`
-    (accessed via self/receiver-param, from INSIDE the class -- B-850 round 4,
-    H5) and an access on an instance obtained from a traced constructor call,
-    from OUTSIDE the class (`w = Wrapper(); w.mod.join = ...` is the same shape
-    as H5's `self.mod...`, one method over -- H5's fix only covered the
-    inside-the-class case). Deliberately narrower than
-    `_containment_target_is_safe`'s general ambiguous-fires rule: an
-    unresolved/opaque RHS (a constructor parameter, a computed value, ...) stays
-    SAFE here -- only a PROVEN-sensitive assignment convicts -- so the common
-    `self.<anything> = <ordinary value>` shape (FP1-FP11) never regresses just
-    because the whole class isn't traceable. (AugAssign-to-attribute, e.g.
-    `self.mod += os.path`, is not chased -- an accepted, narrow residual for a
-    shape no real skill writes.)"""
+    *class_node*'s own methods, OR anywhere in an in-file base class it
+    transitively inherits from (B-850 round 6, see below), fully resolves its
+    <value> to a sensitive dotted name. Shared (B-850 round 5, G5) between
+    `_containment_self_attr_is_safe` (accessed via self/receiver-param, from
+    INSIDE the class -- B-850 round 4, H5) and an access on an instance
+    obtained from a traced constructor call, from OUTSIDE the class (`w =
+    Wrapper(); w.mod.join = ...` is the same shape as H5's `self.mod...`, one
+    method over -- H5's fix only covered the inside-the-class case).
+    Deliberately narrower than `_containment_target_is_safe`'s general
+    ambiguous-fires rule: an unresolved/opaque RHS (a constructor parameter, a
+    computed value, ...) stays SAFE here -- only a PROVEN-sensitive assignment
+    convicts -- so the common `self.<anything> = <ordinary value>` shape
+    (FP1-FP11) never regresses just because the whole class isn't traceable.
+    (AugAssign-to-attribute, e.g. `self.mod += os.path`, is not chased -- an
+    accepted, narrow residual for a shape no real skill writes.)
+
+    B-850 round 6 (C-135 rejection of 92de73e4): this used to walk ONLY
+    `class_node.body`, never `class_node.bases` -- so `self.mod = os.path` set
+    in a PARENT's `__init__`, read/mutated off a CHILD instance one level of
+    inheritance removed (`class Wrapper(Base): pass`), found nothing in the
+    child's own (empty) body and fell through to True -- the exact H5/G5 shape
+    reopened one hop away. Now: a base that resolves (via
+    `_containment_resolve_base_class`) to an in-file ClassDef is recursed into
+    for the SAME attribute, transitively, bounded by
+    `_CONTAINMENT_MRO_MAX_DEPTH` and the `visited` cycle guard (a class can't
+    syntactically inherit from itself in valid Python, but resolution here is
+    purely static/AST-based -- `class A(A):` resolves the free name `A` right
+    back to itself, so the guard matters). An UNRESOLVABLE base (imported from
+    elsewhere, a dynamic/computed base, more than one candidate, budget
+    exhaustion, ...) is treated as OPAQUE and makes the result conservative
+    (not safe) rather than silently proving nothing about the attribute --
+    consistent with this whole recognizer's fail-closed-on-ambiguity design
+    (round 4 onward). The sole exception is `object` -- the implicit base of
+    every class, or an explicit `class Foo(object):` -- which is NOT opaque: a
+    class with no bases, or only `object`, behaves exactly as before this
+    round (own body only, True if nothing sensitive found there). That keeps
+    the ordinary, no-inheritance case (the overwhelming majority of real
+    skills) from regressing just because SOME base is present in the AST."""
+    if visited is None:
+        visited = set()
+    if id(class_node) in visited:
+        return False
+    visited = visited | {id(class_node)}
+
     for meth in class_node.body:
         if not isinstance(meth, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -5987,7 +6040,21 @@ def _containment_class_attr_is_safe(ctx, class_node, attr):
             resolved = _containment_resolve_through_assigns(ctx, value, menv)
             if resolved is not None and _containment_dotted_is_sensitive(resolved):
                 return False
-    return True
+
+    opaque = False
+    for b in class_node.bases:
+        if isinstance(b, ast.Name) and b.id == "object":
+            continue  # the universal implicit base -- not opaque, contributes nothing
+        if depth >= _CONTAINMENT_MRO_MAX_DEPTH:
+            opaque = True  # budget exhausted with a real base still unwalked
+            continue
+        base_class = _containment_resolve_base_class(ctx, b, class_node)
+        if base_class is None:
+            opaque = True  # imported / dynamic / ambiguous base -- can't vouch for it
+            continue
+        if not _containment_class_attr_is_safe(ctx, base_class, attr, visited, depth + 1):
+            return False
+    return not opaque
 
 
 def _containment_self_attr_is_safe(ctx, node, env, visited, depth):
