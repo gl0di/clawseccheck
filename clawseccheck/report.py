@@ -160,6 +160,33 @@ def _redact_home_paths(text: str) -> str:
       runs on every JSON tree unconditionally); `--html` did not, so the identical
       `Finding.evidence` string reached the two formats looking different depending
       solely on which one was asked for -- see tests/test_b825_html_path_redaction.py.
+    * `pdf.py`'s `_pipeline_block` (B-866) wraps every line of all eight `--full`
+      pipeline blocks (Skills/Plugins/MCP/RISK chains/Behavioural/Second opinion/
+      Coverage/Worth a glance) right before they are drawn into the PDF page --
+      report.py's own per-block line renderers below (`_plugins_inventory_lines`,
+      `_mcp_inventory_lines`, `_behavioral_block_lines`, `_second_opinion_item_lines`
+      among them) build their text straight from `Finding.detail`/roster data with NO
+      redaction of their own, because they are shared with the plain-text
+      `--full`/`--dashboard` chat card's OWN tail block (`render_dashboard`), which
+      keeps full paths deliberately -- same "owner's own machine" reasoning as the
+      plain report above, not this function's business to override for a shared
+      renderer. `_worth_a_glance_lines` is the one exception: it has redacted itself
+      since this function's very first caller (see the docstring's opening
+      paragraph), so `_pipeline_block` redacting it a second time is a no-op, not a
+      double redaction. See tests/test_c456_json_pdf_path_redaction.py's
+      `test_pipeline_block_redacts_home_paths_in_every_line`.
+
+    Known real producers of an absolute path reaching a `Finding.detail`/`.fix`
+    (B-866's own producer sweep, kept here rather than only in a Pulse
+    comment so it survives a `checks/_*.py` reshuffle): `checks/_config.py`'s B1 and
+    B11 fixes (a `chmod 700 {ctx.home}` suggestion built from the real audited home),
+    and `checks/_egress.py`'s B82 (an evidence line built through
+    `checks/_shared.py::_detail_path`, which already renders paths INSIDE `ctx.home`
+    relative to it -- see that helper's own docstring -- so B82 is the weaker case of
+    the three, evidence of the shape rather than a confirmed raw leak). None of the
+    three were found to reach `--json`/`--pdf`/`--html` with a raw path in a live,
+    end-to-end run over this repo's 732 fixtures; the gap this enumeration closes is
+    structural (an unaudited renderer), not a demonstrated leak on a real config.
 
     Each caller applies this function itself, at its own render boundary, rather than
     this module reaching out to redact on their behalf -- for everything except the

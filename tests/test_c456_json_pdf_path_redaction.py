@@ -79,12 +79,21 @@ def test_finding_to_dict_alone_does_not_redact():
 def test_render_vet_json_redacts_axes_reason_and_fix():
     """C-135 finding: dossier._reason_and_fix returns worst.detail/worst.fix verbatim
     into axes[].reason/fix, a SEPARATE JSON payload from findings[] -- --vet --json
-    must not leak the home path here even though findings[] is already covered."""
-    detail = f"openclaw install ancestor dir {_LEAKY_PATH} is group-writable"
-    assert _FAKE_HOME_PREFIX in detail  # non-vacuity control
+    must not leak the home path here even though findings[] is already covered.
 
-    f = _c5_shaped_finding(detail=detail, evidence=[])
-    axis = AxisResult(axis="build", status=WARN, reason=detail, fix="", findings=[f])
+    B-866: the reviewer's own finding on this test was that ``fix=""`` here never
+    exercised ``axes[].fix`` at all -- an empty string trivially contains no home path,
+    so the assertion below would have passed whether or not redaction ran. ``fix_text``
+    is a SEPARATE leaking string from ``detail`` (not just the same value reused) so a
+    future regression that redacts ``reason`` but not ``fix`` -- or vice versa -- cannot
+    hide behind the other field's assertion."""
+    detail = f"openclaw install ancestor dir {_LEAKY_PATH} is group-writable"
+    fix_text = f"chmod 700 {_LEAKY_PATH}"
+    assert _FAKE_HOME_PREFIX in detail  # non-vacuity control
+    assert _FAKE_HOME_PREFIX in fix_text  # non-vacuity control -- axes[].fix specifically
+
+    f = _c5_shaped_finding(detail=detail, evidence=[], fix=fix_text)
+    axis = AxisResult(axis="build", status=WARN, reason=detail, fix=fix_text, findings=[f])
     profile = VetProfile(
         target="some-skill", target_type="skill", overall_status=WARN,
         verdict="CAUTION", overall_grade="N/A", score=0,
@@ -94,8 +103,11 @@ def test_render_vet_json_redacts_axes_reason_and_fix():
     assert _FAKE_HOME_PREFIX not in doc, doc
     parsed = json.loads(doc)
     reason = parsed["axes"][0]["reason"]
+    fix = parsed["axes"][0]["fix"]
     assert _FAKE_HOME_PREFIX not in reason, reason
     assert "~/.npm-global" in reason, reason
+    assert _FAKE_HOME_PREFIX not in fix, fix
+    assert "~/.npm-global" in fix, fix
 
 
 def test_incident_pack_is_not_redacted_by_this_fix():
@@ -150,3 +162,87 @@ def test_render_pdf_never_carries_the_home_path_in_content_streams():
     text = content_text(data)
     assert _FAKE_HOME_PREFIX not in text, text
     assert "npm-global" in text, "the informative remainder must survive — redaction, not deletion"
+
+
+class _LeakyPluginSweep:
+    """Duck-typed like checks._mcp.PluginSweep -- see report._plugins_inventory_lines's
+    own docstring for the exact surface this needs (.no_roots/.no_targets/.rows/
+    .findings). One flagged row, so the "flagged" line is built from `finding.detail`
+    (report.py: ``reason = _sanitize(f.detail) if f is not None and f.detail else
+    verdict``) exactly the way a real plugin-vet finding would."""
+
+    def __init__(self, finding: Finding):
+        self.no_roots = False
+        self.no_targets = False
+        self.rows = [("evil-plugin", finding.status, [])]
+        self.findings = [("evil-plugin", finding)]
+
+
+def test_render_pdf_full_pipeline_plugins_block_redacts_home_paths():
+    """B-866: the `--full` pipeline blocks pdf._pipeline_block draws (Plugins/MCP/
+    Behavioural/Second opinion among them) never went through `_finding_block`'s own
+    `_redact_home_paths` call -- `_plugins_inventory_lines` builds its 'flagged' line
+    straight from `Finding.detail` (report.py: ``reason = _sanitize(f.detail)``), with
+    no redaction step of its own (that renderer is shared with the plain-text
+    `--full`/`--dashboard` report, which keeps full paths by design -- see
+    `_redact_home_paths`'s own docstring). Drives the REAL call site
+    (`render_pdf`'s 'Plugins' block via `plugin_sweep`), not `_pipeline_block` in
+    isolation, so a regression in how `render_pdf` wires `plugin_sweep` through
+    cannot hide behind a lower-level test."""
+    finding = _c5_shaped_finding(
+        detail=f"plugin installs a launcher at {_LEAKY_PATH}/bin/evil", evidence=[],
+    )
+    sweep = _LeakyPluginSweep(finding)
+    data = render_pdf([], compute([]), plugin_sweep=sweep)
+    text = content_text(data)
+    assert _FAKE_HOME_PREFIX not in text, text
+    assert "evil-plugin" in text and "bin/evil" in text, (
+        "redaction, not deletion -- the remainder must survive: " + text
+    )
+
+
+def test_pipeline_block_redacts_home_paths_in_every_line():
+    """B-866, direct unit test of `pdf._pipeline_block` itself -- the ONE place all
+    eight `--full` pipeline blocks (Skills/Plugins/MCP/RISK chains/Behavioural/Second
+    opinion/Coverage/Worth a glance) reach the PDF page. Same `_bare_flow` pattern
+    `test_pdf.py`'s `test_line_sanitises_a_hostile_string_directly` uses for a DIRECT
+    unit test of a render boundary, rather than trusting some upstream caller to have
+    already redacted the input -- the leaking line is fed in raw here, bypassing
+    report.py's line renderers entirely, so this cannot pass merely because one of
+    THEM happens to redact."""
+    from clawseccheck.pdf import _PageFlow, _PdfDoc, _pipeline_block
+
+    def _flow():
+        doc = _PdfDoc()
+        font_helv = doc.add_object(
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+        font_bold = doc.add_object(
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold "
+            b"/Encoding /WinAnsiEncoding >>")
+        return _PageFlow(doc, font_helv, font_bold)
+
+    leaking_line = f"   [WARN] evil-plugin  CAUTION - installs to {_LEAKY_PATH}/bin/evil"
+    flow = _flow()
+    _pipeline_block(flow, "Plugins", [leaking_line])
+    drawn = "\n".join(flow._page_ops)
+    assert _FAKE_HOME_PREFIX not in drawn, drawn
+    assert "bin/evil" in drawn, "redaction, not deletion -- the remainder must survive"
+
+    # Mutation control (this repo's "a control that cannot fail controls nothing"
+    # standard): reproduce _pipeline_block's own per-line loop with the
+    # `_redact_home_paths` call removed, and confirm the assertion above would have
+    # caught its absence.
+    from clawseccheck.pdf import _draw_section_header
+
+    mutated_flow = _flow()
+    _draw_section_header(mutated_flow, "Plugins")
+    for raw in [leaking_line]:
+        text = raw.rstrip()
+        indent = (len(text) - len(text.lstrip(" "))) * 3.0
+        mutated_flow.wrapped(text.lstrip(" "), size=9, color="#333333",
+                              indent=min(indent, 60.0))
+    mutated_drawn = "\n".join(mutated_flow._page_ops)
+    assert _FAKE_HOME_PREFIX in mutated_drawn, (
+        "mutation control failed to reproduce the leak -- this test would pass even "
+        "with _pipeline_block's own redaction removed, so it proves nothing"
+    )
