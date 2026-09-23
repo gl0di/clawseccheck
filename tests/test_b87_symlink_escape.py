@@ -270,3 +270,135 @@ def test_own_repo_home_safe_fixture_has_no_symlink_fail():
         assert f.status in (PASS, UNKNOWN, WARN)  # never a false sensitive-path FAIL
         if f.status == FAIL:  # pragma: no cover - explicit guard
             raise AssertionError(f"{name}: unexpected B87 FAIL: {f.detail}")
+
+
+# ---- B-899: an unsearchable skill dir must degrade honestly, never crash or mask -----
+#
+# `Path.is_symlink()` needs search (`x`) permission on the PARENT directory to `lstat()`
+# an entry inside it. A skill dir at mode 0644 (listable via `r`, not searchable) makes
+# every `is_symlink()` call on its own contents raise `PermissionError` -- which used to
+# propagate straight out of `_enumerate_symlinks`/`check_symlink_escape`, taking a
+# confirmed FAIL on a sibling skill down with it. 0000 (unlistable too) took a different,
+# quieter path: `os.walk`'s default `onerror=None` discarded the failure and the check
+# fell through to a false-clean PASS instead of raising. Root runs bypass the directory
+# search-permission check entirely (CAP_DAC_OVERRIDE), so these are skipped under root
+# exactly like this repo's other 0644/0000 permission tests (see test_b551_unsearchable_dir.py).
+
+root_skip = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses directory search-permission checks",
+)
+
+
+@pytest.fixture
+def unlock():
+    """Restore a chmod'd directory's mode even when an assertion fails, so a red test
+    never leaves an unsearchable/unlistable directory behind for the next one."""
+    locked: list = []
+    yield locked.append
+    for d in locked:
+        try:
+            d.chmod(0o755)
+        except OSError:
+            pass
+
+
+def _two_skill_layout(tmp_path):
+    """`aaa` carries a real, out-of-tree sensitive-path escape (FAIL-worthy on its own);
+    `zzz` is an unrelated, otherwise-clean sibling whose permission bits get mangled by
+    each test. Mirrors the exact layout from the B-899 report."""
+    home = tmp_path / "openclaw"
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".ssh").mkdir(parents=True)
+    (fakehome / ".ssh" / "id_rsa").write_text("x", encoding="utf-8")
+    aaa = _mk_skill(home / "workspace" / "skills", name="aaa")
+    zzz = _mk_skill(home / "workspace" / "skills", name="zzz")
+    os.symlink(fakehome / ".ssh", aaa / "keys")
+    return home, zzz
+
+
+@posix_only
+@root_skip
+def test_unsearchable_sibling_0644_does_not_crash_and_keeps_real_fail(tmp_path, unlock):
+    home, zzz = _two_skill_layout(tmp_path)
+    zzz.chmod(0o644)
+    unlock(zzz)
+
+    f = check_symlink_escape(Context(home=home))  # must not raise
+    assert f.status == FAIL
+    assert any(".ssh" in e for e in f.evidence)
+
+
+@posix_only
+@root_skip
+def test_unsearchable_sibling_0000_does_not_crash_and_keeps_real_fail(tmp_path, unlock):
+    home, zzz = _two_skill_layout(tmp_path)
+    zzz.chmod(0o000)
+    unlock(zzz)
+
+    f = check_symlink_escape(Context(home=home))  # must not raise
+    assert f.status == FAIL
+    assert any(".ssh" in e for e in f.evidence)
+
+
+@posix_only
+@root_skip
+def test_solo_unsearchable_skill_0644_is_unknown_not_a_false_pass(tmp_path, unlock):
+    """No sibling FAIL to fall back on: an unsearchable skill dir with nothing else to
+    scan must surface as an honest, engine-side UNKNOWN -- never the false-clean PASS
+    the 0000 shape produced before this fix (the bare crash the 0644 shape produced is
+    covered by the "does not crash" tests above)."""
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="onlyzzz")
+    sk.chmod(0o644)
+    unlock(sk)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
+
+
+@posix_only
+@root_skip
+def test_solo_unsearchable_skill_0000_is_unknown_not_a_false_pass(tmp_path, unlock):
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="onlyzzz")
+    sk.chmod(0o000)
+    unlock(sk)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
+
+
+@posix_only
+@root_skip
+def test_unreadable_path_is_disclosed_in_fix_not_detail(tmp_path, unlock):
+    """The disclosure belongs in `fix`: `baseline.fingerprint()` hashes only `detail`
+    (sha1 keyed by finding id), so folding a host-specific path into `detail` would give
+    every affected machine its own fingerprint and orphan any `.clawseccheckignore` entry
+    already written against this UNKNOWN."""
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="onlyzzz")
+    sk.chmod(0o644)
+    unlock(sk)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == UNKNOWN
+    assert "onlyzzz" not in f.detail, f.detail
+    assert "onlyzzz" in f.fix, f.fix
+
+
+@posix_only
+@root_skip
+def test_healthy_root_is_unaffected_by_the_guard(tmp_path):
+    """Control: an ordinary, fully-searchable skill tree is scored exactly as before --
+    the new guard must never fire (and never set engine_degraded) on a normal run."""
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="clean")
+    (sk / "real.txt").write_text("hi", encoding="utf-8")
+    os.symlink("real.txt", sk / "alias.txt")
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == PASS
+    assert f.engine_degraded is False

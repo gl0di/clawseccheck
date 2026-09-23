@@ -6001,18 +6001,61 @@ def _dep_names_in_skill(blob: str) -> list[str]:
 def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
     """Every symlink (file OR directory) under `root`, NEVER followed for content.
     Shared bound via state['count'] / state['cap']; directory symlinks are pruned from
-    the walk so traversal never descends through one."""
+    the walk so traversal never descends through one.
+
+    B-899: a *listable-but-not-searchable* directory (mode 0644 — read bit set, no `x`)
+    lets `os.walk`/`os.scandir` list its entries just fine, but `lstat()` on any entry
+    *inside* it needs search permission on the directory itself, so `Path.is_symlink()`
+    (which re-raises everything outside ENOENT/ENOTDIR/EBADF/ELOOP, unlike the
+    exception-swallowing `os.path.islink()`) throws a bare `PermissionError` straight out
+    of this function. Before this fix that took the entire B87 check down (`ERR:
+    check_symlink_escape`), erasing a confirmed FAIL on a sibling skill in the same run —
+    the exact `safeio.collect_skill_files` class of bug (B-551), unfixed here because this
+    walk predates that helper's `unreadable_dirs` opt-in and is a bespoke traversal (dirs
+    AND files both feed `out`, not just files). A *fully* unsearchable/unlistable root
+    (mode 0000) never hit this raise at all: `os.walk`'s default `onerror=None` just
+    discards the scandir failure and yields nothing for it, so the check silently reported
+    a clean PASS for content it never looked at. Both shapes are fixed the same way: every
+    `is_symlink()` call and the walk's own per-directory listing are guarded, and a
+    failure is recorded in `state['unreadable']` (a `(Path, reason)` pair) instead of
+    raising or vanishing — `check_symlink_escape` turns a non-empty list into a disclosed,
+    `engine_degraded` UNKNOWN when no FAIL/WARN already accounts for it, so an unsearchable
+    sibling never again converts a real escape into a bare engine crash or a false-clean
+    PASS.
+
+    A directory entry whose `is_symlink()` cannot be determined is dropped from `keep`
+    (never descended) rather than assumed to be a plain directory: the whole point of this
+    walk is "never traverse through an unverified symlink", and treating an unknown as safe
+    would be the one place that invariant could be quietly defeated.
+    """
     out: list[Path] = []
+
+    def _mark_unreadable(path, exc: OSError | None = None) -> None:
+        reason = (exc.strerror if exc and exc.strerror else "permission denied")
+        state.setdefault("unreadable", []).append((Path(path), reason))
+
+    def _on_walk_error(exc: OSError) -> None:
+        # Fires when os.walk cannot even list a directory it is about to (or already
+        # did) descend into -- including `root` itself. Default onerror=None would
+        # discard this silently (the 0000 case above).
+        _mark_unreadable(getattr(exc, "filename", None) or root, exc)
+
     try:
-        walker = os.walk(root, topdown=True, followlinks=False)
-    except OSError:
+        walker = os.walk(root, topdown=True, onerror=_on_walk_error, followlinks=False)
+    except OSError as exc:
+        _mark_unreadable(root, exc)
         return out
     for dirpath, dirnames, filenames in walker:
         dp = Path(dirpath)
         keep: list[str] = []
         for d in sorted(dirnames):
             p = dp / d
-            if p.is_symlink():
+            try:
+                is_link = p.is_symlink()
+            except OSError as exc:
+                _mark_unreadable(p, exc)
+                continue  # unknown -> do not keep, do not descend (see docstring)
+            if is_link:
                 if state["count"] >= _SYMLINK_SCAN_CAP:
                     state["cap"] = True
                     continue
@@ -6024,7 +6067,12 @@ def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
         dirnames[:] = keep
         for f in sorted(filenames):
             p = dp / f
-            if p.is_symlink():
+            try:
+                is_link = p.is_symlink()
+            except OSError as exc:
+                _mark_unreadable(p, exc)
+                continue
+            if is_link:
                 if state["count"] >= _SYMLINK_SCAN_CAP:
                     state["cap"] = True
                     continue
@@ -15337,6 +15385,33 @@ def check_symlink_escape(ctx: Context) -> Finding:
             else:
                 warns.append(f"{rel} -> {safe_real} (escapes the skill/workspace tree)")
 
+    # B-899: a directory `_enumerate_symlinks` could not list, or an entry inside one it
+    # could not classify (e.g. a listable-but-not-searchable 0644 skill dir), lands here
+    # instead of raising past this function or vanishing into a false-clean PASS. This is
+    # an ENGINE-SIDE reason a full verdict could not be reached for that path — the check
+    # ran, but an input it expected to stat turned out unreadable — so `engine_degraded`
+    # is set precisely when it is non-empty (Finding.engine_degraded's contract,
+    # catalog.py). It only ever feeds the UNKNOWN branch below: a FAIL/WARN already found
+    # elsewhere in this same run still wins outright (returned above), so one unsearchable
+    # sibling can never mask a confirmed escape.
+    #
+    # The disclosed path(s) go in `fix`, never `detail`: `baseline.fingerprint()` hashes
+    # only `detail` (sha1 of that string, keyed with the finding id — see baseline.py), so
+    # a host-specific path folded into `detail` would give every affected machine its own
+    # fingerprint and silently orphan any `.clawseccheckignore` entry already written
+    # against this UNKNOWN. `detail` therefore stays a fixed, generic sentence; the actual
+    # unreadable path(s) are named only in `fix` (and in `evidence`, which is not hashed).
+    unreadable = state.get("unreadable") or []
+    engine_degraded = bool(unreadable)
+    unreadable_rel: list[str] = []
+    for unreadable_path, reason in unreadable:
+        try:
+            unreadable_rel.append(
+                f"{unreadable_path.relative_to(ctx.home)} (unreadable: {reason})"
+            )
+        except ValueError:
+            unreadable_rel.append(f"{unreadable_path} (unreadable: {reason})")
+
     cap_note = (
         f" (symlink scan cap of {_SYMLINK_SCAN_CAP} hit — some links not inspected)"
         if state["cap"]
@@ -15371,18 +15446,41 @@ def check_symlink_escape(ctx: Context) -> Finding:
             "resolves outside it cannot be vouched for and may be repointed at a secret store.",
             warns,
         )
-    if unknowns or state["cap"]:
-        detail = (
-            "Some skill/workspace symlinks could not be resolved" + cap_note
-            + (": " + "; ".join(unknowns[:6]) if unknowns else ".")
-        )
+    if unknowns or state["cap"] or unreadable_rel:
+        if unknowns:
+            # Unchanged from before B-899: no "+N more" here (that truncation note is
+            # specific to fails/warns above) — keep this pre-existing branch's detail
+            # format exactly as it was for the dangling-link case.
+            detail = (
+                "Some skill/workspace symlinks could not be resolved" + cap_note
+                + ": " + "; ".join(unknowns[:6])
+            )
+        else:
+            # Purely the B-899 unreadable-directory case (no dangling link and no cap
+            # hit) — a fixed sentence, not the path, keeps this UNKNOWN's fingerprint
+            # stable across hosts (see the comment above `unreadable_rel`).
+            detail = (
+                "A skill/workspace directory could not be scanned for symlink escape"
+                + cap_note + " (unsearchable)."
+            )
+        fix = "Fix or remove broken links so their targets can be assessed."
+        if unreadable_rel:
+            extra_u = f" (+{len(unreadable_rel) - 6} more)" if len(unreadable_rel) > 6 else ""
+            plural = len(unreadable_rel) != 1
+            noun, pronoun = ("directories", "they") if plural else ("directory", "it")
+            fix += (
+                f" Restore at least execute (search) permission on the unsearchable "
+                f"{noun} so {pronoun} can be scanned for a symlink escape: "
+                + "; ".join(unreadable_rel[:6]) + extra_u
+            )
         return _custom(
             "B87",
             HIGH,
             UNKNOWN,
             detail,
-            "Fix or remove broken links so their targets can be assessed.",
-            unknowns,
+            fix,
+            unknowns + unreadable_rel,
+            engine_degraded=engine_degraded,
         )
     return _custom(
         "B87",

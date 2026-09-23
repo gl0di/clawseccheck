@@ -96,7 +96,7 @@ _EXEMPT = {
                             "approval / update-pinning / self-modification / supply-chain "
                             "topic (17 checks + helpers); topic-faithful and over budget "
                             "by design. A finer split is a later cycle.",
-    "checks/_content.py": "~15,129 lines (restated 2026-09-16, C-437 — was ~14,623) — the "
+    "checks/_content.py": "~15,655 lines (restated 2026-09-23, B-899 — was ~15,129) — the "
                           "content-security ring: 51 check functions, 178 "
                           "private helpers and 241 module regexes. Restated 2026-09-06 "
                           "(C-432), and the previous reason is RETRACTED rather than "
