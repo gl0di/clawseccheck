@@ -93,13 +93,16 @@ with one more discipline the plain count readers do not need:
     leave this function -- reused verbatim from the JSONL reader, not re-derived, so the
     two containers cannot diverge on what counts as a "delivered tool definition."
 
-Grep for ``SELECT`` in this module's source: there are now exactly four literal queries.
-Two name ``trajectory_runtime_events`` (:data:`_SELECT_TRAJECTORY_ROWS`,
-:data:`_SELECT_TRAJECTORY_EVENT_JSON`); the other two are :func:`_table_kind`'s own
-``sqlite_master`` lookups, added in round 2 of the same B-811 review to close the
-VIEW/virtual-table/rootpage-aliasing bypasses of "we never name the auth tables in our
-own source" (see that function's docstring). None of the four ever names either auth
-table.
+Grep for ``SELECT`` in this module's source: there are now exactly six literal queries
+(B-852 recount -- an earlier version of this paragraph said "four", missing the two
+``_EXCLUDED_COUNT`` queries added by round 4 of the same B-811 review, below). Four name
+``trajectory_runtime_events`` (:data:`_SELECT_TRAJECTORY_ROWS`,
+:data:`_SELECT_TRAJECTORY_EVENT_JSON`, :data:`_SELECT_TRAJECTORY_ROWS_EXCLUDED_COUNT`,
+:data:`_SELECT_TRAJECTORY_EVENT_JSON_EXCLUDED_COUNT`); the other two are
+:func:`_table_kind`'s own ``sqlite_master`` lookups, added in round 2 of the same B-811
+review to close the VIEW/virtual-table/rootpage-aliasing bypasses of "we never name the
+auth tables in our own source" (see that function's docstring). None of the six ever
+names either auth table.
 
 **What this cannot catch (constraint 4, said plainly).** Every container this reader knows
 about is residue of the SPECIFIC 8.1-era JSONL-to-SQLite migration: pointers, the import
@@ -170,9 +173,10 @@ POINTER_SCHEMA = "openclaw-trajectory-pointer"
 TRAJECTORY_TABLE_NAME = "trajectory_runtime_events"
 
 # A literal, table-scoped SELECT. Never built by string formatting or interpolation --
-# grep for "SELECT" in this module's source: there are exactly four (this one,
-# _SELECT_TRAJECTORY_EVENT_JSON below, and _table_kind's two sqlite_master lookups),
-# none built from a variable. This one names only session_id/seq; event_json (the
+# grep for "SELECT" in this module's source: there are exactly six (this one,
+# _SELECT_TRAJECTORY_EVENT_JSON below, the two _EXCLUDED_COUNT queries further below,
+# and _table_kind's two sqlite_master lookups), none built from a variable. This one
+# names only session_id/seq; event_json (the
 # sensitive per-record payload) is never selected here, and neither auth table is ever
 # named anywhere in this module's source -- see _table_kind's docstring for why a
 # literal table name in OUR source is necessary but not sufficient on its own.
@@ -212,9 +216,24 @@ _SELECT_TRAJECTORY_ROWS = (
 # than the original finding it was meant to fix. `CAST(... AS BLOB)` makes `length()`
 # return the true byte count, embedded NULs included. The bound value is
 # _MAX_COMPILED_LINE_LEN, matching the JSONL sibling's own per-record cap.
+#
+# `ORDER BY created_at DESC` (B-852): this query has always carried a `LIMIT`, and
+# without an ORDER BY SQLite is free to return rows in whatever order its own storage
+# happens to hold them -- in practice the table's natural (rowid/insertion) order, i.e.
+# OLDEST first. On a store past the row cap (`_MAX_SQLITE_CONTENT_ROWS_PER_DB`, 3000
+# rows) or the byte cap (`_MAX_SQLITE_CONTENT_BYTES_PER_DB`, 8 MB) this silently read
+# the OLDEST 3000 rows / oldest bytes' worth of a large agent database and never reached
+# the newest sessions at all -- exactly where a real poisoning attempt would land, since
+# it is the most recent MCP handshake, not the oldest one, that reflects what a server is
+# serving TODAY. `created_at` (INTEGER, populated on every real insert -- see this
+# module's docstring's container list) is this table's own timestamp column, the same
+# one `collector.py`'s sibling readers already order by (`ORDER BY created_at DESC LIMIT
+# ?`, e.g. `task_runs`/`subagent_runs`) -- reused here for the same reason: it is the
+# one column this schema actually offers that means "when this row was written".
 _SELECT_TRAJECTORY_EVENT_JSON = (
     "SELECT event_json FROM trajectory_runtime_events "
-    "WHERE length(CAST(event_json AS BLOB)) <= ? LIMIT ?"
+    "WHERE length(CAST(event_json AS BLOB)) <= ? "
+    "ORDER BY created_at DESC LIMIT ?"
 )
 
 # B-811 (round 4, following round 3's adversarial review, 2026-09-15): the inverse
@@ -556,12 +575,12 @@ def _archive_entries(home: Path) -> "tuple[int, bool]":
     return count, capped
 
 
-def _sqlite_dbs(home: Path) -> "list[Path]":
+def _sqlite_dbs(home: Path, max_dbs: int = _MAX_SQLITE_DBS) -> "list[Path]":
     try:
         dbs = sorted(home.glob("agents/*/agent/openclaw-agent.sqlite"))
     except OSError:
         return []
-    return dbs[:_MAX_SQLITE_DBS]
+    return dbs[:max_dbs]
 
 
 def sqlite_db_paths(home) -> "list[Path]":
@@ -866,9 +885,21 @@ def corroborate(home) -> TrajectoryCorroboration:
 # ---------------------------------------------------------------------------
 
 
-def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]":
+def _read_sqlite_event_json(
+    db_path: Path,
+    max_rows: int = _MAX_SQLITE_CONTENT_ROWS_PER_DB,
+    max_bytes: int = _MAX_SQLITE_CONTENT_BYTES_PER_DB,
+) -> "tuple[list[str], bool, bool, int]":
     """``(event_json_values, capped, unreadable, non_text_rows)`` for one per-agent
     trajectory database.
+
+    ``max_rows``/``max_bytes`` (B-852) override :data:`_MAX_SQLITE_CONTENT_ROWS_PER_DB`/
+    :data:`_MAX_SQLITE_CONTENT_BYTES_PER_DB` for this call only -- the plumbing
+    :func:`read_compiled_tool_descriptions` needs so ``--exhaustive``
+    (``scanbudget.limits_for``) can widen this reader the same way it already widens
+    the JSONL sibling (``trajectory.read_compiled_tool_descriptions``'s own
+    ``max_files``/``max_bytes_per_file``), instead of this container silently staying
+    pinned to its default caps regardless of the flag.
 
     Two DoS bounds now do real work on BOTH axes, and on the underlying byte-counting
     primitive itself -- found missing/bypassable across TWO rounds of adversarial
@@ -914,6 +945,16 @@ def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]
        oversized (or deliberately padded-past-the-cap) poisoned record evade B185
        while this function reports a confident, complete scan -- found silently
        missing in round 3.
+    5. **B-852**: :data:`_SELECT_TRAJECTORY_EVENT_JSON`'s own ``ORDER BY created_at
+       DESC`` reads the NEWEST rows first. Before this fix the query carried the same
+       ``LIMIT`` with no ``ORDER BY`` at all, so on a store past the row/byte cap
+       SQLite returned rows in whatever order its own storage happened to hold them --
+       in practice insertion order, i.e. the OLDEST rows -- meaning a real poisoning
+       attempt landing in a recent session on a large, long-lived agent database was
+       never read once the store exceeded either cap. Newest-first means a capped read
+       now always covers the MOST RECENT sessions, and anything dropped by the cap is
+       the tail of OLDER history, not the sessions most likely to reflect what an MCP
+       server serves today.
 
     ``non_text_rows`` counts rows where a column declared TEXT nonetheless stored a
     BLOB -- the one SQLite dynamic-typing shape this reader can actually observe here,
@@ -944,7 +985,7 @@ def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]
     try:
         cursor = conn.execute(
             _SELECT_TRAJECTORY_EVENT_JSON,
-            (_MAX_COMPILED_LINE_LEN, _MAX_SQLITE_CONTENT_ROWS_PER_DB + 1),
+            (_MAX_COMPILED_LINE_LEN, max_rows + 1),
         )
     except sqlite3.Error:
         conn.close()
@@ -958,7 +999,7 @@ def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]
     try:
         for row in cursor:
             row_count += 1
-            if row_count > _MAX_SQLITE_CONTENT_ROWS_PER_DB:
+            if row_count > max_rows:
                 capped = True
                 break
             value = row[0]
@@ -966,7 +1007,7 @@ def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]
                 non_text += 1
                 continue
             read_bytes += len(value)
-            if read_bytes > _MAX_SQLITE_CONTENT_BYTES_PER_DB:
+            if read_bytes > max_bytes:
                 capped = True
                 break
             values.append(value)
@@ -982,14 +1023,31 @@ def _read_sqlite_event_json(db_path: Path) -> "tuple[list[str], bool, bool, int]
     return values, capped, False, non_text
 
 
-def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
+def read_compiled_tool_descriptions(
+    home,
+    *,
+    max_dbs: int = _MAX_SQLITE_DBS,
+    max_content_rows_per_db: int = _MAX_SQLITE_CONTENT_ROWS_PER_DB,
+    max_content_bytes_per_db: int = _MAX_SQLITE_CONTENT_BYTES_PER_DB,
+) -> "tuple[list[dict], dict]":
     """Return ``(tool_defs, meta)`` -- the tool definitions OpenClaw actually sent to the
     model, recovered from ``context.compiled`` events in the per-agent SQLite trajectory
     store. The SQLite-container sibling of ``trajectory.read_compiled_tool_descriptions()``
-    (the JSONL reader); B185 (``checks/_mcp.py``) is the only caller, and only when
-    :func:`corroborate` reports :data:`STATUS_LOCATOR_STALE` -- this function is never
-    reached on a host whose evidence is fully covered by live JSONL sidecars, narrowing
-    when the exception below actually activates, not just how it is scoped.
+    (the JSONL reader); B185 (``checks/_mcp.py``) is the only caller. It is reached
+    whenever :func:`corroborate` reports :data:`STATUS_LOCATOR_STALE` (no live JSONL
+    sidecar at all), and, since B-852, ALSO on a mixed-container host that has both a
+    live JSONL sidecar and per-agent SQLite database file(s) -- see that check's own
+    module-level comment for the two call sites and why each is gated the way it is.
+
+    ``max_dbs``/``max_content_rows_per_db``/``max_content_bytes_per_db`` (B-852) override
+    :data:`_MAX_SQLITE_DBS`/:data:`_MAX_SQLITE_CONTENT_ROWS_PER_DB`/
+    :data:`_MAX_SQLITE_CONTENT_BYTES_PER_DB` for this call, the same role ``max_files``/
+    ``max_bytes_per_file`` already play on the JSONL sibling -- so B185's own
+    ``scanbudget.limits_for(ctx)`` call can widen this container under ``--exhaustive``
+    too, instead of the SQLite side silently staying pinned to its defaults regardless
+    of the flag (the gap this task exists to close). Defaulting to the module's own
+    constants keeps every OTHER caller, and the default (non-``--exhaustive``) path,
+    byte-identical to before this parameter existed.
 
     Mirrors the JSONL reader's own filtering and projection EXACTLY (same
     ``traceSchema``/``schemaVersion``/type gate, same ``trajectory._compiled_tool_entry()``
@@ -1020,14 +1078,16 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
     if not isinstance(home, Path):
         return tool_defs, meta
 
-    dbs = _sqlite_dbs(home)
+    dbs = _sqlite_dbs(home, max_dbs=max_dbs)
     meta["dbs_found"] = len(dbs)
     if not dbs:
         return tool_defs, meta
 
     seen: set[tuple] = set()
     for db_path in dbs:
-        values, capped, unreadable, non_text = _read_sqlite_event_json(db_path)
+        values, capped, unreadable, non_text = _read_sqlite_event_json(
+            db_path, max_rows=max_content_rows_per_db, max_bytes=max_content_bytes_per_db,
+        )
         if unreadable:
             meta["dbs_unreadable"] += 1
             continue

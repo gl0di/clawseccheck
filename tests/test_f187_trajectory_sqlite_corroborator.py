@@ -78,7 +78,10 @@ def _add_agent_db(home: Path, agent: str, *, trajectory_rows=(), include_auth=Tr
     ``trajectory_rows`` entries are ``(session_id, seq)`` (event_json defaults to a
     harmless ``tool.call`` placeholder) or ``(session_id, seq, event_dict)`` to plant a
     real event -- B-811's ``read_compiled_tool_descriptions()`` tests need this to
-    exercise real content, not just presence.
+    exercise real content, not just presence -- or ``(session_id, seq, event_dict,
+    created_at)`` (B-852) to control this row's own ``created_at`` explicitly, for the
+    ``ORDER BY created_at DESC`` reader tests. Defaults to ``0`` for every row, same as
+    before this fourth element existed.
     """
     agent_dir = home / "agents" / agent / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -93,9 +96,10 @@ def _add_agent_db(home: Path, agent: str, *, trajectory_rows=(), include_auth=Tr
         for entry in trajectory_rows:
             session_id, seq = entry[0], entry[1]
             event = entry[2] if len(entry) > 2 else {"type": "tool.call"}
+            created_at = entry[3] if len(entry) > 3 else 0
             conn.execute(
                 f"INSERT INTO {table} VALUES (?,?,?,?,?)",
-                (session_id, seq, "run-1", json.dumps(event), 0),
+                (session_id, seq, "run-1", json.dumps(event), created_at),
             )
         if include_auth:
             conn.execute(
@@ -346,8 +350,11 @@ def test_the_query_names_only_the_trajectory_table_and_binds_its_limit():
         "WHERE length(CAST(session_id AS BLOB)) <= ? LIMIT ?"
     )
     assert _SELECT_TRAJECTORY_EVENT_JSON == (
+        # B-852: newest rows first, so a hit LIMIT reads the most recent sessions
+        # rather than whichever rows the table's own storage order happened to hold.
         "SELECT event_json FROM trajectory_runtime_events "
-        "WHERE length(CAST(event_json AS BLOB)) <= ? LIMIT ?"
+        "WHERE length(CAST(event_json AS BLOB)) <= ? "
+        "ORDER BY created_at DESC LIMIT ?"
     )
     assert _SELECT_TRAJECTORY_ROWS_EXCLUDED_COUNT == (
         "SELECT count(*) FROM trajectory_runtime_events "
@@ -1120,3 +1127,116 @@ def test_a_pointer_whose_target_exists_is_not_counted_as_missing():
     assert corro.pointer_targets_missing == 0
     # the target file itself IS a live sidecar, so the classic glob finds it too
     assert corro.status == STATUS_LIVE
+
+
+# ---------------------------------------------------------------------------
+# B-852 item 1 — _SELECT_TRAJECTORY_EVENT_JSON now reads newest rows first.
+# ---------------------------------------------------------------------------
+
+
+def test_read_sqlite_event_json_reads_newest_row_first_when_capped():
+    """Before B-852, `_SELECT_TRAJECTORY_EVENT_JSON` carried a `LIMIT` with no `ORDER
+    BY` at all, so on a store past the row cap SQLite returned rows in whatever order
+    its own storage happened to hold them -- in practice insertion order, i.e. the
+    OLDEST rows first, for a plain sequential set of INSERTs like this fixture builds.
+    With `max_rows=1` forcing the cap, the single value returned must be the row with
+    the LARGEST `created_at` ("new"), never the smallest ("old") -- this fails exactly
+    the way it would have before the `ORDER BY created_at DESC` fix, which returned
+    "old" here (the first-inserted row).
+    """
+    from clawseccheck.trajectorystore import _read_sqlite_event_json
+
+    home = _home()
+    agent_dir = home / "agents" / "main" / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    db_path = agent_dir / "openclaw-agent.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE trajectory_runtime_events (session_id TEXT NOT NULL, "
+            "seq INTEGER NOT NULL, run_id TEXT, event_json TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL, PRIMARY KEY (session_id, seq))"
+        )
+        # Inserted OLDEST first, exactly the shape a real long-lived agent database
+        # accumulates rows in.
+        conn.execute(
+            "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+            ("old", 0, "r", json.dumps({"marker": "old"}), 1),
+        )
+        conn.execute(
+            "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+            ("new", 0, "r", json.dumps({"marker": "new"}), 2),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    values, capped, unreadable, non_text = _read_sqlite_event_json(db_path, max_rows=1)
+
+    assert unreadable is False
+    assert capped is True
+    assert len(values) == 1
+    assert json.loads(values[0])["marker"] == "new"
+
+
+# ---------------------------------------------------------------------------
+# B-852 item 2 — the SQLite reader's caps are now overridable, so --exhaustive can
+# widen them the same way it already widens the JSONL sibling's max_files/
+# max_bytes_per_file (checks/_mcp.py's own lim.sqlite_max_* plumbing).
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_dbs_honors_a_narrower_max_dbs_override():
+    from clawseccheck.trajectorystore import _sqlite_dbs
+
+    home = _home()
+    for i in range(3):
+        _add_agent_db(home, f"agent{i}", trajectory_rows=[(f"s{i}", 0)], include_auth=False)
+
+    assert len(_sqlite_dbs(home)) == 3          # default: no cap hit
+    assert len(_sqlite_dbs(home, max_dbs=1)) == 1
+    assert len(_sqlite_dbs(home, max_dbs=0)) == 0
+
+
+def test_read_compiled_tool_descriptions_threads_its_override_kwargs_to_the_reader():
+    """`read_compiled_tool_descriptions`'s new `max_dbs` /
+    `max_content_rows_per_db` / `max_content_bytes_per_db` kwargs (B-852) must
+    actually reach the underlying per-database reads, not just be accepted and
+    ignored. Proven the same way `test_read_sqlite_event_json_reads_newest_row_first_
+    when_capped` proves the reader itself: force the row cap down to 1 via the PUBLIC
+    function's own kwarg (not by reaching into `_read_sqlite_event_json` directly),
+    and confirm only the newest of two events survives.
+    """
+    from clawseccheck.trajectorystore import read_compiled_tool_descriptions
+
+    home = _home()
+    older = [{"name": "older_tool", "description": "d", "parameters": {"properties": {}}}]
+    newer = [{"name": "newer_tool", "description": "d", "parameters": {"properties": {}}}]
+    _add_agent_db(
+        home, "main",
+        trajectory_rows=[
+            ("s_old", 0, _compiled_event(older), 1),
+            ("s_new", 0, _compiled_event(newer), 2),
+        ],
+        include_auth=False,
+    )
+
+    # Default caps: both events recovered.
+    tool_defs, meta = read_compiled_tool_descriptions(home)
+    assert meta["events"] == 2
+    names = {d["name"] for d in tool_defs}
+    assert names == {"older_tool", "newer_tool"}
+
+    # max_content_rows_per_db=1: only the newest row is admitted.
+    capped_defs, capped_meta = read_compiled_tool_descriptions(
+        home, max_content_rows_per_db=1,
+    )
+    assert capped_meta["events"] == 1
+    assert capped_meta["truncated"] is True
+    assert {d["name"] for d in capped_defs} == {"newer_tool"}
+
+    # max_dbs=0: no database is opened at all.
+    empty_defs, empty_meta = read_compiled_tool_descriptions(home, max_dbs=0)
+    assert empty_defs == []
+    assert empty_meta["dbs_found"] == 0
+    assert empty_meta["present"] is False

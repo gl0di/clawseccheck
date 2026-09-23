@@ -161,6 +161,18 @@ class ScanLimits:
     exhaustive: bool
     traj_max_files: int
     traj_max_bytes_per_file: int
+    # B-852: the SQLite-container sibling of traj_max_files/traj_max_bytes_per_file --
+    # trajectorystore.read_compiled_tool_descriptions()'s own per-agent-database and
+    # per-database content caps (B185's SQLite-era trajectory reader). Named
+    # separately because the two containers bound different resources (how many
+    # per-agent DATABASES to open vs how many trajectory FILES to open; how many
+    # BYTES of one database's content vs BYTES of one file) even though both exist
+    # for the identical reason: --exhaustive widening one container's cap and not the
+    # other's silently left that container permanently pinned to its default,
+    # regardless of the flag.
+    sqlite_max_dbs: int
+    sqlite_max_content_rows_per_db: int
+    sqlite_max_content_bytes_per_db: int
     log_check_budget_s: float
     log_per_file_budget_s: float
     log_max_bytes_per_file: int
@@ -181,6 +193,9 @@ class ScanLimits:
 # guarantee this whole feature depends on) — see each source module's own comment
 # for why ITS number is what it is:
 #   traj_max_files / traj_max_bytes_per_file  <- trajectory._MAX_FILES / _MAX_BYTES_PER_FILE
+#   sqlite_max_dbs                        <- trajectorystore._MAX_SQLITE_DBS
+#   sqlite_max_content_rows_per_db        <- trajectorystore._MAX_SQLITE_CONTENT_ROWS_PER_DB
+#   sqlite_max_content_bytes_per_db       <- trajectorystore._MAX_SQLITE_CONTENT_BYTES_PER_DB
 #   log_check_budget_s / log_per_file_budget_s <- checks/_egress._LOG_HUNT_CHECK_BUDGET_S /
 #                                                  _LOG_HUNT_PER_FILE_BUDGET_S
 #   log_max_bytes_per_file  <- logscan._MAX_BYTES_PER_FILE
@@ -194,6 +209,9 @@ DEFAULT_LIMITS = ScanLimits(
     exhaustive=False,
     traj_max_files=60,
     traj_max_bytes_per_file=8_000_000,
+    sqlite_max_dbs=50,
+    sqlite_max_content_rows_per_db=3000,
+    sqlite_max_content_bytes_per_db=8_000_000,
     log_check_budget_s=4.5,
     log_per_file_budget_s=3.0,
     log_max_bytes_per_file=2 * 1024 * 1024,
@@ -248,6 +266,24 @@ EXHAUSTIVE_LIMITS = ScanLimits(
     exhaustive=True,
     traj_max_files=_UNBOUNDED,
     traj_max_bytes_per_file=_UNBOUNDED,
+    # sqlite_max_dbs / sqlite_max_content_bytes_per_db are Python-side-only bounds
+    # (a list slice; an accumulated-byte comparison) — the same shape as
+    # traj_max_files/traj_max_bytes_per_file above — so _UNBOUNDED is exactly as safe
+    # here as it already is there.
+    sqlite_max_dbs=_UNBOUNDED,
+    # sqlite_max_content_rows_per_db is NOT Python-side-only: it is bound straight
+    # into a SQL `LIMIT` parameter as `max_rows + 1`
+    # (trajectorystore._read_sqlite_event_json). SQLite binds an INTEGER parameter as
+    # a signed 64-bit value, and `_UNBOUNDED` (`sys.maxsize`, i.e. `2**63 - 1` on this
+    # platform) plus one overflows that range — measured to raise
+    # `OverflowError: Python int too large to convert to SQLite INTEGER` rather than
+    # widen anything, turning --exhaustive into a crash instead of a wider scan. A
+    # large FINITE value avoids the overflow while still being a real ~33x widening
+    # over DEFAULT_LIMITS' 3000 — same reasoning B-486 already used for
+    # log_max_total_bytes above (a measured finite ceiling, not sys.maxsize, once an
+    # unbounded value was found to cause its own failure mode).
+    sqlite_max_content_rows_per_db=100_000,
+    sqlite_max_content_bytes_per_db=_UNBOUNDED,
     log_check_budget_s=60.0,                   # 13.3x DEFAULT — see check_budget_s below
     log_per_file_budget_s=30.0,                # 10x DEFAULT: one sink may legitimately
                                                 # run far longer scanning more of a corpus
