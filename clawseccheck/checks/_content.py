@@ -6046,6 +6046,30 @@ def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
     a race only a process running DURING the scan can win, and such a process can as
     easily create the link after the scan ends: no static reader closes that.
 
+    B-899 round 3 (C-135): the same ENOENT/ENOTDIR short-circuit now also guards the two
+    PER-ENTRY `is_symlink()` calls below (an already-`os.walk`-listed file or subdirectory
+    vanishing before its own `lstat`, not the directory-level `onerror` case above) — round
+    2's fix only generalized `_on_walk_error`, leaving this sibling trigger path unfixed and
+    still unconditionally grading any vanished entry as a coverage gap.
+
+    Left deliberately UNCHANGED by this round: a directory that vanishes and is then
+    RECREATED as an ordinary (non-symlink) directory before `_on_walk_error`'s own re-lstat
+    — with, say, a real escape symlink already planted inside it — still returns to a plain
+    `continue`/no-gap here, i.e. that content goes unscanned FOR THIS PASS without even an
+    UNKNOWN disclosure. Grading that reappearance was considered and rejected: an ordinary
+    build tool's atomic replace (rmdir+mkdir, or write-temp-then-rename) recreates a plain
+    directory in exactly this shape on every run, so grading "vanished, now an ordinary
+    directory" would reopen the same churn-FP class this rule exists to close, on the far
+    more common benign case, to catch the rare adversarial one. Measured (C-135 round 3, 40
+    real, non-monkeypatched `rmtree`+`mkdir`+`symlink` trials against a live scan target):
+    the race landed on an undetected PASS in 25/40 trials on this fix and 32/40 on the
+    pre-round-3 base — i.e. it is not new here, and not a regression this round introduces
+    or could plausibly close by tightening a static, single-pass walk. A live filesystem
+    monitor (inotify) or a re-scan-on-suspicion pass could catch it; a single `os.walk` over
+    a point-in-time tree structurally cannot, so this is accepted as a TOCTOU limit of that
+    design, not a defect in this rule (see `test_recreated_ordinary_dir_after_vanish_is_a_
+    toctou_limit_not_a_false_pass` for the pinned, current behaviour).
+
     A directory entry whose `is_symlink()` cannot be determined is dropped from `keep`
     (never descended) rather than assumed to be a plain directory: the whole point of this
     walk is "never traverse through an unverified symlink", and treating an unknown as safe
@@ -6085,6 +6109,8 @@ def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
             try:
                 is_link = p.is_symlink()
             except OSError as exc:
+                if exc.errno in _B87_VANISHED_ERRNOS:
+                    continue  # gone by lstat time -> nothing to hide, no gap (see docstring)
                 _b87_note_gap(gaps, dp, exc)  # the gate is the parent missing `x`
                 continue  # unknown -> do not keep, do not descend (see docstring)
             if is_link:
@@ -6098,6 +6124,8 @@ def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
             try:
                 is_link = p.is_symlink()
             except OSError as exc:
+                if exc.errno in _B87_VANISHED_ERRNOS:
+                    continue  # gone by lstat time -> nothing to hide, no gap (see docstring)
                 _b87_note_gap(gaps, dp, exc)
                 continue
             if is_link:
@@ -7213,7 +7241,9 @@ def _squat_hits(
     return hits
 
 
-def _symlink_scan_roots(ctx: Context, gaps: dict | None = None) -> list[Path]:
+def _symlink_scan_roots(
+    ctx: Context, gaps: dict | None = None
+) -> tuple[list[Path], list[Path]]:
     """Directories to enumerate for symlink escape, unifying both modes:
     vet (ctx.home IS the vetted skill dir, marked by a root SKILL.md) and full audit
     (ctx.home is the OpenClaw home -> each installed skill dir + each workspace dir).
@@ -7228,24 +7258,66 @@ def _symlink_scan_roots(ctx: Context, gaps: dict | None = None) -> list[Path]:
     dropped the same way. A skills directory is skill content by definition, so that gap
     is graded (see `_b87_gap_is_graded`). ENOENT/ENOTDIR are not recorded: `Path.is_dir()`
     already answers False for them, and a vanished directory hides nothing.
+
+    Returns ``(roots, root_links)``. `roots` are plain directories to walk. `root_links`
+    are root CANDIDATES (a SKILL_DIRS/WORKSPACE_DIRS entry, its base, or the vetted dir
+    itself under --vet) that turned out to be symlinks — never walked (walking through an
+    unverified symlink is exactly what `_enumerate_symlinks` refuses to do for a link found
+    INSIDE a root; a root that IS one gets the identical treatment), but handed back to the
+    caller to classify with the same sensitive/in-tree/dangling rubric `_enumerate_symlinks`
+    discoveries go through.
+
+    B-899 round 3 (C-135): before this, a root candidate that was itself a symlink was
+    silently dropped with no FAIL, no WARN, no gap and no disclosure. Not an oversight in
+    the OSError handling above — `Path.is_dir()` and `Path.is_symlink()` both swallow
+    ENOENT/ENOTDIR/EBADF/ELOOP internally (cpython's `_ignore_error`) and just return
+    False/True without ever raising, so `is_dir() and not is_symlink()` came back False —
+    "not a usable root" — for a valid symlink-to-a-sensitive-path, a benign symlink to
+    another disk or a dotfile-manager-managed dir, AND a self-referential ELOOP symlink
+    alike, with nothing to distinguish them (this also closed the round-1-flagged sibling
+    residual: a *skill* dir that is itself a symlink was dropped as a root the same way).
+    Every `is_symlink()` check below is now made explicit and first, so a symlink root is
+    routed to `root_links` instead of falling through a boolean that cannot tell "is a
+    symlink" from "raised and was swallowed".
+
+    B-899 round 3 also collapses overlapping roots to the outermost survivor before
+    returning: the standard `workspace/skills/<name>` layout is simultaneously a SKILL_DIRS
+    entry and a descendant of the `workspace` WORKSPACE_DIRS entry, so without this a real
+    escape inside it used to surface twice (once per overlapping root) in the same finding.
+    Walking the ancestor already visits the descendant, so dropping the nested one loses no
+    coverage — only the duplicate walk (and duplicate report).
     """
     from ..collector import SKILL_DIRS, WORKSPACE_DIRS  # noqa: PLC0415
 
     home = ctx.home
     roots: list[Path] = []
+    root_links: list[Path] = []
     seen: set[str] = set()
 
     def _note(gate: Path, exc: OSError) -> None:
         if gaps is not None and exc.errno not in _B87_VANISHED_ERRNOS:
             _b87_note_gap(gaps, gate, exc)
 
+    def _add_link(p: Path) -> None:
+        if str(p) not in seen:
+            seen.add(str(p))
+            root_links.append(p)
+
     def _add(p: Path, gate: Path) -> None:
         try:
-            if p.is_dir() and not p.is_symlink() and str(p) not in seen:
+            is_link = p.is_symlink()
+        except OSError as exc:
+            _note(gate, exc)  # `gate` is the parent that would not let us stat `p`
+            return
+        if is_link:
+            _add_link(p)
+            return
+        try:
+            if p.is_dir() and str(p) not in seen:
                 seen.add(str(p))
                 roots.append(p)
         except OSError as exc:
-            _note(gate, exc)  # `gate` is the parent that would not let us stat `p`
+            _note(gate, exc)
 
     try:
         if (home / "SKILL.md").is_file():  # vet: the vetted dir itself
@@ -7255,7 +7327,15 @@ def _symlink_scan_roots(ctx: Context, gaps: dict | None = None) -> list[Path]:
     for rel in SKILL_DIRS:  # full audit: each installed skill dir
         base = home / rel
         try:
-            if not (base.is_dir() and not base.is_symlink()):
+            is_link = base.is_symlink()
+        except OSError as exc:
+            _note(base.parent, exc)
+            continue
+        if is_link:
+            _add_link(base)
+            continue
+        try:
+            if not base.is_dir():
                 continue
         except OSError as exc:
             _note(base.parent, exc)
@@ -7269,7 +7349,15 @@ def _symlink_scan_roots(ctx: Context, gaps: dict | None = None) -> list[Path]:
             _add(sub, base)
     for ws in WORKSPACE_DIRS:  # full audit: workspace roots
         _add(home / ws, home)
-    return roots
+
+    # Collapse overlapping roots (e.g. `workspace/skills/x` inside `workspace`) to the
+    # outermost survivor -- an ancestor's walk already visits every descendant.
+    roots.sort(key=lambda p: len(p.parts))
+    deduped: list[Path] = []
+    for p in roots:
+        if not any(k == p or k in p.parents for k in deduped):
+            deduped.append(p)
+    return deduped, root_links
 
 
 def _b87_uid_of(path) -> int | None:
@@ -15455,8 +15543,8 @@ def check_symlink_escape(ctx: Context) -> Finding:
         )
 
     gaps: dict = {}
-    roots = _symlink_scan_roots(ctx, gaps)
-    if not roots and not gaps:
+    roots, root_links = _symlink_scan_roots(ctx, gaps)
+    if not roots and not root_links and not gaps:
         return _custom(
             "B87",
             HIGH,
@@ -15474,62 +15562,84 @@ def check_symlink_escape(ctx: Context) -> Finding:
     fails: list[str] = []
     warns: list[str] = []
     unknowns: list[str] = []
+    # B-899 round 3: a belt-and-suspenders dedup on the actual reported LINK path, on top
+    # of `_symlink_scan_roots`'s own root-level dedup -- so a real escape is never listed
+    # twice regardless of which layer of overlap produced the repeat.
+    seen_links: set[str] = set()
+
+    def _classify(link: Path) -> None:
+        if str(link) in seen_links:
+            return
+        seen_links.add(str(link))
+        try:
+            # C-456 FU (adversarial review note): every `root` here comes from
+            # `_symlink_scan_roots`, which only ever yields ctx.home or a subpath of
+            # it, and `link` is discovered by walking inside `root` -- so this
+            # ValueError branch is provably unreachable today and `rel` never falls
+            # back to an absolute, unredacted `str(link)`. Left in (not asserted away)
+            # because that's an invariant of `_symlink_scan_roots`'s current shape, not
+            # of this function -- if a future root ever lived outside ctx.home, silently
+            # dropping the fallback would turn a defensive branch into a crash instead
+            # of a leak, which is worse.
+            rel = str(link.relative_to(ctx.home))
+        except ValueError:
+            rel = str(link)
+        try:
+            raw = os.readlink(link)
+        except OSError:
+            raw = "?"
+        try:
+            real = Path(os.path.realpath(link))
+        except OSError:
+            # C-456 FU: `raw` is the literal on-disk symlink text, which can itself be
+            # an absolute path (a skill author wrote `os.symlink("/home/x/...", link)`)
+            # -- so it carries the operator's username exactly like `real` below.
+            unknowns.append(f"{rel} -> {_username_safe_path(raw)} (unresolvable)")
+            return
+        # Sensitivity is a property of the TARGET PATH, not of whether it currently
+        # exists on the vetting box: `data -> ~/.ssh` is an exfil primitive whether or
+        # not this host happens to have ~/.ssh. So classify sensitivity FIRST; only a
+        # non-sensitive dangling link is a genuine "can't assess" -> UNKNOWN.
+        sclass = _symlink_target_sensitive(real)
+        in_tree = real == contain_root or contain_root in real.parents
+        # C-456 FU: `real` is the resolved symlink TARGET, not a path under ctx.home --
+        # in --vet mode ctx.home is the vetted skill dir, unrelated to the operator's
+        # real account home the target usually lives under, so `_detail_path` (relative
+        # to ctx.home) would miss it. `_username_safe_path` collapses Path.home() instead,
+        # the right frame for a target that can point anywhere on the host (B-757).
+        safe_real = _username_safe_path(real)
+        if sclass and not in_tree:
+            # A symlink that ESCAPES the workspace/home tree into a sensitive store is the
+            # exfil primitive — reading through it hands the skill a secret it could not
+            # otherwise reach. Applies identically to a ROOT that is itself such a link
+            # (B-899 round 3): `~/.openclaw/workspace -> ~/.ssh` is exactly this primitive.
+            fails.append(f"{rel} -> {safe_real} [{sclass}]")
+        elif sclass and in_tree:
+            # C-228 / C-135: a sensitive-named target that stays INSIDE the tree the agent
+            # was already handed (a monorepo `apps/api/.env -> ../../.env`, a direnv
+            # `sub/.envrc -> ../.envrc`) adds no new reach — the file is already readable
+            # without the link. Not an escape; surface as WARN for a human look, never FAIL.
+            warns.append(f"{rel} -> {safe_real} [{sclass}, stays in-tree]")
+        elif not real.exists():  # follows the link: False == dangling (or ELOOP: a
+            # self-referential root symlink resolves to itself via non-strict realpath
+            # without raising, then fails .exists() the same way a dangling link does --
+            # disclosed here, never silently dropped)
+            unknowns.append(f"{rel} -> {_username_safe_path(raw)} (broken / dangling)")
+        elif in_tree:
+            pass  # PASS: stays inside the skill/workspace tree
+        else:
+            # A benign root symlink (a workspace on another disk, a stow/chezmoi-managed
+            # dotfile link, `~/.openclaw/workspace -> ~/code/project`) lands here: it
+            # escapes the tree but is not sensitively named, so it WARNs for a human look
+            # and never FAILs -- the same treatment any other non-sensitive escaping link
+            # gets, not a special case for roots.
+            warns.append(f"{rel} -> {safe_real} (escapes the skill/workspace tree)")
+
     for root in roots:
         for link in _enumerate_symlinks(root, state):
-            try:
-                # C-456 FU (adversarial review note): every `root` here comes from
-                # `_symlink_scan_roots`, which only ever yields ctx.home or a subpath of
-                # it, and `link` is discovered by walking inside `root` -- so this
-                # ValueError branch is provably unreachable today and `rel` never falls
-                # back to an absolute, unredacted `str(link)`. Left in (not asserted away)
-                # because that's an invariant of `_symlink_scan_roots`'s current shape, not
-                # of this function -- if a future root ever lived outside ctx.home, silently
-                # dropping the fallback would turn a defensive branch into a crash instead
-                # of a leak, which is worse.
-                rel = str(link.relative_to(ctx.home))
-            except ValueError:
-                rel = str(link)
-            try:
-                raw = os.readlink(link)
-            except OSError:
-                raw = "?"
-            try:
-                real = Path(os.path.realpath(link))
-            except OSError:
-                # C-456 FU: `raw` is the literal on-disk symlink text, which can itself be
-                # an absolute path (a skill author wrote `os.symlink("/home/x/...", link)`)
-                # -- so it carries the operator's username exactly like `real` below.
-                unknowns.append(f"{rel} -> {_username_safe_path(raw)} (unresolvable)")
-                continue
-            # Sensitivity is a property of the TARGET PATH, not of whether it currently
-            # exists on the vetting box: `data -> ~/.ssh` is an exfil primitive whether or
-            # not this host happens to have ~/.ssh. So classify sensitivity FIRST; only a
-            # non-sensitive dangling link is a genuine "can't assess" -> UNKNOWN.
-            sclass = _symlink_target_sensitive(real)
-            in_tree = real == contain_root or contain_root in real.parents
-            # C-456 FU: `real` is the resolved symlink TARGET, not a path under ctx.home --
-            # in --vet mode ctx.home is the vetted skill dir, unrelated to the operator's
-            # real account home the target usually lives under, so `_detail_path` (relative
-            # to ctx.home) would miss it. `_username_safe_path` collapses Path.home() instead,
-            # the right frame for a target that can point anywhere on the host (B-757).
-            safe_real = _username_safe_path(real)
-            if sclass and not in_tree:
-                # A symlink that ESCAPES the workspace/home tree into a sensitive store is the
-                # exfil primitive — reading through it hands the skill a secret it could not
-                # otherwise reach.
-                fails.append(f"{rel} -> {safe_real} [{sclass}]")
-            elif sclass and in_tree:
-                # C-228 / C-135: a sensitive-named target that stays INSIDE the tree the agent
-                # was already handed (a monorepo `apps/api/.env -> ../../.env`, a direnv
-                # `sub/.envrc -> ../.envrc`) adds no new reach — the file is already readable
-                # without the link. Not an escape; surface as WARN for a human look, never FAIL.
-                warns.append(f"{rel} -> {safe_real} [{sclass}, stays in-tree]")
-            elif not real.exists():  # follows the link: False == dangling
-                unknowns.append(f"{rel} -> {_username_safe_path(raw)} (broken / dangling)")
-            elif in_tree:
-                pass  # PASS: stays inside the skill/workspace tree
-            else:
-                warns.append(f"{rel} -> {safe_real} (escapes the skill/workspace tree)")
+            _classify(link)
+    for link in root_links:
+        _classify(link)
 
     # B-899: a directory `_enumerate_symlinks`/`_symlink_scan_roots` could not list, or
     # whose entries it could not classify (a listable-but-not-searchable 0644 dir), lands

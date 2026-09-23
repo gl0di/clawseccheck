@@ -16,6 +16,7 @@ POSIX-only, so the FS assertions are gated on os.name == "posix".
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -596,3 +597,267 @@ def test_gap_only_unknown_drops_the_broken_link_prefix(tmp_path, unlock):
     f = check_symlink_escape(Context(home=home))
     assert f.status == UNKNOWN
     assert not f.fix.startswith("Fix or remove broken links"), f.fix
+
+
+# ---- B-899 C-135 round 3: the reviewers' four defects (this is the last fix round) ----
+#
+# Round 2 (commit 79174085) generalized `_on_walk_error` but left the sibling per-entry
+# trigger unfixed, dropped a root-that-is-itself-a-symlink silently, and could report one
+# real escape twice when a SKILL_DIRS root nests inside a WORKSPACE_DIRS one. Both
+# independent round-2 reviews reproduced the per-entry blocker; this block pins its fix
+# and the other three round-3 defects.
+
+
+@posix_only
+def test_vanished_file_entry_before_lstat_is_pass_not_degraded(tmp_path, monkeypatch):
+    """The blocker (both C-135 round-2 reviews): an already-`os.walk`-listed FILE entry
+    vanishing before this code's own per-entry `is_symlink()` lstat -- a linter/build-tool
+    temp file rotated away between the parent listing and this call, on an otherwise
+    completely healthy home -- must not count as a coverage gap. Round 2 generalized
+    `_on_walk_error` (the directory-level onerror callback) but left this sibling
+    per-entry trigger path unconditionally grading any vanished entry, even though the
+    same commit touched both of these blocks (renaming state['unreadable'] to gaps)."""
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="clean")
+    victim = sk / "flaky.tmp"
+    victim.write_text("x", encoding="utf-8")
+    real_is_symlink = Path.is_symlink
+
+    def flaky_is_symlink(self):
+        if self == victim:
+            victim.unlink()
+            raise FileNotFoundError(2, "No such file or directory", str(victim))
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", flaky_is_symlink)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == PASS
+    assert f.engine_degraded is False
+
+
+@posix_only
+def test_vanished_subdir_entry_before_lstat_is_pass_not_degraded(tmp_path, monkeypatch):
+    """Same defect, the SUBDIRECTORY-entry trigger (the `dirnames` loop, not `filenames`):
+    an already-listed subdirectory vanishing before this code's own `is_symlink()` lstat
+    must not count as a coverage gap either."""
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="clean")
+    victim = sk / "vanishing_dir"
+    victim.mkdir()
+    real_is_symlink = Path.is_symlink
+
+    def flaky_is_symlink(self):
+        if self == victim:
+            victim.rmdir()
+            raise FileNotFoundError(2, "No such file or directory", str(victim))
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", flaky_is_symlink)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == PASS
+    assert f.engine_degraded is False
+
+
+@posix_only
+def test_permission_denied_per_entry_still_grades_the_gap(tmp_path, monkeypatch):
+    """Control for the two tests above: a per-entry `is_symlink()` failure that is NOT a
+    vanish (a real, persistent permission denial) must still be recorded as a coverage gap
+    and graded -- the new ENOENT/ENOTDIR short-circuit must not swallow every OSError,
+    only the ones that mean the entry is provably gone."""
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="clean")
+    victim = sk / "stuck.tmp"
+    victim.write_text("x", encoding="utf-8")
+    real_is_symlink = Path.is_symlink
+
+    def denied_is_symlink(self):
+        if self == victim:
+            raise PermissionError(13, "Permission denied", str(victim))
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", denied_is_symlink)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
+
+
+@posix_only
+def test_recreated_ordinary_dir_after_vanish_is_a_toctou_limit_not_a_false_pass(
+    tmp_path, monkeypatch
+):
+    """Accepted residual (C-135 round 3), not a regression: a directory that vanishes and
+    is then RECREATED AS AN ORDINARY DIRECTORY (not a symlink) before `_on_walk_error`'s
+    own re-lstat -- with a real escape already planted inside it by the same race -- still
+    returns PASS, not an honest UNKNOWN. Grading this reappearance was considered and
+    rejected: an ordinary build tool's atomic replace (rmdir+mkdir, or write-temp-then-
+    rename) recreates a plain, empty-ish directory in exactly this shape on every run, so
+    grading "vanished, now an ordinary directory" would reopen the same churn-FP class
+    round 1 fixed (158/200 clean-home runs going UNKNOWN+degraded), trading it for a rare
+    adversarial case a single point-in-time `os.walk` cannot reliably close anyway (a live
+    filesystem watch or a re-scan-on-suspicion pass could; a static single pass cannot).
+    Measured over 40 real, non-monkeypatched `rmtree`+`mkdir`+`symlink` trials against a
+    live scan target: this race landed on an undetected PASS in 25/40 runs on the fixed
+    code and 32/40 on the pre-round-3 base -- i.e. this round changes neither the exposure
+    nor its cause. This test pins the CURRENT, deliberate behaviour so a future change
+    does not silently reopen the churn FP trying to close it."""
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".ssh").mkdir(parents=True)
+    (fakehome / ".ssh" / "id_rsa").write_text("x", encoding="utf-8")
+
+    home = tmp_path / "openclaw"
+    sk = _mk_skill(home / "workspace" / "skills", name="clean")
+    victim = sk / "reappeared"
+    victim.mkdir()  # left empty: os.rmdir needs no scandir of its own
+    real_scandir = os.scandir
+
+    def flaky_scandir(path="."):
+        if isinstance(path, (str, os.PathLike)) and os.fspath(path) == os.fspath(victim):
+            os.rmdir(victim)
+            victim.mkdir()  # recreated as an ordinary dir before the re-lstat fires
+            os.symlink(fakehome / ".ssh", victim / "escape")  # a real escape, hidden inside
+            raise FileNotFoundError(2, "No such file or directory", str(victim))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", flaky_scandir)
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == PASS
+    assert f.engine_degraded is False
+
+
+@posix_only
+def test_workspace_root_symlink_to_sensitive_path_is_fail(tmp_path):
+    """A WORKSPACE_DIRS entry that is itself a symlink into a sensitive store must FAIL
+    like any other symlink escape. Before this it vanished with no FAIL, no WARN, no gap
+    and no disclosure anywhere: `Path.is_dir()`/`is_symlink()` both swallow
+    ENOENT/ENOTDIR/EBADF/ELOOP internally and simply return False/True without raising, so
+    `_add`'s `is_dir() and not is_symlink()` boolean check silently rejected it as "not a
+    usable root" with nothing to distinguish a malicious link from a dangling one. This
+    also closes the round-1-flagged "a root symlink is skipped entirely" residual."""
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".ssh").mkdir(parents=True)
+    (fakehome / ".ssh" / "id_rsa").write_text("x", encoding="utf-8")
+
+    home = tmp_path / "openclaw"
+    home.mkdir()
+    os.symlink(fakehome / ".ssh", home / "workspace")
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == FAIL
+    assert any(".ssh" in e for e in f.evidence)
+
+
+@posix_only
+def test_skill_dir_itself_a_symlink_to_sensitive_path_is_fail(tmp_path):
+    """An installed *skill* directory that is itself a symlink (a SKILL_DIRS sub-entry,
+    not a link found inside one) must FAIL exactly like a root symlink does -- the same
+    silent-drop bug, reached through `_add(sub, base)` instead of `_add(home / ws, home)`.
+    Uses the top-level `skills` SKILL_DIRS entry (not nested under any WORKSPACE_DIRS
+    root) so this is reachable ONLY through that code path, not through an overlapping
+    workspace walk."""
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".aws").mkdir(parents=True)
+    (fakehome / ".aws" / "credentials").write_text("x", encoding="utf-8")
+
+    home = tmp_path / "openclaw"
+    skills = home / "skills"
+    skills.mkdir(parents=True)
+    os.symlink(fakehome / ".aws", skills / "evil")
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == FAIL
+    assert any(".aws" in e for e in f.evidence)
+
+
+@posix_only
+def test_skill_dirs_base_itself_a_symlink_to_sensitive_path_is_fail(tmp_path):
+    """The SKILL_DIRS *base* itself (`skills`, not one of its children) being a symlink
+    hits a separate inline check in `_symlink_scan_roots` (not `_add`) with the identical
+    silent-drop bug -- must also be classified, not skipped. Uses the top-level `skills`
+    entry so this is reachable only through that base-level check."""
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".ssh").mkdir(parents=True)
+    (fakehome / ".ssh" / "id_rsa").write_text("x", encoding="utf-8")
+
+    home = tmp_path / "openclaw"
+    home.mkdir()
+    os.symlink(fakehome / ".ssh", home / "skills")
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == FAIL
+    assert any(".ssh" in e for e in f.evidence)
+
+
+@posix_only
+def test_self_referential_workspace_root_is_disclosed_not_silent(tmp_path):
+    """An unresolvable (ELOOP) root symlink must surface as an honest, disclosed UNKNOWN
+    naming the link -- never a silent drop into a bare "nothing to inspect" result that
+    says nothing about the loop. `os.path.realpath`'s default (non-strict) mode does not
+    raise on a cycle -- it stops resolving and hands back the unresolved path -- so this
+    lands on the same "broken / dangling" disclosure a plain dangling link gets, via
+    `Path.exists()` (which DOES report False for a self-referential symlink) rather than
+    an OSError branch."""
+    home = tmp_path / "openclaw"
+    home.mkdir()
+    loop = home / "workspace"
+    os.symlink(loop, loop)  # self-referential: ELOOP once anything tries to fully resolve it
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == UNKNOWN
+    assert "workspace" in f.detail
+
+
+@posix_only
+def test_benign_workspace_root_symlink_is_warn_not_fail(tmp_path):
+    """A benign root symlink -- a workspace kept on another disk, a stow/chezmoi-managed
+    dotfile link, `~/.openclaw/workspace -> ~/code/project` -- must never FAIL. It escapes
+    the tree but is not sensitively named, so it gets the same WARN-for-a-human-look
+    treatment any other non-sensitive escaping link gets; this is not a special case for
+    roots, it falls out of the existing rubric applied uniformly."""
+    home = tmp_path / "openclaw"
+    home.mkdir()
+    project = tmp_path / "code" / "project"
+    project.mkdir(parents=True)
+    (project / "README.md").write_text("hi", encoding="utf-8")
+    os.symlink(project, home / "workspace")
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == WARN
+
+
+@posix_only
+def test_nested_skill_root_is_not_double_reported(tmp_path):
+    """A skill living under the standard `workspace/skills/<name>` layout is simultaneously
+    a SKILL_DIRS entry and a descendant of the `workspace` WORKSPACE_DIRS entry -- a real
+    escape inside it must be reported exactly once, not once per overlapping root."""
+    fakehome = tmp_path / "fakehome"
+    (fakehome / ".ssh").mkdir(parents=True)
+    (fakehome / ".ssh" / "id_rsa").write_text("x", encoding="utf-8")
+
+    home = tmp_path / "openclaw"
+    aaa = _mk_skill(home / "workspace" / "skills", name="aaa")
+    os.symlink(fakehome / ".ssh", aaa / "keys")
+
+    f = check_symlink_escape(Context(home=home))
+    assert f.status == FAIL
+    hits = [e for e in f.evidence if ".ssh" in e]
+    assert len(hits) == 1, f.evidence
+
+
+def test_symlink_scan_roots_collapses_nested_roots(tmp_path):
+    """Unit-level pin for the root-level dedup itself, not just its externally-visible
+    effect (which `check_symlink_escape`'s own belt-and-suspenders link-level dedup would
+    also mask): walking BOTH the inner and outer root wastes scan-cap budget and CPU on
+    every real audit, so the outermost survivor must actually be the only root returned,
+    not merely the only one that ends up reported."""
+    from clawseccheck.checks import _symlink_scan_roots
+
+    home = tmp_path / "openclaw"
+    _mk_skill(home / "workspace" / "skills", name="aaa")
+
+    roots, root_links = _symlink_scan_roots(Context(home=home))
+    assert not root_links
+    assert roots == [home / "workspace"]
