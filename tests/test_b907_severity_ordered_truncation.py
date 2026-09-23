@@ -35,6 +35,20 @@ checks/_vet.py: `AST_FINDINGS_TRUNCATED` is routed through its own `continue` ar
 so a cap-disclosure note can never itself become a B13 FAIL or bleed into the `high`
 (cred-exfil) bucket.
 
+Round 2's `_PASS_SAFETY_CEILING` was still a finite early-break inside each pass's own
+`ast.walk` — a second C-135 adversarial review round showed it only raised the padding
+count an attacker needs (25 -> 500), not closed the class: 500 padding `DANGEROUS_SINK`
+matches (still well under the ~1MB single-file collector cap, so trivially attacker-
+reachable) exhausted the SAME loop's budget before a later node's crit was reached,
+identically to round 1. Round 3 removes the per-pass ceiling entirely — every loop now
+runs to completion over `ast.walk(tree)`, relying solely on (a) the existing per-check
+wall-clock deadline (`scanbudget.check_deadline` / `ScanBudgetExceeded`, armed by every
+caller of `analyze_python`) as the DoS backstop, and (b) the unchanged, already-correct
+final severity-ordered truncation at `return` as the sole enforcement of
+`_MAX_FINDINGS_PER_FILE`. `_PASS_SAFETY_CEILING` no longer exists in `skillast.py`. The
+tests below at n_pad=500+ (round 2's own exact breaking point, plus a further margin)
+pin that no finite per-pass ceiling has been reintroduced.
+
 Secret-shaped test literals are split across adjacent string-literal boundaries
 (Golden Rule #3 / the B-740 idiom) — Python folds them into one `ast.Constant` at parse
 time, so the AST detector still sees one joined value, but no contiguous secret-shaped
@@ -50,6 +64,8 @@ Offline, deterministic. No network calls, no writes outside tmp_path.
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 from clawseccheck.checks._vet import _AST_NEVER_FAIL_RULES, ast_finding_is_fail_capable, check_installed_skills
 from clawseccheck.collector import Context
@@ -273,6 +289,108 @@ def test_tt5_cmd_injection_alone_control():
     rules = _rules(result)
     assert "TT5_CMD_INJECTION" in rules
     assert next(f for f in result if f.rule == "TT5_CMD_INJECTION").severity == "crit"
+
+
+# ---------------------------------------------------------------------------
+# 1c. Round 3: no finite per-pass ceiling survives, at any padding size — a second
+# C-135 review found round 2's own `_PASS_SAFETY_CEILING` (20x = 500) was still a
+# finite early-break, reproducibly bypassed at n_pad=500 (round 2's own boundary,
+# exactly at the `>=` comparison). These fixtures pad well past that boundary; a
+# regression that reintroduces ANY finite per-pass ceiling sized below these counts
+# would make the crit vanish again exactly as it did in rounds 1 and 2.
+# ---------------------------------------------------------------------------
+
+
+def _secret_behind_flood(n_pad):
+    return (
+        "import os\n\n"
+        + "\n".join(f'os.system("echo hi{i}")' for i in range(n_pad))
+        + "\n\n"
+        'TOKEN = os.getenv("API_KEY", "sk_live_" "0123456789abcdef0123456789ABCDEF")\n'
+    )
+
+
+def _obfuscated_exec_behind_flood(n_pad):
+    return (
+        "import os\nimport base64\n\n"
+        + "\n".join(f'os.system("echo hi{i}")' for i in range(n_pad))
+        + "\n\n"
+        'exec(base64.b64decode("cHJpbnQoMSk=").decode())\n'
+    )
+
+
+def _tt5_cmd_behind_arg_injection_flood(n_pad):
+    return (
+        "import subprocess, sys, os\n\n"
+        + "\n\n".join(
+            f"def handle{i}(phone):\n"
+            f"    subprocess.run([sys.executable, '-m', 'scripts.query{i}', phone], shell=False)"
+            for i in range(n_pad)
+        )
+        + "\n\n"
+        "def run_cmd(cmd):\n"
+        "    os.system(cmd)\n\n"
+        "def main(argv):\n"
+        "    run_cmd(argv[1])\n"
+    )
+
+
+@pytest.mark.parametrize("n_pad", [500, 501, 600, 5000])
+def test_getenv_secret_survives_flood_past_round2_ceiling(n_pad):
+    """Round 2's own C-135 reviewer repro: at n_pad=500 exactly, round 2's
+    `_PASS_SAFETY_CEILING` (=25*20) was exhausted before this crit was reached. No
+    finite ceiling should exist any more, so this must hold at 500 and well beyond."""
+    result = analyze_python(_secret_behind_flood(n_pad), "argflood_secret_big.py")
+    hit = next((f for f in result if f.rule == "HARDCODED_PROVIDER_SECRET"), None)
+    assert hit is not None, f"HARDCODED_PROVIDER_SECRET dropped at n_pad={n_pad}"
+    assert hit.severity == "crit"
+    assert len(result) <= _MAX_FINDINGS_PER_FILE
+
+
+@pytest.mark.parametrize("n_pad", [500, 501, 600])
+def test_obfuscated_exec_survives_flood_past_round2_ceiling(n_pad):
+    result = analyze_python(_obfuscated_exec_behind_flood(n_pad), "argflood_obf_big.py")
+    hit = next((f for f in result if f.rule == "OBFUSCATED_EXEC"), None)
+    assert hit is not None, f"OBFUSCATED_EXEC dropped at n_pad={n_pad}"
+    assert hit.severity == "crit"
+    assert len(result) <= _MAX_FINDINGS_PER_FILE
+
+
+@pytest.mark.parametrize("n_pad", [500, 501, 600])
+def test_tt5_cmd_injection_survives_arg_injection_flood_past_round2_ceiling(n_pad):
+    result = analyze_python(
+        _tt5_cmd_behind_arg_injection_flood(n_pad), "argflood_tt5_big.py"
+    )
+    hit = next((f for f in result if f.rule == "TT5_CMD_INJECTION"), None)
+    assert hit is not None, f"TT5_CMD_INJECTION dropped at n_pad={n_pad}"
+    assert hit.severity == "crit"
+    assert len(result) <= _MAX_FINDINGS_PER_FILE
+
+
+def test_getenv_secret_e2e_fails_b13_past_round2_ceiling():
+    """End-to-end pin of round 2's exact live evasion (500-call pad): before this
+    round's fix, `check_installed_skills` returned PASS, "no shell-exec /
+    exfiltration / obfuscation patterns found", on the round-2 tree. Must FAIL B13 on
+    the real secret now."""
+    ctx = _ctx(
+        {"evasive-skill-500": "---\nname: evasive-skill-500\ndescription: does things\n---\n# X\n"},
+        py={"evasive-skill-500": [("scripts/run.py", _secret_behind_flood(500))]},
+    )
+    fx = check_installed_skills(ctx)
+    assert fx.status == "FAIL"
+    assert "hardcoded provider-shaped secret" in fx.detail
+    assert "AST_FINDINGS_TRUNCATED" not in fx.detail
+    assert "suppressed" not in fx.detail
+
+
+def test_no_finite_pass_safety_ceiling_constant_remains():
+    """Pins the round-3 removal itself: `_PASS_SAFETY_CEILING` (round 2's finite
+    per-pass budget) must not exist any more. A future round that reintroduces ANY
+    named finite per-pass ceiling should have to touch this test deliberately,
+    not silently reintroduce the round-1/round-2 starvation shape."""
+    import clawseccheck.skillast as skillast_mod
+
+    assert not hasattr(skillast_mod, "_PASS_SAFETY_CEILING")
 
 
 # ---------------------------------------------------------------------------

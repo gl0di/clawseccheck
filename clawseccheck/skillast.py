@@ -111,23 +111,31 @@ def _is_hardcoded_provider_secret(node: ast.AST) -> bool:
 
 _MAX_FINDINGS_PER_FILE = 25
 
-# B-907 round 2: a per-pass budget set to _MAX_FINDINGS_PER_FILE (25) itself
-# reintroduces the exact starvation it was meant to fix, whenever a single pass emits
-# MIXED severities — e.g. analyze_python's first main Call-walk loop, which emits
-# HARDCODED_PROVIDER_SECRET/OBFUSCATED_EXEC/GETATTR_INDIRECTION/DYNAMIC_IMPORT_EXEC
-# (all crit-capable) inline alongside plain DANGEROUS_SINK (info) in the SAME
-# iteration. 25 padding DANGEROUS_SINK matches early in that one loop still exhaust
-# ITS OWN budget and `break` before the loop ever reaches a later node's crit — round
-# 1's `_pass_start` snapshot only stops one pass from starving a DIFFERENT, later
-# pass; it does nothing for two rules sharing one walk. This ceiling exists ONLY to
-# stop a pathological file (already bounded by the ~1MB per-file source cap upstream)
-# from growing `out` without limit before the real enforcement runs; it is
-# deliberately far above anything a real pass legitimately produces, so it is never
-# expected to bind in practice — the actual per-file cap is enforced exactly once, by
-# severity, at `return` below (see `_ast_severity_rank`), which is what makes a mixed
-# pass safe: every genuine candidate from every pass reaches `out`, and only then does
-# crit-before-info truncation decide what survives the 25-per-file limit.
-_PASS_SAFETY_CEILING = _MAX_FINDINGS_PER_FILE * 20
+# B-907 round 3: rounds 1 and 2 each gave every finding-collection loop below its own
+# early-break — first at `_MAX_FINDINGS_PER_FILE` itself (round 1), then at a 20x
+# "safety ceiling" (round 2) — so an earlier pass's (or an earlier node's, in a pass
+# that mixes severities) info findings could not stop a later crit from being
+# collected at all. Both rounds were still an early-break INSIDE the walk, gated on a
+# finite candidate count, and two independent C-135 adversarial reviews each showed
+# that any such finite ceiling is reachable by a padding-only attacker as long as the
+# ceiling's node count fits inside the ~1MB per-file source cap upstream (round 1's
+# reviewer: 25 padding calls broke round 1; round 2's reviewer: 500 padding calls
+# broke round 2 — a bigger number, not a structural fix). No finite per-pass ceiling
+# closes the vulnerability class; only removing the early-break does. There is
+# therefore NO per-pass ceiling of any kind below — every loop runs to completion over
+# `ast.walk(tree)` and every genuine candidate, crit or info, from every pass reaches
+# `out`. Two things make that safe:
+#   1. `analyze_python` runs strictly inside its caller's existing per-check wall-clock
+#      deadline (`scanbudget.check_deadline`, backed by `SIGALRM` on POSIX — see
+#      `checks/__init__.py`'s `run_all` dispatch and `checks/_vet.py`'s content-ring
+#      call, both of which already wrap every `analyze_python` call site). That
+#      deadline can interrupt mid-loop regardless of which pass is running, so it is
+#      the actual DoS backstop — not a per-pass candidate count.
+#   2. The per-file cap is enforced exactly once, by SEVERITY, at `return` below (see
+#      `_ast_severity_rank`): crit sorts ahead of info, `sorted` is stable so
+#      discovery order survives within one severity, and one slot is reserved for an
+#      `AST_FINDINGS_TRUNCATED` disclosure when anything was actually cut. That is
+#      unchanged from round 2 and was already correct.
 
 # Severity rank for the FINAL truncation below — higher sorts
 # first. `analyze_python`'s own emitted severities are "crit" and "info" only, but
@@ -5120,32 +5128,24 @@ def analyze_python(
         seen.add(key)
         out.append(ASTFinding(rule, severity, lineno, reason))
 
-    # This ceiling (and every other `_pass_start`-relative one below) bounds what
-    # THIS pass alone may contribute, not the shared `out` total — a global
-    # `len(out) >= _MAX_FINDINGS_PER_FILE` check here previously meant an earlier
-    # pass filling `out` with low-severity noise (e.g. plain DANGEROUS_SINK info
-    # findings) made every LATER pass's loop break on its first iteration, silently
-    # dropping a real crit (TT5_CMD_INJECTION) that pass would otherwise have found
-    # (B-907 round 1).
-    #
-    # B-907 round 2: round 1's fix used `_MAX_FINDINGS_PER_FILE` (25) as each pass's
-    # OWN budget too — which reintroduces the identical starvation WITHIN this one
-    # pass, since this particular loop is not single-severity: it also emits
-    # HARDCODED_PROVIDER_SECRET / OBFUSCATED_EXEC / GETATTR_INDIRECTION /
-    # DYNAMIC_IMPORT_EXEC (all crit-capable) inline, in the same walk, alongside
-    # plain DANGEROUS_SINK (info). 25 padding DANGEROUS_SINK matches early in this
-    # loop still filled ITS OWN budget and broke before a later node's crit was ever
-    # reached. `_PASS_SAFETY_CEILING` is deliberately far above what any real pass
-    # produces (a pure DoS-safety backstop on top of the ~1MB per-file source cap
-    # upstream, not a severity budget) — every genuine candidate, crit or info, from
-    # every pass now actually reaches `out`, and `return out` below does the real
-    # enforcement of _MAX_FINDINGS_PER_FILE as a single, severity-ordered final step,
-    # so a real crit can never be starved out by lower-severity findings — from an
-    # earlier pass, OR from earlier in this same pass.
-    _pass_start = len(out)
+    # B-907 round 1 gated this loop (and every other one below) on a shared, global
+    # `len(out) >= _MAX_FINDINGS_PER_FILE` — an earlier pass filling `out` with
+    # low-severity noise made every LATER pass's loop break on its first iteration,
+    # silently dropping a real crit (TT5_CMD_INJECTION) that pass would otherwise have
+    # found. Round 2 gave each pass its own `_MAX_FINDINGS_PER_FILE`-sized budget,
+    # which reintroduced the identical starvation WITHIN this one pass, since it is
+    # not single-severity: it also emits HARDCODED_PROVIDER_SECRET / OBFUSCATED_EXEC /
+    # GETATTR_INDIRECTION / DYNAMIC_IMPORT_EXEC (all crit-capable) inline, in the same
+    # walk, alongside plain DANGEROUS_SINK (info) — 25 padding DANGEROUS_SINK matches
+    # early in this loop still filled that budget and broke before a later node's crit
+    # was ever reached. Round 2's fix of raising the ceiling to 20x only raised the
+    # padding count an attacker needs, so round 3 removes the per-pass ceiling
+    # entirely (see the module-level comment above `_MAX_FINDINGS_PER_FILE`): this
+    # loop now runs to completion over every node, and the final severity-ordered
+    # truncation at `return` below is the sole place `_MAX_FINDINGS_PER_FILE` is
+    # enforced, so a real crit can never be starved out by a lower-severity finding —
+    # from an earlier pass, or from earlier in this same pass.
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
-            break
         if not isinstance(node, ast.Call):
             continue
         f = node.func
@@ -5422,10 +5422,7 @@ def analyze_python(
     # env read that feeds a local sink, or an unrelated network call, never fires.
     if "environ" in source or "getenv" in source or _AGENT_CONFIG_PATH_RE.search(source):
         env_src_tainted = _env_tainted_names(tree) | _agent_config_file_tainted_names(source, tree)
-        _pass_start = len(out)
         for node in ast.walk(tree):
-            if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
-                break
             if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                 continue
             # Only a BODY / URL / params position counts. A secret in headers=/auth= is the
@@ -5466,10 +5463,7 @@ def analyze_python(
     #     same rationale as ENV_EXFIL_FLOW (crash-reporters/telemetry are dual-use).
     if _HOST_INFO_SIGNAL_RE.search(source):
         host_src_tainted = _host_info_tainted_names(tree)
-        _pass_start = len(out)
         for node in ast.walk(tree):
-            if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
-                break
             if not isinstance(node, ast.Call):
                 continue
             ln = getattr(node, "lineno", 0)
@@ -5557,10 +5551,7 @@ def analyze_python(
         collector_funcs = _telemetry_collector_funcnames(tree)
         if collector_funcs:
             telemetry_tainted = _telemetry_tainted_names(tree, collector_funcs)
-            _pass_start = len(out)
             for node in ast.walk(tree):
-                if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
-                    break
                 if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
                     continue
                 arg_subtrees = [
@@ -5596,10 +5587,7 @@ def analyze_python(
     # script into a writable/tmp-like path, with no literal pipe for B100's regex to
     # match (the URL is typically a variable too). Checked independently of the loops
     # above — this is a shape check on the argv list, not a taint flow.
-    _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
-            break
         if not _is_curl_wget_argv_call(node):
             continue
         out_path = _curl_dropper_output_path(node)
@@ -5632,10 +5620,7 @@ def analyze_python(
     # (mirrors CHUNKED_FILE_EXEC's guard), so it can never become FAIL-capable there
     # regardless of this severity label; checks/_content.py's check_tunnel_enrollment
     # (B338) is this rule's sole consumer and stays WARN-only by design.
-    _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
-            break
         if not _is_tunnel_launch_argv_call(node):
             continue
         prog_elts = _argv_str_elts(node.args[0])
@@ -5700,17 +5685,14 @@ def analyze_python(
     if ext_taint_map:
         # This is the TT5/TT4/SSRF taint pass — the one whose INTER-pass starvation
         # (round 1) was the concrete repro (a TT5_CMD_INJECTION crit lost behind 25+
-        # earlier DANGEROUS_SINK info findings from the loop above). `_pass_start`
-        # gives it its own budget regardless of how full `out` already is; see the
-        # comment on the first `_pass_start` above. It is ALSO, itself, a mixed-
-        # severity pass exactly like that first loop (TT5_CMD_INJECTION crit
-        # alongside TT5_ARG_INJECTION/TT4_FILE_NET/TT_SSRF info in the same walk) —
-        # `_PASS_SAFETY_CEILING` (round 2), not `_MAX_FINDINGS_PER_FILE`, is what
-        # stops this pass's own info findings from starving its own later crit.
-        _pass_start = len(out)
+        # earlier DANGEROUS_SINK info findings from the loop above). It is ALSO,
+        # itself, a mixed-severity pass exactly like the first loop above
+        # (TT5_CMD_INJECTION crit alongside TT5_ARG_INJECTION/TT4_FILE_NET/TT_SSRF
+        # info in the same walk), so — per the module-level comment above
+        # `_MAX_FINDINGS_PER_FILE` (round 3) — it has no per-pass ceiling of its own
+        # either; every candidate reaches `out` and the final severity-ordered
+        # truncation at `return` is the sole enforcement point.
         for node in ast.walk(tree):
-            if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
-                break
             if not isinstance(node, ast.Call):
                 continue
             ln = getattr(node, "lineno", 0)
@@ -5828,10 +5810,7 @@ def analyze_python(
     # overwrite of an env var with a hardcoded provider-shaped token. A separate small
     # loop (rather than folding into the ast.Call walk above) since Assign is a
     # different node shape and the Call loop's control flow is continue-heavy.
-    _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
-            break
         if not isinstance(node, ast.Assign):
             continue
         if len(node.targets) != 1:
@@ -5887,10 +5866,7 @@ def analyze_python(
     # already-shipped behavior) or importing a Layer-2 `checks/` helper into this
     # Layer-1 leaf module (a banned reverse dependency, see CLAUDE.md's layering rule)
     # — left as-is, flagged for a follow-up task rather than fixed unilaterally here.
-    _pass_start = len(out)
     for node in ast.walk(tree):
-        if len(out) - _pass_start >= _PASS_SAFETY_CEILING:
-            break
         if isinstance(node, ast.Assign):
             if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
                 continue
