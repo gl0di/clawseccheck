@@ -785,6 +785,21 @@ def _vet_attest_new_findings(target_name: str, verdicts_map: dict) -> list:
     never remove or soften one. Defensive against a non-string verdict value
     (e.g. a dict/list) reaching this function -- see _escalated_status's own
     note; untrusted-input data must never be able to crash this.
+
+    B-406 (parity gap): SKILL.md's vet panel asks the host to submit the SAME
+    optional ``votes`` breakdown alongside ``verdict`` for these three ids as it
+    does for an ordinary escalated finding, but this function, unlike its sibling
+    ``_escalate_finding``, threw the breakdown away -- a 2-1 split verdict and a
+    3-0 unanimous one produced byte-identical ``detail``. Now routed through the
+    SAME ``_vote_tally`` and the SAME "(panel split: h/t VERDICT)" suffix, on the
+    SAME condition (``total and hit < total``): a unanimous panel or a submission
+    with no ``votes`` field at all leaves ``detail`` byte-identical to before this
+    change. This still cannot make two wholly separate host-agent judge
+    invocations of byte-identical prose agree with each other -- that is a
+    property of the external judge, not of this parser -- so ``fix`` also states
+    that limit plainly (never ``detail``: ``baseline.fingerprint()`` hashes
+    ``detail``, and moving disclosure there would silently orphan any
+    ``.clawseccheckignore`` entries already written against these ids).
     """
     out = []
     for fid in _VET_ATTEST_IDS:
@@ -793,11 +808,16 @@ def _vet_attest_new_findings(target_name: str, verdicts_map: dict) -> list:
         status = _VET_ATTEST_NEW_FINDING_STATUS.get(verdict) if isinstance(verdict, str) else None
         if status is None:
             continue
+        hit, total = _vote_tally(verdict, entry.get("votes"))
+        split = f" (panel split: {hit}/{total} {verdict})" if total and hit < total else ""
         out.append(Finding(
             fid, _VET_ATTEST_TITLES[fid], MEDIUM, status,
-            f"[host-agent pre-install attestation, verdict {verdict}] {_VET_ATTEST_QUESTIONS[fid]}",
+            f"[host-agent pre-install attestation, verdict {verdict}{split}] "
+            f"{_VET_ATTEST_QUESTIONS[fid]}",
             "Review the skill's own prose yourself before installing; this finding rests on "
-            "a host-agent self-report with no independent deterministic signal behind it.",
+            "a host-agent self-report with no independent deterministic signal behind it. "
+            "A judge's verdict on byte-identical prose is not guaranteed to repeat across "
+            "separate runs -- a re-run may return a different answer.",
             "Judge Attestation", scored=False, confidence=ATTESTED,
             evidence=[f"{target_name}: {verdict} verdict from pre-install prose attestation"],
         ))

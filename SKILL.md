@@ -298,14 +298,34 @@ makes a successful injection against it worthless.
    every verdict in the file rejected outright (C-135: this closes a confirmed gap
    where two different targets sharing a bare name — two fixtures, or two bundled
    plugin skills — could otherwise have one's verdicts silently escalate the other).
-2. Feed the collected verdicts back with `--vet TARGET --vet-judged verdicts.json`
+2. **Mandatory, with graceful fallback** — the same posture as the audit panel's
+   step 5 above, not weaker: run this panel every time a `--vet`/`--vet-skill`/
+   `--vet-plugin` target is vetted, including a target swept inside item 1's full
+   check, never only when the user separately asks for one. If subagents are
+   unavailable, fall back to reasoning through all 3 lenses yourself in one inline
+   turn per item, with the same SECURITY rule as the guard — never claim a panel
+   ran when it did not, and never claim 3 distinct subagents ran when you reasoned
+   through it inline instead.
+3. Build the verdicts JSON from the collected per-item majority votes, same shape
+   as the audit panel above: submit an optional `votes` breakdown (e.g. `{"SAFE":
+   1, "SUSPICIOUS": 0, "DANGEROUS": 2}`) alongside the reduced `verdict` for EVERY
+   item you answer, **including the three fixed `ATTEST-PROSE-*` questions** below
+   — a disclosed panel split changes the escalated/attested finding's `detail`
+   text (`docs/OUTPUT_SCHEMA.md` §15/§16), never its status or the vet grade.
+   **Never fabricate a `votes` breakdown.** When step 2's inline fallback ran
+   instead of 3 subagents, omit `votes` entirely rather than inventing one — a
+   missing `votes` field reads as "no breakdown submitted," never as a fabricated
+   unanimous vote, and claiming a fallback's single reasoning pass was a 3-lens
+   panel would violate this same step's own "never claim a panel ran when it did
+   not" rule.
+4. Feed the collected verdicts back with `--vet TARGET --vet-judged verdicts.json`
    (same target flags, `-` for stdin) to render the combined vet output.
-3. A `SAFE` verdict changes nothing — the vet verdict/grade stay byte-identical to a
+5. A `SAFE` verdict changes nothing — the vet verdict/grade stay byte-identical to a
    plain `--vet` run. A `SUSPICIOUS`/`DANGEROUS` verdict can raise a finding's status
    (never lower it), which the escalated finding's `detail` field discloses
    (`"[escalated by host-agent judge: ...]"`) so the reader can always tell a judge,
    not the deterministic engine, raised it.
-4. Present this as a distinct **"Judge-escalated"** panel finding, same
+6. Present this as a distinct **"Judge-escalated"** panel finding, same
    advisory-but-separate framing as the audit-path second opinion.
 
 **Pre-install prose attestation (C-255).** The SAME `--vet-judge-packet` output
@@ -359,6 +379,14 @@ independent signal behind them — a pure self-report — so even a `DANGEROUS`
 verdict here only ever produces a `WARN`, never a capping `FAIL`. A compromised
 or hallucinating judge cannot single-handedly fail an install on prose-reading
 alone.
+
+**Repeatability is the judge's property, not this tool's (B-406).** ClawSecCheck's
+own code guarantees that byte-identical input to its own funnel produces
+byte-identical output every time — it cannot guarantee that two SEPARATE runs of
+this panel over byte-identical skill prose return the same verdict, because that
+verdict comes from you, the host-agent judge, not from any deterministic check.
+Each attested finding's `fix` field says this plainly, in one sentence, so the
+limit travels with the finding rather than living only in this doc.
 
 ---
 
