@@ -2711,8 +2711,484 @@ def _is_agent_config_open_call(node: ast.AST) -> bool:
     return False
 
 
-def _has_cred_path_const(node: ast.AST) -> bool:
-    """True if the subtree contains a string constant naming a credential file."""
+# ===================== B-830: root-independent credential-path folding =====================
+# Three gates close the "assemble the path, don't spell it" bypass of _CRED_PATH_RE's
+# literal scan (`Path.home().joinpath('.aws', 'credentials')`, `os.path.join(os.path.
+# expanduser('~'), '.aws', 'credentials')`, ...), without turning every path-join call
+# into a credential finding:
+#
+#   Gate V (_FOLDED_CRED_PATH_RE) -- a CLOSED set of exactly 6 root-independent
+#   credential-FILENAME patterns a fold may assert on its own: it is a proper subset of
+#   _CRED_PATH_RE (which stays unchanged below, for the direct/literal scan) and
+#   deliberately excludes the generic "secrets?" pattern and any single-token filename.
+#   Folding a bare "secrets" segment onto an opaque, caller-controlled root would convict
+#   a legitimate secrets-manager client for doing exactly what it should
+#   (os.path.join(mount_point, "secrets", app_name)) -- that shape must stay clean.
+#
+#   Gate S (_FsFoldCtx.is_* / is_typed_path_join) -- what counts as a path-join "by
+#   construction": pathlib's `/` operator and constructors (TYPED -- bound by an import,
+#   like _path_module_aliases already requires for os.path.join elsewhere in this
+#   module), `.joinpath(...)` on ANY receiver (the method name alone is the signal),
+#   typed os.path.join/posixpath.join/ntpath.join, "/".join([...])/os.sep.join(...), and
+#   a narrow Tier B fallback: an untyped/unverified bare `join(...)` or `x.join(...)`
+#   called with 2+ positional args and no keywords. str.join takes exactly one
+#   (iterable) argument, so a 2+-arg call spelled `join` cannot be a string join --
+#   Tier B exists so a trivial aliasing trick (`os = os`, `op = os.path`,
+#   `self.h.joinpath(...)`) that defeats the TYPED check still doesn't defeat detection
+#   outright; it only forces the fold's root to stay opaque (no re-rooting trust).
+#
+#   Gate A (_fold_fs_path) -- the value-folding algebra itself: known string segments
+#   fold exactly; any segment that can't be determined folds to the sentinel _FOLD_UNK,
+#   which never appears in any Gate-V alternative, so it can only ever WIDEN a fold's
+#   candidate span, never complete a credential-filename match by itself. A bare Name
+#   folds through its bound value only when it is bound EXACTLY ONCE in the whole file
+#   via a single-target Assign/AnnAssign (depth-capped, cycle-guarded) -- otherwise it's
+#   unknown. `.expanduser()`/`.absolute()`/`.resolve()` and a suffix-preserving `str()`/
+#   `os.fspath()` pass their argument/receiver through unchanged.
+_FOLDED_CRED_PATH_RE = re.compile(
+    r"\.ssh/id_[a-z0-9_]+(?![a-z0-9_]|\.pub\b|-cert\.pub\b)"  # private keys only, never .pub/-cert.pub
+    r"|\.aws/credentials"
+    # `config.json` (not just `.docker/config`, the way _CRED_PATH_RE's laxer substring
+    # scan reads below): the Docker CLI's real credentials file is ~/.docker/config.json
+    # -- "config" with no extension isn't a file Docker ever writes there, so requiring
+    # the exact real filename keeps this closed, fold-only set precise, the same
+    # precision principle as the id_*/.pub exclusion above. _CRED_PATH_RE's broader
+    # prefix stays fine for the literal/direct scan, where a substring match against raw
+    # source text already needs the real ".json" text to be present somewhere nearby to
+    # read as this path at all.
+    r"|\.docker/config\.json"
+    r"|\.kube/config"
+    # B-830 round-2 (C-135): a right-hand lookahead, not just a bare prefix -- without
+    # it this over-matched a directory-name collision like a benign
+    # `.config/gcloud-helper/prefs` (an unrelated tool's config dir that merely starts
+    # with "gcloud"), which is not the real gcloud credentials directory at all. Folded
+    # segments are always joined with "/", so requiring a "/" continuation or end-of-
+    # string right after "gcloud" is sufficient to exclude "gcloud-helper" while still
+    # matching the real ".config/gcloud/legacy_credentials/..." shape.
+    r"|\.config/gcloud(?=/|$)"
+    r"|/proc/(?:self|\d+)/environ",
+    re.I,
+)
+_FOLD_UNK = "\x00"  # an unresolved path segment; never a substring of any pattern above
+# B-830 round-3 (C-135): the fold's own recursion has no depth limit of its own, so a
+# long left-deep chain -- `/`-chained BinOps, chained `.joinpath(...)` calls, or a chain
+# of single-use name-hops -- can overflow the interpreter's recursion limit well before
+# anything else in this module would. An explicit, threaded depth counter (not a
+# try/except RecursionError around the caller) bounds this: once a fold's own depth
+# exceeds this cap, it returns `None` (this algebra's existing "unresolved" value,
+# which callers already widen to _FOLD_UNK) instead of recursing further. 200 mirrors
+# CPython's own parser bracket-nesting limit, so a right-nested construct can't hide a
+# credential-bearing tail deeper than that. Returning "unknown" only ever WIDENS what a
+# fold treats as unresolved -- it can never manufacture a spurious credential-path
+# match -- and because these chains are left-deep (a chain's most-recently-appended
+# segment sits at the AST's OUTERMOST/shallowest node, with earlier segments nested
+# progressively deeper), truncating the deep prefix only discards padding, never the
+# tail that a real bypass needs recognized. See the call sites below for why the
+# three former `except RecursionError:` fallbacks (silent, undisclosed, whole-file
+# credential-detection bypasses) are gone now that overflow can't happen here.
+_FOLD_MAX_DEPTH = 200
+# B-830 round-6 (C-135 follow-up review of round-5's fix, with a performance
+# measurement this time): a private sentinel distinguishing "this key's fold is
+# currently being computed, on this same call stack" (the cycle guard) from a real
+# cached `(result, budget)` pair -- see `_fold_fs_path`'s docstring for why a plain
+# `None` can no longer double as the cycle-guard value.
+_FOLD_IN_PROGRESS = object()
+_PATHLIB_CLASSES = frozenset(
+    {"Path", "PurePath", "PosixPath", "PurePosixPath", "WindowsPath", "PureWindowsPath"}
+)
+_PATH_JOIN_MODULES = frozenset({"os.path", "posixpath", "ntpath"})
+
+
+def _binding_site_counts(tree: ast.AST) -> "tuple[dict, dict]":
+    """`(counts, simple)` for *tree*: how many times each name is BOUND anywhere (any
+    binding form -- assignment, parameter, def/class, import, except-as, global/
+    nonlocal, match-capture), and the RHS of every simple single-name Assign/AnnAssign
+    target (last write wins per name in this dict; the caller keeps only the subset
+    whose `counts` is exactly 1, so a name assigned more than once is never treated as
+    resolvable through this map)."""
+    counts: dict = {}
+    simple: dict = {}
+
+    def bump(name: str) -> None:
+        counts[name] = counts.get(name, 0) + 1
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            bump(n.id)
+        elif isinstance(n, ast.arg):
+            bump(n.arg)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bump(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                if a.name != "*":
+                    bump(a.asname or a.name.split(".")[0])
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            bump(n.name)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            for nm in n.names:
+                # A global/nonlocal name's real value lives outside this scope, so it
+                # must never be treated as a resolvable single-site binding even if
+                # this is its only local occurrence -- force the count above 1.
+                counts[nm] = counts.get(nm, 0) + 2
+        elif _MATCH_BIND_NODES and isinstance(n, _MATCH_BIND_NODES) and n.name:
+            bump(n.name)
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    simple[t.id] = n.value
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.value is not None:
+            simple[n.target.id] = n.value
+    return counts, simple
+
+
+class _FsFoldCtx:
+    """Per-file context for `_fold_fs_path`, built once per tree and threaded through
+    every fold call: which names are bound to a path module / pathlib class / typed
+    join function, and which simple single-assignment names may be resolved by value."""
+
+    def __init__(self, tree: ast.AST):
+        self.path_aliases = _path_module_aliases(tree)
+        counts, simple = _binding_site_counts(tree)
+        self.single = {k: v for k, v in simple.items() if counts.get(k, 0) == 1}
+        # Every name bound ANYWHERE in the file, by any binding form. File-wide, not
+        # scope-aware (matches `ctx.single`'s own fail-safe granularity) -- a shadow
+        # anywhere in the file only ever makes a fold MORE conservative, never less.
+        self.shadowed = set(counts)
+
+        join_funcs, expanduser_funcs, ctor_names, pathlib_mods = set(), set(), set(), set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.module in _PATH_JOIN_MODULES:
+                for a in n.names:
+                    if a.name == "join":
+                        join_funcs.add(a.asname or a.name)
+                    elif a.name == "expanduser":
+                        expanduser_funcs.add(a.asname or a.name)
+            elif isinstance(n, ast.ImportFrom) and n.module == "pathlib":
+                for a in n.names:
+                    if a.name in _PATHLIB_CLASSES:
+                        ctor_names.add(a.asname or a.name)
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.name == "pathlib":
+                        pathlib_mods.add(a.asname or "pathlib")
+
+        # A name earns membership only by being bound EXACTLY ONCE, by its qualifying
+        # import -- a name bound any other way too (fail-safe direction) is untyped.
+        def import_bound(names: set) -> set:
+            return {nm for nm in names if counts.get(nm, 0) == 1}
+
+        self.join_funcs = import_bound(join_funcs)
+        self.expanduser_funcs = import_bound(expanduser_funcs)
+        self.ctor_names = import_bound(ctor_names)
+        self.pathlib_mods = import_bound(pathlib_mods)
+        self.memo: dict = {}
+        # B-830 round-3: how many times a fold call hit _FOLD_MAX_DEPTH and gave up
+        # (observability only -- never consulted for a verdict; see _fold_fs_path).
+        self.truncated = 0
+        # B-830 round-7: how many times a fold call REUSED a cache entry that was
+        # itself computed under a truncated (non-None) budget. Deliberately separate
+        # from `self.truncated` -- that counter feeds the disclosed AST_FOLD_TRUNCATED
+        # count and must stay an exact count of genuine depth-cap truncations, not of
+        # cache-reuse events. See `_fold_fs_path`'s docstring for why both counters
+        # must be consulted together when deciding whether a result is cacheable as
+        # budget=None ("exact").
+        self.inexact = 0
+
+    def is_suffix_preserving(self, call: ast.Call) -> bool:
+        """True for a single-argument wrapper that changes at most a leading '~'
+        (expanduser) or the outer type (str()/os.fspath()), never the literal tail --
+        so folding may recurse straight into its one argument."""
+        f = call.func
+        if isinstance(f, ast.Name):
+            if f.id in self.expanduser_funcs:
+                return True
+            # Bare str(...) is trusted as an identity wrapper only when `str` is never
+            # rebound anywhere in the file (as a parameter, import, assignment, ...).
+            return f.id == "str" and f.id not in self.shadowed
+        if isinstance(f, ast.Attribute) and f.attr in ("expanduser", "fspath"):
+            b = f.value
+            direct, viaos = self.path_aliases
+            if f.attr == "expanduser":
+                if isinstance(b, ast.Name) and b.id in direct:
+                    return True
+                return (
+                    isinstance(b, ast.Attribute)
+                    and b.attr == "path"
+                    and isinstance(b.value, ast.Name)
+                    and b.value.id in viaos
+                )
+            return isinstance(b, ast.Name) and b.id in viaos  # os.fspath(...)
+        return False
+
+    def is_pathlib_ctor(self, f: ast.AST, visiting: frozenset = frozenset()) -> bool:
+        if isinstance(f, ast.Name):
+            if f.id in self.ctor_names:
+                return True
+            rhs = self.single.get(f.id)
+            if rhs is not None and f.id not in visiting and len(visiting) < 4:
+                return self.is_pathlib_ctor(rhs, visiting | {f.id})
+            return False
+        return (
+            isinstance(f, ast.Attribute)
+            and f.attr in _PATHLIB_CLASSES
+            and isinstance(f.value, ast.Name)
+            and f.value.id in self.pathlib_mods
+        )
+
+    def is_typed_path_join(self, call: ast.Call) -> bool:
+        f = call.func
+        if isinstance(f, ast.Name):
+            return f.id in self.join_funcs
+        return _is_path_join_call(call, self.path_aliases)
+
+    def is_slash_sep(self, x: ast.AST, visiting: frozenset = frozenset()) -> bool:
+        if isinstance(x, ast.Constant):
+            return x.value == "/"
+        if isinstance(x, ast.Attribute) and x.attr == "sep":
+            b = x.value
+            direct, viaos = self.path_aliases
+            if isinstance(b, ast.Name) and (b.id in viaos or b.id in direct):
+                return True
+            return (
+                isinstance(b, ast.Attribute)
+                and b.attr == "path"
+                and isinstance(b.value, ast.Name)
+                and b.value.id in viaos
+            )
+        if isinstance(x, ast.Name) and x.id in self.single and x.id not in visiting:
+            return self.is_slash_sep(self.single[x.id], visiting | {x.id})
+        return False
+
+
+def _fold_pjoin(acc: "str | None", part: str) -> str:
+    """posixpath.join / pathlib `/` semantics: a later absolute component re-roots the
+    accumulator instead of appending to it."""
+    if acc is None or acc == "":
+        return part
+    if part.startswith("/"):
+        return part
+    return acc + ("" if acc.endswith("/") else "/") + part
+
+
+def _fold_seg(x: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset, depth: int = 0) -> "str | None":
+    """A single path component's folded value: a string literal, a name resolved
+    through its one binding site, or a nested path construction's own fold. `None`
+    when the segment can't be determined at all (the caller substitutes _FOLD_UNK).
+
+    B-830 round-3: *depth* bounds recursion explicitly (see _FOLD_MAX_DEPTH) instead
+    of relying on a caller's try/except RecursionError. A name-hop resolution (following
+    a variable back to its single assignment) counts as one more level of depth, same
+    as descending into a nested path-construction expression.
+
+    B-830 round-4: this function keeps NO memo of its own -- a Constant folds directly,
+    a Name-hop recurses straight into `_fold_seg` again (never cached), and every other
+    node falls through to `_fold_fs_path`, which owns `ctx.memo` and the budget-aware
+    truncation guard (see its own docstring, updated round-6). So that guard belongs
+    solely there; there is no second, parallel cache here to poison."""
+    if depth > _FOLD_MAX_DEPTH:
+        ctx.truncated += 1
+        return None
+    if isinstance(x, ast.Constant) and isinstance(x.value, str):
+        return x.value
+    if isinstance(x, ast.Name):
+        if x.id in visiting or x.id not in ctx.single or len(visiting) >= 4:
+            return None
+        return _fold_seg(ctx.single[x.id], ctx, visiting | {x.id}, depth + 1)
+    return _fold_fs_path(x, ctx, visiting, depth)
+
+
+def _fold_fs_path(
+    node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset = frozenset(), depth: int = 0
+) -> "str | None":
+    """Memoized, cycle-guarded entry point -- every subtree is folded at most once per
+    (node, visiting-set) pair *at a given-or-worse depth budget* -- see round-6 below.
+
+    B-830 round-3: a cached (already fully resolved) result is returned regardless of
+    the caller's current *depth* -- it required no further recursion to produce. A
+    depth-limit truncation is deliberately NEVER cached: a different, shallower call
+    site reaching the same node must still get a real answer, not a poisoned "unknown"
+    left behind by a deeper caller.
+
+    B-830 round-4 (C-135 follow-up review of round-3): round-3's "never cached" claim
+    above only held for THIS call's OWN `depth > _FOLD_MAX_DEPTH` check -- it did not
+    hold for a node folded at depth <= _FOLD_MAX_DEPTH whose CHILDREN recurse past the
+    cap. That node's own result -- built from an all-truncated (_FOLD_UNK) subtree --
+    still got written to `ctx.memo` under its OWN (id(node), visiting) key. Since
+    `_has_folded_cred_path` folds every subtree of the same file through ONE shared
+    `ctx.memo` (via `ast.walk`, root-first), a credential-bearing node reached first as
+    a DEEP descendant of an unrelated outer wrapper (~200 levels of padding) poisoned
+    its own cache entry -- then the SAME node, reached later as its own shallow
+    top-level walk target (where it would normally resolve cleanly), got the poisoned
+    entry back instead of a fresh recompute.
+
+    B-830 round-5 fixed that by simply deleting a truncated subtree's cache entry
+    instead of writing it. Correct, but a severe quadratic performance regression (a
+    fresh independent C-135 review, round-6): `ast.walk` visits EVERY node of the file
+    directly, and for a long chain (a padded `.joinpath()` chain, a right-nested `/`
+    chain, ...) every node along it ends up past the depth cap from *some* call site,
+    so round-5 never lets any of them cache -- each direct `ast.walk` visit re-walks
+    its own ~_FOLD_MAX_DEPTH-deep subtree from scratch, and does so again for every
+    other node whose own re-walk passes back through it, compounding.
+
+    B-830 round-6 (this fix): cache the result TOGETHER WITH the depth budget that was
+    available when it was computed (`_FOLD_MAX_DEPTH - depth` -- how much further this
+    call was allowed to recurse). A cache hit is trusted only when the NEW caller's own
+    remaining budget is no BETTER than the budget the entry was computed under: a
+    caller with less-or-equal budget could not have resolved any further either, so the
+    cached (possibly truncated) answer is still the best available. A caller with MORE
+    remaining budget than the cached entry had -- most importantly `ast.walk`'s own
+    direct, depth=0 visits, which always carry the maximum possible budget -- might
+    resolve further, so it recomputes instead of trusting a shallower answer. This
+    reopens exactly the round-4 bug fix (a poisoned deep-descendant result can never
+    survive to be handed back to that same node's own depth=0 walk target) while
+    letting every node that is only ever reached at similar-or-deeper positions keep
+    its cached answer -- restoring close-to-linear memoized behavior for the common
+    case instead of round-5's always-recompute. A result that finished with NO
+    truncation anywhere in its own subtree (`budget=None` below) is exact regardless of
+    depth -- exactly round-3's original "fully resolved, cache unconditionally" case --
+    and is never invalidated by a shallower caller's larger budget, which also avoids
+    round-5's needless recompute of subtrees that were never actually truncated.
+
+    B-830 round-7 (C-135 follow-up review of round-6): round-6's `budget=None` check
+    above only looked at `ctx.truncated` -- whether THIS call's own subtree hit the
+    depth cap directly. It missed the case where this call's subtree instead REUSED a
+    cached entry from a sibling/descendant call that was itself truncated (the
+    `cached_budget is not None` branch above): reusing a truncated answer makes this
+    node's own result just as non-exhaustive as computing a truncation directly, but
+    nothing marked it so, and it could be cached as `budget=None` ("exact at any
+    depth") regardless. A later, shallower call reaching the SAME node directly then
+    got that wrongly-exact cached answer back instead of a real recompute -- the same
+    memoization-poisoning shape round-4 fixed, reopened through cache reuse instead of
+    direct truncation. Fixed by tracking cache-reuse-of-a-truncated-entry in a second,
+    separate counter (`ctx.inexact` -- deliberately not folded into `ctx.truncated`,
+    which must stay an exact count of genuine depth-cap events for the disclosed
+    AST_FOLD_TRUNCATED finding) and consulting BOTH counters when deciding
+    cacheability: `budget=None` is only assigned when NEITHER counter moved during
+    this call's own computation -- i.e. no truncation happened anywhere in this node's
+    computation, INCLUDING no reuse of any depth-limited (budget is not None) cached
+    entry anywhere below it, whether reached directly or transitively."""
+    key = (id(node), visiting)
+    entry = ctx.memo.get(key)
+    if entry is not None:
+        if entry is _FOLD_IN_PROGRESS:
+            return None  # cycle guard: a self-referential fold resolves to unknown
+        cached_res, cached_budget = entry
+        if cached_budget is None:
+            return cached_res  # exact: no truncation contributed, valid at any depth
+        if (_FOLD_MAX_DEPTH - depth) <= cached_budget:
+            # B-830 round-7: this call is REUSING a cache entry that was itself
+            # computed under a truncated budget -- mark it, so this call's own
+            # result (if cached by an enclosing caller) is never mistaken for
+            # exact. See `ctx.inexact` and the docstring above.
+            ctx.inexact += 1
+            return cached_res
+        # This caller's remaining budget is strictly BETTER than what produced the
+        # cached entry -- it might resolve further where that computation truncated.
+        # Fall through and recompute rather than trust the shallower-budget answer.
+    if depth > _FOLD_MAX_DEPTH:
+        ctx.truncated += 1
+        return None
+    ctx.memo[key] = _FOLD_IN_PROGRESS  # cycle guard
+    before = ctx.truncated + ctx.inexact
+    res = _fold_fs_path_uncached(node, ctx, visiting, depth)
+    budget = None if (ctx.truncated + ctx.inexact) == before else (_FOLD_MAX_DEPTH - depth)
+    ctx.memo[key] = (res, budget)
+    return res
+
+
+def _fold_fs_path_uncached(
+    node: ast.AST, ctx: "_FsFoldCtx", visiting: frozenset, depth: int = 0
+) -> "str | None":
+    def seg_or_unk(x: ast.AST) -> str:
+        if isinstance(x, ast.Starred):
+            return _FOLD_UNK
+        s = _fold_seg(x, ctx, visiting, depth + 1)
+        return _FOLD_UNK if s is None else s
+
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        # pathlib's `/` operator. Fold it only when at least one side is provably
+        # path-shaped -- otherwise this is ordinary arithmetic, not a path join.
+        right = _fold_seg(node.right, ctx, visiting, depth + 1)
+        left = _fold_seg(node.left, ctx, visiting, depth + 1)
+        left_is_path = left is not None and not isinstance(node.left, ast.Constant)
+        if right is None and not left_is_path:
+            return None
+        return _fold_pjoin(_FOLD_UNK if left is None else left, _FOLD_UNK if right is None else right)
+
+    if not isinstance(node, ast.Call):
+        return None
+    f = node.func
+    args = []
+    for a in node.args:  # splice a literal *[...] so join(*[a, b]) reads like join(a, b)
+        if isinstance(a, ast.Starred) and isinstance(a.value, (ast.List, ast.Tuple)):
+            args.extend(a.value.elts)
+        else:
+            args.append(a)
+
+    # Suffix-preserving wrappers change at most a leading '~' or the outer type, never
+    # the literal tail -- the tail read straight through them is exact.
+    if ctx.is_suffix_preserving(node) and len(args) == 1 and not node.keywords:
+        return _fold_seg(args[0], ctx, visiting, depth + 1)
+    if (
+        isinstance(f, ast.Attribute)
+        and f.attr in ("expanduser", "absolute", "resolve")
+        and not args
+        and not node.keywords
+    ):
+        inner = _fold_fs_path(f.value, ctx, visiting, depth + 1)
+        if inner is not None:
+            return inner
+    if isinstance(f, ast.Attribute) and f.attr == "joinpath":
+        # Gate S: `.joinpath(...)` counts on ANY receiver -- the method name alone is
+        # the signal; an unresolved receiver just folds to _FOLD_UNK.
+        acc = seg_or_unk(f.value)
+        for a in args:
+            acc = _fold_pjoin(acc, seg_or_unk(a))
+        return acc
+    if ctx.is_pathlib_ctor(f) and args:
+        acc = None
+        for a in args:
+            acc = _fold_pjoin(acc, seg_or_unk(a))
+        return acc
+    if args and ctx.is_typed_path_join(node):
+        acc = None
+        for a in args:
+            acc = _fold_pjoin(acc, seg_or_unk(a))
+        return acc
+    if isinstance(f, ast.Name) and f.id == "join" and len(args) >= 2 and not node.keywords:
+        # Tier B: an unverified bare `join(...)` name called with 2+ positional args --
+        # str.join is unary, so this cannot be a string join. Root forced opaque since
+        # the join semantics (and thus re-rooting) aren't proven.
+        return _FOLD_UNK + "".join("/" + seg_or_unk(a) for a in args)
+    if isinstance(f, ast.Attribute) and f.attr == "join":
+        recv = f.value
+        if len(args) == 1 and isinstance(args[0], (ast.List, ast.Tuple)) and ctx.is_slash_sep(recv):
+            return "/".join(seg_or_unk(e) for e in args[0].elts)
+        if (
+            len(args) >= 2
+            and not node.keywords
+            and not (isinstance(recv, ast.Constant) and isinstance(recv.value, (str, bytes)))
+        ):
+            # Tier B, attribute form (`x.join(a, b, ...)`) -- same reasoning as above.
+            return _FOLD_UNK + "".join("/" + seg_or_unk(a) for a in args)
+    return None
+
+
+def _has_folded_cred_path(node: ast.AST, ctx: "_FsFoldCtx") -> bool:
+    """True if any subtree of *node* folds to a value containing one of the closed
+    Gate-V credential-filename patterns (see the module comment above)."""
+    for n in ast.walk(node):
+        fs = _fold_fs_path(n, ctx)
+        if fs and _FOLDED_CRED_PATH_RE.search(fs):
+            return True
+    return False
+
+
+def _has_cred_path_const(node: ast.AST, ctx: "_FsFoldCtx | None" = None) -> bool:
+    """True if the subtree contains a string constant naming a credential file, OR --
+    when *ctx* is given -- a root-independent credential path assembled via typed
+    path-join construction (B-830; see the Gate V/S/A block above)."""
     for n in ast.walk(node):
         if (
             isinstance(n, ast.Constant)
@@ -2720,7 +3196,7 @@ def _has_cred_path_const(node: ast.AST) -> bool:
             and _CRED_PATH_RE.search(n.value)
         ):
             return True
-    return False
+    return ctx is not None and _has_folded_cred_path(node, ctx)
 
 
 # B-422 follow-up (C-348 adversarial re-review): base-gating put/patch/request on the
@@ -2796,14 +3272,14 @@ def _is_net_sink(func: ast.AST, net_sink_aliases: frozenset[str] = frozenset()) 
     return False
 
 
-def _cred_tainted_names(tree: ast.AST) -> set[str]:
+def _cred_tainted_names(tree: ast.AST, ctx: "_FsFoldCtx | None" = None) -> set[str]:
     """Names whose value derives from reading a credential file (transitively)."""
     tainted: set[str] = set()
     assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
     for _ in range(4):  # small fixpoint for multi-step flows (p = path; k = open(p).read())
         changed = False
         for a in assigns:
-            if _has_cred_path_const(a.value) or (_names_in(a.value) & tainted):
+            if _has_cred_path_const(a.value, ctx) or (_names_in(a.value) & tainted):
                 for t in a.targets:
                     if isinstance(t, ast.Name) and t.id not in tainted:
                         tainted.add(t.id)
@@ -2826,14 +3302,23 @@ def _has_incluster_token_path_const(node: ast.AST) -> bool:
     return False
 
 
-def _cred_source_classification(node: ast.AST) -> str:
+def _cred_source_classification(node: ast.AST, ctx: "_FsFoldCtx | None" = None) -> str:
     """Classifies *node*'s own credential-path string constants (not recursing
     through names -- callers combine this with the running pure/impure sets for
     that): 'other' if it contains ANY credential-path literal that is NOT the
     narrow in-cluster token path -- even when an in-cluster literal ALSO appears,
     since mixing the two in one expression (e.g. a ternary) makes the value
     impure; 'incluster' if it contains ONLY in-cluster token literal(s); 'none'
-    if it contains no credential-path literal at all."""
+    if it contains no credential-path literal at all.
+
+    B-830 round-2 (C-135): *ctx*, when given, also asks whether *node* folds (Gate
+    V/S/A) to a real closed-set credential filename -- catching a path built FROM
+    the in-cluster token literal but extended with additional joined segments (e.g.
+    `Path(INCLUSTER_TOKEN).joinpath('..', '..', '.aws', 'credentials')`), which the
+    per-literal scan alone can't see since no single string constant spells out the
+    assembled ".aws/credentials" tail. Such a fold always forces 'other', even when
+    an in-cluster literal is ALSO present -- the same mixing-makes-it-impure
+    reasoning as the literal-only case above."""
     has_incluster = False
     has_other = False
     for n in ast.walk(node):
@@ -2842,6 +3327,8 @@ def _cred_source_classification(node: ast.AST) -> str:
                 has_incluster = True
             elif _CRED_PATH_RE.search(n.value):
                 has_other = True
+    if not has_other and ctx is not None and _has_folded_cred_path(node, ctx):
+        has_other = True
     if has_other:
         return "other"
     if has_incluster:
@@ -2849,7 +3336,7 @@ def _cred_source_classification(node: ast.AST) -> str:
     return "none"
 
 
-def _incluster_pure_tainted_names(tree: ast.AST) -> set[str]:
+def _incluster_pure_tainted_names(tree: ast.AST, ctx: "_FsFoldCtx | None" = None) -> set[str]:
     """Subset of credential-tainted names whose value derives ONLY from the
     narrow in-cluster service-account-token path -- never mixed with, or
     overwritten by, a read from any OTHER credential-path source (.ssh, .aws, a
@@ -2860,7 +3347,11 @@ def _incluster_pure_tainted_names(tree: ast.AST) -> set[str]:
     other reads ~/.ssh/id_rsa, into the SAME variable -- is deliberately
     excluded here, so a mixed flow can never qualify for the exemption. C-135:
     this closes the specific smuggling attempt of dressing a real stolen
-    credential as if it shared a name with the legitimate in-cluster token."""
+    credential as if it shared a name with the legitimate in-cluster token.
+
+    *ctx*, when given, is threaded into `_cred_source_classification` so a folded
+    (path-join-assembled) credential extension of the in-cluster literal is caught
+    too -- see that function's docstring (B-830 round-2)."""
     pure: set[str] = set()
     impure: set[str] = set()
     assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
@@ -2870,7 +3361,7 @@ def _incluster_pure_tainted_names(tree: ast.AST) -> set[str]:
             targets = [t.id for t in a.targets if isinstance(t, ast.Name)]
             if not targets:
                 continue
-            classification = _cred_source_classification(a.value)
+            classification = _cred_source_classification(a.value, ctx)
             refs_impure = bool(_names_in(a.value) & impure)
             refs_pure = bool(_names_in(a.value) & pure)
             for name in targets:
@@ -5517,14 +6008,31 @@ def analyze_python(
                 continue
 
     # Taint: credential-FILE contents reaching a network sink (read secret -> send out).
-    # Cheap pre-filter on the raw source so the propagation runs only when relevant.
-    if _CRED_PATH_RE.search(source):
-        cred_tainted = _cred_tainted_names(tree)
+    # Cheap pre-filter on the raw source so the propagation runs only when relevant --
+    # widened by B-830 with a root-independent fold (see the Gate V/S/A block above
+    # _has_cred_path_const) so a credential path assembled via typed path-join
+    # construction (never spelled as one literal) still pre-filters in.
+    #
+    # B-830 round-3 (C-135): the fold algebra (_fold_fs_path/_fold_seg) now bounds its
+    # own recursion with an explicit depth counter (_FOLD_MAX_DEPTH, see its module
+    # comment) instead of relying on a try/except RecursionError here. A prior round's
+    # except-RecursionError fallback (ctx=None, literal-only credential detection) was
+    # itself a silent, undisclosed whole-file bypass: an attacker could deliberately
+    # overflow the fold with an unrelated long chain ANYWHERE else in the file (e.g. a
+    # padding arithmetic expression) and have that disable credential-path folding for
+    # every OTHER, genuinely malicious path-join elsewhere in the same file, with no
+    # UNKNOWN/degraded-engine disclosure -- strictly worse than a loud crash. With
+    # recursion now bounded inside the fold itself, an unhandled RecursionError from
+    # this call would indicate a genuinely unexpected condition and should propagate.
+    _fsctx = _FsFoldCtx(tree)
+    _folded_cred_hit = _has_folded_cred_path(tree, _fsctx)
+    if _CRED_PATH_RE.search(source) or _folded_cred_hit:
+        cred_tainted = _cred_tainted_names(tree, _fsctx)
         if cred_tainted:
             # B-415: names sourced PURELY from the in-cluster K8s service-account
             # token -- computed once per file, only when there's anything credential-
             # tainted at all, since both helpers re-walk the whole tree.
-            incluster_pure = _incluster_pure_tainted_names(tree)
+            incluster_pure = _incluster_pure_tainted_names(tree, _fsctx)
             str_map = _simple_str_const_assigns(tree) if incluster_pure else {}
             for node in ast.walk(tree):
                 if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
@@ -5545,6 +6053,30 @@ def analyze_python(
                     getattr(node, "lineno", 0),
                     "credential-file contents flow into a network sink (read secret -> send out)",
                 )
+
+    # B-830 round-4: ctx.truncated (see _FsFoldCtx.__init__) counts how many fold calls
+    # hit _FOLD_MAX_DEPTH and gave up on their own subtree -- round-3 added the counter
+    # but left it write-only (observability that nobody observed), which is exactly the
+    # "silent, undisclosed... never a fake PASS/FAIL, report UNKNOWN instead" gap this
+    # module's own doctrine forbids elsewhere. Disclosed here in the same SHAPE
+    # AST_UNANALYZABLE uses (per-file ASTFinding, severity "unknown", lineno 0) but
+    # under its own rule id -- deliberately NOT folded into AST_UNANALYZABLE itself:
+    # that rule means "parse failed, nothing in this file was analyzed" and several
+    # callers (checks/_content.py, checks/_vet.py, checks/_lifecycle.py,
+    # checks/_mcp.py) key on that exact string to route a file to their "unreadable"
+    # bucket. A fold truncation means the opposite -- the file parsed and was analyzed,
+    # only one or more deeply-nested path/value expressions exceeded the recursion cap
+    # -- so reusing AST_UNANALYZABLE would misrepresent a mostly-covered file as
+    # entirely unreadable to every one of those consumers.
+    if _fsctx.truncated:
+        add(
+            "AST_FOLD_TRUNCATED",
+            "unknown",
+            0,
+            f"{filename}: {_fsctx.truncated} path/value fold(s) in this file exceeded "
+            "the recursion depth cap and were left unresolved -- coverage of deeply-"
+            "nested path construction is incomplete for this file",
+        )
 
     # F-049: env-var / agent-config secret reaching a network sink (SkillSpector E2 env
     # harvesting + E1 external transmission).  Severity is "info" and the checks engine routes it
@@ -6978,7 +7510,7 @@ def _imported_sink_names(tree: ast.AST) -> tuple:
     return net_names, exec_names
 
 
-def _capability_families_in_tree(tree: ast.AST) -> set:
+def _capability_families_in_tree(tree: ast.AST, ctx: "_FsFoldCtx | None" = None) -> set:
     fams: set = set()
     # Same alias resolution the engine's own rules use (B-422/C-348): without it
     # `s = socket.socket(); s.connect(...)` and `sess = requests.Session(); sess.put(...)`
@@ -7018,7 +7550,7 @@ def _capability_families_in_tree(tree: ast.AST) -> set:
             fams.add("write")
         if name in _CAP_PATHLIB_READ_ATTRS:
             fams.add("read")
-        if _has_cred_path_const(node):
+        if _has_cred_path_const(node, ctx):
             fams.add("cred")
     return fams
 
@@ -7052,7 +7584,12 @@ def capability_families(sources) -> set:
             tree = ast.parse(src)
         except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
             continue
-        fams |= _capability_families_in_tree(tree)
+        # B-830 round-3 (C-135): the fold (_fold_fs_path/_fold_seg) now bounds its own
+        # recursion with an explicit depth counter (_FOLD_MAX_DEPTH) -- see that
+        # constant's module comment and the analyze_python call site above for why the
+        # prior except-RecursionError-here fallback (ctx=None) was itself a silent,
+        # undisclosed capability-detection bypass and has been removed.
+        fams |= _capability_families_in_tree(tree, _FsFoldCtx(tree))
     return fams
 
 

@@ -224,6 +224,21 @@ def _scan_loose_plugin_python(
             # empty list precisely so a caller can tell "clean" from "could not look".
             unparseable = "the AST layer could not parse it"
             continue
+        if af.rule == "AST_FOLD_TRUNCATED":
+            # B-830 round-6: a pure coverage-disclosure note (severity "unknown",
+            # never fail-capable per `ast_finding_is_fail_capable` in checks/_vet.py --
+            # deliberately NOT folded into AST_UNANALYZABLE, see skillast.py's own
+            # comment on that finding) saying the file WAS parsed and analysed, only
+            # one or more deeply-nested path/value folds were left unresolved. Unlike
+            # every other rule reaching this loop, it is not a security signal at all
+            # -- letting it fall into the `else` branch below would land it in
+            # `py_signals`, which floors this plugin's verdict at WARN (see the call
+            # site), misreading "one expression's coverage is partial" as evidence of
+            # danger and dragging an otherwise-clean plugin down on a note that
+            # carries no finding of its own. Skipped outright, and not counted as a
+            # gap either -- the file WAS analysed, so it stays out of
+            # `unanalysed_code` too, the same distinction skillast.py itself draws.
+            continue
         loc = f"{rel}:{af.lineno}"
         if ast_finding_is_fail_capable(af):
             subs.append(_finding(
