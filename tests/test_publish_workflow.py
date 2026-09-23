@@ -1256,11 +1256,32 @@ def test_previous_release_gate_passes_when_the_previous_release_is_live(tmp_path
     """
     run = _run_previous_release_gate(tmp_path, "200", tag_mode="ok", rel_mode="ok")
     assert run.proc.returncode == 0, f"stdout: {run.proc.stdout!r}\nstderr: {run.proc.stderr!r}"
-    assert "Previous release 9.9.8 is live on ClawHub." in run.proc.stdout
+    assert "Previous release 9.9.8 is live on ClawHub and its GitHub Release exists." in run.proc.stdout
     assert _verdicts_in(run.proc.stdout) == []
-    assert run.gh_calls == [] and run.clawhub_calls == [], (
-        "A live previous release needs no tag/release lookup and no scan diagnosis."
+    assert run.gh_calls == ["release view v9.9.8 --repo owner/repo"] and run.clawhub_calls == [], (
+        "A live previous release needs exactly one GitHub Release lookup, no tag lookup "
+        "and no scan diagnosis."
     )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_previous_release_gate_live_but_release_missing_warns_and_passes(tmp_path) -> None:
+    """ClawHub 200 + gh's own `release not found`: the documented recovery-gap warning,
+    never a failure of the CURRENT release."""
+    run = _run_previous_release_gate(tmp_path, "200", tag_mode="ok", rel_mode="not_found")
+    assert run.proc.returncode == 0, f"stdout: {run.proc.stdout!r}\nstderr: {run.proc.stderr!r}"
+    assert "has NO" in run.proc.stdout and "NOT the never-published case" in run.proc.stdout
+    assert "could not be checked" not in run.proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_previous_release_gate_live_but_release_lookup_failed_is_not_reported_missing(tmp_path) -> None:
+    """ClawHub 200 + a gh lookup failure (rate limit): must NOT claim the GitHub Release
+    is missing, which is the misreport the 404 path already refuses to make."""
+    run = _run_previous_release_gate(tmp_path, "200", tag_mode="ok", rel_mode="lookup_fail")
+    assert run.proc.returncode == 0, f"stdout: {run.proc.stdout!r}\nstderr: {run.proc.stderr!r}"
+    assert "could not be checked" in run.proc.stdout
+    assert "has NO" not in run.proc.stdout
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
@@ -2631,7 +2652,7 @@ def test_previous_release_gate_flags_a_missing_github_release_even_when_live() -
     # satisfied by the unrelated `gh release view` call in the 404 trichotomy below
     # (already covered by test_previous_release_gate_separates_never_released_from_
     # never_surfaced).
-    trichotomy_start = text.index("A 404 has THREE causes")
+    trichotomy_start = text.index('if [ "$CODE" != "404" ]; then')
     branch = text[live_branch_start:trichotomy_start]
 
     assert 'gh release view "v${PREV}"' in branch, (
@@ -2675,7 +2696,7 @@ def test_previous_release_gate_shell_warns_on_live_but_unreleased_previous(
     # gh: `release view` fails (no GitHub Release for PREV); anything else succeeds.
     (bindir / "gh").write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = "release" ] && [ "$2" = "view" ]; then exit 1; fi\n'
+        'if [ "$1" = "release" ] && [ "$2" = "view" ]; then echo "release not found" >&2; exit 1; fi\n'
         "exit 0\n",
         encoding="utf-8",
     )

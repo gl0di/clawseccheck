@@ -309,8 +309,18 @@ jobs:
             # from the ordinary case instead of reporting one blanket "fine" for both:
             # this is never fatal for the CURRENT release (the older release is not
             # this run's problem to fix), but it must not read as fully healthy either.
-            if gh release view "v${PREV}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            # Same discriminator as the 404 path below: only gh's own `release not found`
+            # means the release is missing. A rate limit, network or auth failure is a
+            # lookup failure and must not be reported as a missing release.
+            if LIVE_RELEASE_ERR="$(gh release view "v${PREV}" --repo "${GITHUB_REPOSITORY}" 2>&1)"; then
               echo "Previous release ${PREV} is live on ClawHub and its GitHub Release exists."
+            elif ! printf '%s' "$LIVE_RELEASE_ERR" | grep -qi 'release not found'; then
+              echo "::warning::Previous release ${PREV} is live on ClawHub, but whether its" \
+                   "GitHub Release exists could not be checked — the gh lookup itself failed" \
+                   "(rate limit, network, or auth), which is not a verdict on ${PREV}. This" \
+                   "does not block the current release; check by hand with: gh release view" \
+                   "v${PREV}."
+              echo "  release check: ${LIVE_RELEASE_ERR}"
             else
               echo "::warning::Previous release ${PREV} is live on ClawHub but has NO" \
                    "GitHub Release attached, so its signed SHA256SUMS.txt/.bundle are not" \
