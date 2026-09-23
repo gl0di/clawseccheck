@@ -849,3 +849,42 @@ class TestAgentAuthProfileStoreFifoGuard:
         assert ctx.agent_auth_profile_store_length == len(payload)
         finding = check_trifecta(ctx)
         assert finding.status == WARN, finding.detail
+
+    def test_deep_symlink_chain_main_db_does_not_crash_collect(self, tmp_path):
+        """Round 5 BLOCKING fix. On Python 3.12 specifically, ``os.path.realpath``'s
+        ``posixpath._joinrealpath`` recurses once per symlink in the chain; a long
+        enough chain (~1,500 hops here) blew CPython's own recursion limit and raised
+        ``RecursionError`` straight out of ``_refuse_non_regular_sqlite_paths``, past
+        ``_open_and_verify_table``'s ``except sqlite3.Error`` (``RecursionError`` is
+        not a ``sqlite3.Error``), and out of ``collect()`` entirely -- crashing the
+        whole audit rather than merely hedging this one agent's store as unreadable.
+        Not reproduced on 3.9/3.14, whose ``realpath`` implementations do not share
+        3.12's per-hop recursion; on those interpreters this test still exercises the
+        fix's code path (the ``try/except (OSError, RecursionError)`` around the
+        ``realpath`` call), it just cannot demonstrate the ORIGINAL crash there.
+        """
+        home = tmp_path / "h"
+        home.mkdir(parents=True)
+        (home / "openclaw.json").write_text(json.dumps(CFG))
+        os.chmod(home / "openclaw.json", 0o600)
+        agent_dir = home / "agents" / "main" / "agent"
+        agent_dir.mkdir(parents=True)
+
+        # A chain of ~1,500 relative symlinks, each pointing at the next, headed by
+        # the exact path `collect()` looks for (`openclaw-agent.sqlite`). The far end
+        # is left dangling (points at a name that is never created) -- irrelevant,
+        # since a chain this long blows the recursion limit long before resolution
+        # would ever reach it.
+        chain_length = 1500
+        next_name = "chain_ghost"  # dangling -- never created
+        for i in range(chain_length - 1, 0, -1):
+            name = f"chain_{i}"
+            os.symlink(next_name, agent_dir / name)
+            next_name = name
+        os.symlink(next_name, agent_dir / "openclaw-agent.sqlite")
+
+        ctx, elapsed = self._collect_bounded(home)
+        assert elapsed < 10, f"collect() took {elapsed:.1f}s -- expected a few seconds"
+        # Refused as unreadable, exactly like the FIFO cases above -- not crashed.
+        assert ctx.agent_auth_profile_store_read is False
+        assert ctx.agent_auth_profile_store_length is None

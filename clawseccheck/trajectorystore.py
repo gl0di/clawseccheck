@@ -372,21 +372,43 @@ def _refuse_non_regular_sqlite_paths(db_path: Path) -> None:
     this symlink but is cheap insurance against a future caller that might). A
     dangling/broken symlink's realpath simply fails the subsequent ``os.stat`` with
     ``FileNotFoundError``, which this function already treats as "missing sidecar,
-    not an error" -- no special-casing needed.
+    not an error".
+
+    **Round 5 (2026-09-23): the ``os.path.realpath`` call above DOES need
+    special-casing after all.** On Python 3.12 specifically, ``realpath``'s
+    ``posixpath._joinrealpath`` recurses once per symlink in the chain; a long
+    enough chain of symlinks (~991+ hops) blows the interpreter's recursion limit
+    and raises ``RecursionError`` -- straight out of this function, past
+    ``_open_readonly``, past ``_open_and_verify_table`` (whose ``except
+    sqlite3.Error`` never sees it, since ``RecursionError`` is not a
+    ``sqlite3.Error``), and out of ``collect()`` entirely, crashing the whole
+    audit. (Not reproduced on 3.9 or 3.14 -- their realpath implementations do not
+    share 3.12's per-hop recursion.) Closed by wrapping the ``os.path.realpath``
+    call itself in ``try/except (OSError, RecursionError)`` and re-raising as
+    ``sqlite3.OperationalError``, which ``_open_and_verify_table``'s existing
+    ``except sqlite3.Error`` already catches -- no further plumbing needed.
 
     **Documented residual (TOCTOU), not fixed here**: nothing stops a live attacker
-    from swapping a regular file for a FIFO in the window between this check and the
+    from swapping a regular file for a FIFO -- or retargeting a symlink to a
+    different chain length or a different object entirely -- in the window between
+    this check (including the ``realpath`` resolution above) and the
     ``sqlite3.connect`` call right after it. This is not closed by this guard; closing
     it would need a bounded-wait pattern around the actual open itself (e.g. running
     the open-and-query in a daemon thread and joining it with a time limit from the
     caller) -- achievable with stdlib-only tooling, but out of scope for this fix (a
     separate follow-up task). This narrows the window from "unbounded hang on any
-    request" to "requires racing this exact stat-then-open gap", it does not close it.
+    request" to "requires racing this exact resolve/stat-then-open gap", it does
+    not close it.
     """
     candidates = [db_path] + [
         Path(str(db_path) + suffix) for suffix in _SQLITE_SIDECAR_SUFFIXES
     ]
-    real_path = Path(os.path.realpath(db_path))
+    try:
+        real_path = Path(os.path.realpath(db_path))
+    except (OSError, RecursionError) as exc:
+        raise sqlite3.OperationalError(
+            f"could not resolve {db_path} before opening it: {exc}"
+        ) from exc
     if real_path != db_path:
         candidates += [real_path] + [
             Path(str(real_path) + suffix) for suffix in _SQLITE_SIDECAR_SUFFIXES
