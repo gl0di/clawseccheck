@@ -2161,6 +2161,934 @@ def _name_rebound_anywhere(tree: ast.AST, name: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# B-863: TT5 vararg/param wrapper guard, made position-aware without an
+# unsound Q-content/Q-position conflation (see the design note above
+# `_param_argv_call_sites` for the history of the three retracted rounds this
+# replaces). Two tiers:
+#
+#   Tier 1 (content-independent): the wrapper's own body reassigns/mutates the
+#   parameter, but every REAL call site passes only literal constants, AND no
+#   external taint reaches the parameter through anything OTHER than its own
+#   trivial per-function parameter taint (`_b863_m_for` -- the same fixpoint
+#   as `_external_tainted_names`, but with the parameter excluded from its own
+#   seed so the question becomes "is there some OTHER source"), AND the
+#   parameter never escapes to an in-file callee or a container. When all
+#   three hold, POSITION cannot matter -- nothing attacker-controlled is ever
+#   in the value at all -- so the call is exactly as safe as the byte-
+#   identical inline call, matching the B13 argument-injection rule (info).
+#
+#   Tier 2 (position-only, once tier 1 does not apply): a closed grammar of
+#   "channels" that can touch the parameter -- reassignment to a head-
+#   preserving expression (H) or a fresh literal (F, optionally F+X),
+#   .append()/.extend()/.insert(len(P), x)/a bare .copy(), and read-only uses
+#   -- classifies whether the final value's argv[0] is provably the SAME
+#   program the call site (or a fresh literal) names, and whether any
+#   attacker-reachable content ever lands after a shell/interpreter argv[0].
+#   Any shape outside that grammar (position-unsafe methods, subscript/slice
+#   stores, aliasing into a mutated name, an in-file callee, ...) is
+#   conservatively unresolvable -> crit, the same "unresolvable stays crit"
+#   discipline `_param_argv_call_sites` itself already uses.
+#
+# Deviation from the architect's design: T1b's "propagate_mutation" fixpoint
+# is implemented here as `_b863_m_for`, a wrapper that calls the EXISTING,
+# unmodified `_external_tainted_names` repeatedly with an expanding seed
+# (mirroring the architect's own proto2.py prototype almost verbatim), rather
+# than adding an internal `propagate_mutation` flag inside
+# `_external_tainted_names` itself. `_external_tainted_names` is relied on by
+# TT4/SSRF as well as TT5; keeping it byte-for-byte unchanged and building the
+# mutation-aware fixpoint as a pure wrapper removes any risk of a regression
+# there, at the cost of one extra small function. Confirmed to reproduce
+# proto2.py's per-case answer on all 57 harness cases.
+_B863_HEAD_WRAP_CALLS = frozenset({"list", "tuple"})
+_B863_IDENTITY_MAP_NAMES = frozenset({"str"})
+_B863_IDENTITY_MAP_ATTRS = frozenset({"fspath", "fsdecode"})
+# Cost cap on conditional branch-merge shape multiplication -- see the `ast.If`
+# branch of `_b863_process_one`. The 57-case matrix never exceeds 1 independent
+# conditional; this task's own real-corpus differential found a legitimate,
+# common idiom (a CLI-argument builder with several independent `if opt:
+# cmd.append(...)` guards) with up to 6, i.e. 64 shapes -- 512 keeps meaningful
+# headroom above that (9 independent conditionals) while still bounding a truly
+# pathological file's cost.
+_B863_MAX_SHAPES = 512
+
+
+class _B863OutOfDomain(Exception):
+    """Raised by the tier-2 channel walk the instant a statement touches a
+    tracked name in a shape outside the recognised H/F/append/extend/insert(
+    len(P))/copy grammar -- caught by both the tier-2 collector (-> crit) and
+    T1c (-> only escape-shaped reasons disprove T1c; any other reason leaves
+    T1a/T1b free to still clear the call as content-safe)."""
+
+
+class _B863Shape:
+    """One possible post-processing shape of a tracked parameter's value:
+    `fresh` False means "whatever the call site's own R_c is" (a head-
+    preserving derivation); True means a fresh literal starting at `a0` (its
+    own program-name element). `content` accumulates, in order, every
+    append/extend/insert(len(P),x) addition and (for a fresh literal) the
+    literal's own remaining elements. `refs_callsite` is set when a fresh
+    literal's construction referenced the tracked name directly (`F + P`) --
+    at runtime that tail IS the call site's own R_c, so R_c is folded into
+    `content` for that shape's own evaluation (never a blanket taint check on
+    the parameter's own name, which would be trivially "tainted" via ordinary
+    per-function parameter taint and defeat the whole point of this design)."""
+
+    __slots__ = ("fresh", "a0", "content", "refs_callsite")
+
+    def __init__(self, fresh, a0, content, refs_callsite):
+        self.fresh = fresh
+        self.a0 = a0
+        self.content = list(content)
+        self.refs_callsite = refs_callsite
+
+    def add_content(self, node):
+        self.content.append(node)
+
+
+def _b863_attr_is_os_identity_map(node):
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr in _B863_IDENTITY_MAP_ATTRS
+        and _attr_base(node.value) == "os"
+    )
+
+
+def _b863_classify_head(expr, names, tree):
+    """True if *expr* provably preserves whatever argv[0] one of `names` (the
+    tracked parameter and its plain aliases) currently has -- structural, not
+    a value simulation: every branch reduces to "does the innermost reference
+    resolve to a tracked name". Grammar: P; list(H)/tuple(H); H.copy(); H[:]
+    (a full slice only); H+X; [*H, ...]; [t for t in H] / [g(t) for t in H]
+    for a single, filterless, synchronous generator with g one of
+    str/os.fspath/os.fsdecode."""
+    if isinstance(expr, ast.Name):
+        return expr.id in names
+    if isinstance(expr, ast.Call):
+        f = expr.func
+        if (
+            isinstance(f, ast.Name)
+            and f.id in _B863_HEAD_WRAP_CALLS
+            and not _name_rebound_anywhere(tree, f.id)
+            and len(expr.args) == 1
+            and not expr.keywords
+            and not any(isinstance(a, ast.Starred) for a in expr.args)
+        ):
+            return _b863_classify_head(expr.args[0], names, tree)
+        if isinstance(f, ast.Attribute) and f.attr == "copy" and not expr.args and not expr.keywords:
+            return _b863_classify_head(f.value, names, tree)
+        return False
+    if isinstance(expr, ast.Subscript):
+        sl = expr.slice
+        if isinstance(sl, ast.Slice) and sl.lower is None and sl.upper is None and sl.step is None:
+            return _b863_classify_head(expr.value, names, tree)
+        return False
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+        return _b863_classify_head(expr.left, names, tree)
+    if isinstance(expr, ast.List) and expr.elts and isinstance(expr.elts[0], ast.Starred):
+        return _b863_classify_head(expr.elts[0].value, names, tree)
+    if isinstance(expr, (ast.ListComp, ast.GeneratorExp)):
+        if len(expr.generators) != 1:
+            return False
+        gen = expr.generators[0]
+        if gen.is_async or gen.ifs:
+            return False
+        if not isinstance(gen.target, ast.Name):
+            return False
+        if not _b863_classify_head(gen.iter, names, tree):
+            return False
+        elt = expr.elt
+        if isinstance(elt, ast.Name) and elt.id == gen.target.id:
+            return True
+        if (
+            isinstance(elt, ast.Call)
+            and len(elt.args) == 1
+            and not elt.keywords
+            and isinstance(elt.args[0], ast.Name)
+            and elt.args[0].id == gen.target.id
+            and (
+                (
+                    isinstance(elt.func, ast.Name)
+                    and elt.func.id in _B863_IDENTITY_MAP_NAMES
+                    and not _name_rebound_anywhere(tree, elt.func.id)
+                )
+                or _b863_attr_is_os_identity_map(elt.func)
+            )
+        ):
+            return True
+        return False
+    return False
+
+
+def _b863_flatten_fresh(expr, names, tree):
+    """None if *expr* is not F-shaped (a non-empty, non-Starred-headed List/
+    Tuple literal, or F+X); else (a0_node, rest_nodes, references_names) --
+    `rest_nodes` is the literal's own remaining elements (flattened through a
+    nested F+F chain), and `references_names` is True the moment a tracked
+    name appears bare as the RIGHT operand of a `+` -- at runtime that is the
+    call site's own R_c (see `_B863Shape.refs_callsite`)."""
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+        left = _b863_flatten_fresh(expr.left, names, tree)
+        if left is None:
+            return None
+        a0, rest, refs = left
+        right = expr.right
+        if isinstance(right, ast.Name) and right.id in names:
+            return a0, rest, True
+        if isinstance(right, (ast.List, ast.Tuple)) and not (
+            right.elts and isinstance(right.elts[0], ast.Starred)
+        ):
+            r = _b863_flatten_fresh(right, names, tree)
+            if r is not None:
+                r_a0, r_rest, r_refs = r
+                return a0, rest + [r_a0] + r_rest, refs or r_refs
+            return a0, rest + list(right.elts), refs
+        return a0, rest + [right], refs
+    if (
+        isinstance(expr, (ast.List, ast.Tuple))
+        and expr.elts
+        and not isinstance(expr.elts[0], ast.Starred)
+    ):
+        return expr.elts[0], list(expr.elts[1:]), False
+    return None
+
+
+def _b863_classify_assign_value(value, names, tree):
+    """Classify an Assign/reassign RHS into a list of `_B863Shape` (usually
+    one; two for an IfExp / `or`-join whose branches are each H or F), or
+    None if it fits neither grammar -- the caller treats None as out of
+    domain."""
+    if isinstance(value, ast.Name) and value.id in names:
+        return [_B863Shape(False, None, [], False)]
+    fresh = _b863_flatten_fresh(value, names, tree)
+    if fresh is not None:
+        a0, rest, refs = fresh
+        return [_B863Shape(True, a0, rest, refs)]
+    if _b863_classify_head(value, names, tree):
+        return [_B863Shape(False, None, [], False)]
+    if isinstance(value, ast.IfExp):
+        left = _b863_classify_assign_value(value.body, names, tree)
+        right = _b863_classify_assign_value(value.orelse, names, tree)
+        if left is None or right is None:
+            return None
+        return left + right
+    if isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or):
+        shapes = []
+        for v in value.values:
+            s = _b863_classify_assign_value(v, names, tree)
+            if s is None:
+                return None
+            shapes.extend(s)
+        return shapes
+    return None
+
+
+def _b863_fn_bound_names(node):
+    args = node.args
+    out = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    if args.vararg:
+        out.add(args.vararg.arg)
+    if args.kwarg:
+        out.add(args.kwarg.arg)
+    return out
+
+
+def _b863_expr_escapes(node, names, tree, containers_are_escape=True):
+    """True iff a tracked name appears, anywhere within `node`, either bare
+    inside a List/Tuple/Set/Dict display (a container escape -- only when
+    `containers_are_escape`), or as a bare/starred argument to a call whose
+    callee is an in-file def/lambda/class. Used for expression positions the
+    top-level statement grammar in `_b863_process_one` does not itself walk
+    into -- an Assign's RHS when the TARGET is some other, unrelated name, a
+    conditional's test/branches, a Raise/Assert -- where a tracked name is far
+    more often just read (a comparison, an f-string, an argument to an
+    ordinary/external call) than genuinely escaping, so those reads must NOT
+    be flagged.
+
+    `containers_are_escape=False` (only `ast.Return` passes this -- see
+    `_b863_process_one`) is a real-corpus finding, not a matrix shape:
+    packaging the tracked name into a diagnostic/result dict/list that is
+    then RETURNED (`return {"cmd": cmd, "ok": ok}`) is a common, benign
+    pattern (confirmed on this machine's own `~/.openclaw` corpus, e.g. a
+    subprocess-wrapper helper returning `{"cmd": cmd, "present": False, ...}`
+    in its exception branches) -- by the time the function returns, whatever
+    reached the SINK earlier in the same function already reached it; nothing
+    about a later, terminal `return` can retroactively change that. The
+    in-file-callee check still applies (`return poison(cmd)` still escapes)."""
+    for n in ast.walk(node):
+        if containers_are_escape and isinstance(n, (ast.List, ast.Tuple, ast.Set)):
+            for e in n.elts:
+                if isinstance(e, ast.Name) and e.id in names:
+                    return True
+                if isinstance(e, ast.Starred) and isinstance(e.value, ast.Name) and e.value.id in names:
+                    return True
+        elif containers_are_escape and isinstance(n, ast.Dict):
+            for k, v in zip(n.keys, n.values):
+                for e in (k, v):
+                    if isinstance(e, ast.Name) and e.id in names:
+                        return True
+        elif isinstance(n, ast.Call):
+            touched = any(
+                (isinstance(a, ast.Name) and a.id in names)
+                or (isinstance(a, ast.Starred) and isinstance(a.value, ast.Name) and a.value.id in names)
+                for a in n.args
+            ) or any(isinstance(kw.value, ast.Name) and kw.value.id in names for kw in n.keywords)
+            if touched:
+                callee_name = n.func.id if isinstance(n.func, ast.Name) else None
+                if callee_name is not None and any(
+                    isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and d.name == callee_name
+                    for d in ast.walk(tree)
+                ):
+                    return True
+    return False
+
+
+def _b863_is_isinstance_str_bytes_guard(stmt, names, tree):
+    """The one deliberate tier-2 skip besides a rebinding nested scope: `if
+    isinstance(P, str)` / `(..., bytes)` / `(str, bytes)` / `str | bytes` --
+    every value in the H/F domain is already a list or tuple, so a branch
+    that only fires when it is a STRING can never affect this analysis."""
+    if not isinstance(stmt, ast.If):
+        return False
+    t = stmt.test
+    if not (isinstance(t, ast.Call) and isinstance(t.func, ast.Name) and t.func.id == "isinstance"):
+        return False
+    if _name_rebound_anywhere(tree, "isinstance"):
+        return False
+    if len(t.args) != 2 or not isinstance(t.args[0], ast.Name) or t.args[0].id not in names:
+        return False
+    ok = {"str", "bytes"}
+
+    def names_ok(n):
+        if isinstance(n, ast.Name):
+            return n.id in ok
+        if isinstance(n, ast.Tuple):
+            return all(isinstance(e, ast.Name) and e.id in ok for e in n.elts)
+        if isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitOr):
+            return names_ok(n.left) and names_ok(n.right)
+        return False
+
+    return names_ok(t.args[1])
+
+
+def _b863_process_stmts(stmts, names, tree, shapes):
+    for stmt in stmts:
+        shapes = _b863_process_one(stmt, names, tree, shapes)
+    return shapes
+
+
+def _b863_process_one(stmt, names, tree, shapes):
+    """Classify one statement's effect on the tracked-name set `names`
+    (mutated in place as aliases are discovered) and the current `shapes`.
+    Raises `_B863OutOfDomain(("reason", stmt))` for anything outside the
+    recognised grammar -- every branch below either returns updated shapes or
+    raises; see the module comment above `_B863OutOfDomain` for how tier 2
+    and T1c each use the reason."""
+    if _b863_is_isinstance_str_bytes_guard(stmt, names, tree):
+        return _b863_process_stmts(stmt.orelse, names, tree, shapes)
+
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+        tgt = stmt.targets[0]
+        if isinstance(tgt, ast.Name):
+            if tgt.id in names:
+                new_shapes = _b863_classify_assign_value(stmt.value, names, tree)
+                if new_shapes is None:
+                    raise _B863OutOfDomain(("bad_reassign", stmt))
+                return new_shapes
+            if _b863_classify_head(stmt.value, names, tree):
+                names.add(tgt.id)  # new alias of the SAME tracked value
+                return shapes
+            # target is some OTHER, unrelated name -- the RHS is free to READ
+            # a tracked name (e.g. `result = subprocess.run(cmd, ...)`,
+            # `msg = f"{cmd}"`); only a genuine escape (bare inside a new
+            # container, or forwarded to an in-file callee) is out of domain.
+            if _b863_expr_escapes(stmt.value, names, tree):
+                raise _B863OutOfDomain(("escape_into_container", stmt))
+            return shapes
+        # target is Subscript/Attribute/Tuple/List -- any tracked-name touch
+        # here (the base being stored into, or the value stored) is out of
+        # domain (covers `P[:] = ...`, `P[0] = ...`, `obj.attr = P`, ...).
+        if _names_in(tgt) & names or _names_in(stmt.value) & names:
+            raise _B863OutOfDomain(("store_target", stmt))
+        return shapes
+
+    if isinstance(stmt, ast.AugAssign):
+        if isinstance(stmt.target, ast.Name) and stmt.target.id in names and isinstance(stmt.op, ast.Add):
+            for sh in shapes:
+                sh.add_content(stmt.value)
+            return shapes
+        if _names_in(stmt.target) & names or _names_in(stmt.value) & names:
+            raise _B863OutOfDomain(("augassign", stmt))
+        return shapes
+
+    if isinstance(stmt, ast.Delete):
+        for t in stmt.targets:
+            if _names_in(t) & names:
+                raise _B863OutOfDomain(("delete", stmt))
+        return shapes
+
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        call = stmt.value
+        f = call.func
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in names:
+            attr = f.attr
+            if attr == "append" and len(call.args) == 1 and not call.keywords:
+                for sh in shapes:
+                    sh.add_content(call.args[0])
+                return shapes
+            if attr == "extend" and len(call.args) == 1 and not call.keywords:
+                arg = call.args[0]
+                if isinstance(arg, (ast.List, ast.Tuple)) and not (
+                    arg.elts and isinstance(arg.elts[0], ast.Starred)
+                ):
+                    for sh in shapes:
+                        for e in arg.elts:
+                            sh.add_content(e)
+                else:
+                    for sh in shapes:
+                        sh.add_content(arg)
+                return shapes
+            if attr == "insert" and len(call.args) == 2:
+                lenarg = call.args[0]
+                if (
+                    isinstance(lenarg, ast.Call)
+                    and isinstance(lenarg.func, ast.Name)
+                    and lenarg.func.id == "len"
+                    and not _name_rebound_anywhere(tree, "len")
+                    and len(lenarg.args) == 1
+                    and isinstance(lenarg.args[0], ast.Name)
+                    and lenarg.args[0].id in names
+                ):
+                    for sh in shapes:
+                        sh.add_content(call.args[1])
+                    return shapes
+                raise _B863OutOfDomain(("insert_not_len", stmt))
+            if attr == "copy" and not call.args and not call.keywords:
+                return shapes  # bare, discarded -- a no-op
+            raise _B863OutOfDomain(("other_method", stmt))
+        # unbound `list.<method>(nm, ...)` / `tuple.<method>(nm, ...)`.
+        if (
+            isinstance(f, ast.Attribute)
+            and isinstance(f.value, ast.Name)
+            and f.value.id in ("list", "tuple")
+            and not _name_rebound_anywhere(tree, f.value.id)
+            and call.args
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id in names
+        ):
+            raise _B863OutOfDomain(("unbound_method", stmt))
+        # a bare tracked name passed (directly, or **starred) to an in-file
+        # def/lambda/class -- escape; to anything else, read-only (an
+        # accepted residual -- see the module comment above
+        # `_B863OutOfDomain`).
+        touched = any(
+            isinstance(a, ast.Name) and a.id in names
+            for a in list(call.args) + [kw.value for kw in call.keywords]
+        )
+        starred_touched = any(
+            isinstance(a, ast.Starred) and isinstance(a.value, ast.Name) and a.value.id in names
+            for a in call.args
+        )
+        if touched or starred_touched:
+            callee_name = f.id if isinstance(f, ast.Name) else None
+            if callee_name is not None and any(
+                isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name == callee_name
+                for n in ast.walk(tree)
+            ):
+                raise _B863OutOfDomain(("in_file_callee", stmt))
+        return shapes
+
+    if isinstance(stmt, ast.If):
+        # A branch-merge for a tracked name touched inside a plain conditional
+        # (the isinstance guard is handled above): "branch taken" (`body`,
+        # processed on its own copy of names/shapes -- ordinary reads resolve
+        # to unchanged shapes via the very same statement grammar, and an
+        # actual reassignment produces new shapes exactly as it would
+        # unconditionally) and "branch not taken" (`orelse`, or the ORIGINAL
+        # shapes unchanged when there is no `orelse`) are both kept as
+        # possibilities, like an IfExp's two branches. A branch-local alias
+        # does not propagate past the `if` (an accepted, unexercised scope
+        # limit -- see deviations).
+        if not (
+            _names_in(stmt.test) & names
+            or any(_names_in(s) & names for s in stmt.body)
+            or any(_names_in(s) & names for s in stmt.orelse)
+        ):
+            return shapes
+        if _b863_expr_escapes(stmt.test, names, tree):
+            raise _B863OutOfDomain(("conditional_escape", stmt))
+        # Cost cap: each independent conditional doubles the shape count.
+        # Past this cap, stop branching and fall back to conservative
+        # out-of-domain rather than let a pathological file with many
+        # independent `if`s reach an unbounded shape count -- the same
+        # "unresolvable/unresolved stays crit" discipline `_param_argv_
+        # call_sites` itself already uses for its own cost caps.
+        if len(shapes) * 2 > _B863_MAX_SHAPES:
+            raise _B863OutOfDomain(("too_many_branches", stmt))
+        body_shapes = _b863_process_stmts(
+            list(stmt.body), set(names),
+            tree, [_B863Shape(sh.fresh, sh.a0, sh.content, sh.refs_callsite) for sh in shapes],
+        )
+        if stmt.orelse:
+            orelse_shapes = _b863_process_stmts(
+                list(stmt.orelse), set(names),
+                tree, [_B863Shape(sh.fresh, sh.a0, sh.content, sh.refs_callsite) for sh in shapes],
+            )
+        else:
+            orelse_shapes = shapes
+        return body_shapes + orelse_shapes
+
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        # A nested closure: descend (it can still mutate a tracked name by
+        # reference) unless its OWN signature rebinds that name.
+        if names & _b863_fn_bound_names(stmt):
+            return shapes
+        return _b863_process_stmts(stmt.body, names, tree, shapes)
+
+    if isinstance(stmt, (ast.For, ast.AsyncFor)):
+        # Iterating OVER a tracked name (`for a in cmd:`) or its `iter`
+        # otherwise merely reading one (`for a in enumerate(cmd):`) is a
+        # read, not a mutation -- recurse into the body/orelse with the full
+        # statement grammar rather than blanket-refusing the instant the
+        # tracked name is merely mentioned in a loop (a real-corpus false
+        # positive: a subprocess wrapper's own SINK CALL living inside a
+        # `for`/`try`/`with` -- see the `try`/`with` cases below for the
+        # concrete repro). A genuine escape in `iter` (e.g. `poison(cmd)`
+        # used as the iterable) still refuses.
+        if _b863_expr_escapes(stmt.iter, names, tree):
+            raise _B863OutOfDomain(("loop_touch", stmt))
+        return _b863_process_stmts(stmt.body + stmt.orelse, names, tree, shapes)
+
+    if isinstance(stmt, ast.While):
+        if _b863_expr_escapes(stmt.test, names, tree):
+            raise _B863OutOfDomain(("loop_touch", stmt))
+        return _b863_process_stmts(stmt.body + stmt.orelse, names, tree, shapes)
+
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        for item in stmt.items:
+            if _b863_expr_escapes(item.context_expr, names, tree):
+                raise _B863OutOfDomain(("with_touch", stmt))
+        return _b863_process_stmts(stmt.body, names, tree, shapes)
+
+    if isinstance(stmt, ast.Try):
+        # The try/except/else/finally bodies get the full statement grammar
+        # too -- a `try: subprocess.run(cmd, ...) except OSError: ...` (the
+        # single most idiomatic way to call subprocess at all) must not be
+        # treated as out of domain merely because the SINK CALL ITSELF (a
+        # read-only reference, already correctly classified by the Expr/Call
+        # branch above) lives inside the try. Confirmed via this task's own
+        # real-corpus differential (cloudinit's `_stream_command_output_to_
+        # file`, an ngs-analysis skill's `run_probe`): both wrap their own
+        # sink call in exactly this shape and were false-positive-flagged by
+        # the earlier, blunt "any touch inside try -> out of domain" rule.
+        shapes = _b863_process_stmts(stmt.body, names, tree, shapes)
+        for h in stmt.handlers:
+            if h.type is not None and _b863_expr_escapes(h.type, names, tree):
+                raise _B863OutOfDomain(("try_touch", stmt))
+            shapes = _b863_process_stmts(h.body, names, tree, shapes)
+        shapes = _b863_process_stmts(stmt.orelse, names, tree, shapes)
+        shapes = _b863_process_stmts(stmt.finalbody, names, tree, shapes)
+        return shapes
+
+    if isinstance(stmt, ast.Return):
+        # A returned container (`return {"cmd": cmd, ...}`) is not an escape
+        # -- see `_b863_expr_escapes`'s own docstring; an in-file callee still
+        # is (`return poison(cmd)`).
+        if _b863_expr_escapes(stmt, names, tree, containers_are_escape=False):
+            raise _B863OutOfDomain(("escape_into_container", stmt))
+        return shapes
+
+    if isinstance(stmt, (ast.Raise, ast.Assert)):
+        # Read-only positions (an exception message, an assertion condition/
+        # message) -- still checked for a genuine escape (e.g.
+        # `raise Bad(poison(cmd))`), never flagged for a plain read
+        # (`raise RuntimeError(f"... {cmd} ...")`).
+        if _b863_expr_escapes(stmt, names, tree):
+            raise _B863OutOfDomain(("escape_into_container", stmt))
+        return shapes
+
+    if isinstance(stmt, ast.ClassDef):
+        if _names_in(stmt) & names:
+            raise _B863OutOfDomain(("classdef_touch", stmt))
+        return shapes
+
+    # Any statement kind not explicitly handled above: read-only mentions are
+    # fine (the same `_b863_expr_escapes` standard as Assign-to-other-target
+    # and Raise/Assert), a genuine escape still is not.
+    if _b863_expr_escapes(stmt, names, tree):
+        raise _B863OutOfDomain(("unhandled_stmt", stmt))
+    return shapes
+
+
+def _b863_collect_channels(fn, param_name, tree):
+    """Returns ('none', None, {param_name}) when the parameter is never
+    touched in `fn`'s own body at all (the caller's pre-existing, unchanged
+    behaviour applies), ('out_of_domain', reason, names) when tier 2 must
+    give crit unconditionally, or ('shapes', [_B863Shape, ...], names)."""
+    names = {param_name}
+    touched_anywhere = any(
+        isinstance(n, ast.Name) and n.id == param_name for n in ast.walk(fn) if n is not fn
+    )
+    if not touched_anywhere:
+        return "none", None, names
+    shapes = [_B863Shape(False, None, [], False)]
+    try:
+        shapes = _b863_process_stmts(fn.body, names, tree, shapes)
+    except _B863OutOfDomain as e:
+        return "out_of_domain", e.args[0], names
+    return "shapes", shapes, names
+
+
+def _b863_resolve_call_site(expr, tree, owner_map):
+    """The call-site counterpart of the tier-2 walk above: resolves a bound
+    call-site expression to its own flat argv elements, `.append()`/
+    `.extend()` mutations on the CALL SITE's own local variable included
+    (B-863, C-135: a naive one-shot `_single_list_bindings_local`-style
+    resolution -- which only tracks the initial literal binding and stops --
+    would silently drop a later `c.append(os.environ["X"]); run(c)` at the
+    call site, wrongly certifying the whole call fixed; see the harness's
+    N7 case). Returns ("literal", elts) for an inline List/Tuple, ("resolved",
+    elts) for a Name resolved this way, or ("unresolvable", None)."""
+    if isinstance(expr, (ast.List, ast.Tuple)) and expr.elts and not isinstance(expr.elts[0], ast.Starred):
+        return "literal", list(expr.elts)
+    if isinstance(expr, ast.Name):
+        owner = owner_map.get(expr)
+        scope = owner if owner is not None else None
+        stmts = list(scope.body) if scope is not None and hasattr(scope, "body") else []
+        # Only the statements STRICTLY BEFORE the one containing the call site
+        # itself matter -- `expr` (e.g. `argv` in `run(argv)`) lives inside the
+        # very call this resolves, and `run` is almost always an in-file def,
+        # so walking past it would misfire the in-file-callee escape check on
+        # the call site's own invocation rather than on some OTHER escape.
+        for i, s in enumerate(stmts):
+            if any(n is expr for n in ast.walk(s)):
+                stmts = stmts[:i]
+                break
+        names = {expr.id}
+        shapes = [_B863Shape(False, None, [], False)]
+        try:
+            shapes = _b863_process_stmts(stmts, names, tree, shapes)
+        except _B863OutOfDomain:
+            return "unresolvable", None
+        if not shapes or any(not sh.fresh or sh.refs_callsite for sh in shapes):
+            return "unresolvable", None
+        # A conditional (`if flag: name.append(x)`) branches `shapes` even
+        # though every branch shares the SAME initial fresh reassignment --
+        # e.g. `command = [sys.executable, ...]` followed by several
+        # independent `if opt: command.append(...)` guards. Requiring a
+        # single shape here would make every one of those (individually
+        # harmless) conditionals collapse the call site to "unresolvable" ->
+        # crit. All branches sharing the same a0 is exactly what makes this
+        # safe to merge: the danger assessment (`_b863_shape_triggers_crit`)
+        # depends on a0 plus the UNION of possible content either way.
+        a0_dumps = {ast.dump(sh.a0) for sh in shapes}
+        if len(a0_dumps) != 1:
+            return "unresolvable", None
+        merged_content: list = []
+        for sh in shapes:
+            merged_content.extend(sh.content)
+        return "resolved", [shapes[0].a0] + merged_content
+    return "unresolvable", None
+
+
+def _b863_name_single_load_forwarded_to_fn(name, owner_func, fn_name):
+    """T1a's one exception: `name` is a parameter of `owner_func`, and every
+    OTHER Load of `name` within `owner_func`'s own body is itself an argument
+    in a call to a function literally named `fn_name` -- the "pure forwarding
+    wrapper" idiom (`def log(branch): run(['git', 'log', branch])`). A local
+    variable that is not itself a parameter (assigned directly from an
+    external source, say) does NOT qualify -- see N3 in the harness, where
+    the ONLY reason this must stay narrow is that a plain local's provenance
+    is fully visible right there, unlike a parameter's."""
+    if owner_func is None or not isinstance(owner_func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    if name not in _b863_fn_bound_names(owner_func):
+        return False
+    forwarded_ids = set()
+    for n in ast.walk(owner_func):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == fn_name:
+            for a in n.args:
+                if isinstance(a, ast.Name):
+                    forwarded_ids.add(id(a))
+                elif isinstance(a, ast.Starred) and isinstance(a.value, ast.Name):
+                    forwarded_ids.add(id(a.value))
+            for kw in n.keywords:
+                if isinstance(kw.value, ast.Name):
+                    forwarded_ids.add(id(kw.value))
+    for n in ast.walk(owner_func):
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load) and id(n) not in forwarded_ids:
+            return False
+    return True
+
+
+def _b863_t1a_call_sites_all_constant(resolved_sites, owner_map, fn_name):
+    """T1a: every resolved call-site element is a Constant, except a Name
+    that qualifies via `_b863_name_single_load_forwarded_to_fn`."""
+    for rkind, elts in resolved_sites:
+        if rkind == "unresolvable":
+            return False
+        for e in elts:
+            if isinstance(e, ast.Constant):
+                continue
+            if isinstance(e, ast.Name) and _b863_name_single_load_forwarded_to_fn(
+                e.id, owner_map.get(e), fn_name
+            ):
+                continue
+            return False
+    return True
+
+
+_B863_T1C_ESCAPE_REASONS = frozenset(
+    {"escape_into_container", "store_target", "in_file_callee", "classdef_touch"}
+)
+
+
+def _b863_t1c_no_escape(fn, names, tree):
+    """T1c: neither the tracked parameter nor a plain alias is passed to an
+    in-file def/lambda/class, and it does not escape bare into a container or
+    a store value. Reuses the tier-2 walk's own classification: only the
+    escape-shaped reasons in `_B863_T1C_ESCAPE_REASONS` disprove T1c -- any
+    OTHER out-of-domain reason (a position-unsafe mutation, say) says nothing
+    about content-independence, and tier 2 is what catches those."""
+    try:
+        _b863_process_stmts(list(fn.body), set(names), tree, [_B863Shape(False, None, [], False)])
+    except _B863OutOfDomain as e:
+        return e.args[0][0] not in _B863_T1C_ESCAPE_REASONS
+    return True
+
+
+def _b863_m_for(fn, param_name, owner_map, parent_scope, shadow_cache, func_param_taint, ext_taint_map):
+    """T1b: is `param_name` visible-tainted at `fn`'s own sink, from anything
+    OTHER than its own ordinary per-function parameter taint? Recomputes
+    `_external_tainted_names` over `fn`'s own subtree with `param_name`
+    excluded from `fn`'s own seed, plus a mutation-propagation fixpoint
+    (Call-based append/extend/store-target, and plain-Name alias
+    unification) that `_external_tainted_names` itself does not model. See
+    the module comment above `_B863OutOfDomain` for why this is a wrapper
+    around the existing function rather than a flag inside it."""
+    sub = {id(x) for x in ast.walk(fn)}
+    inside = {
+        s for s in list(ext_taint_map.keys()) + list(func_param_taint.keys())
+        if s is not None and id(s) in sub
+    }
+    seeds = {k: set(v) for k, v in ext_taint_map.items() if k not in inside}
+    for k, v in func_param_taint.items():
+        if k in inside:
+            seeds.setdefault(k, set()).update(v - ({param_name} if k is fn else set()))
+
+    def chain(scope):
+        out = []
+        while scope is not None and id(scope) in sub:
+            out.append(scope)
+            scope = parent_scope.get(scope)
+        return out
+
+    def sourced(e, vis):
+        return (
+            _value_is_tainted_source(e, vis)
+            or _rhs_has_subscript_environ(e)
+            or _rhs_has_fstring_taint(e, vis)
+            or bool(_names_in(e) & vis)
+        )
+
+    def base_name(node):
+        while isinstance(node, (ast.Attribute, ast.Subscript, ast.Starred)):
+            node = node.value
+        return node.id if isinstance(node, ast.Name) else None
+
+    M = seeds
+    for _ in range(6):
+        M = _external_tainted_names(fn, {k: set(v) for k, v in seeds.items()}, owner_map, parent_scope, shadow_cache)
+        changed = False
+
+        def add(name, node):
+            nonlocal changed
+            for s in chain(owner_map.get(node)):
+                bucket = seeds.setdefault(s, set())
+                if name not in bucket:
+                    bucket.add(name)
+                    changed = True
+
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+                # B-863, deviation from the architect's own proto2.py prototype
+                # (see deviations_from_design): restricted to METHOD calls whose
+                # receiver is a Name (`X.method(...)`), and only propagating
+                # sourced argument taint to that receiver -- proto2.py's own
+                # blanket "any sourced argument taints EVERY bare-Name argument
+                # of ANY call" additionally taints unrelated sibling arguments of
+                # an ordinary function call whenever ANY one of them happens to
+                # be sourced (a real false positive found via this task's own
+                # real-corpus differential: `subprocess.call(cmd, stdout=f,
+                # stderr=f)` wrongly tainted `cmd` through the unrelated,
+                # independently-sourced `f` file handle in `stdout=`/`stderr=`).
+                # A receiver-only rule still covers every 57-case-matrix shape
+                # that needs propagation at all (`x.append(sourced)` /
+                # `x.extend(sourced)`-style mutation, which is what the fixpoint
+                # exists to model), without inventing taint between unrelated
+                # co-arguments of a plain call.
+                vis = _tainted_names_visible(n, M, owner_map, parent_scope, shadow_cache)
+                args = list(n.args) + [kw.value for kw in n.keywords]
+                if any(sourced(a, vis) for a in args):
+                    b = base_name(n.func.value)
+                    if b:
+                        add(b, n)
+            elif isinstance(n, (ast.Assign, ast.AugAssign)):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                vis = _tainted_names_visible(n, M, owner_map, parent_scope, shadow_cache)
+                for t in targets:
+                    if isinstance(t, (ast.Subscript, ast.Attribute)) and sourced(n.value, vis):
+                        b = base_name(t)
+                        if b:
+                            add(b, n)
+                if (
+                    isinstance(n, ast.Assign)
+                    and len(targets) == 1
+                    and isinstance(targets[0], ast.Name)
+                    and isinstance(n.value, ast.Name)
+                ):
+                    a_, b_ = targets[0].id, n.value.id
+                    if a_ in vis and b_ not in vis:
+                        add(b_, n)
+                    if b_ in vis and a_ not in vis:
+                        add(a_, n)
+        if not changed:
+            break
+    return M
+
+
+def _b863_a0_is_verified_sys_executable(a0, tree):
+    """True for `sys.executable` (guarded against a local shadow of `sys`,
+    same discipline as `_path_module_aliases`/B-753 for `os`) -- a real-
+    corpus finding (this task's own corpus differential over stdlib/dist-
+    packages/`~/.openclaw`): re-invoking the CURRENT interpreter via
+    `[sys.executable, ...]` is an extremely common, benign idiom, and R1's
+    "a fresh a0 must be a str Constant" rule otherwise convicts it outright
+    merely for being an Attribute rather than a literal -- it is exactly as
+    fixed/non-attacker-influenced as a hardcoded interpreter path, just not
+    spelled as one. Deliberately narrow (this one attribute only, not a
+    general "any Attribute is fine" carve-out, which would defeat R1)."""
+    return (
+        isinstance(a0, ast.Attribute)
+        and a0.attr == "executable"
+        and isinstance(a0.value, ast.Name)
+        and a0.value.id == "sys"
+        and "sys" not in _rebound_names(tree)[0]
+    )
+
+
+def _b863_shape_triggers_crit(sh, call_elts, call_site_visible, body_visible, tree):
+    """Tier 2, R1-R4, for one (`_B863Shape`, call site) pairing. `call_elts`
+    is the call site's own resolved R_c; `call_site_visible`/`body_visible`
+    are the tainted-name sets used to check content of call-site-origin vs.
+    body-origin elements respectively (never the parameter's own blanket
+    per-function taint -- see `_B863Shape`'s docstring).
+
+    R2 and R3/R4 share one gate, deliberately: `_argv0_is_shell_indirect_exec`
+    is ALREADY the module's own established rule for "does this argv0 make
+    the REST of argv into code the program itself parses" -- a re-exec
+    wrapper (env/sudo/ssh/...) unconditionally, a scripting interpreter/shell
+    only when a literal eval flag (`-c`/`-e`/...) is ALSO present somewhere in
+    argv (`python -m mod --flag value` is an ordinary program call, not code
+    execution). A prior draft of this function applied that distinction only
+    to R3/R4 and had R2 convict a fresh interpreter a0 on ANY non-constant
+    element unconditionally, without requiring a real eval-flag -- verified
+    against this task's own real-corpus differential to false-positive a
+    `[sys.executable, str(reference_script), str(asset_path), "--output", ...]`
+    invocation (an ordinary program call, no `-c`/`-m`), which is exactly the
+    idiom `_argv0_is_shell_indirect_exec`'s own docstring already carves out.
+
+    A verified `sys.executable` a0 (see `_b863_a0_is_verified_sys_executable`)
+    clears R1 outright rather than being fed through the eval-flag check as a
+    stand-in "python3": `_argv0_is_shell_indirect_exec` can only ever read a
+    literal Constant program name, so it ALREADY cannot recognise `sys.
+    executable` as an interpreter either -- the SAME limitation the pre-
+    existing `_all_call_sites_bind_fixed_argv`/the sink's own literal-list
+    branch both have for this exact attribute, confirmed identical on
+    `integration/4.3.0` unmodified. Disclosed, honest narrowing relative to
+    that existing baseline, not a new gap this diff invents: a
+    `[sys.executable, "-c", tainted]` shape is not caught by this carve-out,
+    but it was already not caught by either pre-existing check it mirrors."""
+    if sh.fresh:
+        a0 = sh.a0
+        if _b863_a0_is_verified_sys_executable(a0, tree):
+            return False
+        if not (isinstance(a0, ast.Constant) and isinstance(a0.value, str)):
+            return True  # R1: a fresh, non-constant, unverified program name
+        content = list(sh.content)
+        if sh.refs_callsite:
+            content = content + list(call_elts)
+    else:
+        if not call_elts:
+            return True  # a body channel exists but the call site is empty/unresolved
+        a0 = call_elts[0]
+        if _b863_a0_is_verified_sys_executable(a0, tree):
+            return False
+        content = list(call_elts[1:]) + list(sh.content)
+
+    if not _argv0_is_shell_indirect_exec([a0] + content):
+        return False
+    if sh.fresh and any(not isinstance(c, ast.Constant) for c in content):
+        return True  # R2: a fresh, eval-flag-bearing interpreter/re-exec with a non-constant element
+    for c in content:  # R3/R4: some content element is tainted
+        if _names_in(c) & call_site_visible or _names_in(c) & body_visible:
+            return True
+    return False
+
+
+def _b863_tier1_tier2_verdict(
+    node, fn, param_name, call_sites, tree, owner_map, parent_scope, shadow_cache,
+    ext_taint_map, func_param_taint, layer2_cache,
+):
+    """B-863: the position-aware replacement for a plain
+    `_all_call_sites_bind_fixed_argv` call once `fn`'s OWN body reassigns or
+    mutates `param_name` -- see the module comment above `_B863OutOfDomain`
+    for the two-tier design. Returns True (crit) / False (info), or None to
+    mean "behaviourally identical to no body channel at all -- caller keeps
+    the pre-existing `_all_call_sites_bind_fixed_argv` path unchanged".
+    `layer2_cache` memoizes the (expensive) channel walk per `fn`, across
+    however many call sites/sinks `analyze_python` visits in this file."""
+    cache_key = id(fn)
+    cached = layer2_cache.get(cache_key) if layer2_cache is not None else None
+    if cached is None or cached.get("param") != param_name:
+        kind, payload, names = _b863_collect_channels(fn, param_name, tree)
+        cached = {"param": param_name, "kind": kind, "payload": payload, "names": names}
+        if layer2_cache is not None:
+            layer2_cache[cache_key] = cached
+    kind = cached["kind"]
+
+    resolved_sites = [_b863_resolve_call_site(expr, tree, owner_map) for expr in call_sites]
+    if any(rkind == "unresolvable" for rkind, _ in resolved_sites):
+        return True  # unresolvable call site -- crit, as today
+
+    if kind == "none":
+        return None
+    shapes = cached["payload"] if kind == "shapes" else None
+    if kind == "shapes" and len(shapes) == 1 and not shapes[0].fresh and not shapes[0].content:
+        return None  # pure identity, no tail -- behaviourally "none"
+
+    names = cached["names"]
+
+    # Tier 1 first: a content-independence proof holds regardless of what
+    # tier 2's position grammar can or cannot classify.
+    if _b863_t1a_call_sites_all_constant(resolved_sites, owner_map, fn.name):
+        if _b863_t1c_no_escape(fn, names, tree):
+            M = _b863_m_for(fn, param_name, owner_map, parent_scope, shadow_cache, func_param_taint, ext_taint_map)
+            if param_name not in _tainted_names_visible(node, M, owner_map, parent_scope, shadow_cache):
+                return False
+
+    # Tier 2.
+    if kind == "out_of_domain":
+        return True
+    for (rkind, elts), expr in zip(resolved_sites, call_sites):
+        call_site_visible = _tainted_names_visible(expr, ext_taint_map, owner_map, parent_scope, shadow_cache)
+        body_visible = _tainted_names_visible(node, ext_taint_map, owner_map, parent_scope, shadow_cache)
+        for sh in shapes:
+            if _b863_shape_triggers_crit(sh, elts, call_site_visible, body_visible, tree):
+                return True
+    return False
+
+
 def _subprocess_taint_is_command_injection(
     node: ast.Call,
     tainted: set,
@@ -2172,6 +3100,8 @@ def _subprocess_taint_is_command_injection(
     shadow_cache: dict | None = None,
     ext_taint_map: dict | None = None,
     list_bindings_by_call: dict | None = None,
+    func_param_taint: dict | None = None,
+    layer2_cache: dict | None = None,
 ) -> bool:
     """For a subprocess.* call with tainted input, is it command-injection grade?
 
@@ -2196,6 +3126,12 @@ def _subprocess_taint_is_command_injection(
     `list_bindings_by_call` args are layer 2's extra context; all optional (default
     None) so this stays callable exactly as before layer 2 existed. Layer 2 is only
     attempted when every one of them is supplied.
+
+    `func_param_taint`/`layer2_cache` (B-863) are layer 2's OWN further extra
+    context, needed only when the wrapper's body itself reassigns or mutates
+    `first`'s bare parameter (see `_b863_tier1_tier2_verdict`); when either is
+    omitted, that step is skipped and the ORIGINAL, pre-B-863 call-site-only
+    check (`_all_call_sites_bind_fixed_argv`) decides alone, unchanged.
     """
     for kw in node.keywords:
         if kw.arg == "shell":
@@ -2277,10 +3213,27 @@ def _subprocess_taint_is_command_injection(
         )
         if is_named_param:
             call_sites = _param_argv_call_sites(fn, first.id, tree, owner_map)
-            if call_sites is not None and _all_call_sites_bind_fixed_argv(
-                call_sites, list_bindings_by_call, owner_map, ext_taint_map, parent_scope, shadow_cache
-            ):
-                return False  # every real call site is a hardcoded command
+            if call_sites is not None:
+                # B-863: `_all_call_sites_bind_fixed_argv` alone only proves the
+                # CALL SITE's own argv is fixed -- it says nothing about a wrapper
+                # whose OWN body reassigns or mutates the parameter before the sink
+                # (see `_b863_tier1_tier2_verdict`'s module comment for the history
+                # of why a call-site-only check is unsound there). Try the B-863
+                # verdict first; it returns None (behaviourally "no body channel at
+                # all") when the parameter is never touched in the body, in which
+                # case this falls through to the ORIGINAL, unchanged check below.
+                b863_verdict = None
+                if func_param_taint is not None:
+                    b863_verdict = _b863_tier1_tier2_verdict(
+                        node, fn, first.id, call_sites, tree, owner_map, parent_scope,
+                        shadow_cache, ext_taint_map, func_param_taint, layer2_cache,
+                    )
+                if b863_verdict is not None:
+                    return b863_verdict
+                if _all_call_sites_bind_fixed_argv(
+                    call_sites, list_bindings_by_call, owner_map, ext_taint_map, parent_scope, shadow_cache
+                ):
+                    return False  # every real call site is a hardcoded command
     return True  # string / name / concat first arg -> string command or program path
 
 
@@ -9308,6 +10261,10 @@ def analyze_python(
     for _ldr_rule, _ldr_sev, _ldr_ln, _ldr_reason in _b917_findings(tree, filename, artifact):
         add(_ldr_rule, _ldr_sev, _ldr_ln, _ldr_reason)
 
+    # B-863: one cache per FILE (never per call), keyed by wrapper function inside
+    # `_b863_tier1_tier2_verdict` -- the channel walk it memoizes is the expensive
+    # part, and a file can have many sink calls into the same small set of wrappers.
+    layer2_cache: dict = {}
     # B-916: `ext_taint_map` only tracks NAMES bound to an external source, so a file
     # whose only external input is read straight into an exec/eval/os.system/os.popen/
     # subprocess.* sink -- no intermediate variable at all, e.g.
@@ -9417,6 +10374,8 @@ def analyze_python(
                         shadow_cache=shadow_cache,
                         ext_taint_map=ext_taint_map,
                         list_bindings_by_call=list_bindings_by_call,
+                        func_param_taint=func_param_taint,
+                        layer2_cache=layer2_cache,
                     ):
                         add(
                             "TT5_ARG_INJECTION",
