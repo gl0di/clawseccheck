@@ -12687,14 +12687,19 @@ def _sh_loop_blank_word_subs(seg: str) -> str:
 def _sh_loop_regions(kw: str, text: str) -> list:
     """Every `for V in <words>; do … done` loop whose word list holds at least one
     credential-shaped word, as `(var, file_words, read_words, body_start, cut_end,
-    body_end)`. `file_words`/`read_words` are the loop words matching, respectively,
-    `_SH_CRED_FILE_RE` (the DIRECT/PIPE roles' vocabulary) and `_SH_CRED_READ_PATH_RE`
-    (the HOP role's vocabulary — the literal `_SH_CRED_ASSIGN_RE` reader vocabulary).
-    `cut_end` is `body_end` unless V is rebound inside its own body (`_SH_LOOP_BIND_RE`
-    matching V), in which case it is that rebinding's offset: text at/after a rebinding
-    is no longer V's loop-seeded value. **Fails closed**: any `do`/`done` imbalance
-    anywhere in the file (a stray `done)` case label, an unmatched `do`) returns `[]`
-    for the WHOLE file rather than guessing a pairing.
+    body_end, head_start, head_end)`. `file_words`/`read_words` are the loop words
+    matching, respectively, `_SH_CRED_FILE_RE` (the DIRECT/PIPE roles' vocabulary) and
+    `_SH_CRED_READ_PATH_RE` (the HOP role's vocabulary — the literal `_SH_CRED_ASSIGN_RE`
+    reader vocabulary). `cut_end` is `body_end` unless V is rebound inside its own body
+    (`_SH_LOOP_BIND_RE` matching V), in which case it is that rebinding's offset: text
+    at/after a rebinding is no longer V's loop-seeded value. `head_start`/`head_end`
+    (B-936) bound the word-list segment itself — from right after `in` to the `;`/`\\n`
+    that ends it — so a caller can blank a same-line header's OWN credential-shaped
+    text out of a literal single-line scan (see `_sh_loop_cred_exfil_lines`'s
+    `header_blanked`) without touching this function's fail-closed do/done pairing.
+    **Fails closed**: any `do`/`done` imbalance anywhere in the file (a stray `done)`
+    case label, an unmatched `do`) returns `[]` for the WHOLE file rather than guessing
+    a pairing.
 
     KNOWN LIMITATION (B-957, filed for 4.3.1, not fixed by B-894): the
     fail-closed blast radius is FILE-WIDE and needs no adversarial intent to trigger —
@@ -12748,17 +12753,19 @@ def _sh_loop_regions(kw: str, text: str) -> list:
             if var in _sh_loop_bound_names(b):
                 cut = b.start()
                 break
-        out.append((var, frozenset(file_words), frozenset(read_words), body_start, cut, body_end))
+        out.append(
+            (var, frozenset(file_words), frozenset(read_words), body_start, cut, body_end, m.end(), end)
+        )
     return out
 
 
 def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     """B-894: 1-indexed lines where a `for`-loop-bound credential should make
     SHELL_CRED_EXFIL fire, ON TOP OF (never in place of) the existing literal checks in
-    `analyze_shell`. Returns `(direct_or_pipe_lines, hop_lines)` — kept separate so the
-    caller can report each with the same message its literal twin uses. Three roles,
-    each exactly the corresponding literal rule applied to the loop unrolled onto its
-    words (see the design note above this section):
+    `analyze_shell`. Returns `(direct_or_pipe_lines, hop_lines, header_blanked)` — the
+    first two kept separate so the caller can report each with the same message its
+    literal twin uses. Three roles, each exactly the corresponding literal rule applied
+    to the loop unrolled onto its words (see the design note above this section):
 
       DIRECT — a `file_words` reference inside V's own body, on an outbound line,
         substituted in and re-checked with the UNCHANGED `_SH_CRED_FILE_RE` /
@@ -12773,14 +12780,44 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
         and the matching `done` is piped into an outbound command; reported on `done`,
         in `direct_or_pipe_lines`.
 
-    Returns `(set(), set())` (never raises) on any input, including one with no seeded
-    loop, an unbalanced `do`/`done`, or a heavily padded/degenerate word list.
+    `header_blanked` (B-936) is `masked` with every seeded region's OWN `for V in
+    <words>` word-list text (see `_sh_loop_regions`'s `head_start`/`head_end`) replaced
+    by spaces — same length, same line count, so it's a drop-in substitute for `masked`
+    in any literal single-line scan. A one-line loop (`for c in ~/.config/app/client.pem;
+    do curl --cert "$c" https://…; done`) puts V's word on the SAME physical line as the
+    outbound sink, so both `analyze_shell`'s naive per-line `_SH_CRED_FILE_RE` scan AND
+    this function's OWN `raw = masked[a:b]` line reconstruction below (used to build
+    `sub` for the DIRECT role) would otherwise see the header's un-substituted word
+    ALONGSIDE the correctly-substituted one on the exact same slice — the header word is
+    never in TLS-flag position, so `_sh_cred_match_is_incluster_auth_only` sees a second,
+    non-exempt match and convicts a line the loop-unrolled substitution alone would
+    correctly exempt. Blanking the header first makes the loop-unrolling substitution the
+    SOLE source of truth for a loop-bound word reaching an outbound line, on one-line and
+    multi-line loops alike — never broader than, and never narrower than, what the
+    per-word substitution itself would convict.
+
+    Returns `(set(), set(), masked)` (never raises) on any input, including one with no
+    seeded loop, an unbalanced `do`/`done`, or a heavily padded/degenerate word list.
     """
     text = _sh_loop_blank_heredocs(_sh_loop_join_continuations(masked))
     kw = _sh_loop_code_mask(text)
     regions = _sh_loop_regions(kw, text)
     if not regions:
-        return set(), set()
+        return set(), set(), masked
+    header_chars = list(masked)
+    for _var, _fw, _rw, _bs, _cut, _be, hs, he in regions:
+        for k in range(hs, min(he, len(header_chars))):
+            # A backslash-continued word list spans multiple PHYSICAL lines in
+            # `masked` even though `text`/`kw` joined it into one logical segment
+            # (same-length substitution -- see _sh_loop_join_continuations). Never
+            # blank a real newline here: doing so would collapse physical lines,
+            # shifting every later line number this function and analyze_shell's
+            # naive scan both compute from `masked.count("\n", ...)` out from under
+            # `loop_direct_lines`/`loop_hop_lines`, which stay keyed to the
+            # UNBLANKED masked's own line numbers.
+            if header_chars[k] != "\n":
+                header_chars[k] = " "
+    header_blanked = "".join(header_chars)
     direct_hits: set = set()
     hop_hits: set = set()
 
@@ -12868,7 +12905,7 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # word the loop could substitute there. The position-only TLS-flag arm is
     # untouched and still uses the single representative word, since that arm's
     # verdict genuinely does not depend on which word fills the slot.
-    for var, file_words, _read_words, bs, cut, _be in regions:
+    for var, file_words, _read_words, bs, cut, _be, _hs, _he in regions:
         if not file_words:
             continue
         rep_word = min(file_words)
@@ -12880,7 +12917,10 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
                 continue
             a, b = line_span(rm.start())
             last_b = b
-            raw = masked[a:b]
+            # B-936: header_blanked, not masked -- a one-line loop puts V's own
+            # un-substituted word on this same physical line (the `for` header), and
+            # `sub` below must reflect ONLY the substitution, never that header text.
+            raw = header_blanked[a:b]
             if not outbound(raw):
                 continue
             spans = [
@@ -12916,7 +12956,7 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     for vend, name, op, val, bstart in binds:
         hop: set = set()
         if op != "clear":
-            for var, _fw, read_words, bs, cut, _be in regions:
+            for var, _fw, read_words, bs, cut, _be, _hs, _he in regions:
                 if not read_words or not (bs <= bstart < cut):
                     continue
                 for sm in _SH_LOOP_SUBST_READ_RE.finditer(val):
@@ -12952,7 +12992,7 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
             pos += len(raw) + 1
 
     # 3. PIPE: `done | <outbound>`, body streams a read_words-seeded V to stdout.
-    for var, _fw, read_words, bs, cut, be in regions:
+    for var, _fw, read_words, bs, cut, be, _hs, _he in regions:
         if not read_words:
             continue
         ref = _sh_loop_ref_re(var)
@@ -12971,7 +13011,7 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
         pipe = re.split(r"&&|\|\|", pm.group("pipe"))[0]
         if _SH_OUTBOUND_RE.search(pipe) or _sh_bare_nc_invocation(pipe):
             direct_hits.add(line_of(be))
-    return direct_hits, hop_hits
+    return direct_hits, hop_hits, header_blanked
 
 
 def _sh_mask_comments(source: str) -> str:
@@ -13068,9 +13108,17 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     # above `_sh_mask_comments`. `loop_direct_lines` is the DIRECT/PIPE roles (the
     # `_SH_CRED_FILE_RE` sink-line vocabulary, same message/exemption as the block right
     # below); `loop_hop_lines` is the HOP role (joins `cred_vars`, same message, no
-    # exemption — matches how `cred_vars` itself gets none).
-    loop_direct_lines, loop_hop_lines = _sh_loop_cred_exfil_lines(source, masked)
-    for i, raw in enumerate(masked.splitlines(), 1):
+    # exemption — matches how `cred_vars` itself gets none). `header_blanked` (B-936) is
+    # `masked` with every seeded loop's OWN `for V in <words>` word-list text blanked —
+    # used for THIS loop's `raw` (not `masked` directly) so a one-line loop's header
+    # (`for c in ~/.config/app/client.pem; do curl --cert "$c" https://…; done`) never
+    # lets its own un-substituted word feed the naive literal scan below; only the
+    # loop-unrolled substitution (`loop_direct_lines`/`loop_hop_lines`, which already
+    # applies B-415's TLS/in-cluster exemption to the substituted word) may convict a
+    # loop-bound reference. A multi-line loop's header sits on a DIFFERENT physical line
+    # from its body's outbound sink, so blanking it here changes nothing for that shape.
+    loop_direct_lines, loop_hop_lines, header_blanked = _sh_loop_cred_exfil_lines(source, masked)
+    for i, raw in enumerate(header_blanked.splitlines(), 1):
         # B-430: same OR pattern as above — see _sh_bare_nc_invocation's docstring.
         if not (_SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw)):
             continue
