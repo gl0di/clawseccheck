@@ -48,6 +48,11 @@ from ..skillast import (
     analyze_python_package,
     analyze_shell,
 )
+from ..skillast import _SH_VAR_ASSIGN_RE, _SH_VAR_REF_RE  # B-985 companion
+from ..skillast import _sh_candidate_destination_tokens as _sh_dest_tokens
+from ..skillast import _sh_line_destination_text as _sh_dest_text
+from ..skillast import _sh_loop_join_continuations as _sh_join_continuations
+from ..skillast import _sh_resolve_var_literal
 from ..skillast import simulate_effects as _simulate_effects
 from ..shippedexec import ShippedArtifact as _ShippedArtifact
 from ..scanbudget import (
@@ -4166,15 +4171,100 @@ _CRED_EXFIL_OWN_DEST_PAIRS = (
 )
 
 
+# B-985 companion, round 2: the forward-window literal check above
+# never sees a destination that is a `$VAR`/`${VAR}` reference resolved from an
+# EARLIER assignment rather than literal text in the exfil call's own argument
+# window — the ordinary shell idiom `API_SERVER="https://kubernetes.default.svc"`
+# ... `curl ... "${API_SERVER}/path"`, routinely split across a backslash-`\`
+# continued multi-line curl invocation, false-FAILed here even though the
+# skillast.py AST-level SHELL_CRED_EXFIL check already carries the equivalent
+# exemption (B-415/B-912/B-985). Fixed with a narrow fallback, never a relaxation
+# of the literal-window check above: when the window names no literal known
+# destination, look at the exfil match's own LOGICAL command (backslash
+# continuations joined, truncated at the first `;`/`|`/`&&`/real newline) for
+# EXACTLY ONE candidate destination token that is itself a `$VAR`/`${VAR}`
+# reference (never a literal — that case is already the window check above), then
+# resolve that ONE variable through the same fail-closed single-binding resolver
+# `_sh_resolve_var_literal` (skillast.py, B-985) that hardened the
+# AST-level check: exactly one binding anywhere in the SAME `# file:` manifest
+# section as the exfil match, textually BEFORE it, and a value with no
+# `$`/`${...}`/`$(...)`/backtick left in it after one layer of quotes is
+# stripped. A resolved literal is then checked against the SAME `dest_rx` as the
+# literal-window path — never a separate, potentially looser, regex.
+_LOGICAL_CMD_BOUNDARY_RE = re.compile(r"[;\n]|&&|\|")
+_LOGICAL_CMD_MAX_SPAN = 2000  # generous cap; a real destination argument is never
+# anywhere near this far from its own exfil verb
+
+
+def _exfil_match_logical_command_tail(joined: str, match_end: int) -> str:
+    """The text from *match_end* (an ``_EXFIL_RE`` match's own end offset) up to
+    the first `;`, `|`, `&&`, or real newline in *joined* — *joined* MUST be the
+    caller's blob run through `_sh_join_continuations` first (a same-length
+    backslash-continuation join), so *match_end* — computed against the
+    ORIGINAL blob — is still a valid offset into *joined*. This is the exfil
+    call's own LOGICAL command tail: every argument the call actually receives,
+    continuation-joined, never spilling into a chained NEXT command or a
+    genuinely different physical line."""
+    tail = joined[match_end : match_end + _LOGICAL_CMD_MAX_SPAN]
+    bm = _LOGICAL_CMD_BOUNDARY_RE.search(tail)
+    return tail[: bm.start()] if bm else tail
+
+
+def _exfil_own_dest_var_resolves(
+    blob: str,
+    joined: str,
+    header_matches: list,
+    m: "re.Match[str]",
+    dest_rx: "re.Pattern[str]",
+) -> bool:
+    """True when *m* (an ``_EXFIL_RE`` match) names no LITERAL destination in
+    its own forward window, but its own logical command has EXACTLY ONE
+    candidate destination token (B-912 discipline: two or more never qualify,
+    even if every one of them would individually resolve) and that one token
+    STARTS WITH `$`/`${` — a variable reference, never a literal. The
+    referenced variable's SOLE binding, in the SAME manifest file section as
+    *m* and textually BEFORE it, must resolve (via `_sh_resolve_var_literal`)
+    to a plain literal that itself satisfies *dest_rx*. Never crosses a
+    manifest file boundary, never accepts a binding positioned after the call,
+    and never trusts an ambiguous or still-dynamic value."""
+    tail = _exfil_match_logical_command_tail(joined, m.end())
+    dest_text = _sh_dest_text(tail)
+    tokens = _sh_dest_tokens(dest_text)
+    if len(tokens) != 1 or not tokens[0].startswith("$"):
+        return False
+    names = _SH_VAR_REF_RE.findall(tokens[0])
+    if len(names) != 1:
+        return False
+    name = names[0]
+    span = _manifest_section_span(blob, m.start(), header_matches)
+    if span is None:
+        return False  # m.start() sits inside an injected "# file:" header itself
+    sec_start, sec_end = span
+    section_text = blob[sec_start:sec_end]
+    rel_pos = m.start() - sec_start
+    literal = _sh_resolve_var_literal(section_text, name)
+    if literal is None:
+        return False
+    assign_pos = None
+    for am in _SH_VAR_ASSIGN_RE.finditer(section_text):
+        if am.group("var") == name:
+            assign_pos = am.start()
+            break  # _sh_resolve_var_literal already guarantees exactly one such match
+    if assign_pos is None or assign_pos >= rel_pos:
+        return False
+    return bool(dest_rx.search(literal))
+
+
 def _exfil_hits_all_target_own_known_destination(blob: str) -> bool:
     """True when EVERY ``_EXFIL_RE`` match in *blob* has one of the narrow
     "credential source's own destination" hosts above (B-748) in its own
-    forward call-argument window, with that pairing's credential-source
-    pattern present and NON-NEGATED somewhere in the blob. False when there
-    are no exfil matches at all, or when even one exfil match cannot be
-    explained this way — so a caller can use this to SUPPRESS a co-occurrence
-    finding only when every exfil-shaped hit is accounted for, never merely
-    one of several.
+    forward call-argument window — or, per B-985 above, resolved
+    through exactly one `$VAR`/`${VAR}` destination reference on its own
+    logical command — with that pairing's credential-source pattern present
+    and NON-NEGATED somewhere in the blob. False when there are no exfil
+    matches at all, or when even one exfil match cannot be explained this way
+    — so a caller can use this to SUPPRESS a co-occurrence finding only when
+    every exfil-shaped hit is accounted for, never merely one of several.
 
     Self-driven C-135: an EARLIER version checked only bare presence of the
     credential-source pattern, which a denial-framed decoy defeats — "We do
@@ -4187,10 +4277,15 @@ def _exfil_hits_all_target_own_known_destination(blob: str) -> bool:
     matches = list(_EXFIL_RE.finditer(blob))
     if not matches:
         return False
+    joined = _sh_join_continuations(blob)
+    header_matches = list(_MANIFEST_HEADER_RE.finditer(blob))
     for m in matches:
         forward = blob[m.end() : m.end() + _CRED_EXFIL_OWN_DEST_WINDOW]
         if not any(
-            dest_rx.search(forward)
+            (
+                dest_rx.search(forward)
+                or _exfil_own_dest_var_resolves(blob, joined, header_matches, m, dest_rx)
+            )
             and any(
                 not _negation_governs_trigger(blob, cm.start())
                 for cm in cred_rx.finditer(blob)

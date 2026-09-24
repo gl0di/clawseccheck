@@ -657,6 +657,36 @@ _INCLUSTER_API_HOST_RE = re.compile(
     r"KUBERNETES_SERVICE_HOST",
     re.I,
 )
+# B-985 companion: the UNANCHORED `_INCLUSTER_API_HOST_RE` above is only
+# ever safe to use as "does this destination TEXT mention the in-cluster host
+# anywhere" -- every consumer that resolves a VARIABLE'S OWN VALUE (rather than
+# scanning raw destination text already narrowed to a single candidate token) must
+# use this START-anchored twin instead. A `.search()` for the bare pattern lets an
+# attacker-controlled value that merely CONTAINS the safe host -- in its PATH
+# (`https://attacker.example.com/kubernetes.default.svc`) rather than as the actual
+# host -- read as "resolves to the cluster's own API server". Scheme (`http(s)://`)
+# is deliberately OPTIONAL here (unlike a literal destination token, which always
+# carries its own scheme by construction -- see `_sh_candidate_destination_tokens`,
+# which only ever yields an http(s)-prefixed or `$`-prefixed candidate): a shell
+# variable commonly holds the bare host with the scheme spliced in at the call site
+# (`API_SERVER="kubernetes.default.svc"` ... `"https://${API_SERVER}/..."`), and
+# requiring a scheme INSIDE the stored value would fail that ordinary idiom closed.
+# The `$KUBERNETES_SERVICE_HOST`/`$KUBERNETES_SERVICE_PORT` alternatives exist for
+# the RAW-TOKEN caller only (a destination argument that literally names the
+# standard K8s-injected env var inline, e.g. `curl https://$KUBERNETES_SERVICE_HOST`)
+# -- a resolved literal (see `_sh_resolve_var_literal`/`_simple_str_const_assigns`)
+# can never itself contain a bare `$`, since both resolvers fail closed on any `$`/
+# backtick in the value before this regex is ever consulted, so the alternative is
+# simply inert (never reachable) on that path -- not a contradiction, just dead code
+# there by construction.
+_INCLUSTER_API_HOST_ANCHORED_RE = re.compile(
+    r"^(?:https?://)?(?:"
+    r"kubernetes\.default(?:\.svc(?:\.cluster\.local)?)?"
+    r"|[A-Za-z0-9_.-]*\.svc\.cluster\.local"
+    r"|\$\{?KUBERNETES_SERVICE_HOST\}?"
+    r")(?::(?:\d+|\$\{?KUBERNETES_SERVICE_PORT\}?))?(?:[/?].*)?$",
+    re.I,
+)
 # B-422 (C-348 adversarial review): "put"/"patch"/"request" are common
 # method names with nothing to do with networking on an arbitrary object --
 # queue.Queue.put / multiprocessing.Queue.put, unittest.mock.patch, and any bare
@@ -5830,8 +5860,23 @@ def _simple_str_const_assigns(tree: ast.AST) -> dict:
     VARIABLE (e.g. `api_server = "https://kubernetes.default.svc"`) for the
     CRED_EXFIL_FLOW in-cluster-auth exemption's destination check below; not a
     general dataflow model. An unresolvable name is simply absent from the map,
-    which the destination check below treats as "not confirmed" (fails closed)."""
+    which the destination check below treats as "not confirmed" (fails closed).
+
+    B-985 companion hardening: a name assigned a string literal MORE
+    THAN ONCE anywhere in the tree is fail-closed EXCLUDED from the map entirely,
+    mirroring the shell-side resolver's "exactly one binding" rule
+    (`_sh_resolve_var_literal`) -- `ast.walk` is a BREADTH-FIRST traversal, so for
+    a name reassigned at two different AST DEPTHS (e.g. once at module level, once
+    inside a function/if-block) the "last one written to the dict" is an artifact
+    of BFS visitation order, not necessarily the assignment that is actually in
+    effect at the point of use. Trusting whichever value BFS happens to see last
+    could silently launder a reassigned-to-attacker-host variable, or a genuinely
+    safe one, depending on tree shape alone. Excluding any multiply-assigned name
+    outright removes that ambiguity rather than trying to model which assignment
+    "wins"."""
     out: dict = {}
+    seen: set = set()
+    ambiguous: set = set()
     for n in ast.walk(tree):
         if (
             isinstance(n, ast.Assign)
@@ -5840,7 +5885,13 @@ def _simple_str_const_assigns(tree: ast.AST) -> dict:
             and isinstance(n.value, ast.Constant)
             and isinstance(n.value.value, str)
         ):
-            out[n.targets[0].id] = n.value.value
+            name = n.targets[0].id
+            if name in seen:
+                ambiguous.add(name)
+                out.pop(name, None)
+                continue
+            seen.add(name)
+            out[name] = n.value.value
     return out
 
 
@@ -5848,14 +5899,22 @@ def _resolves_to_incluster_host(subtrees: list, str_map: dict) -> bool:
     """True if any of *subtrees* contains (directly, or via a name resolved
     through *str_map*) a literal matching the cluster's own in-cluster API
     server signal. Fails closed: anything it can't positively resolve is simply
-    not a match."""
+    not a match.
+
+    B-985 companion: uses the START-anchored
+    `_INCLUSTER_API_HOST_ANCHORED_RE` (never the bare, unanchored
+    `_INCLUSTER_API_HOST_RE`) for BOTH a direct literal argument and a
+    `str_map`-resolved one -- an attacker-controlled string that merely CONTAINS
+    the safe host pattern in its path (`https://attacker.example.com/
+    kubernetes.default.svc`) must never resolve as "the cluster's own API
+    server", whether it appears inline or through a variable."""
     for subtree in subtrees:
         for n in ast.walk(subtree):
             if isinstance(n, ast.Constant) and isinstance(n.value, str):
-                if _INCLUSTER_API_HOST_RE.search(n.value):
+                if _INCLUSTER_API_HOST_ANCHORED_RE.match(n.value):
                     return True
             elif isinstance(n, ast.Name) and n.id in str_map:
-                if _INCLUSTER_API_HOST_RE.search(str_map[n.id]):
+                if _INCLUSTER_API_HOST_ANCHORED_RE.match(str_map[n.id]):
                     return True
     return False
 
@@ -13566,16 +13625,117 @@ _SH_VAR_ASSIGN_RE = re.compile(
 )
 _SH_VAR_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]{0,127})\}?")
 
+# B-985 companion: additional BINDING shapes counted by
+# `_sh_var_binding_count` below, alongside a bare `_SH_VAR_ASSIGN_RE` match --
+# each one is a way a script can (re)bind a name that `_SH_VAR_ASSIGN_RE` alone
+# does not see (a declaration keyword prefix, an externally-sourced `read`, or a
+# `for` loop variable). Any of these existing ALONGSIDE (or instead of) a bare
+# `VAR=` assignment must disqualify "resolves to a known-safe literal" -- see
+# `_sh_resolve_var_literal`'s docstring.
+_SH_VAR_DECL_ASSIGN_RE = re.compile(
+    r"^[ \t]*(?:export|local|declare|readonly|typeset)\b[ \t]+(?:-[A-Za-z]+[ \t]+)*"
+    r"(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=",
+    re.MULTILINE,
+)
+_SH_VAR_FOR_RE = re.compile(
+    r"^[ \t]*for[ \t]+(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})[ \t]+in\b", re.MULTILINE
+)
+_SH_VAR_READ_RE = re.compile(r"^[ \t]*read\b(?P<rest>[^\n]*)$", re.MULTILINE)
+# Command-separator boundary a `VAR=value` RHS never legitimately runs past --
+# used by `_sh_resolve_var_literal` to stop reading `val` where the assignment's
+# OWN command ends, so a `;`-joined single-line script never has an unrelated
+# following command's text folded into the "value" (see its call site).
+_SH_VAL_BOUNDARY_RE = re.compile(r";|&&|\|")
+
+
+def _sh_var_binding_count(masked: str, name: str) -> int:
+    """Total number of assignment-shaped BINDINGS of `name` anywhere in *masked*
+    -- a bare `VAR=`, a declaration-prefixed `export`/`local`/`declare`/
+    `readonly`/`typeset VAR=`, a `read ... VAR ...`, or a `for VAR in ...` loop.
+    Used to fail closed on ANY name with more than one binding site (see
+    `_sh_resolve_var_literal`): a script that reassigns, exports, re-reads, or
+    loop-binds a name is never trusted as "resolves to a known-safe literal",
+    since a text-substrate scan cannot know which binding is in effect at the
+    point of use."""
+    count = 0
+    for m in _SH_VAR_ASSIGN_RE.finditer(masked):
+        if m.group("var") == name:
+            count += 1
+    for m in _SH_VAR_DECL_ASSIGN_RE.finditer(masked):
+        if m.group("var") == name:
+            count += 1
+    for m in _SH_VAR_FOR_RE.finditer(masked):
+        if m.group("var") == name:
+            count += 1
+    for m in _SH_VAR_READ_RE.finditer(masked):
+        for tok in m.group("rest").split():
+            if tok.startswith("-"):
+                continue
+            if tok.strip("'\"") == name:
+                count += 1
+    return count
+
+
+def _sh_resolve_var_literal(masked: str, name: str) -> "str | None":
+    """B-985: fail-closed single-binding literal resolver. Returns
+    the (one-layer-quote-stripped) literal value of `name`'s SOLE binding in
+    *masked*, or None when `name` is not safely resolvable at all:
+
+      * zero bindings, or 2+ bindings of ANY kind (a second `VAR=`, an
+        `export`/`local`/`declare`/`readonly`/`typeset`, a `read VAR`, or a
+        `for VAR in` loop all count -- see `_sh_var_binding_count`);
+      * the sole binding is not itself a bare `VAR=value` (e.g. it is only a
+        `read VAR` or `for VAR in ...` -- externally/loop-sourced, never a
+        literal); or
+      * the value, after stripping one layer of matching quotes, still
+        contains an unresolved dynamic construct -- `$`/`` ` `` anywhere (a
+        `${...}`, `${...:-...}` default expansion, `$(...)` command
+        substitution, or a backtick substitution).
+
+    This is the single fail-closed primitive both the shell-side in-cluster-host
+    check (`_sh_var_mentions_incluster_host`) and `_vet.py`'s B-748 cross-skill
+    "own known destination" exemption fallback build on -- so the two can never
+    drift apart on what counts as "safely resolved"."""
+    if _sh_var_binding_count(masked, name) != 1:
+        return None
+    matches = [m for m in _SH_VAR_ASSIGN_RE.finditer(masked) if m.group("var") == name]
+    if len(matches) != 1:
+        return None  # the sole binding isn't a bare VAR= -- nothing literal to read
+    val = matches[0].group("val")
+    # `_SH_VAR_ASSIGN_RE`'s `val` group runs to the end of the PHYSICAL line, which
+    # -- on a `;`-joined single-line script (`VAR="..."; curl ...`) -- swallows an
+    # entirely separate subsequent command as if it were part of the value. Stop
+    # at the first unescaped command separator, same discipline as the exfil-side
+    # logical-command-tail truncation.
+    bm = _SH_VAL_BOUNDARY_RE.search(val)
+    if bm:
+        val = val[: bm.start()]
+    val = val.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+        val = val[1:-1]
+    if "$" in val or "`" in val:
+        return None
+    return val
+
 
 def _sh_var_mentions_incluster_host(masked: str, name: str) -> bool:
-    """True if any top-level `name=...` assignment line in the WHOLE script
-    mentions the in-cluster API server signal -- a text-substrate search (never
-    a full value resolution), same limitation the Python side's simple
-    `_simple_str_const_assigns` map has."""
-    for m in _SH_VAR_ASSIGN_RE.finditer(masked):
-        if m.group("var") == name and _INCLUSTER_API_HOST_RE.search(m.group("val")):
-            return True
-    return False
+    """True only when `name`'s SOLE binding anywhere in the WHOLE script is a
+    bare `VAR=value` literal (see `_sh_resolve_var_literal` -- fails closed on
+    any reassignment, export/local/declare, read, or for-loop binding, and on
+    any still-dynamic value) whose value is HOST-ANCHORED (not merely
+    containing the pattern anywhere) to the cluster's own in-cluster API
+    server.
+
+    B-985: hardened from an unanchored `search()` over every
+    top-level assignment line (`finditer` returning True on the FIRST
+    matching line, regardless of how many OTHER bindings of the same name
+    existed) -- that let a REASSIGNED variable, a `${VAR:-<safe-default>}`
+    decoy, or an attacker host that merely CONTAINS the host pattern in its
+    path read as "still resolves to the safe host"."""
+    literal = _sh_resolve_var_literal(masked, name)
+    if literal is None:
+        return False
+    return bool(_INCLUSTER_API_HOST_ANCHORED_RE.match(literal))
 
 
 def _sh_line_destination_text(raw: str) -> str:
@@ -13647,7 +13807,11 @@ def _sh_line_has_incluster_destination(raw: str, masked: str) -> bool:
     if len(tokens) != 1:
         return False
     tok = tokens[0]
-    if _INCLUSTER_API_HOST_RE.search(tok):
+    # B-985 companion: anchored, not a bare `search()` -- a literal
+    # token that merely CONTAINS the host pattern in its path
+    # (`https://attacker.example.com/kubernetes.default.svc`) must not confirm
+    # the destination.
+    if _INCLUSTER_API_HOST_ANCHORED_RE.match(tok):
         return True
     for name in _SH_VAR_REF_RE.findall(tok):
         if _sh_var_mentions_incluster_host(masked, name):
