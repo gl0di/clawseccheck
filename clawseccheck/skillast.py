@@ -113,6 +113,53 @@ def _is_hardcoded_provider_secret(node: ast.AST) -> bool:
     return bool(_PROVIDER_TOKEN_RE.match(val)) and not _PLACEHOLDER_TOKEN_RE.search(val)
 
 
+def _secret_name_bindings(tree: ast.AST) -> dict:
+    """name -> its literal `ast.Constant` value node, for every name that is the
+    target of EXACTLY ONE `Assign`/`AnnAssign` (a single `Name` target) anywhere in
+    *tree* whose value itself passes `_is_hardcoded_provider_secret`.
+
+    B-910: a one-hop resolver for the two env-entangled B-140 call sites below
+    (`os.environ[K] = <name>` / `os.getenv`, `os.environ.get`/`setdefault`'s default
+    arg), so `KEY = "sk-..."; os.environ["OPENAI_API_KEY"] = KEY` is caught the same
+    as writing the literal directly — today it only reaches the separate, WARN-only
+    `HARDCODED_PROVIDER_SECRET_ASSIGN` rule (B-893) for the `KEY = "sk-..."` line
+    alone, and the env-write itself sees a bare `ast.Name` and stays silent.
+
+    Deliberately narrow and NOT a general reaching-definition resolver — unlike
+    `shippedexec.py`'s `_FileFacts.sole()` (scope-aware, handles same-scope rebinds/
+    branch order for a very different containment proof), this only counts
+    `Assign`/`AnnAssign` bindings and does not distinguish scope, matching the
+    neighbouring B-893 `HARDCODED_PROVIDER_SECRET_ASSIGN` loop's own `ast.walk(tree)`
+    idiom below. A name bound by ANYTHING ELSE alongside its one Assign/AnnAssign
+    (a second Assign/AnnAssign anywhere in the file, conditional or not, secret-shaped
+    or not) is disqualified outright and never resolved — see the C-135 probes next to
+    the two call sites for why this stays deliberately conservative rather than a
+    precise data-flow analysis: a name rebound across an if/else, or reused later for
+    something unrelated, must not resolve even where doing so would sometimes be
+    safe. `os.environ.update({K: <name>})` is a dict-literal value, not a direct
+    Assign/AnnAssign to `<name>` at a call site, so it is out of scope for this
+    resolver — a documented residual, not an oversight (CLAWSECCHECK-B-910)."""
+    counts: dict = {}
+    secret_values: dict = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            name = node.targets[0].id
+            value_node = node.value
+        elif isinstance(node, ast.AnnAssign):
+            if not isinstance(node.target, ast.Name) or node.value is None:
+                continue
+            name = node.target.id
+            value_node = node.value
+        else:
+            continue
+        counts[name] = counts.get(name, 0) + 1
+        if _is_hardcoded_provider_secret(value_node):
+            secret_values[name] = value_node
+    return {name: val for name, val in secret_values.items() if counts.get(name) == 1}
+
+
 _MAX_FINDINGS_PER_FILE = 25
 
 # B-907 round 3: rounds 1 and 2 each gave every finding-collection loop below its own
@@ -10407,6 +10454,10 @@ def analyze_python(
         # qualifying exec/taint-sink site below — same result, `tree` does not change
         # within this call.
         path_aliases = _path_module_aliases(tree)
+        # B-910: name -> resolved literal, for the same-file one-hop indirection the
+        # two env-entangled B-140 call sites below resolve — see _secret_name_bindings'
+        # own docstring for the uniqueness/scope contract.
+        secret_name_bindings = _secret_name_bindings(tree)
         # B-638: (lineno, col_offset) of exec/eval calls proven to run a shipped file, and
         # of those whose only gap is that the in-artifact file they run is not shipped.
         shipped_exec = (
@@ -10469,10 +10520,13 @@ def analyze_python(
         ln = getattr(node, "lineno", 0)
 
         # B-140(b): os.getenv("KEY", "<provider-shaped-literal>") / os.environ.get("KEY", "<...>")
-        # — a hardcoded provider-shaped secret used as the literal fallback/default arg.
+        # / os.environ.setdefault("KEY", "<...>") — a hardcoded provider-shaped secret
+        # used as the literal fallback/default arg. B-910: `setdefault` joined `get` as
+        # a recognized call here (it was not matched at all before) since it is the
+        # same "default value written into the env" shape.
         if isinstance(f, ast.Attribute) and len(node.args) >= 2:
             is_os_getenv = f.attr == "getenv" and _attr_base(f.value) == "os"
-            is_environ_get = f.attr == "get" and (
+            is_environ_map_call = f.attr in ("get", "setdefault") and (
                 (
                     isinstance(f.value, ast.Attribute)
                     and f.value.attr == "environ"
@@ -10480,22 +10534,36 @@ def analyze_python(
                 )
                 or (isinstance(f.value, ast.Name) and f.value.id == "environ")
             )
-            if is_os_getenv or is_environ_get:
+            if is_os_getenv or is_environ_map_call:
                 default_arg = node.args[1]
-                if _is_hardcoded_provider_secret(default_arg):
+                # B-910: a one-hop indirection — `KEY = "sk-..."; os.getenv("K", KEY)`
+                # — resolves the same as the literal, but ONLY when KEY has exactly one
+                # same-file Assign/AnnAssign binding (see _secret_name_bindings). A
+                # multi-bound, conditional, or non-literal-resolving Name stays silent
+                # here exactly as it did before this fix (C-135 probes in
+                # tests/test_b910_env_entangled_name_indirection.py).
+                resolved = (
+                    secret_name_bindings.get(default_arg.id)
+                    if isinstance(default_arg, ast.Name)
+                    else None
+                )
+                if _is_hardcoded_provider_secret(default_arg) or resolved is not None:
                     key_node = node.args[0]
                     key_repr = (
                         key_node.value
                         if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
                         else "<dynamic>"
                     )
-                    call_name = "os.getenv" if is_os_getenv else f"{_attr_base(f.value)}.get"
+                    call_name = "os.getenv" if is_os_getenv else f"{_attr_base(f.value)}.{f.attr}"
+                    indirection = (
+                        f" (via {default_arg.id!r})" if resolved is not None else ""
+                    )
                     add(
                         "HARDCODED_PROVIDER_SECRET",
                         "crit",
                         ln,
                         f"hardcoded provider-shaped secret as the default arg of "
-                        f"{call_name}({key_repr!r}, ...)",
+                        f"{call_name}({key_repr!r}, ...){indirection}",
                     )
                 continue
 
@@ -11297,7 +11365,18 @@ def analyze_python(
         ) or (isinstance(tv, ast.Name) and tv.id == "environ")
         if not is_os_environ:
             continue
-        if not _is_hardcoded_provider_secret(node.value):
+        # B-910: a one-hop indirection — `KEY = "sk-..."; os.environ["K"] = KEY` —
+        # resolves the same as the literal, but ONLY when KEY has exactly one
+        # same-file Assign/AnnAssign binding (see _secret_name_bindings). A
+        # multi-bound, conditional, or non-literal-resolving Name stays silent here
+        # exactly as it did before this fix (C-135 probes in
+        # tests/test_b910_env_entangled_name_indirection.py).
+        resolved = (
+            secret_name_bindings.get(node.value.id)
+            if isinstance(node.value, ast.Name)
+            else None
+        )
+        if not (_is_hardcoded_provider_secret(node.value) or resolved is not None):
             continue
         key_node = target.slice
         # Python 3.9 compat: a subscript slice may be wrapped in ast.Index.
@@ -11308,11 +11387,12 @@ def analyze_python(
             if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
             else "<dynamic>"
         )
+        indirection = f" (via {node.value.id!r})" if resolved is not None else ""
         add(
             "HARDCODED_PROVIDER_SECRET",
             "crit",
             getattr(node, "lineno", 0),
-            f"hardcoded provider-shaped secret written to os.environ[{key_repr!r}]",
+            f"hardcoded provider-shaped secret written to os.environ[{key_repr!r}]{indirection}",
         )
 
     # B-740: a plain assignment of a provider-shaped literal — e.g. module-level
