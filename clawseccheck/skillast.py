@@ -1950,9 +1950,10 @@ def _deaddrop_fetch_tainted_names(scope: ast.AST, facts=None) -> set[str]:
     `_expr_reads_remote` so a bare `urlopen`/`urlretrieve` fetch (`from
     urllib.request import ...`) is recognised as a fetch source too, not only the
     attribute-call spelling. Opt-in, defaults to `None` (unchanged prior behaviour).
-    Deliberately confined to the FETCH leg only — the decode leg
-    (`_deaddrop_decode_tainted_names`) and the sink leg are untouched by this
-    parameter and keep their existing behaviour.
+    Confined to THIS function's own `_expr_reads_remote` calls — the decode leg
+    (`_deaddrop_decode_tainted_names`) and the sink leg's inline-decode check each take
+    (and thread) their own `facts` parameter separately (round 2, same ticket); this
+    docstring only speaks for the fetch leg's own call sites.
 
     *scope* MUST be one node from `_deaddrop_resolver_findings`'s own scope list (an
     `ast.Module`, or a single `ast.FunctionDef`/`ast.AsyncFunctionDef`), walked via
@@ -1993,13 +1994,21 @@ def _deaddrop_fetch_tainted_names(scope: ast.AST, facts=None) -> set[str]:
     return tainted
 
 
-def _deaddrop_decode_tainted_names(scope: ast.AST, fetch_tainted: set[str]) -> set[str]:
+def _deaddrop_decode_tainted_names(
+    scope: ast.AST, fetch_tainted: set[str], facts=None
+) -> set[str]:
     """F-159: names holding the DECODED form of *fetch_tainted* data, WITHIN *scope*'s
     own body (see `_deaddrop_fetch_tainted_names`'s docstring for the scoping
     discipline and why it matters) — an assignment whose RHS is a real decode primitive
     (`_is_decode_primitive_call`, the same base64/hex/b85/zlib family OBFUSCATED_EXEC
     already trusts) applied to a fetch-tainted argument, propagated onward through
-    further plain assignment."""
+    further plain assignment.
+
+    *facts* (B-993 round 2): see `_is_remote_fetch_call` — threaded through to this
+    function's own `_expr_reads_remote` call so an INLINE bare-name fetch (`payload =
+    base64.b64decode(urlopen(u).read())`, no intermediate variable naming the fetch)
+    is recognised as decoding fetched data too, not only the attribute-call spelling.
+    Opt-in, defaults to `None` (unchanged prior behaviour)."""
     if not fetch_tainted:
         return set()
     tainted: set[str] = set()
@@ -2011,7 +2020,10 @@ def _deaddrop_decode_tainted_names(scope: ast.AST, fetch_tainted: set[str]) -> s
             is_decode_of_fetched = (
                 _is_decode_primitive_call(rhs)
                 and bool(rhs.args)
-                and bool(_names_in(rhs.args[0]) & fetch_tainted or _expr_reads_remote(rhs.args[0]))
+                and bool(
+                    _names_in(rhs.args[0]) & fetch_tainted
+                    or _expr_reads_remote(rhs.args[0], facts)
+                )
             )
             if not (is_decode_of_fetched or (_names_in(rhs) & tainted)):
                 continue
@@ -2118,12 +2130,19 @@ def _deaddrop_resolver_findings(
     list, not treated as an unresolved dynamic command.
 
     *facts* (B-993): see `_is_remote_fetch_call` — threaded through to the FETCH leg
-    only (`_fetching_funcnames`, `_poll_loop_present`, `_deaddrop_fetch_tainted_names`)
-    so a bare `urlopen`/`urlretrieve` poll (`from urllib.request import ...`) is
-    recognised as periodicity + a fetch source, not only the attribute-call spelling.
-    The decode leg (`_deaddrop_decode_tainted_names`) and the sink leg
-    (`_is_exec_sink_call`) are unrelated to this parameter and keep their existing
-    behaviour. Opt-in, defaults to `None` (unchanged prior behaviour).
+    (`_fetching_funcnames`, `_poll_loop_present`, `_deaddrop_fetch_tainted_names`) so a
+    bare `urlopen`/`urlretrieve` poll (`from urllib.request import ...`) is recognised
+    as periodicity + a fetch source, not only the attribute-call spelling. Round 2
+    (same ticket) also threads it into the decode leg
+    (`_deaddrop_decode_tainted_names`) and this function's own inline-decode check in
+    the sink loop below — both wrap their own `_expr_reads_remote` call over a bare
+    fetch, so a bare-name fetch call sitting INLINE inside a decode expression (`payload
+    = base64.b64decode(urlopen(u).read())`, or the decode nested directly in the exec
+    sink's own argument, `exec(base64.b64decode(urlopen(u).read()))`) is now recognised
+    too, matching the attribute-call spelling's confirmed (crit) result instead of
+    falling back to the ambiguous (WARN) co-occurrence leg. `_is_exec_sink_call` itself
+    (recognising the sink call's callee) is still unrelated to this parameter. Opt-in,
+    defaults to `None` (unchanged prior behaviour).
     """
     fetching_funcs = _fetching_funcnames(tree, facts)
     if not _poll_loop_present(tree, fetching_funcs, facts):
@@ -2140,7 +2159,7 @@ def _deaddrop_resolver_findings(
     first_sink_lineno = 0
     for scope in scopes:
         fetch_tainted = _deaddrop_fetch_tainted_names(scope, facts)
-        decode_tainted = _deaddrop_decode_tainted_names(scope, fetch_tainted)
+        decode_tainted = _deaddrop_decode_tainted_names(scope, fetch_tainted, facts)
         for node in _scope_own_nodes(scope):
             if not isinstance(node, ast.Call):
                 continue
@@ -2169,7 +2188,10 @@ def _deaddrop_resolver_findings(
             inline_hit = any(
                 _is_decode_primitive_call(sub)
                 and bool(sub.args)
-                and bool(_names_in(sub.args[0]) & fetch_tainted or _expr_reads_remote(sub.args[0]))
+                and bool(
+                    _names_in(sub.args[0]) & fetch_tainted
+                    or _expr_reads_remote(sub.args[0], facts)
+                )
                 for a in hit_args
                 for sub in ast.walk(a)
             )
@@ -11273,10 +11295,10 @@ def analyze_python(
     # list_bindings_by_call (already computed above, B-132) is threaded through so a
     # subprocess command bound to a local variable is still resolved to its fixed
     # argv list for the command-vs-data-argument split (F-159 follow-up).
-    # B-993: `facts` also threaded through so the poll/fetch leg recognises a bare
-    # `urlopen`/`urlretrieve` (`from urllib.request import ...`) too — see
-    # `_deaddrop_resolver_findings`'s own docstring for the exact scope (fetch leg
-    # only; decode/sink legs unchanged).
+    # B-993: `facts` also threaded through so a bare `urlopen`/`urlretrieve` (`from
+    # urllib.request import ...`) is recognised on the poll/fetch leg AND (round 2,
+    # same ticket) the decode leg and the sink loop's own inline-decode check — see
+    # `_deaddrop_resolver_findings`'s own docstring for the exact scope.
     _dd_confirmed, _dd_ambiguous = _deaddrop_resolver_findings(tree, list_bindings_by_call, facts)
     for _dd_ln, _dd_reason in _dd_confirmed:
         add("DEADDROP_RESOLVER", "crit", _dd_ln, _dd_reason)

