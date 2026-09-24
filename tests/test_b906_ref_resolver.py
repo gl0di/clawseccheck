@@ -786,3 +786,42 @@ def test_b932_control_already_working_forms_unaffected(name, src):
     production code, so this is a plain regression pin, not a before/after
     comparison."""
     assert _has_crit(src), f"{name}: expected TT5_CMD_INJECTION/crit, got {_severities(src)}"
+
+
+def test_b996_ref_resolver_stays_ungated_on_tamper_flags_with_unrelated_inspect_import():
+    """B-996 round 1/round 2 regression guard: `_RefResolver.ref()`
+    reaches a same-scope rebind through `facts.sole()` DIRECTLY (module docstring
+    above, R2: "through `facts.sole()`/`facts._legb_lookup()`"), never through
+    `_reaching()` -- and is documented, deliberately, to stay ungated on tamper
+    flags at all: "deliberately NOT gated on `facts._legb_blocked()` -- that guard
+    protects `locate()`'s FP-safety direction, and gating recall on it here would
+    cost recall for no FP benefit, since a wrong recall-side resolution can only ADD
+    a finding, never remove one" (this file's module docstring, R2's own comment,
+    `skillast.py` `_RefResolver` class docstring).
+
+    B-996 round 1 gated the SHARED `sole()` on the whole `_tampers()` predicate --
+    which `_RefResolver` calls into just as directly as `_reaching()` does -- and so
+    silently overrode that prior, deliberate, already-documented design choice: a
+    rebind through `os.environ` (`e = {}; e = os.environ`) feeding a shell=True
+    `subprocess.run` call, in a file that also happens to `import inspect` for
+    something unrelated (an ordinary `_TAMPER_MODULES` entry, not a frame-jump
+    primitive), silently LOST its TT5_CMD_INJECTION crit finding entirely under
+    round 1 -- not merely weakened to a lower tier, as the loader-sink shapes were,
+    but dropped with NO B-906/TT5 finding replacing it (confirmed empirically
+    against f53a919b). Round 2 tried a narrower gate scoped to `_reaching()`
+    (`shippedexec.py`, `locate()`'s own caller) alone, never in `sole()` itself, so
+    `_RefResolver` was never affected by it; round 3 removed that gate too (see
+    `_reaching()`'s own docstring) -- `_RefResolver`'s pre-existing,
+    monotone-only-adds-findings behaviour stays untouched either way -- this must
+    stay crit."""
+    src = (
+        "import subprocess, inspect\n"
+        "import os\n"
+        "e = {}\n"
+        "e = os.environ\n"
+        'subprocess.run(e["CMD"], shell=True)\n'
+    )
+    assert _has_crit(src), (
+        "a rebind through os.environ lost its TT5_CMD_INJECTION crit finding in a "
+        f"file with an unrelated `import inspect` -- {_severities(src)}"
+    )

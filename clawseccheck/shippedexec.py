@@ -134,6 +134,14 @@ _TAMPER_ATTRS = frozenset({
     # legitimate-looking binding a static reader picks, so the runtime value stays the
     # FIRST, attacker-controlled one. `f_trace` is the same class of primitive one level
     # removed: it installs a PER-LINE local trace function on a frame that already has one.
+    # B-996 round 1 gated `sole()` on this WHOLE set (plus `_TAMPER_MODULES`, which
+    # includes the loader-sink modules `runpy`/`importlib`/`imp`/`zipimport`/`pkgutil`
+    # THEMSELVES -- exactly the files B-917 needs to analyse) and was reverted. Round 2
+    # tried a narrower gate scoped to `_reaching()` alone; that too was reverted in
+    # round 3 (see `_reaching()`'s own docstring) -- refusing a multi-binding
+    # resolution there could only ever REMOVE a conviction, never preserve one, since
+    # both T1 (`loc_eq() == DEFINITE`) and T3 (`loc.writable`) need a real, non-SYM
+    # `Loc` to convict. This set is used by `_tampers()`/`_legb_blocked()` only.
     "f_lineno", "f_trace", "settrace", "setprofile", "settrace_all_threads",
     "setprofile_all_threads",
 })
@@ -422,9 +430,10 @@ class _FileFacts:
         # proof for that one reason (`exact_calls`' second pass).
         self.any_target = False
         self.blocked = self.star or self._blocked(module_names)
-        # B-917 locate() LEGB fallback (2.1): lazily computed and cached, since most
-        # files never take this path. `None` means "not computed yet" for the
-        # whole-file tamper flag; the per-name cache starts empty.
+        # B-917 locate() LEGB fallback (2.1): read through `_file_tampers()`, lazily
+        # computed and cached since most files never take this path. `None` means
+        # "not computed yet" for the whole-file tamper flag; the per-name cache below
+        # starts empty.
         self._legb_tampers: "bool | None" = None
         self._legb_attr_store_cache: dict = {}
 
@@ -614,13 +623,37 @@ class _FileFacts:
         index, matching normal statement-order semantics within that block, and never
         falls back to comparing anything but the tuple.
         Source order is a proxy for RUNTIME order here, and that proxy is only sound
-        because `_tampers()` bans every frame-jump primitive that can break it -- a
-        `sys.settrace`/`setprofile` (or `sys.monitoring` LINE) hook rewriting
-        `frame.f_lineno` mid-run can skip the second binding this picks, so without that
-        ban "last one before the use point" would describe the SOURCE, not what the
-        interpreter actually executes (B-922 round 2); the with-body exception above is
-        still a source-order comparison, so it rests on that same ban rather than a
-        tamper check of its own."""
+        when this file contains none of the frame-jump primitives that could break it
+        (`sys.settrace`/`setprofile`/`sys.monitoring`, a `frame.f_lineno`/`f_trace`
+        rewrite, ...) -- but THIS method deliberately does not gate on that itself.
+
+        B-996 round 1 added such a gate here (via `_file_tampers()`, i.e. the WHOLE
+        `_tampers()` predicate) and was reverted: `_tampers()`'s own `_TAMPER_MODULES`
+        includes the loader-sink modules `runpy`/`importlib`/`imp`/`zipimport`/
+        `pkgutil` THEMSELVES, plus `inspect`/`operator`/other everyday stdlib imports,
+        so gating the shared multi-binding resolution on it disabled `locate()` for
+        almost any file B-917 actually needs to see into, and silently changed the
+        behaviour of every OTHER caller of `sole()` too -- including `_RefResolver`
+        (`skillast.py`'s `ref()`, TT4/TT5/SSRF's source vocabulary), which deliberately
+        stays ungated on tamper flags (`skillast.py`'s own comment on that call site:
+        "gating recall on it here would cost recall for no FP benefit, since a wrong
+        recall-side resolution can only ADD a finding, never remove one"). A gate
+        inside this shared method cannot honour that distinction -- it either protects
+        every caller or none.
+
+        Round 2 tried moving a narrower gate into `_reaching()` instead, scoped to
+        `locate()`'s caller alone. Round 3 reverted that too: a refused resolution
+        here resolves to a `SYM` identity, and B-917's own conviction rules (T1 needs
+        `loc_eq() == DEFINITE`, T3 needs `loc.writable`) both require a real,
+        non-SYM `Loc` to convict -- so refusing this multi-binding resolution could
+        only ever REMOVE a conviction, never preserve one at reduced confidence, and
+        measurement found virtually any marker in the file (a benign `__setattr__`
+        override, an ordinary `import operator`, the standard `getattr(mod, name)`
+        plugin-loader idiom, even a genuine `sys.settrace()` call) dropped an
+        otherwise-unambiguous loader-sink crit finding to WARN/info. No caller of
+        `sole()` gates on the frame-jump-primitive risk today; it is a known, open
+        gap (tracked as a follow-up for a "widen, never refuse" redesign, not another
+        refusal-based patch)."""
         if name == "__file__" or name in self.declared:
             return None
         recs = self.records(scope).get(name, [])
@@ -705,6 +738,16 @@ class _FileFacts:
             child, cur = cur, self.parents.get(cur)
         return child if cur is scope and child in body else None
 
+    def _file_tampers(self) -> bool:
+        """Lazily computed, cached `_tampers(self.tree)` -- whole-file. Used by
+        `_legb_blocked()` (`locate()`'s LEGB-fallback guard) only: neither `sole()`
+        nor `_reaching()` gates its own resolution on this (B-996 rounds 1 and 2
+        each tried a gate here or in `_reaching()` and both were reverted -- see
+        `sole()`'s own docstring)."""
+        if self._legb_tampers is None:
+            self._legb_tampers = _tampers(self.tree)
+        return self._legb_tampers
+
     def _legb_blocked(self, name: str) -> bool:
         """Guard for `locate()`'s LEGB fallback (b917-design.md 2.1). A function-scope
         read with no local binding may resolve through an enclosing/module scope --
@@ -716,9 +759,7 @@ class _FileFacts:
         "module constant" by a route this resolver does not model at all). Sound over
         precise: this only ever REFUSES a resolution, never manufactures one.
         Lazily computed and cached -- most files never take this path."""
-        if self._legb_tampers is None:
-            self._legb_tampers = _tampers(self.tree)
-        if self._legb_tampers:
+        if self._file_tampers():
             return True
         if name not in self._legb_attr_store_cache:
             self._legb_attr_store_cache[name] = any(
@@ -1102,8 +1143,22 @@ class _FileFacts:
 
     def _reaching(self, e: ast.Name, scope: ast.AST) -> tuple:
         """`(record, defining_scope)` for a Name read -- `sole()` in *scope*, then the
-        LEGB walk below -- or `(None, scope)`. Shared by `locate()` and
-        `_module_suffixed()` so a path and its final component resolve names alike."""
+        LEGB walk below -- or `(None, scope)`. `locate()`'s only caller into this
+        method (confirmed by grep -- `_module_suffixed()`/`_bindings_suffixed()` walk
+        `records()` directly and never call this).
+
+        B-996 rounds 1 and 2 each tried refusing `sole()`'s resolution here (or in
+        `sole()` itself) when the file could contain a frame-jump primitive that
+        breaks the "source order is a proxy for runtime order" assumption `sole()`'s
+        multi-binding case rests on. Both were reverted, round 2 for this specific
+        consumer: a refused resolution here resolves to a `SYM` identity, and B-917's
+        conviction rules (T1 needs `loc_eq() == DEFINITE`, T3 needs `loc.writable`)
+        both require a real, non-SYM `Loc` to convict -- so the refusal could only
+        ever REMOVE a conviction, never preserve one at reduced confidence, and it
+        gained nothing in the production `--vet` path for the loader-sink shape it
+        targeted. This method resolves `sole()`'s result unconditionally; the
+        underlying frame-jump-primitive gap is tracked as a follow-up for a "widen,
+        never refuse" redesign instead."""
         rec = self.sole(e.id, scope, before=e)
         found_scope = scope
         # LEGB fallback (b917-design.md 2.1), `resolve()` deliberately lacks this:

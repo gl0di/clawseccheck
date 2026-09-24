@@ -30,6 +30,8 @@ import ast
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from clawseccheck import shippedexec as se
 from clawseccheck.checks._vet import ast_finding_is_fail_capable, vet_skill
 from clawseccheck.skillast import analyze_python
@@ -320,6 +322,70 @@ def test_locate_legb_stops_at_an_intermediate_scopes_own_parameter():
     '''))
     located = facts.locate(value, func)
     assert located is not None and located.anchor == "SYM"
+
+
+def _reaching_at_runpy_call(src: str):
+    """Parse *src*, find its sole `runpy.run_path(<name>)` call, and return
+    `(facts, scope, rec)` where `rec` is `_FileFacts._reaching()`'s raw record for
+    the call's path argument -- the exact B-917 loader-sink call shape
+    (`_b917_loader_call`/`_b917_findings`) that reaches `_reaching()` through
+    `locate()`. `facts` is built the way `skillast.analyze_python()` actually builds
+    it (`_FileFacts(tree, filename, artifact, set(), False)`, never through
+    `ShippedArtifact._compute()`'s own `_tampers()` gate)."""
+    tree = ast.parse(src)
+    art = se.ShippedArtifact([("skill.py", src)])
+    facts = se._FileFacts(tree, "skill.py", art, set(), False)
+    call = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and facts.dotted(n.func) == "runpy.run_path"
+    )
+    scope = facts.scope_of(call)
+    rec, _found_scope = facts._reaching(call.args[0], scope)
+    return facts, scope, rec
+
+
+def test_b996_reaching_multi_binding_resolves_normally_when_untampered():
+    """Negative control for the tests below: `_reaching()` (called only by
+    `locate()`) resolves an ordinary same-scope rebind -- the B-638 multi-binding
+    resolution `sole()` already had, which `_reaching()` never gates (B-996 rounds
+    1 and 2 each tried a gate here and both were reverted -- see `_reaching()`'s
+    own docstring)."""
+    src = dedent('''
+        import os
+
+        here = "/opt/skilldata"
+        here = os.path.join(here, "nested")
+        p = os.path.join(here, "mod.py")
+    ''')
+    tree = ast.parse(src)
+    art = se.ShippedArtifact([("skill.py", src)])
+    facts = se._FileFacts(tree, "skill.py", art, set(), False)
+    p_value = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and n.targets[0].id == "p"
+    ).value
+    located = facts.locate(p_value, tree)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("opt", "skilldata", "nested", "mod.py")
+
+
+def test_b996_round2_reaching_still_resolves_a_decoy_binding_with_no_frame_jump_primitive():
+    """A decoy second same-scope binding feeding a `runpy.run_path()` call, in a
+    file that imports the loader-sink module `runpy` itself (and would therefore
+    trip the WHOLE `_tampers()` predicate, round 1's overbroad, reverted gate) but
+    contains no other tamper marker. `_reaching()` resolves this confidently to the
+    decoy (last-wins is the true runtime behaviour absent any trace hook). Fails
+    against f53a919b (round 1's `_file_tampers()`-in-`sole()` gate refuses this
+    too, since `runpy` is itself a `_TAMPER_MODULES` entry)."""
+    facts, scope, rec = _reaching_at_runpy_call(dedent('''
+        import runpy
+
+        plugin = "/opt/skilldata/default.py"
+        plugin = "/tmp/plugin.py"
+        runpy.run_path(plugin)
+    '''))
+    assert se._tampers(facts.tree) is True  # sanity: `runpy` alone trips _tampers()
+    assert rec is not None and rec[0] == "assign"
 
 
 # ---------------------------------------------------------------------------
@@ -812,6 +878,93 @@ def test_overwrite_shipped_module_then_run_path_is_staged_exec_not_info(tmp_path
     )
     crit = {f.rule for f in findings if f.severity == "crit"}
     assert crit == {"REMOTE_STAGED_EXEC"}, findings
+
+
+# ---------------------------------------------------------------------------
+# Regression guards for round 1's OWN false positives -- a decoy same-scope
+# binding feeding a loader/import site, in a file that merely IMPORTS a
+# loader-sink module (or another everyday `_TAMPER_MODULES` entry), must stay at
+# its ordinary crit verdict. Each one fails against f53a919b (round 1's
+# `_file_tampers()`-in-`sole()` gate refuses these too, since
+# `runpy`/`importlib`/`inspect` are themselves `_TAMPER_MODULES` entries).
+#
+# The B-922 `_operator.attrgetter`/`sys.settrace` frame-jump-plus-decoy-binding
+# shape these guards once sat alongside (round 2's end-to-end pin, removed in
+# round 3) is a real, still-open gap: neither the ungated resolution restored
+# here nor round 2's refusal-based gate can both preserve recall on the files
+# above AND close that shape -- refusing can only ever drop a conviction for
+# this consumer (B-917's T1/T3 both require a real, non-SYM `Loc`), never
+# preserve one at reduced confidence. Tracked as a follow-up for a "widen,
+# never refuse" redesign, not another refusal-based gate.
+# ---------------------------------------------------------------------------
+
+
+def test_b996_round2_runpy_decoy_binding_without_frame_jump_primitive_stays_crit():
+    """Regression shape 1: a decoy second same-scope binding on a `runpy.run_path()`
+    target, in a file with no genuine frame-jump primitive -- the honest runtime
+    value IS the decoy (last-wins is real Python semantics absent a trace hook), and
+    the decoy sits in a world-writable dir, so this is a genuine T3 DANGEROUS_LOADER
+    regardless."""
+    src = dedent('''
+        import runpy
+
+        plugin = "/opt/skilldata/default.py"
+        plugin = "/tmp/plugin.py"
+        runpy.run_path(plugin)
+    ''')
+    findings = _analyze(src, "run.py")
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}, findings
+
+
+@pytest.mark.parametrize("loader_call", [
+    pytest.param('runpy.run_path(os.path.join(cache, "plugin.py"))\n', id="runpy"),
+    pytest.param(
+        'spec = importlib.util.spec_from_file_location('
+        '"m", os.path.join(cache, "plugin.py"))\n'
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n",
+        id="importlib",
+    ),
+])
+def test_b996_round2_accumulating_path_idiom_without_frame_jump_primitive_stays_crit(
+    loader_call,
+):
+    """Regression shape 2: an accumulating-path idiom (`cache = ...; cache =
+    os.path.join(cache, ...)`, itself a same-scope multi-binding rebind `sole()`
+    must resolve) feeding a loader call, for BOTH loader forms -- `runpy.run_path`
+    and `importlib`'s `spec_from_file_location`+`exec_module` -- with no genuine
+    frame-jump primitive present. `tempfile.gettempdir()` anchors the final location
+    under the world-writable temp dir: T3 DANGEROUS_LOADER either way."""
+    src = (
+        "import runpy, importlib.util, os, tempfile\n"
+        "cache = tempfile.gettempdir()\n"
+        'cache = os.path.join(cache, "myskill")\n'
+    ) + loader_call
+    findings = _analyze(src, "run.py")
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}, findings
+
+
+def test_b996_round2_staged_import_rebound_path_with_unrelated_importlib_inspect_stays_crit():
+    """Regression shape 3: a staged-import correlation (a tainted write, then
+    `sys.path.insert`+`import`) whose shared directory is read through a same-scope
+    REBOUND name, in a file that ALSO happens to `import importlib`/`import inspect`
+    for something entirely unrelated to the loader/staged-import shape itself (those
+    two imports alone tripped round 1's `_file_tampers()`-in-`sole()` gate via
+    `_TAMPER_MODULES`, though nothing in this file actually reaches a frame-jump
+    primitive). Must stay REMOTE_STAGED_IMPORT crit."""
+    src = _src('''
+        import sys, os, importlib, inspect
+
+        _STAGE_DIR = "/opt/other"
+        _STAGE_DIR = "/tmp/evilstage"
+        open(os.path.join(_STAGE_DIR, "mod.py"), "wb").write(data)
+        sys.path.insert(0, _STAGE_DIR)
+        import mod
+    ''')
+    findings = _analyze(src, "run.py")
+    assert any(
+        f.rule == "REMOTE_STAGED_IMPORT" and f.severity == "crit" for f in findings
+    ), findings
 
 
 def test_case_02869_shaped_remote_plugin_loader_is_fail():
