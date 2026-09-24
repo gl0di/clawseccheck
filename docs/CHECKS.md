@@ -3099,10 +3099,14 @@ These paths are computed from multiple checks. They fire only when every leg is 
   file writes — overwriting bootstrap or skill files to implant persistent instructions,
   or tampering with data the agent later trusts.
 - Fix:
-  Scope the write capability: set tools.exec.mode='ask' so writes need human sign-off,
-  restrict tools.elevated.allowFrom to an explicit allowlist (no '*'), and lock ingress
-  channels to 'allowlist'. Removing the fs_write/apply_patch grant entirely also breaks
-  the chain.
+  tools.exec.mode='ask', tools.elevated.allowFrom, and locking ingress channels to
+  'allowlist' do NOT scope write-capable tools and do NOT clear this chain on their own
+  (B55 stays WARN; RISK-12 arms on WARN, not just FAIL). What actually clears it: contain
+  the writes with agents.defaults.sandbox.mode='all' AND workspaceAccess='ro' (or 'none')
+  -- verified per agent, with a docker backend, tools.exec.host left at 'auto'/'sandbox',
+  and no docker/browser bind that re-exposes a writable host path (see
+  _fs_writes_contained) -- OR narrow tools.allow so it never names write/edit/apply_patch,
+  OR remove the fs_write/apply_patch grant entirely.
 
 ### RISK-13 - Markdown-image exfil + writable memory/bootstrap = persistence / exfil
 

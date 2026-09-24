@@ -470,16 +470,62 @@ def test_minimal_config_no_paths():
     # to their riskiest value when unset ("main"/"all"), so a config with an allowlist
     # channel and no explicit session isolation genuinely trips RISK-08 -- this test's
     # own "minimal, no paths" intent needs the explicit safe values to hold.
+    #
+    # tools.allow=["read"] pinned safe (CLAWSECCHECK-B-737, test-suite-drift sweep):
+    # with no tools.allow declared at all, B55 reads OpenClaw's own implicit-wildcard
+    # default as granting write/edit/apply_patch (tools.allow/tools.profile both
+    # absent), which -- per B55's own in-source B-737 note -- is armed for RISK-12
+    # exactly like an id'd agent's inert `tools` block: a default-provenance grant is
+    # the SAME vendor state, not a narrower one. B55 stays WARN even with an added
+    # tools.exec.mode="ask" (that gate is non-write-specific; B55's own WARN text says
+    # so), and adding tools.exec.mode at all also makes risk._enabled_tools synthesize
+    # an "exec" tag purely from the KEY being present (regardless of "ask" being the
+    # safe value), which newly arms RISK-03 (no sandbox + untrusted ingress + exec/
+    # write tools) too. The genuinely minimal, safe fix is upstream of both: declare
+    # tools.allow explicitly as a real, non-empty, non-wildcard allowlist that never
+    # names a write-capable tool (write/edit/apply_patch) -- "read" is exactly that,
+    # the same safe grant test_b55.py's own PASS fixtures use -- so B55 resolves to
+    # its "No filesystem-write tool ... is granted" PASS and RISK-12 never reaches its
+    # B55-status gate at all. An EMPTY tools.allow=[] does NOT do this: B55 still
+    # reads it as the same implicit-wildcard default (reproduced directly against
+    # check_fs_write_exposure), so the allowlist must be non-empty.
     cfg = {
         "gateway": {"bind": "127.0.0.1:8080", "auth": {"mode": "token",
                     "token": "a-very-long-token-of-32-characters"}},
         "channels": {"telegram": {"dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
         "logging": {"redactSensitive": "tools"},
         "session": {"dmScope": "per-peer"},
-        "tools": {"sessions": {"visibility": "self"}},
+        "tools": {"sessions": {"visibility": "self"}, "allow": ["read"]},
     }
     paths = _paths(cfg)
     assert paths == []
+
+
+def test_risk12_fix_text_recommendations_actually_clear_the_chain():
+    """CLAWSECCHECK test-suite-drift sweep: RISK-12's own `fix` text used to recommend
+    tools.exec.mode='ask' + tools.elevated.allowFrom + locking channels to 'allowlist'
+    -- none of which actually clears the chain (see
+    test_b55.py::test_risk12_fires_on_declared_allowlist_channel_gated_config, whose
+    clean_b55_fs_write_scoped fixture is exactly that shape and still fires RISK-12).
+    The fix text was corrected in the same change that added this test, to recommend
+    what the engine actually honors: genuine sandbox containment (B-497,
+    test_b497_risk12_containment.py) or narrowing/removing the write-tool grant. Pin
+    both positively here so a future edit to risk.py can't silently re-break the
+    advice without a test noticing."""
+    base = {
+        "channels": {"telegram": {"dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
+        "tools": {"allow": ["fs_write"], "exec": {"mode": "ask"}},
+    }
+    assert "RISK-12" in {p.id for p in _paths(base)}, "sanity: base shape must still arm RISK-12"
+
+    contained = {
+        **base,
+        "agents": {"defaults": {"sandbox": {"mode": "all", "workspaceAccess": "ro"}}},
+    }
+    assert "RISK-12" not in {p.id for p in _paths(contained)}
+
+    narrowed = {**base, "tools": {"allow": ["read"], "exec": {"mode": "ask"}}}
+    assert "RISK-12" not in {p.id for p in _paths(narrowed)}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

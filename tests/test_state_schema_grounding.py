@@ -919,6 +919,27 @@ _CRON_JOBS_NO_CONSTRAINTS_LEGACY = (
     "comparison makes it LEGACY_COLS: identical column count to the vendor, so not a "
     "proper subset either -- the name is aspirational, not a vendor match."
 )
+_B909_TRAJECTORY_SIDECAR_STRIPPED_SHAPE = (
+    "trajectory_runtime_events (B-909) lives in the PER-AGENT database "
+    "(agents/<agent>/agent/openclaw-agent.sqlite), never in the state database "
+    "(state/openclaw.sqlite) this snapshot/registry classifies -- same 'different DB' "
+    "reasoning as _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB. Registered separately, not "
+    "under that constant, because this site's DDL is NOT a verbatim copy of test_f187's "
+    "own fixture: this test only exercises the read-only-open-materializes-WAL-sidecars "
+    "side effect (B-909) via trajectorystore._open_readonly, never "
+    "trajectorystore.corroborate()'s actual row reads, so it declares a stripped-down "
+    "(session_id TEXT, seq INTEGER, event_json TEXT) shape -- missing run_id, "
+    "created_at, every NOT NULL, and the PRIMARY KEY the real per-agent table (and every "
+    "_TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB site) carries. Still absent from the state "
+    "snapshot for the same different-database reason, so still LEGACY_TABLE."
+)
+_B909_IMMUTABLE_DEMO_DECOY = (
+    "a deliberately generic, single-column table (`t`) used only by "
+    "test_immutable_1_would_silently_hide_uncommitted_wal_rows to demonstrate SQLite's "
+    "mode=ro vs immutable=1 WAL-visibility difference in a bare tmp_path SQLite file -- "
+    "never opened through collect() or any per-agent-DB reader, never a real OpenClaw "
+    "table name, never meant to resolve against any vendor shape."
+)
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
     # source scanner sees. Pinned by a full fingerprint row at
@@ -951,6 +972,14 @@ _REGISTRY: "dict[str, _Entry]" = {
         "any real cron_jobs shape.",
     ),
     "tests/test_limit_hit_domains.py:53": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    # CLAWSECCHECK test-suite-drift sweep (2026-09-24): B-909's own state-DB cron_jobs
+    # fixture (test_collect_also_creates_state_db_sidecars_from_nothing, run through the
+    # real collect() path, unlike the per-agent-DB entries above) -- never previously
+    # registered. Byte-identical to test_b294_cron_run_logs.py's own _CRON_JOBS_DDL
+    # constant (same 7 columns: job_id, name, enabled, delete_after_run, trigger_script,
+    # payload_kind, payload_message), so the same _CRON_JOBS_LEGACY reason applies
+    # verbatim -- no new reason constant needed.
+    "tests/test_b909_wal_sidecar_creation.py:108": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
 
     # ---- cron_run_logs (retired table) ----
     "tests/test_b294_cron_run_logs.py:49": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
@@ -1024,8 +1053,10 @@ _REGISTRY: "dict[str, _Entry]" = {
     # (102->108, 109->115) from an earlier, untracked edit to this same docstring/loop
     # -- pre-existing staleness, not introduced by round 11's own trajectorystore.py
     # changes (which never touch this test file's header) -- same DDL, keys renamed.
-    "tests/test_f187_trajectory_sqlite_corroborator.py:108": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:115": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # Re-verified 2026-09-24 (test-suite-drift sweep): both had drifted again by a
+    # uniform +14 (108->122, 115->129), same DDL, keys renamed to match.
+    "tests/test_f187_trajectory_sqlite_corroborator.py:122": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:129": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # B-811 (Option A): a second auth_profile_store fixture, this one in
     # _write_agent_sqlite_db()'s own `auth_secret=` branch (the isolation test for the
     # new event_json-reading reader) -- same per-agent-DB reasoning as the two above.
@@ -1037,21 +1068,24 @@ _REGISTRY: "dict[str, _Entry]" = {
     # via _add_agent_db) in a test proving _table_kind refuses a VIEW named
     # trajectory_runtime_events that reads FROM this table -- same per-agent-DB
     # reasoning as every other entry in this section. Re-verified 2026-09-23: both had
-    # drifted (470->486, 796->812).
-    "tests/test_f187_trajectory_sqlite_corroborator.py:486": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:812": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # drifted (470->486, 796->812). Re-verified 2026-09-24: both had drifted again by
+    # a uniform +14 (486->500, 812->826).
+    "tests/test_f187_trajectory_sqlite_corroborator.py:500": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:826": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # B-811 round 3/4 (2026-09-15): `_plant_generated_column_bypass`'s own standalone
     # fixture -- the GENERATED ALWAYS AS bypass the round-3 review found (a real table,
     # not a VIEW/virtual table, so a different attack shape but the same per-agent-DB
     # isolation reasoning as every other entry in this section). Re-verified
-    # 2026-09-23: had drifted (514->530).
-    "tests/test_f187_trajectory_sqlite_corroborator.py:530": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # 2026-09-23: had drifted (514->530). Re-verified 2026-09-24: had drifted again by
+    # the same uniform +14 (530->544).
+    "tests/test_f187_trajectory_sqlite_corroborator.py:544": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # B-811 round 4 (2026-09-15): `test_compiled_tool_reader_refuses_a_rootpage_
     # aliased_table`'s own standalone fixture -- round 2's rootpage-uniqueness check,
     # given real `PRAGMA writable_schema` behavioural coverage for the first time
     # (round 4's own adversarial review found it had none). Re-verified 2026-09-23:
-    # had drifted (619->635).
-    "tests/test_f187_trajectory_sqlite_corroborator.py:635": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # had drifted (619->635). Re-verified 2026-09-24: had drifted again by the same
+    # uniform +14 (635->649).
+    "tests/test_f187_trajectory_sqlite_corroborator.py:649": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # B-811 round 3/4 (2026-09-15): the same generated-column bypass fixture, built
     # standalone (not via _plant_generated_column_bypass, which lives in the sibling
     # test file) for the CHECK-level end-to-end test. Re-verified 2026-09-23: had
@@ -1089,9 +1123,10 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b185_compiled_tool_poisoning.py:106": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
     # B-811 (adversarial review, 2026-09-15): two standalone fixtures (not via
     # _add_agent_db) in the DoS-bound regression tests -- same DDL, same reasoning.
-    # Re-verified 2026-09-23: both had drifted (920->936, 970->986).
-    "tests/test_f187_trajectory_sqlite_corroborator.py:936": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:986": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    # Re-verified 2026-09-23: both had drifted (920->936, 970->986). Re-verified
+    # 2026-09-24: both had drifted again by a uniform +14 (936->950, 986->1000).
+    "tests/test_f187_trajectory_sqlite_corroborator.py:950": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1000": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
     # B-852 round 11 cleanup (2026-09-23): four more standalone
     # `trajectory_runtime_events` fixtures this registry had never covered (a
     # pre-existing gap, not introduced by round 11's trajectorystore.py changes) -- the
@@ -1100,14 +1135,27 @@ _REGISTRY: "dict[str, _Entry]" = {
     # test_event_json_query_plan_has_no_sort_step) and the excluded-COUNT-query skip
     # tests (test_excluded_count_query_is_skipped_once_already_capped /
     # test_excluded_count_query_still_runs_when_not_already_capped) -- same per-agent-DB
-    # reasoning as every other entry in this section.
-    "tests/test_f187_trajectory_sqlite_corroborator.py:1170": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:1228": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:1354": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:1399": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    # reasoning as every other entry in this section. Re-verified 2026-09-24: all four
+    # had drifted by a uniform +14 (1170->1184, 1228->1242, 1354->1368, 1399->1413).
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1184": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1242": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1368": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1413": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    # CLAWSECCHECK test-suite-drift sweep (2026-09-24): B-909's own standalone
+    # trajectory_runtime_events fixture (test_open_readonly_creates_shm_and_wal_
+    # sidecars_from_nothing) -- never previously registered. Per-agent-DB table like
+    # every other entry in this section, but a stripped-down (session_id, seq,
+    # event_json) shape rather than a verbatim copy of test_f187's own DDL, so it gets
+    # its own reason rather than reusing _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB's
+    # "matching test_f187's own DDL verbatim" claim.
+    "tests/test_b909_wal_sidecar_creation.py:54": _Entry(LEGACY_TABLE, _B909_TRAJECTORY_SIDECAR_STRIPPED_SHAPE),
 
     # ---- cron_jobs (C-476 payload-extras fixture -- vendor column set, no constraints) ----
     "tests/test_c476_cron_payload_extras.py:58": _Entry(LEGACY_COLS, _CRON_JOBS_NO_CONSTRAINTS_LEGACY),
+
+    # ---- t (B-909 mode=ro vs immutable=1 demo decoy) ----
+    # CLAWSECCHECK test-suite-drift sweep (2026-09-24): never previously registered.
+    "tests/test_b909_wal_sidecar_creation.py:143": _Entry(LEGACY_TABLE, _B909_IMMUTABLE_DEMO_DECOY),
 
     # ---- update_runs (F-192, real vendor table, snapshot not yet re-baselined) ----
     # 2026-09-17: re-baselined the snapshot (was last regenerated 2026-09-12, commit
@@ -1117,7 +1165,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_f192_update_runs.py:30": _Entry(MODERN),
 }
 
-assert len(_REGISTRY) == 64, f"registry has {len(_REGISTRY)} entries, expected 64"
+assert len(_REGISTRY) == 67, f"registry has {len(_REGISTRY)} entries, expected 67"
 
 
 # ========================================================================================
