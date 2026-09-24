@@ -1505,7 +1505,7 @@ def _is_remote_fetch_call(node: ast.AST, facts=None) -> bool:
     free by reusing `facts.dotted()`. Deliberately opt-in per call site (defaults to
     `None`, in which case a bare name is never recognised, matching this function's
     prior behaviour exactly): most of this module's callers have only a single node in
-    hand, not the file-wide import context `facts` carries, and CLAWSECCHECK-B-927
+    hand, not the file-wide import context `facts` carries, and B-927
     scopes the widening to the one rule family that needed it rather than every
     consumer of this predicate.
     """
@@ -11094,7 +11094,7 @@ def analyze_python(
     # attribute-call spelling, `urllib.request.urlopen(...)`, was) — see
     # `_is_remote_fetch_call`'s own docstring. REMOTE_CODE_LOAD above deliberately
     # keeps its own call unchanged (no `facts`); this widening is scoped to the
-    # staged-write correlation only, per CLAWSECCHECK-B-927.
+    # staged-write correlation only, per B-927.
     for _se_ln, _se_path in _staged_exec_findings(
         tree, _remote_fetch_tainted_names(tree, facts), facts
     ):
