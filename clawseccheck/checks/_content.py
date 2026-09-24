@@ -1890,35 +1890,40 @@ _B63_DEST_RE = re.compile(
         # matched inside unrelated vocabulary with no boundary at all (reactivating this
         # branch in round 1 turned that pre-existing gap into a live FP: "урок
         # себесто..." matched "к себе", "мойку"/"нашатырном"/"ботинок" matched "мой"/
-        # "наш"/"бот" as bare substrings). "облак" stays a left-bounded STEM (no
-        # LEXICAL collision — no unrelated Russian word starts with those 5 letters, so
-        # the mandatory `\s+` before it already gives it a real left boundary).
+        # "наш"/"бот" as bare substrings). мой/наш/чат/бот/к-себе have each since cleanly
+        # passed two independent C-135 adversarial rounds with zero open issues.
         #
-        # B-947 round 3: round 2's bare stem still collided SEMANTICALLY — "в облаках"
-        # (prepositional/locative plural) is the fixed grammatical shape of the idiom
-        # "витать/быть в облаках" ("to have one's head in the clouds" / daydream),
-        # nothing to do with cloud storage, and it satisfied the bare stem. Rejected a
-        # narrow идиом-verb lookaround (excluding "витат"/"быть" immediately before "в
-        # облак") as fragile/enumerative per this project's own C-135 conventions — the
-        # same idiom also occurs with "парить"/"летать"/no verb at all ("мысли витают/
-        # он вечно в облаках"), which a verb blacklist would not generalise to. Fixed
-        # grammatically instead: an exfil DESTINATION is always the OBJECT of motion-
-        # into, i.e. Russian ACCUSATIVE case (в облако / в облака — "into the cloud(s)"),
-        # never prepositional/locative ("в облаках" — "in/among the clouds", a STATIC
-        # location, the case every form of this idiom uses). `облак` is now bounded to
-        # its bare stem or an accusative о/а suffix only (`облак(?:о|а)?\b`) — the
-        # trailing \b rejects any further case ending (-ах prepositional plural, -е
-        # prepositional singular, -ом instrumental, -у dative, ...), so "облаках"/
-        # "облаке"/"облаком" no longer match while genuine "в облако"/"в облака"
-        # destination phrasing is untouched (verified live). This also transitively
-        # fixes the same collision in every OTHER `_B63_DEST_RE` consumer
-        # (`_has_outbound_exfil` → B63's `_b63_scan`, and `_b64_next_sentence_has_exfil`
-        # → B64), not just B156's object-of-send gate the idiom was first reproduced
-        # through — confirmed live that the idiom also false-anchored a FAIL via B63
-        # before this fix (an unrelated secrecy+action phrase sharing the same 120-char
-        # `_B63_WINDOW` as the idiom fragment), which a B156-local fix could not have
-        # reached.
-        r"|\bк\s+себе\b|\bмне\b|\bв\s+(?:мой\b|наш\b|чат\b|бот\b|облак(?:о|а)?\b)"
+        # B-947 round 4 (RETRACTED, not narrowed further): "облак" ("cloud[-storage]")
+        # is deliberately DROPPED from this alternation, not merely re-bounded again.
+        # Round 3 tried narrowing it to the Russian ACCUSATIVE case only
+        # (`облак(?:о|а)?\b` — "в облако"/"в облака", real motion-into-a-destination
+        # grammar) to exclude the "витать/быть в облаках" (prepositional/locative
+        # "head in the clouds" / daydream) idiom collision round 2's bare stem had. A
+        # further independent round found that premise itself false: accusative "в
+        # облака" is NECESSARY for a genuine cloud-storage destination but nowhere near
+        # SUFFICIENT — ordinary Russian uses accusative "в облака" constantly for
+        # unrelated literal and figurative motion with no exfil meaning at all. Reproduced
+        # live at CRITICAL severity via check_silent_instruction: "самолёт поднимается в
+        # облака" ("the plane rises into the clouds", ordinary aviation/weather prose)
+        # hard-FAILed; swapping only the last word (облака -> небо, "sky") dropped it
+        # back to WARN, isolating this alternative as the sole cause. Two more unrelated
+        # idioms reproduced the same false FAIL: "улечу в облака от радости" (carried
+        # away with joy) and "мысли уносятся в облака" (drifting thoughts). Per this
+        # project's own accepted-residual discipline (CLAUDE.md §2.5/C-135): a 4th regex
+        # patch was rejected as unsound here — no lexical or grammatical-case
+        # discriminator separates "into a storage destination" from ordinary Russian
+        # motion/figurative use of the same case+preposition, so the only sound options
+        # are a real verb-governance redesign (does the destination actually govern the
+        # send verb, not merely share a window) or a collocation requirement (e.g.
+        # "облачное хранилище" — "cloud storage" — actually named) — both materially
+        # bigger, riskier changes to shared B63/B64/B156 infrastructure than this
+        # constant's own scope, and tracked as a follow-up ticket rather than attempted
+        # here. Net effect: Russian cloud-storage destination coverage ("в облако"/"в
+        # облака" alone, no other anchor) is accepted as dropped for now — the
+        # send-verb+destination anchor simply does not fire on it, same as it never did
+        # on `dev` before round 1 (restores that pre-existing, already-accepted gap
+        # rather than reopening a false-positive one).
+        r"|\bк\s+себе\b|\bмне\b|\bв\s+(?:мой\b|наш\b|чат\b|бот\b)"
     ),
     re.IGNORECASE,
 )
