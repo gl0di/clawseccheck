@@ -826,33 +826,7 @@ class _FileFacts:
         if isinstance(e, ast.Name):
             if e.id == "__file__":
                 return Loc("FILE", self.relparts)
-            rec = self.sole(e.id, scope, before=e)
-            found_scope = scope
-            # LEGB fallback (b917-design.md 2.1), `resolve()` deliberately lacks this:
-            # a name read inside a function with no binding in that function (and not
-            # declared global/nonlocal -- sole() already refuses those outright) is
-            # looked up in its enclosing function scopes and then the module scope.
-            # Required for the r2-D1 shape: a module constant read inside a function.
-            #
-            # Gated on "no record for e.id in *scope* at all" (B-917 fix round 2),
-            # never on "sole() returned None" alone: sole() also returns None when
-            # *scope* DOES bind the name, just not through one resolvable, direct
-            # assignment (a parameter, a for/with/comprehension target, an
-            # except-as name, ...). That binding makes the name local to *scope*
-            # for its entire body -- real Python scoping never falls back to an
-            # enclosing/module scope for it, resolvable or not. Walking past it
-            # (e.g. because a same-named module constant exists) is a false
-            # correlation: a `def load_plugin(CACHE_DIR): ... import x` whose
-            # parameter merely shares a name with an unrelated module-level
-            # `CACHE_DIR` must resolve to SYM, not to the module constant.
-            if (
-                rec is None
-                and not self._legb_blocked(e.id)
-                and not self.records(scope).get(e.id)
-            ):
-                found = self._legb_lookup(e.id, scope)
-                if found is not None:
-                    rec, found_scope = found
+            rec, found_scope = self._reaching(e, scope)
             if rec is not None:
                 if rec[0] == "assign":
                     return self.locate(rec[1], found_scope, depth + 1)
@@ -861,8 +835,10 @@ class _FileFacts:
             # Unresolvable (a parameter, several bindings, a loop/comprehension
             # target, ...) -- still a stable identity: the SAME name in the SAME
             # scope always resolves here the same way, so two reads of it compare
-            # DEFINITE while a DIFFERENT unresolvable name never does.
-            return Loc("SYM", (), sym=("name", id(scope), e.id))
+            # DEFINITE while a DIFFERENT unresolvable name never does. `tail`: what
+            # its visible bindings say about the final component (`_bindings_suffixed`).
+            return Loc("SYM", (), sym=("name", id(scope), e.id),
+                       tail="module" if self._bindings_suffixed(e.id, scope) else None)
         if isinstance(e, ast.Attribute) and isinstance(e.ctx, ast.Load) and e.attr == "parent":
             base = self.locate(e.value, scope, depth + 1)
             return base.up() if base is not None else None
@@ -870,8 +846,7 @@ class _FileFacts:
             base = self.locate(e.left, scope, depth + 1)
             if base is None:
                 return None
-            seg = self.literal(e.right, scope)
-            return base.join(seg)
+            return self._join_expr(base, e.right, scope)
         if isinstance(e, ast.Constant) and isinstance(e.value, str):
             return self._locate_literal(e.value)
         if (
@@ -915,7 +890,8 @@ class _FileFacts:
             # Any other call this resolver does not model (tempfile.mkdtemp(),
             # os.environ.get(...), input(), a remote fetch, ...) is still one
             # identifiable expression -- see the SYM comment above.
-            return Loc("SYM", (), sym=("call", id(e)))
+            return Loc("SYM", (), sym=("call", id(e)),
+                       tail="module" if self._module_suffixed(e, scope) else None)
         if isinstance(e.func, ast.Attribute):
             base = self.locate(e.func.value, scope, depth + 1)
             if base is None:
@@ -926,8 +902,7 @@ class _FileFacts:
             if attr == "joinpath":
                 cur = base
                 for a in e.args:
-                    seg = self.literal(a, scope)
-                    cur = cur.join(seg)
+                    cur = self._join_expr(cur, a, scope)
                 return cur
             if attr == "with_name" and len(e.args) == 1:
                 name = self.literal(e.args[0], scope)
@@ -937,6 +912,87 @@ class _FileFacts:
                 return None if parent is None else parent.join(name)
             return None
         return None
+
+    def _reaching(self, e: ast.Name, scope: ast.AST) -> tuple:
+        """`(record, defining_scope)` for a Name read -- `sole()` in *scope*, then the
+        LEGB walk below -- or `(None, scope)`. Shared by `locate()` and
+        `_module_suffixed()` so a path and its final component resolve names alike."""
+        rec = self.sole(e.id, scope, before=e)
+        found_scope = scope
+        # LEGB fallback (b917-design.md 2.1), `resolve()` deliberately lacks this:
+        # a name read inside a function with no binding in that function (and not
+        # declared global/nonlocal -- sole() already refuses those outright) is
+        # looked up in its enclosing function scopes and then the module scope.
+        # Required for the r2-D1 shape: a module constant read inside a function.
+        #
+        # Gated on "no record for e.id in *scope* at all" (B-917 fix round 2),
+        # never on "sole() returned None" alone: sole() also returns None when
+        # *scope* DOES bind the name, just not through one resolvable, direct
+        # assignment (a parameter, a for/with/comprehension target, an
+        # except-as name, ...). That binding makes the name local to *scope*
+        # for its entire body -- real Python scoping never falls back to an
+        # enclosing/module scope for it, resolvable or not. Walking past it
+        # (e.g. because a same-named module constant exists) is a false
+        # correlation: a `def load_plugin(CACHE_DIR): ... import x` whose
+        # parameter merely shares a name with an unrelated module-level
+        # `CACHE_DIR` must resolve to SYM, not to the module constant.
+        if (
+            rec is None
+            and not self._legb_blocked(e.id)
+            and not self.records(scope).get(e.id)
+        ):
+            found = self._legb_lookup(e.id, scope)
+            if found is not None:
+                rec, found_scope = found
+        return rec, found_scope
+
+    def _join_expr(self, base: "Loc", seg_expr: ast.AST, scope: ast.AST) -> "Loc":
+        """`base.join()` one path-segment EXPRESSION. A segment `literal()` cannot read
+        still says something about the path's final component when how it is built
+        carries a module-file extension (`f"{name}.py"`) -- recorded as `Loc.tail`."""
+        seg = self.literal(seg_expr, scope)
+        if seg is not None:
+            return base.join(seg)
+        return base.join(None, module_tail=self._module_suffixed(seg_expr, scope))
+
+    def _module_suffixed(self, e: ast.AST, scope: ast.AST, depth: int = 0) -> bool:
+        """Could the string *e* produces be a module file's name, going by what is
+        visible in how it is built? True when any string literal in it -- or in a
+        binding of any name it reads (`_bindings_suffixed`) -- ends in a module-file
+        suffix or is a bare module extension (`f"{n}.py"`, `n + ".py"`,
+        `s.replace(".tmp", ".py")`, `".".join([n, "py"])`). Evidence, not proof: it
+        only ever keeps a staged-import question open, never closes one."""
+        if depth > _MAX_DEPTH:
+            return False
+        for n in ast.walk(e):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                v = n.value.casefold()
+                if v.endswith(_MODULE_FILE_SUFFIXES) or "." + v in _MODULE_FILE_SUFFIXES:
+                    return True
+            elif isinstance(n, ast.Name) and self._bindings_suffixed(n.id, scope, depth + 1):
+                return True
+        return False
+
+    def _bindings_suffixed(self, name: str, scope: ast.AST, depth: int = 0) -> bool:
+        """`_module_suffixed` over EVERY assignment of *name* in the nearest scope
+        (from *scope* outward) that binds it at all -- all of them, not just a
+        single reaching one, so a conditionally rebound destination still counts."""
+        if depth > _MAX_DEPTH:
+            return False
+        cur = scope
+        while cur is not None:
+            recs = self.records(cur).get(name)
+            if recs:
+                return any(
+                    (r[0] == "assign" and self._module_suffixed(r[1], cur, depth + 1))
+                    or (r[0] == "with"
+                        and self._module_suffixed(r[1].context_expr, cur, depth + 1))
+                    for r in recs
+                )
+            if cur is self.tree:
+                return False
+            cur = self.scope_of(cur)
+        return False
 
     def _locate_literal(self, s: str) -> "Loc":
         if s.startswith("/"):
@@ -949,8 +1005,7 @@ class _FileFacts:
             return None
         cur = base
         for s in rest:
-            seg = self.literal(s, scope)
-            cur = cur.join(seg)
+            cur = self._join_expr(cur, s, scope)
         return cur
 
     def shipped(self, path_node: ast.AST, scope: ast.AST) -> "str | None":
@@ -1267,6 +1322,11 @@ class _FileFacts:
 # (`/tmp/...`) and the ones `tempfile.gettempdir()` resolves to on every POSIX target
 # this project supports; a bespoke writable mount is not guessable statically.
 _WRITABLE_PATH_PREFIXES = (("tmp",), ("var", "tmp"), ("dev", "shm"))
+# The file-name endings a standard path-based import finder loads a module from:
+# source, legacy/optimised bytecode and extension modules (every platform tag of an
+# extension suffix ends in ".so"/".pyd"). Used only to read what a COMPUTED final path
+# component (`Loc.tail`) is known to be.
+_MODULE_FILE_SUFFIXES = (".py", ".pyw", ".pyc", ".pyo", ".pyd", ".so")
 
 
 class Loc:
@@ -1287,18 +1347,34 @@ class Loc:
     resolved so far are kept (still enough to answer "is this under a writable
     directory"), but a caller doing exact-location correlation (B-917 section C)
     should not trust `parts` past that point.
+
+    `tail` says what is known about the path's FINAL component when it is not the
+    literal `parts[-1]`: ``"module"`` when how it is built visibly carries a
+    module-file extension (`_MODULE_FILE_SUFFIXES`, e.g. `f"{name}.py"` --
+    `_FileFacts._module_suffixed`), ``"opaque"`` when a `join()` dropped it with no
+    such evidence, None otherwise (it is `parts[-1]`, or, for a bare SYM, nothing
+    is known). b917-design.md 2.1's `leaf` / `leaf_py` for a computed leaf; read by
+    the staged-import correlation, never by `loc_eq()`.
     """
 
-    __slots__ = ("anchor", "parts", "sym", "exact")
+    __slots__ = ("anchor", "parts", "sym", "exact", "tail")
 
-    def __init__(self, anchor: str, parts: tuple, sym=None, exact: bool = True) -> None:
+    def __init__(self, anchor: str, parts: tuple, sym=None, exact: bool = True,
+                 tail: "str | None" = None) -> None:
         self.anchor = anchor
         self.parts = parts
         self.sym = sym
         self.exact = exact
+        self.tail = tail
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid only
-        return f"Loc({self.anchor!r}, {self.parts!r}, sym={self.sym!r}, exact={self.exact!r})"
+        return (f"Loc({self.anchor!r}, {self.parts!r}, sym={self.sym!r}, "
+                f"exact={self.exact!r}, tail={self.tail!r})")
+
+    @property
+    def final_name(self) -> "str | None":
+        """The path's final component when it is a known literal, else None."""
+        return self.parts[-1] if self.parts and self.tail is None else None
 
     @property
     def leaf_py(self) -> bool:
@@ -1320,28 +1396,36 @@ class Loc:
             return None
         return Loc(self.anchor, self.parts[:-1], self.sym, self.exact)
 
-    def join(self, seg: "str | None") -> "Loc":
+    def join(self, seg: "str | None", module_tail: bool = False) -> "Loc":
         """Append one literal path segment, or -- when `seg` is None (the caller
         could not read it as a literal, e.g. an f-string) or otherwise unusable --
         keep this location's anchor and parts as-is but mark the result inexact
         (B-917: this is what lets `tempfile.gettempdir()` joined with an
         f-string-named leaf still register as a writable TEMP location, matching the
-        real `_config_sync.py`-shaped malicious corpus case)."""
+        real `_config_sync.py`-shaped malicious corpus case). The dropped segment
+        becomes the result's `tail`: ``"module"`` when the caller found module-file
+        evidence in it (*module_tail*), else ``"opaque"``."""
         if seg is None or "\x00" in seg or "\\" in seg or ":" in seg:
-            return Loc(self.anchor, self.parts, self.sym, False)
+            known = module_tail or (
+                seg is not None and seg.casefold().endswith(_MODULE_FILE_SUFFIXES)
+            )
+            return Loc(self.anchor, self.parts, self.sym, False,
+                       "module" if known else "opaque")
         if seg.startswith("/"):
             parts = tuple(p for p in seg.split("/") if p not in ("", "."))
             return Loc("ABS", parts, None, True)
         parts = list(self.parts)
+        tail = self.tail  # a segment of only "."/"" leaves the final component as is
         for c in seg.split("/"):
             if c in ("", "."):
                 continue
+            tail = None
             if c == "..":
                 if parts:
                     parts.pop()
             else:
                 parts.append(c)
-        return Loc(self.anchor, tuple(parts), self.sym, self.exact)
+        return Loc(self.anchor, tuple(parts), self.sym, self.exact, tail)
 
 
 def loc_eq(a: "Loc | None", b: "Loc | None") -> str:

@@ -1235,3 +1235,393 @@ def test_b917_fix2_unrelated_same_name_parameter_elsewhere_does_not_block_the_re
         import mod
     ''')
     assert _staged_import_verdict(src) == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# H. An UNDETERMINED location is not, by itself, a link (the clean B347 fixture
+# `clean_b347_deaddrop_local_decode` vetted WARN). Its `install(dest)` writes decoded
+# bytes to a PARAMETER -- a bare SYM `loc_eq` cannot compare with anything -- so every
+# import of the file (`import base64`, `from pathlib import Path`) came out "possibly
+# the same file", and, through the artifact-wide write set, every import of every
+# SIBLING file too (the SkillTrustBench sweep: `from __future__ import annotations`
+# flagged on 17 normal-labelled skills). The fix keeps `loc_eq` untouched and asks one
+# more question of an UNDETERMINED pair: going by what IS known about the write's final
+# path component (`Loc.final_name` / `Loc.tail`), can it be the file this import
+# loads? Section H1 pins the false WARNs gone; H2 pins every shape that must still
+# WARN; H3 pins the two limits that are now stated rather than accidentally masked.
+# ---------------------------------------------------------------------------
+
+
+def _staged_import_lines(src: str) -> set:
+    return {
+        f.lineno for f in _analyze(src, no_artifact=True)
+        if f.rule in ("REMOTE_STAGED_IMPORT", "STAGED_IMPORT_UNRESOLVED")
+    }
+
+
+_DECODE_WRITE_TO_PARAM = dedent('''
+    import base64
+    from pathlib import Path
+
+    _B64 = "aGVsbG8="
+
+    def install(dest: Path) -> None:
+        dest.write_bytes(base64.b64decode(_B64))
+
+    if __name__ == "__main__":
+        install(Path(__file__).resolve().parent / "icon.png")
+''')
+
+
+def test_h1_fixture_itself_has_no_staged_import_finding():
+    """The real fixture, analysed exactly as vet analyses it (its own relpath, an
+    artifact holding it): no REMOTE_STAGED_IMPORT / STAGED_IMPORT_UNRESOLVED at all."""
+    rel = "scripts/install_icon.py"
+    path = (REPO / "fixtures" / "clean_b347_deaddrop_local_decode" / "skills"
+            / "asset-installer" / rel)
+    src = path.read_text(encoding="utf-8")
+    findings = _analyze(src, rel)
+    assert not [
+        f for f in findings if f.rule in ("REMOTE_STAGED_IMPORT", "STAGED_IMPORT_UNRESOLVED")
+    ], findings
+
+
+def test_h1_decoded_write_to_a_parameter_is_no_link_to_any_import():
+    assert _staged_import_verdict(_DECODE_WRITE_TO_PARAM) == "none"
+
+
+def test_h1_remote_write_to_a_parameter_is_no_link_to_any_import():
+    src = dedent('''
+        import json, os, sys, urllib.request
+
+        def save(url, out):
+            open(out, "wb").write(urllib.request.urlopen(url).read())
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
+def test_h1_opaque_directory_with_a_known_non_module_name_is_no_link():
+    """The directory is a parameter, but the final name is a literal that no import
+    finder loads (`icon.png`, `report.json`): unrelated to every import, whatever the
+    directory turns out to be."""
+    for write in (
+        '(dest_dir / "icon.png").write_bytes(base64.b64decode(_B64))',
+        'open(os.path.join(dest_dir, "report.json"), "wb").write(base64.b64decode(_B64))',
+    ):
+        src = dedent(f'''
+            import base64, json, os
+            _B64 = "aGVsbG8="
+
+            def install(dest_dir):
+                {write}
+        ''')
+        assert _staged_import_verdict(src) == "none", write
+
+
+def test_h1_opaque_directory_with_a_computed_non_module_name_is_no_link():
+    for leaf in ('f"{name}.png"', 'name + ".json"', 'os.path.basename(url)'):
+        src = dedent(f'''
+            import json, os, requests
+
+            def fetch(url, out_dir, name):
+                r = requests.get(url)
+                open(os.path.join(out_dir, {leaf}), "wb").write(r.content)
+        ''')
+        assert _staged_import_verdict(src) == "none", leaf
+
+
+def test_h1_opaque_write_in_one_file_does_not_flag_a_siblings_imports(tmp_path):
+    """The amplification: the artifact-wide write set made every import of every
+    OTHER file of the skill 'possibly the same file' as one opaque write."""
+    helper_src = "from __future__ import annotations\nimport json\nimport os\n"
+    skill_dir = tmp_path / "skill"
+    (skill_dir / "scripts").mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(_SKILL_MD, encoding="utf-8")
+    (skill_dir / "scripts" / "install_icon.py").write_text(
+        _DECODE_WRITE_TO_PARAM, encoding="utf-8"
+    )
+    (skill_dir / "scripts" / "helper.py").write_text(helper_src, encoding="utf-8")
+    findings = _analyze(
+        helper_src, "scripts/helper.py",
+        extra=[("scripts/install_icon.py", _DECODE_WRITE_TO_PARAM)],
+        root=str(skill_dir),
+    )
+    assert not [f for f in findings if f.rule == "STAGED_IMPORT_UNRESOLVED"], findings
+    assert vet_skill(skill_dir).status == "PASS"
+
+
+def test_h1_chdir_does_not_make_a_different_file_name_ambiguous():
+    """chdir leaves the directory CWD names unknown -- never a file's NAME. A remote
+    write to `data.json` cannot be `import json`'s `json.py`, chdir or not."""
+    src = _src('''
+        import os, json
+        os.chdir("/srv/cache")
+        open("data.json", "wb").write(data)
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
+def test_h1_opaque_sys_path_entry_flags_only_the_import_whose_name_matches():
+    """The fix-round-2 shadow repro keeps its WARN -- but on `import user_plugin`
+    alone (the write is `.../user_plugin.py`), no longer on `import os`/`sys`/
+    `urllib.request`, which merely shared a file with an opaque sys.path entry."""
+    lines = _staged_import_lines(_B917_FIX2_SHADOW_SRC)
+    src_lines = _B917_FIX2_SHADOW_SRC.splitlines()
+    assert {src_lines[n - 1].strip() for n in lines} == {
+        "import user_plugin  # noqa: E402"
+    }, lines
+
+
+def test_h2_opaque_directory_with_the_modules_own_file_name_still_warns():
+    """Directory unknown, file name known and IS a file `import mod` could load --
+    source, any case, bytecode, or an extension module."""
+    for leaf in ("mod.py", "MOD.PY", "mod.pyc", "mod.cpython-312-x86_64-linux-gnu.so"):
+        src = _src(f'''
+            import os
+
+            def stage(d):
+                open(os.path.join(d, "{leaf}"), "wb").write(data)
+
+            import mod
+        ''')
+        assert _staged_import_verdict(src) == "WARN", leaf
+
+
+def test_h2_opaque_directory_with_a_package_init_warns_on_any_package_import():
+    src = _src('''
+        import os
+
+        def stage(d):
+            open(os.path.join(d, "__init__.py"), "wb").write(data)
+
+        import anything
+    ''')
+    assert _staged_import_verdict(src) == "WARN"
+
+
+def test_h2_computed_name_carrying_a_module_extension_still_warns():
+    """`Loc.tail == "module"`: the name is computed, but how it is built visibly
+    carries a module-file extension -- f-string, `+`, `%`, `str.format`, a rename
+    idiom (`.replace(".tmp", ".py")`, the C-135 review's shape), a `".".join`, and a
+    module-level constant read inside the function (the LEGB path `locate()` itself
+    uses)."""
+    for leaf in (
+        'f"{name}.py"', 'name + ".py"', '"%s.py" % name', '"{}.py".format(name)',
+        'name.replace(".tmp", ".py")', '".".join([name, "py"])', "_PLUGIN_FILE",
+    ):
+        src = _src(f'''
+            import os
+
+            _PLUGIN_FILE = f"{{PLUGIN_NAME}}.py"
+
+            def stage(d, name):
+                open(os.path.join(d, {leaf}), "wb").write(data)
+
+            import mod
+        ''')
+        assert _staged_import_verdict(src) == "WARN", leaf
+
+
+def test_h2_opaque_target_whose_visible_bindings_name_a_module_still_warns():
+    """A destination that resolves to an opaque SYM only because it has several
+    bindings (a conditional rebind), or because it comes from an unmodelled call,
+    still counts when one of those visible spellings names a module file -- the
+    trivial evasion "pick the target in an if/else" does not buy silence. A rebind
+    among non-module names stays silent."""
+    rebind = _src('''
+        import os
+        HERE = os.path.dirname(__file__)
+
+        def stage(flag):
+            if flag:
+                target = os.path.join(HERE, "cache.json")
+            else:
+                target = os.path.join(HERE, "{leaf}")
+            open(target, "wb").write(data)
+
+        import helper
+    ''')
+    assert _staged_import_verdict(rebind.replace("{leaf}", "helper.py")) == "WARN"
+    assert _staged_import_verdict(rebind.replace("{leaf}", "cache.txt")) == "none"
+
+    call = _src('''
+        import helpers
+        p = helpers.plugin_path("x" + ".py")
+        open(p, "wb").write(data)
+        import json
+    ''')
+    assert _staged_import_verdict(call) == "WARN"
+
+
+def test_h2_remote_plugin_into_its_own_sys_path_entry_still_warns():
+    """The canonical remote-plugin loader: nothing is known about the file name, but
+    it is written into the very directory (same binding) the code then puts on
+    sys.path."""
+    src = dedent('''
+        import os, sys, importlib, urllib.request
+
+        def install_plugin(plugin_dir, filename, url):
+            data = urllib.request.urlopen(url).read()
+            with open(os.path.join(plugin_dir, filename), "wb") as fh:
+                fh.write(data)
+            sys.path.insert(0, plugin_dir)
+            return importlib.import_module("plugin")
+    ''')
+    assert _staged_import_verdict(src) == "WARN"
+
+
+def test_h2_opaque_write_that_is_itself_a_sys_path_entry_still_warns():
+    """An archive on sys.path is imported FROM whatever its own name: the write IS
+    the entry (same binding), with a wholly opaque path or a known archive name."""
+    for write, entry in (
+        ("open(p, 'wb').write(data)", "p"),
+        ("open(os.path.join(d, 'bundle.zip'), 'wb').write(data)",
+         "os.path.join(d, 'bundle.zip')"),
+    ):
+        src = _src(f'''
+            import os, sys
+
+            def stage(p, d):
+                {write}
+                sys.path.insert(0, {entry})
+                import mod
+        ''')
+        assert _staged_import_verdict(src) == "WARN", write
+
+
+def test_h2_opaque_write_with_an_unresolvable_sys_path_entry_still_warns():
+    """mkstemp(suffix=".py") + `sys.path.insert(0, os.path.dirname(p))`: the entry
+    cannot be resolved at all, so an opaque write may lie in it."""
+    src = _src('''
+        import os, sys, tempfile
+
+        fd, p = tempfile.mkstemp(suffix=".py")
+        open(p, "wb").write(data)
+        sys.path.insert(0, os.path.dirname(p))
+        import mod
+    ''')
+    assert _staged_import_verdict(src) == "WARN"
+
+
+def test_h2_a_link_or_import_hook_keeps_names_from_counting():
+    """A link (this file, or any sibling of the artifact) or an import-system hook
+    can make an import load a file under a different name: the H1 shape then keeps
+    the WARN it had before, exactly."""
+    for extra in (
+        'os.symlink("/tmp/a", "/tmp/b")',
+        'Path("/tmp/a").symlink_to("/tmp/b")',
+        "builtins.__import__ = _hook",
+        'setattr(builtins, "__import__", _hook)',
+        "sys.path_importer_cache.clear()",
+    ):
+        src = dedent('''
+            import base64, builtins, os, sys
+            from pathlib import Path
+
+            def _hook(*a):
+                return None
+
+            def install(dest):
+                dest.write_bytes(base64.b64decode("aGVsbG8="))
+
+        ''') + extra + "\n"
+        assert _staged_import_verdict(src) == "WARN", extra
+
+    sibling = 'import os\nos.symlink("/tmp/a", "/tmp/b")\n'
+    findings = _analyze(_DECODE_WRITE_TO_PARAM, "install.py", extra=[("linker.py", sibling)])
+    assert any(f.rule == "STAGED_IMPORT_UNRESOLVED" for f in findings), findings
+
+
+def test_h2_an_unparseable_sibling_keeps_names_from_counting():
+    """A sibling this scan cannot parse cannot be checked for links or hooks either
+    (and is reported AST_UNANALYZABLE on its own): the artifact keeps the pre-fix
+    behaviour -- the same stance shippedexec's B-638 proof takes on a parse failure."""
+    findings = _analyze(
+        _DECODE_WRITE_TO_PARAM, "install.py", extra=[("broken.py", "def f(:\n")]
+    )
+    assert any(f.rule == "STAGED_IMPORT_UNRESOLVED" for f in findings), findings
+
+
+def test_h2_loc_tail_records_what_join_could_not_read():
+    lit = se.Loc("SYM", ("d",), sym=1)
+    assert lit.final_name == "d" and lit.tail is None
+    assert se.Loc("SYM", (), sym=1).final_name is None
+    mod = lit.join(None, module_tail=True)
+    assert (mod.tail, mod.final_name, mod.exact) == ("module", None, False)
+    opaque = lit.join(None)
+    assert opaque.tail == "opaque" and opaque.final_name is None
+    assert opaque.join(".").tail == "opaque"          # "." leaves the final component
+    again = opaque.join("mod.py")                     # a literal re-establishes it
+    assert (again.tail, again.final_name, again.exact) == (None, "mod.py", False)
+    assert mod.up().tail is None
+    assert lit.join("C:\\x\\mod.py").tail == "module"  # unusable literal, known suffix
+
+
+def test_h2_locate_reads_the_ending_of_a_computed_segment():
+    src = dedent('''
+        import os
+        def f(d, name, url):
+            a = os.path.join(d, f"{name}.py")
+            b = os.path.join(d, f"{name}.png")
+            c = os.path.join(d, os.path.basename(url))
+    ''')
+    tree = ast.parse(src)
+    facts = se.PathFacts(tree, "x.py")
+    fn = tree.body[1]
+    got = {
+        n.targets[0].id: facts.locate(n.value, fn)
+        for n in fn.body if isinstance(n, ast.Assign)
+    }
+    assert got["a"].tail == "module"
+    assert got["b"].tail == "opaque"
+    assert got["c"].tail == "opaque"
+    assert all(loc.anchor == "SYM" and loc.parts == () for loc in got.values())
+    # a bare parameter carries nothing: no tail at all (the fixture's own shape)
+    d_read = next(n for n in ast.walk(fn) if isinstance(n, ast.Name) and n.id == "d")
+    bare = facts.locate(d_read, fn)
+    assert (bare.anchor, bare.parts, bare.tail, bare.final_name) == ("SYM", (), None, None)
+
+
+def test_h3_residual_destination_passed_through_a_parameter_is_not_followed():
+    """STATED LIMIT (b917-design.md 5's interprocedural residual, now reaching the
+    destination as well as the content): a helper whose destination is a parameter
+    and whose CALLER passes a module path. Before this fix it WARNed only because an
+    opaque destination WARNed against every import alike (`import base64` included);
+    the call site is not followed, so it is now silent. Flip deliberately if
+    interprocedural destination resolution is ever added."""
+    src = dedent('''
+        import os, urllib.request
+
+        def fetch_to(path):
+            open(path, "wb").write(urllib.request.urlopen("https://example.invalid/p").read())
+
+        fetch_to(os.path.join(os.path.dirname(__file__), "helper.py"))
+        import helper
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
+def test_h3_residual_move_or_copy_of_a_staged_write_is_not_followed():
+    """STATED LIMIT (b917-design.md 2.4 lists the write forms; a move or copy is not
+    one): remote bytes written under one name, then moved to a module name. The
+    LITERAL form was already silent before this fix; the opaque form WARNed only by
+    the accident above. Both now agree, and both flip together once the staged-write
+    enumerator follows moves/copies."""
+    literal = _src('''
+        import os
+        here = os.path.dirname(__file__)
+        open(os.path.join(here, "payload.bin"), "wb").write(data)
+        os.replace(os.path.join(here, "payload.bin"), os.path.join(here, "mod.py"))
+        import mod
+    ''')
+    opaque = _src('''
+        import os
+
+        def stage(tmp):
+            open(tmp, "wb").write(data)
+            os.replace(tmp, os.path.join(os.path.dirname(__file__), "mod.py"))
+
+        import mod
+    ''')
+    assert _staged_import_verdict(literal) == "none"
+    assert _staged_import_verdict(opaque) == "none"

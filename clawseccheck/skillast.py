@@ -8310,6 +8310,109 @@ def _b917_file_flag(tree: ast.AST, facts, dotted_names: frozenset) -> bool:
     )
 
 
+# What lets an import reach a file under a name other than the one it was written
+# under, at the moment of the import: a filesystem link, or an import-system hook (a
+# custom finder/path hook, a replaced `__import__`). Either one, in any correlated
+# file, switches the name-based narrowing in `_b917_write_may_be_import_file` off.
+# (Moving or copying the written file to a module name is a different question -- a
+# NEW write, of content taken from the old one -- that `_b917_staged_writes` does not
+# model for any destination, literal or not; see b917-design.md 2.4's write forms.)
+_B917_LINK_CALLS = frozenset({"os.symlink", "os.link"})
+_B917_LINK_METHODS = frozenset({"symlink_to", "hardlink_to", "link_to"})
+_B917_IMPORT_HOOKS = frozenset({
+    "meta_path", "path_hooks", "path_importer_cache", "__import__", "__builtins__",
+})
+
+
+def _b917_names_may_alias(tree: ast.AST, facts) -> bool:
+    """Does this file create a link, or reach the import system's hooks, by any
+    spelling recognised here (a call, an attribute, a `from sys import meta_path`,
+    a `getattr`/`setattr` string, a `__builtins__` access)?"""
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and (
+            facts.dotted(n.func) in _B917_LINK_CALLS
+            or (isinstance(n.func, ast.Attribute) and n.func.attr in _B917_LINK_METHODS)
+        ):
+            return True
+        if isinstance(n, ast.Attribute) and n.attr in _B917_IMPORT_HOOKS:
+            return True
+        if isinstance(n, ast.Name) and n.id == "__builtins__":
+            return True
+        if isinstance(n, ast.Constant) and n.value in _B917_IMPORT_HOOKS:
+            return True
+        if isinstance(n, ast.ImportFrom) and any(a.name in _B917_IMPORT_HOOKS for a in n.names):
+            return True
+    return False
+
+
+def _b917_may_be_same_path(w, s) -> bool:
+    """Could write location *w* (final name known) be the very path *s* -- by the
+    same binding/literal, or, where only CWD-vs-script-dir is unknown, the same name?
+    Two unrelated opaque values are not evidence of anything."""
+    r = _shippedexec.loc_eq(w, s)
+    if r == "DEFINITE":
+        return True
+    return (
+        r == "UNDETERMINED" and s.final_name is not None
+        and s.final_name.casefold() == w.final_name.casefold()
+    )
+
+
+def _b917_may_lie_in(w, s) -> bool:
+    """Could write location *w* (final name unknown) lie in or under directory *s*,
+    judged on the SAME identity (anchor + SYM binding) only?"""
+    if w.anchor != s.anchor or w.sym != s.sym:
+        return False
+    n = min(len(w.parts), len(s.parts))
+    if w.parts[:n] != s.parts[:n]:
+        return False
+    # an unread tail can descend below a shorter known prefix; a fully known path cannot
+    return len(s.parts) <= len(w.parts) or not w.exact
+
+
+def _b917_write_may_be_import_file(w, c, explicit_dirs: list, unknown_dir: bool) -> bool:
+    """For a write *w* and import candidate *c* that `loc_eq` could not place
+    (UNDETERMINED -- an opaque directory, CWD against the script's own directory, a
+    chdir): can *w* still be the file that import loads, going by what IS known about
+    w's final path component? A path-based finder loads `<module><suffix>` from a
+    search directory, or anything inside an archive that is itself a sys.path entry.
+    Kept only on positive evidence:
+
+    * the final name is known and is a module-file name for c's module (same stem,
+      a `_MODULE_FILE_SUFFIXES` ending -- b917-design.md 2.3's "leaf matches"), or
+      the write may itself BE a sys.path entry (`_b917_may_be_same_path`); or
+    * the final name is unknown but how it is built visibly carries a module-file
+      extension (`Loc.tail == "module"`: `f"{name}.py"`, `s.replace(".tmp", ".py")`,
+      a conditionally rebound target one of whose bindings is `.../mod.py` -- the
+      design's `leaf_py`), or the write lies in a sys.path entry this file adds
+      under the same binding
+      (`_b917_may_lie_in`), or some sys.path entry cannot be resolved at all (then
+      nothing on either side rules it out).
+
+    A destination the scan cannot see into at all -- a bare parameter, an unmodelled
+    call -- with none of that is NOT a link: the design already reads a computed
+    non-.py leaf that way (matrix row 58; the `leaf_py` gate on the wildcard and
+    unknown-member branches below), and a wholly opaque destination carries even
+    less. Without this, every remote/decoded write to such a path made EVERY import
+    of the file (`import base64` included) "possibly the same file" -- a WARN that
+    named no import in particular. Residual, stated: a destination passed in through
+    a parameter whose CALLER supplies a module path (`fetch_to(HERE / "mod.py")`) is
+    not followed across the call -- the interprocedural limit design 5 already
+    records for staged content."""
+    name = w.final_name
+    if name is not None:
+        folded = name.casefold()
+        if (
+            folded.endswith(_shippedexec._MODULE_FILE_SUFFIXES)
+            and folded.split(".", 1)[0] == c.parts[-1].casefold().split(".", 1)[0]
+        ):
+            return True
+        return any(_b917_may_be_same_path(w, s) for s in explicit_dirs)
+    if w.tail == "module":
+        return True
+    return unknown_dir or any(_b917_may_lie_in(w, s) for s in explicit_dirs)
+
+
 def _b917_import_sites(tree: ast.AST, facts):
     """[(node, resolved_candidates, suffix_candidates, is_wildcard)] for every
     import-like statement -- B-917 section C. A relative import resolves fully here
@@ -8387,23 +8490,37 @@ def _b917_import_sites(tree: ast.AST, facts):
     return sites
 
 
-def _b917_staged_import_findings(tree: ast.AST, facts, staged: list) -> list:
+def _b917_staged_import_findings(
+    tree: ast.AST, facts, staged: list, names_may_alias: "bool | None" = None
+) -> list:
     """[(rule, severity, lineno, reason)] -- B-917 section C: correlate every
     import-like statement's search candidates against every tainted staged write in
-    `staged`, by location equality (`shippedexec.loc_eq`)."""
+    `staged`, by location equality (`shippedexec.loc_eq`). *names_may_alias*: does
+    any file those writes come from create a link or hook the import system
+    (`_b917_names_may_alias`)? None means "judge this file alone"."""
     if not staged:
         return []
-    search_dirs, unknown_dir = _b917_search_dirs(tree, facts)
-    search_dirs = [_shippedexec.Loc("FILE", ())] + search_dirs
+    explicit_dirs, unknown_dir = _b917_search_dirs(tree, facts)
+    search_dirs = [_shippedexec.Loc("FILE", ())] + explicit_dirs
     has_chdir = _b917_file_flag(tree, facts, frozenset({"os.chdir", "os.fchdir"}))
     has_symlink = _b917_file_flag(tree, facts, frozenset({"os.symlink", "os.link"}))
+    if names_may_alias is None:
+        names_may_alias = _b917_names_may_alias(tree, facts)
 
-    def compare(a, b) -> str:
-        r = _shippedexec.loc_eq(a, b)
+    def compare(w, c) -> str:
+        r = _shippedexec.loc_eq(w, c)
         if r == "DEFINITE_NOT" and (
-            (has_chdir and (a.anchor == "CWD" or b.anchor == "CWD")) or has_symlink
+            (has_chdir and (w.anchor == "CWD" or c.anchor == "CWD")) or has_symlink
         ):
-            return "UNDETERMINED"
+            r = "UNDETERMINED"
+        # Location alone could not tell them apart; the write's final name may
+        # still rule it out as this import's file (unless a link or an import hook
+        # means names prove nothing).
+        if (
+            r == "UNDETERMINED" and not names_may_alias
+            and not _b917_write_may_be_import_file(w, c, explicit_dirs, unknown_dir)
+        ):
+            return "DEFINITE_NOT"
         return r
 
     out: list = []
@@ -8467,6 +8584,9 @@ def _b917_staged_import_findings(tree: ast.AST, facts, staged: list) -> list:
 # never leak into a different artifact's verdict -- the key disappears with the
 # artifact object itself (b917-design.md's own Risks section, section 6).
 _B917_ARTIFACT_STAGED_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+# Same key, same lifetime: does ANY file of the artifact create a link or hook the
+# import system (`_b917_names_may_alias`)? Filled by the same pass.
+_B917_ARTIFACT_ALIAS_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 
 def _b917_artifact_staged_writes(artifact) -> list:
@@ -8477,21 +8597,33 @@ def _b917_artifact_staged_writes(artifact) -> list:
     relative (the same convention a single file's own `facts.locate()` uses), so no
     further re-basing is needed to compare across files. A sibling file that fails to
     parse contributes no write -- it gets its own AST_UNANALYZABLE finding when (if)
-    it is itself scanned; that is a missed correlation, never a wrong one."""
+    it is itself scanned; that is a missed correlation, never a wrong one. It also
+    cannot be checked for links or import hooks, so it counts as having one (the
+    stance shippedexec's B-638 proof takes on a parse failure)."""
     cached = _B917_ARTIFACT_STAGED_CACHE.get(artifact)
     if cached is not None:
         return cached
     out: list = []
+    may_alias = False
     for rel, src in artifact.sources.items():
         try:
             sib_tree = ast.parse(src)
         except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            may_alias = True
             continue
         sib_facts = _shippedexec._FileFacts(sib_tree, rel, artifact, set(), False)
         sib_remote_names = _b917_remote_tainted_names(sib_tree, sib_facts)
         out.extend(_b917_staged_writes(sib_tree, sib_facts, sib_remote_names))
+        may_alias = may_alias or _b917_names_may_alias(sib_tree, sib_facts)
     _B917_ARTIFACT_STAGED_CACHE[artifact] = out
+    _B917_ARTIFACT_ALIAS_CACHE[artifact] = may_alias
     return out
+
+
+def _b917_artifact_names_may_alias(artifact) -> bool:
+    """`_b917_names_may_alias` over every file of *artifact* (cached with its writes)."""
+    _b917_artifact_staged_writes(artifact)
+    return _B917_ARTIFACT_ALIAS_CACHE.get(artifact, True)
 
 
 def _b917_findings(tree: ast.AST, filename: str, artifact) -> list:
@@ -8509,6 +8641,9 @@ def _b917_findings(tree: ast.AST, filename: str, artifact) -> list:
     # Correlation set: this file alone with no artifact (nothing else to correlate
     # against); every file of the artifact, including this one, when there is one.
     correlated = staged if artifact is None else _b917_artifact_staged_writes(artifact)
+    names_may_alias = _b917_names_may_alias(tree, facts) or (
+        artifact is not None and _b917_artifact_names_may_alias(artifact)
+    )
     out: list = []
 
     for node in ast.walk(tree):
@@ -8580,7 +8715,7 @@ def _b917_findings(tree: ast.AST, filename: str, artifact) -> list:
             "file run here is decided at runtime",
         ))
 
-    out.extend(_b917_staged_import_findings(tree, facts, correlated))
+    out.extend(_b917_staged_import_findings(tree, facts, correlated, names_may_alias))
     return out
 
 
