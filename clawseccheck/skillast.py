@@ -1204,30 +1204,69 @@ def _rhs_has_fstring_taint(node: ast.AST, tainted: set[str]) -> bool:
 
 
 def _value_is_tainted_source(node: ast.AST, tainted: set[str]) -> bool:
-    """True if *node* derives from an external source or a tainted name."""
-    if isinstance(node, ast.Name) and node.id in tainted:
-        return True
-    if isinstance(node, ast.Call):
-        call = node
-        f = call.func
-        # os.getenv
-        if isinstance(f, ast.Attribute) and f.attr == "getenv" and _attr_base(f.value) == "os":
+    """True if *node* derives from an external source or a tainted name.
+
+    B-918: this used to recurse on itself (one self-call per branch: a Call's own
+    args/keywords/func, or -- for anything else -- the node's full child set), with
+    no depth bound at all. A deeply left-nested expression reaching it -- a long
+    `a / b / c / ...` BinOp chain, a padded `.joinpath(...)....joinpath(...)` method
+    chain -- drove that recursion straight into an uncaught `RecursionError`:
+    confirmed on this box (Py 3.12, default recursion limit 1000) at ~995 terms for
+    the bare `/`-chain shape and ~496 for the `.joinpath()` chain (each `.joinpath()`
+    call costs two AST levels -- a Call wrapping an Attribute -- so it crashes at
+    roughly half the term count of a same-depth BinOp chain).
+
+    A first fix bounded the recursion with an explicit depth counter (mirroring
+    `_FOLD_MAX_DEPTH`/`_fold_seg`), giving up past the cap with a deterministic
+    `True` ("assume tainted") rather than a `try`/`except RecursionError`. That
+    cap turned out to be unsound in the OTHER direction: this function is also
+    reached on ordinary, non-adversarial code that legitimately chains well past
+    any reasonable depth cap -- a hardcoded transliteration/normalization table
+    built as `s.replace(a, b).replace(c, d)....` (the real shape in, e.g., a
+    Snowball-stemmer-style character-folding table) routinely runs well over a
+    hundred `.replace()` calls, i.e. (by the same two-AST-levels-per-call rule as
+    `.joinpath()`) well over 200 levels of left-nesting, on a value that carries
+    NO external input whatsoever. A depth cap that gives up as "tainted" there
+    would manufacture a false TT5_CMD_INJECTION conviction on a plain constant the
+    instant it reached an exec-family sink -- trading the crash for a real,
+    reachable false-positive FAIL, not a merely theoretical one.
+
+    So instead of a cap in either direction, this is rewritten as a plain
+    iterative worklist walk -- the same idiom `_has_uncovered_inline_source`
+    (this module) already uses for nearly the same source vocabulary. Nothing in
+    the original recursive version depended on call depth or on any state threaded
+    through the recursion (every branch is a stateless leaf test --
+    `_attr_base`/`_is_external_source_call`/`_is_tool_result_call`/a `Name in
+    tainted` membership check -- or an unconditional descent into every child
+    node), so an explicit Python list standing in for the call stack is exactly
+    equivalent, node-for-node, to the original recursion: every reachable node is
+    still visited exactly once, in the same relative order, with the same checks
+    applied to it. The one thing that changes is what holds that stack -- Python
+    heap memory bounded only by the expression's own node count, never the
+    interpreter's ~1000-frame C recursion limit -- so there is no depth at which
+    this can crash, and consequently no fail-safe "give up" default to pick at
+    all: every node this function is ever asked about gets a real, exact answer.
+    """
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, ast.Name) and n.id in tainted:
             return True
-        # environ.get(...)
-        if isinstance(f, ast.Attribute) and f.attr == "get" and _attr_base(f.value) == "environ":
-            return True
-        if _is_external_source_call(call):
-            return True
-        if _is_tool_result_call(call):
-            return True
-        # Recurse into args — catches open(...).read() chain.
-        for child in ast.iter_child_nodes(call):
-            if _value_is_tainted_source(child, tainted):
+        if isinstance(n, ast.Call):
+            f = n.func
+            # os.getenv
+            if isinstance(f, ast.Attribute) and f.attr == "getenv" and _attr_base(f.value) == "os":
                 return True
-    else:
-        for child in ast.iter_child_nodes(node):
-            if _value_is_tainted_source(child, tainted):
+            # environ.get(...)
+            if isinstance(f, ast.Attribute) and f.attr == "get" and _attr_base(f.value) == "environ":
                 return True
+            if _is_external_source_call(n):
+                return True
+            if _is_tool_result_call(n):
+                return True
+        # Descend into every child regardless -- catches e.g. an open(...).read()
+        # chain nested inside an outer call that didn't itself match above.
+        stack.extend(ast.iter_child_nodes(n))
     return False
 
 
