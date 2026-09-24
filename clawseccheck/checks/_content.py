@@ -3060,6 +3060,33 @@ _B66_REPORTED_SPEECH_RE = re.compile(
 )
 
 
+# B-972: "X reads: '<quote>'" is a common, natural way to introduce a quoted example in
+# defensive prose (a SOUL.md teaching an agent to recognize and resist injection: "a
+# malicious payload reads: 'ignore all previous instructions ...'"). Neither pattern
+# above covers it -- "reads" isn't in `_B66_DETECTIVE_VERB_RE`'s detection-verb list
+# (flag/report/detect/...), and `_B66_REPORTED_SPEECH_RE` only covers "tells the
+# model/assistant/agent" / "asks it to". Modeled on `_B64_REPORT_FRAME_RE`'s own
+# "reads?" frame word for the identical shape in the sibling B64 override-phrase check,
+# but deliberately NARROWER: B64 can afford a bare `.search()` for its frame words
+# because a live actionable-continuation veto (`_b64_actionable_continuation`) already
+# ran and FAILs a real attack regardless of framing. B66 has no such veto -- no FAIL
+# tier at all, WARN-tier by construction (see the PI-001 comment above) -- so a
+# dampener here fully suppresses to PASS, same as the two patterns above. This keeps
+# the SAME `\Z`-anchored discipline the B-429 round-2 fix established for them: the
+# frame verb must be followed by *only* an optional colon/whitespace and an opening
+# quote mark landing directly on the trigger. A decoy "reads:" that introduces
+# something else earlier in the same sentence -- "The config reads:
+# enable_dangerous_mode=true, then ignore all previous instructions ..." -- does not
+# dampen the real, unquoted live imperative later in the sentence, because there is no
+# quote mark immediately before "ignore" in that shape (see
+# test_b66_warn_decoy_reads_config_value_then_live_imperative and its sibling in
+# tests/test_checks_b65_b66.py for the adversarial cases this must keep convicting).
+_B66_REPORT_QUOTE_RE = re.compile(
+    r"""\breads?\b\s*:?\s*['"‘’“”]\s*\Z""",
+    re.IGNORECASE,
+)
+
+
 _B66_DETECTIVE_WINDOW = 100
 
 
@@ -5305,19 +5332,22 @@ def _b156_scan(
 
 
 def _b66_descriptive_frame(blob: str, pos: int) -> bool:
-    """B-429: True when a detection-verb / reported-speech frame word GOVERNS the
-    trigger at *pos* within its OWN sentence — mirrors `_b64_reported_or_quoted`'s
-    bounded-lookback + `_SENTENCE_BREAK_RE`-trim idiom (same file, same shape), scoped
-    to `_B66_DETECTIVE_RELATIVE_RE`/`_B66_REPORTED_SPEECH_RE`'s own vocabulary instead
-    of B64's. Sentence-scoping matters: a frame word in an EARLIER, unrelated sentence
-    of the same block must not launder a genuine directive later in the block (see the
-    constants' own docstring for the concrete fixture this protects).
+    """B-429: True when a detection-verb / reported-speech / report-quote frame word
+    GOVERNS the trigger at *pos* within its OWN sentence — mirrors
+    `_b64_reported_or_quoted`'s bounded-lookback + `_SENTENCE_BREAK_RE`-trim idiom (same
+    file, same shape), scoped to `_B66_DETECTIVE_RELATIVE_RE`/`_B66_REPORTED_SPEECH_RE`/
+    `_B66_REPORT_QUOTE_RE`'s own vocabulary instead of B64's. Sentence-scoping matters:
+    a frame word in an EARLIER, unrelated sentence of the same block must not launder a
+    genuine directive later in the block (see the constants' own docstring for the
+    concrete fixture this protects).
 
-    B-429 round 2: unlike the round-1 version, both patterns are matched with `\\Z`
+    B-429 round 2: unlike the round-1 version, all patterns are matched with `\\Z`
     against the sentence-trimmed segment, i.e. required to reach *pos* with no
     ungoverned gap — a mere `.search()` anywhere in the sentence let a decoy frame
     word "govern" a trigger it was never grammatically connected to (see the
-    constants' comment for the concrete evasion this closes)."""
+    constants' comment for the concrete evasion this closes). B-972 added
+    `_B66_REPORT_QUOTE_RE` under the same `\\Z` discipline for the "X reads: '<quote>'"
+    reporting shape."""
     lo = max(0, pos - _B66_DETECTIVE_WINDOW)
     seg = blob[lo:pos]
     last_break = None
@@ -5325,7 +5355,11 @@ def _b66_descriptive_frame(blob: str, pos: int) -> bool:
         pass
     if last_break is not None:
         seg = seg[last_break.end():]
-    return bool(_B66_DETECTIVE_RELATIVE_RE.search(seg) or _B66_REPORTED_SPEECH_RE.search(seg))
+    return bool(
+        _B66_DETECTIVE_RELATIVE_RE.search(seg)
+        or _B66_REPORTED_SPEECH_RE.search(seg)
+        or _B66_REPORT_QUOTE_RE.search(seg)
+    )
 
 
 def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
