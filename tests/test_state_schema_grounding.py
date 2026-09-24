@@ -1030,6 +1030,12 @@ _REGISTRY: "dict[str, _Entry]" = {
     # extractor does not see the `CREATE VIEW` statement itself (it only walks
     # `CREATE TABLE`), so only this one site needs registering.
     "tests/test_b177_installed_index_shapes.py:440": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    # B-994: the decoy table a `CREATE VIEW installed_plugin_index AS SELECT ... FROM
+    # decoy_plugin_index` view-masquerade fixture projects from -- never a real
+    # OpenClaw table, same shape/reason as B-990's own decoy_plugin_state entry above.
+    # The extractor does not see the `CREATE VIEW` statement itself (it only walks
+    # `CREATE TABLE`), so only this one site needs registering.
+    "tests/test_b177_installed_index_shapes.py:557": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
 
     # ---- audit_events (B191 / F-154) ----
     "tests/test_b191_audit_events.py:44": _Entry(LEGACY_COLS, _AUDIT_EVENTS_PARTIAL_LEGACY),
@@ -1197,8 +1203,10 @@ _REGISTRY: "dict[str, _Entry]" = {
 # `_collect_config_machine_state`'s own hardening (tests/test_f183_config_machine_state.py:389).
 # B-990: +1 -- the config_machine_state view-masquerade hardening's own
 # decoy-table DDL site for _collect_plugin_trust (tests/test_b177_installed_index_shapes.py:440).
-# Combined: 71, was 69.
-assert len(_REGISTRY) == 71, f"registry has {len(_REGISTRY)} entries, expected 71"
+# B-994: +1 -- the identical view-masquerade decoy-table DDL site for
+# _collect_plugin_trust's legacy installed_plugin_index probes (tests/test_b177_installed_index_shapes.py:557).
+# Combined: 72, was 69.
+assert len(_REGISTRY) == 72, f"registry has {len(_REGISTRY)} entries, expected 72"
 
 
 # ========================================================================================
