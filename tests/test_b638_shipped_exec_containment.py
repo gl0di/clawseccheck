@@ -126,6 +126,66 @@ def test_vet_skill_agrees_with_the_audit():
 
 
 # ---------------------------------------------------------------------------------------
+# CLAWSECCHECK-B-922: sole()'s "before this use point" constraint (B-638 round 1) was
+# threaded into resolve()'s Name branch for a PATH-anchor variable, but not into
+# content()'s own Name branch, _namespace_ok()'s Name branch, or _read_call()'s "handle
+# bound once" fallback -- so a CONTENT (or handle) variable rebound twice in
+# unconditional, same-scope, straight-line code lost the proof the same way `here` once
+# did. Only content()'s and _read_call()'s threading resolve a real false-FAIL here:
+# _namespace_ok() has its own separate single-Store walk (below the sole() call) that
+# still requires the namespace name bound exactly once anywhere in the region, so its
+# threading is inert (harmless, precedent-matching) rather than fixing anything on its
+# own.
+# ---------------------------------------------------------------------------------------
+
+
+def test_clean_fixture_content_rebind_then_decode_passes():
+    """CLAWSECCHECK-B-922: the SAME idiom as clean_b638_shipped_version_exec, but the file
+    is opened without a `with` block and the bytes it reads are decoded on a SEPARATE,
+    straight-line statement that reuses the name `src` (`h = open(...); src = h.read();
+    h.close(); src = src.decode(...)`) instead of one nested `f.read().decode(...)`
+    expression. Before this fix: FAIL -- content()'s own Name branch never threaded
+    sole()'s "before this use point" constraint, so this straight-line rebind lost the
+    proof even though the value reaching exec() is unambiguous."""
+    f = _b13(FIXTURES / "clean_b922_content_rebind_then_decode")
+    assert f.status == PASS, (f.status, f.detail)
+
+
+def test_vet_skill_agrees_on_the_content_rebind_then_decode():
+    out = vet_skill(
+        FIXTURES / "clean_b922_content_rebind_then_decode" / "skills" / "demo-packager"
+    )
+    pool = [out, *(out.ring_findings or [])]
+    assert not [f for f in pool if f.status == FAIL], [(f.id, f.detail[:120]) for f in pool]
+
+
+def test_bad_fixture_content_rebind_replaced_fails():
+    """CLAWSECCHECK-B-922 mutation check: the SAME straight-line content-rebind shape as
+    the clean fixture, but the second statement REPLACES `src` with attacker-influenced
+    data (an environment variable) instead of decoding the shipped read. sole()'s
+    "before=" threading resolves the REACHING (last) binding before the use point, not
+    just any prior one, and content() only recognises a resolved value as shipped content
+    through `.decode()` of a shipped read (or another such trusted primitive) --
+    `os.environ.get(...)` is neither, so this must stay FAIL exactly as it did before this
+    fix."""
+    f = _b13(FIXTURES / "bad_b922_content_rebind_replaced")
+    assert f.status == FAIL, (f.status, f.detail)
+    assert "setup.py:24" in f.detail
+    assert "external input flows into" in f.detail
+
+
+def test_b922_fixtures_differ_only_in_the_rebind_statement():
+    """Non-vacuity: the pair must be the same program but for the one replaced statement."""
+    base = FIXTURES / "{}" / "skills" / "demo-packager"
+    clean = Path(str(base).format("clean_b922_content_rebind_then_decode"))
+    bad = Path(str(base).format("bad_b922_content_rebind_replaced"))
+    for rel in ("demo_plugin/__init__.py", "demo_plugin/__version__.py", "SKILL.md"):
+        assert (clean / rel).read_text() == (bad / rel).read_text()
+    assert 'src = src.decode("utf-8")' in (clean / "setup.py").read_text()
+    assert 'src = os.environ.get("DEMO_PAYLOAD", "")' in (bad / "setup.py").read_text()
+
+
+# ---------------------------------------------------------------------------------------
 # Benign spellings: each executes only a file the artifact ships (most were crit before)
 # ---------------------------------------------------------------------------------------
 
@@ -315,6 +375,40 @@ def test_two_hop_path_variable_rebind_clears():
     assert _crit(src) == set()
 
 
+def test_straight_line_content_rebind_clears():
+    """CLAWSECCHECK-B-922: `src` rebuilt across two straight-line, module-scope
+    statements -- `src = h.read()` then `src = src.decode("utf-8")` -- reading via a
+    plain open()/.close() (no `with`), must resolve exactly like the one nested
+    expression `h.read().decode("utf-8")`."""
+    src = (
+        "import os\n"
+        "here = os.path.abspath(os.path.dirname(__file__))\n"
+        "about = {}\n"
+        'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\n'
+        "src = h.read()\n"
+        "h.close()\n"
+        'src = src.decode("utf-8")\n'
+        f"{EX}(src, about)\n"
+    )
+    assert _crit(src) == set()
+
+
+def test_straight_line_handle_rebind_clears():
+    """CLAWSECCHECK-B-922: the same threading applied to `_read_call`'s own "handle bound
+    once" fallback -- the file HANDLE name (not the content) rebuilt across two
+    straight-line statements before its single `.read()`."""
+    src = (
+        "import os\n"
+        "here = os.path.abspath(os.path.dirname(__file__))\n"
+        "about = {}\n"
+        'h = open(os.path.join(here, "demo_plugin", "wrong.py"))\n'
+        'h = open(os.path.join(here, "demo_plugin", "__version__.py"))\n'
+        "src = h.read()\n"
+        f"{EX}(src, about)\n"
+    )
+    assert _crit(src) == set()
+
+
 def test_function_scope_does_not_trust_a_module_global():
     """A module global read by a function can be replaced from another file after import,
     so a function's path, handle and namespace must all be its own locals."""
@@ -354,6 +448,18 @@ ESCAPES = {
     # boundary -- paired controls for test_straight_line_anchor_rebind_clears.
     "branch_rebound_anchor": f'if sys.argv[1:]:\n    here = "/tmp/x"\nwith {_OPEN}) as f:\n    {EX}(f.read(), about)\n',
     "loop_rebound_anchor": f'for _ in range(1):\n    here = os.path.abspath(here)\nwith {_OPEN}) as f:\n    {EX}(f.read(), about)\n',
+    # CLAWSECCHECK-B-922: the content-rebind relaxation (content()'s Name branch) must
+    # stay a categorical rejection the moment the SECOND straight-line binding replaces
+    # `src` with something that is not itself resolved shipped content, or crosses a
+    # branch/loop boundary -- paired controls for test_straight_line_content_rebind_clears.
+    "content_rebound_to_env": f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\nsrc = h.read()\nh.close()\nsrc = os.environ.get("X", "")\n{EX}(src, about)\n',
+    "content_rebound_in_branch": f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\nsrc = h.read()\nh.close()\nif sys.argv[1:]:\n    src = input()\n{EX}(src, about)\n',
+    "content_rebound_in_loop": f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\nsrc = h.read()\nh.close()\nfor _ in range(1):\n    src = "x"\n{EX}(src, about)\n',
+    # CLAWSECCHECK-B-922: the SAME relaxation applied to _read_call's own "handle bound
+    # once" fallback must stay a categorical rejection too -- paired controls for
+    # test_straight_line_handle_rebind_clears.
+    "handle_rebound_in_branch": f'h = open(os.path.join(here, "demo_plugin", "__version__.py"))\nif sys.argv[1:]:\n    h = open("/tmp/evil.py")\nsrc = h.read()\n{EX}(src, about)\n',
+    "handle_rebound_in_loop": f'h = open(os.path.join(here, "demo_plugin", "__version__.py"))\nfor _ in range(1):\n    h = open("/tmp/evil.py")\nsrc = h.read()\n{EX}(src, about)\n',
     "env_segment_inline": f'with open(os.path.join(here, os.environ["P"]), "rb") as fh:\n    {EX}(fh.read().decode(), about)\n',
     "argv_segment": f"with open(os.path.join(here, sys.argv[1])) as f:\n    {EX}(f.read(), about)\n",
     "literal_tmp": f'with open("/tmp/stage2.py") as f:\n    {EX}(f.read(), about)\n',

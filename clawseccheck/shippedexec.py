@@ -1135,7 +1135,7 @@ class _FileFacts:
                 break
             cur = self.parents.get(cur)
         # `h = open(P)` bound once in this scope, touched by nothing else.
-        rec = self.sole(name, scope)
+        rec = self.sole(name, scope, before=call)
         if rec is None or rec[0] != "assign":
             return None
         region = [self.tree] if scope is self.tree else [scope]
@@ -1152,7 +1152,7 @@ class _FileFacts:
         if depth > _MAX_DEPTH:
             return None
         if isinstance(e, ast.Name):
-            rec = self.sole(e.id, scope)
+            rec = self.sole(e.id, scope, before=e)
             if rec is None or rec[0] != "assign":
                 return None
             return self.content(rec[1], scope, covered, depth + 1)
@@ -1217,7 +1217,7 @@ class _FileFacts:
             return True
         if not isinstance(arg, ast.Name):
             return False
-        rec = self.sole(arg.id, scope)
+        rec = self.sole(arg.id, scope, before=arg)
         if rec is None or rec[0] != "assign" or not self._namespace_ok(rec[1], scope, call):
             return False
         region = self.tree if scope is self.tree else scope
