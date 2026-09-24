@@ -371,6 +371,19 @@ class _FileFacts:
         self.parents: dict = {}
         for p in ast.walk(tree):
             for c in ast.iter_child_nodes(p):
+                if isinstance(c, (ast.Load, ast.Store, ast.Del)):
+                    # CPython reuses ONE Load/Store/Del instance for every occurrence
+                    # in the tree (ast.Load() etc. are singletons), so keying this
+                    # dict by node identity would silently overwrite the "parent" on
+                    # every ctx occurrence, leaving whichever was walked last -- an
+                    # arbitrary, usually very deep, node. Nothing legitimately climbs
+                    # FROM a ctx node (every real caller starts from the Name/
+                    # Attribute/Subscript that owns it, which has its own correct
+                    # entry here), so recording nothing for them is both correct
+                    # (scope_of() sees an immediate `is None` instead of a bogus deep
+                    # climb) and avoids a pathological O(depth) walk for every ctx
+                    # node a full `ast.walk()` scope_of() sweep visits.
+                    continue
                 self.parents[c] = p
         self.other_bound, self.import_bound = _bound_names(tree)
         self.star = any(
