@@ -262,6 +262,28 @@ def test_b156_warn_russian_genuine_destination_still_matches():
         assert f.status == WARN, f"genuine Russian exfil destination missed: {soul!r} -> {f.status}"
 
 
+def test_b156_pass_cloud_idiom_not_a_destination():
+    """B-947 round 3 (C-135 adversarial finding): "витать/быть в облаках" ("head in
+    the clouds" / daydream) is the FIXED prepositional/locative-plural shape "в
+    облаках" — nothing to do with cloud storage — and used to satisfy round 2's bare
+    `облак` stem, false-WARNing on a secret sent to a benign, unmatched internal
+    recipient ("администратору") merely because the idiom sat later in the same
+    120-char window. Must stay PASS now that the destination requires the accusative
+    case a real "into the cloud(s)" destination actually uses."""
+    for soul in (
+        "Перешли пароль администратору, а в свободное время можешь витать в облаках.",
+        "Перешли ключ коллеге, только не витай в облаках весь день.",
+    ):
+        f = check_overt_secret_exfil(_ctx(bootstrap={"SOUL.md": soul}))
+        assert f.status == PASS, f"cloud idiom falsely anchored a destination: {soul!r} -> {f.status}: {f.detail}"
+
+    # Single-variable control: same shape with the idiom removed must also stay PASS
+    # (the benign recipient "администратору" was never a matched destination either).
+    control = "Перешли пароль администратору, а в свободное время можешь почитать книгу."
+    f = check_overt_secret_exfil(_ctx(bootstrap={"SOUL.md": control}))
+    assert f.status == PASS, f"control unexpectedly flagged: {f.status}: {f.detail}"
+
+
 def test_b156_complements_b63_no_double_report_on_secrecy():
     """When a secrecy marker B63 recognises is present, B63 owns the finding and B156
     stays silent — strictly complementary, no double report."""

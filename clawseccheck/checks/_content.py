@@ -1890,13 +1890,35 @@ _B63_DEST_RE = re.compile(
         # matched inside unrelated vocabulary with no boundary at all (reactivating this
         # branch in round 1 turned that pre-existing gap into a live FP: "урок
         # себесто..." matched "к себе", "мойку"/"нашатырном"/"ботинок" matched "мой"/
-        # "наш"/"бот" as bare substrings). "облак" stays a left-bounded STEM (no trailing
-        # \b), same asymmetric idiom `_B63_SECRET_TERM_RE` already uses for
-        # секрет/парол/токен/ключ — it is not itself a standalone word (always inflects:
-        # облако/облака/облаке/...), and no unrelated Russian word starts with those 5
-        # letters, so the mandatory `\s+` before it already gives it a real left boundary
-        # without a trailing one costing a false match.
-        r"|\bк\s+себе\b|\bмне\b|\bв\s+(?:мой\b|наш\b|чат\b|бот\b|облак)"
+        # "наш"/"бот" as bare substrings). "облак" stays a left-bounded STEM (no
+        # LEXICAL collision — no unrelated Russian word starts with those 5 letters, so
+        # the mandatory `\s+` before it already gives it a real left boundary).
+        #
+        # B-947 round 3: round 2's bare stem still collided SEMANTICALLY — "в облаках"
+        # (prepositional/locative plural) is the fixed grammatical shape of the idiom
+        # "витать/быть в облаках" ("to have one's head in the clouds" / daydream),
+        # nothing to do with cloud storage, and it satisfied the bare stem. Rejected a
+        # narrow идиом-verb lookaround (excluding "витат"/"быть" immediately before "в
+        # облак") as fragile/enumerative per this project's own C-135 conventions — the
+        # same idiom also occurs with "парить"/"летать"/no verb at all ("мысли витают/
+        # он вечно в облаках"), which a verb blacklist would not generalise to. Fixed
+        # grammatically instead: an exfil DESTINATION is always the OBJECT of motion-
+        # into, i.e. Russian ACCUSATIVE case (в облако / в облака — "into the cloud(s)"),
+        # never prepositional/locative ("в облаках" — "in/among the clouds", a STATIC
+        # location, the case every form of this idiom uses). `облак` is now bounded to
+        # its bare stem or an accusative о/а suffix only (`облак(?:о|а)?\b`) — the
+        # trailing \b rejects any further case ending (-ах prepositional plural, -е
+        # prepositional singular, -ом instrumental, -у dative, ...), so "облаках"/
+        # "облаке"/"облаком" no longer match while genuine "в облако"/"в облака"
+        # destination phrasing is untouched (verified live). This also transitively
+        # fixes the same collision in every OTHER `_B63_DEST_RE` consumer
+        # (`_has_outbound_exfil` → B63's `_b63_scan`, and `_b64_next_sentence_has_exfil`
+        # → B64), not just B156's object-of-send gate the idiom was first reproduced
+        # through — confirmed live that the idiom also false-anchored a FAIL via B63
+        # before this fix (an unrelated secrecy+action phrase sharing the same 120-char
+        # `_B63_WINDOW` as the idiom fragment), which a B156-local fix could not have
+        # reached.
+        r"|\bк\s+себе\b|\bмне\b|\bв\s+(?:мой\b|наш\b|чат\b|бот\b|облак(?:о|а)?\b)"
     ),
     re.IGNORECASE,
 )
