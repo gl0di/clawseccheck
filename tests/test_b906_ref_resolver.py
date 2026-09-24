@@ -652,3 +652,137 @@ def test_adversarial_legb_stops_at_nearest_shadowing_scope():
         "    inner()\n"
     )
     assert _has_crit(src), f"LEGB fallback did not resolve the correct (shadowing) scope: {_severities(src)}"
+
+
+# ---------------------------------------------------------------------------
+# Part 8: CLAWSECCHECK-B-932 investigation -- `os.environ.get(...)` (the combined
+# Attribute+Call form reached via plain `import os`, arguably the single most
+# common real-world "read an env var with a default" idiom) feeding a wrapper's
+# argv[0] through the B-413 layer-2 call-site check.
+#
+# B-932 was filed against `_value_is_tainted_source`'s naive `.get` branch
+# (`isinstance(f, ast.Attribute) and f.attr == "get" and _attr_base(f.value) ==
+# "environ"`), reasoning that it only matches a bare `Name` alias (`from os import
+# environ`) and never a two-level `os.environ` Attribute chain, because
+# `_attr_base` on an Attribute node returns only that node's OWN trailing `.attr`
+# text. That reasoning about `_attr_base` is correct in the abstract, but it
+# does not produce a miss here: for `os.environ.get(...)`, `f.value` (i.e.
+# `os.environ`) IS itself an Attribute whose OWN `.attr` is literally
+# `"environ"` -- the exact string the branch tests for -- so
+# `_attr_base(f.value) == "environ"` is trivially true regardless of what sits
+# under `os.environ` (this is the same pre-existing "compound-base-collapse"
+# spelling quirk `test_flask_request_environ_not_in_vocabulary_directly` above
+# already documents for `request.environ.get(...)`: it OVER-matches ANY
+# `<anything>.environ.get(...)`, never under-matches `os.environ.get(...)`
+# specifically).
+#
+# More importantly, the TT5 argv/layer-2 call sites that actually decide
+# TT5_CMD_INJECTION vs. TT5_ARG_INJECTION here (`_all_call_sites_bind_fixed_argv`,
+# `_subprocess_taint_is_command_injection`'s inline-list branch) deliberately do
+# NOT consult `_value_is_tainted_source` at all (see their own docstrings: "NEVER
+# the spelling vocabulary ... some prior fix rounds wrongly imported into this
+# inline position") -- they consult only `_names_in` and `ref_res.source_in`.
+# B-906 (`fix/b-906`, merged as 755b58b2, an ancestor of this branch's fork
+# point) already added `_RefResolver.is_env_read`, backed by
+# `_ENV_READ_CALLABLE_REFS` -- built as `{f"{_m}.{_a}" for _m in
+# _ENV_MAPPING_REFS for _a in ("get", "pop", "setdefault", "__getitem__")}` --
+# which already includes the canonical `"os.environ.get"` reference and
+# resolves it via genuine reference resolution (R1/R4), independent of the
+# spelling vocabulary entirely.
+#
+# Net result, confirmed empirically (not assumed): the exact repro from the
+# B-932 report already reports TT5_CMD_INJECTION/crit on this tip. Forcing
+# `_RefResolver.source_in` off (matching this file's own `test_monotone_*"
+# technique) reproduces the B-932-reported bug exactly (TT5_ARG_INJECTION/info)
+# -- proof that `_RefResolver`, not the naive spelling branch, is what already
+# closes this gap. These tests pin the current (already-correct) end-to-end behavior
+# so a future change cannot silently reopen it.
+#
+# Companion-issue search (per the B-932 report's own request): the identical
+# `f.attr == "get" and _attr_base(f.value) == "environ"` shape also appears at
+# `_has_uncovered_inline_source` and `_cap_is_secretish_env_read`. Both share the
+# exact same collapse-quirk, and in both cases it is similarly PERMISSIVE, not
+# restrictive, for `os.environ.get(...)` specifically -- no genuine recall miss
+# found in either. Two OTHER nearby call sites (`_is_env_read_value`, and the
+# B-140(b) `HARDCODED_PROVIDER_SECRET` check) already use the correct two-level
+# form (`_attr_base(f.value.value) == "os"`, checking the INNER base), so the
+# team already had the right pattern available where it mattered for recall.
+# ---------------------------------------------------------------------------
+
+
+def test_b932_report_os_environ_get_wrapper_argv_already_crit():
+    """The exact repro from the CLAWSECCHECK-B-932 report: `os.environ.get(...)`
+    (plain `import os`, dotted `.get()` call, no alias) reaching a wrapper's
+    argv[0] through the B-413 layer-2 call-site check. Already crit on this tip
+    (via `_RefResolver`, not the naive spelling branch B-932 was filed against)."""
+    src = (
+        "import os, subprocess\n"
+        "def run(cmd):\n"
+        "    subprocess.check_call(cmd)\n"
+        "def main():\n"
+        '    run([os.environ.get("P"), "x"])\n'
+    )
+    assert _has_crit(src), f"expected TT5_CMD_INJECTION/crit, got {_severities(src)}"
+
+
+def test_b932_report_reproduces_with_ref_resolver_disabled():
+    """Confirms `_RefResolver` (not the naive spelling branch) is the mechanism
+    that closes this gap: forcing `source_in` off reproduces the exact bug the
+    B-932 report describes (TT5_ARG_INJECTION/info instead of
+    TT5_CMD_INJECTION/crit) at the identical line."""
+    src = (
+        "import os, subprocess\n"
+        "def run(cmd):\n"
+        "    subprocess.check_call(cmd)\n"
+        "def main():\n"
+        '    run([os.environ.get("P"), "x"])\n'
+    )
+    r = _rules(src)
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+    orig = _RefResolver.source_in
+    try:
+        _RefResolver.source_in = lambda self, node: False
+        r_disabled = _rules(src)
+    finally:
+        _RefResolver.source_in = orig
+    assert "TT5_CMD_INJECTION" not in r_disabled
+    assert r_disabled["TT5_ARG_INJECTION"].severity == "info"
+
+
+@pytest.mark.parametrize(
+    "name,src",
+    [
+        (
+            "os_environ_subscript",
+            "import os, subprocess\n"
+            "def run(cmd):\n"
+            "    subprocess.check_call(cmd)\n"
+            "def main():\n"
+            '    run([os.environ["P"], "x"])\n',
+        ),
+        (
+            "os_getenv",
+            "import os, subprocess\n"
+            "def run(cmd):\n"
+            "    subprocess.check_call(cmd)\n"
+            "def main():\n"
+            '    run([os.getenv("P"), "x"])\n',
+        ),
+        (
+            "bare_environ_get_from_import",
+            "from os import environ\nimport subprocess\n"
+            "def run(cmd):\n"
+            "    subprocess.check_call(cmd)\n"
+            "def main():\n"
+            '    run([environ.get("P"), "x"])\n',
+        ),
+    ],
+)
+def test_b932_control_already_working_forms_unaffected(name, src):
+    """Controls named in the B-932 report: the forms it says already worked
+    (`os.environ["P"]`, `os.getenv("P")`, bare `environ.get("P")` via `from os
+    import environ`) must remain crit -- this investigation changed no
+    production code, so this is a plain regression pin, not a before/after
+    comparison."""
+    assert _has_crit(src), f"{name}: expected TT5_CMD_INJECTION/crit, got {_severities(src)}"
