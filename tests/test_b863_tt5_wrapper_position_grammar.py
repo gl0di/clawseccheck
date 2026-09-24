@@ -487,23 +487,34 @@ def test_new_n7_callsite_append_then_body_pop_is_crit():
     _assert_crit(src)
 
 
-def test_new_n9_conditional_reassign_pinned_to_current_pre_existing_gap():
+def test_new_n9_conditional_reassign_now_resolved_by_b952():
     """The matrix names this crit: `if DEBUG: args = ['echo']` must not clear
     the danger on the "branch not taken" path, where the call site's own
     tainted, shell-shaped argv (`sh('sh', '-c', p)`) still reaches the sink.
-    B-863's OWN branch-merge grammar gets this right (verified directly
+    B-863's OWN branch-merge grammar already got this right (verified directly
     against `_b863_tier1_tier2_verdict` in isolation: it returns crit). It
-    stays info end-to-end for a reason entirely OUTSIDE B-863's own code: the
+    stayed info end-to-end for a reason entirely OUTSIDE B-863's own code: the
     pre-existing `_single_list_bindings_local` (used by
     `_subprocess_taint_is_command_injection` to resolve the SINK's own
-    argument BEFORE the wrapper/vararg gate this task changes ever runs)
-    counts `args = ['echo']` as "assigned exactly once to a literal" without
-    any awareness that the assignment is inside an `if` -- so it resolves
-    `args` to `['echo']` unconditionally and clears the call before B-863's
-    branch-aware grammar is ever reached. True on every tree, including the
+    argument BEFORE the wrapper/vararg gate B-863 added ever runs) counted
+    `args = ['echo']` as "assigned exactly once to a literal" without any
+    awareness that the assignment sat inside an `if` -- so it resolved `args`
+    to `['echo']` unconditionally and cleared the call before B-863's
+    branch-aware grammar was ever reached. True on every tree, including the
     three retracted rounds ("info on all three trees" in the matrix). Filed
-    as CLAWSECCHECK-B-941 for 4.3.1; out of scope here for the same reason as
-    `test_o2b_inline_env_pinned_to_current_pre_existing_gap` above."""
+    as CLAWSECCHECK-B-941 at B-863 time, out of scope for B-863 itself since
+    the gap lived entirely in the pre-existing single-binding resolver, not in
+    B-863's own wrapper-parameter-reassignment gate -- the same reasoning as
+    `test_o2b_inline_env_now_resolved_by_b906` above.
+
+    B-952 closes the gap: `_single_list_bindings_local` now walks each
+    scope's own body a second time, refusing to descend past a conditional
+    construct (If/For/While/Try/With, sync or async, or TryStar), and routes
+    any name whose only `Assign` is reached that way into the SAME `unsafe`
+    set it already used for a reassignment or an `.insert()` mutation -- so
+    the SINK's own argument resolver no longer clears this call before
+    B-863's branch-aware grammar ever runs. This test now pins the FIXED
+    behaviour."""
     src = "".join([
         "import os, subprocess\n",
         "DEBUG = False\n",
@@ -515,7 +526,7 @@ def test_new_n9_conditional_reassign_pinned_to_current_pre_existing_gap():
         "    p = os.environ['P']\n",
         "    sh('sh', '-c', p)\n",
     ])
-    _assert_info(src)  # NOT the matrix's "crit" -- see docstring
+    _assert_crit(src)  # matrix's own "crit" -- now reached, via B-952
 
 
 def test_new_n13_helper_mutates_is_crit():
@@ -539,8 +550,67 @@ def test_new_n13_helper_mutates_is_crit():
 
 
 # ---------------------------------------------------------------------------
-# BENIGN-N* — the forwarded-parameter idiom must stay clear.
+# B-952 — a conditionally-reached reassignment must not be trusted as if it
+# were unconditional, generalized beyond the `if` shape `test_new_n9...`
+# above pins, and cross-checked against a genuinely unrelated `if` that must
+# NOT taint a sibling, genuinely top-level binding.
+#
+# The three For/Try/With tests below are PINNED-GAP tests, not "now fixed"
+# ones: at THIS harness's layer (a vararg wrapper's own body, routed through
+# B-863's own tier1/tier2 grammar), the fix in `_single_list_bindings_local`
+# is necessary but not sufficient. Verified directly: once
+# `_single_list_bindings_local` correctly refuses to resolve `args` for these
+# three shapes (confirmed in isolation -- same as the `If` case), control
+# falls through to B-863's OWN branch-aware grammar
+# (`_b863_process_stmts`/`_b863_tier1_tier2_verdict`), which -- unlike its
+# `If` handling, a real branch-merge -- recurses into a For/While loop's body,
+# a Try's body/handlers, and a With's body as though each always executes at
+# least once (see those branches' own comments a few hundred lines up in this
+# file: "recurse into the body/orelse with the full statement grammar"), so
+# it still merges the reassignment in unconditionally and reports info. That
+# is a SEPARATE, pre-existing gap in a DIFFERENT function -- not this task's
+# target (`_single_list_bindings_local`'s own body is the only thing in
+# scope here) -- left pinned rather than silently unfixed and untested. The
+# CALL-SITE counterpart of these same three shapes (not inside a vararg
+# wrapper's own body, so B-863's grammar never runs) IS fixed by this task --
+# see `test_wrapper_conditionally_bound_call_site_list_stays_crit` and its
+# For/Try/With siblings in tests/test_b413_scope_taint.py.
 # ---------------------------------------------------------------------------
+
+
+def test_new_b952_for_loop_conditional_reassign_pinned_separate_grammar_gap():
+    src = _va(["for _ in range(1):", "    args = ['echo']"], call='sh("sh", "-c", p)')
+    _assert_info(src)  # pinned pre-existing gap in a DIFFERENT function -- see section docstring
+
+
+def test_new_b952_try_conditional_reassign_pinned_separate_grammar_gap():
+    src = _va(
+        ["try:", "    args = ['echo']", "except Exception:", "    pass"],
+        call='sh("sh", "-c", p)',
+    )
+    _assert_info(src)  # pinned pre-existing gap in a DIFFERENT function -- see section docstring
+
+
+def test_new_b952_with_conditional_reassign_pinned_separate_grammar_gap():
+    src = _va(["with contextlib.suppress(Exception):", "    args = ['echo']"],
+              call='sh("sh", "-c", p)')
+    _assert_info(src)  # pinned pre-existing gap in a DIFFERENT function -- see section docstring
+
+
+def test_new_b952_unrelated_if_does_not_taint_sibling_unconditional_reassign():
+    """An `if` present ELSEWHERE in the wrapper (not wrapping the reassignment
+    itself) must not make a genuinely top-level, sibling `args = ['echo']`
+    look conditional -- only an If's OWN body/orelse is out of reach, never a
+    statement sitting beside it. Distinguishes "nested inside a conditional"
+    from "merely coexists with one" -- must still downgrade to info."""
+    src = _va(
+        ["if payload:", "    pass", "args = ['echo']"],
+        call='sh("sh", "-c", p)',
+    )
+    _assert_info(src)
+
+
+
 
 def test_benign_n4_forwarded_param_is_info():
     src = _HEADER + (

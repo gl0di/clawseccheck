@@ -2723,16 +2723,55 @@ def _scope_own_nodes(scope: ast.AST):
             stack.append(child)
 
 
+# B-952: statement kinds whose body is only CONDITIONALLY reached relative to a
+# scope's own entry. `TryStar` (3.11+ exception groups) is matched by class name
+# rather than `isinstance(n, ast.TryStar)` in `_single_list_bindings_local` below,
+# mirroring the existing `s.__class__.__name__ == "TryStar"` idiom used elsewhere in
+# this file for the same "stay importable under 3.9" reason.
+_CONDITIONAL_STMT_NODES = (
+    ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith,
+)
+
+
 def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tuple]:
-    """Names bound EXACTLY ONCE to a list/tuple literal within `scope`'s own body,
-    with no later mutation that could change argv[0] (`cmd[0] = ...` / `cmd.insert(...)`).
+    """Names bound EXACTLY ONCE, UNCONDITIONALLY, to a list/tuple literal within
+    `scope`'s own body, with no later mutation that could change argv[0]
+    (`cmd[0] = ...` / `cmd.insert(...)`).
 
     Resolves the common real-world safe pattern where the command list is built in a
     local before the call (`cmd = [prog, *args]; subprocess.run(cmd)`) rather than
-    passed inline. Conservative: a name reassigned, index-assigned, or `insert`-mutated
-    is omitted, so the caller falls back to the command-injection default rather than
-    risk a false downgrade.
+    passed inline. Conservative: a name reassigned, index-assigned, `insert`-mutated,
+    or assigned only inside a conditional construct (If/For/While/Try/With, sync or
+    async, or TryStar) is omitted, so the caller falls back to the command-injection
+    default rather than risk a false downgrade.
+
+    B-952: a name assigned to a literal ONLY inside a conditional branch
+    (`if DEBUG: args = ['echo']`) is NOT "bound exactly once" for this function's
+    purposes, even though it is textually the only `Assign` to that name anywhere in
+    the scope -- the far more common path that skips the assignment leaves whatever
+    the name held before (often the call site's own tainted argv) reaching the sink
+    untouched. A second, narrower walk below mirrors `_scope_own_nodes`'s own seed
+    and nested-scope boundary but refuses to descend PAST a conditional construct, so
+    every `Assign` it collects really is reached unconditionally from `scope`'s own
+    entry; anything found only through the first (full) walk and not this one is
+    routed into `unsafe` exactly like every other disqualifying case below.
     """
+    if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
+        stack = [b for b in scope.body if not isinstance(b, _NESTED_SCOPE_NODES)]
+    else:
+        stack = [scope]  # mirrors _scope_own_nodes: the root IS the scope, unfiltered
+    unconditional_assigns: set = set()
+    while stack:
+        n = stack.pop()
+        if isinstance(n, _CONDITIONAL_STMT_NODES) or n.__class__.__name__ == "TryStar":
+            continue  # everything reachable only through here is conditional
+        if isinstance(n, ast.Assign):
+            unconditional_assigns.add(n)
+        for child in ast.iter_child_nodes(n):
+            if isinstance(child, _NESTED_SCOPE_NODES):
+                continue
+            stack.append(child)
+
     assign_count: dict[str, int] = {}
     bindings: dict[str, ast.List | ast.Tuple] = {}
     unsafe: set[str] = set()
@@ -2741,7 +2780,9 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
             for t in n.targets:
                 if isinstance(t, ast.Name):
                     assign_count[t.id] = assign_count.get(t.id, 0) + 1
-                    if isinstance(n.value, (ast.List, ast.Tuple)):
+                    if n not in unconditional_assigns:
+                        unsafe.add(t.id)  # B-952: only conditionally reached
+                    elif isinstance(n.value, (ast.List, ast.Tuple)):
                         bindings[t.id] = n.value
                     else:
                         unsafe.add(t.id)  # bound to a non-literal -> unresolvable
