@@ -1203,78 +1203,70 @@ def _rhs_has_fstring_taint(node: ast.AST, tainted: set[str]) -> bool:
     return False
 
 
-# B-918: unlike `_FOLD_MAX_DEPTH`'s fold family, this walks EVERY child of a Call's
-# own args/keywords/func (not just a name-hop or a typed path-join receiver), so any
-# deeply left-nested expression reaching it -- a long `a / b / c / ...` BinOp chain,
-# a padded `.joinpath(...)....joinpath(...)` method chain -- drives its own uncapped
-# recursion (two self-calls, one per branch below) straight into an uncaught
-# `RecursionError`: confirmed on this box (Py 3.12, default recursion limit 1000) at
-# ~995 terms for the bare `/`-chain shape and ~496 for the `.joinpath()` chain (each
-# `.joinpath()` call costs two AST levels -- a Call wrapping an Attribute -- so it
-# crashes at roughly half the term count of a same-depth BinOp chain). 200 mirrors
-# `_FOLD_MAX_DEPTH` (itself CPython's own parser bracket-nesting limit) -- comfortably
-# below either observed threshold regardless of how much ambient stack the caller
-# chain (pytest, `ast.walk`, an outer analysis pass) has already used before reaching
-# here, so the bound never depends on the caller's own depth at the time of the call.
-_TAINT_SOURCE_MAX_DEPTH = 200
-
-
-def _value_is_tainted_source(node: ast.AST, tainted: set[str], depth: int = 0) -> bool:
+def _value_is_tainted_source(node: ast.AST, tainted: set[str]) -> bool:
     """True if *node* derives from an external source or a tainted name.
 
-    B-918: *depth* bounds the two recursive branches below explicitly, the same
-    explicit-counter pattern `_fold_seg`/`_fold_fs_path` use for `_FOLD_MAX_DEPTH`
-    (see that constant's own comment) -- never a `try`/`except RecursionError`
-    around a caller. A bare except here would be the exact defect round 2 of B-830
-    found and round 3 removed: it swallows the error at whatever partial,
-    unpredictable point the actual C stack happened to overflow, leaving this
-    value's own taint status UNPROVEN rather than a clean, deterministic answer.
+    B-918: this used to recurse on itself (one self-call per branch: a Call's own
+    args/keywords/func, or -- for anything else -- the node's full child set), with
+    no depth bound at all. A deeply left-nested expression reaching it -- a long
+    `a / b / c / ...` BinOp chain, a padded `.joinpath(...)....joinpath(...)` method
+    chain -- drove that recursion straight into an uncaught `RecursionError`:
+    confirmed on this box (Py 3.12, default recursion limit 1000) at ~995 terms for
+    the bare `/`-chain shape and ~496 for the `.joinpath()` chain (each `.joinpath()`
+    call costs two AST levels -- a Call wrapping an Attribute -- so it crashes at
+    roughly half the term count of a same-depth BinOp chain).
 
-    Deliberately the OPPOSITE fail-safe direction from the fold family: a fold
-    giving up returns `None` ("unresolved"), which only ever WIDENS what a
-    path-literal MATCH treats as unresolved -- safe there because giving up can
-    only ever suppress a match, never manufacture one. This function instead feeds
-    a taint-propagation OR-disjunction (`_expr_is_ext_tainted` and its callers) that
-    GROWS a tainted-name set consulted by FAIL-capable sink checks (TT5/TT4/SSRF,
-    the exec-sink exemption gates) -- there, "unresolved" degrading to `False`
-    ("not tainted") would be the unsound direction the ticket warns about: it
-    reads as a clean disproof of taint when the recursion was actually cut off
-    mid-expression, exactly the kind of silent bypass a sufficiently long
-    adversarial chain could be built to trigger on purpose. So past the depth cap
-    this returns `True` ("assume tainted") instead -- it can only ever WIDEN what
-    downstream sink checks scrutinize (more candidates re-examined by the stricter,
-    narrowly-scoped exemption checks that gate an actual suppression, e.g.
-    `_exec_sink_taint_is_only_artifact_relative_decode`), never manufacture a false
-    exemption from a genuine conviction. A real skill's ordinary code never comes
-    close to 200 levels of left-nesting in one expression, so this can only ever
-    fire on a pathologically deep, already-suspicious construct -- not a shape any
-    real-fleet config has been observed to produce.
+    A first fix bounded the recursion with an explicit depth counter (mirroring
+    `_FOLD_MAX_DEPTH`/`_fold_seg`), giving up past the cap with a deterministic
+    `True` ("assume tainted") rather than a `try`/`except RecursionError`. That
+    cap turned out to be unsound in the OTHER direction: this function is also
+    reached on ordinary, non-adversarial code that legitimately chains well past
+    any reasonable depth cap -- a hardcoded transliteration/normalization table
+    built as `s.replace(a, b).replace(c, d)....` (the real shape in, e.g., a
+    Snowball-stemmer-style character-folding table) routinely runs well over a
+    hundred `.replace()` calls, i.e. (by the same two-AST-levels-per-call rule as
+    `.joinpath()`) well over 200 levels of left-nesting, on a value that carries
+    NO external input whatsoever. A depth cap that gives up as "tainted" there
+    would manufacture a false TT5_CMD_INJECTION conviction on a plain constant the
+    instant it reached an exec-family sink -- trading the crash for a real,
+    reachable false-positive FAIL, not a merely theoretical one.
+
+    So instead of a cap in either direction, this is rewritten as a plain
+    iterative worklist walk -- the same idiom `_has_uncovered_inline_source`
+    (this module) already uses for nearly the same source vocabulary. Nothing in
+    the original recursive version depended on call depth or on any state threaded
+    through the recursion (every branch is a stateless leaf test --
+    `_attr_base`/`_is_external_source_call`/`_is_tool_result_call`/a `Name in
+    tainted` membership check -- or an unconditional descent into every child
+    node), so an explicit Python list standing in for the call stack is exactly
+    equivalent, node-for-node, to the original recursion: every reachable node is
+    still visited exactly once, in the same relative order, with the same checks
+    applied to it. The one thing that changes is what holds that stack -- Python
+    heap memory bounded only by the expression's own node count, never the
+    interpreter's ~1000-frame C recursion limit -- so there is no depth at which
+    this can crash, and consequently no fail-safe "give up" default to pick at
+    all: every node this function is ever asked about gets a real, exact answer.
     """
-    if depth > _TAINT_SOURCE_MAX_DEPTH:
-        return True
-    if isinstance(node, ast.Name) and node.id in tainted:
-        return True
-    if isinstance(node, ast.Call):
-        call = node
-        f = call.func
-        # os.getenv
-        if isinstance(f, ast.Attribute) and f.attr == "getenv" and _attr_base(f.value) == "os":
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, ast.Name) and n.id in tainted:
             return True
-        # environ.get(...)
-        if isinstance(f, ast.Attribute) and f.attr == "get" and _attr_base(f.value) == "environ":
-            return True
-        if _is_external_source_call(call):
-            return True
-        if _is_tool_result_call(call):
-            return True
-        # Recurse into args — catches open(...).read() chain.
-        for child in ast.iter_child_nodes(call):
-            if _value_is_tainted_source(child, tainted, depth + 1):
+        if isinstance(n, ast.Call):
+            f = n.func
+            # os.getenv
+            if isinstance(f, ast.Attribute) and f.attr == "getenv" and _attr_base(f.value) == "os":
                 return True
-    else:
-        for child in ast.iter_child_nodes(node):
-            if _value_is_tainted_source(child, tainted, depth + 1):
+            # environ.get(...)
+            if isinstance(f, ast.Attribute) and f.attr == "get" and _attr_base(f.value) == "environ":
                 return True
+            if _is_external_source_call(n):
+                return True
+            if _is_tool_result_call(n):
+                return True
+        # Descend into every child regardless -- catches e.g. an open(...).read()
+        # chain nested inside an outer call that didn't itself match above.
+        stack.extend(ast.iter_child_nodes(n))
     return False
 
 
