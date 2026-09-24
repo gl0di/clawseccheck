@@ -134,8 +134,10 @@ _TAMPER_ATTRS = frozenset({
     # legitimate-looking binding a static reader picks, so the runtime value stays the
     # FIRST, attacker-controlled one. `f_trace` is the same class of primitive one level
     # removed: it installs a PER-LINE local trace function on a frame that already has one.
-    # B-996: `sole()` now consults these sets itself (`_file_tampers()`) rather than
-    # trusting every caller to have gated on `_tampers()` first -- see its docstring.
+    # B-996 round 1 gated `sole()` on this WHOLE set (plus `_TAMPER_MODULES`, which
+    # includes the loader-sink modules `runpy`/`importlib`/`imp`/`zipimport`/`pkgutil`
+    # THEMSELVES -- exactly the files B-917 needs to analyse) and was reverted: see
+    # `_frame_jump_capable()`, the narrower predicate `_reaching()` actually gates on.
     "f_lineno", "f_trace", "settrace", "setprofile", "settrace_all_threads",
     "setprofile_all_threads",
 })
@@ -157,6 +159,29 @@ _TAMPER_DOTTED_MODULES = frozenset({
     # it. Only the import statement itself names the route; catch it there.
     "sys.settrace", "sys.setprofile", "threading.settrace", "threading.setprofile",
 })
+# B-996 round 2: the FRAME-JUMP-PRIMITIVE-ONLY subset `_frame_jump_capable()` checks --
+# deliberately narrower than `_TAMPER_ATTRS`/`_TAMPER_MODULES` above (see that
+# function's own docstring for why reusing the whole `_tampers()` predicate, round 1's
+# approach, was wrong). Attribute/dunder spellings that could reach or install a
+# `sys.settrace`/`setprofile`/`sys.monitoring`/`frame.f_lineno`/`f_trace` primitive,
+# including the reflective routes that reach one without spelling its name literally.
+_FRAME_JUMP_ATTRS = frozenset({
+    "f_lineno", "f_trace", "settrace", "setprofile", "settrace_all_threads",
+    "setprofile_all_threads", "monitoring",
+    "__setattr__", "__getattribute__", "__dict__",
+})
+_FRAME_JUMP_DOTTED_MODULES = frozenset({
+    "sys.settrace", "sys.setprofile", "sys.monitoring",
+    "threading.settrace", "threading.setprofile",
+})
+# Whole-module imports that are themselves frame-jump/reflection TOOLING (not merely
+# loader sinks): `pdb`/`bdb`/`trace` step through frames by design; `operator`/
+# `_operator` carries `attrgetter`/`methodcaller`, the B-922 PoC's own route to
+# `f_lineno` with no `ast.Attribute`/literal `getattr()` anywhere. Deliberately
+# EXCLUDES `runpy`/`importlib`/`imp`/`zipimport`/`pkgutil`: those are the loader-sink
+# modules B-917 exists to analyse, not frame-jump primitives -- including them here
+# would repeat round 1's mistake at a smaller scale.
+_FRAME_JUMP_MODULES = frozenset({"pdb", "bdb", "trace", "operator", "_operator"})
 # A STORE to an attribute with one of these names replaces something the proof relies on.
 _TAMPER_STORE_ATTRS = frozenset({
     "open", "read", "decode", "compile", _EX, _EV, "str", "fspath", "__file__",
@@ -304,6 +329,78 @@ def _tampers(tree: ast.AST) -> bool:
     return False
 
 
+def _frame_jump_capable(tree: ast.AST) -> bool:
+    """Does this file contain, or could it dynamically reach, a FRAME-JUMP primitive
+    that breaks `sole()`'s "source order is a proxy for runtime order" assumption --
+    `sys.settrace`/`setprofile`/`sys.monitoring`, a `frame.f_lineno`/`f_trace`
+    rewrite, or a reflective route to one of those with no literal spelling
+    (`getattr`/`setattr` with a non-literal name, a `__setattr__`/`__getattribute__`
+    override, raw `__dict__`/`vars()` access, `operator`/`_operator`, `pdb`/`bdb`/
+    `trace`, or `exec`/`eval`/`compile` of a non-literal string)?
+
+    B-996 round 2. NARROWER than `_tampers()` on purpose: `_tampers()`'s own
+    `_TAMPER_MODULES` includes `runpy`/`importlib`/`imp`/`zipimport`/`pkgutil` --
+    the loader-sink modules B-917 exists to analyse, not frame-jump primitives -- so
+    reusing it wholesale (round 1's approach, reverted) disabled `locate()`'s
+    multi-binding resolution for almost any file with a genuine loader-sink call,
+    which is exactly the file B-917 most needs to see into. This checks ONLY the
+    frame-jump-specific subset (`_FRAME_JUMP_ATTRS`/`_FRAME_JUMP_DOTTED_MODULES`/
+    `_FRAME_JUMP_MODULES`).
+
+    Still incomplete, by the nature of a static regex/AST scan (not a new gap this
+    fix introduces): a frame-jump primitive's name assembled from string PIECES that
+    are each themselves literal (`getattr(sys, "set" + "trace")`) spells no single
+    recognised name and is not caught here, the same class of gap `_tampers()`'s own
+    `getattr` check already has for its own attribute set."""
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and n.id == "vars":
+            return True
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in (
+            "__setattr__", "__getattribute__",
+        ):
+            return True
+        if isinstance(n, ast.Attribute) and n.attr in _FRAME_JUMP_ATTRS:
+            return True
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id in ("getattr", "setattr")
+            and len(n.args) >= 2
+        ):
+            name = n.args[1]
+            if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                return True
+            if name.value in _FRAME_JUMP_ATTRS:
+                return True
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id in (_EX, _EV, "compile")
+            and n.args
+            and not (isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str))
+        ):
+            return True
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name.split(".")[0] in _FRAME_JUMP_MODULES or any(
+                    a.name == m or a.name.startswith(m + ".")
+                    for m in _FRAME_JUMP_DOTTED_MODULES
+                ):
+                    return True
+        if isinstance(n, ast.ImportFrom):
+            mod = n.module or ""
+            if mod.split(".")[0] in _FRAME_JUMP_MODULES:
+                return True
+            for a in n.names:
+                full = f"{mod}.{a.name}" if mod else a.name
+                if a.name in _FRAME_JUMP_ATTRS or any(
+                    full == m or full.startswith(m + ".") or mod == m
+                    for m in _FRAME_JUMP_DOTTED_MODULES
+                ):
+                    return True
+    return False
+
+
 def _pathlib_tampers(tree: ast.AST) -> bool:
     return any(
         isinstance(n, ast.Attribute)
@@ -424,13 +521,16 @@ class _FileFacts:
         # proof for that one reason (`exact_calls`' second pass).
         self.any_target = False
         self.blocked = self.star or self._blocked(module_names)
-        # B-917 locate() LEGB fallback (2.1), also `sole()`'s own multi-binding
-        # resolution (B-996) -- both read this through `_file_tampers()`, lazily
-        # computed and cached since most files never take either path. `None` means
+        # B-917 locate() LEGB fallback (2.1): read through `_file_tampers()`, lazily
+        # computed and cached since most files never take this path. `None` means
         # "not computed yet" for the whole-file tamper flag; the per-name cache below
-        # starts empty and serves the LEGB guard only.
+        # starts empty.
         self._legb_tampers: "bool | None" = None
         self._legb_attr_store_cache: dict = {}
+        # B-996 round 2: `_reaching()`'s own, narrower frame-jump-primitive gate --
+        # see `_frame_jump_capable()`. Separate cache from `_legb_tampers` above:
+        # a different, narrower predicate over the same tree.
+        self._frame_jump: "bool | None" = None
 
     # ── names ──────────────────────────────────────────────────────────────────────────
 
@@ -593,27 +693,32 @@ class _FileFacts:
         (B-638: a same-scope rebind split across two lines resolves like one nested
         expression); any boundary-crossing or non-Assign binding disqualifies outright.
         Source order is a proxy for RUNTIME order here, and that proxy is only sound
-        when this file contains none of `_tampers()`'s recognised frame-jump primitives
-        -- a `sys.settrace`/`setprofile` (or `sys.monitoring` LINE) hook rewriting
-        `frame.f_lineno` mid-run can skip the second binding this picks, so without that
-        check "last one before the use point" would describe the SOURCE, not what the
-        interpreter actually executes. Self-enforced here (B-996) via `_file_tampers()`
-        -- the same lazily-cached `_tampers(self.tree)` flag `_legb_blocked()` uses --
-        rather than relying on every caller to have gated on it first: `_reaching()`
-        (shared by `locate()`/`_module_suffixed()`) calls straight into this method with
-        no gate of its own, and at least one production caller (`skillast.analyze_python`'s
-        `_FileFacts`/`PathFacts` construction for the B-917 loader-sink/staged-import
-        rules and `_RefResolver`) never checked `_tampers()` before reaching it (B-922
-        round 2 only widened the tamper sets for the OTHER caller, `ShippedArtifact.
-        _compute()`, which already gated on its own)."""
+        when this file contains none of the frame-jump primitives that could break it
+        (`sys.settrace`/`setprofile`/`sys.monitoring`, a `frame.f_lineno`/`f_trace`
+        rewrite, ...) -- but THIS method deliberately does not gate on that itself.
+
+        B-996 round 1 added such a gate here (via `_file_tampers()`, i.e. the WHOLE
+        `_tampers()` predicate) and was reverted: `_tampers()`'s own `_TAMPER_MODULES`
+        includes the loader-sink modules `runpy`/`importlib`/`imp`/`zipimport`/
+        `pkgutil` THEMSELVES, plus `inspect`/`operator`/other everyday stdlib imports,
+        so gating the shared multi-binding resolution on it disabled `locate()` for
+        almost any file B-917 actually needs to see into, and silently changed the
+        behaviour of every OTHER caller of `sole()` too -- including `_RefResolver`
+        (`skillast.py`'s `ref()`, TT4/TT5/SSRF's source vocabulary), which deliberately
+        stays ungated on tamper flags (`skillast.py`'s own comment on that call site:
+        "gating recall on it here would cost recall for no FP benefit, since a wrong
+        recall-side resolution can only ADD a finding, never remove one"). A gate
+        inside this shared method cannot honour that distinction -- it either protects
+        every caller or none. The frame-jump-primitive gate that `locate()`/
+        `_reaching()` needs now lives there instead, narrower both in WHAT it checks
+        (`_frame_jump_capable()`, not the whole `_tampers()` set) and in WHICH caller it
+        applies to."""
         if name == "__file__" or name in self.declared:
             return None
         recs = self.records(scope).get(name, [])
         if len(recs) == 1:
             return None if recs[0][0] == "other" else recs[0]
         if before is None or not recs or any(r[0] != "assign" for r in recs):
-            return None
-        if self._file_tampers():
             return None
         body = getattr(scope, "body", None) or []
         if any(self.parents.get(r[2]) is not scope or r[2] not in body for r in recs):
@@ -632,16 +737,25 @@ class _FileFacts:
         return body.index(child) if cur is scope and child in body else None
 
     def _file_tampers(self) -> bool:
-        """Lazily computed, cached `_tampers(self.tree)` -- whole-file, so one flag
-        serves every caller. Shared by `_legb_blocked()` (locate()'s LEGB-fallback
-        guard) and `sole()`'s own multi-binding source-order resolution (B-996): both
-        depend on the identical assumption -- that this file contains none of
-        `_tampers()`'s recognised frame-jump/reflection spellings -- so one cached
-        computation backs both refusals instead of two independent ones drifting
-        apart."""
+        """Lazily computed, cached `_tampers(self.tree)` -- whole-file. Used by
+        `_legb_blocked()` (`locate()`'s LEGB-fallback guard) only: `sole()`'s own
+        multi-binding resolution does NOT gate on this (B-996 round 1 tried that and
+        was reverted -- see `sole()`'s own docstring); `_reaching()` gates on the
+        narrower `_frame_jump_capable()`/`_file_frame_jump_capable()` instead."""
         if self._legb_tampers is None:
             self._legb_tampers = _tampers(self.tree)
         return self._legb_tampers
+
+    def _file_frame_jump_capable(self) -> bool:
+        """Lazily computed, cached `_frame_jump_capable(self.tree)` (B-996 round 2).
+        Single-file scoped, exactly like `_file_tampers()` above -- a frame-jump
+        primitive installed by a SIBLING file of the same artifact is a known gap
+        this predicate shares with `_file_tampers()`'s own pre-existing scope, not a
+        regression this fix introduces (round 1's broad, WRONG gate was single-file
+        scoped too). Used only by `_reaching()`'s own multi-binding refusal."""
+        if self._frame_jump is None:
+            self._frame_jump = _frame_jump_capable(self.tree)
+        return self._frame_jump
 
     def _legb_blocked(self, name: str) -> bool:
         """Guard for `locate()`'s LEGB fallback (b917-design.md 2.1). A function-scope
@@ -979,9 +1093,27 @@ class _FileFacts:
 
     def _reaching(self, e: ast.Name, scope: ast.AST) -> tuple:
         """`(record, defining_scope)` for a Name read -- `sole()` in *scope*, then the
-        LEGB walk below -- or `(None, scope)`. Shared by `locate()` and
-        `_module_suffixed()` so a path and its final component resolve names alike."""
+        LEGB walk below -- or `(None, scope)`. `locate()`'s only caller into this
+        method (confirmed by grep before B-996 round 2 -- `_module_suffixed()`/
+        `_bindings_suffixed()` walk `records()` directly and never call this).
+
+        B-996 round 2: refuses `sole()`'s own multi-binding "last same-scope binding
+        before the use point wins" resolution specifically HERE, when the file could
+        install a frame-jump primitive (`_file_frame_jump_capable()`) that breaks the
+        source-order-as-runtime-order assumption that resolution rests on. `locate()`
+        resolves a loader-sink/staged-import TARGET (b917-design.md) -- the one place
+        that assumption's soundness actually matters for a security verdict -- so this
+        is where the gate belongs, not inside the shared `sole()` itself (round 1's
+        mistake: every OTHER caller of `sole()`, e.g. `_RefResolver`/TT4/TT5/SSRF,
+        made its own deliberate, already-documented choice to stay ungated on tamper
+        flags, which a gate inside `sole()` silently overrode). Checked only when
+        `sole()` actually took the ambiguous, multi-binding branch (`len(recs) > 1`)
+        -- a single, unambiguous binding has nothing for a frame-jump to skip, so it
+        resolves normally even in a file that could jump frames."""
+        recs = self.records(scope).get(e.id, [])
         rec = self.sole(e.id, scope, before=e)
+        if rec is not None and len(recs) > 1 and self._file_frame_jump_capable():
+            rec = None
         found_scope = scope
         # LEGB fallback (b917-design.md 2.1), `resolve()` deliberately lacks this:
         # a name read inside a function with no binding in that function (and not

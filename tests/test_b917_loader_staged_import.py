@@ -30,6 +30,8 @@ import ast
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from clawseccheck import shippedexec as se
 from clawseccheck.checks._vet import ast_finding_is_fail_capable, vet_skill
 from clawseccheck.skillast import analyze_python
@@ -343,17 +345,10 @@ def _reaching_at_runpy_call(src: str):
 
 
 def test_b996_reaching_multi_binding_resolves_normally_when_untampered():
-    """Negative control for the fix below: `_reaching()` (shared by `locate()`)
-    still resolves an ordinary same-scope rebind via `locate()` when the file
-    contains none of `_tampers()`'s recognised spellings -- B-996 must not regress
-    the B-638 multi-binding resolution `sole()` already had. Deliberately NOT a
-    `runpy.run_path`/loader-sink shape here: `runpy`/`importlib`/`zipimport`
-    themselves are already `_TAMPER_MODULES` entries (any B-917 loader call site
-    trips `_tampers()` through its own import, tamper primitive or not -- see the
-    test below, which relies on exactly that for its OWN sanity), so a clean
-    `os.path.join()` resolution via `locate()` (`_reaching()`'s other real caller,
-    `_join_expr`/`resolve()`-adjacent) is the only shape that can isolate "no
-    tamper spelling anywhere" from "resolves"."""
+    """Negative control for the tests below: `_reaching()` (called only by
+    `locate()`) still resolves an ordinary same-scope rebind when the file has
+    nothing `_frame_jump_capable()` recognises -- B-996 round 2 must not regress
+    the B-638 multi-binding resolution `sole()` already had."""
     src = dedent('''
         import os
 
@@ -362,7 +357,7 @@ def test_b996_reaching_multi_binding_resolves_normally_when_untampered():
         p = os.path.join(here, "mod.py")
     ''')
     tree = ast.parse(src)
-    assert se._tampers(tree) is False  # sanity: genuinely untampered
+    assert se._frame_jump_capable(tree) is False  # sanity: genuinely untampered
     art = se.ShippedArtifact([("skill.py", src)])
     facts = se._FileFacts(tree, "skill.py", art, set(), False)
     p_value = next(
@@ -374,23 +369,52 @@ def test_b996_reaching_multi_binding_resolves_normally_when_untampered():
     assert located.parts == ("opt", "skilldata", "nested", "mod.py")
 
 
+def test_b996_round2_reaching_still_resolves_a_decoy_binding_with_no_frame_jump_primitive():
+    """B-996 ROUND 2 regression guard, the mirror image of the test below: a decoy
+    second same-scope binding feeding a `runpy.run_path()` call, in a file that
+    imports the loader-sink module `runpy` itself (and would therefore trip the
+    WHOLE `_tampers()` predicate, round 1's overbroad gate) but contains no ACTUAL
+    frame-jump primitive. `_reaching()` must still resolve this confidently to the
+    decoy (last-wins is the true runtime behaviour absent any trace hook) --
+    refusing it here would be exactly round 1's false positive. Fails against
+    f53a919b (round 1's `_file_tampers()`-in-`sole()` gate refuses this too, since
+    `runpy` is itself a `_TAMPER_MODULES` entry)."""
+    facts, scope, rec = _reaching_at_runpy_call(dedent('''
+        import runpy
+
+        plugin = "/opt/skilldata/default.py"
+        plugin = "/tmp/plugin.py"
+        runpy.run_path(plugin)
+    '''))
+    assert se._tampers(facts.tree) is True  # sanity: `runpy` alone trips _tampers()
+    assert se._frame_jump_capable(facts.tree) is False  # but not the narrow predicate
+    assert rec is not None and rec[0] == "assign"
+
+
 def test_b996_reaching_refuses_multi_binding_resolution_when_file_tampers():
-    """B-996: a C-135 note on B-922's own review flagged (UNVERIFIED at the time)
-    that `_reaching()` relies on the identical source-order-as-runtime-order
+    """B-996 round 1: a C-135 note on B-922's own review flagged (UNVERIFIED at the
+    time) that `_reaching()` relies on the identical source-order-as-runtime-order
     assumption `sole()`'s multi-binding resolution does -- and `_reaching()` is
-    reached (via `locate()`) by `skillast.analyze_python()`'s `_FileFacts`/
-    `PathFacts` construction for the B-917 loader-sink/`_RefResolver` rules, which
-    builds `facts` DIRECTLY, never through `ShippedArtifact._compute()`'s own
-    `_tampers()` gate -- the ONE path B-922 round 2 actually widened the tamper sets
-    for. Confirmed empirically (pre-fix): the exact shape below resolved to the
-    decoy SECOND binding despite the file containing `_operator.attrgetter`, a
-    recognised B-922 frame-jump primitive, and the equivalent staged-write shape run
-    through the real `analyze_python()` dropped a REMOTE_STAGED_EXEC crit finding to
-    plain info (see the end-to-end pin in section B below). `sole()`'s own
-    `_file_tampers()` check (this fix) now refuses the resolution, so `_reaching()`
-    gets the same protection through the SAME call it already makes into `sole()`
-    -- no separate tamper-checking path needed."""
-    _, _, rec = _reaching_at_runpy_call(dedent('''
+    `locate()`'s only route into it (confirmed by grep, see `_reaching()`'s own
+    docstring), which `skillast.analyze_python()`'s `_FileFacts`/`PathFacts`
+    construction for the B-917 loader-sink/`_RefResolver` rules reaches DIRECTLY,
+    never through `ShippedArtifact._compute()`'s own `_tampers()` gate. Confirmed
+    empirically (pre-B-996): the exact shape below resolved to the decoy SECOND
+    binding despite the file containing `_operator.attrgetter`, a recognised B-922
+    frame-jump primitive, and the equivalent staged-write shape run through the real
+    `analyze_python()` weakened a genuine attack's findings (see the end-to-end pin
+    in section B below).
+
+    Round 1 fixed this by gating the SHARED `sole()` on the whole `_tampers()`
+    predicate -- reverted (see `sole()`'s own docstring: that predicate's
+    `_TAMPER_MODULES` includes `runpy`/`importlib`/`imp`/`zipimport`/`pkgutil`
+    THEMSELVES, so it refused resolution for nearly every B-917-relevant file, and
+    silently changed `_RefResolver`'s own, deliberately-ungated, behaviour too -- see
+    the companion regression test above and `tests/test_b906_ref_resolver.py`).
+    Round 2 (this fix) gates `_reaching()` alone, on the narrower
+    `_file_frame_jump_capable()` -- true here specifically because of the
+    `_operator.attrgetter` frame-jump primitive, not merely the `runpy` import."""
+    facts, scope, rec = _reaching_at_runpy_call(dedent('''
         import runpy
         import _operator
 
@@ -400,6 +424,16 @@ def test_b996_reaching_refuses_multi_binding_resolution_when_file_tampers():
         runpy.run_path(p)
     '''))
     assert rec is None
+    # The gate moved OUT of `sole()` itself (round 2) -- `sole()` called directly,
+    # the way `_RefResolver`/TT4/TT5/SSRF call it, still resolves confidently here;
+    # only `_reaching()`'s own extra check (already exercised via `rec` above)
+    # refuses. Pins WHERE the fix lives, not just that it fires.
+    call = next(
+        n for n in ast.walk(facts.tree)
+        if isinstance(n, ast.Call) and facts.dotted(n.func) == "runpy.run_path"
+    )
+    direct_sole = facts.sole(call.args[0].id, scope, before=call.args[0])
+    assert direct_sole is not None and direct_sole[0] == "assign"
 
 
 # ---------------------------------------------------------------------------
@@ -614,23 +648,35 @@ def test_overwrite_shipped_module_then_run_path_is_staged_exec_not_info(tmp_path
 
 def test_b996_frame_jump_decoy_binding_no_longer_evades_staged_exec_correlation():
     """B-996 end-to-end regression, through the REAL `analyze_python()`/
-    `_b917_findings()` production path (not the unit-level `_reaching()` pin in
+    `_b917_findings()` production path (not the unit-level `_reaching()` pins in
     section A above): the honest single-binding version of this shape is
-    REMOTE_STAGED_EXEC crit (`base_src` below, sanity control). Before this fix,
-    reading the loader's path through a DECOY second same-scope binding -- with a
-    genuine `_operator.attrgetter` frame-jump primitive present in the same file --
-    made `facts.locate()` confidently resolve to the decoy (never-written) path
-    instead of the staged-write location, so the DEFINITE location-equality T1
-    correlation silently missed and REMOTE_STAGED_EXEC never fired at all (measured:
-    the file's only findings dropped to plain info, LOADER_TARGET_UNVERIFIED /
-    STAGED_IMPORT_UNRESOLVED) -- a genuine detection-evasion false negative on
-    otherwise-identical malicious behaviour. After this fix, `sole()` refuses the
-    ambiguous resolution on a tampered file, so `locate()` reports SYM
-    (unresolvable) instead of a wrong-but-confident ABS location: 'sound over
-    precise', the same philosophy `_legb_blocked()` already documented. This does
-    NOT resurrect REMOTE_STAGED_EXEC (a wrong resolution isn't repaired into a right
-    one) -- it removes the WRONG, confidently-exculpatory one, landing back in the
-    honest unresolved tier."""
+    REMOTE_STAGED_EXEC crit (`base_src` below, sanity control). With a DECOY second
+    same-scope binding on the loader's path AND a genuine `_operator.attrgetter`
+    frame-jump primitive present in the same file, a resolver that (wrongly)
+    confidently resolves `target` to the decoy -- because it trusts source order
+    despite the frame-jump primitive -- and a resolver that CORRECTLY refuses to
+    resolve it at all (SYM, 'sound over precise') give the SAME REMOTE_STAGED_EXEC
+    verdict: neither can prove the DEFINITE location-equality T1 correlation, since
+    the decoy path was never written to and SYM cannot equal anything either. That
+    makes `"REMOTE_STAGED_EXEC" not in crit` alone true on an UNPATCHED build too
+    (an independent C-135 review reproduced this: the ORIGINAL version of this test
+    passed against the pre-B-996 parent commit, where `sole()`/`_reaching()` had NO
+    tamper gate at all and confidently picked the decoy) -- it does not distinguish
+    "wrongly confident" from "correctly refused".
+
+    What DOES distinguish them, measured directly against the pre-B-996 parent
+    commit vs. this fix: a CONFIDENT (right OR wrong) resolution of `target` also
+    resolves the EARLIER `with open(target, "wb")` write to a concrete ABS location,
+    which cannot equal any of this file's own `import runpy`/`import _operator`
+    module-suffix candidates (`_b917_staged_import_findings`), so no
+    STAGED_IMPORT_UNRESOLVED fires. A REFUSED resolution (SYM, `tail="module"` since
+    every binding of `target` is `.py`-suffixed) makes the SAME write's location
+    unprovably-not-equal to those candidates instead -- UNDETERMINED --which DOES
+    fire STAGED_IMPORT_UNRESOLVED. Only the fixed (refused) build emits it; the
+    parent commit's confident-decoy resolution never does. This does NOT resurrect
+    REMOTE_STAGED_EXEC (a wrong resolution isn't repaired into a right one) -- it
+    tells apart the WRONG, confidently-exculpatory resolution from the honest
+    unresolved tier that replaces it."""
     base_write = (
         "import runpy, urllib.request\n"
         'target = "/opt/skilldata/_staged.py"\n'
@@ -653,11 +699,93 @@ def test_b996_frame_jump_decoy_binding_no_longer_evades_staged_exec_correlation(
     )
     tampered_findings = _analyze(tampered_src, "run.py")
     crit = {f.rule for f in tampered_findings if f.severity == "crit"}
+    rules = {f.rule for f in tampered_findings}
     assert "REMOTE_STAGED_EXEC" not in crit, tampered_findings
+    assert "LOADER_TARGET_UNVERIFIED" in rules, tampered_findings
+    # The discriminating assertion (absent from the ORIGINAL round-1 test, which
+    # passed on the pre-B-996 parent commit without it): only a REFUSED resolution
+    # produces this. Fails against a build with no frame-jump gate at all.
+    assert "STAGED_IMPORT_UNRESOLVED" in rules, tampered_findings
+
+
+# ---------------------------------------------------------------------------
+# B-996 round 2: regression guards for round 1's OWN false positives -- a decoy
+# same-scope binding feeding a loader/import site, in a file that merely IMPORTS a
+# loader-sink module (or another everyday `_TAMPER_MODULES` entry) but contains no
+# ACTUAL frame-jump primitive, must stay at its pre-round-1 crit verdict. Each one
+# fails against f53a919b (round 1's `_file_tampers()`-in-`sole()` gate refuses
+# these too, since `runpy`/`importlib`/`inspect` are themselves `_TAMPER_MODULES`
+# entries) and passes after this fix (`_frame_jump_capable()` does not recognise a
+# bare loader-sink/introspection import as a frame-jump primitive).
+# ---------------------------------------------------------------------------
+
+
+def test_b996_round2_runpy_decoy_binding_without_frame_jump_primitive_stays_crit():
+    """Regression shape 1: a decoy second same-scope binding on a `runpy.run_path()`
+    target, in a file with no genuine frame-jump primitive -- the honest runtime
+    value IS the decoy (last-wins is real Python semantics absent a trace hook), and
+    the decoy sits in a world-writable dir, so this is a genuine T3 DANGEROUS_LOADER
+    regardless."""
+    src = dedent('''
+        import runpy
+
+        plugin = "/opt/skilldata/default.py"
+        plugin = "/tmp/plugin.py"
+        runpy.run_path(plugin)
+    ''')
+    findings = _analyze(src, "run.py")
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}, findings
+
+
+@pytest.mark.parametrize("loader_call", [
+    pytest.param('runpy.run_path(os.path.join(cache, "plugin.py"))\n', id="runpy"),
+    pytest.param(
+        'spec = importlib.util.spec_from_file_location('
+        '"m", os.path.join(cache, "plugin.py"))\n'
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n",
+        id="importlib",
+    ),
+])
+def test_b996_round2_accumulating_path_idiom_without_frame_jump_primitive_stays_crit(
+    loader_call,
+):
+    """Regression shape 2: an accumulating-path idiom (`cache = ...; cache =
+    os.path.join(cache, ...)`, itself a same-scope multi-binding rebind `sole()`
+    must resolve) feeding a loader call, for BOTH loader forms -- `runpy.run_path`
+    and `importlib`'s `spec_from_file_location`+`exec_module` -- with no genuine
+    frame-jump primitive present. `tempfile.gettempdir()` anchors the final location
+    under the world-writable temp dir: T3 DANGEROUS_LOADER either way."""
+    src = (
+        "import runpy, importlib.util, os, tempfile\n"
+        "cache = tempfile.gettempdir()\n"
+        'cache = os.path.join(cache, "myskill")\n'
+    ) + loader_call
+    findings = _analyze(src, "run.py")
+    assert {f.rule for f in findings if f.severity == "crit"} == {"DANGEROUS_LOADER"}, findings
+
+
+def test_b996_round2_staged_import_rebound_path_with_unrelated_importlib_inspect_stays_crit():
+    """Regression shape 3: a staged-import correlation (a tainted write, then
+    `sys.path.insert`+`import`) whose shared directory is read through a same-scope
+    REBOUND name, in a file that ALSO happens to `import importlib`/`import inspect`
+    for something entirely unrelated to the loader/staged-import shape itself (those
+    two imports alone tripped round 1's `_file_tampers()`-in-`sole()` gate via
+    `_TAMPER_MODULES`, though nothing in this file actually reaches a frame-jump
+    primitive). Must stay REMOTE_STAGED_IMPORT crit."""
+    src = _src('''
+        import sys, os, importlib, inspect
+
+        _STAGE_DIR = "/opt/other"
+        _STAGE_DIR = "/tmp/evilstage"
+        open(os.path.join(_STAGE_DIR, "mod.py"), "wb").write(data)
+        sys.path.insert(0, _STAGE_DIR)
+        import mod
+    ''')
+    findings = _analyze(src, "run.py")
     assert any(
-        f.rule in ("LOADER_TARGET_UNVERIFIED", "STAGED_IMPORT_UNRESOLVED")
-        for f in tampered_findings
-    ), tampered_findings
+        f.rule == "REMOTE_STAGED_IMPORT" and f.severity == "crit" for f in findings
+    ), findings
 
 
 def test_case_02869_shaped_remote_plugin_loader_is_fail():
