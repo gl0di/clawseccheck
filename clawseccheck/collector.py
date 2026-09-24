@@ -4774,6 +4774,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
         return  # neither store present -> cron_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -5090,6 +5091,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     keys = _cron_store_key_candidates(jobs_json)
     placeholders = ",".join("?" * len(keys))
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -5204,6 +5206,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
         return  # no state DB -> cron_run_logs_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -5402,6 +5405,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
         return
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             # BEGIN before the schema check, held open across it AND the read below --
@@ -5630,6 +5634,7 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
 
     placeholders = ",".join("?" for _ in CONFIG_MACHINE_STATE_KEYS)
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -5741,6 +5746,7 @@ def _collect_update_runs(home: Path, ctx: Context) -> None:
         return
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -5825,6 +5831,7 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
         return  # no state DB -> capture_tables_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -5898,6 +5905,7 @@ def _collect_skill_library_state(home: Path, ctx: Context) -> None:
         return
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     except sqlite3.Error as exc:
         ctx.errors.append(f"could not open '{db_path}': {exc}")
@@ -6371,6 +6379,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         return  # no state DB -> both *_found stay False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     except sqlite3.Error as exc:
         # Cannot even open the file as a database -- a shared root cause (not sqlite,
@@ -6880,6 +6889,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
         return  # no state DB -> subagent_runs_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -7085,6 +7095,7 @@ def _collect_audit_events(home: Path, ctx: Context) -> None:
         return  # no state DB -> audit_events_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
