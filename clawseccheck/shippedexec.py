@@ -648,7 +648,7 @@ class _FileFacts:
         OVER, never treated as a stopping point or a resolution source, and the
         walk keeps going past it to whatever encloses the class itself -- a
         module-level name, or an outer function if the class is itself defined
-        locally; see `_legb_skip_wrapper`, CLAWSECCHECK-B-964). No `before`: the
+        locally; see `_legb_skip_wrapper`, B-964). No `before`: the
         read lives in a DIFFERENT, nested scope that runs later, so *scope*'s body
         order does not bound it -- `sole()`'s default (`before=None`) already
         requires exactly one, unconditional, direct-body binding, which is what
@@ -693,7 +693,7 @@ class _FileFacts:
         ancestor rather than reporting whatever encloses THAT ancestor -- exactly
         right for `scope_of()`'s own contract, but wrong for an outward LEGB walk,
         which must keep going past a class the way real Python scoping does
-        (CLAWSECCHECK-B-964: a method has no visibility into its own class's
+        (B-964: a method has no visibility into its own class's
         namespace, but it still sees whatever encloses the class).
 
         Climbs `self.parents` past a run of such wrapper ancestors (a class
@@ -717,7 +717,7 @@ class _FileFacts:
         as `scope_of()`'s own climb does -- a wrapper whose OWN `scope_of()` call
         returns None does not mean "nothing further exists", only that the
         nearest true scope boundary beyond it, past any such transparent
-        containers, is itself another wrapper further out (CLAWSECCHECK-B-964,
+        containers, is itself another wrapper further out (B-964,
         C-135 round 2: a class nested inside an `if`/`try` that is itself nested
         inside another class). Only ClassDef/Lambda/comprehension ancestors are
         ever asked for `scope_of()` here -- a non-scope container is climbed past
