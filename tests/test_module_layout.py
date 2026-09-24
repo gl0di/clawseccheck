@@ -638,7 +638,7 @@ _EXEMPT = {
                      "detectors from the renderer would separate each verdict from the text "
                      "that discloses its own limits, which is the pairing B-245 and B-559 "
                      "both exist to keep. A finer split is a later cycle.",
-    # B-984 (2026-09-24): 1,199 -> 1,209 lines (net +10). `_declared_file_bars_measurability`'s
+    # B-983 (2026-09-24): 1,199 -> 1,209 lines (net +10). `_declared_file_bars_measurability`'s
     # sh/js branch gained the same try/except its py branch already had (a SyntaxError from a
     # malformed declared file was already caught there) -- analyze_shell/analyze_javascript are
     # large recursive parsers with no general depth bound, so an adversarial declared file could
@@ -649,7 +649,7 @@ _EXEMPT = {
     # cohesive sub-concern that could move to its own module.
     "dossier.py": "~1,209 lines — the vet-dossier renderer; _declared_file_bars_measurability's "
                   "sh/js analyzer call now mirrors its py branch's exception containment. Over "
-                  "budget by 9 lines since B-984. Tracked debt, not a design statement.",
+                  "budget by 9 lines since B-983. Tracked debt, not a design statement.",
     # CLAWSECCHECK-C-455: adjudication.py (2,478 lines; the _EXEMPT reason had been
     # restated three times since 2026-08-24 — ~1,247 -> ~1,570 -> ~1,920 -> ~2,433,
     # each restatement filing the split rather than doing it, and the file grew again
