@@ -972,6 +972,12 @@ _REGISTRY: "dict[str, _Entry]" = {
     # B-862 reuses the same loose 3-column shape verbatim to build an oversized
     # plugins.installedIndex row; same classification, same reason.
     "tests/test_b862_sarif_limit_hits_delimited_paths.py:138": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
+    # B-889: the decoy table a `CREATE VIEW config_machine_state AS SELECT ... FROM
+    # decoy_secrets` view-masquerade fixture projects from -- never a real OpenClaw
+    # table, same shape as every other _UNRELATED_DECOY entry above/below. The
+    # extractor does not see the `CREATE VIEW` statement itself (it only walks
+    # `CREATE TABLE`), so only this one site needs registering.
+    "tests/test_b749_auth_profile_store_presence.py:342": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
 
     # ---- audit_events (B191 / F-154) ----
     "tests/test_b191_audit_events.py:44": _Entry(LEGACY_COLS, _AUDIT_EVENTS_PARTIAL_LEGACY),
@@ -1065,7 +1071,9 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_f192_update_runs.py:30": _Entry(MODERN),
 }
 
-assert len(_REGISTRY) == 55, f"registry has {len(_REGISTRY)} entries, expected 55"
+# B-889: +1 (56, was 55) -- the config_machine_state view-masquerade hardening's own
+# decoy-table DDL site (tests/test_b749_auth_profile_store_presence.py:342).
+assert len(_REGISTRY) == 56, f"registry has {len(_REGISTRY)} entries, expected 56"
 
 
 # ========================================================================================

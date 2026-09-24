@@ -305,3 +305,81 @@ class TestConsumersStayConsistent:
         assert _a1_leg(ctx) is False
         assert _risk02_present(ctx) is False
         assert _graph_main_secrets(ctx) is False
+
+
+# --------------------------------------------------------- B-889: view-masquerade hardening
+
+
+class TestB889ViewMasqueradeHardening:
+    """CLAWSECCHECK-B-889 — `_collect_auth_profile_store_presence` ran ``SELECT
+    LENGTH(value_json) FROM config_machine_state ...`` directly against
+    `state/openclaw.sqlite` without first checking the name resolves to a real TABLE,
+    not a VIEW — the identical attack shape `trajectorystore._table_kind` was hardened
+    against for `trajectory_runtime_events` (adversarial review, B-811, 2026-09-15;
+    see `test_f187_trajectory_sqlite_corroborator.py
+    ::test_corroborate_refuses_a_view_masquerading_as_the_trajectory_table` for the
+    sibling reader's own pin of the same shape). This reader now reuses
+    `trajectorystore._table_kind` verbatim (imported into `collector.py` as
+    `_sqlite_table_kind`) rather than re-deriving the check.
+
+    Impact stays bounded either way — only `LENGTH(value_json)` is ever selected, never
+    the value — so the attack surface this closes is spoofing the presence/length
+    signal itself (a false WARN, or suppressing a real one), not a credential leak."""
+
+    def test_view_masquerading_as_config_machine_state_is_refused(self, tmp_path):
+        """The bug's own reproduction: a decoy table plus a VIEW named
+        `config_machine_state` that projects a spoofed `state_key`/`value_json` row.
+        Before the fix this landed `ctx.auth_profile_store_read = True` with a length
+        sourced from a table the code never named, and no disclosure at all. After the
+        fix the row must be refused outright — not silently trusted, and not silently
+        merged into the quieter "table predates this feature" UNDETERMINED case."""
+        home = _home(tmp_path, "h", credentials=True)
+        state = home / "state"
+        state.mkdir()
+        conn = sqlite3.connect(state / "openclaw.sqlite")
+        try:
+            conn.execute(
+                "CREATE TABLE decoy_secrets "
+                "(store_key TEXT, store_json TEXT, updated_at INTEGER)"
+            )
+            spoofed = json.dumps({"version": 1, "profiles": {
+                "anthropic:default": {"type": "api_key", "key": _token("V")}
+            }})
+            conn.execute(
+                "INSERT INTO decoy_secrets VALUES (?, ?, ?)",
+                ("authProfiles.store", spoofed, 0),
+            )
+            conn.execute(
+                "CREATE VIEW config_machine_state AS "
+                "SELECT store_key AS state_key, store_json AS value_json "
+                "FROM decoy_secrets"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        ctx = collect(home)
+        assert ctx.auth_profile_store_read is False
+        assert ctx.auth_profile_store_length is None
+        assert any(
+            "config_machine_state" in e and "did not resolve to a real table" in e
+            for e in ctx.errors
+        ), ctx.errors
+        # The downstream hedge must never fire off a signal that was never really read.
+        finding = check_trifecta(ctx)
+        assert finding.status == PASS, finding.detail
+
+    def test_a_genuine_table_still_reads_correctly_after_the_hardening(self, tmp_path):
+        """Clean-fixture control: an ordinary, honest `config_machine_state` TABLE (the
+        real shape every fleet machine has) must still be read exactly as before — the
+        hardening must not turn every legitimate read into a refusal."""
+        payload = json.dumps({"version": 1, "profiles": {
+            "anthropic:default": {"type": "api_key", "key": _token("W")}
+        }})
+        home = _home(tmp_path, "h", auth_store_json=payload)
+        ctx = collect(home)
+        assert ctx.auth_profile_store_read is True
+        assert ctx.auth_profile_store_length == len(payload)
+        assert not any(
+            "config_machine_state" in e or "auth-profile" in e for e in ctx.errors
+        ), ctx.errors
