@@ -429,10 +429,10 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~PLACEHOLDER_TOTAL lines (restated PLACEHOLDER_DATE, B-863 round 4 — "
+    "skillast.py": "~12,925 lines (restated 2026-09-24, B-863 round 4 — "
                    "was ~11,796; the addition is the position-aware TT5 vararg/param "
                    "wrapper guard plus its four review-driven soundness rounds, "
-                   "~PLACEHOLDER_DELTA lines (735 for the design plus ~190 more from "
+                   "~1,129 lines (735 for the design plus ~190 more from "
                    "real-corpus fixes and a shape-branching cost cap, plus the "
                    "per-name-aliasing state model and its head_src snapshot fix from the "
                    "architect-first redesign's own C-135 rounds — see that block's own "

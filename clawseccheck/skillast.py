@@ -2251,6 +2251,29 @@ def _name_rebound_anywhere(tree: ast.AST, name: str) -> bool:
 # entry) around the SAME `_B863Shape` object(s), preserving true aliasing for
 # any name that still shares one. See `_b863_classify_assign_value`'s own
 # docstring for the detailed trace.
+#
+# Fix round 3 (C-135, 2026-09-24): round 2's "return the resolved name's own
+# current shapes" correction was applied to BOTH branches of
+# `_b863_classify_assign_value` alike, but only ONE of them is actually a
+# same-object case. The bare-Name branch (`args = x`) is sound to
+# reference-share: at runtime `args` and `x` become the exact same list
+# object, so a later mutation through either name must stay visible through
+# the other. The `head_src` branch, however, is reached ONLY via
+# `_b863_classify_head`'s non-Name grammar -- `list(H)`/`tuple(H)`, `H.copy()`,
+# a full slice `H[:]`, `H+X`, `[*H, ...]`, or an identity-map comprehension --
+# and every one of those constructs a BRAND NEW object at runtime. Reference-
+# sharing there wrongly keeps the NEW object coupled to whatever a stale
+# alias of the OLD object goes on to mutate (`args = list(args)` after
+# `x = args` decouples `x` from the new `args` in reality, but round 2's fix
+# kept them coupled in the analysis -- a false positive). Fixed by giving the
+# `head_src` branch its own independent snapshot: a fresh `_B863Shape` object
+# per entry (the same per-shape copy idiom `_b863_copy_shapes_of` already uses
+# for branch merges), instead of the reference-sharing `list(shapes_of[...])`
+# the bare-Name branch correctly keeps. This only ever REMOVES an incidental,
+# unsound coupling between two objects that are distinct at runtime; it
+# cannot lose a genuine same-object aliasing relationship, because the
+# bare-Name branch (the only case where two names truly share one runtime
+# object post-assignment) is untouched.
 _B863_HEAD_WRAP_CALLS = frozenset({"list", "tuple"})
 _B863_IDENTITY_MAP_NAMES = frozenset({"str"})
 _B863_IDENTITY_MAP_ATTRS = frozenset({"fspath", "fsdecode"})
@@ -2443,7 +2466,23 @@ def _b863_classify_assign_value(value, names, tree, shapes_of):
     `shapes_of[tgt.id]` with our return value AFTER we return), the
     self-reassign case (`resolved_name == tgt.id`) correctly sees the
     PRE-reassignment shapes -- RHS evaluation happens before the store, same
-    as Python's own assignment semantics."""
+    as Python's own assignment semantics.
+
+    Fix round 3 (C-135, 2026-09-24): the fix above is only sound for a bare
+    Name RHS (`args = x`), where the reassigned name and the resolved name
+    become the SAME object at runtime, so reference-sharing their shapes is
+    correct. It is NOT sound for the `head_src` branch below: every non-Name
+    shape `_b863_classify_head` recognises (`list(H)`/`tuple(H)`, `H.copy()`,
+    a full slice `H[:]`, `H+X`, `[*H, ...]`, an identity-map comprehension)
+    constructs a BRAND NEW object at runtime, decoupled from whatever `H`
+    itself goes on to alias or mutate afterwards. `args = list(args)` after
+    `x = args` must decouple `x` from the new `args` -- a later
+    `x.append(payload)` cannot reach it. Reference-sharing there (as round 2
+    did, over-generalizing this fix to both branches) kept them wrongly
+    coupled in the analysis. Fixed: the `head_src` branch now returns an
+    independent snapshot -- a fresh `_B863Shape` per entry, the same
+    per-shape copy idiom `_b863_copy_shapes_of` already uses for branch
+    merges -- instead of `list(shapes_of[head_src])`'s reference-sharing."""
     if isinstance(value, ast.Name) and value.id in names:
         return list(shapes_of[value.id])
     fresh = _b863_flatten_fresh(value, names, tree)
@@ -2452,7 +2491,10 @@ def _b863_classify_assign_value(value, names, tree, shapes_of):
         return [_B863Shape(True, a0, rest, refs)]
     head_src = _b863_classify_head(value, names, tree)
     if head_src is not None:
-        return list(shapes_of[head_src])
+        return [
+            _B863Shape(sh.fresh, sh.a0, sh.content, sh.refs_callsite)
+            for sh in shapes_of[head_src]
+        ]
     if isinstance(value, ast.IfExp):
         left = _b863_classify_assign_value(value.body, names, tree, shapes_of)
         right = _b863_classify_assign_value(value.orelse, names, tree, shapes_of)

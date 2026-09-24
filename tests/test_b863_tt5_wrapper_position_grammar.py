@@ -1043,6 +1043,104 @@ def test_fr2_if_else_alias_lost_past_branch_merge_pinned_to_current_pre_existing
 
 
 # ---------------------------------------------------------------------------
+# FR3 -- fix round 3 (C-135, 2026-09-24) against fix/b-863 @ ca710fdb: round 2
+# generalized "a reassignment returns the resolved name's own current shapes"
+# to BOTH branches of `_b863_classify_assign_value` alike, but only the
+# bare-Name branch (`args = x`) is a true same-object case. The `head_src`
+# branch is reached only via `_b863_classify_head`'s non-Name grammar --
+# `list(H)`/`tuple(H)`, `H.copy()`, a full slice `H[:]`, `H+X`, `[*H, ...]`,
+# an identity-map comprehension -- and every one of those constructs a BRAND
+# NEW object at runtime, so reference-sharing shapes there wrongly kept a
+# freshly-rebound name coupled to whatever a stale alias of the OLD object
+# went on to mutate. Fixed by giving the `head_src` branch its own
+# independent snapshot (a fresh `_B863Shape` per entry, the same per-shape
+# copy idiom `_b863_copy_shapes_of` already uses for branch merges) instead
+# of reference-sharing. Mutation-checked: reverting `skillast.py`'s
+# `head_src` branch to `list(shapes_of[head_src])` makes
+# `test_fr3_list_wrap_after_alias_decouples_is_info` and its sibling shapes
+# below go red (all report crit instead of info).
+# ---------------------------------------------------------------------------
+
+def test_fr3_list_wrap_after_alias_decouples_is_info():
+    """Reviewer's round-3 repro (BLOCKER, introduced by ca710fdb): `x = args`
+    aliases `x` to the wrapper's own vararg-as-list; `args` is then rebound
+    to `list(args)` -- a COPY, a genuinely NEW list object at runtime,
+    decoupled from `x`. `x.append(payload)` afterwards mutates the OLD
+    object only; the new `args` cannot see it. Real value at the sink is
+    `['sh', '-c']` -- `payload` never reaches it. Must be info."""
+    src = _va(
+        ["args = list(args)", "x = args", "args = list(args)", "x.append(payload)"],
+        call='sh("sh", "-c")',
+    )
+    _assert_info(src)
+
+
+@pytest.mark.parametrize(
+    "wrap_stmt",
+    [
+        "args = args[:]",
+        "args = args.copy()",
+        "args = tuple(args)",
+        "args = [*args]",
+        "args = list(tuple(args))",
+    ],
+)
+def test_fr3_every_identity_wrap_after_alias_decouples_is_info(wrap_stmt):
+    """Same shape as the repro above, for every OTHER `_b863_classify_head`
+    non-Name grammar member (full slice, `.copy()`, `tuple()`, star-unpack,
+    a nested wrap) -- each constructs its own brand-new object at runtime,
+    so each must decouple from a pre-existing alias exactly like `list()`
+    does. `tuple(args)` needs `list(...)` at the sink because
+    `subprocess.check_output` needs a sequence type argv, not because the
+    taint question changes."""
+    sink = "subprocess.check_output(list(args))" if "tuple" in wrap_stmt else "subprocess.check_output(args)"
+    src = _va(
+        ["args = list(args)", "x = args", wrap_stmt, "x.append(payload)"],
+        call='sh("sh", "-c")',
+        sink=sink,
+    )
+    _assert_info(src)
+
+
+def test_fr3_taint_before_identity_wrap_is_still_crit():
+    """Control for the fix above, so it does not overreach: the mutation
+    happens BEFORE the identity wrap, not through a stale alias afterwards --
+    the wrap must carry the taint FORWARD, not erase it. Real value at the
+    sink is `['sh', '-c', payload]`. This is the reviewer's own verified
+    "not a Side-B loss" check (`.copy()` after taint stays crit)."""
+    src = _va(
+        ["args = list(args)", "args.append(payload)", "args = args.copy()"],
+        call='sh("sh", "-c")',
+    )
+    _assert_crit(src)
+
+
+def test_fr3_alias_of_the_new_object_still_convicts():
+    """A THIRD name (`y`) created as a bare-Name alias of the freshly-wrapped
+    `args` (a true same-object alias of the NEW list, per the bare-Name
+    branch fix-round-3 leaves untouched) must still convict when mutated --
+    this fix must decouple a STALE alias of the OLD object, never every
+    alias whatsoever. Real value at the sink is `['sh', '-c', payload]`."""
+    src = _va(
+        ["args = list(args)", "x = args", "args = list(args)", "y = args", "y.append(payload)"],
+        call='sh("sh", "-c")',
+    )
+    _assert_crit(src)
+
+
+def test_fr3_b965_case2_unaffected_by_this_round():
+    """Control: `args = args + [payload]` (the pre-existing, separately-filed
+    CLAWSECCHECK-B-965 case 2 gap -- `_b863_classify_head`'s `BinOp(Add)`
+    branch recurses into `.left` only and never looks at `.right`) must stay
+    exactly as it was before this round's fix: still info, still filed,
+    not newly broken or newly fixed by the head_src snapshot change (this
+    round never touches `_b863_classify_head`, only what
+    `_b863_classify_assign_value` does with an ALREADY-resolved head_src)."""
+    src = _va(["args = args + [payload]"], call='sh("sh", "-c")')
+    _assert_info(src)
+
+
+# ---------------------------------------------------------------------------
 # Parametrized sanity sweep -- every case above, run twice more (with the
 # zero-based `sink=` and `sig=` combinations already covered) to confirm
 # `analyze_python` never raises on any of them, catching a crash a narrower
