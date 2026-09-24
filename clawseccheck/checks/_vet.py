@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import stat
+import struct
 import traceback
 import unicodedata
 from pathlib import Path
@@ -80,7 +81,11 @@ from ._shared import (
     _skill_declares_telemetry_disclosure,
     _skill_frontmatter_block,
 )
+# B-879 (round 4): the shared prose-binding primitive the authkey
+# grammatical read (`_authkey_block_intent`, below) is built on.
+from ._shared import _prose_binding  # noqa: E402
 from ._content import (
+    _ANY_HEADING_RE,
     _B62_EXPECTED,
     _B62_HIGH_SURPRISE,
     _B64URL_BLOB_RE,
@@ -1888,6 +1893,186 @@ def _authkey_open_calls_bind_write(bound_region: str) -> bool:
     return False
 
 
+# =============================================================================
+# B-879: a fenced (or bare, unfenced) authorized_keys write
+# INSIDE the skill's own SKILL.md is read grammatically via `_prose_binding`
+# instead of the closed-vocabulary fence/negation-marker path
+# (`_is_code_example`) — a positive instruction wrapped around a negation word
+# ("Don't forget to run this to finish enrolling your key:") is present, but
+# does not GOVERN the write, and the closed-vocabulary path cannot see that. A
+# match in some OTHER bundled file (a README, an install.sh, a THREAT_MODEL.md
+# quote) keeps the original `_is_code_example` path unchanged (see the "legacy
+# path" branch in `_authkey_persistence_hits` below).
+# =============================================================================
+
+_SKILL_MD_HEADER_NAME_RE = re.compile(r"(?:^|::)SKILL\.md\Z", re.I)
+
+
+def _pos_in_skill_md_section(
+    blob: str, pos: int, header_matches: list | None = None
+) -> bool:
+    """True when *pos* falls inside the skill's OWN SKILL.md manifest section, as
+    opposed to some OTHER bundled file `_read_skill_text` concatenated alongside it.
+    SKILL.md is the agent's own instruction surface, not documentation ABOUT one —
+    a fenced ```bash block there is the ordinary way to hand an agent a setup
+    command, and a bare marker-free negation is exactly as reachable there as a
+    genuine directive. When the blob carries no "# file:" headers at all (a
+    hand-built unit-test blob, or a lone-file ``--vet-skill path/to/SKILL.md``),
+    there is no OTHER file it could be — the whole blob IS the manifest."""
+    matches = (
+        header_matches if header_matches is not None
+        else list(_MANIFEST_HEADER_RE.finditer(blob))
+    )
+    if not matches:
+        return True
+    for m in matches:
+        if m.start("body") <= pos < m.end("body"):
+            return bool(_SKILL_MD_HEADER_NAME_RE.search(m.group("name").strip()))
+    return False
+
+
+# B-879 round 4, decision (c) (Dave, 2026-09-24): the one piece of
+# attacker-COSTLY evidence available for the "fetched/computed key under a
+# prohibition" case — a backdoor NEEDS a key sshd will actually load. Lenient by
+# construction: reject only what `sshkey_read` provably cannot parse. An
+# unmodelled key type or a runtime value ($VAR / $(...)) is treated as
+# functional (fail closed — "cannot prove it malformed" must never read as
+# "proven harmless").
+_AUTHKEY_KEY_TOKEN_RE = re.compile(
+    r"\b(ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp(?:256|384|521)|"
+    r"sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)"
+    r"(?:[ \t]+(\S+))?",
+    re.I,
+)
+
+
+def _authkey_key_blob_ok(ktype: str, tok: str) -> bool:
+    """One key-type token's base64 blob: True unless it is provably malformed for
+    *ktype* (see `_AUTHKEY_KEY_TOKEN_RE`'s comment for the leniency rule)."""
+    tok = tok.strip("\"'`;),")
+    if tok.startswith("$") or tok.startswith("`$") or "$(" in tok:
+        return True  # a runtime value — cannot prove it malformed
+    if not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", tok):
+        return False
+    try:
+        raw = base64.b64decode(tok + "=" * (-len(tok) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+
+    def _rd(b: bytes, o: int) -> tuple[bytes | None, int]:
+        if o + 4 > len(b):
+            return None, o
+        n = struct.unpack(">I", b[o : o + 4])[0]
+        if o + 4 + n > len(b):
+            return None, o
+        return b[o + 4 : o + 4 + n], o + 4 + n
+
+    name, o = _rd(raw, 0)
+    if name is None or name.decode("latin-1").lower() != ktype.lower():
+        return False
+    kt = ktype.lower()
+    if kt == "ssh-ed25519":
+        pk, o = _rd(raw, o)
+        return pk is not None and len(pk) == 32
+    if kt == "ssh-rsa":
+        e, o = _rd(raw, o)
+        n, o = _rd(raw, o)
+        return e is not None and n is not None and len(n) >= 64
+    return True  # other types: structure not modelled — assume functional
+
+
+def _literal_key_functional(region: str) -> bool:
+    """False only when EVERY literal SSH public-key token in *region* is provably
+    malformed (so sshd's `sshkey_read` would skip it, and a backdoor built on it
+    could never authenticate). True when there is no literal key token at all (a
+    fetched/computed key) or when at least one token is well-formed or a runtime
+    value."""
+    found = False
+    for m in _AUTHKEY_KEY_TOKEN_RE.finditer(region):
+        found = True
+        if m.group(2) and _authkey_key_blob_ok(m.group(1), m.group(2)):
+            return True
+    return not found
+
+
+def _authkey_unfenced_intent_span(blob: str, pos: int) -> tuple[str, int, int]:
+    """The (blob, start, end) span `_authkey_block_intent` should evaluate for an
+    authorized_keys match INSIDE SKILL.md that is not sitting in a Markdown
+    fence. An inline code span (single backticks) on the same line is treated as
+    the block itself, via a synthetic blob that stands the span in for a
+    lone-char placeholder bounded by blank lines, so the span's OWN content
+    cannot masquerade as the intro/trailer prose `_authkey_block_intent` reads.
+    Absent even an inline span, the whole source line is the block, evaluated
+    against the real blob."""
+    ls = blob.rfind("\n", 0, pos) + 1
+    le = blob.find("\n", pos)
+    le = len(blob) if le < 0 else le
+    line = blob[ls:le]
+    for cm in re.finditer(r"`[^`\n]+`", line):
+        if ls + cm.start() <= pos < ls + cm.end():
+            s, e = ls + cm.start(), ls + cm.end()
+            synthetic = blob[:s] + "\n\nX\n\n" + blob[e:]
+            return synthetic, s + 2, s + 3
+    return blob, ls, le
+
+
+def _authkey_block_intent(blob: str, start: int, end: int) -> str:
+    """Map `_shared._prose_binding`'s classification onto the five-way rung
+    `_authkey_persistence_hits` reads: DIRECTED, FORBIDDEN, DOC, DOC_SIGNAL, BARE.
+
+    * DIRECTED: a bound directive reaches the block — convicts (severity split on
+      the literal/non-literal key already decides).
+    * FORBIDDEN: an unscoped prohibition binds the block, NOTHING directs it, and
+      no clouded (unresolved) EXEC verb also reaches the block — the PASS
+      candidate (decision (c) below decides literal-key well-formedness and the
+      install-heading self-contradiction from here).
+    * DOC: has prose, but a directive+prohibition CONFLICT in the same sentence,
+      an otherwise-clean prohibition whose governance is UNRESOLVED elsewhere in
+      the same intro/trailer (round 4 §4.c), or no recognised binding at all.
+    * DOC_SIGNAL: a soft, unbound signal — a scoped prohibition, a marker/label, a
+      third-person description, unreadable (non-Latin) surrounding text, or (round
+      5, decision (e)) an UNRESOLVED clouded EXEC verb that reaches the block with
+      no other binding recognised either way (the catch-all case, as opposed to
+      the `pb.forbids == "governs"` branch above, which is an otherwise-clean
+      prohibition made unresolved by a splice ELSEWHERE in the prose).
+    * BARE: no prose at all around the block.
+
+    Decision (e) (Dave, 2026-09-24): folding `pb.unresolved` into the DOC_SIGNAL
+    rung, not just the FORBIDDEN one, matters for a caller this function does not
+    itself know about — `_authkey_persistence_hits`'s UNFENCED/inline-code-span
+    call site remaps this five-way rung a second time, and that remap treats a
+    bare "DOC" ("nothing recognised at all") as CONVICT (the base direction for a
+    raw line with no fence around it) while treating "DOC_SIGNAL" as a softer
+    "DOC" instead. Before this fold, a clouded negation on the inline path (e.g.
+    an unfenced "Never, under any circumstances, run `...`.") landed on the same
+    plain "DOC" a truly signal-free line gets, and inherited that path's convict
+    default — the exact shape decision (a) fixed for the FENCED path, but never
+    reached here because it is a completely separate downstream remap. On the
+    FENCED path this fold changes nothing observable: DOC and DOC_SIGNAL already
+    reach the identical WARN outcome there (see `_authkey_persistence_hits`'s
+    `else: intent = {"DOC_SIGNAL": "DOC"}...` branch).
+    """
+    pb = _prose_binding(blob, start, end)
+    if pb.directed:
+        return "DOC" if pb.conflict else "DIRECTED"
+    if pb.forbids == "governs":
+        # B-879 round 4 §4.c: a clouded EXEC verb elsewhere in the surrounding
+        # prose keeps this from being a CONFIRMED prohibition — WARN, not PASS.
+        return "DOC" if pb.unresolved else "FORBIDDEN"
+    if not pb.has_prose:
+        return "BARE"
+    if pb.forbids == "scoped" or pb.marker or pb.described or pb.unreadable or pb.unresolved:
+        return "DOC_SIGNAL"
+    return "DOC"
+
+
+# C-135 (performance): a 1MB pathologically-repetitive SKILL.md could otherwise
+# drive `_authkey_block_intent` thousands of times per scan — cap per-blob
+# evaluations and fail CLOSED (convict, never suppress or soften) once the cap is
+# spent, never fail open.
+_AUTHKEY_INTENT_EVAL_CAP = 256
+
+
 def _authkey_persistence_hits(
     blob: str,
     fence_ranges: list[tuple[int, int]],
@@ -1904,7 +2089,20 @@ def _authkey_persistence_hits(
     escalates to HIGH (near-unforgeable: essentially no legitimate skill injects a
     brand-new key); a bound write whose key content is a variable/computed value (not a
     literal) down-ranks to WARN rather than a silent PASS.
-    
+
+    B-879: a match inside the skill's OWN SKILL.md manifest section
+    (`_pos_in_skill_md_section`) is no longer gated by `_is_code_example`'s bare-fence
+    suppression — SKILL.md is the agent's own instruction surface, and a fenced
+    ```bash block there is exactly the ordinary way to hand it a setup command,
+    fence or no fence. Instead it goes through `_authkey_block_intent`'s grammatical
+    read: a bound, unscoped DIRECTIVE convicts; a bound, unscoped PROHIBITION passes
+    only when the payload is attacker-costly-proven harmless (a literal key that
+    cannot authenticate — round 4 decision (c): a fetched/computed key, or a literal
+    key that CAN authenticate, is not proof of harmlessness and downgrades to WARN,
+    never a bare PASS); everything else is WARN, never silently PASS or wrongly FAIL.
+    A match in some OTHER file the skill bundles (a README, an install.sh, a
+    THREAT_MODEL.md quote) keeps the ORIGINAL fence/negation-marker path below,
+    byte-identical.
 
     B-526: *coverage* is an optional append-only sink for fence COVERAGE notes. Pass a
     list to receive them; pass nothing (the default) and they are simply not produced.
@@ -1925,58 +2123,151 @@ def _authkey_persistence_hits(
         "authorized_keys persistence: skill writes to ~/.ssh/authorized_keys "
         "(key content not a literal — review)"
     )
+    # B-879: the WARN rung for a bound write whose surrounding SKILL.md prose does
+    # NOT instruct running it (a scoped prohibition, a marker/label, a third-person
+    # description, or prose the grammar does not recognise as binding either way).
+    # Distinct wording from `warn_label` because the cause is different — not "the
+    # key isn't a literal", but "the prose doesn't direct running this".
+    scoped_label = (
+        "authorized_keys persistence: skill writes an SSH public key to "
+        "~/.ssh/authorized_keys in a block whose surrounding prose does not "
+        "instruct running it — review"
+    )
     # C-135 (performance): compute ONCE per blob, not once per match — a full-blob
     # rescan per match is what turned a 1MB pathologically-repetitive skill (a
     # realistic size under _MAX_BYTES_PER_SKILL) into a measured 107s single-check
     # runtime; see _manifest_header_matches' docstring for the empirical numbers.
     _header_matches = _manifest_header_matches(blob)
+    _heading_matches = list(_ANY_HEADING_RE.finditer(blob))
+    # B-879 (performance): `_authkey_block_intent` is the expensive grammatical
+    # read. Cache it by the surrounding text (not position — two distinct positions
+    # with byte-identical intro/trailer prose get one evaluation), and cap distinct
+    # evaluations per blob, failing CLOSED (convict) once spent.
+    _intent_cache: dict[tuple[str, str], str] = {}
+
+    def _cached_intent(ib: str, s: int, e: int) -> str:
+        key = (ib[max(0, s - 400) : s], ib[e : e + 400])
+        cached = _intent_cache.get(key)
+        if cached is not None:
+            return cached
+        if len(_intent_cache) >= _AUTHKEY_INTENT_EVAL_CAP:
+            return "BARE"  # fail closed: past the cap, nothing is suppressed/softened
+        val = _intent_cache[key] = _authkey_block_intent(ib, s, e)
+        return val
+
     for m in _AUTHKEY_PATH_RE.finditer(blob):
-        if _is_code_example(blob, m.start(), fence_ranges):
-            # B-526, and this is the site the task was filed over: an unclosed fence in
-            # SKILL.md silenced a real authorized_keys backdoor in another file, and the
-            # scan reported a clean INSTALL. It can no longer go silent. WARN, never
-            # `high_hits` — disclosure, not conviction; closing the evasion properly
-            # still needs the adjudication route (B-556).
-            if (
-                coverage is not None
-                and _fence_only_suppression(blob, m.start(), fence_ranges)
-                and not _pos_in_test_fixture_file(blob, m.start(), _header_matches)
-            ):
-                _mf, _ff = fence_suppression_provenance(
-                    blob, m.start(), fence_ranges, _header_matches
-                )
-                coverage.append(
-                    "coverage: "
-                    + fence_suppression_note(
-                        "an ~/.ssh/authorized_keys path", _mf, _ff
+        pos = m.start()
+        if not _pos_in_skill_md_section(blob, pos, _header_matches):
+            # ---------------- legacy path: unchanged, byte-identical ----------------
+            if _is_code_example(blob, pos, fence_ranges):
+                # B-526: an unclosed fence silenced a real authorized_keys backdoor in
+                # another bundled file. It can no longer go silent. WARN via coverage,
+                # never `high_hits` — disclosure, not conviction.
+                if (
+                    coverage is not None
+                    and _fence_only_suppression(blob, pos, fence_ranges)
+                    and not _pos_in_test_fixture_file(blob, pos, _header_matches)
+                ):
+                    _mf, _ff = fence_suppression_provenance(
+                        blob, pos, fence_ranges, _header_matches
                     )
-                )
+                    coverage.append(
+                        "coverage: "
+                        + fence_suppression_note(
+                            "an ~/.ssh/authorized_keys path", _mf, _ff
+                        )
+                    )
+                continue
+            if _pos_in_test_fixture_file(blob, pos, _header_matches):
+                continue
+            bound_start = max(0, pos - _AUTHKEY_BOUND_WRITE_WINDOW)
+            bound_end = min(len(blob), m.end() + _AUTHKEY_BOUND_WRITE_WINDOW)
+            bound_region = _HTML_TAG_RE.sub(" ", blob[bound_start:bound_end])
+            is_bound_write = (
+                _authkey_open_calls_bind_write(bound_region)
+                or bool(_AUTHKEY_CHAINED_WRITE_RE.search(bound_region))
+                or _redirect_targets_file(blob, pos)
+            )
+            if not is_bound_write:
+                continue
+            # C-259 (D8, docs/design/severity-separability.md): measured net-correct.
+            if _SSH_PUBKEY_RE.search(bound_region):
+                if high_label not in high_hits:
+                    high_hits.append(high_label)
+            elif warn_label not in warn_hits:
+                warn_hits.append(warn_label)
             continue
-        if _pos_in_test_fixture_file(blob, m.start(), _header_matches):
+
+        # ---------------- B-879: SKILL.md grammatical path ----------------
+        if _pos_in_test_fixture_file(blob, pos, _header_matches):
             continue
-        bound_start = max(0, m.start() - _AUTHKEY_BOUND_WRITE_WINDOW)
+        bound_start = max(0, pos - _AUTHKEY_BOUND_WRITE_WINDOW)
         bound_end = min(len(blob), m.end() + _AUTHKEY_BOUND_WRITE_WINDOW)
         bound_region = _HTML_TAG_RE.sub(" ", blob[bound_start:bound_end])
         is_bound_write = (
             _authkey_open_calls_bind_write(bound_region)
             or bool(_AUTHKEY_CHAINED_WRITE_RE.search(bound_region))
-            or _redirect_targets_file(blob, m.start())
+            or _redirect_targets_file(blob, pos)
         )
         if not is_bound_write:
             continue
-        # C-259 (D8, docs/design/severity-separability.md): measured net-correct, not
-        # just assumed — over the 2,052-case WARN corpus this gate fires on malicious
-        # WARN-only skills at 2.68% (33/1,230) vs benign WARN-only skills at 5.32%
-        # (24/451), ~2x the malicious rate. Loosening it (the design doc's refuted
-        # option O2) trades benign FAILs for negligible recall — do not reopen on
-        # recall grounds. The other 97.32% of malicious WARN-only cases never had a
-        # FAIL-capable signal at all; that gap is evidence-accumulation/E-038 work
-        # (design doc §7), not this gate.
-        if _SSH_PUBKEY_RE.search(bound_region):
-            if high_label not in high_hits:
-                high_hits.append(high_label)
-        elif warn_label not in warn_hits:
-            warn_hits.append(warn_label)
+        literal = bool(_SSH_PUBKEY_RE.search(bound_region))
+        # Dedup-first: skip the expensive grammatical read when nothing it could
+        # find would change the recorded outcome.
+        if literal and high_label in high_hits:
+            continue
+        if not literal and warn_label in warn_hits and not high_hits:
+            continue
+        fr = next((r for r in fence_ranges if r[0] <= pos < r[1]), None)
+        if fr is not None:
+            ib, s, e = blob, fr[0], fr[1]
+        else:
+            ib, s, e = _authkey_unfenced_intent_span(blob, pos)
+        intent = _cached_intent(ib, s, e)
+        key_region = blob[s:e] if ib is blob else bound_region
+        if fr is None:
+            # Raw line / inline span: the BASE direction is CONVICT — only a marker,
+            # a scoped prohibition, a third-person description or a fully-binding
+            # prohibition softens or clears it. A plain "has prose but nothing
+            # recognised" (DOC) does NOT get the fenced block's benefit of the doubt.
+            intent = {"DOC": "BARE", "DOC_SIGNAL": "DOC"}.get(intent, intent)
+        else:
+            intent = {"DOC_SIGNAL": "DOC"}.get(intent, intent)
+            if intent == "BARE" and _under_defensive_heading(blob, pos, _heading_matches):
+                intent = "DOC"
+        if intent == "FORBIDDEN":
+            # B-879 round 4 decision (c) (Dave, 2026-09-24): PASS only on the
+            # payload proof — a literal key that provably CANNOT authenticate. A
+            # fetched/computed key (no literal at all) or a literal key that CAN
+            # authenticate is not attacker-costly-proven-harmless, so it downgrades
+            # to WARN instead of a bare PASS (the pre-round-4 shape let a fetched
+            # key under ANY prohibition PASS unconditionally, which is unsound
+            # regardless of the negation parser — see the Pulse comment for the two
+            # reproductions this closes).
+            proven_harmless = literal and not _literal_key_functional(key_region)
+            if _under_install_heading(blob, pos) or not proven_harmless:
+                # A prohibition under an install/setup heading is self-contradictory;
+                # a prohibition that is not proven-harmless falls through to the
+                # ordinary DOC/DOC_SIGNAL WARN handling below, never PASS.
+                intent = "DOC"
+            else:
+                if coverage is not None:
+                    coverage.append(
+                        "coverage: an ~/.ssh/authorized_keys write in SKILL.md sits "
+                        "under prose that forbids running it and its literal key is "
+                        "provably malformed, so it was not convicted"
+                    )
+                continue
+        if intent in ("DIRECTED", "BARE"):
+            if literal:
+                if high_label not in high_hits:
+                    high_hits.append(high_label)
+            elif warn_label not in warn_hits:
+                warn_hits.append(warn_label)
+        else:  # DOC or DOC_SIGNAL: a bound write with unresolved/soft prose signal
+            lab = scoped_label if literal else warn_label
+            if lab not in warn_hits:
+                warn_hits.append(lab)
     return high_hits, warn_hits
 
 

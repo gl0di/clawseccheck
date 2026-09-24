@@ -5110,3 +5110,1097 @@ def _canon_tool(token) -> str:
         return ""
     s = token.strip().lower()
     return _TOOL_NAME_ALIASES.get(s, s)
+
+
+# =============================================================================
+# B-879 (round 4 design): prose binding — does a token GOVERN an
+# EXEC verb, or merely sit NEAR it? `_authkey_persistence_hits` (checks/_vet.py)
+# used bare proximity (`_is_code_example`'s fence/negation-marker path) to decide
+# whether a fenced authorized_keys write is a documented example, which a
+# positive instruction wrapped around a negation word ("Don't forget to run
+# this...", "You cannot proceed without running this...") bypasses outright —
+# the negator is present, but it does not GOVERN the EXEC verb.
+#
+# Rounds 1-3 tried to resolve, from local punctuation alone, whether a negator
+# separated from its verb by a comma/dash/paren aside still governs it. That
+# question has no token-level answer: the same shape ("Never, X, run the
+# following:") means a real prohibition when X is a non-predicate aside
+# ("under any circumstances") and a spliced-in order when X contains its own
+# verb ("skip this step"). Guessing either way is either a false FAIL (a real
+# prohibition convicts) or a false PASS (a spliced order is read as negated).
+#
+# The round-4 fix is a third value: when a negator is immediately followed by
+# a comma/dash/paren, its clause is UNRESOLVED ("clouded") rather than guessed
+# bound or unbound. A clouded EXEC verb is neither a confirmed prohibition nor
+# a confirmed order — callers route it to the WARN band that already exists for
+# soft/ambiguous signal, never to a PASS/FAIL guess.
+# =============================================================================
+
+from typing import NamedTuple as _NamedTuple  # noqa: E402
+
+
+class ProseBinding(_NamedTuple):
+    """Classification-only result of `_prose_binding`. See the block comment
+    above. Callers (checks/_vet.py's authkey site) map this to a verdict; this
+    primitive never sees keys, hosts or severities."""
+
+    directed: bool
+    forbids: str | None  # "governs" | "scoped" | None
+    marker: bool
+    described: bool
+    unreadable: bool
+    has_prose: bool
+    conflict: bool
+    unresolved: bool  # B-879 round 4: a clouded EXEC verb reaches the block
+
+
+_PB_TOK_RE = re.compile(
+    r"\$\{?\w+\}?|\{\{[^}]*\}\}|<[A-Za-z_][\w-]*>|`[^`\n]*`|https?://\S+|"
+    r"[A-Za-z][A-Za-z'’]*(?:\.[a-z]{2,}(?:/\S*)?)?|—|–|--|[,;:()]|\S"
+)
+_PB_EMPH_RE = re.compile(r"\*\*|__|(?<!\w)[*_](?=\w)|(?<=\w)[*_](?!\w)")
+
+_PB_DELIM = {",", ";", ":", "(", ")", "—", "–", "--"}
+
+# B-879 round 5: a bare ASCII "-" is a mid-word compound hyphen far more often
+# than stand-alone punctuation ("cross-session"), and the word-token pattern in
+# `_PB_TOK_RE` does not itself include "-", so the tokenizer would otherwise
+# split a compound word into three tokens (word, "-", word) with nothing at the
+# token level to tell that "-" apart from a real delimiter. `_pb_tokens`
+# recognises exactly this shape — a hyphen glued to an alphabetic character on
+# both sides, with no surrounding whitespace — and emits the `_PB_GLUED`
+# sentinel instead of a literal "-", so `_neg_scan`'s class rule (below) never
+# mistakes an ordinary compound word for an unresolved-negation delimiter.
+_PB_GLUED = "\x00-"
+_PB_HYPHENS = {"-", "‐", "‑"}
+
+# The closed EXEC vocabulary — "run it"/"paste it"/"type it"/"source it" — the
+# family of "apply this SKILL.md block to your machine" verbs. Base forms only
+# for `_directive` (do/does/did and every -ing/-s/-ed form are excluded there);
+# the wider form set here is used to find the verb AT ALL, for negation and
+# description purposes, which is mood-agnostic.
+_PB_EXEC_RE = re.compile(
+    r"^(?:run|runs|running|ran|execute[sd]?|executing|paste[sd]?|pasting|type[sd]?|"
+    r"typing|enter(?:s|ed|ing)?|invoke[sd]?|invoking|copy|copies|copied|copying|"
+    r"apply|applies|applied|applying|install(?:s|ed|ing)?|add(?:s|ed|ing)?|"
+    r"append(?:s|ed|ing)?|launch(?:es|ed|ing)?|source[sd]?|sourcing|eval|try|tries|"
+    r"tried|trying|do|does|doing|done|did|use[sd]?|using)$"
+)
+_PB_EXEC_BASE_RE = re.compile(
+    r"^(?:run|execute|paste|type|enter|invoke|copy|apply|install|add|append|"
+    r"launch|source|eval|try|use)$"
+)
+_PB_PASSIVE_PART_RE = re.compile(
+    r"^(?:run|executed|used|done|pasted|typed|entered|invoked|copied|applied|"
+    r"installed|added|appended|launched|sourced|tried)$"
+)
+_PB_INVERT = {"forget", "hesitate", "fail", "skip", "omit", "neglect", "miss", "ignore"}
+_PB_NEG1 = {
+    "never", "cannot", "avoid", "don't", "dont", "mustn't", "shouldn't", "can't",
+    "won't", "wouldn't", "not", "refuse", "nobody",
+}
+_PB_NEG_PP = [
+    ("under", "no", "circumstances"), ("in", "no", "case"), ("at", "no", "time"),
+    ("at", "no", "point"), ("on", "no", "account"), ("by", "no", "means"),
+    ("in", "no", "way"), ("no", "one"),
+]
+_PB_AUX = {
+    "should", "must", "do", "does", "can", "may", "will", "would", "shall", "could",
+    "is", "are", "ever",
+}
+_PB_INV_SUBJ = {"you", "anyone", "anybody", "one", "we", "they", "users", "the", "agent", "it"}
+_PB_ADV_WORDS = {"ever", "even", "again", "really", "seriously", "once", "at", "all"}
+
+# B-879 round 6 (see `_neg_scan_ex`'s docstring): a closed, single-word
+# preposition list — empirically confirmed (a "Never PREP X, run the
+# following:" probe for each) to make the negator's clause walk stop at a
+# fronted PP's head instead of its real object. Deliberately excludes "at":
+# "at" is already in `_PB_ADV_WORDS` above (for "not at all") and is skipped
+# as an adverb before the walk ever reaches this stop-point, so a fronted
+# "at"-PP ("Never at work, run...") is a related, still-open, out-of-scope
+# gap this round does not touch, not a case that would ever reach this set.
+#
+# Round 7: round 6's own docstring called this "a small, closed" set and
+# stopped at ten members. A pre-merge review probed the same "Never PREP X,
+# run the following:" shape against six more ordinary single-word
+# prepositions and found the IDENTICAL fronted-PP-stop bug on every one:
+# "by", "for", "from", "over", "through", "within". This is not meant to be
+# an exhaustive part-of-speech classifier — English has more single-word
+# prepositions than this set will ever enumerate, and a future probe will
+# likely find more (the same "any enumeration is missing a member" lesson
+# round 5's class rule drew for punctuation applies here too, just not
+# solved the same way, because "is this word a preposition" has no
+# alphanumeric-content class rule to fall back on) — it is simply the
+# complete list of single-word prepositions actually probed and confirmed to
+# reproduce this exact mechanism so far.
+_PB_FRONTED_PREP = {
+    "in", "as", "on", "under", "with", "without", "during", "before", "after", "since",
+    "by", "for", "from", "over", "through", "within",
+}
+_PB_OPENERS = {
+    "then", "now", "next", "first", "finally", "also", "just", "simply", "please",
+    "and", "so", "afterwards", "again", "quickly", "quietly", "silently", "lastly",
+    "second", "third", "immediately", "always",
+}
+# B-879 round 7: the subset of `_PB_OPENERS` that is a genuine COORDINATING
+# CONJUNCTION — a word that can introduce a grammatically independent second
+# clause with its own subject and modal, as opposed to a plain sequencing
+# adverb ("then"/"now"/"immediately"/...) that merely orders steps WITHIN the
+# same clause a negator already governs. See `_sentence_directed`'s (d″) for
+# why this distinction is load-bearing: a bare comma-splice aside ("Never,
+# under any circumstances, run...") must stay unresolved, but "..., so you
+# must run..." is a real, separate directive clause. "but" is deliberately
+# NOT in `_PB_OPENERS` itself (a pre-existing, out-of-scope gap — see
+# `_pb_directive_mood`) but IS a coordinating conjunction for this narrower
+# purpose.
+_PB_COORD = {"and", "so", "but"}
+_PB_ADDRESSEE = [
+    ("you",), ("your", "agent"), ("the", "agent"), ("this", "skill"),
+    ("the", "skill"), ("the", "assistant"), ("we",), ("i",),
+]
+_PB_MODALISH = {
+    "must", "should", "will", "can", "may", "need", "needs", "to", "has", "have",
+    "shall", "then", "also", "always", "now", "just", "'ll", "quietly",
+}
+_PB_MATRIX_FRAMES = [
+    ("make", "sure", "to"), ("be", "sure", "to"), ("remember", "to"),
+    ("go", "ahead", "and"), ("proceed", "to"),
+]
+_PB_BLOCK_NOUN = {
+    "command", "commands", "snippet", "snippets", "line", "lines", "block",
+    "blocks", "code", "script", "one", "ones", "example", "examples", "payload",
+    "step",
+}
+_PB_STOP = {
+    "not", "never", "but", "unless", "except", "instead", "than", "other",
+    "besides", "apart", ";", ".", "!", "?", ",", "—", "–", "--", "(", ")",
+}
+_PB_TAIL_OK = {
+    "below", "above", "here", "command", "commands", "snippet", "snippets", "block",
+    "blocks", "line", "lines", "code", "example", "examples", "one", "ones",
+    "script", "payload", "ever", "again", "yourself", ":", ".", "!", ",", "—",
+    "--", "–",
+}
+_PB_FWD_DEIXIS = frozenset({"this", "these", "following", "below"})
+_PB_BACK_DEIXIS = frozenset({"above", "this", "that", "these", "it"})
+_PB_MARKER_RE = re.compile(
+    r"\bexamples?\b|\bfor\s+instance\b|\bsample\b|\bfor\s+example\b|e\.g\.|"
+    r"(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|[✅❌]",
+    re.I | re.M,
+)
+_PB_STRUCT_LINE_RE = re.compile(
+    r"^[ \t>]*(?:`{3,}|~{3,})[\w+-]*[ \t]*$|^[ \t>]*</?pre>[ \t]*$", re.M
+)
+
+# B-879 round 4 §4.f: "e.g."/"i.e."/"etc."/"vs."/"cf." followed by a lowercase
+# word is not a sentence or clause boundary for this primitive — a preceding
+# aside like "(e.g. in staging)" must not split the intro into two sentences
+# (or, at the token level, end a negator's clause early) just because it
+# contains an abbreviation's period. "e.g. Run" with a capital next word still
+# splits normally (the lookahead requires a lowercase follower).
+#
+# B-879 round 5: the whole pattern is compiled with re.I so the abbreviation
+# itself matches any case ("E.g."/"E.G."), but that also made the lookahead's
+# `[a-z]` match an upper-case follower too — "e.g. Run the following" was
+# silently protected as if "Run" were lowercase, which is exactly backwards
+# (a capital follower IS a genuine new sentence). `(?-i:[a-z])` turns
+# case-insensitivity back OFF for just that one group, so the lookahead is
+# strict-lowercase again while the abbreviation match stays case-insensitive.
+_PB_ABBREV_RE = re.compile(r"\b(?:e\.g|i\.e|etc|vs|cf)\.(?=\s+(?-i:[a-z]))", re.I)
+
+
+def _pb_protect_abbrev(text: str) -> str:
+    """Strip every period out of a non-boundary abbreviation match (both the
+    internal period in "e.g"/"i.e" and the trailing one) so neither
+    `_SENTENCE_BREAK_RE` nor the token-level class rule in `_neg_scan` ever
+    reads it as a sentence/clause boundary. Used by both `_pb_sentences` and
+    `_pb_tokens` (round 4 §4.f applies it at both call sites)."""
+    return _PB_ABBREV_RE.sub(lambda m: m.group(0).replace(".", ""), text)
+
+
+def _pb_tokens(s: str) -> list[str]:
+    """Tokenize *s* for every B-879 primitive in this module.
+
+    Two round-5 refinements over the plain `_PB_TOK_RE.finditer` walk:
+
+    * GLUED compounds — a "-" token sandwiched between two other tokens with
+      no whitespace on either side, both of them alphabetic at the join, is a
+      mid-word hyphen ("cross-session"), never stand-alone punctuation. It is
+      emitted as the `_PB_GLUED` sentinel instead of a bare "-" so `_neg_scan`
+      (which treats any non-content token as a class-rule cloud opener) does
+      not misread an ordinary compound word as a negator's delimiter.
+    * Trailing-apostrophe split (decision (a′)/A2) — the word-token pattern's
+      character class includes the apostrophe so a WORD-INTERNAL one
+      ("don't") stays glued on, but that means a CLOSING quote mark glued
+      onto a word's end ("Never'") is swallowed into the word too, and a
+      token like "never'" no longer matches the bare negator vocabulary
+      (`_PB_NEG1`). A trailing "'" is always a closing quote, never part of
+      the word, so it is split into its own token here.
+    """
+    s = _pb_protect_abbrev(s)
+    matches = list(_PB_TOK_RE.finditer(s))
+    out: list[str] = []
+    for k, m in enumerate(matches):
+        raw = m.group(0)
+        if (
+            raw in _PB_HYPHENS
+            and 0 < k < len(matches) - 1
+            and matches[k - 1].end() == m.start()
+            and matches[k + 1].start() == m.end()
+            and matches[k - 1].group(0)[-1:].isalpha()
+            and matches[k + 1].group(0)[:1].isalpha()
+        ):
+            out.append(_PB_GLUED)
+            continue
+        t = raw.lower().replace("’", "'")
+        if len(t) > 1 and t[0].isalpha() and t[-1] == "'":
+            out.append(t.rstrip("'"))
+            out.append("'")
+        else:
+            out.append(t)
+    return out
+
+
+def _pb_sentences(text: str) -> list[str]:
+    text = _pb_protect_abbrev(text)
+    out, last = [], 0
+    for m in _SENTENCE_BREAK_RE.finditer(text):
+        out.append(text[last : m.end()])
+        last = m.end()
+    out.append(text[last:])
+    return [s for s in out if s.strip()]
+
+
+def _pb_is_word(t: str) -> bool:
+    return bool(t[:1].isalpha())
+
+
+def _pb_is_adverb(t: str) -> bool:
+    """B-879 round 4 §4.a fix: an EXEC verb is never an adverb, no matter how it
+    ends. Several EXEC verbs end in a letter sequence that also matches the
+    generic '-ly, len>3' adverb shape — most notably "apply"/"supply"/"reply",
+    which all end in "...ply" (which ends in "ly"). Before this guard, a
+    negator's clause-scan treated "apply" as a skippable adverb and walked
+    straight past it, losing the negation event on "Never, under any
+    circumstances, apply the following:" and reading "apply" as a free-standing
+    directive (a false FAIL)."""
+    if _PB_EXEC_RE.match(t):
+        return False
+    return t in _PB_ADV_WORDS or (t.endswith("ly") and len(t) > 3)
+
+
+def _pb_proform(ts: list[str], j: int) -> bool:
+    """This/these/that/following count only as PRO-FORMS standing in for the
+    block, never as determiners of some other noun ("this audit", "the following
+    steps" do not count)."""
+    w = ts[j]
+    nxt = ts[j + 1] if j + 1 < len(ts) else ""
+    if w in ("this", "these", "that", "following"):
+        return (
+            (not _pb_is_word(nxt))
+            or nxt in _PB_BLOCK_NOUN
+            or nxt in _PB_TAIL_OK
+            or nxt
+            in (
+                "is", "are", "was", "will", "must", "should", "can", "to", "as",
+                "on", "in", "once", "before", "after", "into", "when", "for", "at",
+                "under", "outside", "without", "with", "instead", "now", "first",
+            )
+        )
+    return True
+
+
+def _reaches_block(
+    tokens: list[str], i: int, deixis: frozenset, introducer: bool, *, allow_final: bool = True
+) -> int | None:
+    """Does the verb at tokens[i] take the block as its object? A deixis word
+    within 7 words, with the walk STOPPING at any clause delimiter and at
+    not/never/but/unless/except/instead/than/other/besides/apart (this is what
+    closes "run anything OTHER THAN the following" and "If not already done, run
+    the following" — a verb that ends its sentence ("run:") also reaches."""
+    dx = deixis | ({"it", "that"} if introducer else set())
+    steps = 0
+    j = i + 1
+    if allow_final and (j >= len(tokens) or tokens[j] in {":", ".", "!"}):
+        return j
+    while j < len(tokens) and steps < 7:
+        t = tokens[j]
+        if t in _PB_STOP:
+            return None
+        if t in dx and _pb_proform(tokens, j):
+            return j
+        if _pb_is_word(t):
+            steps += 1
+        j += 1
+    return None
+
+
+def _pb_tail_unscoped(ts: list[str]) -> bool:
+    """The tail after a bound prohibition's deixis, up to sentence end: any word
+    outside the closed "still talking about the same block, unconditionally"
+    vocabulary (`_PB_TAIL_OK`, or "under/on/in/at/for any|no|all ...") makes the
+    prohibition SCOPED rather than fully governing."""
+    i = 0
+    while i < len(ts):
+        t = ts[i]
+        if t in _PB_TAIL_OK or not _pb_is_word(t):
+            i += 1
+            continue
+        if t in ("under", "on", "in", "at", "for") and i + 1 < len(ts) and ts[i + 1] in (
+            "any", "no", "all",
+        ):
+            i += 2
+            while i < len(ts) and _pb_is_word(ts[i]):
+                i += 1
+            continue
+        return False
+    return True
+
+
+def _pb_has_content(t: str) -> bool:
+    """Does *t* contain at least one alphanumeric character? The round-5 class
+    rule (see `_neg_scan_ex`) tests this instead of enumerating a punctuation
+    set: any token that FAILS it is, by construction, punctuation of some
+    kind — a comma, a dash, a bracket, an ellipsis, an emoji, a full stop, a
+    box-drawing character, any of the several thousand Unicode punctuation
+    code points nobody sat down and enumerated — and a token this shape can
+    always open a negator's clause the same way a comma can."""
+    return any(c.isalnum() for c in t)
+
+
+def _neg_scan_ex(
+    tokens: list[str], carry: bool | None = None
+) -> tuple[list[tuple[int, int]], dict[int, int], bool | None]:
+    """B-879 round 5: resolve each negator in *tokens* to either a GOVERNED
+    event, or an UNRESOLVED ("clouded") span, never a guess — and, new in round
+    5, do it with a CLASS rule instead of an enumerated delimiter set.
+
+    Rounds 1-3 tried to resolve, from local punctuation alone, whether a
+    negator separated from its verb by a comma/dash/paren aside still governs
+    it, and guessed either way was unsound (see the module design comment).
+    Round 4's fix was a third value — UNRESOLVED — but it opened the cloud only
+    on an enumerated set of delimiters (comma/dash/open-paren). Any enumerated
+    set is exactly the kind of thing this bug keeps recurring on: a sweep of
+    3,666 Unicode punctuation characters glued directly after "Never" found a
+    false FAIL on all but 5 of them — round 4's own set. The round-5 rule
+    replaces the enumeration with its own justification: a negator's clause
+    walk (see below) is looking for either a skippable filler word or the verb
+    it governs; the FIRST token that is neither — i.e. the first token with NO
+    alphanumeric content at all (`_pb_has_content`) — is definitionally
+    punctuation of some kind, and punctuation right after a negator is an
+    aside-or-splice shape no token-level scanner can resolve, whatever
+    character it happens to be spelled with. `Never, X, run...` is a real
+    prohibition when X is a non-predicate aside and a spliced-in order when X
+    contains its own verb; only open-class part-of-speech knowledge tells them
+    apart, and a class rule at least never depends on which punctuation
+    character X started with, which point-of-Unicode enumeration always did.
+
+    A compound word's mid-word hyphen is not this kind of punctuation — see
+    `_pb_tokens`'s `_PB_GLUED` sentinel, which the walk below special-cases so
+    an ordinary word like "cross-session" is never mistaken for a delimiter.
+
+    Sentence-spanning (round 5, Dave's R3 decision, 2026-09-24): the cloud
+    spans the rest of the LOGICAL sentence, not just the rest of the clause up
+    to the next terminator — a splice's own aside can itself contain a clause
+    terminator ("Never, as Mr. Smith explained: run the following.") without
+    closing the cloud early. *carry* threads an already-open cloud (and the
+    directive-mood of the negator that opened it) in from a PREVIOUS sentence
+    that never resolved before its own sentence boundary — see `_carries` and
+    `_soft_break`, which decide whether that boundary was a genuine full stop
+    or an artifact (an abbreviation `_pb_sentences` did not protect) worth
+    carrying a cloud across. Returns ``(events, clouded, carry_out)``:
+
+      * ``events``: ``(negator_index, governed_index)`` pairs — the negator
+        binds directly to its governed word, unambiguously.
+      * ``clouded``: ``{token_index: owning_negator_index}`` — every token from
+        the first non-content token after a negator (or, for a cloud carried
+        in from a previous sentence, every token in *this* sentence) to the
+        end of the sentence. The owner is the opening negator's index, or -1
+        when the cloud's owner lived in a previous sentence (carried in).
+      * ``carry_out``: the directive-mood of the still-open cloud to hand to
+        the NEXT sentence, or None when nothing is open at sentence end.
+
+    Negators: never/not/cannot/can't/don't/won't/avoid/refuse to/mustn't/
+    shouldn't/nobody, plus negative PPs ("under no circumstances", "at no
+    point", ...) with subject-aux inversion ("...should you/anyone run...").
+
+    After the negator: skip adverbs (ever/even/once/-ly..., but never an EXEC
+    verb — `_pb_is_adverb`), try/attempt to, "to be" and "to <EXEC>".
+
+    Negative PPs: a comma right after the PP is skipped ONLY as part of a full
+    subject-aux inversion (comma, AUX, INV_SUBJ) — "Under no circumstances,
+    should you run..." A bare comma with no following inversion is UNRESOLVED,
+    same as any other negator ("By no means, run the following.").
+
+    Adjacent-negation-wins: a later negator's GOVERNED event on a token removes
+    that token from any earlier cloud, so "Never, ever, never run the
+    following" still resolves to a genuine, unscoped prohibition.
+
+    Fronted prepositional phrases (round 6): the walk's stop-word is not
+    always the negator's true object. "Never under any circumstances, run..."
+    (no comma after "Never"), "Not even in a sandbox, run...", "Never as
+    root, run..." each stop at a PREPOSITION ("under"/"in"/"as") that heads a
+    whole fronted PP the comma closes — the negation's real scope is that
+    whole phrase, not just its first word, so recording a GOVERNED event on
+    the preposition let the verb after the phrase's comma escape negation
+    entirely. `_PB_FRONTED_PREP` (below) is a small, closed, empirically
+    -confirmed set of single-word prepositions this happens with, gated on
+    `_pb_negator_mood` exactly like the class rule's own carry-mood — the
+    misreading only matters when the negator is itself addressed to the
+    reader as an imperative ("If not in a container, run..." keeps its real
+    directive reading, since "if" makes the negator's own mood non-directive).
+    """
+    events: list[tuple[int, int]] = []
+    clouded: dict[int, int] = {}
+    n = len(tokens)
+    carry_mood = carry
+    if carry is not None:
+        # The whole sentence is already inside a cloud carried in from before
+        # it started; owner -1 marks "opened in a previous sentence" so
+        # `_sentence_directed`/`_has_clouded_exec_reaching` can tell it apart
+        # from a cloud this sentence opened itself.
+        for k in range(n):
+            clouded.setdefault(k, -1)
+
+    def _open_cloud(neg_i: int, from_j: int) -> None:
+        # Shared by the class rule's non-content branch and round 6's
+        # fronted-PP branch below: cloud every token from *from_j* to the
+        # sentence's end, owned by the negator at *neg_i*, and remember that
+        # negator's own mood as the carry candidate for the next sentence.
+        nonlocal carry_mood
+        for k in range(from_j, n):
+            clouded.setdefault(k, neg_i)
+        carry_mood = _pb_negator_mood(tokens, neg_i)
+
+    i = 0
+    while i < n:
+        t = tokens[i]
+        start = None
+        pp_len = 0
+        for pp in _PB_NEG_PP:
+            if tuple(tokens[i : i + len(pp)]) == pp:
+                pp_len = len(pp)
+                start = i + pp_len
+                break
+        if start is None and t in _PB_NEG1:
+            start = i + 1
+            if t == "refuse" and start < n and tokens[start] == "to":
+                start += 1
+            if t == "nobody" and start < n and tokens[start] in _PB_AUX:
+                start += 1
+        if start is None:
+            i += 1
+            continue
+
+        if pp_len:
+            if start < n and tokens[start] == ",":
+                # A comma right after the PP is consumed ONLY as part of a full
+                # subject-aux inversion; otherwise it is left in place for the
+                # generic class-rule scan below, which clouds it.
+                if (
+                    start + 2 < n
+                    and tokens[start + 1] in _PB_AUX
+                    and tokens[start + 2] in _PB_INV_SUBJ
+                ):
+                    start += 3
+                    if start < n and tokens[start] == "agent":
+                        start += 1
+            elif start + 1 < n and tokens[start] in _PB_AUX and tokens[start + 1] in _PB_INV_SUBJ:
+                start += 2
+                if start < n and tokens[start] == "agent":
+                    start += 1
+            elif start < n and tokens[start] in _PB_AUX:
+                start += 1
+
+        j = start
+        clouded_here = False
+        while j is not None and j < n:
+            tj = tokens[j]
+            if tj == _PB_GLUED:
+                # An intra-word hyphen is not a delimiter (see `_pb_tokens`) —
+                # stop the skip-walk here and let the negator govern it, the
+                # same neutral (non-EXEC, non-eventful) outcome round 4 gave a
+                # bare "-" that happened to land in this position.
+                break
+            if _pb_is_adverb(tj):
+                j += 1
+                continue
+            if tj in ("try", "attempt") and j + 1 < n and tokens[j + 1] == "to":
+                j += 2
+                continue
+            if tj == "to" and j + 1 < n and (
+                tokens[j + 1] == "be" or _PB_EXEC_RE.match(tokens[j + 1])
+            ):
+                j += 1
+                continue
+            if not _pb_has_content(tj):
+                # The class rule: nothing between the negator and here has
+                # been a real word, and *this* token has no alphanumeric
+                # content either, so it is punctuation of some kind. Cloud
+                # the rest of the sentence and remember this negator's own
+                # mood as the carry candidate, in case the cloud is still open
+                # at the sentence's end.
+                _open_cloud(i, j)
+                clouded_here = True
+                j = None
+                continue
+            if tj in _PB_FRONTED_PREP and _pb_negator_mood(tokens, i):
+                # Round 6: *tj* is not the negator's object — it is the head
+                # of a FRONTED PREPOSITIONAL PHRASE the negation scopes over
+                # as a whole (see the docstring above and `_PB_FRONTED_PREP`'s
+                # own comment). Cloud the rest of the sentence exactly like
+                # the class rule's punctuation branch, rather than recording a
+                # GOVERNED event on the preposition that would let a real
+                # directive verb after the phrase's own comma escape
+                # negation.
+                _open_cloud(i, j)
+                clouded_here = True
+                j = None
+                continue
+            break
+        if not clouded_here and j is not None and j < n:
+            events.append((i, j))
+        i += 1
+
+    governed = {g for _n, g in events}
+    for g in governed:
+        clouded.pop(g, None)
+    return events, clouded, carry_mood
+
+
+def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]:
+    """Single-sentence convenience wrapper over `_neg_scan_ex` — no carry in,
+    carry discarded — kept for callers (and tests) that only ever look at one
+    sentence in isolation."""
+    events, clouded, _carry_out = _neg_scan_ex(tokens)
+    return events, clouded
+
+
+def _neg_events(tokens: list[str]) -> list[tuple[int, int]]:
+    """Thin wrapper over `_neg_scan` kept for the aggregator export contract
+    (§3.1-a: a name importable today stays importable) — returns only the
+    unambiguously GOVERNED events, discarding cloud information."""
+    return _neg_scan(tokens)[0]
+
+
+def _pb_chunk_raw_pre(ts: list[str], i: int) -> tuple[list[str], int]:
+    """The word-only span from the start of *ts[i]*'s clause up to (not
+    including) *ts[i]*, with NOTHING stripped — the raw material
+    `_pb_chunk_pre` immediately throws away by stripping leading openers and a
+    "Step N" prefix. B-879 round 7's cloud-recovery mechanism
+    (`_sentence_directed`'s (d″)) needs to see whether that raw span itself
+    OPENS with a genuine opener/coordinator BEFORE any stripping happens —
+    `_pb_chunk_pre` alone cannot answer that, since by the time it returns,
+    the very evidence of what the chunk started with is already gone."""
+    s = 0
+    for k in range(i - 1, -1, -1):
+        if ts[k] in _PB_DELIM:
+            s = k + 1
+            break
+    return [t for t in ts[s:i] if _pb_is_word(t)], s
+
+
+def _pb_strip_chunk_openers(pre: list[str]) -> list[str]:
+    """Strip leading OPENERS (then/now/next/.../please/and/so/...), any
+    "-ly" adverb, and a leading "Step N" off the front of *pre* — the
+    stripping half of `_pb_chunk_pre`, factored out so B-879 round 7's (d″)
+    can apply the SAME stripping after first removing a coordinator
+    (`_PB_COORD`) that is not itself in `_PB_OPENERS` ("but" — see
+    `_PB_COORD`'s own comment)."""
+    while pre and (pre[0] in _PB_OPENERS or (pre[0].endswith("ly") and len(pre[0]) > 3)):
+        pre = pre[1:]
+    if pre and pre[0] == "step":
+        pre = pre[1:]
+    return pre
+
+
+def _pb_chunk_pre(ts: list[str], i: int) -> tuple[list[str], int]:
+    """The word-only span from the start of *ts[i]*'s clause up to (not
+    including) ts[i], with leading OPENERS (then/now/next/.../please/and/so/...)
+    and a leading "Step N" stripped."""
+    pre, s = _pb_chunk_raw_pre(ts, i)
+    return _pb_strip_chunk_openers(pre), s
+
+
+def _pb_addressee_len(pre: list[str]) -> int:
+    for a in _PB_ADDRESSEE:
+        if tuple(pre[: len(a)]) == a:
+            return len(a)
+    return 0
+
+
+def _pb_directive_mood(ts: list[str], i: int) -> bool:
+    """Frames (a)/(b)/(c): chunk-initial after an opener, an addressee (you/the
+    agent/this skill/we/i) plus modal filler, or a matrix verb (make sure to,
+    be sure to, remember to, go ahead and, proceed to)."""
+    pre, _s = _pb_chunk_pre(ts, i)
+    if not pre:
+        return True
+    n = _pb_addressee_len(pre)
+    if n and all(w in _PB_MODALISH or _pb_is_adverb(w) for w in pre[n:]):
+        return True
+    return any(tuple(pre) == m for m in _PB_MATRIX_FRAMES)
+
+
+def _pb_negator_mood(ts: list[str], n: int) -> bool:
+    """B-879 round 4 §4.d: is the NEGATOR at ts[n] itself in directive mood —
+    "after stripping do-support, the chunk-pre is empty, or it is an addressee
+    plus modal filler"? Same test as `_pb_directive_mood`, but a leading
+    periphrastic "do"/"does"/"did" is stripped from the chunk-pre first: "Do
+    not hesitate to run..." has chunk-pre ["do"] in front of "not", which is
+    do-support with no real subject, not a third-person subject, so it must
+    not read as non-directive the way "Attackers never fail..." (chunk-pre
+    ["attackers"]) does."""
+    pre, _s = _pb_chunk_pre(ts, n)
+    if pre and pre[0] in ("do", "does", "did"):
+        pre = pre[1:]
+    if not pre:
+        return True
+    p = _pb_addressee_len(pre)
+    if p and all(w in _PB_MODALISH or _pb_is_adverb(w) for w in pre[p:]):
+        return True
+    return any(tuple(pre) == m for m in _PB_MATRIX_FRAMES)
+
+
+def _directive(tokens: list[str], i: int, deixis: frozenset, introducer: bool) -> bool:
+    """Is tokens[i] a DIRECTIVE EXEC verb that reaches the block? Base-form EXEC
+    only (`_PB_EXEC_BASE_RE`) — do/does/did and every -ing/-s/-ed form are
+    EXCLUDED here (they are still recognised by the wider `_PB_EXEC_RE` for
+    negation/description purposes).
+
+    Frames, all closed classes:
+      (a) chunk-initial after an opener — `_pb_directive_mood`
+      (b) addressee + modal filler — `_pb_directive_mood`
+      (c) matrix verb (make sure to/be sure to/...) — `_pb_directive_mood`
+      (d) a negator governing an INVERTING verb (forget/hesitate/fail/skip/
+          omit/neglect/miss/ignore) followed by "to <EXEC>" or a block object —
+          handled in `_sentence_directed`, not here (it needs the negation
+          scan, and round 4 gates it on the negator's own mood).
+      (e) "without <EXEC-ing>" inside a sentence whose negation event governs a
+          NON-exec word (necessity: "cannot proceed WITHOUT RUNNING this").
+      (f) "by <EXEC-ing>" in a chunk containing you/your, not starting with a
+          subject word — the addressed means-clause "register your key BY
+          COPYING it below".
+    """
+    t = tokens[i]
+    if not _PB_EXEC_RE.match(t) or t in ("do", "does", "did", "done", "doing"):
+        return False
+    if i > 0 and tokens[i - 1] in ("not", "never", "don't", "dont"):
+        return False
+    ok = bool(_PB_EXEC_BASE_RE.match(t)) and _pb_directive_mood(tokens, i)
+    if not ok and i > 0 and tokens[i - 1] == "without" and t.endswith("ing"):
+        evs = _neg_events(tokens)
+        ok = any(n < i and not _PB_EXEC_RE.match(tokens[g]) for n, g in evs)
+    if not ok and i > 0 and tokens[i - 1] == "by" and t.endswith("ing"):
+        pre, s = _pb_chunk_pre(tokens, i)
+        ok = (
+            bool(pre)
+            and ("your" in tokens[s:] or "you" in tokens[s:])
+            and pre[0]
+            not in ("the", "a", "an", "this", "that", "these", "those", "it", "they", "he",
+                    "she", "attackers", "someone")
+        )
+    return ok and _reaches_block(tokens, i, deixis, introducer) is not None
+
+
+def _sentence_directed(
+    sent: str, deixis: frozenset, introducer: bool, carry: bool | None = None
+) -> bool:
+    """Is there a live, free-standing directive EXEC verb in *sent*? Round 4
+    additions over the base frames: (d) is gated on the NEGATOR's own mood
+    (`_pb_directive_mood`) — "Attackers never fail to run the following:" has a
+    third-person subject before "never", so it no longer counts as an order;
+    and (d′) recovers an inverting verb found INSIDE a cloud when it opens its
+    own chunk and the cloud's own negator is in directive mood ("Never, under
+    any circumstances, forget to run the following:"). Round 5 adds *carry*
+    (see `_neg_scan_ex`/`_carries`): a cloud still open from a previous
+    sentence, threaded in so (d′) can judge an inverting verb sitting in it.
+    Round 7 adds (d″), below: the same "opens its own chunk" recovery
+    principle as (d′), generalized from INVERTING verbs to ordinary EXEC
+    verbs, for a token whose OWN local grammar proves it belongs to a
+    different clause/sentence than the one an unrelated cloud nominally still
+    covers — see (d″)'s own comment for the two different bars (coordinator +
+    subject/modal for a same-sentence cloud; a marked, already-established
+    directive frame for a cross-sentence carry)."""
+    ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
+    evs, clouded, _carry_out = _neg_scan_ex(ts, carry)
+    governed = {g for _n, g in evs}
+    cloud_idx = set(clouded)
+    # (d) negator + inverting verb — only when the negator itself is addressed
+    # to the reader (round 4 §4.d).
+    for _n, g in evs:
+        if ts[g] in _PB_INVERT and _pb_negator_mood(ts, _n):
+            k = g + 1
+            if k < len(ts) and ts[k] == "to":
+                k += 1
+            if k < len(ts) and _PB_EXEC_RE.match(ts[k]) and _reaches_block(
+                ts, k, deixis, introducer
+            ) is not None:
+                return True
+            if _reaches_block(ts, g, deixis, introducer) is not None:
+                return True
+    # (d′) round 4 §4.e, recommended and included in the measured candidate: an
+    # inverting verb INSIDE a cloud still directs when it opens its own chunk
+    # (nothing but the cloud's own delimiter precedes it) and the cloud's
+    # negator is itself in directive mood. A cloud CARRIED IN from a previous
+    # sentence has no negator token in *ts* to re-read (`neg_idx == -1`); its
+    # mood is whatever `_carries` threaded in as *carry*.
+    for i in sorted(cloud_idx):
+        t = ts[i]
+        if t not in _PB_INVERT:
+            continue
+        pre, _s = _pb_chunk_pre(ts, i)
+        if pre:
+            continue
+        k = i + 1
+        if k < len(ts) and ts[k] == "to":
+            k += 1
+        if not (k < len(ts) and _PB_EXEC_RE.match(ts[k])):
+            continue
+        if _reaches_block(ts, k, deixis, introducer) is None:
+            continue
+        neg_idx = clouded.get(i)
+        if neg_idx == -1:
+            mood = bool(carry)
+        else:
+            mood = neg_idx is not None and _pb_negator_mood(ts, neg_idx)
+        if mood:
+            return True
+    # (d″) round 7: generalize (d′)'s "opens its own chunk" recovery from
+    # INVERTING verbs to ordinary EXEC verbs. An earlier, unrelated negator's
+    # cloud being nominally still "open" over a token does not mean that
+    # token is really part of the SAME clause the negator governs — a token
+    # that independently proves it belongs to a different, grammatically
+    # independent clause (or a different SENTENCE) must not be suppressed
+    # just because the cloud's technical span happens to still cover it. The
+    # bar differs by how the token ended up clouded, because a comma and a
+    # period are not equally strong independence signals:
+    #
+    #   * Same-sentence cloud (`neg_idx >= 0`, opened by a comma/dash/etc.
+    #     INSIDE this sentence): only a genuine COORDINATING CONJUNCTION
+    #     (`_PB_COORD` — "and"/"so"/"but", never a plain sequencing adverb
+    #     like "then"/"now") can introduce an independent second clause, and
+    #     even then only when what follows it is a real subject+modal
+    #     ("so you must run...") or a matrix frame ("so make sure to
+    #     run..."). A bare "so run"/"and run" with nothing else stays
+    #     suppressed — that shape is indistinguishable at the token level
+    #     from an ordinary same-clause comma splice ("Never, under any
+    #     circumstances, run..."), which is exactly the false-FAIL shape
+    #     this whole design exists to avoid, so it is deliberately NOT
+    #     recovered just because a coordinator happens to be present.
+    #   * Carried-in cloud (`neg_idx == -1`, threaded in from a PREVIOUS
+    #     sentence via `_carries`/`_soft_break`): this sentence already sits
+    #     on the far side of a genuine `_pb_sentences` PERIOD split — the
+    #     only reason it is still "clouded" at all is `_soft_break`'s casing
+    #     heuristic (the next sentence merely starts lowercase, which could
+    #     mean the period was not a real full stop, or could just as easily
+    #     mean an author wrote a fresh, informally-cased new instruction). A
+    #     period is a much stronger independence signal than a mid-sentence
+    #     comma, so the bar is the ordinary, already-established directive
+    #     test (`_pb_directive_mood`, frames (a)/(b)/(c) — which already
+    #     accepts a bare chunk-initial imperative) — BUT gated on the raw
+    #     chunk finding a genuine `_PB_OPENERS` marker first, so a bare,
+    #     filler-less continuation ("Never, ever. run the following:", the
+    #     C01-C06 accepted-cost group) stays exactly as unresolved as it
+    #     always was: nothing marks it as a deliberate new step rather than
+    #     the unmarked tail end of the same splice.
+    for i in sorted(cloud_idx):
+        t = ts[i]
+        if (
+            not _PB_EXEC_BASE_RE.match(t)
+            or t in ("do", "does", "did", "done", "doing")
+            or (i > 0 and ts[i - 1] in ("not", "never", "don't", "dont"))
+        ):
+            continue
+        raw_pre, _rs = _pb_chunk_raw_pre(ts, i)
+        if not raw_pre:
+            continue
+        neg_idx = clouded.get(i)
+        if neg_idx == -1:
+            if raw_pre[0] not in _PB_OPENERS or not _pb_directive_mood(ts, i):
+                continue
+        else:
+            if raw_pre[0] not in _PB_COORD:
+                continue
+            # Strip the coordinator itself by hand first — plain
+            # `_pb_chunk_pre` would not do it for us here, because "but" is
+            # deliberately NOT a member of `_PB_OPENERS` (its own stripping
+            # loop would leave it in place, and the addressee check below
+            # would never match a pre starting with "but"). Once it is gone,
+            # apply the SAME opener-stripping `_pb_chunk_pre` uses to
+            # whatever follows it ("so now you must run..." still needs
+            # "now" gone too).
+            pre = _pb_strip_chunk_openers(raw_pre[1:])
+            if not pre:
+                continue
+            n = _pb_addressee_len(pre)
+            has_struct = (
+                n and all(w in _PB_MODALISH or _pb_is_adverb(w) for w in pre[n:])
+            ) or any(tuple(pre) == m for m in _PB_MATRIX_FRAMES)
+            if not has_struct:
+                continue
+        if _reaches_block(ts, i, deixis, introducer) is None:
+            continue
+        return True
+    for i, t in enumerate(ts):
+        if (
+            not _PB_EXEC_RE.match(t)
+            or i in governed
+            or i in cloud_idx
+            or t in ("do", "does", "did", "done", "doing")
+        ):
+            continue
+        if _directive(ts, i, deixis, introducer):
+            return True
+    return False
+
+
+def _forbids(sentence: str, deixis: frozenset) -> str | None:
+    """"governs" (fully, unscoped) / "scoped" / None for one sentence: a
+    negation event whose governed word is EXEC and reaches the block, the
+    passive form ("the above must never be run"), or "what not to do".
+
+    Round 4 §4.b: unchanged from the base design — this only ever sees bound
+    `_neg_scan` EVENTS, never cloud information, so a clouded verb can never
+    read as a prohibition (no false PASS)."""
+    ts = _pb_tokens(_PB_EMPH_RE.sub("", sentence))
+    best = None
+    events, _clouded = _neg_scan(ts)
+    for n, g in events:
+        if _PB_EXEC_RE.match(ts[g]):
+            r = _reaches_block(ts, g, deixis, False, allow_final=False)
+            if r is not None:
+                res = "governs" if _pb_tail_unscoped(ts[r + 1 :]) else "scoped"
+                if res == "governs":
+                    return res
+                best = best or res
+        if ts[g] == "be" and g + 1 < len(ts) and _PB_PASSIVE_PART_RE.match(ts[g + 1]):
+            subj = [w for w in ts[:n] if _pb_is_word(w)]
+            if subj and (
+                subj[0] in deixis
+                or (subj[0] == "the" and len(subj) > 1 and (subj[1] in deixis or subj[-1] in _PB_BLOCK_NOUN))
+            ):
+                res = "governs" if _pb_tail_unscoped(ts[g + 2 :]) else "scoped"
+                if res == "governs":
+                    return res
+                best = best or res
+    if re.search(r"\bwhat\s+not\s+to\s+do\b", " ".join(ts)):
+        return "governs"
+    return best
+
+
+def _pb_described(sent: str, deixis: frozenset) -> bool:
+    """A non-base EXEC verb (using/running/executed/...) with a non-addressee
+    subject 1-4 words long, whose object REACHES the block — third-person
+    DESCRIPTION, not a directive to the reader: "Attackers persist by appending
+    a line like this"."""
+    ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
+    for i, t in enumerate(ts):
+        if _PB_EXEC_RE.match(t) and not _PB_EXEC_BASE_RE.match(t) and t != "using":
+            pre, _s = _pb_chunk_pre(ts, i)
+            if (
+                pre
+                and not _pb_addressee_len(pre)
+                and len(pre) <= 4
+                and _reaches_block(ts, i, deixis, False) is not None
+            ):
+                return True
+    return False
+
+
+def _pb_unreadable(text: str) -> bool:
+    return len(re.findall(r"[^\W\d_A-Za-z]", text)) > len(re.findall(r"[A-Za-z]", text))
+
+
+def _block_para_before(blob: str, start: int, cap: int = 400) -> str:
+    """The paragraph before *start*, stripped of layout (frontmatter, heading
+    lines, fence/`<pre>` marker lines, blockquote `>` prefixes) — those are not
+    prose."""
+    seg = blob[max(0, start - cap) : start]
+    seg = _PB_STRUCT_LINE_RE.sub("", seg)
+    seg = re.sub(r"(?m)^[ \t]*>[ \t]?", "", seg).rstrip()
+    last = None
+    for m in re.finditer(r"\n[^\S\n]*\n", seg):
+        last = m
+    seg = seg[last.end() :] if last else seg
+    fm = list(re.finditer(r"^---[ \t]*$", seg, re.M))
+    if fm:
+        seg = seg[fm[-1].end() :]
+    return "\n".join(
+        ln for ln in seg.splitlines()
+        if not re.match(r"\s*#{1,6}\s", ln) and not ln.strip().startswith("---")
+    ).strip()
+
+
+def _block_para_after(blob: str, end: int, cap: int = 400) -> str:
+    seg = blob[end : end + cap].lstrip()
+    m = re.search(r"\n[^\S\n]*\n", seg)
+    seg = seg[: m.start()] if m else seg
+    if re.match(r"\s*#{1,6}\s", seg) or seg.startswith("```") or seg.startswith("# file:"):
+        return ""
+    return seg.strip()
+
+
+def _pb_has_clouded_exec_reaching(
+    sent: str, deixis: frozenset, introducer: bool, carry: bool | None = None
+) -> bool:
+    """B-879 round 4 §4.c: is there a CLOUDED EXEC verb in *sent* that reaches
+    the block? Used to compute `ProseBinding.unresolved` over every intro
+    sentence and the first trailer sentence — not just the one `directed`/
+    `forbids` inspect — so a splice earlier in the intro plus a clean
+    prohibition as the last sentence ("Never, ever skip this, run the following
+    to register your key. Never run the following:") is still unresolved
+    rather than a confirmed FORBIDDEN prohibition. Round 5 adds *carry*: a
+    cloud left open by a previous sentence (see `_neg_scan_ex`/`_carries`)."""
+    ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
+    _events, clouded, _carry_out = _neg_scan_ex(ts, carry)
+    for i in clouded:
+        if _PB_EXEC_RE.match(ts[i]) and _reaches_block(ts, i, deixis, introducer) is not None:
+            return True
+    return False
+
+
+# B-879 round 5: abbreviations `_pb_sentences` does not already protect (that
+# list, `_PB_ABBREV_RE`, only covers e.g./i.e./etc./vs./cf. — the ones that
+# would otherwise strand a lowercase continuation mid-sentence). This wider
+# list feeds `_soft_break`'s fallback, which decides whether a period
+# `_pb_sentences` DID split on was a genuine sentence end or an abbreviation
+# nobody protected — the same "closed enumeration will always be missing a
+# member" problem `_neg_scan_ex`'s class rule solves for punctuation, mirrored
+# here with a shape-based fallback (`_soft_break`'s last clause) for whatever
+# this list itself still misses.
+_PB_SOFT_ABBREV = {
+    "e.g", "i.e", "etc", "vs", "cf", "al", "approx", "ca", "viz", "ibid",
+    "prof", "gen", "col", "capt", "maj", "adm", "rev", "hon", "sen", "rep", "gov", "pres",
+    "supt", "insp", "messrs", "mme", "mlle", "fr", "no", "nos", "vol", "fig", "figs", "sec",
+    "ch", "art", "ed", "eds", "op", "inc", "co", "corp", "univ", "assoc", "asst", "est", "dept",
+    "govt", "ave", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct",
+    "nov", "dec", "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+}
+
+
+def _soft_break(prev: str, rest: str) -> bool:
+    """Should an already-open negation cloud carry FROM *prev* (the sentence
+    `_pb_sentences` just ended) INTO *rest* (everything after it)? A carry-only
+    decision — this never merges two sentences back into one, it only decides
+    whether the CLOUD survives the boundary between them.
+
+    Two paths to "yes":
+
+    1. *rest* starts with a lowercase letter or digit. `_pb_sentences` splits
+       on any ``. `` regardless of what follows (only the small, explicitly
+       protected abbreviation list is exempted beforehand), so a genuine new
+       sentence almost always starts capitalized — if it does not, the period
+       that ended *prev* was not really a full stop.
+    2. *prev* ends in a single, un-doubled period, and the word immediately
+       before it looks like an abbreviation `_pb_sentences` did not protect —
+       a single letter (an initial), an internal period ("U.S"), a member of
+       `_PB_SOFT_ABBREV`, or (the class-rule fallback, for whatever that list
+       itself still misses) a short, non-uppercase, vowel-less token, the same
+       shape common abbreviations like "Blvd"/"Mfg" take. Guarded off when the
+       very next word is a base-form EXEC verb ("e.g. Run the following:" is a
+       real new sentence, capital or not — this only matters for the small
+       sliver `_pb_protect_abbrev` did not already catch)."""
+    m = re.search(r"[A-Za-z0-9]", rest)
+    if m and m.group(0).islower():
+        return True
+    p = prev.rstrip()
+    if not p.endswith(".") or p.endswith(".."):
+        return False
+    wm = re.search(r"([A-Za-z](?:[A-Za-z.]*[A-Za-z])?)\.$", p)
+    if not wm:
+        return False
+    w = wm.group(1)
+    fw = re.match(r"\W*([A-Za-z]+)", rest)
+    if fw and _PB_EXEC_BASE_RE.match(fw.group(1).lower()):
+        return False
+    return (
+        len(w) == 1
+        or "." in w
+        or w.lower() in _PB_SOFT_ABBREV
+        or (2 <= len(w) <= 5 and not w.isupper() and not re.search(r"[aeiouyAEIOUY]", w))
+    )
+
+
+def _carries(sents: list[str]) -> list[bool | None]:
+    """The carry-IN value for each sentence in *sents* (round 5's sentence
+    spanning, Dave's R3 decision): ``out[k]`` is whatever cloud was still open
+    when sentence *k* started, or None when nothing was. Threads `_neg_scan_ex`
+    across the whole sequence, consulting `_soft_break` after each sentence to
+    decide whether its own carry-out should reach the NEXT one."""
+    out: list[bool | None] = []
+    carry: bool | None = None
+    for k, s in enumerate(sents):
+        out.append(carry)
+        ts = _pb_tokens(_PB_EMPH_RE.sub("", s))
+        _events, _clouded, carry_out = _neg_scan_ex(ts, carry)
+        rest = "".join(sents[k + 1 :])
+        carry = carry_out if (carry_out is not None and rest and _soft_break(s, rest)) else None
+    return out
+
+
+def _prose_binding(blob: str, start: int, end: int, *, heading_matches=None) -> ProseBinding:
+    """Classify the prose around one block (SKILL.md fence/line/span) spanning
+    [start, end) in *blob*. CLASSIFICATION ONLY — see the module-level design
+    comment. *heading_matches* is accepted for call-site symmetry with the
+    heading-aware helpers callers combine this with; the primitive itself does
+    not need it.
+    """
+    intro = _block_para_before(blob, start)
+    trail = _block_para_after(blob, end)
+    isents = _pb_sentences(intro)
+    tsents = _pb_sentences(trail)
+    last = isents[-1] if isents else ""
+    first_t = tsents[0] if tsents else ""
+    # B-879 round 5: an unresolved cloud can span more than one `_pb_sentences`
+    # split (a splice's own aside may itself contain what looks like a clause
+    # terminator) — `carry_in[k]` is the cloud state, if any, still open when
+    # intro sentence k starts. The trailer's first sentence never inherits a
+    # carry: it sits on the OTHER side of the code block itself, a real
+    # boundary no aside crosses.
+    carry_in = _carries(isents)
+
+    directed = False
+    conflict = False
+    for k, s in enumerate(isents):
+        intro_last = k == len(isents) - 1
+        if _sentence_directed(s, _PB_FWD_DEIXIS, intro_last, carry_in[k]):
+            directed = True
+            if intro_last and _forbids(s, _PB_FWD_DEIXIS) == "governs":
+                conflict = True  # directive + unscoped prohibition, SAME sentence
+            break
+    if not directed and first_t and _sentence_directed(first_t, _PB_BACK_DEIXIS, introducer=True):
+        directed = True
+
+    forbids_intro = _forbids(last, _PB_FWD_DEIXIS) if last else None
+    forbids_trail = _forbids(first_t, _PB_BACK_DEIXIS) if first_t else None
+    forbids = "governs" if "governs" in (forbids_intro, forbids_trail) else (
+        "scoped" if "scoped" in (forbids_intro, forbids_trail) else None
+    )
+
+    # B-879 round 4 §4.c: a clouded EXEC verb ANYWHERE in the intro (not just
+    # the last sentence) or in the first trailer sentence means the block's
+    # governance is unresolved, even when the LAST intro sentence reads as a
+    # clean, unscoped prohibition.
+    unresolved = any(
+        _pb_has_clouded_exec_reaching(s, _PB_FWD_DEIXIS, k == len(isents) - 1, carry_in[k])
+        for k, s in enumerate(isents)
+    ) or bool(first_t and _pb_has_clouded_exec_reaching(first_t, _PB_BACK_DEIXIS, introducer=True))
+
+    ctx = (intro + " " + trail).strip()
+    marker = bool(_PB_MARKER_RE.search(ctx))
+    described = _pb_described(last, _PB_FWD_DEIXIS) if last else False
+    if not described and first_t:
+        described = _pb_described(first_t, _PB_BACK_DEIXIS)
+    unreadable = _pb_unreadable(last + " " + first_t)
+    has_prose = bool(intro or trail)
+    return ProseBinding(
+        directed=directed,
+        forbids=forbids,
+        marker=marker,
+        described=described,
+        unreadable=unreadable,
+        has_prose=has_prose,
+        conflict=conflict,
+        unresolved=unresolved,
+    )
