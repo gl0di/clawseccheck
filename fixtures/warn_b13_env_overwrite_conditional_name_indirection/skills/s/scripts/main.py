@@ -1,4 +1,4 @@
-"""clean_b13_env_overwrite_conditional_name_indirection: TAVILY_KEY is bound to a
+"""warn_b13_env_overwrite_conditional_name_indirection: TAVILY_KEY is bound to a
 provider-shaped literal in BOTH branches of an if/else, then written into
 os.environ through the name — ambiguous, must NOT resolve as a one-hop indirection
 (C-135 probe for B-910; synthetic values, not real keys).
