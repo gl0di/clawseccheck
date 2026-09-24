@@ -585,14 +585,213 @@ def test_unchanged_n10_zero_callers_literal_reassign_is_info():
     _assert_info(src)
 
 
-def test_unchanged_n11_starred_sink_is_crit_pre_existing():
-    """`check_output([*args, '--flag'])` is a pre-existing false positive
-    (the blanket per-function vararg taint reaches the FIRST literal-list
-    branch directly, before this task's `is_named_param` gate is ever
-    reached) -- unrelated to B-863, not fixed here; the architect's own
-    design already names it a residual to file (see risks item 6)."""
+def test_unchanged_n11_starred_sink_now_resolved_by_b956():
+    """`check_output([*args, '--flag'])` was a pre-existing false positive (the
+    blanket per-function vararg taint reached the FIRST literal-list branch's
+    generic `_names_in(prog) & tainted` check directly, before this task's
+    `is_named_param` gate was ever reached, since `_names_in()` walks INTO the
+    `ast.Starred` wrapping the vararg's own bare Name) -- unrelated to B-863,
+    not fixed by it; the architect's own design named it a residual to file
+    (see risks item 6).
+
+    CLAWSECCHECK-B-956 closes it: the literal-list branch now recognises an
+    `ast.Starred(value=ast.Name(...))` at position 0 that names THIS call's own
+    enclosing function's vararg parameter, and routes it through the SAME
+    call-site-resolution layer 2 the bare-Name vararg sink (`check_output(args)`)
+    already gets -- see `test_c_literal_all_literal_untouched_is_info_unchanged`,
+    this file, for the byte-identical-shape control -- plus a shell-indirect-exec
+    tail-taint check for whatever is written after the splice in THIS sink call
+    (see `_subprocess_taint_is_command_injection`'s own updated docstring). This
+    test now pins the FIXED behaviour: the call site is fully literal
+    (`sh("git", "status")`), so this resolves the same way the byte-identical
+    bare-Name sink already does -- info (TT5_ARG_INJECTION), not crit."""
     src = _va(["pass"], sink="subprocess.check_output([*args, '--flag'])")
+    _assert_info(src)
+
+
+# ---------------------------------------------------------------------------
+# B-956 -- the vararg-splice `argv[0]` case (`[*args, ...]`), a DIFFERENT sink
+# shape from B-863's own bare-Name vararg grammar above (`check_output(args)`),
+# fixed in the SAME literal-list branch of `_subprocess_taint_is_command_injection`.
+# ---------------------------------------------------------------------------
+
+def test_b956_exact_repro_is_no_longer_crit():
+    """The ticket's own literal repro, run through `analyze_python` directly
+    (not the `_va` harness) so the fix is verified against the exact reported
+    shape, independent of the harness's own conventions."""
+    import textwrap as _tw
+
+    from clawseccheck.skillast import analyze_python
+
+    src = _tw.dedent(
+        """
+        import subprocess
+        def sh(*args):
+            return subprocess.check_output([*args, "--flag"])
+
+        def main():
+            sh("git", "describe")
+        """
+    )
+    findings = analyze_python(src, "t.py")
+    tt5 = {(f.rule, f.severity) for f in findings if f.rule.startswith("TT5")}
+    assert tt5 == {("TT5_ARG_INJECTION", "info")}, tt5
+
+
+def test_b956_non_literal_call_site_stays_crit():
+    """One call site literal, one binds the vararg's first (spliced) element to
+    a genuinely tainted name -- `_all_call_sites_bind_fixed_argv` must fail the
+    whole proof, so this stays crit exactly like it did before the fix."""
+    src = _va(
+        ["pass"],
+        call='sh("git", "status")\n    sh(p, "bad")',
+        sink="subprocess.check_output([*args, '--flag'])",
+    )
     _assert_crit(src)
+
+
+def test_b956_shell_indirect_program_with_tainted_splice_tail_stays_crit():
+    """The call site's own spliced first element resolves to a shell
+    (`"sh"`, with `"-c"` present in the vararg's own content -- the exact
+    `_argv0_is_shell_indirect_exec` shape), and the literal element written
+    AFTER the splice in the sink call is itself a tainted name -- the tail-taint
+    check this fix adds must still catch it, exactly like the non-spliced
+    branch's own pre-existing shell-tail check already does for a static
+    argv[0]."""
+    src = _va(
+        ["pass"],
+        call='sh("sh", "-c")',
+        sink="subprocess.check_output([*args, payload])",
+    )
+    _assert_crit(src)
+
+
+def test_b956_self_referential_binop_add_reassign_stays_crit():
+    """C-135 (post-commit review): `_b863_classify_head`'s own `BinOp`/`Add`
+    branch has a PRE-EXISTING bug (out of scope here, not fixed by this test --
+    see `_b863_param_reassigned_via_self_referential_add`'s own docstring) that
+    recurses into `expr.left` ONLY, silently dropping `expr.right` -- so
+    `args = args + ("-c",)` was classified by `_b863_collect_channels`
+    identically to a body that never touches `args` at all, and
+    `_b863_param_body_is_pure_identity` wrongly trusted that to clear a real
+    `sh -c <tainted>` shell injection. Confirmed reproducible on commit
+    eb541ade: this reports TT5_ARG_INJECTION/info there; the byte-identical
+    INLINE control (`subprocess.check_output(["sh", "-c", payload])`, no
+    wrapper at all) correctly stays crit throughout. This test pins the
+    HARDENED behaviour: the direct self-referential-Add scan added on top of
+    `_b863_collect_channels` refuses to clear this shape, regardless of what
+    the shared classifier reports."""
+    import textwrap as _tw
+
+    from clawseccheck.skillast import analyze_python
+
+    src = _tw.dedent(
+        """
+        import os, subprocess
+        def sh(*args):
+            payload = os.environ['P']
+            args = args + ("-c",)
+            return subprocess.check_output([*args, payload])
+        def main():
+            sh("sh")
+        """
+    )
+    findings = analyze_python(src, "t.py")
+    tt5 = {(f.rule, f.severity) for f in findings if f.rule.startswith("TT5")}
+    assert tt5 == {("TT5_CMD_INJECTION", "crit")}, tt5
+
+
+def test_b956_headline_repro_still_clears_after_binop_add_hardening():
+    """Regression guard for the hardening above: a wrapper whose body never
+    touches the vararg at all must still clear to info -- the new
+    self-referential-Add scan must not become overly broad and start
+    convicting the ORIGINAL, unrelated headline shape this task fixed."""
+    src = _va(["pass"], sink="subprocess.check_output([*args, '--flag'])")
+    _assert_info(src)
+
+
+def test_b956_reversed_operand_binop_add_reassign_stays_crit():
+    """`X + name` (the operand ORDER the pre-existing `_b863_classify_head` bug
+    does not even LOOK at, since it only ever recurses into `expr.left`) must
+    be caught too -- the hardening scans both operands, not just `expr.left`."""
+    src = _va(
+        ["args = ('-c',) + args"],
+        sink="subprocess.check_output([*args, payload])",
+        call='sh("sh")',
+    )
+    _assert_crit(src)
+
+
+def test_b956_chained_binop_add_reassign_stays_crit():
+    """`name = name + (a,) + (b,)` -- a chained Add, parsed as a BinOp nested
+    inside another BinOp's own `.left` -- must also be caught: the outer
+    BinOp's own subtree still contains `args` by Name, wherever it is nested."""
+    src = _va(
+        ["args = args + ('x',) + ('-c',)"],
+        sink="subprocess.check_output([*args, payload])",
+        call='sh("sh")',
+    )
+    _assert_crit(src)
+
+
+def test_b956_augmented_assign_add_reassign_stays_crit():
+    """`name += X` is an `ast.AugAssign`, not an `ast.BinOp` -- a structurally
+    different node the scan must handle explicitly, not just BinOp/Add."""
+    src = _va(
+        ["args += ('-c',)"],
+        sink="subprocess.check_output([*args, payload])",
+        call='sh("sh")',
+    )
+    _assert_crit(src)
+
+
+def test_b956_unrelated_binop_add_on_a_different_name_still_clears():
+    """A `+`-concatenation elsewhere in the body that does NOT touch the
+    vararg at all must not trip the new hardening -- only a self-referential
+    reassignment of `args` itself should refuse to clear."""
+    src = _va(
+        ["extra = ['--flag'] + ['--more']"],
+        sink="subprocess.check_output([*args, '--flag'])",
+    )
+    _assert_info(src)
+
+
+def test_b956_list_starred_with_trailing_element_reassign_stays_crit():
+    """C-135 (post-commit review, round 2): `_b863_classify_head`'s own
+    List+Starred branch had the IDENTICAL "only look at the head, silently
+    drop everything else" defect as the `BinOp`/`Add` case above -- just for
+    `ast.List` instead of `ast.BinOp`. `[isinstance(expr, ast.List) and
+    expr.elts and isinstance(expr.elts[0], ast.Starred)]` matched `[*H, X]`
+    for ANY trailing `X`, not just `[*H]` alone, and returned pure head
+    preservation regardless -- so `args = [*args, "-c"]` (the more idiomatic
+    Python spelling of the SAME shape `args = args + ("-c",)` already covers)
+    was classified identically to a body that never touches `args` at all.
+    Confirmed reproducible on commit 43d7630d: this reported
+    TT5_ARG_INJECTION/info there; the identical-shape `args = args + ("-c",)`
+    form (already fixed) and the inline no-wrapper control both correctly
+    stayed crit throughout. Fixed at the ROOT (`_b863_classify_head` itself,
+    not another narrow scan in `_subprocess_taint_is_command_injection`'s own
+    layer) by requiring `len(expr.elts) == 1` -- any trailing element now
+    falls through to `_B863OutOfDomain`, the same conservative default the
+    `BinOp` fix already relies on. This test pins the FIXED behaviour."""
+    import textwrap as _tw
+
+    from clawseccheck.skillast import analyze_python
+
+    src = _tw.dedent(
+        """
+        import os, subprocess
+        def sh(*args):
+            payload = os.environ['P']
+            args = [*args, "-c"]
+            return subprocess.check_output([*args, payload])
+        def main():
+            sh("sh")
+        """
+    )
+    findings = analyze_python(src, "t.py")
+    tt5 = {(f.rule, f.severity) for f in findings if f.rule.startswith("TT5")}
+    assert tt5 == {("TT5_CMD_INJECTION", "crit")}, tt5
 
 
 def test_unchanged_n8_local_list_extend_bash_c_reports_no_tt5():
