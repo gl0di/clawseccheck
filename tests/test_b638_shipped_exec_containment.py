@@ -282,6 +282,19 @@ BENIGN = {
         'with open(os.path.join(here, "README.md"), encoding="utf-8") as f:\n'
         "    readme = f.read()\n"
     ),
+    # B-995 round 2, Finding B: TWO plain `Assign` statements directly in the body of the
+    # SAME `with` -- under round 1's flat with-index both compared EQUAL and fell through
+    # to a raw-AST-node `sorted()` comparison that raised TypeError (confirmed on round
+    # 1). The two-part (with-index, inner-index) position this fix uses orders the pair
+    # by its inner index, so `out.decode("utf-8")` -- the SECOND with-body statement --
+    # correctly reaches exec(), clearing exactly like `var_decode` above's one-statement
+    # form.
+    "with_tie_two_bindings_same_with_decode": (
+        f'with {_OPEN}, "rb") as fh:\n'
+        '    out = fh.read()\n'
+        '    out = out.decode("utf-8")\n'
+        f'{EX}(out, about)\n'
+    ),
 }
 
 
@@ -701,7 +714,7 @@ ESCAPES = {
         f'{EX}(src, about)\n'
     ),
     # Same mixed-items shape, but the second item is a genuinely benign, non-suppressing
-    # context manager -- isolates "every item must be exactly open/io.open/codecs.open"
+    # context manager -- isolates "every item must be exactly open/io.open"
     # from "must not suppress": even a harmless second item gets no trust.
     "with_open_plus_harmless_second_item": (
         'class Harmless:\n'
@@ -714,6 +727,53 @@ ESCAPES = {
         'src = src.decode("utf-8")\n'
         f'{EX}(src, about)\n'
     ),
+    # B-995 round 2, Finding A: an independent C-135 review found round 1's with-body
+    # trust gave a with-body binding its ENCLOSING with-statement's flat index -- the
+    # SAME flat index a use point INSIDE that same with-body also gets. The strict
+    # `i < limit` comparison then silently EXCLUDED the with-body binding (its index was
+    # never `<` a limit equal to itself) and picked the EARLIER, unrelated module-scope
+    # `src = open(P, "rb").read()` binding instead -- confirmed on round 1: this exact
+    # shape cleared with an empty crit set. `src` here never carries the file's own
+    # bytes at the point `exec()` runs; it is the env var, decoded.
+    "index_collision_content_type_mismatch": (
+        f'src = {_OPEN}, "rb").read()\n'
+        f'with {_OPEN}, "rb") as f:\n'
+        '    src = os.environ.get("DEMO_PAYLOAD", "").encode()\n'
+        f'    {EX}(src.decode("utf-8"), about)\n'
+    ),
+    # B-995 round 2, Finding B: two plain `Assign` statements directly in the body of the
+    # SAME `with` -- under round 1's flat with-index both bindings compared EQUAL,
+    # falling through to a raw-AST-node comparison that raised
+    # `TypeError: '<' not supported between instances of 'Call' and 'Call'` (confirmed on
+    # round 1). The two-part (with-index, inner-index) position orders this pair by the
+    # inner index instead, so `out.strip()` -- not `out.read()` -- correctly reaches
+    # `exec()`; it stays crit because a `.strip()`'d value is a transformation, not the
+    # file's own bytes, never because of a crash.
+    "with_tie_two_bindings_same_with_transformed": (
+        f'with {_OPEN}) as fh:\n'
+        '    out = fh.read()\n'
+        '    out = out.strip()\n'
+        f'{EX}(out, about)\n'
+    ),
+    # B-995 round 2, Finding C: `codecs.open` is no longer in `_with_item_is_open`'s
+    # trusted set at all -- it returns a `codecs.StreamReaderWriter`, an ordinary
+    # mutable class, so its `__exit__` can be reassigned at runtime (unlike
+    # `open`/`io.open`'s C-implemented return types), unlike round 1 which trusted it
+    # identically to those two (confirmed: this exact with-body content-rebind-then-
+    # decode shape, unpatched, cleared under round 1). The `__exit__` patch below is not
+    # needed for the verdict any more -- codecs.open is untrusted regardless of it -- it
+    # is kept only as regression coverage of the original finding (a same-file alias
+    # spelling; `getattr`/cross-file spellings are covered by the standalone tests
+    # below).
+    "codecs_open_with_body_exit_patched_alias": (
+        'import codecs\n'
+        'SRW = codecs.StreamReaderWriter\n'
+        'SRW.__exit__ = lambda *a: True\n'
+        f'with codecs.open(os.path.join(here, "demo_plugin", "__version__.py"), "rb") as fh:\n'
+        '    src = fh.read()\n'
+        'src = src.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
 }
 
 
@@ -721,6 +781,24 @@ ESCAPES = {
 def test_escape_stays_crit(name):
     src = _HDR + ESCAPES[name]
     assert _crit(src), name
+
+
+def test_index_collision_content_type_mismatch_stays_crit_at_function_scope():
+    """B-995 round 2, Finding A, function-scope variant of the
+    `index_collision_content_type_mismatch` ESCAPES entry -- the same index-collision
+    false-PASS the C-135 review found, confirmed to reproduce at module scope, also
+    reproduces one function scope down (its own locals, not module globals)."""
+    src = (
+        "import os, sys\n\n"
+        "def get_version():\n"
+        "    here = os.path.abspath(os.path.dirname(__file__))\n"
+        "    about = {}\n"
+        f'    src = {_OPEN}, "rb").read()\n'
+        f'    with {_OPEN}, "rb") as f:\n'
+        '        src = os.environ.get("DEMO_PAYLOAD", "").encode()\n'
+        f'        {EX}(src.decode("utf-8"), about)\n'
+    )
+    assert _crit(src)
 
 
 @pytest.mark.skipif(
@@ -859,6 +937,40 @@ def test_a_harmless_second_file_does_not():
 def test_a_module_shadowing_the_read_path_voids_the_carve_out(shadow):
     """`import pathlib` next to a shipped `pathlib.py` imports the artifact's copy."""
     assert _crit(_SETUP, [(shadow, "X = 1\n")])
+
+
+# ---------------------------------------------------------------------------------------
+# B-995 round 2, Finding C: `codecs.open` is no longer trusted in `_with_item_is_open` at
+# all, so these three stay crit regardless of the `__exit__` patch -- kept as regression
+# coverage of the finding's own three confirmed-reachable spellings (a direct same-file
+# `codecs.StreamReaderWriter.__exit__ = ...` store was already caught by `_blocked`'s
+# existing `_READ_PATH_ROOTS` check before this round; these three were not).
+# ---------------------------------------------------------------------------------------
+
+_CODECS_CONTENT_REBIND = (
+    f'with codecs.open(os.path.join(here, "demo_plugin", "__version__.py"), "rb") as fh:\n'
+    '    src = fh.read()\n'
+    'src = src.decode("utf-8")\n'
+    f'{EX}(src, about)\n'
+)
+
+
+def test_codecs_streamreaderwriter_exit_patched_via_getattr_stays_crit():
+    src = _HDR + (
+        'import codecs\n'
+        'getattr(codecs, "StreamReaderWriter").__exit__ = lambda *a: True\n'
+    ) + _CODECS_CONTENT_REBIND
+    assert _crit(src)
+
+
+def test_codecs_streamreaderwriter_exit_patched_from_a_different_shipped_file_stays_crit():
+    """The direct same-file spelling (`codecs.StreamReaderWriter.__exit__ = ...`) is
+    already caught by `_blocked`'s `_READ_PATH_ROOTS` check; this is the SAME direct
+    spelling written in a SEPARATE shipped file instead, which that per-file check does
+    not reach across."""
+    helper = ("helper.py", 'import codecs\ncodecs.StreamReaderWriter.__exit__ = lambda *a: True\n')
+    src = _HDR + _CODECS_CONTENT_REBIND
+    assert _crit(src, [helper])
 
 
 def test_a_notebook_is_never_a_target(tmp_path):
