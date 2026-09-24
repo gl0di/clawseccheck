@@ -588,12 +588,39 @@ class _FileFacts:
         loop, def or class) -- then the last one before *before* in body order wins
         (B-638: a same-scope rebind split across two lines resolves like one nested
         expression); any boundary-crossing or non-Assign binding disqualifies outright.
+        ONE narrow exception to "direct statement of scope's own body": a binding whose
+        statement sits immediately inside a `with` block is treated as occupying that
+        `with` statement's own position IF every item of the `with` is a verified call to
+        exactly `open`/`io.open` (B-995, see `_direct_index`) -- neither ever suppresses
+        an exception on `__exit__` (it either propagates or the body completed normally),
+        unlike a custom or `contextlib.suppress`-style context manager whose `__exit__`
+        can return True and let a with-body binding silently NOT have happened while
+        control still resumes past the block. `codecs.open` is deliberately NOT trusted
+        here even though it is also read-only (B-995 round 2, Finding C): it returns a
+        `codecs.StreamReaderWriter`, an ordinary mutable Python class, so its `__exit__`
+        can be reassigned at runtime (an alias, `getattr()`, or a store from a different
+        shipped file) the way `open`/`io.open`'s C-implemented return types cannot be. A
+        `with` mixing in ANY other item -- even alongside an open-family one -- gets no
+        trust, since that other item's own `__exit__` could still suppress.
+        A with-body binding's position is a (with-index, inner-index) PAIR, not the
+        with statement's flat index alone (B-995 round 2, Finding A/B): collapsing it to
+        one index made a with-body binding indistinguishable, for comparison purposes,
+        from a USE POINT that is itself inside the same with-body, which could silently
+        prefer an earlier, unrelated same-name binding over the one that actually reaches
+        the use point -- and made two with-body bindings under the SAME `with` compare
+        equal, falling through to a raw-AST-node comparison that raises TypeError. Every
+        position here -- a binding's and the use point's (`_stmt_pos`) -- is that same
+        two-part tuple, so plain tuple `<`/`max` orders a same-with-block tie by its inner
+        index, matching normal statement-order semantics within that block, and never
+        falls back to comparing anything but the tuple.
         Source order is a proxy for RUNTIME order here, and that proxy is only sound
         because `_tampers()` bans every frame-jump primitive that can break it -- a
         `sys.settrace`/`setprofile` (or `sys.monitoring` LINE) hook rewriting
         `frame.f_lineno` mid-run can skip the second binding this picks, so without that
         ban "last one before the use point" would describe the SOURCE, not what the
-        interpreter actually executes (B-922 round 2)."""
+        interpreter actually executes (B-922 round 2); the with-body exception above is
+        still a source-order comparison, so it rests on that same ban rather than a
+        tamper check of its own."""
         if name == "__file__" or name in self.declared:
             return None
         recs = self.records(scope).get(name, [])
@@ -602,20 +629,81 @@ class _FileFacts:
         if before is None or not recs or any(r[0] != "assign" for r in recs):
             return None
         body = getattr(scope, "body", None) or []
-        if any(self.parents.get(r[2]) is not scope or r[2] not in body for r in recs):
+        positions = [self._direct_index(r[2], scope, body) for r in recs]
+        if any(p is None for p in positions):
             return None
-        limit = self._stmt_index(before, scope, body)
+        limit = self._stmt_pos(before, scope, body)
         if limit is None:
             return None
-        reaching = sorted((body.index(r[2]), r) for r in recs if body.index(r[2]) < limit)
-        return reaching[-1][1] if reaching else None
+        reaching = [(p, r) for p, r in zip(positions, recs) if p < limit]
+        return max(reaching, key=lambda pr: pr[0])[1] if reaching else None
 
-    def _stmt_index(self, node: ast.AST, scope: ast.AST, body: list) -> "int | None":
-        """Index in *body* of the statement transitively evaluating *node*, or None."""
+    def _direct_index(self, stmt: ast.AST, scope: ast.AST, body: list) -> "tuple | None":
+        """Where *stmt* counts for `sole()`'s source-order comparison, as a two-part
+        (outer, inner) position tuple, or None when *stmt* is neither a direct,
+        unconditional statement of *scope*'s own body nor the narrow with-body exception
+        `sole()` documents (B-995): *stmt* sits directly in the body of a `with`
+        statement that is itself direct in *scope*'s body, and every item of that `with`
+        resolves to exactly `open`/`io.open`. A direct scope-body statement gets
+        `(index-in-body, -1)`; a with-body statement gets `(index-of-the-with-in-body,
+        index-of-stmt-in-the-with's-own-body)` -- the inner index is what lets `sole()`
+        order two bindings under the SAME `with` correctly instead of treating them as
+        occupying one collapsed position (B-995 round 2, Finding A/B)."""
+        parent = self.parents.get(stmt)
+        if parent is scope and stmt in body:
+            return (body.index(stmt), -1)
+        if (
+            isinstance(parent, ast.With)
+            and self.parents.get(parent) is scope
+            and parent in body
+            and stmt in parent.body
+            and all(self._with_item_is_open(i) for i in parent.items)
+        ):
+            return (body.index(parent), parent.body.index(stmt))
+        return None
+
+    def _with_item_is_open(self, item: ast.withitem) -> bool:
+        """Is *item*'s context expression a call to exactly `open`/`io.open`? Those two
+        are the only context managers `_direct_index` trusts a with-body binding
+        through, because neither ever suppresses an exception on `__exit__`.
+        `codecs.open` is deliberately excluded (B-995 round 2, Finding C): it returns a
+        `codecs.StreamReaderWriter`, an ordinary mutable Python class, so its `__exit__`
+        can be reassigned at runtime (unlike `open`/`io.open`'s C-implemented return
+        types, whose `__exit__` cannot) -- a route that would let it suppress an
+        exception the same way this trust exists to rule out."""
+        ctx = item.context_expr
+        return isinstance(ctx, ast.Call) and self.dotted(ctx.func) in (
+            "builtins.open", "io.open"
+        )
+
+    def _stmt_pos(self, node: ast.AST, scope: ast.AST, body: list) -> "tuple | None":
+        """The two-part (outer, inner) position of *node*'s containing statement, in the
+        same encoding `_direct_index` gives a binding record, so `sole()` can compare a
+        use point against every binding with plain tuple `<`/`max` (B-995 round 2). Outer
+        is `_stmt_child`'s climb to *node*'s direct-body statement in *scope*. When that
+        statement is itself a `with`, inner is *node*'s position within the with's OWN
+        body (a second, bounded climb) -- or -1 when *node* sits in the with-item's
+        context expression itself rather than its body. A non-`with` direct statement
+        gets inner -1, matching `_direct_index`'s direct-statement encoding."""
+        child = self._stmt_child(node, scope, body)
+        if child is None:
+            return None
+        outer = body.index(child)
+        if not isinstance(child, ast.With):
+            return (outer, -1)
+        inner_child = self._stmt_child(node, child, child.body)
+        if inner_child is None:
+            return (outer, -1)
+        return (outer, child.body.index(inner_child))
+
+    def _stmt_child(self, node: ast.AST, scope: ast.AST, body: list) -> "ast.AST | None":
+        """Climb from *node* up to the direct child of *scope* (an element of *body*)
+        that transitively evaluates it, or None. `_stmt_pos` calls this twice, at two
+        different nesting levels, to build its two-part position."""
         child, cur = node, self.parents.get(node)
         while cur is not None and cur is not scope:
             child, cur = cur, self.parents.get(cur)
-        return body.index(child) if cur is scope and child in body else None
+        return child if cur is scope and child in body else None
 
     def _legb_blocked(self, name: str) -> bool:
         """Guard for `locate()`'s LEGB fallback (b917-design.md 2.1). A function-scope

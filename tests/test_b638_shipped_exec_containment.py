@@ -186,6 +186,57 @@ def test_b922_fixtures_differ_only_in_the_rebind_statement():
 
 
 # ---------------------------------------------------------------------------------------
+# B-995: the SAME content-rebind shape as B-922, but the read sits inside a `with`
+# block instead of a plain open()/.close() pair -- sole()'s "direct, unconditional
+# statement of scope's own body" test disqualified a with-body binding outright, even
+# though open()/io.open()/codecs.open() never suppress an exception on `__exit__`, so a
+# with-body binding cannot silently "not have happened" while control still resumes past
+# the block. `_direct_index` trusts a with-body binding only when EVERY item of the
+# enclosing `with` resolves to exactly one of those three.
+# ---------------------------------------------------------------------------------------
+
+
+def test_clean_fixture_with_content_rebind_then_decode_passes():
+    """B-995: the task's own literal repro -- `with open(...) as f: src = f.read()`
+    followed by a SEPARATE, straight-line `src = src.decode("utf-8")` outside the `with`
+    block. Before this fix: FAIL -- the with-body `src = f.read()` binding was not a
+    direct statement of the scope's own body, so sole() disqualified the whole name."""
+    f = _b13(FIXTURES / "clean_b995_with_content_rebind_then_decode")
+    assert f.status == PASS, (f.status, f.detail)
+
+
+def test_vet_skill_agrees_on_the_with_content_rebind_then_decode():
+    out = vet_skill(
+        FIXTURES / "clean_b995_with_content_rebind_then_decode" / "skills" / "demo-packager"
+    )
+    pool = [out, *(out.ring_findings or [])]
+    assert not [f for f in pool if f.status == FAIL], [(f.id, f.detail[:120]) for f in pool]
+
+
+def test_bad_fixture_with_content_rebind_replaced_fails():
+    """B-995 mutation check: the SAME with-block content-rebind shape as the clean
+    fixture, but the second statement REPLACES `src` with attacker-influenced data (an
+    environment variable) instead of decoding the shipped read. This must stay FAIL
+    exactly as before this fix -- the with-body trust extension only widens WHICH
+    binding sole() can see, never what content() accepts as shipped content."""
+    f = _b13(FIXTURES / "bad_b995_with_content_rebind_replaced")
+    assert f.status == FAIL, (f.status, f.detail)
+    assert "setup.py:24" in f.detail
+    assert "external input flows into" in f.detail
+
+
+def test_b995_fixtures_differ_only_in_the_rebind_statement():
+    """Non-vacuity: the pair must be the same program but for the one replaced statement."""
+    base = FIXTURES / "{}" / "skills" / "demo-packager"
+    clean = Path(str(base).format("clean_b995_with_content_rebind_then_decode"))
+    bad = Path(str(base).format("bad_b995_with_content_rebind_replaced"))
+    for rel in ("demo_plugin/__init__.py", "demo_plugin/__version__.py", "SKILL.md"):
+        assert (clean / rel).read_text() == (bad / rel).read_text()
+    assert 'src = src.decode("utf-8")' in (clean / "setup.py").read_text()
+    assert 'src = os.environ.get("DEMO_PAYLOAD", "")' in (bad / "setup.py").read_text()
+
+
+# ---------------------------------------------------------------------------------------
 # Benign spellings: each executes only a file the artifact ships (most were crit before)
 # ---------------------------------------------------------------------------------------
 
@@ -197,6 +248,20 @@ BENIGN = {
     "with_inline_decode": f'with {_OPEN}, "rb") as fh:\n    {EX}(fh.read().decode("utf-8"), about)\n',
     "var_decode": f'with {_OPEN}, "rb") as fh:\n    src = fh.read().decode("utf-8")\n{EX}(src, about)\n',
     "var_text": f"with {_OPEN}) as fh:\n    src = fh.read()\n{EX}(src, about)\n",
+    # B-995: the task's own literal repro -- the read is inside the `with` block, but the
+    # decode is a SEPARATE, straight-line statement OUTSIDE it (unlike "var_decode" above,
+    # whose decode is the same with-body statement as the read).
+    "with_content_rebind_then_decode": (
+        f'with {_OPEN}, "rb") as fh:\n    src = fh.read()\nsrc = src.decode("utf-8")\n'
+        f"{EX}(src, about)\n"
+    ),
+    # B-995: the same shape with the io.open spelling, not just the bare `open` builtin --
+    # `_with_item_is_open` must resolve all three of open()/io.open()/codecs.open().
+    "with_content_rebind_then_decode_io_open": (
+        'import io\n'
+        f'with io.open(os.path.join(here, "demo_plugin", "__version__.py"), "rb") as fh:\n'
+        f'    src = fh.read()\nsrc = src.decode("utf-8")\n{EX}(src, about)\n'
+    ),
     "inline_open_no_with": f"{EX}({_OPEN}).read(), about)\n",
     "compile_with_path_var": (
         'P = os.path.join(here, "demo_plugin", "__version__.py")\n'
@@ -216,6 +281,19 @@ BENIGN = {
         f'with {_OPEN}, encoding="utf-8") as f:\n    {EX}(f.read(), about)\n'
         'with open(os.path.join(here, "README.md"), encoding="utf-8") as f:\n'
         "    readme = f.read()\n"
+    ),
+    # B-995 round 2, Finding B: TWO plain `Assign` statements directly in the body of the
+    # SAME `with` -- under round 1's flat with-index both compared EQUAL and fell through
+    # to a raw-AST-node `sorted()` comparison that raised TypeError (confirmed on round
+    # 1). The two-part (with-index, inner-index) position this fix uses orders the pair
+    # by its inner index, so `out.decode("utf-8")` -- the SECOND with-body statement --
+    # correctly reaches exec(), clearing exactly like `var_decode` above's one-statement
+    # form.
+    "with_tie_two_bindings_same_with_decode": (
+        f'with {_OPEN}, "rb") as fh:\n'
+        '    out = fh.read()\n'
+        '    out = out.decode("utf-8")\n'
+        f'{EX}(out, about)\n'
     ),
 }
 
@@ -586,6 +664,116 @@ ESCAPES = {
         'src = raw.decode("utf-8")\n'
         f'{EX}(src, about)\n'
     ),
+    # B-995: `_direct_index` trusts a with-body binding ONLY when every item of the
+    # enclosing `with` resolves to exactly `open`/`io.open`/`codecs.open`, because those
+    # three never suppress an exception on `__exit__`. Naively trusting ANY with-body
+    # binding would reopen a false-PASS: a context manager whose `__exit__` returns True
+    # lets an earlier with-body's binding silently NOT have happened (the exception it
+    # raises is swallowed) while control still resumes past the block, so the value that
+    # actually reaches exec() at runtime is whichever assignment executed LAST at
+    # runtime, not whichever a naive "trust any with" static reader would pick. Each
+    # variant below is the SAME with-block content-rebind shape as
+    # test_clean_fixture_with_content_rebind_then_decode_passes -- which must stay clear
+    # on its own -- with a suppressing (or mixed) context manager added; every one must
+    # stay crit.
+    "with_suppress_attack_prior_payload": (
+        'import contextlib\n'
+        'with contextlib.suppress(Exception):\n'
+        '    src = "MALICIOUS"\n'
+        '    raise Exception()\n'
+        f'with {_OPEN}, "rb") as f:\n'
+        '    src = f.read()\n'
+        'src = src.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    "with_custom_cm_exit_true": (
+        'class Quiet:\n'
+        '    def __enter__(self):\n'
+        '        return None\n'
+        '    def __exit__(self, *a):\n'
+        '        return True\n'
+        'with Quiet():\n'
+        '    src = "MALICIOUS"\n'
+        '    raise Exception()\n'
+        f'with {_OPEN}, "rb") as f:\n'
+        '    src = f.read()\n'
+        'src = src.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    # A single `with` statement mixing the legitimate open() item with a second,
+    # suppressing item -- "every item" must be open-family, not just one.
+    "with_open_plus_custom_cm": (
+        'class Quiet:\n'
+        '    def __enter__(self):\n'
+        '        return None\n'
+        '    def __exit__(self, *a):\n'
+        '        return True\n'
+        f'with {_OPEN}, "rb") as f, Quiet() as g:\n'
+        '    src = f.read()\n'
+        'src = src.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    # Same mixed-items shape, but the second item is a genuinely benign, non-suppressing
+    # context manager -- isolates "every item must be exactly open/io.open"
+    # from "must not suppress": even a harmless second item gets no trust.
+    "with_open_plus_harmless_second_item": (
+        'class Harmless:\n'
+        '    def __enter__(self):\n'
+        '        return None\n'
+        '    def __exit__(self, *a):\n'
+        '        return False\n'
+        f'with {_OPEN}, "rb") as f, Harmless() as g:\n'
+        '    src = f.read()\n'
+        'src = src.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    # B-995 round 2, Finding A: an independent C-135 review found round 1's with-body
+    # trust gave a with-body binding its ENCLOSING with-statement's flat index -- the
+    # SAME flat index a use point INSIDE that same with-body also gets. The strict
+    # `i < limit` comparison then silently EXCLUDED the with-body binding (its index was
+    # never `<` a limit equal to itself) and picked the EARLIER, unrelated module-scope
+    # `src = open(P, "rb").read()` binding instead -- confirmed on round 1: this exact
+    # shape cleared with an empty crit set. `src` here never carries the file's own
+    # bytes at the point `exec()` runs; it is the env var, decoded.
+    "index_collision_content_type_mismatch": (
+        f'src = {_OPEN}, "rb").read()\n'
+        f'with {_OPEN}, "rb") as f:\n'
+        '    src = os.environ.get("DEMO_PAYLOAD", "").encode()\n'
+        f'    {EX}(src.decode("utf-8"), about)\n'
+    ),
+    # B-995 round 2, Finding B: two plain `Assign` statements directly in the body of the
+    # SAME `with` -- under round 1's flat with-index both bindings compared EQUAL,
+    # falling through to a raw-AST-node comparison that raised
+    # `TypeError: '<' not supported between instances of 'Call' and 'Call'` (confirmed on
+    # round 1). The two-part (with-index, inner-index) position orders this pair by the
+    # inner index instead, so `out.strip()` -- not `out.read()` -- correctly reaches
+    # `exec()`; it stays crit because a `.strip()`'d value is a transformation, not the
+    # file's own bytes, never because of a crash.
+    "with_tie_two_bindings_same_with_transformed": (
+        f'with {_OPEN}) as fh:\n'
+        '    out = fh.read()\n'
+        '    out = out.strip()\n'
+        f'{EX}(out, about)\n'
+    ),
+    # B-995 round 2, Finding C: `codecs.open` is no longer in `_with_item_is_open`'s
+    # trusted set at all -- it returns a `codecs.StreamReaderWriter`, an ordinary
+    # mutable class, so its `__exit__` can be reassigned at runtime (unlike
+    # `open`/`io.open`'s C-implemented return types), unlike round 1 which trusted it
+    # identically to those two (confirmed: this exact with-body content-rebind-then-
+    # decode shape, unpatched, cleared under round 1). The `__exit__` patch below is not
+    # needed for the verdict any more -- codecs.open is untrusted regardless of it -- it
+    # is kept only as regression coverage of the original finding (a same-file alias
+    # spelling; `getattr`/cross-file spellings are covered by the standalone tests
+    # below).
+    "codecs_open_with_body_exit_patched_alias": (
+        'import codecs\n'
+        'SRW = codecs.StreamReaderWriter\n'
+        'SRW.__exit__ = lambda *a: True\n'
+        f'with codecs.open(os.path.join(here, "demo_plugin", "__version__.py"), "rb") as fh:\n'
+        '    src = fh.read()\n'
+        'src = src.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
 }
 
 
@@ -593,6 +781,24 @@ ESCAPES = {
 def test_escape_stays_crit(name):
     src = _HDR + ESCAPES[name]
     assert _crit(src), name
+
+
+def test_index_collision_content_type_mismatch_stays_crit_at_function_scope():
+    """B-995 round 2, Finding A, function-scope variant of the
+    `index_collision_content_type_mismatch` ESCAPES entry -- the same index-collision
+    false-PASS the C-135 review found, confirmed to reproduce at module scope, also
+    reproduces one function scope down (its own locals, not module globals)."""
+    src = (
+        "import os, sys\n\n"
+        "def get_version():\n"
+        "    here = os.path.abspath(os.path.dirname(__file__))\n"
+        "    about = {}\n"
+        f'    src = {_OPEN}, "rb").read()\n'
+        f'    with {_OPEN}, "rb") as f:\n'
+        '        src = os.environ.get("DEMO_PAYLOAD", "").encode()\n'
+        f'        {EX}(src.decode("utf-8"), about)\n'
+    )
+    assert _crit(src)
 
 
 @pytest.mark.skipif(
@@ -731,6 +937,40 @@ def test_a_harmless_second_file_does_not():
 def test_a_module_shadowing_the_read_path_voids_the_carve_out(shadow):
     """`import pathlib` next to a shipped `pathlib.py` imports the artifact's copy."""
     assert _crit(_SETUP, [(shadow, "X = 1\n")])
+
+
+# ---------------------------------------------------------------------------------------
+# B-995 round 2, Finding C: `codecs.open` is no longer trusted in `_with_item_is_open` at
+# all, so these three stay crit regardless of the `__exit__` patch -- kept as regression
+# coverage of the finding's own three confirmed-reachable spellings (a direct same-file
+# `codecs.StreamReaderWriter.__exit__ = ...` store was already caught by `_blocked`'s
+# existing `_READ_PATH_ROOTS` check before this round; these three were not).
+# ---------------------------------------------------------------------------------------
+
+_CODECS_CONTENT_REBIND = (
+    f'with codecs.open(os.path.join(here, "demo_plugin", "__version__.py"), "rb") as fh:\n'
+    '    src = fh.read()\n'
+    'src = src.decode("utf-8")\n'
+    f'{EX}(src, about)\n'
+)
+
+
+def test_codecs_streamreaderwriter_exit_patched_via_getattr_stays_crit():
+    src = _HDR + (
+        'import codecs\n'
+        'getattr(codecs, "StreamReaderWriter").__exit__ = lambda *a: True\n'
+    ) + _CODECS_CONTENT_REBIND
+    assert _crit(src)
+
+
+def test_codecs_streamreaderwriter_exit_patched_from_a_different_shipped_file_stays_crit():
+    """The direct same-file spelling (`codecs.StreamReaderWriter.__exit__ = ...`) is
+    already caught by `_blocked`'s `_READ_PATH_ROOTS` check; this is the SAME direct
+    spelling written in a SEPARATE shipped file instead, which that per-file check does
+    not reach across."""
+    helper = ("helper.py", 'import codecs\ncodecs.StreamReaderWriter.__exit__ = lambda *a: True\n')
+    src = _HDR + _CODECS_CONTENT_REBIND
+    assert _crit(src, [helper])
 
 
 def test_a_notebook_is_never_a_target(tmp_path):

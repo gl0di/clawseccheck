@@ -624,6 +624,28 @@ def test_r1b_env_sourced_loader_target_is_warn_not_fail():
     assert any(f.rule == "LOADER_TARGET_UNVERIFIED" for f in findings)
 
 
+def test_b995_round2_tie_shape_with_body_double_bind_does_not_crash_loader_path():
+    """B-995 round 2, Finding B, in a loader context with no exec()/eval() anywhere: two
+    plain `Assign` statements directly in the body of the SAME `with` (`t = fh.read()`
+    then `t = t.strip()`) feeding a `runpy.run_path` target. Under round 1's flat
+    with-index the two bindings compared EQUAL and fell through to a raw-AST-node
+    `sorted()` comparison that raised `TypeError: '<' not supported between instances of
+    'Call' and 'Call'` -- which propagated up past this file's own analysis into a
+    whole-skill UNKNOWN, silencing unrelated findings elsewhere in the same skill
+    (confirmed reproducing this exact shape against round 1's committed shippedexec.py).
+    The assertion here is only that this must not raise -- the loader-target verdict
+    itself is not the point of this test."""
+    src = dedent('''
+        import runpy
+        with open("/tmp/stage_dir/manifest.txt") as fh:
+            t = fh.read()
+            t = t.strip()
+        runpy.run_path(t)
+    ''')
+    findings = _analyze(src, no_artifact=True)  # must not raise TypeError
+    assert isinstance(findings, list)
+
+
 def test_r1b_variants_input_and_file_read_are_warn():
     for source_expr in ('input("path: ")', 'open("cfg").read()'):
         src = f'import runpy\nt = {source_expr}\nrunpy.run_path(t)\n'
