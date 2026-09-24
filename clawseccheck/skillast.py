@@ -11799,8 +11799,16 @@ def analyze_python_package(files) -> list[ASTFinding]:
 
 # --- Shell (.sh/.bash/.zsh) semantic pass (F-050) ----------------------------
 # Credential FILES whose contents are secrets (mirrors the Python _CRED_PATH_RE intent).
+# B-975: same public-key gap B-898 fixed on _CRED_PATH_RE -- `.ssh/id_` (any key-type
+# suffix) and the bare `id_rsa`/`id_ed25519` spellings used to match a PUBLIC-key
+# filename too (`id_rsa.pub`, `id_ed25519.pub`, an OpenSSH cert `id_rsa-cert.pub`),
+# false-positiving a shell script that legitimately references a public key (e.g.
+# uploading it to a git host) as SHELL_CRED_EXFIL. Same negative-lookahead discipline:
+# "no more identifier chars, and not immediately followed by .pub/-cert.pub".
 _SH_CRED_FILE_RE = re.compile(
-    r"\.ssh/id_[a-z0-9_]+|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|\.netrc\b|"
+    r"\.ssh/id_[a-z0-9_]+(?![a-z0-9_]|\.pub\b|-cert\.pub\b)|"
+    r"\bid_rsa\b(?!\.pub\b|-cert\.pub\b)|\bid_ed25519\b(?!\.pub\b|-cert\.pub\b)|"
+    r"\.aws/credentials|\.netrc\b|"
     r"login\.keychain|wallet\.dat|\.docker/config\b|\.kube/config\b|\.npmrc\b|\.pypirc\b|"
     r"\.openclaw/|/\.config/[^/\s\"']+/|"
     # E-065/C-323: same widening as the Python _CRED_PATH_RE above -- a process's own
@@ -11869,8 +11877,18 @@ _SH_PIPE_INTERP_RE = re.compile(
 # the tight `mcp\.json` form is used (not B61's looser `config(?:\.json)?`) because B61
 # itself notes the `.claude/config-partial.yml` ambiguity. `_SH_CRED_FILE_RE` above is
 # deliberately NOT touched by this addition (it already has its own, wider vocabulary).
+# B-975: same public-key gap `_SH_CRED_FILE_RE` above and B-898's `_CRED_PATH_RE` fixed
+# -- the `.ssh/id_` prefix family and the bare `id_rsa`/`id_ed25519` spellings matched a
+# PUBLIC-key filename too (`id_rsa.pub`, `id_ed25519.pub`, an OpenSSH cert
+# `id_rsa-cert.pub`). Fixed HERE, in the shared fragment, rather than only inline in
+# `_SH_CRED_ASSIGN_RE` below, precisely because this fragment also feeds the loop-hop
+# reader (`_SH_CRED_READ_PATH_RE`'s one call site) -- fixing only one consumer would
+# have reopened the exact drift this fragment exists to prevent. Same negative-lookahead
+# discipline B-898 proved for this shape.
 _SH_CRED_READ_PATH_SRC = (
-    r"\.ssh/id_|id_rsa|id_ed25519|\.aws/credentials|\.netrc|keychain|wallet\.dat|"
+    r"\.ssh/id_[a-z0-9_]+(?![a-z0-9_]|\.pub\b|-cert\.pub\b)|"
+    r"id_rsa(?!\.pub\b|-cert\.pub\b)|id_ed25519(?!\.pub\b|-cert\.pub\b)|"
+    r"\.aws/credentials|\.netrc|keychain|wallet\.dat|"
     r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/|"
     r"\.(?:claude|codex|gemini)/mcp\.json\b"
 )
