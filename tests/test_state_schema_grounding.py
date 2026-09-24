@@ -1205,7 +1205,7 @@ _REGISTRY: "dict[str, _Entry]" = {
 # decoy-table DDL site for _collect_plugin_trust (tests/test_b177_installed_index_shapes.py:440).
 # B-994: +1 -- the identical view-masquerade decoy-table DDL site for
 # _collect_plugin_trust's legacy installed_plugin_index probes (tests/test_b177_installed_index_shapes.py:557).
-# Combined: 72, was 69.
+# Combined: 72, was 71.
 assert len(_REGISTRY) == 72, f"registry has {len(_REGISTRY)} entries, expected 72"
 
 
