@@ -620,6 +620,457 @@ def _is_tool_result_call(node: ast.Call) -> bool:
     return bool(_TOOL_RESULT_CALL_RE.search(name))
 
 
+# ---------------------------------------------------------------------------
+# B-906 ("Option Z"): positive-only reference resolution.
+#
+# Both the TT5 source and sink vocabulary above recognise `os.getenv`/`os.environ`
+# etc. by SPELLING (`_attr_base(x) == "os"`), which is why an aliased or indirect
+# spelling (`import os as o; o.getenv(...)`, `getattr(os, "environ")[...]`, an
+# inline `os.environ["P"]` argv element with no bound Name at all) is a total miss
+# today, on both the source and sink side.
+#
+# The prior fix attempt (round 4, "PF1"/"PF2", both since abandoned) tried to go
+# the OTHER way: prove a spelling-matched `os`/`environ` is NOT the module, to
+# SUPPRESS the base detector's crit finding on a local shadow (`class os: pass`,
+# a local dict named `environ`, ...). That direction cannot be made sound: a
+# must-NOT-alias proof has to hold against an adversary, and Python's namespace
+# has too many rebinding routes (attribute store, setattr, `__dict__`/`vars`
+# mutation, class bodies, decorators, metaclasses, `sys.modules`, `f.__globals__`,
+# `exec`, star-imports, ...) for any finite blacklist to close. Every prior review
+# round reopened by finding one more bypass; this fix does not add another one.
+#
+# `_RefResolver` instead ADDS detection only, through POSITIVE import-provenance
+# resolution: proving an expression genuinely IS `os.environ`/`os.getenv` (an
+# import, a plain local alias of one, or a foldable indirect access through
+# getattr/`__dict__`/`vars`/`sys.modules`/`__import__`/`importlib.import_module`),
+# reusing the same reaching-definition machinery `shippedexec._FileFacts` already
+# validated for B-638/B-917 (`dotted()`/`sole()`/`_legb_lookup()`). Every predicate
+# this fix touches becomes `old_spelling_check(e) or ref_res.source_in(e)`: a pure
+# OR against the untouched base check, so enabling/disabling `_RefResolver` can
+# only ever ADD findings relative to base, never remove one (see
+# `test_monotone`/`test_shadow_inert` in tests/test_b906_ref_resolver.py). A name
+# that dotted()/sole() cannot statically pin down (any of the shadow/rewiring
+# shapes above) resolves to `None` here, `source_in()` is then False for it, and
+# the untouched base spelling check is exactly what convicts (or doesn't) --
+# `_RefResolver` contributes nothing to those cases either way, which is what
+# keeps it inert on every shadow while adding recall on every provable alias.
+#
+# Deliberately NOT in scope for this pass (Pulse task decision D4): inline
+# `input()`/`open()`/network-read forms as a source (T6-T8 in the design's test
+# matrix) and the optional one-hop "local helper function returns a source"
+# rule (T20b) -- both left for a follow-up; `is_external_call` below is defined
+# to match the design's own API shape but is deliberately never consulted by
+# `source_in()` yet.
+# ---------------------------------------------------------------------------
+
+# Canonical (already-resolved, dotted) forms of the env-var read surface. Kept
+# apart from the spelling-based `_EXEC_SINK_*`/`_NET_SOURCE_*` sets above: those
+# match raw AST shape, these match `_RefResolver.ref()`'s OUTPUT.
+_ENV_MAPPING_REFS = frozenset({"os.environ", "os.environb", "posix.environ", "nt.environ"})
+_ENV_READ_CALLABLE_REFS = frozenset(
+    {"os.getenv", "os.getenvb"}
+    | {f"{_m}.{_a}" for _m in _ENV_MAPPING_REFS for _a in ("get", "pop", "setdefault", "__getitem__")}
+)
+# Not yet consulted by source_in() -- see the module note above (decision D4).
+_EXTERNAL_CALL_REFS = frozenset({"builtins.input", "builtins.open", "io.open", "codecs.open"})
+
+
+def _call_no_splat(call: ast.Call) -> bool:
+    """True unless *call* unpacks a positional (`f(*a)`) or keyword (`f(**k)`)
+    argument -- every `_RefResolver` call-shape rule below is written against a
+    fixed, countable argument list and must not be fooled by an unpacked one."""
+    return not any(isinstance(a, ast.Starred) for a in call.args) and not any(
+        kw.arg is None for kw in call.keywords
+    )
+
+
+def _call_kwarg(call: ast.Call, name: str) -> "ast.AST | None":
+    for kw in call.keywords:
+        if kw.arg == name:
+            return kw.value
+    return None
+
+
+def _fromlist_nonempty(node: "ast.AST | None") -> bool:
+    """Conservative: only a non-empty List/Tuple literal counts as "fromlist was
+    given". Anything else (None, an unresolvable expression) is treated as empty --
+    under-resolving here only costs recall (R6 falls back to the top-level package
+    name), never produces a wrong resolution."""
+    if node is None:
+        return False
+    if isinstance(node, ast.Constant) and node.value is None:
+        return False
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return len(node.elts) > 0
+    return False
+
+
+def _is_full_reverse_slice(node: "ast.AST | None") -> bool:
+    """True for the `[::-1]` slice shape (const_str's string-reversal fold)."""
+    return (
+        isinstance(node, ast.Slice)
+        and node.lower is None
+        and node.upper is None
+        and isinstance(node.step, ast.Constant)
+        and node.step.value == -1
+    )
+
+
+class _RefResolver:
+    """B-906 Option Z: positive-only canonical reference resolution, cached by node.
+
+    `ref(node)` returns a canonical dotted name (`"os.getenv"`, `"subprocess.run"`,
+    ...) when *node* is PROVABLY that reference -- via real import provenance
+    (`facts.dotted()`), a single unambiguous local alias of one (`facts.sole()`/
+    `facts._legb_lookup()`, B-917's own LEGB fallback), or a foldable indirect
+    access (`getattr`, `__dict__`/`vars` views, `sys.modules`, `__import__`/
+    `importlib.import_module`) -- or `None` when it cannot prove one. It never
+    proves a NEGATIVE ("this is not os") -- see the module note above for why
+    that direction is deliberately absent.
+
+    Every rule is "first match wins": R1 `facts.dotted()` (whole-file-conservative
+    import provenance, already built by B-638/B-917); R2 a Name `dotted()` leaves
+    unresolved, through `facts.sole()`/`facts._legb_lookup()` (an ("assign", value)
+    record recurses into `ref(value)`; deliberately NOT gated on
+    `facts._legb_blocked()` -- that guard protects `locate()`'s FP-safety
+    direction, and gating recall on it here would cost recall for no FP benefit,
+    since a wrong recall-side resolution can only ADD a finding, never remove
+    one); R3 an unshadowed real builtin (`facts.dotted()` only special-cases
+    `_BUILTINS_USED`, so this resolver checks the full `builtins` module itself);
+    R4 `Attribute(v, a)` in Load context; R5 `getattr(X, k[, d])` with a foldable
+    `k`; R6 `__import__(s[, ..., fromlist])`, `importlib.import_module(s)` (no
+    `package` arg), `sys.modules[s]`/`sys.modules.get(s)`; R7 `X.__dict__[k]`/
+    `vars(X)[k]` in Load context.
+
+    Mutated-path guard (FP side only, `_is_mutated`): a resolved path, or any
+    dotted prefix of it, that the SAME file replaces via an Attribute Store/Del
+    (`os.environ = {...}`), `setattr(<ref>, "<lit>", ...)`, or a namespace-view
+    store (`X.__dict__[k] = ...`/`vars(X)[k] = ...`) resolves to `None` instead.
+    Built from `facts.dotted()` alone (R1 only, no full alias-following) -- a
+    deliberately partial guard is fine here: an incomplete guard only makes this
+    NEW mechanism more conservative on an unmodelled mutation route, it can never
+    cause a regression against base (base's spelling checks are untouched and
+    live entirely outside this class).
+    """
+
+    def __init__(self, tree: ast.AST, facts) -> None:
+        self.tree = tree
+        self.facts = facts
+        self._ref_cache: dict = {}
+        self._const_cache: dict = {}
+        self._source_in_cache: dict = {}
+        self._mutated_paths: "set[str] | None" = None
+
+    # ── ref() and its rules ──────────────────────────────────────────────────
+
+    def ref(self, node: "ast.AST | None", scope: "ast.AST | None" = None, _depth: int = 0) -> "str | None":
+        if node is None or _depth > _shippedexec._MAX_DEPTH:
+            return None
+        if scope is None:
+            scope = self.facts.scope_of(node)
+        key = (id(node), id(scope))
+        if key in self._ref_cache:
+            return self._ref_cache[key]
+        self._ref_cache[key] = None  # cycle guard while this key is in progress
+        result = self._ref_resolve(node, scope, _depth)
+        if result is not None and self._is_mutated(result):
+            result = None
+        self._ref_cache[key] = result
+        return result
+
+    def _ref_resolve(self, node: ast.AST, scope: "ast.AST | None", depth: int) -> "str | None":
+        # R1: whole-file-conservative import provenance (covers Name AND the
+        # Attribute-chain case already, recursively -- see _FileFacts.dotted()).
+        d = self.facts.dotted(node)
+        if d is not None:
+            return d
+        if isinstance(node, ast.Name):
+            return self._ref_name(node, scope, depth)
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            base = self.ref(node.value, scope, depth + 1)
+            return f"{base}.{node.attr}" if base is not None else None
+        if isinstance(node, ast.Call):
+            return self._ref_call(node, scope, depth)
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+            return self._ref_subscript(node, scope, depth)
+        return None
+
+    def _ref_name(self, node: ast.Name, scope: "ast.AST | None", depth: int) -> "str | None":
+        name = node.id
+        if scope is not None:
+            rec = self.facts.sole(name, scope, before=node)
+            rscope = scope
+            # R2 LEGB fallback: only when *scope* itself has NO record for this
+            # name at all (a scope that binds it, even unresolvably, is never
+            # skipped past -- see _FileFacts.locate()'s own identical gate).
+            if rec is None and not self.facts.records(scope).get(name):
+                found = self.facts._legb_lookup(name, scope)
+                if found is not None:
+                    rec, rscope = found
+            if rec is not None and rec[0] == "assign":
+                return self.ref(rec[1], rscope, depth + 1)
+        # R3: an unshadowed real builtin -- not just the narrow _BUILTINS_USED set
+        # facts.dotted() special-cases.
+        if (
+            name not in self.facts.other_bound
+            and name not in self.facts.import_bound
+            and not self.facts.star
+            and hasattr(builtins, name)
+        ):
+            return f"builtins.{name}"
+        return None
+
+    def _ref_call(self, node: ast.Call, scope: "ast.AST | None", depth: int) -> "str | None":
+        fref = self.ref(node.func, scope, depth + 1)
+        args = node.args
+        if fref == "builtins.getattr" and len(args) >= 2 and _call_no_splat(node):
+            base = self.ref(args[0], scope, depth + 1)
+            k = self.const_str(args[1], scope, depth + 1)
+            return f"{base}.{k}" if base is not None and k is not None else None
+        if fref == "builtins.__import__" and args and _call_no_splat(node):
+            s = self.const_str(args[0], scope, depth + 1)
+            if s is None:
+                return None
+            fromlist_arg = args[3] if len(args) >= 4 else _call_kwarg(node, "fromlist")
+            return s if _fromlist_nonempty(fromlist_arg) else s.split(".")[0]
+        if (
+            fref == "importlib.import_module"
+            and len(args) == 1
+            and not node.keywords
+            and _call_no_splat(node)
+        ):
+            return self.const_str(args[0], scope, depth + 1)
+        if fref == "sys.modules.get" and args and _call_no_splat(node):
+            return self.const_str(args[0], scope, depth + 1)
+        return None
+
+    def _ref_subscript(self, node: ast.Subscript, scope: "ast.AST | None", depth: int) -> "str | None":
+        k = self.const_str(node.slice, scope, depth + 1)
+        if k is None:
+            return None
+        vref = self.ref(node.value, scope, depth + 1)
+        if vref == "sys.modules":
+            return k
+        if (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "__dict__"
+            and isinstance(node.value.ctx, ast.Load)
+        ):
+            base = self.ref(node.value.value, scope, depth + 1)
+            return f"{base}.{k}" if base is not None else None
+        if (
+            isinstance(node.value, ast.Call)
+            and not node.value.keywords
+            and len(node.value.args) == 1
+            and not isinstance(node.value.args[0], ast.Starred)
+            and self.ref(node.value.func, scope, depth + 1) == "builtins.vars"
+        ):
+            base = self.ref(node.value.args[0], scope, depth + 1)
+            return f"{base}.{k}" if base is not None else None
+        return None
+
+    # ── const_str() ───────────────────────────────────────────────────────────
+
+    def const_str(self, node: "ast.AST | None", scope: "ast.AST | None" = None, _depth: int = 0) -> "str | None":
+        if node is None or _depth > _shippedexec._MAX_DEPTH:
+            return None
+        if scope is None:
+            scope = self.facts.scope_of(node)
+        key = (id(node), id(scope))
+        if key in self._const_cache:
+            return self._const_cache[key]
+        self._const_cache[key] = None
+        result = self._const_str_resolve(node, scope, _depth)
+        self._const_cache[key] = result
+        return result
+
+    def _const_str_resolve(self, node: ast.AST, scope: "ast.AST | None", depth: int) -> "str | None":
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name) and scope is not None:
+            rec = self.facts.sole(node.id, scope, before=node)
+            if rec is not None and rec[0] == "assign":
+                return self.const_str(rec[1], scope, depth + 1)
+            return None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self.const_str(node.left, scope, depth + 1)
+            right = self.const_str(node.right, scope, depth + 1)
+            return left + right if left is not None and right is not None else None
+        if isinstance(node, ast.JoinedStr):
+            parts: list = []
+            for v in node.values:
+                if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    parts.append(v.value)
+                elif isinstance(v, ast.FormattedValue) and v.format_spec is None:
+                    p = self.const_str(v.value, scope, depth + 1)
+                    if p is None:
+                        return None
+                    parts.append(p)
+                else:
+                    return None
+            return "".join(parts)
+        if (
+            isinstance(node, ast.Call)
+            and not node.keywords
+            and len(node.args) == 1
+            and not isinstance(node.args[0], ast.Starred)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "join"
+        ):
+            sep = self.const_str(node.func.value, scope, depth + 1)
+            items = node.args[0]
+            if (
+                sep is not None
+                and isinstance(items, (ast.List, ast.Tuple))
+                and not any(isinstance(e, ast.Starred) for e in items.elts)
+            ):
+                folded = [self.const_str(e, scope, depth + 1) for e in items.elts]
+                if all(p is not None for p in folded):
+                    return sep.join(folded)
+            return None
+        if isinstance(node, ast.Subscript) and _is_full_reverse_slice(node.slice):
+            base = self.const_str(node.value, scope, depth + 1)
+            return base[::-1] if base is not None else None
+        return None
+
+    # ── env vocabulary ───────────────────────────────────────────────────────
+
+    def is_env_mapping(self, node: "ast.AST | None") -> bool:
+        if node is None:
+            return False
+        if self.ref(node) in _ENV_MAPPING_REFS:
+            return True
+        if isinstance(node, ast.Call) and not node.keywords:
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "copy"
+                and not node.args
+                and self.ref(node.func.value) in _ENV_MAPPING_REFS
+            ):
+                return True
+            if (
+                len(node.args) == 1
+                and not isinstance(node.args[0], ast.Starred)
+                and self.ref(node.func) == "builtins.dict"
+                and self.is_env_mapping(node.args[0])
+            ):
+                return True
+        return False
+
+    def is_env_read(self, node: "ast.AST | None") -> bool:
+        if node is None:
+            return False
+        if isinstance(node, ast.Call):
+            return self.ref(node.func) in _ENV_READ_CALLABLE_REFS
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+            return self.is_env_mapping(node.value)
+        return False
+
+    def is_external_call(self, node: "ast.AST | None") -> bool:
+        """Not yet consulted by source_in() -- decision D4, see the module note."""
+        if not isinstance(node, ast.Call):
+            return False
+        fref = self.ref(node.func)
+        if fref in _EXTERNAL_CALL_REFS:
+            return True
+        if fref is None:
+            return False
+        base, _, attr = fref.rpartition(".")
+        return attr in _NET_SOURCE_ATTRS and base in _NET_SOURCE_BASES
+
+    def source_in(self, node: "ast.AST | None") -> bool:
+        """True if any sub-expression of *node* is a proven env-var read. Scoped to
+        the env-var source only for this pass (decision D4 defers input()/open()/
+        network-read forms -- see the module note above `_RefResolver`)."""
+        if node is None:
+            return False
+        key = id(node)
+        if key in self._source_in_cache:
+            return self._source_in_cache[key]
+        self._source_in_cache[key] = False  # cycle guard
+        result = any(self.is_env_read(n) for n in ast.walk(node))
+        self._source_in_cache[key] = result
+        return result
+
+    # ── mutated-path guard (FP side only) ────────────────────────────────────
+
+    def _guard_base_ref(self, node: "ast.AST | None", scope: "ast.AST | None") -> "str | None":
+        """Base resolution for the mutated-path guard: `facts.dotted()` (R1) plus
+        ONE hop through a plain local alias (`facts.sole()`) -- e.g. `_c = os` --
+        so `_c.environ = {...}` is recognised as replacing `os.environ` too
+        (B-906 adversarial round: an unaliased-only guard let this
+        exact alias-then-mutate shape through). Deliberately bounded to one hop
+        and never calls `self.ref()` (which ends in this same guard -- calling it
+        here would recurse). A deeper miss (an alias of an alias, a mutation
+        reached through `getattr`/`vars`/...) only makes this NEW mechanism more
+        permissive on an unmodelled multi-hop route -- narrower than not having
+        the guard at all, never a regression against base (see the class
+        docstring's `_is_mutated` note)."""
+        d = self.facts.dotted(node)
+        if d is not None:
+            return d
+        if isinstance(node, ast.Name) and scope is not None:
+            rec = self.facts.sole(node.id, scope, before=node)
+            if rec is not None and rec[0] == "assign":
+                return self.facts.dotted(rec[1])
+        return None
+
+    def _mutated_paths_set(self) -> "set[str]":
+        if self._mutated_paths is not None:
+            return self._mutated_paths
+        paths: set = set()
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Attribute) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                base = self._guard_base_ref(n.value, self.facts.scope_of(n))
+                if base is not None:
+                    paths.add(f"{base}.{n.attr}")
+            elif isinstance(n, ast.Subscript) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                scope = self.facts.scope_of(n)
+                k = self.const_str(n.slice, scope)
+                if k is None:
+                    continue
+                if (
+                    isinstance(n.value, ast.Attribute)
+                    and n.value.attr == "__dict__"
+                    and isinstance(n.value.ctx, ast.Load)
+                ):
+                    base = self._guard_base_ref(n.value.value, scope)
+                    if base is not None:
+                        paths.add(f"{base}.{k}")
+                elif (
+                    isinstance(n.value, ast.Call)
+                    and not n.value.keywords
+                    and len(n.value.args) == 1
+                    and not isinstance(n.value.args[0], ast.Starred)
+                    and isinstance(n.value.func, ast.Name)
+                    and n.value.func.id == "vars"
+                ):
+                    base = self._guard_base_ref(n.value.args[0], scope)
+                    if base is not None:
+                        paths.add(f"{base}.{k}")
+            elif (
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "setattr"
+                and len(n.args) >= 2
+                and _call_no_splat(n)
+            ):
+                scope = self.facts.scope_of(n)
+                base = self._guard_base_ref(n.args[0], scope)
+                lit = self.const_str(n.args[1], scope)
+                if base is not None and lit is not None:
+                    paths.add(f"{base}.{lit}")
+        self._mutated_paths = paths
+        return paths
+
+    def _is_mutated(self, path: str) -> bool:
+        paths = self._mutated_paths_set()
+        if not paths:
+            return False
+        parts = path.split(".")
+        return any(".".join(parts[:i]) in paths for i in range(1, len(parts) + 1))
+
+
 def _rhs_has_subscript_environ(node: ast.AST) -> bool:
     """True if *node* is or contains os.environ[...] (subscript form)."""
     for n in ast.walk(node):
@@ -669,12 +1120,35 @@ def _value_is_tainted_source(node: ast.AST, tainted: set[str]) -> bool:
     return False
 
 
+def _expr_is_ext_tainted(node: ast.AST, visible: set[str], ref_res: "_RefResolver | None" = None) -> bool:
+    """B-906: the one "can this expression carry external input"
+    predicate, folded out of the five identical `sourced = (...)` disjunctions that
+    used to live separately in `_external_tainted_names` -- one per binding form
+    (plain assign, comprehension `for`, `with ... as`, statement `for`, walrus).
+
+    `ref_res`, optional, adds a fifth, monotonic disjunct: `ref_res.source_in(node)`
+    is a POSITIVE proof that *node* resolves to a real env-var read (`os.getenv`,
+    an aliased import, `getattr(os, "environ")[...]`, ...) -- never a disproof used
+    to suppress anything (see `_RefResolver`'s own module note, above). Byte-
+    identical to the original four-way disjunction when `ref_res` is None, which is
+    what keeps this fold itself a pure refactor, verdict-neutral on its own.
+    """
+    return (
+        _value_is_tainted_source(node, visible)
+        or _rhs_has_subscript_environ(node)
+        or _rhs_has_fstring_taint(node, visible)
+        or bool(_names_in(node) & visible)
+        or (ref_res is not None and ref_res.source_in(node))
+    )
+
+
 def _external_tainted_names(
     tree: ast.AST,
     func_param_taint: dict,
     owner_map: dict,
     parent_scope: dict,
     shadow_cache: dict,
+    ref_res: "_RefResolver | None" = None,
 ) -> dict:
     """Compute SCOPE-BUCKETED tainted names for TT4/TT5/SSRF rules (B-413, layer 1).
 
@@ -834,12 +1308,7 @@ def _external_tainted_names(
             rhs = a.value
             targets = a.targets if isinstance(a, ast.Assign) else [a.target]
             visible = _tainted_names_visible(a, tainted, owner_map, parent_scope, shadow_cache)
-            sourced = (
-                _value_is_tainted_source(rhs, visible)
-                or _rhs_has_subscript_environ(rhs)
-                or _rhs_has_fstring_taint(rhs, visible)
-                or bool(_names_in(rhs) & visible)
-            )
+            sourced = _expr_is_ext_tainted(rhs, visible, ref_res)
             if not sourced:
                 continue
 
@@ -868,12 +1337,7 @@ def _external_tainted_names(
             # wrongly let that target's own name shadow an outer occurrence of the
             # SAME bare name in its own iterable (`for cmds in cmds`).
             visible = _tainted_names_visible(iterable, tainted, owner_map, parent_scope, shadow_cache)
-            sourced = (
-                _value_is_tainted_source(iterable, visible)
-                or _rhs_has_subscript_environ(iterable)
-                or _rhs_has_fstring_taint(iterable, visible)
-                or bool(_names_in(iterable) & visible)
-            )
+            sourced = _expr_is_ext_tainted(iterable, visible, ref_res)
             if not sourced:
                 continue
             scope = owner_map.get(gen)
@@ -892,12 +1356,7 @@ def _external_tainted_names(
                 continue
             ctx_expr = item.context_expr
             visible = _tainted_names_visible(ctx_expr, tainted, owner_map, parent_scope, shadow_cache)
-            sourced = (
-                _value_is_tainted_source(ctx_expr, visible)
-                or _rhs_has_subscript_environ(ctx_expr)
-                or _rhs_has_fstring_taint(ctx_expr, visible)
-                or bool(_names_in(ctx_expr) & visible)
-            )
+            sourced = _expr_is_ext_tainted(ctx_expr, visible, ref_res)
             if not sourced:
                 continue
             scope = owner_map.get(with_node)
@@ -915,12 +1374,7 @@ def _external_tainted_names(
         for stmt in for_stmts:
             iterable = stmt.iter
             visible = _tainted_names_visible(iterable, tainted, owner_map, parent_scope, shadow_cache)
-            sourced = (
-                _value_is_tainted_source(iterable, visible)
-                or _rhs_has_subscript_environ(iterable)
-                or _rhs_has_fstring_taint(iterable, visible)
-                or bool(_names_in(iterable) & visible)
-            )
+            sourced = _expr_is_ext_tainted(iterable, visible, ref_res)
             if not sourced:
                 continue
             scope = owner_map.get(stmt)
@@ -932,12 +1386,7 @@ def _external_tainted_names(
         for ne in namedexprs:
             rhs = ne.value
             visible = _tainted_names_visible(ne, tainted, owner_map, parent_scope, shadow_cache)
-            sourced = (
-                _value_is_tainted_source(rhs, visible)
-                or _rhs_has_subscript_environ(rhs)
-                or _rhs_has_fstring_taint(rhs, visible)
-                or bool(_names_in(rhs) & visible)
-            )
+            sourced = _expr_is_ext_tainted(rhs, visible, ref_res)
             if not sourced:
                 continue
             scope = owner_map.get(ne)
@@ -1685,7 +2134,9 @@ def _call_args_tainted(node: ast.Call, tainted: set[str]) -> tuple:
     return any_tainted, direct
 
 
-def _call_args_tainted_for_exec_sink(node: ast.Call, tainted: set[str]) -> tuple:
+def _call_args_tainted_for_exec_sink(
+    node: ast.Call, tainted: set[str], ref_res: "_RefResolver | None" = None
+) -> tuple:
     """Like `_call_args_tainted`, but ALSO counts an inline external-source call sitting
     directly in the call's own arguments -- with no intermediate variable -- as tainted,
     the same as an already-bound tainted NAME. Scoped to the TT5 exec-sink call site only
@@ -1705,6 +2156,13 @@ def _call_args_tainted_for_exec_sink(node: ast.Call, tainted: set[str]) -> tuple
     vocabulary TT4/SSRF already trust once a value is ASSIGNED; this only extends that
     same vocabulary to the no-variable case, for the exec-sink rule the ticket names.
 
+    B-906: `ref_res`, optional, adds a positively-resolved inline source too -- e.g.
+    `check_call([os.environ["P"], "x"])`, where `os.environ["P"]` is a Subscript with
+    no tainted NAME in it at all and `_value_is_tainted_source` does not model a bare
+    env-mapping subscript as a source on its own. `ref_res.source_in()` is checked
+    only after `_value_is_tainted_source` already said no, so this can only ADD a
+    finding relative to `ref_res=None`, never remove one.
+
     A NAME already in `tainted` is still handled identically to `_call_args_tainted`
     (checked first, unchanged), so this can only ever ADD a finding, never remove one.
     """
@@ -1713,7 +2171,9 @@ def _call_args_tainted_for_exec_sink(node: ast.Call, tainted: set[str]) -> tuple
         return any_tainted, direct
     all_args = list(node.args) + [kw.value for kw in node.keywords]
     for i, arg_node in enumerate(all_args):
-        if _value_is_tainted_source(arg_node, tainted):
+        if _value_is_tainted_source(arg_node, tainted) or (
+            ref_res is not None and ref_res.source_in(arg_node)
+        ):
             # No intermediate variable carries the source to the sink -- that is at
             # least as direct a flow as a bound Name in the first argument.
             return True, i == 0
@@ -2077,6 +2537,7 @@ def _all_call_sites_bind_fixed_argv(
     ext_taint_map: dict,
     parent_scope: dict,
     shadow_cache: dict,
+    ref_res: "_RefResolver | None" = None,
 ) -> bool:
     """B-413 layer 2: True iff EVERY expression in `bound_exprs` (from
     `_param_argv_call_sites`) is provably a hardcoded command: a non-empty literal
@@ -2096,6 +2557,15 @@ def _all_call_sites_bind_fixed_argv(
     `call_node` (both are visited in the same scope-subtree walk in
     `_build_toplevel_owner_map`), so this is a free re-index of already-computed
     `_single_list_bindings_local` results, not a new computation of them.
+
+    B-906: `ref_res`, optional, adds `ref_res.source_in(elt)` alongside each
+    `_names_in(elt) & visible` check below -- NEVER the spelling vocabulary
+    (`_value_is_tainted_source`/`_rhs_has_subscript_environ`) some prior fix rounds
+    wrongly imported into this inline position (see `_RefResolver`'s module note).
+    Either disjunct failing this call site's "provably hardcoded" proof only makes
+    the whole check MORE conservative (returns False sooner), so this can only ever
+    keep the wrapper's parameter crit in a case it used to wrongly clear, never the
+    reverse.
     """
     if not bound_exprs:
         return False
@@ -2113,13 +2583,15 @@ def _all_call_sites_bind_fixed_argv(
             return False  # unresolvable or empty -- not provably a fixed command
         prog = resolved.elts[0]
         visible = _tainted_names_visible(expr, ext_taint_map, owner_map, parent_scope, shadow_cache)
-        if _names_in(prog) & visible:
+        if (_names_in(prog) & visible) or (ref_res is not None and ref_res.source_in(prog)):
             return False  # tainted program name at THIS call site -> stays crit
         if _argv0_is_shell_indirect_exec(resolved.elts):
             rest_names = set()
             for elt in resolved.elts[1:]:
                 rest_names |= _names_in(elt)
-            if rest_names & visible:
+            if (rest_names & visible) or (
+                ref_res is not None and any(ref_res.source_in(e) for e in resolved.elts[1:])
+            ):
                 return False  # tainted arg handed to a shell/interpreter -> stays crit
     return True
 
@@ -2172,6 +2644,7 @@ def _subprocess_taint_is_command_injection(
     shadow_cache: dict | None = None,
     ext_taint_map: dict | None = None,
     list_bindings_by_call: dict | None = None,
+    ref_res: "_RefResolver | None" = None,
 ) -> bool:
     """For a subprocess.* call with tainted input, is it command-injection grade?
 
@@ -2196,6 +2669,14 @@ def _subprocess_taint_is_command_injection(
     `list_bindings_by_call` args are layer 2's extra context; all optional (default
     None) so this stays callable exactly as before layer 2 existed. Layer 2 is only
     attempted when every one of them is supplied.
+
+    B-906: `ref_res`, optional, adds `ref_res.source_in(elt)` alongside each
+    `_names_in(elt) & tainted` check in the inline-list branch below (and is passed
+    through to layer 2's own `_all_call_sites_bind_fixed_argv`) -- NEVER the
+    spelling vocabulary (`_value_is_tainted_source`/`_rhs_has_subscript_environ`);
+    see `_RefResolver`'s module note for why that vocabulary must stay out of this
+    inline position. Purely additive: each check can only flip False->True (crit),
+    never the reverse.
     """
     for kw in node.keywords:
         if kw.arg == "shell":
@@ -2238,7 +2719,9 @@ def _subprocess_taint_is_command_injection(
         first = list_bindings.get(first.id, first)  # resolve a var-bound command list
     if isinstance(first, (ast.List, ast.Tuple)):
         prog = first.elts[0] if first.elts else None
-        if prog is not None and (_names_in(prog) & tainted):
+        if prog is not None and (
+            (_names_in(prog) & tainted) or (ref_res is not None and ref_res.source_in(prog))
+        ):
             return True  # tainted program name -> arbitrary program execution
         # C-135 (B-413 round 1): argv[0] being untainted is not enough when argv[0]
         # is ITSELF a shell/indirect-execution interpreter -- the rest of the argv
@@ -2248,7 +2731,9 @@ def _subprocess_taint_is_command_injection(
             rest_names = set()
             for elt in first.elts[1:]:
                 rest_names |= _names_in(elt)
-            if rest_names & tainted:
+            if (rest_names & tainted) or (
+                ref_res is not None and any(ref_res.source_in(e) for e in first.elts[1:])
+            ):
                 return True  # tainted arg handed to a shell/interpreter -> command injection
         return False  # only a non-program argv element is tainted -> argument injection
 
@@ -2278,7 +2763,13 @@ def _subprocess_taint_is_command_injection(
         if is_named_param:
             call_sites = _param_argv_call_sites(fn, first.id, tree, owner_map)
             if call_sites is not None and _all_call_sites_bind_fixed_argv(
-                call_sites, list_bindings_by_call, owner_map, ext_taint_map, parent_scope, shadow_cache
+                call_sites,
+                list_bindings_by_call,
+                owner_map,
+                ext_taint_map,
+                parent_scope,
+                shadow_cache,
+                ref_res=ref_res,
             ):
                 return False  # every real call site is a hardcoded command
     return True  # string / name / concat first arg -> string command or program path
@@ -8494,16 +8985,23 @@ def _b917_artifact_staged_writes(artifact) -> list:
     return out
 
 
-def _b917_findings(tree: ast.AST, filename: str, artifact) -> list:
+def _b917_findings(tree: ast.AST, filename: str, artifact, facts=None) -> list:
     """[(rule, severity, lineno, reason)] for B-917: loader sinks
     (runpy/importlib/zipimport execute a FILE by PATH) and staged-import correlation
     (a write then an import resolving to the same location). See
-    shippedexec.Loc/loc_eq and the design doc referenced by the B-917 Pulse task."""
-    facts = (
-        _shippedexec._FileFacts(tree, filename, artifact, set(), False)
-        if artifact is not None
-        else _shippedexec.PathFacts(tree, filename)
-    )
+    shippedexec.Loc/loc_eq and the design doc referenced by the B-917 Pulse task.
+
+    `facts` (B-906): the caller's own `_FileFacts`/`PathFacts`, when it already built
+    one (so `_RefResolver` and this can share a single reaching-definitions pass over
+    the same file instead of computing it twice) -- built internally, exactly as
+    before, when not supplied.
+    """
+    if facts is None:
+        facts = (
+            _shippedexec._FileFacts(tree, filename, artifact, set(), False)
+            if artifact is not None
+            else _shippedexec.PathFacts(tree, filename)
+        )
     remote_names = _b917_remote_tainted_names(tree, facts)
     staged = _b917_staged_writes(tree, facts, remote_names)
     # Correlation set: this file alone with no artifact (nothing else to correlate
@@ -8646,6 +9144,15 @@ def analyze_python(
         unshipped_exec = (
             artifact.unshipped_exec_sites(filename, source) if artifact is not None else {}
         )
+        # B-906: one `_FileFacts`/`PathFacts` pass, shared with `_b917_findings` below
+        # (never computed twice) and handed to `_RefResolver` for the TT5 positive-
+        # resolution rules further down -- see `_RefResolver`'s own module note.
+        facts = (
+            _shippedexec._FileFacts(tree, filename, artifact, set(), False)
+            if artifact is not None
+            else _shippedexec.PathFacts(tree, filename)
+        )
+        ref_res = _RefResolver(tree, facts)
     except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
         err_type = type(exc).__name__
         return [
@@ -9298,14 +9805,16 @@ def analyze_python(
     # taint rule (never recomputed).
     func_param_taint = _func_param_taint_by_scope(tree, owner_map, parent_scope)
     ext_taint_map = _external_tainted_names(
-        tree, func_param_taint, owner_map, parent_scope, shadow_cache
+        tree, func_param_taint, owner_map, parent_scope, shadow_cache, ref_res=ref_res
     )
 
     # B-917: loader sinks (runpy/importlib/zipimport execute a FILE by path, not a
     # name reference) and staged-import correlation (a write followed by an import
     # whose search path resolves to the same location) -- see the `_b917_*` helpers
     # above and shippedexec.Loc/loc_eq for the shared location model.
-    for _ldr_rule, _ldr_sev, _ldr_ln, _ldr_reason in _b917_findings(tree, filename, artifact):
+    for _ldr_rule, _ldr_sev, _ldr_ln, _ldr_reason in _b917_findings(
+        tree, filename, artifact, facts=facts
+    ):
         add(_ldr_rule, _ldr_sev, _ldr_ln, _ldr_reason)
 
     # B-916: `ext_taint_map` only tracks NAMES bound to an external source, so a file
@@ -9315,10 +9824,14 @@ def analyze_python(
     # skipped outright before a single call was even examined. Cheap, separate pre-scan
     # (same style as the other one-shot `ast.walk(tree)` passes already above this one):
     # only exec-sink calls are considered, and only their own arguments are walked.
+    # B-906: `ref_res.source_in(a)` alongside `_value_is_tainted_source` so a file
+    # whose ONLY inline exec-sink argument is a positively-resolved source (e.g.
+    # `subprocess.check_call([os.environ["P"], "x"])`, no bound Name anywhere) still
+    # enters the pass below instead of being skipped outright at this gate.
     _has_inline_exec_sink_source = any(
         _is_exec_sink_call(n.func)[0]
         and any(
-            _value_is_tainted_source(a, set())
+            _value_is_tainted_source(a, set()) or ref_res.source_in(a)
             for a in list(n.args) + [kw.value for kw in n.keywords]
         )
         for n in ast.walk(tree)
@@ -9346,7 +9859,7 @@ def analyze_python(
                 ext_visible = _tainted_names_visible(
                     node, ext_taint_map, owner_map, parent_scope, shadow_cache
                 )
-                any_t, direct = _call_args_tainted_for_exec_sink(node, ext_visible)
+                any_t, direct = _call_args_tainted_for_exec_sink(node, ext_visible, ref_res=ref_res)
                 # B-638: the tainted input is exactly the read of a file this artifact
                 # ships (see the OBFUSCATED_EXEC site above).
                 if any_t and shipped_exec is not None and (
@@ -9371,11 +9884,19 @@ def analyze_python(
                     # waved through by the old `not (_names_in(_a) & ext_visible)`
                     # shortcut, which was vacuously true for it (no NAME to find) before
                     # this rule could ever see an inline-only taint to begin with.
+                    # B-906: same reasoning for a positively-resolved inline source
+                    # (`ref_res.source_in(_a)`) -- without `not ref_res.source_in(_a)`
+                    # here too, an arg tainted ONLY by a resolved env-read would be
+                    # vacuously "explained" by this exemption's first disjunct (neither
+                    # `_names_in` nor `_value_is_tainted_source` sees it) and silently
+                    # waved through -- the exact B-916 failure this site already
+                    # documents, for the new resolver instead of the old one.
                     _all_args = list(node.args) + [kw.value for kw in node.keywords]
                     if shipped_exec is None and _all_args and all(
                         (
                             not (_names_in(_a) & ext_visible)
                             and not _value_is_tainted_source(_a, ext_visible)
+                            and not ref_res.source_in(_a)
                         )
                         or _exec_sink_taint_is_only_artifact_relative_decode(
                             _a,
@@ -9417,6 +9938,7 @@ def analyze_python(
                         shadow_cache=shadow_cache,
                         ext_taint_map=ext_taint_map,
                         list_bindings_by_call=list_bindings_by_call,
+                        ref_res=ref_res,
                     ):
                         add(
                             "TT5_ARG_INJECTION",
