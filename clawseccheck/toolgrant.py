@@ -461,12 +461,12 @@ def _unresolved_profile(cfg: dict, scope=GLOBAL_SCOPE) -> bool:
     the same way an absent one would -- apart from every OTHER reason it can be empty (a
     real config whose only ``tools`` key is an opaque ``byProvider``/``toolsBySender``
     layer this module cannot read at all, or genuinely nothing declared for that scope).
-    Those other shapes are pre-existing, separately-tracked blind spots (this module's own
-    "NOT MODELLED" section; ``OPAQUE_NARROWING_KEYS``), not a value no real vendor schema
-    could ever have accepted -- conflating them would silently "fix" that separate, still-
-    open gap as a side effect of this one (see ``tests/test_b737_permissive_default_scope.
-    py::test_r3_side_finding_named_byprovider_stays_warn_via_g1_not_fixed_here``, which
-    pins that it must not)."""
+    Those other shapes are NOT this function's job -- conflating them would silently
+    widen what "unresolved profile" means, a different malformed-input claim than the
+    one this function makes. The ``byProvider``/``toolsBySender`` shape is a SEPARATE
+    concern, handled by G1 consulting ``resolved_scopes(...).opaque`` directly instead
+    (B-938) -- see ``tests/test_b737_permissive_default_scope.py::
+    test_r3_named_byprovider_only_is_unknown_opaque``."""
     profile = _resolved_profile(_agent_tools(cfg, scope), cfg.get("tools"))
     return profile is not None and _profile_policy(profile) is None
 
