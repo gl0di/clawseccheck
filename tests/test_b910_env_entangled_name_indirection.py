@@ -464,7 +464,7 @@ def test_vet_conditional_name_indirection_fixture_does_not_fail():
     """The ambiguous multi-branch-binding shape must never win a FAIL from the new
     resolver — it may still WARN via the pre-existing, unrelated ASSIGN rule."""
     skill_dir = (
-        FIXTURES / "clean_b13_env_overwrite_conditional_name_indirection" / "skills" / "s"
+        FIXTURES / "warn_b13_env_overwrite_conditional_name_indirection" / "skills" / "s"
     )
     f = vet_skill(skill_dir)
     assert f.status != FAIL, f"must not FAIL; got {f.status}: {f.detail}"
