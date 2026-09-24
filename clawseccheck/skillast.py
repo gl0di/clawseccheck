@@ -6864,7 +6864,7 @@ def _tainted_names_visible(
     it resolves to an ancestor that, by Python's own syntax rules, binds the name and
     therefore ends the walk itself (see `_own_bound_names`).
 
-    CLAWSECCHECK-B-900: `global_here` used to be recomputed with a fresh, uncached
+    B-900: `global_here` used to be recomputed with a fresh, uncached
     `_global_declared_names(scope, owner_map)` -- a full `ast.walk(scope)` -- on
     EVERY call, even though a hot caller (e.g. `_external_tainted_names`'s own
     assign/comprehension/with/for/walrus fixpoint loops) invokes this function once
