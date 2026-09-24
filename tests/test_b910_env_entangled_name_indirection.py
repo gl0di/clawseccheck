@@ -15,7 +15,7 @@ literal-only behavior otherwise. `os.environ.setdefault(...)` also newly joins
 matched AT ALL before this task, literal or indirect). `os.environ.update({K:
 <name>})` stays untouched — a dict-literal value, not a direct call-arg or
 Assign/AnnAssign value, is out of scope for this resolver (documented residual,
-CLAWSECCHECK-B-910 ticket's own explicit permission to skip).
+B-910 ticket's own explicit permission to skip).
 
 C-135: this WIDENS a CRIT-severity, FAIL-capable rule (HARDCODED_PROVIDER_SECRET is
 NOT in `_AST_NEVER_FAIL_RULES` — unlike its ASSIGN-only sibling — so every case this
@@ -25,6 +25,23 @@ name bound once to something that never resolves to a hardcoded-secret-shaped
 literal (a non-secret string, a further `os.getenv(...)` read, a function call), and
 the pre-existing multi-target-Assign guard, must all stay exactly as silent as they
 were before this task.
+
+Round 2 (same ticket, independent C-135 review of round 1): the "bound exactly once"
+uniqueness count above only ever counted `ast.Assign`/`ast.AnnAssign` nodes. It did
+NOT count nine other Python binding forms — function/lambda parameters, `for`-loop
+targets, walrus (`:=`), tuple/list-unpack targets, `with ... as`, `except ... as`,
+imports, class/function `def` names, and comprehension variables (plus `AugAssign`
+and `del`, added for the same reason). Consequence: a secret-shaped module-level
+`KEY = "sk-..."` plus a completely UNRELATED same-named function PARAMETER written
+into `os.environ` somewhere else in the file (`def configure(KEY): os.environ["X"]
+= KEY`) was wrongly counted as "the same, unique binding" and incorrectly resolved
+— a real, common `configure(key)`-style pattern, not a corner case. `_secret_name_
+bindings` now counts every one of those binding forms too (see its own docstring in
+skillast.py for the exact node-type list); the RESOLUTION condition itself — exactly
+one binding, and that binding must be a literal-valued Assign/AnnAssign — is
+unchanged. The "F1" probes below are that round's regression coverage; each must
+newly stay silent (it wrongly resolved before this round) while every round-1 test
+above keeps passing unchanged.
 
 Secret-shaped test literals are split across adjacent string-literal boundaries
 (Golden Rule #3) — Python folds adjacent string literals into a single ast.Constant
@@ -233,6 +250,183 @@ def test_fp_unbound_name_default_arg_does_not_crash_or_resolve():
     src = 'import os\nval = os.getenv("OPENAI_API_KEY", UNBOUND_NAME)\n'
     r = _rules(src)
     assert "HARDCODED_PROVIDER_SECRET" not in r
+
+
+# ---------------------------------------------------------------------------
+# Round 2 / F1 — the widened-counting regression probes. Each shape below wrongly
+# RESOLVED (and FAILed) before this round, because round 1's counter only saw
+# ast.Assign/ast.AnnAssign. Every one of these must now stay exactly as silent as
+# the pre-existing FP probes above — confirmed against the pre-round-2 code
+# (git show bf268d32:clawseccheck/skillast.py) before this test was written.
+# ---------------------------------------------------------------------------
+
+
+def test_f1_parameter_shadow_does_not_resolve():
+    """The ticket's own repro: an unrelated function PARAMETER of the same name,
+    written into os.environ in a completely different function, must disqualify
+    the module-level secret from looking "uniquely bound." Pre-round-2 this wrongly
+    resolved to a crit FAIL with a fabricated "(via 'KEY')" data-flow claim."""
+    src = (
+        'import os\n'
+        'KEY = "tvly-" "0123456789abcdef01234567"\n'
+        'def configure(KEY):\n'
+        '    os.environ["OTHER_SERVICE_TOKEN"] = KEY\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    # The pre-existing plain-assignment rule (B-893) still sees the module-level line.
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_cross_scope_parameter_shadow_does_not_resolve():
+    """Same shape, one scope layer deeper — a class method's (async, with `self`)
+    parameter — to confirm the fix is not accidentally tied to a bare top-level
+    function shape."""
+    src = (
+        'import os\n'
+        'API_KEY = "sk_live_" "0123456789abcdef01234567"\n'
+        'class Client:\n'
+        '    async def configure(self, API_KEY):\n'
+        '        os.environ["THIRD_PARTY_KEY"] = API_KEY\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_for_loop_rebind_does_not_resolve():
+    """A `for`-loop target of the same name anywhere in the file must disqualify
+    the binding, not just a second Assign/AnnAssign."""
+    src = (
+        'import os\n'
+        'TOKEN = "gh" "p_0123456789abcdef012345"\n'
+        'for TOKEN in ["a", "b"]:\n'
+        '    pass\n'
+        'os.environ["GH_TOKEN"] = TOKEN\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_walrus_rebind_does_not_resolve():
+    """A walrus (`:=`) target of the same name must disqualify the binding."""
+    src = (
+        'import os\n'
+        'TOKEN = "gh" "p_0123456789abcdef012345"\n'
+        'if (TOKEN := "unrelated"):\n'
+        '    pass\n'
+        'os.environ["GH_TOKEN"] = TOKEN\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_tuple_unpack_rebind_does_not_resolve():
+    """A tuple-unpacking target of the same name must disqualify the binding."""
+    src = (
+        'import os\n'
+        'TOKEN = "gh" "p_0123456789abcdef012345"\n'
+        'TOKEN, _rest = "unrelated", None\n'
+        'os.environ["GH_TOKEN"] = TOKEN\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_comprehension_variable_shadow_does_not_resolve():
+    """A comprehension's own `for`-target shares its name with the module-level
+    secret. Real Python scoping keeps the two apart (a comprehension has its own
+    scope), but this resolver is deliberately NOT scope-aware (see its docstring),
+    so it must still treat this as ambiguous and stay silent."""
+    src = (
+        'import os\n'
+        'TOKEN = "gh" "p_0123456789abcdef012345"\n'
+        '_ = [TOKEN for TOKEN in range(3)]\n'
+        'os.environ["GH_TOKEN"] = TOKEN\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_import_rebind_does_not_resolve():
+    """An `import ... as` binding of the same name must disqualify the binding."""
+    src = (
+        'import os\n'
+        'TOKEN = "gh" "p_0123456789abcdef012345"\n'
+        'import json as TOKEN\n'
+        'os.environ["GH_TOKEN"] = TOKEN\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_with_as_rebind_does_not_resolve():
+    """A `with ... as` target of the same name must disqualify the binding."""
+    src = (
+        'import os\n'
+        'TOKEN = "gh" "p_0123456789abcdef012345"\n'
+        'with open("f") as TOKEN:\n'
+        '    pass\n'
+        'os.environ["GH_TOKEN"] = TOKEN\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_except_as_rebind_does_not_resolve():
+    """An `except ... as` handler name of the same name must disqualify the
+    binding — not in the ticket's mandatory 8, added for completeness since it is
+    one of the widened counter's own node-type branches."""
+    src = (
+        'import os\n'
+        'TOKEN = "gh" "p_0123456789abcdef012345"\n'
+        'try:\n'
+        '    pass\n'
+        'except Exception as TOKEN:\n'
+        '    pass\n'
+        'os.environ["GH_TOKEN"] = TOKEN\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_def_name_rebind_does_not_resolve():
+    """A nested `def`/`class` sharing the secret's name must disqualify the
+    binding too — not in the ticket's mandatory 8, added for completeness."""
+    src = (
+        'import os\n'
+        'TOKEN = "gh" "p_0123456789abcdef012345"\n'
+        'def TOKEN():\n'
+        '    pass\n'
+        'os.environ["GH_TOKEN"] = TOKEN\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_f1_core_repro_still_resolves_after_widened_counting():
+    """The ticket's original core repro — a single, same-file Assign-only binding —
+    must keep resolving exactly as round 1 shipped it; the fix only widens what
+    DISQUALIFIES a binding, never what qualifies one."""
+    src = (
+        'KEY = (\n'
+        '    "sk-" "ant-0123456789abcdef01234567"\n'
+        ')\n'
+        'import os\n'
+        'os.environ["ANTHROPIC_API_KEY"] = KEY\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" in r
+    assert r["HARDCODED_PROVIDER_SECRET"].severity == "crit"
+    assert "'KEY'" in r["HARDCODED_PROVIDER_SECRET"].reason
 
 
 # ---------------------------------------------------------------------------

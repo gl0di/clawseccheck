@@ -114,9 +114,10 @@ def _is_hardcoded_provider_secret(node: ast.AST) -> bool:
 
 
 def _secret_name_bindings(tree: ast.AST) -> dict:
-    """name -> its literal `ast.Constant` value node, for every name that is the
-    target of EXACTLY ONE `Assign`/`AnnAssign` (a single `Name` target) anywhere in
-    *tree* whose value itself passes `_is_hardcoded_provider_secret`.
+    """name -> its literal `ast.Constant` value node, for every name that has
+    EXACTLY ONE same-file binding of ANY kind anywhere in *tree*, where that single
+    binding is an `Assign`/`AnnAssign` (a single `Name` target) whose value itself
+    passes `_is_hardcoded_provider_secret`.
 
     B-910: a one-hop resolver for the two env-entangled B-140 call sites below
     (`os.environ[K] = <name>` / `os.getenv`, `os.environ.get`/`setdefault`'s default
@@ -127,21 +128,72 @@ def _secret_name_bindings(tree: ast.AST) -> dict:
 
     Deliberately narrow and NOT a general reaching-definition resolver — unlike
     `shippedexec.py`'s `_FileFacts.sole()` (scope-aware, handles same-scope rebinds/
-    branch order for a very different containment proof), this only counts
-    `Assign`/`AnnAssign` bindings and does not distinguish scope, matching the
-    neighbouring B-893 `HARDCODED_PROVIDER_SECRET_ASSIGN` loop's own `ast.walk(tree)`
-    idiom below. A name bound by ANYTHING ELSE alongside its one Assign/AnnAssign
-    (a second Assign/AnnAssign anywhere in the file, conditional or not, secret-shaped
-    or not) is disqualified outright and never resolved — see the C-135 probes next to
-    the two call sites for why this stays deliberately conservative rather than a
-    precise data-flow analysis: a name rebound across an if/else, or reused later for
-    something unrelated, must not resolve even where doing so would sometimes be
-    safe. `os.environ.update({K: <name>})` is a dict-literal value, not a direct
-    Assign/AnnAssign to `<name>` at a call site, so it is out of scope for this
-    resolver — a documented residual, not an oversight (CLAWSECCHECK-B-910)."""
+    branch order for a very different containment proof), this does not distinguish
+    scope at all, matching the neighbouring B-893 `HARDCODED_PROVIDER_SECRET_ASSIGN`
+    loop's own `ast.walk(tree)` idiom below. The RESOLVABLE binding is still only an
+    `Assign`/`AnnAssign` with a single `Name` target — unchanged — but the uniqueness
+    COUNT that gates it counts every way a name can be (re)bound anywhere in the
+    file, not just Assign/AnnAssign: round 1 counted only `Assign`/`AnnAssign`, so an
+    UNRELATED same-named function parameter written into `os.environ` elsewhere in
+    the file (`def configure(KEY): os.environ["X"] = KEY`) was invisible to the
+    counter, and a totally unrelated module-level `KEY = "sk-..."` wrongly looked
+    "uniquely bound" and got resolved into a fabricated data-flow link. The widened
+    count now also covers, via a single `ast.Name` Store/Del check (`ast.walk`
+    already recurses through any Tuple/List/Starred wrapping, so plain, tuple/list-
+    unpack, starred, `for`-loop, `with ... as`, walrus (`:=`), comprehension
+    for-targets, and `del` targets are ALL one check — every one of those lowers to
+    an `ast.Name` with Store, or for `del`, Del, context) plus dedicated checks for
+    the binding forms that are NOT `ast.Name` nodes: a function/lambda parameter
+    (`ast.arg`), an `import`/`from ... import` binding, an `except ... as` handler
+    name, a nested `def`/`class` of the same name, and — on 3.10+, via the same
+    `_MATCH_BIND_NODES`/`_MATCH_MAPPING_NODE` this module's `_own_bound_names`
+    already uses — a `match` capture pattern. `global`/`nonlocal` declarations are
+    deliberately NOT counted on their own: unlike `_own_bound_names` (which needs
+    them to decide what is a local of ONE scope), any actual rebind they enable is a
+    literal `Assign`/`AugAssign`/etc. node somewhere in the file that this walk
+    already counts directly, so the bare declaration adds nothing further here.
+    A name bound by ANYTHING else alongside its one Assign/AnnAssign — a second
+    Assign/AnnAssign anywhere in the file (conditional or not, secret-shaped or
+    not), a parameter, a loop/with/except target, an import, or a redefinition of
+    the same name as a function/class — is disqualified outright and never resolved
+    — see the C-135 probes next to the two call sites, and the parameter-shadow
+    regression probes in tests/test_b910_env_entangled_name_indirection.py, for why
+    this stays deliberately conservative rather than a precise data-flow analysis: a
+    name rebound across an if/else, shadowed by an unrelated parameter, or reused
+    later for something unrelated, must not resolve even where doing so would
+    sometimes be safe. `os.environ.update({K: <name>})` is a dict-literal value, not
+    a direct Assign/AnnAssign to `<name>` at a call site, so it is out of scope for
+    this resolver — a documented residual, not an oversight (B-910)."""
     counts: dict = {}
     secret_values: dict = {}
+
+    def _bump(name):
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+
     for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            _bump(node.id)
+        elif isinstance(node, ast.arg):
+            _bump(node.arg)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.asname:
+                    _bump(alias.asname)
+                elif alias.name != "*":
+                    _bump(alias.name.split(".")[0])
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                _bump(node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _bump(node.name)
+        elif _MATCH_BIND_NODES and isinstance(node, _MATCH_BIND_NODES):
+            if node.name:
+                _bump(node.name)
+        elif _MATCH_MAPPING_NODE is not None and isinstance(node, _MATCH_MAPPING_NODE):
+            if node.rest:
+                _bump(node.rest)
+
         if isinstance(node, ast.Assign):
             if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
                 continue
@@ -154,7 +206,6 @@ def _secret_name_bindings(tree: ast.AST) -> dict:
             value_node = node.value
         else:
             continue
-        counts[name] = counts.get(name, 0) + 1
         if _is_hardcoded_provider_secret(value_node):
             secret_values[name] = value_node
     return {name: val for name, val in secret_values.items() if counts.get(name) == 1}
@@ -10538,9 +10589,14 @@ def analyze_python(
                 default_arg = node.args[1]
                 # B-910: a one-hop indirection — `KEY = "sk-..."; os.getenv("K", KEY)`
                 # — resolves the same as the literal, but ONLY when KEY has exactly one
-                # same-file Assign/AnnAssign binding (see _secret_name_bindings). A
-                # multi-bound, conditional, or non-literal-resolving Name stays silent
-                # here exactly as it did before this fix (C-135 probes in
+                # same-file BINDING OF ANY KIND (an Assign/AnnAssign, a parameter, a
+                # loop/with/except target, an import, a redefinition as a def/class,
+                # ... — see _secret_name_bindings) and that sole binding is itself an
+                # Assign/AnnAssign resolving to a hardcoded-secret-shaped literal. A
+                # multi-bound (of ANY kind — e.g. shadowed by an unrelated function
+                # parameter of the same name elsewhere in the file), conditional, or
+                # non-literal-resolving Name stays silent here exactly as it did
+                # before this fix (C-135 probes in
                 # tests/test_b910_env_entangled_name_indirection.py).
                 resolved = (
                     secret_name_bindings.get(default_arg.id)
@@ -11367,10 +11423,14 @@ def analyze_python(
             continue
         # B-910: a one-hop indirection — `KEY = "sk-..."; os.environ["K"] = KEY` —
         # resolves the same as the literal, but ONLY when KEY has exactly one
-        # same-file Assign/AnnAssign binding (see _secret_name_bindings). A
-        # multi-bound, conditional, or non-literal-resolving Name stays silent here
-        # exactly as it did before this fix (C-135 probes in
-        # tests/test_b910_env_entangled_name_indirection.py).
+        # same-file BINDING OF ANY KIND (an Assign/AnnAssign, a parameter, a
+        # loop/with/except target, an import, a redefinition as a def/class, ... —
+        # see _secret_name_bindings) and that sole binding is itself an
+        # Assign/AnnAssign resolving to a hardcoded-secret-shaped literal. A
+        # multi-bound (of ANY kind — e.g. shadowed by an unrelated function
+        # parameter of the same name elsewhere in the file), conditional, or
+        # non-literal-resolving Name stays silent here exactly as it did before this
+        # fix (C-135 probes in tests/test_b910_env_entangled_name_indirection.py).
         resolved = (
             secret_name_bindings.get(node.value.id)
             if isinstance(node.value, ast.Name)
