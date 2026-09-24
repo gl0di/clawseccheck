@@ -1237,7 +1237,67 @@ def _rhs_has_fstring_taint(node: ast.AST, tainted: set[str]) -> bool:
     return False
 
 
-def _value_is_tainted_source(node: ast.AST, tainted: set[str]) -> bool:
+def _rhs_has_sysargv(node: ast.AST, tree: "ast.AST | None") -> bool:
+    """True if *node* is or contains sys.argv[...] (subscript/slice form), or a bare
+    `argv[...]` Name when `from sys import argv` was used -- B-955.
+
+    Same shape as `_rhs_has_subscript_environ`: a `Subscript` whose base is spelled
+    `sys.argv` (an `Attribute`) or bare `argv` (a `Name`) -- command-line arguments are
+    exactly as externally/attacker-influenced as an env var for this engine's own threat
+    model, so they belong in the same source vocabulary `_value_is_tainted_source`
+    already gives `os.environ`.
+
+    B-955 round 2: this used to be guarded against a local shadow of `sys`/`argv` via
+    `_rebound_names_cached(tree)[0]` -- a whole-FILE, scope-blind set, not scoped to the
+    actual read site. That made the guard trivially defeatable: a single, semantically
+    inert decoy line anywhere in the file -- `sys = sys`, `for sys in range(1): pass`,
+    `[sys for sys in range(1)]`, or the bare-name form's `argv = argv` -- added `"sys"`/
+    `"argv"` to the file-wide rebound set and silenced a REAL, unrelated `sys.argv ->
+    os.system`/`subprocess(shell=True)`/`exec`/`eval` finding anywhere else in the same
+    file, however far from the decoy and regardless of execution order (a review
+    reproduced this against B-955's own round-1 fix; the guard was never adversarially
+    sound against a deliberate bypass, only against an ordinary accidental shadow, and
+    it wasn't even scoped narrowly enough for that).
+
+    There is no legitimate reason to keep a shadow guard here at all: `_rebound_names`
+    doesn't even track function *parameters* (only Assign/AugAssign/AnnAssign targets,
+    for-loop/comprehension/with-as/NamedExpr/except-as targets, and def/class names --
+    see its own docstring), so the one plausible legitimate shadow -- a function
+    parameter genuinely named `argv` that has nothing to do with `sys` -- was NEVER
+    covered by this guard in the first place; dropping the guard changes nothing for
+    that case. Every binding form the guard DID cover (a plain reassignment, a for-
+    loop/comprehension variable, a `with ... as`, a walrus, `def sys():`/`class sys:`,
+    an `except ... as`) is not a realistic way anyone writes code that legitimately
+    still wants `sys.argv`/bare `argv` treated as a non-source afterward -- it's either
+    dead/inert (the decoy shapes above) or a genuine, deliberate rebinding to something
+    else entirely, in which case the LATER read is no longer spelled `sys.argv`/`argv`
+    at all and this function is simply not asked about it.
+
+    So this now matches `_rhs_has_subscript_environ`'s own design exactly: permanently
+    unguarded, by B-906's explicit precedent (see that function's neighboring comment)
+    -- a spelling-based taint-source recognizer does not try to be adversarially sound
+    against shadowing, it just doesn't let an attacker use shadowing to SUPPRESS a real
+    finding either. `tree` is kept as a parameter (unused here now) purely so every
+    existing call site -- unchanged by this round -- keeps working unmodified.
+    """
+    del tree  # no longer consulted; kept for call-site signature compatibility
+    for n in ast.walk(node):
+        if isinstance(n, ast.Subscript):
+            v = n.value
+            if (
+                isinstance(v, ast.Attribute)
+                and v.attr == "argv"
+                and _attr_base(v.value) == "sys"
+            ):
+                return True
+            if isinstance(v, ast.Name) and v.id == "argv":
+                return True
+    return False
+
+
+def _value_is_tainted_source(
+    node: ast.AST, tainted: set[str], tree: "ast.AST | None" = None
+) -> bool:
     """True if *node* derives from an external source or a tainted name.
 
     B-918: this used to recurse on itself (one self-call per branch: a Call's own
@@ -1280,7 +1340,19 @@ def _value_is_tainted_source(node: ast.AST, tainted: set[str]) -> bool:
     interpreter's ~1000-frame C recursion limit -- so there is no depth at which
     this can crash, and consequently no fail-safe "give up" default to pick at
     all: every node this function is ever asked about gets a real, exact answer.
+
+    B-955: `tree` (optional, the whole module AST) folds in
+    `_rhs_has_sysargv` -- a `sys.argv`/bare `argv` subscript is exactly as external a
+    source as `os.environ[...]`, and this is the ONE place both TT4/TT5/SSRF (via
+    `_expr_is_ext_tainted`/`_external_tainted_names`) and the B-863 wrapper-position
+    grammar (via its own `sourced()` closure) end up asking "is this value a tainted
+    source" through, so folding the check in HERE -- rather than adding it as a sibling
+    disjunct at each of this function's own call sites, the way `_rhs_has_subscript_
+    environ` is added alongside it in a couple of places -- gives every current and
+    future caller the new source uniformly, with no risk of a caller being missed.
     """
+    if _rhs_has_sysargv(node, tree):
+        return True
     stack = [node]
     while stack:
         n = stack.pop()
@@ -1304,7 +1376,12 @@ def _value_is_tainted_source(node: ast.AST, tainted: set[str]) -> bool:
     return False
 
 
-def _expr_is_ext_tainted(node: ast.AST, visible: set[str], ref_res: "_RefResolver | None" = None) -> bool:
+def _expr_is_ext_tainted(
+    node: ast.AST,
+    visible: set[str],
+    ref_res: "_RefResolver | None" = None,
+    tree: "ast.AST | None" = None,
+) -> bool:
     """B-906: the one "can this expression carry external input"
     predicate, folded out of the five identical `sourced = (...)` disjunctions that
     used to live separately in `_external_tainted_names` -- one per binding form
@@ -1316,9 +1393,15 @@ def _expr_is_ext_tainted(node: ast.AST, visible: set[str], ref_res: "_RefResolve
     to suppress anything (see `_RefResolver`'s own module note, above). Byte-
     identical to the original four-way disjunction when `ref_res` is None, which is
     what keeps this fold itself a pure refactor, verdict-neutral on its own.
+
+    `tree` (B-955), also optional, is threaded straight through to
+    `_value_is_tainted_source`. As of B-955 round 2, `_rhs_has_sysargv` no longer
+    consults `tree` at all (its whole-file shadow guard was dropped -- see that
+    function's own docstring), so passing `None` here is now a no-op difference
+    rather than a degrade; the parameter is kept purely for call-site compatibility.
     """
     return (
-        _value_is_tainted_source(node, visible)
+        _value_is_tainted_source(node, visible, tree)
         or _rhs_has_subscript_environ(node)
         or _rhs_has_fstring_taint(node, visible)
         or bool(_names_in(node) & visible)
@@ -1494,7 +1577,7 @@ def _external_tainted_names(
             visible = _tainted_names_visible(
                 a, tainted, owner_map, parent_scope, shadow_cache, global_cache
             )
-            sourced = _expr_is_ext_tainted(rhs, visible, ref_res)
+            sourced = _expr_is_ext_tainted(rhs, visible, ref_res, tree)
             if not sourced:
                 continue
 
@@ -1525,7 +1608,7 @@ def _external_tainted_names(
             visible = _tainted_names_visible(
                 iterable, tainted, owner_map, parent_scope, shadow_cache, global_cache
             )
-            sourced = _expr_is_ext_tainted(iterable, visible, ref_res)
+            sourced = _expr_is_ext_tainted(iterable, visible, ref_res, tree)
             if not sourced:
                 continue
             scope = owner_map.get(gen)
@@ -1546,7 +1629,7 @@ def _external_tainted_names(
             visible = _tainted_names_visible(
                 ctx_expr, tainted, owner_map, parent_scope, shadow_cache, global_cache
             )
-            sourced = _expr_is_ext_tainted(ctx_expr, visible, ref_res)
+            sourced = _expr_is_ext_tainted(ctx_expr, visible, ref_res, tree)
             if not sourced:
                 continue
             scope = owner_map.get(with_node)
@@ -1566,7 +1649,7 @@ def _external_tainted_names(
             visible = _tainted_names_visible(
                 iterable, tainted, owner_map, parent_scope, shadow_cache, global_cache
             )
-            sourced = _expr_is_ext_tainted(iterable, visible, ref_res)
+            sourced = _expr_is_ext_tainted(iterable, visible, ref_res, tree)
             if not sourced:
                 continue
             scope = owner_map.get(stmt)
@@ -1580,7 +1663,7 @@ def _external_tainted_names(
             visible = _tainted_names_visible(
                 ne, tainted, owner_map, parent_scope, shadow_cache, global_cache
             )
-            sourced = _expr_is_ext_tainted(rhs, visible, ref_res)
+            sourced = _expr_is_ext_tainted(rhs, visible, ref_res, tree)
             if not sourced:
                 continue
             scope = owner_map.get(ne)
@@ -2426,7 +2509,10 @@ def _call_args_tainted(node: ast.Call, tainted: set[str]) -> tuple:
 
 
 def _call_args_tainted_for_exec_sink(
-    node: ast.Call, tainted: set[str], ref_res: "_RefResolver | None" = None
+    node: ast.Call,
+    tainted: set[str],
+    ref_res: "_RefResolver | None" = None,
+    tree: "ast.AST | None" = None,
 ) -> tuple:
     """Like `_call_args_tainted`, but ALSO counts an inline external-source call sitting
     directly in the call's own arguments -- with no intermediate variable -- as tainted,
@@ -2462,7 +2548,7 @@ def _call_args_tainted_for_exec_sink(
         return any_tainted, direct
     all_args = list(node.args) + [kw.value for kw in node.keywords]
     for i, arg_node in enumerate(all_args):
-        if _value_is_tainted_source(arg_node, tainted) or (
+        if _value_is_tainted_source(arg_node, tainted, tree) or (
             ref_res is not None and ref_res.source_in(arg_node)
         ):
             # No intermediate variable carries the source to the sink -- that is at
@@ -3921,7 +4007,10 @@ def _b863_t1c_no_escape(fn, names, tree):
     return True
 
 
-def _b863_m_for(fn, param_name, owner_map, parent_scope, shadow_cache, func_param_taint, ext_taint_map):
+def _b863_m_for(
+    fn, param_name, owner_map, parent_scope, shadow_cache, func_param_taint, ext_taint_map,
+    tree=None,
+):
     """T1b: is `param_name` visible-tainted at `fn`'s own sink, from anything
     OTHER than its own ordinary per-function parameter taint? Recomputes
     `_external_tainted_names` over `fn`'s own subtree with `param_name`
@@ -3929,7 +4018,17 @@ def _b863_m_for(fn, param_name, owner_map, parent_scope, shadow_cache, func_para
     (Call-based append/extend/store-target, and plain-Name alias
     unification) that `_external_tainted_names` itself does not model. See
     the module comment above `_B863OutOfDomain` for why this is a wrapper
-    around the existing function rather than a flag inside it."""
+    around the existing function rather than a flag inside it.
+
+    `tree` (B-955), the WHOLE module tree -- deliberately NOT `fn` (the
+    recomputed `_external_tainted_names(fn, ...)` call below intentionally scopes ITS
+    OWN `tree` argument to `fn`'s own subtree, which must not change) -- is threaded
+    only into this function's own local `sourced()` closure, feeding
+    `_value_is_tainted_source`'s `sys.argv` recognition (`_rhs_has_sysargv`). As of
+    B-955 round 2 that recognizer no longer guards against a local shadow of
+    `sys`/`argv` at all (permanently unguarded, matching `_rhs_has_subscript_environ`'s
+    own B-906 precedent) -- unlike `_b863_a0_is_verified_sys_executable`'s own
+    `sys.executable` carve-out, which keeps its file-wide rebind guard unchanged."""
     sub = {id(x) for x in ast.walk(fn)}
     inside = {
         s for s in list(ext_taint_map.keys()) + list(func_param_taint.keys())
@@ -3949,7 +4048,7 @@ def _b863_m_for(fn, param_name, owner_map, parent_scope, shadow_cache, func_para
 
     def sourced(e, vis):
         return (
-            _value_is_tainted_source(e, vis)
+            _value_is_tainted_source(e, vis, tree)
             or _rhs_has_subscript_environ(e)
             or _rhs_has_fstring_taint(e, vis)
             or bool(_names_in(e) & vis)
@@ -4037,7 +4136,7 @@ def _b863_a0_is_verified_sys_executable(a0, tree):
         and a0.attr == "executable"
         and isinstance(a0.value, ast.Name)
         and a0.value.id == "sys"
-        and "sys" not in _rebound_names(tree)[0]
+        and "sys" not in _rebound_names_cached(tree)[0]
     )
 
 
@@ -4137,7 +4236,10 @@ def _b863_tier1_tier2_verdict(
     # tier 2's position grammar can or cannot classify.
     if _b863_t1a_call_sites_all_constant(resolved_sites, owner_map, fn.name):
         if _b863_t1c_no_escape(fn, names, tree):
-            M = _b863_m_for(fn, param_name, owner_map, parent_scope, shadow_cache, func_param_taint, ext_taint_map)
+            M = _b863_m_for(
+                fn, param_name, owner_map, parent_scope, shadow_cache, func_param_taint,
+                ext_taint_map, tree=tree,
+            )
             if param_name not in _tainted_names_visible(node, M, owner_map, parent_scope, shadow_cache):
                 return False
 
@@ -5644,6 +5746,48 @@ def _rebound_names(tree: ast.AST) -> "tuple[set, set]":
     return names, os_attr
 
 
+# B-955: `_rebound_names` is a pure O(n) whole-tree `ast.walk`. Round 1 of B-955 had
+# `_rhs_has_sysargv` (above) call it from INSIDE `_external_tainted_names`'s own
+# per-assignment fixpoint loop -- up to 6 iterations over every assignment/
+# comprehension/with-item/for-loop/namedexpr in the file, each one re-testing whether
+# its RHS is a tainted source. Recomputing `_rebound_names` from scratch at every one
+# of those call sites turned an O(n) check into an O(assignments * n) blow-up on a
+# file with many assignments -- measured directly against test_taint.py's own
+# pre-existing wall-clock regression pin (`test_shared_deep_base_referenced_many_
+# times_does_not_blow_up_wall_clock`, 2000 assignments): 76s against its <10s
+# ceiling, unmodified before this cache.
+#
+# Round 2 of B-955 dropped `_rhs_has_sysargv`'s shadow guard entirely (a file-wide,
+# scope-blind rebound check made it trivially defeatable by one inert decoy line --
+# see that function's own docstring), so it no longer calls `_rebound_names_cached`
+# at all. The cache below is kept anyway: it still serves its two ORIGINAL callers
+# (`_path_module_aliases`, `_b863_a0_is_verified_sys_executable`, both predating
+# B-955) and removes the smaller, pre-existing repeated-whole-tree-walk cost the next
+# paragraph describes -- there is no reason to revert a correct, still-useful
+# memoization just because its original motivating caller went away.
+#
+# `tree` never mutates for the life of one `analyze_python` call (this whole module's
+# design is read-only, parse-once), so memoizing by OBJECT IDENTITY is exact, not an
+# approximation. Same `WeakKeyDictionary`-per-input idiom already established for
+# `_B917_ARTIFACT_STAGED_CACHE`/`_B917_ARTIFACT_ALIAS_CACHE` (below), just keyed on
+# `tree` itself instead of a `ShippedArtifact`, so an entry can never leak across files
+# or outlive the tree object it was computed from. Both original call sites
+# (`_path_module_aliases`, `_b863_a0_is_verified_sys_executable`) were switched to
+# this cached wrapper too -- their own results only ever get READ (`|`/`-` build new
+# sets; nothing mutates the returned sets in place), so sharing one cached
+# `(names, os_attr)` pair across all of them is safe.
+_REBOUND_NAMES_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _rebound_names_cached(tree: ast.AST) -> "tuple[set, set]":
+    cached = _REBOUND_NAMES_CACHE.get(tree)
+    if cached is not None:
+        return cached
+    result = _rebound_names(tree)
+    _REBOUND_NAMES_CACHE[tree] = result
+    return result
+
+
 def _path_module_aliases(tree: ast.AST) -> tuple:
     """`(direct, viaos)` — the names *tree*'s own imports bind to a path module.
 
@@ -5701,7 +5845,7 @@ def _path_module_aliases(tree: ast.AST) -> tuple:
     # direction -- it can only put a call back under suspicion. `os.path = <obj>` is a
     # different shape again (an attribute mutation, not a name rebind) and is dropped
     # from `viaos` only.
-    other_rebound, os_attr_rebound = _rebound_names(tree)
+    other_rebound, os_attr_rebound = _rebound_names_cached(tree)
     rebound = other_rebound | bad_imports
     return direct - rebound, viaos - (rebound | os_attr_rebound)
 
@@ -9895,7 +10039,7 @@ def _exec_sink_taint_is_only_artifact_relative_decode(
     like the mixed-name case above.
     """
     tainted_here = _names_in(arg_node) & tainted
-    has_inline_source = _value_is_tainted_source(arg_node, tainted)
+    has_inline_source = _value_is_tainted_source(arg_node, tainted, tree)
     if not tainted_here and not has_inline_source:
         return False
     if not _subtree_has_decode(arg_node):
@@ -11678,7 +11822,7 @@ def analyze_python(
     _has_inline_exec_sink_source = any(
         _is_exec_sink_call(n.func)[0]
         and any(
-            _value_is_tainted_source(a, set()) or ref_res.source_in(a)
+            _value_is_tainted_source(a, set(), tree) or ref_res.source_in(a)
             for a in list(n.args) + [kw.value for kw in n.keywords]
         )
         for n in ast.walk(tree)
@@ -11706,7 +11850,9 @@ def analyze_python(
                 ext_visible = _tainted_names_visible(
                     node, ext_taint_map, owner_map, parent_scope, shadow_cache
                 )
-                any_t, direct = _call_args_tainted_for_exec_sink(node, ext_visible, ref_res=ref_res)
+                any_t, direct = _call_args_tainted_for_exec_sink(
+                    node, ext_visible, ref_res=ref_res, tree=tree
+                )
                 # B-638: the tainted input is exactly the read of a file this artifact
                 # ships (see the OBFUSCATED_EXEC site above).
                 if any_t and shipped_exec is not None and (
@@ -11742,7 +11888,7 @@ def analyze_python(
                     if shipped_exec is None and _all_args and all(
                         (
                             not (_names_in(_a) & ext_visible)
-                            and not _value_is_tainted_source(_a, ext_visible)
+                            and not _value_is_tainted_source(_a, ext_visible, tree)
                             and not ref_res.source_in(_a)
                         )
                         or _exec_sink_taint_is_only_artifact_relative_decode(

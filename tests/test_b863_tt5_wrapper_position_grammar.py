@@ -390,17 +390,39 @@ def test_r1_b6b_closure_is_crit():
 
 
 # ---------------------------------------------------------------------------
-# R3 — the `sys.argv` FN (an accepted, pre-existing, out-of-scope engine gap)
-# and its pinned git+TOKEN sibling.
+# R3 — `sys.argv` is now a recognized taint source (CLAWSECCHECK-B-955) and
+# its pinned git+TOKEN sibling.
 # ---------------------------------------------------------------------------
 
-def test_r3_sysargv_tail_stays_info_pre_existing_engine_gap():
-    """`sys.argv` is not a taint source ANYWHERE in this engine -- a pre-
-    existing, whole-engine gap (CLAUDE.md CLAWSECCHECK-B-863 design's own
-    `residual_proof`), not something this task's grammar can or should paper
-    over. Pinned so a future change does not silently start relying on it."""
+def test_r3_sysargv_tail_now_recognized_but_stays_info_under_non_shell_a0():
+    """CLAWSECCHECK-B-955 fixed the whole-engine gap this test used to pin
+    (`sys.argv` was not a taint source ANYWHERE in the engine): `extra =
+    sys.argv[1]` is now a genuine external source, exactly like `os.environ[...]`
+    already was. This SPECIFIC shape still resolves to info, not crit, but for
+    the same, unrelated, already-correct reason its sibling
+    `test_r3_git_tainted_token_tail_is_info_under_p1` (below) has always been
+    info: a0 ("git") is not a shell/indirect-execution interpreter
+    (`_argv0_is_shell_indirect_exec`), so R3/R4's crit escalation never even
+    looks at whether the tail is tainted -- ordinary data reaching `git`'s own
+    argv is not code injection, taint source notwithstanding. The taint-source
+    fix and this test's own verdict are independent; see
+    `test_r3_sysargv_into_shell_a0_is_crit` for the shape that actually proves
+    the fix landed."""
     src = _va(["extra = sys.argv[1]", "args = list(args)", "args.extend([extra])"])
     _assert_info(src)
+
+
+def test_r3_sysargv_into_shell_a0_is_crit():
+    """The B-955 payoff at THIS wrapper-position-grammar layer: a0 IS a shell
+    here (`sh`), so a `sys.argv`-tainted tail is genuine command injection --
+    the exact `os.environ`-tainted counterpart already convicts (see the O*/A*
+    cases elsewhere in this file), and `sys.argv` must reach the same verdict
+    now that it is a recognized source."""
+    src = _va(
+        ["extra = sys.argv[1]", "args = list(args)", "args.extend(['-c', extra])"],
+        call='sh("sh")',
+    )
+    _assert_crit(src)
 
 
 def test_r3_git_tainted_token_tail_is_info_under_p1():
@@ -1101,9 +1123,14 @@ def test_mech_nonconvergence_default_path_is_unaffected():
     src = _va(["args = list(args)", "args.extend(['sh', '-c', payload])"])
     real_m_for = skillast_mod._b863_m_for
 
-    def zero_iteration_m_for(fn, param_name, owner_map, parent_scope, shadow_cache, fpt, ext_taint_map):
+    def zero_iteration_m_for(
+        fn, param_name, owner_map, parent_scope, shadow_cache, fpt, ext_taint_map, tree=None,
+    ):
         # Force the very first M (seeds only, no fixpoint growth) -- the
-        # weakest possible M, i.e. the LEAST likely to disprove T1b.
+        # weakest possible M, i.e. the LEAST likely to disprove T1b. `tree`
+        # (CLAWSECCHECK-B-955) accepted-and-ignored, matching the real
+        # `_b863_m_for`'s own new keyword-only addition, so this stand-in stays
+        # call-compatible with it.
         seeds = {k: set(v) for k, v in ext_taint_map.items()}
         return skillast_mod._external_tainted_names(fn, seeds, owner_map, parent_scope, shadow_cache)
 
