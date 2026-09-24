@@ -492,6 +492,100 @@ ESCAPES = {
     "dirname_of_trailing_slash": f'd = os.path.dirname(os.path.join(here, "demo_plugin/"))\nwith open(os.path.join(d, "demo_plugin", "__version__.py")) as f:\n    {EX}(f.read(), about)\n',
     # a stray dynamic call in the same file is code we cannot see into
     "stray_eval": f"x = {'ev' + 'al'}(input())\nwith {_OPEN}) as f:\n    {EX}(f.read(), about)\n",
+    # CLAWSECCHECK-B-922 round 2: `sole()`'s "last same-scope binding before the use
+    # point wins" resolution (content()'s Name branch, round 1) assumes direct-body
+    # statements execute in SOURCE order. An independent C-135 review found that a
+    # frame-jump/tracer technique breaks that assumption: install a trace/profile hook
+    # that rewrites `frame.f_lineno` mid-run to SKIP the second, legitimate-looking
+    # `src = raw.decode(...)` rebind sole() picks statically, so the value that actually
+    # reaches exec() at runtime stays the FIRST, attacker-controlled `src = "MALICIOUS"`.
+    # Each variant below is the SAME content-rebind shape as
+    # test_straight_line_content_rebind_clears -- which must stay clear on its own, this
+    # is the paired mutation control -- plus one frame-jump primitive; every one must
+    # void the carve-out (stay crit) via `_tampers()` on its own.
+    "frame_jump_f_lineno_direct_store": (
+        f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\n'
+        'raw = h.read()\n'
+        'h.close()\n'
+        'src = "MALICIOUS"\n'
+        'def _skip(frame, event, arg):\n'
+        '    if event == "line":\n'
+        '        frame.f_lineno = frame.f_lineno + 1\n'
+        '    return _skip\n'
+        'sys.settrace(_skip)\n'
+        'src = raw.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    "frame_jump_type_dunder_set": (
+        f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\n'
+        'raw = h.read()\n'
+        'h.close()\n'
+        'src = "MALICIOUS"\n'
+        'def _skip(frame, event, arg):\n'
+        '    if event == "line":\n'
+        '        type(frame).f_lineno.__set__(frame, frame.f_lineno + 1)\n'
+        '    return _skip\n'
+        'sys.settrace(_skip)\n'
+        'src = raw.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    "frame_jump_operator_attrgetter": (
+        f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\n'
+        'raw = h.read()\n'
+        'h.close()\n'
+        'src = "MALICIOUS"\n'
+        'import _operator\n'
+        '_get_lineno = _operator.attrgetter("f_lineno")\n'
+        'def _skip(frame, event, arg):\n'
+        '    if event == "line":\n'
+        '        frame.f_lineno = _get_lineno(frame) + 1\n'
+        '    return _skip\n'
+        'sys.settrace(_skip)\n'
+        'src = raw.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    "frame_jump_settrace_entry": (
+        f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\n'
+        'raw = h.read()\n'
+        'h.close()\n'
+        'src = "MALICIOUS"\n'
+        'sys.settrace(\n'
+        '    lambda frame, event, arg: setattr(frame, "f_lineno", frame.f_lineno + 1)\n'
+        ')\n'
+        'src = raw.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    "frame_jump_setprofile_entry": (
+        f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\n'
+        'raw = h.read()\n'
+        'h.close()\n'
+        'src = "MALICIOUS"\n'
+        'def _skip(frame, event, arg):\n'
+        '    if event == "line":\n'
+        '        frame.f_lineno = frame.f_lineno + 1\n'
+        '    return _skip\n'
+        'sys.setprofile(_skip)\n'
+        'src = raw.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    # A distinct route from the `sys.settrace`/`setprofile` ATTRIBUTE access the entries
+    # above trigger: `from threading import settrace` binds the bare NAME, so the call
+    # site (`_threading_settrace(_skip)`) is a `Name`, never an `Attribute` -- only the
+    # `_TAMPER_DOTTED_MODULES` entry on the import statement itself catches this one.
+    "frame_jump_threading_settrace_import": (
+        f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\n'
+        'raw = h.read()\n'
+        'h.close()\n'
+        'src = "MALICIOUS"\n'
+        'from threading import settrace as _threading_settrace\n'
+        'def _skip(frame, event, arg):\n'
+        '    if event == "line":\n'
+        '        frame.f_lineno = frame.f_lineno + 1\n'
+        '    return _skip\n'
+        '_threading_settrace(_skip)\n'
+        'src = raw.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
 }
 
 
@@ -499,6 +593,37 @@ ESCAPES = {
 def test_escape_stays_crit(name):
     src = _HDR + ESCAPES[name]
     assert _crit(src), name
+
+
+@pytest.mark.skipif(
+    not hasattr(__import__("sys"), "monitoring"),
+    reason="sys.monitoring needs Python 3.12+",
+)
+def test_frame_jump_via_sys_monitoring_line_callback_stays_crit():
+    """CLAWSECCHECK-B-922 round 2, 7th jump variant: a `sys.monitoring` LINE callback
+    (Python 3.12+) receives `(code, line_number)`, not a frame -- so reaching
+    `frame.f_lineno` from inside one still needs `sys._getframe()`, which was ALREADY a
+    tamper attr before this round. Deliberately no `"monitoring"` token was added to any
+    tamper list (too FP-prone: it would match unrelated attribute names) -- this test
+    confirms detection holds anyway, through `_getframe` and the new `f_lineno` entry,
+    not through naming `sys.monitoring` itself."""
+    src = (
+        f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\n'
+        'raw = h.read()\n'
+        'h.close()\n'
+        'src = "MALICIOUS"\n'
+        'def _skip(code, line_number):\n'
+        '    frame = sys._getframe(1)\n'
+        '    frame.f_lineno = frame.f_lineno + 1\n'
+        'if hasattr(sys, "monitoring"):\n'
+        '    _tool_id = sys.monitoring.PROFILER_ID\n'
+        '    sys.monitoring.use_tool_id(_tool_id, "b922-poc")\n'
+        '    sys.monitoring.register_callback(_tool_id, sys.monitoring.events.LINE, _skip)\n'
+        '    sys.monitoring.set_events(_tool_id, sys.monitoring.events.LINE)\n'
+        'src = raw.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    )
+    assert _crit(_HDR + src)
 
 
 def test_shadowed_file_parameter_stays_crit():
