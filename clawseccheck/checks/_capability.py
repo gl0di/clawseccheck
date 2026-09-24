@@ -772,6 +772,19 @@ def _tool_policy_view(cfg: dict) -> _ToolPolicyView:
         and profile is None  # see (a)
     )
 
+    # B-963: a schema-invalid, non-string `tools.profile` (a list or dict, e.g. from
+    # `{"tools": {"profile": ["x"]}}`) used to count as a resolved answer here just
+    # because it is not `None` -- `_profile_is_powerful` is crash-safe for it
+    # (`str(profile or "").lower()` on a list/dict matches nothing), so a bare
+    # non-string profile with no other grant signal made `_b68_fs_tools_granted`
+    # return "fully resolved, nothing granted" (a confident PASS) instead of the
+    # honest UNKNOWN a real OpenClaw config could never reach (`ToolProfileSchema`
+    # is an enum of strings). Mirrors `toolgrant._block_well_formed`'s own
+    # `isinstance(profile, str)` guard for the identical malformed-input class.
+    # An empty string is unaffected (`"" is not None` was already `True` before
+    # this, and `isinstance("", str)` is `True` too) -- only a non-string value
+    # changes direction, from a confident answer to not-enumerable.
+    profile_enumerable = isinstance(profile, str)
     return _ToolPolicyView(
         named=tuple(named),
         raw_named=tuple(raw_named),
@@ -779,7 +792,7 @@ def _tool_policy_view(cfg: dict) -> _ToolPolicyView:
         profile=profile,
         grants_all=explicit_all or implicit_all,
         implicit_all=implicit_all,
-        enumerable=bool(named) or explicit_all or implicit_all or profile is not None,
+        enumerable=bool(named) or explicit_all or implicit_all or profile_enumerable,
     )
 
 
@@ -916,12 +929,52 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     # permissive default) but it is a decision about what the tool asserts, not this
     # migration — see B-736. Restricted to declaring agents the blast radius is exactly the
     # two fixtures above, which is what a fix for B-668 should touch and nothing more.
+    # B-941: `toolgrant.granted()` is a faithful, vendor-EXECUTED port -- trusting its
+    # answer is right even when this SCOPE's own `tools.profile` is a string
+    # `toolgrant._CORE_TOOL_PROFILES` does not recognise (e.g. "readonly" in the
+    # `clean_b409_weak_agent_profile_no_widening` fixture below), as long as some OTHER
+    # real, well-formed layer -- the global `tools.allow`/`alsoAllow`/`deny`, or this
+    # agent's own -- still resolves to a non-empty `toolgrant._policies(cfg, scope)`.
+    # `_profile_policy` already maps an unrecognised profile string to `None`, dropping
+    # it from that AND-ed list exactly like an ABSENT profile would, so the resolution
+    # is still the genuine vendor answer (that fixture's "readonly" silently drops the
+    # global `minimal` restriction, and the global `alsoAllow` then injects unionAllow's
+    # wildcard -- a real, differentially-verified grant, not a guess).
+    #
+    # The bug is narrower: when `_policies(cfg, scope)` comes back EMPTY *because the
+    # only thing that would have constrained it is an unrecognised `tools.profile`* --
+    # `all(...)` over zero policies vacuously returns `True` for every tool. A real
+    # OpenClaw could never reach that state (`ToolProfileSchema` is a string enum, so
+    # the config would fail to load), so reading it as a confident "everything granted"
+    # WARN, rather than the honest "this value is unparseable" UNKNOWN, was the actual
+    # defect (repro: a named agent whose ENTIRE own `tools` block is just an
+    # unrecognised `profile`, with no global `tools` block either -- `{"agents": {"list":
+    # [{"id": "main", "tools": {"profile": "Messaging"}}]}}`).
+    #
+    # `toolgrant._unresolved_profile(cfg, scope)` isolates exactly that reason, as
+    # opposed to every OTHER way `_policies` can come back empty -- chiefly a real
+    # config whose only `tools` key is an opaque `byProvider`/`toolsBySender` layer this
+    # module cannot read at all (`OPAQUE_NARROWING_KEYS`), a pre-existing, separately-
+    # tracked blind spot this task must not silently "fix" as a side effect (see
+    # `tests/test_b737_permissive_default_scope.py::
+    # test_r3_side_finding_named_byprovider_stays_warn_via_g1_not_fixed_here`, whose own
+    # `{"tools": {"byProvider": {"openai": {}}}}` config has an empty `_policies()` too,
+    # for that different reason, and must keep the pre-existing vacuous-grant WARN it
+    # already (if accidentally) produces). NEVER `toolgrant._block_well_formed`, which
+    # would also (wrongly) discard the "readonly" scope above -- it inspects this
+    # scope's OWN tools block in isolation and cannot see the real global layer that
+    # still resolves it. A scope this loop skips falls through to `_fs_scope_grants`
+    # (`toolgrant.resolved_scopes`) below, which also lands on UNKNOWN for it (that
+    # helper's own, stricter, whole-config `_block_well_formed` contract -- see its
+    # docstring) -- never a silent drop to "nothing granted".
     scoped: set = set()
     _roster = agent_roster(cfg)
     for _entry in _roster:
         if not _entry.id or not isinstance(_entry.entry, dict):
             continue
         if not _entry.entry.get("tools"):
+            continue
+        if not _toolgrant._policies(cfg, _entry.id) and _toolgrant._unresolved_profile(cfg, _entry.id):
             continue
         scoped |= {t for t in _B68_FS_TOOLS
                     if _toolgrant.granted(cfg, t, _entry.id)}
@@ -934,7 +987,14 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     # shape, and gated on the key being DECLARED for the same reason the loop above is gated
     # on `entry["tools"]`: an ungated global query returns the permissive vendor default and
     # reintroduces the 65-fixture expansion this migration is deliberately not making.
-    if not _roster and dig(cfg, "agents.defaults.tools"):
+    # Same B-941 gate as the per-agent loop above -- this is the identical
+    # `toolgrant.granted()` vacuous-grant shape, reached through `agents.defaults.tools`
+    # instead of a roster entry (e.g. `{"agents": {"defaults": {"tools": {"profile":
+    # "Messaging"}}}}`, no roster at all, no global `tools` block either).
+    _defaults_vacuous_malformed = (
+        not _toolgrant._policies(cfg) and _toolgrant._unresolved_profile(cfg)
+    )
+    if not _roster and dig(cfg, "agents.defaults.tools") and not _defaults_vacuous_malformed:
         scoped |= {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t)}
 
     # The enumerability gate has to see `scoped`, and that ordering is the whole point of

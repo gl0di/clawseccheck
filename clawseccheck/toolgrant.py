@@ -435,6 +435,42 @@ def _agent_tools(cfg: dict, scope):
     return tools
 
 
+def _resolved_profile(agent_tools, global_tools):
+    """``agentTools?.profile ?? cfg.tools?.profile`` -- the ``tools.profile`` value that
+    actually feeds resolution for one scope, split out of ``_policies`` (B-941)
+    so ``_unresolved_profile`` below can ask about it without re-deriving the coalesce
+    order. Never AND-ed with the global one -- an agent's own profile REPLACES it, exactly
+    as ``_policies`` (and the module docstring's RESOLUTION ORDER) already document."""
+    profile = agent_tools.get("profile") if isinstance(agent_tools, dict) else None
+    if profile is None:
+        profile = global_tools.get("profile") if isinstance(global_tools, dict) else None
+    return profile
+
+
+def _unresolved_profile(cfg: dict, scope=GLOBAL_SCOPE) -> bool:
+    """True when the ``tools.profile`` value feeding ``scope``'s resolution
+    (``_resolved_profile``) is PRESENT but not a real, resolvable profile -- ``_profile_
+    policy`` returns ``None`` for it (wrong case, an unhashable list/dict, or simply not
+    one of the four known names). A real OpenClaw could never load such a config
+    (``ToolProfileSchema`` is a string enum), so this is the malformed-input class, not an
+    ordinary "no profile set" (which is ``profile is None`` and returns ``False`` here).
+
+    B-941: exists for ``checks/_capability.py``'s G1
+    (``_b68_fs_tools_granted``) to tell THIS specific reason ``_policies(cfg, scope)`` can
+    come back empty -- an unrecognised profile silently dropping out of the AND-ed list,
+    the same way an absent one would -- apart from every OTHER reason it can be empty (a
+    real config whose only ``tools`` key is an opaque ``byProvider``/``toolsBySender``
+    layer this module cannot read at all, or genuinely nothing declared for that scope).
+    Those other shapes are pre-existing, separately-tracked blind spots (this module's own
+    "NOT MODELLED" section; ``OPAQUE_NARROWING_KEYS``), not a value no real vendor schema
+    could ever have accepted -- conflating them would silently "fix" that separate, still-
+    open gap as a side effect of this one (see ``tests/test_b737_permissive_default_scope.
+    py::test_r3_side_finding_named_byprovider_stays_warn_via_g1_not_fixed_here``, which
+    pins that it must not)."""
+    profile = _resolved_profile(_agent_tools(cfg, scope), cfg.get("tools"))
+    return profile is not None and _profile_policy(profile) is None
+
+
 def _policies(cfg: dict, scope=GLOBAL_SCOPE) -> list:
     """The exact ``[profilePolicy, globalPolicy, agentPolicy]`` list
     ``resolveConfiguredToolPolicies`` builds and ANDs together — split out of ``granted()``
@@ -448,9 +484,7 @@ def _policies(cfg: dict, scope=GLOBAL_SCOPE) -> list:
     agent_tools = _agent_tools(cfg, scope)
     global_tools = cfg.get("tools")
 
-    profile = agent_tools.get("profile") if isinstance(agent_tools, dict) else None
-    if profile is None:
-        profile = global_tools.get("profile") if isinstance(global_tools, dict) else None
+    profile = _resolved_profile(agent_tools, global_tools)
 
     also_allow = _explicit_also_allow(agent_tools)
     if also_allow is None:

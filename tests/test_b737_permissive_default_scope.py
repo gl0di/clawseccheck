@@ -377,12 +377,14 @@ def test_extra_idless_unknown_profile_is_unknown_malformed():
     design's own example) is caught by G1's widenings path regardless of id -- verified:
     `_agent_profile_widenings` returns non-empty for it, so `_b68_fs_tools_granted`
     is ALREADY enumerable and `resolved_scopes` never runs (see
-    `test_extra_idd_unknown_profile_pre_existing_g1_quirk_unaffected` for the id'd
-    sibling, unaffected either way). "Messaging" (wrong case, no "exec"/"code"
-    substring) isolates the malformed-profile path this design actually added:
+    `test_extra_idd_profile_name_substring_match_still_widens_unaffected_by_b941` for the
+    id'd sibling of THAT case, still unaffected). "Messaging" (wrong case, no "exec"/
+    "code" substring) isolates the malformed-profile path this design actually added:
     `toolgrant._CORE_TOOL_PROFILES` is case-sensitive, so "Messaging" resolves to
     nothing there, `_block_well_formed` rejects it, and `resolved_scopes` returns
-    None -- UNKNOWN, not a guess."""
+    None -- UNKNOWN, not a guess. CLAWSECCHECK-B-941 closed the id'd sibling of THIS
+    exact config (`test_extra_idd_unknown_profile_is_unknown_malformed` below), which
+    used to disagree with this id-less one -- see that test for the history."""
     cfg = {"agents": {"list": [{"tools": {"profile": "Messaging"}}]}}
     assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
     assert toolgrant.resolved_scopes(cfg) is None
@@ -416,14 +418,95 @@ def test_extra_idless_unhashable_profile_is_unknown_not_a_crash(profile_value):
     assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
 
 
-def test_extra_idd_unknown_profile_pre_existing_g1_quirk_unaffected():
-    """Pre-existing G1 behaviour (design's own note: file for 4.3.1, low): a named agent
-    with a SCHEMA-INVALID `tools.profile` resolves the profile to nothing (unrecognised
-    key), which leaves `policies` empty and therefore vacuously grants everything via
-    G1's own `toolgrant.granted` call -- untouched by B-737 either way."""
+def test_extra_idd_unknown_profile_is_unknown_malformed():
+    """CLAWSECCHECK-B-941 (was `test_extra_idd_unknown_profile_pre_existing_g1_quirk_
+    unaffected`, pinning the OLD, wrong WARN verdict for this exact config -- renamed
+    because the fix it names is no longer "unaffected"). The id'd sibling of
+    `test_extra_idless_unknown_profile_is_unknown_malformed` above: a named roster agent
+    with the SAME schema-invalid `tools.profile` ("Messaging" -- wrong case, no "exec"/
+    "code" substring, so `_agent_profile_widenings`'s heuristic does not fire either)
+    used to resolve to nothing via `toolgrant._profile_policy`, leaving `_policies`
+    empty for that scope -- `all(...)` over an empty policy list vacuously grants every
+    tool via G1's own per-agent `toolgrant.granted` call in `_b68_fs_tools_granted`,
+    reported as a confident full-grant WARN. That call is now skipped whenever
+    `toolgrant._policies(cfg, scope)` is empty AND `toolgrant._unresolved_profile(cfg,
+    scope)` says the reason is exactly this (an unrecognised profile silently dropping
+    out of the AND-ed list) -- NOT the blunter `toolgrant._block_well_formed`, which
+    would also incorrectly reject a scope where a real OTHER layer (e.g. a global
+    `alsoAllow` wildcard) still resolves the grant despite this agent's own unrecognised
+    profile (see `clean_b409_weak_agent_profile_no_widening` in `tests/test_b55.py`).
+    So this scope falls through to `_fs_scope_grants` and lands on the honest UNKNOWN
+    the id-less sibling already had -- the two configs no longer disagree only because
+    of whether the roster entry happens to carry an `id`."""
+    cfg = {"agents": {"list": [{"id": "main", "tools": {"profile": "Messaging"}}]}}
+    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+    assert toolgrant.resolved_scopes(cfg) is None
+
+
+def test_extra_idd_profile_name_substring_match_still_widens_unaffected_by_b941():
+    """Control for B-941: `profile: "Coding"` (capital C) is ALSO not a real
+    `toolgrant._CORE_TOOL_PROFILES` key, but unlike "Messaging" above it contains the
+    substring "code", so `checks/_shared._profile_is_powerful` (case-insensitive,
+    deliberately catching typos/near-misses of a powerful profile name -- its own
+    module comment) treats it as powerful regardless of id. `_agent_profile_widenings`
+    therefore returns non-empty for this config BEFORE `_b68_fs_tools_granted` ever
+    reaches the per-agent `toolgrant.granted` call B-941 gated, so this WARN is driven
+    by that separate, intentional heuristic, not by the malformed-profile vacuous-grant
+    bug -- B-941's fix must not (and does not) change it. This is the id'd sibling of
+    the id-less case documented in `test_extra_idless_unknown_profile_is_unknown_
+    malformed`'s own docstring."""
     cfg = {"agents": {"list": [{"id": "main", "tools": {"profile": "Coding"}}]}}
     b55, _, _ = _verdicts(cfg)
     assert b55 == WARN
+
+
+def test_extra_defaults_tools_malformed_profile_is_unknown():
+    """CLAWSECCHECK-B-941's sibling shape: the SAME vacuous-grant bug, reached through
+    `agents.defaults.tools` instead of a roster entry -- no roster declared at all, so
+    `_b68_fs_tools_granted`'s second `scoped` contribution (`agents.defaults.tools`)
+    used to call `toolgrant.granted(cfg, t)` unconditionally once the key was merely
+    present, with the same "unrecognised profile resolves to an empty, vacuously-
+    granting policy list" defect. Now gated on the same `toolgrant._policies(cfg)`-
+    empty-plus-`toolgrant._unresolved_profile(cfg)` test as the roster loop above, so
+    it falls through to `_fs_scope_grants` and lands on UNKNOWN, same as every other
+    malformed-profile shape in this file."""
+    cfg = {"agents": {"defaults": {"tools": {"profile": "Messaging"}}}}
+    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+    assert toolgrant.resolved_scopes(cfg) is None
+
+
+@pytest.mark.parametrize(
+    "profile_value",
+    [["x"], {"x": 1}],
+    ids=["list_valued_profile", "dict_valued_profile"],
+)
+def test_extra_global_non_string_profile_no_roster_is_unknown_not_pass(profile_value):
+    """CLAWSECCHECK-B-963: `{"tools": {"profile": ["x"]}}` (or an equivalent dict), with
+    NO `agents` key at all -- so resolution happens entirely at `GLOBAL_SCOPE`, the ONE
+    code path that never went through `toolgrant.resolved_scopes` (B-737's fix covers
+    the rostered/`agents.defaults` shapes; this config has neither). `_tool_policy_view`
+    used to read `profile is not None` as "this view is enumerable" regardless of type,
+    so a non-string profile with no other grant signal made `_b68_fs_tools_granted`
+    return `([], True)` -- "fully resolved, nothing granted" -- which both B55 and B68
+    read as a confident PASS. `checks/_shared._profile_is_powerful` is crash-safe for a
+    list/dict (`str(profile or "").lower()` matches nothing for `"['x']"`/`"{'x': 1}"`),
+    so nothing downstream ever surfaced the malformation. A real OpenClaw config could
+    never carry this value (`ToolProfileSchema` is a string enum), so the honest answer
+    is UNKNOWN, not PASS. `_tool_policy_view.enumerable` now requires `isinstance(
+    profile, str)`, matching `toolgrant._block_well_formed`'s own guard for the
+    identical malformed-input class."""
+    cfg = {"tools": {"profile": profile_value}}
+    assert "agents" not in cfg
+    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+
+
+def test_extra_global_valid_string_profile_no_roster_unaffected_by_b963():
+    """Control for B-963: a well-formed, real global `tools.profile` string (no
+    `agents` key either) must keep resolving normally -- the fix narrows `enumerable`
+    to exclude non-string values only; it must not turn every global-profile config
+    into UNKNOWN. "minimal" is not a powerful profile, so both checks stay PASS."""
+    cfg = {"tools": {"profile": "minimal"}}
+    assert _verdicts(cfg) == (PASS, PASS, False)
 
 
 # =====================================================================================
