@@ -126,14 +126,35 @@ _TAMPER_ATTRS = frozenset({
     "f_globals", "f_locals", "f_builtins", "f_back", "_getframe", "gi_frame", "tb_frame",
     "cr_frame", "ag_frame", "modules", "meta_path", "path_hooks", "path_importer_cache",
     "CodeType", "setattr", "delattr", "mock",
+    # B-922 round 2: frame-jump primitives. `sole()`'s multi-binding "last
+    # same-scope binding before the use point wins" resolution (below) assumes direct-body
+    # statements execute in source order; a `sys.settrace`/`setprofile` (or a `sys.monitoring`
+    # LINE callback reaching a frame via `_getframe`, already listed above) hook that
+    # rewrites `frame.f_lineno` mid-run breaks that assumption by skipping the SECOND,
+    # legitimate-looking binding a static reader picks, so the runtime value stays the
+    # FIRST, attacker-controlled one. `f_trace` is the same class of primitive one level
+    # removed: it installs a PER-LINE local trace function on a frame that already has one.
+    "f_lineno", "f_trace", "settrace", "setprofile", "settrace_all_threads",
+    "setprofile_all_threads",
 })
 _TAMPER_MODULES = frozenset({
     "builtins", "importlib", "runpy", "imp", "pkgutil", "zipimport", "inspect", "gc",
     "ctypes", "pickle", "_pickle", "cPickle", "marshal", "shelve", "dill", "cloudpickle",
     "copyreg", "timeit", "doctest", "code", "codeop", "pdb", "bdb", "cProfile", "profile",
     "trace", "operator", "site", "sitecustomize", "usercustomize", "pkg_resources", "mock",
+    # B-922 round 2: `_operator.attrgetter`/`methodcaller` reach an object's
+    # attributes (including a frame's `f_lineno`) without ever spelling the attribute as an
+    # `ast.Attribute` node or a literal `getattr()` call, dodging both existing checks below.
+    "_operator",
 })
-_TAMPER_DOTTED_MODULES = frozenset({"logging.config", "unittest.mock"})
+_TAMPER_DOTTED_MODULES = frozenset({
+    "logging.config", "unittest.mock",
+    # B-922 round 2: `from sys import settrace` / `from threading import
+    # setprofile` (etc.) bind the bare name, so the call site is a `Name`, not an
+    # `Attribute` -- the `settrace`/`setprofile` entries in `_TAMPER_ATTRS` above never see
+    # it. Only the import statement itself names the route; catch it there.
+    "sys.settrace", "sys.setprofile", "threading.settrace", "threading.setprofile",
+})
 # A STORE to an attribute with one of these names replaces something the proof relies on.
 _TAMPER_STORE_ATTRS = frozenset({
     "open", "read", "decode", "compile", _EX, _EV, "str", "fspath", "__file__",
@@ -566,7 +587,13 @@ class _FileFacts:
         a direct, unconditional statement of *scope*'s own body (never inside a branch,
         loop, def or class) -- then the last one before *before* in body order wins
         (B-638: a same-scope rebind split across two lines resolves like one nested
-        expression); any boundary-crossing or non-Assign binding disqualifies outright."""
+        expression); any boundary-crossing or non-Assign binding disqualifies outright.
+        Source order is a proxy for RUNTIME order here, and that proxy is only sound
+        because `_tampers()` bans every frame-jump primitive that can break it -- a
+        `sys.settrace`/`setprofile` (or `sys.monitoring` LINE) hook rewriting
+        `frame.f_lineno` mid-run can skip the second binding this picks, so without that
+        ban "last one before the use point" would describe the SOURCE, not what the
+        interpreter actually executes (B-922 round 2)."""
         if name == "__file__" or name in self.declared:
             return None
         recs = self.records(scope).get(name, [])
@@ -1135,7 +1162,7 @@ class _FileFacts:
                 break
             cur = self.parents.get(cur)
         # `h = open(P)` bound once in this scope, touched by nothing else.
-        rec = self.sole(name, scope)
+        rec = self.sole(name, scope, before=call)
         if rec is None or rec[0] != "assign":
             return None
         region = [self.tree] if scope is self.tree else [scope]
@@ -1152,7 +1179,7 @@ class _FileFacts:
         if depth > _MAX_DEPTH:
             return None
         if isinstance(e, ast.Name):
-            rec = self.sole(e.id, scope)
+            rec = self.sole(e.id, scope, before=e)
             if rec is None or rec[0] != "assign":
                 return None
             return self.content(rec[1], scope, covered, depth + 1)
@@ -1217,6 +1244,16 @@ class _FileFacts:
             return True
         if not isinstance(arg, ast.Name):
             return False
+        # B-922 round 2 revert: unlike content()'s Name branch, this call
+        # site's actual safety property is NOT "last same-scope binding before the use
+        # point" -- it is the single-Store-occurrence walk a few lines below, which
+        # requires the namespace name bound exactly once ANYWHERE in the region,
+        # independent of source order. `before=` here was inert (round 1 confirmed it
+        # changed no verdict: `sole()` without `before` already demands exactly one
+        # binding when there is more than one, so `rec` only ever comes back non-None on
+        # the same single-binding case `before=` would also have resolved) and falsely
+        # implied a mutable, multi-binding namespace dict is trusted via source order,
+        # when it never is -- `literal()` above omits `before=` on the same principle.
         rec = self.sole(arg.id, scope)
         if rec is None or rec[0] != "assign" or not self._namespace_ok(rec[1], scope, call):
             return False
