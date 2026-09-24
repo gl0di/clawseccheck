@@ -777,11 +777,32 @@ def _archive_entries(home: Path) -> "tuple[int, bool]":
     return count, capped
 
 
-def _sqlite_dbs(home: Path, max_dbs: int = _MAX_SQLITE_DBS) -> "list[Path]":
+def _sqlite_dbs(
+    home: Path, max_dbs: int = _MAX_SQLITE_DBS, *, stats: dict | None = None
+) -> "list[Path]":
+    """Per-agent trajectory database paths under *home*, sorted and capped at
+    *max_dbs* (default :data:`_MAX_SQLITE_DBS`).
+
+    If *stats* (a dict) is provided, it is populated with ``dbs_total`` (the number of
+    databases found before the cap was applied) and ``dbs_capped`` (True when
+    ``dbs_total > max_dbs`` caused databases to be dropped) -- mirrors
+    ``trajectory.find_trajectory_files()``'s own ``stats["files_capped"]`` out-param
+    (B-245) for the identical reason (B-891): this glob's ``[:max_dbs]`` slice silently
+    dropped the excess with no signal a caller could surface, so a fleet with more than
+    ``max_dbs`` per-agent databases could read as a confidently complete, clean scan
+    when some databases were never even opened. The default (``None``) keeps the
+    original behaviour for existing callers.
+    """
     try:
         dbs = sorted(home.glob("agents/*/agent/openclaw-agent.sqlite"))
     except OSError:
+        if stats is not None:
+            stats["dbs_total"] = 0
+            stats["dbs_capped"] = False
         return []
+    if stats is not None:
+        stats["dbs_total"] = len(dbs)
+        stats["dbs_capped"] = len(dbs) > max_dbs
     return dbs[:max_dbs]
 
 
@@ -1822,7 +1843,9 @@ def read_compiled_tool_descriptions(
     counts as a "delivered tool definition" -- proven, not just asserted, by
     ``tests/test_b185_compiled_tool_poisoning.py``'s JSONL/SQLite equivalence test.
 
-    ``meta`` reports ``present`` (any db read), ``dbs_found``, ``dbs_read``,
+    ``meta`` reports ``present`` (any db read), ``dbs_found``, ``dbs_capped`` (B-891 --
+    True when more than ``max_dbs`` per-agent databases were found and the excess were
+    never even opened; mirrors the JSONL reader's own ``files_capped``), ``dbs_read``,
     ``dbs_unreadable``, ``dbs_budget_starved``, ``events`` (``context.compiled`` records
     parsed), ``truncated`` (a per-db byte/row cap, an oversized row, a budget-starved db
     -- see ``dbs_budget_starved`` below -- a per-SOURCE definition cap --
@@ -1868,6 +1891,12 @@ def read_compiled_tool_descriptions(
     caps above -- a database can be ``dbs_budget_starved`` (a pure byte-read fairness
     outcome) with no bearing on whether OTHER, successfully-read databases go on to lose
     definitions to the round-robin driver's own caps, and vice versa.
+
+    ``dbs_capped`` is orthogonal to all of the above (B-891): it is a DATABASE-COUNT
+    omission, set BEFORE any database is opened, when ``_sqlite_dbs`` finds more than
+    ``max_dbs`` per-agent databases and silently sorts-and-slices at that cap -- the
+    excess databases are never in ``dbs_found`` at all, let alone read, unreadable, or
+    budget-starved. Mirrors the JSONL reader's own ``files_capped``.
 
     This is POST-HOC FORENSIC evidence, same limit as the JSONL reader: it reports what
     WAS sent to the model in sessions that already ran. It cannot pre-clear a live MCP
@@ -1915,16 +1944,18 @@ def read_compiled_tool_descriptions(
     """
     tool_defs: list[dict] = []
     meta = {
-        "present": False, "dbs_found": 0, "dbs_read": 0, "dbs_unreadable": 0,
-        "dbs_budget_starved": 0,
+        "present": False, "dbs_found": 0, "dbs_capped": False, "dbs_read": 0,
+        "dbs_unreadable": 0, "dbs_budget_starved": 0,
         "events": 0, "unknown_version": False, "unknown_schema": False,
         "truncated": False, "non_text_rows": 0,
     }
     if not isinstance(home, Path):
         return tool_defs, meta
 
-    dbs = _sqlite_dbs(home, max_dbs=max_dbs)
+    stats: dict = {}
+    dbs = _sqlite_dbs(home, max_dbs=max_dbs, stats=stats)
     meta["dbs_found"] = len(dbs)
+    meta["dbs_capped"] = stats.get("dbs_capped", False)
     if not dbs:
         return tool_defs, meta
 

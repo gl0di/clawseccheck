@@ -9536,6 +9536,20 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 "version can also drop a record independent of its age. Either way "
                 "this is incomplete even for what was checked."
             )
+        if sqlite_meta and sqlite_meta.get("dbs_capped"):  # B-891
+            # A DATABASE-COUNT omission, set before any database is opened -- distinct
+            # from every reason above (all of which presuppose a database WAS opened).
+            # Kept as its own, separately-gated sentence rather than folded into the
+            # row-level message above: that message's own wording ("the per-database
+            # row/byte cap is what was hit") would be actively wrong if dbs_capped were
+            # the ONLY reason this branch fired (no row was ever truncated because the
+            # database holding it was never opened at all).
+            sqlite_incomplete += (
+                " Separately, more per-agent SQLite trajectory database(s) were found "
+                "on this host than this scan's per-run database cap -- the excess were "
+                "never even opened, so their contents (if any) are entirely "
+                "unexamined, independent of anything reported above."
+            )
         dbs_budget_starved = (
             sqlite_meta.get("dbs_budget_starved", 0) if sqlite_meta else 0
         )
@@ -9763,7 +9777,8 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
             or sqlite_meta.get("unknown_schema")  # B-716
         )
-        if sqlite_scan_incomplete or dbs_unreadable or dbs_budget_starved:
+        dbs_capped = bool(sqlite_meta.get("dbs_capped"))  # B-891
+        if sqlite_scan_incomplete or dbs_unreadable or dbs_budget_starved or dbs_capped:
             parts = []
             if sqlite_scan_incomplete:
                 parts.append(
@@ -9777,6 +9792,15 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                     "session in at a new, high rowid; a non-text row, an oversized "
                     "single record, an unrecognised schema, or an unrecognised "
                     "schema version can also drop a record independent of its age"
+                )
+            if dbs_capped:
+                # A DATABASE-COUNT omission, distinct from every other part here (all
+                # of which presuppose a database was opened) -- see the identical note
+                # on the UNKNOWN branch above.
+                parts.append(
+                    "more per-agent SQLite trajectory database(s) were found on this "
+                    "host than this scan's per-run database cap, and the excess were "
+                    "never even opened"
                 )
             if dbs_unreadable:
                 parts.append(
