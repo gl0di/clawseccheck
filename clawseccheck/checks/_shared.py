@@ -5210,6 +5210,18 @@ _PB_AUX = {
 }
 _PB_INV_SUBJ = {"you", "anyone", "anybody", "one", "we", "they", "users", "the", "agent", "it"}
 _PB_ADV_WORDS = {"ever", "even", "again", "really", "seriously", "once", "at", "all"}
+
+# B-879 round 6 (see `_neg_scan_ex`'s docstring): a small, closed, single-word
+# preposition list — empirically confirmed (a "Never PREP X, run the
+# following:" probe for each) to make the negator's clause walk stop at a
+# fronted PP's head instead of its real object. Deliberately excludes "at":
+# "at" is already in `_PB_ADV_WORDS` above (for "not at all") and is skipped
+# as an adverb before the walk ever reaches this stop-point, so a fronted
+# "at"-PP ("Never at work, run...") is a related, still-open, out-of-scope
+# gap this round does not touch, not a case that would ever reach this set.
+_PB_FRONTED_PREP = {
+    "in", "as", "on", "under", "with", "without", "during", "before", "after", "since",
+}
 _PB_OPENERS = {
     "then", "now", "next", "first", "finally", "also", "just", "simply", "please",
     "and", "so", "afterwards", "again", "quickly", "quietly", "silently", "lastly",
@@ -5496,6 +5508,20 @@ def _neg_scan_ex(
     Adjacent-negation-wins: a later negator's GOVERNED event on a token removes
     that token from any earlier cloud, so "Never, ever, never run the
     following" still resolves to a genuine, unscoped prohibition.
+
+    Fronted prepositional phrases (round 6): the walk's stop-word is not
+    always the negator's true object. "Never under any circumstances, run..."
+    (no comma after "Never"), "Not even in a sandbox, run...", "Never as
+    root, run..." each stop at a PREPOSITION ("under"/"in"/"as") that heads a
+    whole fronted PP the comma closes — the negation's real scope is that
+    whole phrase, not just its first word, so recording a GOVERNED event on
+    the preposition let the verb after the phrase's comma escape negation
+    entirely. `_PB_FRONTED_PREP` (below) is a small, closed, empirically
+    -confirmed set of single-word prepositions this happens with, gated on
+    `_pb_negator_mood` exactly like the class rule's own carry-mood — the
+    misreading only matters when the negator is itself addressed to the
+    reader as an imperative ("If not in a container, run..." keeps its real
+    directive reading, since "if" makes the negator's own mood non-directive).
     """
     events: list[tuple[int, int]] = []
     clouded: dict[int, int] = {}
@@ -5508,6 +5534,16 @@ def _neg_scan_ex(
         # from a cloud this sentence opened itself.
         for k in range(n):
             clouded.setdefault(k, -1)
+
+    def _open_cloud(neg_i: int, from_j: int) -> None:
+        # Shared by the class rule's non-content branch and round 6's
+        # fronted-PP branch below: cloud every token from *from_j* to the
+        # sentence's end, owned by the negator at *neg_i*, and remember that
+        # negator's own mood as the carry candidate for the next sentence.
+        nonlocal carry_mood
+        for k in range(from_j, n):
+            clouded.setdefault(k, neg_i)
+        carry_mood = _pb_negator_mood(tokens, neg_i)
 
     i = 0
     while i < n:
@@ -5577,9 +5613,20 @@ def _neg_scan_ex(
                 # the rest of the sentence and remember this negator's own
                 # mood as the carry candidate, in case the cloud is still open
                 # at the sentence's end.
-                for k in range(j, n):
-                    clouded.setdefault(k, i)
-                carry_mood = _pb_negator_mood(tokens, i)
+                _open_cloud(i, j)
+                clouded_here = True
+                j = None
+                continue
+            if tj in _PB_FRONTED_PREP and _pb_negator_mood(tokens, i):
+                # Round 6: *tj* is not the negator's object — it is the head
+                # of a FRONTED PREPOSITIONAL PHRASE the negation scopes over
+                # as a whole (see the docstring above and `_PB_FRONTED_PREP`'s
+                # own comment). Cloud the rest of the sentence exactly like
+                # the class rule's punctuation branch, rather than recording a
+                # GOVERNED event on the preposition that would let a real
+                # directive verb after the phrase's own comma escape
+                # negation.
+                _open_cloud(i, j)
                 clouded_here = True
                 j = None
                 continue
