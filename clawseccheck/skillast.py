@@ -12794,7 +12794,19 @@ _SH_AUTH_HEADER_RE = re.compile(r"(?:-H|--header)\s+(['\"])\s*Authorization\s*:.
 # ANY -H/--header value (not just Authorization) -- used to blank header text out
 # of the destination search below, not to detect a credential match.
 _SH_ANY_HEADER_VALUE_RE = re.compile(r"(?:-H|--header)\s+(['\"]).*?\1", re.I)
-_SH_VAR_ASSIGN_RE = re.compile(r"^[ \t]*(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=(?P<val>.*)$")
+# B-985: `_sh_var_mentions_incluster_host` below runs this against `masked`, the
+# WHOLE (comment-blanked) multi-line script buffer -- it needs every physical
+# line's own `VAR=...` assignment to match, not just one at the absolute start
+# of the buffer. Without `re.MULTILINE`, `^`/`$` anchor to the start/end of the
+# ENTIRE string, so on any script with more than one physical line this never
+# matched at all -- `finditer` always returned zero matches, making the
+# variable-referenced-destination half of the B-415 in-cluster exemption dead
+# code for ordinary multi-line scripts (confirmed: a `;`-joined single-line
+# collapse of the same content already matched under the old flags, isolating
+# the missing-MULTILINE diagnosis from any other cause).
+_SH_VAR_ASSIGN_RE = re.compile(
+    r"^[ \t]*(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=(?P<val>.*)$", re.MULTILINE
+)
 _SH_VAR_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]{0,127})\}?")
 
 
