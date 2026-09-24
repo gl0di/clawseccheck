@@ -97,8 +97,42 @@ _PROVIDER_TOKEN_PREFIXES = (
 _PROVIDER_TOKEN_RE = re.compile(
     r"^(?:" + "|".join(re.escape(p) for p in _PROVIDER_TOKEN_PREFIXES) + r")[A-Za-z0-9_-]{12,}$"
 )
+# B-997: widened placeholder-shape coverage. Each addition is its own alternative
+# (never a loosening of an existing one) so no prior exclusion narrows:
+#   - `your[_-][a-z0-9]+[_-]key(?:[_-]here)?` generalizes the word-order gap in
+#     `your[_-]?key` above — it catches both the explicit "your-api-key-here"/
+#     "your_api_key_here" phrasing AND the all-caps snake_case
+#     "YOUR_OPENAI_KEY_HERE"/"sk-proj-YOUR_OPENAI_KEY_HERE" shape for free, since
+#     the whole regex is already case-insensitive (`(?i)`).
+#   - `no[_-]key[_-]required` is the llama.cpp/LM Studio local-server dummy-key
+#     idiom (`sk-no-key-required`) — a field that must be non-empty but is never
+#     actually validated.
+#   - `replace` covers `REPLACE_ME` and provider-prefixed placeholder suffixes
+#     like `sk-ant-api03-REPLACE`.
+#   - `fake`/`mock` are deliberately segment-anchored (`[_-]` or start/end on
+#     BOTH sides), unlike the bare-word alternatives above: they are short
+#     enough that requiring them to be a whole hyphen/underscore-delimited
+#     segment (matching `sk-fake-...`/`sk-mock-...`) — rather than any
+#     substring — keeps a real secret that merely CONTAINS "fake"/"mock"
+#     embedded mid-token (no delimiters) from being wrongly excluded.
+# Deliberately NOT touched: `sk_test_`/`sk-test-` are real Stripe test-mode-
+# adjacent key prefixes, still secret-shaped if leaked — out of scope here.
 _PLACEHOLDER_TOKEN_RE = re.compile(
-    r"(?i)(your[_-]?key|changeme|xxxx|example|placeholder|redacted|dummy|<[a-z_]+>|\.\.\.)"
+    r"(?i)("
+    r"your[_-]?key"
+    r"|your[_-][a-z0-9]+[_-]key(?:[_-]here)?"
+    r"|no[_-]key[_-]required"
+    r"|changeme"
+    r"|replace"
+    r"|xxxx"
+    r"|example"
+    r"|placeholder"
+    r"|redacted"
+    r"|dummy"
+    r"|(?:^|[_-])(?:fake|mock)(?:[_-]|$)"
+    r"|<[a-z_]+>"
+    r"|\.\.\."
+    r")"
 )
 
 
