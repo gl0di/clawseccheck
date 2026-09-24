@@ -347,3 +347,82 @@ def test_an_ordinary_empty_state_dir_stays_quiet(tmp_path):
 
     assert ctx.config_machine_state_read is False
     assert not [e for e in ctx.errors if "stopped listing" in e]
+
+
+# ------------------------------------------------------- B-977 VIEW-masquerade hardening
+
+class TestB977ViewMasqueradeHardening:
+    """CLAWSECCHECK-B-977 -- `_collect_config_machine_state` ran ``SELECT state_key,
+    value_json FROM config_machine_state ...`` directly against `state/openclaw.sqlite`
+    without first checking the name resolves to a real TABLE, not a VIEW -- the identical
+    attack shape `trajectorystore._table_kind` was hardened against for
+    `trajectory_runtime_events` (adversarial review, B-811, 2026-09-15) and, one bug
+    earlier, for `_collect_auth_profile_store_presence` (B-889). This reader reuses
+    `trajectorystore._table_kind` verbatim (already imported into `collector.py` as
+    `_trajectorystore`) rather than re-deriving the check.
+
+    Worse than B-889 here: that sibling only ever selected `LENGTH(value_json)`, an
+    integer, so a successful spoof could only flip a presence/length signal. This reader
+    selects and RETURNS the parsed `value_json` CONTENT for three keys, so a successful
+    spoof can inject an attacker-chosen `plugins.bundledDiscovery` / `cron.store` /
+    `hooks.internal.installs` value into every one of this function's downstream
+    consumers -- the B179 hooks-inventory evidence/status and the plugin-discovery drift
+    monitor signature among them."""
+
+    def test_a_view_masquerading_as_config_machine_state_is_refused(self, tmp_path):
+        """The bug's own reproduction: a decoy table plus a VIEW named
+        `config_machine_state` that projects spoofed rows for two of the three
+        allowlisted keys. Before the fix this landed `ctx.config_machine_state`
+        populated straight from a table this reader never named, with the spoofed
+        values reaching every downstream consumer and no disclosure at all. After the
+        fix the row must be refused outright -- not silently trusted, and not silently
+        merged into the quieter "table predates this feature" UNDETERMINED case."""
+        home = tmp_path / "h"
+        home.mkdir()
+        (home / "openclaw.json").write_text(json.dumps({"hooks": {"enabled": True}}))
+        os.chmod(home / "openclaw.json", 0o600)
+        state = home / "state"
+        state.mkdir()
+        conn = sqlite3.connect(state / "openclaw.sqlite")
+        try:
+            conn.execute(
+                "CREATE TABLE decoy_state "
+                "(state_key TEXT, value_json TEXT, updated_at_ms INTEGER)"
+            )
+            for key, value in (
+                ("plugins.bundledDiscovery", '"compat"'),
+                ("hooks.internal.installs", '{"h1": {}, "h2": {}}'),
+            ):
+                conn.execute("INSERT INTO decoy_state VALUES (?, ?, ?)", (key, value, 0))
+            conn.execute(
+                "CREATE VIEW config_machine_state AS "
+                "SELECT state_key, value_json FROM decoy_state"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        ctx = collect(home)
+        assert ctx.config_machine_state_read is False
+        assert ctx.config_machine_state == {}
+        assert any(
+            "config_machine_state" in e and "did not resolve to a real table" in e
+            for e in ctx.errors
+        ), ctx.errors
+
+        # The spoofed values must never reach any downstream consumer.
+        finding = next(f for f in C.run_all(ctx) if f.id == "B179")
+        assert not any("internal hook install" in e for e in (finding.evidence or []))
+        sig = _plugins_sig(ctx)
+        assert "bundled_discovery_state" not in sig
+
+    def test_a_genuine_table_still_reads_correctly_after_the_hardening(self):
+        """Clean-fixture control: an ordinary, honest `config_machine_state` TABLE (the
+        real shape every fleet machine has) must still be read exactly as before -- the
+        hardening must not turn every legitimate read into a refusal."""
+        ctx = collect(_home([("plugins.bundledDiscovery", '"allowlist"')]))
+        assert ctx.config_machine_state_read is True
+        assert ctx.config_machine_state["plugins.bundledDiscovery"] == "allowlist"
+        assert not any(
+            "did not resolve to a real table" in e for e in ctx.errors
+        ), ctx.errors
