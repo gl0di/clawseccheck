@@ -7746,15 +7746,33 @@ def _negation_governs_trigger(
     ("Never design a skill that would silently execute …") dampened while the
     unrelated-negator exploit stays a live finding. Verb-agnostic (works for every
     content-ring check, not just B63) and stdlib-only.
+
+    B-897: the sentence-break check searches the UNTRUNCATED *blob* from the
+    negator's end, and asks only whether the match STARTS before *pos* — it does
+    NOT slice out a `between` substring and search that. A prior version sliced
+    `between = win[last.end():]` and ran `_SENTENCE_BREAK_RE.search(between)`;
+    that regex's `$` alternative then matched "end of the slice", which is not
+    "end of the real text" — so a trigger sitting right after an attribute-access
+    dot with no intervening space ("Never call Config.execute()...") wrongly read
+    as its own sentence break and the genuine negation silently failed to govern
+    it. Padding the search 2 chars past *pos* gives the regex's own optional-quote
+    + whitespace-or-end lookahead real trailing characters to resolve against,
+    while still bounding the scan to ~*window* chars instead of the rest of a
+    possibly huge blob (a match that starts before *pos* can never need to look
+    past *pos* + 2 to resolve, since the pattern's longest lookahead past a
+    `.`/`!`/`?` is one optional quote char plus one whitespace-or-end check).
     """
-    win = blob[max(0, pos - window):pos]
+    window_start = max(0, pos - window)
+    win = blob[window_start:pos]
     last = None
     for last in _BROAD_NEGATION_RE.finditer(win):
         pass  # the closest negator to the trigger wins
     if last is None:
         return False
-    between = win[last.end():]  # text from end-of-negator to the trigger
-    return _SENTENCE_BREAK_RE.search(between) is None
+    negator_end = window_start + last.end()  # absolute offset into the real blob
+    hi_bound = min(len(blob), pos + 2)
+    sb = _SENTENCE_BREAK_RE.search(blob, negator_end, hi_bound)
+    return sb is None or sb.start() >= pos
 
 
 def _normalize_for_squat(name: str) -> str:
