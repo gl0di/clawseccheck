@@ -1213,26 +1213,40 @@ def _rhs_has_sysargv(node: ast.AST, tree: "ast.AST | None") -> bool:
     model, so they belong in the same source vocabulary `_value_is_tainted_source`
     already gives `os.environ`.
 
-    Guarded against an ORDINARY local shadow of `sys`/`argv` (a parameter, a plain
-    reassignment, a `class sys:`/`def sys():`, ...): `_rebound_names(tree)[0]` is the
-    SAME file-wide, fail-safe "was this name ever taken away from module standing"
-    check `_b863_a0_is_verified_sys_executable` already established for `sys.executable`
-    (B-753/B-855's own os-module-alias discipline, reused here rather than reinvented
-    per CLAUDE.md Sec.9) -- not a claim of adversarial soundness against a deliberate
-    bypass (B-906's own module comment, above, explains why THAT direction is
-    unsound for a spelling-based check and is deliberately not attempted here either),
-    just the same ordinary-shadow guard the sibling `sys.executable` carve-out already
-    trusts. `sys` and `argv` are checked independently: rebinding one must not blind
-    the other's own branch.
+    B-955 round 2: this used to be guarded against a local shadow of `sys`/`argv` via
+    `_rebound_names_cached(tree)[0]` -- a whole-FILE, scope-blind set, not scoped to the
+    actual read site. That made the guard trivially defeatable: a single, semantically
+    inert decoy line anywhere in the file -- `sys = sys`, `for sys in range(1): pass`,
+    `[sys for sys in range(1)]`, or the bare-name form's `argv = argv` -- added `"sys"`/
+    `"argv"` to the file-wide rebound set and silenced a REAL, unrelated `sys.argv ->
+    os.system`/`subprocess(shell=True)`/`exec`/`eval` finding anywhere else in the same
+    file, however far from the decoy and regardless of execution order (a review
+    reproduced this against B-955's own round-1 fix; the guard was never adversarially
+    sound against a deliberate bypass, only against an ordinary accidental shadow, and
+    it wasn't even scoped narrowly enough for that).
 
-    `tree` is `None` for the handful of unit-test call sites that exercise
-    `_value_is_tainted_source` in isolation with no real module tree (e.g.
-    test_b918_taint_source_recursion_bound.py) -- the guard has nothing to search
-    without a tree, so those calls fall back to the unguarded spelling match, exactly
-    like `_rhs_has_subscript_environ`'s own (permanently unguarded, by B-906's explicit
-    design) behaviour.
+    There is no legitimate reason to keep a shadow guard here at all: `_rebound_names`
+    doesn't even track function *parameters* (only Assign/AugAssign/AnnAssign targets,
+    for-loop/comprehension/with-as/NamedExpr/except-as targets, and def/class names --
+    see its own docstring), so the one plausible legitimate shadow -- a function
+    parameter genuinely named `argv` that has nothing to do with `sys` -- was NEVER
+    covered by this guard in the first place; dropping the guard changes nothing for
+    that case. Every binding form the guard DID cover (a plain reassignment, a for-
+    loop/comprehension variable, a `with ... as`, a walrus, `def sys():`/`class sys:`,
+    an `except ... as`) is not a realistic way anyone writes code that legitimately
+    still wants `sys.argv`/bare `argv` treated as a non-source afterward -- it's either
+    dead/inert (the decoy shapes above) or a genuine, deliberate rebinding to something
+    else entirely, in which case the LATER read is no longer spelled `sys.argv`/`argv`
+    at all and this function is simply not asked about it.
+
+    So this now matches `_rhs_has_subscript_environ`'s own design exactly: permanently
+    unguarded, by B-906's explicit precedent (see that function's neighboring comment)
+    -- a spelling-based taint-source recognizer does not try to be adversarially sound
+    against shadowing, it just doesn't let an attacker use shadowing to SUPPRESS a real
+    finding either. `tree` is kept as a parameter (unused here now) purely so every
+    existing call site -- unchanged by this round -- keeps working unmodified.
     """
-    rebound = _rebound_names_cached(tree)[0] if tree is not None else set()
+    del tree  # no longer consulted; kept for call-site signature compatibility
     for n in ast.walk(node):
         if isinstance(n, ast.Subscript):
             v = n.value
@@ -1240,10 +1254,9 @@ def _rhs_has_sysargv(node: ast.AST, tree: "ast.AST | None") -> bool:
                 isinstance(v, ast.Attribute)
                 and v.attr == "argv"
                 and _attr_base(v.value) == "sys"
-                and "sys" not in rebound
             ):
                 return True
-            if isinstance(v, ast.Name) and v.id == "argv" and "argv" not in rebound:
+            if isinstance(v, ast.Name) and v.id == "argv":
                 return True
     return False
 
@@ -1348,9 +1361,10 @@ def _expr_is_ext_tainted(
     what keeps this fold itself a pure refactor, verdict-neutral on its own.
 
     `tree` (B-955), also optional, is threaded straight through to
-    `_value_is_tainted_source` so its `sys.argv` recognition (`_rhs_has_sysargv`) gets
-    the whole-file shadow guard; `None` degrades to the same unguarded spelling match
-    as every other call site that cannot supply a tree.
+    `_value_is_tainted_source`. As of B-955 round 2, `_rhs_has_sysargv` no longer
+    consults `tree` at all (its whole-file shadow guard was dropped -- see that
+    function's own docstring), so passing `None` here is now a no-op difference
+    rather than a degrade; the parameter is kept purely for call-site compatibility.
     """
     return (
         _value_is_tainted_source(node, visible, tree)
@@ -3834,9 +3848,12 @@ def _b863_m_for(
     `tree` (B-955), the WHOLE module tree -- deliberately NOT `fn` (the
     recomputed `_external_tainted_names(fn, ...)` call below intentionally scopes ITS
     OWN `tree` argument to `fn`'s own subtree, which must not change) -- is threaded
-    only into this function's own local `sourced()` closure, so a `sys.argv` shadow
-    guard there sees the same file-wide rebind picture `_b863_a0_is_verified_sys_
-    executable` already relies on for its own `sys.executable` carve-out."""
+    only into this function's own local `sourced()` closure, feeding
+    `_value_is_tainted_source`'s `sys.argv` recognition (`_rhs_has_sysargv`). As of
+    B-955 round 2 that recognizer no longer guards against a local shadow of
+    `sys`/`argv` at all (permanently unguarded, matching `_rhs_has_subscript_environ`'s
+    own B-906 precedent) -- unlike `_b863_a0_is_verified_sys_executable`'s own
+    `sys.executable` carve-out, which keeps its file-wide rebind guard unchanged."""
     sub = {id(x) for x in ast.walk(fn)}
     inside = {
         s for s in list(ext_taint_map.keys()) + list(func_param_taint.keys())
@@ -5462,26 +5479,36 @@ def _rebound_names(tree: ast.AST) -> "tuple[set, set]":
     return names, os_attr
 
 
-# B-955: `_rebound_names` is a pure O(n) whole-tree `ast.walk`, but `_rhs_has_sysargv`
-# (above) now calls it from INSIDE `_external_tainted_names`'s own per-assignment
-# fixpoint loop -- up to 6 iterations over every assignment/comprehension/with-item/
-# for-loop/namedexpr in the file, each one re-testing whether its RHS is a tainted
-# source. Recomputing `_rebound_names` from scratch at every one of those call sites
-# turned an O(n) check into an O(assignments * n) blow-up on a file with many
-# assignments -- measured directly against test_taint.py's own pre-existing wall-clock
-# regression pin (`test_shared_deep_base_referenced_many_times_does_not_blow_up_wall_
-# clock`, 2000 assignments): 76s against its <10s ceiling, unmodified before this cache.
+# B-955: `_rebound_names` is a pure O(n) whole-tree `ast.walk`. Round 1 of B-955 had
+# `_rhs_has_sysargv` (above) call it from INSIDE `_external_tainted_names`'s own
+# per-assignment fixpoint loop -- up to 6 iterations over every assignment/
+# comprehension/with-item/for-loop/namedexpr in the file, each one re-testing whether
+# its RHS is a tainted source. Recomputing `_rebound_names` from scratch at every one
+# of those call sites turned an O(n) check into an O(assignments * n) blow-up on a
+# file with many assignments -- measured directly against test_taint.py's own
+# pre-existing wall-clock regression pin (`test_shared_deep_base_referenced_many_
+# times_does_not_blow_up_wall_clock`, 2000 assignments): 76s against its <10s
+# ceiling, unmodified before this cache.
+#
+# Round 2 of B-955 dropped `_rhs_has_sysargv`'s shadow guard entirely (a file-wide,
+# scope-blind rebound check made it trivially defeatable by one inert decoy line --
+# see that function's own docstring), so it no longer calls `_rebound_names_cached`
+# at all. The cache below is kept anyway: it still serves its two ORIGINAL callers
+# (`_path_module_aliases`, `_b863_a0_is_verified_sys_executable`, both predating
+# B-955) and removes the smaller, pre-existing repeated-whole-tree-walk cost the next
+# paragraph describes -- there is no reason to revert a correct, still-useful
+# memoization just because its original motivating caller went away.
+#
 # `tree` never mutates for the life of one `analyze_python` call (this whole module's
 # design is read-only, parse-once), so memoizing by OBJECT IDENTITY is exact, not an
 # approximation. Same `WeakKeyDictionary`-per-input idiom already established for
 # `_B917_ARTIFACT_STAGED_CACHE`/`_B917_ARTIFACT_ALIAS_CACHE` (below), just keyed on
 # `tree` itself instead of a `ShippedArtifact`, so an entry can never leak across files
-# or outlive the tree object it was computed from. Every existing call site
-# (`_path_module_aliases`, `_b863_a0_is_verified_sys_executable`) is switched to this
-# cached wrapper too -- their own results only ever get READ (`|`/`-` build new sets;
-# nothing mutates the returned sets in place), so sharing one cached `(names, os_attr)`
-# pair across all of them is safe, and it removes a second, pre-existing (smaller,
-# never previously a measured problem) source of the same repeated-whole-tree-walk cost.
+# or outlive the tree object it was computed from. Both original call sites
+# (`_path_module_aliases`, `_b863_a0_is_verified_sys_executable`) were switched to
+# this cached wrapper too -- their own results only ever get READ (`|`/`-` build new
+# sets; nothing mutates the returned sets in place), so sharing one cached
+# `(names, os_attr)` pair across all of them is safe.
 _REBOUND_NAMES_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 

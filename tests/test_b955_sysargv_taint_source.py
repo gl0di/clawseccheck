@@ -14,12 +14,19 @@ a `Subscript`/slice on `sys.argv` (Attribute form) or a bare `argv[...]` (Name f
 `from sys import argv`), folded into `_value_is_tainted_source` itself so every one
 of its callers (TT4/TT5/SSRF via `_expr_is_ext_tainted`/`_external_tainted_names`,
 and the B-863 wrapper-position grammar's own `sourced()` closure) gets the new source
-uniformly. Guarded against an ORDINARY local shadow of `sys`/`argv` (a parameter, a
-plain reassignment, a `class sys:`/`def sys():`, ...) via `_rebound_names(tree)[0]`
--- the same file-wide, fail-safe discipline `_b863_a0_is_verified_sys_executable`
-already established for its own `sys.executable` carve-out -- not a claim of
-soundness against a deliberate, adversarial bypass (out of scope, exactly like the
-equivalent `os.environ` spelling check, per B-906's own module comment).
+uniformly.
+
+Round 1 guarded this against an ORDINARY local shadow of `sys`/`argv` via a whole-
+file `_rebound_names(tree)[0]` membership check. A C-135 review found that guard was
+a real, cheap evasion rather than a merely theoretical one: because the check is
+file-wide and scope-blind, ONE semantically inert decoy line anywhere in the file --
+`sys = sys`, `for sys in range(1): pass`, `[sys for sys in range(1)]`, or the bare-
+name form's `argv = argv` -- silenced a real, unrelated `sys.argv`/`argv` taint
+finding anywhere else in the same file. Round 2 dropped the shadow guard entirely:
+`_rhs_has_sysargv` is now permanently unguarded, exactly matching the sibling
+`_rhs_has_subscript_environ` check's own B-906 precedent (a spelling-based taint-
+source recognizer is not attempting adversarial soundness against shadowing; it
+just must not let shadowing SUPPRESS a real finding, which a guard here would).
 
 Offline, read-only, stdlib only. Every `exec`/`eval`/`os.system`/`subprocess(...)`
 spelling below is INERT test data handed to `analyze_python`'s read-only AST parser
@@ -120,35 +127,101 @@ def test_unrelated_local_variable_named_like_a_cli_arg_is_still_clean():
 
 
 # ---------------------------------------------------------------------------
-# Shadow guard: an ordinary local shadow of `sys`/`argv` must NOT be treated
-# as the real module -- same discipline `_b863_a0_is_verified_sys_executable`
-# already established for `sys.executable`.
+# Round 2 (post-C-135 review): `_rhs_has_sysargv` is now permanently unguarded,
+# matching `_rhs_has_subscript_environ`'s own B-906 precedent exactly. A local
+# rebinding of the NAME `sys`/`argv` elsewhere in the file -- benign or a
+# deliberate decoy -- must not change the verdict on an actual `sys.argv`/
+# `argv` subscript read. (Round 1 had this backwards: see the module docstring
+# and the adversarial-decoy tests below for the exact evasion a C-135 review
+# found and this round closes.)
 # ---------------------------------------------------------------------------
 
 
-def test_locally_reassigned_argv_name_is_not_treated_as_the_real_module():
-    """`from sys import argv` followed by an ordinary reassignment of `argv`
-    to a fixed, benign literal list -- `argv` no longer refers to the real
-    `sys.argv` from that point on, so subscripting it must not convict."""
+def test_reassigning_argv_elsewhere_does_not_clear_an_earlier_real_read():
+    """`from sys import argv` followed later by an ordinary reassignment of
+    `argv` to a fixed, benign literal list. Under the OLD (round-1, buggy)
+    file-wide shadow guard, this reassignment retroactively cleared the
+    earlier real `argv[1]` read too -- exactly the evasion the review found.
+    It must still convict."""
     src = (
         'import os\n'
         'from sys import argv\n'
-        'argv = ["safe", "literal"]\n'
         'key = argv[1]\n'
         'os.system(key)\n'
+        'argv = ["safe", "literal"]\n'
     )
-    assert "TT5_CMD_INJECTION" not in _rules(src)
+    assert "TT5_CMD_INJECTION" in _rules(src)
 
 
-def test_locally_shadowed_sys_class_is_not_treated_as_the_real_module():
-    """A local `class sys:` binding shadows the module name entirely --
-    `sys.argv` here is an ordinary class attribute access, not command-line
-    input, and must not convict."""
+def test_a_local_sys_class_elsewhere_does_not_clear_an_earlier_real_read():
+    """A local `class sys:` binding elsewhere in the file must not blind an
+    earlier, real `sys.argv[...]` read reaching a dangerous sink -- same
+    file-wide-blindness class of evasion as the `argv = argv` shape below,
+    just spelled with a class definition instead of a reassignment."""
     src = (
-        'import os\n'
-        'class sys:\n'
-        '    argv = ["x", "y"]\n'
+        'import os, sys\n'
         'key = sys.argv[1]\n'
         'os.system(key)\n'
+        'class sys:\n'
+        '    argv = ["x", "y"]\n'
     )
-    assert "TT5_CMD_INJECTION" not in _rules(src)
+    assert "TT5_CMD_INJECTION" in _rules(src)
+
+
+# ---------------------------------------------------------------------------
+# The exact adversarial-decoy shapes a C-135 review reproduced against round 1:
+# one throwaway, semantically inert line anywhere in the file used to silence
+# a real, unrelated sys.argv taint finding. All four must now still convict.
+# ---------------------------------------------------------------------------
+
+
+def test_inert_sys_equals_sys_decoy_does_not_suppress_a_real_finding():
+    src = (
+        'import os, sys\n'
+        'key = sys.argv[1]\n'
+        'os.system(key)\n'
+        'sys = sys\n'
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+
+def test_inert_for_sys_in_range_decoy_does_not_suppress_a_real_finding():
+    src = (
+        'import os, sys\n'
+        'key = sys.argv[1]\n'
+        'os.system(key)\n'
+        'for sys in range(1):\n'
+        '    pass\n'
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+
+def test_inert_sys_comprehension_decoy_does_not_suppress_a_real_finding():
+    src = (
+        'import os, sys\n'
+        'key = sys.argv[1]\n'
+        'os.system(key)\n'
+        '_ = [sys for sys in range(1)]\n'
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+
+def test_inert_argv_equals_argv_decoy_does_not_suppress_a_real_finding():
+    """Bare-name form: `from sys import argv` + `argv = argv` (a no-op) must
+    not blind the earlier real `argv[1]` read."""
+    src = (
+        'import os\n'
+        'from sys import argv\n'
+        'key = argv[1]\n'
+        'os.system(key)\n'
+        'argv = argv\n'
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
