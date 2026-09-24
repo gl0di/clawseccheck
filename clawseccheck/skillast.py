@@ -3123,6 +3123,77 @@ def _name_rebound_anywhere(tree: ast.AST, name: str) -> bool:
 # cannot lose a genuine same-object aliasing relationship, because the
 # bare-Name branch (the only case where two names truly share one runtime
 # object post-assignment) is untouched.
+#
+# Fix round 4 (B-965 shape 2, 2026-09-24): `_b863_classify_head`'s `BinOp`/
+# `Add` branch used to recurse into `expr.left` ONLY, silently discarding
+# `expr.right` -- so `H+X` (`args = args + [payload]`) was classified as pure
+# head-preservation, exactly as if `X` did not exist. Both of this function's
+# callers lost `X` entirely: `_b863_classify_assign_value`'s `head_src`
+# branch snapshotted the resolved name's OWN existing shape (dropping the
+# appended `X` from the record a later sink check reads), and
+# `_b863_process_one`'s new-alias branch made the target a TRUE alias --
+# sharing the resolved name's own shapes-list object -- which was doubly
+# wrong for `H+X`, since unlike `H.copy()`/`H[:]`/`list(H)` it constructs a
+# value that is neither identical to H (X's own elements are genuinely
+# appended) nor the same runtime object (a fresh list, not an alias).
+#
+# `_b863_classify_head` itself no longer recognises `BinOp`/`Add` at all (the
+# closed-grammar discipline the List+Starred branch already applies via its
+# own narrowing -- untouched here, out of scope for this fix, see B-956):
+# `H+X` now falls through to its "not head-preserving" default (`None`), so
+# `_b863_process_one`'s new-alias branch (`x = <expr>` for a target NOT yet
+# tracked) falls to its own escape check (`_b863_expr_escapes`), which for a
+# bare `H+X` (not itself inside a container literal) is False, leaving the
+# new name simply untracked -- the same "outside the closed grammar, not
+# analysed" treatment any other unrelated local variable already gets, not a
+# new permissive path (this call site never gets more information than
+# before; it can only stop manufacturing a false alias).
+#
+# `_b863_classify_assign_value` (reached only for a REASSIGNMENT of an
+# ALREADY-tracked name, `tgt.id in names`) instead gained its OWN dedicated
+# `BinOp`/`Add` branch -- see that function's own docstring -- that resolves
+# `head_src` via `_b863_classify_head(value.left, ...)` (reusing the
+# unchanged recursive H grammar) and folds `X`'s own content into fresh
+# independent copies of `head_src`'s shapes, the identical treatment
+# `_b863_process_one`'s `.extend()` handling already gives a literal
+# List/Tuple argument. A first draft simply let `H+X` fall through to
+# `_B863OutOfDomain` ("unresolvable -> crit") here too, reasoning that
+# turning a wrongly-resolved shape into unresolved could only ever be MORE
+# conservative -- retracted after running the existing suite found a real
+# regression: `test_benign_n6_forwarded_coparam_tail_is_info_under_p1`'s
+# `cmd = cmd + ['-C', cwd]` (a co-param always literal at its one real call
+# graph) went from info to a FALSE crit, because out-of-domain routes the
+# verdict through tier 1's separate, coarser taint fixpoint (`_b863_m_for`),
+# which blanket-seeds every co-parameter as tainted regardless of its real
+# call graph -- imprecise in exactly the way this closed-grammar modelling
+# exists to avoid. Folding `X` in directly keeps the precise path instead:
+# the resulting shape's `content` is checked against REAL taint/constness at
+# the sink, so a genuinely-literal `X` still resolves info and a genuinely
+# tainted one (`args = args + [payload]`, `payload` from `os.environ`) still
+# resolves crit -- both cases are regression-tested.
+#
+# Fix round 5 (B-965, 2026-09-24, C-135 catch on round 4's own commit): round
+# 4's dedicated `BinOp`/`Add` branch resolved `head_src` via
+# `_b863_classify_head(value.left, ...)` -- sound only while `value.left` is
+# itself H-shaped. A CHAINED reassignment (`cmd = cmd + ['-C', cwd] +
+# ['--extra']`) parses left-associatively as `BinOp(BinOp(Name(cmd), Add,
+# [...]), Add, [...])`, so at depth >= 2 `value.left` is ITSELF a `BinOp`/
+# `Add` -- a shape `_b863_classify_head` deliberately does not recognise (see
+# above), so it returned None, round 4's branch returned None, and the WHOLE
+# chain fell to `_B863OutOfDomain` -- the exact "unconditional crit via
+# out-of-domain" fallback round 4's own commit message says it specifically
+# fixed this shape to avoid, just one `+` deeper than round 4's own test
+# covered. Confirmed: the parent commit (pre-round-4) only "passed" this
+# depth-2 shape by accident, silently dropping BOTH tails via the original
+# bug; round 4 fixed depth 1 but never retested depth 2. Fixed: the branch
+# now recurses through `_b863_classify_assign_value` ITSELF when `value.left`
+# is a `BinOp`/`Add`, folding each `+`'s own `X` on top of whatever the
+# recursive call returns -- so an arbitrarily deep `H+X+Y+...` chain gets
+# every tail's content threaded in order, the same way nested `F+F+...`
+# already works via `_b863_flatten_fresh`'s own recursion. Verified 2/3-level
+# chains, both a genuinely-literal tail (stays info) and a tainted one
+# (stays crit) -- see the chained-`+` tests in
+# tests/test_b863_tt5_wrapper_position_grammar.py.
 _B863_HEAD_WRAP_CALLS = frozenset({"list", "tuple"})
 _B863_IDENTITY_MAP_NAMES = frozenset({"str"})
 _B863_IDENTITY_MAP_ATTRS = frozenset({"fspath", "fsdecode"})
@@ -3182,9 +3253,20 @@ def _b863_classify_head(expr, names, tree):
     of, or None if *expr* is not head-preserving at all -- structural, not a
     value simulation: every branch reduces to "does the innermost reference
     resolve to a tracked name, and which one". Grammar: P; list(H)/tuple(H);
-    H.copy(); H[:] (a full slice only); H+X; [*H, ...]; [t for t in H] /
+    H.copy(); H[:] (a full slice only); [*H, ...]; [t for t in H] /
     [g(t) for t in H] for a single, filterless, synchronous generator with g
     one of str/os.fspath/os.fsdecode.
+
+    Deliberately NOT `H+X` (B-965 fix round 4, 2026-09-24, see the module
+    comment above `_B863_HEAD_WRAP_CALLS`): every OTHER shape in this grammar
+    constructs a value either identical to H (`H.copy()`, `H[:]`, `list(H)`)
+    or provably equal to it element-for-element (the comprehension forms) --
+    genuinely pure head-preservation. `H+X` does neither: `X` is real,
+    appended content a caller must not silently drop, so it is NOT a shape
+    this function itself resolves; `_b863_classify_assign_value` recognises
+    `H+X` via its own dedicated branch instead (calling back into this
+    function for `H` alone, via `expr.left`), where `X`'s content can
+    actually be folded into the result rather than discarded.
 
     Returning the resolved name (not a bare bool) is fix-round-1 (C-135,
     2026-09-23): the caller needs to know WHICH existing tracked name's
@@ -3212,15 +3294,23 @@ def _b863_classify_head(expr, names, tree):
         if isinstance(sl, ast.Slice) and sl.lower is None and sl.upper is None and sl.step is None:
             return _b863_classify_head(expr.value, names, tree)
         return None
-    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
-        return _b863_classify_head(expr.left, names, tree)
+    # B-965 fix rounds 4-5: `H+X` is deliberately NOT recognised (and no
+    # longer recursed into) here at all -- see this function's own docstring
+    # and the module comment above `_B863_HEAD_WRAP_CALLS` for the full
+    # trace. `H+X` is instead handled by `_b863_classify_assign_value`'s own
+    # dedicated `BinOp`/`Add` branch, which calls back into THIS function for
+    # `H` alone (`expr.left`) and folds `X`'s content in separately, folding
+    # each level's own tail when `H` is itself another `H+X` (a chained
+    # reassignment).
+    #
     # C-135 (post-commit review, B-956, round 2): this branch used to
     # match ANY List whose FIRST element was Starred, regardless of what else the
     # list held -- `[*H, "-c"]` (a trailing literal spliced in AFTER the tracked
     # name) recursed into `H` alone and returned it as pure head-preservation,
-    # silently discarding the trailing `"-c"` the same way the `BinOp`/`Add`
-    # branch above used to silently discard its own `expr.right` (see that
-    # branch's own fix, `_b863_param_reassigned_via_self_referential_add`) --
+    # silently discarding the trailing `"-c"` the same way the (now-removed)
+    # `BinOp`/`Add` branch above used to silently discard its own `expr.right`
+    # (see `_b863_classify_assign_value`'s own `BinOp`/`Add` branch and its
+    # docstring for that fix) --
     # `args = [*args, "-c"]` was misclassified identically to a body that never
     # touches `args` at all. `len(expr.elts) == 1` requires the Starred element
     # to be the list's ONLY element (`[*H]`, already covered by
@@ -3341,7 +3431,7 @@ def _b863_classify_assign_value(value, names, tree, shapes_of):
     become the SAME object at runtime, so reference-sharing their shapes is
     correct. It is NOT sound for the `head_src` branch below: every non-Name
     shape `_b863_classify_head` recognises (`list(H)`/`tuple(H)`, `H.copy()`,
-    a full slice `H[:]`, `H+X`, `[*H, ...]`, an identity-map comprehension)
+    a full slice `H[:]`, `[*H, ...]`, an identity-map comprehension)
     constructs a BRAND NEW object at runtime, decoupled from whatever `H`
     itself goes on to alias or mutate afterwards. `args = list(args)` after
     `x = args` must decouple `x` from the new `args` -- a later
@@ -3350,13 +3440,81 @@ def _b863_classify_assign_value(value, names, tree, shapes_of):
     coupled in the analysis. Fixed: the `head_src` branch now returns an
     independent snapshot -- a fresh `_B863Shape` per entry, the same
     per-shape copy idiom `_b863_copy_shapes_of` already uses for branch
-    merges -- instead of `list(shapes_of[head_src])`'s reference-sharing."""
+    merges -- instead of `list(shapes_of[head_src])`'s reference-sharing.
+
+    Fix round 4 (B-965 shape 2, 2026-09-24): `H+X` is handled by its OWN
+    branch below, not by falling into the generic `head_src` branch (see
+    `_b863_classify_head`'s docstring -- it deliberately no longer recognises
+    `BinOp`/`Add` at all, precisely so this function cannot silently reuse
+    `head_src`'s existing shapes and drop `X`). `X` is genuine appended
+    content (`args = args + [payload]` really does put `payload` after H's
+    own elements at runtime), so it is folded into each of H's OWN fresh
+    snapshot copies via `.add_content`, the identical treatment
+    `_b863_process_one`'s `.extend()` handling already gives a literal
+    List/Tuple argument. An earlier draft of this fix instead simply removed
+    `H+X` recognition altogether (falling through to `_B863OutOfDomain`,
+    "unresolvable -> crit") -- retracted: `test_benign_n6_forwarded_coparam_
+    tail_is_info_under_p1`'s `cmd = cmd + ['-C', cwd]` (co-param `cwd`,
+    always literal at every real call site) went from info to a FALSE crit,
+    because falling to out-of-domain routes the verdict through tier 1's
+    OWN separate, coarser taint fixpoint (`_b863_m_for`), which blanket-
+    seeds every co-parameter as tainted independent of its real call graph --
+    imprecise in exactly the way this function's own closed-grammar
+    modelling is not. Folding `X` in here instead keeps the precise,
+    grammar-based path: the resulting shape's `content` is checked directly
+    against real taint/constness at the sink (`_b863_shape_triggers_crit`),
+    so a genuinely-literal `X` (`cwd` bound to a literal at every call site)
+    still resolves info, while `payload` sourced from `os.environ` still
+    resolves crit -- verified against both regression tests below."""
     if isinstance(value, ast.Name) and value.id in names:
         return list(shapes_of[value.id])
     fresh = _b863_flatten_fresh(value, names, tree)
     if fresh is not None:
         a0, rest, refs = fresh
         return [_B863Shape(True, a0, rest, refs)]
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        # Fix round 5 (B-965, 2026-09-24, C-135 catch): `value.left` is ITSELF
+        # a `BinOp`/`Add` for a chained reassignment (`cmd = cmd + [x] + [y]`
+        # parses left-associatively as `BinOp(BinOp(Name(cmd), Add, [x]), Add,
+        # [y])`) -- recurse through THIS function (not `_b863_classify_head`,
+        # which no longer has a `BinOp`/`Add` case at all) so each `+` in the
+        # chain gets its own content folded in turn, however deep the chain
+        # goes, instead of the innermost `_b863_classify_head(value.left, ...)`
+        # call hitting a `BinOp` it cannot resolve and returning None -> the
+        # whole chain falling to `_B863OutOfDomain` ("unresolvable -> crit")
+        # at depth >= 2. That was a real regression a first round of this fix
+        # shipped (dea394a4) and C-135 caught: `cmd = cmd + ['-C', cwd] +
+        # ['--extra']` -- the SAME co-param-tail shape fixed at depth 1 --
+        # wrongly convicted at depth 2, via the identical coarse-taint-
+        # fixpoint mechanism fix round 4's own docstring above already
+        # diagnoses. See tests/test_b863_tt5_wrapper_position_grammar.py's
+        # chained-`+` tests (2/3/4 levels) for the regression guard.
+        if isinstance(value.left, ast.BinOp) and isinstance(value.left.op, ast.Add):
+            left_shapes = _b863_classify_assign_value(value.left, names, tree, shapes_of)
+            if left_shapes is None:
+                return None
+        else:
+            head_src = _b863_classify_head(value.left, names, tree)
+            if head_src is None:
+                return None
+            left_shapes = [
+                _B863Shape(sh.fresh, sh.a0, sh.content, sh.refs_callsite)
+                for sh in shapes_of[head_src]
+            ]
+        right = value.right
+        if isinstance(right, (ast.List, ast.Tuple)) and not (
+            right.elts and isinstance(right.elts[0], ast.Starred)
+        ):
+            extra = list(right.elts)
+        else:
+            extra = [right]
+        out = []
+        for sh in left_shapes:
+            new_sh = _B863Shape(sh.fresh, sh.a0, sh.content, sh.refs_callsite)
+            for e in extra:
+                new_sh.add_content(e)
+            out.append(new_sh)
+        return out
     head_src = _b863_classify_head(value, names, tree)
     if head_src is not None:
         return [

@@ -1372,16 +1372,255 @@ def test_fr3_alias_of_the_new_object_still_convicts():
     _assert_crit(src)
 
 
-def test_fr3_b965_case2_unaffected_by_this_round():
-    """Control: `args = args + [payload]` (the pre-existing, separately-filed
-    CLAWSECCHECK-B-965 case 2 gap -- `_b863_classify_head`'s `BinOp(Add)`
-    branch recurses into `.left` only and never looks at `.right`) must stay
-    exactly as it was before this round's fix: still info, still filed,
-    not newly broken or newly fixed by the head_src snapshot change (this
-    round never touches `_b863_classify_head`, only what
-    `_b863_classify_assign_value` does with an ALREADY-resolved head_src)."""
+def test_b965_shape2_h_plus_x_reassign_is_now_crit():
+    """B-965 shape 2, fixed (fix round 4, 2026-09-24):
+    `args = args + [payload]` used to be classified as PURE head-preservation
+    -- `_b863_classify_head`'s `BinOp`/`Add` branch recursed into `.left`
+    only and silently discarded `.right`, so `payload` never made it into the
+    tracked shape's `content` at all. Real runtime argv at the sink is
+    `["sh", "-c", payload]` -- genuine shell command injection via `sh -c`.
+    Before this fix this test (then named
+    `test_fr3_b965_case2_unaffected_by_this_round`) pinned the WRONG,
+    pre-existing info verdict as a deliberate "known gap, not this round's
+    problem" control; now that this IS the round fixing it, it pins the
+    correct one."""
     src = _va(["args = args + [payload]"], call='sh("sh", "-c")')
+    _assert_crit(src)
+
+
+def test_b965_shape2_h_plus_x_reassign_still_extends_shape_after_fix():
+    """The exact repro from the B-965 report, spelled out as a
+    named wrapper/call-site pair rather than the `_va()` harness's synthetic
+    layout, to guard against the fix being specific to the harness's own
+    shape rather than the general `H+X` reassignment grammar."""
+    src = (
+        _HEADER
+        + "def sh(*args):\n"
+        + "    payload = os.environ['P']\n"
+        + "    args = args + [payload]\n"
+        + "    return subprocess.check_output(args)\n\n"
+        + "def main():\n"
+        + "    sh('sh', '-c')\n"
+    )
+    _assert_crit(src)
+
+
+def test_b965_shape2_h_plus_x_reassign_with_literal_tail_is_info():
+    """Genuinely-safe control for the SAME `H+X` reassignment grammar: `X` is
+    a fully-literal, untainted addition (`'--verbose'`), and the call-site
+    program (`git`) is not a shell/interpreter -- no sink-reachability issue
+    either way. Must resolve sensibly (info) rather than crash or
+    over-convict now that `H+X` is folded into the tracked shape's content
+    instead of being dropped -- a literal tail is exactly as safe appended as
+    it was when it was (wrongly) discarded."""
+    src = _va(["args = args + ['--verbose']"], call='sh("git", "status")')
     _assert_info(src)
+
+
+def test_b965_shape2_h_plus_x_reassign_named_coparam_tail_is_info():
+    """The N6 shape (co-param tail, always literal at its one real call
+    graph) reassigned via bare `cmd + [...]` rather than `list(cmd) + [...]`
+    -- confirms the fix does not depend on the LEFT operand being a Call-
+    wrapped Name. A first draft of this fix (simply removing `H+X`
+    recognition and falling through to `_B863OutOfDomain`) regressed this
+    exact shape to a false crit -- see the module comment above
+    `_B863_HEAD_WRAP_CALLS` in clawseccheck/skillast.py, Fix round 4, for the
+    full trace of why routing an `H+X` reassignment through tier 1's own
+    coarser taint fixpoint is unsound."""
+    src = _HEADER + (
+        "def run(cmd, cwd=None):\n"
+        "    if cwd:\n"
+        "        cmd = cmd + ['-C', cwd]\n"
+        "    return subprocess.check_output(cmd)\n\n"
+        "def status(repo):\n"
+        "    return run(['git', 'status'], repo)\n\n"
+        "status('.')\n"
+    )
+    _assert_info(src)
+
+
+def test_b965_shape2_h_plus_x_new_alias_target_stays_untracked_not_crash():
+    """`x = args + [payload]` where `x` is a NEW name (not a reassignment of
+    the tracked parameter itself) exercises `_b863_process_one`'s alias-
+    creation branch (`_b863_classify_head(stmt.value, ...)`), not
+    `_b863_classify_assign_value`'s dedicated `H+X` branch (that one only
+    fires for `tgt.id in names`). `_b863_classify_head` no longer recognises
+    `BinOp`/`Add` at all, so `x` is simply left untracked (the same
+    treatment any other out-of-grammar local variable already gets) rather
+    than becoming a FALSE true-alias of `args`'s own shapes-list object (the
+    pre-fix behaviour, itself unsound independent of B-965's content-loss:
+    `args + [payload]` builds a brand-new list, not the same runtime object
+    `args` refers to). `args` itself is untouched by this statement, so the
+    sink (which reads `args`, never `x`) still resolves crit from `args`'s
+    own, unrelated `.append(payload)` -- and analysis must not crash or
+    mis-track `args` merely because an out-of-grammar sibling assignment
+    shares its RHS shape."""
+    src = _va(
+        ["x = args + [payload]", "args.append(payload)"],
+        call='sh("sh", "-c")',
+    )
+    _assert_crit(src)
+
+
+# ---------------------------------------------------------------------------
+# B-965 fix round 5 (C-135 catch on round 4's own commit): a CHAINED `H+X+Y+
+# ...` reassignment parses left-associatively, so `value.left` is ITSELF a
+# `BinOp`/`Add` at depth >= 2 -- round 4's dedicated branch only resolved a
+# single level and fell to `_B863OutOfDomain` ("unresolvable -> crit") one
+# level deeper, regressing the EXACT co-param-tail shape it specifically
+# fixed at depth 1. These tests cover 2 and 3 levels of chaining, both a
+# genuinely-safe all-literal chain and a tainted one -- with the taint placed
+# at different positions in the chain, to confirm every level's own content
+# is actually folded in (not just the outermost or innermost `+`).
+# ---------------------------------------------------------------------------
+
+def test_b965_round5_chained_plus_depth2_coparam_tail_is_info():
+    """The exact regression C-135 found against round 4's own commit
+    (dea394a4): `cmd = cmd + ['-C', cwd] + ['--extra']` is the SAME N6
+    co-param-tail shape (`cwd` always literal at its one real call graph),
+    just with one more chained `+`. Must stay info, not fall to the blunt
+    out-of-domain default a first round-5 draft would leave it at."""
+    src = _HEADER + (
+        "def run(cmd, cwd=None):\n"
+        "    if cwd:\n"
+        "        cmd = cmd + ['-C', cwd] + ['--extra']\n"
+        "    return subprocess.check_output(cmd)\n\n"
+        "def status(repo):\n"
+        "    return run(['git', 'status'], repo)\n\n"
+        "status('.')\n"
+    )
+    _assert_info(src)
+
+
+def test_b965_round5_chained_plus_depth2_taint_in_first_tail_is_crit():
+    """Taint placed in the FIRST (inner) `+`'s own tail -- confirms the
+    innermost level's content is folded into the final shape, not just
+    whatever the outer level appends on top."""
+    src = _va(["args = args + [payload] + ['-x']"], call='sh("sh", "-c")')
+    _assert_crit(src)
+
+
+def test_b965_round5_chained_plus_depth2_taint_in_second_tail_is_crit():
+    """Taint placed in the SECOND (outer) `+`'s own tail -- confirms the
+    outer level's own `X` is folded in too, not only content recursed up
+    from the inner level."""
+    src = _va(["args = args + ['-x'] + [payload]"], call='sh("sh", "-c")')
+    _assert_crit(src)
+
+
+def test_b965_round5_chained_plus_depth2_taint_position_is_the_discriminator():
+    """Same two chained shapes as the pair above, contrasted directly against
+    the all-literal control: proves the crit verdict tracks WHICH content is
+    tainted (real per-position classification), not just "any chain of this
+    shape is crit" (which the blunt out-of-domain fallback this fix replaces
+    would also produce, for the wrong reason)."""
+    literal_chain = _va(["args = args + ['-x'] + ['-y']"], call='sh("sh", "-c")')
+    tainted_first = _va(["args = args + [payload] + ['-y']"], call='sh("sh", "-c")')
+    tainted_second = _va(["args = args + ['-x'] + [payload]"], call='sh("sh", "-c")')
+    assert _severity(literal_chain) == "info"
+    assert _severity(tainted_first) == "crit"
+    assert _severity(tainted_second) == "crit"
+
+
+def test_b965_round5_chained_plus_depth3_all_literal_is_info():
+    """Three levels of chaining, fully literal/untainted -- the co-param-tail
+    shape one level deeper still than the depth-2 regression test, to catch
+    any recursion-depth-specific bug (e.g. a fix that only special-cases
+    exactly one level of nested `BinOp`)."""
+    src = _HEADER + (
+        "def run(cmd, cwd=None):\n"
+        "    if cwd:\n"
+        "        cmd = cmd + ['-C', cwd] + ['--extra'] + ['--more']\n"
+        "    return subprocess.check_output(cmd)\n\n"
+        "def status(repo):\n"
+        "    return run(['git', 'status'], repo)\n\n"
+        "status('.')\n"
+    )
+    _assert_info(src)
+
+
+def test_b965_round5_chained_plus_depth3_taint_in_middle_tail_is_crit():
+    """Three levels of chaining with the taint in the MIDDLE `+`'s own
+    tail (neither the innermost nor the outermost) -- the position least
+    likely to be reached by a fix that only special-cases the first or the
+    last level of recursion."""
+    src = _va(["args = args + ['a'] + [payload] + ['b']"], call='sh("sh", "-c")')
+    _assert_crit(src)
+
+
+def test_b965_round5_chained_plus_depth4_all_literal_is_info():
+    """Four levels of chaining, fully literal -- one level past the depth-3
+    test above, to make the recursion-generalizes-to-arbitrary-depth claim
+    less of an inference from just one extra level."""
+    src = _va(["args = args + ['a'] + ['b'] + ['c'] + ['d']"], call='sh("git", "status")')
+    _assert_info(src)
+
+
+# ---------------------------------------------------------------------------
+# B-965 fix round 6 (post-rebase C-135 gap check, 2026-09-24): the round-5
+# recursion only special-cases the LEFT operand of a chained `H+X` being
+# itself a `BinOp`/`Add` (`(cmd + x) + y`, how `+` actually associates
+# without parens). These two shapes were flagged as worth pinning explicitly
+# rather than left only empirically verified: a parenthesized/right-
+# associative right operand (the right side is itself a fresh `F+X`
+# sub-expression, NOT flattened element-wise -- treated as one opaque
+# content node, same as `.extend()`'s non-literal-arg fallback), and a
+# Starred-headed list on the right side of `H+X` (already excluded from
+# element-wise flattening by the existing `not (right.elts and
+# isinstance(right.elts[0], ast.Starred))` guard, so it is likewise folded
+# in as one opaque node). Both rely on `_names_in()` walking the FULL
+# subtree of an opaque content node (not just its top level) to still see a
+# tainted name buried inside it -- verified directly below, not just
+# inferred from the crit/info split.
+# ---------------------------------------------------------------------------
+
+def test_b965_round6_parenthesized_right_operand_all_literal_is_info():
+    """`args = args + (['-C'] + ['workdir'])` -- the right operand of the
+    outer `+` is itself a fresh `F+X` sub-expression (parens only change
+    grouping, not the AST shape: `BinOp(Name, Add, BinOp(List, Add, List))`).
+    Not the round-5 left-associative chain shape at all -- the right side is
+    folded in as ONE opaque content node (this function's `extra = [right]`
+    fallback, since `right` here is a `BinOp`, not a List/Tuple literal).
+    Fully literal, so must stay info."""
+    src = _va(["args = args + (['-C'] + ['workdir'])"], call='sh("git", "status")')
+    _assert_info(src)
+
+
+def test_b965_round6_parenthesized_right_operand_tainted_is_crit():
+    """Same shape as above with `payload` inside the parenthesized right
+    operand (`args = args + ([payload] + ['-x'])`) -- must still resolve
+    crit under a shell-indirect a0, confirming `_names_in()` finds `payload`
+    even though it is buried two levels inside the single opaque content
+    node, not sitting at that node's own top level."""
+    src = _va(["args = args + ([payload] + ['-x'])"], call='sh("sh", "-c")')
+    _assert_crit(src)
+
+
+def test_b965_round6_starred_right_operand_all_literal_is_info():
+    """`args = args + [*other, "-c"]` -- a Starred-headed list on the RIGHT
+    side of `H+X` (distinct from B-956's own Starred-headed-list-as-the-
+    WHOLE-expression grammar, `_b863_classify_head`'s own List+Starred
+    branch). Already excluded from element-wise flattening by the existing
+    `not (right.elts and isinstance(right.elts[0], ast.Starred))` guard, so
+    the whole `[*other, "-c"]` list folds in as one opaque content node.
+    `other` is a fully-literal local list, so must stay info."""
+    src = _va(
+        ["other = ['--flag']", "args = args + [*other, '-c']"],
+        call='sh("git", "status")',
+    )
+    _assert_info(src)
+
+
+def test_b965_round6_starred_right_operand_tainted_is_crit():
+    """Same shape as above with `other` sourced from `os.environ` -- must
+    still resolve crit under a shell-indirect a0, confirming `_names_in()`
+    finds the tainted name `other` even though it is reached only through
+    the Starred element buried inside the single opaque content node."""
+    src = _va(
+        ["other = os.environ['X']", "args = args + [*other, '-c']"],
+        call='sh("sh", "-c")',
+    )
+    _assert_crit(src)
 
 
 # ---------------------------------------------------------------------------
