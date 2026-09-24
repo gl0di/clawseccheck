@@ -674,10 +674,12 @@ def test_b996_ref_resolver_stays_ungated_on_tamper_flags_with_unrelated_inspect_
     primitive), silently LOST its TT5_CMD_INJECTION crit finding entirely under
     round 1 -- not merely weakened to a lower tier, as the loader-sink shapes were,
     but dropped with NO B-906/TT5 finding replacing it (confirmed empirically
-    against f53a919b). Round 2's narrower `_frame_jump_capable()` gate lives only in
-    `_reaching()` (`shippedexec.py`, `locate()`'s own caller), never in `sole()`
-    itself, so `_RefResolver`'s pre-existing, monotone-only-adds-findings behaviour
-    is untouched -- this must stay crit."""
+    against f53a919b). Round 2 tried a narrower gate scoped to `_reaching()`
+    (`shippedexec.py`, `locate()`'s own caller) alone, never in `sole()` itself, so
+    `_RefResolver` was never affected by it; round 3 removed that gate too (see
+    `_reaching()`'s own docstring) -- `_RefResolver`'s pre-existing,
+    monotone-only-adds-findings behaviour stays untouched either way -- this must
+    stay crit."""
     src = (
         "import subprocess, inspect\n"
         "import os\n"
