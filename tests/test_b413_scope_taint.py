@@ -656,6 +656,236 @@ def test_wrapper_ambiguous_toplevel_name_stays_crit():
 
 
 # ---------------------------------------------------------------------------
+# B-952: a name assigned to a literal ONLY inside a conditional construct must
+# not be trusted as "bound exactly once, unconditionally" by
+# `_single_list_bindings_local` -- see that function's own docstring in
+# clawseccheck/skillast.py.
+# ---------------------------------------------------------------------------
+
+
+def test_conditional_reassign_inside_if_does_not_clear_cmd_injection():
+    """The exact repro: `args` has textually ONE `Assign` in `sh`'s scope, but it
+    sits inside `if DEBUG:` -- on the far more common `DEBUG=False` path `args`
+    is untouched, and the call site's own tainted, shell-shaped argv
+    (`sh('sh', '-c', p)`) reaches the sink directly. Before B-952 this resolved
+    `args` to `['echo']` unconditionally and wrongly downgraded to
+    TT5_ARG_INJECTION/info."""
+    src = (
+        "import os, subprocess\n"
+        "DEBUG = False\n"
+        "def sh(*args):\n"
+        "    if DEBUG:\n"
+        "        args = ['echo']\n"
+        "    return subprocess.check_output(args)\n"
+        "\n"
+        "def main():\n"
+        "    p = os.environ['P']\n"
+        "    sh('sh', '-c', p)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+
+def test_unconditional_reassign_still_clears_to_arg_injection():
+    """Paired control for the test above: the SAME body with the `if` removed --
+    `args = ['echo']` now genuinely IS bound exactly once, unconditionally, at
+    the top level of `sh`'s own scope. Must still downgrade to
+    TT5_ARG_INJECTION/info -- confirms B-952 did not also break the legitimate
+    unconditional case this function exists to handle."""
+    src = (
+        "import os, subprocess\n"
+        "def sh(*args):\n"
+        "    args = ['echo']\n"
+        "    return subprocess.check_output(args)\n"
+        "\n"
+        "def main():\n"
+        "    p = os.environ['P']\n"
+        "    sh('sh', '-c', p)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" not in r
+    assert "TT5_ARG_INJECTION" in r
+    assert r["TT5_ARG_INJECTION"].severity == "info"
+
+
+def test_wrapper_conditionally_bound_call_site_list_stays_crit():
+    """Layer-2 (named-parameter wrapper) counterpart of the two tests above:
+    the CALL SITE binds `argv` to a literal only inside `if debug:` before
+    forwarding it to `run`. Contrast
+    `test_wrapper_var_bound_list_untainted_program_downgrades` above, which
+    uses the same shape unconditionally and correctly downgrades -- here the
+    conditional binding must leave the call unresolved (crit)."""
+    src = (
+        "import subprocess\n"
+        "\n"
+        "\n"
+        "def run(cmd):\n"
+        "    subprocess.run(cmd)\n"
+        "\n"
+        "\n"
+        "def main(debug, argv):\n"
+        "    if debug:\n"
+        "        argv = ['git', 'status']\n"
+        "    run(argv)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+
+def test_wrapper_for_loop_bound_call_site_list_stays_crit():
+    """Generalizes the test above beyond `if`: the call site binds `argv` to a
+    literal only inside a `for` loop -- a loop body is not guaranteed to run
+    (an empty iterable skips it entirely), so `_single_list_bindings_local`
+    must treat it exactly as conditionally as an `if` branch."""
+    src = (
+        "import subprocess\n"
+        "\n"
+        "\n"
+        "def run(cmd):\n"
+        "    subprocess.run(cmd)\n"
+        "\n"
+        "\n"
+        "def main(argv):\n"
+        "    for _ in range(1):\n"
+        "        argv = ['git', 'status']\n"
+        "    run(argv)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+
+def test_wrapper_try_bound_call_site_list_stays_crit():
+    """Same generalization, `try` instead of `for`."""
+    src = (
+        "import subprocess\n"
+        "\n"
+        "\n"
+        "def run(cmd):\n"
+        "    subprocess.run(cmd)\n"
+        "\n"
+        "\n"
+        "def main(argv):\n"
+        "    try:\n"
+        "        argv = ['git', 'status']\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    run(argv)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+
+def test_wrapper_with_bound_call_site_list_stays_crit():
+    """Same generalization, `with` instead of `for`."""
+    src = (
+        "import subprocess\n"
+        "import contextlib\n"
+        "\n"
+        "\n"
+        "def run(cmd):\n"
+        "    subprocess.run(cmd)\n"
+        "\n"
+        "\n"
+        "def main(argv):\n"
+        "    with contextlib.suppress(Exception):\n"
+        "        argv = ['git', 'status']\n"
+        "    run(argv)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+
+def test_wrapper_unrelated_if_does_not_taint_sibling_call_site_binding():
+    """An `if` present ELSEWHERE at the call site (not wrapping the binding
+    itself) must not make a genuinely top-level, sibling `argv = [...]` look
+    conditional -- only an If's OWN body/orelse is out of reach, never a
+    statement sitting beside it. Must still downgrade to info."""
+    src = (
+        "import subprocess\n"
+        "\n"
+        "\n"
+        "def run(cmd):\n"
+        "    subprocess.run(cmd)\n"
+        "\n"
+        "\n"
+        "def main(debug):\n"
+        "    if debug:\n"
+        "        pass\n"
+        "    argv = ['git', 'status']\n"
+        "    run(argv)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" not in r
+    assert "TT5_ARG_INJECTION" in r
+
+
+def test_module_guard_conditional_argv_binding_stays_crit_accepted_tradeoff():
+    """C-135 (adversarial review of the B-952 commit): the module-scope
+    counterpart of `test_wrapper_conditionally_bound_call_site_list_stays_crit`
+    -style binding, in the single most common real shape that puts an
+    `Assign` inside an `If` at module scope -- `if __name__ == "__main__":`. Before
+    B-952 this resolved `args` at module scope and downgraded to
+    TT5_ARG_INJECTION/info; after B-952 it stays TT5_CMD_INJECTION/crit,
+    because -- exactly like the `try`/`with`/`for` call-site cases above --
+    this function has no way to statically PROVE the guard's body runs
+    (the same file can also be imported, in which case it does not), so
+    treating it as conditional is the same sound, conservative default this
+    whole function already applies to every other If/For/While/Try/With
+    binding. This only shifts severity on a call that is ALREADY flagged by
+    some independent taint (here, `cwd=os.environ.get(...)`) -- a bare
+    `if __name__ == "__main__": args = [...]; subprocess.run(args)` with no
+    other taint in the call still produces no TT5 finding at all, since
+    nothing makes the call taint-worthy in the first place.
+
+    ACCEPTED, deliberate tradeoff, not a defect: matches this project's
+    existing "conservative is safe, never risk a false downgrade" doctrine
+    (see `_single_list_bindings_local`'s own docstring, and the identical
+    info->crit direction already accepted for the try/with/for call-site
+    shapes above) -- a false CRITICAL on an already-tainted call is a lower
+    cost than a false downgrade that hides a real command-injection path.
+    Flagged during C-135 review of commit faf9a5e9 for its real-world
+    prevalence (this exact guard appears in a large share of executable
+    skill scripts) rather than for being an unsound result; recorded here
+    rather than silently left untested."""
+    src = (
+        "import os, subprocess\n"
+        "\n"
+        "\n"
+        'if __name__ == "__main__":\n'
+        "    args = ['mytool', '--verbose']\n"
+        "    workdir = os.environ.get('WORKDIR')\n"
+        "    subprocess.run(args, cwd=workdir)\n"
+    )
+    r = _rules(src)
+    assert "TT5_CMD_INJECTION" in r
+    assert r["TT5_CMD_INJECTION"].severity == "crit"
+
+
+def test_module_guard_conditional_argv_binding_with_no_other_taint_is_silent():
+    """Paired control for the test above: the identical `if __name__ ==
+    "__main__":`-guarded binding, but with NO independent taint anywhere in
+    the call (no `cwd=os.environ.get(...)`, nothing else tainted). B-952's
+    conservative refusal to resolve `args` only matters once something else
+    already makes the call taint-worthy -- confirms it does not, by itself,
+    fabricate a finding out of an otherwise fully literal, ordinary call."""
+    src = (
+        "import subprocess\n"
+        "\n"
+        "\n"
+        'if __name__ == "__main__":\n'
+        "    args = ['mytool', '--verbose']\n"
+        "    subprocess.run(args)\n"
+    )
+    r = _rules(src)
+    assert not any(rule.startswith("TT5") for rule in r)
+
+
+# ---------------------------------------------------------------------------
 # Fixture-level (vet_skill) regressions for both layers
 # ---------------------------------------------------------------------------
 
