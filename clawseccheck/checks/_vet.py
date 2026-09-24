@@ -5558,20 +5558,6 @@ def check_installed_skills(ctx: Context) -> Finding:
                     else:
                         warns_js.append(msg)
                         warns_js_rules.add(af.rule)
-            # B-618: this skill contributed if -- and only if -- one of the buckets above
-            # actually grew during its own iteration. Structural, not text-parsed.
-            if len(warns_js) > _warns_js_len0:
-                js_skills.add(name)
-            if len(warns_declared_unverified) > _declared_unverified_len0:
-                declared_unverified_skills.add(name)
-            if len(crit) > _crit_len0:
-                crit_skills.add(name)
-            if len(warns_install_curl) > _install_curl_len0:
-                install_curl_skills.add(name)
-            if len(warns_notify_host) > _notify_len0:
-                notify_skills.add(name)
-            if len(warns_named_exfil_host) > _named_exfil_len0:
-                named_exfil_skills.add(name)
         except ScanBudgetExceeded:
             # A per-check/per-audit deadline firing mid-skill is not a crash: it must
             # reach run_all's own ScanBudgetExceeded handling untouched (it derives
@@ -5609,6 +5595,31 @@ def check_installed_skills(ctx: Context) -> Finding:
             )
             crashed_skills.append(f"{name} ({type(exc).__name__})")
             continue
+        finally:
+            # B-888 follow-up (C-135 round 1): this bookkeeping used to sit at the end
+            # of the `try` block above, AFTER the AST/shell/JS analysis passes that can
+            # raise -- so a skill that both convicts (crit/high/warn) AND crashes later
+            # in its own iteration left `crit_hosts_by_skill`/etc. populated (set early,
+            # right after `_exfil_host_hits`) while the corresponding `*_skills` set
+            # stayed empty (never reached). `_sole_contributor`'s "same skill set"
+            # contract (B-618) then read that mismatch as ambiguous and silently
+            # dropped `destination_hosts` from an otherwise-correct FAIL. Moved to
+            # `finally` so it always runs -- on a clean pass, on the crash-then-continue
+            # path, and before a ScanBudgetExceeded re-raise -- since every line here
+            # only reads already-mutated shared lists and adds to already-declared
+            # sets, which is safe regardless of how this iteration ended.
+            if len(warns_js) > _warns_js_len0:
+                js_skills.add(name)
+            if len(warns_declared_unverified) > _declared_unverified_len0:
+                declared_unverified_skills.add(name)
+            if len(crit) > _crit_len0:
+                crit_skills.add(name)
+            if len(warns_install_curl) > _install_curl_len0:
+                install_curl_skills.add(name)
+            if len(warns_notify_host) > _notify_len0:
+                notify_skills.add(name)
+            if len(warns_named_exfil_host) > _named_exfil_len0:
+                named_exfil_skills.add(name)
     # C-044: unpinned dependency scan — collect across all skills; WARN severity.
     # Runs after the main CRIT/HIGH loop to avoid polluting the main evidence lists.
     warns_unpinned: list[str] = []
