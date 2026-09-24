@@ -5362,6 +5362,23 @@ def _b331_bare_notify_anchored(snippet: str, ok: bool, norm: str) -> bool:
     *snippet* itself was already scanned from) as this function's third argument
     instead of the raw description, so the person-target search sees the same
     confusable-folded text the bare-notify match already did.
+
+    C-135 (B-992 follow-up): `normalize_for_scan`'s NFKC pass (`unicodedata.normalize
+    ("NFKC", ...)`, see textnorm.py) folds Unicode COMPATIBILITY characters —
+    fullwidth Latin (U+FF00-FFEF, e.g. "Ｕｓｅｒ") and circled Latin (U+24B6-24E9, e.g.
+    "ⓐⓓⓜⓘⓝ") — to plain ASCII entirely independently of the curated `_NORM_TABLE`
+    confusable map used for the Greek/Cyrillic case above. So this fix also newly
+    anchors bare "without notifying"-style hits carrying a fullwidth or circled-Latin
+    spelling of a person-target word (e.g. "...without notifying its Ｕｓｅｒ.") to
+    FAIL, where the parent commit left them WARN. This is treated as INTENDED
+    additional coverage, not an accident: fullwidth obfuscation is already an
+    established B331 evasion vector this same module normalizes against elsewhere (see
+    `test_b331_c135_r2_fullwidth_and_zero_width_obfuscation_still_caught`), and a full
+    English word spelled entirely in fullwidth or circled Latin embedded in an
+    otherwise-ASCII sentence has no realistic benign authorship story — genuine
+    fullwidth typesetting (CJK-locale product copy, IME artifacts) affects a whole
+    run of text, not one isolated target word. Pinned by
+    `test_b331_bare_notify_person_target_nfkc_fullwidth_and_circled_latin`.
     """
     if not ok:
         return False

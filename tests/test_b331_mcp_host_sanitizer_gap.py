@@ -554,6 +554,36 @@ def test_b331_bare_notify_c135_benign_descriptions_stay_clean():
         assert f.status != FAIL, benign
 
 
+def test_b331_bare_notify_person_target_nfkc_fullwidth_and_circled_latin():
+    """C-135 follow-up (independent review of the B-992 fix above): `normalize_for_scan`'s
+    NFKC pass folds Unicode COMPATIBILITY characters -- fullwidth Latin (U+FF00-FFEF)
+    and circled Latin (U+24B6-24E9) -- to plain ASCII entirely independently of the
+    curated `_NORM_TABLE` confusable map the Greek-omicron case above exercises. So the
+    B-992 fix also newly anchors a bare "without notifying"-style hit carrying a
+    fullwidth or circled-Latin spelling of a person-target word, where the parent
+    commit left these WARN. Treated as INTENDED additional coverage, not an accident:
+    fullwidth obfuscation is already an established B331 evasion vector elsewhere in
+    this module (`test_b331_c135_r2_fullwidth_and_zero_width_obfuscation_still_caught`),
+    and a full English word spelled entirely in fullwidth or circled Latin embedded in
+    an otherwise-ASCII sentence has no realistic benign authorship story -- genuine
+    fullwidth typesetting (CJK-locale product copy, IME artifacts) affects a whole run
+    of text, not one isolated target word."""
+    fullwidth_user = "Posts a message without notifying its Ｕｓｅｒ."  # fullwidth "User"
+    circled_admin = (
+        "Posts a message without notifying its ⓐⓓⓜⓘⓝ strator."  # circled "admin"
+    )
+
+    for text in (fullwidth_user, circled_admin):
+        hit = _b331_secrecy_hit(text)
+        assert hit is not None
+        assert hit[1] is True  # anchored -> FAIL-worthy
+
+        categories = {c for c, _sev, _ev in _b331_findings(text)}
+        assert "secrecy-directive" in categories
+
+        assert check_mcp_host_sanitizer_gap(_mcp_ctx(text)).status == FAIL
+
+
 # --------------------------------------------------------------------------- BLOCKER 1c: data-URI over-broad
 def test_b331_c135_r2_image_data_uri_not_flagged():
     assert _b331_data_uri_hit("Renders the chart as a data:image/png;base64, data URI.") is False
