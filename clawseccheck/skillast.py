@@ -13058,27 +13058,54 @@ _SH_BRANCH_KW_RE = re.compile(
 # neither would work correctly here since `\A` anchors to offset 0 of the STRING, not
 # to `pos`).
 _SH_CASE_WILDCARD_ARM_RE = re.compile(r"[ \t\n]*\(?[ \t\n]*\*[ \t\n]*\)")
+# The literal `in` closing a case's own `case WORD in` header. Searched for ONLY
+# right after a recognized `case` keyword (never scanned for globally -- a bare
+# `\bin\b` search over the whole file would collide with a `for NAME in` loop
+# header), so this cannot mistake an unrelated loop's own `in` for a top-level
+# `case`'s. KNOWN, accepted imprecision (not chased further, same lexical-layer
+# spirit as B-957's do/done-vs-case-label note above): a `for ... in ... done`
+# NESTED INSIDE a case's own SUBJECT expression (`case $(for f in *; do ...;
+# done) in ...`) has its own earlier `in`, which this bounded, first-match search
+# would find first, truncating the subject span too early. Vanishingly rare in
+# real shell (a subject is essentially always a bare `$var`/`$(cmd)`/literal, never
+# a nested loop); does not itself convict anything wrongly, only mis-attributes
+# which span some later text falls in, the same class of imprecision the file
+# already accepts elsewhere at this lexical/regex layer.
+_SH_CASE_IN_RE = re.compile(r"\bin\b")
+# `_sh_cred_replay` recursion-depth guard (see its own docstring): caps how many
+# NESTED (not sequential) if/case levels get real branch-aware replay before
+# falling back to a flat, branch-blind drain for everything past this point.
+_SH_CRED_REPLAY_MAX_DEPTH = 250
 
 
 def _sh_parse_branch_tree(kw: str) -> list:
     """Stack-based parse of `kw` into a tree of if/case construct dicts (see the
     design note above). FAILS CLOSED (`[]`) on any structural imbalance -- an `if`
     with no matching `fi`, a `then`/`elif`/`else`/`fi` with no open `if`, an `esac`
-    with no open `case`, or a nested construct opened while an `if`'s own CONDITION
-    (before its first `then`) is still being scanned (too rare/pathological a shape to
-    track correctly at this lexical layer) -- so branch-merging is simply not applied
-    for that one file; `_sh_cred_assign_taint_lines`'s plain positional lookup still
-    runs unchanged, same as it does today -- never a regression from failing to parse.
+    with no open `case`, a `case` with no `in`, or a nested construct opened while an
+    `if`'s own CONDITION (before its first `then`) is still being scanned (too
+    rare/pathological a shape to track correctly at this lexical layer). This is NOT
+    a no-op fallback: when `_sh_parse_branch_tree` returns `[]`, `_sh_cred_replay` (in
+    `_sh_cred_assign_taint_lines`) gets an empty construct list and degenerates to a
+    flat, branch-blind drain across the WHOLE FILE for every name -- i.e. round 1's
+    behavior, including round 1's own branch-blindness this round exists to fix, for
+    the ENTIRE file, not just the unparseable construct. That is a real regression
+    back to round-1 behavior for that one file (though never a crash and never a
+    false CONVICTION beyond what round 1 already produced) -- tracked as a known,
+    accepted limitation of this lexical/regex layer, the same class as B-957's
+    do/done blast-radius note above, not something this round fixes.
     """
     top: list = []
     stack: list = []
 
-    def children_target():
+    def children_target(pos: int):
         if not stack:
             return top
         f = stack[-1]
         if f["kind"] == "if":
             return f["branches"][-1]["children"] if f["branches"] else None
+        if pos < f["in_pos"]:
+            return f["subject"]["children"]
         return f["arms"][-1]["children"] if f["arms"] else None
 
     for m in _SH_BRANCH_KW_RE.finditer(kw):
@@ -13092,7 +13119,7 @@ def _sh_parse_branch_tree(kw: str) -> list:
         kw_name = m.group("kw")
         start, end = m.start("kw"), m.end("kw")
         if kw_name == "if":
-            dest = children_target()
+            dest = children_target(start)
             if dest is None:
                 return []
             frame = {"kind": "if", "start": start, "branches": [], "has_else": False,
@@ -13108,11 +13135,22 @@ def _sh_parse_branch_tree(kw: str) -> list:
             frame["branches"].append({"start": end, "end": None, "children": []})
             stack.append(frame)
         elif kw_name == "case":
-            dest = children_target()
+            dest = children_target(start)
             if dest is None:
                 return []
-            frame = {"kind": "case", "start": start, "arms": [], "_dest": dest}
-            frame["arms"].append({"start": end, "end": None, "children": []})
+            in_m = _SH_CASE_IN_RE.search(kw, end)
+            if in_m is None:
+                return []
+            # The SUBJECT (`case WORD` up to `in`) is UNCONDITIONAL, single-execution
+            # state shared by every arm -- not private to arm[0]. A side-effecting
+            # command substitution in the subject (`case "$(C=safe; echo mode)" in`)
+            # must be visible to EVERY arm's own entry taint, not just the first one
+            # textually adjacent to it; `_sh_cred_replay` gives it its own replay,
+            # once, and threads its EXIT taint into every arm (see its own docstring).
+            frame = {"kind": "case", "start": start, "in_pos": in_m.start(),
+                     "subject": {"start": end, "end": in_m.start(), "children": []},
+                     "arms": [], "_dest": dest}
+            frame["arms"].append({"start": in_m.end(), "end": None, "children": []})
             stack.append(frame)
         elif kw_name == "then":
             if not stack or stack[-1]["kind"] != "if" or not stack[-1]["awaiting_then"]:
@@ -13160,7 +13198,7 @@ def _sh_parse_branch_tree(kw: str) -> list:
             has_wild = any(_SH_CASE_WILDCARD_ARM_RE.match(kw, a["start"]) for a in f["arms"])
             f["_dest"].append(
                 {"type": "case", "start": f["start"], "end": end,
-                 "arms": f["arms"], "has_fallback": has_wild}
+                 "subject": f["subject"], "arms": f["arms"], "has_fallback": has_wild}
             )
     if stack:
         return []
@@ -13169,13 +13207,27 @@ def _sh_parse_branch_tree(kw: str) -> list:
 
 def _sh_cred_replay(
     offsets: list, events: list, queries: list, span_start: int, span_end: int,
-    entry_taint: bool, children: list, results: list,
+    entry_taint: bool, children: list, results: list, depth: int = 0,
 ) -> bool:
     """Replay one name's straight-line `events` (parallel sorted `offsets`, and
     `(offset, op, is_cred)` triples) across `[span_start, span_end)`, recursing into
     every direct-child if/case `children` node with `entry_taint` snapshotted at the
     fork and OR-merging the branches'/arms' own exit taints back in at the
     construct's close (see the design note above `_sh_parse_branch_tree`).
+
+    A `case` node's `subject` is replayed EXACTLY ONCE, before any arm, using the
+    SAME `cur` every arm would otherwise fork from -- its EXIT taint (not `cur`
+    itself) becomes the `entry_taint` for every arm, and the fallback contribution
+    when there's no `*)` catch-all. The subject is unconditional, single-execution,
+    shared state (`case "$(C=safe; echo mode)" in a) ... ;; *) ... ;; esac` clears C
+    for EVERY arm, not just the one textually adjacent to it); treating it as any one
+    arm's own private scope -- as an earlier build of this fix did -- either hides a
+    genuine clear from every arm but the first, or hides a genuine credential read
+    from every arm but the first, depending on which way the bug points. An `if`'s
+    own condition does NOT get this treatment (deliberately -- see
+    `_sh_parse_branch_tree`'s own comments): each `if`/`elif` condition only really
+    runs if control reaches it, so it stays private to its own branch, unlike a
+    case subject which unconditionally runs before every arm.
 
     `queries` is the SAME name's own sorted `$NAME`-reference offsets (every
     outbound-line reference, regardless of branch). Each query offset reached during
@@ -13193,8 +13245,21 @@ def _sh_cred_replay(
 
     Events and queries within one straight-line stretch are processed in strict
     offset order (whichever is next), so a query sees every event genuinely before
-    it and none after. Returns the taint at `span_end`, the caller's own next
-    `entry_taint`."""
+    it and none after.
+
+    `depth` counts NESTED (not sequential) if/case levels only -- siblings in the
+    same `children` list are iterated, not recursed into, so a long straight-line
+    run of non-nested constructs costs no extra stack depth at all. Real, adversarial
+    NESTING depth, unlike sequential count, drove an uncaught `RecursionError` at
+    ~1,000 levels during review; past `_SH_CRED_REPLAY_MAX_DEPTH`, a node's WHOLE
+    span (subject/condition + every branch/arm, arbitrarily deeper nesting included)
+    is drained as one flat, branch-blind straight-line run instead of being
+    recursed into at all -- safe (this function can never crash the caller on
+    adversarial nesting) and conservative (silently reverts to round-1 behavior for
+    just that one over-deep subtree, never a false CONVICTION beyond what round 1
+    already produced there).
+
+    Returns the taint at `span_end`, the caller's own next `entry_taint`."""
     cur = entry_taint
     ei = bisect.bisect_left(offsets, span_start)
     qi = bisect.bisect_left(queries, span_start)
@@ -13216,15 +13281,35 @@ def _sh_cred_replay(
 
     for node in children:
         drain(node["start"])
-        branches = node["branches"] if node["type"] == "if" else node["arms"]
-        has_fallback = node["has_else"] if node["type"] == "if" else node["has_fallback"]
-        exits = [
-            _sh_cred_replay(offsets, events, queries, b["start"], b["end"], cur, b["children"], results)
-            for b in branches
-        ]
-        if not has_fallback:
-            exits.append(cur)
-        cur = any(exits)
+        if depth >= _SH_CRED_REPLAY_MAX_DEPTH:
+            drain(node["end"])
+        elif node["type"] == "if":
+            exits = [
+                _sh_cred_replay(
+                    offsets, events, queries, b["start"], b["end"], cur, b["children"],
+                    results, depth + 1,
+                )
+                for b in node["branches"]
+            ]
+            if not node["has_else"]:
+                exits.append(cur)
+            cur = any(exits)
+        else:
+            subj = node["subject"]
+            subj_exit = _sh_cred_replay(
+                offsets, events, queries, subj["start"], subj["end"], cur, subj["children"],
+                results, depth + 1,
+            )
+            exits = [
+                _sh_cred_replay(
+                    offsets, events, queries, a["start"], a["end"], subj_exit, a["children"],
+                    results, depth + 1,
+                )
+                for a in node["arms"]
+            ]
+            if not node["has_fallback"]:
+                exits.append(subj_exit)
+            cur = any(exits)
         ei = bisect.bisect_left(offsets, node["end"])
         qi = bisect.bisect_left(queries, node["end"])
     drain(span_end)
