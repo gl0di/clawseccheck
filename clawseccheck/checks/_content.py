@@ -1884,7 +1884,19 @@ _B63_DEST_RE = re.compile(
         # Python decorators (@app.route) / CSS at-rules (@media), a false positive (C-135 r2 HOLE 3)
         r"|\b(?:to|via|dm)\s+@\w{2,}"
         r"|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
-        r"|к\s+себе|\bмне\b|в\s+(?:мой|наш|чат|бот|облак)"
+        # B-947 round 2: every alternative here is now word-bounded — "к себе" and each
+        # "в <noun>" destination noun (мой/наш/чат/бот) are complete standalone Russian
+        # words in this destination-phrase usage, so an UNbounded literal substring-
+        # matched inside unrelated vocabulary with no boundary at all (reactivating this
+        # branch in round 1 turned that pre-existing gap into a live FP: "урок
+        # себесто..." matched "к себе", "мойку"/"нашатырном"/"ботинок" matched "мой"/
+        # "наш"/"бот" as bare substrings). "облак" stays a left-bounded STEM (no trailing
+        # \b), same asymmetric idiom `_B63_SECRET_TERM_RE` already uses for
+        # секрет/парол/токен/ключ — it is not itself a standalone word (always inflects:
+        # облако/облака/облаке/...), and no unrelated Russian word starts with those 5
+        # letters, so the mandatory `\s+` before it already gives it a real left boundary
+        # without a trailing one costing a false match.
+        r"|\bк\s+себе\b|\bмне\b|\bв\s+(?:мой\b|наш\b|чат\b|бот\b|облак)"
     ),
     re.IGNORECASE,
 )
