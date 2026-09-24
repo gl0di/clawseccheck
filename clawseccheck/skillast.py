@@ -3525,8 +3525,10 @@ def _b863_process_one(stmt, names, tree, shapes_of):
         # unconditionally) and "branch not taken" (`orelse`, or the ORIGINAL
         # shapes_of unchanged when there is no `orelse`) are both kept as
         # possibilities, like an IfExp's two branches. A branch-local alias
-        # does not propagate past the `if` (an accepted, unexercised scope
-        # limit -- see deviations).
+        # discovered in only ONE arm does not propagate past the `if` (an
+        # accepted scope limit); see the B-967 comment below the merge for
+        # the narrower, symmetric case that now DOES propagate, and why the
+        # asymmetric one still deliberately does not.
         if not (
             _names_in(stmt.test) & names
             or any(_names_in(s) & names for s in stmt.body)
@@ -3554,7 +3556,43 @@ def _b863_process_one(stmt, names, tree, shapes_of):
             )
         else:
             orelse_shapes_of = shapes_of
-        return {n: body_shapes_of[n] + orelse_shapes_of[n] for n in names}
+        merged = {n: body_shapes_of[n] + orelse_shapes_of[n] for n in names}
+        # B-967 (2026-09-24): a name first discovered as an alias of a
+        # tracked value INSIDE one arm (`y = x`) used to be silently dropped
+        # right here -- the merge above only re-threads names already in the
+        # OUTER, pre-if `names` set, so a later mutation through that name
+        # (`y.append(payload)`) matched no tracked receiver and was treated
+        # as a benign no-op, losing a genuine crit detection. Confirmed real:
+        # `x = args; if cond: args = ["ls"]; y = args else: y = x`, then
+        # `y.append(payload)` reaching `subprocess.check_output(args)` with a
+        # poisoned argv, was reported only TT5_ARG_INJECTION/info instead of
+        # crit.
+        #
+        # Sound to propagate ONLY when the SAME name was independently
+        # discovered as an alias in BOTH arms: whichever arm actually ran at
+        # runtime, the name is then DEFINITELY an alias of a tracked value
+        # afterwards, so its complete post-if shape set is exactly the union
+        # of what each arm produced -- the identical reasoning the
+        # unconditional merge above already applies to every pre-existing
+        # name (`shapes_of.keys() == names` is an invariant this function
+        # maintains, so "discovered in body_shapes_of" and "discovered in
+        # this arm's own branch-local names" are the same fact).
+        #
+        # A name discovered in only ONE arm is deliberately NOT propagated:
+        # on the other arm it may be an entirely unrelated, untracked
+        # binding, or the arm may never reach the merge point at all -- a
+        # common, benign idiom is `if ok: cmd = list(args) else: raise
+        # ValueError(...)`, where `cmd` is only ever bound on the arm that
+        # falls through. Inventing an alias relationship for the arm that
+        # never created one would fabricate a false alias chain instead of
+        # observing a real one, and risks a brand-new false-positive crit on
+        # ordinary guard-clause code -- so this asymmetric case stays exactly
+        # as unresolved (silently untracked) as it was before this fix.
+        for n in (body_shapes_of.keys() | orelse_shapes_of.keys()) - names:
+            if n in body_shapes_of and n in orelse_shapes_of:
+                names.add(n)
+                merged[n] = body_shapes_of[n] + orelse_shapes_of[n]
+        return merged
 
     if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
         # A nested closure: descend (it can still mutate a tracked name by
