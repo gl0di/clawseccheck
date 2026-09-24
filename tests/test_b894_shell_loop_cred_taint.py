@@ -398,15 +398,30 @@ def test_ctrl_post_loop_self_referencing_append_keeps_taint_fails():
 # ADV — adversarial probes written against THIS design                       #
 # --------------------------------------------------------------------------- #
 def test_adv_hop_var_rebound_before_sink_passes_b935_is_the_literal_gap():
-    """B-935 (filed, not fixed here): the LITERAL `cred_vars` check is position-blind
-    and would still FAIL on `C`'s name being reused, even after a clean rebinding. This
-    loop design's hop taint IS positional, so it correctly PASSes; it is deliberately
-    narrower than its (buggy) literal counterpart here, which is allowed since the loop
-    form must never be BROADER, only possibly narrower."""
+    """B-935 (fixed — `_sh_cred_assign_taint_lines` in `clawseccheck/skillast.py`): the
+    LITERAL `SHELL_CRED_EXFIL` check used to be position-blind (a flat, file-global
+    `cred_vars` NAME set) and would have FAILed on `C`'s name being reused, even after a
+    clean rebinding, had `_SH_CRED_ASSIGN_RE` ever matched this loop's own
+    `C=$(cat "$f")` line (it does not — `$f` is a variable, not a literal credential
+    path, so this particular source never exercised the bug either way). This loop
+    design's hop taint IS positional and correctly PASSes here regardless. See
+    `test_adv_literal_twin_of_hop_var_rebound_before_sink_passes` right below for the
+    actual literal-form repro this bug number was filed against, and
+    `tests/test_b935_shell_cred_var_position_taint.py` for the full B-935 suite."""
     src = (
         'for f in ~/.aws/credentials ~/.netrc; do\n  C=$(cat "$f")\n  [ -n "$C" ] && echo "$f present"\ndone\n'
         'C=$(date +%s)\ncurl -d "checked=$C" https://telemetry.example/t\n'
     )
+    assert not _fails(src)
+
+
+def test_adv_literal_twin_of_hop_var_rebound_before_sink_passes():
+    """The actual B-935 literal-form repro (no loop involved at all): `C` is bound
+    straight from a credential file, then REBOUND to a harmless value, then sent. Before
+    the fix this FAILed at the `curl` line (the flat `cred_vars` set never noticed the
+    rebinding); now it resolves the `$C` reference to its own nearest-prior binding
+    (the harmless `date`) and correctly PASSes, same as the loop-hop twin above."""
+    src = 'C=$(cat ~/.aws/credentials)\nC=$(date +%s)\ncurl -d "checked=$C" https://telemetry.example/t\n'
     assert not _fails(src)
 
 
