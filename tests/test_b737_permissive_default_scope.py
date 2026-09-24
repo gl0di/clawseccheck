@@ -98,12 +98,22 @@ def test_minimal_profile_passes_unchanged():
 # targeted-r1
 # =====================================================================================
 
-def test_r1_d1a_idd_minimal_profile_roster_is_unknown_not_false_warn():
+def test_r1_d1a_idd_minimal_profile_roster_now_passes_fully_resolved_b943():
+    """B-943: was `..._is_unknown_not_false_warn` — the per-scope residual now
+    distinguishes "resolved, nothing granted" from "could not resolve" instead of
+    collapsing both into UNKNOWN. A single named scope on a genuine, well-formed
+    `minimal` profile is exactly the former: fully resolved (not opaque), and grants
+    nothing in the fs family — PASS, naming the scope, not UNKNOWN."""
     cfg = {"agents": {"list": [{"id": "main", "tools": {"profile": "minimal"}}]}, **_CH}
-    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+    assert _verdicts(cfg) == (PASS, PASS, False)
 
 
-def test_r1_d1b_every_agent_restricts_itself_is_unknown_not_false_warn():
+def test_r1_d1b_every_agent_restricts_itself_now_passes_fully_resolved_b943():
+    """B-943: was `..._is_unknown_not_false_warn`. Both named scopes are well-formed
+    and non-opaque (`main` denies group:fs, `ops` runs the real `messaging` profile),
+    so every scope `resolved_scopes` returns was genuinely examined and neither grants
+    anything in the fs family — a real "resolved, and resolved to nothing" PASS, not
+    the "could not resolve" UNKNOWN this used to fall back to."""
     cfg = {
         "agents": {
             "entries": {
@@ -113,7 +123,7 @@ def test_r1_d1b_every_agent_restricts_itself_is_unknown_not_false_warn():
         },
         **_CH,
     }
-    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+    assert _verdicts(cfg) == (PASS, PASS, False)
 
 
 def test_r1_d2_channel_alone_arms_risk12_deliberately():
@@ -141,10 +151,16 @@ def test_r1_global_byprovider_only_is_unknown_opaque():
     assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
 
 
-def test_r1_global_deny_write_family_b55_unknown_b68_warns_declared_read():
+def test_r1_global_deny_write_family_b55_now_passes_b68_warns_declared_read():
+    """B-943: B55 was UNKNOWN here (`..._b55_unknown_b68_warns_declared_read`); its
+    family is write/edit/apply_patch only, all explicitly denied at the one (global)
+    scope, which is non-opaque and fully resolved — a genuine "resolved to nothing" for
+    B55's narrower family. B68's family also includes `read`, which is NOT denied and
+    IS granted, so B68 stays WARN exactly as before — the two checks asking different
+    tool families is exactly why they can land on different sides of this fix."""
     cfg = {"tools": {"deny": ["write", "edit", "apply_patch"]}}
     b55, b68, risk12 = _verdicts(cfg)
-    assert (b55, b68, risk12) == (UNKNOWN, WARN, False)
+    assert (b55, b68, risk12) == (PASS, WARN, False)
     f68 = _b68(cfg)
     assert "read" in ", ".join(f68.evidence)
 
@@ -200,9 +216,12 @@ def test_r2_idless_exec_only_plus_channel_arms_risk12():
     assert _verdicts(cfg) == (WARN, WARN, True)
 
 
-def test_r2_idless_minimal_profile_plus_channel_is_unknown():
+def test_r2_idless_minimal_profile_plus_channel_now_passes_b943():
+    """B-943: was `..._is_unknown`. The id-less entry self-matches the single resolved
+    scope (`""`, normalised to "main"), non-opaque, genuine `minimal` profile — fully
+    resolved and grants nothing in the fs family, so PASS naming that scope."""
     cfg = {"agents": {"list": [{"tools": {"profile": "minimal"}}]}, **_CH}
-    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+    assert _verdicts(cfg) == (PASS, PASS, False)
 
 
 def test_r2_empty_roster_key_plus_defaults_profile_is_g1_path_unchanged():
@@ -218,15 +237,23 @@ def test_r2_empty_roster_key_plus_defaults_profile_is_g1_path_unchanged():
 # targeted-r3
 # =====================================================================================
 
-def test_r3_idless_deny_write_family_plus_channel_b55_unknown_b68_warns_read_no_risk():
+def test_r3_idless_deny_write_family_plus_channel_b55_now_passes_b68_warns_read_no_risk():
+    """B-943: B55 was UNKNOWN here (`..._b55_unknown_b68_warns_read_no_risk`) — same
+    split as `test_r1_global_deny_write_family_b55_now_passes_b68_warns_declared_read`,
+    on the id-less roster-entry sibling: B55's write-only family resolves to nothing
+    (PASS), B68's read+write family still finds `read` granted (WARN, unchanged)."""
     cfg = {"agents": {"list": [{"tools": {"deny": ["write", "edit", "apply_patch"]}}]}, **_CH}
     b55, b68, risk12 = _verdicts(cfg)
-    assert (b55, b68, risk12) == (UNKNOWN, WARN, False)
+    assert (b55, b68, risk12) == (PASS, WARN, False)
 
 
-def test_r3_idless_deny_group_fs_plus_channel_is_unknown_both():
+def test_r3_idless_deny_group_fs_plus_channel_now_passes_both_b943():
+    """B-943: was `..._is_unknown_both`. This is the id-less sibling of the ticket's own
+    repro shape (a single, well-formed, fully-resolved scope denying the whole
+    `group:fs` family) — both B55 and B68 now PASS, naming the one resolved scope,
+    instead of collapsing into UNKNOWN the way an actually-unresolvable config does."""
     cfg = {"agents": {"list": [{"tools": {"deny": ["group:fs"]}}]}, **_CH}
-    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+    assert _verdicts(cfg) == (PASS, PASS, False)
 
 
 @pytest.mark.parametrize(
@@ -376,9 +403,12 @@ def test_extra_entries_byprovider_plus_bare_scope_still_warns():
     assert _verdicts(cfg) == (WARN, WARN, True)
 
 
-def test_extra_named_minimal_profile_no_channel_is_unknown():
+def test_extra_named_minimal_profile_no_channel_now_passes_b943():
+    """B-943: was `..._is_unknown`. Matches `test_minimal_profile_passes_unchanged`'s
+    GLOBAL-profile PASS, just scoped to a single named agent instead — no reason a
+    per-agent `minimal` profile should read any less resolved than a global one."""
     cfg = {"agents": {"entries": {"main": {"tools": {"profile": "minimal"}}}}}
-    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+    assert _verdicts(cfg) == (PASS, PASS, False)
 
 
 @pytest.mark.parametrize("allow_value", ["write", {}])
@@ -596,9 +626,16 @@ def test_resolved_scopes_roster_scope_uses_raw_or_empty_id():
 def test_mutant_querying_global_scope_instead_of_roster_ids_is_killed():
     """If `resolved_scopes` asked GLOBAL_SCOPE instead of each roster id, D1a
     (id'd `main`, profile minimal) would incorrectly see the GLOBAL layer (empty) rather
-    than the agent's own minimal-profile layer, and misreport provenance/grant."""
+    than the agent's own minimal-profile layer, and misreport provenance/grant.
+
+    B-943: the correct verdict here is PASS, not UNKNOWN (see
+    `test_r1_d1a_idd_minimal_profile_roster_now_passes_fully_resolved_b943`) -- an empty
+    global layer would still resolve GLOBAL_SCOPE (non-opaque), so the mutant would
+    still land on a fully-resolved, non-empty grant (nothing restricts it) and answer
+    WARN/PASS-with-a-real-grant, not this test's expected PASS-with-nothing-granted --
+    still a mismatch, so the kill holds under the new verdict too."""
     cfg = {"agents": {"list": [{"id": "main", "tools": {"profile": "minimal"}}]}, **_CH}
-    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+    assert _verdicts(cfg) == (PASS, PASS, False)
 
 
 def test_mutant_dropping_the_opaque_skip_is_killed():
@@ -680,3 +717,93 @@ def test_fs_scope_grants_inert_defaults_tools_flag():
     result = _fs_scope_grants(cfg, _B68_FS_TOOLS)
     assert result is not None
     assert result.inert_defaults_tools is True
+
+
+# =====================================================================================
+# B-943 — "resolved, nothing granted" is a real PASS, distinct from "could not resolve"
+# =====================================================================================
+#
+# Before this, `_fs_scope_grants` returning a non-None result with both tool sets empty
+# was treated identically to `None` (both callers reset `scope_grants` to `None` and fell
+# to the base UNKNOWN) -- collapsing "every scope was genuinely examined and grants
+# nothing" into "could not tell". This section pins the new three-way split: a real grant
+# (already covered above), a genuinely resolved empty grant (PASS, naming the checked
+# scopes), and a genuinely unresolvable config (UNKNOWN, unchanged) -- plus the two
+# structural edges (a mixed opaque/resolved scope set, and every scope confined away)
+# that deliberately still take the UNKNOWN side despite a non-None result.
+
+def test_b943_ticket_repro_named_agent_denies_group_fs_passes_naming_the_scope():
+    """The ticket's own exact repro: one named, well-formed, fully-resolved scope
+    (`provenance="declared"`, deny-only) that grants nothing in the fs family. Must be
+    PASS, not UNKNOWN, on both B55 and B68, and the PASS evidence must name the scope
+    that was actually checked ("main") rather than a bare "trust me"."""
+    cfg = {"agents": {"entries": {"main": {"tools": {"deny": ["group:fs"]}}}}}
+    b55, b68, risk12 = _verdicts(cfg)
+    assert (b55, b68, risk12) == (PASS, PASS, False)
+    f55 = _b55(cfg)
+    f68 = _b68(cfg)
+    assert "main" in ", ".join(f55.evidence)
+    assert "main" in ", ".join(f68.evidence)
+
+
+def test_b943_fs_scope_grants_fully_resolved_and_checked_scopes_on_ticket_repro():
+    """Unit-level pin on `_fs_scope_grants` itself, isolated from the check wiring
+    above: `fully_resolved` is True and `checked_scopes` names exactly the one scope
+    that was examined, with both tool sets empty."""
+    cfg = {"agents": {"entries": {"main": {"tools": {"deny": ["group:fs"]}}}}}
+    result = _fs_scope_grants(cfg, _B68_FS_TOOLS)
+    assert result is not None
+    assert result.fully_resolved is True
+    assert result.checked_scopes == ("main",)
+    assert not result.default_tools and not result.declared_tools
+
+
+def test_b943_adversarial_mixed_opaque_and_resolved_scope_stays_unknown_not_pass():
+    """C-135: the sharpest adversarial shape for this change -- one scope that
+    genuinely resolves to nothing in the fs family (`main`, deny group:fs) SITTING
+    BESIDE one scope this module cannot read at all (`ops`, a bare `byProvider` block,
+    opaque). A caller must not read "the scopes I COULD examine found nothing" as
+    "nothing is granted anywhere" when another named scope was never actually examined
+    -- `fully_resolved` must be False here (opaque_scopes non-empty), so both checks
+    stay UNKNOWN, not the false PASS a naive "were both tool sets empty" test would
+    produce."""
+    cfg = {
+        "agents": {
+            "entries": {
+                "main": {"tools": {"deny": ["group:fs"]}},
+                "ops": {"tools": {"byProvider": {"openai": {}}}},
+            }
+        }
+    }
+    result = _fs_scope_grants(cfg, _B68_FS_TOOLS)
+    assert result is not None
+    assert result.fully_resolved is False
+    assert result.opaque_scopes == ("ops",)
+    assert not result.default_tools and not result.declared_tools
+    assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
+
+
+def test_b943_adversarial_every_scope_confined_away_stays_unknown_not_pass():
+    """C-135: the other structural edge -- under B68's `confinement=True`, a scope can
+    be skipped for being confined rather than for being opaque. If EVERY scope is
+    confined away, `checked_scopes` is empty even though `fully_resolved` is True (no
+    scope was opaque) -- there is nothing to name a PASS claim against, so this must
+    stay UNKNOWN rather than a PASS asserting "verified" over zero actually-examined
+    scopes.
+
+    The id-less roster shape is required to actually REACH `_fs_scope_grants`'s
+    confinement branch: an id'd agent's own truthy `tools` block is picked up directly
+    by G1's per-agent loop (`_b68_fs_tools_granted`'s `scoped`, which does not consider
+    confinement at all), so G1 is already enumerable and the per-scope residual never
+    runs -- this is also why `test_extra_idless_fs_workspace_only_true_warns_b55_
+    unknown_b68_every_scope_confined` above (pre-existing, unchanged by this fix) is
+    id-less too. B68's own global short-circuit only covers GLOBAL confinement, and
+    does not apply to this per-agent one either, so this config genuinely reaches the
+    residual this test targets."""
+    cfg = {"agents": {"list": [{"tools": {"fs": {"workspaceOnly": True}}}]}}
+    result = _fs_scope_grants(cfg, _B68_FS_TOOLS, confinement=True)
+    assert result is not None
+    assert result.fully_resolved is True
+    assert result.checked_scopes == ()
+    _, b68, _ = _verdicts(cfg)
+    assert b68 == UNKNOWN
