@@ -1216,14 +1216,62 @@ class _RefResolver:
         return any(".".join(parts[:i]) in paths for i in range(1, len(parts) + 1))
 
 
+def _is_getattr_of(node: "ast.AST | None", base: str, attr: str) -> bool:
+    """True if *node* is `getattr(<base-expr>, "<attr>")` or the 3-arg default-value
+    form `getattr(<base-expr>, "<attr>", <anything>)` -- the builtin, no keywords/
+    splat -- where `_attr_base(<base-expr>)` equals *base* (already lowercase;
+    `_attr_base` itself lowercases both a bare Name and an Attribute's last segment,
+    so this matches `os`/`import os as o`-style bases the same way every other
+    spelling check in this module does) and the second argument is the literal
+    string *attr*.
+
+    This is the getattr-obfuscated spelling of `<base-expr>.<attr>` -- B-926:
+    `_rhs_has_subscript_environ`/`_rhs_has_sysargv` only matched a Subscript whose
+    base was a literal `ast.Attribute`/`ast.Name` (`os.environ[...]`, bare
+    `environ[...]`), missing the exact same read spelled `getattr(os,
+    "environ")[...]` (respectively `getattr(sys, "argv")[...]`).
+
+    The 3rd positional arg, when present, is `getattr`'s own default-value
+    fallback (`getattr(os, "environ", {})`) -- irrelevant to whether this reads
+    `os.environ`: the attribute genuinely exists on every real `os`/`sys` module,
+    so the default is never actually used at runtime
+    (`getattr(os, "environ", {}) is os.environ` -- always True), and its own
+    shape/value is never inspected here; only its mere presence widens the arg-
+    count check from exactly-2 to 2-or-3.
+
+    Permanently unguarded against a local shadow of the builtin `getattr` name --
+    same established design as every other taint-SOURCE recognizer in this module
+    (see `_rhs_has_sysargv`'s own docstring on the B-955 shadow-guard lesson): a
+    spelling-based source recognizer does not try to be adversarially sound
+    against shadowing, it only must never let an attacker use shadowing to
+    SUPPRESS a real finding -- an unguarded `getattr` match cannot do that, it can
+    only ever add recall.
+    """
+    if node is None or not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) in (2, 3)
+        and not node.keywords
+        and not any(isinstance(a, ast.Starred) for a in node.args)
+    ):
+        return False
+    if _attr_base(node.args[0]) != base:
+        return False
+    return isinstance(node.args[1], ast.Constant) and node.args[1].value == attr
+
+
 def _rhs_has_subscript_environ(node: ast.AST) -> bool:
-    """True if *node* is or contains os.environ[...] (subscript form)."""
+    """True if *node* is or contains os.environ[...] (subscript form), including
+    the getattr-obfuscated spelling `getattr(os, "environ")[...]` -- B-926."""
     for n in ast.walk(node):
         if isinstance(n, ast.Subscript):
             v = n.value
             if isinstance(v, ast.Attribute) and v.attr == "environ" and _attr_base(v.value) == "os":
                 return True
             if isinstance(v, ast.Name) and v.id == "environ":
+                return True
+            if _is_getattr_of(v, "os", "environ"):
                 return True
     return False
 
@@ -1279,6 +1327,10 @@ def _rhs_has_sysargv(node: ast.AST, tree: "ast.AST | None") -> bool:
     against shadowing, it just doesn't let an attacker use shadowing to SUPPRESS a real
     finding either. `tree` is kept as a parameter (unused here now) purely so every
     existing call site -- unchanged by this round -- keeps working unmodified.
+
+    B-926: also matches the getattr-obfuscated spelling `getattr(sys,
+    "argv")[...]` via `_is_getattr_of` -- same gap, same fix, as
+    `_rhs_has_subscript_environ` got for `getattr(os, "environ")[...]`.
     """
     del tree  # no longer consulted; kept for call-site signature compatibility
     for n in ast.walk(node):
@@ -1291,6 +1343,8 @@ def _rhs_has_sysargv(node: ast.AST, tree: "ast.AST | None") -> bool:
             ):
                 return True
             if isinstance(v, ast.Name) and v.id == "argv":
+                return True
+            if _is_getattr_of(v, "sys", "argv"):
                 return True
     return False
 
