@@ -6284,6 +6284,16 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
       generation row be trusted here and ignored by the runtime).
     * A absent (no ``config_machine_state`` table, or no row for that key, or the SELECT
       itself failed) -> legacy path, byte-for-byte as before OC-82.
+    * B-990: A present but ``config_machine_state`` does not resolve to a real TABLE (a
+      VIEW, virtual table, rootpage-aliased, or generated-column row masquerading under
+      that name -- see ``trajectorystore._table_kind``'s docstring) -> refused and
+      disclosed via ``ctx.errors``, ``plugin_trust_found = plugin_trust_parse_error =
+      True`` (and likewise the index pair) -- the SAME "present-and-unreadable, never
+      silently treated as absent" outcome the bullet below already defines for a
+      structurally-invalid modern row, checked BEFORE Probe A's own SELECT runs, inside
+      the same transaction as that read (TOCTOU-closed). This is deliberately NOT the
+      same outcome as "A absent" above: a spoofed row must never be silently swapped for
+      a legacy read that happens to still succeed.
     * Neither present -> both ``*_found`` pairs stay False -> UNKNOWN, exactly as today.
       This must never regress into a fake PASS (Golden Rule #4).
     * A PRESENT but its ``value_json`` is not valid JSON, or parses to something other
@@ -6454,6 +6464,72 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             ctx.plugin_index_found = True
             ctx.plugin_index_parse_error = True
             return
+
+        # B-990: the SAME view-masquerade gap B-889/B-977 hardened for the other two
+        # config_machine_state readers in this file (_collect_auth_profile_store_presence,
+        # _collect_config_machine_state) -- querying config_machine_state by bare name
+        # trusts SQLite to resolve it against a real TABLE, but name resolution is a
+        # property of the FILE'S OWN schema, attacker-controlled if anything can write
+        # into state/openclaw.sqlite. A crafted `CREATE VIEW config_machine_state AS
+        # SELECT ... FROM <decoy>` makes Probe A's SELECT below execute that view body
+        # instead. Worse than B-889 here: that sibling only ever selected
+        # LENGTH(value_json), an integer, so a successful spoof could only flip a
+        # presence/length signal. This reader selects and RETURNS the parsed
+        # value_json CONTENT, so a successful spoof injects an attacker-chosen
+        # plugins.installedIndex row straight into ctx.plugin_trust_records /
+        # ctx.plugin_index_records -- and from there into B177's FAIL evidence (a
+        # fabricated 'blocked' plugin id, or a spoofed 'clean' row masking a genuinely
+        # blocked one), B187's tool-result-interception middleware WARN, and the SBOM's
+        # plugin-supplier attribution (sbom.py's root_dir/plugin_id matching) -- the
+        # same content-injection severity class B-977 documented, not B-889's bounded
+        # presence-only one.
+        #
+        # BEGIN before the schema check, held open across it AND Probe A's read below --
+        # closes the same TOCTOU gap trajectorystore._open_and_verify_table documents (a
+        # concurrent writer swapping the schema between the check and the query). Scoped
+        # to Probe A specifically: legacy Probes B/C below query a DIFFERENT table
+        # (installed_plugin_index), resolved by the SAME attacker-controlled-schema
+        # mechanism -- it is not proven safe, just out of scope for this fix and not yet
+        # hardened (same residual class as B-977 before its own fix).
+        try:
+            conn.execute("BEGIN")
+        except sqlite3.Error as exc:
+            # Same shared-root-cause handling as the PRAGMA query_only failure just
+            # above -- a BEGIN failure here means the database is unusable for both
+            # columns, not just one, so this degrades to UNKNOWN the same way every
+            # other failure in this function already does, rather than propagating
+            # uncaught out of collect()/audit() (B-889's structurally identical sibling
+            # nests its own BEGIN inside this same outer guard; this one now matches).
+            ctx.errors.append(f"could not begin a transaction on {db_path}: {exc}")
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+            ctx.plugin_index_found = True
+            ctx.plugin_index_parse_error = True
+            return
+        kind = _trajectorystore._table_kind(conn, "config_machine_state")
+        if kind not in ("absent", "table"):
+            # Present, but not a real TABLE (view / virtual table / rootpage-aliased /
+            # generated-column row -- see _table_kind's docstring for the demonstrated
+            # shapes). Refuse to query it. Disclosed, never silently trusted, and --
+            # UNLIKE a genuinely absent table -- NEVER falls through to the legacy B/C
+            # probes: a spoofed row must not be silently swapped for a legacy read that
+            # happens to still succeed (the same "present-and-unreadable, never treated
+            # as absent" rule this function's own docstring already states for a
+            # structurally-invalid modern row).
+            ctx.errors.append(
+                f"'config_machine_state' in {db_path} did not resolve to a real "
+                "table (found a view, virtual table, or other schema object "
+                "instead); plugins.installedIndex was not read"
+            )
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+            ctx.plugin_index_found = True
+            ctx.plugin_index_parse_error = True
+            return
+        # kind == "absent" falls through unchanged: Probe A's own SELECT below already
+        # treats "no such table" the same honest way (state_row stays None, falling
+        # through to Probes B/C) -- this check adds a NEW refusal branch above, it does
+        # not change the existing absent-table path below.
 
         # ---- Probe A (OC-82, tried FIRST): the config_machine_state successor row.
         # Named column only, key bound as a parameter -- never SELECT * (see docstring).
