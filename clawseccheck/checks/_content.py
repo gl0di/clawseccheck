@@ -1897,20 +1897,84 @@ def _verb_class_matches(text: str, *patterns: "re.Pattern[str]") -> list["re.Mat
 # … directed at a SECOND-PARTY / external destination. Send-verb + destination must co-occur
 # in the window to signal exfiltration; either alone is benign ("send the summary to the
 # user", "my server" with no verb).
+#
+# B-947: pattern source wrapped in `normalize_for_scan(...)`, matching every other
+# Cyrillic-bearing `_B63_*_RE` sibling in this module (`_B63_ACTION_RE`,
+# `_B63_SECRECY_RE`, `_B63_SOFT_SUPPRESS_RE`, `_B63_FAIL_ANCHOR_RE`,
+# `_B63_SECRET_TERM_RE`, `_B63_SECRET_ACCESS_RE`, `_B63_SEND_VERB_RE`). This constant
+# was the one left as a bare `re.compile(...)` — `_b63_scan` / `_has_outbound_exfil`
+# always match it against `norm = normalize_for_scan(text)` (already confusable-
+# folded), so its own Russian literals (мой/наш/мне/себе/бот/чат/облак — every one
+# built from а/е/о/р/с/х, the exact letters `normalize_for_scan` folds to ASCII) were
+# desynced from what actually reaches this pattern at match time and could never
+# match real folded input — dead code, not merely untested (repro:
+# `_B63_DEST_RE.search(normalize_for_scan("мне"))` was `None`). Confirmed NOT
+# redundant with `_B63_FAIL_ANCHOR_RE`'s own Russian branch: that one only covers
+# impersonal "external/remote server" phrasing (внешн.../удалённ... сервер/адрес/
+# хост/эндпоинт) and covertness/exfil markers, never the personal "to me / my own
+# bot/chat" destination phrasing this constant uniquely carries — and
+# `_B63_SEND_VERB_RE`'s Russian send verbs (отправь, etc.) already fold correctly, so
+# the AND-gate in `_has_outbound_exfil` was silently unreachable for a pure-Russian
+# "send my token to me" phrase with no English/URL/IP alongside it, while the English
+# equivalent ("send it to me") already worked. Wrapping in `normalize_for_scan` (not
+# `fold_pattern` — that helper does not exist on this branch; it lands with the
+# separate, not-yet-merged B-887 fix) makes these alternatives reachable, so this is a
+# FAIL-capable widening, not a no-op cleanup.
 _B63_DEST_RE = re.compile(
-    r"\bto\s+(?:me\b|us\b|my\s|our\s|a\s+(?:remote|external|second|third|another)"
-    r"|the\s+(?:remote|external|attacker|adversary|shared))"
-    r"|\b(?:my|the|a|his|her|their)\s+(?:bot|chat|inbox|server|endpoint|webhook|channel"
-    r"|telegram|discord|slack|gist|paste(?:bin)?|bucket|shared\s+folder|drop\s?box|dropbox"
-    r"|address|c2|handle|account)"
-    # a bare dotted-quad IP as the send target ("beam it to 1.2.3.4"); gated by a preceding
-    # "to/at" so a version string / CIDR mention in prose does not match (C-135 r2 HOLE 2)
-    r"|\b(?:to|at)\s+\d{1,3}(?:\.\d{1,3}){3}\b"
-    # an @-handle, but only when it is the OBJECT of a destination cue — a bare @word matches
-    # Python decorators (@app.route) / CSS at-rules (@media), a false positive (C-135 r2 HOLE 3)
-    r"|\b(?:to|via|dm)\s+@\w{2,}"
-    r"|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
-    r"|к\s+себе|\bмне\b|в\s+(?:мой|наш|чат|бот|облак)",
+    normalize_for_scan(
+        r"\bto\s+(?:me\b|us\b|my\s|our\s|a\s+(?:remote|external|second|third|another)"
+        r"|the\s+(?:remote|external|attacker|adversary|shared))"
+        r"|\b(?:my|the|a|his|her|their)\s+(?:bot|chat|inbox|server|endpoint|webhook|channel"
+        r"|telegram|discord|slack|gist|paste(?:bin)?|bucket|shared\s+folder|drop\s?box|dropbox"
+        r"|address|c2|handle|account)"
+        # a bare dotted-quad IP as the send target ("beam it to 1.2.3.4"); gated by a preceding
+        # "to/at" so a version string / CIDR mention in prose does not match (C-135 r2 HOLE 2)
+        r"|\b(?:to|at)\s+\d{1,3}(?:\.\d{1,3}){3}\b"
+        # an @-handle, but only when it is the OBJECT of a destination cue — a bare @word matches
+        # Python decorators (@app.route) / CSS at-rules (@media), a false positive (C-135 r2 HOLE 3)
+        r"|\b(?:to|via|dm)\s+@\w{2,}"
+        r"|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
+        # B-947 round 2: every alternative here is now word-bounded — "к себе" and each
+        # "в <noun>" destination noun (мой/наш/чат/бот) are complete standalone Russian
+        # words in this destination-phrase usage, so an UNbounded literal substring-
+        # matched inside unrelated vocabulary with no boundary at all (reactivating this
+        # branch in round 1 turned that pre-existing gap into a live FP: "урок
+        # себесто..." matched "к себе", "мойку"/"нашатырном"/"ботинок" matched "мой"/
+        # "наш"/"бот" as bare substrings). мой/наш/чат/бот/к-себе have each since cleanly
+        # passed two independent C-135 adversarial rounds with zero open issues.
+        #
+        # B-947 round 4 (RETRACTED, not narrowed further): "облак" ("cloud[-storage]")
+        # is deliberately DROPPED from this alternation, not merely re-bounded again.
+        # Round 3 tried narrowing it to the Russian ACCUSATIVE case only
+        # (`облак(?:о|а)?\b` — "в облако"/"в облака", real motion-into-a-destination
+        # grammar) to exclude the "витать/быть в облаках" (prepositional/locative
+        # "head in the clouds" / daydream) idiom collision round 2's bare stem had. A
+        # further independent round found that premise itself false: accusative "в
+        # облака" is NECESSARY for a genuine cloud-storage destination but nowhere near
+        # SUFFICIENT — ordinary Russian uses accusative "в облака" constantly for
+        # unrelated literal and figurative motion with no exfil meaning at all. Reproduced
+        # live at CRITICAL severity via check_silent_instruction: "самолёт поднимается в
+        # облака" ("the plane rises into the clouds", ordinary aviation/weather prose)
+        # hard-FAILed; swapping only the last word (облака -> небо, "sky") dropped it
+        # back to WARN, isolating this alternative as the sole cause. Two more unrelated
+        # idioms reproduced the same false FAIL: "улечу в облака от радости" (carried
+        # away with joy) and "мысли уносятся в облака" (drifting thoughts). Per this
+        # project's own accepted-residual discipline (CLAUDE.md §2.5/C-135): a 4th regex
+        # patch was rejected as unsound here — no lexical or grammatical-case
+        # discriminator separates "into a storage destination" from ordinary Russian
+        # motion/figurative use of the same case+preposition, so the only sound options
+        # are a real verb-governance redesign (does the destination actually govern the
+        # send verb, not merely share a window) or a collocation requirement (e.g.
+        # "облачное хранилище" — "cloud storage" — actually named) — both materially
+        # bigger, riskier changes to shared B63/B64/B156 infrastructure than this
+        # constant's own scope, and tracked as a follow-up ticket rather than attempted
+        # here. Net effect: Russian cloud-storage destination coverage ("в облако"/"в
+        # облака" alone, no other anchor) is accepted as dropped for now — the
+        # send-verb+destination anchor simply does not fire on it, same as it never did
+        # on `dev` before round 1 (restores that pre-existing, already-accepted gap
+        # rather than reopening a false-positive one).
+        r"|\bк\s+себе\b|\bмне\b|\bв\s+(?:мой\b|наш\b|чат\b|бот\b)"
+    ),
     re.IGNORECASE,
 )
 
