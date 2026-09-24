@@ -600,7 +600,20 @@ def _c015_is_generated_plugin_model_catalog(parts: tuple, text: str) -> bool:
 # DURING the walk via `prune_dir`/`keep_file`, so excluded material never consumes the
 # budget, and `capped` is threaded through so the caller can disclose a genuine
 # truncation instead of reading a partial scan as a complete one.
-def _c015_candidate_files(ctx: Context, capped: list | None = None) -> list[Path]:
+#
+# B-915: `unreadable_dirs` is opted into for the same reason — a nested directory that
+# is listable but unsearchable (`chmod 0644`: readable, no `x`) used to make
+# `walk_dir_safely`'s internal `os.walk()` raise straight out of this function
+# (`Path.is_symlink()` needs `x` on the parent to stat the entry, and `_note_unlistable`
+# re-raises when the caller did not opt in — see safeio.py). Left uncaught, that crash
+# was only ever caught by `run_all`'s generic `except Exception`, which reports the WHOLE
+# check as an ENGINE-SIDE UNKNOWN (`engine_degraded=True`) and caps the entire audit at
+# `DEGRADED_CHECK_CAP` (49/F) over one directory. Opting in turns that into a scoped,
+# disclosed gap instead — see `check_secrets_at_rest_home`'s `gap_note` for why it is
+# graded the same as the walk-cap branch above (UNKNOWN, never engine_degraded).
+def _c015_candidate_files(
+    ctx: Context, capped: list | None = None, unreadable_dirs: list | None = None
+) -> list[Path]:
     skip_roots = [(ctx.home / rel).resolve() for rel in SKILL_DIRS]
     skill_dir_parts = tuple(Path(rel).parts for rel in SKILL_DIRS)
 
@@ -639,6 +652,7 @@ def _c015_candidate_files(ctx: Context, capped: list | None = None) -> list[Path
         prune_dir=_prune,
         keep_file=_keep_file,
         capped=capped,
+        unreadable_dirs=unreadable_dirs,
     )
 
 
@@ -4065,8 +4079,10 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
     only — secret values are never echoed.
     """
     capped: list = []
-    candidates = _c015_candidate_files(ctx, capped)
+    unreadable: list = []
+    candidates = _c015_candidate_files(ctx, capped, unreadable)
     scan_capped = bool(capped)
+    gap_count = len(unreadable)
     if not candidates:
         return _finding(
             "C015",
@@ -4101,11 +4117,35 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
         if scan_capped
         else ""
     )
+    # B-915: a subdirectory that could not be searched (permission denied) is the same
+    # shape of coverage gap as the walk cap above — content under it was never reached —
+    # so it is disclosed the same way, never silently dropped or left to crash the whole
+    # check. Deliberately NOT narrowed by ownership/reachability the way B87's symlink
+    # gate is (`_b87_gap_is_graded`, checks/_content.py): B87 asks whether an
+    # already-loaded skill's symlink can be FOLLOWED by the agent right now, so a gate
+    # neither the scanning uid nor its owner can currently open genuinely cannot be
+    # exploited that specific way. C015 asks a broader question — is there a plaintext
+    # secret sitting in this home that its owner forgot to lock down — and a directory
+    # the SAME user tightened (deliberately or by accident) is exactly that shape; its
+    # owner can chmod it back open at will, which is B87's own reason a same-owner gate
+    # stays graded rather than exempted. A genuinely foreign-owned, unreachable directory
+    # (e.g. a Docker volume mount) is rarer here, but C015 has no ownership filter
+    # anywhere else in its candidate-file logic either — a foreign-owned file sitting
+    # inside a READABLE directory is scanned exactly like any other — so carving out only
+    # the unreadable subset would open a one-line bypass (`chmod 700` a directory holding
+    # a secret to silence this specific check) that the rest of the check's own logic
+    # does not honor. Kept uniform: always disclosed, never a silent PASS.
+    gap_note = (
+        f" Could not search {gap_count} subdirector{'y' if gap_count == 1 else 'ies'}"
+        " under the home (permission denied) — a secret there would not have been found."
+        if gap_count
+        else ""
+    )
 
     if hits:
         detail = (
             f"Plaintext secret-shaped value(s) found in {len(hits)} home file(s) — see evidence."
-            f"{cap_note}"
+            f"{cap_note}{gap_note}"
         )
         # B-513: the detail states the true count while the evidence list was silently
         # truncated to 12, so a home with 13 hits printed "13 home file(s)" over 12 rows
@@ -4126,18 +4166,43 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             evidence=shown,
         )
 
-    if scan_capped:
+    if scan_capped or gap_count:
         # GR#4/B-228 family: a coverage gap must never roll up to a confident "scanned
         # the home, all clean" headline — UNKNOWN, not PASS, until the rest is covered.
+        #
+        # B-915: engine_degraded stays at its False default here (not passed below). A
+        # scoped, disclosed gap in an otherwise-completed walk — hitting the file-count
+        # cap, or one subdirectory the scan could not search — is not an ENGINE-SIDE
+        # crash/timeout, the identical distinction this walk-cap branch already drew
+        # before the directory case existed as its own channel (see the cap_note/
+        # gap_note comment above): it must not cost the whole audit
+        # DEGRADED_CHECK_CAP's worst-case "cannot rule out a CRITICAL" treatment
+        # (catalog.py's Finding.engine_degraded contract) over one unreachable directory
+        # — which is the literal bug this fix closes (uncaught PermissionError ->
+        # run_all's generic except-Exception handler -> engine_degraded UNKNOWN -> the
+        # whole audit capped at 49/F).
+        reasons = []
+        if scan_capped:
+            reasons.append(f"hit the {_C015_MAX_SCAN_FILES}-file walk cap")
+        if gap_count:
+            reasons.append(
+                f"could not search {gap_count} subdirector"
+                f"{'y' if gap_count == 1 else 'ies'} (permission denied)"
+            )
         return _finding(
             "C015",
             UNKNOWN,
-            f"Scanned {len(candidates)} home file(s) before hitting the "
-            f"{_C015_MAX_SCAN_FILES}-file walk cap; no plaintext secret-shaped values in"
-            " what was scanned, but coverage is incomplete — the rest of the home was"
-            " never reached.",
+            f"Scanned {len(candidates)} home file(s); the scan " + " and ".join(reasons)
+            + " before the home was fully covered — no plaintext secret-shaped values in"
+            " what was scanned, but coverage is incomplete.",
             "Re-run against a narrower home, or manually review any credentials/, "
-            "identity/, devices/, and workspace/ content not covered by this scan.",
+            "identity/, devices/, and workspace/ content not covered by this scan."
+            + (
+                " A skipped subdirectory is normally owned by you — chmod it back to a"
+                " searchable mode and re-run to cover it."
+                if gap_count
+                else ""
+            ),
         )
     return _finding(
         "C015",
