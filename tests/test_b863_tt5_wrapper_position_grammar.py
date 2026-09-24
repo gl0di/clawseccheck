@@ -10,15 +10,20 @@ two-tier replacement (content-independent tier 1, position-only tier 2).
 
 This file turns every row of the architect's test matrix into its own test,
 grouped the same way the matrix names them (O/C/A/B/R3/N/BENIGN/UNCHANGED).
-Two rows (`N9`, and a variant of `O2b`) do NOT reach the verdict the matrix
-names, for a documented reason that is NOT this bug's own grammar — see
-`test_o2b_inline_env_pinned_to_current_pre_existing_gap` and
-`test_n9_conditional_reassign_pinned_to_current_pre_existing_gap` below, which
-pin the CURRENT (pre-existing-bug-limited) behaviour rather than assert a
-verdict this change cannot reach, so the suite stays green without an xfail.
-Both gaps are filed in Pulse for 4.3.1, not fixed here (out of B-863's own
-scope: the wrapper-parameter-reassignment gate) — see CLAWSECCHECK-B-940 and
-CLAWSECCHECK-B-941.
+One row (a variant of `N9`) does NOT reach the verdict the matrix names, for a
+documented reason that is NOT this bug's own grammar — see
+`test_new_n9_conditional_reassign_pinned_to_current_pre_existing_gap` below,
+which pins the CURRENT (pre-existing-bug-limited) behaviour rather than assert
+a verdict this change cannot reach, so the suite stays green without an xfail.
+That gap is filed in Pulse for 4.3.1, not fixed here (out of B-863's own
+scope: the wrapper-parameter-reassignment gate) — see CLAWSECCHECK-B-941. A
+second row (a variant of `O2b`) had the identical treatment for the same
+reason, citing a "CLAWSECCHECK-B-940" that turned out to be the wrong task id
+(that id is a real, unrelated, still-open bug — see
+`test_o2b_inline_env_now_resolved_by_b906`'s own docstring for the
+correction), but CLAWSECCHECK-B-906 closed the underlying gap as a side effect
+of its own, unrelated os.environ/os.getenv resolution work — see that test
+below, which now pins the FIXED behaviour instead.
 
 Offline, deterministic. No network calls, no writes outside pytest's tmp_path
 (none of these tests touch the filesystem at all).
@@ -133,25 +138,34 @@ def test_o2a_concat_reassign_is_crit():
     _assert_crit(src)
 
 
-def test_o2b_inline_env_pinned_to_current_pre_existing_gap():
-    """The matrix names this crit (R2), and R2 DOES fire for it (same shape as
-    O2a, just `os.environ['X']` inline instead of a `payload` local). It stays
-    info here for a reason outside B-863 entirely: `args = ['sh', '-c',
-    os.environ['X']]` is a SINGLE assign to a literal, so
-    `_single_list_bindings_local` (existing, pre-B-863 code, resolves a
-    wrapper's OWN single-literal-bound local before layer 2 / B-863 ever run)
-    resolves it FIRST -- and the EXISTING shell-indirect-exec tail-taint check
+def test_o2b_inline_env_now_resolved_by_b906():
+    """The matrix names this crit (R2). At B-863 time it stayed info instead, for
+    a reason outside B-863 entirely: `args = ['sh', '-c', os.environ['X']]` is a
+    SINGLE assign to a literal, so `_single_list_bindings_local` (pre-B-863 code,
+    resolves a wrapper's OWN single-literal-bound local before layer 2 / B-863
+    ever run) resolves it FIRST -- and the shell-indirect-exec tail-taint check
     that then applies (`_subprocess_taint_is_command_injection`'s literal-List
-    branch) tests taint via a bare `_names_in(elt) & tainted`, which finds only
+    branch) tested taint via a bare `_names_in(elt) & tainted`, which found only
     the bare Name `os` inside `os.environ['X']` -- not itself a taint source --
-    and never applies the `_rhs_has_subscript_environ`/`_value_is_tainted_source`
-    predicates that would recognise the subscript form. Reproduced directly
-    against `_all_call_sites_bind_fixed_argv`'s sibling check with NO B-863
-    code involved. Filed as CLAWSECCHECK-B-940 for 4.3.1; out of scope here
-    because it lives entirely in the pre-existing single-binding/shell-tail
-    check, not in the wrapper-parameter-reassignment gate this task changes."""
+    and never applied the `_rhs_has_subscript_environ`/`_value_is_tainted_source`
+    predicates that would recognise the subscript form. The original B-863 round
+    cited "CLAWSECCHECK-B-940" as the Pulse task tracking this gap, out of scope
+    for B-863 since the gap lives entirely in the pre-existing single-binding/
+    shell-tail check, not in B-863's own wrapper-parameter-reassignment gate --
+    that citation was WRONG (CLAWSECCHECK-B-940 is a real, unrelated, still-open
+    toolpolicy._scope_rows bug; verified directly via pulse_get_task). The real
+    tracking task was CLAWSECCHECK-B-906 all along -- its own title is this
+    exact shape (`run([os.environ["P"], "x"])` misread as argument injection).
+
+    CLAWSECCHECK-B-906 closes the gap it was filed for: `ref_res.source_in(elt)`
+    is now threaded into that exact literal-List branch as an additional `or`
+    disjunct (see `_subprocess_taint_is_command_injection`'s own docstring), and
+    `_RefResolver.source_in()` positively recognises `os.environ['X']`'s
+    subscript form directly -- no change to `_single_list_bindings_local`, the
+    tail-taint check's bare-Name test, or B-863's own grammar was needed. This
+    test now pins the FIXED behaviour."""
     src = _va(["args = ['sh', '-c', os.environ['X']]"], sink="subprocess.check_output(list(args))")
-    _assert_info(src)  # NOT the matrix's "crit (R2)" -- see docstring
+    _assert_crit(src)  # matrix's own "crit (R2)" -- now reached, via B-906
 
 
 def test_o2c_env_string_is_crit_out_of_domain():
