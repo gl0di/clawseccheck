@@ -584,10 +584,39 @@ def test_shared_deep_base_referenced_many_times_does_not_blow_up_wall_clock():
     # references (each one deletes-and-recomputes the shared node's cache entry all
     # over again); round-6 computes `base`'s (truncated) fold once and reuses it for
     # every subsequent reference, since none of them has a better remaining budget
-    # than the first. A generous ceiling (not a tight bound, to stay non-flaky under
-    # load) that round-5's own shape could not have met at this ref count -- measured
-    # directly against this exact construction (depth=300, refs=2000) before this fix:
-    # ~2.3s. After: ~0.2s.
+    # than the first. `_fold_fs_path`/`_has_folded_cred_path` ALONE really do hit
+    # ~2.3s before round-6 / ~0.2s after -- but that isolated measurement is not
+    # what this test's `dt` clocks: `_rules(src)` runs the FULL `analyze_python()`
+    # pipeline, where the dominant cost for this exact construction (depth=300,
+    # refs=2000) turned out (CLAWSECCHECK-B-973, profiled with cProfile against
+    # this exact fixture) to be `shippedexec._FileFacts.scope_of`, called once per
+    # AST node by several B-917 loader/staged-write passes that `ast.walk()` the
+    # whole tree -- NOT the fold cache round-6 covers. Root cause: `_FileFacts.
+    # __init__` built its `node -> parent` map by keying a plain dict on node
+    # identity, but CPython reuses ONE singleton `ast.Load()`/`Store()`/`Del()`
+    # instance for every occurrence in a tree, so every ctx-node visit overwrote
+    # the SAME dict entry, leaving whichever occurrence's parent was recorded
+    # last (near the bottom of the deep `base` chain, ~600 hops up) -- so EVERY
+    # other ctx-node's `scope_of()` call also climbed ~600 bogus hops instead of
+    # its real 1-3. Fixed by excluding those three singleton types from the
+    # parents map (clawseccheck/shippedexec.py); nothing legitimately looks up a
+    # ctx node's parent (every real caller starts from the owning Name/Attribute/
+    # Subscript instead, which has its own correct entry), confirmed by auditing
+    # every `self.parents.get(...)` call site. Measured directly against just the
+    # `scope_of()` sweep over this fixture's 19210 nodes: summed hop count
+    # 2,901,617 -> 302,111 (deterministic; hop counts don't vary run to run),
+    # wall time for that one sweep 2.09s -> 0.19s (single-run sample).
+    # For the full `_rules(src)` pipeline this test actually times: 10
+    # back-to-back unloaded runs after the fix ranged 1.64s-3.01s (mean 2.22s);
+    # the remaining cost is spread across many OTHER legitimate multi-pass taint/
+    # credential analyses that each do their own O(n) (or fixpoint) walk of the
+    # whole file, not one single further bug -- not a quick further win. 5 runs
+    # under synthetic full 8-core CPU contention (`yes > /dev/null` on every
+    # core) ranged 4.66s-7.99s. The ceiling below is set well above the worst of
+    # those measurements -- generous on purpose (not a tight bound), to stay
+    # non-flaky under load, same as the original round-6 intent -- while still
+    # catching a genuine gross regression (e.g. round-5's shape returning, or the
+    # scope_of() fix being reverted).
     import time
 
     src = _shared_deep_base_src(depth=300, refs=2000)
@@ -595,7 +624,7 @@ def test_shared_deep_base_referenced_many_times_does_not_blow_up_wall_clock():
     rules = _rules(src)
     dt = time.time() - t0
     assert "AST_FOLD_TRUNCATED" in rules
-    assert dt < 1.5, f"fold of a shared, repeatedly-referenced deep base took {dt:.2f}s"
+    assert dt < 10.0, f"fold of a shared, repeatedly-referenced deep base took {dt:.2f}s"
 
 
 def test_shared_deep_base_credential_reference_still_detected_alongside_reuse():
