@@ -13062,20 +13062,63 @@ _SH_CASE_WILDCARD_ARM_RE = re.compile(r"[ \t\n]*\(?[ \t\n]*\*[ \t\n]*\)")
 # right after a recognized `case` keyword (never scanned for globally -- a bare
 # `\bin\b` search over the whole file would collide with a `for NAME in` loop
 # header), so this cannot mistake an unrelated loop's own `in` for a top-level
-# `case`'s. KNOWN, accepted imprecision (not chased further, same lexical-layer
-# spirit as B-957's do/done-vs-case-label note above): a `for ... in ... done`
-# NESTED INSIDE a case's own SUBJECT expression (`case $(for f in *; do ...;
-# done) in ...`) has its own earlier `in`, which this bounded, first-match search
-# would find first, truncating the subject span too early. Vanishingly rare in
-# real shell (a subject is essentially always a bare `$var`/`$(cmd)`/literal, never
-# a nested loop); does not itself convict anything wrongly, only mis-attributes
-# which span some later text falls in, the same class of imprecision the file
-# already accepts elsewhere at this lexical/regex layer.
+# `case`'s.
 _SH_CASE_IN_RE = re.compile(r"\bin\b")
+# B-935 round 4: `\bin\b` alone still matches a BARE `$in`/`${in}` variable
+# reference, or an `in` sitting inside an OPEN `${...}` parameter expansion
+# (`${x:-in}`, `${in:-x}`, `${#in}`, ...) -- `$`/`{` are non-word characters, so
+# `\bin\b` validly matches the "in" inside any of those, mistaking it for the
+# real terminator and truncating the subject scan early. `_sh_case_find_in` below
+# rejects a candidate that is (a) immediately preceded by a bare `$` (catches
+# `$in`; a REAL terminator is always separated from the subject WORD by
+# whitespace, so this never rejects a genuine one), or (b) positioned inside an
+# unclosed `${` opened since `start` (catches every `${...in...}` shape,
+# regardless of where "in" sits inside the braces) -- and keeps scanning FORWARD
+# for the next candidate rather than failing closed on the first false match,
+# since a real terminator may still exist later in the subject.
+_SH_CASE_BRACE_RE = re.compile(r"\$\{|\}")
 # `_sh_cred_replay` recursion-depth guard (see its own docstring): caps how many
 # NESTED (not sequential) if/case levels get real branch-aware replay before
 # falling back to a flat, branch-blind drain for everything past this point.
 _SH_CRED_REPLAY_MAX_DEPTH = 250
+
+
+def _sh_case_find_in(kw: str, start: int):
+    """The first `in` at or after `start` that is a real top-level `case ... in`
+    terminator -- not a bare `$in`/`${in}` reference, and not sitting inside some
+    OTHER, unrelated `${...}` parameter expansion opened since `start` (see the
+    design note above `_SH_CASE_BRACE_RE`). `${`/`}` and `in` candidates are each
+    found via one compiled `finditer` pass (never a per-character Python loop) and
+    merged by position, so a brace's own depth contribution is only counted once
+    each `in` candidate actually needs it. Returns the match object, or `None` if
+    no valid candidate exists (fails closed the same way `.search()` returning
+    `None` already did -- see `_sh_parse_branch_tree`'s own docstring for what that
+    means for the whole file).
+
+    KNOWN, accepted imprecision (not chased further, same lexical-layer spirit as
+    B-957's do/done-vs-case-label note above): a `for ... in ... done` NESTED
+    INSIDE a case's own SUBJECT expression (`case $(for f in *; do ...; done)
+    in ...`) has its own earlier, bare (non-`$`/`${`-prefixed) `in`, which this
+    search would still accept as the terminator, truncating the subject span too
+    early. Vanishingly rare in real shell (a subject is essentially always a bare
+    `$var`/`$(cmd)`/literal, never a nested loop); does not itself convict
+    anything wrongly, only mis-attributes which span some later text falls in,
+    the same class of imprecision the file already accepts elsewhere at this
+    lexical/regex layer.
+    """
+    braces = _SH_CASE_BRACE_RE.finditer(kw, start)
+    next_brace = next(braces, None)
+    depth = 0
+    for m in _SH_CASE_IN_RE.finditer(kw, start):
+        while next_brace is not None and next_brace.start() < m.start():
+            if next_brace.group() == "${":
+                depth += 1
+            elif depth > 0:
+                depth -= 1
+            next_brace = next(braces, None)
+        if depth == 0 and (m.start() == 0 or kw[m.start() - 1] != "$"):
+            return m
+    return None
 
 
 def _sh_parse_branch_tree(kw: str) -> list:
@@ -13138,7 +13181,7 @@ def _sh_parse_branch_tree(kw: str) -> list:
             dest = children_target(start)
             if dest is None:
                 return []
-            in_m = _SH_CASE_IN_RE.search(kw, end)
+            in_m = _sh_case_find_in(kw, end)
             if in_m is None:
                 return []
             # The SUBJECT (`case WORD` up to `in`) is UNCONDITIONAL, single-execution
