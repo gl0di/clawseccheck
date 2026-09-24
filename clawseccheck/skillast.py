@@ -12550,8 +12550,32 @@ _SH_CRED_READ_PATH_SRC = (
     r"\.(?:claude|codex|gemini)/mcp\.json\b"
 )
 _SH_CRED_READ_PATH_RE = re.compile(_SH_CRED_READ_PATH_SRC, re.I)
+# B-934: the reader alternatives (cat|less|head|tail|<) previously matched as a bare
+# substring anywhere between the assignment's `=` and the credential path, so
+# `filename=$(basename ~/.openclaw/a.json)` false-fired ("cat" inside "appli-CAT-ion")
+# and `N=$(wc -c < ~/.netrc)` false-fired (a byte COUNT, not the file's content — the
+# `<` was matched as a bare mid-command redirection, not the `$(<file)` read form).
+# Fixed by mirroring `_SH_LOOP_SUBST_READ_RE`'s (B-894) command-position anchoring: the
+# reader must sit immediately after a `$(`/backtick command-substitution open (optional
+# `sudo`, optional `[\w./-]*/` path prefix, `\b`-bounded), or be the `<` of the
+# `$(<file)` redirection-read form specifically — never a bare substring/mid-command
+# redirection. Keeping this idiom identical to the loop-hop reader is deliberate (the
+# same `_CRED_NAME_WORDS`-style precedent already documented above
+# `_SH_CRED_READ_PATH_SRC`): the two reader vocabularies must not drift apart.
+#
+# Inherited limitation (documented, not fixed — same trade-off B-894 already made and
+# had reviewed for `_SH_LOOP_SUBST_READ_RE`, kept intentionally identical here rather
+# than reintroducing the old bare-substring FP surface): because the reader must sit
+# immediately at command position after `$(`/backtick, a reader reached indirectly —
+# `$(eval cat ~/.netrc)`, `$(bash -c "cat ~/.netrc")`, or a chained command before the
+# reader like `$(set -e; cat ~/.netrc)` — is NOT detected. `tests/test_shell_scan.py`
+# pins this as an accepted gap for the direct (non-loop) path; B-894's own
+# `test_r2_b_eval_is_a_documented_fn` / `test_adv_bash_c_child_shell_loop_passes` pin
+# the equivalent loop-hop shapes.
 _SH_CRED_ASSIGN_RE = re.compile(
-    r"(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=[^\n]{0,256}?(?:cat|less|head|tail|<)\s*[^\n]{0,256}?"
+    r"(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=[^\n]{0,256}?"
+    r"(?:\$\(|`)[ \t]*(?:sudo[ \t]+)?(?:(?:[\w./-]*/)?(?:cat|head|tail|less)\b|<)"
+    r"[^\n]{0,256}?"
     r"(?:" + _SH_CRED_READ_PATH_SRC + r")",
     re.I,
 )
