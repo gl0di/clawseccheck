@@ -134,6 +134,8 @@ _TAMPER_ATTRS = frozenset({
     # legitimate-looking binding a static reader picks, so the runtime value stays the
     # FIRST, attacker-controlled one. `f_trace` is the same class of primitive one level
     # removed: it installs a PER-LINE local trace function on a frame that already has one.
+    # B-996: `sole()` now consults these sets itself (`_file_tampers()`) rather than
+    # trusting every caller to have gated on `_tampers()` first -- see its docstring.
     "f_lineno", "f_trace", "settrace", "setprofile", "settrace_all_threads",
     "setprofile_all_threads",
 })
@@ -422,9 +424,11 @@ class _FileFacts:
         # proof for that one reason (`exact_calls`' second pass).
         self.any_target = False
         self.blocked = self.star or self._blocked(module_names)
-        # B-917 locate() LEGB fallback (2.1): lazily computed and cached, since most
-        # files never take this path. `None` means "not computed yet" for the
-        # whole-file tamper flag; the per-name cache starts empty.
+        # B-917 locate() LEGB fallback (2.1), also `sole()`'s own multi-binding
+        # resolution (B-996) -- both read this through `_file_tampers()`, lazily
+        # computed and cached since most files never take either path. `None` means
+        # "not computed yet" for the whole-file tamper flag; the per-name cache below
+        # starts empty and serves the LEGB guard only.
         self._legb_tampers: "bool | None" = None
         self._legb_attr_store_cache: dict = {}
 
@@ -589,17 +593,27 @@ class _FileFacts:
         (B-638: a same-scope rebind split across two lines resolves like one nested
         expression); any boundary-crossing or non-Assign binding disqualifies outright.
         Source order is a proxy for RUNTIME order here, and that proxy is only sound
-        because `_tampers()` bans every frame-jump primitive that can break it -- a
-        `sys.settrace`/`setprofile` (or `sys.monitoring` LINE) hook rewriting
+        when this file contains none of `_tampers()`'s recognised frame-jump primitives
+        -- a `sys.settrace`/`setprofile` (or `sys.monitoring` LINE) hook rewriting
         `frame.f_lineno` mid-run can skip the second binding this picks, so without that
-        ban "last one before the use point" would describe the SOURCE, not what the
-        interpreter actually executes (B-922 round 2)."""
+        check "last one before the use point" would describe the SOURCE, not what the
+        interpreter actually executes. Self-enforced here (B-996) via `_file_tampers()`
+        -- the same lazily-cached `_tampers(self.tree)` flag `_legb_blocked()` uses --
+        rather than relying on every caller to have gated on it first: `_reaching()`
+        (shared by `locate()`/`_module_suffixed()`) calls straight into this method with
+        no gate of its own, and at least one production caller (`skillast.analyze_python`'s
+        `_FileFacts`/`PathFacts` construction for the B-917 loader-sink/staged-import
+        rules and `_RefResolver`) never checked `_tampers()` before reaching it (B-922
+        round 2 only widened the tamper sets for the OTHER caller, `ShippedArtifact.
+        _compute()`, which already gated on its own)."""
         if name == "__file__" or name in self.declared:
             return None
         recs = self.records(scope).get(name, [])
         if len(recs) == 1:
             return None if recs[0][0] == "other" else recs[0]
         if before is None or not recs or any(r[0] != "assign" for r in recs):
+            return None
+        if self._file_tampers():
             return None
         body = getattr(scope, "body", None) or []
         if any(self.parents.get(r[2]) is not scope or r[2] not in body for r in recs):
@@ -617,6 +631,18 @@ class _FileFacts:
             child, cur = cur, self.parents.get(cur)
         return body.index(child) if cur is scope and child in body else None
 
+    def _file_tampers(self) -> bool:
+        """Lazily computed, cached `_tampers(self.tree)` -- whole-file, so one flag
+        serves every caller. Shared by `_legb_blocked()` (locate()'s LEGB-fallback
+        guard) and `sole()`'s own multi-binding source-order resolution (B-996): both
+        depend on the identical assumption -- that this file contains none of
+        `_tampers()`'s recognised frame-jump/reflection spellings -- so one cached
+        computation backs both refusals instead of two independent ones drifting
+        apart."""
+        if self._legb_tampers is None:
+            self._legb_tampers = _tampers(self.tree)
+        return self._legb_tampers
+
     def _legb_blocked(self, name: str) -> bool:
         """Guard for `locate()`'s LEGB fallback (b917-design.md 2.1). A function-scope
         read with no local binding may resolve through an enclosing/module scope --
@@ -628,9 +654,7 @@ class _FileFacts:
         "module constant" by a route this resolver does not model at all). Sound over
         precise: this only ever REFUSES a resolution, never manufactures one.
         Lazily computed and cached -- most files never take this path."""
-        if self._legb_tampers is None:
-            self._legb_tampers = _tampers(self.tree)
-        if self._legb_tampers:
+        if self._file_tampers():
             return True
         if name not in self._legb_attr_store_cache:
             self._legb_attr_store_cache[name] = any(
