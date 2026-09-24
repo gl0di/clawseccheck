@@ -1018,6 +1018,12 @@ _REGISTRY: "dict[str, _Entry]" = {
     # NULL) 3-column shape as tests/test_b177_installed_index_shapes.py:55, same DDL
     # text verbatim, same classification. (Renumbered from :409 to :992, same reason.)
     "tests/test_b749_auth_profile_store_presence.py:992": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
+    # B-990: the decoy table a `CREATE VIEW config_machine_state AS SELECT ... FROM
+    # decoy_plugin_state` view-masquerade fixture projects from -- never a real
+    # OpenClaw table, same shape/reason as B-889's own decoy_secrets entry above. The
+    # extractor does not see the `CREATE VIEW` statement itself (it only walks
+    # `CREATE TABLE`), so only this one site needs registering.
+    "tests/test_b177_installed_index_shapes.py:440": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
 
     # ---- audit_events (B191 / F-154) ----
     "tests/test_b191_audit_events.py:44": _Entry(LEGACY_COLS, _AUDIT_EVENTS_PARTIAL_LEGACY),
@@ -1181,7 +1187,9 @@ _REGISTRY: "dict[str, _Entry]" = {
 # (tests/test_b749_auth_profile_store_presence.py:925) and round 2's embedded-NUL-byte
 # regression fixture (same file, :992). Line numbers renumbered from the peer branch's
 # :342/:409 by the merge that placed the B-845 per-agent test class earlier in that file.
-assert len(_REGISTRY) == 69, f"registry has {len(_REGISTRY)} entries, expected 69"
+# B-990: +1 (70, was 69) -- the config_machine_state view-masquerade hardening's own
+# decoy-table DDL site for _collect_plugin_trust (tests/test_b177_installed_index_shapes.py:440).
+assert len(_REGISTRY) == 70, f"registry has {len(_REGISTRY)} entries, expected 70"
 
 
 # ========================================================================================
