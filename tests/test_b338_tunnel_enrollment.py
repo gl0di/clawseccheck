@@ -441,6 +441,19 @@ def test_negation_governs_trigger_does_not_warn():
     assert check_tunnel_enrollment(ctx).status == PASS
 
 
+def test_negation_governs_dot_adjacent_trigger_does_not_warn():
+    """B-897: the negator-to-trigger sentence-break check used to slice its lookback
+    window and search the SLICE, so a trigger sitting right after an attribute-access
+    dot with no space read its truncated slice boundary as a false sentence break and
+    the negation silently failed to govern it. Before the fix this WARNed exactly like
+    a live invocation; it must PASS."""
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.installed_skills = _blob(
+        "This skill must never call Tunnel.frpc -c frpc.ini directly.\n"
+    )
+    assert check_tunnel_enrollment(ctx).status == PASS
+
+
 def test_defensive_heading_does_not_warn():
     ctx = Context(home=Path("/nonexistent"))
     ctx.installed_skills = _blob(
