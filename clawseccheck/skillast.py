@@ -14034,9 +14034,9 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
 # old flat set was branch-blind-proof by being fully position-blind).
 #
 # Fix: `_sh_parse_branch_tree` parses every `if`/`elif`/`else`/`fi` and `case`/`;;`/
-# `esac` construct into a tree (stack-based, same fail-closed discipline
-# `_sh_loop_regions` uses for do/done: any imbalance anywhere returns `[]` for the
-# WHOLE file, never a guessed pairing), and `_sh_cred_replay` walks it ONCE PER NAME,
+# `esac` construct into a tree (stack-based; B-984 narrowed its recovery
+# from a WHOLE-file `[]` on any imbalance to the smallest provably-safe scope -- see its
+# own docstring -- never a guessed pairing), and `_sh_cred_replay` walks it ONCE PER NAME,
 # threading a single `entry_taint` down into each branch/arm (so a `+=` inside one
 # branch can never inherit a SIBLING's own rebind) and OR-merging the branches' EXIT
 # taints back into the state at the construct's own close -- "OR across mutually-
@@ -14094,9 +14094,9 @@ def _sh_case_find_in(kw: str, start: int):
     found via one compiled `finditer` pass (never a per-character Python loop) and
     merged by position, so a brace's own depth contribution is only counted once
     each `in` candidate actually needs it. Returns the match object, or `None` if
-    no valid candidate exists (fails closed the same way `.search()` returning
-    `None` already did -- see `_sh_parse_branch_tree`'s own docstring for what that
-    means for the whole file).
+    no valid candidate exists -- `_sh_parse_branch_tree` treats `None` here as an
+    unrecognizable `case` token and skips it (B-984; see that
+    function's own docstring), never as a whole-file abort.
 
     KNOWN, accepted imprecision (not chased further, same lexical-layer spirit as
     B-957's do/done-vs-case-label note above): a `for ... in ... done` NESTED
@@ -14126,20 +14126,52 @@ def _sh_case_find_in(kw: str, start: int):
 
 def _sh_parse_branch_tree(kw: str) -> list:
     """Stack-based parse of `kw` into a tree of if/case construct dicts (see the
-    design note above). FAILS CLOSED (`[]`) on any structural imbalance -- an `if`
-    with no matching `fi`, a `then`/`elif`/`else`/`fi` with no open `if`, an `esac`
-    with no open `case`, a `case` with no `in`, or a nested construct opened while an
-    `if`'s own CONDITION (before its first `then`) is still being scanned (too
-    rare/pathological a shape to track correctly at this lexical layer). This is NOT
-    a no-op fallback: when `_sh_parse_branch_tree` returns `[]`, `_sh_cred_replay` (in
-    `_sh_cred_assign_taint_lines`) gets an empty construct list and degenerates to a
-    flat, branch-blind drain across the WHOLE FILE for every name -- i.e. round 1's
-    behavior, including round 1's own branch-blindness this round exists to fix, for
-    the ENTIRE file, not just the unparseable construct. That is a real regression
-    back to round-1 behavior for that one file (though never a crash and never a
-    false CONVICTION beyond what round 1 already produced) -- tracked as a known,
-    accepted limitation of this lexical/regex layer, the same class as B-957's
-    do/done blast-radius note above, not something this round fixes.
+    design note above).
+
+    B-984 (round 2 of this parser): a structural anomaly -- a
+    `then`/`elif`/`else`/`fi` with no fitting open `if`, an `esac` with no open
+    `case`, or a `case` with no findable `in` -- is now SKIPPED as an inert,
+    unrecognized token rather than aborting the whole parse. Skipping never
+    invents a pairing: it neither pushes nor pops any frame, so it can only ever
+    drop a token that could not have been validly paired anyway; every construct
+    that DOES fit the current stack state is paired exactly as before, unchanged.
+    This shrinks a single stray/misplaced keyword's blast radius from "the whole
+    file" down to "nothing" (the file's real constructs, before and after the
+    stray token, are parsed exactly as if the stray token were not there at all).
+
+    A genuinely UNCLOSED opener (an `if` with no matching `fi`, a `case` with no
+    matching `esac`) is different in kind: reaching EOF while it is still open
+    means every construct nested inside it never gets appended anywhere (it was
+    never popped, so it is never linked into its own parent's children list or
+    into `top`) -- it is simply not part of the returned tree. Everything that
+    fully closed BEFORE that still-open frame was ever pushed IS preserved and
+    returned in `top`, since that part of the parse was already complete and
+    self-consistent by the time the unclosed opener appeared. This is the
+    `(a)` half of the B-984 fix ("keep what already closed before the defect").
+
+    KNOWN, accepted residual (B-984 could NOT close this half): content that is
+    TEXTUALLY AFTER an unclosed opener but STRUCTURALLY NESTED INSIDE it (an
+    `if cond2 ... fi` sitting inside an outer `if`'s own body whose own `fi` is
+    missing) cannot be soundly recovered. Promoting it to its own independent,
+    top-level subtree would require GUESSING the entry taint it should replay
+    with -- the real value depends on whether/how many times the broken outer
+    scope actually runs, which is undecidable from malformed text -- and that is
+    exactly the "guessed pairing" this parser has always refused to do. A
+    two-pass, entry-taint-agnostic replay (try both `True` and `False`, keep only
+    offsets where they agree) was considered and is NOT implemented here: it
+    changes `_sh_cred_replay`'s own semantics, not just this parser's error
+    recovery, and even where it would apply, the file's own PRE-EXISTING
+    "textually-last-assignment-wins" flat-bisect fallback (see the design note
+    above) already independently misses the canonical adversarial shape (a
+    credential-bearing branch followed by a textually-later clearing branch) --
+    so that harder redesign would not even close this specific gap on its own.
+    Tracked as a known, accepted limitation of this lexical/regex layer, the same
+    class as B-957's do/done blast-radius note above -- narrower than B-957's
+    (a decoy must specifically be an unclosed opener, not just any stray token,
+    and the real construct must be nested inside it rather than beside it), but
+    not fully closed. See `tests/test_b935_shell_cred_var_position_taint.py`'s
+    `test_adv_unclosed_if_before_real_nested_if_else_silences_that_branch_known_limit`
+    for the pinned repro and its root-cause control.
     """
     top: list = []
     stack: list = []
@@ -14167,7 +14199,12 @@ def _sh_parse_branch_tree(kw: str) -> list:
         if kw_name == "if":
             dest = children_target(start)
             if dest is None:
-                return []
+                # Unreachable today (a live "if"/"case" frame's own branches/arms
+                # list is never empty while it sits on the stack -- see
+                # `children_target`) -- kept `continue`, not `return []`, so that if
+                # this ever DID become reachable it would fail SAFE (skip this one
+                # token) rather than reintroducing a whole-file abort.
+                continue
             frame = {"kind": "if", "start": start, "branches": [], "has_else": False,
                      "awaiting_then": True, "_dest": dest}
             # The branch's own span starts right here, at `if`'s end -- covering its
@@ -14183,10 +14220,16 @@ def _sh_parse_branch_tree(kw: str) -> list:
         elif kw_name == "case":
             dest = children_target(start)
             if dest is None:
-                return []
+                continue  # unreachable today -- see the matching note under "if" above
             in_m = _sh_case_find_in(kw, end)
             if in_m is None:
-                return []
+                # No findable `in` anywhere in the rest of the file: this `case`
+                # cannot be represented (no subject/arms split to build), so treat
+                # the keyword itself as unrecognized/inert and skip it -- never
+                # push a frame for it. The stack is left exactly as it was, so a
+                # later `;;`/`esac` is resolved against whatever is ACTUALLY open,
+                # never against a phantom frame this token would have created.
+                continue
             # The SUBJECT (`case WORD` up to `in`) is UNCONDITIONAL, single-execution
             # state shared by every arm -- not private to arm[0]. A side-effecting
             # command substitution in the subject (`case "$(C=safe; echo mode)" in`)
@@ -14199,12 +14242,17 @@ def _sh_parse_branch_tree(kw: str) -> list:
             frame["arms"].append({"start": in_m.end(), "end": None, "children": []})
             stack.append(frame)
         elif kw_name == "then":
+            # A `then` that doesn't fit the CURRENT top frame (no open `if`, the
+            # top frame is a `case`, or this `if` already saw its own `then`) is
+            # unrecognizable here -- skip it as inert. This never mutates the
+            # stack, so it can never mispair anything: whatever frame IS open
+            # keeps waiting for its own real `then`/`elif`/`else`/`fi`, unaffected.
             if not stack or stack[-1]["kind"] != "if" or not stack[-1]["awaiting_then"]:
-                return []
+                continue
             stack[-1]["awaiting_then"] = False
         elif kw_name == "elif":
             if not stack or stack[-1]["kind"] != "if" or stack[-1]["awaiting_then"]:
-                return []
+                continue
             f = stack[-1]
             f["branches"][-1]["end"] = start
             # Same reasoning as `if` above: the new branch starts at `elif`'s own
@@ -14213,14 +14261,14 @@ def _sh_parse_branch_tree(kw: str) -> list:
             f["awaiting_then"] = True
         elif kw_name == "else":
             if not stack or stack[-1]["kind"] != "if" or stack[-1]["awaiting_then"]:
-                return []
+                continue
             f = stack[-1]
             f["branches"][-1]["end"] = start
             f["branches"].append({"start": end, "end": None, "children": []})
             f["has_else"] = True
         elif kw_name == "fi":
             if not stack or stack[-1]["kind"] != "if" or stack[-1]["awaiting_then"]:
-                return []
+                continue
             f = stack.pop()
             f["branches"][-1]["end"] = start
             f["_dest"].append(
@@ -14228,8 +14276,12 @@ def _sh_parse_branch_tree(kw: str) -> list:
                  "branches": f["branches"], "has_else": f["has_else"]}
             )
         elif kw_name == "esac":
+            # Same "skip, never mutate" discipline as the `if`-family closers
+            # above: an `esac` that doesn't match the current top frame (no open
+            # `case`, or the top frame is an `if`) is dropped as inert rather than
+            # aborting the whole parse.
             if not stack or stack[-1]["kind"] != "case":
-                return []
+                continue
             f = stack.pop()
             if f["arms"][-1]["end"] is None:
                 f["arms"][-1]["end"] = start
@@ -14246,8 +14298,12 @@ def _sh_parse_branch_tree(kw: str) -> list:
                 {"type": "case", "start": f["start"], "end": end,
                  "subject": f["subject"], "arms": f["arms"], "has_fallback": has_wild}
             )
-    if stack:
-        return []
+    # `stack` may be non-empty here (one or more openers never found their own
+    # closer before EOF) -- deliberately NOT a `return []`: everything nested
+    # inside a still-open frame was never popped, so it was never linked into
+    # `top` in the first place; `top` already holds exactly (and only) whatever
+    # fully closed before the first still-open frame was pushed. See this
+    # function's own docstring for what remains a known, accepted residual.
     return top
 
 
