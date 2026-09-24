@@ -323,6 +323,266 @@ def test_locate_legb_stops_at_an_intermediate_scopes_own_parameter():
 
 
 # ---------------------------------------------------------------------------
+# A2. CLAWSECCHECK-B-964 -- `scope_of()` returns None the instant its walk hits a
+# ClassDef (or Lambda/comprehension) ancestor. `_legb_lookup`'s own outward walk
+# treated that None as "genuinely nothing further" and gave up immediately instead
+# of skipping the class's own namespace (which a method can never see unqualified
+# anyway) and continuing from whatever encloses the CLASS itself. Wrapping an
+# ordinary staged-import write in a class method flipped B-917's own r2d1 shape
+# (test_r2d1_module_constant_tmp_dir_plus_syspath_insert_is_fail above) from FAIL
+# to WARN purely because of this. Fixed by `_FileFacts._legb_skip_wrapper`.
+# ---------------------------------------------------------------------------
+
+
+def test_locate_legb_resolves_through_an_enclosing_class_to_the_module():
+    """The reported evasion's own unit-level shape: `stage`'s read of `_STAGE_DIR`
+    has no binding in its own method scope OR in `Loader`'s class body (a method
+    never sees its own class's namespace unqualified) -- so the walk must skip
+    `Loader` entirely and resolve through the MODULE scope beyond it, exactly as
+    `test_locate_legb_fallback_resolves_module_constant_from_function` above does
+    with no class in the way at all."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        class Loader:
+            def stage(self):
+                p = os.path.join(_STAGE_DIR, "mod.py")
+    '''), target="p", func_name="stage")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "evilstage", "mod.py")
+
+
+def test_locate_legb_class_nested_in_a_class_walks_through_both_to_the_module():
+    """Two class wrappers in a row (`Outer.Inner.stage`): the skip must climb PAST
+    both `ClassDef`s, not just the immediate one, before reaching the module."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        class Outer:
+            class Inner:
+                def stage(self):
+                    p = os.path.join(_STAGE_DIR, "mod.py")
+    '''), target="p", func_name="stage")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "evilstage", "mod.py")
+
+
+def test_locate_legb_class_nested_in_a_function_resolves_through_the_function_not_the_module():
+    """Item (d): a class defined INSIDE a function. The class-skip must land on the
+    function `outer` enclosing the class -- not jump straight past it to the module
+    -- proven by giving `outer` its OWN binding of the same name, distinct from an
+    unrelated module-level one, and checking the resolved PATH names outer's value,
+    not the module's."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/modulelevel"
+
+        def outer():
+            _STAGE_DIR = "/tmp/outerlevel"
+
+            class Loader:
+                def stage(self):
+                    p = os.path.join(_STAGE_DIR, "mod.py")
+    '''), target="p", func_name="stage")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "outerlevel", "mod.py")
+
+
+def test_locate_legb_methods_own_parameter_blocks_the_walk_before_any_class_skip():
+    """Critical correctness constraint (see `_legb_lookup`'s own docstring), class
+    variant of Section G's fix-round-2 parameter-shadow test: the METHOD's own
+    parameter shares the module constant's exact name. The read's own immediate
+    scope already binds the name (unresolvably, per `records()`), so `_reaching()`'s
+    pre-check (`not self.records(scope).get(e.id)`) refuses the LEGB fallback
+    outright and `_legb_lookup` -- and the new class-skip logic inside it -- is
+    never even consulted. A class wrapper around the method must not change this."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        class Loader:
+            def stage(self, _STAGE_DIR):
+                p = os.path.join(_STAGE_DIR, "mod.py")
+    '''), target="p", func_name="stage")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "SYM"
+
+
+def test_legb_skip_wrapper_recognises_a_lambda_or_comprehension_ancestor_too():
+    """Item (e): `_legb_skip_wrapper` matches `scope_of()`'s own full wrapper set
+    (ClassDef/Lambda/ListComp/SetComp/DictComp/GeneratorExp), not just ClassDef --
+    for symmetry with the contract it is patching around, not because a Lambda or a
+    comprehension can occur here in practice. A `def`/`async def` is a STATEMENT; a
+    Lambda's body and a comprehension's `elt`/generators are each a single
+    EXPRESSION, so neither can ever contain a nested `def` -- meaning `cur` inside
+    `_legb_lookup`'s own walk (always itself a FunctionDef/AsyncFunctionDef) can
+    never have a Lambda/comprehension as its immediate parent for real. Exercised
+    directly here by pointing a throwaway FunctionDef's recorded parent at a REAL
+    Lambda node from the parsed tree (whose own, unmodified parent chain already
+    leads back to `outer`), since no legal Python source can construct this shape
+    on its own."""
+    src = dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        def outer():
+            f = lambda: None
+    ''')
+    tree = ast.parse(src)
+    facts = se._FileFacts(
+        tree, "skill.py", se.ShippedArtifact([("skill.py", src)]), set(), False
+    )
+    lam = next(n for n in ast.walk(tree) if isinstance(n, ast.Lambda))
+    outer = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "outer"
+    )
+    fake_inner = ast.parse("def inner():\n    pass\n").body[0]
+    facts.parents[fake_inner] = lam
+    assert facts.scope_of(fake_inner) is None
+    assert facts._legb_skip_wrapper(fake_inner) is outer
+
+
+# ---------------------------------------------------------------------------
+# A3. CLAWSECCHECK-B-964, C-135 round 2 (independent adversarial review) -- the
+# round-1 fix above climbed past a wrapper ancestor ONE raw AST-parent hop at a
+# time, re-checking `isinstance(parent, (ClassDef, ...))` at each hop. `scope_of(
+# parent) is None` for a wrapper does not mean "nothing further exists" -- only
+# that the nearest true scope boundary beyond it, past any TRANSPARENT non-scope
+# statement container (`If`/`Try`/`For`/`With`/`ExceptHandler`/...), is itself
+# another wrapper further out. The one-hop `isinstance` gate broke the instant a
+# non-scope container sat directly between two wrapper layers (a class nested in
+# an `if` that is itself nested in another class): the hop landed on the `If`
+# node, `isinstance` failed, and the loop gave up with a scope that genuinely
+# exists just a few hops further up. Fixed by climbing `self.parents` freely
+# (mirroring `scope_of()`'s own climb) and only ever CONSULTING `scope_of()` on a
+# wrapper node, never manufacturing a scope out of the transparent container
+# itself.
+# ---------------------------------------------------------------------------
+
+
+def test_locate_legb_class_inside_an_if_inside_a_class_still_resolves_through_the_module():
+    """The reviewer's own repro, verbatim: a non-scope `If` sits directly between
+    the inner and outer `ClassDef`. Before the round-2 fix this gave an
+    unresolvable SYM -- the exact class of failure B-964 exists to eliminate."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        class Outer:
+            if True:
+                class Loader:
+                    def stage(self):
+                        p = os.path.join(_STAGE_DIR, "mod.py")
+    '''), target="p", func_name="stage")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "evilstage", "mod.py")
+
+
+def test_locate_legb_class_without_the_if_wrapper_is_the_control_and_already_passed():
+    """Control for the test above, over the exact same shape minus the `If`
+    (`test_locate_legb_class_nested_in_a_class_walks_through_both_to_the_module`
+    already pins this directly; repeated here inline so the if-wrapped/unwrapped
+    pair sits side by side, matching this file's shadow/control convention)."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        class Outer:
+            class Loader:
+                def stage(self):
+                    p = os.path.join(_STAGE_DIR, "mod.py")
+    '''), target="p", func_name="stage")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "evilstage", "mod.py")
+
+
+def test_locate_legb_class_inside_a_try_inside_a_class_still_resolves():
+    """Same gap, a `Try`/`ExceptHandler` non-scope container instead of `If`."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        class Outer:
+            try:
+                class Loader:
+                    def stage(self):
+                        p = os.path.join(_STAGE_DIR, "mod.py")
+            except Exception:
+                pass
+    '''), target="p", func_name="stage")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "evilstage", "mod.py")
+
+
+def test_locate_legb_three_deep_class_if_class_if_class_chain_still_resolves():
+    """The general case, not just the one-level gap: two separate wrapper/`If`
+    pairs stacked (class-in-if-in-class-in-if-in-class) before the method. The
+    free `self.parents` climb must keep going past BOTH `If`s and BOTH outer
+    `ClassDef`s to reach the module."""
+    facts, func, value = _locate_assign_value(dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        class A:
+            if True:
+                class B:
+                    if True:
+                        class Loader:
+                            def stage(self):
+                                p = os.path.join(_STAGE_DIR, "mod.py")
+    '''), target="p", func_name="stage")
+    located = facts.locate(value, func)
+    assert located is not None and located.anchor == "ABS"
+    assert located.parts == ("tmp", "evilstage", "mod.py")
+
+
+def test_locate_legb_skip_wrapper_climbs_past_a_nonscope_container_without_querying_it():
+    """Direct unit pin on `_legb_skip_wrapper` itself, in the same style as the
+    Lambda/comprehension unit test above: an `If` node sits on the climb path but
+    is never itself asked for a `scope_of()` result (only ClassDef/Lambda/
+    comprehension ancestors are) -- so this can never manufacture a scope out of
+    an `If`/`Try` body."""
+    src = dedent('''
+        import os
+        _STAGE_DIR = "/tmp/evilstage"
+
+        class Outer:
+            if True:
+                class Loader:
+                    def stage(self):
+                        pass
+    ''')
+    tree = ast.parse(src)
+    facts = se._FileFacts(
+        tree, "skill.py", se.ShippedArtifact([("skill.py", src)]), set(), False
+    )
+    stage = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "stage"
+    )
+    if_node = facts.parents[next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Loader"
+    )]
+    assert isinstance(if_node, ast.If)
+    assert facts.scope_of(stage) is None                 # stops at Loader, as designed
+    # `Outer` is itself top-level, so climbing past `If` AND both `ClassDef`s lands
+    # on the MODULE scope (a real FunctionDef/Module -- never a ClassDef itself).
+    assert facts._legb_skip_wrapper(stage) is facts.tree
+    # The If itself is never a scope scope_of() would report for anything.
+    assert facts.scope_of(if_node) is None
+
+
+# ---------------------------------------------------------------------------
 # B. Loader sinks -- the ticket's own PoCs (O1/O2), tiering (T1-T5)
 # ---------------------------------------------------------------------------
 
@@ -1625,3 +1885,118 @@ def test_h3_residual_move_or_copy_of_a_staged_write_is_not_followed():
     ''')
     assert _staged_import_verdict(literal) == "none"
     assert _staged_import_verdict(opaque) == "none"
+
+
+# ---------------------------------------------------------------------------
+# I. CLAWSECCHECK-B-964 -- end to end. Section A2 above pins `locate()`'s own
+# class-skip fix at the unit level; these reproduce the reported evasion through
+# the full `_staged_import_verdict`/`vet_skill` pipeline, and separately record the
+# investigation into whether the LOADER-SINK side of B-917 (`_b917_loader_call`/
+# `_b917_search_dirs`, clawseccheck/skillast.py) shares the same evasion.
+# ---------------------------------------------------------------------------
+
+_B964_CLASS_WRAPPED_SRC = _src('''
+    import sys, os
+
+    _STAGE_DIR = "/tmp/evilstage"
+
+    class Loader:
+        def stage(self):
+            open(os.path.join(_STAGE_DIR, "mod.py"), "wb").write(data)
+
+    sys.path.insert(0, _STAGE_DIR)
+    import mod
+''')
+
+_B964_BARE_FUNCTION_CONTROL_SRC = _src('''
+    import sys, os
+
+    _STAGE_DIR = "/tmp/evilstage"
+
+    def stage():
+        open(os.path.join(_STAGE_DIR, "mod.py"), "wb").write(data)
+
+    sys.path.insert(0, _STAGE_DIR)
+    import mod
+''')
+
+
+def test_b964_class_wrapped_staged_write_is_fail_not_warn():
+    """CLAWSECCHECK-B-964's own reported repro, verbatim: wrapping r2d1's staged-
+    write function (test_r2d1_module_constant_tmp_dir_plus_syspath_insert_is_fail,
+    Section C above) in an ordinary class method used to flip the verdict from FAIL
+    (REMOTE_STAGED_IMPORT) to WARN (STAGED_IMPORT_UNRESOLVED) purely because
+    `scope_of()` stopped dead at the enclosing `ClassDef` instead of skipping
+    through to the module. An unremarkable Python shape (a class method) must never
+    be a detection-evasion technique on its own."""
+    assert _staged_import_verdict(_B964_CLASS_WRAPPED_SRC) == "FAIL"
+
+
+def test_b964_class_wrapped_and_bare_function_give_the_identical_verdict():
+    """No-regression control, in the fix-round-2 shadow/control style (Section G
+    above): the class wrapper changes nothing about the RESULT, only the AST shape
+    around the read -- `_B964_BARE_FUNCTION_CONTROL_SRC` is the identical r2d1
+    shape with no class at all (already separately pinned by
+    test_r2d1_module_constant_tmp_dir_plus_syspath_insert_is_fail)."""
+    assert _B964_BARE_FUNCTION_CONTROL_SRC != _B964_CLASS_WRAPPED_SRC
+    assert (
+        _staged_import_verdict(_B964_CLASS_WRAPPED_SRC)
+        == _staged_import_verdict(_B964_BARE_FUNCTION_CONTROL_SRC)
+        == "FAIL"
+    )
+
+
+def test_b964_vet_fails_on_the_class_wrapped_staged_write(tmp_path):
+    """End to end through `vet_skill`, matching Section E's convention."""
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(_SKILL_MD, encoding="utf-8")
+    (skill_dir / "main.py").write_text(_B964_CLASS_WRAPPED_SRC, encoding="utf-8")
+    result = vet_skill(skill_dir)
+    assert result.status == "FAIL", result.detail
+
+
+def test_b964_loader_sink_side_is_unaffected_because_its_own_imports_already_block_legb():
+    """Investigated per the ticket: does the LOADER-SINK side of B-917
+    (`_b917_loader_call`/`_b917_search_dirs`, clawseccheck/skillast.py) share the
+    same class-skip evasion as the staged-import side above? No -- not because it
+    is architecturally different (it reuses this exact same `_FileFacts.locate()`/
+    `_legb_lookup`), but because it is structurally UNREACHABLE there: every B-917
+    loader-sink call kind (`runpy`, `importlib`, `imp`, `zipimport`) is itself one
+    of shippedexec.py's own `_TAMPER_MODULES` (import-machinery access), so any
+    file containing a loader-sink call already has `_legb_blocked()` == True for
+    that ENTIRE file -- `_reaching()`'s pre-check refuses the LEGB fallback before
+    `_legb_lookup` (and its class-skip) ever runs, class-wrapped or not. Pinned
+    here: a module-constant loader target gives the IDENTICAL LOADER_TARGET_UNVERIFIED
+    verdict with and without a class wrapper -- proving the two shapes are
+    equivalent already, not that a class specifically evades anything here. (The
+    loader-sink side still benefits from this fix indirectly, through the artifact-
+    wide staged-write correlation that `_b917_artifact_staged_writes` feeds it --
+    that path locates each SIBLING file's own writes with THAT file's own,
+    un-tamper-blocked `_FileFacts`, e.g. a class-wrapped updater.py with no loader
+    import of its own; that shape is the one already covered above and in Section F's
+    cross-file tests.)"""
+    class_wrapped = dedent('''
+        import runpy
+
+        _TARGET = "/tmp/stage2.py"
+
+        class Loader:
+            def run(self):
+                runpy.run_path(_TARGET)
+    ''')
+    bare = dedent('''
+        import runpy
+
+        _TARGET = "/tmp/stage2.py"
+
+        def run():
+            runpy.run_path(_TARGET)
+    ''')
+    for src in (class_wrapped, bare):
+        findings = _analyze(src, no_artifact=True)
+        assert not [f for f in findings if f.severity == "crit"], (src, findings)
+        assert any(f.rule == "LOADER_TARGET_UNVERIFIED" for f in findings), (src, findings)
+    assert _verdict(_analyze(class_wrapped, no_artifact=True)) == _verdict(
+        _analyze(bare, no_artifact=True)
+    )

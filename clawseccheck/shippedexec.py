@@ -644,10 +644,15 @@ class _FileFacts:
         """`(record, defining_scope)` for *name*, found by walking from *scope*
         through each enclosing function scope and finally the module scope (LEGB,
         minus class scope -- a function never sees its enclosing class's namespace,
-        matching Python's own scoping rule). No `before`: the read lives in a
-        DIFFERENT, nested scope that runs later, so *scope*'s body order does not
-        bound it -- `sole()`'s default (`before=None`) already requires exactly one,
-        unconditional, direct-body binding, which is what makes this sound.
+        matching Python's own scoping rule: a class's own namespace is skipped
+        OVER, never treated as a stopping point or a resolution source, and the
+        walk keeps going past it to whatever encloses the class itself -- a
+        module-level name, or an outer function if the class is itself defined
+        locally; see `_legb_skip_wrapper`, CLAWSECCHECK-B-964). No `before`: the
+        read lives in a DIFFERENT, nested scope that runs later, so *scope*'s body
+        order does not bound it -- `sole()`'s default (`before=None`) already
+        requires exactly one, unconditional, direct-body binding, which is what
+        makes this sound.
 
         Stops at the FIRST enclosing scope that binds *name* at all (B-917 fix
         round 2): `sole()` returning None means either "no record here" or "a
@@ -659,20 +664,74 @@ class _FileFacts:
         walking outward", or an intermediate scope's own (unresolvable) binding of
         the same name gets skipped in favour of a further-out one it does not
         actually shadow to. Only a scope with NO record for *name* at all lets the
-        walk continue past it. Returns None when no enclosing scope resolves
-        *name* this way (whether never bound, or blocked by an unresolvable
-        binding somewhere along the walk)."""
+        walk continue past it. This discipline is untouched by the class-skip: a
+        class wrapper is never asked for its own records at all (a method
+        genuinely cannot read an unqualified class-body name), so skipping past
+        one can never skip past a scope that actually binds *name*. Returns None
+        when no enclosing scope resolves *name* this way (whether never bound, or
+        blocked by an unresolvable binding somewhere along the walk)."""
         cur = scope
         while True:
             nxt = self.scope_of(cur)
             if nxt is None:
-                return None
+                nxt = self._legb_skip_wrapper(cur)
+                if nxt is None:
+                    return None
             if self.records(nxt).get(name):
                 rec = self.sole(name, nxt)
                 return (rec, nxt) if rec is not None else None
             if nxt is self.tree:
                 return None
             cur = nxt
+
+    def _legb_skip_wrapper(self, cur: ast.AST) -> "ast.AST | None":
+        """Called only once `self.scope_of(cur)` has already returned None for
+        *cur* (always itself a FunctionDef/AsyncFunctionDef here -- the only kind
+        of node `_legb_lookup`'s walk ever holds as `cur`). `scope_of()` answers
+        "the immediate scope of this one node" and, by design, stops dead the
+        instant it sees a ClassDef/Lambda/ListComp/SetComp/DictComp/GeneratorExp
+        ancestor rather than reporting whatever encloses THAT ancestor -- exactly
+        right for `scope_of()`'s own contract, but wrong for an outward LEGB walk,
+        which must keep going past a class the way real Python scoping does
+        (CLAWSECCHECK-B-964: a method has no visibility into its own class's
+        namespace, but it still sees whatever encloses the class).
+
+        Climbs `self.parents` past a run of such wrapper ancestors (a class
+        nested in a class, a class nested in a function, ...) and returns the
+        first real FunctionDef/Module `scope_of()` reports for one of them, or
+        None once the chain runs out without ever finding one (the original None
+        was for some other reason -- e.g. `scope_of`'s `child not in cur.body`
+        case -- and there is genuinely nothing further to walk to).
+
+        Never inspects a wrapper's own `records()` -- a method cannot resolve an
+        unqualified class-body name, so a class's own bindings of *name* must
+        never be treated as a stopping point here, only skipped over entirely.
+        A FunctionDef/AsyncFunctionDef cannot be nested directly inside a Lambda
+        or a comprehension at all (their bodies are one expression, never a `def`
+        statement), so only the ClassDef case is reachable in practice; the other
+        wrapper types are handled purely for symmetry with `scope_of()`'s own
+        contract.
+
+        Climbs `self.parents` one raw AST-parent hop at a time, past non-scope
+        statement containers (`If`/`Try`/`For`/`With`/`ExceptHandler`/...) exactly
+        as `scope_of()`'s own climb does -- a wrapper whose OWN `scope_of()` call
+        returns None does not mean "nothing further exists", only that the
+        nearest true scope boundary beyond it, past any such transparent
+        containers, is itself another wrapper further out (CLAWSECCHECK-B-964,
+        C-135 round 2: a class nested inside an `if`/`try` that is itself nested
+        inside another class). Only ClassDef/Lambda/comprehension ancestors are
+        ever asked for `scope_of()` here -- a non-scope container is climbed past
+        without being queried at all, so this never manufactures a scope out of
+        an `If`/`Try` body itself."""
+        parent = self.parents.get(cur)
+        while parent is not None:
+            if isinstance(parent, (ast.ClassDef, ast.Lambda, ast.ListComp, ast.SetComp,
+                                    ast.DictComp, ast.GeneratorExp)):
+                nxt = self.scope_of(parent)
+                if nxt is not None:
+                    return nxt
+            parent = self.parents.get(parent)
+        return None
 
     def literal(self, node: ast.AST, scope: ast.AST) -> "str | None":
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
