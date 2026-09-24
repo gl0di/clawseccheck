@@ -252,16 +252,31 @@ def test_r3_idless_toolsbysender_only_is_unknown_opaque():
     assert _verdicts(cfg) == (UNKNOWN, UNKNOWN, False)
 
 
-def test_r3_side_finding_named_byprovider_stays_warn_via_g1_not_fixed_here():
-    """The one shape this task deliberately does NOT fix (design §6 follow-up #1): G1's
-    OWN scoped loop (`_b68_fs_tools_granted`) grants a NAMED agent whose only `tools` key
-    is `byProvider` -- it never resolves via `resolved_scopes` (opaque-aware) at all,
-    because G1 already finds it "enumerable" first. Filed for 4.3.1; pinned here so a
-    future fix has a red test to turn green, and so THIS task cannot be credited with
-    fixing it by accident."""
+def test_r3_named_byprovider_only_is_unknown_opaque():
+    """B-938: this used to be the one shape design §6 follow-up #1 deliberately did NOT
+    fix -- G1's OWN scoped loop (`_b68_fs_tools_granted`) granted a NAMED agent whose only
+    `tools` key is `byProvider` a vacuous full grant, because `_pick_policy` ignores
+    `byProvider` entirely (an empty `_policies()` list, `all(...)` over zero policies is
+    vacuously True) and G1's own gate never asked `resolved_scopes` whether the scope was
+    opaque before calling `toolgrant.granted`. G1 now consults the same
+    `resolved_scopes(...).opaque` verdict `_fs_scope_grants` already trusts for this exact
+    class, so it skips the scope instead of granting it, matching the id-less sibling shape
+    (`test_r3_idless_byprovider_only_is_unknown_opaque`) B-737 already got right."""
     cfg = {"agents": {"list": [{"id": "main", "tools": {"byProvider": {"openai": {}}}}]}, **_CH}
     b55, b68, risk12 = _verdicts(cfg)
-    assert (b55, b68, risk12) == (WARN, WARN, True)
+    assert (b55, b68, risk12) == (UNKNOWN, UNKNOWN, False)
+
+
+def test_r3_named_toolsbysender_only_is_unknown_opaque():
+    """Same shape as `test_r3_named_byprovider_only_is_unknown_opaque` (B-938), the other
+    `OPAQUE_NARROWING_KEYS` member, on a NAMED roster entry instead of the id-less sibling
+    `test_r3_idless_toolsbysender_only_is_unknown_opaque`."""
+    cfg = {
+        "agents": {"list": [{"id": "main", "tools": {"toolsBySender": {"*": {}}}}]},
+        **_CH,
+    }
+    b55, b68, risk12 = _verdicts(cfg)
+    assert (b55, b68, risk12) == (UNKNOWN, UNKNOWN, False)
 
 
 # =====================================================================================
@@ -337,16 +352,18 @@ def test_extra_empty_allow_list_is_a_noop_layer_not_provenance():
 
 
 def test_extra_entries_byprovider_plus_bare_scope_still_warns():
-    """Verdict-only (design's extras row): `main` is a NAMED agent whose only `tools` key
-    is `byProvider`, so this is actually the SAME pre-existing G1 gap as
-    `test_r3_side_finding_named_byprovider_stays_warn_via_g1_not_fixed_here` -- G1's own
-    `scoped` loop (`_b68_fs_tools_granted`) processes `main` (it has an id and a truthy
-    `tools`), calls `toolgrant.granted` on it, and gets a vacuous "everything granted"
-    because `_pick_policy` ignores `byProvider` entirely -- so G1 is ALREADY enumerable
-    here and `_fs_scope_grants` (this design's own code) never runs. `ops` never appears
-    in the evidence because of that, not because of anything B-737 changed; the "scope
-    ops only" phrasing in the design's own extras table undersells this interaction. The
-    verdict triple is still what the design predicts."""
+    """Verdict-only (design's extras row), mechanism updated by B-938: `main` is a NAMED
+    agent whose only `tools` key is `byProvider`. Before B-938, G1's own `scoped` loop
+    (`_b68_fs_tools_granted`) processed `main` (it has an id and a truthy `tools`), called
+    `toolgrant.granted` on it, and got a vacuous "everything granted" because `_pick_policy`
+    ignores `byProvider` entirely -- so G1 was ALREADY enumerable there and `_fs_scope_grants`
+    never ran for this config at all. Now G1 consults `resolved_scopes(...).opaque` and skips
+    `main`, which makes G1 NOT enumerable (`scoped` stays empty), so `_fs_scope_grants` runs:
+    `main` is skipped again there (still opaque), and `ops` -- an id'd agent with an empty
+    `tools` block, `policy_layers` empty -- is read as OpenClaw's own PERMISSIVE DEFAULT, the
+    same B-737 provenance class as every other undeclared scope. `ops` now genuinely appears
+    in the evidence, driving the same WARN/WARN/True triple the design predicted for a
+    different reason than before."""
     cfg = {
         "agents": {
             "entries": {

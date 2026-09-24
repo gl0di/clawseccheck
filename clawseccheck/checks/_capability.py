@@ -954,25 +954,43 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     # `toolgrant._unresolved_profile(cfg, scope)` isolates exactly that reason, as
     # opposed to every OTHER way `_policies` can come back empty -- chiefly a real
     # config whose only `tools` key is an opaque `byProvider`/`toolsBySender` layer this
-    # module cannot read at all (`OPAQUE_NARROWING_KEYS`), a pre-existing, separately-
-    # tracked blind spot this task must not silently "fix" as a side effect (see
-    # `tests/test_b737_permissive_default_scope.py::
-    # test_r3_side_finding_named_byprovider_stays_warn_via_g1_not_fixed_here`, whose own
-    # `{"tools": {"byProvider": {"openai": {}}}}` config has an empty `_policies()` too,
-    # for that different reason, and must keep the pre-existing vacuous-grant WARN it
-    # already (if accidentally) produces). NEVER `toolgrant._block_well_formed`, which
-    # would also (wrongly) discard the "readonly" scope above -- it inspects this
-    # scope's OWN tools block in isolation and cannot see the real global layer that
-    # still resolves it. A scope this loop skips falls through to `_fs_scope_grants`
+    # module cannot read at all (`OPAQUE_NARROWING_KEYS`). That second shape is now
+    # handled too (B-938, below) -- NEVER `toolgrant._block_well_formed`, which would
+    # also (wrongly) discard the "readonly" scope above -- it inspects this scope's OWN
+    # tools block in isolation and cannot see the real global layer that still resolves
+    # it. A scope this loop skips falls through to `_fs_scope_grants`
     # (`toolgrant.resolved_scopes`) below, which also lands on UNKNOWN for it (that
     # helper's own, stricter, whole-config `_block_well_formed` contract -- see its
     # docstring) -- never a silent drop to "nothing granted".
+    #
+    # B-938: this loop used to gate ONLY on `entry.id` + a truthy `entry.get("tools")`
+    # before calling `toolgrant.granted(cfg, t, entry.id)` for each fs tool -- a
+    # SEPARATE "is this scope enumerable" test from the one `_fs_scope_grants` below
+    # already uses (`toolgrant.resolved_scopes(...).opaque`). The two disagreed on
+    # exactly the shape `_unresolved_profile` above does not cover: a named entry whose
+    # ONLY `tools` content is `byProvider`/`toolsBySender`. `_pick_policy` (and
+    # `_profile_policy`, since neither key is a recognised `profile` string) never reads
+    # either key, so such an entry's `_policies(cfg, scope)` comes back EMPTY --
+    # `_unresolved_profile` is False for it (no `profile` key at all, let alone an
+    # unresolved one), so the old gate above did not skip it -- and `all(...)` over zero
+    # policies is vacuously True for every tool: a confident full grant manufactured
+    # from a genuinely opaque, unresolvable config, not a real one. This loop now
+    # consults the SAME `resolved_scopes` opaqueness verdict `_fs_scope_grants` already
+    # trusts for this exact class, so the two gates can no longer disagree; a scope this
+    # skips falls through to `_fs_scope_grants`'s own opaque-skip below, landing on the
+    # same UNKNOWN `_fs_scope_grants` already produces for every other opaque scope --
+    # never a silent drop to "nothing granted".
     scoped: set = set()
     _roster = agent_roster(cfg)
+    _scope_opacity = {
+        _res.scope: _res.opaque for _res in (_toolgrant.resolved_scopes(cfg) or ())
+    }
     for _entry in _roster:
         if not _entry.id or not isinstance(_entry.entry, dict):
             continue
         if not _entry.entry.get("tools"):
+            continue
+        if _scope_opacity.get(_entry.id):
             continue
         if not _toolgrant._policies(cfg, _entry.id) and _toolgrant._unresolved_profile(cfg, _entry.id):
             continue
