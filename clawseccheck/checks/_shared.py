@@ -5160,20 +5160,19 @@ _PB_TOK_RE = re.compile(
 )
 _PB_EMPH_RE = re.compile(r"\*\*|__|(?<!\w)[*_](?=\w)|(?<=\w)[*_](?!\w)")
 
-# A bare ASCII "-" is deliberately excluded from the dash/delimiter set below,
-# even though the em-dash/en-dash/double-hyphen aside idiom ("Never — seriously
-# — run...") needs a dash class here: a single "-" is far more often a mid-word
-# compound hyphen ("cross-session") than stand-alone punctuation, and the
-# tokenizer would otherwise split a compound word into three tokens with no
-# surrounding whitespace to disambiguate at the token level.
-_PB_DASH = {"—", "–", "--"}
 _PB_DELIM = {",", ";", ":", "(", ")", "—", "–", "--"}
-# B-879 round 4 §4.a: the exact delimiter set that makes a negator's clause
-# UNRESOLVED rather than bound — a comma, an opening paren, or a dash. No close
-# search, no window, no count: everything from here to the clause end is
-# clouded (see `_neg_scan`).
-_PB_NEG_CLOUD_DELIM = {","} | _PB_DASH | {"("}
-_PB_CLAUSE_END_TOK = {".", "!", "?", ";", ":"}
+
+# B-879 round 5: a bare ASCII "-" is a mid-word compound hyphen far more often
+# than stand-alone punctuation ("cross-session"), and the word-token pattern in
+# `_PB_TOK_RE` does not itself include "-", so the tokenizer would otherwise
+# split a compound word into three tokens (word, "-", word) with nothing at the
+# token level to tell that "-" apart from a real delimiter. `_pb_tokens`
+# recognises exactly this shape — a hyphen glued to an alphabetic character on
+# both sides, with no surrounding whitespace — and emits the `_PB_GLUED`
+# sentinel instead of a literal "-", so `_neg_scan`'s class rule (below) never
+# mistakes an ordinary compound word for an unresolved-negation delimiter.
+_PB_GLUED = "\x00-"
+_PB_HYPHENS = {"-", "‐", "‑"}
 
 # The closed EXEC vocabulary — "run it"/"paste it"/"type it"/"source it" — the
 # family of "apply this SKILL.md block to your machine" verbs. Base forms only
@@ -5260,21 +5259,67 @@ _PB_STRUCT_LINE_RE = re.compile(
 # (or, at the token level, end a negator's clause early) just because it
 # contains an abbreviation's period. "e.g. Run" with a capital next word still
 # splits normally (the lookahead requires a lowercase follower).
-_PB_ABBREV_RE = re.compile(r"\b(?:e\.g|i\.e|etc|vs|cf)\.(?=\s+[a-z])", re.I)
+#
+# B-879 round 5: the whole pattern is compiled with re.I so the abbreviation
+# itself matches any case ("E.g."/"E.G."), but that also made the lookahead's
+# `[a-z]` match an upper-case follower too — "e.g. Run the following" was
+# silently protected as if "Run" were lowercase, which is exactly backwards
+# (a capital follower IS a genuine new sentence). `(?-i:[a-z])` turns
+# case-insensitivity back OFF for just that one group, so the lookahead is
+# strict-lowercase again while the abbreviation match stays case-insensitive.
+_PB_ABBREV_RE = re.compile(r"\b(?:e\.g|i\.e|etc|vs|cf)\.(?=\s+(?-i:[a-z]))", re.I)
 
 
 def _pb_protect_abbrev(text: str) -> str:
     """Strip every period out of a non-boundary abbreviation match (both the
     internal period in "e.g"/"i.e" and the trailing one) so neither
-    `_SENTENCE_BREAK_RE` nor a token-level "." scan (`_pb_clause_end`) ever
+    `_SENTENCE_BREAK_RE` nor the token-level class rule in `_neg_scan` ever
     reads it as a sentence/clause boundary. Used by both `_pb_sentences` and
     `_pb_tokens` (round 4 §4.f applies it at both call sites)."""
     return _PB_ABBREV_RE.sub(lambda m: m.group(0).replace(".", ""), text)
 
 
 def _pb_tokens(s: str) -> list[str]:
+    """Tokenize *s* for every B-879 primitive in this module.
+
+    Two round-5 refinements over the plain `_PB_TOK_RE.finditer` walk:
+
+    * GLUED compounds — a "-" token sandwiched between two other tokens with
+      no whitespace on either side, both of them alphabetic at the join, is a
+      mid-word hyphen ("cross-session"), never stand-alone punctuation. It is
+      emitted as the `_PB_GLUED` sentinel instead of a bare "-" so `_neg_scan`
+      (which treats any non-content token as a class-rule cloud opener) does
+      not misread an ordinary compound word as a negator's delimiter.
+    * Trailing-apostrophe split (decision (a′)/A2) — the word-token pattern's
+      character class includes the apostrophe so a WORD-INTERNAL one
+      ("don't") stays glued on, but that means a CLOSING quote mark glued
+      onto a word's end ("Never'") is swallowed into the word too, and a
+      token like "never'" no longer matches the bare negator vocabulary
+      (`_PB_NEG1`). A trailing "'" is always a closing quote, never part of
+      the word, so it is split into its own token here.
+    """
     s = _pb_protect_abbrev(s)
-    return [t.group(0).lower().replace("’", "'") for t in _PB_TOK_RE.finditer(s)]
+    matches = list(_PB_TOK_RE.finditer(s))
+    out: list[str] = []
+    for k, m in enumerate(matches):
+        raw = m.group(0)
+        if (
+            raw in _PB_HYPHENS
+            and 0 < k < len(matches) - 1
+            and matches[k - 1].end() == m.start()
+            and matches[k + 1].start() == m.end()
+            and matches[k - 1].group(0)[-1:].isalpha()
+            and matches[k + 1].group(0)[:1].isalpha()
+        ):
+            out.append(_PB_GLUED)
+            continue
+        t = raw.lower().replace("’", "'")
+        if len(t) > 1 and t[0].isalpha() and t[-1] == "'":
+            out.append(t.rstrip("'"))
+            out.append("'")
+        else:
+            out.append(t)
+    return out
 
 
 def _pb_sentences(text: str) -> list[str]:
@@ -5373,40 +5418,75 @@ def _pb_tail_unscoped(ts: list[str]) -> bool:
     return True
 
 
-def _pb_clause_end(tokens: list[str], j: int) -> int:
-    """The index of the first clause/sentence terminator at or after *j*, or
-    len(tokens) when none exists — the right edge of a round-4 cloud."""
-    for k in range(j, len(tokens)):
-        if tokens[k] in _PB_CLAUSE_END_TOK:
-            return k
-    return len(tokens)
+def _pb_has_content(t: str) -> bool:
+    """Does *t* contain at least one alphanumeric character? The round-5 class
+    rule (see `_neg_scan_ex`) tests this instead of enumerating a punctuation
+    set: any token that FAILS it is, by construction, punctuation of some
+    kind — a comma, a dash, a bracket, an ellipsis, an emoji, a full stop, a
+    box-drawing character, any of the several thousand Unicode punctuation
+    code points nobody sat down and enumerated — and a token this shape can
+    always open a negator's clause the same way a comma can."""
+    return any(c.isalnum() for c in t)
 
 
-def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]:
-    """B-879 round 4 §4.a: resolve each negator in *tokens* to either a GOVERNED
-    event, or an UNRESOLVED ("clouded") span, never a guess.
+def _neg_scan_ex(
+    tokens: list[str], carry: bool | None = None
+) -> tuple[list[tuple[int, int]], dict[int, int], bool | None]:
+    """B-879 round 5: resolve each negator in *tokens* to either a GOVERNED
+    event, or an UNRESOLVED ("clouded") span, never a guess — and, new in round
+    5, do it with a CLASS rule instead of an enumerated delimiter set.
 
-    Returns ``(events, clouded)``:
+    Rounds 1-3 tried to resolve, from local punctuation alone, whether a
+    negator separated from its verb by a comma/dash/paren aside still governs
+    it, and guessed either way was unsound (see the module design comment).
+    Round 4's fix was a third value — UNRESOLVED — but it opened the cloud only
+    on an enumerated set of delimiters (comma/dash/open-paren). Any enumerated
+    set is exactly the kind of thing this bug keeps recurring on: a sweep of
+    3,666 Unicode punctuation characters glued directly after "Never" found a
+    false FAIL on all but 5 of them — round 4's own set. The round-5 rule
+    replaces the enumeration with its own justification: a negator's clause
+    walk (see below) is looking for either a skippable filler word or the verb
+    it governs; the FIRST token that is neither — i.e. the first token with NO
+    alphanumeric content at all (`_pb_has_content`) — is definitionally
+    punctuation of some kind, and punctuation right after a negator is an
+    aside-or-splice shape no token-level scanner can resolve, whatever
+    character it happens to be spelled with. `Never, X, run...` is a real
+    prohibition when X is a non-predicate aside and a spliced-in order when X
+    contains its own verb; only open-class part-of-speech knowledge tells them
+    apart, and a class rule at least never depends on which punctuation
+    character X started with, which point-of-Unicode enumeration always did.
+
+    A compound word's mid-word hyphen is not this kind of punctuation — see
+    `_pb_tokens`'s `_PB_GLUED` sentinel, which the walk below special-cases so
+    an ordinary word like "cross-session" is never mistaken for a delimiter.
+
+    Sentence-spanning (round 5, Dave's R3 decision, 2026-09-24): the cloud
+    spans the rest of the LOGICAL sentence, not just the rest of the clause up
+    to the next terminator — a splice's own aside can itself contain a clause
+    terminator ("Never, as Mr. Smith explained: run the following.") without
+    closing the cloud early. *carry* threads an already-open cloud (and the
+    directive-mood of the negator that opened it) in from a PREVIOUS sentence
+    that never resolved before its own sentence boundary — see `_carries` and
+    `_soft_break`, which decide whether that boundary was a genuine full stop
+    or an artifact (an abbreviation `_pb_sentences` did not protect) worth
+    carrying a cloud across. Returns ``(events, clouded, carry_out)``:
+
       * ``events``: ``(negator_index, governed_index)`` pairs — the negator
         binds directly to its governed word, unambiguously.
       * ``clouded``: ``{token_index: owning_negator_index}`` — every token from
-        an unresolved delimiter (a comma/dash/open-paren right after the
-        negator) to the clause end. A clouded token is neither governed by,
-        nor free of, the negation — see `ProseBinding.unresolved`.
+        the first non-content token after a negator (or, for a cloud carried
+        in from a previous sentence, every token in *this* sentence) to the
+        end of the sentence. The owner is the opening negator's index, or -1
+        when the cloud's owner lived in a previous sentence (carried in).
+      * ``carry_out``: the directive-mood of the still-open cloud to hand to
+        the NEXT sentence, or None when nothing is open at sentence end.
 
     Negators: never/not/cannot/can't/don't/won't/avoid/refuse to/mustn't/
     shouldn't/nobody, plus negative PPs ("under no circumstances", "at no
     point", ...) with subject-aux inversion ("...should you/anyone run...").
 
     After the negator: skip adverbs (ever/even/once/-ly..., but never an EXEC
-    verb — `_pb_is_adverb`), try/attempt to, "to be" and "to <EXEC>". A comma,
-    dash or open paren right after the negator (or after an adverb run) makes
-    the REST OF THE CLAUSE unresolved — no close search, no window, no count
-    (round 4 replaces rounds 1-3's closed-parenthetical scan entirely; that
-    scan could not tell a non-predicate aside, "under any circumstances", from
-    a spliced-in order, "skip this step", because both are the same token
-    shape — only open-class part-of-speech knowledge separates them, which a
-    stdlib scanner does not have).
+    verb — `_pb_is_adverb`), try/attempt to, "to be" and "to <EXEC>".
 
     Negative PPs: a comma right after the PP is skipped ONLY as part of a full
     subject-aux inversion (comma, AUX, INV_SUBJ) — "Under no circumstances,
@@ -5420,6 +5500,15 @@ def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]
     events: list[tuple[int, int]] = []
     clouded: dict[int, int] = {}
     n = len(tokens)
+    carry_mood = carry
+    if carry is not None:
+        # The whole sentence is already inside a cloud carried in from before
+        # it started; owner -1 marks "opened in a previous sentence" so
+        # `_sentence_directed`/`_has_clouded_exec_reaching` can tell it apart
+        # from a cloud this sentence opened itself.
+        for k in range(n):
+            clouded.setdefault(k, -1)
+
     i = 0
     while i < n:
         t = tokens[i]
@@ -5444,7 +5533,7 @@ def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]
             if start < n and tokens[start] == ",":
                 # A comma right after the PP is consumed ONLY as part of a full
                 # subject-aux inversion; otherwise it is left in place for the
-                # generic delimiter scan below, which clouds it (round 4 §4.a).
+                # generic class-rule scan below, which clouds it.
                 if (
                     start + 2 < n
                     and tokens[start + 1] in _PB_AUX
@@ -5463,21 +5552,34 @@ def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]
         j = start
         clouded_here = False
         while j is not None and j < n:
-            if _pb_is_adverb(tokens[j]):
+            tj = tokens[j]
+            if tj == _PB_GLUED:
+                # An intra-word hyphen is not a delimiter (see `_pb_tokens`) —
+                # stop the skip-walk here and let the negator govern it, the
+                # same neutral (non-EXEC, non-eventful) outcome round 4 gave a
+                # bare "-" that happened to land in this position.
+                break
+            if _pb_is_adverb(tj):
                 j += 1
                 continue
-            if tokens[j] in ("try", "attempt") and j + 1 < n and tokens[j + 1] == "to":
+            if tj in ("try", "attempt") and j + 1 < n and tokens[j + 1] == "to":
                 j += 2
                 continue
-            if tokens[j] == "to" and j + 1 < n and (
+            if tj == "to" and j + 1 < n and (
                 tokens[j + 1] == "be" or _PB_EXEC_RE.match(tokens[j + 1])
             ):
                 j += 1
                 continue
-            if tokens[j] in _PB_NEG_CLOUD_DELIM:
-                end = _pb_clause_end(tokens, j)
-                for k in range(j, end):
+            if not _pb_has_content(tj):
+                # The class rule: nothing between the negator and here has
+                # been a real word, and *this* token has no alphanumeric
+                # content either, so it is punctuation of some kind. Cloud
+                # the rest of the sentence and remember this negator's own
+                # mood as the carry candidate, in case the cloud is still open
+                # at the sentence's end.
+                for k in range(j, n):
                     clouded.setdefault(k, i)
+                carry_mood = _pb_negator_mood(tokens, i)
                 clouded_here = True
                 j = None
                 continue
@@ -5489,6 +5591,14 @@ def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]
     governed = {g for _n, g in events}
     for g in governed:
         clouded.pop(g, None)
+    return events, clouded, carry_mood
+
+
+def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]:
+    """Single-sentence convenience wrapper over `_neg_scan_ex` — no carry in,
+    carry discarded — kept for callers (and tests) that only ever look at one
+    sentence in isolation."""
+    events, clouded, _carry_out = _neg_scan_ex(tokens)
     return events, clouded
 
 
@@ -5597,16 +5707,20 @@ def _directive(tokens: list[str], i: int, deixis: frozenset, introducer: bool) -
     return ok and _reaches_block(tokens, i, deixis, introducer) is not None
 
 
-def _sentence_directed(sent: str, deixis: frozenset, introducer: bool) -> bool:
+def _sentence_directed(
+    sent: str, deixis: frozenset, introducer: bool, carry: bool | None = None
+) -> bool:
     """Is there a live, free-standing directive EXEC verb in *sent*? Round 4
     additions over the base frames: (d) is gated on the NEGATOR's own mood
     (`_pb_directive_mood`) — "Attackers never fail to run the following:" has a
     third-person subject before "never", so it no longer counts as an order;
     and (d′) recovers an inverting verb found INSIDE a cloud when it opens its
     own chunk and the cloud's own negator is in directive mood ("Never, under
-    any circumstances, forget to run the following:")."""
+    any circumstances, forget to run the following:"). Round 5 adds *carry*
+    (see `_neg_scan_ex`/`_carries`): a cloud still open from a previous
+    sentence, threaded in so (d′) can judge an inverting verb sitting in it."""
     ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
-    evs, clouded = _neg_scan(ts)
+    evs, clouded, _carry_out = _neg_scan_ex(ts, carry)
     governed = {g for _n, g in evs}
     cloud_idx = set(clouded)
     # (d) negator + inverting verb — only when the negator itself is addressed
@@ -5625,7 +5739,9 @@ def _sentence_directed(sent: str, deixis: frozenset, introducer: bool) -> bool:
     # (d′) round 4 §4.e, recommended and included in the measured candidate: an
     # inverting verb INSIDE a cloud still directs when it opens its own chunk
     # (nothing but the cloud's own delimiter precedes it) and the cloud's
-    # negator is itself in directive mood.
+    # negator is itself in directive mood. A cloud CARRIED IN from a previous
+    # sentence has no negator token in *ts* to re-read (`neg_idx == -1`); its
+    # mood is whatever `_carries` threaded in as *carry*.
     for i in sorted(cloud_idx):
         t = ts[i]
         if t not in _PB_INVERT:
@@ -5641,7 +5757,11 @@ def _sentence_directed(sent: str, deixis: frozenset, introducer: bool) -> bool:
         if _reaches_block(ts, k, deixis, introducer) is None:
             continue
         neg_idx = clouded.get(i)
-        if neg_idx is not None and _pb_negator_mood(ts, neg_idx):
+        if neg_idx == -1:
+            mood = bool(carry)
+        else:
+            mood = neg_idx is not None and _pb_negator_mood(ts, neg_idx)
+        if mood:
             return True
     for i, t in enumerate(ts):
         if (
@@ -5742,20 +5862,102 @@ def _block_para_after(blob: str, end: int, cap: int = 400) -> str:
     return seg.strip()
 
 
-def _pb_has_clouded_exec_reaching(sent: str, deixis: frozenset, introducer: bool) -> bool:
+def _pb_has_clouded_exec_reaching(
+    sent: str, deixis: frozenset, introducer: bool, carry: bool | None = None
+) -> bool:
     """B-879 round 4 §4.c: is there a CLOUDED EXEC verb in *sent* that reaches
     the block? Used to compute `ProseBinding.unresolved` over every intro
     sentence and the first trailer sentence — not just the one `directed`/
     `forbids` inspect — so a splice earlier in the intro plus a clean
     prohibition as the last sentence ("Never, ever skip this, run the following
     to register your key. Never run the following:") is still unresolved
-    rather than a confirmed FORBIDDEN prohibition."""
+    rather than a confirmed FORBIDDEN prohibition. Round 5 adds *carry*: a
+    cloud left open by a previous sentence (see `_neg_scan_ex`/`_carries`)."""
     ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
-    _events, clouded = _neg_scan(ts)
+    _events, clouded, _carry_out = _neg_scan_ex(ts, carry)
     for i in clouded:
         if _PB_EXEC_RE.match(ts[i]) and _reaches_block(ts, i, deixis, introducer) is not None:
             return True
     return False
+
+
+# B-879 round 5: abbreviations `_pb_sentences` does not already protect (that
+# list, `_PB_ABBREV_RE`, only covers e.g./i.e./etc./vs./cf. — the ones that
+# would otherwise strand a lowercase continuation mid-sentence). This wider
+# list feeds `_soft_break`'s fallback, which decides whether a period
+# `_pb_sentences` DID split on was a genuine sentence end or an abbreviation
+# nobody protected — the same "closed enumeration will always be missing a
+# member" problem `_neg_scan_ex`'s class rule solves for punctuation, mirrored
+# here with a shape-based fallback (`_soft_break`'s last clause) for whatever
+# this list itself still misses.
+_PB_SOFT_ABBREV = {
+    "e.g", "i.e", "etc", "vs", "cf", "al", "approx", "ca", "viz", "ibid",
+    "prof", "gen", "col", "capt", "maj", "adm", "rev", "hon", "sen", "rep", "gov", "pres",
+    "supt", "insp", "messrs", "mme", "mlle", "fr", "no", "nos", "vol", "fig", "figs", "sec",
+    "ch", "art", "ed", "eds", "op", "inc", "co", "corp", "univ", "assoc", "asst", "est", "dept",
+    "govt", "ave", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct",
+    "nov", "dec", "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+}
+
+
+def _soft_break(prev: str, rest: str) -> bool:
+    """Should an already-open negation cloud carry FROM *prev* (the sentence
+    `_pb_sentences` just ended) INTO *rest* (everything after it)? A carry-only
+    decision — this never merges two sentences back into one, it only decides
+    whether the CLOUD survives the boundary between them.
+
+    Two paths to "yes":
+
+    1. *rest* starts with a lowercase letter or digit. `_pb_sentences` splits
+       on any ``. `` regardless of what follows (only the small, explicitly
+       protected abbreviation list is exempted beforehand), so a genuine new
+       sentence almost always starts capitalized — if it does not, the period
+       that ended *prev* was not really a full stop.
+    2. *prev* ends in a single, un-doubled period, and the word immediately
+       before it looks like an abbreviation `_pb_sentences` did not protect —
+       a single letter (an initial), an internal period ("U.S"), a member of
+       `_PB_SOFT_ABBREV`, or (the class-rule fallback, for whatever that list
+       itself still misses) a short, non-uppercase, vowel-less token, the same
+       shape common abbreviations like "Blvd"/"Mfg" take. Guarded off when the
+       very next word is a base-form EXEC verb ("e.g. Run the following:" is a
+       real new sentence, capital or not — this only matters for the small
+       sliver `_pb_protect_abbrev` did not already catch)."""
+    m = re.search(r"[A-Za-z0-9]", rest)
+    if m and m.group(0).islower():
+        return True
+    p = prev.rstrip()
+    if not p.endswith(".") or p.endswith(".."):
+        return False
+    wm = re.search(r"([A-Za-z](?:[A-Za-z.]*[A-Za-z])?)\.$", p)
+    if not wm:
+        return False
+    w = wm.group(1)
+    fw = re.match(r"\W*([A-Za-z]+)", rest)
+    if fw and _PB_EXEC_BASE_RE.match(fw.group(1).lower()):
+        return False
+    return (
+        len(w) == 1
+        or "." in w
+        or w.lower() in _PB_SOFT_ABBREV
+        or (2 <= len(w) <= 5 and not w.isupper() and not re.search(r"[aeiouyAEIOUY]", w))
+    )
+
+
+def _carries(sents: list[str]) -> list[bool | None]:
+    """The carry-IN value for each sentence in *sents* (round 5's sentence
+    spanning, Dave's R3 decision): ``out[k]`` is whatever cloud was still open
+    when sentence *k* started, or None when nothing was. Threads `_neg_scan_ex`
+    across the whole sequence, consulting `_soft_break` after each sentence to
+    decide whether its own carry-out should reach the NEXT one."""
+    out: list[bool | None] = []
+    carry: bool | None = None
+    for k, s in enumerate(sents):
+        out.append(carry)
+        ts = _pb_tokens(_PB_EMPH_RE.sub("", s))
+        _events, _clouded, carry_out = _neg_scan_ex(ts, carry)
+        rest = "".join(sents[k + 1 :])
+        carry = carry_out if (carry_out is not None and rest and _soft_break(s, rest)) else None
+    return out
 
 
 def _prose_binding(blob: str, start: int, end: int, *, heading_matches=None) -> ProseBinding:
@@ -5771,12 +5973,19 @@ def _prose_binding(blob: str, start: int, end: int, *, heading_matches=None) -> 
     tsents = _pb_sentences(trail)
     last = isents[-1] if isents else ""
     first_t = tsents[0] if tsents else ""
+    # B-879 round 5: an unresolved cloud can span more than one `_pb_sentences`
+    # split (a splice's own aside may itself contain what looks like a clause
+    # terminator) — `carry_in[k]` is the cloud state, if any, still open when
+    # intro sentence k starts. The trailer's first sentence never inherits a
+    # carry: it sits on the OTHER side of the code block itself, a real
+    # boundary no aside crosses.
+    carry_in = _carries(isents)
 
     directed = False
     conflict = False
     for k, s in enumerate(isents):
         intro_last = k == len(isents) - 1
-        if _sentence_directed(s, _PB_FWD_DEIXIS, introducer=intro_last):
+        if _sentence_directed(s, _PB_FWD_DEIXIS, intro_last, carry_in[k]):
             directed = True
             if intro_last and _forbids(s, _PB_FWD_DEIXIS) == "governs":
                 conflict = True  # directive + unscoped prohibition, SAME sentence
@@ -5795,7 +6004,7 @@ def _prose_binding(blob: str, start: int, end: int, *, heading_matches=None) -> 
     # governance is unresolved, even when the LAST intro sentence reads as a
     # clean, unscoped prohibition.
     unresolved = any(
-        _pb_has_clouded_exec_reaching(s, _PB_FWD_DEIXIS, introducer=(k == len(isents) - 1))
+        _pb_has_clouded_exec_reaching(s, _PB_FWD_DEIXIS, k == len(isents) - 1, carry_in[k])
         for k, s in enumerate(isents)
     ) or bool(first_t and _pb_has_clouded_exec_reaching(first_t, _PB_BACK_DEIXIS, introducer=True))
 

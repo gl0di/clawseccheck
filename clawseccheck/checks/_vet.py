@@ -2027,8 +2027,27 @@ def _authkey_block_intent(blob: str, start: int, end: int) -> str:
       an otherwise-clean prohibition whose governance is UNRESOLVED elsewhere in
       the same intro/trailer (round 4 §4.c), or no recognised binding at all.
     * DOC_SIGNAL: a soft, unbound signal — a scoped prohibition, a marker/label, a
-      third-person description, or unreadable (non-Latin) surrounding text.
+      third-person description, unreadable (non-Latin) surrounding text, or (round
+      5, decision (e)) an UNRESOLVED clouded EXEC verb that reaches the block with
+      no other binding recognised either way (the catch-all case, as opposed to
+      the `pb.forbids == "governs"` branch above, which is an otherwise-clean
+      prohibition made unresolved by a splice ELSEWHERE in the prose).
     * BARE: no prose at all around the block.
+
+    Decision (e) (Dave, 2026-09-24): folding `pb.unresolved` into the DOC_SIGNAL
+    rung, not just the FORBIDDEN one, matters for a caller this function does not
+    itself know about — `_authkey_persistence_hits`'s UNFENCED/inline-code-span
+    call site remaps this five-way rung a second time, and that remap treats a
+    bare "DOC" ("nothing recognised at all") as CONVICT (the base direction for a
+    raw line with no fence around it) while treating "DOC_SIGNAL" as a softer
+    "DOC" instead. Before this fold, a clouded negation on the inline path (e.g.
+    an unfenced "Never, under any circumstances, run `...`.") landed on the same
+    plain "DOC" a truly signal-free line gets, and inherited that path's convict
+    default — the exact shape decision (a) fixed for the FENCED path, but never
+    reached here because it is a completely separate downstream remap. On the
+    FENCED path this fold changes nothing observable: DOC and DOC_SIGNAL already
+    reach the identical WARN outcome there (see `_authkey_persistence_hits`'s
+    `else: intent = {"DOC_SIGNAL": "DOC"}...` branch).
     """
     pb = _prose_binding(blob, start, end)
     if pb.directed:
@@ -2039,7 +2058,7 @@ def _authkey_block_intent(blob: str, start: int, end: int) -> str:
         return "DOC" if pb.unresolved else "FORBIDDEN"
     if not pb.has_prose:
         return "BARE"
-    if pb.forbids == "scoped" or pb.marker or pb.described or pb.unreadable:
+    if pb.forbids == "scoped" or pb.marker or pb.described or pb.unreadable or pb.unresolved:
         return "DOC_SIGNAL"
     return "DOC"
 
