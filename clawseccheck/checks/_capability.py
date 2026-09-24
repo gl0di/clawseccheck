@@ -1056,6 +1056,22 @@ class _FsScopeGrants(NamedTuple):
     wording only. ``inert_defaults_tools`` is true when ``agents.defaults.tools`` is set beside
     a declared roster key, where the vendor ignores it entirely (``toolscope_case9``) -- kept
     separate so a finding can say so without implying "nothing declared".
+
+    B-943: ``fully_resolved`` and ``checked_scopes`` exist so a caller can tell "resolved,
+    and genuinely grants nothing" apart from "could not resolve" instead of collapsing both
+    into the same fallback. ``fully_resolved`` is true exactly when ``opaque_scopes`` is
+    empty -- every scope ``resolved_scopes`` returned was assessable, so this function's own
+    "cannot tell" reason never fired for ANY of them (the OTHER "cannot tell" reason -- the
+    whole config being unresolvable -- is already the ``None`` return, one layer up).
+    ``checked_scopes`` names every non-opaque (and, under ``confinement=True``, non-confined)
+    scope this actually ran the grant test against, whether or not that test found anything --
+    ``default_scopes``/``declared_scopes`` are the subset of it where something WAS found. A
+    caller reporting "nothing granted" can therefore name exactly which scopes back that claim
+    (``checked_scopes``) instead of a bare "trust me", and only when ``fully_resolved`` is true
+    AND ``checked_scopes`` is non-empty -- e.g. every scope confined away under
+    ``confinement=True`` leaves ``checked_scopes`` empty with nothing to back a claim, so that
+    edge is deliberately left for the caller to keep reading as unresolved, not promoted to a
+    PASS with no scope to name.
     """
 
     default_tools: frozenset
@@ -1064,6 +1080,8 @@ class _FsScopeGrants(NamedTuple):
     declared_scopes: "tuple[str, ...]"
     opaque_scopes: "tuple[str, ...]"
     inert_defaults_tools: bool
+    checked_scopes: "tuple[str, ...]"
+    fully_resolved: bool
 
 
 def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsScopeGrants | None":
@@ -1083,9 +1101,21 @@ def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsSco
 
     Returns ``None`` when ``resolved_scopes`` itself returns ``None`` (an empty/malformed
     config, an unparseable tools block, or two roster agents that normalize to the same id) --
-    the caller keeps its base UNKNOWN, never a guess. A non-``None`` result with both tool sets
-    empty (no non-opaque, non-confined scope grants anything in ``family``) is likewise read as
-    "nothing found" by both callers.
+    the caller keeps its base UNKNOWN, never a guess.
+
+    B-943: a non-``None`` result is now a THREE-way answer, not two:
+
+    1. Something was found (``default_tools`` or ``declared_tools`` non-empty) -- a real grant,
+       unchanged from before this change.
+    2. Nothing was found, but ``fully_resolved`` is true and ``checked_scopes`` is non-empty --
+       every scope this could examine WAS examined (none opaque), and genuinely grants nothing
+       in ``family``. This is a real, positive "resolved, and resolved to nothing" result, not
+       an "I couldn't tell" -- callers should read it as PASS, naming ``checked_scopes``.
+    3. Nothing was found and either ``fully_resolved`` is false (at least one scope was opaque,
+       so this function's own resolution genuinely fell short somewhere) or ``checked_scopes``
+       is empty (nothing was left to examine, e.g. every scope confined away) -- the caller's
+       base UNKNOWN, same as the ``None`` case, because there is no scope to back a claim
+       either way.
 
     ``confinement=True`` (B68 only) additionally skips a scope whose OWN
     ``tools.fs.workspaceOnly`` (falling back to the global value) is ``True``, or whose sandbox
@@ -1106,6 +1136,7 @@ def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsSco
     default_scopes: list = []
     declared_scopes: list = []
     opaque_scopes: list = []
+    checked_scopes: list = []
     for scope in scopes:
         if scope.opaque:
             opaque_scopes.append(scope.label)
@@ -1123,7 +1154,16 @@ def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsSco
             # already use for this identical question elsewhere in this codebase.
             sandbox_mode = _toolpolicy._sandbox_mode(cfg, scope.entry)
             if workspace_only is True or sandbox_mode == "all":
+                # Deliberately NOT added to `checked_scopes`: this scope was resolved (it is
+                # not opaque), but the grant question was never asked of it because
+                # confinement already makes it moot -- B-943's PASS path only names a scope
+                # it actually ran the grant test against.
                 continue
+        # B-943: recorded BEFORE the emptiness test below, so a scope that resolves and
+        # grants nothing in `family` is still named as "checked" -- previously it silently
+        # vanished (no branch recorded it), which is exactly why the caller had no way to
+        # distinguish "resolved, nothing granted" from "could not resolve".
+        checked_scopes.append(scope.label)
         got = {tool for tool in family if _toolgrant.granted(cfg, tool, scope.scope)}
         if not got:
             continue
@@ -1141,6 +1181,8 @@ def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsSco
         tuple(declared_scopes),
         tuple(opaque_scopes),
         inert_defaults_tools,
+        tuple(checked_scopes),
+        not opaque_scopes,
     )
 
 
@@ -1273,14 +1315,22 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
     WARN-capable only (CheckMeta scored=False) — advisory, never moves the grade, never FAIL.
 
     PASS    — apply_patch confined, and fs is either workspace-confined, sandboxed
-              (``agents.defaults.sandbox.mode == "all"``), or has no granted fs tools.
+              (``agents.defaults.sandbox.mode == "all"``), has no granted fs tools per
+              G1's direct resolution, OR (B-943) G1 is not enumerable but the B-737
+              per-scope residual (``_fs_scope_grants``) resolved EVERY scope it could
+              (none opaque) and none of them grants anything in the fs family — a real
+              "resolved, and resolved to nothing" answer, named by the scopes actually
+              checked, not a guess.
     WARN    — either sibling is explicitly ``false`` (OpenClaw's own dangerous-flag list,
               dangerous-config-flags-current-CrOoyQT2.js:48), or the composite predicate
               holds with the field merely absent.
     UNKNOWN — fs tool grants are not enumerable from config (no tools.allow /
-              tools.alsoAllow naming an fs-family tool, and no tools.profile) and
-              neither sibling is explicitly false, so the composite predicate
-              genuinely cannot be evaluated.
+              tools.alsoAllow naming an fs-family tool, and no tools.profile), neither
+              sibling is explicitly false, AND (B-943) the per-scope residual could not
+              fully resolve either — at least one scope is opaque (a byProvider/
+              toolsBySender layer), or every scope was confined away with none left to
+              name a PASS against — so the composite predicate genuinely cannot be
+              evaluated, not merely "evaluated to nothing".
 
     NARROWS, does not close: reasons over STATIC config only. Per-agent
     ``tools.allow``/``deny``/``profile`` overrides and group/sender-scoped tool policies
@@ -1369,6 +1419,26 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
                 "agents.defaults.sandbox.mode to 'all' so filesystem access is "
                 "contained.",
                 evidence=evidence,
+            )
+        # B-943: `scope_grants` resolved every scope it could (none opaque) and NONE of
+        # them granted anything in the fs family — a real, positive "resolved, and
+        # resolved to nothing" answer, distinct from the genuinely-unresolvable UNKNOWN
+        # below. Only taken when there is at least one checked scope to name, so the
+        # PASS message can point at exactly what was verified instead of asserting a
+        # bare "trust me" (see `_fs_scope_grants`'s own docstring for why an all-confined
+        # config, `checked_scopes` empty, deliberately falls through to UNKNOWN instead).
+        if scope_grants is not None and scope_grants.fully_resolved and scope_grants.checked_scopes:
+            checked = ", ".join(scope_grants.checked_scopes)
+            return _finding(
+                "B68",
+                PASS,
+                "No filesystem tool (read/write/edit/apply_patch) is granted in any "
+                f"resolvable scope ({checked}), per OpenClaw's own tool-policy "
+                "resolution — apply_patch has nothing to escape the workspace with.",
+                "Keep it that way: if a filesystem tool is later granted, set "
+                "tools.fs.workspaceOnly to true or agents.defaults.sandbox.mode to "
+                "'all'.",
+                evidence=[f"scopes checked, nothing granted: {checked}"],
             )
         return _finding(
             "B68",
@@ -1631,11 +1701,18 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
               tools.alsoAllow declared as a LIST, no tools.profile set, and no
               per-agent tools.profile widening (B-409) either. A declared-but-non-list
               tools.allow (a scalar or mapping — schema-invalid, but seen in the wild)
-              also lands here, not PASS.
+              also lands here, not PASS. (B-943) The B-737 per-scope residual
+              (``_fs_scope_grants``) also lands here, rather than PASS, when it could
+              not fully resolve every scope either — at least one is opaque, or every
+              scope was confined away with none left to name.
     PASS    — no write-capable tool granted, OR one is granted, no open-ingress channel
               reaches it, AND no channel is declared at all with untrusted-content
               reach either (_external_input_channels empty), with tools.exec.mode
-              set as an approval gate.
+              set as an approval gate. (B-943) Also PASS, naming the scopes checked,
+              when G1 is not enumerable but the B-737 per-scope residual resolved EVERY
+              scope it could (none opaque) and none of them grants a write-capable
+              tool — a real "resolved, and resolved to nothing" answer, not the
+              UNKNOWN this used to collapse into.
     WARN    — write tool granted with no proven broad reach and no approval gate
               (ungated), OR reachable by a declared-but-not-open channel carrying
               untrusted content (_external_input_channels non-empty, e.g.
@@ -1694,6 +1771,24 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
         if scope_grants is not None and (scope_grants.default_tools or scope_grants.declared_tools):
             write_tools = sorted(scope_grants.default_tools | scope_grants.declared_tools)
             enumerable = True
+        elif scope_grants is not None and scope_grants.fully_resolved and scope_grants.checked_scopes:
+            # B-943: every scope this could resolve WAS resolved (none opaque), and none
+            # of them grants a write-capable tool -- a real, positive "resolved to
+            # nothing" answer, not the "could not resolve" UNKNOWN below. Named scopes
+            # back the claim instead of a bare "trust me" (see `_fs_scope_grants`'s
+            # docstring for why an all-confined/empty-checked-scopes config deliberately
+            # does NOT take this branch).
+            checked = ", ".join(scope_grants.checked_scopes)
+            return _finding(
+                "B55",
+                PASS,
+                "No filesystem-write tool (write / edit / apply_patch) is granted in "
+                f"any resolvable scope ({checked}), per OpenClaw's own tool-policy "
+                "resolution.",
+                "Keep write-capable tools out of the allowlist unless they are "
+                "required.",
+                evidence=[f"scopes checked, nothing granted: {checked}"],
+            )
         else:
             scope_grants = None
 
