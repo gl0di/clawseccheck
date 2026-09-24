@@ -806,6 +806,7 @@ from ._vet import (
     _runtime_fetch_matches,
     _skill_own_host,
     _skill_tool_overgrant,
+    _stat_or_reason,
     _url_matches_own_host,
     check_installed_skill_content_coverage,
     check_installed_skills,
