@@ -300,6 +300,11 @@ def record_skill_sweep(sweep, *, elapsed_s: float = 0.0) -> PhaseResult:
                   f"{c['warns']} suspicious, {c['safe']} no known issue")
         if c["truncated"]:
             detail += f", {c['truncated']} partially scanned"
+        # B-888: a skill whose own scan raised (already excluded from
+        # `safe` by cli.SkillSweep.counts()) named here too — `.get()`, not `[...]`,
+        # since a duck-typed `sweep` predating this key must not KeyError.
+        if c.get("unknown"):
+            detail += f", {c['unknown']} could not be analyzed (engine error)"
         if c["skipped"]:
             detail += f", {c['skipped']} not scanned (budget exceeded)"
     # B-787: `complete` (below) can be False from `discovery_incomplete_reasons` alone
@@ -410,6 +415,10 @@ def _sweep_phase_from(name: str, sweep, *, unit: str, elapsed_s: float,
                   f"{c['warns']} suspicious, {c['safe']} no known issue")
         if c.get("truncated"):
             detail += f", {c['truncated']} partially scanned"
+        # B-888: a skill sweep row can carry "unknown" (its own scan raised); a
+        # plugin sweep has no such bucket today, so this is inert there.
+        if c.get("unknown"):
+            detail += f", {c['unknown']} could not be analyzed (engine error)"
         if c.get("skipped"):
             detail += f", {c['skipped']} not scanned (budget exceeded)"
         detail += "."

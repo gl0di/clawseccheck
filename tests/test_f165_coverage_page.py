@@ -217,6 +217,48 @@ def test_build_coverage_page_truncated_targets_count_as_not_scanned():
     assert page["skills"]["not_scanned"] == ["skipped-one", "truncated-one"]
 
 
+def test_build_coverage_page_crashed_skill_not_counted_as_scanned(tmp_path, monkeypatch):
+    """CLAWSECCHECK-B-888, at the coverage-page integration level.
+
+    `_sweep_coverage` derives "scanned" as ``total - len(sweep.not_scanned())``, using
+    the REAL ``cli.SkillSweep`` here (not a hand-built `_FakeSweep`, unlike the other
+    tests in this module) — this is the one test that would have stayed green on the
+    pre-fix ``not_scanned()`` (SKIPPED/TRUNCATED only), since a crashed skill's UNKNOWN
+    row fell through it exactly the way it fell through ``counts()['safe']``.
+    """
+    import clawseccheck.cli as cli_mod
+
+    home = tmp_path / "home"
+    skills = home / "workspace" / "skills"
+    for name in ("crashy", "clean"):
+        d = skills / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: A helper skill.\n---\nHelper.\n",
+            encoding="utf-8",
+        )
+
+    def _flaky_vet_skill(p):
+        if Path(p).name == "crashy":
+            raise RecursionError("simulated engine crash (B-888 test)")
+        return Finding(id="B13", title="Installed skill sweep", severity="INFO",
+                        status="PASS", detail="nothing found", fix="n/a",
+                        framework="Skill Trust")
+
+    monkeypatch.setattr(cli_mod, "vet_skill", _flaky_vet_skill)
+    sweep = cli_mod.sweep_installed_skills(home, narrate=False)
+
+    ctx = collect(FIXTURES / "clean_full")
+    page = cov.build_coverage_page(ctx, [], skill_sweep=sweep)
+
+    assert page["skills"]["total"] == 2, page["skills"]
+    assert page["skills"]["scanned"] == 1, (
+        "a crashed skill was counted as scanned/covered (CLAWSECCHECK-B-888): "
+        f"{page['skills']}"
+    )
+    assert "crashy" in page["skills"]["not_scanned"], page["skills"]
+
+
 def test_build_coverage_page_mcp_none_configured():
     ctx = collect(FIXTURES / "clean_full")
     page = cov.build_coverage_page(ctx, [])

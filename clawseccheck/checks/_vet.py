@@ -7,7 +7,9 @@ from __future__ import annotations
 import base64
 import binascii
 import bisect
+import logging
 import re
+import traceback
 import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
@@ -4091,6 +4093,10 @@ _B13_WINNER_SUBSIGNAL = {
     "skill_limit_hits": "skill scanning truncated by oversized low-entropy padding",
     "warnings": "warnings in installed skill(s)",
     "parse_error_paths": "a bundled file could not be parsed",
+    # B-888: deliberately a DIFFERENT label from parse_error_paths above —
+    # see this bucket's own cascade-arm comment in check_installed_skills for why
+    # conflating the two would mislabel the sub-signal a judge is told.
+    "crashed_skills": "could not be fully analyzed — the scan engine raised an unexpected error",
 }
 
 # B-743 note on the paragraph above: its "LIFTED FROM THE BRANCH'S OWN VERDICT HEADLINE"
@@ -4655,910 +4661,954 @@ def check_installed_skills(ctx: Context) -> Finding:
     named_exfil_skills: set = set()
     # B-618: same idiom — which skills fed the unverified-declared-script WARN bucket.
     declared_unverified_skills: set = set()
+    # B-888: names of skills whose OWN iteration below raised an unexpected
+    # exception, each as "name (ExceptionType)". Populated by the loop's own except
+    # clause (see its comment) and consumed by the crashed_skills cascade arm further
+    # down — kept a plain list, not a set, so a skill whose analysis is somehow entered
+    # twice in a future refactor is still visible rather than silently deduplicated.
+    crashed_skills: list[str] = []
     for name, blob in skills.items():
-        _warns_js_len0 = len(warns_js)
-        _crit_len0 = len(crit)
-        _install_curl_len0 = len(warns_install_curl)
-        _notify_len0 = len(warns_notify_host)
-        _named_exfil_len0 = len(warns_named_exfil_host)
-        _declared_unverified_len0 = len(warns_declared_unverified)
-        # C-041: precompute fence ranges once per blob so every check below can
-        # skip matches that are purely inside a documented code example.
-        _fr = _fence_ranges(blob)
-        _own_host = _skill_own_host(blob, _fr)  # F-097: skill's own declared homepage host
+        try:
+            _warns_js_len0 = len(warns_js)
+            _crit_len0 = len(crit)
+            _install_curl_len0 = len(warns_install_curl)
+            _notify_len0 = len(warns_notify_host)
+            _named_exfil_len0 = len(warns_named_exfil_host)
+            _declared_unverified_len0 = len(warns_declared_unverified)
+            # C-041: precompute fence ranges once per blob so every check below can
+            # skip matches that are purely inside a documented code example.
+            _fr = _fence_ranges(blob)
+            _own_host = _skill_own_host(blob, _fr)  # F-097: skill's own declared homepage host
 
-        # B-555: resolved BEFORE the loop below because this label used to be
-        # _SKILL_CRIT[0] — running it first keeps a convicting match in the same
-        # position in `crit`, so no existing finding's rendered text moves.
-        _exfil_crit_hosts: set = set()
-        _exfil_warn_hosts: set = set()
-        _exfil_crit_anchors: set = set()
-        _exfil_crit, _exfil_warn = _exfil_host_hits(
-            name,
-            blob,
-            _fr,
-            coverage_fence,
-            _exfil_crit_hosts,
-            _exfil_warn_hosts,
-            crit_anchors=_exfil_crit_anchors,
-        )
-        for _h in _exfil_crit:
-            crit.append(f"{name}: {_h}")
-        if _exfil_crit_hosts:
-            crit_hosts_by_skill.setdefault(name, set()).update(_exfil_crit_hosts)
-        if _exfil_crit_anchors:
-            exfil_crit_anchors_by_skill.setdefault(name, set()).update(_exfil_crit_anchors)
-        for _h in _exfil_warn:
-            warns_named_exfil_host.append(f"{name}: {_h}")
-        if _exfil_warn_hosts:
-            named_exfil_hosts_by_skill.setdefault(name, set()).update(_exfil_warn_hosts)
+            # B-555: resolved BEFORE the loop below because this label used to be
+            # _SKILL_CRIT[0] — running it first keeps a convicting match in the same
+            # position in `crit`, so no existing finding's rendered text moves.
+            _exfil_crit_hosts: set = set()
+            _exfil_warn_hosts: set = set()
+            _exfil_crit_anchors: set = set()
+            _exfil_crit, _exfil_warn = _exfil_host_hits(
+                name,
+                blob,
+                _fr,
+                coverage_fence,
+                _exfil_crit_hosts,
+                _exfil_warn_hosts,
+                crit_anchors=_exfil_crit_anchors,
+            )
+            for _h in _exfil_crit:
+                crit.append(f"{name}: {_h}")
+            if _exfil_crit_hosts:
+                crit_hosts_by_skill.setdefault(name, set()).update(_exfil_crit_hosts)
+            if _exfil_crit_anchors:
+                exfil_crit_anchors_by_skill.setdefault(name, set()).update(_exfil_crit_anchors)
+            for _h in _exfil_warn:
+                warns_named_exfil_host.append(f"{name}: {_h}")
+            if _exfil_warn_hosts:
+                named_exfil_hosts_by_skill.setdefault(name, set()).update(_exfil_warn_hosts)
 
-        # CRIT patterns: iterate all matches; drop those that are code examples.
-        for label, rx in _SKILL_CRIT:
-            # B-526: a match hidden by a bare fence is remembered, not acted on inside
-            # the loop. Emitting it here and breaking would be a FALSE NEGATIVE: a
-            # fenced match early in the blob would end the scan and swallow a genuine
-            # unfenced match later in the same file. So the WARN is emitted only by the
-            # `else` clause below, which runs exactly when no `break` happened — i.e.
-            # when nothing convicted.
-            _fenced_only_pos = None  # B-526: keep the offset, not just the fact
-            for m in rx.finditer(blob):
-                if not _is_code_example(blob, m.start(), _fr):
-                    crit.append(f"{name}: {label}")
-                    break  # one finding per label per skill is enough
-                if _fenced_only_pos is None and _fence_only_suppression(
-                    blob, m.start(), _fr
-                ):
-                    _fenced_only_pos = m.start()
-            else:
-                if _fenced_only_pos is not None:
-                    _mf, _ff = fence_suppression_provenance(blob, _fenced_only_pos, _fr)
-                    coverage_fence.append(
-                        f"coverage: {name}: "
-                        + fence_suppression_note(label, _mf, _ff)
-                    )
-
-        # B-122: Telegram/Discord are dual-use notification hosts, not unambiguous
-        # exfil sinks — CRITICAL only when a secret/file-read taint reaches the same
-        # request; a bare self-notification hit is WARN (down-rank, not drop).
-        _notify_hosts: set = set()
-        _notify_crit, _notify_warn = _notify_host_hits(
-            blob, _fr, coverage_fence, _notify_hosts
-        )
-        if _notify_hosts:
-            notify_hosts_by_skill.setdefault(name, set()).update(_notify_hosts)
-        for h in _notify_crit:
-            crit.append(f"{name}: {h}")
-        for h in _notify_warn:
-            warns_notify_host.append(f"{name}: {h}")
-
-        # Same-line cred+exfil: skip lines that fall entirely inside a fence.
-        if _has_cred_exfil_outside_fence(blob, _fr):
-            crit.append(f"{name}: secret/credential exfiltration (same-line)")
-
-        for payload in _decoded_payloads(blob):
-            # Redact before the preview enters the finding — the decoded bytes are
-            # attacker-controlled and may contain secret-shaped strings (H2).
-            # Base64/PS-EncodedCommand payloads are NOT prose examples; no FP filter.
-            crit.append(f"{name}: hidden base64 payload -> '{_redact(payload)}'")
-        for payload in _powershell_encoded_payloads(blob):
-            crit.append(f"{name}: {_redact(payload)}")
-
-        # HIGH patterns: same fence-aware approach.
-        for label, rx in _SKILL_HIGH:
-            _test_fixture_only = False  # B-193: saw ONLY test-fixture-scoped live matches
-            _agency_prohibited_only = False  # B-197: saw ONLY prohibition-governed matches
-            _fence_only_pos = None  # B-526: offset of the first bare-fence-hidden match
-            for m in rx.finditer(blob):
-                # C-135 (performance): _is_code_example is computed ONCE per match —
-                # this file's own notes record a 1 MB skill turning into a 107s check
-                # when a per-match helper was re-run.
-                _suppressed = _is_code_example(blob, m.start(), _fr)
-                if _suppressed:
-                    # B-526: recorded, never acted on inside the loop — this loop's
-                    # `break` means "one finding per label", so emitting here would let
-                    # a fenced match end the scan and swallow a real one further down.
-                    # The else clause below already exists for exactly this pattern
-                    # (B-193 / B-197), so this is a third flag in an established shape.
-                    if _fence_only_pos is None and _fence_only_suppression(
+            # CRIT patterns: iterate all matches; drop those that are code examples.
+            for label, rx in _SKILL_CRIT:
+                # B-526: a match hidden by a bare fence is remembered, not acted on inside
+                # the loop. Emitting it here and breaking would be a FALSE NEGATIVE: a
+                # fenced match early in the blob would end the scan and swallow a genuine
+                # unfenced match later in the same file. So the WARN is emitted only by the
+                # `else` clause below, which runs exactly when no `break` happened — i.e.
+                # when nothing convicted.
+                _fenced_only_pos = None  # B-526: keep the offset, not just the fact
+                for m in rx.finditer(blob):
+                    if not _is_code_example(blob, m.start(), _fr):
+                        crit.append(f"{name}: {label}")
+                        break  # one finding per label per skill is enough
+                    if _fenced_only_pos is None and _fence_only_suppression(
                         blob, m.start(), _fr
                     ):
-                        _fence_only_pos = m.start()  # B-526: keep the offset
+                        _fenced_only_pos = m.start()
                 else:
-                    # C-259 (D2, docs/design/severity-separability.md): measured net-correct,
-                    # not just assumed — over the 2,052-case WARN corpus this gate fires on
-                    # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
-                    # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
-                    # design doc's refuted option O2) trades benign FAILs for negligible
-                    # recall — do not reopen on recall grounds. The other 97.32% of
-                    # malicious WARN-only cases never had a FAIL-capable signal at all;
-                    # that gap is evidence-accumulation/E-038 work (design doc §7), not
-                    # this gate.
-                    # B-193: attack-shaped strings inside the skill's OWN test fixtures
-                    # (tests/test_*.py legitimately asserting defenses against them,
-                    # case_01472) are the named FP driver for exactly this label — keep
-                    # scanning for a genuine, non-test-fixture match instead.
-                    if label == "base64-decode piped to exec / obfuscation" and (
-                        _pos_in_test_fixture_file(blob, m.start())
-                    ):
-                        _test_fixture_only = True
-                        continue
-                    _test_fixture_only = False
-                    # C-259 (D3, docs/design/severity-separability.md): measured net-correct,
-                    # not just assumed — over the 2,052-case WARN corpus this gate fires on
-                    # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
-                    # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
-                    # design doc's refuted option O2) trades benign FAILs for negligible
-                    # recall — do not reopen on recall grounds. The other 97.32% of
-                    # malicious WARN-only cases never had a FAIL-capable signal at all;
-                    # that gap is evidence-accumulation/E-038 work (design doc §7), not
-                    # this gate.
-                    # B-197: a safety-constraint prohibition ("You must never: execute
-                    # arbitrary code") FORBIDS the action, not directs it — keep scanning
-                    # for a genuine, non-prohibited match instead.
-                    if label == "excessive agency: auto-approve/execute directive (skill content)" and (
-                        _agency_prohibition_governs(blob, m)
-                    ):
-                        _agency_prohibited_only = True
-                        continue
-                    _agency_prohibited_only = False
-                    # C-259 (D1, docs/design/severity-separability.md): measured net-correct,
-                    # not just assumed — over the 2,052-case WARN corpus this gate fires on
-                    # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
-                    # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
-                    # design doc's refuted option O2) trades benign FAILs for negligible
-                    # recall — do not reopen on recall grounds. The other 97.32% of
-                    # malicious WARN-only cases never had a FAIL-capable signal at all;
-                    # that gap is evidence-accumulation/E-038 work (design doc §7), not
-                    # this gate.
-                    # F-097: an http download-and-run under an install/setup heading is a
-                    # documented installer (capability, not malice) -> WARN. The obfuscation/
-                    # powershell/git entries are NOT gated and stay FAIL.
-                    if label == "download-and-run a package over http" and (
-                        _under_install_heading(blob, m.start())
-                        or _under_defensive_heading(blob, m.start())
-                    ):
-                        warns_install_curl.append(f"{name}: {label}")
-                    else:
-                        high.append(f"{name}: {label}")
-                    break
-            else:
-                if _test_fixture_only:
-                    warns_content.append(f"{name}: {label} (inside the skill's own test fixture)")
-                elif _fence_only_pos is not None:
-                    # B-526: reached only when NOTHING convicted for this label, so a
-                    # real match later in the blob can never be hidden by this note.
-                    _mf, _ff = fence_suppression_provenance(blob, _fence_only_pos, _fr)
-                    coverage_fence.append(
-                        f"coverage: {name}: "
-                        + fence_suppression_note(label, _mf, _ff)
-                    )
-                elif _agency_prohibited_only:
-                    warns_content.append(f"{name}: {label} (prohibition/safety-constraint phrasing)")
+                    if _fenced_only_pos is not None:
+                        _mf, _ff = fence_suppression_provenance(blob, _fenced_only_pos, _fr)
+                        coverage_fence.append(
+                            f"coverage: {name}: "
+                            + fence_suppression_note(label, _mf, _ff)
+                        )
 
-        # F-021: runtime-external-fetch instruction (OWASP AST05).
-        # Fires when a skill's text contains fetch/load verb + external http(s) URL +
-        # instruction/context noun bound into one directive segment (FAIL) or
-        # structural block (WARN) — all outside code examples. B-308: no
-        # longer a raw character window; see _RUNTIME_FETCH_STRUCTURAL_CAP.
-        _rf_bound, _rf_adjacent = _runtime_fetch_scan(blob, _fr)
-        # B-284 round 2: the adjacent-segment band — the directive is split across a
-        # markdown list / blockquote / sentence pair inside ONE structural block. That is
-        # both how a real AST05 hijack is normally written and how ordinary docs read, so
-        # it is advisory: never a FAIL, never a silent PASS.
-        for rf_url in _rf_adjacent:
-            warns_content.append(
-                f"{name}: possible runtime-external-fetch instruction (OWASP AST05), "
-                f"split across adjacent lines — verify manually: {rf_url}"
+            # B-122: Telegram/Discord are dual-use notification hosts, not unambiguous
+            # exfil sinks — CRITICAL only when a secret/file-read taint reaches the same
+            # request; a bare self-notification hit is WARN (down-rank, not drop).
+            _notify_hosts: set = set()
+            _notify_crit, _notify_warn = _notify_host_hits(
+                blob, _fr, coverage_fence, _notify_hosts
             )
-        for rf_url in _rf_bound:
-            # C-259 (D4, docs/design/severity-separability.md): measured net-correct,
-            # not just assumed — over the 2,052-case WARN corpus this gate fires on
-            # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
-            # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
-            # design doc's refuted option O2) trades benign FAILs for negligible
-            # recall — do not reopen on recall grounds. The other 97.32% of
-            # malicious WARN-only cases never had a FAIL-capable signal at all;
-            # that gap is evidence-accumulation/E-038 work (design doc §7), not
-            # this gate.
-            # F-097: a fetch to the skill's own declared host (now also checks a JSON
-            # manifest like skill.json/package.json, B-194), or documented under an
-            # install/setup heading, is capability not malice -> WARN. A foreign/IP host
-            # fetch (e.g. agentos' hardcoded IP) is not down-ranked and stays FAIL.
-            _pos = blob.find(rf_url)
-            # B-194: a "get your API key here" doc-URL sentence is a credential-
-            # acquisition instruction for the USER, not a runtime fetch by the agent —
-            # down-rank rather than suppress, since a real attack could plausibly borrow
-            # the same phrasing.
-            # B-308 follow-up (C-135): the window fed to the down-rank/governance checks
-            # below must cover (at least) the same directive segment that BOUND this url
-            # to FAIL in the first place — a raw +/-300-char slice can fall short of that
-            # segment and blind the governance checks to a governing clause the bind
-            # itself already saw. See _runtime_fetch_governance_window.
-            if _pos != -1:
-                _rf_window, _rf_anchor = _runtime_fetch_governance_window(
-                    blob, _pos, _pos + len(rf_url)
+            if _notify_hosts:
+                notify_hosts_by_skill.setdefault(name, set()).update(_notify_hosts)
+            for h in _notify_crit:
+                crit.append(f"{name}: {h}")
+            for h in _notify_warn:
+                warns_notify_host.append(f"{name}: {h}")
+
+            # Same-line cred+exfil: skip lines that fall entirely inside a fence.
+            if _has_cred_exfil_outside_fence(blob, _fr):
+                crit.append(f"{name}: secret/credential exfiltration (same-line)")
+
+            for payload in _decoded_payloads(blob):
+                # Redact before the preview enters the finding — the decoded bytes are
+                # attacker-controlled and may contain secret-shaped strings (H2).
+                # Base64/PS-EncodedCommand payloads are NOT prose examples; no FP filter.
+                crit.append(f"{name}: hidden base64 payload -> '{_redact(payload)}'")
+            for payload in _powershell_encoded_payloads(blob):
+                crit.append(f"{name}: {_redact(payload)}")
+
+            # HIGH patterns: same fence-aware approach.
+            for label, rx in _SKILL_HIGH:
+                _test_fixture_only = False  # B-193: saw ONLY test-fixture-scoped live matches
+                _agency_prohibited_only = False  # B-197: saw ONLY prohibition-governed matches
+                _fence_only_pos = None  # B-526: offset of the first bare-fence-hidden match
+                for m in rx.finditer(blob):
+                    # C-135 (performance): _is_code_example is computed ONCE per match —
+                    # this file's own notes record a 1 MB skill turning into a 107s check
+                    # when a per-match helper was re-run.
+                    _suppressed = _is_code_example(blob, m.start(), _fr)
+                    if _suppressed:
+                        # B-526: recorded, never acted on inside the loop — this loop's
+                        # `break` means "one finding per label", so emitting here would let
+                        # a fenced match end the scan and swallow a real one further down.
+                        # The else clause below already exists for exactly this pattern
+                        # (B-193 / B-197), so this is a third flag in an established shape.
+                        if _fence_only_pos is None and _fence_only_suppression(
+                            blob, m.start(), _fr
+                        ):
+                            _fence_only_pos = m.start()  # B-526: keep the offset
+                    else:
+                        # C-259 (D2, docs/design/severity-separability.md): measured net-correct,
+                        # not just assumed — over the 2,052-case WARN corpus this gate fires on
+                        # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
+                        # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
+                        # design doc's refuted option O2) trades benign FAILs for negligible
+                        # recall — do not reopen on recall grounds. The other 97.32% of
+                        # malicious WARN-only cases never had a FAIL-capable signal at all;
+                        # that gap is evidence-accumulation/E-038 work (design doc §7), not
+                        # this gate.
+                        # B-193: attack-shaped strings inside the skill's OWN test fixtures
+                        # (tests/test_*.py legitimately asserting defenses against them,
+                        # case_01472) are the named FP driver for exactly this label — keep
+                        # scanning for a genuine, non-test-fixture match instead.
+                        if label == "base64-decode piped to exec / obfuscation" and (
+                            _pos_in_test_fixture_file(blob, m.start())
+                        ):
+                            _test_fixture_only = True
+                            continue
+                        _test_fixture_only = False
+                        # C-259 (D3, docs/design/severity-separability.md): measured net-correct,
+                        # not just assumed — over the 2,052-case WARN corpus this gate fires on
+                        # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
+                        # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
+                        # design doc's refuted option O2) trades benign FAILs for negligible
+                        # recall — do not reopen on recall grounds. The other 97.32% of
+                        # malicious WARN-only cases never had a FAIL-capable signal at all;
+                        # that gap is evidence-accumulation/E-038 work (design doc §7), not
+                        # this gate.
+                        # B-197: a safety-constraint prohibition ("You must never: execute
+                        # arbitrary code") FORBIDS the action, not directs it — keep scanning
+                        # for a genuine, non-prohibited match instead.
+                        if label == "excessive agency: auto-approve/execute directive (skill content)" and (
+                            _agency_prohibition_governs(blob, m)
+                        ):
+                            _agency_prohibited_only = True
+                            continue
+                        _agency_prohibited_only = False
+                        # C-259 (D1, docs/design/severity-separability.md): measured net-correct,
+                        # not just assumed — over the 2,052-case WARN corpus this gate fires on
+                        # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
+                        # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
+                        # design doc's refuted option O2) trades benign FAILs for negligible
+                        # recall — do not reopen on recall grounds. The other 97.32% of
+                        # malicious WARN-only cases never had a FAIL-capable signal at all;
+                        # that gap is evidence-accumulation/E-038 work (design doc §7), not
+                        # this gate.
+                        # F-097: an http download-and-run under an install/setup heading is a
+                        # documented installer (capability, not malice) -> WARN. The obfuscation/
+                        # powershell/git entries are NOT gated and stay FAIL.
+                        if label == "download-and-run a package over http" and (
+                            _under_install_heading(blob, m.start())
+                            or _under_defensive_heading(blob, m.start())
+                        ):
+                            warns_install_curl.append(f"{name}: {label}")
+                        else:
+                            high.append(f"{name}: {label}")
+                        break
+                else:
+                    if _test_fixture_only:
+                        warns_content.append(f"{name}: {label} (inside the skill's own test fixture)")
+                    elif _fence_only_pos is not None:
+                        # B-526: reached only when NOTHING convicted for this label, so a
+                        # real match later in the blob can never be hidden by this note.
+                        _mf, _ff = fence_suppression_provenance(blob, _fence_only_pos, _fr)
+                        coverage_fence.append(
+                            f"coverage: {name}: "
+                            + fence_suppression_note(label, _mf, _ff)
+                        )
+                    elif _agency_prohibited_only:
+                        warns_content.append(f"{name}: {label} (prohibition/safety-constraint phrasing)")
+
+            # F-021: runtime-external-fetch instruction (OWASP AST05).
+            # Fires when a skill's text contains fetch/load verb + external http(s) URL +
+            # instruction/context noun bound into one directive segment (FAIL) or
+            # structural block (WARN) — all outside code examples. B-308: no
+            # longer a raw character window; see _RUNTIME_FETCH_STRUCTURAL_CAP.
+            _rf_bound, _rf_adjacent = _runtime_fetch_scan(blob, _fr)
+            # B-284 round 2: the adjacent-segment band — the directive is split across a
+            # markdown list / blockquote / sentence pair inside ONE structural block. That is
+            # both how a real AST05 hijack is normally written and how ordinary docs read, so
+            # it is advisory: never a FAIL, never a silent PASS.
+            for rf_url in _rf_adjacent:
+                warns_content.append(
+                    f"{name}: possible runtime-external-fetch instruction (OWASP AST05), "
+                    f"split across adjacent lines — verify manually: {rf_url}"
                 )
-            else:
-                _rf_window, _rf_anchor = "", 0
-            # B-308 (3rd C-135 round): both governance checks below bind to the
-            # occurrence STRUCTURALLY NEAREST this url (_rf_anchor) rather than the
-            # first match anywhere in the widened window — see _fetch_prohibition_governs
-            # / _cred_acquisition_governs for why "first in scan order" let a decoy
-            # elsewhere in the same unbroken segment immunize an unrelated real directive.
-            _cred_doc = bool(_rf_window) and _cred_acquisition_governs(_rf_window, _rf_anchor)
-            # B-194 (C-135): a prohibition sentence that actually GOVERNS the fetch verb
-            # (see _fetch_prohibition_governs) down-ranks to WARN — never a silent PASS.
-            _prohibited = bool(_rf_window) and _fetch_prohibition_governs(_rf_window, _rf_anchor)
-            _downrank = (
-                _url_matches_own_host(rf_url, _own_host)
-                or (_pos != -1 and _under_install_heading(blob, _pos))
-                or bool(_cred_doc)
-                or _prohibited
-            )
-            msg = f"{name}: runtime-external-fetch instruction (OWASP AST05): {rf_url}"
-            (warns_install_curl if _downrank else high).append(msg)
-
-        # F-023: same-line credential-source + local data-bearing sink (log/tempfile/report).
-        # WARN-only; collected outside the HIGH bucket so it never escalates to FAIL.
-        warns_local_exfil.extend(_local_sink_exfil_hits(name, blob, _fr))
-
-        # Pipe-to-shell: use finditer so we have match positions for FP filter.
-        for pm in _PIPE_SHELL_RE.finditer(blob):
-            host = pm.group(1)
-            h = host.lower()
-            if any(h == r or h.endswith("." + r) for r in _REPUTABLE_INSTALL_HOSTS):
-                continue
-            if _is_code_example(blob, pm.start(), _fr):
-                # B-526: no label loop here, so no for/else is needed — each match is
-                # independent and a demote cannot swallow a later one.
-                # B-194 / I-032: a loopback-or-private host is never real egress, and an
-                # RFC 2606 reserved example domain can never be a live dropper host. Both
-                # are true whether or not a fence hides the line, so demoting them would
-                # be pure noise — these are the site's OWN exclusions, applied to the
-                # demote path as well as the conviction path.
-                if (
-                    _fence_only_suppression(blob, pm.start(), _fr)
-                    and not _url_host_is_local("http://" + host)
-                    and h not in _RESERVED_EXAMPLE_DOMAINS
-                ):
-                    # B-884: when `host` is itself a bare public IPv4 literal, the exact
-                    # same "https?://<ip>" text is also what `_IOC_IPURL_RE` below
-                    # matches — and that loop's `fence_needs_negation=True` (B-525) means
-                    # an unannotated fence no longer suppresses IT, so this same fence
-                    # reliably produces a separate "hardcoded public-IP URL" WARN even
-                    # though the pipe-to-shell EXECUTION shape stays unassessed here. The
-                    # flat "so it was not assessed" wording read as contradicting that
-                    # WARN (same evidence, two notes that looked like they disagreed) —
-                    # name the two questions as different ones instead of restating
-                    # "not assessed" next to a WARN about the identical text.
-                    if _is_public_ip(host):
-                        coverage_fence.append(
-                            f"coverage: {name}: this fence's pipe-to-shell EXECUTION "
-                            f"(no marker we recognise) was not assessed — a different "
-                            f"question from the bare public-IP URL ({host}) itself, "
-                            "which is scored separately, above"
-                        )
-                    else:
-                        coverage_fence.append(
-                            f"coverage: {name}: a pipe-to-shell from {host} sits in a "
-                            "fence carrying no marker we recognise, so it was not "
-                            "assessed"
-                        )
-                continue
-            msg = f"{name}: pipe-to-shell from non-reputable host {host}"
-            # C-259 (D5, docs/design/severity-separability.md): measured net-correct,
-            # not just assumed — over the 2,052-case WARN corpus this gate fires on
-            # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
-            # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
-            # design doc's refuted option O2) trades benign FAILs for negligible
-            # recall — do not reopen on recall grounds. The other 97.32% of
-            # malicious WARN-only cases never had a FAIL-capable signal at all;
-            # that gap is evidence-accumulation/E-038 work (design doc §7), not
-            # this gate.
-            # F-097: pipe-to-shell to the skill's own host or under an install/setup
-            # heading is a documented installer -> WARN; else it stays FAIL.
-            _own = _own_host is not None and (h == _own_host or h.endswith("." + _own_host))
-            # I-032: an RFC 2606 reserved example domain (exact match only — see
-            # _RESERVED_EXAMPLE_DOMAINS above) can never be a live dropper host,
-            # so it downgrades the same as an own-host/install-heading match. This
-            # never suppresses the finding outright, only downgrades HIGH -> WARN.
-            _reserved_example = h in _RESERVED_EXAMPLE_DOMAINS
-            # B-193: same test-fixture FP driver as the base64/exec label above
-            # (case_01472) — a live pipe-to-shell string inside the skill's own
-            # tests/test_*.py is a fixture, not a directive.
-            if _own or _under_install_heading(blob, pm.start()) or _reserved_example:
-                warns_install_curl.append(msg)
-                # B-556: `h` is _PIPE_SHELL_RE's own captured host, not a tail-parse of
-                # the evidence string — the distinction Finding.destination_hosts exists
-                # for. It still runs adjudication's gate before publication.
-                install_hosts_by_skill.setdefault(name, set()).add(h)
-            elif _pos_in_test_fixture_file(blob, pm.start()):
-                warns_content.append(msg + " (inside the skill's own test fixture)")
-            else:
-                high.append(msg)
-
-        # Cross-skill cred+exfil: run against the blob with fenced spans blanked so
-        # a credential path that only appears inside a documentation example does not
-        # combine with an exfil host reference to produce a cross-skill finding.
-        #
-        # C-135 (round 2, B-408): a test-fixture-file exemption (SkillTrustBench
-        # case_04843, also blanking _test_fixture_file_spans) was attempted here and
-        # RETRACTED for the same reason as _has_cred_exfil_outside_fence above — the
-        # shared signal-counting guard it depends on is bypassable with two cheap,
-        # structurally unconnected decoy signals. case_04843 is a known, accepted,
-        # unfixed spurious FAIL as a result.
-        _blob_nofence = _blank_fences(blob, _fr)
-        _has_same_line = _has_cred_exfil_outside_fence(blob, _fr)
-        _has_cross = bool(
-            _has_non_negated_cred_match(_blob_nofence) and _EXFIL_RE.search(_blob_nofence)
-        )
-        # B-748: every exfil-shaped hit resolves to its own credential source's
-        # known-legitimate destination (npm registry / in-cluster K8s API) — not
-        # exfiltration, so this specific co-occurrence is explained away.
-        if _has_cross and _exfil_hits_all_target_own_known_destination(_blob_nofence):
-            _has_cross = False
-        if not _has_same_line and _has_cross:
-            high.append(
-                f"{name}: credential path and exfil sink both present in skill (split-stage risk)"
-            )
-
-        # B-744: OpenClaw's own credential store — WARN-only, and deliberately NOT
-        # folded into `_has_cross` above. See _openclaw_cred_store_exfil_hit's own
-        # comment for the trigger and why this stays a separate rule.
-        if _openclaw_cred_store_exfil_hit(_blob_nofence):
-            warns_openclaw_cred.append(
-                f"{name}: OpenClaw credential-store path referenced, with "
-                "credential-shaped content reaching a network sink"
-            )
-
-        # C-039/B-193: destructive + autonomy pattern — HIGH when a destructive shell command
-        # (git reset --hard, git push --force, rm -rf ~, shred, mkfs, dd to /dev/) co-occurs
-        # WITHIN A BOUNDED WINDOW of an autonomy marker in the skill text. Bare rm -rf / is
-        # already CRITICAL via _SKILL_CRIT; this catches the broader class that only becomes
-        # dangerous when the agent is instructed to act on it without asking. Fence-aware:
-        # skip matches inside documented code-example blocks.
-        _da_hit, _da_fenced = _destructive_autonomy_hit(blob, _fr)
-        if _da_hit:
-            high.append(
-                f"{name}: destructive command with autonomy marker (no-confirmation destructive action)"
-            )
-        elif _da_fenced:
-            coverage_fence.append(
-                f"coverage: {name}: a destructive command with an autonomy marker sits in a"
-                " fence carrying no marker we recognise, so it was not assessed"
-            )
-
-        # Dual-use directives only fire alongside a real cred/exfil signal (zero-FP);
-        # the canonical "ignore previous instructions" phrase fires on its own. Co-located
-        # real malware (paste-host) still scores CRITICAL via _SKILL_CRIT independently.
-        # B-119: the standalone (canonical-phrase) arm previously had NO defensive/example
-        # guard, unlike its F-052 sibling below — so a skill that merely QUOTES the phrase as
-        # documentation ("for example: <!-- ignore previous instructions -->") got FAILed
-        # HIGH. Mirror F-052 EXACTLY: dampen a canonical-phrase hit only when it sits in an
-        # example/quote context (_in_example_context). We deliberately do NOT also dampen on
-        # _whole_text_is_defensive — a "## Known Risks" heading + one "Never…" line is
-        # trivially forgeable and silenced a real hijack directive (C-135 bypasses B5/B1) —
-        # nor gate on a sink predicate: bare "curl"/"POST"/URL tokens are ordinary security-
-        # doc vocabulary and produced a false-positive FAIL class (C-135 direction A). A
-        # co-located live payload (obfuscated / paste-host / hidden-comment exfil) still
-        # scores via B58 / _SKILL_CRIT independently. The standalone regexes match against
-        # _blob_norm, so the guard uses fence ranges over THAT SAME string (position
-        # consistency), not the raw-blob _fr computed above.
-        cred_exfil_signal = _has_same_line or _has_cross
-        _blob_norm = normalize_for_scan(blob)
-        _fr_norm = _fence_ranges(_blob_norm)
-        for label, standalone, rx in _SKILL_INJECTION:
-            if not standalone:
-                if rx.search(_blob_norm) and cred_exfil_signal:
-                    high.append(f"{name}: injection directive — {label}")
-                continue
-            _inj_fence_only = False
-            for m in rx.finditer(_blob_norm):
-                if _in_example_context(_blob_norm, m.start(), _fr_norm):
-                    # B-526: remembered, not emitted here — see the _SKILL_CRIT loop for
-                    # why acting inside the loop would swallow a real later match.
-                    if not _inj_fence_only:
-                        _inj_fence_only = _example_context_is_fence_only(
-                            _blob_norm, m.start(), _fr_norm
-                        )
-                    continue
-                high.append(f"{name}: injection directive — {label}")
-                break
-            else:
-                if _inj_fence_only:
-                    coverage_fence.append(
-                        f"coverage: {name}: an injection directive ({label}) sits in a fence"
-                        " carrying no marker we recognise, so it was not assessed"
+            for rf_url in _rf_bound:
+                # C-259 (D4, docs/design/severity-separability.md): measured net-correct,
+                # not just assumed — over the 2,052-case WARN corpus this gate fires on
+                # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
+                # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
+                # design doc's refuted option O2) trades benign FAILs for negligible
+                # recall — do not reopen on recall grounds. The other 97.32% of
+                # malicious WARN-only cases never had a FAIL-capable signal at all;
+                # that gap is evidence-accumulation/E-038 work (design doc §7), not
+                # this gate.
+                # F-097: a fetch to the skill's own declared host (now also checks a JSON
+                # manifest like skill.json/package.json, B-194), or documented under an
+                # install/setup heading, is capability not malice -> WARN. A foreign/IP host
+                # fetch (e.g. agentos' hardcoded IP) is not down-ranked and stays FAIL.
+                _pos = blob.find(rf_url)
+                # B-194: a "get your API key here" doc-URL sentence is a credential-
+                # acquisition instruction for the USER, not a runtime fetch by the agent —
+                # down-rank rather than suppress, since a real attack could plausibly borrow
+                # the same phrasing.
+                # B-308 follow-up (C-135): the window fed to the down-rank/governance checks
+                # below must cover (at least) the same directive segment that BOUND this url
+                # to FAIL in the first place — a raw +/-300-char slice can fall short of that
+                # segment and blind the governance checks to a governing clause the bind
+                # itself already saw. See _runtime_fetch_governance_window.
+                if _pos != -1:
+                    _rf_window, _rf_anchor = _runtime_fetch_governance_window(
+                        blob, _pos, _pos + len(rf_url)
                     )
+                else:
+                    _rf_window, _rf_anchor = "", 0
+                # B-308 (3rd C-135 round): both governance checks below bind to the
+                # occurrence STRUCTURALLY NEAREST this url (_rf_anchor) rather than the
+                # first match anywhere in the widened window — see _fetch_prohibition_governs
+                # / _cred_acquisition_governs for why "first in scan order" let a decoy
+                # elsewhere in the same unbroken segment immunize an unrelated real directive.
+                _cred_doc = bool(_rf_window) and _cred_acquisition_governs(_rf_window, _rf_anchor)
+                # B-194 (C-135): a prohibition sentence that actually GOVERNS the fetch verb
+                # (see _fetch_prohibition_governs) down-ranks to WARN — never a silent PASS.
+                _prohibited = bool(_rf_window) and _fetch_prohibition_governs(_rf_window, _rf_anchor)
+                _downrank = (
+                    _url_matches_own_host(rf_url, _own_host)
+                    or (_pos != -1 and _under_install_heading(blob, _pos))
+                    or bool(_cred_doc)
+                    or _prohibited
+                )
+                msg = f"{name}: runtime-external-fetch instruction (OWASP AST05): {rf_url}"
+                (warns_install_curl if _downrank else high).append(msg)
 
-        # F-052: anti-refusal + system-prompt/tool-definition leak directives. Malicious on
-        # their own (no co-signal), but dampened by _in_example_context so a security skill
-        # that quotes them as examples stays clean. Fence-position-aware -> search raw blob.
-        for label, rx in _SKILL_SAFETY_SUBVERSION:
-            _sub_fence_only = False
-            for m in rx.finditer(blob):
+            # F-023: same-line credential-source + local data-bearing sink (log/tempfile/report).
+            # WARN-only; collected outside the HIGH bucket so it never escalates to FAIL.
+            warns_local_exfil.extend(_local_sink_exfil_hits(name, blob, _fr))
+
+            # Pipe-to-shell: use finditer so we have match positions for FP filter.
+            for pm in _PIPE_SHELL_RE.finditer(blob):
+                host = pm.group(1)
+                h = host.lower()
+                if any(h == r or h.endswith("." + r) for r in _REPUTABLE_INSTALL_HOSTS):
+                    continue
+                if _is_code_example(blob, pm.start(), _fr):
+                    # B-526: no label loop here, so no for/else is needed — each match is
+                    # independent and a demote cannot swallow a later one.
+                    # B-194 / I-032: a loopback-or-private host is never real egress, and an
+                    # RFC 2606 reserved example domain can never be a live dropper host. Both
+                    # are true whether or not a fence hides the line, so demoting them would
+                    # be pure noise — these are the site's OWN exclusions, applied to the
+                    # demote path as well as the conviction path.
+                    if (
+                        _fence_only_suppression(blob, pm.start(), _fr)
+                        and not _url_host_is_local("http://" + host)
+                        and h not in _RESERVED_EXAMPLE_DOMAINS
+                    ):
+                        # B-884: when `host` is itself a bare public IPv4 literal, the exact
+                        # same "https?://<ip>" text is also what `_IOC_IPURL_RE` below
+                        # matches — and that loop's `fence_needs_negation=True` (B-525) means
+                        # an unannotated fence no longer suppresses IT, so this same fence
+                        # reliably produces a separate "hardcoded public-IP URL" WARN even
+                        # though the pipe-to-shell EXECUTION shape stays unassessed here. The
+                        # flat "so it was not assessed" wording read as contradicting that
+                        # WARN (same evidence, two notes that looked like they disagreed) —
+                        # name the two questions as different ones instead of restating
+                        # "not assessed" next to a WARN about the identical text.
+                        if _is_public_ip(host):
+                            coverage_fence.append(
+                                f"coverage: {name}: this fence's pipe-to-shell EXECUTION "
+                                f"(no marker we recognise) was not assessed — a different "
+                                f"question from the bare public-IP URL ({host}) itself, "
+                                "which is scored separately, above"
+                            )
+                        else:
+                            coverage_fence.append(
+                                f"coverage: {name}: a pipe-to-shell from {host} sits in a "
+                                "fence carrying no marker we recognise, so it was not "
+                                "assessed"
+                            )
+                    continue
+                msg = f"{name}: pipe-to-shell from non-reputable host {host}"
+                # C-259 (D5, docs/design/severity-separability.md): measured net-correct,
+                # not just assumed — over the 2,052-case WARN corpus this gate fires on
+                # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
+                # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
+                # design doc's refuted option O2) trades benign FAILs for negligible
+                # recall — do not reopen on recall grounds. The other 97.32% of
+                # malicious WARN-only cases never had a FAIL-capable signal at all;
+                # that gap is evidence-accumulation/E-038 work (design doc §7), not
+                # this gate.
+                # F-097: pipe-to-shell to the skill's own host or under an install/setup
+                # heading is a documented installer -> WARN; else it stays FAIL.
+                _own = _own_host is not None and (h == _own_host or h.endswith("." + _own_host))
+                # I-032: an RFC 2606 reserved example domain (exact match only — see
+                # _RESERVED_EXAMPLE_DOMAINS above) can never be a live dropper host,
+                # so it downgrades the same as an own-host/install-heading match. This
+                # never suppresses the finding outright, only downgrades HIGH -> WARN.
+                _reserved_example = h in _RESERVED_EXAMPLE_DOMAINS
+                # B-193: same test-fixture FP driver as the base64/exec label above
+                # (case_01472) — a live pipe-to-shell string inside the skill's own
+                # tests/test_*.py is a fixture, not a directive.
+                if _own or _under_install_heading(blob, pm.start()) or _reserved_example:
+                    warns_install_curl.append(msg)
+                    # B-556: `h` is _PIPE_SHELL_RE's own captured host, not a tail-parse of
+                    # the evidence string — the distinction Finding.destination_hosts exists
+                    # for. It still runs adjudication's gate before publication.
+                    install_hosts_by_skill.setdefault(name, set()).add(h)
+                elif _pos_in_test_fixture_file(blob, pm.start()):
+                    warns_content.append(msg + " (inside the skill's own test fixture)")
+                else:
+                    high.append(msg)
+
+            # Cross-skill cred+exfil: run against the blob with fenced spans blanked so
+            # a credential path that only appears inside a documentation example does not
+            # combine with an exfil host reference to produce a cross-skill finding.
+            #
+            # C-135 (round 2, B-408): a test-fixture-file exemption (SkillTrustBench
+            # case_04843, also blanking _test_fixture_file_spans) was attempted here and
+            # RETRACTED for the same reason as _has_cred_exfil_outside_fence above — the
+            # shared signal-counting guard it depends on is bypassable with two cheap,
+            # structurally unconnected decoy signals. case_04843 is a known, accepted,
+            # unfixed spurious FAIL as a result.
+            _blob_nofence = _blank_fences(blob, _fr)
+            _has_same_line = _has_cred_exfil_outside_fence(blob, _fr)
+            _has_cross = bool(
+                _has_non_negated_cred_match(_blob_nofence) and _EXFIL_RE.search(_blob_nofence)
+            )
+            # B-748: every exfil-shaped hit resolves to its own credential source's
+            # known-legitimate destination (npm registry / in-cluster K8s API) — not
+            # exfiltration, so this specific co-occurrence is explained away.
+            if _has_cross and _exfil_hits_all_target_own_known_destination(_blob_nofence):
+                _has_cross = False
+            if not _has_same_line and _has_cross:
+                high.append(
+                    f"{name}: credential path and exfil sink both present in skill (split-stage risk)"
+                )
+
+            # B-744: OpenClaw's own credential store — WARN-only, and deliberately NOT
+            # folded into `_has_cross` above. See _openclaw_cred_store_exfil_hit's own
+            # comment for the trigger and why this stays a separate rule.
+            if _openclaw_cred_store_exfil_hit(_blob_nofence):
+                warns_openclaw_cred.append(
+                    f"{name}: OpenClaw credential-store path referenced, with "
+                    "credential-shaped content reaching a network sink"
+                )
+
+            # C-039/B-193: destructive + autonomy pattern — HIGH when a destructive shell command
+            # (git reset --hard, git push --force, rm -rf ~, shred, mkfs, dd to /dev/) co-occurs
+            # WITHIN A BOUNDED WINDOW of an autonomy marker in the skill text. Bare rm -rf / is
+            # already CRITICAL via _SKILL_CRIT; this catches the broader class that only becomes
+            # dangerous when the agent is instructed to act on it without asking. Fence-aware:
+            # skip matches inside documented code-example blocks.
+            _da_hit, _da_fenced = _destructive_autonomy_hit(blob, _fr)
+            if _da_hit:
+                high.append(
+                    f"{name}: destructive command with autonomy marker (no-confirmation destructive action)"
+                )
+            elif _da_fenced:
+                coverage_fence.append(
+                    f"coverage: {name}: a destructive command with an autonomy marker sits in a"
+                    " fence carrying no marker we recognise, so it was not assessed"
+                )
+
+            # Dual-use directives only fire alongside a real cred/exfil signal (zero-FP);
+            # the canonical "ignore previous instructions" phrase fires on its own. Co-located
+            # real malware (paste-host) still scores CRITICAL via _SKILL_CRIT independently.
+            # B-119: the standalone (canonical-phrase) arm previously had NO defensive/example
+            # guard, unlike its F-052 sibling below — so a skill that merely QUOTES the phrase as
+            # documentation ("for example: <!-- ignore previous instructions -->") got FAILed
+            # HIGH. Mirror F-052 EXACTLY: dampen a canonical-phrase hit only when it sits in an
+            # example/quote context (_in_example_context). We deliberately do NOT also dampen on
+            # _whole_text_is_defensive — a "## Known Risks" heading + one "Never…" line is
+            # trivially forgeable and silenced a real hijack directive (C-135 bypasses B5/B1) —
+            # nor gate on a sink predicate: bare "curl"/"POST"/URL tokens are ordinary security-
+            # doc vocabulary and produced a false-positive FAIL class (C-135 direction A). A
+            # co-located live payload (obfuscated / paste-host / hidden-comment exfil) still
+            # scores via B58 / _SKILL_CRIT independently. The standalone regexes match against
+            # _blob_norm, so the guard uses fence ranges over THAT SAME string (position
+            # consistency), not the raw-blob _fr computed above.
+            cred_exfil_signal = _has_same_line or _has_cross
+            _blob_norm = normalize_for_scan(blob)
+            _fr_norm = _fence_ranges(_blob_norm)
+            for label, standalone, rx in _SKILL_INJECTION:
+                if not standalone:
+                    if rx.search(_blob_norm) and cred_exfil_signal:
+                        high.append(f"{name}: injection directive — {label}")
+                    continue
+                _inj_fence_only = False
+                for m in rx.finditer(_blob_norm):
+                    if _in_example_context(_blob_norm, m.start(), _fr_norm):
+                        # B-526: remembered, not emitted here — see the _SKILL_CRIT loop for
+                        # why acting inside the loop would swallow a real later match.
+                        if not _inj_fence_only:
+                            _inj_fence_only = _example_context_is_fence_only(
+                                _blob_norm, m.start(), _fr_norm
+                            )
+                        continue
+                    high.append(f"{name}: injection directive — {label}")
+                    break
+                else:
+                    if _inj_fence_only:
+                        coverage_fence.append(
+                            f"coverage: {name}: an injection directive ({label}) sits in a fence"
+                            " carrying no marker we recognise, so it was not assessed"
+                        )
+
+            # F-052: anti-refusal + system-prompt/tool-definition leak directives. Malicious on
+            # their own (no co-signal), but dampened by _in_example_context so a security skill
+            # that quotes them as examples stays clean. Fence-position-aware -> search raw blob.
+            for label, rx in _SKILL_SAFETY_SUBVERSION:
+                _sub_fence_only = False
+                for m in rx.finditer(blob):
+                    if not _in_example_context(blob, m.start(), _fr):
+                        high.append(f"{name}: injection directive — {label}")
+                        break
+                    if not _sub_fence_only:
+                        _sub_fence_only = _example_context_is_fence_only(blob, m.start(), _fr)
+                else:
+                    if _sub_fence_only:
+                        coverage_fence.append(
+                            f"coverage: {name}: an injection directive ({label}) sits in a fence"
+                            " carrying no marker we recognise, so it was not assessed"
+                        )
+
+            # F-051 / F-060 / F-062: soft content signals -> WARN (never FAIL on their own).
+            for m in _SKILL_BROAD_TRIGGER_RE.finditer(blob):
                 if not _in_example_context(blob, m.start(), _fr):
-                    high.append(f"{name}: injection directive — {label}")
-                    break
-                if not _sub_fence_only:
-                    _sub_fence_only = _example_context_is_fence_only(blob, m.start(), _fr)
-            else:
-                if _sub_fence_only:
-                    coverage_fence.append(
-                        f"coverage: {name}: an injection directive ({label}) sits in a fence"
-                        " carrying no marker we recognise, so it was not assessed"
+                    warns_content.append(
+                        f"{name}: overly-broad activation trigger — the skill "
+                        "claims to fire on nearly any user action (TR1)"
                     )
-
-        # F-051 / F-060 / F-062: soft content signals -> WARN (never FAIL on their own).
-        for m in _SKILL_BROAD_TRIGGER_RE.finditer(blob):
-            if not _in_example_context(blob, m.start(), _fr):
-                warns_content.append(
-                    f"{name}: overly-broad activation trigger — the skill "
-                    "claims to fire on nearly any user action (TR1)"
-                )
-                break
-        # B-525 (fence family, LEGACY sites #5/#3/#2 of the 2026-08-28 inventory):
-        # all three loops below kept the legacy fence_needs_negation=False default,
-        # so an unannotated ```fence``` silently dropped the match. H6 is advisory-only
-        # (never drives a verdict on its own — see h6_advisory's declaration above),
-        # but a fence still hid the fact from the reader; ONION/IPURL are WARN-band.
-        # Positive controls, measured through vet_skill() directly, same shape as the
-        # cron/self-mod/daemonize flips above:
-        #
-        #     run scripts/bootstrap.sh                 bare -> H6 evidence   fenced -> dropped
-        #     http://abcdefghij234567.onion/x           bare -> WARN          fenced -> PASS
-        #     http://185.220.101.5/collect               bare -> WARN          fenced -> PASS
-        #
-        # fence_needs_negation=True closes all three. Existing fenced-example tests
-        # (test_fenced_onion_example_is_safe) keep their "For example:" annotation right
-        # before the fence, so _fence_is_annotated still matches and they stay PASS.
-        for m in _SKILL_LOCAL_CHAIN_RE.finditer(blob):
-            if not _is_code_example(blob, m.start(), _fr, fence_needs_negation=True):
-                # B-544: advisory only — see h6_advisory's declaration above. Does not
-                # join warns_content, so it can never drive a WARN on its own.
-                h6_advisory.append(
-                    f"{name}: prose instructs running a bundled script "
-                    f"({m.group(0)[:60]}) — review the referenced file (H6)"
-                )
-                break
-        for m in _IOC_ONION_RE.finditer(blob):
-            if not _is_code_example(blob, m.start(), _fr, fence_needs_negation=True):
-                warns_content.append(f"{name}: references a Tor .onion address ({m.group(0)})")
-                break
-        for m in _IOC_IPURL_RE.finditer(blob):
-            if _is_public_ip(m.group(1)) and not _is_code_example(
-                blob, m.start(), _fr, fence_needs_negation=True
-            ):
-                warns_content.append(
-                    f"{name}: hardcoded public-IP URL ({m.group(0)}) — "
-                    "unusual for a legitimate skill"
-                )
-                break
-        # F-059: skill-manifest least-privilege — allowed-tools grant vs declared purpose.
-        _overgrant = _skill_tool_overgrant(blob, name)
-        if _overgrant:
-            warns_content.append(_overgrant)
-
-        # C-040: persistence / rogue-agent patterns — HIGH (self-mod)
-        # and WARN (backgrounding/daemonize). Fence-aware via _is_code_example.
-        for p_label, p_rx in _SKILL_PERSISTENCE_HIGH:
-            # B-526: same for/else shape as the _SKILL_CRIT loop above — a fenced match
-            # must never end the scan, or it swallows a genuine unfenced one later.
+                    break
+            # B-525 (fence family, LEGACY sites #5/#3/#2 of the 2026-08-28 inventory):
+            # all three loops below kept the legacy fence_needs_negation=False default,
+            # so an unannotated ```fence``` silently dropped the match. H6 is advisory-only
+            # (never drives a verdict on its own — see h6_advisory's declaration above),
+            # but a fence still hid the fact from the reader; ONION/IPURL are WARN-band.
+            # Positive controls, measured through vet_skill() directly, same shape as the
+            # cron/self-mod/daemonize flips above:
             #
-            # B-525: `fence_needs_negation=True`, same family and same evidence as the
-            # cron/systemd flip in `_cron_persistence_hits`. This is B-097's rule being
-            # carried to another site, not a new judgement: B-097 already established
-            # that an unannotated fence must not dampen on its own and applied it to the
-            # prose ring, and C-204/B-508 carried it to the authorized_keys site. What
-            # still has to be paid per site is the MEASUREMENT — the rule is general, the
-            # cost of getting it wrong is not. Measured through the real
-            # `vet_skill()` before the flip, with the positive control the task demands:
+            #     run scripts/bootstrap.sh                 bare -> H6 evidence   fenced -> dropped
+            #     http://abcdefghij234567.onion/x           bare -> WARN          fenced -> PASS
+            #     http://185.220.101.5/collect               bare -> WARN          fenced -> PASS
             #
-            #     with open(__file__, 'w') as fh: fh.write(payload)
-            #         bare prose -> FAIL      inside ```bash -> PASS
-            #
-            # A skill rewriting its own source is persistence, and wrapping the line in
-            # an unannotated fence made the HIGH finding vanish outright. Nothing else
-            # in this loop absorbed it: the `_p_fenced_only` coverage note below only
-            # fires when NOTHING convicted, so the suppression was silent whenever any
-            # other label happened to fire first.
-            _p_fenced_only_pos = None  # B-526: keep the offset, not just the fact
-            for pm in p_rx.finditer(blob):
-                if not _is_code_example(blob, pm.start(), _fr, fence_needs_negation=True):
-                    high.append(f"{name}: {p_label}")
-                    break  # one finding per label per skill
-                if _p_fenced_only_pos is None and _fence_only_suppression(
-                    blob, pm.start(), _fr
+            # fence_needs_negation=True closes all three. Existing fenced-example tests
+            # (test_fenced_onion_example_is_safe) keep their "For example:" annotation right
+            # before the fence, so _fence_is_annotated still matches and they stay PASS.
+            for m in _SKILL_LOCAL_CHAIN_RE.finditer(blob):
+                if not _is_code_example(blob, m.start(), _fr, fence_needs_negation=True):
+                    # B-544: advisory only — see h6_advisory's declaration above. Does not
+                    # join warns_content, so it can never drive a WARN on its own.
+                    h6_advisory.append(
+                        f"{name}: prose instructs running a bundled script "
+                        f"({m.group(0)[:60]}) — review the referenced file (H6)"
+                    )
+                    break
+            for m in _IOC_ONION_RE.finditer(blob):
+                if not _is_code_example(blob, m.start(), _fr, fence_needs_negation=True):
+                    warns_content.append(f"{name}: references a Tor .onion address ({m.group(0)})")
+                    break
+            for m in _IOC_IPURL_RE.finditer(blob):
+                if _is_public_ip(m.group(1)) and not _is_code_example(
+                    blob, m.start(), _fr, fence_needs_negation=True
                 ):
-                    _p_fenced_only_pos = pm.start()
-            else:
-                if _p_fenced_only_pos is not None:
-                    _mf, _ff = fence_suppression_provenance(blob, _p_fenced_only_pos, _fr)
-                    coverage_fence.append(
-                        f"coverage: {name}: "
-                        + fence_suppression_note(p_label, _mf, _ff)
+                    warns_content.append(
+                        f"{name}: hardcoded public-IP URL ({m.group(0)}) — "
+                        "unusual for a legitimate skill"
                     )
-
-        # B-144: cron/startup persistence — dual-use, disclosure-aware (see
-        # _cron_persistence_hits docstring). A disclosed watchdog/monitoring job
-        # down-ranks to WARN instead of HIGH.
-        _cron_high, _cron_warn = _cron_persistence_hits(
-            blob, _fr, coverage_fence, _cron_bare_path_hits, _cron_verb_anchored_hits
-        )
-        for h in _cron_high:
-            high.append(f"{name}: {h}")
-        for h in _cron_warn:
-            _persist_warn.append(f"{name}: {h}")
-
-        # C-204: authorized_keys persistence — write-verb + key-literal HIGH/WARN split
-        # (see _authkey_persistence_hits docstring). Same shape as the cron block above.
-        _authkey_high, _authkey_warn = _authkey_persistence_hits(blob, _fr, coverage_fence)
-        for h in _authkey_high:
-            high.append(f"{name}: {h}")
-        for h in _authkey_warn:
-            _persist_warn.append(f"{name}: {h}")
-
-        # C-259 (D9, docs/design/severity-separability.md): measured net-correct, not
-        # just assumed — over the 2,052-case WARN corpus this gate fires on malicious
-        # WARN-only skills at 2.68% (33/1,230) vs benign WARN-only skills at 5.32%
-        # (24/451), ~2x the malicious rate. Loosening it (the design doc's refuted
-        # option O2) trades benign FAILs for negligible recall — do not reopen on
-        # recall grounds. The other 97.32% of malicious WARN-only cases never had a
-        # FAIL-capable signal at all; that gap is evidence-accumulation/E-038 work
-        # (design doc §7), not this gate.
-        # C-040/B-193: agent-config injection (two-step: filename + write-verb in window).
-        # Down-rank to WARN only when BOTH hold: the skill's own SKILL.md declares this
-        # exact target as its purpose (_skill_declares_config_target), AND nothing else
-        # has already flagged this skill crit/high — a declared config-writer that also
-        # trips any other signal still FAILs (case_01826 mitigation, architect design).
-        _acw_hits, _acw_fenced = _agent_config_write_hits(name, blob, _fr)
-        for _f in _acw_fenced:
-            warns_content.append(
-                f"{name}: write to an agent-context file ({_f}) inside a fence with no"
-                " marker we recognise, so it was not assessed"
-            )
-        for evidence, fname in _acw_hits:
-            _prefix = f"{name}:"
-            _has_other_signal = any(e.startswith(_prefix) for e in crit) or any(
-                e.startswith(_prefix) for e in high
-            )
-            if (
-                not _has_other_signal
-                and _skill_declares_config_target(blob, fname)
-                and not _config_write_carries_dangerous_payload(blob)
-            ):
-                _persist_warn.append(f"{evidence} (skill's own declared purpose)")
-                # B-634: same severity as the crit/high cascade would give this exact
-                # hit if nothing else had already fired for this skill.
-                _persistence_axis_reasons.append([WARN, f"{evidence} (skill's own declared purpose)"])
-            else:
-                high.append(evidence)
-                _persistence_axis_reasons.append([FAIL, evidence])
-
-        # C-199 (SkillTrustBench T09): insecure temp-file handling — hardcoded/
-        # predictable /tmp path opened for write. WARN regardless of exfil/other
-        # signals (CWE-377 is a coding-quality issue, not itself a malice indicator).
-        warns_insecure_tempfile.extend(_insecure_tempfile_write_hits(name, blob, _fr))
-
-        # C-040: backgrounding/daemonize — lower confidence → WARN bucket.
-        # We collect into a separate list so they don't escalate to HIGH FAIL.
-        # Stored per-skill in a shared list; returned as WARN after the HIGH check.
-        for p_label, p_rx in _SKILL_PERSISTENCE_WARN:
-            # B-525: `fence_needs_negation=True` — third site in the persistence family,
-            # and like the other two this carries B-097's already-established rule to a
-            # site that kept the legacy default, rather than deciding anything new.
-            # Measured the same way:
-            #
-            #     nohup python3 agent_loop.py &   /   disown
-            #         bare prose -> WARN      inside ```bash -> PASS
-            #
-            # Flipped even though this band is only WARN: the whole point of a WARN band
-            # is that a human still sees the signal, and a bare fence was deleting it
-            # rather than down-ranking it. A demotion the reader never learns about is
-            # the silencer shape this project keeps rejecting, WARN or not.
-            for pm in p_rx.finditer(blob):
-                if not _is_code_example(blob, pm.start(), _fr, fence_needs_negation=True):
-                    # Append to high for now with a WARN tag — separated at return time.
-                    # Actually: collect separately to keep severity correct.
-                    # We use a dedicated collector defined just below.
-                    _persist_warn.append(f"{name}: {p_label}")
                     break
+            # F-059: skill-manifest least-privilege — allowed-tools grant vs declared purpose.
+            _overgrant = _skill_tool_overgrant(blob, name)
+            if _overgrant:
+                warns_content.append(_overgrant)
 
-        # AST analysis of the skill's Python files — catches obfuscation regex misses.
-        # crit rules (obfuscated exec, getattr/import indirection) FAIL on their own;
-        # info rules (plain shell sinks, deserialization) escalate only alongside a
-        # credential/exfil signal, so a skill that merely uses subprocess is never failed.
-        # F-057: AST_UNANALYZABLE findings (parse failures) are collected separately so
-        # they surface as UNKNOWN rather than silently vanishing; they do not alter
-        # crit/high/verdict but rank above the WARN buckets below.
-        # F-018: also run the abstract effect simulator on each Python file and accumulate
-        # the per-entry-point results into ctx.effect_profiles[name].  This is strictly
-        # additive — the simulator result is NEVER used to alter crit/high/verdict.
-        _skill_ep_results: list[dict] = []
-        # B-638: the skill's own file set, so an exec() of a file the skill ships is judged
-        # by where its path RESOLVES (skillast delegates to shippedexec), not by whether the
-        # path merely mentions __file__. Deliberately built from installed_skill_py ONLY —
-        # a declared file (B-612 below) never enters that list, so a declared file's own
-        # self-referential exec() idiom is NOT exempted by this artifact; it falls to
-        # shippedexec's WARN-grade "unshipped" branch instead of a false clean pass, which
-        # is the direction B-612's contract allows.
-        _shipped = _ShippedArtifact(
-            ctx.installed_skill_py.get(name, []),
-            root=(getattr(ctx, "installed_skill_dirs", None) or {}).get(name)
-            or getattr(ctx, "home", None),
-        )
-        # B-612: files only this skill's SKILL.md runs with a named interpreter
-        # (collector.read_skill_declared). FINDINGS ONLY, and the three `_declared`
-        # guards below are the whole contract: no parse-error record (it carries verdict
-        # weight and the baseline never read the file), no effect simulation (that feeds
-        # ctx.effect_profiles, i.e. coverage and B62), no cross-file package pass. Every
-        # finding rule is routed exactly as it is for a `.py`/`.sh`/`.js` file — same
-        # `own_host`, same `artifact` — so the same bytes reach the same bucket under
-        # either name.
-        _declared = (getattr(ctx, "installed_skill_declared", None) or {}).get(name, [])
-        _py_files = [(r, s, False) for r, s in ctx.installed_skill_py.get(name, [])]
-        _py_files += [(r, s, True) for r, lang, s in _declared if lang == "py"]
-        for relpath, src, _is_declared in _py_files:
-            for af in analyze_python(src, relpath, own_host=_own_host, artifact=_shipped):
-                if af.rule == "AST_UNANALYZABLE":
-                    if not _is_declared:
-                        parse_error_paths.append(f"{name}: {relpath}")
-                    else:
-                        declared_unparsed.append(
-                            f"coverage: {name}: {relpath} is run by SKILL.md as Python but "
-                            "did not parse as Python, so no dangerous-pattern check reached it"
-                        )
-                    continue
-                # F-049: env/agent-config secret -> network sink. WARN-grade (never an
-                # automatic FAIL); collected separately from the crit/info verdict path.
-                if af.rule == "ENV_EXFIL_FLOW":
-                    warns_env_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
-                    continue
-                # C-203: host/machine-identity info -> outbound sink (covert telemetry).
-                # WARN-grade (never an automatic FAIL — telemetry/crash-reporters are dual-use).
-                if af.rule == "HOST_INFO_EXFIL_FLOW":
-                    warns_host_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
-                    continue
-                # B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY): a function combining
-                # >=2 over-collection axes reaches a network sink. WARN-grade, and ONLY
-                # surfaced when the skill's OWN SKILL.md does NOT disclose the collection
-                # (_skill_declares_telemetry_disclosure) — a disclosed telemetry/diagnostics/
-                # backup skill is not flagged; an undisclosed one is the actual T09 gap this
-                # closes (V_EXCESSIVE_TELEMETRY co-occurring with V_MISLEADING_DESCRIPTION).
-                if af.rule == "EXCESSIVE_TELEMETRY_FLOW":
-                    if not _skill_declares_telemetry_disclosure(blob):
-                        warns_telemetry_undisclosed.append(
-                            f"{name}: {af.reason} ({relpath}:{af.lineno})"
-                        )
-                    continue
-                # C-205: argv-list curl/wget staging a script to a writable/tmp path.
-                # WARN-grade (staging a download isn't itself proof of malice).
-                if af.rule == "DROPPER_DOWNLOAD_TO_TMP":
-                    warns_curl_dropper.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
-                    continue
-                # F-058: code-level time-bomb / sandbox-evasion gate. WARN-grade.
-                if af.rule == "CONDITIONAL_SINK":
-                    warns_timebomb.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
-                    continue
-                # C-199: subprocess/os.system shell-injection-prone shape, regardless of
-                # exfil — WARN-grade on its own (never escalated to FAIL by this rule).
-                if af.rule == "SHELL_INJECTION_RISK":
-                    warns_shell_injection.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
-                    continue
-                # B336: chunked/part-file read+join composed into an exec/eval call — the
-                # split-by-file scanner-evasion loader shape. WARN-grade only — routed
-                # here, BEFORE the generic crit/cred-exfil fallthrough below, so this
-                # rule can never become FAIL-capable regardless of its own "info"
-                # severity label or any co-occurring cred/exfil signal.
-                if af.rule == "CHUNKED_FILE_EXEC":
-                    warns_chunked_file_exec.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
-                    continue
-                # B-638: an exec/eval proven to run a path inside the skill whose file this
-                # scan did not analyse (not shipped, or not Python). WARN-grade, routed here
-                # BEFORE the cred/exfil fallthrough so it can never escalate: its content is
-                # unknown, which is a question, not evidence.
-                if af.rule == "UNSHIPPED_FILE_EXEC":
-                    warns_unshipped_exec.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
-                    continue
-                # B394 (B-850): a decode-then-exec read the allowlist recognizer
-                # positively anchors on __file__ but cannot statically bound (a
-                # runtime-computed tail segment). WARN-grade only -- routed here,
-                # BEFORE the generic crit/cred-exfil fallthrough below, so this rule
-                # can never become FAIL-capable regardless of its own "info" severity
-                # label or any co-occurring cred/exfil signal (mirrors CHUNKED_FILE_
-                # EXEC's guard just above).
-                if af.rule == "ARTIFACT_READ_UNPROVEN":
-                    warns_artifact_unproven.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
-                # B-917 T5: a loader (runpy/importlib/zipimport) target that is
-                # neither proven to be the skill's own shipped code nor proven safe.
-                # WARN-grade, routed here for the identical reason UNSHIPPED_FILE_EXEC
-                # is: a benign parameterized loader and a planted-file read through the
-                # same parameter are the same AST (Golden Rule #4).
-                if af.rule == "LOADER_TARGET_UNVERIFIED":
-                    warns_loader_target_unverified.append(
-                        f"{name}: {af.reason} ({relpath}:{af.lineno})"
-                    )
-                    continue
-                # B-917: a write/import pair whose locations could not be proven equal
-                # OR proven different. WARN-grade -- never escalated, since the two
-                # shapes behind it (an ext-taint-only selector; a CWD-vs-FILE ambiguity)
-                # are not distinguishable from source alone (b917-design.md's
-                # residual_proof).
-                if af.rule == "STAGED_IMPORT_UNRESOLVED":
-                    warns_staged_import_unresolved.append(
-                        f"{name}: {af.reason} ({relpath}:{af.lineno})"
-                    )
-                    continue
-                # Argv-list tunnel/mesh-VPN launch primitive (TUNNEL_LAUNCH_ARGV).
-                # WARN-only, HIGH severity but explicitly not
-                # FAIL-capable (checks/_content.py's check_tunnel_enrollment / B338 —
-                # a bare launch primitive alone is real and benign, same standing
-                # policy as B334/B336/B337). Routed here, BEFORE the generic crit/
-                # cred-exfil fallthrough below (mirrors CHUNKED_FILE_EXEC's guard just
-                # above), so it can never bleed into THIS function's own B13 verdict
-                # regardless of its own "info" severity label or any co-occurring
-                # cred/exfil signal — B338 already reports it independently via
-                # SKILL_CONTENT_RING (check_dynamic_dispatch_obfuscation/B91's exact
-                # wiring template), so this rule has no B13-facing bucket at all.
-                if af.rule == "TUNNEL_LAUNCH_ARGV":
-                    continue
-                # B-893 (Dave's D2 ruling on B-543): skillast.py's
-                # HARDCODED_PROVIDER_SECRET_ASSIGN — a plain `NAME = "<provider-shaped
-                # -literal>"` module/function/class-level assignment, distinct from the
-                # two env-entangled HARDCODED_PROVIDER_SECRET call sites (os.getenv(...,
-                # <secret>) / os.environ[...] = <secret>), which are a different rule
-                # name and fall through unchanged to the generic crit/FAIL path below.
-                # A shipped key is the author's own hygiene issue, not DO-NOT-INSTALL
-                # harm to the installing user, so this shape never FAILs (see
-                # _AST_NEVER_FAIL_RULES below) — WARN in an ordinary file, evidence-only
-                # (never a verdict winner) when the file's own basename says it is a
-                # test fixture.
+            # C-040: persistence / rogue-agent patterns — HIGH (self-mod)
+            # and WARN (backgrounding/daemonize). Fence-aware via _is_code_example.
+            for p_label, p_rx in _SKILL_PERSISTENCE_HIGH:
+                # B-526: same for/else shape as the _SKILL_CRIT loop above — a fenced match
+                # must never end the scan, or it swallows a genuine unfenced one later.
                 #
-                # Deliberately _TEST_FIXTURE_BASENAME_RE (basename-only), NOT the
-                # shape-gated _pos_in_test_fixture_file/_PYTHON_TEST_SHAPE_SIGNALS pair
-                # the prose side uses (:1174-1330). That gate exists because ITS false
-                # negative is a live attack: a forged "# file: test_x.py" heading can
-                # hide a real payload inside an unrelated file's prose, so the prose
-                # side additionally demands real pytest/unittest shape before trusting
-                # the name. Here the file is not a synthetic marker inside a text blob
-                # — it is the AST loop's own `relpath`, the scanner's real path for a
-                # real bundled Python file — so there is nothing to forge; the only
-                # question is whether the false negative this trades away is a live
-                # attack or an author's own leaked test key. Measured on the B-543
-                # corpus: every one of the 33 gold-normal `tests/conftest.py` hits is a
-                # single byte-identical template with ZERO of the 7
-                # _PYTHON_TEST_SHAPE_SIGNALS (no `def test_`, no `assert`, no
-                # `import pytest` — just `MOCK_* = "..."` lines), so a shape gate here
-                # would still convict every one of them; basename alone is the
-                # deliberate, documented choice. A real live key in a file whose
-                # basename does NOT match (e.g. `scripts/deploy.py`) is unaffected and
-                # still WARNs. This trade-off is disclosed in the WARN finding's `fix`
-                # text below, never in `detail` (CLAUDE.md §2.5/B-555 — `detail` is
-                # what `baseline.fingerprint()` hashes, and moving disclosure text
-                # there would orphan every `.clawseccheckignore` entry already written
-                # against it).
-                if af.rule == "HARDCODED_PROVIDER_SECRET_ASSIGN":
-                    if _TEST_FIXTURE_BASENAME_RE.match(Path(relpath).name):
-                        hardcoded_secret_fixture_note.append(
-                            f"{name}: {af.reason} ({relpath}:{af.lineno}) — a "
-                            "test-fixture-named file, carried as evidence only, "
-                            "never counted toward the verdict"
+                # B-525: `fence_needs_negation=True`, same family and same evidence as the
+                # cron/systemd flip in `_cron_persistence_hits`. This is B-097's rule being
+                # carried to another site, not a new judgement: B-097 already established
+                # that an unannotated fence must not dampen on its own and applied it to the
+                # prose ring, and C-204/B-508 carried it to the authorized_keys site. What
+                # still has to be paid per site is the MEASUREMENT — the rule is general, the
+                # cost of getting it wrong is not. Measured through the real
+                # `vet_skill()` before the flip, with the positive control the task demands:
+                #
+                #     with open(__file__, 'w') as fh: fh.write(payload)
+                #         bare prose -> FAIL      inside ```bash -> PASS
+                #
+                # A skill rewriting its own source is persistence, and wrapping the line in
+                # an unannotated fence made the HIGH finding vanish outright. Nothing else
+                # in this loop absorbed it: the `_p_fenced_only` coverage note below only
+                # fires when NOTHING convicted, so the suppression was silent whenever any
+                # other label happened to fire first.
+                _p_fenced_only_pos = None  # B-526: keep the offset, not just the fact
+                for pm in p_rx.finditer(blob):
+                    if not _is_code_example(blob, pm.start(), _fr, fence_needs_negation=True):
+                        high.append(f"{name}: {p_label}")
+                        break  # one finding per label per skill
+                    if _p_fenced_only_pos is None and _fence_only_suppression(
+                        blob, pm.start(), _fr
+                    ):
+                        _p_fenced_only_pos = pm.start()
+                else:
+                    if _p_fenced_only_pos is not None:
+                        _mf, _ff = fence_suppression_provenance(blob, _p_fenced_only_pos, _fr)
+                        coverage_fence.append(
+                            f"coverage: {name}: "
+                            + fence_suppression_note(p_label, _mf, _ff)
                         )
-                    else:
-                        warns_hardcoded_secret_assign.append(
+
+            # B-144: cron/startup persistence — dual-use, disclosure-aware (see
+            # _cron_persistence_hits docstring). A disclosed watchdog/monitoring job
+            # down-ranks to WARN instead of HIGH.
+            _cron_high, _cron_warn = _cron_persistence_hits(
+                blob, _fr, coverage_fence, _cron_bare_path_hits, _cron_verb_anchored_hits
+            )
+            for h in _cron_high:
+                high.append(f"{name}: {h}")
+            for h in _cron_warn:
+                _persist_warn.append(f"{name}: {h}")
+
+            # C-204: authorized_keys persistence — write-verb + key-literal HIGH/WARN split
+            # (see _authkey_persistence_hits docstring). Same shape as the cron block above.
+            _authkey_high, _authkey_warn = _authkey_persistence_hits(blob, _fr, coverage_fence)
+            for h in _authkey_high:
+                high.append(f"{name}: {h}")
+            for h in _authkey_warn:
+                _persist_warn.append(f"{name}: {h}")
+
+            # C-259 (D9, docs/design/severity-separability.md): measured net-correct, not
+            # just assumed — over the 2,052-case WARN corpus this gate fires on malicious
+            # WARN-only skills at 2.68% (33/1,230) vs benign WARN-only skills at 5.32%
+            # (24/451), ~2x the malicious rate. Loosening it (the design doc's refuted
+            # option O2) trades benign FAILs for negligible recall — do not reopen on
+            # recall grounds. The other 97.32% of malicious WARN-only cases never had a
+            # FAIL-capable signal at all; that gap is evidence-accumulation/E-038 work
+            # (design doc §7), not this gate.
+            # C-040/B-193: agent-config injection (two-step: filename + write-verb in window).
+            # Down-rank to WARN only when BOTH hold: the skill's own SKILL.md declares this
+            # exact target as its purpose (_skill_declares_config_target), AND nothing else
+            # has already flagged this skill crit/high — a declared config-writer that also
+            # trips any other signal still FAILs (case_01826 mitigation, architect design).
+            _acw_hits, _acw_fenced = _agent_config_write_hits(name, blob, _fr)
+            for _f in _acw_fenced:
+                warns_content.append(
+                    f"{name}: write to an agent-context file ({_f}) inside a fence with no"
+                    " marker we recognise, so it was not assessed"
+                )
+            for evidence, fname in _acw_hits:
+                _prefix = f"{name}:"
+                _has_other_signal = any(e.startswith(_prefix) for e in crit) or any(
+                    e.startswith(_prefix) for e in high
+                )
+                if (
+                    not _has_other_signal
+                    and _skill_declares_config_target(blob, fname)
+                    and not _config_write_carries_dangerous_payload(blob)
+                ):
+                    _persist_warn.append(f"{evidence} (skill's own declared purpose)")
+                    # B-634: same severity as the crit/high cascade would give this exact
+                    # hit if nothing else had already fired for this skill.
+                    _persistence_axis_reasons.append([WARN, f"{evidence} (skill's own declared purpose)"])
+                else:
+                    high.append(evidence)
+                    _persistence_axis_reasons.append([FAIL, evidence])
+
+            # C-199 (SkillTrustBench T09): insecure temp-file handling — hardcoded/
+            # predictable /tmp path opened for write. WARN regardless of exfil/other
+            # signals (CWE-377 is a coding-quality issue, not itself a malice indicator).
+            warns_insecure_tempfile.extend(_insecure_tempfile_write_hits(name, blob, _fr))
+
+            # C-040: backgrounding/daemonize — lower confidence → WARN bucket.
+            # We collect into a separate list so they don't escalate to HIGH FAIL.
+            # Stored per-skill in a shared list; returned as WARN after the HIGH check.
+            for p_label, p_rx in _SKILL_PERSISTENCE_WARN:
+                # B-525: `fence_needs_negation=True` — third site in the persistence family,
+                # and like the other two this carries B-097's already-established rule to a
+                # site that kept the legacy default, rather than deciding anything new.
+                # Measured the same way:
+                #
+                #     nohup python3 agent_loop.py &   /   disown
+                #         bare prose -> WARN      inside ```bash -> PASS
+                #
+                # Flipped even though this band is only WARN: the whole point of a WARN band
+                # is that a human still sees the signal, and a bare fence was deleting it
+                # rather than down-ranking it. A demotion the reader never learns about is
+                # the silencer shape this project keeps rejecting, WARN or not.
+                for pm in p_rx.finditer(blob):
+                    if not _is_code_example(blob, pm.start(), _fr, fence_needs_negation=True):
+                        # Append to high for now with a WARN tag — separated at return time.
+                        # Actually: collect separately to keep severity correct.
+                        # We use a dedicated collector defined just below.
+                        _persist_warn.append(f"{name}: {p_label}")
+                        break
+
+            # AST analysis of the skill's Python files — catches obfuscation regex misses.
+            # crit rules (obfuscated exec, getattr/import indirection) FAIL on their own;
+            # info rules (plain shell sinks, deserialization) escalate only alongside a
+            # credential/exfil signal, so a skill that merely uses subprocess is never failed.
+            # F-057: AST_UNANALYZABLE findings (parse failures) are collected separately so
+            # they surface as UNKNOWN rather than silently vanishing; they do not alter
+            # crit/high/verdict but rank above the WARN buckets below.
+            # F-018: also run the abstract effect simulator on each Python file and accumulate
+            # the per-entry-point results into ctx.effect_profiles[name].  This is strictly
+            # additive — the simulator result is NEVER used to alter crit/high/verdict.
+            _skill_ep_results: list[dict] = []
+            # B-638: the skill's own file set, so an exec() of a file the skill ships is judged
+            # by where its path RESOLVES (skillast delegates to shippedexec), not by whether the
+            # path merely mentions __file__. Deliberately built from installed_skill_py ONLY —
+            # a declared file (B-612 below) never enters that list, so a declared file's own
+            # self-referential exec() idiom is NOT exempted by this artifact; it falls to
+            # shippedexec's WARN-grade "unshipped" branch instead of a false clean pass, which
+            # is the direction B-612's contract allows.
+            _shipped = _ShippedArtifact(
+                ctx.installed_skill_py.get(name, []),
+                root=(getattr(ctx, "installed_skill_dirs", None) or {}).get(name)
+                or getattr(ctx, "home", None),
+            )
+            # B-612: files only this skill's SKILL.md runs with a named interpreter
+            # (collector.read_skill_declared). FINDINGS ONLY, and the three `_declared`
+            # guards below are the whole contract: no parse-error record (it carries verdict
+            # weight and the baseline never read the file), no effect simulation (that feeds
+            # ctx.effect_profiles, i.e. coverage and B62), no cross-file package pass. Every
+            # finding rule is routed exactly as it is for a `.py`/`.sh`/`.js` file — same
+            # `own_host`, same `artifact` — so the same bytes reach the same bucket under
+            # either name.
+            _declared = (getattr(ctx, "installed_skill_declared", None) or {}).get(name, [])
+            _py_files = [(r, s, False) for r, s in ctx.installed_skill_py.get(name, [])]
+            _py_files += [(r, s, True) for r, lang, s in _declared if lang == "py"]
+            for relpath, src, _is_declared in _py_files:
+                for af in analyze_python(src, relpath, own_host=_own_host, artifact=_shipped):
+                    if af.rule == "AST_UNANALYZABLE":
+                        if not _is_declared:
+                            parse_error_paths.append(f"{name}: {relpath}")
+                        else:
+                            declared_unparsed.append(
+                                f"coverage: {name}: {relpath} is run by SKILL.md as Python but "
+                                "did not parse as Python, so no dangerous-pattern check reached it"
+                            )
+                        continue
+                    # F-049: env/agent-config secret -> network sink. WARN-grade (never an
+                    # automatic FAIL); collected separately from the crit/info verdict path.
+                    if af.rule == "ENV_EXFIL_FLOW":
+                        warns_env_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                        continue
+                    # C-203: host/machine-identity info -> outbound sink (covert telemetry).
+                    # WARN-grade (never an automatic FAIL — telemetry/crash-reporters are dual-use).
+                    if af.rule == "HOST_INFO_EXFIL_FLOW":
+                        warns_host_exfil.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                        continue
+                    # B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY): a function combining
+                    # >=2 over-collection axes reaches a network sink. WARN-grade, and ONLY
+                    # surfaced when the skill's OWN SKILL.md does NOT disclose the collection
+                    # (_skill_declares_telemetry_disclosure) — a disclosed telemetry/diagnostics/
+                    # backup skill is not flagged; an undisclosed one is the actual T09 gap this
+                    # closes (V_EXCESSIVE_TELEMETRY co-occurring with V_MISLEADING_DESCRIPTION).
+                    if af.rule == "EXCESSIVE_TELEMETRY_FLOW":
+                        if not _skill_declares_telemetry_disclosure(blob):
+                            warns_telemetry_undisclosed.append(
+                                f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                            )
+                        continue
+                    # C-205: argv-list curl/wget staging a script to a writable/tmp path.
+                    # WARN-grade (staging a download isn't itself proof of malice).
+                    if af.rule == "DROPPER_DOWNLOAD_TO_TMP":
+                        warns_curl_dropper.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                        continue
+                    # F-058: code-level time-bomb / sandbox-evasion gate. WARN-grade.
+                    if af.rule == "CONDITIONAL_SINK":
+                        warns_timebomb.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                        continue
+                    # C-199: subprocess/os.system shell-injection-prone shape, regardless of
+                    # exfil — WARN-grade on its own (never escalated to FAIL by this rule).
+                    if af.rule == "SHELL_INJECTION_RISK":
+                        warns_shell_injection.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                        continue
+                    # B336: chunked/part-file read+join composed into an exec/eval call — the
+                    # split-by-file scanner-evasion loader shape. WARN-grade only — routed
+                    # here, BEFORE the generic crit/cred-exfil fallthrough below, so this
+                    # rule can never become FAIL-capable regardless of its own "info"
+                    # severity label or any co-occurring cred/exfil signal.
+                    if af.rule == "CHUNKED_FILE_EXEC":
+                        warns_chunked_file_exec.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                        continue
+                    # B-638: an exec/eval proven to run a path inside the skill whose file this
+                    # scan did not analyse (not shipped, or not Python). WARN-grade, routed here
+                    # BEFORE the cred/exfil fallthrough so it can never escalate: its content is
+                    # unknown, which is a question, not evidence.
+                    if af.rule == "UNSHIPPED_FILE_EXEC":
+                        warns_unshipped_exec.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                        continue
+                    # B394 (B-850): a decode-then-exec read the allowlist recognizer
+                    # positively anchors on __file__ but cannot statically bound (a
+                    # runtime-computed tail segment). WARN-grade only -- routed here,
+                    # BEFORE the generic crit/cred-exfil fallthrough below, so this rule
+                    # can never become FAIL-capable regardless of its own "info" severity
+                    # label or any co-occurring cred/exfil signal (mirrors CHUNKED_FILE_
+                    # EXEC's guard just above).
+                    if af.rule == "ARTIFACT_READ_UNPROVEN":
+                        warns_artifact_unproven.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                    # B-917 T5: a loader (runpy/importlib/zipimport) target that is
+                    # neither proven to be the skill's own shipped code nor proven safe.
+                    # WARN-grade, routed here for the identical reason UNSHIPPED_FILE_EXEC
+                    # is: a benign parameterized loader and a planted-file read through the
+                    # same parameter are the same AST (Golden Rule #4).
+                    if af.rule == "LOADER_TARGET_UNVERIFIED":
+                        warns_loader_target_unverified.append(
                             f"{name}: {af.reason} ({relpath}:{af.lineno})"
                         )
-                    continue
-                # analyze_python's own per-file cap disclosure —
-                # "N more findings suppressed" — is metadata about the scan, not a
-                # verdict about the skill. Routed here, BEFORE the generic crit/
-                # cred-exfil fallthrough (same guard shape as CHUNKED_FILE_EXEC/
-                # TUNNEL_LAUNCH_ARGV just above), so it can never bleed into this
-                # function's own FAIL or `high` (cred-exfil) bucket — an unrelated
-                # cred-exfil signal elsewhere in the same skill must not make a
-                # scan-completeness note read as more exfil evidence.
-                if af.rule == "AST_FINDINGS_TRUNCATED":
-                    continue
-                loc = f"{relpath}:{af.lineno}"
-                # B-636: the same predicate checks/_mcp.py asks. Equivalent here by
-                # construction — every rule in _AST_NEVER_FAIL_RULES has already
-                # `continue`d above — and stated rather than implied, so the two callers
-                # cannot drift apart silently.
-                if ast_finding_is_fail_capable(af):
-                    crit.append(f"{name}: {af.reason} ({loc})")
-                elif cred_exfil_signal:
-                    high.append(f"{name}: {af.reason} ({loc})")
-            if _is_declared:
-                continue  # B-612: never effect_profiles — see the `_declared` comment above
-            # simulate_effects never raises; guard here too in case of future
-            # refactors or mocking in tests.
-            #
-            # C-175: ScanBudgetExceeded must NOT be swallowed here. A bare
-            # `except Exception` catching the per-check wall-clock deadline firing
-            # mid-simulation silently treats a truncated analysis as "nothing found",
-            # letting this check fall through to a false PASS instead of the UNKNOWN
-            # run_all's own ScanBudgetExceeded handler is meant to produce. Since B-352
-            # the type derives from BaseException, so the catch-all below cannot reach
-            # it and this re-raise is belt-and-braces — kept deliberately, because it
-            # documents the requirement at the site that has to satisfy it.
-            try:
-                _ep = _simulate_effects(src, relpath)
-            except ScanBudgetExceeded:
-                raise
-            except Exception:  # noqa: BLE001
-                _ep = []
-            for entry in _ep:
-                # Annotate each entry-point record with its source file for traceability.
-                annotated = dict(entry)
-                annotated["file"] = relpath
-                _skill_ep_results.append(annotated)
-        if _skill_ep_results:
-            ctx.effect_profiles[name] = _skill_ep_results
-        # F-056: cross-file / import-graph taint. A decode-derived value defined in one of
-        # this skill's files, imported and run in another, is invisible to the per-file
-        # pass above (each half is clean alone). CROSS_FILE_EXEC is crit -> FAIL; the reason
-        # already carries the importing file:line and the source module.
-        for af in analyze_python_package(ctx.installed_skill_py.get(name, [])):
-            crit.append(f"{name}: {af.reason}")
-        # F-050: bundled shell (.sh/.bash/.zsh) semantic pass — cred-file read -> outbound
-        # exfil, or download piped into a non-shell interpreter. Both are crit -> FAIL for
-        # a real .sh/.bash/.zsh file or a declared file whose OWN shebang independently
-        # names sh (B-612 "verified" — two statements agreeing). A declared file with no
-        # shebang of its own cannot be confirmed to be shell at all (`bash -n` accepts
-        # English, measured) — same crit hit there is capped at WARN, in
-        # `warns_declared_unverified`, never `crit`/FAIL. See that bucket's comment below.
-        _sh_files = [(r, s, True) for r, s in ctx.installed_skill_shell.get(name, [])]
-        _sh_files += [
-            (r, s, _shebang_language(s) == "sh") for r, lang, s in _declared if lang == "sh"
-        ]
-        for relpath, src, _verified in _sh_files:
-            for af in analyze_shell(src, relpath):
-                msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
-                if _verified:
-                    crit.append(msg)
-                else:
-                    warns_declared_unverified.append(msg)
-        # F-064: bundled JS/TS (.js/.ts/.mjs/.cjs) lexical pass. eval-of-decoded and
-        # remote fetch-then-exec are crit -> FAIL; every other rule is warn -> the JS WARN
-        # bucket below. B-743: this comment used to enumerate the warn rules as two, which
-        # went stale the moment JS_NATIVE_DLOPEN was added and is how the bucket's fixed
-        # advice drifted out of truth unnoticed. Stated as the RULE now, not as a list —
-        # `_JS_WARN_REMEDIATION` is the list, and a test keeps it complete.
-        #
-        # B-612: same "verified" split as shell above — a declared file's OWN shebang has
-        # to independently name js/node before a crit-grade JS hit can reach `crit`/FAIL.
-        # A non-crit JS rule is already WARN-grade (`warns_js`), so it carries no false-FAIL
-        # risk and is left exactly where a real .js file's hit would land, verified or not.
-        _js_files = [(r, s, True) for r, s in ctx.installed_skill_js.get(name, [])]
-        _js_files += [
-            (r, s, _shebang_language(s) == "js") for r, lang, s in _declared if lang == "js"
-        ]
-        for relpath, src, _verified in _js_files:
-            for af in analyze_javascript(src, relpath):
-                msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
-                if af.severity == "crit":
+                        continue
+                    # B-917: a write/import pair whose locations could not be proven equal
+                    # OR proven different. WARN-grade -- never escalated, since the two
+                    # shapes behind it (an ext-taint-only selector; a CWD-vs-FILE ambiguity)
+                    # are not distinguishable from source alone (b917-design.md's
+                    # residual_proof).
+                    if af.rule == "STAGED_IMPORT_UNRESOLVED":
+                        warns_staged_import_unresolved.append(
+                            f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                        )
+                        continue
+                    # Argv-list tunnel/mesh-VPN launch primitive (TUNNEL_LAUNCH_ARGV).
+                    # WARN-only, HIGH severity but explicitly not
+                    # FAIL-capable (checks/_content.py's check_tunnel_enrollment / B338 —
+                    # a bare launch primitive alone is real and benign, same standing
+                    # policy as B334/B336/B337). Routed here, BEFORE the generic crit/
+                    # cred-exfil fallthrough below (mirrors CHUNKED_FILE_EXEC's guard just
+                    # above), so it can never bleed into THIS function's own B13 verdict
+                    # regardless of its own "info" severity label or any co-occurring
+                    # cred/exfil signal — B338 already reports it independently via
+                    # SKILL_CONTENT_RING (check_dynamic_dispatch_obfuscation/B91's exact
+                    # wiring template), so this rule has no B13-facing bucket at all.
+                    if af.rule == "TUNNEL_LAUNCH_ARGV":
+                        continue
+                    # B-893 (Dave's D2 ruling on B-543): skillast.py's
+                    # HARDCODED_PROVIDER_SECRET_ASSIGN — a plain `NAME = "<provider-shaped
+                    # -literal>"` module/function/class-level assignment, distinct from the
+                    # two env-entangled HARDCODED_PROVIDER_SECRET call sites (os.getenv(...,
+                    # <secret>) / os.environ[...] = <secret>), which are a different rule
+                    # name and fall through unchanged to the generic crit/FAIL path below.
+                    # A shipped key is the author's own hygiene issue, not DO-NOT-INSTALL
+                    # harm to the installing user, so this shape never FAILs (see
+                    # _AST_NEVER_FAIL_RULES below) — WARN in an ordinary file, evidence-only
+                    # (never a verdict winner) when the file's own basename says it is a
+                    # test fixture.
+                    #
+                    # Deliberately _TEST_FIXTURE_BASENAME_RE (basename-only), NOT the
+                    # shape-gated _pos_in_test_fixture_file/_PYTHON_TEST_SHAPE_SIGNALS pair
+                    # the prose side uses (:1174-1330). That gate exists because ITS false
+                    # negative is a live attack: a forged "# file: test_x.py" heading can
+                    # hide a real payload inside an unrelated file's prose, so the prose
+                    # side additionally demands real pytest/unittest shape before trusting
+                    # the name. Here the file is not a synthetic marker inside a text blob
+                    # — it is the AST loop's own `relpath`, the scanner's real path for a
+                    # real bundled Python file — so there is nothing to forge; the only
+                    # question is whether the false negative this trades away is a live
+                    # attack or an author's own leaked test key. Measured on the B-543
+                    # corpus: every one of the 33 gold-normal `tests/conftest.py` hits is a
+                    # single byte-identical template with ZERO of the 7
+                    # _PYTHON_TEST_SHAPE_SIGNALS (no `def test_`, no `assert`, no
+                    # `import pytest` — just `MOCK_* = "..."` lines), so a shape gate here
+                    # would still convict every one of them; basename alone is the
+                    # deliberate, documented choice. A real live key in a file whose
+                    # basename does NOT match (e.g. `scripts/deploy.py`) is unaffected and
+                    # still WARNs. This trade-off is disclosed in the WARN finding's `fix`
+                    # text below, never in `detail` (CLAUDE.md §2.5/B-555 — `detail` is
+                    # what `baseline.fingerprint()` hashes, and moving disclosure text
+                    # there would orphan every `.clawseccheckignore` entry already written
+                    # against it).
+                    if af.rule == "HARDCODED_PROVIDER_SECRET_ASSIGN":
+                        if _TEST_FIXTURE_BASENAME_RE.match(Path(relpath).name):
+                            hardcoded_secret_fixture_note.append(
+                                f"{name}: {af.reason} ({relpath}:{af.lineno}) — a "
+                                "test-fixture-named file, carried as evidence only, "
+                                "never counted toward the verdict"
+                            )
+                        else:
+                            warns_hardcoded_secret_assign.append(
+                                f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                            )
+                        continue
+                    # analyze_python's own per-file cap disclosure —
+                    # "N more findings suppressed" — is metadata about the scan, not a
+                    # verdict about the skill. Routed here, BEFORE the generic crit/
+                    # cred-exfil fallthrough (same guard shape as CHUNKED_FILE_EXEC/
+                    # TUNNEL_LAUNCH_ARGV just above), so it can never bleed into this
+                    # function's own FAIL or `high` (cred-exfil) bucket — an unrelated
+                    # cred-exfil signal elsewhere in the same skill must not make a
+                    # scan-completeness note read as more exfil evidence.
+                    if af.rule == "AST_FINDINGS_TRUNCATED":
+                        continue
+                    loc = f"{relpath}:{af.lineno}"
+                    # B-636: the same predicate checks/_mcp.py asks. Equivalent here by
+                    # construction — every rule in _AST_NEVER_FAIL_RULES has already
+                    # `continue`d above — and stated rather than implied, so the two callers
+                    # cannot drift apart silently.
+                    if ast_finding_is_fail_capable(af):
+                        crit.append(f"{name}: {af.reason} ({loc})")
+                    elif cred_exfil_signal:
+                        high.append(f"{name}: {af.reason} ({loc})")
+                if _is_declared:
+                    continue  # B-612: never effect_profiles — see the `_declared` comment above
+                # simulate_effects never raises; guard here too in case of future
+                # refactors or mocking in tests.
+                #
+                # C-175: ScanBudgetExceeded must NOT be swallowed here. A bare
+                # `except Exception` catching the per-check wall-clock deadline firing
+                # mid-simulation silently treats a truncated analysis as "nothing found",
+                # letting this check fall through to a false PASS instead of the UNKNOWN
+                # run_all's own ScanBudgetExceeded handler is meant to produce. Since B-352
+                # the type derives from BaseException, so the catch-all below cannot reach
+                # it and this re-raise is belt-and-braces — kept deliberately, because it
+                # documents the requirement at the site that has to satisfy it.
+                try:
+                    _ep = _simulate_effects(src, relpath)
+                except ScanBudgetExceeded:
+                    raise
+                except Exception:  # noqa: BLE001
+                    _ep = []
+                for entry in _ep:
+                    # Annotate each entry-point record with its source file for traceability.
+                    annotated = dict(entry)
+                    annotated["file"] = relpath
+                    _skill_ep_results.append(annotated)
+            if _skill_ep_results:
+                ctx.effect_profiles[name] = _skill_ep_results
+            # F-056: cross-file / import-graph taint. A decode-derived value defined in one of
+            # this skill's files, imported and run in another, is invisible to the per-file
+            # pass above (each half is clean alone). CROSS_FILE_EXEC is crit -> FAIL; the reason
+            # already carries the importing file:line and the source module.
+            for af in analyze_python_package(ctx.installed_skill_py.get(name, [])):
+                crit.append(f"{name}: {af.reason}")
+            # F-050: bundled shell (.sh/.bash/.zsh) semantic pass — cred-file read -> outbound
+            # exfil, or download piped into a non-shell interpreter. Both are crit -> FAIL for
+            # a real .sh/.bash/.zsh file or a declared file whose OWN shebang independently
+            # names sh (B-612 "verified" — two statements agreeing). A declared file with no
+            # shebang of its own cannot be confirmed to be shell at all (`bash -n` accepts
+            # English, measured) — same crit hit there is capped at WARN, in
+            # `warns_declared_unverified`, never `crit`/FAIL. See that bucket's comment below.
+            _sh_files = [(r, s, True) for r, s in ctx.installed_skill_shell.get(name, [])]
+            _sh_files += [
+                (r, s, _shebang_language(s) == "sh") for r, lang, s in _declared if lang == "sh"
+            ]
+            for relpath, src, _verified in _sh_files:
+                for af in analyze_shell(src, relpath):
+                    msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
                     if _verified:
                         crit.append(msg)
                     else:
                         warns_declared_unverified.append(msg)
-                else:
-                    warns_js.append(msg)
-                    warns_js_rules.add(af.rule)
-        # B-618: this skill contributed if -- and only if -- one of the buckets above
-        # actually grew during its own iteration. Structural, not text-parsed.
-        if len(warns_js) > _warns_js_len0:
-            js_skills.add(name)
-        if len(warns_declared_unverified) > _declared_unverified_len0:
-            declared_unverified_skills.add(name)
-        if len(crit) > _crit_len0:
-            crit_skills.add(name)
-        if len(warns_install_curl) > _install_curl_len0:
-            install_curl_skills.add(name)
-        if len(warns_notify_host) > _notify_len0:
-            notify_skills.add(name)
-        if len(warns_named_exfil_host) > _named_exfil_len0:
-            named_exfil_skills.add(name)
+            # F-064: bundled JS/TS (.js/.ts/.mjs/.cjs) lexical pass. eval-of-decoded and
+            # remote fetch-then-exec are crit -> FAIL; every other rule is warn -> the JS WARN
+            # bucket below. B-743: this comment used to enumerate the warn rules as two, which
+            # went stale the moment JS_NATIVE_DLOPEN was added and is how the bucket's fixed
+            # advice drifted out of truth unnoticed. Stated as the RULE now, not as a list —
+            # `_JS_WARN_REMEDIATION` is the list, and a test keeps it complete.
+            #
+            # B-612: same "verified" split as shell above — a declared file's OWN shebang has
+            # to independently name js/node before a crit-grade JS hit can reach `crit`/FAIL.
+            # A non-crit JS rule is already WARN-grade (`warns_js`), so it carries no false-FAIL
+            # risk and is left exactly where a real .js file's hit would land, verified or not.
+            _js_files = [(r, s, True) for r, s in ctx.installed_skill_js.get(name, [])]
+            _js_files += [
+                (r, s, _shebang_language(s) == "js") for r, lang, s in _declared if lang == "js"
+            ]
+            for relpath, src, _verified in _js_files:
+                for af in analyze_javascript(src, relpath):
+                    msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
+                    if af.severity == "crit":
+                        if _verified:
+                            crit.append(msg)
+                        else:
+                            warns_declared_unverified.append(msg)
+                    else:
+                        warns_js.append(msg)
+                        warns_js_rules.add(af.rule)
+            # B-618: this skill contributed if -- and only if -- one of the buckets above
+            # actually grew during its own iteration. Structural, not text-parsed.
+            if len(warns_js) > _warns_js_len0:
+                js_skills.add(name)
+            if len(warns_declared_unverified) > _declared_unverified_len0:
+                declared_unverified_skills.add(name)
+            if len(crit) > _crit_len0:
+                crit_skills.add(name)
+            if len(warns_install_curl) > _install_curl_len0:
+                install_curl_skills.add(name)
+            if len(warns_notify_host) > _notify_len0:
+                notify_skills.add(name)
+            if len(warns_named_exfil_host) > _named_exfil_len0:
+                named_exfil_skills.add(name)
+        except ScanBudgetExceeded:
+            # A per-check/per-audit deadline firing mid-skill is not a crash: it must
+            # reach run_all's own ScanBudgetExceeded handling untouched (it derives
+            # from BaseException, B-352, precisely so nothing here swallows it by
+            # accident) rather than being mistaken for this skill's own engine fault.
+            # A bare `except Exception:` below would not catch it anyway; this is
+            # belt-and-braces, stated at the site the requirement applies to — the
+            # same discipline `_simulate_effects`'s own call site above follows.
+            raise
+        except Exception as exc:  # noqa: BLE001 — one skill's crash must not silence
+            # every other skill's findings (B-888). Before this guard, an
+            # uncaught exception anywhere in one skill's analysis (most commonly
+            # skillast.analyze_python's post-parse AST walk — its own try/except only
+            # covers the parse itself, not the checks that walk the tree afterward)
+            # propagated straight out of this function, unwinding the WHOLE loop above
+            # and discarding every crit/high/warn finding already accumulated for every
+            # OTHER skill scanned this run. run_all's own per-CHECK isolation (B-101)
+            # could only convert that into ONE crash finding for the ENTIRE B13 check --
+            # it has no visibility into per-skill state inside this function, so it
+            # could not tell "skill B crashed" from "every skill's scan failed".
+            #
+            # Recorded here instead, then the loop CONTINUES to the next skill: this
+            # skill's own crit/high/warn contributions for THIS iteration are lost (it
+            # never finished), but every other skill's already-accumulated findings
+            # survive untouched, and every skill still to come is still scanned. The
+            # crashed_skills cascade arm below (ranked with parse_error_paths — the
+            # same "the engine could not fully assess this" tier) turns this into an
+            # honest UNKNOWN/engine_degraded verdict for THIS skill rather than a
+            # silent, false-clean PASS, unless a real crit/high FAIL from another
+            # skill outranks it.
+            logging.getLogger("clawseccheck").debug(
+                "check_installed_skills: skill %r crashed mid-analysis:\n%s",
+                name,
+                traceback.format_exc(),
+            )
+            crashed_skills.append(f"{name} ({type(exc).__name__})")
+            continue
     # C-044: unpinned dependency scan — collect across all skills; WARN severity.
     # Runs after the main CRIT/HIGH loop to avoid polluting the main evidence lists.
     warns_unpinned: list[str] = []
@@ -5625,6 +5675,13 @@ def check_installed_skills(ctx: Context) -> Finding:
         "high": high,
         "parse_error_paths": parse_error_paths,
         "warns_declared_unverified": warns_declared_unverified,
+        # B-888: registered EAGERLY (in this literal, same as parse_error_paths
+        # above) rather than at its own later point in the cascade — the B-857 contract
+        # (see _B13_WINNER_ONLY_BUCKETS above) this dict's own construction is built to
+        # satisfy. It is populated entirely by the per-skill loop above, which has
+        # already finished by the time this literal is built, exactly like every other
+        # eager key here.
+        "crashed_skills": crashed_skills,
         "warns_install_curl": warns_install_curl,
         "warns_env_exfil": warns_env_exfil,
         "warns_host_exfil": warns_host_exfil,
@@ -5839,6 +5896,72 @@ def check_installed_skills(ctx: Context) -> Finding:
             high,
             _signal_buckets,
             "high",
+        )
+
+    # B-888: an unexpected engine CRASH while analyzing one skill — checked
+    # BEFORE parse_error_paths (next arm) so the "both non-empty" case always lands here,
+    # where the parse-error facts are still folded in as a "separately" addendum (mirrors
+    # how this arm's own path_traversal addendum works, and how parse_error_paths already
+    # folds in path_traversal below). Ranked in the SAME tier as parse_error_paths — above
+    # the WARN buckets, below crit/high FAIL — because both mean the same thing to the
+    # reader: "the engine could not fully assess this", which must cap the score
+    # (engine_degraded=True) rather than let a real gap read as a clean, unscanned PASS.
+    #
+    # Deliberately a SEPARATE bucket/winner from parse_error_paths, not folded into it —
+    # a parse error means the AST/taint layer looked at a file and could not parse it at
+    # all; a crash here means a file DID parse and something afterwards (an AST-walk
+    # helper, the shell/JS analyzer, a taint pass) raised an exception nothing expected.
+    # Conflating the two would mislabel the sub-signal a judge/reader is told (see
+    # _B13_WINNER_SUBSIGNAL's own comment) — the same reason `_run_content_ring` keeps
+    # its own `crashed` disclosure separate from `skipped` rather than reusing one id for
+    # both (see that function's `except Exception` comment).
+    #
+    # See the per-skill loop's own `except Exception` clause above for how `crashed_skills`
+    # is populated and why every OTHER skill's crit/high/warn findings survive a crash here.
+    if crashed_skills:
+        extra = f" (+{len(crashed_skills) - 6} more)" if len(crashed_skills) > 6 else ""
+        _detail = (
+            f"{len(crashed_skills)} installed skill(s) could not be fully analyzed — "
+            "the scan engine raised an unexpected error partway through: "
+            + "; ".join(crashed_skills[:6])
+            + extra
+        )
+        _fix = (
+            "This is an engine fault, not evidence about the flagged skill(s) — re-run "
+            "with --debug for the traceback and file a bug. Treat the flagged skill(s) "
+            "as unverified rather than clean until a scan completes without error."
+        )
+        if parse_error_paths:
+            _pe_extra = (
+                f" (+{len(parse_error_paths) - 6} more)" if len(parse_error_paths) > 6 else ""
+            )
+            _detail += (
+                " — separately, could not analyze " + "; ".join(parse_error_paths[:6])
+                + _pe_extra + " — parse error(s); file(s) not scanned by the AST/taint layer"
+            )
+            _fix += (
+                " Separately: one or more OTHER bundled file(s) named in detail failed to "
+                "parse outright — inspect them manually."
+            )
+        if _path_traversal:
+            _detail += (
+                " — separately, a confirmed archive path traversal was ALSO found in "
+                "what could be read: " + "; ".join(_path_traversal_named[:6])
+            )
+            _fix += (
+                " Separately: an installed skill named in detail also contains a "
+                "confirmed archive path traversal (see detail) — treat it as dangerous "
+                "regardless of what the crashed skill turns out to hold."
+            )
+        return _b13_verdict(
+            HIGH,
+            UNKNOWN,
+            _detail,
+            _fix,
+            crashed_skills,
+            _signal_buckets,
+            "crashed_skills",
+            engine_degraded=True,
         )
 
     # F-057: parse-error UNKNOWN — ranked above WARN buckets so an unparseable file is
