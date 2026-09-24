@@ -6434,8 +6434,24 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         # closes the same TOCTOU gap trajectorystore._open_and_verify_table documents (a
         # concurrent writer swapping the schema between the check and the query). Scoped
         # to Probe A specifically: legacy Probes B/C below query a DIFFERENT table
-        # (installed_plugin_index), which carries no view-masquerade concern here.
-        conn.execute("BEGIN")
+        # (installed_plugin_index), resolved by the SAME attacker-controlled-schema
+        # mechanism -- it is not proven safe, just out of scope for this fix and not yet
+        # hardened (same residual class as CLAWSECCHECK-B-977 before its own fix).
+        try:
+            conn.execute("BEGIN")
+        except sqlite3.Error as exc:
+            # Same shared-root-cause handling as the PRAGMA query_only failure just
+            # above -- a BEGIN failure here means the database is unusable for both
+            # columns, not just one, so this degrades to UNKNOWN the same way every
+            # other failure in this function already does, rather than propagating
+            # uncaught out of collect()/audit() (B-889's structurally identical sibling
+            # nests its own BEGIN inside this same outer guard; this one now matches).
+            ctx.errors.append(f"could not begin a transaction on {db_path}: {exc}")
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+            ctx.plugin_index_found = True
+            ctx.plugin_index_parse_error = True
+            return
         kind = _trajectorystore._table_kind(conn, "config_machine_state")
         if kind not in ("absent", "table"):
             # Present, but not a real TABLE (view / virtual table / rootpage-aliased /
