@@ -52,7 +52,8 @@ from .textnorm import normalize_for_scan, obfuscation_signals
 # VIEW named `auth_profile_store`) also reuses trajectorystore's own schema verification
 # (`_open_and_verify_table`/`_table_kind`) rather than opening the connection directly --
 # only the actual SELECT query stays local to this file, matching every other sqlite
-# reader here.
+# reader here. B-889's hardening of the shared `config_machine_state` read (below) reuses
+# the same `_table_kind` via this one module import rather than a second, separate import.
 from . import trajectorystore as _trajectorystore
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
@@ -5364,6 +5365,24 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
     rather than sharing `_collect_config_machine_state`'s connection, matching this
     file's own one-reader-per-concern idiom (`_collect_update_runs`,
     `_collect_capture_state`, ...).
+
+    B-889: before B-811 (trajectorystore.py, 2026-09-15), the query below trusted
+    `config_machine_state` to name the real table SQLite would resolve at read time --
+    but name resolution is a property of the FILE'S OWN schema, attacker-controlled if
+    anything can write into `state/openclaw.sqlite`. A crafted
+    `CREATE VIEW config_machine_state AS SELECT ... FROM <decoy>` makes `SELECT
+    LENGTH(value_json) FROM config_machine_state ...` execute that view body instead,
+    spoofing the presence/length signal in either direction (forcing a false WARN, or
+    suppressing a real one via a view returning NULL) -- bounded impact only, since
+    LENGTH() alone can never leak the value itself. `trajectorystore._table_kind`
+    (its own docstring has the full four-round history of what "a real TABLE" has to
+    rule out beyond a plain VIEW: virtual tables, rootpage aliasing, generated
+    columns) is reused here verbatim rather than re-derived, and the schema check is
+    run inside the SAME transaction as the real read, closing the TOCTOU gap the same
+    way `trajectorystore._open_and_verify_table` does. A name that does not resolve to
+    a real table is refused, disclosed via `ctx.errors`, and never silently trusted --
+    it is neither treated as a genuinely absent table (that stays its own, quieter
+    "predates the table" case below) nor as a readable one.
     """
     state_dir = home / "state"
     capped: list = []
@@ -5385,12 +5404,46 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
     try:
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
+            # BEGIN before the schema check, held open across it AND the read below --
+            # closes the same TOCTOU gap `trajectorystore._open_and_verify_table`
+            # documents (a concurrent writer swapping the schema between the check and
+            # the query).
+            conn.execute("BEGIN")
             conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "config_machine_state")
+            if kind == "absent":
+                # Genuinely no such table yet -- same honest UNDETERMINED as the
+                # `sqlite3.Error` "no such table" branch below, not a refusal.
+                return
+            if kind != "table":
+                # B-889: present, but not a real TABLE (view / virtual table /
+                # rootpage-aliased / generated-column row -- see `_table_kind`'s
+                # docstring for the demonstrated shapes). Refuse to query it. Disclosed,
+                # never silently trusted: NOT the same outcome as "absent" above, and
+                # NOT read as if it were a genuine row.
+                ctx.errors.append(
+                    f"'config_machine_state' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the auth-profile store presence was not read"
+                )
+                return
             # LENGTH(value_json), never value_json itself: the secret payload is never
             # fetched into this process, only its byte count. One literal key is bound,
             # never interpolated, and there is no SELECT *.
+            #
+            # `CAST(value_json AS BLOB)` before `LENGTH()` -- the identical B-811 round-2
+            # fix trajectorystore.py already carries for `session_id`/`event_json`
+            # (see that module's `_SELECT_TRAJECTORY_ROWS`/`_SELECT_TRAJECTORY_EVENT_JSON`
+            # comments). A bare `LENGTH()` on a TEXT value stops at the first embedded
+            # NUL byte (computed as if by C's `strlen()`), so a genuine, honestly-stored
+            # row whose value happens to start with a NUL byte reads as length 0/near-0
+            # regardless of its true size -- silently suppressing the hedge this
+            # function exists to raise, with zero disclosure, and without needing the
+            # view-masquerade trick at all. Casting to BLOB first makes `LENGTH()`
+            # return the true byte count, embedded NULs included.
             row = conn.execute(
-                "SELECT LENGTH(value_json) FROM config_machine_state WHERE state_key = ?",
+                "SELECT LENGTH(CAST(value_json AS BLOB)) FROM config_machine_state "
+                "WHERE state_key = ?",
                 (_AUTH_PROFILE_STORE_KEY,),
             ).fetchone()
         finally:

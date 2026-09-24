@@ -1006,6 +1006,18 @@ _REGISTRY: "dict[str, _Entry]" = {
     # classifications, same reasons.
     "tests/test_b704_state_db_shm_sidecar.py:42": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b704_state_db_shm_sidecar.py:46": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
+    # B-889 round 1: the decoy table a `CREATE VIEW config_machine_state AS SELECT ...
+    # FROM decoy_secrets` view-masquerade fixture projects from -- never a real
+    # OpenClaw table, same shape as every other _UNRELATED_DECOY entry above/below. The
+    # extractor does not see the `CREATE VIEW` statement itself (it only walks
+    # `CREATE TABLE`), so only this one site needs registering. (Line renumbered from
+    # :342 to :925 by the merge that placed the B-845 per-agent test class earlier in
+    # this file, ahead of B-889's own class.)
+    "tests/test_b749_auth_profile_store_presence.py:925": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    # B-889 round 2: the embedded-NUL-byte regression fixture -- same loose (no NOT
+    # NULL) 3-column shape as tests/test_b177_installed_index_shapes.py:55, same DDL
+    # text verbatim, same classification. (Renumbered from :409 to :992, same reason.)
+    "tests/test_b749_auth_profile_store_presence.py:992": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
 
     # ---- audit_events (B191 / F-154) ----
     "tests/test_b191_audit_events.py:44": _Entry(LEGACY_COLS, _AUDIT_EVENTS_PARTIAL_LEGACY),
@@ -1165,7 +1177,11 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_f192_update_runs.py:30": _Entry(MODERN),
 }
 
-assert len(_REGISTRY) == 67, f"registry has {len(_REGISTRY)} entries, expected 67"
+# B-889: +2 (69, was 67) -- round 1's view-masquerade decoy-table DDL site
+# (tests/test_b749_auth_profile_store_presence.py:925) and round 2's embedded-NUL-byte
+# regression fixture (same file, :992). Line numbers renumbered from the peer branch's
+# :342/:409 by the merge that placed the B-845 per-agent test class earlier in that file.
+assert len(_REGISTRY) == 69, f"registry has {len(_REGISTRY)} entries, expected 69"
 
 
 # ========================================================================================
