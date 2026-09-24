@@ -126,7 +126,7 @@ def test_vet_skill_agrees_with_the_audit():
 
 
 # ---------------------------------------------------------------------------------------
-# CLAWSECCHECK-B-922: sole()'s "before this use point" constraint (B-638 round 1) was
+# B-922: sole()'s "before this use point" constraint (B-638 round 1) was
 # threaded into resolve()'s Name branch for a PATH-anchor variable, but not into
 # content()'s own Name branch, _namespace_ok()'s Name branch, or _read_call()'s "handle
 # bound once" fallback -- so a CONTENT (or handle) variable rebound twice in
@@ -140,7 +140,7 @@ def test_vet_skill_agrees_with_the_audit():
 
 
 def test_clean_fixture_content_rebind_then_decode_passes():
-    """CLAWSECCHECK-B-922: the SAME idiom as clean_b638_shipped_version_exec, but the file
+    """B-922: the SAME idiom as clean_b638_shipped_version_exec, but the file
     is opened without a `with` block and the bytes it reads are decoded on a SEPARATE,
     straight-line statement that reuses the name `src` (`h = open(...); src = h.read();
     h.close(); src = src.decode(...)`) instead of one nested `f.read().decode(...)`
@@ -160,7 +160,7 @@ def test_vet_skill_agrees_on_the_content_rebind_then_decode():
 
 
 def test_bad_fixture_content_rebind_replaced_fails():
-    """CLAWSECCHECK-B-922 mutation check: the SAME straight-line content-rebind shape as
+    """B-922 mutation check: the SAME straight-line content-rebind shape as
     the clean fixture, but the second statement REPLACES `src` with attacker-influenced
     data (an environment variable) instead of decoding the shipped read. sole()'s
     "before=" threading resolves the REACHING (last) binding before the use point, not
@@ -376,7 +376,7 @@ def test_two_hop_path_variable_rebind_clears():
 
 
 def test_straight_line_content_rebind_clears():
-    """CLAWSECCHECK-B-922: `src` rebuilt across two straight-line, module-scope
+    """B-922: `src` rebuilt across two straight-line, module-scope
     statements -- `src = h.read()` then `src = src.decode("utf-8")` -- reading via a
     plain open()/.close() (no `with`), must resolve exactly like the one nested
     expression `h.read().decode("utf-8")`."""
@@ -394,7 +394,7 @@ def test_straight_line_content_rebind_clears():
 
 
 def test_straight_line_handle_rebind_clears():
-    """CLAWSECCHECK-B-922: the same threading applied to `_read_call`'s own "handle bound
+    """B-922: the same threading applied to `_read_call`'s own "handle bound
     once" fallback -- the file HANDLE name (not the content) rebuilt across two
     straight-line statements before its single `.read()`."""
     src = (
@@ -448,14 +448,14 @@ ESCAPES = {
     # boundary -- paired controls for test_straight_line_anchor_rebind_clears.
     "branch_rebound_anchor": f'if sys.argv[1:]:\n    here = "/tmp/x"\nwith {_OPEN}) as f:\n    {EX}(f.read(), about)\n',
     "loop_rebound_anchor": f'for _ in range(1):\n    here = os.path.abspath(here)\nwith {_OPEN}) as f:\n    {EX}(f.read(), about)\n',
-    # CLAWSECCHECK-B-922: the content-rebind relaxation (content()'s Name branch) must
+    # B-922: the content-rebind relaxation (content()'s Name branch) must
     # stay a categorical rejection the moment the SECOND straight-line binding replaces
     # `src` with something that is not itself resolved shipped content, or crosses a
     # branch/loop boundary -- paired controls for test_straight_line_content_rebind_clears.
     "content_rebound_to_env": f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\nsrc = h.read()\nh.close()\nsrc = os.environ.get("X", "")\n{EX}(src, about)\n',
     "content_rebound_in_branch": f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\nsrc = h.read()\nh.close()\nif sys.argv[1:]:\n    src = input()\n{EX}(src, about)\n',
     "content_rebound_in_loop": f'h = open(os.path.join(here, "demo_plugin", "__version__.py"), "rb")\nsrc = h.read()\nh.close()\nfor _ in range(1):\n    src = "x"\n{EX}(src, about)\n',
-    # CLAWSECCHECK-B-922: the SAME relaxation applied to _read_call's own "handle bound
+    # B-922: the SAME relaxation applied to _read_call's own "handle bound
     # once" fallback must stay a categorical rejection too -- paired controls for
     # test_straight_line_handle_rebind_clears.
     "handle_rebound_in_branch": f'h = open(os.path.join(here, "demo_plugin", "__version__.py"))\nif sys.argv[1:]:\n    h = open("/tmp/evil.py")\nsrc = h.read()\n{EX}(src, about)\n',
@@ -492,7 +492,7 @@ ESCAPES = {
     "dirname_of_trailing_slash": f'd = os.path.dirname(os.path.join(here, "demo_plugin/"))\nwith open(os.path.join(d, "demo_plugin", "__version__.py")) as f:\n    {EX}(f.read(), about)\n',
     # a stray dynamic call in the same file is code we cannot see into
     "stray_eval": f"x = {'ev' + 'al'}(input())\nwith {_OPEN}) as f:\n    {EX}(f.read(), about)\n",
-    # CLAWSECCHECK-B-922 round 2: `sole()`'s "last same-scope binding before the use
+    # B-922 round 2: `sole()`'s "last same-scope binding before the use
     # point wins" resolution (content()'s Name branch, round 1) assumes direct-body
     # statements execute in SOURCE order. An independent C-135 review found that a
     # frame-jump/tracer technique breaks that assumption: install a trace/profile hook
@@ -600,7 +600,7 @@ def test_escape_stays_crit(name):
     reason="sys.monitoring needs Python 3.12+",
 )
 def test_frame_jump_via_sys_monitoring_line_callback_stays_crit():
-    """CLAWSECCHECK-B-922 round 2, 7th jump variant: a `sys.monitoring` LINE callback
+    """B-922 round 2, 7th jump variant: a `sys.monitoring` LINE callback
     (Python 3.12+) receives `(code, line_number)`, not a frame -- so reaching
     `frame.f_lineno` from inside one still needs `sys._getframe()`, which was ALREADY a
     tamper attr before this round. Deliberately no `"monitoring"` token was added to any

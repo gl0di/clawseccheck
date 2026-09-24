@@ -126,7 +126,7 @@ _TAMPER_ATTRS = frozenset({
     "f_globals", "f_locals", "f_builtins", "f_back", "_getframe", "gi_frame", "tb_frame",
     "cr_frame", "ag_frame", "modules", "meta_path", "path_hooks", "path_importer_cache",
     "CodeType", "setattr", "delattr", "mock",
-    # CLAWSECCHECK-B-922 round 2: frame-jump primitives. `sole()`'s multi-binding "last
+    # B-922 round 2: frame-jump primitives. `sole()`'s multi-binding "last
     # same-scope binding before the use point wins" resolution (below) assumes direct-body
     # statements execute in source order; a `sys.settrace`/`setprofile` (or a `sys.monitoring`
     # LINE callback reaching a frame via `_getframe`, already listed above) hook that
@@ -142,14 +142,14 @@ _TAMPER_MODULES = frozenset({
     "ctypes", "pickle", "_pickle", "cPickle", "marshal", "shelve", "dill", "cloudpickle",
     "copyreg", "timeit", "doctest", "code", "codeop", "pdb", "bdb", "cProfile", "profile",
     "trace", "operator", "site", "sitecustomize", "usercustomize", "pkg_resources", "mock",
-    # CLAWSECCHECK-B-922 round 2: `_operator.attrgetter`/`methodcaller` reach an object's
+    # B-922 round 2: `_operator.attrgetter`/`methodcaller` reach an object's
     # attributes (including a frame's `f_lineno`) without ever spelling the attribute as an
     # `ast.Attribute` node or a literal `getattr()` call, dodging both existing checks below.
     "_operator",
 })
 _TAMPER_DOTTED_MODULES = frozenset({
     "logging.config", "unittest.mock",
-    # CLAWSECCHECK-B-922 round 2: `from sys import settrace` / `from threading import
+    # B-922 round 2: `from sys import settrace` / `from threading import
     # setprofile` (etc.) bind the bare name, so the call site is a `Name`, not an
     # `Attribute` -- the `settrace`/`setprofile` entries in `_TAMPER_ATTRS` above never see
     # it. Only the import statement itself names the route; catch it there.
@@ -593,7 +593,7 @@ class _FileFacts:
         `sys.settrace`/`setprofile` (or `sys.monitoring` LINE) hook rewriting
         `frame.f_lineno` mid-run can skip the second binding this picks, so without that
         ban "last one before the use point" would describe the SOURCE, not what the
-        interpreter actually executes (CLAWSECCHECK-B-922 round 2)."""
+        interpreter actually executes (B-922 round 2)."""
         if name == "__file__" or name in self.declared:
             return None
         recs = self.records(scope).get(name, [])
@@ -1244,7 +1244,7 @@ class _FileFacts:
             return True
         if not isinstance(arg, ast.Name):
             return False
-        # CLAWSECCHECK-B-922 round 2 revert: unlike content()'s Name branch, this call
+        # B-922 round 2 revert: unlike content()'s Name branch, this call
         # site's actual safety property is NOT "last same-scope binding before the use
         # point" -- it is the single-Store-occurrence walk a few lines below, which
         # requires the namespace name bound exactly once ANYWHERE in the region,
