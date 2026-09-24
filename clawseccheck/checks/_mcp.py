@@ -9253,12 +9253,13 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
         if sqlite_meta and (
             sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
             or sqlite_meta.get("unknown_schema")  # B-716
+            or sqlite_meta.get("dbs_capped")  # B-891
         ):
             sqlite_incomplete = (
                 " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, an "
-                "unrecognised schema, or an unrecognised schema version) meant some "
-                "records were not examined there either, so this is incomplete even "
-                "for what was checked."
+                "unrecognised schema, an unrecognised schema version, or a per-scan "
+                "database cap) meant some records were not examined there either, so "
+                "this is incomplete even for what was checked."
             )
         return _finding(
             "B185",
@@ -9349,11 +9350,13 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
         )
         incomplete = ""
         if (sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
-                or sqlite_meta.get("unknown_schema")):  # B-716
+                or sqlite_meta.get("unknown_schema")  # B-716
+                or sqlite_meta.get("dbs_capped")):  # B-891
             incomplete = (
                 " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, an "
-                "unrecognised schema, or an unrecognised schema version) meant some "
-                "records were not examined, so this verdict is incomplete."
+                "unrecognised schema, an unrecognised schema version, or a per-scan "
+                "database cap) meant some records were not examined, so this verdict "
+                "is incomplete."
             )
     else:
         scope = (

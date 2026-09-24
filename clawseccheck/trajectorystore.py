@@ -556,11 +556,30 @@ def _archive_entries(home: Path) -> "tuple[int, bool]":
     return count, capped
 
 
-def _sqlite_dbs(home: Path) -> "list[Path]":
+def _sqlite_dbs(home: Path, *, stats: dict | None = None) -> "list[Path]":
+    """Per-agent trajectory database paths under *home*, sorted and capped at
+    :data:`_MAX_SQLITE_DBS`.
+
+    If *stats* (a dict) is provided, it is populated with ``dbs_total`` (the number of
+    databases found before the cap was applied) and ``dbs_capped`` (True when
+    ``dbs_total > _MAX_SQLITE_DBS`` caused databases to be dropped) -- mirrors
+    ``trajectory.find_trajectory_files()``'s own ``stats["files_capped"]`` out-param
+    (B-245) for the identical reason (B-891): this glob's ``[:_MAX_SQLITE_DBS]`` slice
+    silently dropped the excess with no signal a caller could surface, so a fleet with
+    more than ``_MAX_SQLITE_DBS`` per-agent databases could read as a confidently
+    complete, clean scan when some databases were never even opened. The default
+    (``None``) keeps the original behaviour for existing callers.
+    """
     try:
         dbs = sorted(home.glob("agents/*/agent/openclaw-agent.sqlite"))
     except OSError:
+        if stats is not None:
+            stats["dbs_total"] = 0
+            stats["dbs_capped"] = False
         return []
+    if stats is not None:
+        stats["dbs_total"] = len(dbs)
+        stats["dbs_capped"] = len(dbs) > _MAX_SQLITE_DBS
     return dbs[:_MAX_SQLITE_DBS]
 
 
@@ -997,11 +1016,13 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
     counts as a "delivered tool definition" -- proven, not just asserted, by
     ``tests/test_b185_compiled_tool_poisoning.py``'s JSONL/SQLite equivalence test.
 
-    ``meta`` reports ``present`` (any db read), ``dbs_found``, ``dbs_read``,
-    ``dbs_unreadable``, ``events`` (``context.compiled`` records parsed), ``truncated``,
-    ``unknown_version`` and ``non_text_rows`` (see :func:`_read_sqlite_event_json`) --
-    same vocabulary as the JSONL reader's meta where they overlap, so a caller can treat
-    both uniformly for the fields both have.
+    ``meta`` reports ``present`` (any db read), ``dbs_found``, ``dbs_capped`` (B-891 --
+    True when more than ``_MAX_SQLITE_DBS`` per-agent databases were found and the
+    excess were never even opened; mirrors the JSONL reader's own ``files_capped``),
+    ``dbs_read``, ``dbs_unreadable``, ``events`` (``context.compiled`` records parsed),
+    ``truncated``, ``unknown_version`` and ``non_text_rows`` (see
+    :func:`_read_sqlite_event_json`) -- same vocabulary as the JSONL reader's meta where
+    they overlap, so a caller can treat both uniformly for the fields both have.
 
     This is POST-HOC FORENSIC evidence, same limit as the JSONL reader: it reports what
     WAS sent to the model in sessions that already ran. It cannot pre-clear a live MCP
@@ -1013,15 +1034,17 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
     """
     tool_defs: list[dict] = []
     meta = {
-        "present": False, "dbs_found": 0, "dbs_read": 0, "dbs_unreadable": 0,
-        "events": 0, "unknown_version": False, "unknown_schema": False,
-        "truncated": False, "non_text_rows": 0,
+        "present": False, "dbs_found": 0, "dbs_capped": False, "dbs_read": 0,
+        "dbs_unreadable": 0, "events": 0, "unknown_version": False,
+        "unknown_schema": False, "truncated": False, "non_text_rows": 0,
     }
     if not isinstance(home, Path):
         return tool_defs, meta
 
-    dbs = _sqlite_dbs(home)
+    stats: dict = {}
+    dbs = _sqlite_dbs(home, stats=stats)
     meta["dbs_found"] = len(dbs)
+    meta["dbs_capped"] = stats.get("dbs_capped", False)
     if not dbs:
         return tool_defs, meta
 
