@@ -1491,7 +1491,9 @@ def _external_tainted_names(
         for a in assigns:
             rhs = a.value
             targets = a.targets if isinstance(a, ast.Assign) else [a.target]
-            visible = _tainted_names_visible(a, tainted, owner_map, parent_scope, shadow_cache)
+            visible = _tainted_names_visible(
+                a, tainted, owner_map, parent_scope, shadow_cache, global_cache
+            )
             sourced = _expr_is_ext_tainted(rhs, visible, ref_res)
             if not sourced:
                 continue
@@ -1520,7 +1522,9 @@ def _external_tainted_names(
             # comprehension's own `for`-target exists), so using `gen` here would
             # wrongly let that target's own name shadow an outer occurrence of the
             # SAME bare name in its own iterable (`for cmds in cmds`).
-            visible = _tainted_names_visible(iterable, tainted, owner_map, parent_scope, shadow_cache)
+            visible = _tainted_names_visible(
+                iterable, tainted, owner_map, parent_scope, shadow_cache, global_cache
+            )
             sourced = _expr_is_ext_tainted(iterable, visible, ref_res)
             if not sourced:
                 continue
@@ -1539,7 +1543,9 @@ def _external_tainted_names(
             if item.optional_vars is None:
                 continue
             ctx_expr = item.context_expr
-            visible = _tainted_names_visible(ctx_expr, tainted, owner_map, parent_scope, shadow_cache)
+            visible = _tainted_names_visible(
+                ctx_expr, tainted, owner_map, parent_scope, shadow_cache, global_cache
+            )
             sourced = _expr_is_ext_tainted(ctx_expr, visible, ref_res)
             if not sourced:
                 continue
@@ -1557,7 +1563,9 @@ def _external_tainted_names(
         # first-iterator special case is needed here).
         for stmt in for_stmts:
             iterable = stmt.iter
-            visible = _tainted_names_visible(iterable, tainted, owner_map, parent_scope, shadow_cache)
+            visible = _tainted_names_visible(
+                iterable, tainted, owner_map, parent_scope, shadow_cache, global_cache
+            )
             sourced = _expr_is_ext_tainted(iterable, visible, ref_res)
             if not sourced:
                 continue
@@ -1569,7 +1577,9 @@ def _external_tainted_names(
 
         for ne in namedexprs:
             rhs = ne.value
-            visible = _tainted_names_visible(ne, tainted, owner_map, parent_scope, shadow_cache)
+            visible = _tainted_names_visible(
+                ne, tainted, owner_map, parent_scope, shadow_cache, global_cache
+            )
             sourced = _expr_is_ext_tainted(rhs, visible, ref_res)
             if not sourced:
                 continue
@@ -6822,7 +6832,12 @@ def _tainted_names(
 
 
 def _tainted_names_visible(
-    node: ast.AST, tainted: dict, owner_map: dict, parent_scope: dict, shadow_cache: dict
+    node: ast.AST,
+    tainted: dict,
+    owner_map: dict,
+    parent_scope: dict,
+    shadow_cache: dict,
+    global_cache: dict | None = None,
 ) -> set[str]:
     """B-205: the tainted-name set visible at `node`'s position — names tainted by a
     module-level decode assignment, by node's own scope, or by any ENCLOSING scope
@@ -6847,7 +6862,27 @@ def _tainted_names_visible(
     FAIL. So the redirect is applied as a redirect: the name is shadowed for the whole
     chain, then taken from the module bucket directly. `nonlocal` needs nothing here —
     it resolves to an ancestor that, by Python's own syntax rules, binds the name and
-    therefore ends the walk itself (see `_own_bound_names`)."""
+    therefore ends the walk itself (see `_own_bound_names`).
+
+    CLAWSECCHECK-B-900: `global_here` used to be recomputed with a fresh, uncached
+    `_global_declared_names(scope, owner_map)` -- a full `ast.walk(scope)` -- on
+    EVERY call, even though a hot caller (e.g. `_external_tainted_names`'s own
+    assign/comprehension/with/for/walrus fixpoint loops) invokes this function once
+    per node, repeatedly, against the SAME `scope`: a file with one large function
+    made that O(k * scope_size) for the k nodes sharing it, quadratic in practice and
+    enough on its own to push a file past `DEFAULT_CHECK_BUDGET_S`. `global_cache`,
+    optional and keyed by `scope` alone (mirroring `_tainted_names`'s own
+    `global_cache[scope]` pattern), lets a hot caller thread through the SAME dict it
+    already builds for its own purposes across a loop, so the recompute happens at
+    most once per distinct scope instead of once per call. Deliberately `dict | None
+    = None` rather than a mutable default argument (which would persist stale
+    scope-keyed data across unrelated files analysed by the same process) -- when
+    omitted, behaviour is byte-identical to before this fix (a fresh, uncached
+    lookup every call). Callers that invoke this only once per scope (the large
+    majority of the 16 call sites in this module) are deliberately left unchanged;
+    threading a cache through them would add correctness surface -- a STALE result
+    if the cache were ever shared across a DIFFERENT `owner_map` for the same
+    `scope` object -- without fixing anything measurable."""
     scope = owner_map.get(node)
     if scope is None:
         return set(tainted.get(None, ()))
@@ -6859,7 +6894,12 @@ def _tainted_names_visible(
 
     # Names `scope` declares `global` in its OWN body (owner_map-filtered, so a
     # declaration inside a nested function is not attributed here — B-209).
-    global_here = _global_declared_names(scope, owner_map)
+    if global_cache is None:
+        global_here = _global_declared_names(scope, owner_map)
+    else:
+        if scope not in global_cache:
+            global_cache[scope] = _global_declared_names(scope, owner_map)
+        global_here = global_cache[scope]
 
     visible = set(tainted.get(scope, ()))
     # `get_shadow` has already subtracted `global_here` (it is not a local binding);
