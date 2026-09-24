@@ -10839,7 +10839,9 @@ def _sh_line_has_incluster_destination(raw: str, masked: str) -> bool:
     return False
 
 
-def _sh_cred_match_is_incluster_auth_only(raw: str, masked: str) -> bool:
+def _sh_cred_match_is_incluster_auth_only(
+    raw: str, masked: str, *, all_incluster_token: "bool | None" = None
+) -> bool:
     """B-415/C-135: True only when EVERY `_SH_CRED_FILE_RE` match on *raw* is
     either (a) inside curl's own TLS-material flag argument (--cacert/--capath/
     --cert/--key/-E -- read locally for the handshake, never sent as request
@@ -10851,7 +10853,24 @@ def _sh_cred_match_is_incluster_auth_only(raw: str, masked: str) -> bool:
     False, so the exemption can never launder a real exfil position. A generic
     secrets-mount or dotfile credential (not the exact service-account token
     path) never qualifies for (b), at any position or destination -- only the
-    TLS-flag case (a) can ever apply to it."""
+    TLS-flag case (a) can ever apply to it.
+
+    `all_incluster_token` (B-894 round 4, loop DIRECT role only): when not
+    None, replaces the per-match `_INCLUSTER_TOKEN_PATH_RE` content test on
+    *m.group(0)* with this precomputed, whole-word-list verdict. The loop role
+    substitutes a single representative word for cost reasons (round 2) before
+    calling this function; the TLS-material-flag arm above is sound to check
+    with any one word since it never reads word content, but the in-cluster-
+    token arm DOES read the substituted word's own text, so a representative
+    word can only stand in for the FULL word list when every word in it is
+    independently the in-cluster token path -- never for one word picked out of
+    a MIXED list. Round 3's review found that padding a real credential path's
+    loop word list with the harmless in-cluster token path made `min(file_words)`
+    pick the token, exempting the whole line and laundering the real credential
+    past this crit rule. Passing this keeps the exemption decided by one
+    function for both the literal and loop forms (single source of truth) while
+    letting the loop caller supply a content verdict it computed once per region
+    instead of once per word."""
     matches = list(_SH_CRED_FILE_RE.finditer(raw))
     if not matches:
         return False
@@ -10871,7 +10890,11 @@ def _sh_cred_match_is_incluster_auth_only(raw: str, masked: str) -> bool:
                 is_tls_flag_arg = True
         if is_tls_flag_arg:
             continue
-        is_incluster_token = bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
+        is_incluster_token = (
+            bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
+            if all_incluster_token is None
+            else all_incluster_token
+        )
         in_auth_header = any(
             start <= m.start() and m.end() <= end for start, end in auth_header_spans
         )
@@ -10882,6 +10905,26 @@ def _sh_cred_match_is_incluster_auth_only(raw: str, masked: str) -> bool:
                 continue
         return False
     return True
+
+
+def _sh_word_is_incluster_token(word: str) -> bool:
+    """B-894 round 4: True only when `_SH_CRED_FILE_RE`'s OWN match WITHIN *word*
+    (not *word* itself) is the in-cluster token path -- the same text
+    `_sh_cred_match_is_incluster_auth_only` would test via `m.group(0)` for a
+    literal single-line match. This distinction matters because
+    `_SH_CRED_FILE_RE`'s generic `/run/secrets/[^/\\s"']+` alternative (the
+    Docker/Swarm secrets-mount catch-all) truncates a `/run/secrets/kubernetes.io/
+    serviceaccount/token` word -- missing the `var/` prefix the exact literal
+    in-cluster alternative requires -- down to just `/run/secrets/kubernetes.io`,
+    which `_INCLUSTER_TOKEN_PATH_RE` does not match; the literal single-line form
+    therefore convicts that spelling as an ordinary secrets-mount read, not an
+    exempt in-cluster token. Testing `_INCLUSTER_TOKEN_PATH_RE` against the WHOLE
+    word instead of `_SH_CRED_FILE_RE`'s own match would silently exempt that one
+    spelling inside a loop while the literal form still convicts it -- a
+    loop-broader-than-literal gap the design's own invariant forbids (found while
+    verifying the round-4 fix, before it shipped -- never observed by a reviewer)."""
+    m = _SH_CRED_FILE_RE.search(word)
+    return bool(m) and bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
 
 
 # decode-then-exec: an encoded blob is decoded (base64/xxd/openssl) and piped straight
@@ -11658,13 +11701,37 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # exemption-checks per line regardless of how large `file_words` is, the same
     # amortization round 1 already applied to same-line reference count, just
     # applied to the other multiplication axis (distinct file_words × distinct
-    # outbound lines) that round 1 did not touch. This changes no verdict: the
-    # representative word's `_SH_CRED_FILE_RE` match and exemption outcome are the
-    # same as every other file_word's would be, by the argument above.
+    # outbound lines) that round 1 did not touch. CORRECTION (round 3 review):
+    # round 2's claim that "the representative word's exemption outcome is the
+    # same as every other file_word's would be" is only true of the position-only
+    # TLS-material-flag arm, never of the in-cluster-token arm, which reads the
+    # substituted word's own text -- see round 4 below.
+    #
+    # B-894 fix round 3 [sic; the fourth round of this specific mechanism, see the
+    # task history] (review finding, BLOCKER, introduced by round 2's own fix):
+    # `_sh_cred_match_is_incluster_auth_only`'s in-cluster-token arm decides
+    # `is_incluster_token` from the SUBSTITUTED word's own text
+    # (`_INCLUSTER_TOKEN_PATH_RE.search(m.group(0))`), which is content, not
+    # position -- unlike the TLS-flag arm. Round 2's single `rep_word` therefore
+    # decided that arm for the WHOLE word list: padding a real credential path's
+    # loop word list with the harmless in-cluster service-account token path
+    # (which sorts first lexicographically, `/var/... < ~/...`) made `min()` pick
+    # the token, so the line was excused even though the loop also binds the same
+    # variable to the real credential on another iteration -- laundering a real
+    # exfil past this crit rule. Fix: precompute, once per REGION (not per line,
+    # so no return to O(K) per line), whether EVERY word in `file_words` is
+    # itself the in-cluster token path; only that all-or-nothing verdict may
+    # stand in for "this word is the token" in the exemption check, matching the
+    # design's own "loop is sugar for BODY repeated per word" invariant -- a line
+    # is exempt for the loop as a whole only when it would be exempt for every
+    # word the loop could substitute there. The position-only TLS-flag arm is
+    # untouched and still uses the single representative word, since that arm's
+    # verdict genuinely does not depend on which word fills the slot.
     for var, file_words, _read_words, bs, cut, _be in regions:
         if not file_words:
             continue
         rep_word = min(file_words)
+        region_all_incluster_token = all(_sh_word_is_incluster_token(w) for w in file_words)
         ref = _sh_loop_ref_re(var)
         last_b = None
         for rm in ref.finditer(text, bs, cut):
@@ -11686,7 +11753,7 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
             pieces.append(raw[last:])
             sub = "".join(pieces)
             if _SH_CRED_FILE_RE.search(sub) and not _sh_cred_match_is_incluster_auth_only(
-                sub, masked
+                sub, masked, all_incluster_token=region_all_incluster_token
             ):
                 direct_hits.add(line_of(rm.start()))
 
