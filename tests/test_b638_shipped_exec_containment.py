@@ -186,6 +186,57 @@ def test_b922_fixtures_differ_only_in_the_rebind_statement():
 
 
 # ---------------------------------------------------------------------------------------
+# B-995: the SAME content-rebind shape as B-922, but the read sits inside a `with`
+# block instead of a plain open()/.close() pair -- sole()'s "direct, unconditional
+# statement of scope's own body" test disqualified a with-body binding outright, even
+# though open()/io.open()/codecs.open() never suppress an exception on `__exit__`, so a
+# with-body binding cannot silently "not have happened" while control still resumes past
+# the block. `_direct_index` trusts a with-body binding only when EVERY item of the
+# enclosing `with` resolves to exactly one of those three.
+# ---------------------------------------------------------------------------------------
+
+
+def test_clean_fixture_with_content_rebind_then_decode_passes():
+    """B-995: the task's own literal repro -- `with open(...) as f: src = f.read()`
+    followed by a SEPARATE, straight-line `src = src.decode("utf-8")` outside the `with`
+    block. Before this fix: FAIL -- the with-body `src = f.read()` binding was not a
+    direct statement of the scope's own body, so sole() disqualified the whole name."""
+    f = _b13(FIXTURES / "clean_b995_with_content_rebind_then_decode")
+    assert f.status == PASS, (f.status, f.detail)
+
+
+def test_vet_skill_agrees_on_the_with_content_rebind_then_decode():
+    out = vet_skill(
+        FIXTURES / "clean_b995_with_content_rebind_then_decode" / "skills" / "demo-packager"
+    )
+    pool = [out, *(out.ring_findings or [])]
+    assert not [f for f in pool if f.status == FAIL], [(f.id, f.detail[:120]) for f in pool]
+
+
+def test_bad_fixture_with_content_rebind_replaced_fails():
+    """B-995 mutation check: the SAME with-block content-rebind shape as the clean
+    fixture, but the second statement REPLACES `src` with attacker-influenced data (an
+    environment variable) instead of decoding the shipped read. This must stay FAIL
+    exactly as before this fix -- the with-body trust extension only widens WHICH
+    binding sole() can see, never what content() accepts as shipped content."""
+    f = _b13(FIXTURES / "bad_b995_with_content_rebind_replaced")
+    assert f.status == FAIL, (f.status, f.detail)
+    assert "setup.py:24" in f.detail
+    assert "external input flows into" in f.detail
+
+
+def test_b995_fixtures_differ_only_in_the_rebind_statement():
+    """Non-vacuity: the pair must be the same program but for the one replaced statement."""
+    base = FIXTURES / "{}" / "skills" / "demo-packager"
+    clean = Path(str(base).format("clean_b995_with_content_rebind_then_decode"))
+    bad = Path(str(base).format("bad_b995_with_content_rebind_replaced"))
+    for rel in ("demo_plugin/__init__.py", "demo_plugin/__version__.py", "SKILL.md"):
+        assert (clean / rel).read_text() == (bad / rel).read_text()
+    assert 'src = src.decode("utf-8")' in (clean / "setup.py").read_text()
+    assert 'src = os.environ.get("DEMO_PAYLOAD", "")' in (bad / "setup.py").read_text()
+
+
+# ---------------------------------------------------------------------------------------
 # Benign spellings: each executes only a file the artifact ships (most were crit before)
 # ---------------------------------------------------------------------------------------
 
@@ -197,6 +248,20 @@ BENIGN = {
     "with_inline_decode": f'with {_OPEN}, "rb") as fh:\n    {EX}(fh.read().decode("utf-8"), about)\n',
     "var_decode": f'with {_OPEN}, "rb") as fh:\n    src = fh.read().decode("utf-8")\n{EX}(src, about)\n',
     "var_text": f"with {_OPEN}) as fh:\n    src = fh.read()\n{EX}(src, about)\n",
+    # B-995: the task's own literal repro -- the read is inside the `with` block, but the
+    # decode is a SEPARATE, straight-line statement OUTSIDE it (unlike "var_decode" above,
+    # whose decode is the same with-body statement as the read).
+    "with_content_rebind_then_decode": (
+        f'with {_OPEN}, "rb") as fh:\n    src = fh.read()\nsrc = src.decode("utf-8")\n'
+        f"{EX}(src, about)\n"
+    ),
+    # B-995: the same shape with the io.open spelling, not just the bare `open` builtin --
+    # `_with_item_is_open` must resolve all three of open()/io.open()/codecs.open().
+    "with_content_rebind_then_decode_io_open": (
+        'import io\n'
+        f'with io.open(os.path.join(here, "demo_plugin", "__version__.py"), "rb") as fh:\n'
+        f'    src = fh.read()\nsrc = src.decode("utf-8")\n{EX}(src, about)\n'
+    ),
     "inline_open_no_with": f"{EX}({_OPEN}).read(), about)\n",
     "compile_with_path_var": (
         'P = os.path.join(here, "demo_plugin", "__version__.py")\n'
@@ -584,6 +649,69 @@ ESCAPES = {
         '    return _skip\n'
         '_threading_settrace(_skip)\n'
         'src = raw.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    # B-995: `_direct_index` trusts a with-body binding ONLY when every item of the
+    # enclosing `with` resolves to exactly `open`/`io.open`/`codecs.open`, because those
+    # three never suppress an exception on `__exit__`. Naively trusting ANY with-body
+    # binding would reopen a false-PASS: a context manager whose `__exit__` returns True
+    # lets an earlier with-body's binding silently NOT have happened (the exception it
+    # raises is swallowed) while control still resumes past the block, so the value that
+    # actually reaches exec() at runtime is whichever assignment executed LAST at
+    # runtime, not whichever a naive "trust any with" static reader would pick. Each
+    # variant below is the SAME with-block content-rebind shape as
+    # test_clean_fixture_with_content_rebind_then_decode_passes -- which must stay clear
+    # on its own -- with a suppressing (or mixed) context manager added; every one must
+    # stay crit.
+    "with_suppress_attack_prior_payload": (
+        'import contextlib\n'
+        'with contextlib.suppress(Exception):\n'
+        '    src = "MALICIOUS"\n'
+        '    raise Exception()\n'
+        f'with {_OPEN}, "rb") as f:\n'
+        '    src = f.read()\n'
+        'src = src.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    "with_custom_cm_exit_true": (
+        'class Quiet:\n'
+        '    def __enter__(self):\n'
+        '        return None\n'
+        '    def __exit__(self, *a):\n'
+        '        return True\n'
+        'with Quiet():\n'
+        '    src = "MALICIOUS"\n'
+        '    raise Exception()\n'
+        f'with {_OPEN}, "rb") as f:\n'
+        '    src = f.read()\n'
+        'src = src.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    # A single `with` statement mixing the legitimate open() item with a second,
+    # suppressing item -- "every item" must be open-family, not just one.
+    "with_open_plus_custom_cm": (
+        'class Quiet:\n'
+        '    def __enter__(self):\n'
+        '        return None\n'
+        '    def __exit__(self, *a):\n'
+        '        return True\n'
+        f'with {_OPEN}, "rb") as f, Quiet() as g:\n'
+        '    src = f.read()\n'
+        'src = src.decode("utf-8")\n'
+        f'{EX}(src, about)\n'
+    ),
+    # Same mixed-items shape, but the second item is a genuinely benign, non-suppressing
+    # context manager -- isolates "every item must be exactly open/io.open/codecs.open"
+    # from "must not suppress": even a harmless second item gets no trust.
+    "with_open_plus_harmless_second_item": (
+        'class Harmless:\n'
+        '    def __enter__(self):\n'
+        '        return None\n'
+        '    def __exit__(self, *a):\n'
+        '        return False\n'
+        f'with {_OPEN}, "rb") as f, Harmless() as g:\n'
+        '    src = f.read()\n'
+        'src = src.decode("utf-8")\n'
         f'{EX}(src, about)\n'
     ),
 }

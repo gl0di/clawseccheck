@@ -588,12 +588,24 @@ class _FileFacts:
         loop, def or class) -- then the last one before *before* in body order wins
         (B-638: a same-scope rebind split across two lines resolves like one nested
         expression); any boundary-crossing or non-Assign binding disqualifies outright.
+        ONE narrow exception to "direct statement of scope's own body": a binding whose
+        statement sits immediately inside a `with` block is treated as occupying that
+        `with` statement's own position IF every item of the `with` is a verified call to
+        exactly `open`/`io.open`/`codecs.open` (B-995, see `_direct_index`) -- those three
+        never suppress an exception on `__exit__` (it either propagates or the body
+        completed normally), unlike a custom or `contextlib.suppress`-style context
+        manager whose `__exit__` can return True and let a with-body binding silently NOT
+        have happened while control still resumes past the block. A `with` mixing in ANY
+        other item -- even alongside an open-family one -- gets no trust, since that other
+        item's own `__exit__` could still suppress.
         Source order is a proxy for RUNTIME order here, and that proxy is only sound
         because `_tampers()` bans every frame-jump primitive that can break it -- a
         `sys.settrace`/`setprofile` (or `sys.monitoring` LINE) hook rewriting
         `frame.f_lineno` mid-run can skip the second binding this picks, so without that
         ban "last one before the use point" would describe the SOURCE, not what the
-        interpreter actually executes (B-922 round 2)."""
+        interpreter actually executes (B-922 round 2); the with-body exception above is
+        still a source-order comparison, so it rests on that same ban rather than a
+        tamper check of its own."""
         if name == "__file__" or name in self.declared:
             return None
         recs = self.records(scope).get(name, [])
@@ -602,13 +614,43 @@ class _FileFacts:
         if before is None or not recs or any(r[0] != "assign" for r in recs):
             return None
         body = getattr(scope, "body", None) or []
-        if any(self.parents.get(r[2]) is not scope or r[2] not in body for r in recs):
+        indices = [self._direct_index(r[2], scope, body) for r in recs]
+        if any(i is None for i in indices):
             return None
         limit = self._stmt_index(before, scope, body)
         if limit is None:
             return None
-        reaching = sorted((body.index(r[2]), r) for r in recs if body.index(r[2]) < limit)
+        reaching = sorted((i, r) for i, r in zip(indices, recs) if i < limit)
         return reaching[-1][1] if reaching else None
+
+    def _direct_index(self, stmt: ast.AST, scope: ast.AST, body: list) -> "int | None":
+        """Where *stmt* counts for `sole()`'s source-order comparison, or None when it is
+        neither a direct, unconditional statement of *scope*'s own body nor the narrow
+        with-body exception `sole()` documents (B-995): *stmt* sits directly in the body
+        of a `with` statement that is itself direct in *scope*'s body, and every item of
+        that `with` resolves to exactly `open`/`io.open`/`codecs.open`."""
+        parent = self.parents.get(stmt)
+        if parent is scope and stmt in body:
+            return body.index(stmt)
+        if (
+            isinstance(parent, ast.With)
+            and self.parents.get(parent) is scope
+            and parent in body
+            and stmt in parent.body
+            and all(self._with_item_is_open(i) for i in parent.items)
+        ):
+            return body.index(parent)
+        return None
+
+    def _with_item_is_open(self, item: ast.withitem) -> bool:
+        """Is *item*'s context expression a call to exactly `open`/`io.open`/
+        `codecs.open`? Those three are the only context managers `_direct_index` trusts a
+        with-body binding through, because none of them ever suppresses an exception on
+        `__exit__`."""
+        ctx = item.context_expr
+        return isinstance(ctx, ast.Call) and self.dotted(ctx.func) in (
+            "builtins.open", "io.open", "codecs.open"
+        )
 
     def _stmt_index(self, node: ast.AST, scope: ast.AST, body: list) -> "int | None":
         """Index in *body* of the statement transitively evaluating *node*, or None."""
