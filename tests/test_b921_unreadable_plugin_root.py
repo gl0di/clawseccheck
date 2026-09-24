@@ -49,6 +49,7 @@ from clawseccheck.catalog import HIGH, PASS, UNKNOWN, WARN
 from clawseccheck.checks import (
     _locate_plugin_root,
     _locate_plugin_root_or_reason,
+    _stat_or_reason,
     check_orphaned_plugin_caches,
     vet_plugin,
 )
@@ -341,3 +342,124 @@ def test_normal_readable_plugin_root_still_resolves_and_scans(tmp_path):
 
     f = vet_plugin(root)
     assert f.status == PASS, f.detail
+
+
+# --------------------------------------------------------------------------- #
+# 6. B-966 — the EACCES-vs-ENOENT distinction must come from os.stat()'s own  #
+#    errno, not from Path.is_file()/is_dir()'s internal ignore-set.          #
+#                                                                              #
+#    CPython's pathlib was rewritten around 3.13; on 3.13+ Path.is_file()/    #
+#    is_dir() started swallowing EACCES/EPERM too (returning False instead    #
+#    of raising), which is exactly what the guard above depended on NOT       #
+#    happening. os.stat()'s raised OSError.errno is stable across versions,   #
+#    so _locate_plugin_root_or_reason now resolves via _stat_or_reason()      #
+#    instead of Path.is_file()/is_dir(). These tests pin that mechanism       #
+#    directly rather than only the outward behavior sections 1-5 already      #
+#    cover on this repo's pinned 3.9/3.12 -- section 1-5's tests would not    #
+#    have caught this on a 3.13+ interpreter before this fix (Path.is_file()  #
+#    silently returning False looks identical to "genuinely absent"); the     #
+#    tests below no longer route through Path.is_file()/is_dir() at all for   #
+#    the permission check, so they hold regardless of how a future CPython    #
+#    version implements pathlib internally.                                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_stat_or_reason_succeeds_on_a_readable_path(tmp_path):
+    d = tmp_path / "readable"
+    d.mkdir()
+    st, reason = _stat_or_reason(d)
+    assert st is not None
+    assert reason is None
+
+
+def test_stat_or_reason_is_none_none_on_enoent(tmp_path):
+    """A path that genuinely doesn't exist -- ENOENT -- is "nothing to report", the
+    same as pathlib's is_file()/is_dir() returning False for it on every Python
+    version. Never a reason: nothing was denied, there was simply nothing there."""
+    missing = tmp_path / "does-not-exist"
+    st, reason = _stat_or_reason(missing)
+    assert st is None
+    assert reason is None
+
+
+def test_stat_or_reason_is_none_none_on_enotdir(tmp_path):
+    """A path that tries to descend through a FILE as though it were a directory --
+    ENOTDIR -- is the other "genuinely not there" shape, same bucket as ENOENT."""
+    f = tmp_path / "a-file"
+    f.write_text("x")
+    bogus_child = f / "child"
+    st, reason = _stat_or_reason(bogus_child)
+    assert st is None
+    assert reason is None
+
+
+@posix_only
+@root_skip
+def test_stat_or_reason_reports_a_reason_on_eacces(tmp_path, unlock):
+    """The actual distinction this fix exists for: EACCES gets a *reason*, not a
+    silent (None, None) -- pinned directly against os.stat()'s own errno, independent
+    of whatever Path.is_file()/is_dir() do internally on this interpreter."""
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    child = blocked / "child"
+    child.write_text("x")
+    blocked.chmod(0o000)
+    unlock(blocked)
+
+    st, reason = _stat_or_reason(child)
+    assert st is None
+    assert reason is not None
+
+
+@posix_only
+@root_skip
+def test_locate_plugin_root_or_reason_never_calls_path_is_file_or_is_dir(
+    tmp_path, unlock, monkeypatch
+):
+    """The strongest form of the B-966 regression pin: patch Path.is_file()/is_dir()
+    to explode if called at all, then re-run every shape sections 1 and 5 already
+    cover (0000 root, 0644 root, absent manifest, normal readable plugin). If this
+    passes, _locate_plugin_root_or_reason's EACCES-vs-ENOENT answer cannot depend on
+    however a future CPython version implements pathlib's is_file()/is_dir() --
+    there is no code path left that reaches them for this resolution."""
+
+    def _boom(self):
+        raise AssertionError(
+            "Path.is_file()/is_dir() must not be called by "
+            "_locate_plugin_root_or_reason (B-966) -- it must resolve via os.stat() "
+            "so the EACCES-vs-ENOENT answer doesn't depend on pathlib's internal, "
+            "version-drifting ignore-set."
+        )
+
+    monkeypatch.setattr(Path, "is_file", _boom)
+    monkeypatch.setattr(Path, "is_dir", _boom)
+
+    # 0000 root -- must not raise (before B-966 it also wouldn't, but via the OSError
+    # guard around is_file()/is_dir(); here those methods are gone entirely).
+    root0000 = _mk_plugin(tmp_path / "plug0000")
+    root0000.chmod(0o000)
+    unlock(root0000)
+    found, reason = _locate_plugin_root_or_reason(root0000)
+    assert found is None
+    assert reason is not None
+
+    # 0644 root -- listable, not searchable -- same shape.
+    root0644 = _mk_plugin(tmp_path / "plug0644")
+    root0644.chmod(0o644)
+    unlock(root0644)
+    found, reason = _locate_plugin_root_or_reason(root0644)
+    assert found is None
+    assert reason is not None
+
+    # Genuinely absent -- no reason.
+    empty = tmp_path / "not-a-plugin"
+    empty.mkdir()
+    found, reason = _locate_plugin_root_or_reason(empty)
+    assert found is None
+    assert reason is None
+
+    # Normal readable plugin -- resolves cleanly.
+    readable = _mk_plugin(tmp_path / "plug-ok")
+    found, reason = _locate_plugin_root_or_reason(readable)
+    assert found == readable
+    assert reason is None

@@ -7,8 +7,11 @@ from __future__ import annotations
 import base64
 import binascii
 import bisect
+import errno
 import logging
+import os
 import re
+import stat
 import traceback
 import unicodedata
 from pathlib import Path
@@ -8227,6 +8230,38 @@ def _attach_ring_coverage(fx: Finding, ctx: Context) -> None:
 _PLUGIN_MANIFEST = "openclaw.plugin.json"
 
 
+def _stat_or_reason(path: Path) -> "tuple[os.stat_result | None, str | None]":
+    """``os.stat(path)``, split into "genuinely not there" vs "could not tell".
+
+    B-966: the docstring below used to lean on ``Path.is_file()``/``is_dir()``
+    swallowing ENOENT/ENOTDIR/EBADF/ELOOP internally and letting EACCES/EPERM
+    through as a raised ``OSError`` — but that ignored-errno set is pathlib's own
+    internal implementation detail, not a stable public contract. CPython's pathlib
+    rewrite around 3.13 changed which errnos its internal ``is_file()``/``is_dir()``
+    swallow, and on 3.13+ they also swallow EACCES/EPERM (returning ``False``
+    instead of raising). This repo's CI only pins 3.9/3.12 today, where the
+    original ``except OSError`` guard already worked and still does — but a future
+    matrix bump would silently regress the degraded-vs-absent distinction the
+    docstring below exists to preserve, with nothing able to catch it on the
+    versions this repo actually tests.
+
+    ``os.stat()``'s raised ``OSError.errno`` is the real POSIX-level signal and is
+    stable across Python versions, so this reads it directly instead of depending
+    on pathlib's internal, version-drifting ignore-set.
+
+    Returns ``(stat_result, None)`` when *path* stats cleanly, ``(None, None)``
+    when it is genuinely not there (ENOENT/ENOTDIR — e.g. a parent path component
+    isn't a directory), or ``(None, reason)`` for anything else (EACCES/EPERM —
+    exists but isn't readable/searchable — or any other ``OSError``).
+    """
+    try:
+        return os.stat(path), None
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            return None, None
+        return None, (exc.strerror or str(exc))
+
+
 def _locate_plugin_root_or_reason(p: Path) -> "tuple[Path | None, str | None]":
     """:func:`_locate_plugin_root`, plus WHY a resolution failure means "could not
     tell" rather than "confidently not a plugin".
@@ -8237,21 +8272,22 @@ def _locate_plugin_root_or_reason(p: Path) -> "tuple[Path | None, str | None]":
     not search (EACCES resolving a child of *p*) — so *p*'s plugin-ness was never
     actually determined.
 
-    B-921: ``Path.is_file()``/``is_dir()`` only ignore ENOENT/ENOTDIR/EBADF/ELOOP
-    internally (see ``pathlib._ignore_error``, and B-680's identical note on
-    ``Path.exists()`` a few lines up in this module) — EACCES is not in that set, so a
-    plugin root at mode 0000 made ``(p / _PLUGIN_MANIFEST).is_file()`` raise
+    B-921: a plugin root at mode 0000 made resolving a child of *p* raise
     ``PermissionError`` straight out of this function and both its reachable callers
     (``checks/_mcp.py``'s ``vet_plugin()`` and its ``_npm_projects_plugin_ids()``
     wrapper-dir sweep), with no dossier — the same crash shape B-899/B-902 closed for
     the tree-sweep case. Confirmed live against the two Python versions this repo's CI
     actually pins (3.9, 3.12): stat-ing *p* itself never raises (mode 0000 on *p* only
     blocks searching INTO it — resolving *p* needs search permission on *p*'s PARENT,
-    not on *p*), but stat-ing anything inside *p* does. Every ``is_file()``/``is_dir()``
-    call in the resolution is guarded here, not just the one the repro hits: a caller
-    with a different unsearchable ancestor (e.g. the npm wrapper directory itself, one
-    level up from the plugin root under it) hits the identical failure shape one level
-    higher.
+    not on *p*), but stat-ing anything inside *p* does. Every resolution step below is
+    guarded, not just the one the repro hits: a caller with a different unsearchable
+    ancestor (e.g. the npm wrapper directory itself, one level up from the plugin root
+    under it) hits the identical failure shape one level higher.
+
+    B-966: the resolution below uses :func:`_stat_or_reason` (explicit ``os.stat()`` +
+    errno) rather than ``Path.is_file()``/``is_dir()`` — see that function's docstring
+    for why: pathlib's own EACCES-vs-ENOENT handling drifted across CPython versions,
+    while ``os.stat()``'s raised errno did not.
 
     A caller that only wants the ``Path | None`` contract keeps using
     :func:`_locate_plugin_root` below. ``vet_plugin`` — the one caller whose verdict is
@@ -8263,20 +8299,32 @@ def _locate_plugin_root_or_reason(p: Path) -> "tuple[Path | None, str | None]":
     *more* leniently than one the engine never had to look past.
     """
     try:
-        if p.is_file() and p.name == _PLUGIN_MANIFEST:
+        p_st, reason = _stat_or_reason(p)
+        if reason is not None:
+            return None, reason
+        if p_st is not None and stat.S_ISREG(p_st.st_mode) and p.name == _PLUGIN_MANIFEST:
             return p.parent, None
-        if not p.is_dir():
+        if p_st is None or not stat.S_ISDIR(p_st.st_mode):
             return None, None
-        if (p / _PLUGIN_MANIFEST).is_file():
+        manifest_st, reason = _stat_or_reason(p / _PLUGIN_MANIFEST)
+        if reason is not None:
+            return None, reason
+        if manifest_st is not None and stat.S_ISREG(manifest_st.st_mode):
             return p, None
         nm = p / "node_modules"
-        if nm.is_dir():
+        nm_st, reason = _stat_or_reason(nm)
+        if reason is not None:
+            return None, reason
+        if nm_st is not None and stat.S_ISDIR(nm_st.st_mode):
             hits = sorted(nm.glob("*/" + _PLUGIN_MANIFEST)) + sorted(
                 nm.glob("@*/*/" + _PLUGIN_MANIFEST)
             )
             if len(hits) == 1:
                 return hits[0].parent, None
     except OSError as exc:
+        # Defense in depth: _stat_or_reason() covers every is_file()/is_dir() check
+        # above explicitly, but glob() a few lines up still walks the filesystem via
+        # pathlib and could in principle raise on some other unreadable descendant.
         return None, (exc.strerror or str(exc))
     return None, None
 
