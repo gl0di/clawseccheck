@@ -5211,7 +5211,7 @@ _PB_AUX = {
 _PB_INV_SUBJ = {"you", "anyone", "anybody", "one", "we", "they", "users", "the", "agent", "it"}
 _PB_ADV_WORDS = {"ever", "even", "again", "really", "seriously", "once", "at", "all"}
 
-# B-879 round 6 (see `_neg_scan_ex`'s docstring): a small, closed, single-word
+# B-879 round 6 (see `_neg_scan_ex`'s docstring): a closed, single-word
 # preposition list — empirically confirmed (a "Never PREP X, run the
 # following:" probe for each) to make the negator's clause walk stop at a
 # fronted PP's head instead of its real object. Deliberately excludes "at":
@@ -5219,14 +5219,41 @@ _PB_ADV_WORDS = {"ever", "even", "again", "really", "seriously", "once", "at", "
 # as an adverb before the walk ever reaches this stop-point, so a fronted
 # "at"-PP ("Never at work, run...") is a related, still-open, out-of-scope
 # gap this round does not touch, not a case that would ever reach this set.
+#
+# Round 7: round 6's own docstring called this "a small, closed" set and
+# stopped at ten members. A pre-merge review probed the same "Never PREP X,
+# run the following:" shape against six more ordinary single-word
+# prepositions and found the IDENTICAL fronted-PP-stop bug on every one:
+# "by", "for", "from", "over", "through", "within". This is not meant to be
+# an exhaustive part-of-speech classifier — English has more single-word
+# prepositions than this set will ever enumerate, and a future probe will
+# likely find more (the same "any enumeration is missing a member" lesson
+# round 5's class rule drew for punctuation applies here too, just not
+# solved the same way, because "is this word a preposition" has no
+# alphanumeric-content class rule to fall back on) — it is simply the
+# complete list of single-word prepositions actually probed and confirmed to
+# reproduce this exact mechanism so far.
 _PB_FRONTED_PREP = {
     "in", "as", "on", "under", "with", "without", "during", "before", "after", "since",
+    "by", "for", "from", "over", "through", "within",
 }
 _PB_OPENERS = {
     "then", "now", "next", "first", "finally", "also", "just", "simply", "please",
     "and", "so", "afterwards", "again", "quickly", "quietly", "silently", "lastly",
     "second", "third", "immediately", "always",
 }
+# B-879 round 7: the subset of `_PB_OPENERS` that is a genuine COORDINATING
+# CONJUNCTION — a word that can introduce a grammatically independent second
+# clause with its own subject and modal, as opposed to a plain sequencing
+# adverb ("then"/"now"/"immediately"/...) that merely orders steps WITHIN the
+# same clause a negator already governs. See `_sentence_directed`'s (d″) for
+# why this distinction is load-bearing: a bare comma-splice aside ("Never,
+# under any circumstances, run...") must stay unresolved, but "..., so you
+# must run..." is a real, separate directive clause. "but" is deliberately
+# NOT in `_PB_OPENERS` itself (a pre-existing, out-of-scope gap — see
+# `_pb_directive_mood`) but IS a coordinating conjunction for this narrower
+# purpose.
+_PB_COORD = {"and", "so", "but"}
 _PB_ADDRESSEE = [
     ("you",), ("your", "agent"), ("the", "agent"), ("this", "skill"),
     ("the", "skill"), ("the", "assistant"), ("we",), ("i",),
@@ -5656,21 +5683,43 @@ def _neg_events(tokens: list[str]) -> list[tuple[int, int]]:
     return _neg_scan(tokens)[0]
 
 
-def _pb_chunk_pre(ts: list[str], i: int) -> tuple[list[str], int]:
+def _pb_chunk_raw_pre(ts: list[str], i: int) -> tuple[list[str], int]:
     """The word-only span from the start of *ts[i]*'s clause up to (not
-    including) ts[i], with leading OPENERS (then/now/next/.../please/and/so/...)
-    and a leading "Step N" stripped."""
+    including) *ts[i]*, with NOTHING stripped — the raw material
+    `_pb_chunk_pre` immediately throws away by stripping leading openers and a
+    "Step N" prefix. B-879 round 7's cloud-recovery mechanism
+    (`_sentence_directed`'s (d″)) needs to see whether that raw span itself
+    OPENS with a genuine opener/coordinator BEFORE any stripping happens —
+    `_pb_chunk_pre` alone cannot answer that, since by the time it returns,
+    the very evidence of what the chunk started with is already gone."""
     s = 0
     for k in range(i - 1, -1, -1):
         if ts[k] in _PB_DELIM:
             s = k + 1
             break
-    pre = [t for t in ts[s:i] if _pb_is_word(t)]
+    return [t for t in ts[s:i] if _pb_is_word(t)], s
+
+
+def _pb_strip_chunk_openers(pre: list[str]) -> list[str]:
+    """Strip leading OPENERS (then/now/next/.../please/and/so/...), any
+    "-ly" adverb, and a leading "Step N" off the front of *pre* — the
+    stripping half of `_pb_chunk_pre`, factored out so B-879 round 7's (d″)
+    can apply the SAME stripping after first removing a coordinator
+    (`_PB_COORD`) that is not itself in `_PB_OPENERS` ("but" — see
+    `_PB_COORD`'s own comment)."""
     while pre and (pre[0] in _PB_OPENERS or (pre[0].endswith("ly") and len(pre[0]) > 3)):
         pre = pre[1:]
     if pre and pre[0] == "step":
         pre = pre[1:]
-    return pre, s
+    return pre
+
+
+def _pb_chunk_pre(ts: list[str], i: int) -> tuple[list[str], int]:
+    """The word-only span from the start of *ts[i]*'s clause up to (not
+    including) ts[i], with leading OPENERS (then/now/next/.../please/and/so/...)
+    and a leading "Step N" stripped."""
+    pre, s = _pb_chunk_raw_pre(ts, i)
+    return _pb_strip_chunk_openers(pre), s
 
 
 def _pb_addressee_len(pre: list[str]) -> int:
@@ -5765,7 +5814,14 @@ def _sentence_directed(
     own chunk and the cloud's own negator is in directive mood ("Never, under
     any circumstances, forget to run the following:"). Round 5 adds *carry*
     (see `_neg_scan_ex`/`_carries`): a cloud still open from a previous
-    sentence, threaded in so (d′) can judge an inverting verb sitting in it."""
+    sentence, threaded in so (d′) can judge an inverting verb sitting in it.
+    Round 7 adds (d″), below: the same "opens its own chunk" recovery
+    principle as (d′), generalized from INVERTING verbs to ordinary EXEC
+    verbs, for a token whose OWN local grammar proves it belongs to a
+    different clause/sentence than the one an unrelated cloud nominally still
+    covers — see (d″)'s own comment for the two different bars (coordinator +
+    subject/modal for a same-sentence cloud; a marked, already-established
+    directive frame for a cross-sentence carry)."""
     ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
     evs, clouded, _carry_out = _neg_scan_ex(ts, carry)
     governed = {g for _n, g in evs}
@@ -5810,6 +5866,82 @@ def _sentence_directed(
             mood = neg_idx is not None and _pb_negator_mood(ts, neg_idx)
         if mood:
             return True
+    # (d″) round 7: generalize (d′)'s "opens its own chunk" recovery from
+    # INVERTING verbs to ordinary EXEC verbs. An earlier, unrelated negator's
+    # cloud being nominally still "open" over a token does not mean that
+    # token is really part of the SAME clause the negator governs — a token
+    # that independently proves it belongs to a different, grammatically
+    # independent clause (or a different SENTENCE) must not be suppressed
+    # just because the cloud's technical span happens to still cover it. The
+    # bar differs by how the token ended up clouded, because a comma and a
+    # period are not equally strong independence signals:
+    #
+    #   * Same-sentence cloud (`neg_idx >= 0`, opened by a comma/dash/etc.
+    #     INSIDE this sentence): only a genuine COORDINATING CONJUNCTION
+    #     (`_PB_COORD` — "and"/"so"/"but", never a plain sequencing adverb
+    #     like "then"/"now") can introduce an independent second clause, and
+    #     even then only when what follows it is a real subject+modal
+    #     ("so you must run...") or a matrix frame ("so make sure to
+    #     run..."). A bare "so run"/"and run" with nothing else stays
+    #     suppressed — that shape is indistinguishable at the token level
+    #     from an ordinary same-clause comma splice ("Never, under any
+    #     circumstances, run..."), which is exactly the false-FAIL shape
+    #     this whole design exists to avoid, so it is deliberately NOT
+    #     recovered just because a coordinator happens to be present.
+    #   * Carried-in cloud (`neg_idx == -1`, threaded in from a PREVIOUS
+    #     sentence via `_carries`/`_soft_break`): this sentence already sits
+    #     on the far side of a genuine `_pb_sentences` PERIOD split — the
+    #     only reason it is still "clouded" at all is `_soft_break`'s casing
+    #     heuristic (the next sentence merely starts lowercase, which could
+    #     mean the period was not a real full stop, or could just as easily
+    #     mean an author wrote a fresh, informally-cased new instruction). A
+    #     period is a much stronger independence signal than a mid-sentence
+    #     comma, so the bar is the ordinary, already-established directive
+    #     test (`_pb_directive_mood`, frames (a)/(b)/(c) — which already
+    #     accepts a bare chunk-initial imperative) — BUT gated on the raw
+    #     chunk finding a genuine `_PB_OPENERS` marker first, so a bare,
+    #     filler-less continuation ("Never, ever. run the following:", the
+    #     C01-C06 accepted-cost group) stays exactly as unresolved as it
+    #     always was: nothing marks it as a deliberate new step rather than
+    #     the unmarked tail end of the same splice.
+    for i in sorted(cloud_idx):
+        t = ts[i]
+        if (
+            not _PB_EXEC_BASE_RE.match(t)
+            or t in ("do", "does", "did", "done", "doing")
+            or (i > 0 and ts[i - 1] in ("not", "never", "don't", "dont"))
+        ):
+            continue
+        raw_pre, _rs = _pb_chunk_raw_pre(ts, i)
+        if not raw_pre:
+            continue
+        neg_idx = clouded.get(i)
+        if neg_idx == -1:
+            if raw_pre[0] not in _PB_OPENERS or not _pb_directive_mood(ts, i):
+                continue
+        else:
+            if raw_pre[0] not in _PB_COORD:
+                continue
+            # Strip the coordinator itself by hand first — plain
+            # `_pb_chunk_pre` would not do it for us here, because "but" is
+            # deliberately NOT a member of `_PB_OPENERS` (its own stripping
+            # loop would leave it in place, and the addressee check below
+            # would never match a pre starting with "but"). Once it is gone,
+            # apply the SAME opener-stripping `_pb_chunk_pre` uses to
+            # whatever follows it ("so now you must run..." still needs
+            # "now" gone too).
+            pre = _pb_strip_chunk_openers(raw_pre[1:])
+            if not pre:
+                continue
+            n = _pb_addressee_len(pre)
+            has_struct = (
+                n and all(w in _PB_MODALISH or _pb_is_adverb(w) for w in pre[n:])
+            ) or any(tuple(pre) == m for m in _PB_MATRIX_FRAMES)
+            if not has_struct:
+                continue
+        if _reaches_block(ts, i, deixis, introducer) is None:
+            continue
+        return True
     for i, t in enumerate(ts):
         if (
             not _PB_EXEC_RE.match(t)
