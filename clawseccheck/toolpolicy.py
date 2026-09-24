@@ -542,14 +542,32 @@ def _scope_rows(cfg: dict) -> list:
     ``None`` is kept anyway because it is this module's own, narrower distinction.
     ``confined_scopes`` walks the same rows, so index N of its answer is scope N of this
     list.
+
+    B-940: two roster agents that normalise to the same id (two id-less ``agents.list``
+    entries both fold to ``main`` -- see ``_normalize_agent_id``) used to be collapsed by a
+    LAST-wins dict comprehension, silently keeping the later declaration and discarding the
+    earlier one entirely -- not just for the entry ``by_name`` looked up, but from the
+    returned row list altogether, since the tail append also matched on name. The real
+    vendor's ``resolveAgentEntry`` takes the FIRST match on a duplicate id and silently
+    shadows the rest (``toolgrant.resolved_scopes`` documents the same fact); this module's
+    callers need a concrete row per scope rather than an ``undecided`` answer, so it mirrors
+    that FIRST-wins resolution directly instead of ``toolgrant``'s more conservative
+    "ambiguous -> None" -- deduplicate once, in declaration order, before either using it.
     """
     main = _default_agent_id(cfg)
     rows = [(_normalize_agent_id(agent.id), agent.entry,
              agent.id if isinstance(agent.id, str) else "")
             for agent in agent_roster(cfg)]
-    by_name = {name: (entry, raw) for name, entry, raw in rows}
+    seen = set()
+    deduped = []
+    for row in rows:
+        if row[0] in seen:
+            continue
+        seen.add(row[0])
+        deduped.append(row)
+    by_name = {name: (entry, raw) for name, entry, raw in deduped}
     entry, raw = by_name.get(main, ({}, None))
-    return [(main, entry, raw)] + [row for row in rows if row[0] != main]
+    return [(main, entry, raw)] + [row for row in deduped if row[0] != main]
 
 
 def _has_opaque_narrowing(entry) -> bool:
