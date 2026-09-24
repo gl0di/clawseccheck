@@ -3128,7 +3128,26 @@ def _b863_classify_head(expr, names, tree):
         return None
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
         return _b863_classify_head(expr.left, names, tree)
-    if isinstance(expr, ast.List) and expr.elts and isinstance(expr.elts[0], ast.Starred):
+    # C-135 (post-commit review, CLAWSECCHECK-B-956, round 2): this branch used to
+    # match ANY List whose FIRST element was Starred, regardless of what else the
+    # list held -- `[*H, "-c"]` (a trailing literal spliced in AFTER the tracked
+    # name) recursed into `H` alone and returned it as pure head-preservation,
+    # silently discarding the trailing `"-c"` the same way the `BinOp`/`Add`
+    # branch above used to silently discard its own `expr.right` (see that
+    # branch's own fix, `_b863_param_reassigned_via_self_referential_add`) --
+    # `args = [*args, "-c"]` was misclassified identically to a body that never
+    # touches `args` at all. `len(expr.elts) == 1` requires the Starred element
+    # to be the list's ONLY element (`[*H]`, already covered by
+    # `test_fr3_every_identity_wrap_after_alias_decouples_is_info`'s own
+    # `"args = [*args]"` case) -- ANY trailing element now falls through to
+    # `return None` below, which `_b863_classify_assign_value` (this function's
+    # only caller on an assignment RHS) treats as out of domain -> crit,
+    # unresolved, exactly the same conservative default the BinOp fix already
+    # relies on. Purely monotone: this can only turn a PREVIOUSLY "head-
+    # preserving" verdict into "not classified here", never the reverse, so it
+    # cannot silently clear anything this branch did not already silently
+    # clear before.
+    if isinstance(expr, ast.List) and len(expr.elts) == 1 and isinstance(expr.elts[0], ast.Starred):
         return _b863_classify_head(expr.elts[0].value, names, tree)
     if isinstance(expr, (ast.ListComp, ast.GeneratorExp)):
         if len(expr.generators) != 1:
@@ -3708,6 +3727,80 @@ def _b863_collect_channels(fn, param_name, tree):
     return "shapes", shapes_of[param_name], names
 
 
+def _b863_param_reassigned_via_self_referential_add(fn, param_name) -> bool:
+    """C-135 hardening (CLAWSECCHECK-B-956, post-commit review): `_b863_classify_
+    head`'s own `ast.BinOp`/`ast.Add` branch has a PRE-EXISTING bug, out of scope
+    here and not fixed by this function -- `return _b863_classify_head(expr.left,
+    names, tree)` recurses into `expr.left` ONLY and silently drops `expr.right`,
+    so `name = name + (X,)` is classified by `_b863_collect_channels` identically
+    to a body that never touches `name` at all (`fresh=False, content=[]`). That
+    same pre-existing gap is ALSO already reachable today through the unrelated
+    named-param path (`_b863_tier1_tier2_verdict`'s own identical bail-out
+    predicate) -- e.g. `def run(cmd): cmd = cmd + ["-c"]; ...` -- so the real fix
+    belongs in `_b863_classify_head` itself, shared by every consumer; NOT
+    attempted here, deliberately.
+
+    `_b863_param_body_is_pure_identity` cannot trust `_b863_collect_channels`
+    alone, then -- this is a direct, local scan (touching neither
+    `_b863_classify_head` nor `_b863_process_one`/`_b863_tier1_tier2_verdict`)
+    for any assignment target `param_name = ...` (or augmented `param_name +=
+    ...`) whose value both contains an `ast.BinOp(ast.Add)` node AND references
+    `param_name` by Name anywhere within it -- covers `name + X`, `X + name`, and
+    a chained `name + (a,) + (b,)` (the chain's outer `BinOp` still has `name`
+    somewhere inside its own subtree). Deliberately not smart about which operand
+    is actually the parameter or whether the shape is safe -- fails closed on the
+    shape alone, matching this module's own "unresolvable stays crit"
+    discipline."""
+    for node in ast.walk(fn):
+        if node is fn:
+            continue
+        if (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.op, ast.Add)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == param_name
+        ):
+            return True  # `name += X` -- self-reference is implicit in the target
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == param_name for t in node.targets
+        ):
+            for sub in ast.walk(node.value):
+                if (
+                    isinstance(sub, ast.BinOp)
+                    and isinstance(sub.op, ast.Add)
+                    and param_name in _names_in(sub)
+                ):
+                    return True
+    return False
+
+
+def _b863_param_body_is_pure_identity(fn, param_name, tree) -> bool:
+    """True iff `fn`'s own body never reassigns/mutates/extends `param_name`
+    at all -- the SAME "no meaningful body channel" classification
+    `_b863_tier1_tier2_verdict` already computes for itself at its own start
+    (`kind == "none"`, or a single `"shapes"` entry that is neither `fresh`
+    nor has any `content`) before it ever tries tier 1/tier 2. Extracted as
+    its own tiny predicate (CLAWSECCHECK-B-956) for a caller that does NOT
+    want `_b863_tier1_tier2_verdict`'s full position-aware tier-2 machinery --
+    specifically, the vararg-splice `argv[0]` case in
+    `_subprocess_taint_is_command_injection` (`[*args, "--flag"]`), which has
+    no way to feed an OUTER, sink-local trailing literal element like
+    `"--flag"` through that machinery's own call-site-content model, so it
+    only ever attempts to clear the plain pass-through case and stays
+    conservative (crit) whenever the body actually transforms the vararg.
+
+    C-135 (post-commit review, same task): ALSO False when
+    `_b863_param_reassigned_via_self_referential_add` finds a self-referential
+    `name = name + X` reassignment -- see that function's own docstring for why
+    `_b863_collect_channels` alone cannot be trusted for that shape."""
+    if _b863_param_reassigned_via_self_referential_add(fn, param_name):
+        return False
+    kind, payload, _names = _b863_collect_channels(fn, param_name, tree)
+    if kind == "none":
+        return True
+    return kind == "shapes" and len(payload) == 1 and not payload[0].fresh and not payload[0].content
+
+
 def _b863_resolve_call_site(expr, tree, owner_map):
     """The call-site counterpart of the tier-2 walk above: resolves a bound
     call-site expression to its own flat argv elements, `.append()`/
@@ -4112,6 +4205,21 @@ def _subprocess_taint_is_command_injection(
     see `_RefResolver`'s module note for why that vocabulary must stay out of this
     inline position. Purely additive: each check can only flip False->True (crit),
     never the reverse.
+
+    B-956: ALSO False when the inline argv list's `elts[0]` (argv[0] itself) is
+    `ast.Starred(value=ast.Name(...))` naming THIS call's own enclosing function's
+    vararg parameter (`check_output([*args, "--flag"])` inside `def sh(*args):
+    ...`) -- the SPLICED-first-element counterpart of the bare-Name case just
+    above, reusing the identical `_param_argv_call_sites`/
+    `_all_call_sites_bind_fixed_argv` machinery on `*args`'s own per-call-site
+    binding, PLUS a check that any literal element written after the splice in
+    THIS sink call (e.g. "--flag") is untainted whenever a call site's own
+    resolved program name is shell-indirect (same C-135 lesson as the inline
+    branch's own shell-tail check). Deliberately narrower than the bare-Name
+    case: only fires when the function's body never transforms the vararg before
+    this sink (`_b863_param_body_is_pure_identity`) -- a body that DOES transform
+    it has no position-aware tier 2 for a spliced sink and stays crit, same as
+    before this fix.
     """
     for kw in node.keywords:
         if kw.arg == "shell":
@@ -4154,6 +4262,83 @@ def _subprocess_taint_is_command_injection(
         first = list_bindings.get(first.id, first)  # resolve a var-bound command list
     if isinstance(first, (ast.List, ast.Tuple)):
         prog = first.elts[0] if first.elts else None
+        # B-956: `prog` can be `ast.Starred(value=ast.Name(...))` --
+        # `check_output([*args, "--flag"])` inside `def sh(*args): ...` -- not a
+        # literal value the generic check below can read directly. `_names_in()`
+        # still walks INTO the Starred and finds the vararg's own bare Name, and a
+        # vararg parameter is unconditionally tainted from its OWN function's
+        # perspective (ordinary layer-1 parameter taint), so the generic check just
+        # below used to call this tainted unconditionally -- without ever trying the
+        # SAME call-site-resolution layer 2 already runs for a bare-Name vararg sink
+        # (`check_output(args)`, further down this function). Narrow fix: only when
+        # the Starred element is `first.elts[0]` (argv[0] itself, the one position
+        # this whole function classifies) AND it wraps THIS call's own enclosing
+        # function's vararg name is it handled here at all -- any other Starred (a
+        # different name, a nested function/method, no `tree`/context available)
+        # falls straight through to the generic, unchanged check below.
+        if (
+            isinstance(prog, ast.Starred)
+            and isinstance(prog.value, ast.Name)
+            and tree is not None
+            and owner_map is not None
+            and parent_scope is not None
+            and shadow_cache is not None
+            and ext_taint_map is not None
+            and list_bindings_by_call is not None
+        ):
+            fn = owner_map.get(node)
+            vararg_name = prog.value.id
+            if (
+                isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and fn.args.vararg is not None
+                and fn.args.vararg.arg == vararg_name
+            ):
+                # It IS this call's own enclosing function's vararg -- decide here,
+                # either clearing or staying crit; never fall through to the
+                # Starred-blind generic check below for this shape.
+                cleared = False
+                if _b863_param_body_is_pure_identity(fn, vararg_name, tree):
+                    # A body that DOES transform the vararg before this sink is out
+                    # of scope for this fix (no position-aware tier 2 for a spliced
+                    # sink exists) and stays crit, unresolved, exactly as before.
+                    call_sites = _param_argv_call_sites(fn, vararg_name, tree, owner_map)
+                    if call_sites is not None and _all_call_sites_bind_fixed_argv(
+                        call_sites,
+                        list_bindings_by_call,
+                        owner_map,
+                        ext_taint_map,
+                        parent_scope,
+                        shadow_cache,
+                        ref_res=ref_res,
+                    ):
+                        # `_all_call_sites_bind_fixed_argv` only proves each call
+                        # site's OWN [prog, ...rest-of-vararg] is a hardcoded
+                        # command -- it has no way to see `first.elts[1:]`, the
+                        # LITERAL elements written after the splice in THIS sink
+                        # call (e.g. "--flag"), since those live outside the
+                        # vararg's own binding entirely. C-135 (B-413 round 1's own
+                        # lesson, reapplied): if ANY call site's own resolved
+                        # program name is a shell/indirect-execution interpreter,
+                        # those trailing elements are re-parsed as that
+                        # interpreter's command text too, not inert execve data --
+                        # check them here, in THIS scope's own already-correct
+                        # `tainted`/`ref_res`, exactly like the non-spliced case
+                        # below does for a static argv[0].
+                        if any(
+                            isinstance(cs, (ast.List, ast.Tuple))
+                            and _argv0_is_shell_indirect_exec(cs.elts)
+                            for cs in call_sites
+                        ):
+                            tail_names = set()
+                            for elt in first.elts[1:]:
+                                tail_names |= _names_in(elt)
+                            if (tail_names & tainted) or (
+                                ref_res is not None
+                                and any(ref_res.source_in(e) for e in first.elts[1:])
+                            ):
+                                return True  # tainted arg handed to a shell/interpreter -> command injection
+                        cleared = True
+                return False if cleared else True  # every real call site is a hardcoded command / unresolved -> crit
         if prog is not None and (
             (_names_in(prog) & tainted) or (ref_res is not None and ref_res.source_in(prog))
         ):
