@@ -6898,8 +6898,16 @@ def analyze_python_package(files) -> list[ASTFinding]:
 
 # --- Shell (.sh/.bash/.zsh) semantic pass (F-050) ----------------------------
 # Credential FILES whose contents are secrets (mirrors the Python _CRED_PATH_RE intent).
+# B-975: same public-key gap B-898 fixed on _CRED_PATH_RE -- `.ssh/id_` (any key-type
+# suffix) and the bare `id_rsa`/`id_ed25519` spellings used to match a PUBLIC-key
+# filename too (`id_rsa.pub`, `id_ed25519.pub`, an OpenSSH cert `id_rsa-cert.pub`),
+# false-positiving a shell script that legitimately references a public key (e.g.
+# uploading it to a git host) as SHELL_CRED_EXFIL. Same negative-lookahead discipline:
+# "no more identifier chars, and not immediately followed by .pub/-cert.pub".
 _SH_CRED_FILE_RE = re.compile(
-    r"\.ssh/id_[a-z0-9_]+|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|\.netrc\b|"
+    r"\.ssh/id_[a-z0-9_]+(?![a-z0-9_]|\.pub\b|-cert\.pub\b)|"
+    r"\bid_rsa\b(?!\.pub\b|-cert\.pub\b)|\bid_ed25519\b(?!\.pub\b|-cert\.pub\b)|"
+    r"\.aws/credentials|\.netrc\b|"
     r"login\.keychain|wallet\.dat|\.docker/config\b|\.kube/config\b|\.npmrc\b|\.pypirc\b|"
     r"\.openclaw/|/\.config/[^/\s\"']+/|"
     # E-065/C-323: same widening as the Python _CRED_PATH_RE above -- a process's own
@@ -6956,9 +6964,15 @@ _SH_PIPE_INTERP_RE = re.compile(
 # input (e.g. a 40KB identifier run has no '=' and previously backtracked at every start
 # → quadratic). A real credential-read assignment line is short, so the bounds (128-char
 # var, 256-char gaps) never clip a genuine match.
+# B-975: same public-key gap as `_SH_CRED_FILE_RE` above (and B-898's `_CRED_PATH_RE`
+# fix) -- `.ssh/id_`/bare `id_rsa`/`id_ed25519` used to match a PUBLIC-key filename too
+# (`id_rsa.pub`, `id_ed25519.pub`, `id_rsa-cert.pub`), so `VAR=$(cat ~/.ssh/id_rsa.pub)`
+# false-positived as a credential-read assignment. Same negative-lookahead discipline.
 _SH_CRED_ASSIGN_RE = re.compile(
     r"(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=[^\n]{0,256}?(?:cat|less|head|tail|<)\s*[^\n]{0,256}?"
-    r"(?:\.ssh/id_|id_rsa|id_ed25519|\.aws/credentials|\.netrc|keychain|wallet\.dat|"
+    r"(?:\.ssh/id_[a-z0-9_]+(?![a-z0-9_]|\.pub\b|-cert\.pub\b)|"
+    r"id_rsa(?!\.pub\b|-cert\.pub\b)|id_ed25519(?!\.pub\b|-cert\.pub\b)|"
+    r"\.aws/credentials|\.netrc|keychain|wallet\.dat|"
     r"\.docker/config|\.kube/config|\.npmrc|\.pypirc|\.openclaw/)",
     re.I,
 )
