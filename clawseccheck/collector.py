@@ -52,8 +52,10 @@ from .textnorm import normalize_for_scan, obfuscation_signals
 # VIEW named `auth_profile_store`) also reuses trajectorystore's own schema verification
 # (`_open_and_verify_table`/`_table_kind`) rather than opening the connection directly --
 # only the actual SELECT query stays local to this file, matching every other sqlite
-# reader here. B-889's hardening of the shared `config_machine_state` read (below) reuses
-# the same `_table_kind` via this one module import rather than a second, separate import.
+# reader here. B-889's hardening of `_collect_auth_profile_store_presence`'s own query
+# against `config_machine_state`, and B-977's identical hardening of
+# `_collect_config_machine_state` itself (below), both reuse the same `_table_kind` via
+# this one module import rather than a second, separate import.
 from . import trajectorystore as _trajectorystore
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
@@ -5611,6 +5613,27 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     ``meta.lastTouchedVersion`` predates ``BUNDLED_DISCOVERY_STATE_CUTOVER_VERSION =
     "2026.7.2"``. So the population that loses its allowlist is exactly the population that
     took the trouble to write one.
+
+    B-977: the SAME gap B-889 hardened for ``_collect_auth_profile_store_presence`` --
+    querying ``config_machine_state`` by bare name trusts SQLite to resolve it against a
+    real TABLE, but name resolution is a property of the FILE'S OWN schema, attacker-
+    controlled if anything can write into ``state/openclaw.sqlite``. A crafted
+    ``CREATE VIEW config_machine_state AS SELECT ... FROM <decoy>`` makes the SELECT below
+    execute that view body instead. Worse here than in B-889: that sibling only ever
+    selected ``LENGTH(value_json)``, an integer, so a successful spoof could only flip a
+    presence/length signal. This reader selects and RETURNS the parsed ``value_json``
+    CONTENT for three keys -- an attacker-controlled row can inject an arbitrary
+    ``plugins.bundledDiscovery`` / ``cron.store`` / ``hooks.internal.installs`` value into
+    every one of this function's downstream consumers (the B179 hooks-inventory evidence,
+    the cron-store-shadow detector that demotes a stale-scan PASS to UNKNOWN, and the
+    plugin-discovery drift monitor). Same fix as B-889, reusing
+    ``trajectorystore._table_kind`` verbatim via this module's existing import (see the
+    import-site comment above): the schema check runs inside the SAME transaction as the
+    real read (closing the TOCTOU gap the same way
+    ``trajectorystore._open_and_verify_table`` does), a name that resolves to ``"absent"``
+    stays the existing quiet UNDETERMINED path, and a name that resolves to anything other
+    than a real table is refused and disclosed via ``ctx.errors`` -- never silently
+    trusted.
     """
     state_dir = home / "state"
     capped: list = []
@@ -5637,7 +5660,29 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
+            # BEGIN before the schema check, held open across it AND the read below --
+            # closes the same TOCTOU gap `trajectorystore._open_and_verify_table`
+            # documents (a concurrent writer swapping the schema between the check and
+            # the query).
+            conn.execute("BEGIN")
             conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "config_machine_state")
+            if kind == "absent":
+                # Genuinely no such table yet -- same honest UNDETERMINED as the
+                # `sqlite3.Error` "no such table" branch below, not a refusal.
+                return
+            if kind != "table":
+                # B-977: present, but not a real TABLE (view / virtual table /
+                # rootpage-aliased / generated-column row -- see `_table_kind`'s
+                # docstring for the demonstrated shapes). Refuse to query it. Disclosed,
+                # never silently trusted: NOT the same outcome as "absent" above, and
+                # NOT read as if it were a genuine row.
+                ctx.errors.append(
+                    f"'config_machine_state' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the machine-owned config store was not read"
+                )
+                return
             rows = conn.execute(
                 # The key list is bound, not interpolated, and there is no `SELECT *`:
                 # this query cannot return a row this tool is not allowed to see.
