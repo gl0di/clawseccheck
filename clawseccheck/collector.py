@@ -6294,6 +6294,11 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
       the same transaction as that read (TOCTOU-closed). This is deliberately NOT the
       same outcome as "A absent" above: a spoofed row must never be silently swapped for
       a legacy read that happens to still succeed.
+    * B-994: the SAME check, reused verbatim for ``installed_plugin_index``, gates
+      Probes B/C -- reached only once A is genuinely absent. A name that does not
+      resolve to a real table there is refused and disclosed the identical way, never
+      silently read; a genuinely absent table falls through to the existing quiet
+      UNKNOWN both SELECTs below already produce for "no such table".
     * Neither present -> both ``*_found`` pairs stay False -> UNKNOWN, exactly as today.
       This must never regress into a fake PASS (Golden Rule #4).
     * A PRESENT but its ``value_json`` is not valid JSON, or parses to something other
@@ -6486,11 +6491,12 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         #
         # BEGIN before the schema check, held open across it AND Probe A's read below --
         # closes the same TOCTOU gap trajectorystore._open_and_verify_table documents (a
-        # concurrent writer swapping the schema between the check and the query). Scoped
-        # to Probe A specifically: legacy Probes B/C below query a DIFFERENT table
-        # (installed_plugin_index), resolved by the SAME attacker-controlled-schema
-        # mechanism -- it is not proven safe, just out of scope for this fix and not yet
-        # hardened (same residual class as B-977 before its own fix).
+        # concurrent writer swapping the schema between the check and the query). This
+        # transaction is held open through Probes B/C below too: legacy Probes B/C query
+        # a DIFFERENT table (installed_plugin_index), resolved by the SAME
+        # attacker-controlled-schema mechanism -- B-994 gives it the identical
+        # _table_kind guard, reusing this same transaction rather than opening a second
+        # one (see that guard, just below Probe A's SELECT).
         try:
             conn.execute("BEGIN")
         except sqlite3.Error as exc:
@@ -6554,6 +6560,41 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         state_value_json = state_row[0] if state_row is not None else None
 
         if state_value_json is None:
+            # B-994: the SAME view-masquerade gap B-990 hardened for config_machine_state
+            # (Probe A) -- installed_plugin_index is queried by bare name below, and name
+            # resolution is a property of the FILE'S OWN schema, attacker-controlled if
+            # anything can write into state/openclaw.sqlite. A crafted `CREATE VIEW
+            # installed_plugin_index AS SELECT ... FROM <decoy>` makes Probes B/C's
+            # SELECTs below execute that view body instead, injecting an attacker-chosen
+            # install_records_json/plugins_json pair straight into
+            # ctx.plugin_trust_records/ctx.plugin_index_records -- the SAME
+            # content-injection severity class Probe A's own guard above closes (B177's
+            # FAIL evidence, B187's tool-result-interception middleware WARN, the SBOM's
+            # plugin-supplier attribution), just reached only once Probe A is genuinely
+            # absent. Reuses the transaction Probe A's own BEGIN already opened above --
+            # no second BEGIN (SQLite refuses a nested one on the same connection) -- so
+            # the TOCTOU gap stays closed across both probes, not just Probe A's.
+            kind = _trajectorystore._table_kind(conn, "installed_plugin_index")
+            if kind not in ("absent", "table"):
+                # Present, but not a real TABLE (view / virtual table / rootpage-aliased
+                # / generated-column row -- see _table_kind's docstring for the
+                # demonstrated shapes). Refuse to query it. Disclosed, never silently
+                # trusted -- the same "present-and-unreadable, never treated as absent"
+                # rule Probe A's own guard above already applies.
+                ctx.errors.append(
+                    f"'installed_plugin_index' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the legacy plugin trust/index data was not read"
+                )
+                ctx.plugin_trust_found = True
+                ctx.plugin_trust_parse_error = True
+                ctx.plugin_index_found = True
+                ctx.plugin_index_parse_error = True
+                return
+            # kind == "absent" falls through unchanged: a genuinely absent table is the
+            # same honest UNKNOWN both SELECTs below already produce for "no such table"
+            # -- this check adds a NEW refusal branch above, it does not change that.
+
             # ---- Probes B/C (legacy): install_records_json's OWN SELECT, independent of
             # plugins_json. B-292/RT-2 fix: a merged single-query read let a schema shape
             # missing ONE column (e.g. "no such column: plugins_json") take down BOTH
