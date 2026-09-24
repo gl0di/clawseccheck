@@ -54,20 +54,29 @@ tests/test_b879_prose_binding.py's private-helper idiom (its own `_fenced`,
 
 IMPORTANT, flagged for reviewer attention (see also the final task report):
 two shapes in the architect's own matrix -- "N24" in the benign group, and
-the whole "R01-R06" out-of-scope-residuals group -- are marked there as
+the whole "R01-R06" out-of-scope-residuals group -- were marked there as
 `notFAIL`, but were verified in this task (against the architect's own
 reference implementation, in every edge-mode variant it offers, not just this
-port) to still produce FAIL under the Dave-approved R3-only design. Both
-shapes are a DIFFERENT, pre-existing closed-vocabulary gap this round does not
-touch (an adverbial phrase or a sentence-final "?!" that the negator's own
-walk, or `_pb_sentences`/`_soft_break`, does not recognise as skippable/
-non-terminal -- see each test's docstring below for the specific mechanism).
-Rather than assert an aspirational want this design does not achieve (which
-would either fail the suite or need an xfail CLAUDE.md forbids), the tests
-below PIN the real, current, verified behaviour and say so plainly, so a
-reviewer can decide whether the matrix's "want" column needs updating or a
-follow-up ticket is warranted -- this task was not asked to fix them, only to
-report them.
+port) to still produce FAIL under the Dave-approved R3-only design. The
+R01-R06 group remains a DIFFERENT, pre-existing closed-vocabulary gap this
+round does not touch (an adverbial phrase or a negative-PP variant the
+negator's own walk does not recognise -- see each test's docstring below for
+the specific mechanism). Rather than assert an aspirational want this design
+does not achieve (which would either fail the suite or need an xfail CLAUDE.md
+forbids), the R01-R06 tests below PIN the real, current, verified behaviour
+and say so plainly, so a reviewer can decide whether the matrix's "want"
+column needs updating or a follow-up ticket is warranted -- this task was not
+asked to fix them, only to report them.
+
+CORRECTION (round 6, architect-flagged): the paragraph above originally
+grouped "N24" in with R01-R06 and described their shared cause as including
+"a sentence-final '?!' ... [that] does not recognise as skippable/
+non-terminal". That framing is wrong for N24 specifically, and round 6 has
+since closed it -- see `test_n24_is_now_fixed_by_round_6` below and
+tests/test_b879_r6_prep_scope.py's module docstring for the full corrected
+mechanism (in one line: N24's cause was the preposition-stop gap round 6
+fixes, not the "?!" split, which only explains where `_pb_sentences` divides
+the string). N24 is no longer part of the R01-R06 residual group.
 
 Offline, read-only, stdlib only.
 """
@@ -216,7 +225,7 @@ _N_CASES = [
     ("N21", "Never, per Sgt. Cole, run the following:"),
     ("N22", "Never → run the following on a shared host:"),
     ("N23", "Never . . . under any circumstances, run the following:"),
-    # N24 deliberately omitted here -- see test_n24_sentence_fragment_residual.
+    # N24 deliberately omitted here -- see test_n24_is_now_fixed_by_round_6 below.
     ("N30", "**Never, ever:** run the following as root."),
     ("N31", "**Never (not even in testing):** run the following."),
     ("N32", "Never… under any circumstances; run the following:"),
@@ -235,45 +244,38 @@ def test_benign_unenumerated_punctuation_does_not_fail_fetched(cid, sentence):
     _assert_not_fail(_status(_fetched(sentence, heading="# Security Hygiene")))
 
 
-def test_n24_sentence_fragment_residual_currently_still_fails():
-    """N24 = "Never?! Not even in a sandbox, run the following:" is marked
-    `notFAIL` in the architect's matrix, but is NOT achieved by the
-    Dave-approved R3-only design -- verified directly against the architect's
-    own reference implementation (clawseccheck/checks candidate, every
-    edge-mode variant it offers), not just this port.
+def test_n24_is_now_fixed_by_round_6():
+    """N24 = "Never?! Not even in a sandbox, run the following:" was pinned
+    HERE, at round 5, as verified-still-FAIL -- CORRECTED at round 6, which
+    closes this specific gap. See tests/test_b879_r6_prep_scope.py's
+    `test_n24_is_now_warn_not_fail_round_6_fixes_the_preposition_stop` for the
+    full mechanism and the fix; this stub stays in place (per this test's own
+    original instruction: "update this test ... rather than deleting it") so
+    a reader following round 5's own numbering does not find a silently
+    vanished test.
 
-    Root cause, confirmed by tracing both the port and the reference: "?!" is
-    not "." (`_SENTENCE_BREAK_RE` still splits a sentence there, but
-    `_soft_break`'s abbreviation-shaped fallback only fires after a token
-    ending in "." -- "Never?!" does not, so the cloud opened by "Never" does
-    NOT carry into the next sentence). That next sentence, "Not even in a
-    sandbox, run the following:", has its OWN negator ("not"), but the walk
-    only skips a closed ADVERB vocabulary (`_PB_ADV_WORDS`) after it: "even" is
-    in that set and gets skipped, but "in" (the start of the prepositional
-    phrase "in a sandbox") is not, so the walk stops there and never reaches
-    the comma that would have opened a class-rule cloud. This is the same
-    lexical-gap shape as the R01-R06 residuals below, just reached through a
-    "?!" sentence-fragment first -- a different closed vocabulary (adverbs,
-    not punctuation) than the one round 5 fixed, and out of THIS ticket's
-    scope. Pinned here as a known, reported (not fixed) gap; a fetched-key
-    twin (`test_benign_unenumerated_punctuation_does_not_fail_fetched`'s N24
-    entry would have been, had it not been excluded above) is not affected --
-    the fetched key alone caps this at WARN, since a DIRECTED verdict with no
-    literal key never escalates past WARN.
+    Documentation correction (architect-flagged, round 6): round 5's own text
+    here previously attributed N24's cause to "a sentence-final '?!' that
+    defeats `_soft_break`'s carry". That was WRONG. "?!" only explains why
+    `_pb_sentences` splits N24 into two pieces at all -- a real but SEPARATE
+    fact about where the sentence boundary falls. Taken in isolation, the
+    second sentence, "Not even in a sandbox, run the following:", has its own
+    negator ("not") and never needed a carry from the first at all: the
+    actual cause was round 6's own preposition-stop gap ("not" skips the
+    adverb "even" and used to stop at, and GOVERN, the preposition "in"
+    instead of clouding the fronted phrase "in a sandbox" as a whole). Round
+    5's `_soft_break`/carry machinery was never reached in producing this
+    FAIL and is not implicated in it.
     """
     blob = _fenced(
         "Never?! Not even in a sandbox, run the following:",
         K_VALID,
         heading="# Security Hygiene",
     )
-    assert _status(blob) == FAIL, (
-        "if this now passes, the R3 design has improved on the N24 shape -- "
-        "update this test (and flag the matrix's want was finally reachable) "
-        "rather than deleting it"
+    assert _status(blob) == WARN, (
+        "round 6's preposition-scope fix (_PB_FRONTED_PREP in "
+        "clawseccheck/checks/_shared.py) appears to have been lost or reverted"
     )
-    # The fetched-key twin is unaffected by the misclassification (WARN either
-    # way, since a non-literal key never escalates past WARN) -- confirming
-    # the gap is specifically about severity given a LITERAL, valid key.
     assert _status(_fetched(
         "Never?! Not even in a sandbox, run the following:", heading="# Security Hygiene"
     )) != FAIL
