@@ -1,8 +1,12 @@
 """C015 — secrets-at-rest scan of the OpenClaw home."""
 from __future__ import annotations
 
+import os
 import shutil
+import sys
 from pathlib import Path
+
+import pytest
 
 from clawseccheck import audit
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
@@ -451,4 +455,97 @@ def test_c015_still_flags_real_secret_elsewhere_alongside_plugin_catalog(tmp_pat
     f = check_secrets_at_rest_home(_ctx(tmp_path))
     assert f.status == WARN
     assert any("workspace/notes.env" in item for item in f.evidence)
+    assert "coverage is incomplete" not in f.detail
+
+
+# ---------------------------------------------------------------------------
+# B-915: a nested directory that is listable but unsearchable (chmod 0644: readable,
+# no search/x bit) used to make walk_dir_safely's internal os.walk() raise a bare
+# PermissionError straight out of _c015_candidate_files (Path.is_symlink() needs `x`
+# on the parent to stat an entry, and safeio._note_unlistable re-raises when the
+# caller did not opt into `unreadable_dirs`) -- crashing the WHOLE check to an
+# ENGINE-SIDE UNKNOWN (engine_degraded=True) that capped the entire audit at
+# DEGRADED_CHECK_CAP (49/F) over one directory. Opting into `unreadable_dirs` turns
+# that into a scoped, disclosed UNKNOWN instead -- graded the same as the walk-cap
+# branch above (never engine_degraded), see check_secrets_at_rest_home's own comment.
+# ---------------------------------------------------------------------------
+
+pytestmark_b915_posix = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX permission bits only"
+)
+_SKIP_ROOT_B915 = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read/search bits"
+)
+
+
+def _make_unsearchable_nested_dir(tmp_path: Path, mode: int) -> Path:
+    """A nested directory two levels under tmp_path, holding one file, chmod'd to
+    *mode* -- the literal B-915 repro shape (a Docker-volume-style data dir sitting
+    inside workspace/, e.g. Postgres's pgdata/)."""
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    pgdata = tmp_path / "workspace" / "proj" / "pgdata"
+    pgdata.mkdir(parents=True)
+    (pgdata / "PG_VERSION").write_text("16\n", encoding="utf-8")
+    os.chmod(pgdata, mode)
+    return pgdata
+
+
+@pytestmark_b915_posix
+@_SKIP_ROOT_B915
+def test_c015_unsearchable_nested_dir_degrades_to_scoped_unknown_not_crash(tmp_path):
+    """The literal B-915 repro: chmod 0644 (readable, no search bit) on a nested
+    directory must not crash the check -- it must degrade to a scoped, disclosed
+    UNKNOWN, and must NOT be engine_degraded: this is a coverage gap in an otherwise-
+    completed walk, the same treatment the walk-cap branch already gets, not an
+    engine-side crash that should cap the whole audit."""
+    pgdata = _make_unsearchable_nested_dir(tmp_path, 0o644)
+    try:
+        f = check_secrets_at_rest_home(_ctx(tmp_path))  # must not raise
+    finally:
+        os.chmod(pgdata, 0o755)
+
+    assert f.status == UNKNOWN
+    assert getattr(f, "engine_degraded", False) is False
+    assert "coverage is incomplete" in f.detail
+    assert "permission denied" in f.detail.lower()
+
+
+@pytestmark_b915_posix
+@_SKIP_ROOT_B915
+def test_c015_chmod_000_nested_dir_also_disclosed_not_silently_dropped(tmp_path):
+    """B-915 also names an asymmetry: a chmod 0000 (no read, no search) nested
+    directory did NOT crash before this fix -- os.walk's default onerror handling
+    discards it -- but the gap was then totally invisible: no disclosure, and a
+    home that happened to be otherwise clean read as a confident PASS over a scan
+    that never actually covered this subtree. Opting into `unreadable_dirs` makes
+    BOTH shapes (0644 and 0000) surface the identical disclosed coverage gap,
+    closing the silent-drop side of the asymmetry along with the crash side."""
+    pgdata = _make_unsearchable_nested_dir(tmp_path, 0o000)
+    try:
+        f = check_secrets_at_rest_home(_ctx(tmp_path))
+    finally:
+        os.chmod(pgdata, 0o755)
+
+    assert f.status == UNKNOWN
+    assert getattr(f, "engine_degraded", False) is False
+    assert "coverage is incomplete" in f.detail
+    assert "permission denied" in f.detail.lower()
+
+
+@pytestmark_b915_posix
+@_SKIP_ROOT_B915
+def test_c015_healthy_home_with_no_permission_gaps_is_unaffected(tmp_path):
+    """Paired control: a normal healthy home with no permission gaps at all (the
+    same nested directory shape, but left at the default searchable mode) must stay
+    exactly PASS, with no gap-disclosure text leaking in -- confirming the
+    unreadable_dirs opt-in changes nothing for the common, ungapped case."""
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    pgdata = tmp_path / "workspace" / "proj" / "pgdata"
+    pgdata.mkdir(parents=True)
+    (pgdata / "PG_VERSION").write_text("16\n", encoding="utf-8")
+
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+
+    assert f.status == PASS
+    assert "permission denied" not in f.detail.lower()
     assert "coverage is incomplete" not in f.detail
