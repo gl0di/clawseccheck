@@ -8,7 +8,7 @@ from pathlib import Path
 
 from clawseccheck.catalog import CRITICAL, FAIL, MEDIUM, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_silent_instruction
-from clawseccheck.checks._content import _b63_scan, _fence_ranges
+from clawseccheck.checks._content import _b63_scan, _B63_SECRET_TERM_RE, _fence_ranges
 from clawseccheck.collector import Context, collect
 from clawseccheck.textnorm import normalize_for_scan
 
@@ -429,3 +429,139 @@ def test_b426_followup_warn_ux_artifact_conceal_with_reformatting_cue_still_not_
     ctx = collect(FIXTURES / "clean_b63_ux_artifact_conceal")
     f = check_silent_instruction(ctx)
     assert f.status != FAIL, f"UX-artifact-display prose regressed to hard-FAIL: {f.detail}"
+
+
+# --------------------------------------------------------------------- B-954 (Cyrillic guard)
+#
+# `_B63_SECRET_TERM_RE`'s Russian noun branch guards against matching mid-word with
+# `(?<![а-я])` -- "not preceded by a Cyrillic letter", mirroring the English bare-noun
+# guard's own `(?<![a-z])` a few lines above. But the WHOLE pattern string (not just the
+# scanned text) is run through `normalize_for_scan()` before `re.compile()`, and that
+# function folds the Cyrillic/Greek CONFUSABLE letters (textnorm._CONFUSABLES:
+# а/е/о/р/с/х -> ASCII a/e/o/p/c/x) wherever they appear in the source -- range endpoints
+# included. The literal `а-я` (U+0430-U+044F) range therefore silently became `a-я`
+# (U+0061-U+044F) at compile time: an enormous class spanning nearly all of ASCII plus
+# every script up to Cyrillic, so almost ANY character glued directly in front of
+# секрет/парол/токен/ключ -- not just a Cyrillic letter -- wrongly satisfied "preceded by
+# a letter" and suppressed the match, even a closing "»" guillemet or an ASCII quote/
+# digit/paren, all common right next to a quoted term in real Russian prose or config.
+
+def test_b954_secret_term_re_matches_after_non_cyrillic_punctuation_and_digits():
+    # These were all false negatives under the pre-fix bogus a(U+0061)-я(U+044F) range --
+    # every character below only reads as "not a letter" once the class is correctly
+    # restricted back to the 32-letter native Cyrillic alphabet.
+    previously_missed = [
+        "«секрет»",     # Russian guillemet quoting -- everyday typography
+        '"секрет"',     # ASCII double quotes
+        "(секрет)",
+        "1секрет",
+        "не-секрет",    # hyphen-glued
+        "«ключ»",
+        "«токен»",
+        "«парол»",
+    ]
+    for text in previously_missed:
+        norm = normalize_for_scan(text)
+        assert _B63_SECRET_TERM_RE.search(norm), (
+            f"{text!r} (normalized {norm!r}) should match -- was wrongly blocked by the "
+            "bogus a-я range"
+        )
+
+
+def test_b954_secret_term_re_still_excludes_genuine_cyrillic_derivations():
+    # Negative control: real, everyday Russian words that happen to contain
+    # ключ/секрет as a substring, formed by gluing a genuine derivational PREFIX onto the
+    # root (Russian word-formation, not a two-word compound) -- none of these are about
+    # a secret/key at all, and the fix must not turn them into new false positives. This
+    # is the exact class the guard exists to exclude, same purpose as the English guard
+    # excluding "secretary"/"tokenizer" as substrings of unrelated words.
+    unrelated_words = [
+        "отключить",     # "to turn off/disconnect"
+        "включить",      # "to turn on"
+        "заключить",     # "to conclude/enter into"
+        "переключить",   # "to switch"
+        "подключить",    # "to connect"
+        "рассекретить",  # "to declassify"
+        "засекретить",   # "to classify"
+    ]
+    for text in unrelated_words:
+        norm = normalize_for_scan(text)
+        assert not _B63_SECRET_TERM_RE.search(norm), (
+            f"{text!r} (normalized {norm!r}) should NOT match -- ordinary Cyrillic "
+            "derivation, not a secret/credential mention"
+        )
+
+
+def test_b954_secret_term_re_baseline_unaffected():
+    # Sanity: the cases that already worked before this fix (whitespace-separated
+    # Cyrillic prose, and the pre-existing English underscore-compound shapes) still work.
+    for text in ("мой секрет", "секретный токен доступа", "прочитай пароль"):
+        norm = normalize_for_scan(text)
+        assert _B63_SECRET_TERM_RE.search(norm), f"{text!r} regressed: norm={norm!r}"
+    for text in ("fake_secrets", "db_token"):
+        assert _B63_SECRET_TERM_RE.search(normalize_for_scan(text)), f"{text!r} regressed"
+
+
+def test_b954_secret_term_re_letter_glued_cyrillic_compound_stays_conservative():
+    # Documents a deliberate, unchanged limitation (not a regression this fix owns): a
+    # letter-glued two-word Cyrillic compound with NO derivational relationship (e.g. "my"
+    # + "secret" typed with no space) still doesn't match, same as before this fix and
+    # same as the English guard's own "nonsecret"/"secretary" exclusion -- there is no
+    # dictionary of Cyrillic prefixes here to tell a genuine derivation (see the negative
+    # control above) apart from a glued two-word compound, so narrowing the guard further
+    # to catch this shape would reopen the false positives that test excludes.
+    for text in ("мойсекрет", "усекрет"):
+        norm = normalize_for_scan(text)
+        assert not _B63_SECRET_TERM_RE.search(norm), (
+            f"{text!r} (normalized {norm!r}) unexpectedly started matching"
+        )
+
+
+# ------------------------------------------------------- B-954 round 2 (C-135 follow-up)
+#
+# The round-1 fix's enumeration was lowercase-only. `_CONFUSABLES` (textnorm.py) only has
+# LOWERCASE Cyrillic keys (а/е/о/р/с/х -> ASCII a/e/o/p/c/x), never uppercase, so those 6
+# letters compiled into the class as ASCII -- and `re.IGNORECASE` case-folds WITHIN a
+# script (Cyrillic А <-> а) but never ACROSS scripts (ASCII 'a' does not fold to match
+# Cyrillic 'А'). An ALL-CAPS word built on one of the 6 folded letters therefore fell
+# through the guard uncaught: "ПЕРЕКЛЮЧИТЬ" ("to switch"), preceded by uppercase "Е",
+# false-matched even though its lowercase twin "переключить" was correctly excluded.
+# ALL-CAPS is ordinary for Russian UI labels/headings/banners, so this was a real
+# false-positive surface. Fixed by appending the 6 native uppercase confusables (АЕОРСХ)
+# to the enumeration.
+
+def test_b954_round2_secret_term_re_excludes_uppercase_cyrillic_derivations():
+    # Regression pin: these all false-matched under the round-1 fix (confirmed via live
+    # execution against the pre-round-2 pattern) because their preceding letter is one of
+    # the 6 confusable-folded letters in its UPPERCASE form -- "not preceded by a Cyrillic
+    # letter" was silently satisfied for a Cyrillic letter. Same words as the lowercase
+    # negative control above, upper-cased.
+    uppercase_unrelated_words = [
+        "ОТКЛЮЧИТЬ",
+        "ВКЛЮЧИТЬ",
+        "ЗАКЛЮЧИТЬ",
+        "ПЕРЕКЛЮЧИТЬ",
+        "ПОДКЛЮЧИТЬ",
+        "РАССЕКРЕТИТЬ",
+        "ЗАСЕКРЕТИТЬ",
+    ]
+    for text in uppercase_unrelated_words:
+        norm = normalize_for_scan(text)
+        assert not _B63_SECRET_TERM_RE.search(norm), (
+            f"{text!r} (normalized {norm!r}) should NOT match -- ordinary ALL-CAPS "
+            "Cyrillic derivation, not a secret/credential mention"
+        )
+
+
+def test_b954_round2_original_repro_and_glued_compounds_unaffected():
+    # The round-2 uppercase fix must not disturb round-1's outcomes: the ticket's
+    # punctuation/digit-adjacent repro still matches, and the glued-compound cases stay
+    # conservatively non-matching (documented limitation, unchanged).
+    for text in ("«секрет»", '"секрет"', "(секрет)", "1секрет", "не-секрет"):
+        norm = normalize_for_scan(text)
+        assert _B63_SECRET_TERM_RE.search(norm), f"{text!r} regressed: norm={norm!r}"
+    for text in ("мойсекрет", "усекрет"):
+        norm = normalize_for_scan(text)
+        assert not _B63_SECRET_TERM_RE.search(norm), (
+            f"{text!r} (normalized {norm!r}) unexpectedly started matching"
+        )

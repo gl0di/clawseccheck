@@ -1725,7 +1725,51 @@ _B63_SECRET_TERM_RE = re.compile(
         # are themselves the credential-relevant artifact (not directories), so they keep
         # matching bare, same as _CRED_RE's own bare `.npmrc`.
         r"|\.env\b|\.ssh/id_[a-z0-9]+|\.aws/credentials|\.npmrc"
-        r"|(?<![а-я])(?:секрет|парол|токен|ключ)"
+        # B-954: the Russian guard is meant to mirror the English `(?<![a-z])` lookbehind
+        # above -- "not preceded by a Cyrillic letter" -- but this whole pattern STRING (not
+        # just the scanned text) is run through `normalize_for_scan()` before `re.compile()`,
+        # and that function folds Cyrillic confusables (textnorm._CONFUSABLES: а/е/о/р/с/х ->
+        # ASCII a/e/o/p/c/x) character-by-character wherever they appear in the source, range
+        # endpoints included. A literal `а-я` range therefore silently became `a-я`
+        # (U+0061-U+044F) at compile time -- an enormous class spanning nearly all of
+        # ASCII plus every other script up to Cyrillic, so almost ANY character glued
+        # directly in front of секрет/парол/токен/ключ (including a closing "»" guillemet,
+        # ASCII quotes, digits, parens -- all common in real Russian prose/config) wrongly
+        # satisfied "preceded by a letter" and suppressed the match. Fixed by writing the
+        # 32-letter а-я block as an explicit ENUMERATION (no hyphen -> no range for
+        # normalize_for_scan to mangle); each listed Cyrillic letter still individually folds
+        # to its ASCII form exactly like the rest of this pattern, so the compiled class ends
+        # up correctly covering both the folded (a/e/o/p/c/x) and native-Cyrillic members of
+        # the ORIGINAL 32-letter alphabet -- restoring, not widening past, the original
+        # "not preceded by any Cyrillic letter" intent. This still leaves a letter-glued
+        # Cyrillic compound (e.g. "мойсекрет") unmatched, same as today and same as the
+        # English guard's own "secretary"/"nonsecret" exclusion -- Russian word-formation
+        # glues real derivational prefixes onto these exact roots with no separator
+        # (отключить/включить/заключить/переключить/рассекретить/засекретить, all common,
+        # secret-unrelated words), and there is no dictionary of Cyrillic prefixes here to
+        # tell a genuine derivation apart from a two-word compound, so narrowing further
+        # would trade this false negative for new false positives on ordinary vocabulary —
+        # see tests/test_b63.py for both directions pinned.
+        #
+        # B-954 round 2 (C-135 adversarial follow-up): the enumeration above is
+        # lowercase-only, and `_CONFUSABLES` only has LOWERCASE keys (а/е/о/р/с/х), never
+        # uppercase (А/Е/О/Р/С/Х) -- so those 6 letters end up as ASCII a/e/o/p/c/x in the
+        # compiled class, and `re.IGNORECASE` case-folds within a script (Cyrillic А <-> а)
+        # but never ACROSS scripts (it will not fold ASCII 'a' to match Cyrillic 'А'). An
+        # ALL-CAPS Russian word built on one of these 6 letters -- e.g. "ПЕРЕКЛЮЧИТЬ" ("to
+        # switch"), preceded by uppercase "Е" -- therefore fell straight through the guard:
+        # ASCII 'e' in the class never matches Cyrillic 'Е', so the lookbehind wrongly
+        # reported "not preceded by a letter" and let it anchor. ALL-CAPS is completely
+        # ordinary for Russian UI button labels, headings and warning banners, so this is a
+        # real false-positive surface, not a corner case. Fixed by appending the 6 native
+        # uppercase Cyrillic confusables directly (АЕОРСХ) -- `_CONFUSABLES` has no
+        # uppercase keys, so `normalize_for_scan` leaves them as literal Cyrillic in the
+        # compiled pattern, matching how uppercase Cyrillic survives unfolded in the
+        # scanned text too (verified: "ПЕРЕКЛЮЧИТЬ" passes through `normalize_for_scan`
+        # completely unchanged). The other 26 letters don't need an uppercase twin: they
+        # were never folded to ASCII in the first place, so `re.IGNORECASE`'s ordinary
+        # same-script case-folding already covers their uppercase forms.
+        r"|(?<![абвгдежзийклмнопрстуфхцчшщъыьэюяАЕОРСХ])(?:секрет|парол|токен|ключ)"
     ),
     re.IGNORECASE,
 )
