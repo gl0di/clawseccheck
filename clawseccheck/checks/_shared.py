@@ -562,8 +562,21 @@ def _c015_has_secret(text: str) -> bool:
 # F-124/E-044 layer-fix: moved here VERBATIM from checks/_content.py so logscan.py (a
 # Layer-1 leaf) can reuse it without importing a Layer-2 topic module — _content.py now
 # imports it back from here like every other cross-topic name.
+#
+# B-976: same missing exclusion B-898 (ea6db77d) fixed for skillast.py's AST-level
+# `_CRED_PATH_RE` — `.ssh/id_[a-z0-9]+` matched a PUBLIC-key filename too (id_rsa.pub,
+# id_ed25519.pub, an OpenSSH cert id_rsa-cert.pub), since nothing excluded the
+# `.pub`/`-cert.pub` suffix. A public key is meant to be shared (uploaded to a git host,
+# handed to a key-provisioning flow), not a credential leak, so a skill's own prose
+# documenting exactly that flow (mentioning the pubkey filename near a network verb)
+# false-positived this SHARED regex's several consumers — up to and including a same-line
+# CRITICAL "secret/credential exfiltration" verdict in check_installed_skills (B13) when
+# the mention and the upload verb share a line, or a HIGH "split-stage" finding via
+# `_has_cross` when they sit on different lines. Same negative-lookahead discipline as
+# B-898: "no more identifier chars, and not immediately followed by .pub/-cert.pub".
 _CRED_RE = re.compile(
-    r"find-generic-password|login\.keychain|\.ssh/id_[a-z0-9]+|\.aws/credentials|"
+    r"find-generic-password|login\.keychain|"
+    r"\.ssh/id_[a-z0-9]+(?![a-z0-9]|\.pub\b|-cert\.pub\b)|\.aws/credentials|"
     r"wallet\.dat|keystore\.json|MetaMask|"
     r"\.npmrc|\.pypirc|\.netrc|\.docker/config\.json|"
     r"\.kube/config|\.config/gcloud|"
