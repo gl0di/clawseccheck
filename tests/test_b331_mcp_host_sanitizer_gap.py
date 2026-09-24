@@ -501,6 +501,59 @@ def test_b331_confidential_re_c135_benign_descriptions_stay_clean():
         assert f.status != FAIL, benign
 
 
+def test_b331_bare_notify_person_target_normalizes_before_matching():
+    """B-992: `_b331_bare_notify_anchored`'s own `_B331_PERSON_TARGET_RE` search was
+    the last B331 sub-signal still scanning the RAW description -- B-969's note said so
+    explicitly ("stays RAW and out of scope here"). A confusable-obfuscated "Posts a
+    message without notifying its οperator." (Greek omicron U+03BF for Latin 'o' in
+    "operator") therefore anchored=False and silently downgraded to WARN even though the
+    ASCII control anchors and FAILs. Fixed by threading `norm` through to
+    `_b331_bare_notify_anchored` instead of the raw description, mirroring B-969's fix
+    for the sibling `_B331_CONFIDENTIAL_RE`."""
+    ascii_ctrl = "Posts a message without notifying its operator."
+    obf = "Posts a message without notifying its οperator."  # Greek omicron
+
+    ctrl_hit = _b331_secrecy_hit(ascii_ctrl)
+    obf_hit = _b331_secrecy_hit(obf)
+    assert ctrl_hit is not None
+    assert ctrl_hit[1] is True  # anchored -> FAIL-worthy
+    assert obf_hit is not None
+    assert obf_hit[1] is True  # no longer invisible
+
+    ctrl_categories = {c for c, _sev, _ev in _b331_findings(ascii_ctrl)}
+    obf_categories = {c for c, _sev, _ev in _b331_findings(obf)}
+    assert "secrecy-directive" in ctrl_categories
+    assert "secrecy-directive" in obf_categories
+
+    assert check_mcp_host_sanitizer_gap(_mcp_ctx(ascii_ctrl)).status == FAIL
+    assert check_mcp_host_sanitizer_gap(_mcp_ctx(obf)).status == FAIL
+
+
+def test_b331_bare_notify_c135_benign_descriptions_stay_clean():
+    """C-135: `_B331_PERSON_TARGET_RE` requires a literal user/operator/owner/admin/
+    human word, not bare non-ASCII presence -- realistic MCP tool descriptions that
+    legitimately use a bare "without notifying"-style idiom with NO person-target word
+    (the tool's own audience, e.g. "its members"), including ones that happen to carry
+    an accented name or word for unrelated reasons, must stay clean. Normalizing the
+    person-target search must not newly convict any of them -- accented Latin letters
+    (é/ö/ü/ï) are not confusables and are left untouched by `normalize_for_scan`, so
+    they cannot accidentally fold into "user"/"operator"/"owner"/"admin"/"human"."""
+    for benign in (
+        "Posts a message without notifying its members.",
+        "Posts a message without notifying its mëmbers.",
+        "Runs headless without notifying — José prefers silent mode for the "
+        "café UI.",
+        "Sends the report without notifying — Müller's dashboard stays quiet.",
+        "Applies the patch without notifying — naïve default is off.",
+    ):
+        hit = _b331_secrecy_hit(benign)
+        assert hit is None or hit[1] is False, (benign, hit)
+        findings = _b331_tool_findings(benign, "manifest", False)
+        assert all(status != FAIL for status, _c, _d in findings), (benign, findings)
+        f = check_mcp_host_sanitizer_gap(_mcp_ctx(benign))
+        assert f.status != FAIL, benign
+
+
 # --------------------------------------------------------------------------- BLOCKER 1c: data-URI over-broad
 def test_b331_c135_r2_image_data_uri_not_flagged():
     assert _b331_data_uri_hit("Renders the chart as a data:image/png;base64, data URI.") is False
