@@ -1018,27 +1018,31 @@ def test_fr2_augassign_after_full_literal_divergence_is_info():
     _assert_info(src)
 
 
-def test_fr2_if_else_alias_lost_past_branch_merge_pinned_to_current_pre_existing_gap():
+def test_fr2_if_else_alias_now_resolved_by_b967():
     """Reviewer's round-2 side-B finding (lost detection, NOT fixed by this
-    round -- filed as CLAWSECCHECK-B-967 for 4.3.1): a name (`y`) first
-    discovered as an alias INSIDE one arm of an `ast.If` is dropped once the
-    branch-merge completes (`_b863_process_one`'s `ast.If` handling only
-    re-threads names that were already tracked BEFORE the `if`), so the
-    post-if `y.append(payload)` matches no tracked receiver and is a silent
-    no-op even though, at runtime, the `else` arm's `y = x` truly aliases
-    the ORIGINAL `args` object that `args` itself still refers to on that
-    same path (the `if` arm reassigns `args` to a new `['ls']`, but the
-    `else` arm never touches `args` at all). Real value at the sink on the
-    `else` path: `['sh', '-c', payload]` -- should be
-    TT5_CMD_INJECTION/crit. This is a DIFFERENT root cause from this round's
-    fix (branch-merge alias re-threading, not reassignment-value
-    classification) and hits a different function
-    (`_b863_process_one`'s `ast.If` branch, not
-    `_b863_classify_assign_value`); confirmed NOT touched by this round's
-    change (both before and after this round's fix give the same info
-    verdict here). Pinned rather than asserted-and-xfailed so the suite
-    stays green, per this file's own convention for CLAWSECCHECK-B-940/941
-    above."""
+    round -- filed as CLAWSECCHECK-B-967 for 4.3.1, pinned info at fix-round-3
+    time): a name (`y`) first discovered as an alias INSIDE one arm of an
+    `ast.If` was dropped once the branch-merge completed
+    (`_b863_process_one`'s `ast.If` handling only re-threaded names that were
+    already tracked BEFORE the `if`), so the post-if `y.append(payload)`
+    matched no tracked receiver and was a silent no-op even though, at
+    runtime, the `else` arm's `y = x` truly aliases the ORIGINAL `args`
+    object that `args` itself still refers to on that same path (the `if`
+    arm reassigns `args` to a new `['ls']`, but the `else` arm never touches
+    `args` at all). Real value at the sink on the `else` path:
+    `['sh', '-c', payload]`. This was a DIFFERENT root cause from fix round 3
+    (branch-merge alias re-threading, not reassignment-value classification)
+    and lives in a different function (`_b863_process_one`'s `ast.If`
+    branch, not `_b863_classify_assign_value`); confirmed NOT touched by
+    fix round 3's own change.
+
+    CLAWSECCHECK-B-967 closed this gap directly: the merge now also
+    propagates any name discovered as an alias in BOTH arms of the `if`
+    (here, `y` is created in both), so this is now the correctly-reachable
+    TT5_CMD_INJECTION/crit -- see
+    tests/test_b967_branch_local_alias_if_else_merge.py for the full B-967
+    regression suite, including the narrower "discovered in only ONE arm"
+    case B-967 deliberately leaves unresolved."""
     src = _va(
         [
             "import random",
@@ -1053,7 +1057,7 @@ def test_fr2_if_else_alias_lost_past_branch_merge_pinned_to_current_pre_existing
         ],
         call='sh("sh", "-c")',
     )
-    _assert_info(src)  # NOT the real reachable crit on the else-path -- see docstring; CLAWSECCHECK-B-967
+    _assert_crit(src)  # the real reachable crit on the else-path; CLAWSECCHECK-B-967
 
 
 # ---------------------------------------------------------------------------
