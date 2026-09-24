@@ -1,6 +1,7 @@
 ---
 name: loader
 description: Loads a bundled data file relative to its own directory and executes the decoded content (B394 must stay clean).
+allowed-tools: [exec]
 ---
 
 # Loader Skill (fully bounded artifact-relative read)
