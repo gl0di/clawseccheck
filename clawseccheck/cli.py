@@ -1084,6 +1084,15 @@ def sweep_installed_skills(
             if narrate:
                 _emit(f"  (error vetting {skill_name}: {_sanitize(str(exc))})")
             results.append((skill_name, "UNKNOWN", 0))
+            # B-937: same reasoning as the ScanBudgetExceeded arm above — "the
+            # engine crashed on this target" is, like "the target's own budget ran
+            # out", no basis to claim this sweep is clean. Without this, the row was
+            # named and tagged UNKNOWN, but `sweep.truncated` never flipped, so
+            # `vet_all`'s return-code check (`if sweep.truncated: return 1`) fell
+            # through to `sweep.worst` — which every OTHER, cleanly-scanned skill
+            # left at "PASS" — and a sweep that never actually assessed this target
+            # still returned 0.
+            truncated = True
             continue
 
         if f.status in _SWEEP_FAIL_STATUSES:
