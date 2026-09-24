@@ -11887,6 +11887,16 @@ _SH_CRED_READ_PATH_RE = re.compile(_SH_CRED_READ_PATH_SRC, re.I)
 # redirection. Keeping this idiom identical to the loop-hop reader is deliberate (the
 # same `_CRED_NAME_WORDS`-style precedent already documented above
 # `_SH_CRED_READ_PATH_SRC`): the two reader vocabularies must not drift apart.
+#
+# Inherited limitation (documented, not fixed — same trade-off B-894 already made and
+# had reviewed for `_SH_LOOP_SUBST_READ_RE`, kept intentionally identical here rather
+# than reintroducing the old bare-substring FP surface): because the reader must sit
+# immediately at command position after `$(`/backtick, a reader reached indirectly —
+# `$(eval cat ~/.netrc)`, `$(bash -c "cat ~/.netrc")`, or a chained command before the
+# reader like `$(set -e; cat ~/.netrc)` — is NOT detected. `tests/test_shell_scan.py`
+# pins this as an accepted gap for the direct (non-loop) path; B-894's own
+# `test_r2_b_eval_is_a_documented_fn` / `test_adv_bash_c_child_shell_loop_passes` pin
+# the equivalent loop-hop shapes.
 _SH_CRED_ASSIGN_RE = re.compile(
     r"(?P<var>[A-Za-z_][A-Za-z0-9_]{0,127})=[^\n]{0,256}?"
     r"(?:\$\(|`)[ \t]*(?:sudo[ \t]+)?(?:(?:[\w./-]*/)?(?:cat|head|tail|less)\b|<)"
