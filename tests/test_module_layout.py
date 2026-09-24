@@ -290,8 +290,13 @@ _EXEMPT = {
     # `_mcp.py` has owed since I-022 is still owed and is now the second-largest piece of
     # structural debt in the tree after `_content.py`; vet_plugin alone (the dispatcher,
     # its tree sweep and the plugin sweep) is a coherent unit that could leave.
-    "checks/_mcp.py": "~9,356 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
-                      "topic-faithful and over budget by design. Restated 2026-09-23 "
+    "checks/_mcp.py": "~9,871 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
+                      "topic-faithful and over budget by design. Restated 2026-09-24 "
+                      "(+515 lines since the 2026-09-23 restatement below, accumulated "
+                      "across many small fixes landing in the 4.3.0 wave rather than one "
+                      "large change — B-948's normalize-before-scan fix among the most "
+                      "recent — not investigated commit-by-commit; the trend itself is the "
+                      "signal, not any single contributor). Previously restated 2026-09-23 "
                       "(B-831 added a second, appServer-level detection branch to B353 "
                       "plus its grounding helpers, +517 lines, and its round-1 fix ported "
                       "the vendor's exec-policy layering, +214) — previously restated "
