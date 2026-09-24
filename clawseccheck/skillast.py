@@ -1457,6 +1457,22 @@ _REMOTE_FETCH_BASES = {
     "session",
 }
 _REMOTE_CODE_EXEC_SINKS = {"ex" + "ec", "ev" + "al"}
+# B-927: a bare (unqualified) call name is recognised as a remote fetch ONLY when
+# FACTS resolves it to one of these fully-qualified targets -- shadow- and alias-safe
+# via `shippedexec._FileFacts`/`PathFacts.dotted()` (reused, not re-derived: its
+# `_import_table()` already excludes any name ALSO bound by a local def/assignment/
+# other import elsewhere in the file, so `def urlopen(...): ...` or `urlopen =
+# something_else` never matches). Deliberately narrow to urlopen/urlretrieve, mirroring
+# `_B917_REMOTE_FUNCS` below (which independently fixed the identical gap for the
+# B-917 loader/staged-import path) -- NEVER bare `get`/`post`/`request`, which are
+# common generic names ("session dict .get()", a dataclass ".get()", ...) that would
+# false-fire on unrelated code with no import to anchor them (see the module note
+# above `_REMOTE_FETCH_ATTRS` for why the ATTRIBUTE form can stay wide while this bare
+# form must stay narrow).
+_BARE_REMOTE_FETCH_FUNCS = frozenset({
+    "urllib.request.urlopen",
+    "urllib.request.urlretrieve",
+})
 
 
 def _dotted_path(node: ast.AST) -> str:
@@ -1479,11 +1495,25 @@ def _dotted_path(node: ast.AST) -> str:
     return ".".join(reversed(parts)).lower()
 
 
-def _is_remote_fetch_call(node: ast.AST) -> bool:
-    """True when *node* is a call that reads bytes FROM the network."""
+def _is_remote_fetch_call(node: ast.AST, facts=None) -> bool:
+    """True when *node* is a call that reads bytes FROM the network.
+
+    *facts* (B-927, optional): the calling file's `shippedexec._FileFacts`/`PathFacts`
+    instance. When supplied, ALSO recognises a bare `urlopen(...)`/`urlretrieve(...)`
+    call whose name was imported via `from urllib.request import ...` — see
+    `_BARE_REMOTE_FETCH_FUNCS`'s docstring for the shadow/alias safety this gets for
+    free by reusing `facts.dotted()`. Deliberately opt-in per call site (defaults to
+    `None`, in which case a bare name is never recognised, matching this function's
+    prior behaviour exactly): most of this module's callers have only a single node in
+    hand, not the file-wide import context `facts` carries, and CLAWSECCHECK-B-927
+    scopes the widening to the one rule family that needed it rather than every
+    consumer of this predicate.
+    """
     if not isinstance(node, ast.Call):
         return False
     f = node.func
+    if isinstance(f, ast.Name):
+        return facts is not None and facts.dotted(f) in _BARE_REMOTE_FETCH_FUNCS
     if not isinstance(f, ast.Attribute):
         return False
     if f.attr not in _REMOTE_FETCH_ATTRS:
@@ -1496,14 +1526,17 @@ def _is_remote_fetch_call(node: ast.AST) -> bool:
     return path in _REMOTE_FETCH_BASES or path.split(".")[0] in _REMOTE_FETCH_BASES
 
 
-def _expr_reads_remote(node: ast.AST) -> bool:
+def _expr_reads_remote(node: ast.AST, facts=None) -> bool:
     """True when evaluating *node* performs a network read anywhere in its subtree —
-    covers `urlopen(u).read()`, `requests.get(u).text`, `urlopen(u).read().decode()`."""
-    return any(_is_remote_fetch_call(sub) for sub in ast.walk(node))
+    covers `urlopen(u).read()`, `requests.get(u).text`, `urlopen(u).read().decode()`.
+    *facts*: see `_is_remote_fetch_call`."""
+    return any(_is_remote_fetch_call(sub, facts) for sub in ast.walk(node))
 
 
-def _remote_returning_funcs(tree: ast.AST) -> set[str]:
-    """Names of locally-defined functions whose RETURN value is network-derived."""
+def _remote_returning_funcs(tree: ast.AST, facts=None) -> set[str]:
+    """Names of locally-defined functions whose RETURN value is network-derived.
+    *facts*: see `_is_remote_fetch_call` (B-927; opt-in, defaults to unchanged
+    behaviour)."""
     names: set[str] = set()
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1514,7 +1547,7 @@ def _remote_returning_funcs(tree: ast.AST) -> set[str]:
             for a in ast.walk(fn):
                 if not isinstance(a, ast.Assign):
                     continue
-                if not (_expr_reads_remote(a.value) or (_names_in(a.value) & local)):
+                if not (_expr_reads_remote(a.value, facts) or (_names_in(a.value) & local)):
                     continue
                 for t in a.targets:
                     if isinstance(t, ast.Name) and t.id not in local:
@@ -1524,7 +1557,7 @@ def _remote_returning_funcs(tree: ast.AST) -> set[str]:
                 break
         for r in ast.walk(fn):
             if isinstance(r, ast.Return) and r.value is not None:
-                if _expr_reads_remote(r.value) or (_names_in(r.value) & local):
+                if _expr_reads_remote(r.value, facts) or (_names_in(r.value) & local):
                     names.add(fn.name)
                     break
     return names
@@ -1638,8 +1671,10 @@ def _open_path_bindings(tree: ast.AST, remote: set[str]) -> dict[str, str]:
     return out
 
 
-def _staged_remote_paths(tree: ast.AST, remote: set[str]) -> set[str]:
-    """Literal paths that receive remote-fetched bytes."""
+def _staged_remote_paths(tree: ast.AST, remote: set[str], facts=None) -> set[str]:
+    """Literal paths that receive remote-fetched bytes.
+    *facts*: see `_is_remote_fetch_call` (B-927; opt-in, defaults to unchanged
+    behaviour)."""
     handles = _open_path_bindings(tree, remote)
     paths: set[str] = set()
     for node in ast.walk(tree):
@@ -1648,7 +1683,7 @@ def _staged_remote_paths(tree: ast.AST, remote: set[str]) -> set[str]:
         if node.func.attr not in _STAGED_WRITE_METHODS:
             continue
         # the written value must be remote-derived
-        if not any(_names_in(a) & remote or _expr_reads_remote(a) for a in node.args):
+        if not any(_names_in(a) & remote or _expr_reads_remote(a, facts) for a in node.args):
             continue
         recv = node.func.value
         if isinstance(recv, ast.Name) and recv.id in handles:
@@ -1662,9 +1697,13 @@ def _staged_remote_paths(tree: ast.AST, remote: set[str]) -> set[str]:
     return paths
 
 
-def _staged_exec_findings(tree: ast.AST, remote: set[str]) -> list[tuple[int, str]]:
-    """B-284: (lineno, path) where a staged remote payload path is executed."""
-    paths = _staged_remote_paths(tree, remote)
+def _staged_exec_findings(
+    tree: ast.AST, remote: set[str], facts=None
+) -> list[tuple[int, str]]:
+    """B-284: (lineno, path) where a staged remote payload path is executed.
+    *facts*: see `_is_remote_fetch_call` (B-927; opt-in, defaults to unchanged
+    behaviour)."""
+    paths = _staged_remote_paths(tree, remote, facts)
     if not paths:
         return []
     found: list[tuple[int, str]] = []
@@ -1686,10 +1725,12 @@ def _staged_exec_findings(tree: ast.AST, remote: set[str]) -> list[tuple[int, st
     return found
 
 
-def _remote_fetch_tainted_names(tree: ast.AST) -> set[str]:
+def _remote_fetch_tainted_names(tree: ast.AST, facts=None) -> set[str]:
     """Names holding network-fetched data — direct fetch calls plus the one local-helper
-    return hop. Shared by REMOTE_CODE_LOAD and REMOTE_STAGED_EXEC."""
-    remote_funcs = _remote_returning_funcs(tree)
+    return hop. Shared by REMOTE_CODE_LOAD and REMOTE_STAGED_EXEC.
+    *facts*: see `_is_remote_fetch_call` (B-927; opt-in, defaults to unchanged
+    behaviour — REMOTE_CODE_LOAD's own caller never passes one, so it is unaffected)."""
+    remote_funcs = _remote_returning_funcs(tree, facts)
     tainted: set[str] = set()
     assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
     for _ in range(6):
@@ -1701,7 +1742,7 @@ def _remote_fetch_tainted_names(tree: ast.AST) -> set[str]:
                 and sub.func.id in remote_funcs
                 for sub in ast.walk(a.value)
             )
-            if not (hop or _expr_reads_remote(a.value) or (_names_in(a.value) & tainted)):
+            if not (hop or _expr_reads_remote(a.value, facts) or (_names_in(a.value) & tainted)):
                 continue
             for t in a.targets:
                 if isinstance(t, ast.Name) and t.id not in tainted:
@@ -11048,7 +11089,15 @@ def analyze_python(
 
     # B-284: remote fetch -> write to a literal path -> execute that path. The file write
     # breaks name-level taint, so TT5 below cannot reach it.
-    for _se_ln, _se_path in _staged_exec_findings(tree, _remote_fetch_tainted_names(tree)):
+    # B-927: `facts` threaded through so a bare `urlopen`/`urlretrieve` reached via
+    # `from urllib.request import ...` is recognised too (previously only the
+    # attribute-call spelling, `urllib.request.urlopen(...)`, was) — see
+    # `_is_remote_fetch_call`'s own docstring. REMOTE_CODE_LOAD above deliberately
+    # keeps its own call unchanged (no `facts`); this widening is scoped to the
+    # staged-write correlation only, per CLAWSECCHECK-B-927.
+    for _se_ln, _se_path in _staged_exec_findings(
+        tree, _remote_fetch_tainted_names(tree, facts), facts
+    ):
         add(
             "REMOTE_STAGED_EXEC",
             "crit",
