@@ -5130,8 +5130,20 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
             # LENGTH(value_json), never value_json itself: the secret payload is never
             # fetched into this process, only its byte count. One literal key is bound,
             # never interpolated, and there is no SELECT *.
+            #
+            # `CAST(value_json AS BLOB)` before `LENGTH()` -- the identical B-811 round-2
+            # fix trajectorystore.py already carries for `session_id`/`event_json`
+            # (see that module's `_SELECT_TRAJECTORY_ROWS`/`_SELECT_TRAJECTORY_EVENT_JSON`
+            # comments). A bare `LENGTH()` on a TEXT value stops at the first embedded
+            # NUL byte (computed as if by C's `strlen()`), so a genuine, honestly-stored
+            # row whose value happens to start with a NUL byte reads as length 0/near-0
+            # regardless of its true size -- silently suppressing the hedge this
+            # function exists to raise, with zero disclosure, and without needing the
+            # view-masquerade trick at all. Casting to BLOB first makes `LENGTH()`
+            # return the true byte count, embedded NULs included.
             row = conn.execute(
-                "SELECT LENGTH(value_json) FROM config_machine_state WHERE state_key = ?",
+                "SELECT LENGTH(CAST(value_json AS BLOB)) FROM config_machine_state "
+                "WHERE state_key = ?",
                 (_AUTH_PROFILE_STORE_KEY,),
             ).fetchone()
         finally:

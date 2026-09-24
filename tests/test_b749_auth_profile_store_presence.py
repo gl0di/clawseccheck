@@ -383,3 +383,42 @@ class TestB889ViewMasqueradeHardening:
         assert not any(
             "config_machine_state" in e or "auth-profile" in e for e in ctx.errors
         ), ctx.errors
+
+    def test_an_embedded_nul_byte_does_not_truncate_the_measured_length(self, tmp_path):
+        """Round 2 of B-889 (reviewer-found, reproduced independently here): a bare
+        `LENGTH(value_json)` on a TEXT column stops counting at the first embedded NUL
+        byte (SQLite computes it as if by C's `strlen()`) -- the IDENTICAL bug class
+        B-811 round 2 already fixed for `trajectorystore.py`'s own `session_id`/
+        `event_json` queries (see that module's `_SELECT_TRAJECTORY_ROWS`/
+        `_SELECT_TRAJECTORY_EVENT_JSON` comments). This is a genuine, honestly-stored
+        `config_machine_state` TABLE -- it passes `_table_kind` cleanly, no VIEW trick
+        needed -- so round 1's hardening does not touch this route at all. A real
+        >500KB payload starting with one NUL byte must still measure as its true byte
+        length, not silently truncate to (near) zero and suppress the hedge below the
+        27-byte empty-store threshold."""
+        payload = "\x00" + ("A" * 500_000)
+        home = tmp_path / "h"
+        home.mkdir()
+        (home / "openclaw.json").write_text(json.dumps(CFG))
+        os.chmod(home / "openclaw.json", 0o600)
+        state = home / "state"
+        state.mkdir()
+        conn = sqlite3.connect(state / "openclaw.sqlite")
+        try:
+            conn.execute(
+                "CREATE TABLE config_machine_state "
+                "(state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO config_machine_state VALUES (?, ?, ?)",
+                ("authProfiles.store", payload, 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        ctx = collect(home)
+        assert ctx.auth_profile_store_read is True
+        assert ctx.auth_profile_store_length == len(payload) == 500_001
+        finding = check_trifecta(ctx)
+        assert finding.status == WARN, finding.detail
