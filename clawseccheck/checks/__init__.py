@@ -230,6 +230,12 @@ from ._egress import (
     check_webfetch_redirects,
 )
 
+from ._shared import (  # B-879
+    ProseBinding,
+    _neg_events,
+    _neg_scan,
+    _prose_binding,
+)
 from ._shared import (_trifecta_legs, _trifecta_leg_sources,)  # B-493
 from ._shared import (  # C-462
     _FS_GOVERNED_TOOL_IDS,
@@ -814,6 +820,16 @@ from ._vet import (
     resolve_skill_target,
     vet_skill,
     vet_source,
+)
+
+from ._vet import (  # B-879
+    _AUTHKEY_KEY_TOKEN_RE,
+    _authkey_block_intent,
+    _authkey_key_blob_ok,
+    _authkey_persistence_hits,
+    _authkey_unfenced_intent_span,
+    _literal_key_functional,
+    _pos_in_skill_md_section,
 )
 
 from ._mcp import (

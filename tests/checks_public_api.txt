@@ -19,6 +19,7 @@ LOOPBACK
 OUTBOUND_TOOL_HINTS
 OUTBOUND_TOOL_IDS
 PASS
+ProseBinding
 SECRET_KEY_RE
 SECRET_PATTERNS
 SENSITIVE_TOOL_HINTS
@@ -27,6 +28,7 @@ SKILL_CONTENT_RING
 UNKNOWN
 WARN
 _ACTIONS_ALLOW_UNDETERMINED
+_AUTHKEY_KEY_TOKEN_RE
 _AUTONOMY_RE
 _B182_ENV_OVERRIDES
 _B184_CODELOAD_ENV_VARS
@@ -72,6 +74,10 @@ _allow_from_is_present
 _ambiguous_example_suppression
 _ancestors_allow_other_access
 _attested_tool_id_sources
+_authkey_block_intent
+_authkey_key_blob_ok
+_authkey_persistence_hits
+_authkey_unfenced_intent_span
 _b135_is_pending_security
 _b135_reasons_are_inconclusive
 _b135_records_adverse_security
@@ -136,6 +142,7 @@ _is_wildcard_allow_entry
 _key_advice
 _layer_exec_policy
 _levenshtein
+_literal_key_functional
 _local_sink_exfil_hits
 _loopback_ip
 _mcp_fs_root_is_broad
@@ -149,6 +156,8 @@ _mcp_value_looks_secret
 _memory_default_owner_blocked
 _message_actions_allow_for_scope
 _message_actions_guarded_reachable
+_neg_events
+_neg_scan
 _negation_context
 _negation_governs_trigger
 _node_allow_skills
@@ -163,6 +172,8 @@ _parse_source_target
 _parse_version
 _peragent_sandbox_evidence
 _persistence_note
+_pos_in_skill_md_section
+_prose_binding
 _read_jsonl_tail
 _reassembly
 _resolved_channel_nodes
