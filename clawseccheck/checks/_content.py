@@ -1847,20 +1847,45 @@ def _verb_class_matches(text: str, *patterns: "re.Pattern[str]") -> list["re.Mat
 # … directed at a SECOND-PARTY / external destination. Send-verb + destination must co-occur
 # in the window to signal exfiltration; either alone is benign ("send the summary to the
 # user", "my server" with no verb).
+#
+# B-947: pattern source wrapped in `normalize_for_scan(...)`, matching every other
+# Cyrillic-bearing `_B63_*_RE` sibling in this module (`_B63_ACTION_RE`,
+# `_B63_SECRECY_RE`, `_B63_SOFT_SUPPRESS_RE`, `_B63_FAIL_ANCHOR_RE`,
+# `_B63_SECRET_TERM_RE`, `_B63_SECRET_ACCESS_RE`, `_B63_SEND_VERB_RE`). This constant
+# was the one left as a bare `re.compile(...)` — `_b63_scan` / `_has_outbound_exfil`
+# always match it against `norm = normalize_for_scan(text)` (already confusable-
+# folded), so its own Russian literals (мой/наш/мне/себе/бот/чат/облак — every one
+# built from а/е/о/р/с/х, the exact letters `normalize_for_scan` folds to ASCII) were
+# desynced from what actually reaches this pattern at match time and could never
+# match real folded input — dead code, not merely untested (repro:
+# `_B63_DEST_RE.search(normalize_for_scan("мне"))` was `None`). Confirmed NOT
+# redundant with `_B63_FAIL_ANCHOR_RE`'s own Russian branch: that one only covers
+# impersonal "external/remote server" phrasing (внешн.../удалённ... сервер/адрес/
+# хост/эндпоинт) and covertness/exfil markers, never the personal "to me / my own
+# bot/chat" destination phrasing this constant uniquely carries — and
+# `_B63_SEND_VERB_RE`'s Russian send verbs (отправь, etc.) already fold correctly, so
+# the AND-gate in `_has_outbound_exfil` was silently unreachable for a pure-Russian
+# "send my token to me" phrase with no English/URL/IP alongside it, while the English
+# equivalent ("send it to me") already worked. Wrapping in `normalize_for_scan` (not
+# `fold_pattern` — that helper does not exist on this branch; it lands with the
+# separate, not-yet-merged B-887 fix) makes these alternatives reachable, so this is a
+# FAIL-capable widening, not a no-op cleanup.
 _B63_DEST_RE = re.compile(
-    r"\bto\s+(?:me\b|us\b|my\s|our\s|a\s+(?:remote|external|second|third|another)"
-    r"|the\s+(?:remote|external|attacker|adversary|shared))"
-    r"|\b(?:my|the|a|his|her|their)\s+(?:bot|chat|inbox|server|endpoint|webhook|channel"
-    r"|telegram|discord|slack|gist|paste(?:bin)?|bucket|shared\s+folder|drop\s?box|dropbox"
-    r"|address|c2|handle|account)"
-    # a bare dotted-quad IP as the send target ("beam it to 1.2.3.4"); gated by a preceding
-    # "to/at" so a version string / CIDR mention in prose does not match (C-135 r2 HOLE 2)
-    r"|\b(?:to|at)\s+\d{1,3}(?:\.\d{1,3}){3}\b"
-    # an @-handle, but only when it is the OBJECT of a destination cue — a bare @word matches
-    # Python decorators (@app.route) / CSS at-rules (@media), a false positive (C-135 r2 HOLE 3)
-    r"|\b(?:to|via|dm)\s+@\w{2,}"
-    r"|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
-    r"|к\s+себе|\bмне\b|в\s+(?:мой|наш|чат|бот|облак)",
+    normalize_for_scan(
+        r"\bto\s+(?:me\b|us\b|my\s|our\s|a\s+(?:remote|external|second|third|another)"
+        r"|the\s+(?:remote|external|attacker|adversary|shared))"
+        r"|\b(?:my|the|a|his|her|their)\s+(?:bot|chat|inbox|server|endpoint|webhook|channel"
+        r"|telegram|discord|slack|gist|paste(?:bin)?|bucket|shared\s+folder|drop\s?box|dropbox"
+        r"|address|c2|handle|account)"
+        # a bare dotted-quad IP as the send target ("beam it to 1.2.3.4"); gated by a preceding
+        # "to/at" so a version string / CIDR mention in prose does not match (C-135 r2 HOLE 2)
+        r"|\b(?:to|at)\s+\d{1,3}(?:\.\d{1,3}){3}\b"
+        # an @-handle, but only when it is the OBJECT of a destination cue — a bare @word matches
+        # Python decorators (@app.route) / CSS at-rules (@media), a false positive (C-135 r2 HOLE 3)
+        r"|\b(?:to|via|dm)\s+@\w{2,}"
+        r"|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
+        r"|к\s+себе|\bмне\b|в\s+(?:мой|наш|чат|бот|облак)"
+    ),
     re.IGNORECASE,
 )
 
