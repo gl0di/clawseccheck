@@ -46,6 +46,21 @@ def test_urlopen_sink_is_flow():
     assert "CRED_EXFIL_FLOW" in _rules(src)
 
 
+def test_private_key_variants_still_flow():
+    # B-898: the negative lookahead added to exclude .pub/-cert.pub must not swallow
+    # genuine private-key spellings -- bare id_ed25519, and a non-rsa/ed25519 key type
+    # that only matches via the .ssh/id_ prefix family (e.g. id_ecdsa).
+    for src in (
+        'k = open("/home/u/.ssh/id_ed25519").read()\n'
+        'import requests\nrequests.post(url, data=k)\n',
+        'p = "id_ed25519"\nk = open(p).read()\n'
+        'import requests\nrequests.post(url, data=k)\n',
+        'k = open("/home/u/.ssh/id_ecdsa").read()\n'
+        'import requests\nrequests.post(url, data=k)\n',
+    ):
+        assert "CRED_EXFIL_FLOW" in _rules(src), src
+
+
 # ---------------------------------------------------------------------------
 # FP-safety
 # ---------------------------------------------------------------------------
@@ -71,6 +86,24 @@ def test_no_cred_path_short_circuits():
     # no credential path anywhere -> taint pass is skipped, nothing flagged
     src = 'data = open("notes.txt").read()\nimport requests\nrequests.post(url, data=data)\n'
     assert "CRED_EXFIL_FLOW" not in _rules(src)
+
+
+def test_public_key_upload_is_not_cred_exfil_flow():
+    # B-898: id_rsa.pub / id_ed25519.pub / an OpenSSH cert (id_rsa-cert.pub) are the
+    # PUBLIC half of a keypair -- meant to be shared (uploaded to a git host, handed to
+    # a key-provisioning flow), never a credential leak. Bare filename and .ssh-prefixed
+    # spellings both must stay clean.
+    for src in (
+        'k = open("/home/u/.ssh/id_rsa.pub").read()\n'
+        'import requests\nrequests.post(url, data=k)\n',
+        'p = "id_ed25519.pub"\nk = open(p).read()\n'
+        'import requests\nrequests.post(url, data=k)\n',
+        'k = open("/home/u/.ssh/id_rsa-cert.pub").read()\n'
+        'import requests\nrequests.post(url, data=k)\n',
+        'k = open("/home/u/.ssh/id_ed25519-cert.pub").read()\n'
+        'import requests\nrequests.post(url, data=k)\n',
+    ):
+        assert "CRED_EXFIL_FLOW" not in _rules(src), src
 
 
 # ---------------------------------------------------------------------------
@@ -101,3 +134,21 @@ def test_vet_legit_env_api_skill_is_safe(tmp_path):
         "tool.py": ('import os, requests\nkey = os.environ["API_KEY"]\n'
                     'requests.post(url, headers={"Authorization": key})\n')})
     assert vet_skill(d).status == PASS
+
+
+def test_vet_public_key_upload_skill_is_not_cred_exfil_flow(tmp_path):
+    # B-898: uploading a PUBLIC key (id_ed25519.pub) to a git host is a legitimate
+    # SSH key-provisioning flow, not credential theft -- the CRED_EXFIL_FLOW taint
+    # finding ("credential-file contents flow into a network sink...", the only
+    # reason string containing "credential-file") must not fire. NOT asserting
+    # `vet_skill(d).status == PASS` here on purpose: this same fixture also trips
+    # `_has_cred_exfil_cross_skill` (checks/_shared.py's separate, prose-level
+    # `_CRED_RE` -- an unrelated regex family, out of scope for B-898, which is
+    # scoped to skillast.py's `_CRED_PATH_RE`/taint layer only), so overall status
+    # stays FAIL independent of this fix.
+    d = _mk_skill(tmp_path / "pubkey", {
+        "provision.py": ('k = open("/home/u/.ssh/id_ed25519.pub").read()\n'
+                          'import requests\n'
+                          'requests.post("https://git.example.com/keys", data=k)\n')})
+    f = vet_skill(d)
+    assert not any("credential-file" in e for e in f.evidence)
