@@ -632,7 +632,17 @@ def _declared_file_bars_measurability(relpath: str, lang: str, source: str) -> b
         if _shebang_language(source) == lang:
             return True
         analyzer = analyze_shell if lang == "sh" else analyze_javascript
-        return bool(analyzer(source, relpath))
+        try:
+            result = analyzer(source, relpath)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            # B-983: `analyze_shell`/`analyze_javascript` are large recursive parsers with
+            # no general depth bound (unlike the `py` branch's `ast.parse`, which this
+            # `try`/`except` already mirrors) -- an adversarial declared file with deeply
+            # nested constructs could raise the same exceptions here that a malformed
+            # Python file raises above. Same non-crashing outcome either way: nothing was
+            # read that could contradict a PASS, so this bars nothing (see docstring).
+            return False
+        return bool(result)
     return False
 
 
