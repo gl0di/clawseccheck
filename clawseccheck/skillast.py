@@ -480,8 +480,20 @@ def _is_trusted_installer_url(url: str) -> bool:
     )
 
 
+# B-898: `.ssh/id_` (any key-type prefix) and the bare `id_rsa`/`id_ed25519` spellings
+# used to match a PUBLIC-key filename too (`id_rsa.pub`, `id_ed25519.pub`, an OpenSSH
+# certificate `id_rsa-cert.pub`, ...) -- a public key is meant to be shared (uploaded to
+# a git host, handed to a key-provisioning flow), never a credential leak. Same
+# negative-lookahead discipline as the folded/path-join credential family the taint
+# layer already applies elsewhere for this exact shape: `.ssh/id_` gets the full
+# "no more identifier chars, and not immediately followed by .pub/-cert.pub" lookahead
+# (its filename half is unbounded -- rsa/ed25519/ecdsa/dsa/...); the two bare words
+# already stop the match with `\b` before any identifier suffix, so they only need the
+# `.pub`/`-cert.pub` half of that same lookahead.
 _CRED_PATH_RE = re.compile(
-    r"\.ssh/id_|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|login\.keychain|wallet\.dat|"
+    r"\.ssh/id_[a-z0-9_]+(?![a-z0-9_]|\.pub\b|-cert\.pub\b)|"
+    r"\bid_rsa\b(?!\.pub\b|-cert\.pub\b)|\bid_ed25519\b(?!\.pub\b|-cert\.pub\b)|"
+    r"\.aws/credentials|login\.keychain|wallet\.dat|"
     r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
     r"\.config/gcloud|/\.?secrets?\b|cookies\.sqlite|Cookies\b|"
     # E-065/C-323: the HF-incident reproduction read a process's own environment
