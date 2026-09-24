@@ -3128,7 +3128,7 @@ def _b863_classify_head(expr, names, tree):
         return None
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
         return _b863_classify_head(expr.left, names, tree)
-    # C-135 (post-commit review, CLAWSECCHECK-B-956, round 2): this branch used to
+    # C-135 (post-commit review, B-956, round 2): this branch used to
     # match ANY List whose FIRST element was Starred, regardless of what else the
     # list held -- `[*H, "-c"]` (a trailing literal spliced in AFTER the tracked
     # name) recursed into `H` alone and returned it as pure head-preservation,
@@ -3728,7 +3728,7 @@ def _b863_collect_channels(fn, param_name, tree):
 
 
 def _b863_param_reassigned_via_self_referential_add(fn, param_name) -> bool:
-    """C-135 hardening (CLAWSECCHECK-B-956, post-commit review): `_b863_classify_
+    """C-135 hardening (B-956, post-commit review): `_b863_classify_
     head`'s own `ast.BinOp`/`ast.Add` branch has a PRE-EXISTING bug, out of scope
     here and not fixed by this function -- `return _b863_classify_head(expr.left,
     names, tree)` recurses into `expr.left` ONLY and silently drops `expr.right`,
@@ -3780,7 +3780,7 @@ def _b863_param_body_is_pure_identity(fn, param_name, tree) -> bool:
     `_b863_tier1_tier2_verdict` already computes for itself at its own start
     (`kind == "none"`, or a single `"shapes"` entry that is neither `fresh`
     nor has any `content`) before it ever tries tier 1/tier 2. Extracted as
-    its own tiny predicate (CLAWSECCHECK-B-956) for a caller that does NOT
+    its own tiny predicate (B-956) for a caller that does NOT
     want `_b863_tier1_tier2_verdict`'s full position-aware tier-2 machinery --
     specifically, the vararg-splice `argv[0]` case in
     `_subprocess_taint_is_command_injection` (`[*args, "--flag"]`), which has
