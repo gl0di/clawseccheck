@@ -1603,9 +1603,11 @@ def _is_remote_fetch_call(node: ast.AST, facts=None) -> bool:
     free by reusing `facts.dotted()`. Deliberately opt-in per call site (defaults to
     `None`, in which case a bare name is never recognised, matching this function's
     prior behaviour exactly): most of this module's callers have only a single node in
-    hand, not the file-wide import context `facts` carries, and B-927
-    scopes the widening to the one rule family that needed it rather than every
-    consumer of this predicate.
+    hand, not the file-wide import context `facts` carries. B-927 threaded `facts`
+    into the REMOTE_STAGED_EXEC call site only; B-993 later threaded it into
+    REMOTE_CODE_LOAD's and DEADDROP_RESOLVER's fetch legs too, each reviewed and
+    fixed on its own merits rather than as a blanket "thread facts everywhere"
+    change — a caller not listed here still gets `facts=None` (unchanged behaviour).
     """
     if not isinstance(node, ast.Call):
         return False
@@ -1661,10 +1663,17 @@ def _remote_returning_funcs(tree: ast.AST, facts=None) -> set[str]:
     return names
 
 
-def _remote_code_load_findings(tree: ast.AST) -> list[tuple[int, str]]:
+def _remote_code_load_findings(tree: ast.AST, facts=None) -> list[tuple[int, str]]:
     """B-284: (lineno, reason) for every exec/eval sink fed by network-read bytes that
-    arrived through a local helper's return value (the one hop TT5 misses)."""
-    remote_funcs = _remote_returning_funcs(tree)
+    arrived through a local helper's return value (the one hop TT5 misses).
+
+    *facts* (B-993): threaded through to `_remote_returning_funcs` so a helper whose
+    body performs a bare `urlopen(...)`/`urlretrieve(...)` (reached via `from
+    urllib.request import ...`) is recognised as remote-returning too, not only the
+    attribute-call spelling -- see `_is_remote_fetch_call`'s own docstring. Opt-in,
+    defaults to `None` (unchanged prior behaviour) like every other consumer of this
+    predicate."""
+    remote_funcs = _remote_returning_funcs(tree, facts)
     if not remote_funcs:
         return []
     tainted: set[str] = set()
@@ -1882,28 +1891,36 @@ def _is_sleep_call(node: ast.AST) -> bool:
     return isinstance(f, ast.Attribute) and f.attr == "sleep" and _attr_base(f.value) in _SLEEP_BASES
 
 
-def _fetching_funcnames(tree: ast.AST) -> set[str]:
+def _fetching_funcnames(tree: ast.AST, facts=None) -> set[str]:
     """Names of locally-defined functions whose OWN body performs a network fetch
     (`_is_remote_fetch_call`) anywhere in it — one hop, mirroring this module's other
     remote-fetch helpers (`_remote_returning_funcs`), used so a poll LOOP that calls a
-    small `_poll_once()`-style helper (rather than fetching inline) still counts."""
+    small `_poll_once()`-style helper (rather than fetching inline) still counts.
+
+    *facts* (B-993): see `_is_remote_fetch_call` — threaded through so a helper whose
+    fetch is a bare `urlopen`/`urlretrieve` (`from urllib.request import ...`) is
+    recognised too. Opt-in, defaults to `None` (unchanged prior behaviour)."""
     names: set[str] = set()
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if any(_is_remote_fetch_call(n) for n in ast.walk(fn)):
+        if any(_is_remote_fetch_call(n, facts) for n in ast.walk(fn)):
             names.add(fn.name)
     return names
 
 
-def _poll_loop_present(tree: ast.AST, fetching_funcs: set[str]) -> bool:
+def _poll_loop_present(tree: ast.AST, fetching_funcs: set[str], facts=None) -> bool:
     """True when a `while`/`for` loop's own subtree carries BOTH a sleep-like call and a
     network fetch — inline, or one hop through a name in *fetching_funcs* — the
     `while True: _poll_once(); time.sleep(N)` scheduler shape (leg 1 of the dead-drop
     resolver composition). Deliberately narrow: a cron-like interval config/decorator or
     an "every N minutes" prose directive is NOT recognised here — this narrows rather
     than closes the periodicity signal; widening either needs its own fixture + C-135
-    pass, not folding in here unreviewed."""
+    pass, not folding in here unreviewed.
+
+    *facts* (B-993): see `_is_remote_fetch_call` — threaded through so an inline bare
+    `urlopen`/`urlretrieve` fetch inside the loop itself is recognised too. Opt-in,
+    defaults to `None` (unchanged prior behaviour)."""
     for node in ast.walk(tree):
         if not isinstance(node, (ast.While, ast.For)):
             continue
@@ -1914,7 +1931,7 @@ def _poll_loop_present(tree: ast.AST, fetching_funcs: set[str]) -> bool:
                 has_sleep = True
                 continue
             if isinstance(sub, ast.Call):
-                if _is_remote_fetch_call(sub):
+                if _is_remote_fetch_call(sub, facts):
                     has_fetch = True
                 elif isinstance(sub.func, ast.Name) and sub.func.id in fetching_funcs:
                     has_fetch = True
@@ -1923,11 +1940,19 @@ def _poll_loop_present(tree: ast.AST, fetching_funcs: set[str]) -> bool:
     return False
 
 
-def _deaddrop_fetch_tainted_names(scope: ast.AST) -> set[str]:
+def _deaddrop_fetch_tainted_names(scope: ast.AST, facts=None) -> set[str]:
     """F-159: names holding network-fetched data WITHIN *scope*'s own body, propagated
     through simple assignment AND a plain `for` target over a fetch-tainted iterable —
     unlike `_remote_fetch_tainted_names` (Assign only), which misses the dead-drop
     shape's `for line in body.splitlines():` idiom.
+
+    *facts* (B-993): see `_is_remote_fetch_call` — threaded through to
+    `_expr_reads_remote` so a bare `urlopen`/`urlretrieve` fetch (`from
+    urllib.request import ...`) is recognised as a fetch source too, not only the
+    attribute-call spelling. Opt-in, defaults to `None` (unchanged prior behaviour).
+    Deliberately confined to the FETCH leg only — the decode leg
+    (`_deaddrop_decode_tainted_names`) and the sink leg are untouched by this
+    parameter and keep their existing behaviour.
 
     *scope* MUST be one node from `_deaddrop_resolver_findings`'s own scope list (an
     `ast.Module`, or a single `ast.FunctionDef`/`ast.AsyncFunctionDef`), walked via
@@ -1949,7 +1974,7 @@ def _deaddrop_fetch_tainted_names(scope: ast.AST) -> set[str]:
     for _ in range(6):
         changed = False
         for a in assigns:
-            if not (_expr_reads_remote(a.value) or (_names_in(a.value) & tainted)):
+            if not (_expr_reads_remote(a.value, facts) or (_names_in(a.value) & tainted)):
                 continue
             for t in a.targets:
                 for name in _assign_target_names(t):
@@ -1957,7 +1982,7 @@ def _deaddrop_fetch_tainted_names(scope: ast.AST) -> set[str]:
                         tainted.add(name)
                         changed = True
         for f in for_loops:
-            if not (_expr_reads_remote(f.iter) or (_names_in(f.iter) & tainted)):
+            if not (_expr_reads_remote(f.iter, facts) or (_names_in(f.iter) & tainted)):
                 continue
             for name in _assign_target_names(f.target):
                 if name not in tainted:
@@ -2045,6 +2070,7 @@ def _deaddrop_subprocess_command_parts(
 def _deaddrop_resolver_findings(
     tree: ast.AST,
     list_bindings_by_call: dict[ast.Call, dict[str, ast.List | ast.Tuple]] | None = None,
+    facts=None,
 ) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
     """F-159: the dead-drop C2 resolver composition — see the module comment above
     `_SLEEP_BASES`. Returns (confirmed, ambiguous), each a list of (lineno, reason):
@@ -2090,9 +2116,17 @@ def _deaddrop_resolver_findings(
     well, more precisely the common `cmd = [...]; subprocess.run(cmd)` single-binding
     idiom `_single_list_bindings_local` resolves) is still recognised as a fixed argv
     list, not treated as an unresolved dynamic command.
+
+    *facts* (B-993): see `_is_remote_fetch_call` — threaded through to the FETCH leg
+    only (`_fetching_funcnames`, `_poll_loop_present`, `_deaddrop_fetch_tainted_names`)
+    so a bare `urlopen`/`urlretrieve` poll (`from urllib.request import ...`) is
+    recognised as periodicity + a fetch source, not only the attribute-call spelling.
+    The decode leg (`_deaddrop_decode_tainted_names`) and the sink leg
+    (`_is_exec_sink_call`) are unrelated to this parameter and keep their existing
+    behaviour. Opt-in, defaults to `None` (unchanged prior behaviour).
     """
-    fetching_funcs = _fetching_funcnames(tree)
-    if not _poll_loop_present(tree, fetching_funcs):
+    fetching_funcs = _fetching_funcnames(tree, facts)
+    if not _poll_loop_present(tree, fetching_funcs, facts):
         return [], []
     if not any(_is_decode_primitive_call(n) for n in ast.walk(tree)):
         return [], []
@@ -2105,7 +2139,7 @@ def _deaddrop_resolver_findings(
     exec_sink_present = False
     first_sink_lineno = 0
     for scope in scopes:
-        fetch_tainted = _deaddrop_fetch_tainted_names(scope)
+        fetch_tainted = _deaddrop_fetch_tainted_names(scope, facts)
         decode_tainted = _deaddrop_decode_tainted_names(scope, fetch_tainted)
         for node in _scope_own_nodes(scope):
             if not isinstance(node, ast.Call):
@@ -11208,7 +11242,11 @@ def analyze_python(
     # B-284: remote-fetch -> exec/eval through ONE local-helper return hop, the form
     # TT5_CMD_INJECTION below does not reach. crit, like TT5: bytes downloaded at
     # runtime and executed are a remote code loader by construction.
-    for _rcl_ln, _rcl_reason in _remote_code_load_findings(tree):
+    # B-993: `facts` threaded through so a bare `urlopen`/`urlretrieve` inside the
+    # local helper (reached via `from urllib.request import ...`) is recognised too
+    # (previously only the attribute-call spelling was) — see
+    # `_remote_code_load_findings`'s own docstring.
+    for _rcl_ln, _rcl_reason in _remote_code_load_findings(tree, facts):
         add("REMOTE_CODE_LOAD", "crit", _rcl_ln, _rcl_reason)
 
     # B-284: remote fetch -> write to a literal path -> execute that path. The file write
@@ -11216,9 +11254,8 @@ def analyze_python(
     # B-927: `facts` threaded through so a bare `urlopen`/`urlretrieve` reached via
     # `from urllib.request import ...` is recognised too (previously only the
     # attribute-call spelling, `urllib.request.urlopen(...)`, was) — see
-    # `_is_remote_fetch_call`'s own docstring. REMOTE_CODE_LOAD above deliberately
-    # keeps its own call unchanged (no `facts`); this widening is scoped to the
-    # staged-write correlation only, per B-927.
+    # `_is_remote_fetch_call`'s own docstring. B-993 later closed the same gap for
+    # REMOTE_CODE_LOAD (above) and DEADDROP_RESOLVER (below), each on its own merits.
     for _se_ln, _se_path in _staged_exec_findings(
         tree, _remote_fetch_tainted_names(tree, facts), facts
     ):
@@ -11236,7 +11273,11 @@ def analyze_python(
     # list_bindings_by_call (already computed above, B-132) is threaded through so a
     # subprocess command bound to a local variable is still resolved to its fixed
     # argv list for the command-vs-data-argument split (F-159 follow-up).
-    _dd_confirmed, _dd_ambiguous = _deaddrop_resolver_findings(tree, list_bindings_by_call)
+    # B-993: `facts` also threaded through so the poll/fetch leg recognises a bare
+    # `urlopen`/`urlretrieve` (`from urllib.request import ...`) too — see
+    # `_deaddrop_resolver_findings`'s own docstring for the exact scope (fetch leg
+    # only; decode/sink legs unchanged).
+    _dd_confirmed, _dd_ambiguous = _deaddrop_resolver_findings(tree, list_bindings_by_call, facts)
     for _dd_ln, _dd_reason in _dd_confirmed:
         add("DEADDROP_RESOLVER", "crit", _dd_ln, _dd_reason)
     for _dd_ln, _dd_reason in _dd_ambiguous:
