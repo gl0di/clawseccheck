@@ -5383,6 +5383,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                     # EXEC's guard just above).
                     if af.rule == "ARTIFACT_READ_UNPROVEN":
                         warns_artifact_unproven.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+                        continue
                     # B-917 T5: a loader (runpy/importlib/zipimport) target that is
                     # neither proven to be the skill's own shipped code nor proven safe.
                     # WARN-grade, routed here for the identical reason UNSHIPPED_FILE_EXEC
