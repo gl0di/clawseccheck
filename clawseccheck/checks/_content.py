@@ -1744,7 +1744,26 @@ _B63_SECRET_TERM_RE = re.compile(
         # tell a genuine derivation apart from a two-word compound, so narrowing further
         # would trade this false negative for new false positives on ordinary vocabulary —
         # see tests/test_b63.py for both directions pinned.
-        r"|(?<![абвгдежзийклмнопрстуфхцчшщъыьэюя])(?:секрет|парол|токен|ключ)"
+        #
+        # B-954 round 2 (C-135 adversarial follow-up): the enumeration above is
+        # lowercase-only, and `_CONFUSABLES` only has LOWERCASE keys (а/е/о/р/с/х), never
+        # uppercase (А/Е/О/Р/С/Х) -- so those 6 letters end up as ASCII a/e/o/p/c/x in the
+        # compiled class, and `re.IGNORECASE` case-folds within a script (Cyrillic А <-> а)
+        # but never ACROSS scripts (it will not fold ASCII 'a' to match Cyrillic 'А'). An
+        # ALL-CAPS Russian word built on one of these 6 letters -- e.g. "ПЕРЕКЛЮЧИТЬ" ("to
+        # switch"), preceded by uppercase "Е" -- therefore fell straight through the guard:
+        # ASCII 'e' in the class never matches Cyrillic 'Е', so the lookbehind wrongly
+        # reported "not preceded by a letter" and let it anchor. ALL-CAPS is completely
+        # ordinary for Russian UI button labels, headings and warning banners, so this is a
+        # real false-positive surface, not a corner case. Fixed by appending the 6 native
+        # uppercase Cyrillic confusables directly (АЕОРСХ) -- `_CONFUSABLES` has no
+        # uppercase keys, so `normalize_for_scan` leaves them as literal Cyrillic in the
+        # compiled pattern, matching how uppercase Cyrillic survives unfolded in the
+        # scanned text too (verified: "ПЕРЕКЛЮЧИТЬ" passes through `normalize_for_scan`
+        # completely unchanged). The other 26 letters don't need an uppercase twin: they
+        # were never folded to ASCII in the first place, so `re.IGNORECASE`'s ordinary
+        # same-script case-folding already covers their uppercase forms.
+        r"|(?<![абвгдежзийклмнопрстуфхцчшщъыьэюяАЕОРСХ])(?:секрет|парол|токен|ключ)"
     ),
     re.IGNORECASE,
 )

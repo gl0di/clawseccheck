@@ -515,3 +515,53 @@ def test_b954_secret_term_re_letter_glued_cyrillic_compound_stays_conservative()
         assert not _B63_SECRET_TERM_RE.search(norm), (
             f"{text!r} (normalized {norm!r}) unexpectedly started matching"
         )
+
+
+# ------------------------------------------------------- B-954 round 2 (C-135 follow-up)
+#
+# The round-1 fix's enumeration was lowercase-only. `_CONFUSABLES` (textnorm.py) only has
+# LOWERCASE Cyrillic keys (а/е/о/р/с/х -> ASCII a/e/o/p/c/x), never uppercase, so those 6
+# letters compiled into the class as ASCII -- and `re.IGNORECASE` case-folds WITHIN a
+# script (Cyrillic А <-> а) but never ACROSS scripts (ASCII 'a' does not fold to match
+# Cyrillic 'А'). An ALL-CAPS word built on one of the 6 folded letters therefore fell
+# through the guard uncaught: "ПЕРЕКЛЮЧИТЬ" ("to switch"), preceded by uppercase "Е",
+# false-matched even though its lowercase twin "переключить" was correctly excluded.
+# ALL-CAPS is ordinary for Russian UI labels/headings/banners, so this was a real
+# false-positive surface. Fixed by appending the 6 native uppercase confusables (АЕОРСХ)
+# to the enumeration.
+
+def test_b954_round2_secret_term_re_excludes_uppercase_cyrillic_derivations():
+    # Regression pin: these all false-matched under the round-1 fix (confirmed via live
+    # execution against the pre-round-2 pattern) because their preceding letter is one of
+    # the 6 confusable-folded letters in its UPPERCASE form -- "not preceded by a Cyrillic
+    # letter" was silently satisfied for a Cyrillic letter. Same words as the lowercase
+    # negative control above, upper-cased.
+    uppercase_unrelated_words = [
+        "ОТКЛЮЧИТЬ",
+        "ВКЛЮЧИТЬ",
+        "ЗАКЛЮЧИТЬ",
+        "ПЕРЕКЛЮЧИТЬ",
+        "ПОДКЛЮЧИТЬ",
+        "РАССЕКРЕТИТЬ",
+        "ЗАСЕКРЕТИТЬ",
+    ]
+    for text in uppercase_unrelated_words:
+        norm = normalize_for_scan(text)
+        assert not _B63_SECRET_TERM_RE.search(norm), (
+            f"{text!r} (normalized {norm!r}) should NOT match -- ordinary ALL-CAPS "
+            "Cyrillic derivation, not a secret/credential mention"
+        )
+
+
+def test_b954_round2_original_repro_and_glued_compounds_unaffected():
+    # The round-2 uppercase fix must not disturb round-1's outcomes: the ticket's
+    # punctuation/digit-adjacent repro still matches, and the glued-compound cases stay
+    # conservatively non-matching (documented limitation, unchanged).
+    for text in ("«секрет»", '"секрет"', "(секрет)", "1секрет", "не-секрет"):
+        norm = normalize_for_scan(text)
+        assert _B63_SECRET_TERM_RE.search(norm), f"{text!r} regressed: norm={norm!r}"
+    for text in ("мойсекрет", "усекрет"):
+        norm = normalize_for_scan(text)
+        assert not _B63_SECRET_TERM_RE.search(norm), (
+            f"{text!r} (normalized {norm!r}) unexpectedly started matching"
+        )
