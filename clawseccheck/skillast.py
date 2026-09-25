@@ -2733,17 +2733,80 @@ _CONDITIONAL_STMT_NODES = (
 )
 
 
+# B-953: list methods that mutate the bound object IN PLACE, split into two groups by
+# whether they can change what sits at index 0 (argv[0], the PROGRAM) versus only ever
+# touching index 1+ (trailing arguments).
+#
+# `insert`/`remove`/`pop`/`sort`/`clear`/`reverse` can all put a DIFFERENT value at
+# index 0 (or remove it outright): `.insert(0, x)` / a `.remove(x)` that happens to
+# match the current argv[0] / a `.pop(0)` (or even a no-arg `.pop()`, since a static
+# walk cannot prove which index) / a `.sort()` that reorders a non-constant element
+# ahead of the program / a `.reverse()` that moves the LAST element (possibly tainted)
+# into position 0 / a `.clear()` that removes argv[0] along with everything else.
+# `_subprocess_taint_is_command_injection` treats a tainted (or merely unproven)
+# argv[0] as command injection UNCONDITIONALLY, regardless of the program's own
+# identity, so these always disqualify the binding outright -- unconditionally unsafe,
+# same as `.insert()` already was before this fix.
+_ARGV0_INVALIDATING_MUTATORS = frozenset({"insert", "remove", "pop", "clear", "sort", "reverse"})
+
+# `append`/`extend` (and `cmd += [...]`, the AugAssign spelling of `.extend()`) never
+# touch index 0 -- they only ever ADD elements at the end. The recorded literal's own
+# argv[0] therefore stays byte-for-byte accurate after either call; what goes stale is
+# only the TAIL (`elts[1:]`), which matters to a sink resolver only when argv[0] is
+# itself a shell/interpreter/re-exec wrapper (`_argv0_is_shell_indirect_exec`'s own
+# domain) -- an ordinary program (`git`, `sys.executable`, ...) never re-parses its
+# trailing args as code, so a stale/incomplete tail is harmless to that check and
+# disqualifying the binding here would only manufacture a false "unresolvable ->
+# crit"/DANGEROUS_SINK on the extremely common, genuinely-safe `cmd = [prog, base...];
+# if opt: cmd.append(flag)` idiom (reproduced against two real-fleet-shaped pinned
+# regression tests in this exact repo during this fix's own development -- see
+# `test_call_site_merges_conditional_append_branches_sharing_one_a0` and its sibling in
+# tests/test_b863_tt5_wrapper_position_grammar.py).
+#
+# So `.append`/`.extend`/`+=` disqualify ONLY when the recorded literal's own argv[0]
+# is a NAME `_prog_name_could_become_shell_indirect` recognizes -- deliberately NOT the
+# stricter `_argv0_is_shell_indirect_exec` itself, which additionally requires an eval
+# flag (`-c`/`-e`/...) to already be present in the literal's OWN `elts[1:]`. That
+# extra requirement is exactly backwards here: the ticket's own repro
+# (`c = ["bash"]; c.extend(["-c", payload])`) adds the eval flag THROUGH the very
+# `.extend()` call this function is deciding about, so it is never visible in the
+# PRE-mutation literal `_argv0_is_shell_indirect_exec` would be checking.
+_TRAILING_ONLY_MUTATORS = frozenset({"append", "extend"})
+
+# Deliberately NOT in either set above: `count`/`index` (read-only, never mutate) and
+# `copy` (returns a NEW list; the bound name's own object is untouched).
+
+
+def _prog_name_could_become_shell_indirect(elts: list) -> bool:
+    """Like `_argv0_is_shell_indirect_exec`'s own argv[0]-identification half, but
+    WITHOUT requiring an eval flag (`-c`/`-e`/...) to already be present in `elts[1:]`
+    -- used only to decide whether a LATER `.append()`/`.extend()`/`+=` could itself be
+    what completes the "shell -c <payload>" shape, which a flag-presence check on the
+    STALE, pre-mutation literal can never see (the flag and the payload are typically
+    added together, in that same call). `_REEXEC_WRAPPER_NAMES` (env/sudo/ssh/...)
+    need no flag at all -- true unconditionally, same as in the stricter check."""
+    if not elts:
+        return False
+    prog = elts[0]
+    if not isinstance(prog, ast.Constant) or not isinstance(prog.value, str):
+        return False
+    basename = prog.value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    return basename in _SHELL_EVAL_FLAG_INTERPRETERS or basename in _REEXEC_WRAPPER_NAMES
+
+
 def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tuple]:
     """Names bound EXACTLY ONCE, UNCONDITIONALLY, to a list/tuple literal within
-    `scope`'s own body, with no later mutation that could change argv[0]
-    (`cmd[0] = ...` / `cmd.insert(...)`).
+    `scope`'s own body, with no later mutation this function cannot prove leaves the
+    recorded literal still accurate (`cmd[0] = ...` / `cmd.insert(...)` / a shell-
+    indirect-program-shaped `cmd.append(...)`/`cmd += [...]` / ...).
 
     Resolves the common real-world safe pattern where the command list is built in a
     local before the call (`cmd = [prog, *args]; subprocess.run(cmd)`) rather than
-    passed inline. Conservative: a name reassigned, index-assigned, `insert`-mutated,
-    or assigned only inside a conditional construct (If/For/While/Try/With, sync or
-    async, or TryStar) is omitted, so the caller falls back to the command-injection
-    default rather than risk a false downgrade.
+    passed inline. Conservative: a name reassigned, index-assigned, mutated via any
+    argv[0]-invalidating list method (see `_ARGV0_INVALIDATING_MUTATORS`), or assigned
+    only inside a conditional construct (If/For/While/Try/With, sync or async, or
+    TryStar) is omitted, so the caller falls back to the command-injection default
+    rather than risk a false downgrade.
 
     B-952: a name assigned to a literal ONLY inside a conditional branch
     (`if DEBUG: args = ['echo']`) is NOT "bound exactly once" for this function's
@@ -2755,6 +2818,34 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
     every `Assign` it collects really is reached unconditionally from `scope`'s own
     entry; anything found only through the first (full) walk and not this one is
     routed into `unsafe` exactly like every other disqualifying case below.
+
+    B-953: `.insert()` was the ONLY list-mutating method this function treated as
+    disqualifying -- a name built as `c = ["bash"]; c.extend(["-c", payload])` was
+    still returned as "safely bound to ['bash']", silently hiding the appended tail
+    from every downstream sink resolver entirely. `.insert`/`.remove`/`.pop`/`.sort`/
+    `.reverse`/`.clear` join `.insert()` unconditionally (see
+    `_ARGV0_INVALIDATING_MUTATORS`) -- each can change or remove whatever sits at
+    index 0, which every downstream taint-classifier treats as dangerous regardless of
+    the program's own identity. `.append`/`.extend`/`cmd += [...]` (see
+    `_TRAILING_ONLY_MUTATORS`) are different: they never touch index 0, so the
+    recorded literal's own argv[0] stays accurate either way, and a downstream
+    consumer that trusts THIS function's raw literal never looks past argv[0] unless
+    that program is itself a shell/interpreter/re-exec wrapper -- so these two
+    disqualify only when `_prog_name_could_become_shell_indirect` says the recorded
+    argv[0] could be one. Marking them unconditionally unsafe (an earlier, retracted
+    version of this fix) reproducibly turned two independent, real-fleet-shaped
+    pinned regression tests -- a `command = [sys.executable, 'script.py']` CLI-flag
+    builder mutated only via `.append()` of hardcoded/loop-sourced flags, at TWO
+    different branch-merge shapes -- from their correct `info` into a false `crit`,
+    because `_all_call_sites_bind_fixed_argv` (a DIFFERENT consumer of this same
+    per-scope binding dict, resolving a WRAPPER's call-site argument rather than a
+    sink's own direct one) only ever needs argv[0]'s own identity to certify a call
+    site safe; it never inspects trailing elements unless argv[0] is itself shell-
+    indirect, so disqualifying on `.append`/`.extend` regardless of program identity
+    cost real precision for zero security benefit. See
+    `tests/test_b863_tt5_wrapper_position_grammar.py`'s
+    `test_call_site_merges_conditional_append_branches_sharing_one_a0` and
+    `test_call_site_merges_many_independent_conditional_branches`.
     """
     if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
         stack = [b for b in scope.body if not isinstance(b, _NESTED_SCOPE_NODES)]
@@ -2775,6 +2866,13 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
     assign_count: dict[str, int] = {}
     bindings: dict[str, ast.List | ast.Tuple] = {}
     unsafe: set[str] = set()
+    # B-953: `.append`/`.extend`/`+=` targets are collected here, NOT disqualified
+    # inline -- whether they matter depends on `bindings[name]` (the recorded
+    # literal's own argv[0]), which is not guaranteed to be fully populated yet at
+    # this point in the walk (`_scope_own_nodes` is a stack-based traversal, not
+    # textual/execution order), so the decision is deferred to a second pass below,
+    # once `bindings` is complete.
+    trailing_mutated: set[str] = set()
     for n in _scope_own_nodes(scope):
         if isinstance(n, ast.Assign):
             for t in n.targets:
@@ -2790,12 +2888,21 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
                     unsafe.add(t.value.id)  # cmd[0] = ... could replace the program
         elif isinstance(n, ast.Call):
             f = n.func
-            if (
-                isinstance(f, ast.Attribute)
-                and f.attr == "insert"
-                and isinstance(f.value, ast.Name)
-            ):
-                unsafe.add(f.value.id)  # cmd.insert(0, ...) could shift argv[0]
+            if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+                if f.attr in _ARGV0_INVALIDATING_MUTATORS:
+                    unsafe.add(f.value.id)  # could change/remove whatever is at index 0
+                elif f.attr in _TRAILING_ONLY_MUTATORS:
+                    trailing_mutated.add(f.value.id)
+        elif (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Name)
+            and isinstance(n.op, ast.Add)
+        ):
+            trailing_mutated.add(n.target.id)  # cmd += [...] mutates like .extend()
+    for name in trailing_mutated:
+        lit = bindings.get(name)
+        if lit is not None and _prog_name_could_become_shell_indirect(lit.elts):
+            unsafe.add(name)
     return {k: v for k, v in bindings.items() if assign_count.get(k, 0) == 1 and k not in unsafe}
 
 

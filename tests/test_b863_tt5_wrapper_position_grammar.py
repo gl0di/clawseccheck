@@ -889,7 +889,25 @@ def test_b956_list_starred_with_trailing_element_reassign_stays_crit():
 def test_unchanged_n8_local_list_extend_bash_c_reports_no_tt5():
     """A local variable's OWN `.extend` at a DIRECT (non-wrapper) sink is
     invisible to the taint engine entirely -- unrelated to B-863's wrapper/
-    vararg gate, not fixed here; already named in the architect's design."""
+    vararg gate, not fixed here; already named in the architect's design.
+
+    Re-verified directly (not merely re-read) while landing B-953, which
+    touches the SAME `_single_list_bindings_local` this shape's own gap
+    lives outside of: this exact source still produces zero TT5 findings
+    both before and after that fix. The reason is unaffected by B-953 at
+    all -- `_external_tainted_names` only propagates taint through an
+    `Assign`/`AugAssign` target, never through a bare `.extend()`/`.append()`
+    method-call statement, so the local `c` here never enters the taint set
+    `_subprocess_taint_is_command_injection` would need to even be invoked
+    at this DIRECT sink. What DOES change for this exact shape post-B-953:
+    the taint-INDEPENDENT `DANGEROUS_SINK` shape check
+    (`_subprocess_call_is_fixed_argv`) now correctly stops treating `c` as a
+    resolved fixed-argv list (previously silently skipped this sink
+    entirely); see `test_b953_append_non_shell_indirect_program_stays_arg_
+    injection_not_crit`'s sibling section below for the shape B-953 actually
+    closes -- one call-site hop of indirection, or `+=` (AugAssign, which
+    already propagates through the general taint fixpoint independently of
+    `_single_list_bindings_local`)."""
     src = (
         "import os, subprocess\n"
         "def main():\n"
@@ -898,6 +916,164 @@ def test_unchanged_n8_local_list_extend_bash_c_reports_no_tt5():
         "    subprocess.run(c)\n"
     )
     _assert_none(src)
+
+
+# ---------------------------------------------------------------------------
+# B-953 -- `_single_list_bindings_local` now distinguishes two classes of
+# list-mutating method calls: `_ARGV0_INVALIDATING_MUTATORS` (insert/remove/
+# pop/clear/sort/reverse) always disqualify the binding -- same treatment
+# `.insert()` alone already had; `_TRAILING_ONLY_MUTATORS` (append/extend,
+# plus `+=`) disqualify ONLY when the recorded literal's own argv[0] could
+# become shell-indirect (`_prog_name_could_become_shell_indirect`), since
+# neither ever touches index 0 and an ordinary program (`sys.executable`,
+# `git`, ...) is unaffected by a stale tail.
+#
+# The gap this fix closes is reachable through `analyze_python` in two
+# shapes: one call-site hop of indirection (B-413 layer 2's own
+# `_all_call_sites_bind_fixed_argv`, which resolves a call-site argument
+# through the SAME `_single_list_bindings_local`-backed `list_bindings_by_
+# call`), or `+=` (AugAssign) even at a fully direct sink, since AugAssign
+# already propagates taint to its own target through the ordinary taint
+# fixpoint, independent of this function. `test_unchanged_n8_...` above
+# pins the shape this fix does NOT close (a DIRECT, non-wrapper sink with a
+# bare `.extend()`/`.append()` call) -- a separate, still-open limitation in
+# the taint propagator itself, not in `_single_list_bindings_local`.
+# ---------------------------------------------------------------------------
+
+
+def test_new_extend_via_callsite_now_resolved_by_b953():
+    """The ticket's own repro (`c = ['bash']; c.extend(['-c', payload])`) one
+    call-site hop away from the sink: `sh`'s own parameter is unconditionally
+    tainted (ordinary layer-1 parameter taint), so B-413 layer 2's call-site
+    resolver is what actually decides this call, via `list_bindings_by_call`
+    (`_single_list_bindings_local`'s own per-scope result). Before this fix,
+    `c` stale-resolved to `['bash']` alone -- a ONE-element list, so
+    `_argv0_is_shell_indirect_exec` never saw the '-c' flag the very
+    `.extend()` call itself introduces, and the call site was wrongly
+    certified as a hardcoded, safe command (reproduces TT5_ARG_INJECTION/info
+    against the pre-fix tree, verified directly). After this fix, `c` is
+    excluded from the resolved bindings entirely (its own argv[0], 'bash', is
+    shell-eval-flag-capable), so the call site is unresolvable and stays
+    crit."""
+    src = (
+        "import os, subprocess\n\n"
+        "def sh(cmd):\n"
+        "    subprocess.run(cmd)\n\n"
+        "def main():\n"
+        "    c = ['bash']\n"
+        "    c.extend(['-c', os.environ['P']])\n"
+        "    sh(c)\n"
+    )
+    _assert_crit(src)
+
+
+def test_new_append_via_callsite_now_resolved_by_b953():
+    """Same gap, `.append()` spelling (one element per call instead of one
+    `.extend()`): each individual `.append()` is its own disqualifying
+    mutation once the recorded argv[0] ('bash') is shell-eval-flag-capable --
+    the SECOND `.append()` (carrying the tainted payload) does not even need
+    to be reached for the binding to already be excluded."""
+    src = (
+        "import os, subprocess\n\n"
+        "def sh(cmd):\n"
+        "    subprocess.run(cmd)\n\n"
+        "def main():\n"
+        "    c = ['bash']\n"
+        "    c.append('-c')\n"
+        "    c.append(os.environ['P'])\n"
+        "    sh(c)\n"
+    )
+    _assert_crit(src)
+
+
+def test_new_augassign_direct_sink_now_resolved_by_b953():
+    """`+=` needs no call-site indirection to demonstrate this fix: `c += [
+    ...]` is an `AugAssign`, already walked by `_external_tainted_names`'s
+    own Assign/AugAssign propagation fixpoint (unrelated to
+    `_single_list_bindings_local`), so `c` itself enters the sink's own
+    directly-visible taint set regardless of this fix -- `any_t` is already
+    True either way. What this fix changes is
+    `_subprocess_taint_is_command_injection`'s OWN inline resolution of
+    `first = list_bindings.get('c', first)`: before, `c` stale-resolved to
+    `['bash']` (missing '-c'/payload, added only by the `+=` itself), so
+    `_argv0_is_shell_indirect_exec` saw a one-element list and returned False
+    -- argument injection, not command injection (reproduces info against the
+    pre-fix tree, verified directly). After, `c` is excluded from bindings
+    entirely, `first` stays the unresolved Name, and the call falls through
+    to the unresolved-name branch -- crit."""
+    src = (
+        "import os, subprocess\n\n"
+        "def main():\n"
+        "    c = ['bash']\n"
+        "    c += ['-c', os.environ['P']]\n"
+        "    subprocess.run(c)\n"
+    )
+    _assert_crit(src)
+
+
+@pytest.mark.parametrize(
+    "mutator_stmt",
+    [
+        "cmd.insert(0, 'sudo')",
+        "cmd.remove('status')",
+        "cmd.pop()",
+        "cmd.clear()",
+        "cmd.sort()",
+        "cmd.reverse()",
+    ],
+)
+def test_b953_argv0_invalidating_mutators_disqualify_direct_sink_binding(mutator_stmt):
+    """Every `_ARGV0_INVALIDATING_MUTATORS` member, exercised one at a time on
+    an otherwise-literal list at a DIRECT (non-wrapper) sink: each must
+    disqualify the binding (fall back to the conservative default -- the
+    taint-independent DANGEROUS_SINK shape check no longer treats `cmd` as a
+    resolved fixed argv list and reports it) rather than crash or silently
+    keep trusting the mutated list. `.insert()` alone already had this
+    treatment before B-953 (regression-locked here alongside its five new
+    siblings); `.remove`/`.pop`/`.clear`/`.sort`/`.reverse` are the newly-
+    covered five -- verified directly against the pre-fix tree that each of
+    those five previously produced NO finding at all (the mutation was
+    silently trusted as leaving `['git', 'status']` intact), while
+    `.insert()` already produced DANGEROUS_SINK/info there too."""
+    src = (
+        "import subprocess\n"
+        "def main():\n"
+        "    cmd = ['git', 'status']\n"
+        f"    {mutator_stmt}\n"
+        "    subprocess.run(cmd)\n"
+    )
+    findings = analyze_python(src, "t.py")
+    rules = {f.rule for f in findings}
+    assert "DANGEROUS_SINK" in rules, findings  # unresolved -> not silently trusted as fixed argv
+    assert not any(f.rule.startswith("TT5") and f.severity == "crit" for f in findings), findings
+
+
+def test_b953_append_non_shell_indirect_program_stays_arg_injection_not_crit():
+    """The false positive this fix's own design deliberately avoids (see
+    `_TRAILING_ONLY_MUTATORS`'s module comment): `cmd = [sys.executable,
+    'script.py']; cmd.append('--verbose')`, forwarded through one call-site
+    hop the same way the ticket's own repro is above -- `sys.executable` is
+    not a string constant `_prog_name_could_become_shell_indirect` can even
+    read, so `.append()` does NOT disqualify `cmd`'s binding, and the call
+    site is still correctly certified as a hardcoded command -- info
+    (TT5_ARG_INJECTION), never crit. Byte-identical before and after this fix
+    (verified directly against the pre-fix tree) -- a pure regression lock,
+    not a gap closure. Mirrors the two pre-existing pinned regressions this
+    fix's own code comments cite (`test_call_site_merges_conditional_append_
+    branches_sharing_one_a0` and `test_call_site_merges_many_independent_
+    conditional_branches`, both further up this file) at a single,
+    unconditional `.append()` instead of their own conditional-branch-merge
+    shape."""
+    src = (
+        "import sys, subprocess\n\n"
+        "def run(command):\n"
+        "    return subprocess.run(command)\n\n"
+        "def main():\n"
+        "    cmd = [sys.executable, 'script.py']\n"
+        "    cmd.append('--verbose')\n"
+        "    run(cmd)\n"
+    )
+    _assert_info(src)
 
 
 # ---------------------------------------------------------------------------
