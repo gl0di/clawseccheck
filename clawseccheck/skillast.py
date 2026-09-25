@@ -3355,9 +3355,20 @@ def _ssrf_url_slot_nodes(node: ast.Call) -> list:
     """The argument-expression "slots" of an SSRF-sink call that can carry the fetch
     URL: positional arg 0, any `*args` splat (its real contents are unknown until
     runtime, so a tainted splat is treated as reaching the URL slot the same as a
-    resolved arg 0 would), the `url=` keyword, and any `**kwargs` splat (same
-    unknown-until-runtime reasoning). Every OTHER keyword (headers=/auth=/cert=/...)
-    is deliberately never included -- see `_SSRF_URL_KWARGS`'s own note.
+    resolved arg 0 would), the `url=` keyword, and a `**kwargs`/`**{...}` splat.
+    Every OTHER keyword (headers=/auth=/cert=/timeout=/proxies=/...) is deliberately
+    never included -- see `_SSRF_URL_KWARGS`'s own note.
+
+    A `**` unpack is scoped the same way a literal keyword already is, whenever it's
+    statically apparent: when the unpacked expression is a `dict` LITERAL whose keys
+    are all resolvable string constants (`**{"headers": ..., "url": ...}`), only the
+    value(s) under an `_SSRF_URL_KWARGS` key are included -- the same exclusion a
+    direct `headers=`/`auth=`/... keyword already gets, now applied regardless of
+    which spelling the call used to reach the sink. Only a genuinely opaque unpack
+    (not a dict literal, or one with a key that isn't a resolvable string constant --
+    e.g. a nested `**other` spread inside it) falls back to the fully permissive
+    "unknown until runtime, be conservative" treatment: the whole splat expression is
+    a candidate slot, same as today.
     """
     slots: list = []
     if node.args:
@@ -3366,7 +3377,19 @@ def _ssrf_url_slot_nodes(node: ast.Call) -> list:
         if isinstance(a, ast.Starred) and a not in slots:
             slots.append(a)
     for kw in node.keywords:
-        if kw.arg is None or kw.arg in _SSRF_URL_KWARGS:
+        if kw.arg is not None:
+            if kw.arg in _SSRF_URL_KWARGS:
+                slots.append(kw.value)
+            continue
+        # kw.arg is None: a **kwargs / **{...} unpack.
+        if isinstance(kw.value, ast.Dict) and all(
+            isinstance(k, ast.Constant) and isinstance(k.value, str)
+            for k in kw.value.keys
+        ):
+            for dict_key, dict_val in zip(kw.value.keys, kw.value.values):
+                if dict_key.value in _SSRF_URL_KWARGS:
+                    slots.append(dict_val)
+        else:
             slots.append(kw.value)
     return slots
 

@@ -212,6 +212,70 @@ def test_ssrf_kwargs_splat_with_no_taint_does_not_fire():
     assert "TT_SSRF" not in _rules(src)
 
 
+def test_ssrf_fixed_url_with_env_in_auth_header_via_kwargs_splat_does_not_fire():
+    """Paired negative for the DICT-LITERAL `**{...}` splat form of
+    `test_ssrf_fixed_url_with_env_in_auth_header_does_not_fire` above: the same
+    tainted value under `headers`, reached through `**{"headers": ...}` instead of a
+    direct `headers=` keyword, must stay silent for the exact same reason -- the
+    excluded key stays excluded regardless of which spelling reaches it."""
+    src = (
+        "import os, requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f():\n"
+        "    requests.get(FIXED_URL, **{\"headers\": {\"Authorization\": os.environ[\"TOKEN\"]}})\n"
+    )
+    assert "TT_SSRF" not in _rules(src)
+
+
+def test_ssrf_url_key_in_kwargs_splat_dict_literal_fires():
+    """The `url` key IS one of `_SSRF_URL_KWARGS` -- when it is genuinely present in
+    a splatted dict literal, unlike the `headers` key above, it must still fire."""
+    src = (
+        "import os, requests\n"
+        "def f():\n"
+        "    requests.get(**{\"url\": os.environ[\"URL\"]})\n"
+    )
+    r = _rules(src)
+    assert "TT_SSRF" in r
+
+
+def test_ssrf_opaque_kwargs_splat_via_call_falls_back_to_permissive_check():
+    """A `**` unpack of a CALL -- not a dict literal, so its keys can never be
+    statically read -- can't be narrowed like the two dict-literal cases above and
+    must stay on the old, fully permissive "unknown until runtime, be conservative"
+    path: the whole splat expression is still a candidate URL slot, so an
+    externally-sourced value nested inside it (here, the same network-response-
+    chained-into-a-key shape `test_ssrf_inline_chained_json_key_off_network_call_
+    fires` already covers un-splatted) is still found."""
+    src = (
+        "import requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f():\n"
+        "    requests.get(FIXED_URL, **requests.get(\"https://x.example/y\").json())\n"
+    )
+    r = _rules(src)
+    assert "TT_SSRF" in r
+
+
+def test_ssrf_mixed_dict_literal_splat_url_and_headers_both_tainted_fires_via_url_key():
+    """A dict literal splat carrying BOTH a tainted `url` key and a tainted (but
+    excluded) `headers` key: must still fire -- via the `url` key alone -- and the
+    finding's reason text must not misattribute the conviction to the excluded
+    `headers` key (this rule's reason string never names a specific keyword either
+    way, so this also pins that it stays that way for the splat form)."""
+    src = (
+        "import os, requests\n"
+        "def f():\n"
+        "    requests.get(**{\n"
+        "        \"url\": os.environ[\"URL\"],\n"
+        "        \"headers\": {\"Authorization\": os.environ[\"TOKEN\"]},\n"
+        "    })\n"
+    )
+    r = _rules(src)
+    assert "TT_SSRF" in r
+    assert "headers" not in r["TT_SSRF"].reason
+
+
 def test_ssrf_literal_concat_url_does_not_fire():
     """Paired negative: string concatenation of only literals -- no taint anywhere --
     must not newly fire."""
