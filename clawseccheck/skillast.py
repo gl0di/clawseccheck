@@ -3282,8 +3282,14 @@ def _call_args_tainted_for_exec_sink(
     """Like `_call_args_tainted`, but ALSO counts an inline external-source call sitting
     directly in the call's own arguments -- with no intermediate variable -- as tainted,
     the same as an already-bound tainted NAME. Scoped to the TT5 exec-sink call site only
-    (see its one call site below); TT4, SSRF and the subprocess-argv resolver keep calling
-    plain `_call_args_tainted`, unchanged.
+    (see its one call site below). TT4 and SSRF have since gained their OWN narrower
+    inline wrappers (`_call_args_tainted_for_file_net_sink` / `_call_args_tainted_for_ssrf_sink`,
+    below) rather than sharing this one -- each sink's "is this inline expression
+    tainted" test is semantically different (TT4: file-read call shapes only; SSRF:
+    the URL-argument slot only) and reusing this exec-sink wrapper's broader inline
+    vocabulary (env-reads/input()/sys.argv/network-reads/tool-results, appropriate for
+    an exec sink) would have been wrong for both. The subprocess-argv resolver keeps
+    calling plain `_call_args_tainted`, unchanged.
 
     B-916: `_call_args_tainted` intersects only the NAMES appearing in each argument
     against `tainted`, so `exec(urlopen(u).read(), {})` -- external input read and handed
@@ -3319,6 +3325,156 @@ def _call_args_tainted_for_exec_sink(
             # No intermediate variable carries the source to the sink -- that is at
             # least as direct a flow as a bound Name in the first argument.
             return True, i == 0
+    return False, False
+
+
+def _file_read_prefilter(source: str) -> bool:
+    """Cheap text-level pre-check: True when *source* could contain a file-read call
+    (`open(`/`read_text`/`read_bytes`). Deliberately a plain SUBSTRING test, not a
+    parse -- it also matches `urlopen(...)` (contains `open(`) and
+    `.sendall(open(p).read())` for free, which is exactly what lets TT4's existing
+    bound-path source detection already recognize those shapes.
+
+    Pulled out of `_file_tainted` as its own named helper so the inline-taint
+    pre-scan gate below (the one guarding the whole TT5/TT4/SSRF pass) can reuse the
+    identical cheap gate before doing a full AST walk for an inline TT4 shape,
+    without duplicating the substring list. Pure extraction: `_file_tainted`'s own
+    behavior is unchanged by this split.
+    """
+    return "open(" in source or "read_text" in source or "read_bytes" in source
+
+
+# The URL-argument-shaped keyword names an SSRF sink call can pass its target through.
+# Deliberately excludes headers=/auth=/cert=/timeout=/proxies=/... -- mirrors
+# `_ENV_AUTH_KWARGS`'s existing, deliberate rule that a secret sitting in an
+# auth-shaped kwarg is not exfiltration; only the URL/body-addressing slot counts.
+_SSRF_URL_KWARGS = frozenset({"url"})
+
+
+def _ssrf_url_slot_nodes(node: ast.Call) -> list:
+    """The argument-expression "slots" of an SSRF-sink call that can carry the fetch
+    URL: positional arg 0, any `*args` splat (its real contents are unknown until
+    runtime, so a tainted splat is treated as reaching the URL slot the same as a
+    resolved arg 0 would), the `url=` keyword, and any `**kwargs` splat (same
+    unknown-until-runtime reasoning). Every OTHER keyword (headers=/auth=/cert=/...)
+    is deliberately never included -- see `_SSRF_URL_KWARGS`'s own note.
+    """
+    slots: list = []
+    if node.args:
+        slots.append(node.args[0])
+    for a in node.args:
+        if isinstance(a, ast.Starred) and a not in slots:
+            slots.append(a)
+    for kw in node.keywords:
+        if kw.arg is None or kw.arg in _SSRF_URL_KWARGS:
+            slots.append(kw.value)
+    return slots
+
+
+def _inline_file_read_arg_index(node: ast.Call) -> int | None:
+    """The index into `list(node.args) + [kw.value for kw in node.keywords]` of the
+    first argument that itself CONTAINS an inline file-read call
+    (`.read()`/`.read_text()`/`.read_bytes()`/`.readline()`/`.readlines()` --
+    `_FILE_READ_METHOD_ATTRS`, the exact same method-attribute set TT4's bound-path
+    source (`_is_file_read_value`/`_file_read_tainted_names`) already trusts), with no
+    intermediate variable at all -- e.g. `requests.post(u, data=open(p).read())`.
+    Returns None when no argument contains one.
+
+    Deliberately narrower than `_value_is_tainted_source` (env-reads/input()/
+    sys.argv/network-reads/tool-results are NOT file reads and must not count here --
+    TT4's source vocabulary is file-reads only, per the existing ENV_EXFIL_FLOW/TT4
+    split).
+    """
+    all_args = list(node.args) + [kw.value for kw in node.keywords]
+    for i, arg_node in enumerate(all_args):
+        for sub in ast.walk(arg_node):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr in _FILE_READ_METHOD_ATTRS
+            ):
+                return i
+    return None
+
+
+def _call_args_tainted_for_ssrf_sink(
+    node: ast.Call,
+    tainted: set[str],
+    ref_res: "_RefResolver | None" = None,
+    tree: "ast.AST | None" = None,
+) -> tuple:
+    """Like `_call_args_tainted`, but ALSO counts an inline externally-tainted
+    expression sitting directly in the call's own URL-argument SLOT -- positional
+    arg 0, a later `*args` splat, the `url=` keyword, or a `**kwargs` splat
+    (`_ssrf_url_slot_nodes`) -- as tainted, the same as an already-bound tainted
+    Name. Scoped to the SSRF sink call site only; TT4 has its own equivalent wrapper
+    (`_call_args_tainted_for_file_net_sink`, below), and TT5's exec-sink wrapper
+    (`_call_args_tainted_for_exec_sink`, above) is untouched.
+
+    `_call_args_tainted` intersects only the NAMES appearing in each argument
+    against `tainted`, so `requests.get(os.environ["URL"])` -- the URL read and
+    handed straight to the sink, nothing ever assigned to a variable -- has no
+    tainted Name in it and TT_SSRF silently never fires.
+
+    Deliberately narrower than TT5's inline check in two ways:
+      * only the URL-argument SLOT is examined (`_ssrf_url_slot_nodes`), never
+        headers=/auth=/cert=/timeout=/proxies=/... -- mirrors `_ENV_AUTH_KWARGS`'s
+        existing, deliberate rule that a secret in an auth-shaped kwarg is not
+        exfiltration; scanning every argument here would silently contradict that
+        rule for the inline case.
+      * "is this expression tainted" is tested with `_expr_is_ext_tainted` -- the
+        EXACT SAME predicate the bound assignment-taint-tracking path
+        (`_external_tainted_names`) already uses to decide whether an assigned
+        expression counts as an SSRF source -- so the inline case can never be MORE
+        permissive than binding the same sub-expression to a name first would be.
+
+    A NAME already in `tainted` is still handled identically to `_call_args_tainted`
+    (checked first, unchanged), so this can only ever ADD a finding, never remove one.
+    """
+    any_tainted, direct = _call_args_tainted(node, tainted)
+    if any_tainted:
+        return any_tainted, direct
+    for slot in _ssrf_url_slot_nodes(node):
+        if _expr_is_ext_tainted(slot, tainted, ref_res, tree):
+            return True, bool(node.args and slot is node.args[0])
+    return False, False
+
+
+def _call_args_tainted_for_file_net_sink(
+    node: ast.Call,
+    file_tainted: set[str],
+    inline_ok: bool,
+) -> tuple:
+    """Like `_call_args_tainted`, but ALSO counts an inline file-read call sitting
+    directly in one of the call's own arguments -- with no intermediate variable --
+    as tainted, the same as an already-bound file-read-tainted Name. Scoped to the
+    TT4 (file-read -> network) sink call site only; SSRF has its own equivalent
+    wrapper (`_call_args_tainted_for_ssrf_sink`, above), and TT5's exec-sink wrapper
+    (`_call_args_tainted_for_exec_sink`, above) is untouched.
+
+    `inline_ok` is the file-level inline pre-scan gate's own verdict for THIS file
+    (whether an inline TT4 shape -- a file-read call sitting directly in a
+    network-data-sink argument -- exists anywhere in it). When it is False the
+    caller already knows no such shape exists in this file at all, so this
+    degenerates to plain `_call_args_tainted`, unchanged -- the null-if-gate-closed
+    guard that avoids the extra per-call walk (`_inline_file_read_arg_index`) on
+    every single net-out-data-sink call in files that were never going to match.
+
+    `_call_args_tainted` intersects only the NAMES appearing in each argument
+    against `file_tainted`, so `requests.post(u, data=open(p).read())` -- the file
+    read handed straight to the sink, nothing ever assigned to a variable -- has no
+    tainted Name in it and TT4_FILE_NET silently never fires.
+
+    A NAME already in `file_tainted` is still handled identically to
+    `_call_args_tainted` (checked first, unchanged), so this can only ever ADD a
+    finding, never remove one.
+    """
+    any_tainted, direct = _call_args_tainted(node, file_tainted)
+    if any_tainted or not inline_ok:
+        return any_tainted, direct
+    idx = _inline_file_read_arg_index(node)
+    if idx is not None:
+        return True, idx == 0
     return False, False
 
 
@@ -5641,7 +5797,7 @@ def _is_file_read_value(node: ast.AST, tainted: set[str]) -> bool:
 
 def _file_tainted(source: str, tree: ast.AST) -> set[str]:
     """Pre-filtered file-read taint: only run when the source has an open()/read_text() call."""
-    if "open(" not in source and "read_text" not in source and "read_bytes" not in source:
+    if not _file_read_prefilter(source):
         return set()
     return _file_read_tainted_names(tree)
 
@@ -12931,8 +13087,38 @@ def analyze_python(
         for n in ast.walk(tree)
         if isinstance(n, ast.Call)
     )
+    # The same starvation as _has_inline_exec_sink_source above, but for
+    # TT4/SSRF -- `ext_taint_map` only tracks NAMES, so a file whose only SSRF/TT4
+    # source is an inline expression sitting directly in a sink's own arguments (e.g.
+    # `requests.get(os.environ["URL"])`, `requests.post(u, data=open(p).read())`) has
+    # an empty map on BOTH counts and this whole pass used to be skipped outright.
+    # Two more one-shot, whole-file pre-scans, same style as the exec one above --
+    # SSRF's uses the same `_expr_is_ext_tainted` predicate the bound-path
+    # assignment-taint fixpoint already trusts (via `_ssrf_url_slot_nodes` to stay
+    # scoped to the URL argument only); TT4's is gated behind the cheap
+    # `_file_read_prefilter` text check first, since an inline file-read call is the
+    # only thing it is looking for.
+    _has_inline_ssrf_source = any(
+        _is_ssrf_sink_call(n.func)[0]
+        and any(
+            _expr_is_ext_tainted(slot, set(), ref_res, tree)
+            for slot in _ssrf_url_slot_nodes(n)
+        )
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+    )
+    _has_inline_tt4_source = _file_read_prefilter(source) and any(
+        _is_net_out_data_sink(n.func)[0] and _inline_file_read_arg_index(n) is not None
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+    )
 
-    if ext_taint_map or _has_inline_exec_sink_source:
+    if (
+        ext_taint_map
+        or _has_inline_exec_sink_source
+        or _has_inline_ssrf_source
+        or _has_inline_tt4_source
+    ):
         # This is the TT5/TT4/SSRF taint pass — the one whose INTER-pass starvation
         # (round 1) was the concrete repro (a TT5_CMD_INJECTION crit lost behind 25+
         # earlier DANGEROUS_SINK info findings from the loop above). It is ALSO,
@@ -13059,8 +13245,10 @@ def analyze_python(
             is_net_data, net_name = _is_net_out_data_sink(node.func)
             if is_net_data:
                 file_t = _file_tainted(source, tree)
-                if file_t:
-                    any_t, direct = _call_args_tainted(node, file_t)
+                if file_t or _has_inline_tt4_source:
+                    any_t, direct = _call_args_tainted_for_file_net_sink(
+                        node, file_t, inline_ok=_has_inline_tt4_source
+                    )
                     if any_t:
                         flow_kind = "direct" if direct else "indirect"
                         add(
@@ -13077,7 +13265,9 @@ def analyze_python(
                 ext_visible = _tainted_names_visible(
                     node, ext_taint_map, owner_map, parent_scope, shadow_cache
                 )
-                any_t, direct = _call_args_tainted(node, ext_visible)
+                any_t, direct = _call_args_tainted_for_ssrf_sink(
+                    node, ext_visible, ref_res=ref_res, tree=tree
+                )
                 if any_t:
                     # Elevate evidence when a literal internal endpoint appears in the file.
                     has_internal = bool(_SSRF_LITERAL_RE.search(source))
