@@ -48,15 +48,17 @@ Secret-shaped test literals are split across adjacent string-literal boundaries
 at parse time, so the AST detector still sees one joined value, but no contiguous
 secret-shaped substring exists in this file's raw text.
 
-B-998 update: `HARDCODED_PROVIDER_SECRET` stays FAIL-capable (still NOT in
+B-998 round 3 update: `HARDCODED_PROVIDER_SECRET` stays FAIL-capable (still NOT in
 `_AST_NEVER_FAIL_RULES` — the C-135 note above is unchanged), but `checks/_vet.py`'s
-B13 loop now ALSO routes it evidence-only when the file's own basename matches
-`_TEST_FIXTURE_BASENAME_RE` — the same carve-out B-893 already gave the ASSIGN-only
-sibling, extended here to this rule's env-write call sites (including the one-hop
-indirection this file's resolver adds). See
+B13 loop now ALSO routes it evidence-only when BOTH the file's own basename matches
+`_TEST_FIXTURE_BASENAME_RE` AND `skillast.hardcoded_env_secret_is_inert` can positively
+prove every written secret never escapes the file (see that function's own module note
+for the full G0-G4 structure, and checks/_vet.py's in-source note at the call site for
+why two earlier, basename-only/token-scan-only rounds were each retracted). See
 tests/test_b998_env_write_secret_test_fixture.py for the dedicated coverage; this
-file's own `test_vet_name_indirection_in_test_named_file_now_passes` was updated in
-place (it used to assert the opposite).
+file's own `test_vet_name_indirection_in_test_named_file_still_fails` stays FAIL,
+unchanged, because its `search()` function returns the secret (an unconditional escape
+per that proof).
 
 Offline, deterministic. No network calls, no writes outside tmp_path/fixtures.
 """
@@ -458,23 +460,23 @@ def test_vet_setdefault_name_indirection_fixture_is_critical_fail():
     assert f.severity == CRITICAL
 
 
-def test_vet_name_indirection_in_test_named_file_now_passes():
-    """B-998 update: the env-entangled crit rule NOW gets the same test-fixture-
-    basename dampening as HARDCODED_PROVIDER_SECRET_ASSIGN (B-893) — see
-    tests/test_b998_env_write_secret_test_fixture.py for the dedicated coverage of
-    that routing change. This fixture (renamed clean_* accordingly) used to assert
-    the opposite (FAIL/CRITICAL, "no dampening"); that assumption no longer holds."""
+def test_vet_name_indirection_in_test_named_file_still_fails():
+    """B-998 round 3 update: the env-entangled crit rule DOES now get a
+    test-fixture-basename exemption (see tests/test_b998_env_write_secret_test_fixture.py),
+    but ONLY when skillast.hardcoded_env_secret_is_inert can positively prove the
+    written value never escapes the file. This fixture's `search()` function returns
+    the value — an unconditional escape per that proof (a `return` always refuses) —
+    so the exemption is never granted and this must still FAIL/CRITICAL, exactly as
+    before B-998 existed at all."""
     skill_dir = (
         FIXTURES
-        / "clean_b13_env_overwrite_name_indirection_test_fixture_file"
+        / "bad_b13_env_overwrite_name_indirection_test_fixture_file"
         / "skills"
         / "s"
     )
     f = vet_skill(skill_dir)
-    assert f.status == PASS, f"expected PASS; got {f.status}: {f.detail}"
-    assert any("TAVILY" in e for e in (f.evidence or [])), (
-        f"the test-fixture secret must still be disclosed as evidence: {f.evidence}"
-    )
+    assert f.status == FAIL, f"expected FAIL; got {f.status}: {f.detail}"
+    assert f.severity == CRITICAL
 
 
 def test_vet_conditional_name_indirection_fixture_does_not_fail():

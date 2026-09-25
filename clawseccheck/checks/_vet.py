@@ -47,6 +47,7 @@ from ..skillast import (
     analyze_python,
     analyze_python_package,
     analyze_shell,
+    hardcoded_env_secret_is_inert as _b998_hardcoded_env_secret_is_inert,
 )
 from ..skillast import _SH_VAR_ASSIGN_RE, _SH_VAR_REF_RE  # B-985 companion
 from ..skillast import _sh_candidate_destination_tokens as _sh_dest_tokens
@@ -1433,6 +1434,37 @@ _TEST_FIXTURE_BASENAME_RE = re.compile(
     r"^(?:test_.*|.*_test)\.(?:py|sh)$|^conftest\.py$|^.*\.(?:spec|test)\.(?:js|ts|tsx|jsx)$",
     re.I,
 )
+
+
+# B-998 round 3: `HARDCODED_PROVIDER_SECRET`'s two sibling finding IDs (the plain
+# env-write-site rule, and skillast.py's own `_ASSIGN` variant, which this gate never
+# routes here at all — see the ASSIGN arm above, unconditionally basename-gated and
+# unaffected by this task) are the ONLY findings `_b998_env_secret_stays_local`
+# tolerates seeing for a file before it will even attempt the G4 proof (G2). Any OTHER
+# rule firing on the same file — a real subprocess/exec/exfil signal skillast.py
+# already flagged independently — refuses outright; this gate must never be the thing
+# that silences a genuinely different finding.
+_B998_COMPANION_RULES = frozenset({"HARDCODED_PROVIDER_SECRET", "HARDCODED_PROVIDER_SECRET_ASSIGN"})
+
+
+def _b998_env_secret_stays_local(src: str, afs) -> bool:
+    """G2 + G4 caller for B-998 round 3 (see the in-source note at this function's
+    call site, and `skillast.hardcoded_env_secret_is_inert`'s own module note, for the
+    full G0-G4 structure and the round-1/round-2 retraction history). *afs* is the
+    COMPLETE list of AST findings `analyze_python` produced for this one file (not
+    just the `HARDCODED_PROVIDER_SECRET` ones) — G2 requires every one of them to be a
+    `HARDCODED_PROVIDER_SECRET`/`_ASSIGN` finding before the G4 reachability proof is
+    even attempted; any other rule firing on this file refuses immediately. Never
+    raises: an engine fault in the proof itself must cost this file the exemption, not
+    crash the audit."""
+    if any(af.rule not in _B998_COMPANION_RULES for af in afs):
+        return False
+    lns = frozenset(af.lineno for af in afs if af.rule == "HARDCODED_PROVIDER_SECRET")
+    try:
+        ok, _why = _b998_hardcoded_env_secret_is_inert(src, lns)
+    except Exception:
+        return False
+    return ok
 
 
 # C-135 (adversarial review) found the basename check alone is forgeable: the
@@ -5807,7 +5839,15 @@ def check_installed_skills(ctx: Context) -> Finding:
             _py_files = [(r, s, False) for r, s in ctx.installed_skill_py.get(name, [])]
             _py_files += [(r, s, True) for r, lang, s in _declared if lang == "py"]
             for relpath, src, _is_declared in _py_files:
-                for af in analyze_python(src, relpath, own_host=_own_host, artifact=_shipped):
+                # B-998 round 3: analyze_python(...) returns a plain list (not a
+                # generator), but is captured ONCE per file into `_afs` rather than
+                # called again below -- both so it is never re-run twice per file, and
+                # so `_b998_env_secret_stays_local` (G2) can see EVERY finding this file
+                # produced, not just the ones already iterated past by the time
+                # HARDCODED_PROVIDER_SECRET is reached in the loop below.
+                _afs = analyze_python(src, relpath, own_host=_own_host, artifact=_shipped)
+                _b998_inert = None  # tri-state cache: None = not yet computed this file
+                for af in _afs:
                     if af.rule == "AST_UNANALYZABLE":
                         if not _is_declared:
                             parse_error_paths.append(f"{name}: {relpath}")
@@ -5958,108 +5998,79 @@ def check_installed_skills(ctx: Context) -> Finding:
                                 f"{name}: {af.reason} ({relpath}:{af.lineno})"
                             )
                         continue
-                    # B-998 (Dave's ruling, extending B-893's D2 carve-out from the
-                    # ASSIGN rule to its env-entangled sibling): the SAME
-                    # _TEST_FIXTURE_BASENAME_RE basename check just above, now also
-                    # applied to the two `HARDCODED_PROVIDER_SECRET` call sites (a
-                    # plain `os.environ[K] = "<secret>"` / `os.getenv(K, "<secret>")`
-                    # write-site, including the B-910 one-hop name-indirection variant
-                    # — skillast.py's `_secret_name_bindings` resolver). Same reasoning
-                    # as the ASSIGN arm: a provider-shaped literal sitting in
-                    # `tests/conftest.py`/`test_*.py` is the author's own leaked/mock
-                    # test key, not DO-NOT-INSTALL harm to the installing user, so in a
-                    # test-fixture-named file it is carried as evidence only and never
-                    # moves the verdict — exactly the same `hardcoded_secret_fixture_
-                    # note` bucket the ASSIGN arm feeds, not a new one, so it renders
-                    # identically and is lifted into evidence by `_b13_verdict` the
-                    # same way. Deliberately does NOT add this rule name to
-                    # `_AST_NEVER_FAIL_RULES`: unlike ASSIGN (WARN-only everywhere),
-                    # this rule must stay fully crit/FAIL-capable for every file whose
-                    # basename does NOT match — the `else` branch below intentionally
-                    # falls through to the untouched generic crit/FAIL path (it is NOT
-                    # `continue`d), so `test_vet_env_overwrite_fixture_still_critical_
-                    # fail`/`test_vet_getenv_default_fixture_still_critical_fail`
-                    # (non-fixture basenames) see zero behavior change.
+                    # B-998 round 3 (Dave's ruling: build a real positive proof, not
+                    # another token-vocabulary patch — see the full retraction history
+                    # below before touching this gate again).
                     #
-                    # C-135 risk-equivalence note (required before widening a
-                    # CRIT-capable rule's PASS surface, CLAUDE.md §4): this rule and
-                    # ASSIGN both fire on nothing more than "a provider-shaped literal
-                    # is visible in source" — ASSIGN via a bare name binding, this rule
-                    # via that same literal (or a same-file one-hop alias of it) being
-                    # written into / read as a default for `os.environ`. Neither shape,
-                    # on its own, proves the value ever leaves the process: actual
-                    # credential exfiltration (the `cred_exfil_signal` escalation two
-                    # arms below, `ENV_EXFIL_FLOW`, `_has_same_line`/`_has_cross`'s
-                    # cred-path-plus-network-sink co-occurrence at :5500-5520) is
-                    # computed from the raw file blob by an ENTIRELY SEPARATE code path
-                    # that does not key off this rule name or this routing arm at all
-                    # — so a real secret-to-network-sink flow hiding in a test-fixture-
-                    # named file is still caught, unaffected by this exemption. The one
-                    # residual this shares with ASSIGN, already accepted by Dave's D2
-                    # ruling: an attacker could name a real payload file `test_x.py` to
-                    # dodge BOTH rules' FAIL — not a new evasion this task introduces,
-                    # the identical one B-893 already ruled acceptable for the ASSIGN
-                    # shape. The one difference measured and judged immaterial: an
-                    # env-write, unlike a bare assignment, mutates process-wide
-                    # `os.environ` if the module is actually imported/executed — but
-                    # this scanner is purely static (it never imports or executes
-                    # skill code), so that distinction has no bearing on THIS check's
-                    # own detection surface; it would only matter to a downstream
-                    # dynamic analysis, which does not exist here.
+                    # Round 1 (7a5b272a): gave `HARDCODED_PROVIDER_SECRET` the SAME
+                    # bare `_TEST_FIXTURE_BASENAME_RE` carve-out B-893 already gives its
+                    # sibling `HARDCODED_PROVIDER_SECRET_ASSIGN`, on the claimed grounds
+                    # that real exfiltration detection is an "entirely separate code
+                    # path" unaffected by this routing arm. RETRACTED by independent
+                    # C-135 review the same cycle: that claim is true for ASSIGN's bare
+                    # name-binding shape, but FALSE for this env-entangled rule —
+                    # `ENV_EXFIL_FLOW` is WARN-only everywhere, `CRED_EXFIL_FLOW`'s
+                    # sources are credential FILE paths only (never env vars), and
+                    # `cred_exfil_signal`'s blob regex never matches a bare
+                    # `os.environ[...]` reference. This rule's own generic crit/FAIL
+                    # fallthrough was the ONLY detector covering "a secret is placed in
+                    # os.environ, then exfiltrated" — a bare basename exemption handed
+                    # an attacker a free CRITICAL bypass for that exact shape merely by
+                    # naming the payload file `conftest.py`.
                     #
-                    # C-135 adversarial-review correction on the paragraph above (found
-                    # BEFORE this task shipped, same review cycle): the claim that "actual
-                    # credential exfiltration ... is computed by an ENTIRELY SEPARATE code
-                    # path" is only true for the ASSIGN rule's own bare-name-binding shape —
-                    # for THIS rule it was FALSE. `ENV_EXFIL_FLOW` is WARN-only everywhere
-                    # (see `_AST_NEVER_FAIL_RULES` above), `CRED_EXFIL_FLOW`'s sources are
-                    # credential FILE paths only (`.aws/credentials`, `.ssh/id_*`, ... —
-                    # explicitly NOT env vars), and `cred_exfil_signal`'s blob regex
-                    # (`_has_same_line`/`_has_cross`, `_CRED_RE`) never matches a bare
-                    # `os.environ[...]` reference either. So THIS rule's own generic
-                    # crit/FAIL fallthrough was the ONLY detector covering "a secret is
-                    # placed in os.environ, then exfiltrated" — and the basename-only
-                    # exemption above handed an attacker a free CRITICAL bypass for that
-                    # exact shape merely by naming the payload file `conftest.py`.
+                    # Round 2 (92a8df05): narrowed the exemption to additionally require
+                    # `not _EXFIL_RE.search(src)` — the same shared curl/wget/nc/
+                    # `requests?\.post`/`fetch(`/base64/known-host token scan used
+                    # elsewhere in this module for "does this file look like it reaches
+                    # a network sink at all". RETRACTED by a second independent review:
+                    # a file-wide TEXT scan cannot tell "this value reaches a sink" from
+                    # "this file merely CONTAINS an unrelated sink-shaped token anywhere"
+                    # — a real env-write-only fixture that also happens to mention
+                    # `requests.post` in a docstring, a comment, or an unrelated helper
+                    # would wrongly lose the exemption (a false FAIL — the opposite
+                    # failure mode from round 1, but still unsound), while a genuinely
+                    # laundered flow one indirection hop away from any such token would
+                    # still slip through it (the false PASS round 1 already had). Round
+                    # 2 was a vocabulary patch on the SAME gate, not a structural fix.
                     #
-                    # Fix: the exemption now additionally requires that this SAME file
-                    # (`src` — the AST loop's own per-file source text, not the whole
-                    # skill's cross-file blob) contain no exfil-shaped network-sink token
-                    # at all, checked with `_EXFIL_RE` — the SAME shared curl/wget/nc/
-                    # `requests?\.post`/`fetch(`/base64/known-paste-and-tunnel-host
-                    # alternation already used to spot "a value reaches a network call" for
-                    # `_has_same_line`/`_has_cross`/`_openclaw_cred_store_exfil_hit` above.
-                    # This is deliberately NOT full taint tracking (same "conservative,
-                    # file-wide, good enough" standard those callers already accept) — a
-                    # genuine test fixture that only ever writes the mock value into
-                    # `os.environ` for its own process and never sends it anywhere has NO
-                    # exfil-shaped token in its own source at all, so it is unaffected and
-                    # still gets the exemption; a file that ALSO ships a `requests.post(...)`
-                    # (or curl/wget/fetch/nc/base64/...) call — regardless of whether that
-                    # call is provably wired to THIS value — no longer qualifies, and falls
-                    # through unchanged to the generic crit/FAIL path below, exactly as if
-                    # its basename had never matched `_TEST_FIXTURE_BASENAME_RE` at all.
-                    # Widening this later to real per-value taint (rather than "any exfil
-                    # token anywhere in the file") would let a fixture with an UNRELATED,
-                    # genuinely disconnected `requests.post` call back into the exemption —
-                    # a possible future refinement, not attempted here: false negatives on
-                    # the attack this rule exists to catch are worse than a rare, over-broad
-                    # false CRIT on a test fixture that happens to also make network calls,
-                    # and a taut per-value flow proof is exactly the complexity this
-                    # module's sibling helpers (see `_openclaw_cred_store_exfil_hit`'s own
-                    # comment on two retracted broader attempts) have repeatedly rejected in
-                    # favor of narrow, explainable, conservative signals.
-                    if (
-                        af.rule == "HARDCODED_PROVIDER_SECRET"
-                        and _TEST_FIXTURE_BASENAME_RE.match(Path(relpath).name)
-                        and not _EXFIL_RE.search(src)
+                    # Round 3 (this arm): replaces the token scan with an actual
+                    # per-file, per-finding-line reachability PROOF —
+                    # `skillast.hardcoded_env_secret_is_inert` (G1-G4, see that
+                    # function's own module note for the full structure) — computed
+                    # once per file (`_b998_inert`, cached above the `for af in _afs`
+                    # loop) and gated on THIS file's `_afs` list containing no OTHER
+                    # rule's finding at all (G2 — enforced here, not in skillast.py,
+                    # since only this loop sees the full per-file finding list).
+                    # Disclosed, deliberately out-of-scope residuals (all bounded the
+                    # same way: a miss here only costs the WARN-vs-FAIL distinction,
+                    # since `ENV_EXFIL_FLOW` independently WARNs on a plain
+                    # env-read-to-network flow regardless of this exemption): a
+                    # cross-file read (a sibling module importing the tainted name); a
+                    # wrapper library not on the G3 capability blocklist; a
+                    # string-built accessor name. Same standing residual as both prior
+                    # rounds and B-893's own ruling: an attacker can still name a real
+                    # payload file `test_x.py` to reach THIS gate at all — G0, the
+                    # basename check, is unchanged and deliberately not this task's
+                    # concern (Dave's D2 ruling already accepted that trade for ASSIGN).
+                    # Deliberately does NOT add `HARDCODED_PROVIDER_SECRET` to
+                    # `_AST_NEVER_FAIL_RULES`: a file whose proof fails (`_b998_inert`
+                    # is `False`) falls through unchanged to the untouched generic
+                    # crit/FAIL path below (it is NOT `continue`d) — including every
+                    # non-fixture-basename file, which never even calls the proof.
+                    if af.rule == "HARDCODED_PROVIDER_SECRET" and _TEST_FIXTURE_BASENAME_RE.match(
+                        Path(relpath).name
                     ):
-                        hardcoded_secret_fixture_note.append(
-                            f"{name}: {af.reason} ({relpath}:{af.lineno}) — a "
-                            "test-fixture-named file, carried as evidence only, "
-                            "never counted toward the verdict"
-                        )
-                        continue
+                        if _b998_inert is None:
+                            _b998_inert = _b998_env_secret_stays_local(src, _afs)
+                        if _b998_inert:
+                            hardcoded_secret_fixture_note.append(
+                                f"{name}: {af.reason} ({relpath}:{af.lineno}) — a "
+                                "test-fixture-named file, carried as evidence only, "
+                                "never counted toward the verdict"
+                            )
+                            continue
+                        # else: the proof could not clear this file (G2/G3/G4 failed) --
+                        # fall through unchanged to the generic crit/FAIL path below.
                     # analyze_python's own per-file cap disclosure —
                     # "N more findings suppressed" — is metadata about the scan, not a
                     # verdict about the skill. Routed here, BEFORE the generic crit/

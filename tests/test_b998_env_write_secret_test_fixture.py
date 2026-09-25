@@ -47,22 +47,30 @@ is still caught, unaffected by this exemption. The residual this shares with ASS
 (already accepted by Dave's D2 ruling): an attacker could name a real payload file
 `test_x.py` to dodge BOTH rules' FAIL — not a new evasion this task introduces.
 
-C-135 CORRECTION (found before this task shipped, same review cycle): the
-risk-equivalence paragraph above was WRONG for this rule. `ENV_EXFIL_FLOW` is
-WARN-only everywhere, `CRED_EXFIL_FLOW`'s sources are credential FILE paths only
-(never env vars), and `cred_exfil_signal`'s blob regex never matches a bare
-`os.environ[...]` reference — so this rule's own generic crit/FAIL fallthrough was
-the ONLY detector covering "a secret is placed in os.environ, then exfiltrated", and
-the basename-only exemption handed an attacker a free CRITICAL bypass for that exact
-shape by naming the payload file `conftest.py`. The exemption above now additionally
-requires that the SAME file contain no exfil-shaped network-sink token at all
-(`_EXFIL_RE` — the shared curl/wget/nc/requests-dot-post/`fetch(`/base64/... token
-set this module already uses elsewhere to spot "a value reaches a network call"): a
-test fixture that only writes the mock value into `os.environ` still gets the
-exemption; one that ALSO ships an exfil-shaped call anywhere in the same file no
-longer does, and falls straight through to the untouched generic crit/FAIL path. See
-the tests below under "C-135 correction" and the in-source comment at the
-`checks/_vet.py` arm for the full reasoning.
+ROUND 3 (current state — Dave's ruling: build a real positive proof, not another
+token-vocabulary patch): both rounds above were retracted by independent review.
+Round 1's "entirely separate code path" risk-equivalence claim was FALSE for this
+rule (`ENV_EXFIL_FLOW` is WARN-only everywhere, `CRED_EXFIL_FLOW`'s sources are
+credential FILE paths only, `cred_exfil_signal`'s blob regex never matches a bare
+`os.environ[...]` reference — so this rule's own generic crit/FAIL fallthrough was the
+ONLY detector covering this shape at all). Round 2's `_EXFIL_RE` file-wide TEXT-scan
+narrowing fixed that hole but introduced a new, opposite one: a genuine env-write-only
+fixture that merely MENTIONS a sink-shaped token anywhere in the file (a comment, a
+docstring, an unrelated helper) would wrongly lose the exemption, while a laundered
+flow one indirection hop away from any such token could still slip through — a
+vocabulary patch on the same unsound gate, not a structural fix.
+
+Round 3 replaces the token scan with `skillast.hardcoded_env_secret_is_inert`, a real
+per-file, per-finding-line reachability proof (G1: every finding line is a
+structurally recognized, literal-keyed write site; G2: no OTHER AST rule fired on this
+file, enforced by `_b998_env_secret_stays_local` in checks/_vet.py; G3: the file
+carries none of a small dynamic-execution/introspection capability blocklist; G4: every
+read of a written key, or any other occurrence of `os.environ` itself, traces to a
+demonstrably harmless outcome — never a function call argument, a `return`/`yield`, or
+a module/class-level binding). See that function's own module note in skillast.py, and
+the in-source comment at the `checks/_vet.py` call site, for the full structure and
+retraction history. The tests below under "round 3" exercise the new adversarial
+must-refuse/must-still-pass shapes G4 introduces.
 
 Secret-shaped test literals are split across adjacent string-literal boundaries
 (Golden Rule #3) — Python folds adjacent string literals into a single ast.Constant
@@ -160,19 +168,23 @@ def test_vet_env_write_secret_in_non_fixture_file_still_critical_fail():
     assert f.severity == CRITICAL
 
 
-def test_vet_name_indirection_test_fixture_shape_is_clean():
-    """The B-910 one-hop-indirection variant of the same fixture-basename shape
-    (renamed from bad_* to clean_* by this task) — also covered directly in
-    tests/test_b910_env_entangled_name_indirection.py's own updated test, asserted
-    again here so this file stands on its own."""
+def test_vet_name_indirection_test_fixture_shape_still_fails():
+    """The B-910 one-hop-indirection variant of the same fixture-basename shape —
+    also covered directly in tests/test_b910_env_entangled_name_indirection.py's own
+    test, asserted again here so this file stands on its own. This fixture's
+    `search()` function RETURNS the written value, which round 3's G4 reachability
+    proof (hardcoded_env_secret_is_inert) treats as an unconditional escape — a
+    `return` always refuses — so the test-fixture exemption is never reached and this
+    must still FAIL/CRITICAL, unlike the write-only sibling fixtures below."""
     skill_dir = (
         FIXTURES
-        / "clean_b13_env_overwrite_name_indirection_test_fixture_file"
+        / "bad_b13_env_overwrite_name_indirection_test_fixture_file"
         / "skills"
         / "s"
     )
     f = vet_skill(skill_dir)
-    assert f.status == PASS, f"expected PASS; got {f.status}: {f.detail}"
+    assert f.status == FAIL, f"expected FAIL; got {f.status}: {f.detail}"
+    assert f.severity == CRITICAL
 
 
 def test_vet_env_overwrite_fixture_still_critical_fail():
@@ -187,24 +199,22 @@ def test_vet_env_overwrite_fixture_still_critical_fail():
 
 
 # ---------------------------------------------------------------------------
-# C-135 correction: the exemption above is unsafe unconditionally on file
-# content — it must not fire when the SAME file also ships an exfil-shaped
-# network-sink call. See the checks/_vet.py B-998 arm's own comment for the
-# full reasoning (ENV_EXFIL_FLOW is WARN-only everywhere, CRED_EXFIL_FLOW's
-# sources are credential FILE paths only, and cred_exfil_signal's blob regex
-# never matches a bare os.environ[...] reference — so this rule's own
-# generic crit/FAIL fallthrough was the ONLY detector ever covering this
-# shape, and the original unconditional basename exemption gave a free
-# CRITICAL bypass to any payload file merely named conftest.py).
+# The exemption must not fire when the SAME file also ships a real exfil sink.
+# Round 1/round-2 caught this via a bare basename check / a file-wide token scan
+# (both retracted — see the module docstring's "ROUND 3" paragraph). Round 3's G4
+# reachability proof catches it structurally instead: the written value flows
+# into `requests.post(...)`'s keyword argument, which is a Call boundary the
+# proof never treats as safe, so it refuses regardless of file basename.
 # ---------------------------------------------------------------------------
 
 
 def test_vet_env_write_secret_with_exfil_sink_in_conftest_stays_critical_fail():
-    """The exact C-135 adversarial-review repro: tests/conftest.py both writes the
-    mock provider-shaped literal into os.environ AND ships a real requests.post(...)
-    call that reads that same env var back out and sends it to an external host.
-    Before this fix, the basename-only exemption wrongly demoted this to WARN/HIGH;
-    it must stay FAIL/CRITICAL regardless of the conftest.py basename."""
+    """The C-135 adversarial-review repro that broke round 1: tests/conftest.py both
+    writes the mock provider-shaped literal into os.environ AND ships a real
+    requests.post(...) call that reads that same env var back out and sends it to an
+    external host. Must stay FAIL/CRITICAL regardless of the conftest.py basename —
+    round 3's G4 proof refuses the moment the value reaches the requests.post(...)
+    call's keyword argument."""
     skill_dir = FIXTURES / "bad_b13_env_write_secret_conftest_with_exfil" / "skills" / "s"
     f = vet_skill(skill_dir)
     assert f.status == FAIL, f"expected FAIL; got {f.status}: {f.detail}"
