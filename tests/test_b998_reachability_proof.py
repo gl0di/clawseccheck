@@ -548,3 +548,190 @@ def test_vet_original_no_sink_fixture_still_passes_unchanged():
     assert any("MOCK_OPENAI_KEY" in e for e in (f.evidence or [])), (
         f"the test-fixture secret must still be disclosed as evidence: {f.evidence}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 7: independent C-135 review found the round-5/6 object-identity gate's
+# own polarity was backwards for a security gate -- `_g3_looks_like_os_ref`
+# (skillast.py) treated ANY expression shape it didn't specifically recognize
+# as an os-rooted Name/Attribute chain as "definitely not os" and granted the
+# exemption, which is fail-OPEN. A real getattr(<os ref>, "system")-equivalent
+# RCE primitive reached through exactly one hop of indirection -- a helper
+# call returning os, a subscript into a container holding os, or an attribute
+# assigned to os elsewhere -- was silently exempted instead of refused.
+# `_g3_definitely_not_os_ref` replaces it with a narrow, fail-CLOSED allowlist
+# (see its docstring): only a bare Name confirmed not to be a tracked os alias,
+# or a literal display/constant (Dict/List/Set/Tuple/Constant) evaluated
+# directly at the call site, is positively cleared -- everything else refuses.
+# ---------------------------------------------------------------------------
+
+
+def test_refuses_reflective_getattr_via_helper_call_returning_os_round_7_bypass_repro():
+    """The exact repro from the round-7 C-135 finding: a helper function that simply
+    `return os`s, reflected on through getattr. The object argument is an ast.Call
+    (`_get_os()`), not a Name/Attribute chain -- the old gate treated any
+    unrecognized shape as "definitely not os" and wrongly exempted this, silently
+    downgrading a working os.system-equivalent RCE primitive to "proven inert"."""
+    src = (
+        "import os\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "def _get_os():\n"
+        "    return os\n"
+        "def unrelated_helper(cmd):\n"
+        "    fn = getattr(_get_os(), 'system')\n"
+        "    return fn(cmd)\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (False, "capability-blocklist")
+
+
+def test_refuses_reflective_getattr_via_list_subscript_holding_os_round_7_bypass_repro():
+    """A list-subscript hop (`_stash[0]` where `_stash = [os]`): the object argument
+    is an ast.Subscript, which reads a VALUE the container holds -- unlike a bare
+    literal display, the value read back could be (and here, is) the os module."""
+    src = (
+        "import os\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "_stash = [os]\n"
+        "def _run():\n"
+        "    fn = getattr(_stash[0], 'popen')\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (False, "capability-blocklist")
+
+
+def test_refuses_reflective_getattr_via_dict_subscript_holding_os_round_7_bypass_repro():
+    """Same shape via a dict-subscript hop (`d['x']` where `d = {'x': os}`)."""
+    src = (
+        "import os\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "d = {'x': os}\n"
+        "def _run():\n"
+        "    fn = getattr(d['x'], 'fork')\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (False, "capability-blocklist")
+
+
+def test_refuses_reflective_getattr_via_self_attribute_assigned_to_os_round_7_bypass_repro():
+    """`self.osmod = os` assigned in __init__, reflected on later via `self.osmod`.
+    The object argument is an ast.Attribute chain rooted at `self` -- `self` is never
+    a tracked os-import alias, so the OLD root-name-only check wrongly cleared this
+    too (an Attribute chain rooted at a non-os Name still isn't proof the ATTRIBUTE
+    itself isn't os, since this lightweight pass has no cross-statement attribute
+    data-flow). The new gate never positively clears any Attribute chain."""
+    src = (
+        "import os\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "class C:\n"
+        "    def __init__(self):\n"
+        "        self.osmod = os\n"
+        "    def run(self):\n"
+        "        fn = getattr(self.osmod, 'system')\n"
+        "        return fn\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (False, "capability-blocklist")
+
+
+def test_refuses_reflective_getattr_on_bare_os_name_still_after_round_7_fix():
+    """Re-confirms the ORIGINAL, always-correct case is unaffected by the round-7
+    polarity flip: `getattr(os, 'system')`, a bare Name that IS a tracked os alias,
+    must still refuse."""
+    src = (
+        "import os\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "def _run():\n"
+        "    fn = getattr(os, 'system')\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (False, "capability-blocklist")
+
+
+def test_refuses_reflective_getattr_via_os_alias_still_after_round_7_fix():
+    """Re-confirms the os-ALIAS case is unaffected: `import os as o` followed by
+    `getattr(o, 'execv')` must still refuse."""
+    src = (
+        "import os\n"
+        "import os as o\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "def _run():\n"
+        "    fn = getattr(o, 'execv')\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (False, "capability-blocklist")
+
+
+def test_still_grants_exemption_for_unrelated_object_via_name_after_round_7_fix():
+    """Re-confirms round 5's own FP fix is NOT reintroduced by the round-7 polarity
+    flip: `r = object(); getattr(r, 'executive_summary')` -- a bare Name ('r') that is
+    positively confirmed to NOT be a tracked os alias -- must stay exempted."""
+    src = (
+        "import os\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "def _run():\n"
+        "    r = object()\n"
+        "    fn = getattr(r, 'executive_summary')\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (True, "")
+
+
+def test_still_grants_exemption_for_local_class_instance_and_dict_literal_after_round_7_fix():
+    """Re-confirms round 6's own FP fix is NOT reintroduced by the round-7 polarity
+    flip: `r = SomeLocalClass(); getattr(r, 'popen')` (bare Name, not a tracked os
+    alias) and `getattr({}, 'system')` (a Dict literal evaluated directly at the call
+    site, provably not os regardless of contents -- a dict instance can never itself
+    expose a `system` attribute) must both stay exempted."""
+    src = (
+        "import os\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "class SomeLocalClass:\n"
+        "    pass\n"
+        "def _run():\n"
+        "    r = SomeLocalClass()\n"
+        "    fn = getattr(r, 'popen')\n"
+        "    fn2 = getattr({}, 'system')\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (True, "")

@@ -446,22 +446,54 @@ def _g3_reflection_target(f: ast.AST, call: ast.Call):
     return None
 
 
-def _g3_looks_like_os_ref(node: ast.AST, os_aliases: set) -> bool:
-    """True if *node* syntactically looks like a reference to the os module: a
-    bare Name bound to a known os-alias, or an attribute-access chain rooted
-    at one (e.g. `os.path`). Used to scope BOTH the exact-set (system/popen/
-    fork/...) and the exec*/spawn* prefix members of the getattr/setattr/
-    delattr reflection rule (below) to calls that actually reflect on os, so
-    neither `getattr(<some unrelated object>, "system")` nor
-    `getattr(<some unrelated object>, "executive_summary")` trips G3 just
-    because the string happens to match -- there is no actual os reachability
-    when the reflected-on object provably isn't os. Any other object shape --
-    a literal, a local variable of unrelated/unknown origin, a different
-    import -- returns False and the whole reflection rule is skipped for it."""
+_G3_LITERAL_DISPLAY_TYPES = (ast.Dict, ast.List, ast.Set, ast.Tuple, ast.Constant)
+
+
+def _g3_definitely_not_os_ref(node: ast.AST, os_aliases: set) -> bool:
+    """True ONLY when *node* can be positively proven to never be (or expose an
+    os-danger attribute belonging to) the os module -- a narrow, fail-CLOSED
+    allowlist. This is the inverse of the retired _g3_looks_like_os_ref, whose
+    polarity was backwards for a security gate: it defaulted to "not os" for
+    ANY expression shape it didn't specifically recognize as an os-rooted
+    Name/Attribute chain, which is fail-OPEN. That let a real
+    getattr(<os ref>, "system")-equivalent RCE primitive slip through
+    whenever the os reference was reached via one hop of indirection: a
+    helper call returning os (`_get_os()`), a subscript into a container
+    holding os (`_stash[0]`, `d['x']`), or an attribute assigned to os
+    elsewhere (`self.osmod = os`) -- none of these are a bare Name or an
+    Attribute chain rooted at a *tracked* os alias, so the old helper waved
+    all of them through as "definitely not os".
+
+    Exactly two shapes are positively cleared here:
+
+      1. A bare Name that is NOT a tracked os-import alias. A Name can only
+         ever be bound to the os module via `import os [as X]` (tracked in
+         *os_aliases*) or via a plain assignment (`x = os`) that this
+         lightweight single-pass AST helper does not trace across statements
+         -- but every existing accepted false-positive fix for this gate
+         (round 5/6) uses exactly the bare-Name shape (`r = object()`;
+         `getattr(r, ...)`), so bare-Name exemption must stay to avoid
+         reopening those.
+      2. A literal display or constant (Dict/List/Set/Tuple/Constant)
+         evaluated directly at the call site, e.g. `getattr({}, "system")`.
+         These are provably safe regardless of their CONTENTS: a
+         dict/list/set/tuple/scalar-constant instance can never itself expose
+         a system/popen/fork/exec*/spawn*-shaped attribute. This is NOT the
+         same shape as a Subscript (`d['x']`) -- a subscript reads a VALUE the
+         container holds (which could be os), whereas a bare literal display
+         attributes to the freshly-constructed container/constant instance
+         itself, never to something stashed inside it.
+
+    Every other expression shape -- an Attribute chain (even one not rooted
+    at a tracked os alias, since e.g. `self.osmod` can be assigned to os
+    elsewhere and this pass has no cross-statement attribute data-flow), a
+    Call, a Subscript, a BinOp, an IfExp, a comprehension result, a walrus,
+    or anything else -- is NOT positively cleared, so the caller must treat
+    the reflection as possibly reaching os and refuse."""
     if isinstance(node, ast.Name):
-        return node.id in os_aliases
-    if isinstance(node, ast.Attribute):
-        return _g3_looks_like_os_ref(node.value, os_aliases)
+        return node.id not in os_aliases
+    if isinstance(node, _G3_LITERAL_DISPLAY_TYPES):
+        return True
     return False
 
 
@@ -528,12 +560,22 @@ def _g3_blocklist_hit(tree: ast.AST) -> bool:
                     # attrgetter/methodcaller have no object at the call site
                     # (they return a callable applied later), so
                     # _g3_reflection_target returns None for them and they keep
-                    # tripping unconditionally, fail-closed -- only a
-                    # getattr/setattr/delattr call whose object argument
-                    # syntactically resolves to something other than os skips it.
+                    # tripping unconditionally, fail-closed.
+                    #
+                    # FAIL-CLOSED, not fail-open: only a getattr/setattr/delattr
+                    # call whose object argument is POSITIVELY PROVEN to not be
+                    # (or expose) os -- per _g3_definitely_not_os_ref -- skips this.
+                    # Any object shape that helper can't positively clear (a Call
+                    # like `_get_os()`, a Subscript like `_stash[0]`/`d['x']`, an
+                    # Attribute chain like `self.osmod` that was assigned to os
+                    # elsewhere, ...) refuses instead of exempting -- a round-6-era
+                    # version of this gate treated "not specifically recognized as
+                    # os" as "definitely not os", which silently exempted every one
+                    # of those reachable-via-one-hop-of-indirection shapes (a real,
+                    # independently confirmed security-bypass regression).
                     if _g3_os_danger_attr(attr_arg.value):
                         target = _g3_reflection_target(node.func, node)
-                        if target is None or _g3_looks_like_os_ref(target, os_aliases):
+                        if target is None or not _g3_definitely_not_os_ref(target, os_aliases):
                             return True
                         # Exempted: record it so the blanket string scan below
                         # doesn't independently re-trip on this same node.
