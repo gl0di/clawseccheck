@@ -1572,7 +1572,16 @@ _B63_SECRECY_RE = re.compile(
         # Russian
         r"|не\s+(?:сообщай|говори|показывай|уведомляй|информируй)\s+(?:пользовател[юя]|юзер[ау])"
         r"|скрой\s+(?:от\s+(?:пользовател[яю]|юзер[ау])|это|результат|действи[ея])"
-        r"|(?:тайно|скрытно|незаметно)\s+(?:выполни|запусти|отправь|удали|установи|скачай)"
+        # B-968: added передай/скопируй — English's own equivalent compound (above) covers
+        # ~20 verbs (execute/run/.../forward/transmit/.../copy/.../deliver/...), but this
+        # Russian compound had only 6, missing a send-class verb ("передай" — hand over/pass,
+        # separate from "отправь" already present) and copy entirely. Without one of these,
+        # "тайно передай ..." / "незаметно скопируй ..." never matched Signal A at all — not
+        # this constant's own bug, but adversarial review for B-968 found it while
+        # constructing genuine attack examples the fixed anchor (below) is supposed to still
+        # catch, so closed here alongside it rather than left as an undiagnosed gap.
+        r"|(?:тайно|скрытно|незаметно)\s+(?:выполни|запусти|отправь|удали|установи|скачай"
+        r"|передай|скопируй)"
         r")"
     ),
     re.IGNORECASE,
@@ -1682,9 +1691,61 @@ _B63_FAIL_ANCHOR_RE = re.compile(
         r"(?:endpoint|server|host|url|api|service|address|machine|drop|bucket|site|webhook)"
         r"|(?:attacker|adversar\w*)(?:'?s)?\s+(?:server|endpoint|host|inbox|site|drop|machine)"
         r"|exfiltrat\w*|\bexfil\b"
-        # Russian: overseer-concealment / covert / exfil
-        r"|(?:от\s+)?(?:пользовател|юзер)|тайно|скрытно|незаметно"
+        # B-968: тайно/скрытно/незаметно REMOVED from this bucket. They were listed
+        # here as bare, unconditioned anchors — any Signal-A action co-located with
+        # one of them anchored a FAIL on its own, no further corroborator needed. But
+        # these three are Russian's equivalent of English "silently" (a bare
+        # MANNER adverb: "do it without noise/without anyone noticing"), not of
+        # English's (2) covertness-markers tier above (invisible/covert/stealth/
+        # clandestine/surreptitious — words whose whole point is DECEPTIVE
+        # concealment, not merely quiet execution). "silently" itself is deliberately
+        # ABSENT from this anchor regex for exactly that reason (B-177 above: a bare
+        # verbosity idiom is ambiguous with benign quiet execution, e.g. "silently
+        # install the deps" / "тайно обнови кэш, чтобы не мешать пользователю" — the
+        # ticket's own confirmed repro, "тайно удали кэш ... никто не заметит лишнего
+        # места на диске", is exactly this benign shape). Leaving тайно/скрытно/
+        # незаметно in THIS regex while "silently" was never here was the asymmetry:
+        # the Russian branch self-anchored on bare verbosity where the English branch
+        # never did. Fixed by deleting them, restoring the same "bare manner-adverb
+        # never self-anchors" structure English already has — a genuine Russian
+        # secrecy directive still anchors via the OTHER families below (overseer-
+        # concealment naming a person, exfil-to-external-destination prose) or via
+        # the separate secret-term+access anchor in `_b63_scan`, exactly like its
+        # English "silently ..." counterpart relies on those same families rather
+        # than on "silently" itself. No unambiguous single-word Russian translation of
+        # covert/stealth/clandestine/surreptitious was added in its place: Russian's
+        # closest vocabulary for those concepts shares a root with тайно/скрытно
+        # (тайный, скрытый) — "hidden" is itself deliberately excluded from this
+        # English bucket too (see (2) above), for the identical reason "скрытая
+        # папка"/"скрытый файл" ("hidden folder"/"hidden file") are ordinary,
+        # security-irrelevant Russian IT vocabulary — so no such word could be added
+        # here without reopening the same over-broad-anchor problem this fix closes.
+        # See tests/test_b63.py for both directions (benign idiom -> WARN; genuine
+        # exfil/overseer-concealment directive using this same vocabulary -> still
+        # FAIL via an untouched anchor family, or via the (4) malicious-tooling-noun
+        # anchor added below).
+        #
+        # Russian: overseer-concealment / exfil
+        r"|(?:от\s+)?(?:пользовател|юзер)"
         r"|(?:внешн|удалённ|удаленн)\w*\s+(?:сервер|адрес|хост|эндпоинт)|эксфильтр\w*"
+        # (4) B-968 adversarial follow-up: "тайно установи бэкдор" ("secretly install a
+        # backdoor") — a bare covertness adverb + a malicious-TOOLING object, with no
+        # person/exfil-destination/secret-term in the window — has no anchor in any
+        # family above (same as English's own, already-accepted "silently install a
+        # backdoor", which is WARN-only today too — see tests/test_b63.py). Rather than
+        # leave a real deploy-malware directive one manner-adverb away from a FAIL,
+        # named-malware-family nouns get their own anchor, applied EQUALLY to English
+        # and Russian so this does not create a fresh asymmetry in the other direction.
+        # Deliberately a NOUN list, not a verb or a generic "malicious" adjective: a
+        # backdoor/rootkit/keylogger has no ordinary benign reading as the direct
+        # object of an install/deploy/plant directive (unlike "hidden"/"secret", which
+        # collide with routine IT vocabulary — see (2)'s own note above) — a defensive
+        # security-tool description ("scans for backdoor processes") does not pair one
+        # of these nouns with a co-located Signal-A secrecy phrase + Signal-B action in
+        # the first place, so this stays gated behind both of those, same as every
+        # other anchor family here.
+        r"|\b(?:backdoor|rootkit|keylogger|ransomware|trojan)s?\b"
+        r"|бэкдор\w*|руткит\w*|кейлогер\w*|кейлоггер\w*|вымогател\w*|троян\w*"
         r")"
     ),
     re.IGNORECASE,
@@ -1781,7 +1842,13 @@ _B63_SECRET_ACCESS_RE = re.compile(
     fold_pattern(
         r"\b(?:read|cat|less|head|tail|grep|jq|dump|grab|extract|steal|harvest|collect"
         r"|fetch|download|load|pull|open|copy|exfiltrat\w*|send|forward|transmit|upload|leak)\w*"
-        r"|прочит\w*|чита\w*|скача\w*|загруз\w*|извлек\w*|собер\w*|укра\w*"
+        # B-968: added копир\w* (copy) — English's list above has "copy" but this Russian
+        # list had no equivalent, so a secret term "accessed" only via copying (e.g.
+        # "скопируй SSH-ключи" — copy the SSH keys) never satisfied the secret-term+access
+        # anchor even when a real secret term co-occurred. Also переда\w* (hand over/send,
+        # already the verb class `_B63_SEND_VERB_RE` recognizes as an outbound send — added
+        # here too so the read-then-access anchor and the send-verb anchor agree on this verb).
+        r"|прочит\w*|чита\w*|скача\w*|загруз\w*|извлек\w*|собер\w*|укра\w*|копир\w*|переда\w*"
     ),
     re.IGNORECASE,
 )
@@ -1818,7 +1885,11 @@ _B63_SEND_VERB_RE = re.compile(
         # "piping" never matches — and, like every send verb, it only signals exfil when
         # _B63_DEST_RE (a 2nd-party/external destination) co-occurs.
         r"|\bdm\b|\bpipe\b"
-        r"|отправ\w*|переда\w*|выгруж\w*|слить|перешл\w*|слив\w*"
+        # B-968: added копир\w* — the English list above has "copy" as a recognized
+        # send-class verb (data duplicated OUT counts the same as data sent out), but
+        # this Russian list had no equivalent, so "скопируй SSH-ключи в облако" ("copy
+        # the SSH keys to the cloud") never registered as Signal B here.
+        r"|отправ\w*|переда\w*|выгруж\w*|слить|перешл\w*|слив\w*|копир\w*"
     ),
     re.IGNORECASE,
 )
