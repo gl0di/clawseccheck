@@ -1668,6 +1668,7 @@ class Loc:
             return Loc("ABS", parts, None, True)
         parts = list(self.parts)
         tail = self.tail  # a segment of only "."/"" leaves the final component as is
+        exact = self.exact
         for c in seg.split("/"):
             if c in ("", "."):
                 continue
@@ -1675,9 +1676,14 @@ class Loc:
             if c == "..":
                 if parts:
                     parts.pop()
+                else:
+                    # Climbs above what `parts` can represent (e.g. one level
+                    # above the anchor itself) -- nothing was popped, so the
+                    # result must not claim to be a confident, exact location.
+                    exact = False
             else:
                 parts.append(c)
-        return Loc(self.anchor, tuple(parts), self.sym, self.exact, tail)
+        return Loc(self.anchor, tuple(parts), self.sym, exact, tail)
 
 
 def loc_eq(a: "Loc | None", b: "Loc | None") -> str:

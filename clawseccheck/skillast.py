@@ -11245,7 +11245,10 @@ def _b917_staged_import_findings(
         return r
 
     out: list = []
-    tainted_py_write = any(w_tainted and w_loc.leaf_py for _, w_loc, w_tainted in staged)
+    tainted_py_write = any(
+        w_tainted and (w_loc.leaf_py or w_loc.tail == "module")
+        for _, w_loc, w_tainted in staged
+    )
     for node, resolved, suffixes, is_wildcard in _b917_import_sites(tree, facts):
         ln = getattr(node, "lineno", 0)
         if is_wildcard:
