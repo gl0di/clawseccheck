@@ -25,6 +25,7 @@ from ..collector import (
     LIMIT_DOMAIN_APPROVALS,
     LIMIT_DOMAIN_BOOTSTRAP,
     LIMIT_DOMAIN_CONFIG,
+    LIMIT_DOMAIN_PAIRED,
     Context,
     _safe_is_dir,  # B-913
     _safe_is_file,  # B-913
@@ -4767,7 +4768,11 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
               age), never proof of compromise.
     UNKNOWN -- devices/paired.json exists but is unreadable or not valid JSON, OR (when
               that file is absent) the device_pairing_paired state-DB table exists but
-              could not be reliably read.
+              could not be reliably read, OR (when that file is absent) no device among
+              those actually read holds high-privilege authority BUT the collector's own
+              size/row cap excluded one or more device_pairing_paired rows -- a verdict
+              built only over what WAS read cannot be trusted as a clean bill of health
+              when rows were dropped for size (see the C-135 round 2 note below).
 
     B-661: exempt from the "23 checks PASS on an unread config" audit. This check
     never reads ``ctx.config`` -- the locus is ``devices/paired.json`` under
@@ -4787,10 +4792,30 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     shape the legacy JSON envelope uses) is consulted ONLY as a fallback when that
     file is absent, so the scope/revoked-token evaluation loop below runs unmodified
     against either source.
+
+    C-135 round 2 (2026-09-26): the first version of this fallback consulted
+    ``ctx.paired_devices_sqlite`` alone -- never ``ctx.limit_hits`` -- so a device
+    row the collector excluded for exceeding its size/row cap
+    (``collector._collect_paired_devices_sqlite``'s own C-135 round-1 hardening)
+    silently read as "this device does not exist" here, downstream of the
+    collector's own honest "present but not read" disclosure. Reviewer's concrete
+    repro: an attacker who already has write access to state/openclaw.sqlite (the
+    same precondition the view-masquerade defense already treats as worth defending
+    against) pads their OWN high-scope paired device's ``tokens_json`` just over the
+    cap -- turning a correct WARN into a silent PASS, trading the collector's DoS
+    bug for a targeted evasion primitive against exactly the attacker class this
+    check exists to catch. Both verdict-by-absence branches below now consult
+    ``limit_hits_for(ctx, LIMIT_DOMAIN_PAIRED)`` (only when the SQLite fallback is
+    in play -- the legacy JSON path, when present, is unaffected by a SQLite-side
+    cap and must never be second-guessed by it) and downgrade to UNKNOWN when a row
+    was dropped, the same ``LIMIT_DOMAIN_APPROVALS``/B172 precedent this codebase
+    already uses for its own collector-cap case: "a WARN found in what WAS scanned
+    stands regardless; only a verdict built on ABSENCE degrades."
     """
     import json as _json
     import time as _time
 
+    using_sqlite_fallback = False
     paired_path = ctx.home / "devices" / "paired.json"
     if paired_path.is_file():
         try:
@@ -4838,6 +4863,7 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
         # or a migrated install with nothing paired yet) reuses the exact same PASS
         # wording the legacy "file absent" case already used, so nothing about this
         # fallback changes behavior on any install that has never used either store.
+        using_sqlite_fallback = True
         if ctx.paired_devices_sqlite_parse_error:
             return _finding(
                 "B176",
@@ -4849,6 +4875,24 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
             )
         data = ctx.paired_devices_sqlite
         if not data:
+            if limit_hits_for(ctx, LIMIT_DOMAIN_PAIRED):
+                # C-135 round 2: some rows exist but were excluded for size/count --
+                # "no paired devices to evaluate" would be a verdict built entirely
+                # on absence, over data an attacker with state-DB write access could
+                # have engineered to look empty on purpose. See this function's own
+                # docstring for the concrete evasion this closes.
+                return _finding(
+                    "B176",
+                    UNKNOWN,
+                    "device_pairing_paired exceeded the collector's size/row cap and "
+                    "no paired device could be read — cannot determine whether any "
+                    "paired device holds standing operator.admin/operator.write "
+                    "authority.",
+                    "Investigate why device_pairing_paired holds an oversized row "
+                    "(scopes/approvedScopes/tokens past the size cap) or more rows "
+                    "than the collector's cap, then re-run the audit.",
+                    engine_degraded=True,
+                )
             return _finding(
                 "B176",
                 PASS,
@@ -4905,6 +4949,27 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
         high_scope_ev.append(_redact(f"{base} lastSeenAgeDays={age_desc}"))
 
     if not high_scope_ev:
+        if using_sqlite_fallback and limit_hits_for(ctx, LIMIT_DOMAIN_PAIRED):
+            # C-135 round 2: none of the devices that WERE read hold high-privilege
+            # authority, but the collector's own size/row cap excluded at least one
+            # device_pairing_paired row -- the same "a WARN found in what WAS
+            # scanned stands regardless; only a verdict built on absence degrades"
+            # rule this function's docstring cites (LIMIT_DOMAIN_APPROVALS/B172).
+            # An attacker who can write to state/openclaw.sqlite could otherwise pad
+            # their own high-scope device's tokens_json past the cap to manufacture
+            # exactly this "nothing found" shape on purpose.
+            return _finding(
+                "B176",
+                UNKNOWN,
+                f"{len(data)} paired device(s) were read and none hold operator.admin/"
+                "operator.write authority, but device_pairing_paired exceeded the "
+                "collector's size/row cap — some paired-device rows were never read, "
+                "so a clean bill of health cannot be given.",
+                "Investigate why device_pairing_paired holds an oversized row "
+                "(scopes/approvedScopes/tokens past the size cap) or more rows than "
+                "the collector's cap, then re-run the audit.",
+                engine_degraded=True,
+            )
         return _finding(
             "B176",
             PASS,

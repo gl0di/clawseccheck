@@ -370,6 +370,7 @@ LIMIT_DOMAIN_CONFIG = "config"        # openclaw.json itself
 LIMIT_DOMAIN_BOOTSTRAP = "bootstrap"  # AGENTS.md / SOUL.md & friends
 LIMIT_DOMAIN_AGENTS = "agents"        # subagent_runs disk-disclosure (B-296 / B18)
 LIMIT_DOMAIN_AUDIT = "audit"          # audit_events runtime trail (F-134 / B191)
+LIMIT_DOMAIN_PAIRED = "paired"        # migrated paired-device store size/row caps (B176)
 
 LIMIT_DOMAINS = (
     LIMIT_DOMAIN_SKILL,
@@ -381,6 +382,7 @@ LIMIT_DOMAINS = (
     LIMIT_DOMAIN_BOOTSTRAP,
     LIMIT_DOMAIN_AGENTS,
     LIMIT_DOMAIN_AUDIT,
+    LIMIT_DOMAIN_PAIRED,
 )
 
 
@@ -5737,10 +5739,19 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     means present but not reliably readable (a schema this reader does not
     recognise, a locked file, or a masquerading view) -- the caller must report
     UNKNOWN for that case, never a fake PASS. An oversized/truncated row is a
-    THIRD, narrower case (disclosed via ``ctx.errors``, not a table-wide parse
-    error): the other, well-formed rows are still evaluated normally, exactly as
-    ``config_machine_state_unparsed`` does not block reading the OTHER allowlisted
-    keys.
+    THIRD, narrower case: the other, well-formed rows are still evaluated
+    normally, exactly as ``config_machine_state_unparsed`` does not block reading
+    the OTHER allowlisted keys -- but (C-135 round 2) it is NOT enough to disclose
+    this only via ``ctx.errors``, which ``check_paired_device_operator_authority``
+    never reads. A row excluded for size/count is ALSO recorded via
+    ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, ...)``, the same channel
+    B172/``LIMIT_DOMAIN_APPROVALS`` already uses for its own collector-cap case, so
+    the check can call ``limit_hits_for(ctx, LIMIT_DOMAIN_PAIRED)`` and downgrade a
+    verdict-by-absence to UNKNOWN instead of silently trusting a PASS built over
+    data an attacker with state-DB write access could have padded out of the
+    result on purpose -- reproduced concretely: padding a live high-scope device's
+    own ``tokens_json`` just over the cap turned a correct WARN into a silent PASS
+    before this fix.
     """
     state_dir = home / "state"
     capped: list = []
@@ -5815,20 +5826,36 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     if oversized_count:
         # Present, but not read -- never conflated with "this device does not exist"
         # (GR#4). The other, well-formed rows below are still evaluated normally.
-        ctx.errors.append(
+        #
+        # C-135 round 2 (2026-09-26): ctx.errors alone is not enough here -- it is
+        # text-report-only disclosure that check_paired_device_operator_authority
+        # never consults. Reviewer's concrete repro: an attacker who already has
+        # write access to state/openclaw.sqlite pads their OWN high-scope paired
+        # device's tokens_json past the cap, so it is excluded here -- without a
+        # verdict-visible signal, the check silently falls through to PASS ("no
+        # paired devices to evaluate"), trading the DoS bug for a targeted evasion
+        # primitive against exactly the attacker class B176 exists to catch.
+        # note_limit's LIMIT_DOMAIN_PAIRED bucket is the channel the check actually
+        # reads (limit_hits_for) to downgrade a verdict-by-absence to UNKNOWN --
+        # the same B172/LIMIT_DOMAIN_APPROVALS precedent for its own collector cap.
+        message = (
             f"device_pairing_paired in {db_path} has {oversized_count} paired-device "
             f"row(s) whose scopes/approvedScopes/tokens exceed the "
             f"{_MAX_PAIRED_DEVICE_JSON_BYTES // 1024}KB cap; those rows were not read"
         )
+        ctx.errors.append(message)
+        note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
 
     truncated = len(rows) > _MAX_PAIRED_DEVICES
     rows = rows[:_MAX_PAIRED_DEVICES]  # discard the probe row; scanned set stays capped
     if truncated:
-        ctx.errors.append(
+        message = (
             f"device_pairing_paired in {db_path} has more than {_MAX_PAIRED_DEVICES} "
             "paired-device rows within the size cap; only the first "
             f"{_MAX_PAIRED_DEVICES} were read"
         )
+        ctx.errors.append(message)
+        note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
 
     def _json_list(raw):
         if not raw:

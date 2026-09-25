@@ -575,6 +575,93 @@ class TestB176DualSourceCheck:
         finding = check_paired_device_operator_authority(ctx)
         assert finding.status == UNKNOWN, finding.detail
 
+    def test_padded_high_scope_device_yields_unknown_not_a_silent_pass(self, tmp_path):
+        """C-135 round 2's own repro: an attacker who already has write access to
+        state/openclaw.sqlite pads their OWN high-scope paired device's tokens_json
+        just over the size cap. Before this fix that device was silently excluded
+        with only an un-consulted ctx.errors note, and the check fell through to a
+        confident PASS ("no paired devices to evaluate") -- exactly the evasion this
+        fix closes. The device is the ONLY row, so if it had been read whole it
+        would have been a genuine WARN naming operator.admin; excluded, it must be
+        UNKNOWN, never PASS."""
+        padded_tokens = json.dumps({"operator": {
+            "token": "irrelevant-would-never-be-echoed-anyway",
+            "role": "operator",
+            "padding": "x" * (_MAX_PAIRED_DEVICE_JSON_BYTES + 1_000),
+        }})
+        home = _migrated_home(tmp_path, "h", rows=[{
+            "device_id": "attacker-padded-device",
+            "platform": "linux",
+            "scopes": ["operator.admin", "operator.write"],
+            "tokens": {"operator": {"token": "placeholder"}},
+        }])
+        conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
+        conn.execute(
+            "UPDATE device_pairing_paired SET tokens_json = ? WHERE device_id = ?",
+            (padded_tokens, "attacker-padded-device"),
+        )
+        conn.commit()
+        conn.close()
+
+        ctx = collect(home)
+        # The collector's own side of the fix: the padded row is excluded, not
+        # silently trusted, and a size-cap hit is recorded where the check can see it.
+        assert "attacker-padded-device" not in ctx.paired_devices_sqlite
+        from clawseccheck.collector import LIMIT_DOMAIN_PAIRED, limit_hits_for
+        assert limit_hits_for(ctx, LIMIT_DOMAIN_PAIRED)
+
+        finding = check_paired_device_operator_authority(ctx)
+        assert finding.status == UNKNOWN, (
+            f"expected UNKNOWN once the padded high-scope device was excluded by the "
+            f"size cap, got {finding.status}: {finding.detail}"
+        )
+        assert finding.status != PASS
+
+    def test_padded_high_scope_device_among_low_scope_siblings_still_yields_unknown(
+        self, tmp_path
+    ):
+        """Same evasion, but with a legitimate low-scope device also present -- so
+        the padded device's exclusion does not empty ctx.paired_devices_sqlite
+        outright, it only removes it from the per-entry evaluation loop. This
+        exercises the SECOND verdict-by-absence branch (the final "none of the
+        devices read hold high-privilege authority" PASS), not the first ("no
+        devices at all")."""
+        padded_tokens = json.dumps({"operator": {
+            "token": "irrelevant", "padding": "x" * (_MAX_PAIRED_DEVICE_JSON_BYTES + 1_000),
+        }})
+        home = _migrated_home(tmp_path, "h", rows=[
+            {
+                "device_id": "legit-low-scope-phone",
+                "platform": "ios",
+                "approved_scopes": ["operator.read"],
+            },
+            {
+                "device_id": "attacker-padded-device",
+                "platform": "linux",
+                "scopes": ["operator.admin"],
+                "tokens": {"operator": {"token": "placeholder"}},
+            },
+        ])
+        conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
+        conn.execute(
+            "UPDATE device_pairing_paired SET tokens_json = ? WHERE device_id = ?",
+            (padded_tokens, "attacker-padded-device"),
+        )
+        conn.commit()
+        conn.close()
+
+        ctx = collect(home)
+        assert "legit-low-scope-phone" in ctx.paired_devices_sqlite
+        assert "attacker-padded-device" not in ctx.paired_devices_sqlite
+
+        finding = check_paired_device_operator_authority(ctx)
+        assert finding.status == UNKNOWN, (
+            f"expected UNKNOWN -- one low-scope device was read cleanly, but the "
+            f"padded high-scope device was excluded by the size cap, got "
+            f"{finding.status}: {finding.detail}"
+        )
+        assert finding.status != PASS
+
     def test_never_echoes_token_value_from_sqlite_source(self, tmp_path):
         secret = _token("F")
         home = _migrated_home(tmp_path, "h", rows=[{
