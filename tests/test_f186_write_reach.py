@@ -30,8 +30,9 @@ Deliberately outside the comparison, stated rather than hidden:
 
 * a config with a sandbox block in ``agents`` -- sandbox confinement is a third layer the
   vendor battery does not exercise (it is graded by tests/test_b712_sandbox_three_state.py);
-* a scope whose own tools carry ``byProvider``/``toolsBySender`` -- layers this code cannot
-  resolve; treating them as possible narrowing is the quiet direction by design.
+* a scope whose own tools, or the config's GLOBAL ``tools`` block, carry ``byProvider``/
+  ``toolsBySender`` -- layers this code cannot resolve; treating them as possible narrowing
+  is the quiet direction by design (B-939: the global case used to be missed entirely).
 """
 from __future__ import annotations
 
@@ -119,9 +120,12 @@ def _expected_scopes(cfg, scopes):
     roster = agent_roster(cfg)
     tools_of = {(a.id if isinstance(a.id, str) else "(no id)"): (a.entry or {}).get("tools")
                 for a in roster}
+    # B-939: a GLOBAL byProvider/toolsBySender block narrows every scope, not only one whose
+    # own tools carry the key -- computed once and applied to every row, mirroring the fix.
+    global_opaque = _opaque(cfg.get("tools"))
     out = set()
     for s in scopes:
-        if not s["granted"] or s["workspaceOnly"]:
+        if not s["granted"] or s["workspaceOnly"] or global_opaque:
             continue
         if s["id"] == "global":
             # no roster: agents.defaults.tools is this scope's own tools
@@ -183,6 +187,49 @@ def test_the_tool_list_is_the_callers_not_a_hardcoded_one():
 def test_by_provider_on_the_scope_is_possible_narrowing():
     cfg = {"agents": {"list": [{"id": "w", "tools": {"profile": "coding",
                                                        "byProvider": {"x": {"deny": ["write"]}}}}]}}
+    assert unconfined_write_scopes(cfg, TOOLS) == []
+
+
+# ---------------------------------------------------------- B-939: global-block opaqueness
+# `_write_scopes` used to ask `_has_opaque_narrowing` about a scope's OWN `tools`
+# (`entry.get("tools")`, or -- with no roster -- `agents.defaults.tools`) and never about the
+# config's GLOBAL `tools` block, so an opaque `tools.byProvider`/`tools.toolsBySender` at the
+# root fell through both checks and the scope was wrongly counted as proven unconfined and
+# write-capable. `toolgrant.resolved_scopes` already got this right (its `global_opaque`).
+
+def test_global_by_provider_narrows_the_default_agent_scope():
+    """The exact repro: a root-level `tools.byProvider`, no roster (so a single synthesised
+    default-agent scope with an empty own `entry`). Before the fix this scope's confinement
+    resolves to proven-False (no sandbox, no workspaceOnly) and `toolgrant.granted` does not
+    model `byProvider` either, so it was found both unconfined AND write-granted -- a false
+    detection this fix removes by recognising the scope as opaque instead."""
+    cfg = {"tools": {"byProvider": {"openai": {"profile": "minimal"}}}}
+    assert unconfined_write_scopes(cfg, TOOLS) == []
+    # confinement here is proven False, not undecided, so this list was already empty before
+    # the fix too -- the meaningful pin for this shape is `unconfined_write_scopes` above.
+    assert undecided_write_scopes(cfg, TOOLS) == []
+
+
+def test_global_toolsbysender_narrows_a_rostered_agent_with_no_own_tools():
+    """The global block narrows a rostered agent just as much as the no-roster default: a
+    declared agent with no `tools` block of its own used to slip through unnarrowed."""
+    cfg = {"tools": {"toolsBySender": {"user:1": {"deny": ["write"]}}},
+           "agents": {"list": [{"id": "w"}]}}
+    assert unconfined_write_scopes(cfg, TOOLS) == []
+
+
+def test_no_narrowing_anywhere_is_unaffected():
+    """Control: neither a global nor a per-scope byProvider/toolsBySender key is present, so
+    the scope still resolves non-opaque and write-capable exactly as before this fix."""
+    cfg = {"tools": {"allow": ["write"]}}
+    assert unconfined_write_scopes(cfg, ["write"]) == ["main"]
+
+
+def test_own_defaults_tools_narrowing_with_no_global_block_is_still_opaque():
+    """No regression: the pre-existing no-roster special case (a scope's OWN
+    `agents.defaults.tools` carrying the key, with no global `tools` block at all) already
+    worked before this fix and must keep working -- this path is untouched by it."""
+    cfg = {"agents": {"defaults": {"tools": {"byProvider": {"x": {"deny": ["write"]}}}}}}
     assert unconfined_write_scopes(cfg, TOOLS) == []
 
 
