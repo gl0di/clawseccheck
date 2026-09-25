@@ -14703,6 +14703,40 @@ def _sh_loop_blank_word_subs(seg: str) -> str:
     return "".join(out)
 
 
+# B-957: the GAP between a `case`/`esac` arm's own start offset (right after `case
+# ... in`, or right after the arm's own `;;`) and a candidate `done` token, for real
+# case-arm-PATTERN syntax only: an optional leading `(` (the decorative
+# `(pattern)` spelling), zero or more `|`-separated pattern alternatives
+# ("pending|"), and whitespace -- nothing else. Deliberately excludes `(` and `)`
+# and `|` from a pattern WORD's own character class, so a genuine loop's `do`/`done`
+# sitting in an arm's own BODY (always textually after that arm's pattern-closing
+# `)`) can never satisfy this gap -- the `)` breaks it. See
+# `_sh_loop_case_done_is_arm_label` and `_sh_loop_regions`'s own docstring.
+_SH_CASE_ARM_LABEL_GAP_RE = re.compile(r"[ \t\n]*\(?(?:[ \t\n]*[^\s()|]+[ \t\n]*\|)*[ \t\n]*")
+
+
+def _sh_loop_case_done_is_arm_label(kw: str, case_stack: list, dm) -> bool:
+    """True iff `dm` (a `_SH_LOOP_DO_DONE_RE` match with `group("kw") == "done"`) is
+    really the pattern LABEL of the innermost open case arm on `case_stack` (a list of
+    arm-start offsets — see `_sh_loop_regions`), rather than a genuine loop-closing
+    keyword: the text from that arm's own start up to `dm`'s own start must be nothing
+    but case-arm-pattern syntax (`_SH_CASE_ARM_LABEL_GAP_RE`, matched exactly, no
+    leftover), AND `dm` itself must be followed (skipping whitespace) by `)` — a real
+    case arm pattern is always terminated by one. `_SH_BRANCH_KW_RE`/`_sh_case_find_in`
+    referenced here are defined later in this module (the B-935/B-984 branch-tree
+    section below) — a safe forward reference: both are resolved at CALL time, and
+    every call into this function happens well after the module has finished loading."""
+    if not case_stack:
+        return False
+    arm_start = case_stack[-1]
+    start = dm.start("kw")
+    m = _SH_CASE_ARM_LABEL_GAP_RE.match(kw, arm_start, start)
+    if m is None or m.end() != start:
+        return False
+    after = kw[dm.end("kw") :]
+    return after.lstrip(" \t\n")[:1] == ")"
+
+
 def _sh_loop_regions(kw: str, text: str) -> list:
     """Every `for V in <words>; do … done` loop whose word list holds at least one
     credential-shaped word, as `(var, file_words, read_words, body_start, cut_end,
@@ -14716,32 +14750,67 @@ def _sh_loop_regions(kw: str, text: str) -> list:
     that ends it — so a caller can blank a same-line header's OWN credential-shaped
     text out of a literal single-line scan (see `_sh_loop_cred_exfil_lines`'s
     `header_blanked`) without touching this function's fail-closed do/done pairing.
-    **Fails closed**: any `do`/`done` imbalance anywhere in the file (a stray `done)`
-    case label, an unmatched `do`) returns `[]` for the WHOLE file rather than guessing
-    a pairing.
+    **Fails closed**: any GENUINE `do`/`done` imbalance anywhere in the file (an
+    unmatched `do`, a stray `done` that pairs with nothing) returns `[]` for the WHOLE
+    file rather than guessing a pairing.
 
-    KNOWN LIMITATION (B-957, filed for 4.3.1, not fixed by B-894): the
-    fail-closed blast radius is FILE-WIDE and needs no adversarial intent to trigger —
-    an entirely ordinary, unrelated `case "$X" in ...; done) ...;; esac` state block
-    ANYWHERE ELSE in the same file (using "done" as an everyday status/state label, a
-    common non-adversarial shell idiom) unbalances the same stack and silences every
-    loop-based SHELL_CRED_EXFIL finding in the whole file, not just near that block.
-    `test_adv_case_label_done_paren_does_not_mispair_fails_closed` in
-    `tests/test_b894_shell_loop_cred_taint.py` pins the narrower case (the label sits
-    next to the loop under test); `test_adv_unrelated_case_done_label_elsewhere_...`
-    pins this broader, unrelated-code-elsewhere shape. There is no small sound fix at
-    this lexical-regex layer: a bare `done)` case label is genuinely ambiguous with a
-    real subshell wrapping a loop (`(for f in a; do ...; done)`), so telling them apart
-    needs case/esac-aware structural do/done tracking, not a regex tweak."""
+    CASE/ESAC-AWARE (B-957, fixed; was a known limitation through 4.3.0, not fixed by
+    B-894): a `done` token that is really the PATTERN LABEL of a `case`/`esac` arm
+    (`case "$X" in ...; done) ...;; esac` — "done" used as an everyday status/state
+    word, a common non-adversarial shell idiom) is structurally never a loop closer,
+    and previously still matched `_SH_LOOP_DO_DONE_RE`'s bare lexical shape, unbalancing
+    this function's file-wide stack and silencing every loop-based SHELL_CRED_EXFIL
+    finding in the WHOLE file — not just near that block. Fixed by tracking case/esac
+    nesting and each open arm's own start offset (right after `case ... in`, or right
+    after the arm's own `;;`) alongside the do/done stack, via `_sh_loop_case_done_is_arm_label`
+    below: a `done` is recognized as an arm's own pattern label — and excluded from the
+    do/done stack entirely, neither pushed nor popped — only when the text between that
+    arm's start and the `done` token is ITSELF nothing but case-arm-pattern syntax (an
+    optional leading `(`, zero or more `|`-separated pattern alternatives, whitespace)
+    and `done` is itself followed (skipping whitespace) by `)`. A genuine loop's `do`/
+    `done` sitting in an arm's own BODY — after that arm's pattern-closing `)` — never
+    matches this gap (the class disallows `)`), so it still pairs on the do/done stack
+    exactly as before; likewise a bare subshell wrapping a loop (`(for f in a; do ...;
+    done)`) outside any case block never touches `case_stack` at all. See
+    `test_adv_case_label_done_paren_now_recovered` (the narrower shape, the label sits
+    right next to the loop under test — pinned since B-894 as a fail-closed degrade,
+    now recovered too) and `test_adv_unrelated_case_done_label_elsewhere_now_recovered`
+    (the broader, unrelated-code-elsewhere shape B-957 was actually filed for) in
+    `tests/test_b894_shell_loop_cred_taint.py`, plus
+    `test_adv_genuine_do_done_imbalance_not_in_case_still_fails_closed` (a genuine
+    imbalance, unrelated to any case block, still fails closed exactly as before)."""
     pairs: dict = {}
     stack: list = []
-    for dm in _SH_LOOP_DO_DONE_RE.finditer(kw):
-        if dm.group("kw") == "do":
-            stack.append(dm.end("kw"))
+    case_stack: list = []  # open case-arm start offsets, innermost/most-recent last
+    events = [(m.start("kw"), "dd", m) for m in _SH_LOOP_DO_DONE_RE.finditer(kw)]
+    for m in _SH_BRANCH_KW_RE.finditer(kw):
+        if m.group("dsemi"):
+            events.append((m.start(), "dsemi", m))
+        elif m.group("kw") in ("case", "esac"):
+            events.append((m.start("kw"), m.group("kw"), m))
+    events.sort(key=lambda e: e[0])
+    for _pos, kind, m in events:
+        if kind == "case":
+            in_m = _sh_case_find_in(kw, m.end("kw"))
+            if in_m is not None:
+                case_stack.append(in_m.end())
+            # else: no findable `in` for this `case` -- unrecognizable, treated as an
+            # inert token (mirrors `_sh_parse_branch_tree`'s own recovery); never
+            # pushed, so it can never mispair a later `;;`/`esac` either.
+        elif kind == "esac":
+            if case_stack:
+                case_stack.pop()
+        elif kind == "dsemi":
+            if case_stack:
+                case_stack[-1] = m.end()
+        elif m.group("kw") == "do":
+            stack.append(m.end("kw"))
         else:
+            if _sh_loop_case_done_is_arm_label(kw, case_stack, m):
+                continue
             if not stack:
                 return []
-            pairs[stack.pop()] = dm.start("kw")
+            pairs[stack.pop()] = m.start("kw")
     if stack:
         return []
     seg_ends = [m.start() for m in _SH_LOOP_SEG_END_RE.finditer(kw)]
@@ -15254,11 +15323,13 @@ def _sh_parse_branch_tree(kw: str) -> list:
     above) already independently misses the canonical adversarial shape (a
     credential-bearing branch followed by a textually-later clearing branch) --
     so that harder redesign would not even close this specific gap on its own.
-    Tracked as a known, accepted limitation of this lexical/regex layer, the same
-    class as B-957's do/done blast-radius note above -- narrower than B-957's
-    (a decoy must specifically be an unclosed opener, not just any stray token,
-    and the real construct must be nested inside it rather than beside it), but
-    not fully closed. See `tests/test_b935_shell_cred_var_position_taint.py`'s
+    Tracked as a known, accepted limitation of this lexical/regex layer -- the same
+    general class `_sh_loop_regions`'s own do/done pairing had before it was fixed
+    (B-957: a file-wide fail-closed stack, narrowed by structural case/esac-awareness
+    rather than eliminated), but narrower still (a decoy here must specifically be an
+    unclosed opener, not just any stray token, and the real construct must be nested
+    inside it rather than beside it), and not fully closed the way B-957 was. See
+    `tests/test_b935_shell_cred_var_position_taint.py`'s
     `test_adv_unclosed_if_before_real_nested_if_else_silences_that_branch_known_limit`
     for the pinned repro and its root-cause control.
     """
