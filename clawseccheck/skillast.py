@@ -15115,15 +15115,34 @@ _SH_CASE_IN_RE = re.compile(r"\bin\b")
 # reference, or an `in` sitting inside an OPEN `${...}` parameter expansion
 # (`${x:-in}`, `${in:-x}`, `${#in}`, ...) -- `$`/`{` are non-word characters, so
 # `\bin\b` validly matches the "in" inside any of those, mistaking it for the
-# real terminator and truncating the subject scan early. `_sh_case_find_in` below
-# rejects a candidate that is (a) immediately preceded by a bare `$` (catches
-# `$in`; a REAL terminator is always separated from the subject WORD by
-# whitespace, so this never rejects a genuine one), or (b) positioned inside an
-# unclosed `${` opened since `start` (catches every `${...in...}` shape,
-# regardless of where "in" sits inside the braces) -- and keeps scanning FORWARD
-# for the next candidate rather than failing closed on the first false match,
-# since a real terminator may still exist later in the subject.
-_SH_CASE_BRACE_RE = re.compile(r"\$\{|\}")
+# real terminator and truncating the subject scan early.
+#
+# B-988: `\bin\b` ALSO validly matches any ordinary, standalone English word
+# "in" sitting in genuine, unsubstituted shell CODE inside a still-open
+# `$(...)` (or `` `...` ``) command substitution in the subject -- e.g.
+# `case "$(echo checking in; ...)" in`. The `${...}`-only depth check above did
+# not see this at all (no `${` involved anywhere in that text), so it accepted
+# the FIRST such "in" -- "checking in", "opt-in", "log in", any ordinary prose
+# word, or a genuine nested shell keyword like `for f in` -- as the real
+# terminator and truncated the subject scan right there, silently dropping
+# every real credential-exfil check on the text AFTER it: a MISSED conviction
+# (false negative) on `SHELL_CRED_EXFIL`, not a mis-attribution of some later
+# span, as an earlier revision of this file's docstring incorrectly claimed.
+#
+# `_sh_case_find_in` below now rejects a candidate that is (a) immediately
+# preceded by a bare `$` (catches `$in`; a REAL terminator is always separated
+# from the subject WORD by whitespace, so this never rejects a genuine one),
+# (b) positioned inside an unclosed `${` opened since `start` (catches every
+# `${...in...}` shape, regardless of where "in" sits inside the braces), or (c)
+# positioned inside an unclosed `$(...)`/bare `(...)` (the `$((...))`
+# arithmetic-expansion shape is exactly a `$(` immediately followed by a bare
+# `(`, so bare `(`/`)` are tracked identically to `$(`/`)`) or an unclosed
+# backtick `` `...` `` opened since `start` -- mirroring the same paren/backtick
+# depth idiom `_sh_loop_code_mask` already uses for real structural scanning
+# (see its own docstring) -- and keeps scanning FORWARD for the next candidate
+# rather than failing closed on the first false match, since a real terminator
+# may still exist later in the subject.
+_SH_CASE_DEPTH_TOKEN_RE = re.compile(r"\$\{|\}|\$\(|\(|\)|`")
 # `_sh_cred_replay` recursion-depth guard (see its own docstring): caps how many
 # NESTED (not sequential) if/case levels get real branch-aware replay before
 # falling back to a flat, branch-blind drain for everything past this point.
@@ -15133,37 +15152,63 @@ _SH_CRED_REPLAY_MAX_DEPTH = 250
 def _sh_case_find_in(kw: str, start: int):
     """The first `in` at or after `start` that is a real top-level `case ... in`
     terminator -- not a bare `$in`/`${in}` reference, and not sitting inside some
-    OTHER, unrelated `${...}` parameter expansion opened since `start` (see the
-    design note above `_SH_CASE_BRACE_RE`). `${`/`}` and `in` candidates are each
-    found via one compiled `finditer` pass (never a per-character Python loop) and
-    merged by position, so a brace's own depth contribution is only counted once
-    each `in` candidate actually needs it. Returns the match object, or `None` if
-    no valid candidate exists -- `_sh_parse_branch_tree` treats `None` here as an
-    unrecognizable `case` token and skips it (B-984; see that
-    function's own docstring), never as a whole-file abort.
+    OTHER, unrelated `${...}` parameter expansion, `$(...)`/bare `(...)` command
+    substitution, or `` `...` `` command substitution opened since `start` (see
+    the design note above `_SH_CASE_DEPTH_TOKEN_RE`). `kw` has already been
+    through `_sh_loop_code_mask` by the time it reaches here, so quoted LITERAL
+    text is already blanked to spaces -- only genuine, unsubstituted CODE
+    (including the body of a still-open `$(...)`) remains for this scan to see.
+    Depth tokens and `in` candidates are each found via one compiled `finditer`
+    pass (never a per-character Python loop) and merged by position, so a
+    construct's own depth contribution is only counted once each `in` candidate
+    actually needs it. Returns the match object, or `None` if no valid candidate
+    exists -- `_sh_parse_branch_tree` treats `None` here as an unrecognizable
+    `case` token and skips it (B-984; see that function's own docstring), never
+    as a whole-file abort.
 
-    KNOWN, accepted imprecision (not chased further, same lexical-layer spirit as
-    B-957's do/done-vs-case-label note above): a `for ... in ... done` NESTED
-    INSIDE a case's own SUBJECT expression (`case $(for f in *; do ...; done)
-    in ...`) has its own earlier, bare (non-`$`/`${`-prefixed) `in`, which this
-    search would still accept as the terminator, truncating the subject span too
-    early. Vanishingly rare in real shell (a subject is essentially always a bare
-    `$var`/`$(cmd)`/literal, never a nested loop); does not itself convict
-    anything wrongly, only mis-attributes which span some later text falls in,
-    the same class of imprecision the file already accepts elsewhere at this
-    lexical/regex layer.
+    B-988 (this round): before this fix, the ONLY depth tracked here was
+    `${...}`, so ANY standalone English word "in" sitting in still-open,
+    unsubstituted code -- ordinary prose in a `$(...)`/`` `...` `` subject like
+    "checking in", "opt-in", "log in", or a genuine nested shell keyword like
+    `for f in` -- was wrongly accepted as the terminator, truncating the subject
+    scan early and SILENTLY DROPPING whatever credential-exfil logic sat later
+    in that same subject: a missed `SHELL_CRED_EXFIL` conviction (a false
+    negative), not a mis-attribution of some later span as an earlier revision
+    of this docstring incorrectly claimed. This round adds real depth tracking
+    for `$(...)`/bare `(...)` and backtick command substitutions (mirroring
+    `_sh_loop_code_mask`'s own paren/backtick idiom, per its own docstring), so
+    a bare "in" inside any of those -- including a `for ... in ... done` nested
+    inside the subject's own `$(...)`, the prior round's KNOWN, accepted
+    imprecision -- now stays rejected until the construct that actually
+    contains it closes.
     """
-    braces = _SH_CASE_BRACE_RE.finditer(kw, start)
-    next_brace = next(braces, None)
-    depth = 0
+    tokens = _SH_CASE_DEPTH_TOKEN_RE.finditer(kw, start)
+    next_tok = next(tokens, None)
+    brace_depth = 0
+    paren_depth = 0
+    backtick_open = False
     for m in _SH_CASE_IN_RE.finditer(kw, start):
-        while next_brace is not None and next_brace.start() < m.start():
-            if next_brace.group() == "${":
-                depth += 1
-            elif depth > 0:
-                depth -= 1
-            next_brace = next(braces, None)
-        if depth == 0 and (m.start() == 0 or kw[m.start() - 1] != "$"):
+        while next_tok is not None and next_tok.start() < m.start():
+            tok = next_tok.group()
+            if tok == "${":
+                brace_depth += 1
+            elif tok == "}":
+                if brace_depth > 0:
+                    brace_depth -= 1
+            elif tok == "`":
+                backtick_open = not backtick_open
+            elif tok == "$(" or tok == "(":
+                paren_depth += 1
+            elif tok == ")":
+                if paren_depth > 0:
+                    paren_depth -= 1
+            next_tok = next(tokens, None)
+        if (
+            brace_depth == 0
+            and paren_depth == 0
+            and not backtick_open
+            and (m.start() == 0 or kw[m.start() - 1] != "$")
+        ):
             return m
     return None
 

