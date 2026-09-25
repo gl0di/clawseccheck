@@ -449,14 +449,15 @@ def _g3_reflection_target(f: ast.AST, call: ast.Call):
 def _g3_looks_like_os_ref(node: ast.AST, os_aliases: set) -> bool:
     """True if *node* syntactically looks like a reference to the os module: a
     bare Name bound to a known os-alias, or an attribute-access chain rooted
-    at one (e.g. `os.path`). Used to scope the getattr/setattr/delattr exec*/
-    spawn* prefix rule (below) to calls that actually reflect on os, so
-    `getattr(<some unrelated object>, "executive_summary")` doesn't trip G3
-    just because the string happens to start with "exec". Any other object
-    shape -- a literal, a local variable of unrelated/unknown origin, a
-    different import -- returns False and the prefix rule is skipped for it;
-    the small exact-set check below is unaffected and still fires regardless
-    of the target object."""
+    at one (e.g. `os.path`). Used to scope BOTH the exact-set (system/popen/
+    fork/...) and the exec*/spawn* prefix members of the getattr/setattr/
+    delattr reflection rule (below) to calls that actually reflect on os, so
+    neither `getattr(<some unrelated object>, "system")` nor
+    `getattr(<some unrelated object>, "executive_summary")` trips G3 just
+    because the string happens to match -- there is no actual os reachability
+    when the reflected-on object provably isn't os. Any other object shape --
+    a literal, a local variable of unrelated/unknown origin, a different
+    import -- returns False and the whole reflection rule is skipped for it."""
     if isinstance(node, ast.Name):
         return node.id in os_aliases
     if isinstance(node, ast.Attribute):
@@ -473,6 +474,17 @@ def _g3_blocklist_hit(tree: ast.AST) -> bool:
         | _G3_OS_DANGER_ATTRS_EXACT
         | {"getattr", "setattr", "delattr", "attrgetter", "methodcaller"}
     ) - _G3_STRING_EXEMPT
+    # id() of every attr-name Constant node that the ast.Call arm below already
+    # judged, via the object-identity gate, to NOT reflect on os (e.g.
+    # `getattr(<unrelated object>, "system")`). `_G3_OS_DANGER_ATTRS_EXACT`'s members
+    # are folded into `string_banned` for the blanket string-literal scan (the final
+    # `elif` arm) too, and ast.walk visits a Constant argument as its own top-level
+    # node in addition to visiting the Call it belongs to -- so without this, that
+    # blanket scan would independently re-trip on the very same node the Call arm
+    # just correctly exempted, silently undoing the gate above. ast.walk yields a
+    # parent strictly before its own children, so this set is always populated
+    # before its matching Constant node is reached.
+    exempted_attr_name_ids = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -502,29 +514,34 @@ def _g3_blocklist_hit(tree: ast.AST) -> bool:
             if attr_arg is not None:
                 if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
                     # A constant attribute-name argument to getattr/setattr/delattr/
-                    # attrgetter/methodcaller. The small exact-set members
-                    # (system/popen/fork/...) trip unconditionally, same as the
-                    # literal-Attribute and `from os import` arms below. But the
-                    # exec*/spawn* PREFIX rule only makes sense as an os-reflection
-                    # signal in the first place -- it must not trip for
-                    # `getattr(<unrelated object>, "executive_summary")` just
-                    # because the string happens to start with "exec".
+                    # attrgetter/methodcaller. `_g3_os_danger_attr` recognizes BOTH
+                    # the small exact-set members (system/popen/fork/...) and the
+                    # exec*/spawn* PREFIX family -- but naming one of these strings
+                    # is only an os-reflection signal in the first place, so BOTH
+                    # shapes are gated the same way on the object actually being
+                    # reflected on. Without this gate, `getattr(<unrelated object>,
+                    # "system")` or `getattr(<unrelated object>,
+                    # "executive_summary")` would wrongly trip G3 even though there
+                    # is no os reachability at all (round-5/round-6 false
+                    # positives) -- do NOT split this back into two independently
+                    # gated checks, that is exactly how the round-6 bug happened.
                     # attrgetter/methodcaller have no object at the call site
                     # (they return a callable applied later), so
                     # _g3_reflection_target returns None for them and they keep
-                    # tripping the prefix rule unconditionally too -- only a
+                    # tripping unconditionally, fail-closed -- only a
                     # getattr/setattr/delattr call whose object argument
                     # syntactically resolves to something other than os skips it.
-                    if attr_arg.value in _G3_OS_DANGER_ATTRS_EXACT:
-                        return True
-                    if attr_arg.value.startswith("exec") or attr_arg.value.startswith("spawn"):
+                    if _g3_os_danger_attr(attr_arg.value):
                         target = _g3_reflection_target(node.func, node)
                         if target is None or _g3_looks_like_os_ref(target, os_aliases):
                             return True
+                        # Exempted: record it so the blanket string scan below
+                        # doesn't independently re-trip on this same node.
+                        exempted_attr_name_ids.add(id(attr_arg))
                 else:
                     return True
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value in string_banned:
+            if node.value in string_banned and id(node) not in exempted_attr_name_ids:
                 return True
     return False
 

