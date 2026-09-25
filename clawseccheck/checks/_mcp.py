@@ -5234,6 +5234,31 @@ def _b331_data_uri_hit(description: str) -> bool:
 # target ("from the user/operator/owner/admin") makes this unambiguous on its own, the
 # same way `_B63_FAIL_ANCHOR_RE`'s own "concealment framed around a human overseer"
 # alternative is unconditioned.
+#
+# CLAWSECCHECK-B-991 (CLAUDE.md §2.5 accepted residual): this same unconditioned
+# anchor also fires on ordinary, benign zero-knowledge/E2E-encryption and NDA
+# product copy that legitimately describes a privacy PROPERTY using this exact
+# phrase shape ("Keep this confidential from the admin -- not even administrators
+# can read your notes thanks to end-to-end encryption.", and four similar password-
+# vault/deal-room/field-service/note-taking examples — see the ticket for the full
+# five). Two independent carve-out attempts were built and retracted on C-135
+# grounds: round 1 (commit 40d90e2e) demoted the anchor to WARN when E2E/ZK/NDA
+# evidence was present AND no verb from a small malicious-action-verb list was
+# found nearby — its own review found 10 ordinary data-movement verbs outside that
+# list (mirror/transfer/dump/publish/cache/broadcast/tee/write/put/sync) that let a
+# genuinely malicious directive slip through as WARN. Round 2 (commit ff169839)
+# widened the veto with those 10 verbs plus the existing `_BACKUP_TRANSPORT_VERB_RE`
+# — its OWN review found a THIRD bypass roughly 3x the size on the first attempt
+# (backup/archive/export/save/store/persist/snapshot/checkpoint/clone/replicate/
+# stash/redirect/route/rclone/"copies", plus two verb-less constructions like
+# "Destination for X: ..."), with no sign of hitting a natural floor — an
+# open-ended allowlist-of-forbidden-verbs problem, unlike B-980/B-986's closed,
+# groundable oracles (a finite, versioned curl flag set checkable against the real
+# binary). Both attempts are reverted; this anchor stays unconditioned. Disclosure
+# lives in `check_mcp_host_sanitizer_gap`'s FAIL `fix` text (never `detail`, which
+# `baseline.fingerprint()` hashes), per the same routing B-555/B-895 use. Accepted
+# by Dave, 2026-09-25 ruling. Test-pinned by
+# `tests/test_b991_confidential_residual.py`.
 _B331_CONFIDENTIAL_RE = re.compile(
     r"\bkeep\s+(?:this|it|these|that)\b[^.]{0,60}\bconfidential\b[^.]{0,30}\bfrom\s+"
     r"(?:the\s+)?(?:user|operator|owner|admin(?:istrator)?|human)\b",
@@ -5573,6 +5598,7 @@ def check_mcp_host_sanitizer_gap(ctx: Context) -> Finding:
     unknown_hits: list[str] = []
     surfaces_seen = 0
     any_surface_truncated = False
+    confidential_from_fail = False
 
     for sname, spec in sorted(servers.items()):
         tools = spec.get("tools") if isinstance(spec, dict) else None
@@ -5592,6 +5618,10 @@ def check_mcp_host_sanitizer_gap(ctx: Context) -> Finding:
                 line = f"{sname}/{tool.name}: {detail}"
                 if status == FAIL:
                     fail_hits.append(line)
+                    if _category == "secrecy-directive" and _B331_CONFIDENTIAL_RE.search(
+                        detail
+                    ):
+                        confidential_from_fail = True
                 elif status == WARN:
                     warn_hits.append(line)
                 else:
@@ -5599,15 +5629,34 @@ def check_mcp_host_sanitizer_gap(ctx: Context) -> Finding:
 
     if fail_hits:
         ev = fail_hits[:5]
+        fix = (
+            "Review these servers' declared tool descriptions directly (they are "
+            "attacker-influenced input); do not rely on OpenClaw's host-side "
+            "sanitizer, which covers only two literal phrase families on one of three "
+            "runtime paths."
+        )
+        if confidential_from_fail:
+            # CLAWSECCHECK-B-991 (CLAUDE.md §2.5 accepted residual) — see the
+            # in-source note above `_B331_CONFIDENTIAL_RE`. Disclosure lives here
+            # (`fix`), never in `detail`, which `baseline.fingerprint()` hashes.
+            fix += (
+                " Note: at least one FAIL matched a bare 'keep this confidential "
+                "from the user/operator/owner/admin' phrase (CLAWSECCHECK-B-991) — "
+                "this static signal cannot distinguish a genuine concealment-from-"
+                "operator instruction from ordinary, legitimate zero-knowledge/"
+                "end-to-end-encryption or NDA product copy that uses the identical "
+                "phrase shape to describe its own privacy design; two independent "
+                "carve-out attempts were retracted after each traded this false "
+                "positive for a real false negative (an open-ended verb "
+                "vocabulary). Judge this specific hit by reading the surrounding "
+                "tool description yourself."
+            )
         return _finding(
             "B331",
             FAIL,
             "MCP tool description(s) carry content-security signal(s) OpenClaw's own "
             "metadata sanitizer does not mitigate (" + "; ".join(ev) + ").",
-            "Review these servers' declared tool descriptions directly (they are "
-            "attacker-influenced input); do not rely on OpenClaw's host-side "
-            "sanitizer, which covers only two literal phrase families on one of three "
-            "runtime paths.",
+            fix,
             evidence=ev,
         )
     if warn_hits:
