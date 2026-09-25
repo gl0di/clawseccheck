@@ -36,6 +36,17 @@ REPO = Path(__file__).resolve().parent.parent
 PAYLOAD = (REPO / "fixtures" / "bad_b13_fetch_to_exec" / "skills" / "bootstrap-helper"
            / "scripts" / "post_install.py")
 
+# CLAWSECCHECK-B-998 round 3 added a SECOND never-fail shape alongside the plain
+# `if af.rule == "X": ...; continue` arms `_AST_NEVER_FAIL_RULES` already tracks: a
+# CONDITIONAL branch (`_vet.py:6060`) whose test is `af.rule == "X" and <extra guard>`
+# and whose `continue` sits behind further nested branching, so matching the rule name
+# does not by itself guarantee a `continue` — the file can still fall through to the
+# generic crit/FAIL path. This set is the explicit, reviewed registry of rules allowed
+# to use that shape; a new one must be added here consciously, not discovered by an
+# under-specified test silently passing (see test_never_fail_rules_match_the_guards_in_
+# the_classifier, which confirmed this exact branch existed unseen since round 1).
+_KNOWN_CONDITIONAL_NEVER_FAIL = {"HARDCODED_PROVIDER_SECRET"}
+
 _BENIGN_PY = '''#!/usr/bin/env python3
 """Write a default config file next to this plugin."""
 import json
@@ -240,6 +251,25 @@ def test_never_fail_rules_match_the_guards_in_the_classifier():
     calling it. Written down because the first draft of this guard looked for it inside
     `vet_skill`, found zero loops, and would have compared the registry against an empty
     set. The `assert loops` below is why that cannot happen quietly.
+
+    CLAWSECCHECK-B-998 round 3 restructured the loop's iterator from a direct
+    `for af in analyze_python(...):` into `_afs = analyze_python(...)` captured once per
+    file, then `for af in _afs:` — needed so a later check in the same loop
+    (`_b998_env_secret_stays_local`) can see the full per-file finding list, not just the
+    findings already iterated past. The loop-detection below recognises both the direct
+    call and this assign-then-iterate shape.
+
+    B-998 round 3 also introduced a SECOND never-fail shape this guard must not miss: a
+    CONDITIONAL branch (`_vet.py:6060`, `if af.rule == "HARDCODED_PROVIDER_SECRET" and
+    _TEST_FIXTURE_BASENAME_RE.match(...):`) whose `continue` sits behind further nested
+    branching (`_b998_inert`), so matching the rule name does not by itself guarantee a
+    `continue`. Confirmed: the original detector below — which only recognised a bare
+    `af.rule == "X"` Compare as the WHOLE test — did not see this branch at all, neither
+    as guarded nor as a discrepancy, so it silently passed even in round 1 despite this
+    exact conditional exception existing. `conditional_guarded` below closes that blind
+    spot by tracking such branches against the explicit, reviewed
+    `_KNOWN_CONDITIONAL_NEVER_FAIL` registry, so a future conditional exception needs a
+    conscious update here rather than an under-specified test passing by accident.
     """
     # Imported HERE, not at module scope. On the pre-fix tree these names do not exist,
     # and a module-level import turns every behavioural test in this file into a COLLECTION
@@ -249,35 +279,70 @@ def test_never_fail_rules_match_the_guards_in_the_classifier():
     # missing constant instead of on its own census).
     from clawseccheck.checks._vet import _AST_NEVER_FAIL_RULES
 
+    def _callee(call: ast.Call):
+        return getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+
+    def _rule_compared_in_test(test):
+        """The rule name an `if` guard's test names via `af.rule == "X"` — whether that
+        Compare IS the whole test (the ordinary unconditional guards) or is ANDed with
+        more conditions (the B-998 conditional-branch shape: `af.rule == "X" and
+        <extra guard>`). Returns None when the test names no rule at all."""
+        parts = test.values if isinstance(test, ast.BoolOp) else [test]
+        for part in parts:
+            if (isinstance(part, ast.Compare) and isinstance(part.left, ast.Attribute)
+                    and part.left.attr == "rule" and len(part.comparators) == 1
+                    and isinstance(part.comparators[0], ast.Constant)):
+                return part.comparators[0].value
+        return None
+
     tree = ast.parse((REPO / "clawseccheck" / "checks" / "_vet.py").read_text())
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "check_installed_skills")
+
+    # Names bound by `NAME = analyze_python(...)` anywhere in the function, so the
+    # assign-then-iterate shape (`_afs = analyze_python(...)` / `for af in _afs:`) is
+    # recognised alongside the direct `for af in analyze_python(...):` shape.
+    bound = {
+        t.id for n in ast.walk(fn)
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+        and _callee(n.value) == "analyze_python"
+        for t in n.targets if isinstance(t, ast.Name)
+    }
     loops = [
         n for n in ast.walk(fn)
         if isinstance(n, ast.For) and isinstance(n.target, ast.Name) and n.target.id == "af"
-        and isinstance(n.iter, ast.Call)
-        and (getattr(n.iter.func, "id", None)
-             or getattr(n.iter.func, "attr", None)) == "analyze_python"
+        and ((isinstance(n.iter, ast.Call) and _callee(n.iter) == "analyze_python")
+             or (isinstance(n.iter, ast.Name) and n.iter.id in bound))
     ]
     assert loops, "non-vacuity: the analyze_python loop this set describes was not found"
 
     guarded = set()
     guard_lines: list[int] = []
+    conditional_guarded = set()
     predicate_line = None
     for loop in loops:
         for stmt in loop.body:
             if not isinstance(stmt, ast.If):
                 continue
-            test = stmt.test
-            if (isinstance(test, ast.Compare) and isinstance(test.left, ast.Attribute)
-                    and test.left.attr == "rule"
-                    and isinstance(test.comparators[0], ast.Constant)
-                    and any(isinstance(b, ast.Continue) for b in stmt.body)):
-                guarded.add(test.comparators[0].value)
+            rule = _rule_compared_in_test(stmt.test)
+            if rule is None:
+                if (isinstance(stmt.test, ast.Call)
+                        and getattr(stmt.test.func, "id", None) == "ast_finding_is_fail_capable"):
+                    predicate_line = stmt.lineno
+                continue
+            if any(isinstance(b, ast.Continue) for b in stmt.body):
+                # The rule name alone determines the branch: matching it ALWAYS continues.
+                guarded.add(rule)
                 guard_lines.append(stmt.lineno)
-            elif (isinstance(test, ast.Call)
-                  and getattr(test.func, "id", None) == "ast_finding_is_fail_capable"):
-                predicate_line = stmt.lineno
+            else:
+                # Conditional shape: `continue` must still be reachable SOMEWHERE in the
+                # branch (else this is dead code or a shape this detector doesn't
+                # understand at all) — just not guaranteed merely by the rule matching.
+                assert any(isinstance(n, ast.Continue) for n in ast.walk(stmt) if n is not stmt), (
+                    f"line {stmt.lineno}: an `if af.rule == {rule!r}` branch with no "
+                    "`continue` anywhere in its body — dead code or an unrecognised shape"
+                )
+                conditional_guarded.add(rule)
 
     # ORDER, not just membership. Adopting the predicate inside this loop is only
     # behaviour-preserving because every never-FAIL arm `continue`s BEFORE it runs. Set
@@ -295,6 +360,21 @@ def test_never_fail_rules_match_the_guards_in_the_classifier():
         "the never-FAIL registry and the classifier's own guards disagree — "
         f"only in code: {sorted(guarded - set(_AST_NEVER_FAIL_RULES))}; "
         f"only in the registry: {sorted(set(_AST_NEVER_FAIL_RULES) - guarded)}"
+    )
+
+    # CLAWSECCHECK-B-998: the conditional never-fail branch(es) found in the classifier
+    # must match the explicit, reviewed registry exactly — a new one appearing here
+    # unnoticed is precisely the blind spot this addition closes.
+    assert conditional_guarded == _KNOWN_CONDITIONAL_NEVER_FAIL, (
+        "the conditional never-fail branches in the classifier disagree with "
+        "_KNOWN_CONDITIONAL_NEVER_FAIL — "
+        f"only in code: {sorted(conditional_guarded - _KNOWN_CONDITIONAL_NEVER_FAIL)}; "
+        f"only in the constant: {sorted(_KNOWN_CONDITIONAL_NEVER_FAIL - conditional_guarded)}"
+    )
+    assert not (conditional_guarded & set(_AST_NEVER_FAIL_RULES)), (
+        "a rule is registered as both an unconditional never-fail rule and a "
+        f"conditional never-fail branch: "
+        f"{sorted(conditional_guarded & set(_AST_NEVER_FAIL_RULES))}"
     )
 
 

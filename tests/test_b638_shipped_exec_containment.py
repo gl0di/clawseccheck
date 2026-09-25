@@ -19,8 +19,8 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
+import ast
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -1007,14 +1007,26 @@ def test_without_an_artifact_behaviour_is_unchanged():
 
 def test_every_production_caller_passes_the_artifact():
     """The carve-out and the tighter rule both live behind `artifact=`; a call site that
-    forgets it silently reverts to the token check this task replaced."""
+    forgets it silently reverts to the token check this task replaced.
+
+    AST-based, not a text/regex scan: CLAWSECCHECK-B-998 round 3 added a comment to
+    `_vet.py` (`# B-998 round 3: analyze_python(...) returns a plain list...`) that
+    contains the literal substring `analyze_python(` — a regex over raw source text
+    matched it as a fake "call" with no `artifact=` keyword to find, producing a false
+    failure over a comment, not a call site. Parsing the source and walking real
+    `ast.Call` nodes cannot see comments at all.
+    """
     for rel in ("clawseccheck/checks/_vet.py", "clawseccheck/checks/_mcp.py",
                 "clawseccheck/adjudication/_builder.py"):
-        text = (REPO / rel).read_text()
-        calls = re.findall(r"analyze_python\(([^()]*(?:\([^()]*\)[^()]*)*)\)", text)
-        calls = [c for c in calls if c.strip() and "source: str" not in c]
+        tree = ast.parse((REPO / rel).read_text())
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and (getattr(n.func, "id", None) or getattr(n.func, "attr", None)) == "analyze_python"
+        ]
         assert calls, rel
-        assert all("artifact=" in c for c in calls), (rel, calls)
+        missing = [n.lineno for n in calls if not any(k.arg == "artifact" for k in n.keywords)]
+        assert not missing, (rel, missing)
 
 
 # ---------------------------------------------------------------------------------------
