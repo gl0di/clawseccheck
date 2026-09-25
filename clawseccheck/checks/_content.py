@@ -1849,6 +1849,26 @@ _B63_SECRET_ACCESS_RE = re.compile(
         # already the verb class `_B63_SEND_VERB_RE` recognizes as an outbound send — added
         # here too so the read-then-access anchor and the send-verb anchor agree on this verb).
         r"|прочит\w*|чита\w*|скача\w*|загруз\w*|извлек\w*|собер\w*|укра\w*|копир\w*|переда\w*"
+        # B-968 follow-up (C-135 reviewer catch on the original commit): English's list
+        # above also has send|forward|transmit|upload|leak, but the Russian list still had
+        # no equivalent for the bare "send" sense — only переда\w* (hand over) landed, and
+        # a *different* verb, "отправь" (send), is the one `_B63_SEND_VERB_RE` actually
+        # recognizes and real Russian directives use ("Скрытно отправь токен доступа" — no
+        # destination phrase, so `_has_outbound_exfil`'s dest-co-location gate never fired
+        # either — the secret-term+access anchor was the only other path and it was blind
+        # to this exact verb). Closed with the same five stems `_B63_SEND_VERB_RE` already
+        # carries (line below this one, unchanged) for this exact concept, so the two
+        # verb classes stay in agreement rather than inventing a new vocabulary here:
+        # отправ\w* (send — отправь/отправить/отправка), выгруж\w* (upload/export —
+        # выгрузи/выгрузка), слить (leak, perfective infinitive — fixed form, no \w*
+        # suffix since its conjugated forms don't share this stem: солью/слил/слила),
+        # перешл\w* (forward, imperative/future stem — перешли/перешлю; the infinitive
+        # "переслать" does not share this stem, same known gap `_B63_SEND_VERB_RE` already
+        # has), слив\w* (leak, noun/imperfective-verb — слив/сливать/сливается; also
+        # matches слива "plum" and сливки "cream" in isolation, but this branch only ever
+        # fires already-gated behind a co-located secret term, so that ambiguity is inert
+        # here exactly as it already is for `_B63_SEND_VERB_RE`).
+        r"|отправ\w*|выгруж\w*|слить|перешл\w*|слив\w*"
     ),
     re.IGNORECASE,
 )
