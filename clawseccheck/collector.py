@@ -962,6 +962,23 @@ class Context:
     subagent_runs: list = field(default_factory=list)
     subagent_runs_found: bool = False        # state DB + subagent_runs table present and read
     subagent_runs_parse_error: bool = False  # present but no row could be reliably parsed
+    # B176 follow-up (2026-09-25): OpenClaw 2026.9.6 migrates the legacy
+    # devices/paired.json store into a dedicated device_pairing_paired table in
+    # state/openclaw.sqlite, leaving only devices/paired.json.migrated behind --
+    # measured directly against this machine's own installed OpenClaw (2026.9.6),
+    # not decompiled from a dist bundle. checks/_lifecycle.py's
+    # check_paired_device_operator_authority still reads the legacy JSON file
+    # itself (unchanged); this dict is consulted ONLY as a fallback when that file
+    # is absent, so a migrated install is not silently read as "nothing paired".
+    # Keyed by device_id, one entry per row, using the SAME field names the legacy
+    # JSON shape already uses (deviceId, platform, scopes, approvedScopes, tokens,
+    # createdAtMs, approvedAtMs, lastSeenAtMs) so the check's existing per-entry
+    # evaluation loop works unmodified against either source. `tokens` never
+    # carries the live token secret string -- see
+    # `_collect_paired_devices_sqlite`'s docstring.
+    paired_devices_sqlite: dict = field(default_factory=dict)
+    paired_devices_sqlite_found: bool = False        # table present and read (0 rows still counts)
+    paired_devices_sqlite_parse_error: bool = False  # present but could not be reliably read
     # F-134 (DISK-1, B191): rows from OpenClaw's OWN runtime audit trail (``audit_events`` in
     # the shared state SQLite DB), most-recent first. Each entry is a plain dict: kind,
     # action, status, error_code, actor_type, actor_id, agent_id, session_key, session_id,
@@ -5586,6 +5603,174 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
                 ctx.agent_auth_profile_store_length = length
 
 
+# B176 follow-up (2026-09-25): legacy devices/paired.json -> device_pairing_paired
+# (state/openclaw.sqlite) migration.
+_PAIRED_DEVICE_SQLITE_SELECT = (
+    "SELECT device_id, platform, scopes_json, approved_scopes_json, tokens_json, "
+    "created_at_ms, approved_at_ms, last_seen_at_ms FROM device_pairing_paired"
+)
+
+
+def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
+    """Read-only collection of the migrated paired-device store
+    (``device_pairing_paired`` in ``~/.openclaw/state/openclaw.sqlite``) into
+    ``ctx.paired_devices_sqlite``.
+
+    Grounded by DIRECT SCHEMA INSPECTION of a real, installed OpenClaw 2026.9.6
+    (``sqlite3 ~/.openclaw/state/openclaw.sqlite ".schema device_pairing_paired"``),
+    not decompiled from a dist bundle -- filed the same day this was found live: the
+    legacy ``devices/paired.json`` file this machine used to carry is now
+    ``devices/paired.json.migrated`` (inert, never read by the runtime again), and its
+    2 real paired devices live ONLY in this table. Before this fix,
+    ``check_paired_device_operator_authority`` (B176) checked ``paired_path.is_file()``
+    on the legacy path alone, found it absent, and reported a confident PASS ("no
+    paired devices to evaluate") on a machine that genuinely has 2 -- a false negative
+    on a security-relevant standing-authority check.
+
+    Columns actually seen (STRICT table, one row per device, ``device_id`` the PK):
+    ``device_id, public_key, display_name, operator_label, platform, device_family,
+    client_id, client_mode, browser_origin, role, roles_json, scopes_json,
+    approved_scopes_json, remote_ip, tokens_json, approved_via, node_surface_json,
+    pending_node_surface_json, created_at_ms, approved_at_ms, last_seen_at_ms,
+    last_seen_reason``. Only the columns B176's own per-entry evaluation loop
+    actually consumes are ever selected -- never ``public_key``, ``remote_ip``,
+    ``browser_origin``, or either ``node_surface_json`` column, none of which the
+    legacy JSON shape carried either.
+
+    Each row is normalised into the SAME per-entry dict shape the legacy
+    ``devices/paired.json`` envelope already uses (``deviceId``, ``platform``,
+    ``scopes``, ``approvedScopes``, ``tokens``, ``createdAtMs``, ``approvedAtMs``,
+    ``lastSeenAtMs``), keyed by ``device_id``, so
+    ``check_paired_device_operator_authority``'s existing scope/revoked-token
+    evaluation runs unmodified against either source -- see that check's docstring
+    for the merge rule (legacy JSON wins outright when present; this table is
+    consulted only when it is absent, the same "legacy wins" precedent
+    ``_collect_cron`` already established for its own JSON-vs-SQLite pair).
+
+    Never-echo-the-token contract, defense in depth: unlike the legacy JSON path
+    (which loads the whole file, secret token strings included, and relies on the
+    check's own logic never printing them), this reader strips each token's
+    ``token`` sub-key -- the live secret value -- while parsing ``tokens_json``, so
+    the secret string never enters a Python object this reader hands back at all.
+    Only ``role``/``scopes``/``createdAtMs``/``rotatedAtMs``/``lastUsedAtMs``/
+    ``revokedAtMs`` survive -- exactly what the check's own revoked-token logic
+    (B-243) needs, and nothing else.
+
+    Same view-masquerade defense as the other security-plane tables in this module
+    (``config_machine_state``, ``installed_plugin_index``): resolved via
+    ``trajectorystore._table_kind`` before being queried, so a crafted
+    ``CREATE VIEW device_pairing_paired AS ...`` cannot spoof, in either direction,
+    whether a standing operator-authority grant exists.
+
+    Three-state disclosure, matching every sibling reader on this database:
+    ``paired_devices_sqlite_found`` False means undetermined (no state DB, or one
+    predating this table); True with an empty ``paired_devices_sqlite`` means
+    "looked, table exists, genuinely zero rows" (a real, correctly-reported clean
+    PASS on a migrated-but-never-paired install); ``paired_devices_sqlite_parse_error``
+    means present but not reliably readable (a schema this reader does not
+    recognise, a locked file, or a masquerading view) -- the caller must report
+    UNKNOWN for that case, never a fake PASS.
+    """
+    state_dir = home / "state"
+    capped: list = []
+    sqlite_candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # Same disclosure discipline as `_collect_auth_profile_store_presence`: a
+        # capped walk that never reached the DB is not the same fact as "no state
+        # store" (GR#4 -- no silent completeness claim over a capped scan).
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the paired-device store presence was not read"
+            )
+        return  # no state DB -> paired_devices_sqlite_found stays False (UNKNOWN, not a fake PASS)
+
+    try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("BEGIN")
+            conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "device_pairing_paired")
+            if kind == "absent":
+                # Genuinely no such table yet (pre-migration install) -- same honest
+                # UNDETERMINED as the sqlite3.Error "no such table" branch below.
+                return
+            if kind != "table":
+                # Present, but not a real TABLE (view / virtual table / rootpage-
+                # aliased / generated-column row). Refuse to query it -- disclosed,
+                # never silently trusted, and never conflated with "absent".
+                ctx.errors.append(
+                    f"'device_pairing_paired' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the paired-device store was not read"
+                )
+                ctx.paired_devices_sqlite_found = True
+                ctx.paired_devices_sqlite_parse_error = True
+                return
+            rows = conn.execute(_PAIRED_DEVICE_SQLITE_SELECT).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(
+                f"could not read device_pairing_paired from {db_path}: {exc}"
+            )
+            ctx.paired_devices_sqlite_found = True
+            ctx.paired_devices_sqlite_parse_error = True
+        return
+
+    def _json_list(raw):
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return None
+        return value if isinstance(value, list) else None
+
+    ctx.paired_devices_sqlite_found = True
+    entries: dict = {}
+    for (
+        device_id, platform, scopes_json, approved_scopes_json, tokens_json,
+        created_at_ms, approved_at_ms, last_seen_at_ms,
+    ) in rows:
+        if not isinstance(device_id, str) or not device_id:
+            continue
+
+        tokens: dict = {}
+        if tokens_json:
+            try:
+                raw_tokens = json.loads(tokens_json)
+            except ValueError:
+                raw_tokens = None
+            if isinstance(raw_tokens, dict):
+                for role_key, tok in raw_tokens.items():
+                    if isinstance(tok, dict):
+                        # Strip the live secret token string -- see docstring's
+                        # never-echo-the-token contract.
+                        tokens[role_key] = {
+                            k: v for k, v in tok.items() if k != "token"
+                        }
+
+        entries[device_id] = {
+            "deviceId": device_id,
+            "platform": platform,
+            "scopes": _json_list(scopes_json),
+            "approvedScopes": _json_list(approved_scopes_json),
+            "tokens": tokens,
+            "createdAtMs": created_at_ms,
+            "approvedAtMs": approved_at_ms,
+            "lastSeenAtMs": last_seen_at_ms,
+        }
+
+    ctx.paired_devices_sqlite = entries
+
+
 def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     """Read the allowlisted rows of ``config_machine_state`` into ``ctx``.
 
@@ -8469,6 +8654,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_config_machine_state(home, ctx)
     _collect_auth_profile_store_presence(home, ctx)  # B-749: length-only, never the value
     _collect_agent_auth_profile_store_presence(home, ctx)  # B-845: same, per-agent DBs
+    _collect_paired_devices_sqlite(home, ctx)  # B176: migrated devices/paired.json fallback
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)

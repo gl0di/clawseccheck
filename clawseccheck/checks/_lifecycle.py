@@ -4755,70 +4755,106 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     """B176 (B-243) -- standing operator authority in paired device store
     (devices/paired.json).
 
-    PASS    -- devices/paired.json is absent (nothing paired yet), OR present with no
-              device holding a *live* high-privilege scope (operator.admin /
-              operator.write) -- a device whose every token has been revoked
-              (`tokens[role].revokedAtMs` set for all roles) does not count, even if
-              `scopes`/`approvedScopes` still list the historical grant.
+    PASS    -- neither store has a paired device: devices/paired.json is absent AND
+              (the device_pairing_paired state-DB table is absent/unreachable/empty),
+              OR a store is present with no device holding a *live* high-privilege
+              scope (operator.admin / operator.write) -- a device whose every token
+              has been revoked (`tokens[role].revokedAtMs` set for all roles) does
+              not count, even if `scopes`/`approvedScopes` still list the historical
+              grant.
     WARN    -- one or more paired devices hold standing operator.admin/operator.write
               authority via a live (non-revoked) token -- an inventory advisory (count +
               age), never proof of compromise.
-    UNKNOWN -- devices/paired.json exists but is unreadable or not valid JSON.
+    UNKNOWN -- devices/paired.json exists but is unreadable or not valid JSON, OR (when
+              that file is absent) the device_pairing_paired state-DB table exists but
+              could not be reliably read.
 
     B-661: exempt from the "23 checks PASS on an unread config" audit. This check
     never reads ``ctx.config`` -- the locus is ``devices/paired.json`` under
-    ``ctx.home``, checked by presence/content alone regardless of whether
-    openclaw.json was found or parsed.
+    ``ctx.home`` (or its SQLite successor below), checked by presence/content alone
+    regardless of whether openclaw.json was found or parsed.
+
+    B176 follow-up (2026-09-25): OpenClaw 2026.9.6 migrates the legacy
+    ``devices/paired.json`` store into a dedicated ``device_pairing_paired`` table in
+    ``state/openclaw.sqlite``, leaving only an inert ``devices/paired.json.migrated``
+    behind -- ``paired_path.is_file()`` alone used to read that as "nothing paired"
+    even on a machine with real, live paired devices. The legacy JSON file still wins
+    outright when present (same "legacy wins when both exist" precedent
+    ``collector._collect_cron`` already established for its own JSON-vs-SQLite pair,
+    since an unmigrated install's live data is there); the SQLite-sourced
+    ``ctx.paired_devices_sqlite`` (populated by
+    ``collector._collect_paired_devices_sqlite``, normalised into the SAME per-entry
+    shape the legacy JSON envelope uses) is consulted ONLY as a fallback when that
+    file is absent, so the scope/revoked-token evaluation loop below runs unmodified
+    against either source.
     """
     import json as _json
     import time as _time
 
     paired_path = ctx.home / "devices" / "paired.json"
-    if not paired_path.is_file():
-        return _finding(
-            "B176",
-            PASS,
-            "no devices/paired.json found — no paired devices to evaluate.",
-            "No action needed.",
-        )
+    if paired_path.is_file():
+        try:
+            data = _json.loads(paired_path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return _finding(
+                "B176",
+                UNKNOWN,
+                "devices/paired.json present but unreadable — cannot evaluate paired "
+                "device operator authority.",
+                "Ensure devices/paired.json is owner-readable, or review it manually.",
+            )
+        except ValueError:
+            return _finding(
+                "B176",
+                UNKNOWN,
+                "devices/paired.json present but not valid JSON — cannot evaluate paired "
+                "device operator authority.",
+                "Review devices/paired.json manually for paired devices holding standing "
+                "operator authority.",
+            )
 
-    try:
-        data = _json.loads(paired_path.read_text(encoding="utf-8", errors="replace"))
-    except OSError:
-        return _finding(
-            "B176",
-            UNKNOWN,
-            "devices/paired.json present but unreadable — cannot evaluate paired "
-            "device operator authority.",
-            "Ensure devices/paired.json is owner-readable, or review it manually.",
-        )
-    except ValueError:
-        return _finding(
-            "B176",
-            UNKNOWN,
-            "devices/paired.json present but not valid JSON — cannot evaluate paired "
-            "device operator authority.",
-            "Review devices/paired.json manually for paired devices holding standing "
-            "operator authority.",
-        )
+        if not isinstance(data, dict):
+            return _finding(
+                "B176",
+                UNKNOWN,
+                "devices/paired.json present but not in the expected format — cannot "
+                "evaluate paired device operator authority.",
+                "Review devices/paired.json manually for paired devices holding standing "
+                "operator authority.",
+            )
 
-    if not isinstance(data, dict):
-        return _finding(
-            "B176",
-            UNKNOWN,
-            "devices/paired.json present but not in the expected format — cannot "
-            "evaluate paired device operator authority.",
-            "Review devices/paired.json manually for paired devices holding standing "
-            "operator authority.",
-        )
-
-    if not data:
-        return _finding(
-            "B176",
-            PASS,
-            "devices/paired.json found but empty — no paired devices to evaluate.",
-            "No action needed.",
-        )
+        if not data:
+            return _finding(
+                "B176",
+                PASS,
+                "devices/paired.json found but empty — no paired devices to evaluate.",
+                "No action needed.",
+            )
+    else:
+        # Legacy file absent -- fall back to the migrated SQLite store (see the
+        # docstring above). A present-but-unreadable table (a schema this collector
+        # does not recognise, a locked file, or a masquerading view) is UNKNOWN, not
+        # a fake PASS (GR#4); a genuinely absent/empty table (pre-migration install,
+        # or a migrated install with nothing paired yet) reuses the exact same PASS
+        # wording the legacy "file absent" case already used, so nothing about this
+        # fallback changes behavior on any install that has never used either store.
+        if ctx.paired_devices_sqlite_parse_error:
+            return _finding(
+                "B176",
+                UNKNOWN,
+                "device_pairing_paired (state/openclaw.sqlite) present but unreadable "
+                "— cannot evaluate paired device operator authority.",
+                "Review ~/.openclaw/state/openclaw.sqlite's device_pairing_paired "
+                "table manually, or re-run once the state database is not locked.",
+            )
+        data = ctx.paired_devices_sqlite
+        if not data:
+            return _finding(
+                "B176",
+                PASS,
+                "no devices/paired.json found — no paired devices to evaluate.",
+                "No action needed.",
+            )
 
     from ..logsafe import redact as _redact  # noqa: PLC0415
 

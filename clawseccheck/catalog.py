@@ -2346,6 +2346,13 @@ CATALOG: list[CheckMeta] = [
     # normal install (the user's own phone/laptop) — never FAIL; matches B138's
     # advisory precedent exactly (a pending high-scope request is also common/expected
     # and still only WARNs). Never reads the `tokens` field's value.
+    #
+    # 2026-09-25 follow-up: OpenClaw 2026.9.6 migrates this store into a
+    # device_pairing_paired table in state/openclaw.sqlite, leaving only an inert
+    # devices/paired.json.migrated behind -- the legacy-JSON-only check false-PASSed
+    # on a machine with 2 real paired devices. collector._collect_paired_devices_sqlite
+    # is now consulted as a fallback when the legacy file is absent (see that
+    # collector's and this check's own docstrings for the merge rule and grounding).
     CheckMeta(
         "B176",
         "Standing operator authority in paired device store (devices/paired.json)",
