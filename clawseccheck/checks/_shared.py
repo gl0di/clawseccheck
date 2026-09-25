@@ -1200,6 +1200,59 @@ def _cross_context_default(ctx) -> str:
     return "unknown"
 
 
+# B351 (re-grounded): the build that flipped an UNSET tools.codeMode from hardcoded-off to
+# an automatic-activation default. Executed against the real resolver, not read from the
+# descriptions map: 2026.9.6's code-mode resolver fills a missing `tools.codeMode` with
+# `{enabled: "auto", executor: "node"}`, where `"auto"` engages Code Mode for any model
+# whose provider-manifest `compat.codeMode` field is `"preferred"`. Every release from
+# 2026.7.1 (the oldest cached tarball whose resolver was read) through 2026.9.5 leaves an
+# unset key OFF -- there is no separate "off-measured-but-unmeasured" straddle here the way
+# _SCHEMA_LEGACY_MAX/_SCHEMA_MODERN_MIN needed one, because the whole 7.1-9.5 span was read
+# as one hardcoded-off block and 9.6 is the single, consecutive release that changed it.
+_CODE_MODE_AUTO_DEFAULT_MIN = (2026, 9, 6)      # unset -> "auto", executor default -> node
+_CODE_MODE_OFF_MEASURED_MIN = (2026, 7, 1)      # oldest resolver read
+
+
+def _code_mode_default(ctx) -> str:
+    """What does an UNSET ``tools.codeMode`` mean on the reader's OpenClaw? ``"off"`` /
+    ``"auto"`` / ``"unknown"``.
+
+    Three answers for the reason ``_cross_context_default`` has three: "we could not see
+    the build" is not "the build leaves it off", and collapsing them is how an "auto"
+    -activating 2026.9.6+ install would report a clean surface.
+
+    Sources are ``_cross_context_default``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose
+    resolver actually fills the missing key. ``meta.lastTouchedVersion`` is consulted ONLY
+    when it lands at 2026.9.6 or later: that stamp proves a 2026.9.6+ build once SAVED the
+    config, so the default is ``"auto"``. A stamp BELOW the threshold proves nothing about
+    what is installed now (the user may have upgraded five minutes ago and not re-saved),
+    so it answers ``"unknown"``, never ``"off"``.
+
+    ``"off"`` is the one answer that PASSes an otherwise-unset config, so it is only given
+    for an installed version shaped like a calendar release (``YYYY.M.P``, three or more
+    numeric parts) at or after ``_CODE_MODE_OFF_MEASURED_MIN`` -- the oldest release whose
+    resolver was read. Anything else that sorts below 2026.9.6 ("0.0.0", "2026.9", a build
+    older than the measured series) is ``"unknown"``: a version string we cannot place on
+    the timeline is not evidence of a safe default.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _CODE_MODE_AUTO_DEFAULT_MIN:
+            return "auto"
+        if len(installed) >= 3 and installed >= _CODE_MODE_OFF_MEASURED_MIN:
+            return "off"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _CODE_MODE_AUTO_DEFAULT_MIN:
+        return "auto"
+    return "unknown"
+
+
 # B382: keys a newer OpenClaw build REMOVED from its strict root config schema, so a file
 # that still holds one is rejected by `openclaw config validate` and by every CLI command
 # that loads the config, until `openclaw doctor --fix` migrates it.

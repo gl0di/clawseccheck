@@ -3304,10 +3304,18 @@ CATALOG: list[CheckMeta] = [
     # (config-schema.d.ts:4499-4503, description :129-131), default false. WARN-only:
     # enabling it is the owner's explicit act, so it is a capability disclosure, not a
     # compromise. A FAIL tier would need its own C-135 pass.
-    # B351: code mode swaps the model's tool surface for exec+wait behind a QuickJS-WASI
-    # catalog bridge. MEDIUM, not HIGH: the guest is sandboxed and the feature fails
-    # closed, so this is a disclosure that recontextualises every other tool-policy
-    # verdict, not a hole. Grounded on the vendor's own resolver (code-mode-D5mNEiYV.js).
+    # B351: code mode swaps the model's tool surface for exec+wait behind a catalog
+    # bridge. MEDIUM, not HIGH: on releases before 2026.9.6 the guest is sandboxed
+    # (QuickJS-WASI) and the feature fails closed, so this is a disclosure that
+    # recontextualises every other tool-policy verdict, not a hole by itself.
+    # NOT unconditionally true from 2026.9.6 on: an unset tools.codeMode now defaults
+    # to automatic activation with the UNSANDBOXED `node:vm` executor (OpenClaw's own
+    # docs: "not a security boundary", sharing the Gateway process's OS-level
+    # privileges) -- QuickJS-WASI still ships but now needs an explicit
+    # executor: "quickjs". The check's own WARN text names which executor actually
+    # applies; this severity was kept MEDIUM rather than re-litigated per build, since
+    # that would need its own independent C-135 pass. Grounded on the vendor's own
+    # resolver (code-mode-D5mNEiYV.js), executed across openclaw@7.1-9.6.
     # B352: tools.exec.pathPrepend — directories exported AHEAD of $PATH for every exec
     # run, deliberately outranking the operator's own shell startup files
     # (wrapPosixCommandWithPathPrepend). A writable entry there is a standing

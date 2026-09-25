@@ -34,6 +34,7 @@ from ._shared import (
     _b323_contains_env_var_reference,
     _B55_FS_WRITE_TOOLS,
     _canon_tool,
+    _code_mode_default,
     _config_unreadable,
     _custom,
     _dir_replaceable_by_others,
@@ -2917,15 +2918,21 @@ def check_path_safety(ctx: Context) -> Finding:
 # B351: mirrors OpenClaw's own `normalizeCodeModeRawConfig`
 # (code-mode-D5mNEiYV.js:36-41) rather than approximating it. The boolean shorthand is
 # REAL - `codeMode: true` is a legal config with no `.enabled` key at all - and anything
-# that is neither a boolean nor a record resolves to "absent", which the caller's `or {}`
-# then turns into disabled. Reimplementing this by hand is how a lying-PASS gets written:
-# reading `.enabled` off `True` returns nothing and reports the feature off.
+# that is neither a boolean, the "auto" literal, nor a record resolves to "absent", which
+# the caller's `or {}` then turns into disabled. Reimplementing this by hand is how a
+# lying-PASS gets written: reading `.enabled` off `True` returns nothing and reports the
+# feature off. The "auto" string branch is 2026.9.6+'s own normalisation (the SAME literal
+# already validates on 8.1-9.5, it just is not yet the unset-key DEFAULT there -- see
+# `_code_mode_default`).
 def _b351_raw_code_mode(value):
-    """The vendor's normalisation: bool -> {"enabled": bool}, record -> itself, else None."""
+    """The vendor's normalisation: bool -> {"enabled": bool}, "auto" -> {"enabled": "auto"},
+    record -> itself, else None."""
     if value is True:
         return {"enabled": True}
     if value is False:
         return {"enabled": False}
+    if isinstance(value, str) and value == "auto":
+        return {"enabled": "auto"}
     return value if isinstance(value, dict) else None
 
 
@@ -2935,9 +2942,175 @@ def _b351_enabled(raw: dict) -> bool:
     Only a real boolean counts. A truthy non-bool (`"true"`, `1`) falls back to the
     default, so it does NOT enable code mode - matching the vendor exactly instead of
     guessing, the same discipline B350 applies to gateway.terminal.enabled.
+
+    Kept importable (and still used by ``_b351_resolve`` where a per-scope caller wants a
+    plain False-on-anything-else read that never reaches the auto literal or the version
+    default) -- ``_b351_read_enabled`` is the newer sibling that also recognises "auto".
     """
     val = raw.get("enabled")
     return val if isinstance(val, bool) else False
+
+
+def _b351_read_enabled(v):
+    """The vendor's field-level read, extended for the "auto" literal introduced
+    alongside the per-model-key override: only a real boolean or the exact string
+    "auto" counts. Anything else -- including a truthy junk value like "true" or 1,
+    OR OpenClaw's own version-default sentinel arriving unresolved -- resolves to
+    False, the same discipline ``_b351_enabled`` already applies. Callers that need to
+    keep an unresolved version-default sentinel as UNKNOWN (rather than collapsing it
+    to False) must intercept it before calling this -- see ``_b351_resolve``.
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v == "auto":
+        return "auto"
+    return False
+
+
+def _b351_first_set(*vals):
+    """JS `??` (nullish coalescing) semantics, left to right: the first argument that is
+    not ``None`` wins -- INCLUDING a non-``None``-but-invalid value (e.g. ``"yes"``),
+    which must WIN over a later, valid layer and then get read as ``False`` by
+    ``_b351_read_enabled``, exactly matching the vendor (which never re-consults a later
+    ``??`` operand once an earlier one is anything other than `null`/`undefined`).
+    Returns ``None`` only when every argument does.
+    """
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
+# Sentinel: the winning term in `_b351_resolve`'s precedence chain was the reader's
+# OWN version-default marker (`_code_mode_default(ctx) == "unknown"`) rather than
+# anything the config itself sets -- not a vendor value, purely ours, and must never
+# reach `_b351_read_enabled` (which would silently read it as a truthy-junk `False`
+# and manufacture a PASS on a build we cannot place).
+_B351_DEFAULT_UNKNOWN = object()
+
+
+def _b351_default_value(default: str):
+    """``_code_mode_default``'s three answers, translated into a `??`-chain operand:
+    ``"auto"`` and ``"off"`` become the literal values OpenClaw's own resolver would use
+    for an entirely-unset `tools.codeMode`; ``"unknown"`` becomes the sentinel above so
+    the caller can tell "genuinely off" apart from "we don't know"."""
+    if default == "auto":
+        return "auto"
+    if default == "off":
+        return False
+    return _B351_DEFAULT_UNKNOWN
+
+
+def _b351_resolve(global_raw, default, agent_entry: dict, defaults_models: dict, key):
+    """The real vendor precedence, EXECUTED across openclaw@7.1 through 9.6, not merely
+    read off one version's source:
+
+        agent.models[key].codeMode
+          ?? agent.tools.codeMode.enabled
+          ?? defaults.models[key].codeMode
+          ?? global_source
+
+    where ``global_source`` is ``global_raw.get("enabled")`` when ``global_raw`` is not
+    ``None`` (``tools.codeMode`` normalised to a real record), otherwise the reader's own
+    version-default translation of an entirely-unset key (``_b351_default_value``).
+
+    JS `??`, not `||`: an explicit ``false`` at any layer WINS over a later layer's
+    ``true``, ``_b351_first_set`` implements this precisely (only ``None`` is skipped),
+    and a non-``None``-but-invalid value at an earlier layer (e.g. an agent's own
+    ``"yes"``) also wins outright and is then read as ``False`` -- it does NOT fall
+    through to a later, valid layer, exactly like the vendor's own field read never
+    re-consults a later operand once an earlier one resolves to anything.
+
+    ``agent.models`` and ``agents.defaults.models`` are two INDEPENDENT dicts, never
+    merged into one before this chain runs: an agent's own explicit ``false`` for a model
+    key wins over ``defaults.models[K]: true`` for that SAME key, because each is read
+    from its own dict at its own position in the chain, not deep-merged first. This is
+    the THIRD activation layer B351 missed before this fix -- confirmed executable on the
+    installed 2026.9.5 and 2026.9.6 dists.
+
+    *key* is the real, possibly-DOTTED model key (``"gpt-5.6-sol"``) read by plain dict
+    ``.get()`` -- NEVER through ``dig()``, which would misparse the dots as a path
+    separator. *key* is ``None`` for the base (no per-model-override) resolution, in
+    which case both model-keyed terms are ``None`` and the chain degenerates to exactly
+    the existing two-layer ``agent.tools.codeMode.enabled ?? global_source`` read.
+
+    Returns ``True`` / ``False`` / ``"auto"``, or ``_B351_DEFAULT_UNKNOWN`` when the
+    winning term is the reader's own unresolved version-default marker.
+    """
+    agent_models = agent_entry.get("models")
+    agent_models = agent_models if isinstance(agent_models, dict) else {}
+    model_val = None
+    if key is not None:
+        model_entry = agent_models.get(key)
+        if isinstance(model_entry, dict):
+            model_val = model_entry.get("codeMode")
+
+    agent_raw = _b351_raw_code_mode(dig(agent_entry, "tools.codeMode"))
+    agent_enabled_val = agent_raw.get("enabled") if agent_raw is not None else None
+
+    defaults_val = None
+    if key is not None and isinstance(defaults_models, dict):
+        default_entry = defaults_models.get(key)
+        if isinstance(default_entry, dict):
+            defaults_val = default_entry.get("codeMode")
+
+    if global_raw is not None:
+        global_source = global_raw.get("enabled")
+    else:
+        global_source = _b351_default_value(default)
+
+    winner = _b351_first_set(model_val, agent_enabled_val, defaults_val, global_source)
+    if winner is _B351_DEFAULT_UNKNOWN:
+        return _B351_DEFAULT_UNKNOWN
+    return _b351_read_enabled(winner)
+
+
+_B351_VALID_EXECUTORS = ("node", "quickjs")
+
+
+def _b351_executor(global_raw, agent_raw, default) -> str:
+    """Which engine actually runs the guest, given the resolved regime.
+
+    A ``default`` of ``"off"`` (pre-2026.9.6): always ``"quickjs-wasi"``, unconditionally
+    -- the ``executor`` sub-key did not exist in that era's schema at all, so even a
+    config that happens to carry one is not read by that build's own resolver.
+
+    Otherwise (``"auto"``, or an explicit raw ``true``/``"auto"`` regardless of the
+    version default): the agent's own ``executor`` key fully OVERRIDES the global one
+    (object-spread precedence, matching the rest of this module -- it does NOT merge),
+    else the global ``executor`` key, else ``"node"`` -- the confirmed 2026.9.6+ default
+    when the key itself is absent. Only ``"node"``/``"quickjs"`` are recognised; anything
+    else is treated the same as absent.
+
+    A genuinely ``"unknown"`` build/default: the explicit ``executor`` value if the
+    config sets one (a config-authored choice is real evidence independent of which
+    build is installed), else ``"unknown"`` -- it could be either.
+    """
+    if default == "off":
+        return "quickjs-wasi"
+    explicit = None
+    if isinstance(agent_raw, dict) and agent_raw.get("executor") in _B351_VALID_EXECUTORS:
+        explicit = agent_raw.get("executor")
+    elif isinstance(global_raw, dict) and global_raw.get("executor") in _B351_VALID_EXECUTORS:
+        explicit = global_raw.get("executor")
+    if default == "unknown":
+        return explicit if explicit is not None else "unknown"
+    return explicit if explicit is not None else "node"
+
+
+def _b351_classify(val) -> str:
+    """Bucket a ``_b351_resolve`` result for scope aggregation: ``"on"`` / ``"auto"`` /
+    ``"unknown"`` / ``"off"``. ``val`` is always one of ``True``/``False``/``"auto"``/
+    ``_B351_DEFAULT_UNKNOWN`` -- never plain ``None`` -- because ``_b351_resolve`` always
+    routes through ``_b351_read_enabled`` (or the sentinel short-circuit) before
+    returning."""
+    if val is True:
+        return "on"
+    if val == "auto":
+        return "auto"
+    if val is _B351_DEFAULT_UNKNOWN:
+        return "unknown"
+    return "off"
 
 
 # B351: OpenClaw's own agent-id canonicalisation, ported from `normalizeAgentId`
@@ -3000,57 +3173,111 @@ def _b351_resolvable_agents(agents) -> list:
 
 
 def check_code_mode_tool_surface(ctx: Context) -> Finding:
-    """B351 - code mode replaces the model's tool surface with `exec` + `wait`.
+    """B351 (re-grounded) - code mode replaces the model's tool surface with
+    `exec` + `wait`. Was a FALSE PASS from OpenClaw 2026.8.1 onward until this fix: a
+    THIRD activation layer this check never read, on top of the two it already knew
+    about.
 
-    Grounded on the INSTALLED dist (openclaw@2026.7.1-2) and on its RESOLVER, not on the
-    descriptions map. `tools.codeMode` is
-    ``ZodOptional<ZodUnion<[ZodBoolean, ZodObject<{enabled?, runtime?, mode?, ...}>]>>``
-    (plugin-sdk/config-schema.d.ts:3654), with a per-agent twin at
-    ``agents.list[].tools.codeMode`` (:1583). OpenClaw's own description (:331) states
-    that when enabled, "agent runs expose only `exec` and `wait` to the model and hide
-    normal tools behind a QuickJS-WASI catalog bridge".
+    Grounded on `code-mode-*.js`'s own resolver, EXECUTED against real npm tarballs
+    7.1 through 9.6, not read off one version's descriptions map or schema comment.
+    `tools.codeMode` is a union of a boolean, the literal string ``"auto"`` (present in
+    the schema from 2026.8.1, though not yet the unset-key DEFAULT until 9.6 -- see
+    below), and an object (``{enabled?, executor?, ...}``), with the SAME union at three
+    more places: the per-agent twin (`agents.list[].tools.codeMode` /
+    `agents.entries.<id>.tools.codeMode`), and -- the layer that made this check lie for
+    a full release cycle -- a per-EXACT-model-key override at
+    `agents.defaults.models.<key>.codeMode` and the agent's own `models.<key>.codeMode`.
+    OpenClaw's own description (:331) states that when active, "agent runs expose only
+    `exec` and `wait` to the model and hide normal tools behind a catalog bridge".
 
-    WHY THIS IS WORTH A FINDING AT ALL. Code mode is not a hole - the guest runs in
-    QuickJS-WASI and the feature fails closed when the runtime is unavailable (:332). It
-    is reported because it silently changes what every OTHER tool-policy verdict MEANS: a
-    `tools.allow` list, a profile, a deny entry all describe a surface the model no longer
-    sees directly, while `exec` is exposed. An owner reading "tools are restricted to X"
-    should know the model is actually being handed exec-and-wait over a catalog bridge.
+    WHY THIS IS WORTH A FINDING AT ALL. Code mode is not inherently a hole when it runs
+    in the sandboxed QuickJS-WASI bridge, and the feature fails closed when that runtime
+    is unavailable. It is reported because it silently changes what every OTHER
+    tool-policy verdict MEANS: a `tools.allow` list, a profile, a deny entry all describe
+    a surface the model no longer sees directly, while `exec` is exposed. From
+    2026.9.6 onward it is ALSO worth a finding because the DEFAULT executor for that
+    exec surface changed from the sandboxed QuickJS-WASI bridge to unsandboxed
+    `node:vm` (OpenClaw's own docs: "not a security boundary", sharing the Gateway
+    process's OS-level privileges) -- QuickJS-WASI still ships bundled, but now requires
+    explicitly setting `executor: "quickjs"`.
 
-    THE LYING-PASS THIS CLOSES, and why the check must walk agents. The resolver merges
-    per-agent OVER global - ``agentRaw ? {...globalRaw, ...agentRaw} : globalRaw``
-    (code-mode-D5mNEiYV.js:42-49) - so the override works in BOTH directions:
+    THREE BUILD REGIMES, not one hardcoded default -- see `_code_mode_default` in
+    `_shared.py` for the full grounding and measured release series:
 
-      global off + agent `codeMode: true`   -> ON for that agent   <- a global-only read
-                                                                      reports PASS here
-      global on  + agent `codeMode: false`  -> OFF for that agent  <- benign narrowing,
-                                                                      must not fire
-      global on  + agent `{timeoutMs: 100}` -> still ON (the agent object carries no
-                                               `enabled`, so global's survives the spread)
+      pre-2026.7.1        unmeasured; this check answers UNKNOWN for it, never "off".
+      2026.7.1 - 9.5       an entirely-unset `tools.codeMode` resolves OFF. The object
+                           variant and the "auto" literal already validate from 8.1, but
+                           "auto" is not yet the unset-key default.
+      2026.9.6 and later   an entirely-unset `tools.codeMode` resolves to
+                           `{enabled: "auto", executor: "node"}` -- Code Mode
+                           auto-activates for any model whose provider-manifest
+                           `compat.codeMode` field is `"preferred"`, and the guest runs
+                           UNSANDBOXED by default.
 
-    Reading only `tools.codeMode` would therefore report a clean surface while a named
-    agent runs in code mode. Measured against the schema: `agents.defaults` carries no
-    `tools.codeMode`, so there are exactly TWO layers and no third to miss.
+    THE FULL PRECEDENCE CHAIN this check now walks (`_b351_resolve`, JS `??` semantics,
+    EXECUTED against the installed 2026.9.5 and 2026.9.6 dists), for every (agent, model
+    key) pair a session could actually use:
 
-    PASS    - resolved off everywhere: globally, and for every configured agent.
-    WARN    - resolved on globally, or on for at least one named agent (which one is
-              named in the detail).
-    UNKNOWN - the config was not read, or is present and unparseable.
+        agent.models[key].codeMode
+          ?? agent.tools.codeMode.enabled
+          ?? defaults.models[key].codeMode
+          ?? global tools.codeMode.enabled (or the version default, if the key is
+             entirely unset)
 
-    Never FAILs: this is a capability disclosure about a sandboxed, fail-closed vendor
-    feature, not a compromise. A FAIL tier would need its own independent C-135 pass.
+    THE LYING-PASS THIS CLOSES -- confirmed executable on BOTH 9.5 and 9.6:
+    `tools.codeMode: false` globally, with `agents.defaults.models["anthropic/
+    claude-opus-4-8"].codeMode: true`, resolves Code Mode ON for any agent using that
+    model, at every OpenClaw version from 2026.8.1 onward -- and the OLD two-layer
+    check reported this configuration PASS on every one of those releases, because
+    `agents.defaults` carries no `tools.codeMode` and was never read as a source of a
+    per-model override. `agent.models` and `agents.defaults.models` are NEVER merged:
+    an agent's own explicit `false` for a model key wins over `defaults.models[K]:
+    true` for that SAME key, because the vendor checks each independently, in the
+    chain order above -- not as one deep-merged dict.
 
-    WHY THE VERDICT SAYS "QuickJS code mode" AND NOT "code mode". An independent pass
-    found a SECOND, unrelated path to the same user-visible property:
+    JUDGING THE POLICY, NOT THE MODEL TIER (Dave-approved design, matching the
+    established B363/B-833 pattern for a vendor default fork): this check does not try
+    to determine which specific models a running OpenClaw would flag
+    `compat.codeMode: "preferred"` for -- that would require reading ever-changing
+    bundled provider manifests, invisible external provider plugins, and runtime-only
+    signals (a per-run CLI `--code-mode` override, a `/model` switch) that are an
+    open-ended enumeration trap this project's own practice avoids. An `"auto"`
+    resolution is therefore ALWAYS at least a WARN, never silently folded into PASS,
+    regardless of which models the reader's fleet actually runs.
+
+    THE GLOBAL/AGENT DEFAULT ASYMMETRY, worth stating explicitly because it is easy to
+    conflate: an AGENT object missing `enabled` INHERITS whatever the global scope (or,
+    absent that, the version default) resolves to -- it is not its own independent
+    "off". The GLOBAL object being entirely absent, on a pre-9.6 build, means off; on a
+    9.6+ build it means auto. These are the SAME missing-key shape read two different
+    ways depending on WHICH scope is missing it and WHICH build is running -- never
+    conflate "agent inherits" with "global's own default".
+
+    PASS    - resolved off for every scope this config names: globally, for every
+              configured agent, and for every named model key (own or default).
+    WARN    - ANY scope (global, an agent, or a per-model-key override) resolves to
+              `true` or `"auto"` -- an `"auto"` resolution is WARN even when every
+              explicit value in the config is `false`, because it is the reader's own
+              build defaulting the feature on. Names every on/auto scope.
+    UNKNOWN - the config was not read or is unparseable, OR at least one scope leaves
+              `tools.codeMode` entirely unset AND the installed OpenClaw build could not
+              be determined (so the version-forked default cannot be resolved for it) --
+              UNLESS some OTHER scope already resolves to `true`/`"auto"`, in which case
+              that WARN is reported regardless of the unrelated unknown.
+
+    Never FAILs: this is a capability disclosure about a vendor feature that fails
+    closed when its runtime is unavailable, not a compromise by itself. A FAIL tier
+    would need its own independent C-135 pass.
+
+    WHY THE VERDICT NAMES "OpenClaw Code Mode" AND NOT JUST "code mode". An independent
+    pass found a SECOND, unrelated path to the same user-visible property:
     ``plugins.entries.<name>.config.appServer.codeModeOnly`` (config-fy-53tqM.js:122,
     read at :302) flows through to ``"features.code_mode_only": true`` for Codex
     app-server runs (run-attempt-CXZNKJ6y.js:2863 ->
     thread-lifecycle-DSMv62L1.js:2339,2346). That is a DIFFERENT engine - Codex native,
-    not the QuickJS exec/wait bridge - so it is outside ``resolveCodeModeConfig`` and
-    outside this check. Nothing in ``checks/`` reads it today. The honest response is to
-    narrow the CLAIM rather than widen the check on ungrounded ground: an unqualified
-    "code mode is off" is what a reader would believe, and it would be wrong for that
-    config. Widening is a separate change with its own C-135 pass.
+    not this resolver's exec/wait bridge - so it is outside ``resolveCodeModeConfig``
+    and outside this check. Nothing in ``checks/`` reads it today. The honest response
+    is to narrow the CLAIM rather than widen the check on ungrounded ground.
 
     AGENT IDENTITY IS THE VENDOR'S, NOT LIST POSITION. See
     ``_b351_resolvable_agents``: OpenClaw resolves an agent by NORMALISED id and takes
@@ -3059,6 +3286,14 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
     one) are ONE agent, and the later entry is unreachable. Looping raw list entries
     reported an agent the resolver can never produce - a false WARN, found by an
     independent adversarial pass and fixed here.
+
+    WHAT THIS CHECK STILL CANNOT SEE, by design (see the module-level module-map, not
+    reproduced here): a per-run CLI `--code-mode` override; a runtime `/model` switch
+    that moves a session onto a different model key mid-conversation; a run routed
+    through the Codex harness, which never reaches `resolveCodeModeConfig` at all; and
+    an external provider plugin's own `compat.codeMode` manifest flag, which decides
+    whether `"auto"` actually engages for a given model and is not part of this
+    project's grounded schema.
     """
     unreadable = _config_unreadable("B351", ctx)
     if unreadable is not None:
@@ -3074,51 +3309,189 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
-    global_raw = _b351_raw_code_mode(dig(cfg, "tools.codeMode")) or {}
-    global_on = _b351_enabled(global_raw)
+    global_raw = _b351_raw_code_mode(dig(cfg, "tools.codeMode"))
+    default = _code_mode_default(ctx)
+    defaults_models_raw = dig(cfg, "agents.defaults.models")
+    defaults_models = defaults_models_raw if isinstance(defaults_models_raw, dict) else {}
+
+    global_state = _b351_classify(
+        _b351_resolve(global_raw, default, {}, defaults_models, None))
 
     on_agents: list[str] = []
     off_agents: list[str] = []
-    for aid, agent in _b351_resolvable_agents(agent_roster(cfg)):
-        agent_raw = _b351_raw_code_mode(dig(agent.entry, "tools.codeMode"))
-        merged = {**global_raw, **agent_raw} if agent_raw is not None else global_raw
-        label = agent.labelled(aid)
-        (on_agents if _b351_enabled(merged) else off_agents).append(label)
+    auto_agents: list[str] = []
+    unknown_agents: list[str] = []
+    agent_raw_by_label: dict = {}
+    model_on: list[tuple] = []
+    model_auto: list[tuple] = []
+    model_unknown: list[str] = []
 
-    if not global_on and not on_agents:
+    for key in sorted(defaults_models):
+        label = f'agents.defaults.models["{key}"].codeMode'
+        state = _b351_classify(_b351_resolve(global_raw, default, {}, defaults_models, key))
+        if state == "on":
+            model_on.append((label, None))
+        elif state == "auto":
+            model_auto.append((label, None))
+        elif state == "unknown":
+            model_unknown.append(label)
+
+    for aid, agent in _b351_resolvable_agents(agent_roster(cfg)):
+        label = agent.labelled(aid)
+        agent_raw = _b351_raw_code_mode(dig(agent.entry, "tools.codeMode"))
+        agent_raw_by_label[label] = agent_raw
+        state = _b351_classify(
+            _b351_resolve(global_raw, default, agent.entry, defaults_models, None))
+        {"on": on_agents, "off": off_agents,
+         "auto": auto_agents, "unknown": unknown_agents}[state].append(label)
+
+        own_models = agent.entry.get("models")
+        own_models = own_models if isinstance(own_models, dict) else {}
+        for key in sorted(set(own_models) | set(defaults_models)):
+            mlabel = f'{label}.models["{key}"].codeMode'
+            mstate = _b351_classify(
+                _b351_resolve(global_raw, default, agent.entry, defaults_models, key))
+            if mstate == "on":
+                model_on.append((mlabel, agent_raw))
+            elif mstate == "auto":
+                model_auto.append((mlabel, agent_raw))
+            elif mstate == "unknown":
+                model_unknown.append(mlabel)
+
+    has_on = global_state == "on" or bool(on_agents) or bool(model_on)
+    has_auto = global_state == "auto" or bool(auto_agents) or bool(model_auto)
+    has_unknown = global_state == "unknown" or bool(unknown_agents) or bool(model_unknown)
+
+    if has_on or has_auto:
+        executor_agent_raw = None
+        if global_state in ("on", "auto"):
+            who = "for every agent" if not off_agents else (
+                f"globally, and narrowed off for {', '.join(sorted(off_agents)[:4])}"
+            )
+            state_word = "auto-activated" if global_state == "auto" else "on"
+            lead = f"tools.codeMode is {state_word} {who}."
+        elif on_agents or auto_agents:
+            combined = sorted(on_agents + auto_agents)[:4]
+            verb = "ON" if on_agents else "auto-activated"
+            global_word = "off" if global_state == "off" else "unset (build unknown)"
+            lead = (f"tools.codeMode is {global_word} globally but {verb} for "
+                    f"{', '.join(combined)}.")
+            executor_agent_raw = agent_raw_by_label.get(combined[0])
+        else:
+            combined_model = model_on + model_auto
+            verb = "true" if model_on else "auto"
+            labels_text = ', '.join(sorted(m[0] for m in combined_model)[:4])
+            lead = ("No global or per-agent tools.codeMode is on, but a per-model "
+                    f"codeMode override resolves {verb} for {labels_text}.")
+            executor_agent_raw = combined_model[0][1]
+
+        base_drove_lead = global_state in ("on", "auto") or on_agents or auto_agents
+        extra_sentence = ""
+        if base_drove_lead and (model_on or model_auto):
+            extra_labels = sorted({m[0] for m in model_on} | {m[0] for m in model_auto})[:4]
+            extra_verb = "true" if model_on else "auto"
+            extra_sentence = (
+                f" A per-model codeMode override also resolves {extra_verb} for "
+                f"{', '.join(extra_labels)}."
+            )
+
+        auto_note = ""
+        if has_auto:
+            auto_note = (
+                " This is the 2026.9.6+ automatic-activation default: it engages for "
+                "any model whose provider catalog marks it "
+                "compat.codeMode=\"preferred\"."
+            )
+
+        executor = _b351_executor(global_raw, executor_agent_raw, default)
+        if executor == "quickjs-wasi":
+            trailing = (
+                "Those agent runs expose only `exec` and `wait` to the model and hide "
+                "the normal tools behind a QuickJS-WASI catalog bridge, so any tools.allow / "
+                "tools.profile / tools.deny policy describes a surface the model does not see "
+                "directly."
+            )
+        elif executor == "node":
+            trailing = (
+                "Those agent runs expose only `exec` and `wait` to the model, and the "
+                "guest code runs in OpenClaw's default Node executor (`node:vm`, in a "
+                "Gateway worker thread) rather than the sandboxed QuickJS-WASI bridge -- "
+                "OpenClaw's own documentation states this is not a security boundary and "
+                "shares the Gateway process's OS-level privileges, so any tools.allow / "
+                "tools.profile / tools.deny policy describes a surface the model does "
+                "not see directly."
+            )
+        elif executor == "quickjs":
+            trailing = (
+                "Those agent runs expose only `exec` and `wait` to the model and hide "
+                "the normal tools behind the bundled, sandboxed QuickJS-WASI catalog "
+                "bridge (executor explicitly set to \"quickjs\"), so any tools.allow / "
+                "tools.profile / tools.deny policy describes a surface the model does "
+                "not see directly."
+            )
+        else:
+            trailing = (
+                "Those agent runs expose only `exec` and `wait` to the model. Which "
+                "executor runs the guest code could not be determined: releases before "
+                "2026.9.6 sandbox it in QuickJS-WASI, 2026.9.6 and later run it in the "
+                "unsandboxed Node executor (`node:vm`, sharing the Gateway process's "
+                "OS-level privileges) unless tools.codeMode.executor is explicitly "
+                "\"quickjs\" -- so any tools.allow / tools.profile / tools.deny policy "
+                "describes a surface the model does not see directly."
+            )
+
+        detail = f"{lead}{extra_sentence}{auto_note} {trailing}"
+        evidence = sorted(
+            set(on_agents) | set(auto_agents)
+            | {m[0] for m in model_on} | {m[0] for m in model_auto}
+            | ({"tools.codeMode"} if global_state in ("on", "auto") else set())
+        )
         return _finding(
             "B351",
-            PASS,
-            "QuickJS code mode is off, so the model sees the ordinary tool surface "
-            "rather than exec/wait over a catalog bridge.",
-            "Keep it off unless you specifically want the exec/wait surface; it is off "
-            "by default.",
+            WARN,
+            detail,
+            "If code mode is intentional, read the tool-policy findings in this report "
+            "as describing the CATALOG rather than what the model is handed, and "
+            "confirm the exec surface is governed by tools.exec.*. If it is not "
+            "intentional, set tools.codeMode.enabled to false (also check each "
+            f"per-agent entry under {_key_advice(ctx, 'agents.list', 'agents.entries')}, "
+            "and each per-model-key override under agents.defaults.models.<key>."
+            "codeMode / the agent's own models.<key>.codeMode -- any of these can turn "
+            "it back on independently of the global setting). This audit cannot see a "
+            "per-run CLI --code-mode override, a runtime /model switch, a run routed "
+            "through the Codex harness (a separate engine this check does not read), or "
+            "an external provider plugin's own compat.codeMode manifest flag.",
+            evidence=evidence[:8] or None,
         )
 
-    if global_on:
-        who = "for every agent" if not off_agents else (
-            f"globally, and narrowed off for {', '.join(sorted(off_agents)[:4])}"
+    if has_unknown:
+        return _finding(
+            "B351",
+            UNKNOWN,
+            "tools.codeMode is unset for at least one scope this config names (global, "
+            "an agent, or a per-model override) and the installed OpenClaw build could "
+            "not be determined, so whether Code Mode is active there could not be "
+            "established: releases up to 2026.9.5 leave it off when unset, 2026.9.6 and "
+            "later default it to automatic activation (\"auto\") for certain models.",
+            "Set tools.codeMode.enabled to false explicitly (safe on every build), or "
+            "run the audit where the installed openclaw can be found so the build is "
+            "known. This audit also cannot see a per-run CLI --code-mode override, a "
+            "runtime /model switch, a run routed through the Codex harness (a separate "
+            "engine this check does not read), or an external provider plugin's own "
+            "compat.codeMode manifest flag.",
         )
-        where = f"tools.codeMode is on {who}"
-    else:
-        where = (
-            "tools.codeMode is off globally but ON for "
-            f"{', '.join(sorted(on_agents)[:4])}"
-        )
+
     return _finding(
         "B351",
-        WARN,
-        f"{where}. Those agent runs expose only `exec` and `wait` to the model and hide "
-        "the normal tools behind a QuickJS-WASI catalog bridge, so any tools.allow / "
-        "tools.profile / tools.deny policy describes a surface the model does not see "
-        "directly.",
-        "If code mode is intentional, read the tool-policy findings in this report as "
-        "describing the CATALOG rather than what the model is handed, and confirm the "
-        "exec surface is governed by tools.exec.*. If it is not intentional, set "
-        "tools.codeMode.enabled to false (and check each per-agent entry under "
-        f"{_key_advice(ctx, 'agents.list', 'agents.entries')}, which can "
-        "turn it back on independently of the global setting).",
-        evidence=sorted(on_agents)[:8] or None,
+        PASS,
+        "OpenClaw Code Mode (tools.codeMode) is off for every agent and model this "
+        "config names, so the model sees the ordinary tool surface rather than "
+        "exec/wait over a catalog bridge.",
+        "Keep it off unless you specifically want the exec/wait surface. It is off by "
+        "default before OpenClaw 2026.9.6; 2026.9.6 and later default it to automatic "
+        "activation (\"auto\") for certain models, so an explicit "
+        "tools.codeMode.enabled=false is the only way to guarantee it stays off on "
+        "every build.",
     )
 
 

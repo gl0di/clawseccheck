@@ -297,6 +297,14 @@ from ._capability import (
     _b351_resolvable_agents,
     _b351_enabled,
     _b351_raw_code_mode,
+    _b351_read_enabled,
+    _b351_first_set,
+    _b351_resolve,
+    _b351_executor,
+    _b351_classify,
+    _b351_default_value,
+    _B351_DEFAULT_UNKNOWN,
+    _B351_VALID_EXECUTORS,
     check_code_mode_tool_surface,
     _AUTO_GATE_BLAST,
     _B31_BYPASS_CANDIDATES,
@@ -405,6 +413,7 @@ from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK
 from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_contains_env_var_reference,)  # B-397: relocated from _config (reused by B326 too)
 from ._shared import (_SYMLINK_KNOB_RETIRED_MIN, _workshop_symlink_knob,)  # B-783
 from ._shared import (_CROSS_CONTEXT_DEFAULT_ALLOW_MIN, _CROSS_CONTEXT_DENY_MEASURED_MIN, _cross_context_default,)  # B-833
+from ._shared import (_CODE_MODE_AUTO_DEFAULT_MIN, _CODE_MODE_OFF_MEASURED_MIN, _code_mode_default,)  # B351 re-grounded
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
     _B182_ENV_OVERRIDES,
