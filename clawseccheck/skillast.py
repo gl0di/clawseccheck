@@ -27,6 +27,7 @@ import weakref
 from collections import namedtuple
 from urllib.parse import urlparse
 
+from . import shellwords as _shellwords
 from . import shippedexec as _shippedexec
 from .scanbudget import ScanBudgetExceeded
 
@@ -14656,44 +14657,15 @@ def _sh_loop_ref_re(name: str):
     return re.compile(r"\$\{?" + re.escape(name) + r"\b\}?")
 
 
-def _sh_loop_word_end(text: str, start: int) -> int:
-    """End offset of the shell word starting at *start* (an assignment's value):
-    quotes, `$(…)`, `${…}` and backticks nest; unquoted whitespace or a separator ends
-    it. Never crosses a newline, so a call is always bounded by its own line."""
-    stop = text.find("\n", start)
-    stop = len(text) if stop == -1 else stop
-    stack: list = []
-    i = start
-    while i < stop:
-        c = text[i]
-        top = stack[-1] if stack else ""
-        if c == "\\" and top != "'":
-            i += 2
-            continue
-        if top in ("'", "`", "{"):
-            if c == {"'": "'", "`": "`", "{": "}"}[top]:
-                stack.pop()
-        elif top == '"':
-            if c == '"':
-                stack.pop()
-            elif c == "`" or (c == "$" and text.startswith("(", i + 1)):
-                stack.append(c if c == "`" else "(")
-                i += c == "$"
-        elif c in "'\"`":
-            stack.append(c)
-        elif c == "$" and text.startswith(("(", "{"), i + 1):
-            stack.append(text[i + 1])
-            i += 1
-        elif c == "(":
-            stack.append("(")
-        elif c == ")":
-            if not stack:
-                return i
-            stack.pop()
-        elif not stack and c in " \t;&|<>":
-            return i
-        i += 1
-    return min(i, stop)
+# CLAWSECCHECK-B-986 P2: moved to shellwords.py (the new real shell word/
+# command splitter curlargv.py's positional parsing is built on) -- kept
+# importable under this exact name here since this module's own loop-taint
+# code below is its one remaining direct caller, and tests/other code may
+# still import it as `clawseccheck.skillast._sh_loop_word_end`. Byte-for-byte
+# the same algorithm; see shellwords._word_scan_state's docstring for the
+# two additional fail-closed signals shellwords.scan_line derives from it
+# that this thin re-export does not expose.
+_sh_loop_word_end = _shellwords._sh_loop_word_end
 
 
 def _sh_loop_bound_names(m) -> list:
