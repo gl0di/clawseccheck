@@ -250,6 +250,682 @@ def _secret_name_bindings(tree: ast.AST) -> dict:
     return {name: val for name, val in secret_values.items() if counts.get(name) == 1}
 
 
+# B-998 round 3 (Dave's ruling: build a real positive proof, not another token-vocabulary
+# patch on the exemption gate -- rounds 1/round-2 in commits 7a5b272a/92a8df05 were each
+# retracted by independent review; see the in-source note above the call site in
+# checks/_vet.py for the full retraction history). This is a self-contained, fail-closed
+# reachability proof: given a source file and the line numbers where
+# HARDCODED_PROVIDER_SECRET fired, prove every one of those env-writes is INERT -- the
+# written value never reaches a network-send call, a return/yield, an import-visible
+# module/class binding, or any other node this proof cannot positively clear. Anything it
+# cannot prove safe, it refuses (returns False) -- it never grants an exemption on a guess.
+#
+# Structure (G0-G4; G0 is the caller's basename gate in checks/_vet.py, not part of this
+# function):
+#   G1 -- every HARDCODED_PROVIDER_SECRET finding line must sit on a STRUCTURALLY
+#         recognized os.environ-write site, with a literal (non-dynamic) key.
+#   G2 -- (enforced by the caller, checks/_vet.py -- this function does not see the full
+#         finding list for other rules) every other AST rule must be silent.
+#   G3 -- the file may not contain any of a small capability blocklist (dynamic
+#         execution/introspection/subprocess primitives) -- if it does, refuse outright;
+#         a file that can run arbitrary code or reflectively reach process internals is
+#         not something this static proof can reason about at all.
+#   G4 -- the actual reachability proof: trace every read of a written key (and every
+#         other occurrence of the os.environ mapping object itself, plus any string
+#         constant that looks like it names a written key or the word "environ") upward
+#         through its enclosing expressions/statements, and confirm it can only ever
+#         terminate in a small set of DEMONSTRABLY harmless positions (a bare expression
+#         statement, a presence-only `is None`/`is not None` test, an assert with no call
+#         in its message, a function-local name binding whose own future reads are
+#         re-walked the same way, or a same-key save/restore subscript write). Reaching a
+#         function call's argument list, a `return`/`yield`, a module/class-level binding,
+#         or any node shape this function does not explicitly recognize, refuses.
+#
+# Disclosed residuals (deliberately out of scope, all bounded the same way -- a miss here
+# only costs the WARN-vs-FAIL distinction, because ENV_EXFIL_FLOW independently WARNs on
+# a plain env-read-to-network flow regardless of whether this exemption fires):
+#   - cross-file reads (a sibling module importing the tainted name) are not traced --
+#     the same documented residual _secret_name_bindings already carries;
+#   - a wrapper library not on the G3 blocklist (e.g. a bespoke `def run_shell(cmd): ...`
+#     that itself calls subprocess three files away) is invisible to this proof;
+#   - a string-built accessor name (`getattr(os.environ, "get")(...)`) is not recognized
+#     as a read at all, so it is simply never queued as a source -- conservative in the
+#     "harmless" direction for THIS proof, but G3's getattr/setattr/delattr blocklist arm
+#     already refuses outright the moment a non-constant attribute-name argument appears
+#     anywhere in the file, which covers the shape that would actually matter here.
+_ENV_MAPPING_ATTRS = frozenset({"environ", "environb"})
+_ENV_READ_METHODS = frozenset({"get", "setdefault", "pop"})
+_ENV_WRITE_METHODS = frozenset({"get", "setdefault"})  # the two-arg "default becomes a write" shape
+_GETENV_NAMES = frozenset({"getenv", "getenvb"})
+
+
+def _env_bare_name_aliases(tree: ast.AST) -> dict:
+    """name -> set of bare identifiers that resolve to it, seeded with the name itself.
+    Covers `from os import environ as E` / `from os import getenv as g`, etc. Attribute
+    access (`os.environ`, `o.environ` for `import os as o`) needs no alias tracking at
+    all -- every check below matches `.attr in {"environ", "environb"}` / `{"getenv",
+    "getenvb"}` on ANY base, deliberately, so a module alias is transparent by
+    construction; only a BARE-NAME rebinding via `from os import X as Y` needs this."""
+    aliases = {
+        "environ": {"environ"},
+        "environb": {"environb"},
+        "getenv": {"getenv"},
+        "getenvb": {"getenvb"},
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "os":
+            for alias in node.names:
+                if alias.name in aliases:
+                    aliases[alias.name].add(alias.asname or alias.name)
+    return aliases
+
+
+def _env_mapping_ref(node: ast.AST, aliases: dict) -> bool:
+    """True if *node* structurally denotes the os.environ(b) mapping object itself --
+    an Attribute with `.attr` in {environ, environb} on ANY base (handles `os.environ`,
+    an aliased module `o.environ`, or any other base -- deliberately unconditional on
+    the base, see the module note above), or a bare Name bound to it (literal `environ`/
+    `environb`, or a `from os import environ as E` alias)."""
+    if isinstance(node, ast.Attribute):
+        return node.attr in _ENV_MAPPING_ATTRS
+    if isinstance(node, ast.Name):
+        return node.id in aliases["environ"] or node.id in aliases["environb"]
+    return False
+
+
+def _env_getenv_call(f: ast.AST, aliases: dict) -> bool:
+    """True if *f* (a Call's `.func`) is `os.getenv`/`os.getenvb` (any base/alias)."""
+    if isinstance(f, ast.Attribute):
+        return f.attr in _GETENV_NAMES
+    if isinstance(f, ast.Name):
+        return f.id in aliases["getenv"] or f.id in aliases["getenvb"]
+    return False
+
+
+def _env_method_call(f: ast.AST, methods: frozenset, aliases: dict) -> bool:
+    """True if *f* is `<env-mapping-ref>.<method>` for one of *methods* (get/setdefault/
+    pop) -- always an Attribute (there is no bare-name form of a bound method)."""
+    return (
+        isinstance(f, ast.Attribute)
+        and f.attr in methods
+        and _env_mapping_ref(f.value, aliases)
+    )
+
+
+def _env_subscript_key_node(node: ast.Subscript):
+    key_node = node.slice
+    if key_node.__class__.__name__ == "Index":  # py3.9 compat wrapper
+        key_node = key_node.value  # type: ignore[attr-defined]
+    return key_node
+
+
+def _const_text_upper(node: ast.AST):
+    """The upper-cased text of a str/bytes ast.Constant, or None for anything else
+    (including a non-Constant key -- a dynamic key is never resolved, deliberately)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.upper()
+    if isinstance(node, ast.Constant) and isinstance(node.value, bytes):
+        return node.value.decode("utf-8", "replace").upper()
+    return None
+
+
+# G3: a small capability blocklist. Any hit anywhere in the file refuses this proof
+# outright -- these are exactly the primitives that would let a "harmless-looking"
+# env-write reach a sink through a path this static proof cannot trace (reflection,
+# process control, dynamic code, or an opaque shell-out library).
+_G3_BANNED_IMPORT_MODULES = frozenset({
+    "subprocess", "pty", "multiprocessing", "_posixsubprocess", "_winapi", "ctypes",
+    "cffi", "importlib", "runpy", "inspect", "gc", "builtins", "sh", "plumbum",
+    "pexpect", "invoke", "fabric",
+})
+_G3_BANNED_BARE_NAMES = frozenset({
+    "eval", "exec", "compile", "globals", "locals", "vars", "__import__",
+})
+_G3_BANNED_ATTRS = frozenset({
+    "__dict__", "__builtins__", "f_globals", "f_locals", "f_back", "_getframe",
+    "modules", "gi_frame", "cr_frame", "tb_frame", "create_subprocess_exec",
+    "create_subprocess_shell", "ProcessPoolExecutor", "getoutput", "getstatusoutput",
+})
+_G3_OS_DANGER_ATTRS_EXACT = frozenset({
+    "system", "popen", "fork", "forkpty", "posix_spawn", "posix_spawnp", "startfile",
+})
+# Short, common words that would otherwise pathologically false-refuse if any unrelated
+# string literal in the file happened to equal them (a dict key "code", a shell name
+# "sh", a module name "invoke", a variable named "modules", the two-letter "gc").
+_G3_STRING_EXEMPT = frozenset({"code", "gc", "sh", "invoke", "modules"})
+
+
+def _g3_os_danger_attr(name: str) -> bool:
+    return name in _G3_OS_DANGER_ATTRS_EXACT or name.startswith("exec") or name.startswith("spawn")
+
+
+def _g3_os_module_aliases(tree: ast.AST) -> set:
+    aliases = {"os"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os":
+                    aliases.add(alias.asname or "os")
+    return aliases
+
+
+def _g3_attr_name_arg(f: ast.AST, call: ast.Call):
+    """For a getattr/setattr/delattr (bare, or `builtins.`-qualified) or an
+    operator.attrgetter/methodcaller call, the argument node holding the
+    dynamically-named attribute -- or None if *f* is not one of these shapes."""
+    if isinstance(f, ast.Name) and f.id in ("getattr", "setattr", "delattr"):
+        return call.args[1] if len(call.args) >= 2 else None
+    if (
+        isinstance(f, ast.Attribute)
+        and f.attr in ("getattr", "setattr", "delattr")
+        and isinstance(f.value, ast.Name)
+        and f.value.id == "builtins"
+    ):
+        return call.args[1] if len(call.args) >= 2 else None
+    if (
+        isinstance(f, ast.Attribute)
+        and f.attr in ("attrgetter", "methodcaller")
+        and isinstance(f.value, ast.Name)
+        and f.value.id == "operator"
+    ):
+        return call.args[0] if len(call.args) >= 1 else None
+    return None
+
+
+def _g3_blocklist_hit(tree: ast.AST) -> bool:
+    os_aliases = _g3_os_module_aliases(tree)
+    string_banned = (
+        _G3_BANNED_IMPORT_MODULES
+        | _G3_BANNED_BARE_NAMES
+        | _G3_BANNED_ATTRS
+        | _G3_OS_DANGER_ATTRS_EXACT
+        | {"getattr", "setattr", "delattr", "attrgetter", "methodcaller"}
+    ) - _G3_STRING_EXEMPT
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in _G3_BANNED_IMPORT_MODULES:
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.module.split(".")[0] in _G3_BANNED_IMPORT_MODULES:
+                return True
+            if node.module == "os":
+                for alias in node.names:
+                    if _g3_os_danger_attr(alias.name):
+                        return True
+        elif isinstance(node, ast.Name):
+            if node.id in _G3_BANNED_BARE_NAMES:
+                return True
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _G3_BANNED_ATTRS:
+                return True
+            if (
+                isinstance(node.value, ast.Name)
+                and node.value.id in os_aliases
+                and _g3_os_danger_attr(node.attr)
+            ):
+                return True
+        elif isinstance(node, ast.Call):
+            attr_arg = _g3_attr_name_arg(node.func, node)
+            if attr_arg is not None:
+                if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
+                    # A constant attribute-name argument to getattr/setattr/delattr/
+                    # attrgetter/methodcaller. `_g3_os_danger_attr` recognizes BOTH
+                    # the small exact-set members (system/popen/fork/...) and the
+                    # exec*/spawn* PREFIX family.
+                    #
+                    # Round 8 (Dave's ruling, replacing rounds 3-7's escalating
+                    # attempts to classify the REFLECTED-ON OBJECT as "the os
+                    # module" vs. "something else" -- see this function's git
+                    # history for the full retraction trail): that classification
+                    # is not attempted anymore, at all. Every version of it --
+                    # a root-name-only check, then a fail-closed allowlist of
+                    # bare-Name/literal-display shapes -- had its own distinct
+                    # bug, alternating between a security bypass (a real os
+                    # reference reached through one hop of indirection: a helper
+                    # call returning os, a subscript into a container holding os,
+                    # an attribute assigned to os elsewhere) and a false positive
+                    # (an unrelated object whose reflected attribute name merely
+                    # matched a danger string). Measured: this exemption never
+                    # fired on any of 1,019+98 real test-fixture-named files
+                    # sampled, so refusing unconditionally costs nothing observed
+                    # while ending the object-identity whack-a-mole for good. A
+                    # reflective call naming an os-danger attribute via a constant
+                    # string now ALWAYS refuses, regardless of what it reflects on.
+                    if _g3_os_danger_attr(attr_arg.value):
+                        return True
+                else:
+                    return True
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value in string_banned:
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------------
+# G1: structural os.environ-write-site collector.
+# ---------------------------------------------------------------------------------
+
+
+def _collect_env_write_sites(tree: ast.AST, aliases: dict):
+    """Returns (written, write_target_ref_ids, update_object_ids, key_position_ids):
+      written             -- {lineno: set(key_upper | None)} for every recognized
+                              write-site (Subscript-assign, getenv/get/setdefault
+                              default-arg with >=2 args, environ.update(...) dict-
+                              literal/keyword form). `None` marks a dynamic (non-
+                              constant) key at that line.
+      write_target_ref_ids -- id() of every env-mapping-ref node used as a Subscript
+                              Store/Del TARGET (`os.environ[K] = ...` / `del
+                              os.environ[K]`) -- excluded from G4's "any other
+                              occurrence" bulk-read source (S3).
+      update_object_ids    -- id() of every env-mapping-ref node used as the object of
+                              `.update(...)` -- likewise excluded from S3.
+      key_position_ids     -- id() of every Constant node already accounted for as a
+                              KEY (read or write) -- excluded from G4's S4 (a written
+                              key's own key-argument is not itself a "leak").
+    """
+    written: dict = {}
+    write_target_ref_ids: set = set()
+    update_object_ids: set = set()
+    key_position_ids: set = set()
+
+    def note(lineno, key_node):
+        if key_node is not None:
+            key_position_ids.add(id(key_node))
+        written.setdefault(lineno, set()).add(_const_text_upper(key_node))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if _env_mapping_ref(node.value, aliases):
+                write_target_ref_ids.add(id(node.value))
+                if isinstance(node.ctx, ast.Store):
+                    note(getattr(node, "lineno", 0), _env_subscript_key_node(node))
+        elif isinstance(node, ast.Call):
+            f = node.func
+            if (_env_getenv_call(f, aliases) or _env_method_call(f, _ENV_WRITE_METHODS, aliases)) and len(node.args) >= 2:
+                note(getattr(node, "lineno", 0), node.args[0])
+            elif isinstance(f, ast.Attribute) and f.attr == "update" and _env_mapping_ref(f.value, aliases):
+                update_object_ids.add(id(f.value))
+                ln = getattr(node, "lineno", 0)
+                if node.args and isinstance(node.args[0], ast.Dict):
+                    for key_node, _value_node in zip(node.args[0].keys, node.args[0].values):
+                        if key_node is None:
+                            written.setdefault(ln, set()).add(None)  # a **unpack entry
+                        else:
+                            note(ln, key_node)
+                for kw in node.keywords:
+                    if kw.arg is None:
+                        written.setdefault(ln, set()).add(None)  # a **unpack entry
+                    else:
+                        written.setdefault(ln, set()).add(kw.arg.upper())
+    return written, write_target_ref_ids, update_object_ids, key_position_ids
+
+
+# ---------------------------------------------------------------------------------
+# G4: parent-pointer map + scope helpers.
+# ---------------------------------------------------------------------------------
+
+
+def _build_parent_map(tree: ast.AST) -> dict:
+    parent_of: dict = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent_of[id(child)] = node
+    return parent_of
+
+
+def _index_name_loads(tree: ast.AST) -> dict:
+    index: dict = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            index.setdefault(node.id, []).append(node)
+    return index
+
+
+def _enclosing_function_scope(node: ast.AST, parent_of: dict):
+    cur = parent_of.get(id(node))
+    while cur is not None:
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return cur
+        if isinstance(cur, (ast.Module, ast.ClassDef, ast.Lambda)):
+            return None
+        cur = parent_of.get(id(cur))
+    return None
+
+
+def _function_declares_global(func_node, name: str) -> bool:
+    stack = list(func_node.body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, ast.Global) and name in n.names:
+            return True
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue  # a nested scope's own `global` does not redirect the outer one
+        stack.extend(ast.iter_child_nodes(n))
+    return False
+
+
+def _subtree_has_call(node) -> bool:
+    return any(isinstance(n, ast.Call) for n in ast.walk(node))
+
+
+def _compare_is_presence_shaped(cmp: ast.Compare) -> bool:
+    """True for `X is None` / `X is not None` (chained is/is-not against a literal
+    None) -- a test that can leak nothing beyond "is the key present", never a value."""
+    if not all(isinstance(op, (ast.Is, ast.IsNot)) for op in cmp.ops):
+        return False
+    values = [cmp.left, *cmp.comparators]
+    return any(isinstance(v, ast.Constant) and v.value is None for v in values)
+
+
+_PASS_THROUGH_PRESENCE_NEUTRAL = (ast.UnaryOp, ast.BoolOp)  # 'not'/and/or: presence-safe
+# Everything else on the generic pass-through list mixes in real value use -- crossing it
+# clears the "presence-only" flag (it may still be harmless overall, e.g. a plain Expr
+# statement, just no longer eligible for the narrow If/While presence-check carve-out).
+_PASS_THROUGH_TYPES = (
+    ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare, ast.IfExp, ast.JoinedStr,
+    ast.FormattedValue, ast.Subscript, ast.Attribute, ast.Starred, ast.Tuple,
+    ast.List, ast.Set, ast.Dict, ast.ListComp, ast.SetComp, ast.DictComp,
+    ast.GeneratorExp, ast.Slice, ast.Await, ast.keyword,
+)
+if hasattr(ast, "Index"):
+    _PASS_THROUGH_TYPES = _PASS_THROUGH_TYPES + (ast.Index,)
+
+_SEND_NODE_TYPES = (ast.Lambda, ast.Return, ast.Yield, ast.YieldFrom, ast.arguments, ast.ExceptHandler)
+
+
+class _Refuse(Exception):
+    def __init__(self, lineno):
+        self.lineno = lineno
+
+
+def _bind_target(target, ctx) -> None:
+    """Implements the binding rules for an assignment-like target. Raises `_Refuse`
+    the moment any element cannot be proven safe; otherwise queues follow-on work
+    (tainted Name loads) into `ctx["queue"]` and returns."""
+    if isinstance(target, (ast.Tuple, ast.List)):
+        for elt in target.elts:
+            _bind_target(elt, ctx)
+        return
+    if isinstance(target, ast.Starred):
+        _bind_target(target.value, ctx)
+        return
+    if isinstance(target, ast.Name):
+        if ctx.get("comprehension_target"):
+            _queue_name_loads(target.id, ctx)
+            return
+        scope = _enclosing_function_scope(target, ctx["parent_of"])
+        if scope is not None and not _function_declares_global(scope, target.id):
+            _queue_name_loads(target.id, ctx)
+            return
+        raise _Refuse(getattr(target, "lineno", 0))  # module/class-level -- importable elsewhere
+    if isinstance(target, ast.Subscript):
+        if _env_mapping_ref(target.value, ctx["aliases"]):
+            key_node = _env_subscript_key_node(target)
+            key = _const_text_upper(key_node)
+            if key is not None and key in ctx["written_keys"]:
+                return  # the save/restore idiom: writing the SAME known key back
+        raise _Refuse(getattr(target, "lineno", 0))
+    raise _Refuse(getattr(target, "lineno", 0))  # Attribute target, or anything else
+
+
+def _queue_name_loads(name: str, ctx) -> None:
+    for load_node in ctx["name_loads"].get(name, ()):
+        if id(load_node) not in ctx["seen"]:
+            ctx["queue"].append(load_node)
+
+
+def _assign_value_and_targets(stmt):
+    if isinstance(stmt, ast.Assign):
+        return stmt.value, stmt.targets
+    if isinstance(stmt, ast.AnnAssign):
+        return stmt.value, ([stmt.target] if stmt.value is not None else [])
+    if isinstance(stmt, ast.AugAssign):
+        return stmt.value, [stmt.target]
+    return None, []
+
+
+def _walk_outcome(origin, ctx) -> None:
+    """Walk from *origin* to its enclosing outcome. Raises `_Refuse` the moment the
+    value provably escapes; returns normally (silently) once the path is proven
+    harmless or terminates in a further binding (already queued by `_bind_target`)."""
+    cur = origin
+    presence_ok = True
+    parent_of = ctx["parent_of"]
+    while True:
+        parent = parent_of.get(id(cur))
+        if parent is None:
+            return  # nothing consumes this value (an unreachable/top-level fragment)
+
+        if isinstance(parent, ast.Call):
+            # ANY Call boundary refuses unconditionally -- whether `cur` is a plain
+            # positional/keyword argument (the value is handed to an opaque callable
+            # this proof cannot see inside), or `cur` is the callable itself / part of
+            # its `.func` chain (`cur(...)`, or a chained method call like
+            # `os.environ.copy()`/`.items()` -- `Call` is deliberately NOT in
+            # `_PASS_THROUGH_TYPES`, see the module note above
+            # hardcoded_env_secret_is_inert). No required scenario needs a Call to be
+            # treated as safe pass-through, and fail-closed means an unrecognized call
+            # shape refuses rather than being guessed safe.
+            raise _Refuse(getattr(parent, "lineno", getattr(cur, "lineno", 0)))
+
+        if isinstance(parent, _SEND_NODE_TYPES):
+            raise _Refuse(getattr(parent, "lineno", getattr(cur, "lineno", 0)))
+
+        if isinstance(parent, ast.NamedExpr) and parent.value is cur:
+            _bind_target(parent.target, ctx)
+            cur = parent
+            continue
+
+        if isinstance(parent, ast.comprehension) and parent.iter is cur:
+            _bind_target(parent.target, dict(ctx, comprehension_target=True))
+            cur = parent
+            continue
+
+        if isinstance(parent, ast.withitem) and parent.context_expr is cur:
+            if parent.optional_vars is None:
+                raise _Refuse(getattr(cur, "lineno", 0))
+            _bind_target(parent.optional_vars, ctx)
+            return
+
+        if isinstance(parent, _PASS_THROUGH_TYPES):
+            if isinstance(parent, ast.Compare):
+                if not _compare_is_presence_shaped(parent):
+                    presence_ok = False
+            elif not isinstance(parent, _PASS_THROUGH_PRESENCE_NEUTRAL):
+                presence_ok = False
+            cur = parent
+            continue
+
+        if isinstance(parent, ast.Expr):
+            return  # a bare expression statement -- e.g. `os.environ.pop(K, None)`
+
+        if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            value, targets = _assign_value_and_targets(parent)
+            if value is cur:
+                for t in targets:
+                    _bind_target(t, ctx)
+                return
+            raise _Refuse(getattr(parent, "lineno", 0))  # cur sits inside a TARGET (e.g. d[R] = 1)
+
+        if isinstance(parent, (ast.For, ast.AsyncFor)) and parent.iter is cur:
+            _bind_target(parent.target, ctx)
+            return
+
+        if isinstance(parent, ast.Assert):
+            if parent.test is cur:
+                # Harmless only if the assert has no message, or that message has no
+                # Call in it -- a message that calls something is not trusted to be
+                # side-effect-free just because THIS value only reached `test`.
+                if parent.msg is None or not _subtree_has_call(parent.msg):
+                    return
+                raise _Refuse(getattr(parent, "lineno", 0))
+            if parent.msg is cur:
+                # The value reaching the failure MESSAGE always refuses -- an assert
+                # message is emitted (printed/raised) exactly when it would matter.
+                raise _Refuse(getattr(parent, "lineno", 0))
+            raise _Refuse(getattr(parent, "lineno", 0))
+
+        if isinstance(parent, (ast.If, ast.While)) and parent.test is cur:
+            if presence_ok:
+                return  # a presence-only guard -- leaks at most "is the key set"
+            raise _Refuse(getattr(parent, "lineno", 0))
+
+        # Any other statement (Raise, Delete, a decorator/default/base expression, a
+        # With/AsyncWith reached directly, an If/While body/orelse position, Match,
+        # ...) or any expression type not explicitly handled above -- fail closed.
+        raise _Refuse(getattr(parent, "lineno", getattr(cur, "lineno", 0)))
+
+
+def hardcoded_env_secret_is_inert(source: str, finding_linenos) -> tuple:
+    """G1-G4 positive reachability proof for B-998 (see the module note above): True
+    only when every `HARDCODED_PROVIDER_SECRET` finding line in *finding_linenos* is a
+    recognized, literal-keyed env-write site (G1), the file carries none of a small
+    dynamic-execution/introspection capability blocklist (G3), and every read of a
+    written key -- or any other occurrence of `os.environ` itself, or a string constant
+    naming a written key or the word "environ" -- can be traced to a demonstrably
+    harmless outcome (G4). G0 (the test-fixture basename gate) and G2 (every OTHER AST
+    rule staying silent for this file) are the caller's job, in checks/_vet.py -- this
+    function only sees one file's source and this one rule's finding lines. Returns
+    (True, "") when proven inert, or (False, reason) the moment anything cannot be
+    proven safe -- fail-closed: an engine bug, a parse failure, or any unrecognized
+    shape refuses, never silently passes."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+        return False, "parse-error"
+
+    aliases = _env_bare_name_aliases(tree)
+    written, write_target_ref_ids, update_object_ids, key_position_ids = _collect_env_write_sites(tree, aliases)
+
+    for ln in finding_linenos:
+        keys = written.get(ln)
+        if not keys:
+            return False, "unrecognized-site"
+        if None in keys:
+            return False, "dynamic-key"
+
+    if _g3_blocklist_hit(tree):
+        return False, "capability-blocklist"
+
+    written_keys = {k for keys in written.values() for k in keys if k is not None}
+    parent_of = _build_parent_map(tree)
+    name_loads = _index_name_loads(tree)
+
+    ctx = {
+        "parent_of": parent_of,
+        "name_loads": name_loads,
+        "aliases": aliases,
+        "written_keys": written_keys,
+        "seen": set(),
+        "queue": [],
+        "comprehension_target": False,
+    }
+
+    origins: list = []
+
+    for node in ast.walk(tree):
+        # S1: env[k] in Load context.
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load) and _env_mapping_ref(node.value, aliases):
+            key_node = _env_subscript_key_node(node)
+            key_position_ids.add(id(key_node))  # a read's own key arg is never itself an S4 "leak"
+            key = _const_text_upper(key_node)
+            if key is None or key in written_keys:
+                origins.append(node)
+            continue
+        # S2: env.get/setdefault/pop(k, ...), or getenv/getenvb(k, ...).
+        if isinstance(node, ast.Call):
+            f = node.func
+            if _env_getenv_call(f, aliases) or _env_method_call(f, _ENV_READ_METHODS, aliases):
+                if node.args:
+                    key_position_ids.add(id(node.args[0]))  # same rationale as S1 above
+                    key = _const_text_upper(node.args[0])
+                    if key is None or key in written_keys:
+                        origins.append(node)
+                continue
+
+    # S3: any other occurrence of the env-mapping reference itself.
+    for node in ast.walk(tree):
+        if not _env_mapping_ref(node, aliases):
+            continue
+        if id(node) in write_target_ref_ids or id(node) in update_object_ids:
+            continue
+        parent = parent_of.get(id(node))
+        if isinstance(parent, ast.Subscript) and parent.value is node and isinstance(parent.ctx, ast.Load):
+            continue  # already an S1 candidate (whether or not its key qualified)
+        if isinstance(parent, ast.Call) and parent.func is node:
+            continue  # a bare call to the reference itself -- nonsensical, ignore
+        if (
+            isinstance(parent, ast.Attribute)
+            and parent.value is node
+            and parent.attr in _ENV_READ_METHODS
+            and isinstance(parent_of.get(id(parent)), ast.Call)
+            and parent_of[id(parent)].func is parent
+        ):
+            # `env.get/setdefault/pop(...)` -- node is the *object* of an S2-shaped
+            # call (getenv/getenvb never has an env-mapping-ref as their base at
+            # all -- their base is the `os` module itself -- so no getenv exclusion
+            # is needed here; `os`/an os-alias never matches `_env_mapping_ref`).
+            continue  # already an S2 candidate (whether or not its key qualified)
+        if isinstance(parent, ast.Compare):
+            excluded = False
+            for op, comparator in zip(parent.ops, parent.comparators):
+                if isinstance(op, (ast.In, ast.NotIn)) and comparator is node:
+                    excluded = True
+                    break
+            if excluded:
+                continue
+        origins.append(node)
+
+    # S4: string/bytes constants that spell out a written key, or mention "environ".
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
+            continue
+        if id(node) in key_position_ids:
+            continue
+        parent = parent_of.get(id(node))
+        if (
+            isinstance(parent, ast.Compare)
+            and parent.left is node
+            and parent.ops
+            and isinstance(parent.ops[0], (ast.In, ast.NotIn))
+        ):
+            continue  # the left side of `"KEY" in os.environ` / `"KEY" not in os.environ`
+        if (
+            isinstance(parent, ast.Call)
+            and isinstance(parent.func, ast.Attribute)
+            and parent.func.attr in ("setenv", "delenv", "putenv", "unsetenv")
+            and parent.args
+            and parent.args[0] is node
+        ):
+            continue
+        if (
+            isinstance(parent, ast.Call)
+            and isinstance(parent.func, ast.Name)
+            and parent.func.id in ("setenv", "delenv", "putenv", "unsetenv")
+            and parent.args
+            and parent.args[0] is node
+        ):
+            continue
+        text = node.value.decode("utf-8", "replace") if isinstance(node.value, bytes) else node.value
+        upper = text.upper()
+        if any(k in upper for k in written_keys) or "environ" in text.lower():
+            origins.append(node)
+
+    ctx["queue"] = list(origins)
+    while ctx["queue"]:
+        node = ctx["queue"].pop()
+        if id(node) in ctx["seen"]:
+            continue
+        ctx["seen"].add(id(node))
+        try:
+            _walk_outcome(node, dict(ctx, comprehension_target=False))
+        except _Refuse as exc:
+            return False, f"reach@{exc.lineno}"
+
+    return True, ""
+
+
 _MAX_FINDINGS_PER_FILE = 25
 
 # B-907 round 3: rounds 1 and 2 each gave every finding-collection loop below its own
