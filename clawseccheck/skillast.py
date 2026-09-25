@@ -427,6 +427,43 @@ def _g3_attr_name_arg(f: ast.AST, call: ast.Call):
     return None
 
 
+def _g3_reflection_target(f: ast.AST, call: ast.Call):
+    """The AST node for the OBJECT a getattr/setattr/delattr call reflects on
+    (its first positional argument), bare or `builtins.`-qualified -- or None
+    for an operator.attrgetter/methodcaller call, which has no object at the
+    call site at all (it returns a callable applied to some object later), or
+    when the object argument is missing. Companion to _g3_attr_name_arg, which
+    extracts the attribute-NAME argument from the same call shapes."""
+    if isinstance(f, ast.Name) and f.id in ("getattr", "setattr", "delattr"):
+        return call.args[0] if len(call.args) >= 1 else None
+    if (
+        isinstance(f, ast.Attribute)
+        and f.attr in ("getattr", "setattr", "delattr")
+        and isinstance(f.value, ast.Name)
+        and f.value.id == "builtins"
+    ):
+        return call.args[0] if len(call.args) >= 1 else None
+    return None
+
+
+def _g3_looks_like_os_ref(node: ast.AST, os_aliases: set) -> bool:
+    """True if *node* syntactically looks like a reference to the os module: a
+    bare Name bound to a known os-alias, or an attribute-access chain rooted
+    at one (e.g. `os.path`). Used to scope the getattr/setattr/delattr exec*/
+    spawn* prefix rule (below) to calls that actually reflect on os, so
+    `getattr(<some unrelated object>, "executive_summary")` doesn't trip G3
+    just because the string happens to start with "exec". Any other object
+    shape -- a literal, a local variable of unrelated/unknown origin, a
+    different import -- returns False and the prefix rule is skipped for it;
+    the small exact-set check below is unaffected and still fires regardless
+    of the target object."""
+    if isinstance(node, ast.Name):
+        return node.id in os_aliases
+    if isinstance(node, ast.Attribute):
+        return _g3_looks_like_os_ref(node.value, os_aliases)
+    return False
+
+
 def _g3_blocklist_hit(tree: ast.AST) -> bool:
     os_aliases = _g3_os_module_aliases(tree)
     string_banned = (
@@ -465,12 +502,25 @@ def _g3_blocklist_hit(tree: ast.AST) -> bool:
             if attr_arg is not None:
                 if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
                     # A constant attribute-name argument to getattr/setattr/delattr/
-                    # attrgetter/methodcaller: same exec*/spawn* prefix rule as the
-                    # literal-Attribute and `from os import` arms below, so
-                    # `getattr(os, "execv")` can't slip past as merely "not in the
-                    # small exact set".
-                    if _g3_os_danger_attr(attr_arg.value):
+                    # attrgetter/methodcaller. The small exact-set members
+                    # (system/popen/fork/...) trip unconditionally, same as the
+                    # literal-Attribute and `from os import` arms below. But the
+                    # exec*/spawn* PREFIX rule only makes sense as an os-reflection
+                    # signal in the first place -- it must not trip for
+                    # `getattr(<unrelated object>, "executive_summary")` just
+                    # because the string happens to start with "exec".
+                    # attrgetter/methodcaller have no object at the call site
+                    # (they return a callable applied later), so
+                    # _g3_reflection_target returns None for them and they keep
+                    # tripping the prefix rule unconditionally too -- only a
+                    # getattr/setattr/delattr call whose object argument
+                    # syntactically resolves to something other than os skips it.
+                    if attr_arg.value in _G3_OS_DANGER_ATTRS_EXACT:
                         return True
+                    if attr_arg.value.startswith("exec") or attr_arg.value.startswith("spawn"):
+                        target = _g3_reflection_target(node.func, node)
+                        if target is None or _g3_looks_like_os_ref(target, os_aliases):
+                            return True
                 else:
                     return True
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
