@@ -3360,15 +3360,18 @@ def _ssrf_url_slot_nodes(node: ast.Call) -> list:
     never included -- see `_SSRF_URL_KWARGS`'s own note.
 
     A `**` unpack is scoped the same way a literal keyword already is, whenever it's
-    statically apparent: when the unpacked expression is a `dict` LITERAL whose keys
-    are all resolvable string constants (`**{"headers": ..., "url": ...}`), only the
-    value(s) under an `_SSRF_URL_KWARGS` key are included -- the same exclusion a
-    direct `headers=`/`auth=`/... keyword already gets, now applied regardless of
-    which spelling the call used to reach the sink. Only a genuinely opaque unpack
-    (not a dict literal, or one with a key that isn't a resolvable string constant --
-    e.g. a nested `**other` spread inside it) falls back to the fully permissive
-    "unknown until runtime, be conservative" treatment: the whole splat expression is
-    a candidate slot, same as today.
+    statically apparent: when the unpacked expression is a `dict` LITERAL, each
+    key/value pair is judged on its own -- a resolvable string-constant key
+    (`**{"headers": ..., "url": ...}`) gets exactly the same include/exclude test a
+    direct `headers=`/`auth=`/`url=` keyword already gets, now applied regardless of
+    which spelling the call used to reach the sink. A pair whose key ISN'T statically
+    resolvable (a `None` key from a nested `**other` spread, a non-`Constant` key, or
+    a `Constant` whose value isn't a `str`, e.g. an int key) falls back to the fully
+    permissive "unknown until runtime, be conservative" treatment for THAT PAIR'S
+    VALUE ALONE -- it never poisons the exclusion of the dict literal's other,
+    resolvable sibling keys. Only when the unpacked expression is not a dict literal
+    at all (a call, a bound Name, any other opaque expression) does the whole splat
+    expression become one opaque candidate slot, same as today.
     """
     slots: list = []
     if node.args:
@@ -3382,12 +3385,21 @@ def _ssrf_url_slot_nodes(node: ast.Call) -> list:
                 slots.append(kw.value)
             continue
         # kw.arg is None: a **kwargs / **{...} unpack.
-        if isinstance(kw.value, ast.Dict) and all(
-            isinstance(k, ast.Constant) and isinstance(k.value, str)
-            for k in kw.value.keys
-        ):
+        if isinstance(kw.value, ast.Dict):
+            # Judge each key/value pair on its own -- an unresolvable key (a
+            # nested `**other` spread's `None` key, a non-Constant key, or a
+            # Constant whose value isn't a str) must not poison the exclusion
+            # of its resolvable sibling keys in the same literal.
             for dict_key, dict_val in zip(kw.value.keys, kw.value.values):
-                if dict_key.value in _SSRF_URL_KWARGS:
+                if isinstance(dict_key, ast.Constant) and isinstance(
+                    dict_key.value, str
+                ):
+                    if dict_key.value in _SSRF_URL_KWARGS:
+                        slots.append(dict_val)
+                else:
+                    # Not statically resolvable: fall back to "unknown until
+                    # runtime, be conservative" for this pair's VALUE alone --
+                    # never for the whole dict literal.
                     slots.append(dict_val)
         else:
             slots.append(kw.value)

@@ -289,6 +289,121 @@ def test_ssrf_literal_concat_url_does_not_fire():
 
 
 # ---------------------------------------------------------------------------
+# SSRF round 3: a single unresolvable key in a `**{...}` dict-literal splat must not
+# poison the exclusion of its resolvable sibling keys. Round 2's `all(...)` gate
+# demoted the ENTIRE dict literal to the opaque, fully-permissive fallback the moment
+# ANY one key couldn't be read statically -- a nested `**other` spread (a `None` key),
+# a bare `int` key, etc. -- so an otherwise-excluded `headers=`-shaped key rode along
+# and wrongly convicted the call. The fix judges each key/value pair independently.
+# ---------------------------------------------------------------------------
+
+
+def test_ssrf_nested_spread_key_with_untainted_spread_source_does_not_poison_excluded_headers_key():
+    """The bug's own shape, properly isolated: a nested `**other` spread inside the
+    dict literal (an unresolvable `None` key, `other` here bound to a plain,
+    demonstrably UNTAINTED local dict -- not a function parameter, see the note on
+    the sibling test below for why that distinction matters) sits alongside a
+    `headers` key carrying the only taint. The URL itself is the fixed literal
+    `FIXED_URL`. Must stay silent -- the unresolvable spread key must not drag the
+    excluded `headers` key's tainted value in as an opaque whole-dict candidate
+    slot."""
+    src = (
+        "import os, requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f():\n"
+        "    other = {\"timeout\": 5}\n"
+        "    requests.get(FIXED_URL, **{**other, \"headers\": {\"Authorization\": os.environ[\"TOKEN\"]}})\n"
+    )
+    assert "TT_SSRF" not in _rules(src)
+
+
+def test_ssrf_reported_parameter_spread_repro_still_fires_via_a_separate_pre_existing_mechanism():
+    """The exact literal repro as reported -- `other` is a function PARAMETER, not a
+    plain local var like the sibling test above -- is deliberately pinned as STILL
+    FIRING here, not silenced. This is not a gap in this round's fix: every function
+    parameter is unconditionally treated as an externally-tainted source elsewhere in
+    this same taint engine (`_func_param_taint_by_scope`, consumed by
+    `_external_tainted_names`), and `_call_args_tainted` -- called FIRST and
+    UNCONDITIONALLY inside `_call_args_tainted_for_ssrf_sink`, before
+    `_ssrf_url_slot_nodes` is ever consulted -- intersects tainted names against every
+    `ast.Name` appearing ANYWHERE in the call's arguments with NO restriction to the
+    URL-argument slot at all. Since the literal `other` Name is textually present
+    inside this call (as the spread operand), that pre-existing, slot-unrestricted
+    check alone already convicts it, completely independent of the dict-literal
+    key-handling this round's fix touches. The two tests directly below isolate the
+    same mechanism with NO `**` splat involved at all, proving it. Left unfixed
+    deliberately: touching `_call_args_tainted`'s bound-name scan to also respect the
+    URL-slot restriction is a broader, shared-helper design change (it also backs
+    TT4's and TT5's own sink wrappers) outside this fix's scope -- flagged for the
+    orchestrator, not guessed at here."""
+    src = (
+        "import os, requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f(other):\n"
+        "    requests.get(FIXED_URL, **{**other, \"headers\": {\"Authorization\": os.environ[\"TOKEN\"]}})\n"
+    )
+    r = _rules(src)
+    assert "TT_SSRF" in r
+
+
+def test_ssrf_tainted_parameter_in_excluded_headers_kwarg_already_fires_with_no_splat_at_all():
+    """Isolates the separate mechanism the test above documents, with ZERO `**`
+    splat anywhere: a function parameter referenced directly as a plain `headers=`
+    keyword value already fires, on this codebase both before and after this round's
+    fix -- proving the reported repro's persistence has nothing to do with dict-literal
+    key handling."""
+    src = (
+        "import requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f(other):\n"
+        "    requests.get(FIXED_URL, headers=other)\n"
+    )
+    r = _rules(src)
+    assert "TT_SSRF" in r
+
+
+def test_ssrf_tainted_parameter_in_excluded_timeout_kwarg_already_fires_with_no_splat_at_all():
+    """Same isolation as above, using `timeout=` -- a keyword with no URL/header
+    semantics whatsoever -- to underline that the pre-existing mechanism is a
+    whole-call, unrestricted Name scan, not anything specific to `headers`."""
+    src = (
+        "import requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f(other):\n"
+        "    requests.get(FIXED_URL, timeout=other)\n"
+    )
+    r = _rules(src)
+    assert "TT_SSRF" in r
+
+
+def test_ssrf_bare_int_key_does_not_poison_excluded_headers_key():
+    """Same shape as the spread repro above, but the unresolvable key is a bare `int`
+    literal instead of a spread -- confirms the fix is about ANY non-enumerable key,
+    not spreads specifically. Must stay silent."""
+    src = (
+        "import os, requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f():\n"
+        "    requests.get(FIXED_URL, **{1: \"whatever\", \"headers\": {\"Authorization\": os.environ[\"TOKEN\"]}})\n"
+    )
+    assert "TT_SSRF" not in _rules(src)
+
+
+def test_ssrf_nested_spread_key_alongside_genuinely_tainted_url_key_still_fires():
+    """The mirror-image case: the dict literal has BOTH an unresolvable spread key
+    AND a genuinely tainted `url` key. Per-key granularity must not accidentally
+    suppress this real positive just because an unresolvable key is also present --
+    it must still fire, via the resolvable `url` key."""
+    src = (
+        "import os, requests\n"
+        "def f(other):\n"
+        "    requests.get(**{**other, \"url\": os.environ[\"URL\"], \"headers\": {\"Authorization\": \"fixed\"}})\n"
+    )
+    r = _rules(src)
+    assert "TT_SSRF" in r
+
+
+# ---------------------------------------------------------------------------
 # TT4: inline file-read-to-network-sink taint.
 # ---------------------------------------------------------------------------
 
