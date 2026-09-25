@@ -195,9 +195,14 @@ def _secret_name_bindings(tree: ast.AST) -> dict:
     this stays deliberately conservative rather than a precise data-flow analysis: a
     name rebound across an if/else, shadowed by an unrelated parameter, or reused
     later for something unrelated, must not resolve even where doing so would
-    sometimes be safe. `os.environ.update({K: <name>})` is a dict-literal value, not
-    a direct Assign/AnnAssign to `<name>` at a call site, so it is out of scope for
-    this resolver — a documented residual, not an oversight (B-910)."""
+    sometimes be safe. B-999: `os.environ.update({K: <name>})` (dict-literal value)
+    and `os.environ.update(K=<name>)` (keyword-argument value) are now IN scope —
+    both are resolved by the same one-hop lookup at their own call site below. What
+    stays out of scope is a name bound to the WHOLE dict object rather than to one of
+    its values — `d = {K: "sk-..."}; os.environ.update(d)` — since that is a
+    same-file dict-content trace, a different and still-unimplemented resolution
+    shape from the single-hop Name->literal lookup this function performs; a
+    documented residual, not an oversight (B-910/B-999)."""
     counts: dict = {}
     secret_values: dict = {}
 
@@ -12467,6 +12472,70 @@ def analyze_python(
             getattr(node, "lineno", 0),
             f"hardcoded provider-shaped secret written to os.environ[{key_repr!r}]{indirection}",
         )
+
+    # B-999: os.environ.update({"KEY": "<provider-shaped-literal>"}) /
+    # os.environ.update(KEY="<provider-shaped-literal>") — two more env-write shapes
+    # the two B-140 call sites above (the `os.environ["K"] = value` Subscript-assign
+    # loop just above, and the `os.getenv`/`.get`/`.setdefault` default-arg call
+    # earlier in this function) do not reach: `dict.update`'s dict-literal positional
+    # arg and its keyword arguments. Same predicate, same one-hop
+    # `_secret_name_bindings` indirection, same HARDCODED_PROVIDER_SECRET rule name
+    # and crit severity as the Subscript-assign loop — this is the identical
+    # "hardcoded secret written unconditionally into the environment" shape, just a
+    # third call form. Scoped narrowly per B-999 triage: only the dict-literal value
+    # and keyword-argument forms are handled here — NOT a name bound to the dict
+    # itself (`d = {"K": "sk-..."}; os.environ.update(d)`, still a residual, same as
+    # `_secret_name_bindings`'s own documented `os.environ.update({K: <name>})` note)
+    # and not `os.putenv`/two-hop indirection/attribute targets, all explicitly out
+    # of scope for this task.
+    def _b999_env_update_secret(key_repr, value_node, ln) -> None:
+        resolved = (
+            secret_name_bindings.get(value_node.id)
+            if isinstance(value_node, ast.Name)
+            else None
+        )
+        if not (_is_hardcoded_provider_secret(value_node) or resolved is not None):
+            return
+        indirection = f" (via {value_node.id!r})" if resolved is not None else ""
+        add(
+            "HARDCODED_PROVIDER_SECRET",
+            "crit",
+            ln,
+            f"hardcoded provider-shaped secret written to os.environ.update(...)[{key_repr!r}]{indirection}",
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if not (isinstance(f, ast.Attribute) and f.attr == "update"):
+            continue
+        is_os_environ = (
+            isinstance(f.value, ast.Attribute)
+            and f.value.attr == "environ"
+            and _attr_base(f.value.value) == "os"
+        ) or (isinstance(f.value, ast.Name) and f.value.id == "environ")
+        if not is_os_environ:
+            continue
+        ln = getattr(node, "lineno", 0)
+
+        # dict-literal positional arg: os.environ.update({"KEY": "<secret>"})
+        if node.args and isinstance(node.args[0], ast.Dict):
+            for key_node, value_node in zip(node.args[0].keys, node.args[0].values):
+                if key_node is None:
+                    continue  # a `**expr` unpack entry inside the dict literal, not a literal key
+                key_repr = (
+                    key_node.value
+                    if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
+                    else "<dynamic>"
+                )
+                _b999_env_update_secret(key_repr, value_node, ln)
+
+        # keyword-argument form: os.environ.update(KEY="<secret>")
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue  # a `**expr` unpack, not a literal key
+            _b999_env_update_secret(kw.arg, kw.value, ln)
 
     # B-740: a plain assignment of a provider-shaped literal — e.g. module-level
     # `STRIPE_SECRET_KEY = "sk_live_..."` — reached neither os.environ-entangled shape

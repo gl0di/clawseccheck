@@ -12,10 +12,18 @@ and `os.getenv`/`os.environ.get`/`os.environ.setdefault`'s default arg — consu
 when the value/default-arg is an `ast.Name`, and fall through to their EXISTING
 literal-only behavior otherwise. `os.environ.setdefault(...)` also newly joins
 `os.environ.get(...)` as a recognized call shape at the same site (it was not
-matched AT ALL before this task, literal or indirect). `os.environ.update({K:
-<name>})` stays untouched — a dict-literal value, not a direct call-arg or
-Assign/AnnAssign value, is out of scope for this resolver (documented residual,
-B-910 ticket's own explicit permission to skip).
+matched AT ALL before this task, literal or indirect).
+
+UPDATE (B-999): `os.environ.update({K: <name>})` (dict-literal value) and
+`os.environ.update(K=<name>)` (keyword-argument value) are no longer untouched —
+a third call-site loop in skillast.py now consults the same
+`_secret_name_bindings(tree)` resolver for both shapes, mirroring the
+Subscript-assign loop's own structure. `test_environ_update_dict_literal_name_
+is_untouched_residual` below has been superseded and updated accordingly — see
+its own docstring. What remains a genuine, documented residual after B-999 is a
+name bound to the WHOLE dict object passed to `.update()`, not one of its
+values — `d = {K: "sk-..."}; os.environ.update(d)` — a same-file dict-content
+trace this resolver still does not perform.
 
 C-135: this WIDENS a CRIT-severity, FAIL-capable rule (HARDCODED_PROVIDER_SECRET is
 NOT in `_AST_NEVER_FAIL_RULES` — unlike its ASSIGN-only sibling — so every case this
@@ -139,9 +147,11 @@ def test_environ_get_default_resolves_one_hop_name_indirection():
     assert "HARDCODED_PROVIDER_SECRET" in r
 
 
-def test_environ_update_dict_literal_name_is_untouched_residual():
-    """os.environ.update({K: <name>}) is a documented, deliberately out-of-scope
-    residual — a dict-literal value, not a direct call-arg/Assign value."""
+def test_environ_update_dict_literal_name_now_resolves_one_hop_indirection():
+    """B-999 superseded this test's original claim: os.environ.update({K: <name>})
+    is no longer an untouched residual — the new .update() call-site loop consults
+    the same `_secret_name_bindings` resolver as the Subscript-assign loop, so this
+    now resolves and FAILs exactly like the direct-literal form."""
     src = (
         'KEY = (\n'
         '    "tvly-"\n'
@@ -149,6 +159,43 @@ def test_environ_update_dict_literal_name_is_untouched_residual():
         ')\n'
         'import os\n'
         'os.environ.update({"TAVILY_API_KEY": KEY})\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" in r
+    assert r["HARDCODED_PROVIDER_SECRET"].severity == "crit"
+    assert "'KEY'" in r["HARDCODED_PROVIDER_SECRET"].reason
+    # The pre-existing plain-assignment rule (B-893) still sees the KEY = "..." line.
+    assert "HARDCODED_PROVIDER_SECRET_ASSIGN" in r
+
+
+def test_environ_update_keyword_name_also_resolves_one_hop_indirection():
+    """Same one-hop resolution, keyword-argument form: os.environ.update(K=<name>)."""
+    src = (
+        'KEY = (\n'
+        '    "sk-proj-"\n'
+        '    "abcdef0123456789abcdef0123456789"\n'
+        ')\n'
+        'import os\n'
+        'os.environ.update(OPENAI_API_KEY=KEY)\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" in r
+    assert r["HARDCODED_PROVIDER_SECRET"].severity == "crit"
+    assert "'KEY'" in r["HARDCODED_PROVIDER_SECRET"].reason
+
+
+def test_environ_update_dict_bound_to_whole_dict_name_is_untouched_residual():
+    """What DOES remain out of scope after B-999: a name bound to the WHOLE dict
+    object passed to .update(), not one of its values — a same-file dict-content
+    trace this resolver still does not perform (documented residual)."""
+    src = (
+        'KEY = (\n'
+        '    "tvly-"\n'
+        '    "0123456789abcdef01234567"\n'
+        ')\n'
+        'import os\n'
+        'd = {"TAVILY_API_KEY": KEY}\n'
+        'os.environ.update(d)\n'
     )
     r = _rules(src)
     assert "HARDCODED_PROVIDER_SECRET" not in r
@@ -427,6 +474,110 @@ def test_f1_core_repro_still_resolves_after_widened_counting():
     assert "HARDCODED_PROVIDER_SECRET" in r
     assert r["HARDCODED_PROVIDER_SECRET"].severity == "crit"
     assert "'KEY'" in r["HARDCODED_PROVIDER_SECRET"].reason
+
+
+# ---------------------------------------------------------------------------
+# B-999: os.environ.update({...}) — dict-literal value and keyword-argument forms.
+# Same HARDCODED_PROVIDER_SECRET rule/crit-severity convention as the Subscript-
+# assign loop above, reached via a new, third env-write call-site loop in
+# skillast.py. C-135: this is a FAIL-reach WIDENING (catches more true positives,
+# narrows nothing) — the clean fixture/test below is the adversarial pass: an
+# ordinary, non-secret-shaped os.environ.update(...) value must stay silent.
+# ---------------------------------------------------------------------------
+
+
+def test_environ_update_dict_literal_direct_secret_fires():
+    src = (
+        'import os\n'
+        'os.environ.update({"TAVILY_API_KEY": (\n'
+        '    "tvly-"\n'
+        '    "0123456789abcdef01234567"\n'
+        ')})\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" in r
+    assert r["HARDCODED_PROVIDER_SECRET"].severity == "crit"
+    assert "TAVILY_API_KEY" in r["HARDCODED_PROVIDER_SECRET"].reason
+    assert "via" not in r["HARDCODED_PROVIDER_SECRET"].reason
+
+
+def test_environ_update_keyword_direct_secret_fires():
+    src = (
+        'import os\n'
+        'os.environ.update(OPENAI_API_KEY=(\n'
+        '    "sk-proj-"\n'
+        '    "abcdef0123456789abcdef0123456789"\n'
+        '))\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" in r
+    assert r["HARDCODED_PROVIDER_SECRET"].severity == "crit"
+    assert "OPENAI_API_KEY" in r["HARDCODED_PROVIDER_SECRET"].reason
+
+
+def test_environ_update_ordinary_dict_literal_value_stays_clean():
+    """Adversarial C-135 probe: an ordinary, non-secret-shaped dict-literal value
+    (a config flag) must not fire."""
+    src = 'import os\nos.environ.update({"LOG_LEVEL": "debug"})\n'
+    assert "HARDCODED_PROVIDER_SECRET" not in _rules(src)
+
+
+def test_environ_update_ordinary_keyword_value_stays_clean():
+    """Adversarial C-135 probe: an ordinary, non-secret-shaped keyword-argument
+    value must not fire."""
+    src = 'import os\nos.environ.update(FEATURE_FLAG="enabled")\n'
+    assert "HARDCODED_PROVIDER_SECRET" not in _rules(src)
+
+
+def test_environ_update_dict_unpack_entry_does_not_crash():
+    """A `**expr` unpack inside the dict literal has a `None` key node — must not
+    raise, and must not itself be treated as a literal key."""
+    src = 'import os\nextra = {}\nos.environ.update({**extra, "MODE": "prod"})\n'
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+
+
+def test_environ_update_keyword_unpack_does_not_crash():
+    """A `**expr` unpack as the sole argument has a `None` keyword.arg — must not
+    raise."""
+    src = 'import os\nextra = {"MODE": "prod"}\nos.environ.update(**extra)\n'
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" not in r
+
+
+def test_environ_update_dynamic_key_name_does_not_crash():
+    """A non-literal dict key (computed at runtime) must not raise."""
+    src = (
+        'import os\n'
+        'name = "TAVILY_API_KEY"\n'
+        'os.environ.update({name: (\n'
+        '    "tvly-"\n'
+        '    "0123456789abcdef01234567"\n'
+        ')})\n'
+    )
+    r = _rules(src)
+    assert "HARDCODED_PROVIDER_SECRET" in r
+    assert "<dynamic>" in r["HARDCODED_PROVIDER_SECRET"].reason
+
+
+def test_vet_env_update_dict_literal_secret_fixture_is_critical_fail():
+    skill_dir = FIXTURES / "bad_b13_env_update_dict_literal_secret" / "skills" / "s"
+    f = vet_skill(skill_dir)
+    assert f.status == FAIL, f"expected FAIL; got {f.status}: {f.detail}"
+    assert f.severity == CRITICAL
+
+
+def test_vet_env_update_keyword_secret_fixture_is_critical_fail():
+    skill_dir = FIXTURES / "bad_b13_env_update_keyword_secret" / "skills" / "s"
+    f = vet_skill(skill_dir)
+    assert f.status == FAIL, f"expected FAIL; got {f.status}: {f.detail}"
+    assert f.severity == CRITICAL
+
+
+def test_vet_env_update_ordinary_value_fixture_is_pass():
+    skill_dir = FIXTURES / "clean_b13_env_update_ordinary_value" / "skills" / "s"
+    f = vet_skill(skill_dir)
+    assert f.status == PASS, f"expected PASS; got {f.status}: {f.detail}"
 
 
 # ---------------------------------------------------------------------------
