@@ -5605,10 +5605,65 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
 
 # B176 follow-up (2026-09-25): legacy devices/paired.json -> device_pairing_paired
 # (state/openclaw.sqlite) migration.
+#
+# C-135 round 1 (2026-09-25): the first version of this reader had neither a row-count
+# limit nor a per-value byte cap on scopes_json/approved_scopes_json/tokens_json --
+# reproduced concretely by the reviewer: a single row with a 50MB tokens_json string (a
+# plain stored TEXT value, not a generated column) was fetched and processed whole, no
+# truncation, no disclosure. `device_pairing_paired` is written by the SAME runtime that
+# writes `config_machine_state`/`trajectory_runtime_events`, so it carries the identical
+# precondition (an attacker who already has write access to state/openclaw.sqlite) those
+# two tables' own bounds already treat as worth defending against -- and this table had
+# none. `_MAX_PAIRED_DEVICE_JSON_BYTES` is generous headroom, not a realistic size (a
+# real device's scope list or per-role token dict is a few hundred bytes at most), same
+# "generous enough to never clip real data" spirit as `_MAX_MACHINE_STATE_VALUE_BYTES`.
+# `_MAX_PAIRED_DEVICES` is likewise generous for a store real installs populate with a
+# handful of devices at most.
+#
+# The bound is enforced AT THE SQL LEVEL (`length(CAST(col AS BLOB)) <= ?`), not by
+# fetching the value and measuring it in Python: the same B-811 lesson
+# `trajectorystore._SELECT_TRAJECTORY_EVENT_JSON` documents at length applies here
+# verbatim -- a bound checked only AFTER `.fetchall()` has already materialized the
+# oversized value never had a chance to stop the allocation. `CAST(... AS BLOB)` matters,
+# not just style: a bare `length()` on TEXT stops at the first embedded NUL byte (computed
+# as if by C's `strlen()`), so an oversized value engineered to start with a NUL byte
+# would otherwise report a tiny length while still being arbitrarily large.
+#
+# A ROW is the natural unit here (one paired device), not a column -- the same
+# granularity `_collect_config_machine_state` uses for its own per-KEY
+# present-but-unparsed tracking (`config_machine_state_unparsed`). A row whose scopes/
+# approvedScopes/tokens value exceeds the cap on ANY of the three columns is excluded
+# from the main SELECT (never partially parsed -- the same all-or-nothing per-row
+# treatment `trajectorystore`'s own excluded-count queries already establish for their
+# own oversized rows) and counted separately below, so it is disclosed as "present but
+# not read", never silently missing as if it had never existed (GR#4).
+_MAX_PAIRED_DEVICE_JSON_BYTES = 256 * 1024
+_MAX_PAIRED_DEVICES = 500
+
+_PAIRED_DEVICE_ROW_WITHIN_CAP = (
+    "(scopes_json IS NULL OR length(CAST(scopes_json AS BLOB)) <= ?) "
+    "AND (approved_scopes_json IS NULL OR length(CAST(approved_scopes_json AS BLOB)) <= ?) "
+    "AND (tokens_json IS NULL OR length(CAST(tokens_json AS BLOB)) <= ?)"
+)
 _PAIRED_DEVICE_SQLITE_SELECT = (
     "SELECT device_id, platform, scopes_json, approved_scopes_json, tokens_json, "
-    "created_at_ms, approved_at_ms, last_seen_at_ms FROM device_pairing_paired"
+    "created_at_ms, approved_at_ms, last_seen_at_ms FROM device_pairing_paired "
+    f"WHERE {_PAIRED_DEVICE_ROW_WITHIN_CAP} LIMIT ?"
 )
+_PAIRED_DEVICE_SQLITE_OVERSIZED_COUNT = (
+    "SELECT count(*) FROM device_pairing_paired "
+    f"WHERE NOT ({_PAIRED_DEVICE_ROW_WITHIN_CAP})"
+)
+
+# B176 follow-up, C-135 round 1: an ALLOWLIST, not a denylist, of the sub-keys that
+# survive out of each `tokens_json[role]` entry -- tightened from "strip only `token`"
+# after review found everything else in that dict passed through unfiltered, so a future
+# vendor field (a hypothetical `refreshToken`/`deviceFingerprint`) would silently ride
+# along even though this reader's own docstring claimed only these six survive. Matches
+# this file's own field-select precedent (`_collect_update_runs`'s named-key extraction).
+_SAFE_TOKEN_SUBKEYS = frozenset({
+    "role", "scopes", "createdAtMs", "rotatedAtMs", "lastUsedAtMs", "revokedAtMs",
+})
 
 
 def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
@@ -5649,12 +5704,24 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
 
     Never-echo-the-token contract, defense in depth: unlike the legacy JSON path
     (which loads the whole file, secret token strings included, and relies on the
-    check's own logic never printing them), this reader strips each token's
-    ``token`` sub-key -- the live secret value -- while parsing ``tokens_json``, so
-    the secret string never enters a Python object this reader hands back at all.
-    Only ``role``/``scopes``/``createdAtMs``/``rotatedAtMs``/``lastUsedAtMs``/
+    check's own logic never printing them), this reader keeps only an ALLOWLIST of
+    each token's sub-keys (``_SAFE_TOKEN_SUBKEYS``) while parsing ``tokens_json``, so
+    the live secret string -- and any future vendor sub-field this reader has not been
+    taught about -- never enters a Python object this reader hands back at all. Only
+    ``role``/``scopes``/``createdAtMs``/``rotatedAtMs``/``lastUsedAtMs``/
     ``revokedAtMs`` survive -- exactly what the check's own revoked-token logic
     (B-243) needs, and nothing else.
+
+    Bounded, defense in depth against a hostile state DB (C-135 round 1, see
+    ``_PAIRED_DEVICE_SQLITE_SELECT``'s own comment for the full grounding): a row
+    whose ``scopes_json``/``approved_scopes_json``/``tokens_json`` exceeds
+    ``_MAX_PAIRED_DEVICE_JSON_BYTES`` on any of the three is excluded AT THE SQL
+    LEVEL (never fetched into this process at all) and counted via
+    ``_PAIRED_DEVICE_SQLITE_OVERSIZED_COUNT`` for disclosure -- "present but not
+    read", never silently absent. The row set itself is capped at
+    ``_MAX_PAIRED_DEVICES`` (the classic one-extra-row probe: requesting one more
+    than the cap and discarding it distinguishes "truncated" from "exactly at the
+    cap" without a second query), with truncation disclosed the same way.
 
     Same view-masquerade defense as the other security-plane tables in this module
     (``config_machine_state``, ``installed_plugin_index``): resolved via
@@ -5669,7 +5736,11 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     PASS on a migrated-but-never-paired install); ``paired_devices_sqlite_parse_error``
     means present but not reliably readable (a schema this reader does not
     recognise, a locked file, or a masquerading view) -- the caller must report
-    UNKNOWN for that case, never a fake PASS.
+    UNKNOWN for that case, never a fake PASS. An oversized/truncated row is a
+    THIRD, narrower case (disclosed via ``ctx.errors``, not a table-wide parse
+    error): the other, well-formed rows are still evaluated normally, exactly as
+    ``config_machine_state_unparsed`` does not block reading the OTHER allowlisted
+    keys.
     """
     state_dir = home / "state"
     capped: list = []
@@ -5712,7 +5783,24 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
                 ctx.paired_devices_sqlite_found = True
                 ctx.paired_devices_sqlite_parse_error = True
                 return
-            rows = conn.execute(_PAIRED_DEVICE_SQLITE_SELECT).fetchall()
+            # The classic one-extra-row probe (matching `_collect_subagent_runs`):
+            # request one more row than the cap allows, purely to detect "more exist"
+            # -- discarded below, never evaluated.
+            cap_params = (
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+            )
+            rows = conn.execute(
+                _PAIRED_DEVICE_SQLITE_SELECT, (*cap_params, _MAX_PAIRED_DEVICES + 1),
+            ).fetchall()
+            # A SEPARATE, cheap count of the rows the WHERE clause above excluded for
+            # being oversized -- read only to disclose that count, never to recover the
+            # excluded rows' own content (same "excluded-count query never selects the
+            # row itself" discipline `trajectorystore`'s own sibling queries use).
+            oversized_count = conn.execute(
+                _PAIRED_DEVICE_SQLITE_OVERSIZED_COUNT, cap_params,
+            ).fetchone()[0]
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -5723,6 +5811,24 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
             ctx.paired_devices_sqlite_found = True
             ctx.paired_devices_sqlite_parse_error = True
         return
+
+    if oversized_count:
+        # Present, but not read -- never conflated with "this device does not exist"
+        # (GR#4). The other, well-formed rows below are still evaluated normally.
+        ctx.errors.append(
+            f"device_pairing_paired in {db_path} has {oversized_count} paired-device "
+            f"row(s) whose scopes/approvedScopes/tokens exceed the "
+            f"{_MAX_PAIRED_DEVICE_JSON_BYTES // 1024}KB cap; those rows were not read"
+        )
+
+    truncated = len(rows) > _MAX_PAIRED_DEVICES
+    rows = rows[:_MAX_PAIRED_DEVICES]  # discard the probe row; scanned set stays capped
+    if truncated:
+        ctx.errors.append(
+            f"device_pairing_paired in {db_path} has more than {_MAX_PAIRED_DEVICES} "
+            "paired-device rows within the size cap; only the first "
+            f"{_MAX_PAIRED_DEVICES} were read"
+        )
 
     def _json_list(raw):
         if not raw:
@@ -5751,10 +5857,13 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
             if isinstance(raw_tokens, dict):
                 for role_key, tok in raw_tokens.items():
                     if isinstance(tok, dict):
-                        # Strip the live secret token string -- see docstring's
-                        # never-echo-the-token contract.
+                        # Allowlist, not denylist -- see docstring's never-echo-the-
+                        # token contract. Keeps only the sub-keys the check's own
+                        # revoked-token logic (B-243) actually needs; a future vendor
+                        # sub-field (e.g. a hypothetical refreshToken) is dropped by
+                        # default rather than silently riding along.
                         tokens[role_key] = {
-                            k: v for k, v in tok.items() if k != "token"
+                            k: v for k, v in tok.items() if k in _SAFE_TOKEN_SUBKEYS
                         }
 
         entries[device_id] = {

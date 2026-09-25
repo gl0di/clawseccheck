@@ -31,12 +31,19 @@ touches a real ``~/.openclaw``.
 from __future__ import annotations
 
 import json
+import resource
 import sqlite3
 from pathlib import Path
 
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_paired_device_operator_authority
-from clawseccheck.collector import Context, _collect_paired_devices_sqlite, collect
+from clawseccheck.collector import (
+    Context,
+    _MAX_PAIRED_DEVICE_JSON_BYTES,
+    _MAX_PAIRED_DEVICES,
+    _collect_paired_devices_sqlite,
+    collect,
+)
 
 # DDL copied verbatim from `sqlite3 ~/.openclaw/state/openclaw.sqlite ".schema
 # device_pairing_paired"` against a real, installed OpenClaw 2026.9.6 -- see this
@@ -281,6 +288,168 @@ class TestViewMasqueradeHardening:
         assert ctx.paired_devices_sqlite_found is True
         assert ctx.paired_devices_sqlite_parse_error is False
         assert "d1" in ctx.paired_devices_sqlite
+
+
+# --------------------------------------------------------------------------------
+# C-135 round 1 (2026-09-25): the size-cap hardening. A single row with a 50MB
+# tokens_json string was fetched and processed whole, no cap, no truncation, no
+# disclosure -- the same DoS class trajectorystore's own `length(CAST(... AS BLOB))
+# <= ?` bound exists to close for trajectory_runtime_events (B-811).
+# --------------------------------------------------------------------------------
+
+
+class TestSizeCapHardening:
+    def test_oversized_tokens_json_is_excluded_not_silently_absent(self, tmp_path):
+        """The reviewer's own repro, shrunk: an oversized tokens_json must be excluded
+        from the result (never parsed, never partially trusted) AND disclosed via
+        ctx.errors as "present but not read" -- never silently absent as if the
+        device had never existed (GR#4)."""
+        oversized_tokens = json.dumps({
+            "operator": {"token": "x" * (_MAX_PAIRED_DEVICE_JSON_BYTES + 1_000)}
+        })
+        home = tmp_path / "h"
+        _make_state_db(home / "state", [{
+            "device_id": "oversized-device",
+            "scopes": ["operator.admin"],
+            "tokens": {"operator": {"token": "irrelevant"}},
+        }])
+        # Overwrite with the raw oversized tokens_json directly (json.dumps of a huge
+        # nested dict via _make_state_db's own dict->json.dumps path is equivalent,
+        # but writing the raw string keeps this test's intent explicit).
+        conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
+        conn.execute(
+            "UPDATE device_pairing_paired SET tokens_json = ? WHERE device_id = ?",
+            (oversized_tokens, "oversized-device"),
+        )
+        conn.commit()
+        conn.close()
+
+        ctx = Context(home=home)
+        _collect_paired_devices_sqlite(home, ctx)
+        assert ctx.paired_devices_sqlite_found is True
+        assert ctx.paired_devices_sqlite_parse_error is False
+        assert "oversized-device" not in ctx.paired_devices_sqlite
+        assert any(
+            "device_pairing_paired" in e and "were not read" in e for e in ctx.errors
+        ), ctx.errors
+        # The disclosure names a COUNT, never the oversized value itself.
+        assert not any(str(_MAX_PAIRED_DEVICE_JSON_BYTES + 1_000) in e for e in ctx.errors)
+        assert oversized_tokens not in " ".join(ctx.errors)
+
+    def test_a_normal_sibling_row_is_still_read_despite_an_oversized_one(self, tmp_path):
+        """Fault isolation: one oversized row must not blind the reader to every
+        OTHER, well-formed row -- the same per-row isolation `_collect_subagent_runs`
+        already established for its own bad rows."""
+        oversized_tokens = json.dumps({"operator": {"token": "x" * (_MAX_PAIRED_DEVICE_JSON_BYTES + 1)}})
+        home = tmp_path / "h"
+        state = home / "state"
+        _make_state_db(state, [{"device_id": "normal-device", "scopes": ["operator.write"]}])
+        conn = sqlite3.connect(state / "openclaw.sqlite")
+        conn.execute(
+            "INSERT INTO device_pairing_paired "
+            "(device_id, public_key, scopes_json, tokens_json, created_at_ms, approved_at_ms) "
+            "VALUES ('oversized-device', 'pk', '[\"operator.admin\"]', ?, 1700000000000, 1700000000000)",
+            (oversized_tokens,),
+        )
+        conn.commit()
+        conn.close()
+
+        ctx = Context(home=home)
+        _collect_paired_devices_sqlite(home, ctx)
+        assert "normal-device" in ctx.paired_devices_sqlite
+        assert "oversized-device" not in ctx.paired_devices_sqlite
+
+        # And the check itself still WARNs off the normal device's own high scope.
+        (home / "openclaw.json").write_text("{}", encoding="utf-8")
+        ctx2 = collect(home)
+        finding = check_paired_device_operator_authority(ctx2)
+        assert finding.status == WARN, finding.detail
+        assert any("normal-device" in e for e in finding.evidence)
+
+    def test_oversized_value_never_materializes_in_python_memory(self, tmp_path):
+        """The concrete DoS proof: a 50MB tokens_json string must never be fully
+        fetched into this process -- RSS growth stays far under the payload size,
+        the same `resource.getrusage` proof
+        `test_f187_trajectory_sqlite_corroborator.py` already uses for the SAME
+        SQL-level-bound defense on a sibling table."""
+        payload_bytes = 50_000_000
+        oversized_tokens = json.dumps({"operator": {"token": "x" * payload_bytes}})
+        home = tmp_path / "h"
+        _make_state_db(home / "state", [{"device_id": "d1", "scopes": ["operator.write"]}])
+        conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
+        conn.execute(
+            "UPDATE device_pairing_paired SET tokens_json = ? WHERE device_id = 'd1'",
+            (oversized_tokens,),
+        )
+        conn.commit()
+        conn.close()
+        del oversized_tokens  # drop this process's own copy before measuring
+
+        before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        ctx = Context(home=home)
+        _collect_paired_devices_sqlite(home, ctx)
+        after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+        assert "d1" not in ctx.paired_devices_sqlite
+        grew_kb = after - before
+        # Generous ceiling: a tenth of the oversized payload. A pre-fix reader would
+        # materialize the whole ~50MB string via fetchall(); the SQL-level bound
+        # should keep this reader's own growth to a small, constant-ish amount.
+        assert grew_kb < (payload_bytes // 1024) // 10, (
+            f"RSS grew {grew_kb} KB reading a {payload_bytes // 1_000_000}MB oversized "
+            "tokens_json -- looks like the value is still being materialized whole"
+        )
+
+    def test_row_count_is_capped_and_truncation_is_disclosed(self, tmp_path):
+        rows = [
+            {"device_id": f"device-{i:04d}", "scopes": ["operator.read"]}
+            for i in range(_MAX_PAIRED_DEVICES + 1)
+        ]
+        home = tmp_path / "h"
+        _make_state_db(home / "state", rows)
+        ctx = Context(home=home)
+        _collect_paired_devices_sqlite(home, ctx)
+        assert ctx.paired_devices_sqlite_found is True
+        assert len(ctx.paired_devices_sqlite) == _MAX_PAIRED_DEVICES
+        assert any(
+            f"more than {_MAX_PAIRED_DEVICES}" in e for e in ctx.errors
+        ), ctx.errors
+
+    def test_row_count_under_the_cap_is_not_flagged_as_truncated(self, tmp_path):
+        rows = [
+            {"device_id": f"device-{i:04d}", "scopes": ["operator.read"]}
+            for i in range(3)
+        ]
+        home = tmp_path / "h"
+        _make_state_db(home / "state", rows)
+        ctx = Context(home=home)
+        _collect_paired_devices_sqlite(home, ctx)
+        assert len(ctx.paired_devices_sqlite) == 3
+        assert not any("more than" in e for e in ctx.errors)
+
+    def test_token_subkey_allowlist_drops_an_unknown_future_field(self, tmp_path):
+        """The bundled, cheap fix: an allowlist, not a denylist. A hypothetical
+        future vendor sub-field (e.g. refreshToken) must be dropped by default, not
+        silently ride along just because it isn't literally named `token`."""
+        home = tmp_path / "h"
+        _make_state_db(home / "state", [{
+            "device_id": "d1",
+            "scopes": ["operator.admin"],
+            "tokens": {"operator": {
+                "token": "secret-value",
+                "role": "operator",
+                "refreshToken": "also-secret-shaped",
+                "deviceFingerprint": "unexpected-future-field",
+                "revokedAtMs": 1784000000000,
+            }},
+        }])
+        ctx = Context(home=home)
+        _collect_paired_devices_sqlite(home, ctx)
+        survived = ctx.paired_devices_sqlite["d1"]["tokens"]["operator"]
+        assert survived == {"role": "operator", "revokedAtMs": 1784000000000}
+        assert "token" not in survived
+        assert "refreshToken" not in survived
+        assert "deviceFingerprint" not in survived
 
 
 # --------------------------------------------------------------------------------

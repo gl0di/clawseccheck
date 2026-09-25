@@ -684,7 +684,7 @@ _EXEMPT = {
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~8,254 lines (restated 2026-09-23 — was ~7,542) — the read-only "
+    "collector.py": "~8,787 lines (restated 2026-09-25 — was ~8,254) — the read-only "
                     "collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
@@ -716,7 +716,17 @@ _EXEMPT = {
                     "(the seven-round retraction history is why). That is a fourth candidate "
                     "seam, and the leaf-most one of the four: it depends on nothing else this "
                     "file collects and nothing else depends on it, unlike the byte-format and "
-                    "state-DB seams above.",
+                    "state-DB seams above. SIXTH growth (+533, B176): a new state-DB reader "
+                    "(_collect_paired_devices_sqlite) for the devices/paired.json -> "
+                    "device_pairing_paired SQLite migration, following the SAME dual-source "
+                    "(legacy JSON wins, SQLite is the fallback) shape _collect_cron already "
+                    "established — so it belongs with the THIRD candidate seam (the state-DB "
+                    "readers) above, not a new one. A C-135 round-1 review then added a "
+                    "row-count cap, a SQL-level per-column byte bound (the same "
+                    "length(CAST(...AS BLOB)) <= ? shape trajectorystore.py uses for the "
+                    "identical B-811 DoS class), and an allowlist-not-denylist tightening of "
+                    "the token sub-key filter — all of it belongs in the SAME state-DB-readers "
+                    "seam, reinforcing that boundary rather than arguing for a fifth.",
     "cli.py": "~7,009 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
