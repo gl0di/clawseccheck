@@ -4083,8 +4083,13 @@ _LIFECYCLE_HOOK_RE = re.compile(
 # this way`), none of them compliance-inverting like skip/forget/omit/ignore.
 # Widening-only: every "do not <verb> X" shape that matched before (run/execute/use/
 # install/curl/wget/download/fetch/share/visit/start) keeps matching exactly as
-# before; only "do not <non-verb, e.g. skip/forget/omit/ignore> X" stops being
-# treated as a negation marker.
+# before. The dividing line is this specific 11-word list, not "verb vs. non-verb" —
+# "do not <word outside the list> X" stops matching, whether that word is a
+# compliance-inverting non-verb (skip/forget/omit/ignore) or an ordinary disclaimer
+# verb this list doesn't yet cover (deploy/upload/publish/enable/...). C-135 review
+# confirmed this residual gap doesn't fire on the real fleet (fleet_fp_gate.py
+# compare, clean) and is the same bounded class of imprecision every sibling
+# alternative above already accepts — widen the list here if a real instance surfaces.
 _NEGATION_RE = re.compile(
     r"\bfor\s+example\b|e\.g\.|(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|"
     r"\bdo\s+not\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start)\b|"
