@@ -581,6 +581,14 @@ def _write_scopes(cfg: dict, tools, undecided_only: bool):
     confined = confined_scopes(cfg)
     if confined is None:
         return None
+    # B-939: a GLOBAL byProvider/toolsBySender block narrows every scope, not only one that
+    # sets its own -- `toolgrant.resolved_scopes` already folds this in (its `global_opaque`),
+    # but this function used to ask `_has_opaque_narrowing` about `entry`/`agents.defaults.tools`
+    # only, so a config with no roster and no per-scope tools block, but an opaque root-level
+    # `tools`, was never recognised as opaque at all: `entry` is `{}` and
+    # `agents.defaults.tools` is absent, so both checks below silently passed. Computed once,
+    # same as `toolgrant`'s, and OR'd into every row.
+    global_opaque = _has_opaque_narrowing({"tools": cfg.get("tools")})
     out = []
     for is_confined, (name, entry, grant_id) in zip(confined, _scope_rows(cfg)):
         # `is True`, not truthiness: `confined_scopes` yields None for a scope the config does
@@ -592,7 +600,7 @@ def _write_scopes(cfg: dict, tools, undecided_only: bool):
             continue
         if undecided_only and is_confined is not None:
             continue
-        if _has_opaque_narrowing(entry):
+        if global_opaque or _has_opaque_narrowing(entry):
             continue
         if grant_id is None and _has_opaque_narrowing(
                 {"tools": dig(cfg, "agents.defaults.tools")}):
@@ -623,9 +631,11 @@ def unconfined_write_scopes(cfg: dict, tools):
     grow a third list of them. ``granted`` runs the vendor's matcher over whatever string it
     is given, so a legacy name needs no alias entry.
 
-    A scope whose own tools carry ``byProvider``/``toolsBySender`` is left out: those layers
-    can remove a grant and are not resolved here, and the quiet direction may cost a
-    finding but never invents one. Returns scope NAMES (this module's normalised form).
+    A scope is left out when either the config's GLOBAL ``tools`` block or the scope's own
+    tools carry ``byProvider``/``toolsBySender`` (B-939, mirroring
+    ``toolgrant.resolved_scopes``'s ``global_opaque``): those layers can remove a grant and
+    are not resolved here, and the quiet direction may cost a finding but never invents one.
+    Returns scope NAMES (this module's normalised form).
     """
     return _write_scopes(cfg, tools, undecided_only=False)
 
