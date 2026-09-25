@@ -6006,8 +6006,53 @@ def check_installed_skills(ctx: Context) -> Finding:
                     # skill code), so that distinction has no bearing on THIS check's
                     # own detection surface; it would only matter to a downstream
                     # dynamic analysis, which does not exist here.
-                    if af.rule == "HARDCODED_PROVIDER_SECRET" and _TEST_FIXTURE_BASENAME_RE.match(
-                        Path(relpath).name
+                    #
+                    # C-135 adversarial-review correction on the paragraph above (found
+                    # BEFORE this task shipped, same review cycle): the claim that "actual
+                    # credential exfiltration ... is computed by an ENTIRELY SEPARATE code
+                    # path" is only true for the ASSIGN rule's own bare-name-binding shape —
+                    # for THIS rule it was FALSE. `ENV_EXFIL_FLOW` is WARN-only everywhere
+                    # (see `_AST_NEVER_FAIL_RULES` above), `CRED_EXFIL_FLOW`'s sources are
+                    # credential FILE paths only (`.aws/credentials`, `.ssh/id_*`, ... —
+                    # explicitly NOT env vars), and `cred_exfil_signal`'s blob regex
+                    # (`_has_same_line`/`_has_cross`, `_CRED_RE`) never matches a bare
+                    # `os.environ[...]` reference either. So THIS rule's own generic
+                    # crit/FAIL fallthrough was the ONLY detector covering "a secret is
+                    # placed in os.environ, then exfiltrated" — and the basename-only
+                    # exemption above handed an attacker a free CRITICAL bypass for that
+                    # exact shape merely by naming the payload file `conftest.py`.
+                    #
+                    # Fix: the exemption now additionally requires that this SAME file
+                    # (`src` — the AST loop's own per-file source text, not the whole
+                    # skill's cross-file blob) contain no exfil-shaped network-sink token
+                    # at all, checked with `_EXFIL_RE` — the SAME shared curl/wget/nc/
+                    # `requests?\.post`/`fetch(`/base64/known-paste-and-tunnel-host
+                    # alternation already used to spot "a value reaches a network call" for
+                    # `_has_same_line`/`_has_cross`/`_openclaw_cred_store_exfil_hit` above.
+                    # This is deliberately NOT full taint tracking (same "conservative,
+                    # file-wide, good enough" standard those callers already accept) — a
+                    # genuine test fixture that only ever writes the mock value into
+                    # `os.environ` for its own process and never sends it anywhere has NO
+                    # exfil-shaped token in its own source at all, so it is unaffected and
+                    # still gets the exemption; a file that ALSO ships a `requests.post(...)`
+                    # (or curl/wget/fetch/nc/base64/...) call — regardless of whether that
+                    # call is provably wired to THIS value — no longer qualifies, and falls
+                    # through unchanged to the generic crit/FAIL path below, exactly as if
+                    # its basename had never matched `_TEST_FIXTURE_BASENAME_RE` at all.
+                    # Widening this later to real per-value taint (rather than "any exfil
+                    # token anywhere in the file") would let a fixture with an UNRELATED,
+                    # genuinely disconnected `requests.post` call back into the exemption —
+                    # a possible future refinement, not attempted here: false negatives on
+                    # the attack this rule exists to catch are worse than a rare, over-broad
+                    # false CRIT on a test fixture that happens to also make network calls,
+                    # and a taut per-value flow proof is exactly the complexity this
+                    # module's sibling helpers (see `_openclaw_cred_store_exfil_hit`'s own
+                    # comment on two retracted broader attempts) have repeatedly rejected in
+                    # favor of narrow, explainable, conservative signals.
+                    if (
+                        af.rule == "HARDCODED_PROVIDER_SECRET"
+                        and _TEST_FIXTURE_BASENAME_RE.match(Path(relpath).name)
+                        and not _EXFIL_RE.search(src)
                     ):
                         hardcoded_secret_fixture_note.append(
                             f"{name}: {af.reason} ({relpath}:{af.lineno}) — a "

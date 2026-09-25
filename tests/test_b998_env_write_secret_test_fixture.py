@@ -47,6 +47,23 @@ is still caught, unaffected by this exemption. The residual this shares with ASS
 (already accepted by Dave's D2 ruling): an attacker could name a real payload file
 `test_x.py` to dodge BOTH rules' FAIL — not a new evasion this task introduces.
 
+C-135 CORRECTION (found before this task shipped, same review cycle): the
+risk-equivalence paragraph above was WRONG for this rule. `ENV_EXFIL_FLOW` is
+WARN-only everywhere, `CRED_EXFIL_FLOW`'s sources are credential FILE paths only
+(never env vars), and `cred_exfil_signal`'s blob regex never matches a bare
+`os.environ[...]` reference — so this rule's own generic crit/FAIL fallthrough was
+the ONLY detector covering "a secret is placed in os.environ, then exfiltrated", and
+the basename-only exemption handed an attacker a free CRITICAL bypass for that exact
+shape by naming the payload file `conftest.py`. The exemption above now additionally
+requires that the SAME file contain no exfil-shaped network-sink token at all
+(`_EXFIL_RE` — the shared curl/wget/nc/requests-dot-post/`fetch(`/base64/... token
+set this module already uses elsewhere to spot "a value reaches a network call"): a
+test fixture that only writes the mock value into `os.environ` still gets the
+exemption; one that ALSO ships an exfil-shaped call anywhere in the same file no
+longer does, and falls straight through to the untouched generic crit/FAIL path. See
+the tests below under "C-135 correction" and the in-source comment at the
+`checks/_vet.py` arm for the full reasoning.
+
 Secret-shaped test literals are split across adjacent string-literal boundaries
 (Golden Rule #3) — Python folds adjacent string literals into a single ast.Constant
 at parse time, so the AST detector still sees one joined value, but no contiguous
@@ -167,3 +184,45 @@ def test_vet_env_overwrite_fixture_still_critical_fail():
     f = vet_skill(skill_dir)
     assert f.status == FAIL
     assert f.severity == CRITICAL
+
+
+# ---------------------------------------------------------------------------
+# C-135 correction: the exemption above is unsafe unconditionally on file
+# content — it must not fire when the SAME file also ships an exfil-shaped
+# network-sink call. See the checks/_vet.py B-998 arm's own comment for the
+# full reasoning (ENV_EXFIL_FLOW is WARN-only everywhere, CRED_EXFIL_FLOW's
+# sources are credential FILE paths only, and cred_exfil_signal's blob regex
+# never matches a bare os.environ[...] reference — so this rule's own
+# generic crit/FAIL fallthrough was the ONLY detector ever covering this
+# shape, and the original unconditional basename exemption gave a free
+# CRITICAL bypass to any payload file merely named conftest.py).
+# ---------------------------------------------------------------------------
+
+
+def test_vet_env_write_secret_with_exfil_sink_in_conftest_stays_critical_fail():
+    """The exact C-135 adversarial-review repro: tests/conftest.py both writes the
+    mock provider-shaped literal into os.environ AND ships a real requests.post(...)
+    call that reads that same env var back out and sends it to an external host.
+    Before this fix, the basename-only exemption wrongly demoted this to WARN/HIGH;
+    it must stay FAIL/CRITICAL regardless of the conftest.py basename."""
+    skill_dir = FIXTURES / "bad_b13_env_write_secret_conftest_with_exfil" / "skills" / "s"
+    f = vet_skill(skill_dir)
+    assert f.status == FAIL, f"expected FAIL; got {f.status}: {f.detail}"
+    assert f.severity == CRITICAL
+
+
+def test_vet_env_write_secret_without_exfil_sink_in_conftest_still_clean():
+    """Control, paired 1:1 with the repro above: byte-for-byte the same env-write
+    shape MINUS the requests.post exfil sink. With no exfil-shaped network-sink
+    token anywhere in the file, the basename carve-out still applies and this must
+    PASS with the secret carried as evidence only — proving the new file-wide
+    exfil-sink gate demotes only what it is meant to, not everything named
+    conftest.py."""
+    skill_dir = (
+        FIXTURES / "clean_b13_env_write_secret_conftest_without_exfil" / "skills" / "s"
+    )
+    f = vet_skill(skill_dir)
+    assert f.status == PASS, f"expected PASS; got {f.status}: {f.detail}"
+    assert any("MOCK_OPENAI_KEY" in e for e in (f.evidence or [])), (
+        f"the test-fixture secret must still be disclosed as evidence: {f.evidence}"
+    )
