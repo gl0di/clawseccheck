@@ -1374,6 +1374,41 @@ def test_dynamic_import_non_literal_is_warn_when_a_py_write_exists():
     assert _staged_import_verdict(src) == "WARN"
 
 
+def test_b980c_wildcard_branch_computed_py_write_now_warns():
+    """CLAWSECCHECK-B-980(c): the same shape as
+    test_dynamic_import_non_literal_is_warn_when_a_py_write_exists above, but the
+    write's final path segment is COMPUTED (`name + ".py"`) rather than a literal
+    ".py" name. Before the fix the wildcard branch's `tainted_py_write` only looked
+    at `Loc.leaf_py` (true only for a literal final segment), so this shape --
+    already recognised elsewhere via `Loc.tail == "module"` -- was invisible here
+    and produced no finding at all."""
+    src = _src('''
+        import os, importlib
+        here = os.path.dirname(__file__)
+        name = compute_name()
+        open(os.path.join(here, name + ".py"), "wb").write(data)
+        mod_name = compute_name()
+        importlib.import_module(mod_name)
+    ''')
+    assert _staged_import_verdict(src) == "WARN"
+
+
+def test_b980c_wildcard_branch_untainted_computed_py_write_stays_clean():
+    """Clean control for the fix above: the identical computed-.py-write shape, but
+    the write's content is ordinary local data, not remote/decoded --
+    `tainted_py_write` still requires `w_tainted`, so this stays clean exactly as it
+    did before the fix."""
+    src = dedent('''
+        import os, importlib
+        here = os.path.dirname(__file__)
+        name = compute_name()
+        open(os.path.join(here, name + ".py"), "wb").write(b"local content")
+        mod_name = compute_name()
+        importlib.import_module(mod_name)
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
 def test_mkdtemp_same_binding_is_fail_two_calls_is_warn():
     src_same = _src('''
         import sys, os, tempfile
@@ -2011,6 +2046,42 @@ def test_h2_opaque_write_with_an_unresolvable_sys_path_entry_still_warns():
     assert _staged_import_verdict(src) == "WARN"
 
 
+def test_b980c_unknown_dir_branch_computed_py_write_now_warns():
+    """CLAWSECCHECK-B-980(c): a REMOTE-tainted write whose final path segment is
+    COMPUTED (`name + ".py"`) sits in this file's own directory (a known FILE-
+    anchored location, so it correlates DEFINITE_NOT -- not UNDETERMINED -- against
+    every candidate `import unrelated_module` could resolve to), while a SEPARATE
+    sys.path entry cannot be resolved at all (`unknown_dir`). This file cannot rule
+    out that the unresolvable entry is where the staged file actually landed. Before
+    the fix the unknown_dir branch's `tainted_py_write` only looked at `Loc.leaf_py`
+    (true only for a literal final segment), so a computed name was invisible here
+    too and produced no finding at all."""
+    src = _src('''
+        import os, sys
+        here = os.path.dirname(__file__)
+        name = compute_name()
+        open(os.path.join(here, name + ".py"), "wb").write(data)
+        sys.path.insert(0, os.environ["STAGE_DIR"])
+        import unrelated_module
+    ''')
+    assert _staged_import_verdict(src) == "WARN"
+
+
+def test_b980c_unknown_dir_branch_untainted_computed_py_write_stays_clean():
+    """Clean control for the fix above: the identical shape, but the write's
+    content is ordinary local data, not remote/decoded -- `tainted_py_write` still
+    requires `w_tainted`, so this stays clean exactly as it did before the fix."""
+    src = dedent('''
+        import os, sys
+        here = os.path.dirname(__file__)
+        name = compute_name()
+        open(os.path.join(here, name + ".py"), "wb").write(b"local content")
+        sys.path.insert(0, os.environ["STAGE_DIR"])
+        import unrelated_module
+    ''')
+    assert _staged_import_verdict(src) == "none"
+
+
 def test_h2_a_link_or_import_hook_keeps_names_from_counting():
     """A link (this file, or any sibling of the artifact) or an import-system hook
     can make an import load a file under a different name: the H1 shape then keeps
@@ -2063,6 +2134,34 @@ def test_h2_loc_tail_records_what_join_could_not_read():
     assert (again.tail, again.final_name, again.exact) == (None, "mod.py", False)
     assert mod.up().tail is None
     assert lit.join("C:\\x\\mod.py").tail == "module"  # unusable literal, known suffix
+
+
+def test_b980a_loc_join_leading_dotdot_past_empty_parts_is_not_exact():
+    """CLAWSECCHECK-B-980(a): a leading ".." with nothing left in `parts` to pop is
+    silently absorbed (a no-op) -- but the result is actually ONE LEVEL ABOVE what
+    `parts` can represent, so it must not claim `exact=True`. Before the fix this
+    returned `exact=True`, reading as a confident DEFINITE match INSIDE the anchor
+    when the true location is outside it."""
+    climbed = se.Loc("FILE", ()).join("../mod.py")
+    assert climbed.anchor == "FILE"
+    assert climbed.parts == ("mod.py",)
+    assert climbed.tail is None
+    assert climbed.exact is False, climbed
+
+    # Control: a ".." that DOES have something to pop is unaffected -- stays exact.
+    popped = se.Loc("FILE", ("pkg",)).join("../mod.py")
+    assert (popped.parts, popped.exact) == (("mod.py",), True)
+
+    # Two leading ".." against one real level: the first pops "pkg", the second
+    # finds parts already empty and can't -- the whole join is inexact.
+    climbed2 = se.Loc("FILE", ("pkg",)).join("../../mod.py")
+    assert climbed2.parts == ("mod.py",)
+    assert climbed2.exact is False
+
+    # A later ordinary segment does not paper back over an earlier underflow.
+    climbed3 = se.Loc("FILE", ()).join("../pkg/mod.py")
+    assert climbed3.parts == ("pkg", "mod.py")
+    assert climbed3.exact is False
 
 
 def test_h2_locate_reads_the_ending_of_a_computed_segment():
