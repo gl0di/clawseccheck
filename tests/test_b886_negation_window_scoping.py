@@ -235,11 +235,34 @@ def test_parenthesised_inline_marker_does_not_claim_the_outer_colon():
 
 
 def test_parenthesised_disclaimer_does_not_claim_the_outer_colon():
-    """Same shape for a disclaimer: the parenthesised 'do not skip' aside is LIVE
+    """Same shape for a disclaimer: the parenthesised 'do not run' aside is LIVE
     for the colon's own STRONG claim, but the marker itself still plausibly
-    disclaims the block it sits inside of -- AMBIGUOUS, not STRONG."""
-    blob = "Setup (do not skip):\n\n1. Run crontab -e and add an @reboot line.\n"
+    disclaims the block it sits inside of -- AMBIGUOUS, not STRONG.
+
+    B-924: was originally worded "do not skip" -- a bare `do not` with no
+    trailing verb used to match `_NEGATION_RE` unconditionally, so the exact
+    wording of the aside did not matter to this test. Now that the bare `do
+    not`/`do NOT` alternatives require a following action-verb (matching every
+    sibling alternative's own discipline), "do not skip" no longer matches at
+    all -- see `test_parenthesised_bare_do_not_skip_no_longer_matches_anything`
+    directly below for that shape pinned on its own terms. Reworded to "do not
+    run" here so this test keeps exercising what it is actually about: paren
+    containment, not the do-not verb gate.
+    """
+    blob = "Setup (do not run):\n\n1. Run crontab -e and add an @reboot line.\n"
     assert _gov(blob, blob.index("crontab -e")) == _AMBIGUOUS
+
+
+def test_parenthesised_bare_do_not_skip_no_longer_matches_anything():
+    """B-924: "do not skip" names the thing the reader must NOT fail to do, not
+    the thing to avoid -- the list right after it is a live "make sure this
+    executes" directive, not a disclaimed example. Before the fix this matched
+    `_NEGATION_RE` unconditionally (see the test above, pre-B-924) and reached
+    AMBIGUOUS through the same paren-containment path; with no verb after "not",
+    no marker exists at all here any more, and the cron/@reboot payload right
+    after it is fully LIVE."""
+    blob = "Setup (do not skip):\n\n1. Run crontab -e and add an @reboot line.\n"
+    assert _gov(blob, blob.index("crontab -e")) == _LIVE
 
 
 def test_marker_fully_inside_a_parenthesised_trigger_still_dampens():

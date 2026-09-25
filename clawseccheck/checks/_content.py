@@ -4065,9 +4065,31 @@ _LIFECYCLE_HOOK_RE = re.compile(
 # 186 files green without it, and 0 of the 16 fixture skills whose text contains the word
 # change verdict. The measurement that matters is that second one — a green suite proves
 # the alternative is unexercised, not that it is unnecessary.
+#
+# B-924: the bare `do not`/`do NOT` alternatives had no trailing-verb constraint at all,
+# unlike every sibling here (`don't` requires do/run/use/execute; `never` requires
+# run/use; `avoid` requires running/using/this). "Do not run the following commands"
+# and "Do not skip the following safety checks" both matched identically, even though
+# they are opposite instructions — the first names the thing NOT to do (run), the
+# second names the thing the reader must not fail to do (skip), so the list right
+# after it is a live "make sure this executes" directive, not a disclaimed example.
+# Tightened to the same discipline, with a verb list wide enough for the "do not
+# <verb> ..." shape actually seen in this project's own negation-marker prose: the
+# command-execution verbs (run/execute/use/install/do) plus the curl/wget/download/
+# fetch fetch-verbs already established as this file's canonical action vocabulary
+# (see `_B63_ACTION_RE` above), plus `share`/`visit`/`start` — each already exercised
+# by a pre-existing fixture or unit test as a genuine "don't do this" disclaimer
+# (`do not share your API key`, `do not visit <url>`, `do not start long processes
+# this way`), none of them compliance-inverting like skip/forget/omit/ignore.
+# Widening-only: every "do not <verb> X" shape that matched before (run/execute/use/
+# install/curl/wget/download/fetch/share/visit/start) keeps matching exactly as
+# before; only "do not <non-verb, e.g. skip/forget/omit/ignore> X" stops being
+# treated as a negation marker.
 _NEGATION_RE = re.compile(
     r"\bfor\s+example\b|e\.g\.|(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|"
-    r"\bdo\s+not\b|\bdo\s+NOT\b|\bdon'?t\s+(?:do|run|use|execute)\b|"
+    r"\bdo\s+not\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start)\b|"
+    r"\bdo\s+NOT\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start)\b|"
+    r"\bdon'?t\s+(?:do|run|use|execute)\b|"
     r"\bnever\s+run\b|\bnever\s+use\b|\bavoid\s+(?:running|using|this)\b|"
     r"\bexample:\s*$|\bwhat\s+not\s+to\s+do\b|"
     r"[✅❌]\s*(?:\*\*)?(?:don|never|avoid|bad|no\b)",
