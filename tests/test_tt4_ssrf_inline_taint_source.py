@@ -404,6 +404,75 @@ def test_ssrf_nested_spread_key_alongside_genuinely_tainted_url_key_still_fires(
 
 
 # ---------------------------------------------------------------------------
+# SSRF round 4: the per-key-pair judgment above only ran at the TOP level of the
+# dict literal -- when an unresolvable key's fallback VALUE was itself a nested dict
+# literal, that nested literal was appended as one opaque atomic slot instead of
+# being decomposed key-by-key the same way, so an excluded key buried one level
+# deeper (`headers`) could still smuggle its taint back in via
+# `_expr_is_ext_tainted`'s whole-subtree walk. The fix makes the per-key decomposition
+# recursive: any dict literal encountered as a value, at any depth, gets the same
+# per-key test applied to it.
+# ---------------------------------------------------------------------------
+
+
+def test_ssrf_double_splat_nested_dict_does_not_poison_excluded_headers_key():
+    """The exact reported round-4 repro: `**{**{...}}` -- the outer dict's only entry
+    is an unresolvable (`None`) spread key whose fallback value is ITSELF a dict
+    literal containing nothing but an excluded `headers` key carrying the only
+    taint. Must stay silent -- the nested literal must be decomposed key-by-key,
+    not swallowed whole as one opaque slot."""
+    src = (
+        "import os, requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f():\n"
+        "    requests.get(FIXED_URL, **{**{\"headers\": {\"Authorization\": os.environ[\"TOKEN\"]}}})\n"
+    )
+    assert "TT_SSRF" not in _rules(src)
+
+
+def test_ssrf_int_key_with_nested_dict_value_does_not_poison_excluded_headers_key():
+    """Same class of gap as above, reached through an ordinary (non-spread)
+    unresolvable key -- a bare `int` -- whose value is a nested dict literal, sitting
+    alongside a separate, harmless, resolvable `timeout` key. Must stay silent."""
+    src = (
+        "import os, requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f():\n"
+        "    requests.get(FIXED_URL, **{1: {\"headers\": {\"Authorization\": os.environ[\"TOKEN\"]}}, \"timeout\": 5})\n"
+    )
+    assert "TT_SSRF" not in _rules(src)
+
+
+def test_ssrf_triple_nested_dict_does_not_poison_excluded_headers_key():
+    """Confirms the recursion has no artificial depth limit: two unresolvable `int`
+    keys nest a dict two levels deep before reaching the excluded `headers` key
+    carrying the only taint. Must stay silent."""
+    src = (
+        "import os, requests\n"
+        "FIXED_URL = \"https://example.com/api\"\n"
+        "def f():\n"
+        "    requests.get(FIXED_URL, **{1: {2: {\"headers\": {\"Authorization\": os.environ[\"TOKEN\"]}}}})\n"
+    )
+    assert "TT_SSRF" not in _rules(src)
+
+
+def test_ssrf_genuine_url_key_buried_under_an_unresolvable_key_still_fires():
+    """The mirror-image of the three silent cases above: the genuinely tainted `url`
+    key is the one buried a level deep, under an unresolvable (bare `int`) outer
+    key, alongside an excluded `headers` key at the same nested depth. Must still
+    fire -- via the resolvable `url` key -- confirming the recursion decomposes the
+    nested literal correctly in both directions rather than just suppressing
+    everything under an unresolvable key."""
+    src = (
+        "import os, requests\n"
+        "def f():\n"
+        "    requests.get(**{1: {\"url\": os.environ[\"URL\"], \"headers\": {\"Authorization\": \"fixed\"}}})\n"
+    )
+    r = _rules(src)
+    assert "TT_SSRF" in r
+
+
+# ---------------------------------------------------------------------------
 # TT4: inline file-read-to-network-sink taint.
 # ---------------------------------------------------------------------------
 

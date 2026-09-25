@@ -3351,6 +3351,49 @@ def _file_read_prefilter(source: str) -> bool:
 _SSRF_URL_KWARGS = frozenset({"url"})
 
 
+def _ssrf_dict_literal_candidate_slots(d: ast.Dict) -> list:
+    """Recursively decompose a `dict` LITERAL into SSRF URL-slot candidates,
+    key/value pair by key/value pair, at ANY nesting depth.
+
+    A resolvable string-constant key (`isinstance(k, ast.Constant) and
+    isinstance(k.value, str)`) gets exactly the include/exclude test a direct
+    `headers=`/`auth=`/`url=` keyword already gets: its value is a candidate only
+    when the key is one of `_SSRF_URL_KWARGS`; an excluded key's value is never a
+    candidate, full stop, at any depth -- a `headers` dict's own contents are not
+    re-examined for a nested `url`-shaped key, since they were never going to reach
+    the sink as anything but headers.
+
+    A key that ISN'T statically resolvable (a `None` key from a nested `**other`
+    spread, a non-`Constant` key, or a `Constant` whose value isn't a `str`, e.g. an
+    int key) falls back to the "unknown until runtime, be conservative" treatment
+    for THAT PAIR'S VALUE ALONE -- but if that value is ITSELF a dict literal, this
+    recurses into it with the identical per-key test instead of appending the whole
+    nested literal as one opaque blob. Without the recursion, an otherwise-excluded
+    key buried one level deeper than the unresolvable key (`**{**{"headers": ...}}`,
+    `**{1: {"headers": ...}, "timeout": 5}`) would be swept in as a single atomic
+    slot, and `_expr_is_ext_tainted`'s whole-subtree-walking predicates
+    (`_rhs_has_subscript_environ`/`_value_is_tainted_source`) would find the tainted
+    value buried under that excluded key anyway -- silently reintroducing the exact
+    poisoning this whole fix exists to prevent, just one level down. Only a value
+    that ISN'T itself a dict literal (a `Name`, `Call`, `BinOp`, comprehension, ...
+    -- something genuinely opaque at the AST level) ever becomes an atomic slot.
+    """
+    slots: list = []
+    for dict_key, dict_val in zip(d.keys, d.values):
+        if isinstance(dict_key, ast.Constant) and isinstance(dict_key.value, str):
+            if dict_key.value in _SSRF_URL_KWARGS:
+                slots.append(dict_val)
+            # else: resolvable but excluded -- never a candidate, at any depth.
+        elif isinstance(dict_val, ast.Dict):
+            slots.extend(_ssrf_dict_literal_candidate_slots(dict_val))
+        else:
+            # Not statically resolvable and not a nested dict literal: fall back
+            # to "unknown until runtime, be conservative" for this pair's VALUE
+            # alone -- never for the whole dict literal.
+            slots.append(dict_val)
+    return slots
+
+
 def _ssrf_url_slot_nodes(node: ast.Call) -> list:
     """The argument-expression "slots" of an SSRF-sink call that can carry the fetch
     URL: positional arg 0, any `*args` splat (its real contents are unknown until
@@ -3360,18 +3403,12 @@ def _ssrf_url_slot_nodes(node: ast.Call) -> list:
     never included -- see `_SSRF_URL_KWARGS`'s own note.
 
     A `**` unpack is scoped the same way a literal keyword already is, whenever it's
-    statically apparent: when the unpacked expression is a `dict` LITERAL, each
-    key/value pair is judged on its own -- a resolvable string-constant key
-    (`**{"headers": ..., "url": ...}`) gets exactly the same include/exclude test a
-    direct `headers=`/`auth=`/`url=` keyword already gets, now applied regardless of
-    which spelling the call used to reach the sink. A pair whose key ISN'T statically
-    resolvable (a `None` key from a nested `**other` spread, a non-`Constant` key, or
-    a `Constant` whose value isn't a `str`, e.g. an int key) falls back to the fully
-    permissive "unknown until runtime, be conservative" treatment for THAT PAIR'S
-    VALUE ALONE -- it never poisons the exclusion of the dict literal's other,
-    resolvable sibling keys. Only when the unpacked expression is not a dict literal
-    at all (a call, a bound Name, any other opaque expression) does the whole splat
-    expression become one opaque candidate slot, same as today.
+    statically apparent: when the unpacked expression is a `dict` LITERAL, it is
+    recursively decomposed into candidate slots by `_ssrf_dict_literal_candidate_
+    slots` -- see that function's own docstring for the per-key, any-depth rules.
+    Only when the unpacked expression is not a dict literal at all (a call, a bound
+    Name, any other opaque expression) does the whole splat expression become one
+    opaque candidate slot, same as today.
     """
     slots: list = []
     if node.args:
@@ -3386,21 +3423,7 @@ def _ssrf_url_slot_nodes(node: ast.Call) -> list:
             continue
         # kw.arg is None: a **kwargs / **{...} unpack.
         if isinstance(kw.value, ast.Dict):
-            # Judge each key/value pair on its own -- an unresolvable key (a
-            # nested `**other` spread's `None` key, a non-Constant key, or a
-            # Constant whose value isn't a str) must not poison the exclusion
-            # of its resolvable sibling keys in the same literal.
-            for dict_key, dict_val in zip(kw.value.keys, kw.value.values):
-                if isinstance(dict_key, ast.Constant) and isinstance(
-                    dict_key.value, str
-                ):
-                    if dict_key.value in _SSRF_URL_KWARGS:
-                        slots.append(dict_val)
-                else:
-                    # Not statically resolvable: fall back to "unknown until
-                    # runtime, be conservative" for this pair's VALUE alone --
-                    # never for the whole dict literal.
-                    slots.append(dict_val)
+            slots.extend(_ssrf_dict_literal_candidate_slots(kw.value))
         else:
             slots.append(kw.value)
     return slots
