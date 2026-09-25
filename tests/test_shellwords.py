@@ -319,3 +319,170 @@ def test_sh_loop_word_end_matches_word_scan_state_end():
     end2, unbalanced, anomaly = sw._word_scan_state(text, start)
     assert end1 == end2
     assert not unbalanced and not anomaly
+
+
+# ---------------------------------------------------------------------------
+# CLAWSECCHECK-B-986 round 5 P1: param_refs -- bare vs operator classifier
+# ---------------------------------------------------------------------------
+
+
+def _refs(text: str, name: str, lo: int = None, hi: int = None):
+    if lo is None:
+        lo = 0
+    if hi is None:
+        hi = len(text)
+    return sw.param_refs(text, name, lo, hi)
+
+
+def test_param_refs_unbraced_is_bare():
+    text = "echo $t done"
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    ref = refs[0]
+    assert ref.bare is True
+    assert text[ref.start : ref.end] == "$t"
+
+
+def test_param_refs_exactly_braced_is_bare():
+    text = 'echo "${t}" done'
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    ref = refs[0]
+    assert ref.bare is True
+    assert text[ref.start : ref.end] == "${t}"
+
+
+def test_param_refs_suffix_operator_truncation_is_operator():
+    text = 'echo "${t%%pattern}" done'
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    ref = refs[0]
+    assert ref.bare is False
+    assert text[ref.start : ref.end] == "${t%%pattern}"
+
+
+def test_param_refs_pattern_substitution_is_operator():
+    text = 'echo "${t/x/y}" done'
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    assert refs[0].bare is False
+    assert text[refs[0].start : refs[0].end] == "${t/x/y}"
+
+
+def test_param_refs_substring_extraction_is_operator():
+    text = 'echo "${t:0:0}" done'
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    assert refs[0].bare is False
+
+
+def test_param_refs_default_value_operator_is_operator():
+    text = 'echo "${t:-}" done'
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    assert refs[0].bare is False
+
+
+def test_param_refs_error_if_unset_operator_is_operator():
+    text = 'echo "${t:?}" done'
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    assert refs[0].bare is False
+
+
+def test_param_refs_assign_default_operator_is_operator():
+    text = 'echo "${t=x}" done'
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    assert refs[0].bare is False
+
+
+def test_param_refs_hash_prefix_strip_is_operator():
+    text = 'echo "${t#*}" done'
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    assert refs[0].bare is False
+
+
+def test_param_refs_unbalanced_brace_is_operator_spanning_to_hi():
+    text = 'echo "${t%%unterminated'
+    hi = len(text)
+    refs = _refs(text, "t", 0, hi)
+    assert len(refs) == 1
+    ref = refs[0]
+    assert ref.bare is False
+    assert ref.end == hi
+
+
+def test_param_refs_finds_references_inside_command_substitution():
+    """The whole point: scan_line treats $(...) as one opaque cmdsub Part, so
+    a Part-walking implementation would miss references inside it entirely.
+    param_refs scans raw text, so it must still find them."""
+    text = 'curl -H "Authorization: Bearer $(cat "${t%%x}")" https://x'
+    refs = _refs(text, "t")
+    assert len(refs) == 1
+    ref = refs[0]
+    assert ref.bare is False
+    assert text[ref.start : ref.end] == "${t%%x}"
+
+
+def test_param_refs_no_reference_to_a_different_name():
+    text = "echo $team $t_other ${totally} done"
+    refs = _refs(text, "t")
+    assert refs == ()
+
+
+def test_param_refs_respects_lo_hi_window():
+    text = "$t $t $t"
+    # only the middle reference (offsets 3-5) is in-window
+    refs = _refs(text, "t", 3, 5)
+    assert len(refs) == 1
+    assert refs[0].start == 3
+
+
+def test_param_refs_multiple_references_mixed_bare_and_operator():
+    text = 'echo $t "${t}" "${t%%x}"'
+    refs = _refs(text, "t")
+    assert len(refs) == 3
+    assert [r.bare for r in refs] == [True, True, False]
+
+
+def test_param_refs_nested_braced_reference_inside_operator():
+    text = 'echo "${t/x/${u}}"'
+    refs_t = _refs(text, "t")
+    assert len(refs_t) == 1
+    assert refs_t[0].bare is False
+    refs_u = _refs(text, "u")
+    assert len(refs_u) == 1
+    assert refs_u[0].bare is True
+
+
+def test_param_refs_is_o_of_span_length_plus_hits_many_balanced_pairs():
+    """Perf guard: N nested `${t:-` opens followed by N closes must not
+    trigger an O(hits * text length) blowup (see the module comment above
+    `param_refs` in shellwords.py)."""
+    import time
+
+    n = 8000
+    text = ("${t:-" * n) + ("}" * n)
+    start = time.monotonic()
+    refs = sw.param_refs(text, "t", 0, len(text))
+    elapsed = time.monotonic() - start
+    assert len(refs) == n
+    assert elapsed < 2.0
+
+
+def test_param_refs_is_fast_on_many_unbalanced_opens():
+    """Perf guard: N unbalanced `${t` opens (no closing brace at all) must
+    each resolve in O(1) via the dict lookup, not a fresh balanced-end scan
+    per hit."""
+    import time
+
+    n = 8000
+    text = "${t " * n
+    start = time.monotonic()
+    refs = sw.param_refs(text, "t", 0, len(text))
+    elapsed = time.monotonic() - start
+    assert len(refs) == n
+    assert all(not r.bare for r in refs)
+    assert elapsed < 2.0

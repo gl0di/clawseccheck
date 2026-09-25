@@ -37,6 +37,7 @@ skillast.py's B-415 in-cluster destination check, which does exactly that).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 _QUOTE_CLOSE = {"'": "'", "`": "`", "{": "}"}
@@ -483,3 +484,111 @@ def scan_line(text: str) -> "tuple[SimpleCommand, ...] | None":
     if current:
         commands.append(SimpleCommand(tuple(current)))
     return tuple(commands)
+
+
+# --------------------------------------------------------------------------
+# CLAWSECCHECK-B-986 (round 5) P1: a precise classifier for one loop
+# variable's own references within a raw text span -- BARE (`$NAME`/
+# `${NAME}`, safe to splice a representative value into) vs OPERATOR (any
+# other `${NAME...}` parameter-expansion form: `${NAME%%pat}`, `${NAME/x/y}`,
+# `${NAME:-x}`, `${NAME:0:0}`, ... -- never splice-safe, since the shell's
+# own runtime value after the operator runs can differ arbitrarily from the
+# raw variable value skillast.py's loop DIRECT role substitutes in).
+#
+# Deliberately NOT built by walking `scan_line`'s own `variable` Parts:
+# `scan_line` treats `$(...)`/backtick command substitution as one opaque
+# `cmdsub` Part and never looks inside it, but every real B-986 round-5 repro
+# sits inside a `$(cat ...)` read -- Part-walking would silently miss all of
+# them. `param_refs` instead scans the raw text span directly with its own
+# regex + a single balanced-brace pass, so it naturally sees references
+# nested inside a cmdsub span too (the whole reason this function exists).
+#
+# Cost discipline (CLAWSECCHECK-B-894's own round-1/round-2 history, this
+# module's `scan_line` docstring, and `_word_scan_state`'s comment above it,
+# all warn about the same shape): a caller that finds each hit's own matching
+# `}` with a fresh whole-text balanced-end scan (`_find_balanced_end`, called
+# once PER HIT) is O(hits * text length) -- an adversarial line of N nested
+# `${t:-` opens followed by N closes makes every one of the N hits re-walk
+# roughly the REMAINING length of the text to find its own close, an O(N^2)
+# blowup that can exceed the per-check scan budget on its own. `_brace_pairs`
+# below instead does ONE single forward pass over the whole span, pairing
+# every unescaped `{` with its matching `}` via a plain stack, in O(span
+# length) total -- every hit then looks its own close up in that prebuilt
+# dict in O(1), so the whole function is O(span length + hit count), never
+# O(hits * span length). See `tests/test_b894_shell_loop_cred_taint.py`'s
+# perf-guard tests for both the many-open-and-close and the
+# many-unbalanced-open adversarial shapes this is built to survive.
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ParamRef:
+    """One reference to a loop variable within a text span, as found by
+    `param_refs`. `start`/`end` are absolute offsets into the text passed to
+    `param_refs` (matching `Part`'s own convention). `bare` is True only for
+    an unbraced `$NAME` or an exactly-`${NAME}` braced reference -- False for
+    any OTHER braced form (an operator/expansion is present) or for a braced
+    reference whose matching `}` could not be found before the caller's own
+    `hi` bound (fails CLOSED: never bare)."""
+
+    start: int
+    end: int
+    bare: bool
+
+
+def _brace_pairs(text: str, lo: int, hi: int) -> dict:
+    """One forward pass over `text[lo:hi]`, pairing every unescaped `{` with
+    its nesting-matching `}` (a plain depth stack -- see the module comment
+    above `param_refs` for why this must be a single pass, not one balanced-
+    end lookup per caller hit). Returns `{open_pos: close_pos}` for every
+    pair actually closed within the window; an unmatched `{` still open at
+    `hi` simply has no entry (the caller's own "no matching `}`" fail-closed
+    path)."""
+    pairs: dict = {}
+    stack: list = []
+    i = lo
+    while i < hi:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "{":
+            stack.append(i)
+        elif c == "}":
+            if stack:
+                pairs[stack.pop()] = i
+        i += 1
+    return pairs
+
+
+def param_refs(text: str, name: str, lo: int, hi: int) -> "tuple[ParamRef, ...]":
+    """Every reference to variable `name` within `text[lo:hi]`, classified
+    BARE vs OPERATOR (see `ParamRef`). One `\\$\\{?NAME\\b` regex pass locates
+    the hits; `_brace_pairs` (one prior single pass over the same window)
+    supplies each braced hit's own matching `}` in O(1) -- see the module
+    comment above for the cost reasoning this shape exists to satisfy.
+
+    Classification, per hit:
+      * unbraced (`$NAME`) -- always bare.
+      * braced, and the matching `}` is found, and there is nothing at all
+        between the end of `NAME` and that `}` -- exactly `${NAME}` -- bare.
+      * braced, matching `}` found, but with an expansion operator in
+        between (`${NAME%%x}`, `${NAME/x/y}`, `${NAME:-x}`, `${NAME:0:0}`,
+        `${NAME=x}`, ...) -- operator, spanning through that `}`.
+      * braced, no matching `}` found before `hi` -- operator, spanning
+        through `hi` itself (fails closed: an unbalanced reference is never
+        treated as a safe bare one)."""
+    pat = re.compile(r"\$\{?" + re.escape(name) + r"\b")
+    pairs = _brace_pairs(text, lo, hi)
+    refs: list = []
+    for m in pat.finditer(text, lo, hi):
+        start = m.start()
+        if text[m.start() + 1 : m.start() + 2] != "{":
+            refs.append(ParamRef(start, m.end(), True))
+            continue
+        open_pos = m.start() + 1
+        close = pairs.get(open_pos)
+        if close is None or close >= hi:
+            refs.append(ParamRef(start, hi, False))
+            continue
+        end = close + 1
+        refs.append(ParamRef(start, end, text[m.end() : close] == ""))
+    return tuple(refs)
