@@ -659,7 +659,43 @@ class _ToolPolicyView(NamedTuple):
     enumerable: bool  # static config bounds the grant at all
 
 
-def _agent_profile_widenings(cfg: dict) -> list:
+def _b68_scope_confined(cfg: dict, own_tools, entry) -> bool:
+    """B-942: whether ONE scope's own filesystem-tool policy confines it -- its own
+    ``tools.fs.workspaceOnly`` (falling back to the global value when this scope
+    doesn't set one) is ``True``, or its own sandbox mode (its own roster entry's
+    ``sandbox.mode``, falling back to ``agents.defaults.sandbox.mode``) is ``"all"``.
+
+    This is OpenClaw's own per-context ``fsUnguarded`` composite
+    (``context.tools?.fs?.workspaceOnly ?? cfg.tools?.fs?.workspaceOnly``,
+    ``audit.nondeep.runtime``), asked about ONE scope instead of only the global
+    config -- factored out of `_fs_scope_grants`'s inline ``confinement=True`` test
+    (B-737) so a second caller can ask the identical question about a roster entry
+    it already has in hand (G1's `scoped`/widening resolution below, B-942) without
+    duplicating the composite a second time and risking the two drifting apart.
+
+    ``own_tools`` and ``entry`` are threaded separately, not derived from one
+    another, because they come from different sources for the synthesised
+    default-agent scope: its ``own_tools`` is ``agents.defaults.tools`` while its
+    ``entry`` (for the sandbox-mode lookup) has no roster row at all. For a real
+    roster agent both are the same entry's own dict (``entry.get("tools")`` and
+    ``entry`` itself) -- exactly how `_fs_scope_grants` already threads
+    ``scope.own_tools`` and ``scope.entry`` through this same test.
+    """
+    own_fs = own_tools.get("fs") if isinstance(own_tools, dict) else None
+    workspace_only = own_fs.get("workspaceOnly") if isinstance(own_fs, dict) else None
+    if workspace_only is None:
+        workspace_only = dig(cfg, "tools.fs.workspaceOnly")
+    # Reuses `toolpolicy._sandbox_mode` (own entry's `sandbox.mode`, falling back to
+    # `agents.defaults.sandbox.mode`) rather than a second `dig(entry, "sandbox.mode")`
+    # -- that helper already reads the per-entry field directly (not through `dig()`,
+    # so it carries no `relative:` schema-grounding manifest entry of its own to
+    # duplicate), and is the SAME resolution `_sandbox_confines`/`confined_scopes`
+    # already use for this identical question elsewhere in this codebase.
+    sandbox_mode = _toolpolicy._sandbox_mode(cfg, entry)
+    return workspace_only is True or sandbox_mode == "all"
+
+
+def _agent_profile_widenings(cfg: dict, *, skip_confined: bool = False) -> list:
     """Per-agent tools.profile entries that WIDEN beyond the global tools.profile.
 
     B-409: every OTHER per-agent/per-channel/per-sender policy layer this module
@@ -681,6 +717,15 @@ def _agent_profile_widenings(cfg: dict) -> list:
     is powerful while the global tools.profile is not. When the global profile is
     already powerful no per-agent profile can widen further (there is nothing left
     to widen into), so the whole scan is skipped.
+
+    B-942: ``skip_confined=True`` additionally drops a widening whose OWN agent
+    individually confines itself (`_b68_scope_confined`, the same per-scope
+    ``tools.fs.workspaceOnly``/sandbox-mode composite `_fs_scope_grants` already
+    asks) -- B68's confinement-aware caller passes this so a widening that grants
+    an fs tool to an agent that ALSO opts that agent back into workspace
+    confinement doesn't get named as an unconfined reason to WARN. Every other
+    caller (B55, and G1's own default resolution) keeps the default ``False`` and
+    is unaffected -- widening/narrowing is orthogonal to confinement for them.
     """
     if _profile_is_powerful(dig(cfg, "tools.profile")):
         return []
@@ -689,6 +734,10 @@ def _agent_profile_widenings(cfg: dict) -> list:
     for agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
         profile = dig(agent.entry, "tools.profile")
         if isinstance(profile, str) and profile and _profile_is_powerful(profile):
+            if skip_confined and _b68_scope_confined(
+                cfg, agent.entry.get("tools"), agent.entry
+            ):
+                continue
             out.append((f"{agent.path}.tools.profile", profile))
     return out
 
@@ -796,12 +845,29 @@ def _tool_policy_view(cfg: dict) -> _ToolPolicyView:
     )
 
 
-def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
+def _b68_fs_tools_granted(cfg: dict, *, confine_per_agent: bool = False) -> tuple[list[str], bool]:
     """Which filesystem tools config GRANTS, and whether that is knowable at all.
 
     B-283 (b). Returns ``(granted, enumerable)``. Delegates ALL policy resolution to
     _tool_policy_view — see its docstring for the grounding, including the alsoAllow
     implicit-wildcard (B-411) and the gateway.tools.allow de-denylist correction (B-423).
+
+    B-942: ``confine_per_agent=True`` (B68's own call site only -- B44/B55/B84 keep the
+    default and are byte-unaffected) drops a per-agent (``scoped``) or per-agent-profile
+    (``widenings``) contribution whose OWN scope individually confines itself
+    (`_b68_scope_confined`) -- the same ``tools.fs.workspaceOnly``/sandbox-mode composite
+    `_fs_scope_grants` already applies for its NOT-ENUMERABLE residual, now also applied
+    here, on G1's own ENUMERABLE path, which previously granted-then-warned about a
+    per-agent scope without ever reading THAT scope's own confinement declaration. The
+    GLOBAL accumulator (named/grants_all/profile) is untouched by this flag: it is not
+    per-scope, and by the time B68 calls G1 the caller has already cleared the whole
+    config on a TRUE global `tools.fs.workspaceOnly` (see `check_exec_applypatch_
+    workspace`'s own short-circuit above its G1 call), so anything the global
+    accumulator still contributes here is, by construction, genuinely unconfined.
+    Enumerability (whether ANYTHING was resolvable at all) is computed from the RAW,
+    unfiltered `widenings`/`scoped` below, deliberately -- confinement and resolvability
+    are orthogonal questions; a config that resolves to "confined, nothing left
+    unconfined" is a real, positive answer, not an unresolvable one.
 
     Every grant source is ADDITIVE (union) so no source can narrow another: a narrow
     alsoAllow can never shrink a powerful profile's "every fs tool" verdict. deny is
@@ -864,6 +930,14 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
         return [], True
 
     widenings = _agent_profile_widenings(cfg)
+    # B-942: the confinement-aware subset of `widenings` -- equal to `widenings` itself
+    # unless `confine_per_agent` is set, in which case a widening whose own agent
+    # individually confines itself is dropped. Only used to gate the grant contribution
+    # below, never the enumerability test further down, which stays keyed on the RAW
+    # `widenings` (see this function's own docstring for why).
+    gating_widenings = (
+        _agent_profile_widenings(cfg, skip_confined=True) if confine_per_agent else widenings
+    )
 
     granted: set = set()
     if view.grants_all or "group:fs" in view.named:
@@ -871,7 +945,7 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     granted |= {t for t in _B68_FS_TOOLS if t in view.named}
     if view.profile is not None and _profile_is_powerful(view.profile):
         granted |= set(_B68_FS_TOOLS)
-    if widenings:
+    if gating_widenings:
         # The "STILL OPEN" gap this closes: when a global tools.profile is set AND
         # global tools.alsoAllow is also non-empty, _tool_policy_view's implicit_all
         # suppresses unionAllow's wildcard injection on the theory that the GLOBAL
@@ -981,6 +1055,14 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     # same UNKNOWN `_fs_scope_grants` already produces for every other opaque scope --
     # never a silent drop to "nothing granted".
     scoped: set = set()
+    # B-942: `scoped_unconfined` mirrors `scoped` exactly except it skips a roster
+    # entry's contribution when that entry individually confines itself
+    # (`_b68_scope_confined`) -- computed alongside `scoped` (not derived from it
+    # afterwards) because `scoped` is a flat union of tool NAMES and cannot be
+    # un-mixed by origin once merged. Only consulted by the caller when
+    # `confine_per_agent` is set; `scoped` itself stays the full, unfiltered union so
+    # the enumerability test below is unaffected by confinement.
+    scoped_unconfined: set = set()
     _roster = agent_roster(cfg)
     _scope_opacity = {
         _res.scope: _res.opaque for _res in (_toolgrant.resolved_scopes(cfg) or ())
@@ -994,8 +1076,10 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
             continue
         if not _toolgrant._policies(cfg, _entry.id) and _toolgrant._unresolved_profile(cfg, _entry.id):
             continue
-        scoped |= {t for t in _B68_FS_TOOLS
-                    if _toolgrant.granted(cfg, t, _entry.id)}
+        _entry_granted = {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t, _entry.id)}
+        scoped |= _entry_granted
+        if not _b68_scope_confined(cfg, _entry.entry.get("tools"), _entry.entry):
+            scoped_unconfined |= _entry_granted
 
     # `agents.defaults.tools` is the second DECLARED per-agent surface, and it is a scope
     # only when NO roster exists -- measured against the vendor: declared with no roster it
@@ -1013,7 +1097,15 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
         not _toolgrant._policies(cfg) and _toolgrant._unresolved_profile(cfg)
     )
     if not _roster and dig(cfg, "agents.defaults.tools") and not _defaults_vacuous_malformed:
-        scoped |= {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t)}
+        # No roster exists here (the `if not _roster` guard), so this synthesised
+        # default-agent scope cannot have its OWN per-entry `tools.fs.workspaceOnly`
+        # override to individually confine it -- its confinement is exactly the
+        # GLOBAL `tools.fs.workspaceOnly`/`agents.defaults.sandbox.mode` composite
+        # `check_exec_applypatch_workspace` already clears before ever calling G1.
+        # Always counted as unconfined-eligible here for that reason, not skipped.
+        _defaults_granted = {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t)}
+        scoped |= _defaults_granted
+        scoped_unconfined |= _defaults_granted
 
     # The enumerability gate has to see `scoped`, and that ordering is the whole point of
     # computing it above rather than below. An independent C-135 pass on the first draft of
@@ -1044,7 +1136,12 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     # (verified: global `deny:["write"]` with a per-agent `allow:["write"]` resolves to
     # nothing at that agent's scope) -- subtracting it a second time could only remove a
     # grant the runtime keeps.
-    return sorted((granted - view.denied) | scoped), True
+    #
+    # B-942: `confine_per_agent` swaps in `scoped_unconfined` here -- the same per-agent
+    # union, minus any scope that individually confines itself. `granted` (the global
+    # accumulator) is untouched either way; see this function's own docstring for why.
+    final_scoped = scoped_unconfined if confine_per_agent else scoped
+    return sorted((granted - view.denied) | final_scoped), True
 
 
 class _FsScopeGrants(NamedTuple):
@@ -1142,18 +1239,11 @@ def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsSco
             opaque_scopes.append(scope.label)
             continue
         if confinement:
-            own_fs = scope.own_tools.get("fs") if isinstance(scope.own_tools, dict) else None
-            workspace_only = own_fs.get("workspaceOnly") if isinstance(own_fs, dict) else None
-            if workspace_only is None:
-                workspace_only = dig(cfg, "tools.fs.workspaceOnly")
-            # Reuses `toolpolicy._sandbox_mode` (own entry's `sandbox.mode`, falling back to
-            # `agents.defaults.sandbox.mode`) rather than a second `dig(entry, "sandbox.mode")`
-            # -- that helper already reads the per-entry field directly (not through `dig()`,
-            # so it carries no `relative:` schema-grounding manifest entry of its own to
-            # duplicate), and is the SAME resolution `_sandbox_confines`/`confined_scopes`
-            # already use for this identical question elsewhere in this codebase.
-            sandbox_mode = _toolpolicy._sandbox_mode(cfg, scope.entry)
-            if workspace_only is True or sandbox_mode == "all":
+            # B-942: factored out into `_b68_scope_confined` so B68's own per-agent grant
+            # loop (G1's `scoped`/widening resolution) can ask the identical composite
+            # about a roster entry it already has in hand, instead of duplicating it a
+            # second time -- see that helper's docstring for the full grounding.
+            if _b68_scope_confined(cfg, scope.own_tools, scope.entry):
                 # Deliberately NOT added to `checked_scopes`: this scope was resolved (it is
                 # not opaque), but the grant question was never asked of it because
                 # confinement already makes it moot -- B-943's PASS path only names a scope
@@ -1320,7 +1410,12 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
               per-scope residual (``_fs_scope_grants``) resolved EVERY scope it could
               (none opaque) and none of them grants anything in the fs family — a real
               "resolved, and resolved to nothing" answer, named by the scopes actually
-              checked, not a guess.
+              checked, not a guess. (B-942) G1's own direct resolution is itself now
+              per-agent confinement-aware (``confine_per_agent=True``): a scope that
+              grants an fs tool but individually confines ITSELF (its own
+              ``tools.fs.workspaceOnly`` or sandbox mode) does not count toward this
+              function's grant, so an all-confined-per-agent config reaches this PASS
+              via G1 directly rather than needing the not-enumerable residual.
     WARN    — either sibling is explicitly ``false`` (OpenClaw's own dangerous-flag list,
               dangerous-config-flags-current-CrOoyQT2.js:48), or the composite predicate
               holds with the field merely absent.
@@ -1373,12 +1468,18 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
 
     # Composite predicate: only meaningful when fs tools are actually reachable.
     #
-    # Only the GLOBAL scope being true clears the whole config. A per-agent `true` under an
-    # absent global confines that one agent while every agent without an override keeps the
-    # product default (false) — so it is deliberately NOT treated as a blanket PASS. The
-    # inverse (global true, one agent opting out with false) is already reported above,
-    # because per-agent overrides global: `context.tools?.fs?.workspaceOnly ??
-    # cfg.tools?.fs?.workspaceOnly` (audit.nondeep.runtime-C3y1Q5Fi.js:589).
+    # Only the GLOBAL scope being true clears the whole config BLANKET-style here. A
+    # per-agent `true` under an absent global confines that one agent while every agent
+    # without an override keeps the product default (false) — so it is deliberately NOT
+    # treated as a blanket PASS at this short-circuit. The inverse (global true, one
+    # agent opting out with false) is already reported above, because per-agent
+    # overrides global: `context.tools?.fs?.workspaceOnly ?? cfg.tools?.fs?.workspaceOnly`
+    # (audit.nondeep.runtime-C3y1Q5Fi.js:589). B-942: the per-agent case this short-circuit
+    # deliberately does NOT clear is no longer left unconfirmed either — G1 below is now
+    # called with `confine_per_agent=True`, so a scope that grants an fs tool but
+    # individually confines ITSELF (its own `tools.fs.workspaceOnly` or sandbox mode) is
+    # excluded from the grant this function warns about, the same composite
+    # `_fs_scope_grants` already applies for its own NOT-ENUMERABLE residual just below.
     confined_globally = dig(cfg, "tools.fs.workspaceOnly") is True
     sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
     if sandbox_mode == "all" or confined_globally:
@@ -1390,7 +1491,7 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
             "Keep tools.exec.applyPatch.workspaceOnly and tools.fs.workspaceOnly true.",
         )
 
-    granted, enumerable = _b68_fs_tools_granted(cfg)
+    granted, enumerable = _b68_fs_tools_granted(cfg, confine_per_agent=True)
     if not enumerable:
         # B-737: same residual as B55's (see its own comment) -- ask `toolgrant.
         # resolved_scopes` per scope instead of G1's syntactic "declared" vocabulary.
@@ -1458,7 +1559,11 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
             f"filesystem tools granted: {', '.join(granted)}",
             f"agents.defaults.sandbox.mode={sandbox_mode!r} (not 'all')",
         ]
-        widenings = _agent_profile_widenings(cfg)
+        # B-942: `skip_confined=True` so this evidence sentence never cites a widening
+        # whose own agent individually confines itself as the reason for a WARN this
+        # function only reaches once `granted` (already confinement-filtered above) is
+        # non-empty from some OTHER, genuinely unconfined source.
+        widenings = _agent_profile_widenings(cfg, skip_confined=True)
         if widenings:
             global_profile = dig(cfg, "tools.profile")
             widen_desc = (
