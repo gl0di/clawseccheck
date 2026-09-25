@@ -462,10 +462,17 @@ def _g3_blocklist_hit(tree: ast.AST) -> bool:
                 return True
         elif isinstance(node, ast.Call):
             attr_arg = _g3_attr_name_arg(node.func, node)
-            if attr_arg is not None and not (
-                isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str)
-            ):
-                return True
+            if attr_arg is not None:
+                if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
+                    # A constant attribute-name argument to getattr/setattr/delattr/
+                    # attrgetter/methodcaller: same exec*/spawn* prefix rule as the
+                    # literal-Attribute and `from os import` arms below, so
+                    # `getattr(os, "execv")` can't slip past as merely "not in the
+                    # small exact set".
+                    if _g3_os_danger_attr(attr_arg.value):
+                        return True
+                else:
+                    return True
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             if node.value in string_banned:
                 return True
