@@ -5235,7 +5235,7 @@ def _b331_data_uri_hit(description: str) -> bool:
 # same way `_B63_FAIL_ANCHOR_RE`'s own "concealment framed around a human overseer"
 # alternative is unconditioned.
 #
-# CLAWSECCHECK-B-991 (CLAUDE.md §2.5 accepted residual): this same unconditioned
+# B-991 (CLAUDE.md §2.5 accepted residual): this same unconditioned
 # anchor also fires on ordinary, benign zero-knowledge/E2E-encryption and NDA
 # product copy that legitimately describes a privacy PROPERTY using this exact
 # phrase shape ("Keep this confidential from the admin -- not even administrators
@@ -5619,7 +5619,7 @@ def check_mcp_host_sanitizer_gap(ctx: Context) -> Finding:
                 if status == FAIL:
                     fail_hits.append(line)
                     if _category == "secrecy-directive" and _B331_CONFIDENTIAL_RE.search(
-                        detail
+                        normalize_for_scan(description)
                     ):
                         confidential_from_fail = True
                 elif status == WARN:
@@ -5636,14 +5636,15 @@ def check_mcp_host_sanitizer_gap(ctx: Context) -> Finding:
             "runtime paths."
         )
         if confidential_from_fail:
-            # CLAWSECCHECK-B-991 (CLAUDE.md §2.5 accepted residual) — see the
-            # in-source note above `_B331_CONFIDENTIAL_RE`. Disclosure lives here
-            # (`fix`), never in `detail`, which `baseline.fingerprint()` hashes.
+            # B-991 (CLAUDE.md §2.5 accepted residual) — see the in-source note
+            # above `_B331_CONFIDENTIAL_RE`. Disclosure lives here (`fix`), never
+            # in `detail`, which `baseline.fingerprint()` hashes. No tracker id in
+            # this string — it ships (tests/test_public_boundary.py).
             fix += (
                 " Note: at least one FAIL matched a bare 'keep this confidential "
-                "from the user/operator/owner/admin' phrase (CLAWSECCHECK-B-991) — "
-                "this static signal cannot distinguish a genuine concealment-from-"
-                "operator instruction from ordinary, legitimate zero-knowledge/"
+                "from the user/operator/owner/admin' phrase — this static signal "
+                "cannot distinguish a genuine concealment-from-operator "
+                "instruction from ordinary, legitimate zero-knowledge/"
                 "end-to-end-encryption or NDA product copy that uses the identical "
                 "phrase shape to describe its own privacy design; two independent "
                 "carve-out attempts were retracted after each traded this false "

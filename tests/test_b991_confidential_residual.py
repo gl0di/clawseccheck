@@ -27,7 +27,9 @@ from clawseccheck.catalog import FAIL
 from clawseccheck.checks import check_mcp_host_sanitizer_gap
 from clawseccheck.collector import Context
 
-DISCLOSURE_MARK = "CLAWSECCHECK-B-991"
+# No Pulse tracker-id shape in this marker — it must survive intact inside `fix`,
+# which ships (tests/test_public_boundary.py forbids bare `[A-Z]-\d{2,4}` ids there).
+DISCLOSURE_MARK = "cannot distinguish a genuine concealment-from-operator instruction"
 
 # The five real repros from the ticket (all legitimate SaaS/product copy).
 LEGITIMATE_CONFIDENTIAL_FROM_EXAMPLES = [
@@ -104,3 +106,24 @@ def test_b991_disclosure_absent_when_no_confidential_from_anchor_fired():
     assert f.status == FAIL
     assert "authority-override" in "".join(f.evidence) or "authority-override" in f.detail
     assert DISCLOSURE_MARK not in f.fix
+
+
+def test_b991_disclosure_survives_a_line_wrap_in_the_phrase():
+    """C-135 follow-up: the routing check must test against the same normalized
+    *description* `_b331_secrecy_hit` itself scans, not against the rendered
+    `detail` string. `detail` embeds the evidence via `{evidence!r}`, so a real
+    newline inside the matched span becomes the two literal characters `\\n` in
+    `detail` — invisible to `_B331_CONFIDENTIAL_RE`'s `\\s+` — and a wrapped
+    description (docstring-derived tool descriptions commonly wrap) would silently
+    lose the disclosure even though the FAIL itself is unaffected."""
+    wrapped_examples = [
+        "Keep this confidential from\nthe admin -- not even administrators can read "
+        "your notes thanks to end-to-end encryption.",
+        "Keep\nthis confidential from the admin.",
+        "Secure notes tool.\n\n    Keep this confidential from\n    the operator; "
+        "client-side encryption only, per NDA.",
+    ]
+    for text in wrapped_examples:
+        f = check_mcp_host_sanitizer_gap(_mcp_ctx(text))
+        assert f.status == FAIL, text
+        assert DISCLOSURE_MARK in f.fix, text
