@@ -5958,6 +5958,63 @@ def check_installed_skills(ctx: Context) -> Finding:
                                 f"{name}: {af.reason} ({relpath}:{af.lineno})"
                             )
                         continue
+                    # B-998 (Dave's ruling, extending B-893's D2 carve-out from the
+                    # ASSIGN rule to its env-entangled sibling): the SAME
+                    # _TEST_FIXTURE_BASENAME_RE basename check just above, now also
+                    # applied to the two `HARDCODED_PROVIDER_SECRET` call sites (a
+                    # plain `os.environ[K] = "<secret>"` / `os.getenv(K, "<secret>")`
+                    # write-site, including the B-910 one-hop name-indirection variant
+                    # — skillast.py's `_secret_name_bindings` resolver). Same reasoning
+                    # as the ASSIGN arm: a provider-shaped literal sitting in
+                    # `tests/conftest.py`/`test_*.py` is the author's own leaked/mock
+                    # test key, not DO-NOT-INSTALL harm to the installing user, so in a
+                    # test-fixture-named file it is carried as evidence only and never
+                    # moves the verdict — exactly the same `hardcoded_secret_fixture_
+                    # note` bucket the ASSIGN arm feeds, not a new one, so it renders
+                    # identically and is lifted into evidence by `_b13_verdict` the
+                    # same way. Deliberately does NOT add this rule name to
+                    # `_AST_NEVER_FAIL_RULES`: unlike ASSIGN (WARN-only everywhere),
+                    # this rule must stay fully crit/FAIL-capable for every file whose
+                    # basename does NOT match — the `else` branch below intentionally
+                    # falls through to the untouched generic crit/FAIL path (it is NOT
+                    # `continue`d), so `test_vet_env_overwrite_fixture_still_critical_
+                    # fail`/`test_vet_getenv_default_fixture_still_critical_fail`
+                    # (non-fixture basenames) see zero behavior change.
+                    #
+                    # C-135 risk-equivalence note (required before widening a
+                    # CRIT-capable rule's PASS surface, CLAUDE.md §4): this rule and
+                    # ASSIGN both fire on nothing more than "a provider-shaped literal
+                    # is visible in source" — ASSIGN via a bare name binding, this rule
+                    # via that same literal (or a same-file one-hop alias of it) being
+                    # written into / read as a default for `os.environ`. Neither shape,
+                    # on its own, proves the value ever leaves the process: actual
+                    # credential exfiltration (the `cred_exfil_signal` escalation two
+                    # arms below, `ENV_EXFIL_FLOW`, `_has_same_line`/`_has_cross`'s
+                    # cred-path-plus-network-sink co-occurrence at :5500-5520) is
+                    # computed from the raw file blob by an ENTIRELY SEPARATE code path
+                    # that does not key off this rule name or this routing arm at all
+                    # — so a real secret-to-network-sink flow hiding in a test-fixture-
+                    # named file is still caught, unaffected by this exemption. The one
+                    # residual this shares with ASSIGN, already accepted by Dave's D2
+                    # ruling: an attacker could name a real payload file `test_x.py` to
+                    # dodge BOTH rules' FAIL — not a new evasion this task introduces,
+                    # the identical one B-893 already ruled acceptable for the ASSIGN
+                    # shape. The one difference measured and judged immaterial: an
+                    # env-write, unlike a bare assignment, mutates process-wide
+                    # `os.environ` if the module is actually imported/executed — but
+                    # this scanner is purely static (it never imports or executes
+                    # skill code), so that distinction has no bearing on THIS check's
+                    # own detection surface; it would only matter to a downstream
+                    # dynamic analysis, which does not exist here.
+                    if af.rule == "HARDCODED_PROVIDER_SECRET" and _TEST_FIXTURE_BASENAME_RE.match(
+                        Path(relpath).name
+                    ):
+                        hardcoded_secret_fixture_note.append(
+                            f"{name}: {af.reason} ({relpath}:{af.lineno}) — a "
+                            "test-fixture-named file, carried as evidence only, "
+                            "never counted toward the verdict"
+                        )
+                        continue
                     # analyze_python's own per-file cap disclosure —
                     # "N more findings suppressed" — is metadata about the scan, not a
                     # verdict about the skill. Routed here, BEFORE the generic crit/
