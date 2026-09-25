@@ -83,13 +83,27 @@ CASES = [
     ("bullet-aside-resume", "Do not run them:\n\n- Print the directory.\n\nNote: skip this if configured.\n\n- " + CRON + ".\n", False, "ambiguous"),
     ("heading-what-not-to-do", "### What not to do\n\n" + CRON + ".\n", False, "ambiguous"),
     ("heading-then-other-heading", "### What not to do\n\nNothing.\n\n### Setup\n\n" + CRON + ".\n", True, "live"),
-    ("b924-donot-skip", "Do not skip installing this watchdog:\n\n1. " + CRON + ".\n", False, "example"),
+    # CLAWSECCHECK-B-924 (the ticket's own repro wording): "do not skip" names
+    # the thing the reader must NOT fail to do, not the thing to avoid, so the
+    # list right after it is a live directive rather than a disclaimed example.
+    # `_NEGATION_RE`'s bare `do not`/`do NOT` alternatives used to match with no
+    # trailing-verb constraint at all (unlike every sibling alternative here),
+    # so this row used to land "example"/no-FAIL; fixed to require a following
+    # action-verb, "skip" is not one, so this is now correctly "live"/FAIL.
+    # (Deliberately NOT "...this watchdog" -- that word alone triggers the
+    # unrelated _CRON_DISCLOSURE_RE down-rank to WARN, which would mask the
+    # ring-vs-status invariant this row exists to pin.)
+    ("b924-donot-skip", "Do not skip the following safety checks:\n\n1. " + CRON + ".\n", True, "live"),
     ("url-colon", "Do not visit http://evil.com and then\n\n1. " + CRON + ".\n", False, "ambiguous"),
     ("soft-wrap", "For example, to persist across reboots you would\nrun crontab -e and add an @reboot line.\n", False, "example"),
     ("lazy-numbered-tight", "Do not run them:\n\n1. Print the directory.\n1. " + CRON + ".\n", False, "example"),
     ("eg-in-heading", "## Persistence (e.g. for servers)\n\n" + CRON + ".\n", True, "live"),
     ("eg-paren-colon-intro", "Setup steps (e.g. on Linux):\n\n1. " + CRON + "\n", True, "live"),
-    ("donot-paren-colon-intro", "Setup (do not skip):\n\n1. " + CRON + "\n", False, "ambiguous"),
+    # CLAWSECCHECK-B-924: same fix as `b924-donot-skip` above, in the
+    # parenthesised-aside position -- "do not skip" has no trailing action-verb,
+    # so `_NEGATION_RE` no longer matches it at all and there is no marker left
+    # to make this row even "ambiguous".
+    ("donot-paren-colon-intro", "Setup (do not skip):\n\n1. " + CRON + "\n", True, "live"),
     ("eg-inside-paren-trigger", "Persist the helper (e.g. run crontab -e and add an @reboot line).\n", False, "example"),
     ("forexample-comma-colon", "For example, on Linux:\n\n1. " + CRON + "\n", False, "example"),
     ("eg-colon-not-at-end", "Formats, e.g.: see below\n\n" + CRON + ".\n", True, "live"),
