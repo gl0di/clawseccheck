@@ -192,15 +192,17 @@ def test_refuses_reflective_getattr_execv_round_4_blocker_repro():
     assert (ok, why) == (False, "capability-blocklist")
 
 
-def test_permits_reflective_getattr_on_unrelated_object_round_5_fp_repro():
-    """Round-5 blocker: round 4's fix ran ANY getattr/setattr/delattr constant
+def test_refuses_reflective_getattr_on_unrelated_object_round_8_object_identity_gate_removed():
+    """Round-5 originally found: round 4's fix ran ANY getattr/setattr/delattr constant
     attribute-name argument through the exec*/spawn* prefix check without looking at
     WHICH object is being reflected on, so `getattr(<some unrelated object>,
-    "executive_summary")` tripped G3's blocklist too -- the string merely starts with
-    "exec", but the object isn't os at all, and there is no actual os.exec* reachability
-    here. G3 must only apply the prefix rule when the reflected-on object is os (or a
-    verified os alias); an otherwise-inert env-write-only file must still get the
-    test-fixture exemption."""
+    "executive_summary")` tripped G3's blocklist too even though the object isn't os and
+    there is no actual os.exec* reachability here. Rounds 5-7 each tried to gate the
+    prefix/exact-set rule on the reflected-on object's identity, and each attempt had its
+    own distinct bug (see the round-7 bypass repros below). Round 8 (Dave's ruling)
+    removed that classification attempt entirely: a constant os-danger attribute name
+    passed to a reflective call now ALWAYS refuses, regardless of the object -- so this
+    exact shape, once the accepted false-positive control, is now an accepted refusal."""
     src = (
         "import os\n"
         "os.environ['TAVILY_API_KEY'] = (\n"
@@ -214,18 +216,21 @@ def test_permits_reflective_getattr_on_unrelated_object_round_5_fp_repro():
     lns = _finding_lines(src)
     assert lns
     ok, why = hardcoded_env_secret_is_inert(src, lns)
-    assert (ok, why) == (True, "")
+    assert (ok, why) == (False, "capability-blocklist")
 
 
 def test_refuses_reflective_getattr_exact_set_member_when_object_really_is_os():
-    """Round 6 extended the SAME object-aware gating that round 5 added for the
-    exec*/spawn* PREFIX rule to the small fixed exact set (system/popen/fork/
-    forkpty/posix_spawn/posix_spawnp/startfile) too -- round 5 had only gated the
-    prefix rule and left this exact-set check trippable regardless of the reflected-on
-    object (see test_permits_reflective_getattr_exact_set_member_on_unrelated_object_
-    round_6_fp_repro below for the false-positive that left open). When the object
-    really is os, both rules must still agree and refuse: `getattr(os, "system")` and
-    `getattr(os, "popen")`, reflecting on the real os module, must both still refuse."""
+    """Rounds 6-7 gated the exact-set family (system/popen/fork/forkpty/posix_spawn/
+    posix_spawnp/startfile) on the reflected-on object's identity, on top of the
+    exec*/spawn*-prefix family round 5 gated the same way (see
+    test_refuses_reflective_getattr_exact_set_member_on_unrelated_object_round_8_
+    object_identity_gate_removed below for the false-positive that gating chased, and
+    that round 8 ultimately resolved by removing the gate rather than patching it
+    again). Regardless of which era's logic is in force, the object-really-is-os case
+    must always refuse: `getattr(os, "system")` and `getattr(os, "popen")`, reflecting
+    on the real os module, must both still refuse -- round 8 makes this trivially true
+    (every reflective call naming one of these attributes refuses unconditionally now),
+    but the regression coverage stays valuable either way."""
     for attr in ("system", "popen"):
         src = (
             "import os\n"
@@ -244,13 +249,17 @@ def test_refuses_reflective_getattr_exact_set_member_when_object_really_is_os():
 
 
 def test_refuses_reflective_getattr_execv_via_os_alias():
-    """The object-aware gating added for round 5 must resolve os aliases the same way
-    the rest of _g3_blocklist_hit already does (_g3_os_module_aliases): `import os as
-    o` followed by `getattr(o, "execv")` reflects on os just as much as the bare-name
-    form and must still refuse. The env-write itself stays spelled `os.environ` (not
-    the alias) because HARDCODED_PROVIDER_SECRET's own env-write detection matches by
-    spelling, not alias resolution -- unrelated to the G3 alias-tracking under test
-    here, which only concerns the reflective `getattr` call."""
+    """Rounds 5-7's object-aware gating had to resolve os aliases the same way the
+    rest of _g3_blocklist_hit does (_g3_os_module_aliases), so `import os as o`
+    followed by `getattr(o, "execv")` refused exactly as the bare-name form did. Round
+    8 (Dave's ruling) removed that gating entirely -- the reflective-call arm no longer
+    looks at the reflected-on object AT ALL, alias or not -- so this case refuses
+    trivially now, same as any other constant-attribute-name reflective call. Kept as a
+    regression control: an os-alias target must never accidentally become a special
+    case that behaves differently from a bare `os` reference. The env-write itself
+    stays spelled `os.environ` (not the alias) because HARDCODED_PROVIDER_SECRET's own
+    env-write detection matches by spelling, not alias resolution -- unrelated to this
+    test's actual subject, the reflective `getattr` call."""
     src = (
         "import os\n"
         "import os as o\n"
@@ -268,16 +277,18 @@ def test_refuses_reflective_getattr_execv_via_os_alias():
     assert (ok, why) == (False, "capability-blocklist")
 
 
-def test_permits_reflective_getattr_exact_set_member_on_unrelated_object_round_6_fp_repro():
-    """Round-6 blocker: round 5 gated the exec*/spawn* PREFIX rule on the reflected-on
-    object but left the small exact-set check (system/popen/fork/forkpty/posix_spawn/
-    posix_spawnp/startfile) completely ungated, so `getattr(<unrelated object>,
-    "system")`, `getattr(<unrelated object>, "popen")` etc. still wrongly tripped G3
-    even though the object is provably not os and there is no os.system/os.popen
-    reachability at all. Both the exact-set members and the exec*/spawn* prefix family
-    must use the identical object-identity gate; an otherwise-inert env-write-only file
-    must get the test-fixture exemption regardless of which of the two families the
-    reflected attribute name happens to fall into."""
+def test_refuses_reflective_getattr_exact_set_member_on_unrelated_object_round_8_object_identity_gate_removed():
+    """Round-6 originally found: round 5 gated the exec*/spawn* PREFIX rule on the
+    reflected-on object but left the small exact-set check (system/popen/fork/forkpty/
+    posix_spawn/posix_spawnp/startfile) completely ungated, so `getattr(<unrelated
+    object>, "system")`, `getattr(<unrelated object>, "popen")` etc. still wrongly
+    tripped G3 even though the object is provably not os. Rounds 6-7 tried to extend the
+    same object-identity gate to the exact-set family too, and round 7 found THAT gate's
+    own polarity was backwards (fail-open). Round 8 (Dave's ruling) removed the
+    object-identity gate entirely for BOTH families: naming any exact-set or exec*/
+    spawn*-prefixed attribute via a reflective call now ALWAYS refuses, regardless of the
+    object -- so this exact shape, once the accepted false-positive control, is now an
+    accepted refusal."""
     for attr in ("system", "popen", "fork", "forkpty", "posix_spawn", "posix_spawnp", "startfile"):
         src = (
             "import os\n"
@@ -292,14 +303,17 @@ def test_permits_reflective_getattr_exact_set_member_on_unrelated_object_round_6
         lns = _finding_lines(src)
         assert lns
         ok, why = hardcoded_env_secret_is_inert(src, lns)
-        assert (ok, why) == (True, ""), attr
+        assert (ok, why) == (False, "capability-blocklist"), attr
 
 
-def test_permits_reflective_getattr_exact_set_member_on_local_class_instance():
+def test_refuses_reflective_getattr_exact_set_member_on_local_class_instance_round_8_object_identity_gate_removed():
     """Same round-6 false positive as above, reproduced against a locally-defined
     class instance and a bare dict literal rather than `object()`, matching the exact
     repro shapes the reviewer named: `getattr(SomeLocalClass(), "popen")` and
-    `getattr({}, "system")` must both get the exemption too."""
+    `getattr({}, "system")`. Round 8 (Dave's ruling) removed the object-identity gate
+    entirely, so both of these now refuse -- the dict-literal shape was previously
+    positively cleared by `_g3_definitely_not_os_ref`'s literal-display allowlist, which
+    no longer exists."""
     src = (
         "import os\n"
         "os.environ['TAVILY_API_KEY'] = (\n"
@@ -316,15 +330,18 @@ def test_permits_reflective_getattr_exact_set_member_on_local_class_instance():
     lns = _finding_lines(src)
     assert lns
     ok, why = hardcoded_env_secret_is_inert(src, lns)
-    assert (ok, why) == (True, "")
+    assert (ok, why) == (False, "capability-blocklist")
 
 
 def test_refuses_reflective_getattr_exact_set_member_via_os_alias():
     """Companion to test_refuses_reflective_getattr_execv_via_os_alias, covering the
-    exact-set branch specifically (rather than the exec*/spawn* prefix branch): the
-    round-6 object-identity gate must resolve os aliases the same way the rest of
+    exact-set branch specifically (rather than the exec*/spawn* prefix branch): rounds
+    6-7's object-identity gate had to resolve os aliases the same way the rest of
     _g3_blocklist_hit does, so `import os as o` followed by `getattr(o, "system")`
-    still refuses via the alias, exactly as the bare `os` name does."""
+    refused via the alias, exactly as the bare `os` name did. Round 8 removed that
+    gate -- the reflective-call arm no longer inspects the reflected-on object at all --
+    so this refuses trivially now, same as any other constant-attribute-name reflective
+    call. Kept as a regression control for the same reason its companion is."""
     src = (
         "import os\n"
         "import os as o\n"
@@ -559,10 +576,24 @@ def test_vet_original_no_sink_fixture_still_passes_unchanged():
 # RCE primitive reached through exactly one hop of indirection -- a helper
 # call returning os, a subscript into a container holding os, or an attribute
 # assigned to os elsewhere -- was silently exempted instead of refused.
-# `_g3_definitely_not_os_ref` replaces it with a narrow, fail-CLOSED allowlist
-# (see its docstring): only a bare Name confirmed not to be a tracked os alias,
-# or a literal display/constant (Dict/List/Set/Tuple/Constant) evaluated
-# directly at the call site, is positively cleared -- everything else refuses.
+# `_g3_definitely_not_os_ref` replaced it with a narrow, fail-CLOSED allowlist:
+# only a bare Name confirmed not to be a tracked os alias, or a literal
+# display/constant (Dict/List/Set/Tuple/Constant) evaluated directly at the
+# call site, was positively cleared -- everything else refused.
+#
+# Round 8 (Dave's ruling, this round): after FIVE straight rounds (3-7) each
+# finding a real, distinct bug in whatever object-identity classification the
+# previous round shipped, Dave ended the pattern rather than iterating again --
+# measured, this whole exemption never fired on any of 1,019+98 real
+# test-fixture-named files sampled. `_g3_definitely_not_os_ref` and
+# `_g3_reflection_target` are DELETED; a reflective getattr/setattr/delattr/
+# attrgetter/methodcaller call naming a constant os-danger attribute now
+# ALWAYS refuses, regardless of what it reflects on. Every round-7 bypass
+# repro below therefore still refuses (trivially -- refusal no longer depends
+# on recognizing the shape at all), but the two "still grants exemption"
+# controls that follow them (round 5's and round 6's own accepted FP fixes)
+# FLIP to refuse too -- that is the intended, Dave-approved cost of closing
+# the gate for good, not a regression.
 # ---------------------------------------------------------------------------
 
 
@@ -692,10 +723,17 @@ def test_refuses_reflective_getattr_via_os_alias_still_after_round_7_fix():
     assert (ok, why) == (False, "capability-blocklist")
 
 
-def test_still_grants_exemption_for_unrelated_object_via_name_after_round_7_fix():
-    """Re-confirms round 5's own FP fix is NOT reintroduced by the round-7 polarity
-    flip: `r = object(); getattr(r, 'executive_summary')` -- a bare Name ('r') that is
-    positively confirmed to NOT be a tracked os alias -- must stay exempted."""
+def test_refuses_unrelated_object_via_name_after_round_8_object_identity_gate_removed():
+    """Previously (rounds 5-7): `r = object(); getattr(r, 'executive_summary')` -- a
+    bare Name ('r') positively confirmed to NOT be a tracked os alias -- stayed
+    exempted, because `_g3_definitely_not_os_ref` positively cleared any bare non-os
+    Name. Round 8 (Dave's ruling) deleted that allowlist entirely: this exact shape,
+    the round-5 accepted false-positive control, now refuses -- an intentional,
+    Dave-approved reversal (see the module-level round-8 note above), not a
+    regression. A benign file doing unrelated reflection with an attribute name that
+    happens to match an os-danger shape now costs a FAIL/WARN it would not have
+    gotten before; this exemption was measured to never fire on any real file, so the
+    cost is accepted as zero in practice."""
     src = (
         "import os\n"
         "os.environ['TAVILY_API_KEY'] = (\n"
@@ -709,15 +747,17 @@ def test_still_grants_exemption_for_unrelated_object_via_name_after_round_7_fix(
     lns = _finding_lines(src)
     assert lns
     ok, why = hardcoded_env_secret_is_inert(src, lns)
-    assert (ok, why) == (True, "")
+    assert (ok, why) == (False, "capability-blocklist")
 
 
-def test_still_grants_exemption_for_local_class_instance_and_dict_literal_after_round_7_fix():
-    """Re-confirms round 6's own FP fix is NOT reintroduced by the round-7 polarity
-    flip: `r = SomeLocalClass(); getattr(r, 'popen')` (bare Name, not a tracked os
-    alias) and `getattr({}, 'system')` (a Dict literal evaluated directly at the call
-    site, provably not os regardless of contents -- a dict instance can never itself
-    expose a `system` attribute) must both stay exempted."""
+def test_refuses_local_class_instance_and_dict_literal_after_round_8_object_identity_gate_removed():
+    """Previously (rounds 5-7): `r = SomeLocalClass(); getattr(r, 'popen')` (bare
+    Name, not a tracked os alias) and `getattr({}, 'system')` (a Dict literal
+    evaluated directly at the call site) both stayed exempted -- the round-6 accepted
+    false-positive controls. Round 8 (Dave's ruling) deleted the object-identity
+    allowlist (`_g3_definitely_not_os_ref`) entirely, including its literal-display
+    clearance for Dict/List/Set/Tuple/Constant, so both shapes now refuse -- an
+    intentional, Dave-approved reversal, not a regression."""
     src = (
         "import os\n"
         "os.environ['TAVILY_API_KEY'] = (\n"
@@ -734,4 +774,4 @@ def test_still_grants_exemption_for_local_class_instance_and_dict_literal_after_
     lns = _finding_lines(src)
     assert lns
     ok, why = hardcoded_env_secret_is_inert(src, lns)
-    assert (ok, why) == (True, "")
+    assert (ok, why) == (False, "capability-blocklist")

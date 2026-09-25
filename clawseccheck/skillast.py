@@ -427,76 +427,6 @@ def _g3_attr_name_arg(f: ast.AST, call: ast.Call):
     return None
 
 
-def _g3_reflection_target(f: ast.AST, call: ast.Call):
-    """The AST node for the OBJECT a getattr/setattr/delattr call reflects on
-    (its first positional argument), bare or `builtins.`-qualified -- or None
-    for an operator.attrgetter/methodcaller call, which has no object at the
-    call site at all (it returns a callable applied to some object later), or
-    when the object argument is missing. Companion to _g3_attr_name_arg, which
-    extracts the attribute-NAME argument from the same call shapes."""
-    if isinstance(f, ast.Name) and f.id in ("getattr", "setattr", "delattr"):
-        return call.args[0] if len(call.args) >= 1 else None
-    if (
-        isinstance(f, ast.Attribute)
-        and f.attr in ("getattr", "setattr", "delattr")
-        and isinstance(f.value, ast.Name)
-        and f.value.id == "builtins"
-    ):
-        return call.args[0] if len(call.args) >= 1 else None
-    return None
-
-
-_G3_LITERAL_DISPLAY_TYPES = (ast.Dict, ast.List, ast.Set, ast.Tuple, ast.Constant)
-
-
-def _g3_definitely_not_os_ref(node: ast.AST, os_aliases: set) -> bool:
-    """True ONLY when *node* can be positively proven to never be (or expose an
-    os-danger attribute belonging to) the os module -- a narrow, fail-CLOSED
-    allowlist. This is the inverse of the retired _g3_looks_like_os_ref, whose
-    polarity was backwards for a security gate: it defaulted to "not os" for
-    ANY expression shape it didn't specifically recognize as an os-rooted
-    Name/Attribute chain, which is fail-OPEN. That let a real
-    getattr(<os ref>, "system")-equivalent RCE primitive slip through
-    whenever the os reference was reached via one hop of indirection: a
-    helper call returning os (`_get_os()`), a subscript into a container
-    holding os (`_stash[0]`, `d['x']`), or an attribute assigned to os
-    elsewhere (`self.osmod = os`) -- none of these are a bare Name or an
-    Attribute chain rooted at a *tracked* os alias, so the old helper waved
-    all of them through as "definitely not os".
-
-    Exactly two shapes are positively cleared here:
-
-      1. A bare Name that is NOT a tracked os-import alias. A Name can only
-         ever be bound to the os module via `import os [as X]` (tracked in
-         *os_aliases*) or via a plain assignment (`x = os`) that this
-         lightweight single-pass AST helper does not trace across statements
-         -- but every existing accepted false-positive fix for this gate
-         (round 5/6) uses exactly the bare-Name shape (`r = object()`;
-         `getattr(r, ...)`), so bare-Name exemption must stay to avoid
-         reopening those.
-      2. A literal display or constant (Dict/List/Set/Tuple/Constant)
-         evaluated directly at the call site, e.g. `getattr({}, "system")`.
-         These are provably safe regardless of their CONTENTS: a
-         dict/list/set/tuple/scalar-constant instance can never itself expose
-         a system/popen/fork/exec*/spawn*-shaped attribute. This is NOT the
-         same shape as a Subscript (`d['x']`) -- a subscript reads a VALUE the
-         container holds (which could be os), whereas a bare literal display
-         attributes to the freshly-constructed container/constant instance
-         itself, never to something stashed inside it.
-
-    Every other expression shape -- an Attribute chain (even one not rooted
-    at a tracked os alias, since e.g. `self.osmod` can be assigned to os
-    elsewhere and this pass has no cross-statement attribute data-flow), a
-    Call, a Subscript, a BinOp, an IfExp, a comprehension result, a walrus,
-    or anything else -- is NOT positively cleared, so the caller must treat
-    the reflection as possibly reaching os and refuse."""
-    if isinstance(node, ast.Name):
-        return node.id not in os_aliases
-    if isinstance(node, _G3_LITERAL_DISPLAY_TYPES):
-        return True
-    return False
-
-
 def _g3_blocklist_hit(tree: ast.AST) -> bool:
     os_aliases = _g3_os_module_aliases(tree)
     string_banned = (
@@ -506,17 +436,6 @@ def _g3_blocklist_hit(tree: ast.AST) -> bool:
         | _G3_OS_DANGER_ATTRS_EXACT
         | {"getattr", "setattr", "delattr", "attrgetter", "methodcaller"}
     ) - _G3_STRING_EXEMPT
-    # id() of every attr-name Constant node that the ast.Call arm below already
-    # judged, via the object-identity gate, to NOT reflect on os (e.g.
-    # `getattr(<unrelated object>, "system")`). `_G3_OS_DANGER_ATTRS_EXACT`'s members
-    # are folded into `string_banned` for the blanket string-literal scan (the final
-    # `elif` arm) too, and ast.walk visits a Constant argument as its own top-level
-    # node in addition to visiting the Call it belongs to -- so without this, that
-    # blanket scan would independently re-trip on the very same node the Call arm
-    # just correctly exempted, silently undoing the gate above. ast.walk yields a
-    # parent strictly before its own children, so this set is always populated
-    # before its matching Constant node is reached.
-    exempted_attr_name_ids = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -548,42 +467,32 @@ def _g3_blocklist_hit(tree: ast.AST) -> bool:
                     # A constant attribute-name argument to getattr/setattr/delattr/
                     # attrgetter/methodcaller. `_g3_os_danger_attr` recognizes BOTH
                     # the small exact-set members (system/popen/fork/...) and the
-                    # exec*/spawn* PREFIX family -- but naming one of these strings
-                    # is only an os-reflection signal in the first place, so BOTH
-                    # shapes are gated the same way on the object actually being
-                    # reflected on. Without this gate, `getattr(<unrelated object>,
-                    # "system")` or `getattr(<unrelated object>,
-                    # "executive_summary")` would wrongly trip G3 even though there
-                    # is no os reachability at all (round-5/round-6 false
-                    # positives) -- do NOT split this back into two independently
-                    # gated checks, that is exactly how the round-6 bug happened.
-                    # attrgetter/methodcaller have no object at the call site
-                    # (they return a callable applied later), so
-                    # _g3_reflection_target returns None for them and they keep
-                    # tripping unconditionally, fail-closed.
+                    # exec*/spawn* PREFIX family.
                     #
-                    # FAIL-CLOSED, not fail-open: only a getattr/setattr/delattr
-                    # call whose object argument is POSITIVELY PROVEN to not be
-                    # (or expose) os -- per _g3_definitely_not_os_ref -- skips this.
-                    # Any object shape that helper can't positively clear (a Call
-                    # like `_get_os()`, a Subscript like `_stash[0]`/`d['x']`, an
-                    # Attribute chain like `self.osmod` that was assigned to os
-                    # elsewhere, ...) refuses instead of exempting -- a round-6-era
-                    # version of this gate treated "not specifically recognized as
-                    # os" as "definitely not os", which silently exempted every one
-                    # of those reachable-via-one-hop-of-indirection shapes (a real,
-                    # independently confirmed security-bypass regression).
+                    # Round 8 (Dave's ruling, replacing rounds 3-7's escalating
+                    # attempts to classify the REFLECTED-ON OBJECT as "the os
+                    # module" vs. "something else" -- see this function's git
+                    # history for the full retraction trail): that classification
+                    # is not attempted anymore, at all. Every version of it --
+                    # a root-name-only check, then a fail-closed allowlist of
+                    # bare-Name/literal-display shapes -- had its own distinct
+                    # bug, alternating between a security bypass (a real os
+                    # reference reached through one hop of indirection: a helper
+                    # call returning os, a subscript into a container holding os,
+                    # an attribute assigned to os elsewhere) and a false positive
+                    # (an unrelated object whose reflected attribute name merely
+                    # matched a danger string). Measured: this exemption never
+                    # fired on any of 1,019+98 real test-fixture-named files
+                    # sampled, so refusing unconditionally costs nothing observed
+                    # while ending the object-identity whack-a-mole for good. A
+                    # reflective call naming an os-danger attribute via a constant
+                    # string now ALWAYS refuses, regardless of what it reflects on.
                     if _g3_os_danger_attr(attr_arg.value):
-                        target = _g3_reflection_target(node.func, node)
-                        if target is None or not _g3_definitely_not_os_ref(target, os_aliases):
-                            return True
-                        # Exempted: record it so the blanket string scan below
-                        # doesn't independently re-trip on this same node.
-                        exempted_attr_name_ids.add(id(attr_arg))
+                        return True
                 else:
                     return True
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value in string_banned and id(node) not in exempted_attr_name_ids:
+            if node.value in string_banned:
                 return True
     return False
 
