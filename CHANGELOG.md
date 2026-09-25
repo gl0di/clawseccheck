@@ -3,6 +3,22 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Closed a bypass in the shell credential-exfiltration check's `for`-loop handling.
+  When a loop variable that legitimately holds an in-cluster Kubernetes service-account
+  token was referenced through a shell parameter-expansion operator (for example
+  stripping or rewriting part of the value) rather than referenced plainly, the check
+  could still treat the reference as the safe token and miss that the operator made the
+  script actually read a different, real credential file at run time. Any such operator
+  reference outside a TLS-certificate-argument position now refuses the safe exemption
+  outright. A related gap let a live, executing command hidden inside a `curl`
+  TLS-certificate/key argument's value go unnoticed because that argument position is
+  normally treated as safe; a match is now only treated as safe there when it is a plain
+  file path, not when it contains an executing subcommand.
+
 ## [4.3.0] — 2026-09-23
 
 **OpenClaw 2026.9.5 changed a safe default to an unsafe one without touching a config
