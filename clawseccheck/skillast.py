@@ -14156,9 +14156,43 @@ def _sh_word_is_incluster_token(word: str) -> bool:
     word instead of `_SH_CRED_FILE_RE`'s own match would silently exempt that one
     spelling inside a loop while the literal form still convicts it -- a
     loop-broader-than-literal gap the design's own invariant forbids (found while
-    verifying the round-4 fix, before it shipped -- never observed by a reviewer)."""
+    verifying the round-4 fix, before it shipped -- never observed by a reviewer).
+
+    CLAWSECCHECK-B-986 round 3 (independent C-135 review of 63fcecd1, BLOCKER):
+    `.search()` only ever returns `_SH_CRED_FILE_RE`'s FIRST match within *word*,
+    silently ignoring that a single shell word (no whitespace required between two
+    `_SH_CRED_FILE_RE` alternatives) can contain a SECOND, independent match right
+    after the first. Repro: the loop word
+    `/var/run/secrets/kubernetes.io/serviceaccount/token.ssh/id_rsa` -- the exact
+    in-cluster token path with `.ssh/id_rsa` glued on, no separator -- makes
+    `.search()` return only the token alternative (span ending at `...token`,
+    `m.group(0)` = the pure token, which `_INCLUSTER_TOKEN_PATH_RE` of course
+    matches), never reaching the SECOND match `.ssh/id_rsa` (a real, unrelated
+    credential file) that `finditer()` reveals starting exactly where the first
+    match stops. This function then wrongly certified the whole word as a "pure"
+    in-cluster token, which the caller (`region_all_incluster_token` in the loop
+    DIRECT role) folds into a blanket `all_incluster_token=True` passed to
+    `_sh_line_incluster_exemption` -- bypassing that function's own per-match
+    `_INCLUSTER_TOKEN_PATH_RE` content check for EVERY `_SH_CRED_FILE_RE` match on
+    the substituted line, including the `.ssh/id_rsa` one, so the whole line went
+    unconvicted (0 findings). The literal (non-loop) form of the same substituted
+    text was never affected -- it always calls `_sh_line_incluster_exemption` with
+    `all_incluster_token=None`, which checks each match independently and
+    correctly refuses the `.ssh/id_rsa` match. Fix: a word counts as the in-cluster
+    token ONLY when `_SH_CRED_FILE_RE`'s match consumes the ENTIRE word (`m.start()
+    == 0 and m.end() == len(word)`) -- i.e. the word IS the token, nothing else is
+    glued onto either end -- so a second (or leading) credential-shaped match
+    anywhere in the same word can no longer hide behind the first one. Verified
+    against every existing word shape this function is pinned against (the pure
+    token, the no-`var/`-prefix spelling, `~/.aws/credentials`,
+    `~/.config/.../wallet.dat`): only the pure token still returns True."""
     m = _SH_CRED_FILE_RE.search(word)
-    return bool(m) and bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
+    return (
+        bool(m)
+        and m.start() == 0
+        and m.end() == len(word)
+        and bool(_INCLUSTER_TOKEN_PATH_RE.search(m.group(0)))
+    )
 
 
 # ============================================================================
