@@ -14633,6 +14633,38 @@ def _sh_loop_bound_names(m) -> list:
     return []
 
 
+def _sh_loop_bind_content_start(m) -> int:
+    """B-978: where a `_SH_LOOP_BIND_RE` match's own bound-name content actually
+    starts, as opposed to `m.start()` -- the whole match's start, anchored by
+    `_SH_LOOP_CMD_POS`'s lookbehind at the nearest HARD separator (`\\n;&|(){` or
+    text start). `_SH_LOOP_CMD_POS` optionally SWALLOWS a leading command-position
+    keyword (`do`/`then`/`else`/`elif`/`if`/`while`/`until`/`time`/`!`) as part of
+    its own match, purely so a bind sitting right after one of those keywords is
+    still recognized as command-position without a caller having to look behind
+    the match. That swallow is transparent everywhere the keyword and the bound
+    name sit on DIFFERENT physical lines (`m.start()` is already anchored at the
+    newline in that case, never retreating past the keyword) -- but when they
+    share ONE physical line with only whitespace between them (no hard
+    separator), `m.start()` retreats all the way back to the separator BEFORE the
+    keyword, i.e. BEFORE the keyword itself. A caller comparing `m.start()`
+    against a loop region's `body_start` (`_sh_loop_regions`'s `do.end()`, which
+    does NOT retreat past `do`) then sees a bind that genuinely is the loop
+    body's first statement as sitting BEFORE the body starts. Returns the offset
+    of whichever named group `_SH_LOOP_BIND_RE` actually populated for this
+    alternative (mirroring `_sh_loop_bound_names`'s own alternative selection,
+    `decl` added since it is real content -- unlike CMD_POS's swallowed keywords
+    -- and precedes `var`), which is always inside the match and therefore never
+    retreats behind a swallowed keyword. Falls back to `m.start()` itself only if
+    no such group is populated (should not happen for a match `_sh_loop_bound_names`
+    already found non-empty names for)."""
+    if m.group("cmd"):
+        return m.start("cmd")
+    for g in ("decl", "pv", "fv", "dv", "var"):
+        if m.group(g):
+            return m.start(g)
+    return m.start()
+
+
 def _sh_loop_blank_word_subs(seg: str) -> str:
     """Blank every balanced ``$(...)``/backtick command substitution in a `for`-loop
     word-list segment, same length. A plain whitespace `.split()` cannot tell a
@@ -14935,12 +14967,18 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
         names = _sh_loop_bound_names(b)
         if not names:
             continue
+        # B-978: `_sh_loop_bind_content_start`, not `b.start()` -- see its own
+        # docstring. A one-line loop body's FIRST statement (`do X=...`, only
+        # whitespace between `do` and `X`) makes `b.start()` retreat behind `do`
+        # itself, landing before this region's `body_start` and wrongly failing
+        # the `bs <= bstart < cut` gate below for a bind that IS in the body.
+        bstart = _sh_loop_bind_content_start(b)
         if b.group("var") and b.group("op"):
             vend = _sh_loop_word_end(text, b.end())
-            binds.append((vend, b.group("var"), b.group("op"), text[b.end() : vend], b.start()))
+            binds.append((vend, b.group("var"), b.group("op"), text[b.end() : vend], bstart))
         else:
             for nm in names:
-                binds.append((b.end(), nm, "clear", "", b.start()))
+                binds.append((b.end(), nm, "clear", "", bstart))
     for vend, name, op, val, bstart in binds:
         hop: set = set()
         if op != "clear":
