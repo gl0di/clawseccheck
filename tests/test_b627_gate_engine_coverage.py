@@ -165,9 +165,12 @@ def test_a_healthy_comparison_still_says_ok():
 # --------------------------------------------------------------------------- #
 def test_a_target_dropped_for_sharing_a_name_is_counted(tmp_path):
     """Keying targets by basename drops the second directory sharing a name, and the gate
-    would then report its target count as if it had scanned both. Nothing collides on this
-    machine today — 0 of 3 skill basenames, 0 of 70 plugin basenames — which is exactly why
-    it was never noticed. The policy is unchanged; the drop is no longer silent."""
+    would then report its target count as if it had scanned both. This was never noticed
+    on config-declared skill/plugin roots alone (0 of 3 skill basenames, 0 of 70 plugin
+    basenames) — but B-946 widened `discover_targets()` to the Codex CLI plugin doc-cache
+    tree, which DOES collide in practice (measured: 5 of 502 bundled skill basenames on a
+    real machine, see test_b946_codex_plugin_doc_cache_targets.py). The policy is
+    unchanged; the drop is no longer silent."""
     a, b = tmp_path / "one" / "dup", tmp_path / "two" / "dup"
     a.mkdir(parents=True)
     b.mkdir(parents=True)
