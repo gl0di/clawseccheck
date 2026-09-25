@@ -609,3 +609,98 @@ class TestExecutorNamingIntegration:
         assert f.status == WARN
         assert "could not be determined" in f.detail
         assert "QuickJS-WASI" in f.detail and "Node executor" in f.detail
+
+
+# =========================================================================================
+# MIXED EXECUTORS ACROSS SCOPES (C-135 finding). The 2026.9.6+ `executor` key is read
+# per-scope -- an agent's own key fully overrides the global one, never merged -- so one
+# scope can genuinely run the sandboxed QuickJS-WASI bridge while a sibling runs the
+# unsandboxed Node executor. A finding that picks ONE representative executor and applies
+# its text to every named scope states a FALSE fact about whichever scope disagrees --
+# reproduced against the real 2026.9.6 resolver (4,000-config differential fuzz, 614/3314
+# WARNs genuinely mixed, 148 of those would have named quickjs while a hot scope ran node).
+# Every case here is only possible via the 9.6+ executor key -- no pre-9.6 build can mix,
+# since _b351_executor returns the same "quickjs-wasi" for every scope when the version
+# default is "off" -- so none of these shapes exist in the corpus yet and none of the
+# existing byte-identical pins above can be affected by this fix.
+# =========================================================================================
+def _mixed_executor_clauses(detail: str) -> tuple:
+    """(node_clause, quickjs_clause): the two `;`-separated clauses of the mixed-executor
+    sentence, isolated from the LEAD sentence (which names the same scope labels for an
+    unrelated reason and would otherwise pollute a naive substring/partition check)."""
+    mixed = detail.split("do NOT all use the same executor: ", 1)[1]
+    clauses = mixed.split("; ")
+    node_clause = next(c for c in clauses if "unsandboxed Node" in c)
+    quickjs_clause = next(c for c in clauses if "sandboxed QuickJS-WASI" in c)
+    return node_clause, quickjs_clause
+
+
+class TestMixedExecutorNaming:
+    def test_agent_explicit_quickjs_vs_sibling_agent_implicit_node(self, tmp_path):
+        """The literal reviewer-confirmed repro: global off, agent `a` explicitly pins
+        the sandboxed executor, agent `b` uses the boolean shorthand (no executor key of
+        its own, and global sets none either) so it inherits 9.6's unsandboxed default."""
+        cfg = {"tools": {"codeMode": False},
+               "agents": {"list": [
+                   {"id": "a", "tools": {"codeMode": {"enabled": True, "executor": "quickjs"}}},
+                   {"id": "b", "tools": {"codeMode": True}},
+               ]}}
+        f = check_code_mode_tool_surface(_ctx(cfg, tmp_path, "2026.9.6"))
+        assert f.status == WARN
+        assert "do NOT all use the same executor" in f.detail
+        assert "agents.list[a]" in f.detail and "agents.list[b]" in f.detail
+        # the claim must be scoped to the RIGHT agent, not blanket-applied
+        node_clause, quickjs_clause = _mixed_executor_clauses(f.detail)
+        assert "agents.list[b]" in node_clause and "agents.list[a]" not in node_clause
+        assert "agents.list[a]" in quickjs_clause and "agents.list[b]" not in quickjs_clause
+
+    def test_global_explicit_quickjs_vs_agent_explicit_node_override(self, tmp_path):
+        """Global pins the sandboxed executor and is itself ON; one agent explicitly
+        overrides ITS OWN executor to node (object-spread precedence: the agent's own
+        `executor` key fully replaces global's, it does not merge)."""
+        cfg = {"tools": {"codeMode": {"enabled": True, "executor": "quickjs"}},
+               "agents": {"list": [
+                   {"id": "w", "tools": {"codeMode": {"executor": "node"}}},
+               ]}}
+        f = check_code_mode_tool_surface(_ctx(cfg, tmp_path, "2026.9.6"))
+        assert f.status == WARN
+        assert "do NOT all use the same executor" in f.detail
+        assert "tools.codeMode" in f.detail and "agents.list[w]" in f.detail
+        node_clause, quickjs_clause = _mixed_executor_clauses(f.detail)
+        assert "agents.list[w]" in node_clause and "tools.codeMode" not in node_clause
+        assert "tools.codeMode" in quickjs_clause and "agents.list[w]" not in quickjs_clause
+
+    def test_third_layer_on_with_one_agent_overriding_to_node(self, tmp_path):
+        """Global is explicitly OFF but pins the sandboxed executor for whenever it
+        WOULD apply; agents.defaults.models turns Code Mode on for a model key both
+        agents share. Agent `w` overrides its own executor to node; agent `x` has no
+        override of its own and inherits global's quickjs pin for that same key."""
+        cfg = {
+            "tools": {"codeMode": {"enabled": False, "executor": "quickjs"}},
+            "agents": {
+                "list": [
+                    {"id": "w", "tools": {"codeMode": {"executor": "node"}}},
+                    {"id": "x"},
+                ],
+                "defaults": {"models": {"p/m": {"codeMode": True}}},
+            },
+        }
+        f = check_code_mode_tool_surface(_ctx(cfg, tmp_path, "2026.9.6"))
+        assert f.status == WARN
+        assert "do NOT all use the same executor" in f.detail
+        assert 'agents.list[w].models["p/m"].codeMode' in f.detail
+        assert 'agents.list[x].models["p/m"].codeMode' in f.detail
+        node_clause, quickjs_clause = _mixed_executor_clauses(f.detail)
+        assert "agents.list[w]" in node_clause and "agents.list[x]" not in node_clause
+        assert "agents.list[x]" in quickjs_clause and "agents.list[w]" not in quickjs_clause
+
+    def test_a_homogeneous_9_6_shape_is_unaffected_by_the_mixed_path(self, tmp_path):
+        """Guard against a regression in the other direction: when every on/auto scope
+        genuinely agrees, the single-executor text must still be used verbatim (no
+        "do NOT all use the same executor" sentence must ever appear)."""
+        cfg = {"tools": {"codeMode": True},
+               "agents": {"list": [{"id": "a", "tools": {"codeMode": True}}]}}
+        f = check_code_mode_tool_surface(_ctx(cfg, tmp_path, "2026.9.6"))
+        assert f.status == WARN
+        assert "do NOT all use the same executor" not in f.detail
+        assert "node:vm" in f.detail

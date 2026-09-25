@@ -2943,9 +2943,11 @@ def _b351_enabled(raw: dict) -> bool:
     default, so it does NOT enable code mode - matching the vendor exactly instead of
     guessing, the same discipline B350 applies to gateway.terminal.enabled.
 
-    Kept importable (and still used by ``_b351_resolve`` where a per-scope caller wants a
-    plain False-on-anything-else read that never reaches the auto literal or the version
-    default) -- ``_b351_read_enabled`` is the newer sibling that also recognises "auto".
+    Kept importable per the aggregator contract (``checks/__init__.py``'s re-export
+    surface) even though production code no longer calls it -- ``_b351_resolve`` reads
+    every scope through ``_b351_read_enabled`` instead, the newer sibling that also
+    recognises "auto" and the version-default sentinel. This helper's own direct tests
+    (``test_the_normaliser_matches_the_vendors_shapes``) are the only remaining caller.
     """
     val = raw.get("enabled")
     return val if isinstance(val, bool) else False
@@ -3363,7 +3365,6 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
     has_unknown = global_state == "unknown" or bool(unknown_agents) or bool(model_unknown)
 
     if has_on or has_auto:
-        executor_agent_raw = None
         if global_state in ("on", "auto"):
             who = "for every agent" if not off_agents else (
                 f"globally, and narrowed off for {', '.join(sorted(off_agents)[:4])}"
@@ -3376,14 +3377,12 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
             global_word = "off" if global_state == "off" else "unset (build unknown)"
             lead = (f"tools.codeMode is {global_word} globally but {verb} for "
                     f"{', '.join(combined)}.")
-            executor_agent_raw = agent_raw_by_label.get(combined[0])
         else:
             combined_model = model_on + model_auto
             verb = "true" if model_on else "auto"
             labels_text = ', '.join(sorted(m[0] for m in combined_model)[:4])
             lead = ("No global or per-agent tools.codeMode is on, but a per-model "
                     f"codeMode override resolves {verb} for {labels_text}.")
-            executor_agent_raw = combined_model[0][1]
 
         base_drove_lead = global_state in ("on", "auto") or on_agents or auto_agents
         extra_sentence = ""
@@ -3403,41 +3402,99 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
                 "compat.codeMode=\"preferred\"."
             )
 
-        executor = _b351_executor(global_raw, executor_agent_raw, default)
-        if executor == "quickjs-wasi":
-            trailing = (
-                "Those agent runs expose only `exec` and `wait` to the model and hide "
-                "the normal tools behind a QuickJS-WASI catalog bridge, so any tools.allow / "
-                "tools.profile / tools.deny policy describes a surface the model does not see "
-                "directly."
-            )
-        elif executor == "node":
-            trailing = (
-                "Those agent runs expose only `exec` and `wait` to the model, and the "
-                "guest code runs in OpenClaw's default Node executor (`node:vm`, in a "
-                "Gateway worker thread) rather than the sandboxed QuickJS-WASI bridge -- "
-                "OpenClaw's own documentation states this is not a security boundary and "
-                "shares the Gateway process's OS-level privileges, so any tools.allow / "
-                "tools.profile / tools.deny policy describes a surface the model does "
-                "not see directly."
-            )
-        elif executor == "quickjs":
-            trailing = (
-                "Those agent runs expose only `exec` and `wait` to the model and hide "
-                "the normal tools behind the bundled, sandboxed QuickJS-WASI catalog "
-                "bridge (executor explicitly set to \"quickjs\"), so any tools.allow / "
-                "tools.profile / tools.deny policy describes a surface the model does "
-                "not see directly."
-            )
+        # THE EXECUTOR CLAIM MUST BE TRUE FOR EVERY NAMED SCOPE, NOT JUST ONE. Mixing is
+        # real: the 2026.9.6+ `executor` key is read per-scope (agent's own key fully
+        # overrides global's, never merged), so one agent can run the sandboxed bridge
+        # while a sibling with no explicit key runs the unsandboxed 9.6+ default. A
+        # single "representative" executor picked from one scope and applied to the
+        # whole sentence would state a false fact about every OTHER named scope -- so
+        # every on/auto scope gets its OWN executor resolved here, and the text only
+        # ever picks the single-executor phrasing below when they all genuinely agree.
+        executor_scopes: list[tuple] = []
+        if global_state in ("on", "auto"):
+            executor_scopes.append(("tools.codeMode", None))
+        for scope_label in on_agents + auto_agents:
+            executor_scopes.append((scope_label, agent_raw_by_label.get(scope_label)))
+        executor_scopes.extend(model_on)
+        executor_scopes.extend(model_auto)
+
+        executors_by_scope = {
+            scope_label: _b351_executor(global_raw, scope_agent_raw, default)
+            for scope_label, scope_agent_raw in executor_scopes
+        }
+        distinct_executors = set(executors_by_scope.values())
+
+        if len(distinct_executors) <= 1:
+            executor = next(iter(distinct_executors), "unknown")
+            if executor == "quickjs-wasi":
+                trailing = (
+                    "Those agent runs expose only `exec` and `wait` to the model and hide "
+                    "the normal tools behind a QuickJS-WASI catalog bridge, so any tools.allow / "
+                    "tools.profile / tools.deny policy describes a surface the model does not see "
+                    "directly."
+                )
+            elif executor == "node":
+                trailing = (
+                    "Those agent runs expose only `exec` and `wait` to the model, and the "
+                    "guest code runs in OpenClaw's default Node executor (`node:vm`, in a "
+                    "Gateway worker thread) rather than the sandboxed QuickJS-WASI bridge -- "
+                    "OpenClaw's own documentation states this is not a security boundary and "
+                    "shares the Gateway process's OS-level privileges, so any tools.allow / "
+                    "tools.profile / tools.deny policy describes a surface the model does "
+                    "not see directly."
+                )
+            elif executor == "quickjs":
+                trailing = (
+                    "Those agent runs expose only `exec` and `wait` to the model and hide "
+                    "the normal tools behind the bundled, sandboxed QuickJS-WASI catalog "
+                    "bridge (executor explicitly set to \"quickjs\"), so any tools.allow / "
+                    "tools.profile / tools.deny policy describes a surface the model does "
+                    "not see directly."
+                )
+            else:
+                trailing = (
+                    "Those agent runs expose only `exec` and `wait` to the model. Which "
+                    "executor runs the guest code could not be determined: releases before "
+                    "2026.9.6 sandbox it in QuickJS-WASI, 2026.9.6 and later run it in the "
+                    "unsandboxed Node executor (`node:vm`, sharing the Gateway process's "
+                    "OS-level privileges) unless tools.codeMode.executor is explicitly "
+                    "\"quickjs\" -- so any tools.allow / tools.profile / tools.deny policy "
+                    "describes a surface the model does not see directly."
+                )
         else:
+            def _named(labels: list) -> str:
+                shown = labels[:4]
+                text = ', '.join(shown)
+                rest = len(labels) - len(shown)
+                return f"{text}, and {rest} more" if rest > 0 else text
+
+            node_scopes = sorted(lbl for lbl, e in executors_by_scope.items() if e == "node")
+            safe_scopes = sorted(
+                lbl for lbl, e in executors_by_scope.items()
+                if e in ("quickjs", "quickjs-wasi"))
+            unresolved_scopes = sorted(
+                lbl for lbl, e in executors_by_scope.items() if e == "unknown")
+
+            clauses = []
+            if node_scopes:
+                clauses.append(
+                    f"{_named(node_scopes)} run in OpenClaw's unsandboxed Node executor "
+                    "(`node:vm`, sharing the Gateway process's OS-level privileges -- "
+                    "OpenClaw's own documentation states this is not a security boundary)"
+                )
+            if safe_scopes:
+                clauses.append(
+                    f"{_named(safe_scopes)} run in the sandboxed QuickJS-WASI catalog bridge"
+                )
+            if unresolved_scopes:
+                clauses.append(
+                    f"which executor runs {_named(unresolved_scopes)} could not be determined"
+                )
             trailing = (
-                "Those agent runs expose only `exec` and `wait` to the model. Which "
-                "executor runs the guest code could not be determined: releases before "
-                "2026.9.6 sandbox it in QuickJS-WASI, 2026.9.6 and later run it in the "
-                "unsandboxed Node executor (`node:vm`, sharing the Gateway process's "
-                "OS-level privileges) unless tools.codeMode.executor is explicitly "
-                "\"quickjs\" -- so any tools.allow / tools.profile / tools.deny policy "
-                "describes a surface the model does not see directly."
+                "Those agent runs expose only `exec` and `wait` to the model, and they do "
+                "NOT all use the same executor: " + "; ".join(clauses) + ". Any "
+                "tools.allow / tools.profile / tools.deny policy describes a surface the "
+                "model does not see directly for any of them."
             )
 
         detail = f"{lead}{extra_sentence}{auto_note} {trailing}"
