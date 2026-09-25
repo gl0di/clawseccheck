@@ -11222,7 +11222,7 @@ def _b917_staged_import_findings(
     if not staged:
         return []
     explicit_dirs, unknown_dir = _b917_search_dirs(tree, facts)
-    search_dirs = [_shippedexec.Loc("FILE", ())] + explicit_dirs
+    search_dirs = [_shippedexec.Loc("FILE", facts.relparts[:-1])] + explicit_dirs
     has_chdir = _b917_file_flag(tree, facts, frozenset({"os.chdir", "os.fchdir"}))
     has_symlink = _b917_file_flag(tree, facts, frozenset({"os.symlink", "os.link"}))
     if names_may_alias is None:
