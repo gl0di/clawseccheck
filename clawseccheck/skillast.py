@@ -15157,6 +15157,23 @@ _SH_LOOP_PIPE_AFTER_DONE_RE = re.compile(r"[ \t]*\|(?!\|)(?P<pipe>[^\n;]*)")
 
 
 def _sh_loop_ref_re(name: str):
+    """A LOOSE reference pattern: matches a bare `$name`/`${name}` AND the
+    opening `${name` of any parameter-expansion operator form alike (it has
+    no concept of the operator syntax that may follow, or of where the
+    matching `}` actually is). CLAWSECCHECK-B-986 round 5: this is now
+    DETECTION-only/legacy -- safe for a caller that only needs "does this
+    text reference `name` at all" (every remaining caller in this module is
+    exactly that: the DIRECT role's own per-line candidate scan, and
+    `_sh_incluster_dest_word_is_safe`'s single-reference substitution, which
+    is a LITERAL destination path with no operator syntax in scope for B-986
+    -- see decision 4/the R-4 follow-up). It must NEVER be used to SPLICE a
+    representative value in -- it does not know where an operator reference
+    actually ends, so blindly substituting at its match would glue a
+    representative word directly onto dangling operator syntax (the exact
+    round-5 bug `shellwords.param_refs` and the DIRECT role's splice loop in
+    `_sh_loop_cred_exfil_lines` exist to close -- see the round-5 history
+    block above that loop). Use `shellwords.param_refs` instead for any new
+    splice-shaped use."""
     return re.compile(r"\$\{?" + re.escape(name) + r"\b\}?")
 
 
@@ -15732,7 +15749,20 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
                 if not read_words or not (bs <= bstart < cut):
                     continue
                 for sm in _SH_LOOP_SUBST_READ_RE.finditer(val):
-                    if _sh_loop_ref_re(var).search(sm.group("args")):
+                    # B-986 round 5 (P4): `param_refs`, not the loose
+                    # `_sh_loop_ref_re`, decides whether this reads `var` --
+                    # accepts BOTH a bare AND an operator reference as "this
+                    # word references the tainted variable" (never bare-only:
+                    # G-1's own regression control -- an operator reference
+                    # still seeds HOP taint -- proves narrowing to bare-only
+                    # here would silently reopen a false negative). Verdict-
+                    # neutral vs. the old `.search()`: HOP/PIPE never spliced
+                    # a representative word in the first place, so there is no
+                    # substitution-defeating-a-negative-lookahead bypass class
+                    # to close here -- this is purely a detection-precision
+                    # swap, not a new exemption/refusal.
+                    args = sm.group("args")
+                    if _shellwords.param_refs(args, var, 0, len(args)):
                         hop |= read_words
         if hop:
             hop_names.add(name)
@@ -15746,7 +15776,10 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
             if op == "clear":
                 cur = frozenset()
             else:
-                keep = op == "+=" or bool(_sh_loop_ref_re(name).search(val))
+                # P4: same param_refs swap as the seed check above -- bare
+                # OR operator both count as "this rebinding still references
+                # itself" (G-3's own regression control).
+                keep = op == "+=" or bool(_shellwords.param_refs(val, name, 0, len(val)))
                 cur = frozenset(hop | (cur if keep else frozenset()))
             offs.append(off)
             taints.append(cur)
@@ -15757,8 +15790,11 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
             i = masked.count("\n", 0, pos) + 1
             if outbound(raw):
                 for name, (offs, taints) in state_hist.items():
-                    for rm in _sh_loop_ref_re(name).finditer(text, pos, pos + len(raw)):
-                        k = bisect.bisect_right(offs, rm.start())
+                    # P4: same param_refs swap -- G-2's own regression
+                    # control (an operator-referenced sink) proves this must
+                    # keep matching an operator reference, not just a bare one.
+                    for pr in _shellwords.param_refs(text, name, pos, pos + len(raw)):
+                        k = bisect.bisect_right(offs, pr.start)
                         if k and taints[k - 1]:
                             hop_hits.add(i)
             pos += len(raw) + 1
@@ -15767,11 +15803,13 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     for var, _fw, read_words, bs, cut, be, _hs, _he in regions:
         if not read_words:
             continue
-        ref = _sh_loop_ref_re(var)
         streams = False
         for sm in _SH_LOOP_STDOUT_READ_RE.finditer(kw, bs, cut):
             a0, a1 = sm.start("args"), sm.end("args")
-            if ref.search(text[a0:a1]) and ">" not in kw[a0:a1]:
+            # P4: same param_refs swap -- G-4's own regression control (an
+            # operator-referenced PIPE read) proves this must keep matching
+            # an operator reference, not just a bare one.
+            if _shellwords.param_refs(text, var, a0, a1) and ">" not in kw[a0:a1]:
                 streams = True
                 break
         if not streams:
