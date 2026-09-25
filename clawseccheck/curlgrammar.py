@@ -1,4 +1,4 @@
-"""CLAWSECCHECK-B-986: curl's own option grammar, as vetted data -- not
+"""B-986: curl's own option grammar, as vetted data -- not
 enumeration-by-reading-the-source.
 
 Generated from a real, executed curl 8.5.0 (Ubuntu, `curl 8.5.0

@@ -1,4 +1,4 @@
-"""CLAWSECCHECK-B-986 P2: a real (non-`shlex`) shell word/command splitter.
+"""B-986 P2: a real (non-`shlex`) shell word/command splitter.
 
 Splits ONE shell logical line into simple commands (top-level `;`/`&&`/`||`/
 `|`/`&`-separated), each a sequence of `Word`s that keep their own source
@@ -487,7 +487,7 @@ def scan_line(text: str) -> "tuple[SimpleCommand, ...] | None":
 
 
 # --------------------------------------------------------------------------
-# CLAWSECCHECK-B-986 (round 5) P1: a precise classifier for one loop
+# B-986 (round 5) P1: a precise classifier for one loop
 # variable's own references within a raw text span -- BARE (`$NAME`/
 # `${NAME}`, safe to splice a representative value into) vs OPERATOR (any
 # other `${NAME...}` parameter-expansion form: `${NAME%%pat}`, `${NAME/x/y}`,
@@ -503,7 +503,7 @@ def scan_line(text: str) -> "tuple[SimpleCommand, ...] | None":
 # regex + a single balanced-brace pass, so it naturally sees references
 # nested inside a cmdsub span too (the whole reason this function exists).
 #
-# Cost discipline (CLAWSECCHECK-B-894's own round-1/round-2 history, this
+# Cost discipline (B-894's own round-1/round-2 history, this
 # module's `scan_line` docstring, and `_word_scan_state`'s comment above it,
 # all warn about the same shape): a caller that finds each hit's own matching
 # `}` with a fresh whole-text balanced-end scan (`_find_balanced_end`, called

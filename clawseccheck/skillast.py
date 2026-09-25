@@ -694,7 +694,7 @@ _INCLUSTER_API_HOST_ANCHORED_RE = re.compile(
     r")(?::(?:\d+|\$\{?KUBERNETES_SERVICE_PORT\}?))?(?:[/?].*)?$",
     re.I,
 )
-# CLAWSECCHECK-B-986 (Dave's decision 2): the SAME closed host allowlist as
+# B-986 (Dave's decision 2): the SAME closed host allowlist as
 # above, but for the NEW real-positional-argv-parsed shell exemption
 # (`_sh_incluster_dest_word_is_safe` below) -- scheme is REQUIRED to be
 # literally `https://`, never optional/`http://`/scheme-less. This is
@@ -709,7 +709,7 @@ _INCLUSTER_API_HOST_ANCHORED_RE = re.compile(
 # node-substituted text (see `_sh_incluster_dest_word_is_safe`), where the
 # scheme -- if any -- is always part of that same word's literal text. The
 # trailing path group is `\S*`, not `.*` (unlike its optional-scheme twin
-# above): CLAWSECCHECK-B-986 N16 -- a resolved variable's value can land on
+# above): B-986 N16 -- a resolved variable's value can land on
 # a whitespace-joined SECOND https:// URL (an unquoted `$URLS` holding two
 # space-separated destinations, IFS-split into two argv words by a real
 # shell at runtime but seen here as one already-resolved string) -- `.*`
@@ -14030,7 +14030,7 @@ def _sh_word_is_incluster_token(word: str) -> bool:
     loop-broader-than-literal gap the design's own invariant forbids (found while
     verifying the round-4 fix, before it shipped -- never observed by a reviewer).
 
-    CLAWSECCHECK-B-986 round 3 (independent C-135 review of 63fcecd1, BLOCKER):
+    B-986 round 3 (independent C-135 review of 63fcecd1, BLOCKER):
     `.search()` only ever returns `_SH_CRED_FILE_RE`'s FIRST match within *word*,
     silently ignoring that a single shell word (no whitespace required between two
     `_SH_CRED_FILE_RE` alternatives) can contain a SECOND, independent match right
@@ -14068,7 +14068,7 @@ def _sh_word_is_incluster_token(word: str) -> bool:
 
 
 # ============================================================================
-# CLAWSECCHECK-B-986: real positional-argv-parsed exemption for the LITERAL
+# B-986: real positional-argv-parsed exemption for the LITERAL
 # (non-loop) SHELL_CRED_EXFIL path.
 #
 # Two blocked prior rounds each tried to make `_sh_cred_match_is_incluster_
@@ -14102,7 +14102,7 @@ def _sh_word_is_incluster_token(word: str) -> bool:
 #      credential-file read reaching a `wget` invocation with NO exemption at
 #      all (only `curl` gets one), exactly as before this ticket.
 #
-# CLAWSECCHECK-B-988 CORRECTION (this paragraph originally said B-986
+# B-988 CORRECTION (this paragraph originally said B-986
 # deliberately left the LOOP-substituted-word exemption path, B-894's
 # `_sh_loop_cred_exfil_lines` DIRECT role, calling the OLD
 # `_sh_cred_match_is_incluster_auth_only` / `_sh_line_has_incluster_destination`
@@ -14204,7 +14204,7 @@ def _sh_incluster_dest_word_is_safe(word_text: str, masked: str) -> bool:
         pod's own runtime environment injects this name and a legitimate
         script never touches it) is trusted at face value, matched directly.
         A NON-zero binding count means the script itself has (re)bound this
-        name -- CLAWSECCHECK-B-986 N7: `KUBERNETES_SERVICE_HOST=attacker....`
+        name -- B-986 N7: `KUBERNETES_SERVICE_HOST=attacker....`
         followed by `"https://$KUBERNETES_SERVICE_HOST/..."` must NOT be
         trusted just because the literal env-var NAME is the trusted one --
         falls through to the general resolver below instead, exactly like
@@ -14216,7 +14216,7 @@ def _sh_incluster_dest_word_is_safe(word_text: str, masked: str) -> bool:
         re-matched.
 
     Either way, the final candidate text is rejected outright if it contains
-    ANY whitespace (CLAWSECCHECK-B-986 N16: an unquoted `$URLS` holding TWO
+    ANY whitespace (B-986 N16: an unquoted `$URLS` holding TWO
     space-joined https:// URLs is IFS-split into two argv words by a REAL
     shell at runtime, which this module's static analysis does not
     simulate -- it still sees one argv word. Resolving that one word's
@@ -14292,7 +14292,7 @@ def _sh_line_incluster_exemption(
 ) -> bool:
     """B-986: the real, positional-argv-parsed exemption engine, shared by
     BOTH the LITERAL (non-loop) call site in `analyze_shell` below AND (since
-    CLAWSECCHECK-B-988) the loop DIRECT role in `_sh_loop_cred_exfil_lines` --
+    B-988) the loop DIRECT role in `_sh_loop_cred_exfil_lines` --
     there is now exactly one function that ever grants this exemption, on
     either path. True only when EVERY `_SH_CRED_FILE_RE` match on *raw* is
     either (a) inside a TLS_MATERIAL-role option's own value (read locally
@@ -14331,7 +14331,7 @@ def _sh_line_incluster_exemption(
     loop caller supply a content verdict it computed once per region instead
     of once per line.
 
-    `operator_ref_spans` (CLAWSECCHECK-B-986 round 5, loop DIRECT role only):
+    `operator_ref_spans` (B-986 round 5, loop DIRECT role only):
     each span is a parameter-expansion OPERATOR reference to the loop
     variable (`${var%%x}`, `${var/x/y}`, `${var:-}`, ...) the caller copied
     through *raw* UNCHANGED rather than splicing a representative word into
@@ -14369,7 +14369,7 @@ def _sh_line_incluster_exemption(
         if not words:
             continue
         idx = 0
-        # CLAWSECCHECK-B-988: tolerate a single leading `do` -- `shellwords.
+        # B-988: tolerate a single leading `do` -- `shellwords.
         # scan_line` has no concept of shell reserved words, so a one-line loop
         # body sharing its physical line with `do` (`for c in ...; do curl
         # --cert "$c" https://...; done`, the B-936 idiom) hands this function a
@@ -14418,7 +14418,7 @@ def _sh_line_incluster_exemption(
         for t in tokens
         if t.role == "TLS_MATERIAL" and t.value_start is not None
     ]
-    # CLAWSECCHECK-B-986 round 5 (P3b): a TLS-material flag's value being
+    # B-986 round 5 (P3b): a TLS-material flag's value being
     # POSITION-only safe ("read locally for the handshake, never sent")
     # only holds for a literal file path. A `$(...)`/backtick command
     # substitution sitting inside that same value is not a path at all --
@@ -14846,7 +14846,7 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
 # INVARIANT (pinned by tests/test_b894_shell_loop_cred_taint.py): a
 # `for V in <literal words>; do BODY; done` loop is sugar for BODY repeated with V
 # replaced by each word. This engine adds ONLY what the UNCHANGED literal rules above
-# (`_SH_CRED_FILE_RE` / `_SH_CRED_ASSIGN_RE`, and — since CLAWSECCHECK-B-988 —
+# (`_SH_CRED_FILE_RE` / `_SH_CRED_ASSIGN_RE`, and — since B-988 —
 # `_sh_line_incluster_exemption`, the SAME function the literal path itself calls, not
 # a loop-only copy) would convict on that unrolled text, and is NEVER broader than
 # them — every role below uses exactly the literal rule's own vocabulary and exemption
@@ -15035,7 +15035,7 @@ def _sh_loop_ref_re(name: str):
     """A LOOSE reference pattern: matches a bare `$name`/`${name}` AND the
     opening `${name` of any parameter-expansion operator form alike (it has
     no concept of the operator syntax that may follow, or of where the
-    matching `}` actually is). CLAWSECCHECK-B-986 round 5: this is now
+    matching `}` actually is). B-986 round 5: this is now
     DETECTION-only/legacy -- safe for a caller that only needs "does this
     text reference `name` at all" (every remaining caller in this module is
     exactly that: the DIRECT role's own per-line candidate scan, and
@@ -15052,7 +15052,7 @@ def _sh_loop_ref_re(name: str):
     return re.compile(r"\$\{?" + re.escape(name) + r"\b\}?")
 
 
-# CLAWSECCHECK-B-986 P2: moved to shellwords.py (the new real shell word/
+# B-986 P2: moved to shellwords.py (the new real shell word/
 # command splitter curlargv.py's positional parsing is built on) -- kept
 # importable under this exact name here since this module's own loop-taint
 # code below is its one remaining direct caller, and tests/other code may
@@ -15296,7 +15296,7 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
 
       DIRECT — a `file_words` reference inside V's own body, on an outbound line,
         substituted in and re-checked with the UNCHANGED `_SH_CRED_FILE_RE`, then
-        (CLAWSECCHECK-B-988) run through `_sh_line_incluster_exemption` -- the SAME
+        (B-988) run through `_sh_line_incluster_exemption` -- the SAME
         real positional-argv-parsed exemption engine B-986 built for the literal
         path, not the old enumeration-based `_sh_cred_match_is_incluster_auth_only`
         (retired: it had no concept of HOP/proxy flags at all, so `curl -x
@@ -15440,7 +15440,7 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # untouched and still uses the single representative word, since that arm's
     # verdict genuinely does not depend on which word fills the slot.
     #
-    # CLAWSECCHECK-B-988 (independent C-135 review of B-986, BLOCKER; see the module
+    # B-988 (independent C-135 review of B-986, BLOCKER; see the module
     # comment above `_sh_line_incluster_exemption` for the full repro): rounds 1-3
     # above fixed this role's COST, never its SOUNDNESS -- they kept calling the old,
     # enumeration-based `_sh_cred_match_is_incluster_auth_only` /
@@ -15472,7 +15472,7 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # substitutes anything at all. See the round-5 history block above
     # `_sh_loop_cred_exfil_lines` for the actual fix (P1-P3).
     #
-    # CLAWSECCHECK-B-986 round 4 (independent C-135 review of 32f39d52, the round-3
+    # B-986 round 4 (independent C-135 review of 32f39d52, the round-3
     # fix above, BLOCKER): round 3 made `_sh_word_is_incluster_token` an EXACT
     # predicate (a word counts as the token only when `_SH_CRED_FILE_RE`'s match
     # spans the whole word) but left THIS call site folding that verdict into a
@@ -16465,7 +16465,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             # connection, are legitimate in-cluster auth -- not exfiltration.
             # `_sh_line_incluster_exemption` is the real-positional-argv-
             # parsed exemption engine -- see its own module comment for
-            # exactly what it covers and why. Since CLAWSECCHECK-B-988, the
+            # exactly what it covers and why. Since B-988, the
             # loop-substituted-word DIRECT role below (`_sh_loop_cred_exfil_lines`)
             # calls this SAME function too, not a separate copy.
             if not _sh_line_incluster_exemption(raw, masked):

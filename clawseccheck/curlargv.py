@@ -1,4 +1,4 @@
-"""CLAWSECCHECK-B-986 P3: real positional argv parsing for one curl
+"""B-986 P3: real positional argv parsing for one curl
 invocation's own argument words, against clawseccheck/curlgrammar.py's role
 table.
 
