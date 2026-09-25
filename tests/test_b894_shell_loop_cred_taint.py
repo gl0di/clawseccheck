@@ -1469,7 +1469,9 @@ def test_b986_r3_vet_skill_pure_incluster_loop_drops_b13(tmp_path):
 # position. A genuinely, exactly-certified loop token can still share a line   #
 # with a DIFFERENT credential-shaped match reached through a parameter-        #
 # expansion operator (`${var%%*}` and siblings) this module's substitution     #
-# never models (`_sh_loop_ref_re` only recognizes bare `$var`/`${var}`), so    #
+# never modeled AT THE TIME (`_sh_loop_ref_re` only recognized bare            #
+# `$var`/`${var}` -- fixed by round 5's `shellwords.param_refs` classifier,    #
+# see that section below; read this as history, not current behavior), so     #
 # the blanket override certified that unrelated match too. Repro              #
 # (`analyze_shell` returned `[]` before this fix):                            #
 #                                                                              #
