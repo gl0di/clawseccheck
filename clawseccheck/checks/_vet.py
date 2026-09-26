@@ -3133,12 +3133,15 @@ _RUNTIME_FETCH_BREAK_LOOKAHEAD = 40  # chars of the next line inspected for a ha
 
 def _runtime_fetch_segment_breaks(blob: str) -> list[int]:
     """B-284: offsets at which a runtime-fetch DIRECTIVE segment ends — sentence
-    punctuation plus every hard (non-soft-wrap) line break. Sorted, deduplicated."""
+    punctuation plus every hard (non-soft-wrap) line break, PLUS (table-cells fix)
+    every unescaped GFM cell boundary in a real table row — see
+    _runtime_fetch_table_pipe_breaks. Sorted, deduplicated."""
     breaks = {m.end() for m in _RUNTIME_FETCH_SENT_END_RE.finditer(blob)}
     for m in re.finditer(r"\n", blob):
         nxt = blob[m.end() : m.end() + _RUNTIME_FETCH_BREAK_LOOKAHEAD]
         if _RUNTIME_FETCH_HARD_BREAK_RE.match(nxt):
             breaks.add(m.end())
+    breaks |= _runtime_fetch_table_pipe_breaks(blob)
     return sorted(breaks)
 
 
@@ -3296,6 +3299,21 @@ def _runtime_fetch_segment(
 # (the FAIL-band segment machinery) or the +/-300-char window bound itself -- re-verified
 # byte-identical FAIL band across the full fixture corpus and the real fleet config
 # (Golden Rule #5) after this change; see tests/test_b284r3_mutation_invariance.py.
+#
+# table-cells fix (F-021 real-fleet FP, the real `workers-best-practices` skill): the
+# claim above no longer holds for table rows specifically -- this IS a later, narrow
+# change to the FAIL-band segmenter itself. A GFM table row is one line with no
+# sentence punctuation and, before this fix, an internal `|` was not a segment break
+# either, so a fetch verb in one cell and an instruction noun in a DIFFERENT cell of the
+# same row bound into one FAIL segment (measured: "| Workers best practices | Fetch
+# `<url>` | Canonical rules, patterns, anti-practices |"). A GFM cell boundary is a
+# structural break at least as strong as a sentence end, and splitting a directive
+# across cells was already going nowhere better than the pre-existing adjacent/table
+# WARN band (fix 3 above), never PASS -- so adding the break costs an attacker no new
+# evasion: a same-cell twin ("Fetch `<url>` and follow its rules" in ONE cell) still
+# FAILs. See _runtime_fetch_table_pipe_breaks below for the mechanism and its scope
+# (real tables only, escaped `\|` never splits) and
+# tests/test_fleetfp_table_cells.py for the fixtures.
 _RUNTIME_FETCH_BQ_LINE_RE = re.compile(r"[^\S\n]*>")
 _RUNTIME_FETCH_LIST_LINE_RE = re.compile(r"[^\S\n]*(?:[-*+]|\d+[.)])\s")
 _RUNTIME_FETCH_TABLE_LINE_RE = re.compile(r"[^\S\n]*\|")
@@ -3317,6 +3335,63 @@ def _runtime_fetch_line_spans(blob: str) -> list[tuple[int, int]]:
         spans.append((i, j))
         i = j + 1
     return spans
+
+
+# table-cells fix: a delimiter row (`|---|:--:|` etc.) is what makes a `|`-prefixed run a
+# REAL GFM table rather than a pipe-prefixed shell continuation or a quoted pipeline --
+# both of those have no such row anywhere in their run, so gating on it keeps the FAIL
+# band reachable there (design C-135 near-miss 5; see _runtime_fetch_table_pipe_breaks).
+_RUNTIME_FETCH_TABLE_DELIM_LINE_RE = re.compile(
+    r"^[^\S\n]*\|?[^\S\n]*:?-{3,}:?[^\S\n]*(?:\|[^\S\n]*:?-{3,}:?[^\S\n]*)*\|?[^\S\n]*$"
+)
+_RUNTIME_FETCH_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+
+def _runtime_fetch_table_pipe_breaks(blob: str) -> "set[int]":
+    """table-cells fix (F-021 real-fleet FP on the real `workers-best-practices` skill):
+    a GFM table row is one line with no sentence punctuation, so before this a verb in
+    one cell and an instruction noun in another cell of the SAME row bound into one FAIL
+    segment -- an internal `|` was not a segment break. Adds a break at the end offset of
+    every unescaped `|` (`\\|` inside a cell is never a boundary) on every line of a
+    contiguous `|`-prefixed run that contains a real delimiter row
+    (_RUNTIME_FETCH_TABLE_DELIM_LINE_RE), so a pipe-prefixed shell continuation or a quoted
+    pipeline with no delimiter row anywhere in its run is untouched and stays
+    FAIL-capable. Splitting a directive across cells still lands in the pre-existing
+    table/adjacent WARN band (_runtime_fetch_line_kind's "table" bucket,
+    _runtime_fetch_block) via these SAME cell-level segments, never PASS -- a same-cell
+    directive ("Fetch <url> and follow its rules" in ONE cell) is unaffected and still
+    binds at FAIL. Accepted, un-tested scope limits (documented, not defended): a code
+    span's own `|` inside a cell is not distinguished from a real cell boundary, and a
+    table nested inside a blockquote (`> | a | b |`) never matches
+    _RUNTIME_FETCH_TABLE_LINE_RE in the first place (the leading `>` wins), so it is
+    unaffected by this function either way -- the same FN trade already accepted for
+    list/sentence splits elsewhere in this module."""
+    breaks: "set[int]" = set()
+    spans = _runtime_fetch_line_spans(blob)
+    i, n = 0, len(spans)
+    while i < n:
+        ls, le = spans[i]
+        if not _RUNTIME_FETCH_TABLE_LINE_RE.match(blob[ls:le]):
+            i += 1
+            continue
+        j = i
+        has_delim = False
+        while j < n:
+            js, je = spans[j]
+            line = blob[js:je]
+            if not _RUNTIME_FETCH_TABLE_LINE_RE.match(line):
+                break
+            if _RUNTIME_FETCH_TABLE_DELIM_LINE_RE.match(line):
+                has_delim = True
+            j += 1
+        if has_delim:
+            for k in range(i, j):
+                ks, ke = spans[k]
+                line = blob[ks:ke]
+                for pm in _RUNTIME_FETCH_UNESCAPED_PIPE_RE.finditer(line):
+                    breaks.add(ks + pm.end())
+        i = j
+    return breaks
 
 
 def _runtime_fetch_line_kind(line: str) -> str:

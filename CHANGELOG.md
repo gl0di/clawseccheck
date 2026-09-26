@@ -48,6 +48,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   TLS-certificate/key argument's value go unnoticed because that argument position is
   normally treated as safe; a match is now only treated as safe there when it is a plain
   file path, not when it contains an executing subcommand.
+- Fixed a false FAIL on the runtime-external-fetch skill check when a documentation
+  table's own row named a fetch step in one column and a reference to its rules,
+  patterns, or instructions in another column of the same row: a markdown table row is
+  one line with no sentence-ending punctuation, so the two previously read as a single
+  fetch-and-follow directive. A cell boundary is now treated as its own break, so a
+  directive that only comes together across table cells is downgraded to the existing
+  advisory band instead of failing outright; a directive written entirely within one
+  cell still fails as before.
 
 ## [4.3.0] — 2026-09-23
 
