@@ -2938,7 +2938,14 @@ _AGENCY_EXEC_VERB_RE = re.compile(
 
 _AGENCY_PROHIBITION_RE = re.compile(
     r"\bnever\b|\bmust\s+not\b|\bshall\s+not\b|\bdo\s+not\b|\bdon.?t\b|"
-    r"\b(?:strictly\s+)?(?:forbidden|prohibited)\b|\bnot\s+allowed\b",
+    r"\b(?:strictly\s+)?(?:forbidden|prohibited)\b|\bnot\s+allowed\b|"
+    # CLAWSECCHECK fleetfp-fixes/vet-example-prohibition (real-fleet FP, figma-use): the
+    # hard-prohibition vocabulary above didn't cover the SOFT modal a vendored JSDoc
+    # comment used to govern "run any code" ("it is not recommended to run any code
+    # after calling close()"). Consumed only by _agency_prohibition_governs /
+    # _prohibition_governs_clause, which already demote to WARN rather than PASS and
+    # still apply _AGENCY_DOUBLE_NEG_RE, so this cannot newly PASS anything.
+    r"\bnot\s+recommended\b|\b(?:is|are)\s+discouraged\b|\bshould\s+not\b|\bshouldn.?t\b",
     re.I,
 )
 
@@ -2980,6 +2987,24 @@ _AGENCY_DOUBLE_NEG_RE = re.compile(
 # by sound static means" territory CLAUDE.md §2.5 routes to the judge band rather than
 # a third regex-iteration round. case_01018 and case_02565 are known, accepted, unfixed
 # spurious FAILs as a result.
+def _prohibition_governs_clause(blob: str, m: re.Match) -> bool:
+    """CLAWSECCHECK fleetfp-fixes/vet-example-prohibition: the same-sentence-window
+    governance test factored out of `_agency_prohibition_governs` (B-197) so a second
+    FAIL-capable arm (the no-warnings 'without' alternative, see its cluster note) can
+    reuse it without duplicating the window math. True when a prohibition phrase
+    GOVERNS the clause containing *m* (same sentence, positioned before it, no
+    double-negation) — mirrors B-194's _fetch_prohibition_governs. Callers that need an
+    additional match-shape gate (e.g. C-044's exec-verb-only restriction) apply that
+    gate themselves before calling this."""
+    prefix = blob[max(0, m.start() - _RUNTIME_FETCH_WINDOW) : m.start()]
+    breaks = list(_SENTENCE_BREAK_RE.finditer(prefix))
+    sentence_start = breaks[-1].end() if breaks else 0
+    clause = prefix[sentence_start:]
+    if not _AGENCY_PROHIBITION_RE.search(clause):
+        return False
+    return not _AGENCY_DOUBLE_NEG_RE.search(clause)
+
+
 def _agency_prohibition_governs(blob: str, m: re.Match) -> bool:
     """B-197: True when a prohibition phrase GOVERNS the matched exec-directive text
     (same sentence, positioned before it, no double-negation) — mirrors B-194's
@@ -2989,13 +3014,7 @@ def _agency_prohibition_governs(blob: str, m: re.Match) -> bool:
     safety constraint would use)."""
     if not _AGENCY_EXEC_VERB_RE.match(m.group(0)):
         return False
-    prefix = blob[max(0, m.start() - _RUNTIME_FETCH_WINDOW) : m.start()]
-    breaks = list(_SENTENCE_BREAK_RE.finditer(prefix))
-    sentence_start = breaks[-1].end() if breaks else 0
-    clause = prefix[sentence_start:]
-    if not _AGENCY_PROHIBITION_RE.search(clause):
-        return False
-    return not _AGENCY_DOUBLE_NEG_RE.search(clause)
+    return _prohibition_governs_clause(blob, m)
 
 
 # B-202 (C-135 adversarial finding, retracted after 3 rounds): C-044's exec-verb
@@ -3866,8 +3885,17 @@ _SKILL_SAFETY_SUBVERSION = [
         re.compile(
             r"\bdo\s+not\s+(?:add|include|show|give|display|write|append)\s+(?:any\s+)?"
             r"(?:warnings?|disclaimers?|caveats?|safety\s+notices?)\b|"
-            r"\bwithout\s+(?:any\s+)?(?:warnings?|disclaimers?|caveats?)\b|"
-            r"\bomit\s+(?:all\s+)?(?:warnings?|disclaimers?|caveats?)\b",
+            # 'caveat(s)' dropped from this alternative and the next (CLAWSECCHECK
+            # fleetfp-fixes/vet-example-prohibition, real-fleet FP): 'caveat' is ordinary
+            # analytical/editorial vocabulary ("omit caveats that don't change
+            # interpretation"), not AI-safety-disclaimer vocabulary — unlike the
+            # 'do not add/include/show...' alternative above, where 'caveats' names a
+            # response-content object an attacker is telling the model to omit, not just
+            # loose prose about a claim's caveats. The singular 'warning' stays (governed
+            # separately below via _prohibition_governs_clause for a prohibition-governed
+            # double negative like "Do not break X without warning").
+            r"\bwithout\s+(?:any\s+)?(?:warnings?|disclaimers?|warning\s+(?:or|and)\s+disclaimers?)\b|"
+            r"\bomit\s+(?:all\s+)?(?:warnings?|disclaimers?)\b",
             re.I,
         ),
     ),
@@ -3897,6 +3925,18 @@ _SKILL_SAFETY_SUBVERSION = [
 ]
 
 
+# CLAWSECCHECK fleetfp-fixes/vet-example-prohibition: identifies a "no-warnings
+# directive" match as coming from the `without ...` alternative specifically (not
+# `do not add/include/show...`, which is itself the prohibition and needs no separate
+# governance check). Used only to gate _prohibition_governs_clause in the
+# _SKILL_SAFETY_SUBVERSION loop below — kept as a standalone regex rather than
+# re-deriving it from the combined pattern's match text.
+_NO_WARNINGS_WITHOUT_RE = re.compile(
+    r"\bwithout\s+(?:any\s+)?(?:warnings?|disclaimers?|warning\s+(?:or|and)\s+disclaimers?)\b",
+    re.I,
+)
+
+
 # Wider "this is a documented example, not a live instruction" vocabulary than
 # _negation_context: a security skill that quotes these attack phrases surrounds them with
 # words like e.g. / malicious / attacker / scanner / detect / flag / like. Any of these within
@@ -3909,17 +3949,49 @@ _SAFETY_EXAMPLE_RE = re.compile(
     r"malicious|malware|attacker|adversar|phish|red[\s-]?team|injection|jailbreak|"
     r"detect|detector|flag(?:s|ged|ging)?|scan(?:s|ner|ning)?|audit|review|"
     r"never\s+(?:say|write|include|use)|avoid|instead\s+of|rather\s+than|"
-    r"looks?\s+like|might\s+(?:say|instruct|ask|contain)|would\s+(?:say|instruct)|"
+    r"looks?\s+like|might\s+(?:say|instruct|ask|contain)|may\s+contain|"
+    r"would\s+(?:say|instruct)|"
     r"such\s+directives?|these\s+(?:phrases?|patterns?|directives?)|watch\s+(?:out\s+)?for)\b",
     re.I,
 )
 
 
+# CLAWSECCHECK fleetfp-fixes/vet-example-prohibition: a third-party automated-scanner
+# FINDING report line (e.g. NVIDIA BENCHMARK.md's NVSkills-Eval output) can quote text
+# shaped exactly like a live directive while describing a DIFFERENT file, in the third
+# person, with no fence and no _SAFETY_EXAMPLE_RE vocabulary nearby. Recognized only by
+# its full structural shape — a leading bullet, a severity word, an ALL_CAPS/CATEGORY
+# id-in-parens prefix, a colon, AND a trailing backticked `path:line` citation, all on
+# the SAME line — never by broad vocabulary like 'security'/'evaluation'/'benchmark',
+# which would cost recall against naive malware that says those words too. Both the
+# prefix and the citation must be on the one line, so a live directive that merely
+# mentions a filename, or is merely prefixed with a severity word, still FAILs.
+_SCANNER_FINDING_LINE_RE = re.compile(
+    r"^[^\S\n]*[-*][^\S\n]+(?:INFO|LOW|MEDIUM|HIGH|CRITICAL)[^\S\n]+"
+    r"[A-Z][A-Z_]+/[\w-]+(?:[^\S\n]+\([A-Z]{2,}-\d+\))?:[^\S\n].*\(`[^`\n]+`\)[^\S\n]*$",
+    re.M,
+)
+
+
+def _pos_in_scanner_finding_line(blob: str, pos: int) -> bool:
+    """True when *pos* lies on a line matching `_SCANNER_FINDING_LINE_RE` in full —
+    line-local, so a live directive on the line right before or after a finding line
+    is unaffected."""
+    line_start = blob.rfind("\n", 0, pos) + 1
+    line_end = blob.find("\n", pos)
+    if line_end == -1:
+        line_end = len(blob)
+    return bool(_SCANNER_FINDING_LINE_RE.match(blob[line_start:line_end]))
+
+
 def _in_example_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]) -> bool:
-    """True when the match at *pos* is a documented example, not a live directive — either
-    inside a fence / negation window (_is_code_example) or surrounded by security-doc
+    """True when the match at *pos* is a documented example, not a live directive —
+    inside a fence / negation window (_is_code_example), on a third-party scanner
+    finding-report line (_pos_in_scanner_finding_line), or surrounded by security-doc
     vocabulary (_SAFETY_EXAMPLE_RE) within _SAFETY_EXAMPLE_WINDOW chars."""
     if _is_code_example(blob, pos, fence_ranges):
+        return True
+    if _pos_in_scanner_finding_line(blob, pos):
         return True
     seg = blob[max(0, pos - _SAFETY_EXAMPLE_WINDOW) : pos + _SAFETY_EXAMPLE_WINDOW]
     return bool(_SAFETY_EXAMPLE_RE.search(seg))
@@ -3928,17 +4000,19 @@ def _in_example_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]
 def _example_context_is_fence_only(
     blob: str, pos: int, fence_ranges: list[tuple[int, int]]
 ) -> bool:
-    """B-526: of the two reasons `_in_example_context` suppresses, is it ONLY the bare fence?
+    """B-526: of the reasons `_in_example_context` suppresses, is it ONLY the bare fence?
 
     A sibling rather than a signature change, so the three existing consumers keep their
     control flow and only the FAIL-capable two consult this. Security-doc vocabulary
-    (`_SAFETY_EXAMPLE_RE`) is left alone deliberately: a skill discussing prompt injection
-    in prose is the documented benign case those windows exist for, and demoting it would
-    reintroduce exactly the false positive `_SAFETY_EXAMPLE_RE` was added to remove."""
+    (`_SAFETY_EXAMPLE_RE`) and the scanner-finding-line shape are left alone deliberately:
+    each is the documented benign case those checks exist for, and demoting either would
+    reintroduce exactly the false positive it was added to remove."""
     if not _is_code_example(blob, pos, fence_ranges):
         return False
     seg = blob[max(0, pos - _SAFETY_EXAMPLE_WINDOW) : pos + _SAFETY_EXAMPLE_WINDOW]
     if _SAFETY_EXAMPLE_RE.search(seg):
+        return False
+    if _pos_in_scanner_finding_line(blob, pos):
         return False
     return _fence_only_suppression(blob, pos, fence_ranges)
 
@@ -5616,8 +5690,24 @@ def check_installed_skills(ctx: Context) -> Finding:
             # that quotes them as examples stays clean. Fence-position-aware -> search raw blob.
             for label, rx in _SKILL_SAFETY_SUBVERSION:
                 _sub_fence_only = False
+                # CLAWSECCHECK fleetfp-fixes/vet-example-prohibition: True when every
+                # live (non-example) 'no-warnings directive' match seen so far was the
+                # `without ...` alternative AND governed by a same-sentence prohibition
+                # (real case: "Do not break X ... without warning" — an instruction to
+                # always warn, the opposite polarity of a warning-suppression directive).
+                # Mirrors _agency_prohibited_only (B-197): demote to WARN, keep scanning
+                # for a genuine ungoverned match instead of PASSing outright.
+                _no_warnings_governed_only = False
                 for m in rx.finditer(blob):
                     if not _in_example_context(blob, m.start(), _fr):
+                        if (
+                            label == "no-warnings directive"
+                            and _NO_WARNINGS_WITHOUT_RE.match(m.group(0))
+                            and _prohibition_governs_clause(blob, m)
+                        ):
+                            _no_warnings_governed_only = True
+                            continue
+                        _no_warnings_governed_only = False
                         high.append(f"{name}: injection directive — {label}")
                         break
                     if not _sub_fence_only:
@@ -5627,6 +5717,10 @@ def check_installed_skills(ctx: Context) -> Finding:
                         coverage_fence.append(
                             f"coverage: {name}: an injection directive ({label}) sits in a fence"
                             " carrying no marker we recognise, so it was not assessed"
+                        )
+                    elif _no_warnings_governed_only:
+                        warns_content.append(
+                            f"{name}: {label} (prohibition-governed: requires a warning)"
                         )
 
             # F-051 / F-060 / F-062: soft content signals -> WARN (never FAIL on their own).
