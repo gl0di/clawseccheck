@@ -165,10 +165,12 @@ _EXEMPT = {
                           "schema-verification layer (~900 lines would remain, per "
                           "B-845's own analysis) — either narrows this file with no "
                           "import cycle.",
-    "checks/_config.py": "~6,986 lines (restated 2026-09-21 for the 4.3.0 wave build — "
-                         "was ~6,302, +11% stale; earlier 2026-09-18, B382 — ~5,743) — the config-hardening topic (29 checks + helpers); "
-                         "topic-faithful and over budget by design. A finer split is a "
-                         "later cycle (I-022 secondary target).",
+    "checks/_config.py": "~8,019 lines (restated 2026-09-26, B397 — was ~6,986, +15% "
+                         "stale; earlier 2026-09-21 for the 4.3.0 wave build — was "
+                         "~6,302, +11% stale; earlier 2026-09-18, B382 — ~5,743) — the "
+                         "config-hardening topic (30 checks + helpers); topic-faithful "
+                         "and over budget by design. A finer split is a later cycle "
+                         "(I-022 secondary target).",
     # Restated 2026-09-04 (B-727): 5,662 -> 6,172. The tolerance is min(25%, 500 LINES),
     # so on a file this size it is the 500-line cap that binds, and the claim had already
     # drifted ~490 before this change added ~20 — i.e. the number is being corrected, not

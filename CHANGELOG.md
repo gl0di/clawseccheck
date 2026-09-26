@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 
 ## [Unreleased]
 
+### Added
+
+- New advisory check: agent-opened Gateway portals (`gateway.portals`, the `portal`
+  tool) are gated only by a per-portal bearer token in the URL, never by the Gateway's
+  own authentication, trusted-proxy identity, or any access layer in front of it. This
+  holds across all three ways a portal can be published — a wildcard-proxy ingress
+  route, a managed Tailscale Serve route, or a direct listener on whatever address the
+  Gateway itself binds — so a hardened gateway on a LAN bind is flagged the same way an
+  ingress or Tailscale setup is. Reports only when a non-sandboxed agent is actually
+  granted the `portal` tool; otherwise it notes that only an authenticated Gateway
+  operator could open one. Unscored, WARN-capped advisory — never a hard failure.
+
 ### Fixed
 
 - Closed a bypass in the shell credential-exfiltration check's `for`-loop handling.

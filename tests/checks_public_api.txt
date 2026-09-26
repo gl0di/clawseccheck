@@ -63,6 +63,8 @@ _MCP_DATA_CAP_RE
 _MCP_FS_PKG_RE
 _MCP_INTAKE_CAP_RE
 _MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS
+_PORTALS_ABSENT_MEASURED_MIN
+_PORTALS_GROUNDED_MIN
 _SECRET_PATH_RE
 _SKILL_CRIT
 _SKILL_HIGH
@@ -103,6 +105,8 @@ _b351_resolvable_agents
 _b351_resolve
 _b352_effective_prepends
 _b352_risky
+_b397_direct_reach
+_b397_ingress_domain_ok
 _b55_resolved_write_grant
 _b58_hidden_segments
 _b62_actual_families
@@ -184,6 +188,7 @@ _parse_source_target
 _parse_version
 _peragent_sandbox_evidence
 _persistence_note
+_portal_model_version
 _pos_in_skill_md_section
 _prose_binding
 _read_jsonl_tail
@@ -279,6 +284,7 @@ check_frontmatter_hygiene
 check_fs_write_exposure
 check_gateway
 check_gateway_operator_terminal
+check_gateway_portal_reach
 check_gateway_rate_limit
 check_hex_private_key_exposure
 check_hook_policy_bypass

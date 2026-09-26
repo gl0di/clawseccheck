@@ -1253,6 +1253,62 @@ def _code_mode_default(ctx) -> str:
     return "unknown"
 
 
+# B397: the build that FIRST shipped `gateway.portals` (and its only child,
+# `gateway.portals.ingress`) in the root config schema. Grounded against the installed
+# dist (openclaw@2026.9.6): `GatewayConfigSchema`, `zod-schema-B-u3AXjg.mjs:992-996`.
+# The key is absent from every schema-path walk from 2026.7.1-2 through 2026.9.5
+# (`docs/research/openclaw-schema-paths-2026.{7.1-2,8.1,8.2,9.1,9.2,9.3,9.4,9.5}.txt`
+# at the workspace root -- a grep for "portal" matches nothing in any of them), so 9.6 is
+# the single, consecutive release that added it, the same shape `_CODE_MODE_AUTO_DEFAULT_MIN`
+# and `_SYMLINK_KNOB_RETIRED_MIN` already use for a clean one-release jump.
+_PORTALS_GROUNDED_MIN = (2026, 9, 6)      # gateway.portals first exists in the schema
+_PORTALS_ABSENT_MEASURED_MIN = (2026, 7, 1, 2)  # oldest schema-path walk that was read
+
+
+def _portal_model_version(ctx) -> str:
+    """Does the reader's OpenClaw model portal publishing the way B397 was verified?
+    ``"grounded"`` / ``"predates"`` / ``"unknown"``.
+
+    Three answers for the reason ``_code_mode_default`` has three: "we could not see the
+    build" is not "the build predates portals", and collapsing them would let an
+    unmeasured or future build silently inherit the 2026.9.6 model.
+
+    Sources are ``_code_mode_default``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose
+    Gateway process actually implements (or lacks) `gateway.portals`.
+    ``meta.lastTouchedVersion`` is consulted ONLY when it lands at 2026.9.6 or later: that
+    stamp proves a 2026.9.6+ build once SAVED the config, so portal publishing is grounded.
+    A stamp BELOW the threshold proves nothing about what is installed now (the user may
+    have upgraded five minutes ago and not re-saved), so it answers ``"unknown"``, never
+    ``"predates"``.
+
+    ``"predates"`` leads to UNKNOWN, never PASS -- it is only given for a calendar release
+    in the MEASURED-ABSENT window (``_PORTALS_ABSENT_MEASURED_MIN`` and above, below
+    ``_PORTALS_GROUNDED_MIN``): a build that provably cannot have `gateway.portals` at all
+    still cannot tell us how *this* check's model applies, because the check exists to
+    describe 2026.9.6's transport/reach behavior, not merely the key's presence. A stamp
+    below 2026.9.6 proves nothing about what is installed now, so it is not treated as a
+    safe answer either. A pre-release string (e.g. ``2026.9.6-beta.1``) parses to ``None``
+    via ``_numeric_version`` (not ``_parse_version``, B-264) and falls through to the
+    ``meta.lastTouchedVersion`` stamp, same as every sibling helper in this family.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _PORTALS_GROUNDED_MIN:
+            return "grounded"
+        if len(installed) >= 3 and installed >= _PORTALS_ABSENT_MEASURED_MIN:
+            return "predates"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _PORTALS_GROUNDED_MIN:
+        return "grounded"
+    return "unknown"
+
+
 # B382: keys a newer OpenClaw build REMOVED from its strict root config schema, so a file
 # that still holds one is rejected by `openclaw config validate` and by every CLI command
 # that loads the config, until `openclaw doctor --fix` migrates it.
