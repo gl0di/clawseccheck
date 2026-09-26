@@ -2102,8 +2102,19 @@ def _has_outbound_exfil(window: str) -> bool:
 # therefore unaffected STRUCTURALLY (nothing about them changed), not by enumeration.
 # This sibling is the ONLY thing this ticket adds, and it has exactly one caller:
 # `_b63_scan` below, itself the only path into B63 (`check_silent_instruction`).
+#
+# Post-review closure: the pattern originally ended in a bare `\b`, which is a
+# word/non-word boundary, not an end-of-compound marker — a following hyphen is
+# itself non-word, so `\b` is satisfied there too. That let a CHAINED compound
+# ("post-setup-attacker", "post-install-drop", "post-mortem-bot", …) match the
+# same as the bare listed word, laundering an attacker-appended continuation
+# through the exemption. Replaced with `(?![\w-])`: a following hyphen or word
+# character now disqualifies the match, so only the exact listed word ending at
+# a real boundary (space, punctuation, EOL) is tolerated; any further
+# `-<word>` suffix keeps the whole "post"-match live and falls through to the
+# `return True` below, same as any other unlisted continuation.
 _B63_POST_COMPOUND_BENIGN_RE = re.compile(
-    r"^-(?:set-?up|install(?:ation)?|process(?:ing)?|mortem|selection)\b",
+    r"^-(?:set-?up|install(?:ation)?|process(?:ing)?|mortem|selection)(?![\w-])",
     re.IGNORECASE,
 )
 

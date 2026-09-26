@@ -54,15 +54,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   routine, low-severity note into a critical silent-instruction failure. A real POST
   (uppercase, or lowercase with no hyphenated word following it) is unaffected, and so
   is any other hyphenated word not on this small, reviewed list (setup, install,
-  process, mortem, selection). Two earlier attempts at this fix narrowed the
-  underlying exfiltration-transport pattern itself, which is shared by over a dozen
-  other checks; each one accidentally silenced a different, unrelated check that has
-  no fallback signal of its own (the same-line and cross-skill credential+exfiltration
-  CRITICAL/HIGH checks). The final fix touches only the silent-instruction check: the
-  shared pattern is unchanged everywhere else, so a credential path next to "post" (any
-  case, hyphenated or not) always counts for those checks, same as before this fix
-  existed. A skill that adopts one of the five exempt words for its own exfiltration
-  step still gets flagged for human review (WARN), never silently passed.
+  process, mortem, selection) — including a further word chained onto one of them
+  ("post-setup-attacker", "post-install-drop", "post-mortem-bot"), which still counts
+  as a live transport, never as the benign compound. Two earlier attempts at this fix
+  narrowed the underlying exfiltration-transport pattern itself, which is shared by
+  over a dozen other checks; each one accidentally silenced a different, unrelated
+  check that has no fallback signal of its own (the same-line and cross-skill
+  credential+exfiltration CRITICAL/HIGH checks). The final fix touches only the
+  silent-instruction check: the shared pattern is unchanged everywhere else, so a
+  credential path next to "post" (any case, hyphenated or not) always counts for those
+  checks, same as before this fix existed. A skill that adopts one of the five exempt
+  words for its own exfiltration step still gets flagged for human review (WARN),
+  never silently passed.
 
 ## [4.3.0] — 2026-09-23
 
