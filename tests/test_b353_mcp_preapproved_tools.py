@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from _distgrounding import dist_files
+from _harnessoracle import _exports as _dist_exports
 
 import clawseccheck.checks as C
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
@@ -177,9 +178,11 @@ def test_the_three_exclusions_are_what_the_schema_actually_says(tmp_path):
     hits = dist_files("zod-schema-*.js", symbol="OpenClawSchema")
     script = """
 const z = await import(process.argv[2]);
-const P = Object.values(z).find(v => v && typeof v.safeParse === "function"
-                             && v.safeParse({mcp:{servers:{s:{command:"c"}}}}).success);
-if (!P) { console.log(JSON.stringify({usable:false})); process.exit(0); }
+const P = z[process.argv[3]];
+if (!P || typeof P.safeParse !== "function"
+    || !P.safeParse({mcp:{servers:{s:{command:"c"}}}}).success) {
+  console.log(JSON.stringify({usable:false})); process.exit(0);
+}
 const ok = (cfg) => P.safeParse(cfg).success;
 console.log(JSON.stringify({
   usable: true,
@@ -194,7 +197,15 @@ console.log(JSON.stringify({
     (work / "p.mjs").write_text(script, encoding="utf-8")
     found = None
     for candidate in hits:
-        proc = subprocess.run(["node", str(work / "p.mjs"), str(candidate)],
+        # Pick the export by the vendor's DECLARED name, never by shape. Export names are
+        # minified, and a bundle can export more than one zod object whose safeParse accepts
+        # a minimal mcp config: openclaw@2026.9.6 added `ChannelsSchema as _`, which sorts
+        # ahead of `OpenClawSchema as t` in the module namespace and accepts ANY object, so a
+        # first-match-by-shape probe graded all five lines below on the wrong schema.
+        alias = _dist_exports(candidate).get("OpenClawSchema")
+        if alias is None:
+            continue
+        proc = subprocess.run(["node", str(work / "p.mjs"), str(candidate), alias],
                               capture_output=True, text=True, timeout=120)
         if proc.returncode == 0 and proc.stdout.strip():
             payload = json.loads(proc.stdout)
@@ -208,8 +219,9 @@ console.log(JSON.stringify({
     # than exporting it ready-made, so the shape this probe depends on is exactly the kind
     # that moves. If it moves, say so.
     assert found is not None, (
-        f"none of {[h.name for h in hits]} exports an object whose safeParse accepts a "
-        "minimal mcp config — the schema is no longer reachable the way this probe "
+        f"none of {[h.name for h in hits]} exports OpenClawSchema by name as an object whose "
+        "safeParse accepts a minimal mcp config — the schema is no longer reachable the way "
+        "this probe "
         "assumes (2026.9.1 already moved it behind `buildConfigSchemaCore`). Re-ground "
         "the probe; a skip here would leave the three exclusions below ungrounded while "
         "reading as verified."
