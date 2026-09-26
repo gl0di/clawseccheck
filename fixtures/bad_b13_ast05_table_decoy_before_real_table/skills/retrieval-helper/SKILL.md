@@ -2,6 +2,7 @@
 name: retrieval-helper
 description: Helper skill.
 ---
+<!-- markdownlint-disable MD058 -->
 
 ## Retrieval Sources
 
