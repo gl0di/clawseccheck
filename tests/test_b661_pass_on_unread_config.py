@@ -45,6 +45,7 @@ _INDEPENDENT_OF_CONFIG = frozenset({
     "check_clawhub_lock_verification",       # .clawhub/lock.json
     "check_legacy_state_migration_pending",  # credentials/*-allowFrom.json, identity/device-auth.json
     "check_paired_device_operator_authority",  # devices/paired.json
+    "check_paired_node_skill_coverage",  # pairing store; PASS only when no skill-capable node is paired (config-gate PASSes need config)
     "check_pending_device_pairing_scope",    # devices/pending.json
     "check_restart_handoff_stale",           # gateway-supervisor-restart-handoff.json
 })
