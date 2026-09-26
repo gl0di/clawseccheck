@@ -1645,8 +1645,23 @@ _B63_FAIL_ANCHOR_RE = re.compile(
         # affirmative transparency ("always tell the user what you changed") never anchors.
         r"|(?:don'?t|do\s+not|never|no\s+need\s+to|avoid|refrain\s+from)\s+"
         r"(?:\w+\s+){0,2}?"
-        r"(?:tell|inform|notif|alert|warn|reveal|disclos|mention|show|surfac|let|allow)"
+        r"(?:"
+        # `tell` is split out from the rest: "tell <person> to <verb>" is the
+        # DIRECTIVE sense (instruct someone to act), not the informational sense
+        # ("tell <person> that/about ..."). Real repro (osmo-cli workflow-expert.md:77,
+        # reference.md:252): "Run/execute the command yourself — do not tell the user
+        # to run/execute it" — the agent is told to substitute itself for a
+        # permission-style prompt, not to hide that the action happened, so it is not
+        # concealment. Vetoed only when the infinitive names an EXECUTION verb; an
+        # oversight-suppression infinitive still anchors ("do not tell the user to
+        # check the audit log"). `warn`/`let`/`allow` keep a different sense ("warn
+        # the user to back up first" is a caution, not an agent substituting itself)
+        # and are deliberately NOT given this veto.
+        r"tell\w*\s+(?:the\s+)?(?:user|human|operator|owner|admin|them|him|her)"
+        r"(?!\s+to\s+(?:run|execute|type|paste|enter)\b)"
+        r"|(?:inform|notif|alert|warn|reveal|disclos|mention|show|surfac|let|allow)"
         r"\w*\s+(?:the\s+)?(?:user|human|operator|owner|admin|them|him|her)"
+        r")"
         # B-426, narrowed by adversarial re-review: veto this branch when the disclosure
         # verb's OBJECT — right after the person noun — is a concrete display/output
         # ARTIFACT ("raw stack traces", "the compiler log") AND the text shortly after that
@@ -4690,6 +4705,13 @@ def _b58_decode_variants(text: str, rounds: int = 2) -> list[tuple[str, str]]:
     return variants
 
 
+def _b58_pattern_hit_count(pat: re.Pattern, s: str) -> int:
+    """Count of non-overlapping `pat` matches in `s` — used to tell whether a decode
+    variant actually REVEALED a new occurrence vs. merely changed unrelated bytes
+    elsewhere in the document (B58 decode-variant loop, below)."""
+    return sum(1 for _ in pat.finditer(s))
+
+
 def _b58_extract_actionable(seg_norm: str) -> bool:
     """True when a decoded/hidden B58 segment carries an ACTIONABLE payload — an action verb
     (_B63_ACTION_RE), an exfil transport (_EXFIL_RE), a bare URL/email sink, or an
@@ -6006,7 +6028,21 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 continue
             for pat in INJECTION_PATTERNS:
                 if pat.search(variant) and (
-                    (variant != norm and not is_extract)
+                    (
+                        variant != norm
+                        and not is_extract
+                        # B58: decoding must have REVEALED the match, not merely
+                        # changed unrelated bytes elsewhere while an identical
+                        # occurrence was already plainly visible in `norm` (e.g. a
+                        # `%99` Python modulo op decoding to `99` while the injection
+                        # phrase sits unencoded, in the clear, in a SKILL.md heading —
+                        # real repro). An occurrence-COUNT comparison (not a mere
+                        # presence check) stays sound against a decoy: a plaintext
+                        # copy of the phrase elsewhere plus a genuinely encoded live
+                        # copy still yields variant-count > norm-count and FAILs.
+                        and _b58_pattern_hit_count(pat, variant)
+                        > _b58_pattern_hit_count(pat, norm)
+                    )
                     or not pat.search(text)
                     or (
                         (
