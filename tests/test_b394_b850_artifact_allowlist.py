@@ -29,6 +29,7 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -432,6 +433,14 @@ _FAILCLOSED_CASES = [
 
 @pytest.mark.parametrize("case_id,relpath,src", _FAILCLOSED_CASES)
 def test_fail_closed_namespace_guard_convicts(case_id, relpath, src):
+    if "match-capture" in case_id and sys.version_info < (3, 10):
+        # 3.9's ast cannot parse a match statement, so the whole file is unanalyzable:
+        # that must surface as UNKNOWN, never as a silent clean.
+        assert any(
+            f.rule == "AST_UNANALYZABLE" and f.severity == "unknown"
+            for f in analyze_python(src, relpath)
+        ), case_id
+        return
     assert _verdict(src, relpath) == "convict", case_id
 
 
