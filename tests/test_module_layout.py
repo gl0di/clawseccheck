@@ -186,7 +186,10 @@ _EXEMPT = {
                             "self-modification / supply-chain topic (18 checks + "
                             "helpers); topic-faithful and over budget by design. A finer "
                             "split is a later cycle.",
-    "checks/_content.py": "~16,589 lines (restated 2026-09-23, B-886 fence leg — was ~16,459) — the "
+    "checks/_content.py": "~17,155 lines (restated 2026-09-26 on integration/4.3.0 after the "
+                          "fleet-FP fixes — B63 post-compound anchor, B63 tell-directive "
+                          "residual disclosure, B58 occurrence count; was ~16,589, and "
+                          "~16,459 before B-886's fence leg) — the "
                           "content-security ring: 51 check functions, 178 "
                           "private helpers and 241 module regexes. Restated 2026-09-06 "
                           "(C-432), and the previous reason is RETRACTED rather than "
