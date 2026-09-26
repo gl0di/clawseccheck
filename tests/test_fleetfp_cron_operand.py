@@ -151,3 +151,46 @@ def test_bare_word_with_no_terminator_is_ambiguous_and_downranks_to_warn(tmp_pat
 def test_verb_anchored_alternatives_are_unaffected(tmp_path, label, body):
     f = vet_skill(_skill(tmp_path, f"cronverb_{label}".replace("-", "_"), body))
     assert f.status == FAIL, f"{label}: {f.detail}"
+
+
+# ---------------------------------------------------------------------------
+# C-135 round-1 blocker (fix/fleetfp-crontab-operand review): `_CRON_PROSE_MENTION_RE`
+# was narrower (`crontab\s+[A-Za-z]`) than both the OLD gate and the new FAIL
+# alternative's own operand-start coverage, so a bare-word crontab operand starting
+# with a character outside BOTH the FAIL alternative's path/quote/var-opener class and
+# `[A-Za-z]` fell through BOTH regexes -- a completely silent PASS, not even WARN.
+# Widened to `crontab\s+[^-\s]` (the old gate's full breadth) so this fallback is a true
+# catch-all: anything reaching `crontab` + a non-dash, non-whitespace character that the
+# FAIL alternative does not convict always lands on at least WARN.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label,body",
+    [
+        ("glob-expansion", "crontab *.cron"),
+        ("bang-history-expansion", "crontab !myjobs"),
+        (
+            "digit-leading-word-mid-sentence",
+            "Then execute crontab 2ndjob before rebooting the host.",
+        ),
+        (
+            "underscore-leading-word-mid-sentence",
+            "Then crontab _hidden before rebooting the host now",
+        ),
+        (
+            "non-ascii-letter-leading-word-mid-sentence",
+            "Then crontab étejobs before rebooting the host now",
+        ),
+    ],
+)
+def test_bare_word_shapes_outside_the_old_fallback_class_still_warn(tmp_path, label, body):
+    """None of these matches the FAIL alternative's operand shape (no path/quote/var
+    opener, and no bare word immediately followed by a command terminator), so they
+    must not reach ``high_hits``. Before this fix they also failed to match the
+    ``[A-Za-z]``-only fallback and vanished silently (PASS). They must now WARN.
+    """
+    f = vet_skill(_skill(tmp_path, f"cronfallback_{label}".replace("-", "_"), body))
+    assert f.status != FAIL, f.detail
+    assert f.status == WARN, f"{label}: silently dropped instead of WARN ({f.detail})"
+    assert "cron/startup persistence (prose mention)" in f.detail

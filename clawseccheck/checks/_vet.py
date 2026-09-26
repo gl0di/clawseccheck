@@ -1110,7 +1110,21 @@ _CRON_PERSIST_RE = re.compile(
 # "[Crontab Guru](...)", "crontab syntax is..."). A bare-word mention that fails this
 # gate is not dropped silently: _cron_persistence_hits routes it to WARN via this
 # regex (ambiguous-suppression-to-WARN, never a silent PASS).
-_CRON_PROSE_MENTION_RE = re.compile(r"crontab\s+[A-Za-z]", re.I)
+#
+# C-135 round 1 (fix/fleetfp-crontab-operand blocker): this fallback used to be
+# `crontab\s+[A-Za-z]` — narrower than both the OLD gate (`crontab\s+[^-\s]`) and the
+# new FAIL alternative's own operand-start coverage. Any operand starting with a
+# character outside BOTH the FAIL alternative's path/quote/var-opener class and its
+# `[A-Za-z]` bare-word start silently PASSed instead of WARNing — `crontab *.cron`
+# (glob), `crontab !myjobs` (bang), a digit-/underscore-/non-ASCII-letter-leading bare
+# word trailing into more prose ("execute crontab 2ndjob before rebooting the host").
+# Restored to the OLD gate's full breadth so this fallback is a true catch-all: ANY
+# non-dash, non-whitespace character after `crontab\s+` that the tightened FAIL
+# alternative does not convict now always reaches at least WARN. This only widens the
+# WARN/fallback arm — it does not touch `_CRON_PERSIST_RE`'s FAIL alternative or any
+# already-convicted shape, so it cannot reopen the original prose false positive (the
+# operand gate above still gatekeeps FAIL) and cannot demote an existing FAIL.
+_CRON_PROSE_MENTION_RE = re.compile(r"crontab\s+[^-\s]", re.I)
 
 # KNOWN RESIDUAL (B-534 -- NARROWED, NOT CLOSED). Three of the ten alternatives above
 # are bare PATH mentions with no install/enable verb requirement -- Library/LaunchAgents,
