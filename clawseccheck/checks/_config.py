@@ -6860,8 +6860,13 @@ def _b397_ingress_domain_ok(domain: str) -> bool:
 
     Deliberately leaves the WHATWG ``new URL(...)`` hostname round-trip unported (§7 of
     the design, a declared over-report-only residual): it can only reject a domain this
-    port would accept, on punycode/IDNA-normalized labels the rest of the predicate
-    already treats as a plain ASCII label — never the reverse. Callers are expected to
+    port would accept, never the reverse. Measured against the vendor function run in
+    Node, the divergence is mostly IP-literal-shaped strings the URL host parser treats
+    as IPv4 and refuses ("0177.0.0.1", "0x7f.0.0.1", "192.168.001.1",
+    "999.999.999.999"), which ``ipaddress`` does not recognise as addresses; IDNA-
+    normalized labels are the smaller share. OpenClaw's own config validation rejects
+    all of them, so the only effect is a WARN on a portal that can never start.
+    Callers are expected to
     have already confirmed ``domain`` is a non-empty ``str``; this only ports the four
     structural conditions after that.
     """
