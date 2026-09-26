@@ -3,119 +3,7 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
-## [Unreleased]
-
-### Added
-
-- New check: paired-node skills outside this audit's skill content scan. A paired
-  gateway node can publish its own machine's skills into your setup while connected,
-  but OpenClaw only ever keeps that published content in the gateway's memory and on
-  the node's own disk — never on the machine this audit runs on — so the existing
-  skill content checks can never see it, however thoroughly they scan the skills
-  actually installed locally. This advisory check discloses whether such a node
-  currently exists (a paired device holding a live node token that is allowed to run
-  commands) so that gap in coverage is visible instead of silent; it never fails the
-  audit and does not change your security score.
-- New advisory check: agent-opened Gateway portals (`gateway.portals`, the `portal`
-  tool) are gated only by a per-portal bearer token in the URL, never by the Gateway's
-  own authentication, trusted-proxy identity, or any access layer in front of it. This
-  holds across all three ways a portal can be published — a wildcard-proxy ingress
-  route, a managed Tailscale Serve route, or a direct listener on whatever address the
-  Gateway itself binds — so a hardened gateway on a LAN bind is flagged the same way an
-  ingress or Tailscale setup is. Reports only when a non-sandboxed agent is actually
-  granted the `portal` tool; otherwise it notes that only an authenticated Gateway
-  operator could open one. Unscored, WARN-capped advisory — never a hard failure.
-
-### Fixed
-
-- B25 (update / pinning hygiene) no longer warns when OpenClaw's own background
-  auto-update (`update.auto.enabled`) is turned on. That setting updates OpenClaw
-  itself (the core update also refreshes plugins that follow a floating version, which
-  B25 already reports as unpinned; skills are not touched), so flagging it as a
-  skill/plugin supply-chain risk was a false claim — and it contradicted this project's
-  own advice (C4) to keep OpenClaw updated. B25 still warns on a pre-release update
-  channel (`update.channel` = `dev`/`beta`) and on an unpinned/floating skill or plugin
-  ref. If you ignored B25's pre-release-channel warning in `.clawseccheckignore`,
-  re-add that entry: its wording changed, so the old fingerprint no longer matches.
-- Closed a bypass in the shell credential-exfiltration check's `for`-loop handling.
-  When a loop variable that legitimately holds an in-cluster Kubernetes service-account
-  token was referenced through a shell parameter-expansion operator (for example
-  stripping or rewriting part of the value) rather than referenced plainly, the check
-  could still treat the reference as the safe token and miss that the operator made the
-  script actually read a different, real credential file at run time. Any such operator
-  reference outside a TLS-certificate-argument position now refuses the safe exemption
-  outright. A related gap let a live, executing command hidden inside a `curl`
-  TLS-certificate/key argument's value go unnoticed because that argument position is
-  normally treated as safe; a match is now only treated as safe there when it is a plain
-  file path, not when it contains an executing subcommand.
-- The installed-skill safety scan no longer fails a skill that describes untrusted
-  input as something that "may contain" an injection-style phrase — the existing
-  "might contain" example wording now also recognizes this synonym.
-- The installed-skill safety scan no longer fails ordinary editorial use of the word
-  "caveat(s)" (for example, advice to keep caveats near the claim they affect, or to
-  omit ones that don't change interpretation); it still catches a directive to omit
-  warnings or disclaimers.
-- A "do not break things without warning" style instruction — an instruction to
-  always warn before a destructive action — now warns instead of failing outright,
-  matching how the scan already treats other safety-constraint phrasing; a directive
-  that actually tells the assistant to act without any warning still fails.
-- The installed-skill safety scan no longer fails a code comment that merely notes
-  running arbitrary code afterward "is not recommended"; a live directive to run
-  arbitrary code still fails.
-- The installed-skill safety scan no longer fails a live-looking directive phrase when
-  it appears inside a third-party automated scanner's own finding-report line (a
-  bulleted, severity-tagged line citing a different file), rather than as an actual
-  instruction in the skill's own prose.
-- Fixed a false FAIL on the runtime-external-fetch skill check when a documentation
-  table's own row named a fetch step in one column and a reference to its rules,
-  patterns, or instructions in another column of the same row: a markdown table row is
-  one line with no sentence-ending punctuation, so the two previously read as a single
-  fetch-and-follow directive. A cell boundary is now treated as its own break, so a
-  directive that only comes together across table cells is downgraded to the existing
-  advisory band instead of failing outright; a directive written entirely within one
-  cell still fails as before. Table detection follows the real GFM tables-extension
-  rule exactly: a table only begins where a delimiter row (one or more hyphens per
-  cell — not just three or more) immediately follows and column-count-matches the line
-  above it, and only that line onward gets cell-boundary splitting — so a directive line
-  that merely sits next to an unrelated real table, with no blank line between them, is
-  left whole and still fails, instead of being wrongly pulled into the neighboring
-  table's advisory downgrade.
-- The installed-skill scanner no longer fails a skill on scheduled-task/boot
-  persistence when "crontab" appears only inside the clickable text of a genuine
-  markdown inline link (e.g. a link to a crontab syntax validator); it is downgraded to
-  a warning instead of dropped. Whether a hit is inside a real link is judged the way a
-  CommonMark renderer would: backslash-escaped brackets, a destination that never closes
-  on the line, or a code span are not links and still fail. A command written as the
-  text of a real link also lands on that warning, so read any such link yourself.
-- The silent-instruction check (B63) no longer reads an ordinary hyphen compound such
-  as "post-setup", "post-install" or "post-mortem" as the HTTP verb POST, which had
-  turned routine UX prose ("Do not show post-setup flow-control choices") into a
-  critical failure. Only a short reviewed list of words ending at a real word boundary
-  is exempt; an uppercase POST, any other compound, or a word chained onto a listed one
-  ("post-setup-attacker", "post-setup.attacker.example") still counts. A skill that uses
-  a listed word for its own exfiltration step is still flagged for review (WARN), never
-  passed. Every other check that looks for exfiltration transports is unchanged.
-- The obfuscation check no longer flags a skill just because decoding some unrelated,
-  incidentally percent-encoded-looking text elsewhere in the file (for example a Python
-  modulo operator) happens to touch the same document as an already plainly visible quote
-  of a suspicious phrase. It still fails when decoding genuinely reveals a new occurrence
-  of the phrase that was not visible before.
-
-### Changed
-
-- Three known static-analysis limits are now disclosed in the affected finding's advice
-  text instead of left implicit: a TT5 command-injection hit whose program path comes
-  from external configuration (an env var, CLI flag, or config value) rather than a
-  literal, or is composed by a wrapper from a module-level command table and a
-  same-module prefix helper; a credential-path mention sitting alongside an
-  exfil/transport keyword with no proven data flow between them; and a silent-instruction
-  hit whose only anchor is "do not tell the user to <do something>", which can mean "do
-  this step yourself" rather than concealment. No disclosure changes the verdict — all
-  keep failing exactly as before — it only tells you the signal can't rule out an
-  attacker-chosen path or a genuinely split exfiltration, so you know to read the
-  flagged line yourself.
-
-## [4.3.0] — 2026-09-23
+## [4.3.0] — 2026-09-26
 
 **OpenClaw 2026.9.5 changed a safe default to an unsafe one without touching a config
 path or a schema entry, and the audit kept calling the unset key the shipped default.**
@@ -129,7 +17,12 @@ isolation, telemetry, and a Gateway computer-use route. It adds a Codex harness
 determination behind B333/B353, extends release signing to the whole install bundle, and
 fixes a batch of false positives, false negatives, redaction gaps and wording problems.
 
-### Added — new checks (B382-B391, B393)
+It is also verified against OpenClaw 2026.9.6, and it was checked against a real
+installed set of several hundred vendor plugin skills: every false FAIL that set surfaced
+is either fixed or, for three narrowly-named static-analysis limits, kept failing with the
+limit disclosed in the finding's own advice text.
+
+### Added — new checks (B382-B391, B393, B396, B397)
 
 - **B382** — warns when `openclaw.json` still holds a key that the installed OpenClaw
   build has removed from its strict schema. That build treats the config as invalid
@@ -180,6 +73,24 @@ fixes a batch of false positives, false negatives, redaction gaps and wording pr
   version, the surface that invoked it, channel/provider names, plugin and session
   counts, and the id of every enabled plugin. That is more than the setting's own help
   text lists.
+- **B396** — paired-node skills outside this audit's skill content scan. A paired
+  gateway node can publish its own machine's skills into your setup while connected,
+  but OpenClaw only ever keeps that published content in the gateway's memory and on
+  the node's own disk — never on the machine this audit runs on — so the existing
+  skill content checks can never see it, however thoroughly they scan the skills
+  actually installed locally. This advisory check discloses whether such a node
+  currently exists (a paired device holding a live node token that is allowed to run
+  commands) so that gap in coverage is visible instead of silent; it never fails the
+  audit and does not change your security score.
+- **B397** — agent-opened Gateway portals (`gateway.portals`, the `portal`
+  tool) are gated only by a per-portal bearer token in the URL, never by the Gateway's
+  own authentication, trusted-proxy identity, or any access layer in front of it. This
+  holds across all three ways a portal can be published — a wildcard-proxy ingress
+  route, a managed Tailscale Serve route, or a direct listener on whatever address the
+  Gateway itself binds — so a hardened gateway on a LAN bind is flagged the same way an
+  ingress or Tailscale setup is. Reports only when a non-sandboxed agent is actually
+  granted the `portal` tool; otherwise it notes that only an authenticated Gateway
+  operator could open one. Unscored, WARN-capped advisory — never a hard failure.
 
 ### Added — new capabilities
 
@@ -325,6 +236,78 @@ fixes a batch of false positives, false negatives, redaction gaps and wording pr
   the format used before windowing. `docs/OUTPUT_SCHEMA.md` now documents
   `pluginSweep`'s `dangerous`/`suspicious` arrays. The README stats badge's alt text no
   longer names an older verified OpenClaw build than the badge itself.
+- B25 (update / pinning hygiene) no longer warns when OpenClaw's own background
+  auto-update (`update.auto.enabled`) is turned on. That setting updates OpenClaw
+  itself (the core update also refreshes plugins that follow a floating version, which
+  B25 already reports as unpinned; skills are not touched), so flagging it as a
+  skill/plugin supply-chain risk was a false claim — and it contradicted this project's
+  own advice (C4) to keep OpenClaw updated. B25 still warns on a pre-release update
+  channel (`update.channel` = `dev`/`beta`) and on an unpinned/floating skill or plugin
+  ref. If you ignored B25's pre-release-channel warning in `.clawseccheckignore`,
+  re-add that entry: its wording changed, so the old fingerprint no longer matches.
+- Closed a bypass in the shell credential-exfiltration check's `for`-loop handling.
+  When a loop variable that legitimately holds an in-cluster Kubernetes service-account
+  token was referenced through a shell parameter-expansion operator (for example
+  stripping or rewriting part of the value) rather than referenced plainly, the check
+  could still treat the reference as the safe token and miss that the operator made the
+  script actually read a different, real credential file at run time. Any such operator
+  reference outside a TLS-certificate-argument position now refuses the safe exemption
+  outright. A related gap let a live, executing command hidden inside a `curl`
+  TLS-certificate/key argument's value go unnoticed because that argument position is
+  normally treated as safe; a match is now only treated as safe there when it is a plain
+  file path, not when it contains an executing subcommand.
+- The installed-skill safety scan no longer fails a skill that describes untrusted
+  input as something that "may contain" an injection-style phrase — the existing
+  "might contain" example wording now also recognizes this synonym.
+- The installed-skill safety scan no longer fails ordinary editorial use of the word
+  "caveat(s)" (for example, advice to keep caveats near the claim they affect, or to
+  omit ones that don't change interpretation); it still catches a directive to omit
+  warnings or disclaimers.
+- A "do not break things without warning" style instruction — an instruction to
+  always warn before a destructive action — now warns instead of failing outright,
+  matching how the scan already treats other safety-constraint phrasing; a directive
+  that actually tells the assistant to act without any warning still fails.
+- The installed-skill safety scan no longer fails a code comment that merely notes
+  running arbitrary code afterward "is not recommended"; a live directive to run
+  arbitrary code still fails.
+- The installed-skill safety scan no longer fails a live-looking directive phrase when
+  it appears inside a third-party automated scanner's own finding-report line (a
+  bulleted, severity-tagged line citing a different file), rather than as an actual
+  instruction in the skill's own prose.
+- Fixed a false FAIL on the runtime-external-fetch skill check when a documentation
+  table's own row named a fetch step in one column and a reference to its rules,
+  patterns, or instructions in another column of the same row: a markdown table row is
+  one line with no sentence-ending punctuation, so the two previously read as a single
+  fetch-and-follow directive. A cell boundary is now treated as its own break, so a
+  directive that only comes together across table cells is downgraded to the existing
+  advisory band instead of failing outright; a directive written entirely within one
+  cell still fails as before. Table detection follows the real GFM tables-extension
+  rule exactly: a table only begins where a delimiter row (one or more hyphens per
+  cell — not just three or more) immediately follows and column-count-matches the line
+  above it, and only that line onward gets cell-boundary splitting — so a directive line
+  that merely sits next to an unrelated real table, with no blank line between them, is
+  left whole and still fails, instead of being wrongly pulled into the neighboring
+  table's advisory downgrade.
+- The installed-skill scanner no longer fails a skill on scheduled-task/boot
+  persistence when "crontab" appears only inside the clickable text of a genuine
+  markdown inline link (e.g. a link to a crontab syntax validator); it is downgraded to
+  a warning instead of dropped. Whether a hit is inside a real link is judged the way a
+  CommonMark renderer would: backslash-escaped brackets, a destination that never closes
+  on the line, or a code span are not links and still fail. A command written as the
+  text of a real link also lands on that warning, so read any such link yourself.
+- The silent-instruction check (B63) no longer reads an ordinary hyphen compound such
+  as "post-setup", "post-install" or "post-mortem" as the HTTP verb POST, which had
+  turned routine UX prose ("Do not show post-setup flow-control choices") into a
+  critical failure. Only a short reviewed list of words ending at a real word boundary
+  is exempt; an uppercase POST, any other compound, or a word chained onto a listed one
+  ("post-setup-attacker", "post-setup.attacker.example") still counts. A skill that uses
+  a listed word for its own exfiltration step is still flagged for review (WARN), never
+  passed. Every other check that looks for exfiltration transports is unchanged.
+- The obfuscation check no longer flags a skill just because decoding some unrelated,
+  incidentally percent-encoded-looking text elsewhere in the file (for example a Python
+  modulo operator) happens to touch the same document as an already plainly visible quote
+  of a suspicious phrase. It still fails when decoding genuinely reveals a new occurrence
+  of the phrase that was not visible before.
 
 ### Security
 
@@ -390,6 +373,17 @@ fixes a batch of false positives, false negatives, redaction gaps and wording pr
   yet** as a named, dated set of open follow-ups. It also dates its known-advisories
   table, because "at or past all known-advisory fixes" means no row in the table reaches
   this version, not that the version was checked and cleared.
+- Three known static-analysis limits are now disclosed in the affected finding's advice
+  text instead of left implicit: a TT5 command-injection hit whose program path comes
+  from external configuration (an env var, CLI flag, or config value) rather than a
+  literal, or is composed by a wrapper from a module-level command table and a
+  same-module prefix helper; a credential-path mention sitting alongside an
+  exfil/transport keyword with no proven data flow between them; and a silent-instruction
+  hit whose only anchor is "do not tell the user to <do something>", which can mean "do
+  this step yourself" rather than concealment. No disclosure changes the verdict — all
+  keep failing exactly as before — it only tells you the signal can't rule out an
+  attacker-chosen path or a genuinely split exfiltration, so you know to read the
+  flagged line yourself.
 
 ## [4.2.1] — 2026-09-18
 

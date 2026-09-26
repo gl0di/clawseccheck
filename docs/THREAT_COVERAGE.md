@@ -2,7 +2,7 @@
 
 Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
-all (so they can't even surface as a finding). Updated 2026-09-23 for v4.3.0
+all (so they can't even surface as a finding). Updated 2026-09-26 for v4.3.0
 (B396 and B397 added — paired-node skills outside the skill content scan, and
 agent-opened portals reachable off-host outside gateway authentication).
 
