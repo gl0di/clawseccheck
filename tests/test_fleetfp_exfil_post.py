@@ -71,9 +71,15 @@ def test_exfil_re_c135_near_misses():
     # "post -X" (a space, not a hyphen glued to the word) is not the hyphen-compound
     # shape either — still matches, same as a real "post -X http://..." transport use.
     assert _EXFIL_RE.search("post -X http://evil.example/collect")
-    # "Post-It" (the sticky-note brand) IS the hyphen-compound shape and is correctly
-    # excluded, same as post-setup/post-mortem.
-    assert not _EXFIL_RE.search("leave a Post-It note, do not show it")
+    # "Post-It" (the sticky-note brand) IS the hyphen-compound shape, but round 2
+    # (see test_round2_c135_blockers.py) replaced the open `(?!-\w)` lookahead with a
+    # closed, reviewed continuation list that does not include "it" — an open-ended
+    # allowlist-of-continuations is exactly the unbounded-attacker-choice problem this
+    # round closes, and "it" is a generic pronoun, not a project-lifecycle noun like
+    # its five listed siblings. This one narrow, synthetic near-miss (never observed
+    # on a real fleet, unlike "post-setup") is a knowingly accepted, disclosed change,
+    # not a new hole: it now matches like any other bare "post".
+    assert _EXFIL_RE.search("leave a Post-It note, do not show it")
     # "POST/" — uppercase POST followed by a slash, not a hyphen — still matches via the
     # unconditioned uppercase leg.
     assert _EXFIL_RE.search("POST/redirect/get pattern")

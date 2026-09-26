@@ -782,6 +782,7 @@ from ._vet import (
     SKILL_CONTENT_RING,
     _AGENT_CONTEXT_FILES_RE,
     _AUTONOMY_RE,
+    _BARE_POST_RE,
     _CONCAT_STRIP_RE,
     _CRON_PERSIST_RE,
     _DAEMONIZE_RE,

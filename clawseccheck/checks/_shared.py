@@ -689,12 +689,35 @@ _CRED_RE = re.compile(
 # alone, turning a WARN-tier "Do not show" into a CRITICAL FAIL. Narrowed to: uppercase
 # `POST` always counts (case-sensitive, via the scoped `(?-i:...)` flag — an attacker
 # gains nothing from this, since "post"/"POST" was never the only transport word this
-# pattern looks for); any-case "post" counts UNLESS immediately followed by a
-# hyphen+word (the compound shape). Scoped inline flags (`(?-i:...)`) are supported on
-# Python 3.9+.
+# pattern looks for).
+#
+# ROUND 2 (this ticket — CLAWSECCHECK C-135 B13/B63 blockers): round 1 exempted any-case
+# "post" before ANY hyphen+word (`post(?!-\w)`), disclosed as accepting one narrow FN
+# risk ("a lowercase hyphenated 'post-request'"). Two independent adversarial repros
+# showed the real bypass surface was much wider than disclosed, because the lookahead
+# never inspected WHAT the continuation word was:
+#   - B13 (checks/_vet.py, _has_cred_exfil_outside_fence, the same-line cred+exfil
+#     CRITICAL rule): an attacker's own made-up continuation ("post-forward") silenced
+#     the rule's ENTIRE anchor with zero fallback — see that function's own comment for
+#     why this consumer is hardened separately (_BARE_POST_RE) rather than by narrowing
+#     this pattern alone.
+#   - B63 (_has_outbound_exfil below): ANY non-full-caps spelling ("Post-sync",
+#     "PoSt-collect"), not just literal lowercase "post-request", bypassed the
+#     FAIL->WARN downgrade the same way, because the case-insensitive leg matches
+#     "post" in any case and the open lookahead accepted any continuation.
+# Fixed by replacing the open `(?!-\w)` lookahead with a CLOSED, reviewed list of the
+# specific English continuations this fix actually needs — exactly the ones the
+# real-fleet repro and this pattern's own test suite establish as benign, non-transport
+# nouns: "setup", "install(ation)", "process(ing)", "mortem", "selection". An attacker
+# can no longer supply an arbitrary word to manufacture the compound shape; only these
+# five already-vetted continuations are exempt, in any case, with or without a hyphen
+# before "up" in "set-up". Extend this list only with the same rigor as any other
+# closed enumeration in this codebase (e.g. curlgrammar.py) — confirm a candidate word
+# is never itself a live outbound-transport verb before adding it.
 _EXFIL_RE = re.compile(
     r"\bcurl\b|\bwget\b|\bnc\b|netcat|requests?\.post|fetch\(|"
-    r"\b(?:(?-i:POST)|post(?!-\w))\b|\bscp\b|base64|"
+    r"\b(?:(?-i:POST)|post(?!-(?:set-?up|install(?:ation)?|process(?:ing)?|mortem|"
+    r"selection)\b))\b|\bscp\b|base64|"
     r"glot\.io|webhook\.site|transfer\.sh|pastebin|"
     r"rentry\.co|rentry\.org|"
     r"beeceptor\.com|interactsh\.com|oast\.|canarytokens\.|file\.io|"

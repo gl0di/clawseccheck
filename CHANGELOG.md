@@ -53,6 +53,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   POST. A skill's own UX prose ("Do not show post-setup flow-control choices") could
   turn a routine, low-severity note into a critical silent-instruction failure. A real
   POST (uppercase, or lowercase with no hyphenated word following it) is unaffected.
+  A follow-up review found the first version of this fix accepted an open-ended
+  exemption — any hyphenated word after "post", in any case — that could itself be
+  turned around: an attacker-chosen continuation ("post-forward") could fully silence
+  the same-line credential+exfiltration CRITICAL check, which has no independent
+  fallback signal of its own, and any non-full-caps spelling of "post" bypassed a
+  separate downgrade more broadly than first assessed. The exemption is now a small,
+  reviewed list of the specific benign continuations this fix needs (setup, install,
+  process, mortem, selection) instead of "any word," and the same-line
+  credential+exfiltration check no longer uses the exemption at all, so a same-line
+  credential path plus "post" (any case, hyphenated or not) always counts there.
 
 ## [4.3.0] — 2026-09-23
 
