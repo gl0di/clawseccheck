@@ -48,11 +48,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   TLS-certificate/key argument's value go unnoticed because that argument position is
   normally treated as safe; a match is now only treated as safe there when it is a plain
   file path, not when it contains an executing subcommand.
-- The silent-instruction check no longer flags an instruction to run a command "yourself"
-  instead of asking the user to run it (a permission-style prompt the skill is choosing
-  to skip), which is not the same as hiding that the action happened. A directive that
-  really does hide an action from the user — "don't tell the user THAT you ran it" or
-  "ABOUT it" — still fails.
 - The obfuscation check no longer flags a skill just because decoding some unrelated,
   incidentally percent-encoded-looking text elsewhere in the file (for example a Python
   modulo operator) happens to touch the same document as an already plainly visible quote
