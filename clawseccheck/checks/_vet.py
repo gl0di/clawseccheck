@@ -1248,6 +1248,8 @@ def _cron_link_destination_close(line: str, open_paren_idx: int):
             if c == "\\" and i + 1 < n and line[i + 1] in _CRON_LINK_ESCAPABLE_PUNCTUATION:
                 i += 2
                 continue
+            if c == "<":
+                return None  # unescaped `<` inside `<...>` invalidates the destination
             if c == ">":
                 i += 1
                 closed = True
