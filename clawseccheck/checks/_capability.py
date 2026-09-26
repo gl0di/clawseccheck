@@ -34,6 +34,7 @@ from ._shared import (
     _b323_contains_env_var_reference,
     _B55_FS_WRITE_TOOLS,
     _canon_tool,
+    _code_mode_default,
     _config_unreadable,
     _custom,
     _dir_replaceable_by_others,
@@ -42,6 +43,7 @@ from ._shared import (
     _has_approval_gate,
     _hint,
     _key_advice,
+    _node_allow_skills,
     _node_commands,
     _open_channels,
     _profile_is_powerful,
@@ -658,7 +660,43 @@ class _ToolPolicyView(NamedTuple):
     enumerable: bool  # static config bounds the grant at all
 
 
-def _agent_profile_widenings(cfg: dict) -> list:
+def _b68_scope_confined(cfg: dict, own_tools, entry) -> bool:
+    """B-942: whether ONE scope's own filesystem-tool policy confines it -- its own
+    ``tools.fs.workspaceOnly`` (falling back to the global value when this scope
+    doesn't set one) is ``True``, or its own sandbox mode (its own roster entry's
+    ``sandbox.mode``, falling back to ``agents.defaults.sandbox.mode``) is ``"all"``.
+
+    This is OpenClaw's own per-context ``fsUnguarded`` composite
+    (``context.tools?.fs?.workspaceOnly ?? cfg.tools?.fs?.workspaceOnly``,
+    ``audit.nondeep.runtime``), asked about ONE scope instead of only the global
+    config -- factored out of `_fs_scope_grants`'s inline ``confinement=True`` test
+    (B-737) so a second caller can ask the identical question about a roster entry
+    it already has in hand (G1's `scoped`/widening resolution below, B-942) without
+    duplicating the composite a second time and risking the two drifting apart.
+
+    ``own_tools`` and ``entry`` are threaded separately, not derived from one
+    another, because they come from different sources for the synthesised
+    default-agent scope: its ``own_tools`` is ``agents.defaults.tools`` while its
+    ``entry`` (for the sandbox-mode lookup) has no roster row at all. For a real
+    roster agent both are the same entry's own dict (``entry.get("tools")`` and
+    ``entry`` itself) -- exactly how `_fs_scope_grants` already threads
+    ``scope.own_tools`` and ``scope.entry`` through this same test.
+    """
+    own_fs = own_tools.get("fs") if isinstance(own_tools, dict) else None
+    workspace_only = own_fs.get("workspaceOnly") if isinstance(own_fs, dict) else None
+    if workspace_only is None:
+        workspace_only = dig(cfg, "tools.fs.workspaceOnly")
+    # Reuses `toolpolicy._sandbox_mode` (own entry's `sandbox.mode`, falling back to
+    # `agents.defaults.sandbox.mode`) rather than a second `dig(entry, "sandbox.mode")`
+    # -- that helper already reads the per-entry field directly (not through `dig()`,
+    # so it carries no `relative:` schema-grounding manifest entry of its own to
+    # duplicate), and is the SAME resolution `_sandbox_confines`/`confined_scopes`
+    # already use for this identical question elsewhere in this codebase.
+    sandbox_mode = _toolpolicy._sandbox_mode(cfg, entry)
+    return workspace_only is True or sandbox_mode == "all"
+
+
+def _agent_profile_widenings(cfg: dict, *, skip_confined: bool = False) -> list:
     """Per-agent tools.profile entries that WIDEN beyond the global tools.profile.
 
     B-409: every OTHER per-agent/per-channel/per-sender policy layer this module
@@ -680,6 +718,15 @@ def _agent_profile_widenings(cfg: dict) -> list:
     is powerful while the global tools.profile is not. When the global profile is
     already powerful no per-agent profile can widen further (there is nothing left
     to widen into), so the whole scan is skipped.
+
+    B-942: ``skip_confined=True`` additionally drops a widening whose OWN agent
+    individually confines itself (`_b68_scope_confined`, the same per-scope
+    ``tools.fs.workspaceOnly``/sandbox-mode composite `_fs_scope_grants` already
+    asks) -- B68's confinement-aware caller passes this so a widening that grants
+    an fs tool to an agent that ALSO opts that agent back into workspace
+    confinement doesn't get named as an unconfined reason to WARN. Every other
+    caller (B55, and G1's own default resolution) keeps the default ``False`` and
+    is unaffected -- widening/narrowing is orthogonal to confinement for them.
     """
     if _profile_is_powerful(dig(cfg, "tools.profile")):
         return []
@@ -688,6 +735,10 @@ def _agent_profile_widenings(cfg: dict) -> list:
     for agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
         profile = dig(agent.entry, "tools.profile")
         if isinstance(profile, str) and profile and _profile_is_powerful(profile):
+            if skip_confined and _b68_scope_confined(
+                cfg, agent.entry.get("tools"), agent.entry
+            ):
+                continue
             out.append((f"{agent.path}.tools.profile", profile))
     return out
 
@@ -771,6 +822,19 @@ def _tool_policy_view(cfg: dict) -> _ToolPolicyView:
         and profile is None  # see (a)
     )
 
+    # B-963: a schema-invalid, non-string `tools.profile` (a list or dict, e.g. from
+    # `{"tools": {"profile": ["x"]}}`) used to count as a resolved answer here just
+    # because it is not `None` -- `_profile_is_powerful` is crash-safe for it
+    # (`str(profile or "").lower()` on a list/dict matches nothing), so a bare
+    # non-string profile with no other grant signal made `_b68_fs_tools_granted`
+    # return "fully resolved, nothing granted" (a confident PASS) instead of the
+    # honest UNKNOWN a real OpenClaw config could never reach (`ToolProfileSchema`
+    # is an enum of strings). Mirrors `toolgrant._block_well_formed`'s own
+    # `isinstance(profile, str)` guard for the identical malformed-input class.
+    # An empty string is unaffected (`"" is not None` was already `True` before
+    # this, and `isinstance("", str)` is `True` too) -- only a non-string value
+    # changes direction, from a confident answer to not-enumerable.
+    profile_enumerable = isinstance(profile, str)
     return _ToolPolicyView(
         named=tuple(named),
         raw_named=tuple(raw_named),
@@ -778,16 +842,33 @@ def _tool_policy_view(cfg: dict) -> _ToolPolicyView:
         profile=profile,
         grants_all=explicit_all or implicit_all,
         implicit_all=implicit_all,
-        enumerable=bool(named) or explicit_all or implicit_all or profile is not None,
+        enumerable=bool(named) or explicit_all or implicit_all or profile_enumerable,
     )
 
 
-def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
+def _b68_fs_tools_granted(cfg: dict, *, confine_per_agent: bool = False) -> tuple[list[str], bool]:
     """Which filesystem tools config GRANTS, and whether that is knowable at all.
 
     B-283 (b). Returns ``(granted, enumerable)``. Delegates ALL policy resolution to
     _tool_policy_view — see its docstring for the grounding, including the alsoAllow
     implicit-wildcard (B-411) and the gateway.tools.allow de-denylist correction (B-423).
+
+    B-942: ``confine_per_agent=True`` (B68's own call site only -- B44/B55/B84 keep the
+    default and are byte-unaffected) drops a per-agent (``scoped``) or per-agent-profile
+    (``widenings``) contribution whose OWN scope individually confines itself
+    (`_b68_scope_confined`) -- the same ``tools.fs.workspaceOnly``/sandbox-mode composite
+    `_fs_scope_grants` already applies for its NOT-ENUMERABLE residual, now also applied
+    here, on G1's own ENUMERABLE path, which previously granted-then-warned about a
+    per-agent scope without ever reading THAT scope's own confinement declaration. The
+    GLOBAL accumulator (named/grants_all/profile) is untouched by this flag: it is not
+    per-scope, and by the time B68 calls G1 the caller has already cleared the whole
+    config on a TRUE global `tools.fs.workspaceOnly` (see `check_exec_applypatch_
+    workspace`'s own short-circuit above its G1 call), so anything the global
+    accumulator still contributes here is, by construction, genuinely unconfined.
+    Enumerability (whether ANYTHING was resolvable at all) is computed from the RAW,
+    unfiltered `widenings`/`scoped` below, deliberately -- confinement and resolvability
+    are orthogonal questions; a config that resolves to "confined, nothing left
+    unconfined" is a real, positive answer, not an unresolvable one.
 
     Every grant source is ADDITIVE (union) so no source can narrow another: a narrow
     alsoAllow can never shrink a powerful profile's "every fs tool" verdict. deny is
@@ -850,6 +931,14 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
         return [], True
 
     widenings = _agent_profile_widenings(cfg)
+    # B-942: the confinement-aware subset of `widenings` -- equal to `widenings` itself
+    # unless `confine_per_agent` is set, in which case a widening whose own agent
+    # individually confines itself is dropped. Only used to gate the grant contribution
+    # below, never the enumerability test further down, which stays keyed on the RAW
+    # `widenings` (see this function's own docstring for why).
+    gating_widenings = (
+        _agent_profile_widenings(cfg, skip_confined=True) if confine_per_agent else widenings
+    )
 
     granted: set = set()
     if view.grants_all or "group:fs" in view.named:
@@ -857,7 +946,7 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     granted |= {t for t in _B68_FS_TOOLS if t in view.named}
     if view.profile is not None and _profile_is_powerful(view.profile):
         granted |= set(_B68_FS_TOOLS)
-    if widenings:
+    if gating_widenings:
         # The "STILL OPEN" gap this closes: when a global tools.profile is set AND
         # global tools.alsoAllow is also non-empty, _tool_policy_view's implicit_all
         # suppresses unionAllow's wildcard injection on the theory that the GLOBAL
@@ -915,14 +1004,83 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     # permissive default) but it is a decision about what the tool asserts, not this
     # migration — see B-736. Restricted to declaring agents the blast radius is exactly the
     # two fixtures above, which is what a fix for B-668 should touch and nothing more.
+    # B-941: `toolgrant.granted()` is a faithful, vendor-EXECUTED port -- trusting its
+    # answer is right even when this SCOPE's own `tools.profile` is a string
+    # `toolgrant._CORE_TOOL_PROFILES` does not recognise (e.g. "readonly" in the
+    # `clean_b409_weak_agent_profile_no_widening` fixture below), as long as some OTHER
+    # real, well-formed layer -- the global `tools.allow`/`alsoAllow`/`deny`, or this
+    # agent's own -- still resolves to a non-empty `toolgrant._policies(cfg, scope)`.
+    # `_profile_policy` already maps an unrecognised profile string to `None`, dropping
+    # it from that AND-ed list exactly like an ABSENT profile would, so the resolution
+    # is still the genuine vendor answer (that fixture's "readonly" silently drops the
+    # global `minimal` restriction, and the global `alsoAllow` then injects unionAllow's
+    # wildcard -- a real, differentially-verified grant, not a guess).
+    #
+    # The bug is narrower: when `_policies(cfg, scope)` comes back EMPTY *because the
+    # only thing that would have constrained it is an unrecognised `tools.profile`* --
+    # `all(...)` over zero policies vacuously returns `True` for every tool. A real
+    # OpenClaw could never reach that state (`ToolProfileSchema` is a string enum, so
+    # the config would fail to load), so reading it as a confident "everything granted"
+    # WARN, rather than the honest "this value is unparseable" UNKNOWN, was the actual
+    # defect (repro: a named agent whose ENTIRE own `tools` block is just an
+    # unrecognised `profile`, with no global `tools` block either -- `{"agents": {"list":
+    # [{"id": "main", "tools": {"profile": "Messaging"}}]}}`).
+    #
+    # `toolgrant._unresolved_profile(cfg, scope)` isolates exactly that reason, as
+    # opposed to every OTHER way `_policies` can come back empty -- chiefly a real
+    # config whose only `tools` key is an opaque `byProvider`/`toolsBySender` layer this
+    # module cannot read at all (`OPAQUE_NARROWING_KEYS`). That second shape is now
+    # handled too (B-938, below) -- NEVER `toolgrant._block_well_formed`, which would
+    # also (wrongly) discard the "readonly" scope above -- it inspects this scope's OWN
+    # tools block in isolation and cannot see the real global layer that still resolves
+    # it. A scope this loop skips falls through to `_fs_scope_grants`
+    # (`toolgrant.resolved_scopes`) below, which also lands on UNKNOWN for it (that
+    # helper's own, stricter, whole-config `_block_well_formed` contract -- see its
+    # docstring) -- never a silent drop to "nothing granted".
+    #
+    # B-938: this loop used to gate ONLY on `entry.id` + a truthy `entry.get("tools")`
+    # before calling `toolgrant.granted(cfg, t, entry.id)` for each fs tool -- a
+    # SEPARATE "is this scope enumerable" test from the one `_fs_scope_grants` below
+    # already uses (`toolgrant.resolved_scopes(...).opaque`). The two disagreed on
+    # exactly the shape `_unresolved_profile` above does not cover: a named entry whose
+    # ONLY `tools` content is `byProvider`/`toolsBySender`. `_pick_policy` (and
+    # `_profile_policy`, since neither key is a recognised `profile` string) never reads
+    # either key, so such an entry's `_policies(cfg, scope)` comes back EMPTY --
+    # `_unresolved_profile` is False for it (no `profile` key at all, let alone an
+    # unresolved one), so the old gate above did not skip it -- and `all(...)` over zero
+    # policies is vacuously True for every tool: a confident full grant manufactured
+    # from a genuinely opaque, unresolvable config, not a real one. This loop now
+    # consults the SAME `resolved_scopes` opaqueness verdict `_fs_scope_grants` already
+    # trusts for this exact class, so the two gates can no longer disagree; a scope this
+    # skips falls through to `_fs_scope_grants`'s own opaque-skip below, landing on the
+    # same UNKNOWN `_fs_scope_grants` already produces for every other opaque scope --
+    # never a silent drop to "nothing granted".
     scoped: set = set()
+    # B-942: `scoped_unconfined` mirrors `scoped` exactly except it skips a roster
+    # entry's contribution when that entry individually confines itself
+    # (`_b68_scope_confined`) -- computed alongside `scoped` (not derived from it
+    # afterwards) because `scoped` is a flat union of tool NAMES and cannot be
+    # un-mixed by origin once merged. Only consulted by the caller when
+    # `confine_per_agent` is set; `scoped` itself stays the full, unfiltered union so
+    # the enumerability test below is unaffected by confinement.
+    scoped_unconfined: set = set()
     _roster = agent_roster(cfg)
+    _scope_opacity = {
+        _res.scope: _res.opaque for _res in (_toolgrant.resolved_scopes(cfg) or ())
+    }
     for _entry in _roster:
         if not _entry.id or not isinstance(_entry.entry, dict):
             continue
         if not _entry.entry.get("tools"):
             continue
-        scoped |= {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t, _entry.id)}
+        if _scope_opacity.get(_entry.id):
+            continue
+        if not _toolgrant._policies(cfg, _entry.id) and _toolgrant._unresolved_profile(cfg, _entry.id):
+            continue
+        _entry_granted = {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t, _entry.id)}
+        scoped |= _entry_granted
+        if not _b68_scope_confined(cfg, _entry.entry.get("tools"), _entry.entry):
+            scoped_unconfined |= _entry_granted
 
     # `agents.defaults.tools` is the second DECLARED per-agent surface, and it is a scope
     # only when NO roster exists -- measured against the vendor: declared with no roster it
@@ -932,8 +1090,23 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     # shape, and gated on the key being DECLARED for the same reason the loop above is gated
     # on `entry["tools"]`: an ungated global query returns the permissive vendor default and
     # reintroduces the 65-fixture expansion this migration is deliberately not making.
-    if not _roster and dig(cfg, "agents.defaults.tools"):
-        scoped |= {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t)}
+    # Same B-941 gate as the per-agent loop above -- this is the identical
+    # `toolgrant.granted()` vacuous-grant shape, reached through `agents.defaults.tools`
+    # instead of a roster entry (e.g. `{"agents": {"defaults": {"tools": {"profile":
+    # "Messaging"}}}}`, no roster at all, no global `tools` block either).
+    _defaults_vacuous_malformed = (
+        not _toolgrant._policies(cfg) and _toolgrant._unresolved_profile(cfg)
+    )
+    if not _roster and dig(cfg, "agents.defaults.tools") and not _defaults_vacuous_malformed:
+        # No roster exists here (the `if not _roster` guard), so this synthesised
+        # default-agent scope cannot have its OWN per-entry `tools.fs.workspaceOnly`
+        # override to individually confine it -- its confinement is exactly the
+        # GLOBAL `tools.fs.workspaceOnly`/`agents.defaults.sandbox.mode` composite
+        # `check_exec_applypatch_workspace` already clears before ever calling G1.
+        # Always counted as unconfined-eligible here for that reason, not skipped.
+        _defaults_granted = {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t)}
+        scoped |= _defaults_granted
+        scoped_unconfined |= _defaults_granted
 
     # The enumerability gate has to see `scoped`, and that ordering is the whole point of
     # computing it above rather than below. An independent C-135 pass on the first draft of
@@ -964,7 +1137,186 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     # (verified: global `deny:["write"]` with a per-agent `allow:["write"]` resolves to
     # nothing at that agent's scope) -- subtracting it a second time could only remove a
     # grant the runtime keeps.
-    return sorted((granted - view.denied) | scoped), True
+    #
+    # B-942: `confine_per_agent` swaps in `scoped_unconfined` here -- the same per-agent
+    # union, minus any scope that individually confines itself. `granted` (the global
+    # accumulator) is untouched either way; see this function's own docstring for why.
+    final_scoped = scoped_unconfined if confine_per_agent else scoped
+    return sorted((granted - view.denied) | final_scoped), True
+
+
+class _FsScopeGrants(NamedTuple):
+    """Per-scope fs-tool grant resolution for B55/B68's NOT-ENUMERABLE branch (B-737).
+
+    Split by PROVENANCE, never by scope identity: ``default_tools``/``declared_tools`` are the
+    union of tools any non-opaque, non-confined scope of that provenance grants;
+    ``default_scopes``/``declared_scopes``/``opaque_scopes`` are those scopes' labels, for
+    wording only. ``inert_defaults_tools`` is true when ``agents.defaults.tools`` is set beside
+    a declared roster key, where the vendor ignores it entirely (``toolscope_case9``) -- kept
+    separate so a finding can say so without implying "nothing declared".
+
+    B-943: ``fully_resolved`` and ``checked_scopes`` exist so a caller can tell "resolved,
+    and genuinely grants nothing" apart from "could not resolve" instead of collapsing both
+    into the same fallback. ``fully_resolved`` is true exactly when ``opaque_scopes`` is
+    empty -- every scope ``resolved_scopes`` returned was assessable, so this function's own
+    "cannot tell" reason never fired for ANY of them (the OTHER "cannot tell" reason -- the
+    whole config being unresolvable -- is already the ``None`` return, one layer up).
+    ``checked_scopes`` names every non-opaque (and, under ``confinement=True``, non-confined)
+    scope this actually ran the grant test against, whether or not that test found anything --
+    ``default_scopes``/``declared_scopes`` are the subset of it where something WAS found. A
+    caller reporting "nothing granted" can therefore name exactly which scopes back that claim
+    (``checked_scopes``) instead of a bare "trust me", and only when ``fully_resolved`` is true
+    AND ``checked_scopes`` is non-empty -- e.g. every scope confined away under
+    ``confinement=True`` leaves ``checked_scopes`` empty with nothing to back a claim, so that
+    edge is deliberately left for the caller to keep reading as unresolved, not promoted to a
+    PASS with no scope to name.
+    """
+
+    default_tools: frozenset
+    declared_tools: frozenset
+    default_scopes: "tuple[str, ...]"
+    declared_scopes: "tuple[str, ...]"
+    opaque_scopes: "tuple[str, ...]"
+    inert_defaults_tools: bool
+    checked_scopes: "tuple[str, ...]"
+    fully_resolved: bool
+
+
+def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsScopeGrants | None":
+    """B-737: resolves ``family``'s per-scope grant over every scope ``toolgrant.
+    resolved_scopes`` says the vendor actually resolves, for B55/B68's NOT-ENUMERABLE branch
+    ONLY -- ``_b68_fs_tools_granted`` (G1, above) already resolves every shape it covers, and
+    this function runs only on ITS residual (``not enumerable``), so the two can never
+    double-count the same grant.
+
+    This replaces three earlier, independently-drifting predicates for "does the operator's
+    tool policy decide this scope" (a hand-written declared-keys list, and a ``toolgrant``
+    query at ``GLOBAL_SCOPE`` that stopped being a real session scope once a roster existed)
+    with one semantic test: ``toolgrant.resolved_scopes``'s ``provenance``, which asks whether
+    any operator-written policy LAYER (``toolgrant.policy_layers``) constrains the scope the
+    vendor actually resolves, not whether some hand-chosen set of config keys is present. See
+    the ``toolgrant.py`` module docstring's ``resolved_scopes`` for the full grounding.
+
+    Returns ``None`` when ``resolved_scopes`` itself returns ``None`` (an empty/malformed
+    config, an unparseable tools block, or two roster agents that normalize to the same id) --
+    the caller keeps its base UNKNOWN, never a guess.
+
+    B-943: a non-``None`` result is now a THREE-way answer, not two:
+
+    1. Something was found (``default_tools`` or ``declared_tools`` non-empty) -- a real grant,
+       unchanged from before this change.
+    2. Nothing was found, but ``fully_resolved`` is true and ``checked_scopes`` is non-empty --
+       every scope this could examine WAS examined (none opaque), and genuinely grants nothing
+       in ``family``. This is a real, positive "resolved, and resolved to nothing" result, not
+       an "I couldn't tell" -- callers should read it as PASS, naming ``checked_scopes``.
+    3. Nothing was found and either ``fully_resolved`` is false (at least one scope was opaque,
+       so this function's own resolution genuinely fell short somewhere) or ``checked_scopes``
+       is empty (nothing was left to examine, e.g. every scope confined away) -- the caller's
+       base UNKNOWN, same as the ``None`` case, because there is no scope to back a claim
+       either way.
+
+    ``confinement=True`` (B68 only) additionally skips a scope whose OWN
+    ``tools.fs.workspaceOnly`` (falling back to the global value) is ``True``, or whose sandbox
+    mode (the scope's own roster entry, falling back to ``agents.defaults.sandbox.mode``) is
+    ``"all"`` -- the vendor's own per-context fsUnguarded composite
+    (``context.tools?.fs?.workspaceOnly ?? cfg.tools?.fs?.workspaceOnly``,
+    ``audit.nondeep.runtime``), asked PER SCOPE instead of only at the global scope B68's own
+    G1 path (and the global short-circuit above it) already read.
+    """
+    scopes = _toolgrant.resolved_scopes(cfg)
+    if scopes is None:
+        return None
+
+    inert_defaults_tools = bool(dig(cfg, "agents.defaults.tools")) and _toolgrant._has_agent_roster(cfg)
+
+    default_tools: set = set()
+    declared_tools: set = set()
+    default_scopes: list = []
+    declared_scopes: list = []
+    opaque_scopes: list = []
+    checked_scopes: list = []
+    for scope in scopes:
+        if scope.opaque:
+            opaque_scopes.append(scope.label)
+            continue
+        if confinement:
+            # B-942: factored out into `_b68_scope_confined` so B68's own per-agent grant
+            # loop (G1's `scoped`/widening resolution) can ask the identical composite
+            # about a roster entry it already has in hand, instead of duplicating it a
+            # second time -- see that helper's docstring for the full grounding.
+            if _b68_scope_confined(cfg, scope.own_tools, scope.entry):
+                # Deliberately NOT added to `checked_scopes`: this scope was resolved (it is
+                # not opaque), but the grant question was never asked of it because
+                # confinement already makes it moot -- B-943's PASS path only names a scope
+                # it actually ran the grant test against.
+                continue
+        # B-943: recorded BEFORE the emptiness test below, so a scope that resolves and
+        # grants nothing in `family` is still named as "checked" -- previously it silently
+        # vanished (no branch recorded it), which is exactly why the caller had no way to
+        # distinguish "resolved, nothing granted" from "could not resolve".
+        checked_scopes.append(scope.label)
+        got = {tool for tool in family if _toolgrant.granted(cfg, tool, scope.scope)}
+        if not got:
+            continue
+        if scope.provenance == "default":
+            default_tools |= got
+            default_scopes.append(scope.label)
+        else:
+            declared_tools |= got
+            declared_scopes.append(scope.label)
+
+    return _FsScopeGrants(
+        frozenset(default_tools),
+        frozenset(declared_tools),
+        tuple(default_scopes),
+        tuple(declared_scopes),
+        tuple(opaque_scopes),
+        inert_defaults_tools,
+        tuple(checked_scopes),
+        not opaque_scopes,
+    )
+
+
+def _b737_provenance(result: "_FsScopeGrants") -> str:
+    """"default", "declared" or "mixed" -- which of `result`'s two tool sets is non-empty.
+    Only ever called after confirming at least one of them is (both callers check that
+    before keeping a non-``None`` `scope_grants`), so this never needs a third "neither"
+    answer."""
+    if result.default_tools and result.declared_tools:
+        return "mixed"
+    return "default" if result.default_tools else "declared"
+
+
+def _b737_provenance_sentences(result: "_FsScopeGrants") -> list:
+    """The wording B-737's design mandates for a finding driven by `_fs_scope_grants`:
+    name the specific scopes and tools a provenance applies to, never "declared anywhere"
+    or "every agent" -- that would overstate a `default`/`mixed` result to every scope when
+    only some of them are default, and understate a `declared` result by implying no policy
+    applies. A `mixed` result gets both sentences, one per provenance."""
+    out: list = []
+    if result.default_scopes:
+        out.append(
+            f"No tool policy restricts {', '.join(result.default_scopes)}: OpenClaw's "
+            f"permissive default grants {', '.join(sorted(result.default_tools))}."
+        )
+    if result.declared_scopes:
+        out.append(
+            f"The tool policy that applies to {', '.join(result.declared_scopes)} still "
+            f"grants {', '.join(sorted(result.declared_tools))}."
+        )
+    if result.inert_defaults_tools:
+        out.append(
+            "agents.defaults.tools is set but ignored: OpenClaw drops it entirely once a "
+            "roster (agents.entries / agents.list) is declared, even an empty one."
+        )
+    if result.opaque_scopes:
+        out.append(
+            "Not assessed for "
+            + ", ".join(result.opaque_scopes)
+            + ": a byProvider/toolsBySender tool-policy layer there is not readable from "
+            "static config."
+        )
+    return out
 
 
 def _b55_write_tools_granted(
@@ -984,8 +1336,8 @@ def _b55_write_tools_granted(
     substring-matched, plus `_FS_WRITE_TOOL_EXACT` ("fs_delete", "fs_move"),
     exact-canonical-match (C-135: as substrings they collide with plausible real tool
     names like "refs_delete"/"prefs_move" -- see `_FS_WRITE_TOOL_HINTS`'s own B-735
-    comment). These ARE real OpenClaw tool ids (B-735 correction: this docstring used
-    to claim otherwise, which is exactly why fs_delete/fs_move went unmodelled for as
+    comment). These are treated as real tool ids (B-735 correction: this docstring used
+    to claim otherwise; they are named in vendor deny lists, dispatchability is unproven, which is exactly why fs_delete/fs_move went unmodelled for as
     long as they did) -- the union exists because `_b68_fs_tools_granted` only
     enumerates the canonical `_B68_FS_TOOLS` names via profile/group:fs/widening
     resolution, and fs_write/fs_delete/fs_move are not in that tuple, so an EXPLICIT
@@ -1029,6 +1381,60 @@ def _b55_write_tools_granted(
     return write_tools, enumerable, view, legacy_write
 
 
+def _b55_resolved_write_grant(
+    cfg: dict,
+) -> "tuple[list[str], bool, _ToolPolicyView, frozenset, _FsScopeGrants | None]":
+    """B-904: `_b55_write_tools_granted` PLUS the B-737 not-enumerable fallback
+    (`_fs_scope_grants`), factored into one shared resolver so a non-check consumer
+    (report.py's capability graph) sees the exact same three-way outcome
+    `check_fs_write_exposure` (B55) itself branches on, instead of calling
+    `_b55_write_tools_granted` alone and silently missing the fallback -- the same
+    graph/check divergence class B-503 fixed one level up for
+    `_enabled_tools` vs. `_b68_fs_tools_granted`.
+
+    Runs `_b55_write_tools_granted` first; if it is not enumerable, applies
+    `_fs_scope_grants` over ``_B55_FS_WRITE_TOOLS & _B68_FS_TOOLS`` exactly as
+    `check_fs_write_exposure` does, with the same three outcomes:
+
+    (a) `_fs_scope_grants` found a grant (default and/or declared tools) -- `write_tools`
+        becomes their union, `enumerable` becomes True, `scope_grants` is the result
+        (its provenance backs B55's own evidence sentences).
+    (b) `_fs_scope_grants` fully resolved every scope it could and none of them grants a
+        write-capable tool -- a real "resolved, and resolved to nothing" answer:
+        `write_tools` is `[]`, `enumerable` becomes True, and `scope_grants` is kept (its
+        `checked_scopes` is what backs B55's own "no filesystem-write tool ... in any
+        resolvable scope (...)" PASS text and must be carried out to the caller so it
+        can print the same claim rather than re-deriving it).
+    (c) Otherwise (at least one opaque scope, or nothing left to check) --
+        `_fs_scope_grants` itself returned `None`, or resolved nothing without being
+        fully resolved: `enumerable` stays False and `scope_grants` is `None`, same as
+        `_b55_write_tools_granted` alone would have left it.
+
+    A caller can tell (a) and (b) apart from the ordinary G1-enumerable case (where
+    `scope_grants` is never touched, so it stays `None`) by `scope_grants is not None`;
+    it can tell (b) apart from (a) by `write_tools` being empty -- (a) only reaches this
+    branch when `_fs_scope_grants` found something to union in.
+
+    Returns ``(write_tools, enumerable, view, legacy_write, scope_grants)``. B55 itself
+    must keep reading `scope_grants` for its own evidence wording (the caller, not this
+    helper, owns exactly which sentence a given outcome earns) -- this only unifies GRANT
+    RESOLUTION, never the wording built on top of it.
+    """
+    write_tools, enumerable, view, legacy_write = _b55_write_tools_granted(cfg)
+    scope_grants = None
+    if not enumerable:
+        scope_grants = _fs_scope_grants(cfg, _B55_FS_WRITE_TOOLS & set(_B68_FS_TOOLS))
+        if scope_grants is not None and (scope_grants.default_tools or scope_grants.declared_tools):
+            write_tools = sorted(scope_grants.default_tools | scope_grants.declared_tools)
+            enumerable = True
+        elif scope_grants is not None and scope_grants.fully_resolved and scope_grants.checked_scopes:
+            write_tools = []
+            enumerable = True
+        else:
+            scope_grants = None
+    return write_tools, enumerable, view, legacy_write, scope_grants
+
+
 def check_exec_applypatch_workspace(ctx: Context) -> Finding:
     """B68 — filesystem workspace-only confinement (apply_patch + the fs tool family).
 
@@ -1054,14 +1460,27 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
     WARN-capable only (CheckMeta scored=False) — advisory, never moves the grade, never FAIL.
 
     PASS    — apply_patch confined, and fs is either workspace-confined, sandboxed
-              (``agents.defaults.sandbox.mode == "all"``), or has no granted fs tools.
+              (``agents.defaults.sandbox.mode == "all"``), has no granted fs tools per
+              G1's direct resolution, OR (B-943) G1 is not enumerable but the B-737
+              per-scope residual (``_fs_scope_grants``) resolved EVERY scope it could
+              (none opaque) and none of them grants anything in the fs family — a real
+              "resolved, and resolved to nothing" answer, named by the scopes actually
+              checked, not a guess. (B-942) G1's own direct resolution is itself now
+              per-agent confinement-aware (``confine_per_agent=True``): a scope that
+              grants an fs tool but individually confines ITSELF (its own
+              ``tools.fs.workspaceOnly`` or sandbox mode) does not count toward this
+              function's grant, so an all-confined-per-agent config reaches this PASS
+              via G1 directly rather than needing the not-enumerable residual.
     WARN    — either sibling is explicitly ``false`` (OpenClaw's own dangerous-flag list,
               dangerous-config-flags-current-CrOoyQT2.js:48), or the composite predicate
               holds with the field merely absent.
     UNKNOWN — fs tool grants are not enumerable from config (no tools.allow /
-              tools.alsoAllow naming an fs-family tool, and no tools.profile) and
-              neither sibling is explicitly false, so the composite predicate
-              genuinely cannot be evaluated.
+              tools.alsoAllow naming an fs-family tool, and no tools.profile), neither
+              sibling is explicitly false, AND (B-943) the per-scope residual could not
+              fully resolve either — at least one scope is opaque (a byProvider/
+              toolsBySender layer), or every scope was confined away with none left to
+              name a PASS against — so the composite predicate genuinely cannot be
+              evaluated, not merely "evaluated to nothing".
 
     NARROWS, does not close: reasons over STATIC config only. Per-agent
     ``tools.allow``/``deny``/``profile`` overrides and group/sender-scoped tool policies
@@ -1104,12 +1523,18 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
 
     # Composite predicate: only meaningful when fs tools are actually reachable.
     #
-    # Only the GLOBAL scope being true clears the whole config. A per-agent `true` under an
-    # absent global confines that one agent while every agent without an override keeps the
-    # product default (false) — so it is deliberately NOT treated as a blanket PASS. The
-    # inverse (global true, one agent opting out with false) is already reported above,
-    # because per-agent overrides global: `context.tools?.fs?.workspaceOnly ??
-    # cfg.tools?.fs?.workspaceOnly` (audit.nondeep.runtime-C3y1Q5Fi.js:589).
+    # Only the GLOBAL scope being true clears the whole config BLANKET-style here. A
+    # per-agent `true` under an absent global confines that one agent while every agent
+    # without an override keeps the product default (false) — so it is deliberately NOT
+    # treated as a blanket PASS at this short-circuit. The inverse (global true, one
+    # agent opting out with false) is already reported above, because per-agent
+    # overrides global: `context.tools?.fs?.workspaceOnly ?? cfg.tools?.fs?.workspaceOnly`
+    # (audit.nondeep.runtime-C3y1Q5Fi.js:589). B-942: the per-agent case this short-circuit
+    # deliberately does NOT clear is no longer left unconfirmed either — G1 below is now
+    # called with `confine_per_agent=True`, so a scope that grants an fs tool but
+    # individually confines ITSELF (its own `tools.fs.workspaceOnly` or sandbox mode) is
+    # excluded from the grant this function warns about, the same composite
+    # `_fs_scope_grants` already applies for its own NOT-ENUMERABLE residual just below.
     confined_globally = dig(cfg, "tools.fs.workspaceOnly") is True
     sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
     if sandbox_mode == "all" or confined_globally:
@@ -1121,8 +1546,56 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
             "Keep tools.exec.applyPatch.workspaceOnly and tools.fs.workspaceOnly true.",
         )
 
-    granted, enumerable = _b68_fs_tools_granted(cfg)
+    granted, enumerable = _b68_fs_tools_granted(cfg, confine_per_agent=True)
     if not enumerable:
+        # B-737: same residual as B55's (see its own comment) -- ask `toolgrant.
+        # resolved_scopes` per scope instead of G1's syntactic "declared" vocabulary.
+        # `confinement=True` also skips a scope that OpenClaw itself confines
+        # (`tools.fs.workspaceOnly` / `sandbox.mode="all"`, own value or falling back
+        # to the global/defaults one) -- the same composite the global short-circuit
+        # above this function already reads at global scope only.
+        scope_grants = _fs_scope_grants(cfg, _B68_FS_TOOLS, confinement=True)
+        if scope_grants is not None and (scope_grants.default_tools or scope_grants.declared_tools):
+            tools = sorted(scope_grants.default_tools | scope_grants.declared_tools)
+            provenance = _b737_provenance(scope_grants)
+            evidence = [
+                f"filesystem tools granted ({', '.join(tools)}) by OpenClaw's own "
+                f"tool-policy resolution, provenance={provenance}",
+                f"agents.defaults.sandbox.mode={sandbox_mode!r} (not 'all')",
+            ] + _b737_provenance_sentences(scope_grants)
+            return _finding(
+                "B68",
+                WARN,
+                f"Filesystem tools are granted ({', '.join(tools)}), the sandbox does "
+                f"not contain all agents (agents.defaults.sandbox.mode={sandbox_mode!r}"
+                "), and tools.fs.workspaceOnly is unset for at least one scope — its "
+                "default is false, so file tools may read, write or delete anywhere "
+                "the agent process can reach.",
+                "Set tools.fs.workspaceOnly to true (per scope if needed), or set "
+                "agents.defaults.sandbox.mode to 'all' so filesystem access is "
+                "contained.",
+                evidence=evidence,
+            )
+        # B-943: `scope_grants` resolved every scope it could (none opaque) and NONE of
+        # them granted anything in the fs family — a real, positive "resolved, and
+        # resolved to nothing" answer, distinct from the genuinely-unresolvable UNKNOWN
+        # below. Only taken when there is at least one checked scope to name, so the
+        # PASS message can point at exactly what was verified instead of asserting a
+        # bare "trust me" (see `_fs_scope_grants`'s own docstring for why an all-confined
+        # config, `checked_scopes` empty, deliberately falls through to UNKNOWN instead).
+        if scope_grants is not None and scope_grants.fully_resolved and scope_grants.checked_scopes:
+            checked = ", ".join(scope_grants.checked_scopes)
+            return _finding(
+                "B68",
+                PASS,
+                "No filesystem tool (read/write/edit/apply_patch) is granted in any "
+                f"resolvable scope ({checked}), per OpenClaw's own tool-policy "
+                "resolution — apply_patch has nothing to escape the workspace with.",
+                "Keep it that way: if a filesystem tool is later granted, set "
+                "tools.fs.workspaceOnly to true or agents.defaults.sandbox.mode to "
+                "'all'.",
+                evidence=[f"scopes checked, nothing granted: {checked}"],
+            )
         return _finding(
             "B68",
             UNKNOWN,
@@ -1141,7 +1614,11 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
             f"filesystem tools granted: {', '.join(granted)}",
             f"agents.defaults.sandbox.mode={sandbox_mode!r} (not 'all')",
         ]
-        widenings = _agent_profile_widenings(cfg)
+        # B-942: `skip_confined=True` so this evidence sentence never cites a widening
+        # whose own agent individually confines itself as the reason for a WARN this
+        # function only reaches once `granted` (already confinement-filtered above) is
+        # non-empty from some OTHER, genuinely unconfined source.
+        widenings = _agent_profile_widenings(cfg, skip_confined=True)
         if widenings:
             global_profile = dig(cfg, "tools.profile")
             widen_desc = (
@@ -1225,7 +1702,7 @@ def check_exec_strict_inline_eval(ctx: Context) -> Finding:
 
 
 def _escaping_scope_label(cfg: dict, name: str) -> str:
-    """B-670: a POSITIONAL label for one name `unconfined_scopes_inheriting_global_tools`
+    """B-670: a POSITIONAL label for one name `unconfined_write_scopes`
     returned — the roster entry's own config path (``agents.list[1]`` /
     ``agents.entries.web``), or ``"global scope"`` for the synthesised default-agent scope
     that has no roster row at all.
@@ -1281,18 +1758,40 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     TIGHT `tools.elevated.allowFrom` happened to also be set, even though that field
     cannot scope write-tool reachability either. Removed from both directions.
 
-    Known, deliberately UNFIXED gap #1 in this same pass (documented rather than silently
-    left, and filed as a follow-up, B-409): OpenClaw resolves the EFFECTIVE tool set
+    Gap #1, kept current rather than treated as a one-time snapshot (originally written
+    during B-395; the composition problem it describes is real, but which layers this
+    check actually reads has moved since): OpenClaw resolves the EFFECTIVE tool set
     through up to 8 composable policy layers (global allow/deny, per-agent allow/deny,
     byProvider ×2, channel/group tools, toolsBySender, subagent/inherited session
     policy — each AND-ed via `policies.every(...)`, `tool-policy-match-*.js:32-34`, so
     each of THESE layers can only further NARROW the set; per-agent `tools.profile` is
-    the one exception and is covered separately as gap #4 below). This check reads only
-    the global `tools.allow`/`tools.alsoAllow`/`tools.profile` layer for these eight. A
-    narrower per-agent-allow, per-channel, or per-sender policy that actually removes
-    the write tool from the agent reachable through an open channel is invisible here
-    and can still produce a false FAIL. Closing this needs a real multi-layer policy
-    composer, not a one-line patch — out of scope for this pass.
+    the one exception and is covered separately as gap #4 below).
+
+    RESOLVED since this was first written: per-agent `tools.allow`/`tools.deny`/
+    `tools.profile` narrowing is no longer invisible here. The `_toolgrant.granted()`
+    per-scope query in `_b68_fs_tools_granted` above (the B-668/S3 migration) consults
+    every roster entry that declares its own `tools` block through the same ported
+    vendor resolver `toolgrant.py` uses, and unions the result in as `scoped` — so this
+    check now reads the global layer AND the per-agent layer, not the global layer alone.
+
+    STILL OPEN, and not this check's job to close: the channel/group-scoped tools
+    policy (`channels.<provider>.groups.<id>.tools` / `.direct.tools`) and the
+    sender-keyed `toolsBySender` layer are both part of what OpenClaw's real resolver
+    calls `extraPolicies` — `toolgrant.granted()` never receives them (see its own "NOT
+    MODELLED" section), and nothing here maps a reachable channel back to the specific
+    agent bound to it. A channel- or sender-scoped policy that actually removes the
+    write tool from the agent reachable through that specific open channel is therefore
+    still invisible here and can still produce a false FAIL. This is live, separately
+    tracked work on the channel-attribution problem, not an abandoned gap — it stays
+    named here until it lands.
+
+    PERMANENT, not a follow-up: `byProvider` (keyed on the model provider/model id
+    actually selected at request time — `resolveProviderToolPolicyEntry` reads
+    `params.modelProvider`/`params.modelId`, neither of which static config carries)
+    and subagent/inherited session policy (pure runtime session state, never present in
+    config at all) cannot be resolved by a static scanner in principle, no matter how
+    much more of this composer gets built. They are recorded here as a structural limit
+    of a config-reading approach, not as unfinished work a future pass could finish.
 
     Gap #2 (B-410) is now CLOSED: `gated` (`tools.exec.mode` having an approval-gate
     value) used to clear `not open_ch` straight to PASS, even though this same
@@ -1333,9 +1832,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     missed WARN. This is now unioned in via `_agent_profile_widenings` (see
     `_b68_fs_tools_granted`), and can only ever push a verdict from PASS toward WARN
     here — it deliberately never sets `explicit_write_grant` below, so it cannot alone
-    drive a FAIL: the seven still-open narrowing layers in gap #1 could still remove
-    the write tool for that specific agent/channel/sender combination, which this
-    static check still cannot see.
+    drive a FAIL: the channel/sender narrowing layers gap #1 still can't see (plus the
+    two permanently-unreadable byProvider/subagent layers) could still remove the write
+    tool for that specific agent/channel/sender combination.
 
     Gap #5 (global tools.profile + global tools.alsoAllow under a widening) is now
     also CLOSED. Previously documented here as "STILL OPEN": when a global
@@ -1362,11 +1861,18 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
               tools.alsoAllow declared as a LIST, no tools.profile set, and no
               per-agent tools.profile widening (B-409) either. A declared-but-non-list
               tools.allow (a scalar or mapping — schema-invalid, but seen in the wild)
-              also lands here, not PASS.
+              also lands here, not PASS. (B-943) The B-737 per-scope residual
+              (``_fs_scope_grants``) also lands here, rather than PASS, when it could
+              not fully resolve every scope either — at least one is opaque, or every
+              scope was confined away with none left to name.
     PASS    — no write-capable tool granted, OR one is granted, no open-ingress channel
               reaches it, AND no channel is declared at all with untrusted-content
               reach either (_external_input_channels empty), with tools.exec.mode
-              set as an approval gate.
+              set as an approval gate. (B-943) Also PASS, naming the scopes checked,
+              when G1 is not enumerable but the B-737 per-scope residual resolved EVERY
+              scope it could (none opaque) and none of them grants a write-capable
+              tool — a real "resolved, and resolved to nothing" answer, not the
+              UNKNOWN this used to collapse into.
     WARN    — write tool granted with no proven broad reach and no approval gate
               (ungated), OR reachable by a declared-but-not-open channel carrying
               untrusted content (_external_input_channels non-empty, e.g.
@@ -1381,8 +1887,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
               static check, so it stays the "ambiguous" WARN case rather than FAIL, OR
               reachable by a proven-open channel, unconfined, but the ONLY grant signal
               is a per-agent tools.profile WIDENING (B-409) with no explicit global
-              grant -- deliberately never a FAIL, for the same "seven still-unread
-              narrowing layers" reason gap #4 above gives.
+              grant -- deliberately never a FAIL, for the same reason gap #4 above
+              gives: the channel/sender layers (plus the two permanently-unreadable
+              ones) could still narrow it away unseen by this static check.
     FAIL    — an EXPLICIT write tool grant (a literal write/edit/apply_patch/"*"/
               "group:fs" token, or a powerful tools.profile) AND reachable by a
               PROVEN-open channel, not confined, gated or not. scored=True.
@@ -1402,13 +1909,38 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     open-group config.
     """
     cfg = ctx.config
-    # B-503: grant resolution delegated to `_b55_write_tools_granted`, the same
-    # write/edit/apply_patch model report.py's capability graph now also calls, so
-    # the two can no longer disagree the way `_enabled_tools` vs.
-    # `_b68_fs_tools_granted` did. `view`/`legacy_write` are still needed below for
+    # B-503/B-904: grant resolution delegated to `_b55_resolved_write_grant`, the same
+    # `_b55_write_tools_granted` PLUS B-737 not-enumerable-fallback resolution
+    # report.py's capability graph now also calls, so the two can no longer disagree
+    # the way `_enabled_tools` vs. `_b68_fs_tools_granted` did (B-503) nor the way the
+    # graph's own bare `_b55_write_tools_granted` call missed this fallback entirely
+    # (B-904). `view`/`legacy_write` are still needed below for
     # `explicit_write_grant`'s EXPLICIT/WIDENED/IMPLICIT-WILDCARD distinction.
-    write_tools, enumerable, view, legacy_write = _b55_write_tools_granted(cfg)
+    # `scope_grants` stays `None` unless the B-737 residual is what supplied
+    # `write_tools`, so every later branch can tell whether it is reasoning about a G1
+    # grant (unchanged) or a B-737 per-scope one (needs provenance wording) purely from
+    # `scope_grants is not None`.
+    write_tools, enumerable, view, legacy_write, scope_grants = _b55_resolved_write_grant(cfg)
     widenings = _agent_profile_widenings(cfg)
+
+    if scope_grants is not None and not write_tools:
+        # B-943: every scope this could resolve WAS resolved (none opaque), and none
+        # of them grants a write-capable tool -- a real, positive "resolved to
+        # nothing" answer, not the "could not resolve" UNKNOWN below. Named scopes
+        # back the claim instead of a bare "trust me" (see `_fs_scope_grants`'s
+        # docstring for why an all-confined/empty-checked-scopes config deliberately
+        # does NOT take this branch).
+        checked = ", ".join(scope_grants.checked_scopes)
+        return _finding(
+            "B55",
+            PASS,
+            "No filesystem-write tool (write / edit / apply_patch) is granted in "
+            f"any resolvable scope ({checked}), per OpenClaw's own tool-policy "
+            "resolution.",
+            "Keep write-capable tools out of the allowlist unless they are "
+            "required.",
+            evidence=[f"scopes checked, nothing granted: {checked}"],
+        )
 
     if not enumerable:
         return _finding(
@@ -1476,9 +2008,10 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # widening is ALSO in play (B-409 C-135 round 2's confirmed false-FAIL territory —
     # test_b409_c135_exact_repro_no_longer_fails / _multi_token_deny_variant). That
     # round found the true effective grant under a widening carries MORE uncertainty
-    # than the bare global layer alone: seven still-unread narrowing layers (per-agent
-    # allow/deny, channel/group, toolsBySender, byProvider) could remove it for that
-    # agent unseen by this static check, so it stays the "traces to a per-agent
+    # than the bare global layer alone: the channel/group and toolsBySender layers
+    # (still unread) — plus byProvider and subagent/inherited session policy
+    # (permanently unreadable from static config) — could remove it for that agent
+    # unseen by this static check, so it stays the "traces to a per-agent
     # tools.profile" WARN below rather than jumping straight to FAIL. This disjunct is
     # scoped to the BARE GLOBAL case B-736's own repro is ("no agents at all... so no
     # per-agent resolution is involved") — exactly where no such extra layer exists to
@@ -1517,25 +2050,29 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     #    cannot write at all: one whose own `tools.deny` removes the write family, or which
     #    runs `tools.profile: "messaging"` -- an ordinary notifier-bot layout beside a
     #    sandboxed coding agent. No path from untrusted input to an arbitrary write existed.
-    # 2. Answering "can this scope write" inside `toolpolicy` was UNSOUND, and the full suite
-    #    proved it while a scoped run stayed green: that module's profile table and alias
-    #    table are both read-specific, so `fixtures/bad_b55_fs_write_broad` -- whose
-    #    `tools.allow: ["fs_write"]` uses a legacy alias -- resolved to "cannot write" and a
-    #    designed-bad config was DOWNGRADED to WARN. Trading a constructed false FAIL for a
-    #    real suppression is the worse deal, and `confined_scopes` had already documented the
-    #    same trap one tool over (`fs_read`).
+    # 2. Answering "can this scope write" by parametrising the READ stack in `toolpolicy` was
+    #    UNSOUND: its profile and alias tables are read-specific, so
+    #    `fixtures/bad_b55_fs_write_broad` -- `tools.allow: ["fs_write"]`, a legacy alias --
+    #    resolved to "cannot write" and a designed-bad config was DOWNGRADED to WARN.
+    # 3. A token heuristic over each scope's own `tools` block ("could this have removed the
+    #    write family?") was wrong both ways -- it convicted allow:[write] + deny:[write,...]
+    #    and acquitted profile:messaging + alsoAllow:[write] -- because it never resolved the
+    #    grant.
     #
-    # What survives asks only what can be answered soundly here: this check's own vetted
-    # resolver already established that a write tool is granted GLOBALLY, so the open question
-    # is which scopes inherit that grant unchanged AND are unconfined. A scope with no `tools`
-    # key of its own inherits it by the runtime's nullish-coalesce; a scope that sets `tools`
-    # may narrow the write family, and we decline to guess. Conservative in the quiet
-    # direction, but strictly narrower than the global read it replaces -- which missed every
-    # per-agent escape -- and it adds no false positive. The residual gap is F-186's.
+    # F-186: what survives COMPOSES two vendor-validated models instead of guessing.
+    # `toolgrant.granted` resolves the per-scope grant (profile / allow / alsoAllow / deny,
+    # agent replaces global) and `confined_scopes` the per-scope confinement;
+    # `unconfined_write_scopes` is their conjunction, asked with THIS check's own write-tool
+    # list so no third list of names exists. What it still cannot read in a scope's OWN tools
+    # block -- byProvider, toolsBySender -- is treated as possible narrowing (quiet direction).
+    # A per-channel/per-group tools block is NOT: it is not read at all, because it narrows
+    # only the group turns of one provider -- never a DM, never another provider -- so it
+    # cannot be credited to a scope (toolpolicy's "STILL OPEN" note). A config whose group
+    # block really removes write therefore keeps this FAIL: the loud direction, left open.
     fs_confined = _fs_reads_are_confined(cfg)
-    # Which unconfined scopes demonstrably inherit this global grant. Consumed at the FAIL
+    # Which unconfined scopes are demonstrably granted a write tool. Consumed at the FAIL
     # escalation below, NOT here: an empty list must never be read as confinement (see there).
-    inheriting = _toolpolicy.unconfined_scopes_inheriting_global_tools(cfg)
+    write_scopes = _toolpolicy.unconfined_write_scopes(cfg, write_tools)
     # DELIBERATE: _open_channels (open-only), NOT _external_input_channels. This feeds the
     # FAIL gate below; a hard FAIL ("arbitrary writes reachable by untrusted senders")
     # requires proven-broad reach — a wildcard sender or a truly-open/public channel. An
@@ -1592,6 +2129,24 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # all; a declared-but-not-open channel downgrades to WARN even when gated.
     if not open_ch:
         ext_ch = _external_input_channels(cfg)
+        # B-737 (Dave's ruling): a grant that is only OpenClaw's permissive DEFAULT (no
+        # operator policy layer decided it, `provenance` "default" or "mixed") never gets
+        # the gated-and-no-ingress PASS below, even though it would look identical to a
+        # genuinely narrow, operator-declared grant otherwise. A default grant is stricter
+        # than an explicit one BY DESIGN here: an explicit grant reflects a decision this
+        # check can point at, a default one reflects the absence of one.
+        if gated and not ext_ch and scope_grants is not None and scope_grants.default_tools:
+            return _finding(
+                "B55",
+                WARN,
+                f"Filesystem-write tool granted ({label}) by OpenClaw's own permissive "
+                f"default, not by any operator-written tool policy. No ingress channel "
+                f"is declared, and an approval gate (tools.exec.mode) is set, but the "
+                f"grant itself was never decided by config.",
+                "Declare tools.allow (or tools.profile) explicitly so this grant is an "
+                "operator decision, not the platform default.",
+                evidence=[f"write tool granted: {label}"] + _b737_provenance_sentences(scope_grants),
+            )
         if gated and not ext_ch:
             return _finding(
                 "B55",
@@ -1602,6 +2157,13 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 evidence=[f"write tool granted: {label}"],
             )
         if gated and ext_ch:
+            evidence = [
+                f"write tool granted: {label}",
+                f"declared, not-open, untrusted-content channel(s): {', '.join(ext_ch)}",
+                "approval gate present (tools.exec.mode) but not write-specific",
+            ]
+            if scope_grants is not None:
+                evidence += _b737_provenance_sentences(scope_grants)
             return _finding(
                 "B55",
                 WARN,
@@ -1611,11 +2173,7 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 f"gate (tools.exec.mode) — it doesn't scope write-capable tools.",
                 "Lock the channel(s) to 'owner' (or 'disabled'); tools.exec.mode='ask' "
                 "alone does not clear this — it doesn't scope write-capable tools.",
-                evidence=[
-                    f"write tool granted: {label}",
-                    f"declared, not-open, untrusted-content channel(s): {', '.join(ext_ch)}",
-                    "approval gate present (tools.exec.mode) but not write-specific",
-                ],
+                evidence=evidence,
             )
     else:
         ev = [
@@ -1637,6 +2195,8 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 "(tools.fs.workspaceOnly or a fully-sandboxed session, resolved per agent) "
                 "-- not arbitrary write reach"
             )
+            if scope_grants is not None:
+                ev += _b737_provenance_sentences(scope_grants)
             return _finding(
                 "B55",
                 WARN,
@@ -1648,6 +2208,28 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 evidence=ev,
             )
         if not explicit_write_grant:
+            # B-737: a grant this check only knows about via `scope_grants` (the
+            # not-enumerable residual) is, by construction, never an explicit global
+            # write/edit/apply_patch grant and never a per-agent tools.profile widening
+            # (`widenings` is guaranteed empty here -- see the comment where `scope_grants`
+            # is computed above). The two branches below both assume a specific OTHER
+            # mechanism produced the grant (a widening, or tools.alsoAllow's implicit
+            # wildcard); neither is true here, so provenance wording replaces them instead
+            # of running underneath a caption that describes a mechanism that didn't fire.
+            if scope_grants is not None:
+                ev += _b737_provenance_sentences(scope_grants)
+                return _finding(
+                    "B55",
+                    WARN,
+                    f"Filesystem-write capability ({label}) is reachable by untrusted "
+                    f"senders, but the grant was resolved only for the not-enumerable "
+                    f"residual (OpenClaw's own per-scope tool-policy resolution, not this "
+                    f"check's own allow/alsoAllow/profile model), so this stays WARN "
+                    f"pending confirmation of real intent.",
+                    "Declare tools.allow (or tools.profile) explicitly so the intended "
+                    "grant is unambiguous, and lock the open channel(s) to 'allowlist'.",
+                    evidence=ev,
+                )
             if widenings:
                 global_profile = dig(cfg, "tools.profile")
                 widen_desc = (
@@ -1659,9 +2241,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                     f"grant traces to a per-agent tools.profile that {widen_desc}: "
                     + ", ".join(f'{path}="{profile}"' for path, profile in widenings)
                     + " -- not an explicit global write/edit/apply_patch grant, and "
-                    "the seven still-unread narrowing layers (per-agent allow/deny, "
-                    "channel/group, toolsBySender, byProvider) could remove it for "
-                    "this agent unseen by this static check"
+                    "the channel/group, toolsBySender, and byProvider layers this "
+                    "static check still can't read could remove it for this agent "
+                    "unseen here"
                 )
                 return _finding(
                     "B55",
@@ -1693,38 +2275,31 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 "is unambiguous, and lock the open channel(s) to 'allowlist'.",
                 evidence=ev,
             )
-        # The unconfined scopes all narrow their OWN tools, so nothing here demonstrably
-        # carries the global write grant out of the workspace. Deliberately NOT expressed by
-        # making `fs_confined` true: a scope that sets `tools` is not a confined scope, and
-        # saying so would fabricate the confinement B-670 exists to stop fabricating -- an
-        # earlier attempt did exactly that, and claimed full confinement for a config where
-        # NOTHING was confined, because its only agent happened to set `tools`.
-        #
-        # This is the same argument the widening branch above already makes and this check
-        # already accepts: the per-agent allow/deny, channel/group, toolsBySender and
-        # byProvider layers can remove a granted tool for one agent, and none of them is
-        # readable here. Resolving it properly needs a vetted write-grant model (F-186);
-        # until then the honest answer is WARN with the reason on screen, not a FAIL whose
-        # premise this check cannot establish.
+        # No unconfined scope is granted a write tool by its resolved policy, so nothing here
+        # demonstrably carries a write out of the workspace. Deliberately NOT expressed by
+        # making `fs_confined` true: a scope that cannot write is still not a confined scope,
+        # and saying so would fabricate the confinement B-670 exists to stop fabricating.
+        # It stays WARN rather than PASS because the layers `toolgrant` does not resolve
+        # (byProvider, toolsBySender, per-channel tools) could only ever REMOVE a grant, and
+        # this branch is reached on a grant the global resolver already established.
         # The sentence below describes the NARROWING TEST, not `widenings`. An earlier version
         # claimed "none of them widens toward the write family" while asserting it from
         # `_agent_profile_widenings`, which is profile-only and cannot see an allow/alsoAllow
         # widening -- so for `tools: {"allow": ["write"]}` the finding printed a claim the code
         # had never checked, about an override that names the write tool outright.
         #
-        # `not widenings` is load-bearing, and the over-correction it repairs was caught by
-        # test_b409_widening_still_applies_when_global_allow_is_a_wildcard: a scope whose own
-        # `tools` is `{"profile": "coding"}` has not NARROWED anything -- that profile is what
-        # GRANTS the write family. "Sets its own tools" is too coarse a proxy for "might have
-        # taken the grant away"; a detected widening is direct evidence of the opposite.
-        # B-712: when a scope is in `inheriting` ONLY because its confinement could not be
+        # `not widenings` used to gate this branch, because "sets its own tools" was too coarse
+        # a proxy for "might have taken the grant away" and a per-agent `profile: coding`
+        # GRANTS the family. The grant is resolved now, so a widened scope simply appears in
+        # `write_scopes` when it can write and is absent when it cannot -- the proxy is gone.
+        # B-712: when a scope is in `write_scopes` ONLY because its confinement could not be
         # resolved -- `sandbox.mode: "non-main"`, whose answer depends on which session runs
         # -- the FAIL below asserts "no write-specific scoping" and "arbitrary file writes"
         # about ground this check did not read. Keeping the scope is right (declining to
         # prove confinement is not proving it), but the evidence has to say which it is, or
         # the verdict fabricates certainty in the direction opposite to the confident `True`
         # the sandbox predicate used to return. Evidence-only: the verdict is unchanged.
-        _undecided = _toolpolicy.undecided_inheriting_scopes(cfg) or []
+        _undecided = _toolpolicy.undecided_write_scopes(cfg, write_tools) or []
         if _undecided:
             ev.append(
                 f"{len(_undecided)} of the unconfined scope(s) are UNDECIDED rather than "
@@ -1733,13 +2308,12 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 "others are not), so the config does not settle whether the write reach is "
                 "real -- it only fails to rule it out"
             )
-        if inheriting is not None and not inheriting and not widenings:
+        if write_scopes is not None and not write_scopes:
             ev.append(
-                "every unconfined scope narrows its own tool policy in a way that could "
-                "remove write/edit/apply_patch (a tools.profile, a tools.allow naming no "
-                "write tool, a tools.deny naming one, or a byProvider/toolsBySender layer "
-                "this static check cannot resolve), so none is shown to inherit this global "
-                "grant"
+                "no unconfined scope is granted a write tool by its resolved tool policy "
+                "(profile, allow, alsoAllow and deny resolved the way OpenClaw resolves "
+                "them, an agent's own policy narrowing the global one), so none is shown "
+                "to carry a write out of the workspace"
             )
             return _finding(
                 "B55",
@@ -1747,19 +2321,20 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 f"Filesystem-write capability ({label}) is reachable by untrusted senders "
                 f"and not confined to the workspace, but every unconfined scope narrows its "
                 f"own tool policy, so broad write reach is not established.",
-                "Confirm the per-agent tools.* narrowing really removes write/edit/"
-                "apply_patch for those agents, and lock the open channel(s) to 'allowlist'.",
+                "Confirm the per-agent tools.* policy really removes write/edit/"
+                "apply_patch for those agents, and lock the open channel(s) to "
+                "'allowlist'.",
                 evidence=ev,
             )
-        if inheriting:
+        if write_scopes:
             # B-670: name WHICH scopes escaped, positionally (never the raw agent id —
             # see _escaping_scope_label). Evidence-only; the FAIL verdict above is
             # unchanged whether or not this appends.
             total_scopes = len(_toolpolicy.confined_scopes(cfg) or [])
-            labels = [_escaping_scope_label(cfg, name) for name in inheriting]
+            labels = [_escaping_scope_label(cfg, name) for name in write_scopes]
             ev.append(
-                f"{len(inheriting)} of {total_scopes} declared scope(s) are unconfined "
-                f"and inherit the global write grant unchanged: {', '.join(labels)}"
+                f"{len(write_scopes)} of {total_scopes} declared scope(s) are unconfined "
+                f"and granted a write tool: {', '.join(labels)}"
             )
         return _finding(
             "B55",
@@ -1773,6 +2348,12 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             scored=True,
         )
 
+    _bottom_ev = [
+        f"write tool granted: {label}",
+        "no approval gate (tools.exec.mode is not deny/allowlist/ask/auto)",
+    ]
+    if scope_grants is not None:
+        _bottom_ev += _b737_provenance_sentences(scope_grants)
     return _finding(
         "B55",
         WARN,
@@ -1780,10 +2361,7 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
         f"open-ingress channel was found to prove broader reach either way.",
         "Scope it: set tools.exec.mode='ask' (or 'deny'/'allowlist') so write-capable "
         "tools require approval.",
-        evidence=[
-            f"write tool granted: {label}",
-            "no approval gate (tools.exec.mode is not deny/allowlist/ask/auto)",
-        ],
+        evidence=_bottom_ev,
     )
 
 
@@ -2109,6 +2687,82 @@ def check_node_denycommands_ineffective(ctx: Context) -> Finding:
     )
 
 
+def check_node_allowskills_default_on(ctx: Context) -> Finding:
+    """B386 — gateway.nodes.allowSkills default-on paired-node skill push.
+
+    Grounded against the installed 2026.9.5 dist (F-199): the vendor's own field
+    description (schema-*.mjs) reads "Accept skills published by paired nodes while
+    they are connected (default: true). Set false to ignore node-published skills." — a
+    PAIRED node can publish executable skills into this setup while connected, and the
+    gate defaults OPEN. `node-registry-*.mjs`'s own runtime confirms the effective-state
+    rule this check applies: ``node.nodeSkills = cfg?.gateway?.nodes?.allowSkills ===
+    false ? [] : policy.skills`` — only a literal ``false`` closes the gate; an absent
+    key behaves exactly like an explicit ``true``.
+
+    Reads BOTH spellings via ``_node_allow_skills`` (F-199) — ``gateway.nodes
+    .allowSkills`` on OpenClaw 2026.8.1+, ``gateway.nodes.skills.enabled`` before it —
+    the same dual-shape pattern B71 already applies to the sibling ``commands`` setting
+    (B-698), and every user-facing string names the spelling actually found.
+
+    WARN — the effective value is anything other than the literal ``False``: absent
+           (vendor default true), explicit ``true``, or any other non-``False`` value.
+           Same effective-state doctrine B196 applies to ``browser.evaluateEnabled`` —
+           an absent key and an explicit ``true`` are the same runtime exposure, so a
+           no-op deletion of the line cannot move the verdict two grades.
+    PASS — explicitly ``False`` in either shape (the only state that closes the gate).
+    UNKNOWN — openclaw.json not found, or present but unparseable.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B386",
+            UNKNOWN,
+            "No openclaw.json found -- gateway.nodes.allowSkills cannot be assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B386", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    value, path = _node_allow_skills(ctx.config)
+
+    if value is False:
+        return _finding(
+            "B386",
+            PASS,
+            f"{path}=false -- paired gateway nodes may not publish skills into this "
+            "setup.",
+            f"Keep {path}=false unless a specific paired-node workflow needs it.",
+        )
+
+    if value is None:
+        # Nothing found in either shape -- there is no single path to point the fix
+        # at, so (like B71's own UNKNOWN-branch fix text) it names both spellings.
+        spelling = ("gateway.nodes.allowSkills is not set (pre-2026.8.1: "
+                    "gateway.nodes.skills.enabled)")
+        fix = ("Set gateway.nodes.allowSkills=false unless this setup genuinely relies "
+               "on a paired node publishing skills; on OpenClaw builds before 2026.8.1 "
+               "the equivalent key is gateway.nodes.skills.enabled=false.")
+    else:
+        # A value WAS found in one shape -- point only at the spelling this config
+        # actually contains, same precedent as B71's WARN/PASS branches (deny_path).
+        spelling = (f"{path}=true" if value is True
+                    else f"{path} is set to a value that is not the boolean false")
+        fix = (f"Set {path}=false unless this setup genuinely relies on a paired node "
+               "publishing skills.")
+
+    return _finding(
+        "B386",
+        WARN,
+        f"{spelling} -- OpenClaw's own default for this key is true, so a paired "
+        "gateway node may publish skills into this setup the moment it is connected, "
+        "with no operator opt-in. A pushed skill is executable surface reaching the "
+        "same content-security scanning this tool applies to every installed skill's "
+        "content -- pairing a node is not the same act as approving what it publishes.",
+        fix,
+        evidence=[spelling],
+    )
+
+
 # ---------- C5: native binary PATH safety (advisory, POSIX only) ----------
 def check_path_safety(ctx: Context) -> Finding:
     """C5 — Native binary PATH safety.
@@ -2308,15 +2962,21 @@ def check_path_safety(ctx: Context) -> Finding:
 # B351: mirrors OpenClaw's own `normalizeCodeModeRawConfig`
 # (code-mode-D5mNEiYV.js:36-41) rather than approximating it. The boolean shorthand is
 # REAL - `codeMode: true` is a legal config with no `.enabled` key at all - and anything
-# that is neither a boolean nor a record resolves to "absent", which the caller's `or {}`
-# then turns into disabled. Reimplementing this by hand is how a lying-PASS gets written:
-# reading `.enabled` off `True` returns nothing and reports the feature off.
+# that is neither a boolean, the "auto" literal, nor a record resolves to "absent", which
+# the caller's `or {}` then turns into disabled. Reimplementing this by hand is how a
+# lying-PASS gets written: reading `.enabled` off `True` returns nothing and reports the
+# feature off. The "auto" string branch is 2026.9.6+'s own normalisation (the SAME literal
+# already validates on 8.1-9.5, it just is not yet the unset-key DEFAULT there -- see
+# `_code_mode_default`).
 def _b351_raw_code_mode(value):
-    """The vendor's normalisation: bool -> {"enabled": bool}, record -> itself, else None."""
+    """The vendor's normalisation: bool -> {"enabled": bool}, "auto" -> {"enabled": "auto"},
+    record -> itself, else None."""
     if value is True:
         return {"enabled": True}
     if value is False:
         return {"enabled": False}
+    if isinstance(value, str) and value == "auto":
+        return {"enabled": "auto"}
     return value if isinstance(value, dict) else None
 
 
@@ -2326,9 +2986,177 @@ def _b351_enabled(raw: dict) -> bool:
     Only a real boolean counts. A truthy non-bool (`"true"`, `1`) falls back to the
     default, so it does NOT enable code mode - matching the vendor exactly instead of
     guessing, the same discipline B350 applies to gateway.terminal.enabled.
+
+    Kept importable per the aggregator contract (``checks/__init__.py``'s re-export
+    surface) even though production code no longer calls it -- ``_b351_resolve`` reads
+    every scope through ``_b351_read_enabled`` instead, the newer sibling that also
+    recognises "auto" and the version-default sentinel. This helper's own direct tests
+    (``test_the_normaliser_matches_the_vendors_shapes``) are the only remaining caller.
     """
     val = raw.get("enabled")
     return val if isinstance(val, bool) else False
+
+
+def _b351_read_enabled(v):
+    """The vendor's field-level read, extended for the "auto" literal introduced
+    alongside the per-model-key override: only a real boolean or the exact string
+    "auto" counts. Anything else -- including a truthy junk value like "true" or 1,
+    OR OpenClaw's own version-default sentinel arriving unresolved -- resolves to
+    False, the same discipline ``_b351_enabled`` already applies. Callers that need to
+    keep an unresolved version-default sentinel as UNKNOWN (rather than collapsing it
+    to False) must intercept it before calling this -- see ``_b351_resolve``.
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v == "auto":
+        return "auto"
+    return False
+
+
+def _b351_first_set(*vals):
+    """JS `??` (nullish coalescing) semantics, left to right: the first argument that is
+    not ``None`` wins -- INCLUDING a non-``None``-but-invalid value (e.g. ``"yes"``),
+    which must WIN over a later, valid layer and then get read as ``False`` by
+    ``_b351_read_enabled``, exactly matching the vendor (which never re-consults a later
+    ``??`` operand once an earlier one is anything other than `null`/`undefined`).
+    Returns ``None`` only when every argument does.
+    """
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
+# Sentinel: the winning term in `_b351_resolve`'s precedence chain was the reader's
+# OWN version-default marker (`_code_mode_default(ctx) == "unknown"`) rather than
+# anything the config itself sets -- not a vendor value, purely ours, and must never
+# reach `_b351_read_enabled` (which would silently read it as a truthy-junk `False`
+# and manufacture a PASS on a build we cannot place).
+_B351_DEFAULT_UNKNOWN = object()
+
+
+def _b351_default_value(default: str):
+    """``_code_mode_default``'s three answers, translated into a `??`-chain operand:
+    ``"auto"`` and ``"off"`` become the literal values OpenClaw's own resolver would use
+    for an entirely-unset `tools.codeMode`; ``"unknown"`` becomes the sentinel above so
+    the caller can tell "genuinely off" apart from "we don't know"."""
+    if default == "auto":
+        return "auto"
+    if default == "off":
+        return False
+    return _B351_DEFAULT_UNKNOWN
+
+
+def _b351_resolve(global_raw, default, agent_entry: dict, defaults_models: dict, key):
+    """The real vendor precedence, EXECUTED across openclaw@7.1 through 9.6, not merely
+    read off one version's source:
+
+        agent.models[key].codeMode
+          ?? agent.tools.codeMode.enabled
+          ?? defaults.models[key].codeMode
+          ?? global_source
+
+    where ``global_source`` is ``global_raw.get("enabled")`` when ``global_raw`` is not
+    ``None`` (``tools.codeMode`` normalised to a real record), otherwise the reader's own
+    version-default translation of an entirely-unset key (``_b351_default_value``).
+
+    JS `??`, not `||`: an explicit ``false`` at any layer WINS over a later layer's
+    ``true``, ``_b351_first_set`` implements this precisely (only ``None`` is skipped),
+    and a non-``None``-but-invalid value at an earlier layer (e.g. an agent's own
+    ``"yes"``) also wins outright and is then read as ``False`` -- it does NOT fall
+    through to a later, valid layer, exactly like the vendor's own field read never
+    re-consults a later operand once an earlier one resolves to anything.
+
+    ``agent.models`` and ``agents.defaults.models`` are two INDEPENDENT dicts, never
+    merged into one before this chain runs: an agent's own explicit ``false`` for a model
+    key wins over ``defaults.models[K]: true`` for that SAME key, because each is read
+    from its own dict at its own position in the chain, not deep-merged first. This is
+    the THIRD activation layer B351 missed before this fix -- confirmed executable on the
+    installed 2026.9.5 and 2026.9.6 dists.
+
+    *key* is the real, possibly-DOTTED model key (``"gpt-5.6-sol"``) read by plain dict
+    ``.get()`` -- NEVER through ``dig()``, which would misparse the dots as a path
+    separator. *key* is ``None`` for the base (no per-model-override) resolution, in
+    which case both model-keyed terms are ``None`` and the chain degenerates to exactly
+    the existing two-layer ``agent.tools.codeMode.enabled ?? global_source`` read.
+
+    Returns ``True`` / ``False`` / ``"auto"``, or ``_B351_DEFAULT_UNKNOWN`` when the
+    winning term is the reader's own unresolved version-default marker.
+    """
+    agent_models = agent_entry.get("models")
+    agent_models = agent_models if isinstance(agent_models, dict) else {}
+    model_val = None
+    if key is not None:
+        model_entry = agent_models.get(key)
+        if isinstance(model_entry, dict):
+            model_val = model_entry.get("codeMode")
+
+    agent_raw = _b351_raw_code_mode(dig(agent_entry, "tools.codeMode"))
+    agent_enabled_val = agent_raw.get("enabled") if agent_raw is not None else None
+
+    defaults_val = None
+    if key is not None and isinstance(defaults_models, dict):
+        default_entry = defaults_models.get(key)
+        if isinstance(default_entry, dict):
+            defaults_val = default_entry.get("codeMode")
+
+    if global_raw is not None:
+        global_source = global_raw.get("enabled")
+    else:
+        global_source = _b351_default_value(default)
+
+    winner = _b351_first_set(model_val, agent_enabled_val, defaults_val, global_source)
+    if winner is _B351_DEFAULT_UNKNOWN:
+        return _B351_DEFAULT_UNKNOWN
+    return _b351_read_enabled(winner)
+
+
+_B351_VALID_EXECUTORS = ("node", "quickjs")
+
+
+def _b351_executor(global_raw, agent_raw, default) -> str:
+    """Which engine actually runs the guest, given the resolved regime.
+
+    A ``default`` of ``"off"`` (pre-2026.9.6): always ``"quickjs-wasi"``, unconditionally
+    -- the ``executor`` sub-key did not exist in that era's schema at all, so even a
+    config that happens to carry one is not read by that build's own resolver.
+
+    Otherwise (``"auto"``, or an explicit raw ``true``/``"auto"`` regardless of the
+    version default): the agent's own ``executor`` key fully OVERRIDES the global one
+    (object-spread precedence, matching the rest of this module -- it does NOT merge),
+    else the global ``executor`` key, else ``"node"`` -- the confirmed 2026.9.6+ default
+    when the key itself is absent. Only ``"node"``/``"quickjs"`` are recognised; anything
+    else is treated the same as absent.
+
+    A genuinely ``"unknown"`` build/default: the explicit ``executor`` value if the
+    config sets one (a config-authored choice is real evidence independent of which
+    build is installed), else ``"unknown"`` -- it could be either.
+    """
+    if default == "off":
+        return "quickjs-wasi"
+    explicit = None
+    if isinstance(agent_raw, dict) and agent_raw.get("executor") in _B351_VALID_EXECUTORS:
+        explicit = agent_raw.get("executor")
+    elif isinstance(global_raw, dict) and global_raw.get("executor") in _B351_VALID_EXECUTORS:
+        explicit = global_raw.get("executor")
+    if default == "unknown":
+        return explicit if explicit is not None else "unknown"
+    return explicit if explicit is not None else "node"
+
+
+def _b351_classify(val) -> str:
+    """Bucket a ``_b351_resolve`` result for scope aggregation: ``"on"`` / ``"auto"`` /
+    ``"unknown"`` / ``"off"``. ``val`` is always one of ``True``/``False``/``"auto"``/
+    ``_B351_DEFAULT_UNKNOWN`` -- never plain ``None`` -- because ``_b351_resolve`` always
+    routes through ``_b351_read_enabled`` (or the sentinel short-circuit) before
+    returning."""
+    if val is True:
+        return "on"
+    if val == "auto":
+        return "auto"
+    if val is _B351_DEFAULT_UNKNOWN:
+        return "unknown"
+    return "off"
 
 
 # B351: OpenClaw's own agent-id canonicalisation, ported from `normalizeAgentId`
@@ -2391,57 +3219,111 @@ def _b351_resolvable_agents(agents) -> list:
 
 
 def check_code_mode_tool_surface(ctx: Context) -> Finding:
-    """B351 - code mode replaces the model's tool surface with `exec` + `wait`.
+    """B351 (re-grounded) - code mode replaces the model's tool surface with
+    `exec` + `wait`. Was a FALSE PASS from OpenClaw 2026.8.1 onward until this fix: a
+    THIRD activation layer this check never read, on top of the two it already knew
+    about.
 
-    Grounded on the INSTALLED dist (openclaw@2026.7.1-2) and on its RESOLVER, not on the
-    descriptions map. `tools.codeMode` is
-    ``ZodOptional<ZodUnion<[ZodBoolean, ZodObject<{enabled?, runtime?, mode?, ...}>]>>``
-    (plugin-sdk/config-schema.d.ts:3654), with a per-agent twin at
-    ``agents.list[].tools.codeMode`` (:1583). OpenClaw's own description (:331) states
-    that when enabled, "agent runs expose only `exec` and `wait` to the model and hide
-    normal tools behind a QuickJS-WASI catalog bridge".
+    Grounded on `code-mode-*.js`'s own resolver, EXECUTED against real npm tarballs
+    7.1 through 9.6, not read off one version's descriptions map or schema comment.
+    `tools.codeMode` is a union of a boolean, the literal string ``"auto"`` (present in
+    the schema from 2026.8.1, though not yet the unset-key DEFAULT until 9.6 -- see
+    below), and an object (``{enabled?, executor?, ...}``), with the SAME union at three
+    more places: the per-agent twin (`agents.list[].tools.codeMode` /
+    `agents.entries.<id>.tools.codeMode`), and -- the layer that made this check lie for
+    a full release cycle -- a per-EXACT-model-key override at
+    `agents.defaults.models.<key>.codeMode` and the agent's own `models.<key>.codeMode`.
+    OpenClaw's own description (:331) states that when active, "agent runs expose only
+    `exec` and `wait` to the model and hide normal tools behind a catalog bridge".
 
-    WHY THIS IS WORTH A FINDING AT ALL. Code mode is not a hole - the guest runs in
-    QuickJS-WASI and the feature fails closed when the runtime is unavailable (:332). It
-    is reported because it silently changes what every OTHER tool-policy verdict MEANS: a
-    `tools.allow` list, a profile, a deny entry all describe a surface the model no longer
-    sees directly, while `exec` is exposed. An owner reading "tools are restricted to X"
-    should know the model is actually being handed exec-and-wait over a catalog bridge.
+    WHY THIS IS WORTH A FINDING AT ALL. Code mode is not inherently a hole when it runs
+    in the sandboxed QuickJS-WASI bridge, and the feature fails closed when that runtime
+    is unavailable. It is reported because it silently changes what every OTHER
+    tool-policy verdict MEANS: a `tools.allow` list, a profile, a deny entry all describe
+    a surface the model no longer sees directly, while `exec` is exposed. From
+    2026.9.6 onward it is ALSO worth a finding because the DEFAULT executor for that
+    exec surface changed from the sandboxed QuickJS-WASI bridge to unsandboxed
+    `node:vm` (OpenClaw's own docs: "not a security boundary", sharing the Gateway
+    process's OS-level privileges) -- QuickJS-WASI still ships bundled, but now requires
+    explicitly setting `executor: "quickjs"`.
 
-    THE LYING-PASS THIS CLOSES, and why the check must walk agents. The resolver merges
-    per-agent OVER global - ``agentRaw ? {...globalRaw, ...agentRaw} : globalRaw``
-    (code-mode-D5mNEiYV.js:42-49) - so the override works in BOTH directions:
+    THREE BUILD REGIMES, not one hardcoded default -- see `_code_mode_default` in
+    `_shared.py` for the full grounding and measured release series:
 
-      global off + agent `codeMode: true`   -> ON for that agent   <- a global-only read
-                                                                      reports PASS here
-      global on  + agent `codeMode: false`  -> OFF for that agent  <- benign narrowing,
-                                                                      must not fire
-      global on  + agent `{timeoutMs: 100}` -> still ON (the agent object carries no
-                                               `enabled`, so global's survives the spread)
+      pre-2026.7.1        unmeasured; this check answers UNKNOWN for it, never "off".
+      2026.7.1 - 9.5       an entirely-unset `tools.codeMode` resolves OFF. The object
+                           variant and the "auto" literal already validate from 8.1, but
+                           "auto" is not yet the unset-key default.
+      2026.9.6 and later   an entirely-unset `tools.codeMode` resolves to
+                           `{enabled: "auto", executor: "node"}` -- Code Mode
+                           auto-activates for any model whose provider-manifest
+                           `compat.codeMode` field is `"preferred"`, and the guest runs
+                           UNSANDBOXED by default.
 
-    Reading only `tools.codeMode` would therefore report a clean surface while a named
-    agent runs in code mode. Measured against the schema: `agents.defaults` carries no
-    `tools.codeMode`, so there are exactly TWO layers and no third to miss.
+    THE FULL PRECEDENCE CHAIN this check now walks (`_b351_resolve`, JS `??` semantics,
+    EXECUTED against the installed 2026.9.5 and 2026.9.6 dists), for every (agent, model
+    key) pair a session could actually use:
 
-    PASS    - resolved off everywhere: globally, and for every configured agent.
-    WARN    - resolved on globally, or on for at least one named agent (which one is
-              named in the detail).
-    UNKNOWN - the config was not read, or is present and unparseable.
+        agent.models[key].codeMode
+          ?? agent.tools.codeMode.enabled
+          ?? defaults.models[key].codeMode
+          ?? global tools.codeMode.enabled (or the version default, if the key is
+             entirely unset)
 
-    Never FAILs: this is a capability disclosure about a sandboxed, fail-closed vendor
-    feature, not a compromise. A FAIL tier would need its own independent C-135 pass.
+    THE LYING-PASS THIS CLOSES -- confirmed executable on BOTH 9.5 and 9.6:
+    `tools.codeMode: false` globally, with `agents.defaults.models["anthropic/
+    claude-opus-4-8"].codeMode: true`, resolves Code Mode ON for any agent using that
+    model, at every OpenClaw version from 2026.8.1 onward -- and the OLD two-layer
+    check reported this configuration PASS on every one of those releases, because
+    `agents.defaults` carries no `tools.codeMode` and was never read as a source of a
+    per-model override. `agent.models` and `agents.defaults.models` are NEVER merged:
+    an agent's own explicit `false` for a model key wins over `defaults.models[K]:
+    true` for that SAME key, because the vendor checks each independently, in the
+    chain order above -- not as one deep-merged dict.
 
-    WHY THE VERDICT SAYS "QuickJS code mode" AND NOT "code mode". An independent pass
-    found a SECOND, unrelated path to the same user-visible property:
+    JUDGING THE POLICY, NOT THE MODEL TIER (Dave-approved design, matching the
+    established B363/B-833 pattern for a vendor default fork): this check does not try
+    to determine which specific models a running OpenClaw would flag
+    `compat.codeMode: "preferred"` for -- that would require reading ever-changing
+    bundled provider manifests, invisible external provider plugins, and runtime-only
+    signals (a per-run CLI `--code-mode` override, a `/model` switch) that are an
+    open-ended enumeration trap this project's own practice avoids. An `"auto"`
+    resolution is therefore ALWAYS at least a WARN, never silently folded into PASS,
+    regardless of which models the reader's fleet actually runs.
+
+    THE GLOBAL/AGENT DEFAULT ASYMMETRY, worth stating explicitly because it is easy to
+    conflate: an AGENT object missing `enabled` INHERITS whatever the global scope (or,
+    absent that, the version default) resolves to -- it is not its own independent
+    "off". The GLOBAL object being entirely absent, on a pre-9.6 build, means off; on a
+    9.6+ build it means auto. These are the SAME missing-key shape read two different
+    ways depending on WHICH scope is missing it and WHICH build is running -- never
+    conflate "agent inherits" with "global's own default".
+
+    PASS    - resolved off for every scope this config names: globally, for every
+              configured agent, and for every named model key (own or default).
+    WARN    - ANY scope (global, an agent, or a per-model-key override) resolves to
+              `true` or `"auto"` -- an `"auto"` resolution is WARN even when every
+              explicit value in the config is `false`, because it is the reader's own
+              build defaulting the feature on. Names every on/auto scope.
+    UNKNOWN - the config was not read or is unparseable, OR at least one scope leaves
+              `tools.codeMode` entirely unset AND the installed OpenClaw build could not
+              be determined (so the version-forked default cannot be resolved for it) --
+              UNLESS some OTHER scope already resolves to `true`/`"auto"`, in which case
+              that WARN is reported regardless of the unrelated unknown.
+
+    Never FAILs: this is a capability disclosure about a vendor feature that fails
+    closed when its runtime is unavailable, not a compromise by itself. A FAIL tier
+    would need its own independent C-135 pass.
+
+    WHY THE VERDICT NAMES "OpenClaw Code Mode" AND NOT JUST "code mode". An independent
+    pass found a SECOND, unrelated path to the same user-visible property:
     ``plugins.entries.<name>.config.appServer.codeModeOnly`` (config-fy-53tqM.js:122,
     read at :302) flows through to ``"features.code_mode_only": true`` for Codex
     app-server runs (run-attempt-CXZNKJ6y.js:2863 ->
     thread-lifecycle-DSMv62L1.js:2339,2346). That is a DIFFERENT engine - Codex native,
-    not the QuickJS exec/wait bridge - so it is outside ``resolveCodeModeConfig`` and
-    outside this check. Nothing in ``checks/`` reads it today. The honest response is to
-    narrow the CLAIM rather than widen the check on ungrounded ground: an unqualified
-    "code mode is off" is what a reader would believe, and it would be wrong for that
-    config. Widening is a separate change with its own C-135 pass.
+    not this resolver's exec/wait bridge - so it is outside ``resolveCodeModeConfig``
+    and outside this check. Nothing in ``checks/`` reads it today. The honest response
+    is to narrow the CLAIM rather than widen the check on ungrounded ground.
 
     AGENT IDENTITY IS THE VENDOR'S, NOT LIST POSITION. See
     ``_b351_resolvable_agents``: OpenClaw resolves an agent by NORMALISED id and takes
@@ -2450,6 +3332,14 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
     one) are ONE agent, and the later entry is unreachable. Looping raw list entries
     reported an agent the resolver can never produce - a false WARN, found by an
     independent adversarial pass and fixed here.
+
+    WHAT THIS CHECK STILL CANNOT SEE, by design (see the module-level module-map, not
+    reproduced here): a per-run CLI `--code-mode` override; a runtime `/model` switch
+    that moves a session onto a different model key mid-conversation; a run routed
+    through the Codex harness, which never reaches `resolveCodeModeConfig` at all; and
+    an external provider plugin's own `compat.codeMode` manifest flag, which decides
+    whether `"auto"` actually engages for a given model and is not part of this
+    project's grounded schema.
     """
     unreadable = _config_unreadable("B351", ctx)
     if unreadable is not None:
@@ -2465,51 +3355,244 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
-    global_raw = _b351_raw_code_mode(dig(cfg, "tools.codeMode")) or {}
-    global_on = _b351_enabled(global_raw)
+    global_raw = _b351_raw_code_mode(dig(cfg, "tools.codeMode"))
+    default = _code_mode_default(ctx)
+    defaults_models_raw = dig(cfg, "agents.defaults.models")
+    defaults_models = defaults_models_raw if isinstance(defaults_models_raw, dict) else {}
+
+    global_state = _b351_classify(
+        _b351_resolve(global_raw, default, {}, defaults_models, None))
 
     on_agents: list[str] = []
     off_agents: list[str] = []
-    for aid, agent in _b351_resolvable_agents(agent_roster(cfg)):
-        agent_raw = _b351_raw_code_mode(dig(agent.entry, "tools.codeMode"))
-        merged = {**global_raw, **agent_raw} if agent_raw is not None else global_raw
-        label = agent.labelled(aid)
-        (on_agents if _b351_enabled(merged) else off_agents).append(label)
+    auto_agents: list[str] = []
+    unknown_agents: list[str] = []
+    agent_raw_by_label: dict = {}
+    model_on: list[tuple] = []
+    model_auto: list[tuple] = []
+    model_unknown: list[str] = []
 
-    if not global_on and not on_agents:
+    for key in sorted(defaults_models):
+        label = f'agents.defaults.models["{key}"].codeMode'
+        state = _b351_classify(_b351_resolve(global_raw, default, {}, defaults_models, key))
+        if state == "on":
+            model_on.append((label, None))
+        elif state == "auto":
+            model_auto.append((label, None))
+        elif state == "unknown":
+            model_unknown.append(label)
+
+    for aid, agent in _b351_resolvable_agents(agent_roster(cfg)):
+        label = agent.labelled(aid)
+        agent_raw = _b351_raw_code_mode(dig(agent.entry, "tools.codeMode"))
+        agent_raw_by_label[label] = agent_raw
+        state = _b351_classify(
+            _b351_resolve(global_raw, default, agent.entry, defaults_models, None))
+        {"on": on_agents, "off": off_agents,
+         "auto": auto_agents, "unknown": unknown_agents}[state].append(label)
+
+        own_models = agent.entry.get("models")
+        own_models = own_models if isinstance(own_models, dict) else {}
+        for key in sorted(set(own_models) | set(defaults_models)):
+            mlabel = f'{label}.models["{key}"].codeMode'
+            mstate = _b351_classify(
+                _b351_resolve(global_raw, default, agent.entry, defaults_models, key))
+            if mstate == "on":
+                model_on.append((mlabel, agent_raw))
+            elif mstate == "auto":
+                model_auto.append((mlabel, agent_raw))
+            elif mstate == "unknown":
+                model_unknown.append(mlabel)
+
+    has_on = global_state == "on" or bool(on_agents) or bool(model_on)
+    has_auto = global_state == "auto" or bool(auto_agents) or bool(model_auto)
+    has_unknown = global_state == "unknown" or bool(unknown_agents) or bool(model_unknown)
+
+    if has_on or has_auto:
+        if global_state in ("on", "auto"):
+            who = "for every agent" if not off_agents else (
+                f"globally, and narrowed off for {', '.join(sorted(off_agents)[:4])}"
+            )
+            state_word = "auto-activated" if global_state == "auto" else "on"
+            lead = f"tools.codeMode is {state_word} {who}."
+        elif on_agents or auto_agents:
+            combined = sorted(on_agents + auto_agents)[:4]
+            verb = "ON" if on_agents else "auto-activated"
+            global_word = "off" if global_state == "off" else "unset (build unknown)"
+            lead = (f"tools.codeMode is {global_word} globally but {verb} for "
+                    f"{', '.join(combined)}.")
+        else:
+            combined_model = model_on + model_auto
+            verb = "true" if model_on else "auto"
+            labels_text = ', '.join(sorted(m[0] for m in combined_model)[:4])
+            lead = ("No global or per-agent tools.codeMode is on, but a per-model "
+                    f"codeMode override resolves {verb} for {labels_text}.")
+
+        base_drove_lead = global_state in ("on", "auto") or on_agents or auto_agents
+        extra_sentence = ""
+        if base_drove_lead and (model_on or model_auto):
+            extra_labels = sorted({m[0] for m in model_on} | {m[0] for m in model_auto})[:4]
+            extra_verb = "true" if model_on else "auto"
+            extra_sentence = (
+                f" A per-model codeMode override also resolves {extra_verb} for "
+                f"{', '.join(extra_labels)}."
+            )
+
+        auto_note = ""
+        if has_auto:
+            auto_note = (
+                " This is the 2026.9.6+ automatic-activation default: it engages for "
+                "any model whose provider catalog marks it "
+                "compat.codeMode=\"preferred\"."
+            )
+
+        # THE EXECUTOR CLAIM MUST BE TRUE FOR EVERY NAMED SCOPE, NOT JUST ONE. Mixing is
+        # real: the 2026.9.6+ `executor` key is read per-scope (agent's own key fully
+        # overrides global's, never merged), so one agent can run the sandboxed bridge
+        # while a sibling with no explicit key runs the unsandboxed 9.6+ default. A
+        # single "representative" executor picked from one scope and applied to the
+        # whole sentence would state a false fact about every OTHER named scope -- so
+        # every on/auto scope gets its OWN executor resolved here, and the text only
+        # ever picks the single-executor phrasing below when they all genuinely agree.
+        executor_scopes: list[tuple] = []
+        if global_state in ("on", "auto"):
+            executor_scopes.append(("tools.codeMode", None))
+        for scope_label in on_agents + auto_agents:
+            executor_scopes.append((scope_label, agent_raw_by_label.get(scope_label)))
+        executor_scopes.extend(model_on)
+        executor_scopes.extend(model_auto)
+
+        executors_by_scope = {
+            scope_label: _b351_executor(global_raw, scope_agent_raw, default)
+            for scope_label, scope_agent_raw in executor_scopes
+        }
+        distinct_executors = set(executors_by_scope.values())
+
+        if len(distinct_executors) <= 1:
+            executor = next(iter(distinct_executors), "unknown")
+            if executor == "quickjs-wasi":
+                trailing = (
+                    "Those agent runs expose only `exec` and `wait` to the model and hide "
+                    "the normal tools behind a QuickJS-WASI catalog bridge, so any tools.allow / "
+                    "tools.profile / tools.deny policy describes a surface the model does not see "
+                    "directly."
+                )
+            elif executor == "node":
+                trailing = (
+                    "Those agent runs expose only `exec` and `wait` to the model, and the "
+                    "guest code runs in OpenClaw's default Node executor (`node:vm`, in a "
+                    "Gateway worker thread) rather than the sandboxed QuickJS-WASI bridge -- "
+                    "OpenClaw's own documentation states this is not a security boundary and "
+                    "shares the Gateway process's OS-level privileges, so any tools.allow / "
+                    "tools.profile / tools.deny policy describes a surface the model does "
+                    "not see directly."
+                )
+            elif executor == "quickjs":
+                trailing = (
+                    "Those agent runs expose only `exec` and `wait` to the model and hide "
+                    "the normal tools behind the bundled, sandboxed QuickJS-WASI catalog "
+                    "bridge (executor explicitly set to \"quickjs\"), so any tools.allow / "
+                    "tools.profile / tools.deny policy describes a surface the model does "
+                    "not see directly."
+                )
+            else:
+                trailing = (
+                    "Those agent runs expose only `exec` and `wait` to the model. Which "
+                    "executor runs the guest code could not be determined: releases before "
+                    "2026.9.6 sandbox it in QuickJS-WASI, 2026.9.6 and later run it in the "
+                    "unsandboxed Node executor (`node:vm`, sharing the Gateway process's "
+                    "OS-level privileges) unless tools.codeMode.executor is explicitly "
+                    "\"quickjs\" -- so any tools.allow / tools.profile / tools.deny policy "
+                    "describes a surface the model does not see directly."
+                )
+        else:
+            def _named(labels: list) -> str:
+                shown = labels[:4]
+                text = ', '.join(shown)
+                rest = len(labels) - len(shown)
+                return f"{text}, and {rest} more" if rest > 0 else text
+
+            node_scopes = sorted(lbl for lbl, e in executors_by_scope.items() if e == "node")
+            safe_scopes = sorted(
+                lbl for lbl, e in executors_by_scope.items()
+                if e in ("quickjs", "quickjs-wasi"))
+            unresolved_scopes = sorted(
+                lbl for lbl, e in executors_by_scope.items() if e == "unknown")
+
+            clauses = []
+            if node_scopes:
+                clauses.append(
+                    f"{_named(node_scopes)} run in OpenClaw's unsandboxed Node executor "
+                    "(`node:vm`, sharing the Gateway process's OS-level privileges -- "
+                    "OpenClaw's own documentation states this is not a security boundary)"
+                )
+            if safe_scopes:
+                clauses.append(
+                    f"{_named(safe_scopes)} run in the sandboxed QuickJS-WASI catalog bridge"
+                )
+            if unresolved_scopes:
+                clauses.append(
+                    f"which executor runs {_named(unresolved_scopes)} could not be determined"
+                )
+            trailing = (
+                "Those agent runs expose only `exec` and `wait` to the model, and they do "
+                "NOT all use the same executor: " + "; ".join(clauses) + ". Any "
+                "tools.allow / tools.profile / tools.deny policy describes a surface the "
+                "model does not see directly for any of them."
+            )
+
+        detail = f"{lead}{extra_sentence}{auto_note} {trailing}"
+        evidence = sorted(
+            set(on_agents) | set(auto_agents)
+            | {m[0] for m in model_on} | {m[0] for m in model_auto}
+            | ({"tools.codeMode"} if global_state in ("on", "auto") else set())
+        )
         return _finding(
             "B351",
-            PASS,
-            "QuickJS code mode is off, so the model sees the ordinary tool surface "
-            "rather than exec/wait over a catalog bridge.",
-            "Keep it off unless you specifically want the exec/wait surface; it is off "
-            "by default.",
+            WARN,
+            detail,
+            "If code mode is intentional, read the tool-policy findings in this report "
+            "as describing the CATALOG rather than what the model is handed, and "
+            "confirm the exec surface is governed by tools.exec.*. If it is not "
+            "intentional, set tools.codeMode.enabled to false (also check each "
+            f"per-agent entry under {_key_advice(ctx, 'agents.list', 'agents.entries')}, "
+            "and each per-model-key override under agents.defaults.models.<key>."
+            "codeMode / the agent's own models.<key>.codeMode -- any of these can turn "
+            "it back on independently of the global setting). This audit cannot see a "
+            "per-run CLI --code-mode override, a runtime /model switch, a run routed "
+            "through the Codex harness (a separate engine this check does not read), or "
+            "an external provider plugin's own compat.codeMode manifest flag.",
+            evidence=evidence[:8] or None,
         )
 
-    if global_on:
-        who = "for every agent" if not off_agents else (
-            f"globally, and narrowed off for {', '.join(sorted(off_agents)[:4])}"
+    if has_unknown:
+        return _finding(
+            "B351",
+            UNKNOWN,
+            "tools.codeMode is unset for at least one scope this config names (global, "
+            "an agent, or a per-model override) and the installed OpenClaw build could "
+            "not be determined, so whether Code Mode is active there could not be "
+            "established: releases up to 2026.9.5 leave it off when unset, 2026.9.6 and "
+            "later default it to automatic activation (\"auto\") for certain models.",
+            "Set tools.codeMode.enabled to false explicitly (safe on every build), or "
+            "run the audit where the installed openclaw can be found so the build is "
+            "known. This audit also cannot see a per-run CLI --code-mode override, a "
+            "runtime /model switch, a run routed through the Codex harness (a separate "
+            "engine this check does not read), or an external provider plugin's own "
+            "compat.codeMode manifest flag.",
         )
-        where = f"tools.codeMode is on {who}"
-    else:
-        where = (
-            "tools.codeMode is off globally but ON for "
-            f"{', '.join(sorted(on_agents)[:4])}"
-        )
+
     return _finding(
         "B351",
-        WARN,
-        f"{where}. Those agent runs expose only `exec` and `wait` to the model and hide "
-        "the normal tools behind a QuickJS-WASI catalog bridge, so any tools.allow / "
-        "tools.profile / tools.deny policy describes a surface the model does not see "
-        "directly.",
-        "If code mode is intentional, read the tool-policy findings in this report as "
-        "describing the CATALOG rather than what the model is handed, and confirm the "
-        "exec surface is governed by tools.exec.*. If it is not intentional, set "
-        "tools.codeMode.enabled to false (and check each per-agent entry under "
-        f"{_key_advice(ctx, 'agents.list', 'agents.entries')}, which can "
-        "turn it back on independently of the global setting).",
-        evidence=sorted(on_agents)[:8] or None,
+        PASS,
+        "OpenClaw Code Mode (tools.codeMode) is off for every agent and model this "
+        "config names, so the model sees the ordinary tool surface rather than "
+        "exec/wait over a catalog bridge.",
+        "Keep it off unless you specifically want the exec/wait surface. It is off by "
+        "default before OpenClaw 2026.9.6; 2026.9.6 and later default it to automatic "
+        "activation (\"auto\") for certain models, so an explicit "
+        "tools.codeMode.enabled=false is the only way to guarantee it stays off on "
+        "every build.",
     )
 
 

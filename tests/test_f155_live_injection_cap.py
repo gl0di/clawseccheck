@@ -178,7 +178,7 @@ class TestReportRendering:
             "(capped from 79 - a live injection-test scenario reported VULNERABLE "
             "(redteam:PI-01))"
         ) in out
-        assert "Live-test exception (F-155): this run's grade WAS capped" in out
+        assert "Live-test exception (LIVE-TEST-CAP): this run's grade WAS capped" in out
         assert "redteam:PI-01" in out
 
     def test_html_no_new_text_when_not_capped(self):
@@ -378,8 +378,8 @@ class TestCliEndToEnd:
         # WAS capped" framing is reworded rather than suppressed (C-423): the fact
         # that a VULNERABLE verdict was submitted is stated whether or not a grade
         # was issued.
-        assert "Live-test exception (F-155)" not in out
-        assert "Live-test result (F-155): a submitted VULNERABLE verdict" in out
+        assert "Live-test exception (LIVE-TEST-CAP)" not in out
+        assert "Live-test result (LIVE-TEST-CAP): a submitted VULNERABLE verdict" in out
         # B-600 follow-up: see the sibling note in test_f154_behavioral_cap.py. The
         # paragraph above keeps its framing; the cap sentence is now said once, by the
         # cascade line, with rank. The pinned invariant -- an ungraded run still states
@@ -646,7 +646,7 @@ class TestTrendMonitorReachC135:
 
     def test_home_safe_baseline_is_uncapped_and_grades_a(self, capsys):
         # Sanity anchor: without a live-test bundle, home_safe's own default score
-        # really is 97/A -- so the 49/F assertions below are a genuine cap, not two
+        # really is 98/A -- so the 49/F assertions below are a genuine cap, not two
         # coincidentally-equal runs.
         #
         # --no-sockets (B-374, C-135 round 2, 2026-07-31): without it, this read the
@@ -656,22 +656,28 @@ class TestTrendMonitorReachC135:
         # home_safe's declared gateway.bind (127.0.0.1:8080) port number, but that
         # UNKNOWN-vs-FAIL split still depends on whatever happens to be listening on
         # this host, so the exact uncapped score is only deterministic with sockets
-        # scanning disabled. The actual VALUE has moved twice now (79 -> 98 -> 97);
-        # the test's own point -- this is a real, non-49 baseline -- is unaffected.
-        # Deliberately not naming the number in the test's own NAME any more (it had
-        # already gone stale once) -- the assertion below is the single source of
-        # truth for the current value.
+        # scanning disabled. The actual VALUE has moved three times now
+        # (79 -> 98 -> 97 -> 98); the test's own point -- this is a real, non-49
+        # baseline -- is unaffected. Deliberately not naming the number in the
+        # test's own NAME any more (it had already gone stale once) -- the
+        # assertion below is the single source of truth for the current value.
         #
-        # 2026-09-16: 98 -> 97 under 6c11585 -- `_has_approval_gate` no longer lets
+        # 2026-09-16: 98 -> 97 under 6c11585 -- `_has_approval_gate` stopped letting
         # `tools.exec.mode: "ask"` gate home_safe's separate `tools.elevated.allowFrom`
-        # grant, so B8 ("Human approval on destructive actions") correctly reads WARN
-        # instead of PASS: the fixture sets an exec-scoped gate but has no elevated-
-        # scoped one, and elevated is where the destructive-tool grant actually lives.
-        # Deliberate, not a regression -- the fixture genuinely is un-gated on that axis.
+        # grant, so B8 ("Human approval on destructive actions") read WARN instead of
+        # PASS, on the premise that elevated is a non-exec grant tools.exec.* has no
+        # bearing on.
+        #
+        # B-848: 97 -> 98, back to the original value. That premise was wrong: the
+        # installed OpenClaw dist (2026.9.5) gates an elevated "full" request's own
+        # approval bypass behind the SAME tools.exec.mode/security/ask fields
+        # (`bash-tools-BBKNLrRH.mjs:4085,4090`), so `tools.exec.mode: "ask"` DOES
+        # force human approval on it. home_safe's exec-scoped gate genuinely covers
+        # its elevated grant, and B8 correctly reads PASS again.
         #
         # C-425: this CLI run is itself ungraded (no --attest/--judged-bundle -- two
         # of five layers never ran), so --json's own score/grade are None here --
-        # asserted below. The 97/A anchor is taken from a plain library `audit()`
+        # asserted below. The 98/A anchor is taken from a plain library `audit()`
         # call over the SAME fixture/flags: `audit()` never builds a ledger, so it
         # scores exactly as `compute()` always has (C-422's "ledger=None means
         # graded" rule) -- the identical severity-weighted verdict this CLI run's own
@@ -684,7 +690,7 @@ class TestTrendMonitorReachC135:
         assert payload["grade"] is None
 
         _, _, graded_reference = audit(SAFE, include_native=False, include_sockets=False)
-        assert graded_reference.score == 97
+        assert graded_reference.score == 98
         assert graded_reference.grade == "A"
 
     def test_json_reference_is_capped_49_f(self, tmp_path, capsys):
@@ -891,9 +897,10 @@ class TestTrendMonitorReachC135:
                {k: v for k, v in rows2[0].items() if k != "ts"}
 
         # ...and RESISTANT genuinely did not cap the underlying verdict either.
+        # B-848: 97 -> 98, see test_home_safe_baseline_is_uncapped_and_grades_a.
         ctx, findings, uncapped = audit(SAFE, include_native=False, include_sockets=False)
         assert uncapped.graded is True
-        assert uncapped.score == 97
+        assert uncapped.score == 98
         assert uncapped.grade == "A"
 
 

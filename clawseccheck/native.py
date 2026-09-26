@@ -106,7 +106,7 @@ def _to_finding(d: dict) -> Finding:
     detail = _pick(d, "message", "description", "detail", "why", "summary")
     fix = _pick(d, "remediation", "fix", "recommendation", "suggestion", "advice",
                 default="See the OpenClaw security docs for remediation.")
-    fid = str(_pick(d, "id", "check", "rule", default="native"))[:24]
+    fid = str(_pick(d, "id", "checkId", "check", "rule", default="native"))[:24]
     return Finding(f"N:{fid}", str(title), sev, FAIL, str(detail), str(fix),
                    "OpenClaw built-in audit", scored=False)
 

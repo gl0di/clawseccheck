@@ -355,9 +355,16 @@ class TestFsWorkspaceOnly:
 
     def test_unenumerable_grants_are_unknown(self):
         # No allowlist and no profile -> grants come from runtime defaults static config
-        # cannot resolve. UNKNOWN, never a fabricated PASS (GR#4).
+        # cannot resolve BY G1 (`_b68_fs_tools_granted`) alone. Never a fabricated PASS
+        # (GR#4).
+        #
+        # CLAWSECCHECK-B-737: this now falls through to `_fs_scope_grants`, which resolves
+        # the same "no tools policy declared anywhere" shape via `toolgrant.
+        # resolved_scopes` as a `provenance="default"` grant (OpenClaw's own permissive
+        # default), so it is WARN rather than UNKNOWN -- UNKNOWN would now be the fake-
+        # ignorance verdict, not the honest one.
         f = check_exec_applypatch_workspace(_ctx({"gateway": {"bind": "127.0.0.1:8080"}}))
-        assert f.status == UNKNOWN
+        assert f.status == WARN, f.detail
 
     def test_applypatch_sibling_still_warns(self):
         # The pre-B-283 behavior must not regress.

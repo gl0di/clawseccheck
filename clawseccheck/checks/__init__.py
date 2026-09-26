@@ -136,6 +136,8 @@ from ._shared import (
     _real_exec_enabled,
     _resolve_sandbox_scope,
     _safe_mtime,
+    _sandbox_browser_binds,
+    _sandbox_browser_enabled,
     _sandbox_docker_binds,
     _sandbox_has_writable_bind,
     SECRET_KEY_RE,
@@ -178,7 +180,8 @@ from ._host import (
 )
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_tool_texts, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
-from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions, _node_commands,)
+from ._shared import (_RETIRED_CONFIG_KEYS, _retired_keys_present,)
+from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions, _node_commands, _node_allow_skills,)
 from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
 # B-297: the wildcard-group ingress predicate — risk.py's ingress leg reaches it only
 # through this aggregator (CLAUDE.md §3.1-a), never by importing a topic module.
@@ -195,6 +198,7 @@ from ._egress import (
     check_browser_executable_path,
     check_browser_existing_session_profile,
     check_browser_cdp_control_port,
+    check_browser_extension_relay_legacy_auth,
     _cdp_url_classify,
     _cdp_url_display,
     _cdp_allow_origins_findings,
@@ -206,6 +210,8 @@ from ._egress import (
     check_provider_baseurl,
     check_otel_content_capture_egress,
     check_memory_search_remote_egress,
+    check_secrets_egress_proxy,
+    check_attachments_ttl,
     check_cachetrace_redaction,
     check_config_audit_log,
     check_config_health_integrity,
@@ -213,6 +219,9 @@ from ._egress import (
     check_state_db_atrest,
     check_debug_proxy_capture,
     _other_can_reach_write,
+    _b188_collect_state_copies,
+    _b188_collect_backups,
+    _b188_dir_traversable_by_other,
     check_discovery_mdns_mode,
     check_egress,
     check_egress_inventory,
@@ -221,6 +230,12 @@ from ._egress import (
     check_webfetch_redirects,
 )
 
+from ._shared import (  # B-879
+    ProseBinding,
+    _neg_events,
+    _neg_scan,
+    _prose_binding,
+)
 from ._shared import (_trifecta_legs, _trifecta_leg_sources,)  # B-493
 from ._shared import (  # C-462
     _FS_GOVERNED_TOOL_IDS,
@@ -239,16 +254,20 @@ from ._shared import (  # B-666
 )
 from ._shared import (_unpolicied_open_wildcard_group_channels,)  # B-371
 from ._agents import (
+    _ACTIONS_ALLOW_UNDETERMINED,
     _B21_OBEY_RE,
     _B21_SAFE_STANCE_RE,
     _B21_SOURCE_RE,
     _B30_HISTORY_KEY,
     _B30_NAME_MATCH_KEY,
     _DELEGATION_TIER,
+    _MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS,
     _WEB_FETCH_SKILL_HINTS,
     _b21_has_trust_boundary,
     _disk_subagent_disclosure,
     _has_subagents,
+    _message_actions_allow_for_scope,
+    _message_actions_guarded_reachable,
     _reassembly,
     check_embedded_agent_project_settings_policy,
     check_agent_separation,
@@ -278,6 +297,14 @@ from ._capability import (
     _b351_resolvable_agents,
     _b351_enabled,
     _b351_raw_code_mode,
+    _b351_read_enabled,
+    _b351_first_set,
+    _b351_resolve,
+    _b351_executor,
+    _b351_classify,
+    _b351_default_value,
+    _B351_DEFAULT_UNKNOWN,
+    _B351_VALID_EXECUTORS,
     check_code_mode_tool_surface,
     _AUTO_GATE_BLAST,
     _B31_BYPASS_CANDIDATES,
@@ -289,8 +316,13 @@ from ._capability import (
     _agent_profile_widenings,
     _approval_bypass_actors,
     _b31_collect_deny_lists,
+    _b55_resolved_write_grant,
     _b55_write_tools_granted,
     _b68_fs_tools_granted,
+    _b737_provenance,
+    _b737_provenance_sentences,
+    _FsScopeGrants,
+    _fs_scope_grants,
     _has_heartbeat_signal,
     _tool_policy_view,
     check_attestation_mismatch,
@@ -301,6 +333,7 @@ from ._capability import (
     check_exec_applypatch_workspace,
     check_exec_strict_inline_eval,
     check_fs_write_exposure,
+    check_node_allowskills_default_on,
     check_node_denycommands_ineffective,
     check_path_safety,
     _b378_normalize_path_for_compare,
@@ -336,6 +369,8 @@ from ._config import (
     _is_native_unconditional_critical_check_id,
     _ENV6_TOGGLES,
     _b323_is_literal_path_override,
+    _b397_direct_reach,
+    _b397_ingress_domain_ok,
     check_env_vars_path_override,
     check_audit_target_divergence,
     check_audit_suppressions,
@@ -348,10 +383,15 @@ from ._config import (
     check_controlui_origins,
     check_credential_blast_radius,
     check_config_externally_managed,
+    check_retired_config_keys_invalid,
     check_dangerous_overrides,
+    check_desktop_host_exposure,
+    check_desktop_host_password_file,
     check_effective_bind,
     check_gateway,
+    check_gateway_computer_plugin_reach,
     check_gateway_operator_terminal,
+    check_gateway_portal_reach,
     check_gateway_rate_limit,
     check_gateway_remote_ssh_host_key_policy,
     check_hook_template_content,
@@ -360,12 +400,14 @@ from ._config import (
     check_least_privilege,
     check_local_first,
     check_local_model_service_command,
+    check_nodehost_workerruns_isolation,
     check_privileged_commands_exposure,
     check_proxy_header_forging,
     check_redactor_blind_secret_paths,
     check_sandbox,
     check_secrets,
     check_secrets_at_rest_home,
+    check_telemetry_enabled,
     check_tls,
     check_trifecta,
     check_trustedproxy_loopback,
@@ -374,11 +416,16 @@ from ._config import (
 from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
 from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_contains_env_var_reference,)  # B-397: relocated from _config (reused by B326 too)
 from ._shared import (_SYMLINK_KNOB_RETIRED_MIN, _workshop_symlink_knob,)  # B-783
+from ._shared import (_CROSS_CONTEXT_DEFAULT_ALLOW_MIN, _CROSS_CONTEXT_DENY_MEASURED_MIN, _cross_context_default,)  # B-833
+from ._shared import (_CODE_MODE_AUTO_DEFAULT_MIN, _CODE_MODE_OFF_MEASURED_MIN, _code_mode_default,)  # B351 re-grounded
+from ._shared import (_PORTALS_ABSENT_MEASURED_MIN, _PORTALS_GROUNDED_MIN, _portal_model_version,)  # B397
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
     _B182_ENV_OVERRIDES,
     _B184_CODELOAD_ENV_VARS,
     _B184_REGISTRY_ENV_VARS,
+    _B396_MAX_LEGACY_STORE_BYTES,
+    _B396_MODEL_MIN,
     _CRITICAL_BOOTSTRAP,
     _FLOATING_REF_RE,
     _HOOK_POLICY_FIX_VERSION,
@@ -398,6 +445,16 @@ from ._lifecycle import (
     _b182_candidate_stores,
     _b182_readable_by_others,
     _b184_is_canonical,
+    _b396_admission_state,
+    _b396_approved_state,
+    _b396_build_modelled,
+    _b396_js_truthy,
+    _b396_legacy_record_valid,
+    _b396_node_candidate,
+    _b396_read_legacy_store,
+    _b396_role_list,
+    _b396_safe_int,
+    _b396_surface_state,
     _iter_entries,
     _parse_version,
     _writable_identity_files,
@@ -431,6 +488,7 @@ from ._lifecycle import (
     check_memory_reconsumption_injection,
     check_offboarding_hygiene,
     check_paired_device_operator_authority,
+    check_paired_node_skill_coverage,
     check_pending_device_pairing_scope,
     check_restart_handoff_stale,
     check_self_modification,
@@ -589,6 +647,7 @@ from ._content import (
     _XFILE_LITERAL_CAP,
     _XFILE_STRING_LITERAL_RE,
     _XFILE_WINDOW_MAX_FRAGS,
+    _ambiguous_example_suppression,
     _b102_leading_run,
     _b102_trailing_run,
     _b58_base64_variants,
@@ -629,6 +688,7 @@ from ._content import (
     _defensive_section,
     _dep_names_in_skill,
     _enumerate_symlinks,
+    _example_governance,
     _fence_is_annotated,
     _fence_ranges,
     _fm_metadata_obj,
@@ -663,6 +723,7 @@ from ._content import (
     _verb_class_matches,
     _whole_text_is_defensive,
     check_agent_snooping,
+    check_artifact_read_unproven,
     check_capability_intent_mismatch,
     check_chunked_file_assembly_exec,
     check_clickfix_setup_section,
@@ -700,6 +761,7 @@ from ._content import (
     check_pth_persistence,
     check_python_runtime_persist_install,
     check_prose_bulk_exfil,
+    check_prose_host_fingerprint_exfil,
     check_remote_code_dependency,
     check_self_erase_directive,
     check_self_modification_directive,
@@ -769,6 +831,7 @@ from ._vet import (
     _in_example_context,
     _local_sink_exfil_hits,
     _locate_plugin_root,
+    _locate_plugin_root_or_reason,
     _parse_source_target,
     _powershell_encoded_payloads,
     _run_content_ring,
@@ -776,13 +839,25 @@ from ._vet import (
     _runtime_fetch_matches,
     _skill_own_host,
     _skill_tool_overgrant,
+    _stat_or_reason,
     _url_matches_own_host,
+    check_installed_skill_content_coverage,
     check_installed_skills,
     detect_vet_type,
     detect_vet_type_with_reason,
     resolve_skill_target,
     vet_skill,
     vet_source,
+)
+
+from ._vet import (  # B-879
+    _AUTHKEY_KEY_TOKEN_RE,
+    _authkey_block_intent,
+    _authkey_key_blob_ok,
+    _authkey_persistence_hits,
+    _authkey_unfenced_intent_span,
+    _literal_key_functional,
+    _pos_in_skill_md_section,
 )
 
 from ._mcp import (
@@ -859,8 +934,18 @@ from ._mcp import (
     _b333_hinted_tool_names,
     _b333_modern_surface_verdict,
     _b333_waived_tool_names,
+    _CODEX_APPSERVER_RUNTIME_CAVEAT,
+    _CODEX_EXEC_UNRESOLVED,
+    _codex_appserver_posture,
+    _codex_appserver_yolo_reach,
+    _codex_effective_exec_modes,
+    _codex_exec_approvals_floor,
+    _codex_exec_mode_from_policy,
+    _codex_exec_policy_layer,
+    _codex_unmoded_server_names,
     _mcp_codex_annotations,
     _mcp_codex_approval_mode,
+    _mcp_codex_explicit_mode,
     _mcp_codex_is_loopback_server,
     _mcp_codex_normalize_mode,
     _mcp_codex_requires_approval,
@@ -868,6 +953,8 @@ from ._mcp import (
     _mcp_normalize_tool_filter,
     _mcp_tool_allowed,
     _mcp_tool_filter_matches,
+    _memory_default_owner_blocked,
+    _plugin_activation_blocked,
     _b333_surface_verdict,
     _host_sanitize_simulated,
     _load_mcp_spec_file,
@@ -1337,6 +1424,7 @@ CHECKS = [
     check_gateway,
     check_least_privilege,
     check_sandbox,
+    check_nodehost_workerruns_isolation,  # B391 (F-198) — beside B4, advisory
     check_supply_chain,
     check_bootstrap_injection,
     check_identity_file_injection,
@@ -1347,6 +1435,7 @@ CHECKS = [
     check_tls,
     check_local_first,
     check_installed_skills,
+    check_installed_skill_content_coverage,  # B395 — per-skill coverage gap, scored independently of B13
     check_egress,
     check_egress_inventory,
     check_mcp,
@@ -1395,6 +1484,22 @@ CHECKS = [
     # memory chunk to a configured third-party endpoint (global + per-agent scope).
     check_otel_content_capture_egress,
     check_memory_search_remote_egress,
+    # B387 (F-196) — secrets.egressProxy (new in OpenClaw 2026.8.1, re-grounded on
+    # 2026.9.5): WARN when the proxy is enabled with no allowedHosts, since OpenClaw's
+    # own docs say omitting it (not an empty array — that is lockdown) leaves
+    # non-sentinel proxy traffic unrestricted. Never FAIL: both allowedHosts and
+    # bypassHosts already reject a wildcard at config-load time (EgressProxyExactHostSchema
+    # / normalizeExactAllowedHost), so there is no FAIL-worthy wildcard shape to catch.
+    check_secrets_egress_proxy,
+    # B390 (F-201) -- attachments.ttlHours (straight rename of pre-8.1 media.ttlHours):
+    # WARN when unset, since OpenClaw's own runtime sweep gate
+    # (`params.ttlHours !== void 0 && ...`) never runs the expiry check at all without
+    # it, so staged incoming media (screenshots, voice notes, forwarded files)
+    # accumulates on disk indefinitely. PASS on any set number. Never FAIL: a
+    # data-hygiene gap, not a proven compromise. See the check's own docstring for the
+    # full grounding against the installed 2026.9.5 dist (the internal recon's own
+    # descriptions map omits the `attachments` namespace).
+    check_attachments_ttl,
     check_session_visibility,
     # B361-B364 (C-411) — remote-ingress / multi-user session hardening: unrestricted
     # cross-agent session-tool access reachable from an open channel; session.scope
@@ -1416,6 +1521,7 @@ CHECKS = [
     check_wildcard_group_ingress,
     check_known_vulns,
     check_credential_blast_radius,
+    check_retired_config_keys_invalid,  # B382 — retired config key the installed build rejects (F-184)
     check_config_externally_managed,  # B373 — OPENCLAW_CONFIG_READONLY / Nix mode (C-527)
     check_effective_tools,
     check_host_network_ids,
@@ -1463,6 +1569,7 @@ CHECKS = [
     check_exec_strict_inline_eval,
     check_trustedproxy_loopback,
     check_node_denycommands_ineffective,
+    check_node_allowskills_default_on,  # B386 — paired-node skill push default-on (F-199)
     check_subagents_allow_agents,
     check_discovery_mdns_mode,
     check_mcp_tool_inheritance,
@@ -1472,9 +1579,29 @@ CHECKS = [
     check_session_approval_policy,
     check_gateway_rate_limit,
     check_effective_bind,  # B340 — corroborate declared gateway.bind against the actual listening socket (F-156)
+    # B384/B385 (F-197): desktop.host is a second network listener beside the gateway
+    # (a VNC/RFB service, default port 5900) plus its passwordFile credential — both
+    # completely unread before this. B384 corroborates the always-loopback design
+    # assumption against the actual listening socket (sockets.py, same spirit as
+    # B340); B385 checks the password file's at-rest permissions (same idiom as
+    # B182/B193).
+    check_desktop_host_exposure,
+    check_desktop_host_password_file,
     # B350 — the gateway operator terminal: a PTY-backed shell carrying the gateway
     # process environment, served to Control UI and mobile clients. WARN-only.
     check_gateway_operator_terminal,
+    # B389 — the Gateway's own unmanaged-desktop `computer`
+    # control route (computer.invoke/computer.status), which bypasses
+    # gateway.nodes.commands.deny and has no per-action confirmation. WARN-only,
+    # unscored advisory; requires both the plugin's explicit opt-in and an agent
+    # scope granted `computer` while unsandboxed.
+    check_gateway_computer_plugin_reach,
+    # B397 — agent-opened Gateway portals (gateway.portals, the `portal` tool) are
+    # gated only by a per-portal bearer token in the URL, never by gateway.auth,
+    # trusted-proxy identity or any access layer in front of the Gateway, across all
+    # three transports (ingress / Tailscale Serve / direct). WARN-only, unscored
+    # advisory; requires an agent scope granted `portal` while unsandboxed.
+    check_gateway_portal_reach,
     # B351 — code mode: the model is handed exec+wait over a catalog bridge instead of
     # the ordinary tool surface. Walks agents.list, which can enable it independently.
     check_code_mode_tool_surface,
@@ -1519,6 +1646,7 @@ CHECKS = [
     check_codex_project_trust,  # B136 — Codex CLI project trust_level="trusted"
     check_pending_device_pairing_scope,  # B138 — dangling high-scope pending device pairing
     check_paired_device_operator_authority,  # B176 — standing operator authority in devices/paired.json (B-243)
+    check_paired_node_skill_coverage,  # B396 — paired-node skills outside the skill content scan (coverage disclosure)
     check_systemd_persistence,  # B150 — systemd user-unit Restart=always persistence
     check_host_scheduled_persistence,  # B379 — systemd timer / system cron naming OpenClaw, outside C048's scope (F-178)
     check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
@@ -1546,6 +1674,7 @@ CHECKS = [
     check_browser_executable_path,  # B321 — browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs (E-060 item 4, B-653)
     check_browser_existing_session_profile,  # B322 — browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session" (E-060 item 5)
     check_browser_cdp_control_port,  # B330 — unauthenticated CDP control port: off-host cdpUrl / --remote-allow-origins (C-298)
+    check_browser_extension_relay_legacy_auth,  # B383 — browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default (F-195)
     check_marketplace_feed_provenance,  # B325 — marketplaces.feeds non-canonical registry (E-060 item 8)
     check_exec_safe_bin_trusted_dirs,  # B328 — tools.exec.safeBinTrustedDirs writable-dir promotion (E-060 item 11)
     # B191 (F-134, DISK-1) is DELIBERATELY NOT REGISTERED HERE. It is cataloged in
@@ -1565,6 +1694,7 @@ CHECKS = [
     # belongs to the full audit only, the same reasoning B105 records for itself.
     check_compiled_tool_poisoning,  # B185 — poisoned tool description already delivered to the model (F-133, RT-1)
     check_cloudworkers_prepared_pool,  # B374 — cloudWorkers 9.4 prepared-pool default-on warm reserve (C-526)
+    check_telemetry_enabled,  # B393 (F-202) — telemetry.enabled disclosure, INFO-only (never FAIL/WARN)
 ]
 
 

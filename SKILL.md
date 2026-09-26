@@ -1,7 +1,7 @@
 ---
 name: clawseccheck
-version: 4.2.1
-description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Reports the most urgent holes, and grades your setup A–F when all five check layers ran — short of that it names the missing layers instead of printing a number. It is built to be run again, not once: --monitor records a local baseline and every later run alerts on what changed — a new MCP server, a new or edited skill, config drift, a finding that appeared or cleared. Nothing here ever changes your OpenClaw config, a skill, or a bootstrap file: only two opt-in flags write inside your OpenClaw setup at all — --apply-ignore-proposals (confirmation-gated; appends only suppressions you approved to .clawseccheckignore) and a no-PATH --pdf (auto-resolves inside your OpenClaw home when its own attachment directory exists). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A–F security score, watch your OpenClaw setup for changes, or ask what changed since the last check.
+version: 4.3.0
+description: Free, local, read-only security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, logs, agent session logs, and installed skills, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Grades your setup A–F when all five check layers ran, naming what's missing otherwise. --monitor records a local baseline so every later run alerts on what changed — a new MCP server, an edited skill, config drift, a finding that appeared or cleared. No API key, no network calls; the only external command it runs is your own read-only openclaw security audit (skip with --no-native). Only two opt-in flags write anything: --apply-ignore-proposals and --pdf. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A–F security score, watch your OpenClaw setup for changes, or ask what changed since the last check.
 license: MIT
 metadata: {"openclaw":{"emoji":"🦞","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Reports the most urgent holes, and grades your setup A–F when all five check layers ran — short of that it names the missing layers instead of printing a number. It is built to be run again, not once: --monitor records a local baseline and every later run alerts on what changed — a new MCP server, a new or edited skill, config drift, a finding that appeared or cleared. Nothing here ever changes your OpenClaw config, a skill, or a bootstrap file: only two opt-in flags write inside your OpenClaw setup at all — --apply-ignore-proposals (confirmation-gated; appends only suppressions you approved to .clawseccheckignore) and a no-PATH --pdf (auto-resolves inside your OpenClaw home when its own attachment directory exists). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A–F security score, watch your OpenClaw setup for changes, or ask what changed since the last check."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
 ---
@@ -298,14 +298,34 @@ makes a successful injection against it worthless.
    every verdict in the file rejected outright (C-135: this closes a confirmed gap
    where two different targets sharing a bare name — two fixtures, or two bundled
    plugin skills — could otherwise have one's verdicts silently escalate the other).
-2. Feed the collected verdicts back with `--vet TARGET --vet-judged verdicts.json`
+2. **Mandatory, with graceful fallback** — the same posture as the audit panel's
+   step 5 above, not weaker: run this panel every time a `--vet`/`--vet-skill`/
+   `--vet-plugin` target is vetted, including a target swept inside item 1's full
+   check, never only when the user separately asks for one. If subagents are
+   unavailable, fall back to reasoning through all 3 lenses yourself in one inline
+   turn per item, with the same SECURITY rule as the guard — never claim a panel
+   ran when it did not, and never claim 3 distinct subagents ran when you reasoned
+   through it inline instead.
+3. Build the verdicts JSON from the collected per-item majority votes, same shape
+   as the audit panel above: submit an optional `votes` breakdown (e.g. `{"SAFE":
+   1, "SUSPICIOUS": 0, "DANGEROUS": 2}`) alongside the reduced `verdict` for EVERY
+   item you answer, **including the three fixed `ATTEST-PROSE-*` questions** below
+   — a disclosed panel split changes the escalated/attested finding's `detail`
+   text (`docs/OUTPUT_SCHEMA.md` §15/§16), never its status or the vet grade.
+   **Never fabricate a `votes` breakdown.** When step 2's inline fallback ran
+   instead of 3 subagents, omit `votes` entirely rather than inventing one — a
+   missing `votes` field reads as "no breakdown submitted," never as a fabricated
+   unanimous vote, and claiming a fallback's single reasoning pass was a 3-lens
+   panel would violate this same step's own "never claim a panel ran when it did
+   not" rule.
+4. Feed the collected verdicts back with `--vet TARGET --vet-judged verdicts.json`
    (same target flags, `-` for stdin) to render the combined vet output.
-3. A `SAFE` verdict changes nothing — the vet verdict/grade stay byte-identical to a
+5. A `SAFE` verdict changes nothing — the vet verdict/grade stay byte-identical to a
    plain `--vet` run. A `SUSPICIOUS`/`DANGEROUS` verdict can raise a finding's status
    (never lower it), which the escalated finding's `detail` field discloses
    (`"[escalated by host-agent judge: ...]"`) so the reader can always tell a judge,
    not the deterministic engine, raised it.
-4. Present this as a distinct **"Judge-escalated"** panel finding, same
+6. Present this as a distinct **"Judge-escalated"** panel finding, same
    advisory-but-separate framing as the audit-path second opinion.
 
 **Pre-install prose attestation (C-255).** The SAME `--vet-judge-packet` output
@@ -359,6 +379,14 @@ independent signal behind them — a pure self-report — so even a `DANGEROUS`
 verdict here only ever produces a `WARN`, never a capping `FAIL`. A compromised
 or hallucinating judge cannot single-handedly fail an install on prose-reading
 alone.
+
+**Repeatability is the judge's property, not this tool's (B-406).** ClawSecCheck's
+own code guarantees that byte-identical input to its own funnel produces
+byte-identical output every time — it cannot guarantee that two SEPARATE runs of
+this panel over byte-identical skill prose return the same verdict, because that
+verdict comes from you, the host-agent judge, not from any deterministic check.
+Each attested finding's `fix` field says this plainly, in one sentence, so the
+limit travels with the finding rather than living only in this doc.
 
 ---
 
@@ -461,7 +489,18 @@ After the user chooses (or says "check" / "go"), proceed to Step 2.
 
 ### Step 2 — Run the audit
 
-**Stop rule — checked FIRST, before anything else in this step.** If a run this session
+**Suspected-sandbox rule — checked FIRST, before the stop rule below, and before anything
+else in this step.** Suspecting you cannot see the host's real OpenClaw setup is not the same
+as a run having told you so — only a run is evidence. If no run this session has yet reported
+on OpenClaw visibility, run the bare default audit ONCE anyway (`python3 {baseDir}/audit.py`,
+no other flags) even if you suspect sandboxing — it is read-only, exits 0, and costs one
+command. Its own output tells you and the user whether the session is sandboxed, in wording
+you must relay verbatim; never write your own paraphrase of it. Never assert sandboxing from
+priors — only a run's own output may state it. Do not invent your own command line either;
+`--version` / `--menu` above are the one prescribed invocation, not a template to add untested
+flags to. Once that run has reported, the stop rule below governs everything after.
+
+**Stop rule — checked next, before proceeding further in this step.** If a run this session
 already reported no OpenClaw config found, or reported that this session is sandboxed
 and cannot see the host's real OpenClaw setup: STOP here. Do not proceed to the
 capability self-report, the judge panel, `--attest`, or any live test below — there is
@@ -734,6 +773,9 @@ It emits, in this fixed order (F-153):
   wording adapts to whether this run earned a grade. Paste it with the rest of the card.
   Under `--compact` it condenses to a one-line pointer (`run --next for the ranked list`) —
   the compact card exists to fit a message-capped channel and has no room for the full block.
+  If this audit was pointed at a non-default `--home` and/or `--data-dir`, the commands that
+  actually read or write that state carry the same flags, so running one verbatim targets the
+  setup this audit just looked at, not `~/.openclaw`/`~/.clawseccheck`.
 
 Skills/Plugins/MCP/RISK Chains are each independently **omitted** only when there is
 genuinely nothing to show (no skills/plugins/MCP servers installed, no RISK chain

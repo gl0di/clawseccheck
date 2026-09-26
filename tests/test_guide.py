@@ -5,6 +5,7 @@ All tests are offline and deterministic. Uses real audit() on fixtures
 """
 from __future__ import annotations
 
+import shlex
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -372,3 +373,126 @@ class TestRenderNextActions:
         out = render_next_actions(actions)
         # safe fixture may still have warn findings -> header present; or all clear
         assert "What you can do next:" in out or "No further action suggested" in out
+
+
+# ---------------------------------------------------------------------------
+# B-873: every emitted command that reads/writes state carries --home/--data-dir
+# when they differ from the tool's own defaults -- see each Action's own comment
+# in guide.py for which flag(s), if any, it needs.
+# ---------------------------------------------------------------------------
+
+class TestStateFlagsB873:
+    """Table-driven over every `Action` kind, the way the bug's own DoD asks for.
+
+    `_WANTS` is the single source of truth for which flag(s) each id needs once BOTH
+    home and data_dir are non-default -- a new id with no entry here fails the trigger-
+    set assertion in `_all_actions` rather than silently going unchecked.
+    """
+
+    _WANTS = {
+        "vet_skills": (False, False),      # exempt: <skill-folder> is its own target
+        "setup_monitoring": (True, True),
+        "live_test": (False, True),
+        "review_mcp": (True, True),
+        "track_trend": (False, True),
+        "share_grade": (True, True),
+    }
+
+    def _all_actions(self, *, home, data_dir):
+        """Hand-built findings that trip every trigger at once (same idiom
+        test_b566_next_sees_skill_surface_fails.py uses) -- independent of whether a
+        real fixture happens to still trip every rule."""
+        score = ScoreResult(score=40, grade="F", capped=False,
+                            raw_score=40, failed_critical=1, failed_high=1)
+        findings = [
+            Finding(id="B13", title="t", severity="HIGH", status=FAIL,
+                    detail="", fix="", framework="f"),
+            Finding(id="B16", title="t", severity="HIGH", status=FAIL,
+                    detail="", fix="", framework="f"),
+            Finding(id="B17", title="t", severity="HIGH", status=WARN,
+                    detail="", fix="", framework="f"),
+            Finding(id="B15", title="t", severity="MEDIUM", status=UNKNOWN,
+                    detail="", fix="", framework="f"),
+        ]
+        actions = suggest_actions(findings, score, home=home, data_dir=data_dir)
+        assert {a.id for a in actions} == set(self._WANTS), (
+            "trigger set drifted from _WANTS -- update the table alongside it")
+        return {a.id: a.command for a in actions}
+
+    def test_unresolved_home_and_data_dir_add_no_flags(self):
+        """`None` (every pre-B-873 caller) must read as 'unknown', not 'differs' --
+        must fail before this fix existed (there was no `home=`/`data_dir=` param at
+        all), and must stay this way for any caller that still omits them."""
+        commands = self._all_actions(home=None, data_dir=None)
+        for cid, command in commands.items():
+            assert "--home" not in command, (cid, command)
+            assert "--data-dir" not in command, (cid, command)
+
+    def test_explicit_default_strings_add_no_flags(self):
+        """Passing the tool's own defaults explicitly must be byte-identical to not
+        passing them at all -- a run that happens to type the default path verbatim
+        must not see its output change."""
+        commands = self._all_actions(home="~/.openclaw", data_dir="~/.clawseccheck")
+        for cid, command in commands.items():
+            assert "--home" not in command, (cid, command)
+            assert "--data-dir" not in command, (cid, command)
+
+    def test_non_default_appends_exactly_the_flags_each_action_needs(self):
+        """The DoD's core assertion: a non-default --home/--data-dir must reach every
+        command whose own comment in guide.py says it needs it, and must NEVER reach
+        one marked exempt. Must fail on pre-B-873 code, where no command ever carried
+        either flag regardless of what was audited."""
+        commands = self._all_actions(home="fixtures/home_vuln", data_dir="/tmp/b873-dd")
+        for cid, (wants_home, wants_data_dir) in self._WANTS.items():
+            command = commands[cid]
+            if wants_home:
+                assert "--home fixtures/home_vuln" in command, (cid, command)
+            else:
+                assert "--home" not in command, (cid, command)
+            if wants_data_dir:
+                assert "--data-dir /tmp/b873-dd" in command, (cid, command)
+            else:
+                assert "--data-dir" not in command, (cid, command)
+
+    def test_only_home_non_default_adds_only_home(self):
+        commands = self._all_actions(home="fixtures/home_vuln", data_dir=None)
+        assert "--home fixtures/home_vuln" in commands["setup_monitoring"]
+        assert "--data-dir" not in commands["setup_monitoring"]
+        # live_test/track_trend never want --home at all, non-default or not.
+        assert "--home" not in commands["live_test"]
+        assert "--home" not in commands["track_trend"]
+
+    def test_only_data_dir_non_default_adds_only_data_dir(self):
+        commands = self._all_actions(home=None, data_dir="/tmp/b873-dd")
+        assert "--data-dir /tmp/b873-dd" in commands["track_trend"]
+        assert "--home" not in commands["track_trend"]
+        assert "--data-dir /tmp/b873-dd" in commands["setup_monitoring"]
+        assert "--home" not in commands["setup_monitoring"]
+
+    def test_paths_with_spaces_round_trip_through_shlex(self):
+        """The DoD's "shell-quote a path containing spaces so the printed line is
+        runnable as written" — verified by actually re-tokenizing the printed command,
+        not by matching one particular quoting style."""
+        home = "/home/dave/my openclaw"
+        data_dir = "/tmp/b 873"
+        commands = self._all_actions(home=home, data_dir=data_dir)
+        tokens = shlex.split(commands["setup_monitoring"])
+        assert tokens[tokens.index("--home") + 1] == home
+        assert tokens[tokens.index("--data-dir") + 1] == data_dir
+
+    def test_tilde_relative_paths_round_trip_through_shlex(self):
+        """A `~/...` value must still expand under the shell after quoting -- quoting
+        the tilde itself (a bare `shlex.quote`) would turn it into a literal directory
+        named `~` instead. `shlex.split` doesn't expand `~`, so the round-tripped token
+        is compared as the literal (unexpanded) string, same as the input."""
+        home = "~/my openclaw with spaces"
+        commands = self._all_actions(home=home, data_dir=None)
+        tokens = shlex.split(commands["setup_monitoring"])
+        assert tokens[tokens.index("--home") + 1] == home
+
+    def test_vet_skills_stays_a_placeholder_never_a_real_path(self):
+        """Exempt, explicitly (DoD: 'listed explicitly as exempt, not silently
+        skipped') -- vetting the caller-supplied skill folder does not depend on which
+        --home/--data-dir this run used."""
+        commands = self._all_actions(home="fixtures/home_vuln", data_dir="/tmp/b873-dd")
+        assert commands["vet_skills"].endswith("--vet <skill-folder>")

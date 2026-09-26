@@ -113,6 +113,32 @@ def test_b09_redact_off_severity_is_low_catalog_wide():
 
 # ---- B-128: end-to-end clean fixture via the real collector/audit path ----
 
+def _modern_ctx(cfg: dict) -> Context:
+    c = _ctx(cfg)
+    c.installed_dist_version = "2026.9.5"
+    return c
+
+
+# ---- CLAWSECCHECK-B-836: redactPatterns REPLACES defaults on console/openclaw-logs,
+# ---- UNIONS only on tool-payload/transcript paths -- the modern-PASS fix used to claim
+# ---- a custom list "cannot disable the built-in redaction" everywhere.
+def test_b09_modern_absent_pass_fix_describes_pattern_replace_not_union():
+    f = check_leak(_modern_ctx({}))
+    assert f.status == PASS
+    fix = f.fix.lower()
+    assert "replace" in fix
+    assert "cannot disable the built-in redaction" not in fix
+
+
+def test_b09_modern_absent_pass_detail_is_unchanged():
+    # detail is fingerprinted (baseline.fingerprint()); B-836 must only touch fix/docstring.
+    f = check_leak(_modern_ctx({}))
+    assert f.detail == (
+        "Sensitive redaction is unconditional on this OpenClaw build — the logging "
+        "block has no setting that turns it off."
+    )
+
+
 def test_b09_clean_fixture_redact_not_pinned_end_to_end():
     """clean_b9_redact_not_pinned: no logging.redactSensitive key at all — confirms the
     reworded, secure-by-default rationale and the LOW severity through the real

@@ -137,7 +137,9 @@ _BIDI_MARK_SRC = (
 #                  U+FE0F), the two presentation selectors that are
 #                  legitimate and PERVASIVE in ordinary emoji-using text (see
 #                  the Tier 2 comment inside obfuscation_signals). FE00-FE0D
-#                  have no comparable everyday use.
+#                  have no comparable everyday use (FE00-FE06 do have
+#                  standardized base characters, just far rarer -- see
+#                  _has_dense_vs_supplement_channel).
 #   U+E0100-E01EF: Variation Selectors Supplement -- a 240-symbol invisible
 #                  alphabet (~8 bits/code point) dense enough to carry a real
 #                  payload, published and in live use (a real skill encodes
@@ -241,6 +243,16 @@ _INVISIBLE_TOKEN_RE = re.compile(
 #   Cyrillic small а U+0430, е U+0435, о U+043E, р U+0440, с U+0441,
 #   х U+0445, ѕ U+0455, і U+0456 (Ukrainian/Belarusian і)
 #   Greek letters: ο (omicron) U+03BF, α U+03B1
+#
+# B-887: capitals ADDED for every lowercase entry above whose case-fold is itself
+# a Latin lookalike. NOT added: lowercase у→y -- not needed here, and it would
+# re-fold every Russian evidence snippet containing у (fixtures / users'
+# .clawseccheckignore), an unannounced change out of scope for this fix (4.3.1).
+# See I1 below for why the table must stay closed under case, and `fold_pattern`
+# further down for capital-only lookalikes (lowercase not itself a confusable,
+# e.g. Cyrillic К/к) -- those need PATTERN-side closure, not a table entry here
+# (a table entry would re-fold real lowercase Cyrillic/Greek prose the same way
+# lowercase у→y would; see `_ML_OVERRIDE_TABLE_NORM` in checks/_content.py).
 # ---------------------------------------------------------------------------
 _CONFUSABLES: dict[int, str] = {
     # Cyrillic confusables
@@ -252,10 +264,97 @@ _CONFUSABLES: dict[int, str] = {
     0x0445: "x",   # Cyrillic small х → ASCII x
     0x0455: "s",   # Cyrillic small ѕ → ASCII s
     0x0456: "i",   # Cyrillic/Ukrainian і → ASCII i
+    # Cyrillic capitals (B-887) -- Ѕ/І are the upper-case of a lowercase entry
+    # already above; the rest (А/В/Е/К/М/Н/О/Р/С/Т/У/Х/Ј) have no lowercase table
+    # entry of their own -- see _PATTERN_CASE_CLOSURE below for how patterns still
+    # match THEIR lowercase lookalikes (в/к/м/н/т/у/ј) under case.
+    0x0410: "A",   # Cyrillic capital А → ASCII A
+    0x0412: "B",   # Cyrillic capital В → ASCII B
+    0x0415: "E",   # Cyrillic capital Е → ASCII E
+    0x041A: "K",   # Cyrillic capital К → ASCII K
+    0x041C: "M",   # Cyrillic capital М → ASCII M
+    0x041D: "H",   # Cyrillic capital Н → ASCII H
+    0x041E: "O",   # Cyrillic capital О → ASCII O
+    0x0420: "P",   # Cyrillic capital Р → ASCII P
+    0x0421: "C",   # Cyrillic capital С → ASCII C
+    0x0422: "T",   # Cyrillic capital Т → ASCII T
+    0x0423: "Y",   # Cyrillic capital У → ASCII Y
+    0x0425: "X",   # Cyrillic capital Х → ASCII X
+    0x0405: "S",   # Cyrillic capital Ѕ → ASCII S
+    0x0406: "I",   # Cyrillic capital І (Ukrainian/Belarusian) → ASCII I
+    0x0408: "J",   # Cyrillic capital Ј (Je, Serbian/Macedonian) → ASCII J
     # Greek confusables
     0x03B1: "a",   # Greek small α → ASCII a
     0x03BF: "o",   # Greek small ο (omicron) → ASCII o
+    # Greek capitals (B-887)
+    0x0391: "A",   # Greek capital Α (Alpha) → ASCII A
+    0x0392: "B",   # Greek capital Β (Beta) → ASCII B
+    0x0395: "E",   # Greek capital Ε (Epsilon) → ASCII E
+    0x0396: "Z",   # Greek capital Ζ (Zeta) → ASCII Z
+    0x0397: "H",   # Greek capital Η (Eta) → ASCII H
+    0x0399: "I",   # Greek capital Ι (Iota) → ASCII I
+    0x039A: "K",   # Greek capital Κ (Kappa) → ASCII K
+    0x039C: "M",   # Greek capital Μ (Mu) → ASCII M
+    0x039D: "N",   # Greek capital Ν (Nu) → ASCII N
+    0x039F: "O",   # Greek capital Ο (Omicron) → ASCII O
+    0x03A1: "P",   # Greek capital Ρ (Rho) → ASCII P
+    0x03A4: "T",   # Greek capital Τ (Tau) → ASCII T
+    0x03A5: "Y",   # Greek capital Υ (Upsilon) → ASCII Y
+    0x03A7: "X",   # Greek capital Χ (Chi) → ASCII X
 }
+
+# ---------------------------------------------------------------------------
+# I1 (B-887): upper-closure invariant, next to the Hebrew guard below. A regex
+# compiled from this table under re.I (`fold_pattern`) can only trust T(x) and
+# T(upper(x)) to be re.I-equivalent if the table is closed under case: every
+# lowercase key whose upper() is also a key must map case-equivalently, and
+# vice versa. This is exactly the invariant B-887's three prior rounds each
+# broke (capitals on one script only, or via a second, independently-
+# normalised haystack). Capital-only entries with no lowercase counterpart
+# (e.g. Cyrillic К) can't be checked here -- see _PATTERN_CASE_CLOSURE below.
+# ---------------------------------------------------------------------------
+for _cp, _latin in _CONFUSABLES.items():
+    _ch = chr(_cp)
+    if _ch.islower() and len(_ch.upper()) == 1 and _ch.upper() != _ch:
+        _up_cp = ord(_ch.upper())
+        if _up_cp in _CONFUSABLES:
+            assert _CONFUSABLES[_up_cp] == _latin.upper(), (
+                f"textnorm._CONFUSABLES case-closure broken: "
+                f"{_ch!r} -> {_latin!r} but {_ch.upper()!r} -> "
+                f"{_CONFUSABLES[_up_cp]!r} (expected {_latin.upper()!r})"
+            )
+    if _ch.isupper() and len(_ch.lower()) == 1 and _ch.lower() != _ch:
+        _lo_cp = ord(_ch.lower())
+        if _lo_cp in _CONFUSABLES:
+            assert _CONFUSABLES[_lo_cp] == _latin.lower(), (
+                f"textnorm._CONFUSABLES case-closure broken: "
+                f"{_ch!r} -> {_latin!r} but {_ch.lower()!r} -> "
+                f"{_CONFUSABLES[_lo_cp]!r} (expected {_latin.lower()!r})"
+            )
+del _cp, _latin, _ch
+
+# ---------------------------------------------------------------------------
+# I2 (B-887): DERIVED pattern-side case-closure map, not a hand-maintained
+# vocabulary. Keyed by the LOWERCASE Cyrillic/Greek letter itself (not ASCII) --
+# for every table entry whose key is a capital with no lowercase counterpart in
+# the table (adding one here would re-fold genuine lowercase prose -- see
+# above), record that capital's OWN lowercase glyph -> its ASCII fold target.
+# `fold_pattern` uses this to widen a literal Cyrillic/Greek letter already
+# sitting in a PATTERN's own Russian/Greek alternative (e.g. "тайно"'s literal
+# т) so it also matches whatever that letter folds to when text capitalizes it
+# (a sentence-initial "Тайно" folds its capital Т straight to ASCII "T", which
+# the pattern's un-folded lowercase т cannot re.I-match on its own). E.g. only
+# capital К is a table key, lowercase к is not, so this yields {"к": "k"}:
+# wherever pattern source has literal Cyrillic "к", also match ASCII "k"/"K".
+# ---------------------------------------------------------------------------
+_PATTERN_CASE_CLOSURE: dict[str, str] = {
+    chr(_cp).lower(): _latin.lower()
+    for _cp, _latin in _CONFUSABLES.items()
+    if chr(_cp).isupper()
+    and len(chr(_cp).lower()) == 1
+    and ord(chr(_cp).lower()) not in _CONFUSABLES
+}
+
 # Build a str.translate table from the dict.
 _CONFUSABLES_TABLE = str.maketrans(_CONFUSABLES)
 
@@ -706,8 +805,54 @@ _VS_SUPPLEMENT_RE = re.compile("[" + _VS_SUPPLEMENT_CLASS_SRC + "]")
 # number, a second application of one this project already trusted.
 _VS_SUPPLEMENT_SIGNAL_MIN_COUNT = 32
 
+# B-859: an Ideographic Variation Sequence (IVS) is Unicode's OWN mechanism for
+# selecting a glyph variant of the ideograph immediately before it. UTS #37
+# section 2 defines one as exactly two code points: a base "with the Ideographic
+# property that is not canonically nor compatibly decomposable", then a selector
+# in U+E0100-E01EF. Japanese personal and place names are a real use (a family
+# name printed with one specific stroke variant). Reproduced (B-859): a benign
+# list of 48 IVS-tagged kanji names tripped the raw count gate below at WARN
+# (B58) and reached CRITICAL FAIL through B349's install-time path.
+#
+# The base test is Unicode's Unified_Ideograph set, taken from the UCD that
+# ships with the running Python rather than a hand-typed block table: every
+# assigned "CJK UNIFIED IDEOGRAPH-XXXX" plus the twelve code points in the CJK
+# Compatibility Ideographs BLOCK that are nonetheless unified ideographs (they
+# carry Unified_Ideograph=Yes and no decomposition, unlike their neighbours).
+# Verified on Python 3.12 (UCD 15.0.0): this set is 97,058 code points, the same
+# count Perl's Unicode::UCD 15.0 `prop_invlist("Unified_Ideograph")` returns.
+# It is deliberately NARROWER than what UTS #37 allows as a base:
+#   * the ~1,000 CJK compatibility ideographs (U+F900-FAFF minus the twelve,
+#     U+2F800-2FA1F) are excluded, correctly -- each is canonically
+#     decomposable, so UTS #37 rules it out as a base;
+#   * unassigned code points inside the CJK blocks (category Cn, e.g. U+2A6E0,
+#     U+2EBE5) have no name and are excluded -- nothing can be a base yet;
+#   * other Ideographic, non-decomposable scripts (Tangut, Nushu, Khitan Small
+#     Script, U+3006/U+3007 and the Hangzhou numerals) are excluded by choice.
+#     Excusing fewer selectors only ever counts more of them, so the cost of
+#     that choice is a WARN on dense IVS text in those scripts, never a
+#     missed payload.
+# Python-version edge: a unified ideograph added to Unicode after the running
+# interpreter's UCD (Python 3.9 ships UCD 13.0.0) has no name there and is not
+# excused -- again the counting-more direction.
+_UNIFIED_IDEOGRAPHS_IN_COMPAT_BLOCK = frozenset({
+    0xFA0E, 0xFA0F, 0xFA11, 0xFA13, 0xFA14, 0xFA1F,
+    0xFA21, 0xFA23, 0xFA24, 0xFA27, 0xFA28, 0xFA29,
+})
+_IVS_SELECTOR_LO = 0xE0100
+_IVS_SELECTOR_HI = 0xE01EF
 
-def _has_dense_vs_supplement_channel(text: str) -> bool:
+
+def _is_ivs_base(ch: str) -> bool:
+    """True when *ch* is a unified ideograph -- the base an Ideographic Variation
+    Sequence is built on (see the comment above for the exact set and why it is
+    narrower than UTS #37 allows)."""
+    if ord(ch) in _UNIFIED_IDEOGRAPHS_IN_COMPAT_BLOCK:
+        return True
+    return unicodedata.name(ch, "").startswith("CJK UNIFIED IDEOGRAPH-")
+
+
+def _has_dense_vs_supplement_channel(text: str, *, excuse_ivs: bool = True) -> bool:
     """True when *text* carries enough Variation-Selector-Supplement-class
     characters (see `_VS_SUPPLEMENT_CLASS_SRC`) to look like a deliberate
     invisible-alphabet channel rather than one or two incidental occurrences
@@ -727,17 +872,85 @@ def _has_dense_vs_supplement_channel(text: str) -> bool:
     a DIFFERENT class — see its own module comment for why the two must not
     be merged).
 
-    No per-character exemption (unlike U+200D/U+180E above): the payload
-    here lives in WHICH selector is chosen, not in where one sits relative
-    to its neighbours, so a flanking check would answer a question this
-    channel does not ask.
+    ONE per-character exemption, added by B-859 and applied only when
+    *excuse_ivs* is true (the default): an E0100-E01EF selector is excused
+    from the count when the character immediately before it is a unified
+    ideograph (`_is_ivs_base`), i.e. when the pair is a well-formed
+    Ideographic Variation Sequence. It excuses the SELECTOR only, never the
+    base. An E0100-E01EF selector NOT directly after a unified ideograph (an
+    isolated run, or a stack behind one anchor such as the corpus's genuine
+    positive, hundreds of selectors behind ONE emoji) keeps counting.
+
+    FE00-FE0D get no exemption, but NOT because they have no legitimate
+    base. Unicode's StandardizedVariants.txt (18.0.0) registers FE00-FE06
+    after real base characters: FE00-FE02 after CJK unified ideographs (the
+    CJK-compatibility-ideograph variation sequences), FE00-FE02 after math
+    symbols and mathematical script letters, FE00 after Myanmar, Phags-pa
+    and Manichaean letters, FE00-FE06 after Egyptian hieroglyphs (rotations).
+    It lists no sequence for FE07-FE0D. So a dense run of those standardized
+    sequences is a real benign shape this count gate cannot tell from a
+    payload. Observed, not hypothetical: HTML's named character references
+    have twenty math-symbol + FE00 entries (`&caps;`, `&lvertneqq;`, ...; the
+    `character-entities` npm package lists exactly twenty), an entity table
+    carries them, and a bundle that embeds the table more than once can cross
+    the gate (OpenClaw 2026.9.5's bundled imap
+    extension carries 34 in one 3 MB file -- above the 1 MB per-file skill
+    read cap, so no consumer reads it today). Left un-excused on purpose:
+    each extra excused shape is another carrier an attacker can pad with,
+    and none of these has been seen at gate density in a file a consumer
+    actually reads. The Hangul fillers are a jamo placeholder with no
+    preceding base, so there is no pair to excuse.
+
+    KNOWN RESIDUAL OF THE EXEMPTION, and why B349 opts out of it. Placing a
+    unified ideograph before EVERY payload selector (base1+selector1+
+    base2+selector2...) makes every pair well-formed, so the exemption
+    excuses all of them; the payload still lives in WHICH selector is chosen,
+    and a per-pair test cannot see that. The carrier is free in any Chinese
+    or Japanese file: ordinary prose already supplies one ideograph per
+    payload symbol, so nothing visible is added. The exemption therefore
+    trades a demonstrated false negative for a false positive that has never
+    been observed (0 of 74,496 local npm-tree and ~/.openclaw files carry any
+    E0100-E01EF selector at all, measured 2026-09-23). That trade is tolerable
+    only where this signal is advisory. B58 and the other consumers only
+    WARN on it, so they keep the default. B349 can spend a CRITICAL FAIL on
+    it, so `checks/_lifecycle.py` calls with ``excuse_ivs=False`` and keeps
+    the raw count -- the same trade B-448 refused there for the zero-width
+    class (see the note next to `_b349_assess_target`).
+    Closing the residual for the advisory consumers would need the IVD
+    base+selector registry (not in the stdlib) or giving up the exemption.
+
+    Cost: the class count comes from one C-level ``findall``. Text under the
+    gate returns there; the exemption only ever LOWERS the count, so it can
+    never lift such text over it. Only text at or above the gate walks its
+    matches, and it stops as soon as the gate is reached.
     """
-    return len(_VS_SUPPLEMENT_RE.findall(text)) >= _VS_SUPPLEMENT_SIGNAL_MIN_COUNT
+    if len(_VS_SUPPLEMENT_RE.findall(text)) < _VS_SUPPLEMENT_SIGNAL_MIN_COUNT:
+        return False
+    if not excuse_ivs:
+        return True
+    counted = 0
+    for m in _VS_SUPPLEMENT_RE.finditer(text):
+        pos = m.start()
+        if (
+            _IVS_SELECTOR_LO <= ord(text[pos]) <= _IVS_SELECTOR_HI
+            and pos > 0
+            and _is_ivs_base(text[pos - 1])
+        ):
+            continue
+        counted += 1
+        if counted >= _VS_SUPPLEMENT_SIGNAL_MIN_COUNT:
+            return True
+    return False
 
 
-def obfuscation_signals(text: str) -> list[str]:
+def obfuscation_signals(text: str, *, excuse_ivs: bool = True) -> list[str]:
     """Return human-readable evidence strings for each class of de-obfuscation
     that *changed* the text.  Returns an empty list when the text is clean.
+
+    *excuse_ivs* is passed through to `_has_dense_vs_supplement_channel`: a
+    caller that can spend a FAIL on the dense-channel signal passes False so
+    well-formed Ideographic Variation Sequences still count (B-859 -- see that
+    function's docstring for the residual the default exemption leaves open).
 
     Signal categories (all checked independently):
       - "zero-width / invisible characters found" — invisible chars stripped
@@ -834,10 +1047,20 @@ def obfuscation_signals(text: str) -> list[str]:
     #   an honest single-occurrence use, and the payload this class exists to
     #   catch needs many symbols to carry anything, so a count gate is the
     #   sound direction the paragraph above asks for -- applied at the class
-    #   level here rather than per-character, because the position/effect
-    #   predicates that per-character exemption uses do not apply: the
-    #   payload lives in WHICH selector is chosen, not in a split, so
-    #   stripping it reveals nothing to check for.
+    #   level for FE00-FE0D and the Hangul fillers. FE00-FE06 DO have
+    #   standardized base characters (CJK unified ideographs, math symbols,
+    #   Myanmar, Egyptian hieroglyphs, ...), so a dense run of real standardized
+    #   sequences is a known benign shape the count gate cannot separate from a
+    #   payload; they are counted anyway, for the reason recorded in
+    #   `_has_dense_vs_supplement_channel`'s docstring.
+    #   B-859 ADDS ONE NARROW per-character exemption on top of the count gate,
+    #   for the E0100-E01EF sub-range only: a selector immediately following a
+    #   unified ideograph forms a well-formed Ideographic Variation Sequence
+    #   (Unicode's own mechanism, real in Japanese personal names) and is
+    #   excused from the count; one that is not so attached still counts. The
+    #   exemption is on by default and OFF for B349 (`excuse_ivs=False`),
+    #   because padding each payload selector with an ideograph evades it for
+    #   free in Chinese or Japanese text. See the helper's docstring.
     # ------------------------------------------------------------------------
     # B-490: both bodies now come from the module-level sources above, so the
     # signal and the stripper cannot drift apart again (they did, for 14 members).
@@ -857,7 +1080,7 @@ def obfuscation_signals(text: str) -> list[str]:
         signals.append("bidi-override / embedding controls found")
     if _has_suspicious_tag_run(text):
         signals.append("Unicode Tag-block characters found")
-    if _has_dense_vs_supplement_channel(text):
+    if _has_dense_vs_supplement_channel(text, excuse_ivs=excuse_ivs):
         signals.append("dense variation-selector / invisible-alphabet channel found")
 
     # Check whether confusable folding would change the NFKC-normalized text.
@@ -974,3 +1197,67 @@ def asciify(text: str) -> str:
     substitute it BEFORE calling this, exactly as they already do. This is the
     backstop, not the first line."""
     return text.translate(ASCII_MAP).encode("ascii", "replace").decode("ascii")
+
+
+def fold_pattern(src: str) -> str:
+    """`normalize_for_scan(src)` plus pattern-side case-closure (B-887).
+
+    Every English/Russian B63-family regex is a pattern SOURCE compiled under
+    re.I. Text-side folding (`normalize_for_scan`, applied to the haystack)
+    already makes a pattern letter x match a text confusable whenever x or
+    upper(x) is a `_CONFUSABLES` key (I1 keeps those case-equivalent). It
+    cannot cover a CAPITAL-ONLY lookalike (lowercase not itself a key, e.g.
+    Cyrillic К) without folding genuine lowercase prose too -- so that half is
+    closed on the PATTERN instead, via `_PATTERN_CASE_CLOSURE`: each closure
+    letter `x` in *src* becomes the class `[x<alt>]`, which re.I then also
+    matches as `X`/`<ALT>`. One haystack (`norm`), one offset space, no
+    call-site change anywhere this replaces a plain `normalize_for_scan(...)`.
+
+    A backslash escape passes through untouched. Outside a class, `x` becomes
+    `[x<alt>]`. Inside an existing class, `x` stays put and `<alt>` is appended
+    just before the closing `]` (never spliced in mid-class, which could turn
+    `[а-я]` into a bogus range) -- so `[а-я]` survives as `[а-яy]`. A leading
+    `^` or `]` right after `[` is copied through before closure scanning, so
+    `[^...]` / `[]...]` keep their special first member.
+
+    Byte-identical to `normalize_for_scan` for any source with no closure-key
+    letters -- every English-only pattern is untouched.
+    """
+    src = normalize_for_scan(src)
+    out: list[str] = []
+    i, n, in_class = 0, len(src), False
+    pending: list[str] = []
+    while i < n:
+        ch = src[i]
+        if ch == "\\" and i + 1 < n:
+            out.append(src[i : i + 2])
+            i += 2
+            continue
+        if not in_class and ch == "[":
+            in_class, pending = True, []
+            out.append(ch)
+            i += 1
+            if i < n and src[i] == "^":
+                out.append("^")
+                i += 1
+            if i < n and src[i] == "]":
+                out.append("]")
+                i += 1
+            continue
+        if in_class and ch == "]":
+            out.extend(pending)
+            out.append("]")
+            in_class = False
+            i += 1
+            continue
+        alt = _PATTERN_CASE_CLOSURE.get(ch)
+        if alt is None:
+            out.append(ch)
+        elif in_class:
+            out.append(ch)
+            if alt not in pending:
+                pending.append(alt)
+        else:
+            out.append("[" + ch + alt + "]")
+        i += 1
+    return "".join(out)

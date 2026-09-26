@@ -49,12 +49,26 @@ def journal_lock(target: "str | Path"):
     on any failure to prepare/acquire the lock, or when ``fcntl`` is unavailable,
     this is a no-op context manager (the critical section still runs, just without
     the extra serialization). Always releases (``LOCK_UN`` + close) in ``finally``.
+
+    B-870: *target* is expanded (``~``/``~user``) here, once, before the sidecar
+    path is built. Every other ``journal_lock`` caller already expands its own
+    path before calling in (history.py, ledger.py, runstore.py, sbom_runs.py,
+    incidentstore.py, monitorstore.py — all do ``Path(path).expanduser()``
+    first), so this is a no-op for them. The one caller that didn't,
+    ``cli.py``'s ``--monitor`` path, passed the literal default string
+    ``"~/.clawseccheck/state.json"`` straight through: the lock sidecar landed
+    at a literal ``./~/.clawseccheck/state.json.lock`` in the current working
+    directory instead of the real state file's directory. That both littered
+    the launch directory with a bogus ``~`` tree and meant the lock was never
+    actually the shared resource two concurrent ``--monitor`` runs contend
+    over — expanding here, centrally, closes both.
     """
     if not _HAS_FCNTL:
         yield
         return
 
-    lock_path = Path(str(target) + ".lock")
+    lock_path = Path(str(target)).expanduser()
+    lock_path = Path(str(lock_path) + ".lock")
     fd = None
     locked = False
     try:

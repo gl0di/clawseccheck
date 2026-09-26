@@ -447,7 +447,8 @@ class HistoryRows(list):
 #: C-448: how many of the most recent rows `render_trend` prints by default. Chosen to
 #: match the worked example the task that added this was filed with ("showing the last
 #: 30 of 4,604 runs"); not itself load-bearing, since `window=None` (the `--all` opt-out)
-#: reproduces the pre-C-448 unbounded output byte-for-byte.
+#: reproduces the pre-C-448 unbounded ROW output byte-for-byte -- the summary/disclosure
+#: sentences below the rows do not (see the `window` note on `render_trend` and B-847).
 DEFAULT_TREND_WINDOW = 30
 
 
@@ -468,17 +469,30 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         C-448: print only the last *window* rows (most recent), stated as a count in
         the header so nothing is hidden SILENTLY — the same problem this fixes as
         `render_events`' own retention-marker header. ``None`` (or a value ``>=
-        len(rows)``) prints every row, reproducing the pre-C-448 behaviour exactly;
-        this is what the CLI's ``--all`` flag passes. The window affects ONLY which
-        lines are printed: every arrow, the "N of M runs have no grade" ratio, and
-        every other statistic below is still computed by walking the FULL ``rows``
-        list in order — narrowing the denominator to the visible slice is the exact
-        defect the deleted source filter (see the design note below) already taught
-        this function not to repeat, just on a different axis (recency instead of
-        source/grade). A windowed row's arrow still compares against the true
+        len(rows)``) prints every ROW, in the same per-row format, as the pre-C-448
+        behaviour; this is what the CLI's ``--all`` flag passes. The window affects
+        ONLY which lines are printed: every arrow, the "N of M runs have no grade"
+        ratio, and every other statistic below is still computed by walking the FULL
+        ``rows`` list in order — narrowing the denominator to the visible slice is the
+        exact defect the deleted source filter (see the design note below) already
+        taught this function not to repeat, just on a different axis (recency instead
+        of source/grade). A windowed row's arrow still compares against the true
         previous GRADED row even when that row itself sits outside the window and is
         never printed, because ``last_graded_score``/``last_graded_row`` are updated
         on every row unconditionally, before the window check ever runs.
+
+        B-847: "prints the same as pre-C-448" stops at the ROW lines. The six
+        disclosure/summary sentences below the table ("N runs ... have no grade", the
+        pinned/compounded-fall notes, the uncorroborated-runs note) -- plus the B-580
+        retention-notice sentence, worded to match them under B-847 -- were reworded
+        because "shown above"/"runs above" stopped being true the moment a hidden row
+        could be one being counted. ``window=None``/``--all`` does NOT revert this
+        wording, on purpose: under ``--all`` every row genuinely IS "above", so the old
+        wording would not be wrong there, but reverting it would mean the sentence's
+        truth depended on which flag was passed, which is worse than picking one
+        accurate wording and keeping it. So ``--all`` reproduces the pre-C-448 output
+        byte-for-byte for the rows and the window disclosure, but NOT for these seven
+        sentences -- see ``docs/USAGE.md``'s ``--trend`` section and B-847.
 
     Parameters
     ----------
@@ -535,6 +549,25 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     at least one hole exists, naming the count so an ungraded run is legible
     as "incomplete", not silently absent or silently averaged over.
 
+    B-695: a GRADED row's arrow is itself a claim — that the row being compared
+    against describes the same subject, not merely that both carry a score. It
+    renders BLANK (no glyph at all, not the flat one) in two cases: the first
+    graded row in the store, which has no predecessor to claim anything against;
+    and any later graded row whose predecessor fails ``_same_subject`` — B-691's
+    own comparability gate (different ``home``, tool build or check set, or a
+    ``test``/``dev``-tagged predecessor), reused here rather than restated. A
+    legacy row written before that gate existed carries no ``home``/``raw_scope``/
+    ``raw_ver`` at all (``None``, not a string) and so fails the gate on presence
+    alone — counted as not comparable, never as agreement, the identical
+    "presence before equality" rule the pass-rate clause below already applied.
+    The first-graded-row case is never counted toward the disclosure below: there
+    was no comparison to withhold there, only one that never applied. A store
+    holding only such rows renders every arrow blank and says so once; the
+    arrows return on their own, with no rewrite of the store, as soon as two
+    comparable graded runs land back to back. No new glyph was added for this —
+    the existing arrow set (``▲▼·`` / ``^v=``) is unchanged; the fix withholds
+    the character instead of choosing a different one.
+
     B-579: a row whose ``source`` is exactly ``"view"`` is produced by the act
     of running ``--trend`` itself (see ``history.record``'s call site in
     ``cli.py``), not by a check the user asked for. It renders unconditionally,
@@ -581,6 +614,10 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     # evidence, the other has a letter that already moved and must not be told otherwise.
     compounded_falls = 0
     uncorroborated = 0
+    # B-695: graded rows whose arrow rendered BLANK because the predecessor failed the
+    # comparability gate below -- never incremented for the first graded row (nothing
+    # precedes it, so there is no withheld claim to disclose, only one that never applied).
+    non_comparable_arrows = 0
     holes = 0
     # B-579: a "view" row is produced by the ACT of running --trend, not by a check the
     # user asked for (see history.record's B-579 call site). It still renders — every row
@@ -600,8 +637,50 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
                 holes += 1
             line = f"{label}  no grade  [{row.get('source', 'legacy')}]"
         else:
-            if last_graded_score is None:
-                arrow = arrow_flat
+            # B-695: `_same_subject` gates the ARROW itself now, not only the pass-rate
+            # clause below it -- computed FIRST, before any glyph is chosen, so the choice
+            # can no longer outrun the gate the way it used to. One `_prev`/`_curr` pair
+            # serves both this and the pass-rate clause below; nothing here recomputes it.
+            #
+            # Presence BEFORE equality, and a legacy row (no `home`/`raw_scope`/`raw_ver`
+            # at all -- `None`, not a string) counts as not comparable rather than as
+            # agreement: inventing a baseline from `score` would read the ARRIVAL of a
+            # figure as a fall. Absent = skip for one pair, self-healing, the idiom
+            # `monitordims/_score.py` states for the same fields.
+            if last_graded_row is not None:
+                _prev, _curr = last_graded_row, row
+                # B-695: `raw_scope` EQUALITY joins the tuple here -- it was checked for
+                # presence only before this task, because the pass-rate clause below
+                # already re-derives scope equality itself, inside `raw_backstop` (its
+                # `RAW_DEGRADED`/`RAW_HELD` verdicts are UNREACHABLE unless the two scopes
+                # already match — see that function's own `p_scope != c_scope` guard), so
+                # adding it here changes nothing that clause could observe. It DOES matter
+                # for the arrow: a check set that grew or shrank between two runs — a
+                # release landing new checks is the ordinary case, not an edge one — moves
+                # the denominator the CAPPED score is itself a percentage OF, so "same
+                # home, same build, different scope" is still not one claim the arrow can
+                # make soundly.
+                _same_subject = (
+                    all(isinstance(r.get(k), str) for r in (_prev, _curr)
+                        for k in ("raw_scope", "raw_ver", "home"))
+                    and _prev["raw_scope"] == _curr["raw_scope"]
+                    and _prev["raw_ver"] == _curr["raw_ver"]
+                    and _prev["home"] == _curr["home"]
+                    and _prev.get("source") in ("audit", "view")
+                    and _curr.get("source") in ("audit", "view")
+                )
+            else:
+                # The first graded row: nothing precedes it, so "same subject as what?"
+                # has no answer. Falls through to the blank arrow below like any other
+                # non-comparable pair, but is deliberately never counted toward
+                # `non_comparable_arrows` -- see that counter's own comment.
+                _same_subject = False
+
+            if last_graded_row is None:
+                arrow = ""
+            elif not _same_subject:
+                arrow = ""
+                non_comparable_arrows += 1
             elif row["score"] > last_graded_score:
                 arrow = arrow_up
             elif row["score"] < last_graded_score:
@@ -623,21 +702,7 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
             # not just `id` -- see `_raw_score_scope`, monitordims/_score.py). `source`
             # keeps a `test`-tagged row -- the suite appends thousands into the real store
             # -- from corroborating a real one.
-            #
-            # Presence BEFORE equality, and a legacy row (no figure at all) counts as not
-            # comparable rather than as agreement: inventing a baseline from `score` would
-            # read the ARRIVAL of the figure as a fall. Absent = skip for one pair,
-            # self-healing, the idiom `monitordims/_score.py` states for the same fields.
             if last_graded_row is not None:
-                _prev, _curr = last_graded_row, row
-                _same_subject = (
-                    all(isinstance(r.get(k), str) for r in (_prev, _curr)
-                        for k in ("raw_scope", "raw_ver", "home"))
-                    and _prev["raw_ver"] == _curr["raw_ver"]
-                    and _prev["home"] == _curr["home"]
-                    and _prev.get("source") in ("audit", "view")
-                    and _curr.get("source") in ("audit", "view")
-                )
                 # C-469: the extra pair lets the backstop see a fall smaller than
                 # raw_score's own rounding -- sound here for the identical reason it is
                 # sound in the monitor: the scope hash above now pins per-check weight, so
@@ -760,6 +825,27 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
                 "that were run."
             )
 
+    # B-695: some graded rows' arrows rendered BLANK because the run compared against
+    # was not a sound comparison -- distinct from the `holes`/`[view]` disclosures above
+    # (those cover rows with no score at all) and from the pass-rate paragraphs below
+    # (those cover what a REAL arrow cannot say). This one is about arrows that never
+    # rendered in the first place. Never counts the first graded row -- see
+    # `non_comparable_arrows`'s own comment in the loop above.
+    if non_comparable_arrows:
+        lines.append("")
+        _runs = "run" if non_comparable_arrows == 1 else "runs"
+        _shows = "shows" if non_comparable_arrows == 1 else "show"
+        lines.append(
+            f"{non_comparable_arrows} graded {_runs} in this history {_shows} no arrow: "
+            "the run compared against measured a different agent home, a different "
+            "build of this tool, a different set of checks, or predates this "
+            "comparability check entirely and carries no subject info to compare at "
+            "all -- so no fair claim of a rise, fall or standstill could be made. This "
+            "self-heals on its own, with no rewrite of what is already on disk: once "
+            "two comparable graded runs land back to back, the arrow between them "
+            "returns."
+        )
+
     # B-691: the arrow answers "did the LETTER move", which an open FAIL pins at a floor.
     # These two paragraphs answer what the arrow cannot, and they are separate because
     # they are different claims: one says a figure fell, the other says a comparison was
@@ -803,12 +889,22 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     # B-580: what this trend does NOT cover. Said after the rows, because it qualifies the
     # shape the reader has just looked at — the pruned runs are the OLDEST, i.e. the
     # baseline against which "improving" would be judged.
+    #
+    # B-847: used to read "Not every recorded run is above: {notice}", which implied the
+    # named pruned count was the WHOLE reason a recorded run might not be on screen. C-448
+    # made that false: a `window` can also leave recorded (loaded) rows off screen, and it
+    # is not named here. This is the same "above" staleness C-448 fixed in the six
+    # sentences above, just missed on this one -- worded now as a fact about the FILE
+    # (rows dropped before `load()` ever saw them), kept separate from the window
+    # disclosure above (rows that WERE loaded but are not printed).
     notice = getattr(rows, "retention_notice", None)
     if notice:
         lines.append("")
         lines.append(
-            "Not every recorded run is above: " + notice.strip()
-            + " The trend therefore starts mid-history; the pruned runs are the oldest."
+            "This history's own file already dropped some of what it recorded: "
+            + notice.strip() + " The trend therefore starts mid-history; the pruned "
+            "runs were the oldest, and are gone from the file entirely -- distinct "
+            "from any --all/window cut on the rows that remain, described above."
         )
 
     # B-582: the chain check this store has always had, run on the path a human

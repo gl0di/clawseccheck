@@ -381,3 +381,244 @@ def test_index_wrong_version_is_unusable_not_trusted(tmp_path):
     assert ctx.plugin_index_parse_error is True
     assert ctx.plugin_trust_records == []
     assert ctx.plugin_index_records == []
+
+
+# ---------------------------------------------------------------------------------
+# 12. B-990: view-masquerade hardening -- config_machine_state resolving to a VIEW (or
+#     other non-table schema object) must be refused, not silently treated as absent
+#     (which would wrongly fall through to the legacy B/C probes) and not silently
+#     trusted for its spoofed content.
+# ---------------------------------------------------------------------------------
+
+class TestB990ViewMasqueradeHardening:
+    """CLAWSECCHECK-B-990 -- Probe A's own ``SELECT value_json FROM config_machine_state
+    WHERE state_key = ?`` ran directly against ``state/openclaw.sqlite`` without first
+    checking the name resolves to a real TABLE, not a VIEW -- the identical attack shape
+    ``trajectorystore._table_kind`` was hardened against for ``trajectory_runtime_events``
+    (B-811), and already fixed for this file's two sibling ``config_machine_state``
+    readers, ``_collect_auth_profile_store_presence`` (B-889) and
+    ``_collect_config_machine_state`` (B-977). This reader reuses
+    ``trajectorystore._table_kind`` verbatim via ``collector.py``'s existing
+    ``_trajectorystore`` module import.
+
+    Worse than B-889 here: that sibling only ever selected ``LENGTH(value_json)``, an
+    integer, so a successful spoof could only flip a presence/length signal. This reader
+    selects and RETURNS the parsed ``value_json`` CONTENT (the full
+    ``plugins.installedIndex`` row), so a successful spoof can inject an attacker-chosen
+    plugin trust/index record straight into ``ctx.plugin_trust_records`` /
+    ``ctx.plugin_index_records`` -- and from there into B177's FAIL evidence, B187's
+    tool-result-interception WARN, and the SBOM's plugin-supplier attribution -- the same
+    content-injection severity class B-977 documented, not B-889's bounded presence-only
+    one."""
+
+    def test_a_view_masquerading_as_config_machine_state_is_refused(self, tmp_path):
+        """The bug's own reproduction: a decoy table plus a VIEW named
+        ``config_machine_state`` that projects a spoofed ``plugins.installedIndex`` row.
+        Before the fix this landed straight into ``ctx.plugin_trust_found`` /
+        ``ctx.plugin_index_found`` sourced from a table this reader never named, with no
+        disclosure at all. After the fix the row must be refused outright -- not
+        silently trusted, and not silently merged into the quieter 'table predates this
+        feature' absent case (which would instead leave both ``*_found`` flags False,
+        with no matching legacy table present here to fall through to)."""
+        home = tmp_path / "openclaw"
+        state = home / "state"
+        state.mkdir(parents=True)
+        (home / "openclaw.json").write_text("{}", encoding="utf-8")
+
+        spoofed_index = json.dumps({
+            "index": {
+                "version": 1, "hostContractVersion": "x", "compatRegistryVersion": "v1",
+                "migrationVersion": 1, "policyHash": "h", "generatedAtMs": 1,
+                "installRecords": {}, "plugins": [], "diagnostics": [],
+            },
+            "revision": 1,
+        })
+
+        conn = sqlite3.connect(state / "openclaw.sqlite")
+        try:
+            conn.execute(
+                "CREATE TABLE decoy_plugin_state "
+                "(decoy_key TEXT, decoy_value TEXT, updated_at_ms INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO decoy_plugin_state VALUES (?, ?, ?)",
+                ("plugins.installedIndex", spoofed_index, 0),
+            )
+            conn.execute(
+                "CREATE VIEW config_machine_state AS "
+                "SELECT decoy_key AS state_key, decoy_value AS value_json "
+                "FROM decoy_plugin_state"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        ctx = Context(home=home)
+        _collect_plugin_trust(home, ctx)
+
+        assert ctx.plugin_trust_found is True
+        assert ctx.plugin_trust_parse_error is True
+        assert ctx.plugin_trust_records == []
+        assert ctx.plugin_index_found is True
+        assert ctx.plugin_index_parse_error is True
+        assert ctx.plugin_index_records == []
+        assert any(
+            "config_machine_state" in e and "did not resolve to a real table" in e
+            for e in ctx.errors
+        ), ctx.errors
+
+    def test_a_genuine_table_still_reads_correctly_after_the_hardening(self, tmp_path):
+        """Clean-fixture control: an ordinary, honest ``config_machine_state`` TABLE
+        (the real shape every fleet machine has) must still be read exactly as before --
+        the hardening must not turn every legitimate Probe A read into a refusal."""
+        modern = _modern_index(
+            install_records={"p1": {"clawhubTrustDisposition": "clean"}},
+            plugins=[{"pluginId": "p1", "origin": "bundled", "enabled": True}],
+        )
+        ctx = _build_home(tmp_path, modern_row=modern)
+        assert ctx.plugin_trust_found is True
+        assert ctx.plugin_trust_parse_error is False
+        assert len(ctx.plugin_trust_records) == 1
+        assert ctx.plugin_index_found is True
+        assert ctx.plugin_index_parse_error is False
+        assert not any(
+            "did not resolve to a real table" in e for e in ctx.errors
+        ), ctx.errors
+
+    def test_absent_config_machine_state_still_falls_through_to_legacy(self, tmp_path):
+        """Regression guard for the ONE structural difference from B-889/B-977: here,
+        'absent' must still fall through to the legacy B/C probes, not just return
+        UNDETERMINED -- the schema-kind check added above must not disturb that
+        fallback. Same fixture shape as ``test_legacy_shape_unchanged`` above,
+        exercised again here so the view-masquerade hardening and its boundary with
+        the absent case are pinned together in one place."""
+        legacy = (
+            json.dumps({"p1": {"clawhubTrustDisposition": "clean"}}),
+            json.dumps([{"pluginId": "p1", "origin": "bundled", "enabled": True}]),
+        )
+        ctx = _build_home(tmp_path, modern_row=None, legacy_row=legacy)
+        assert ctx.plugin_trust_found is True
+        assert ctx.plugin_trust_parse_error is False
+        assert len(ctx.plugin_trust_records) == 1
+        assert ctx.plugin_trust_records[0]["plugin_id"] == "p1"
+        assert ctx.plugin_index_found is True
+        assert ctx.plugin_index_parse_error is False
+        assert not any(
+            "did not resolve to a real table" in e for e in ctx.errors
+        ), ctx.errors
+
+
+# ---------------------------------------------------------------------------------
+# 13. B-994: the SAME view-masquerade hardening, applied to Probes B/C's own table
+#     (installed_plugin_index) -- unaudited by B-990, which only covered Probe A's
+#     config_machine_state. Reached only once Probe A (config_machine_state) is
+#     genuinely absent, since B/C are never consulted otherwise.
+# ---------------------------------------------------------------------------------
+
+class TestB994ViewMasqueradeHardening:
+    """B-994 -- Probes B/C's own ``SELECT install_records_json /
+    plugins_json FROM installed_plugin_index WHERE index_key = ...`` ran directly
+    against ``state/openclaw.sqlite`` without ever checking that ``installed_plugin_index``
+    resolves to a real TABLE, not a VIEW -- the identical attack shape B-990 closed for
+    Probe A's ``config_machine_state``, left unaudited for this table specifically
+    because B-990's own scope was Probe A only. Reuses
+    ``trajectorystore._table_kind`` verbatim, and reuses the SAME already-open
+    transaction Probe A's own ``BEGIN`` opened (no second ``BEGIN`` -- SQLite refuses a
+    nested one on an already-open connection), so the TOCTOU-closing property extends
+    across both probes, not just Probe A's.
+
+    Same content-injection severity class as B-990: this reader selects and RETURNS the
+    parsed ``install_records_json``/``plugins_json`` CONTENT, so a successful spoof can
+    inject an attacker-chosen plugin trust/index record straight into
+    ``ctx.plugin_trust_records``/``ctx.plugin_index_records`` -- and from there into
+    B177's FAIL evidence, B187's tool-result-interception WARN, and the SBOM's
+    plugin-supplier attribution."""
+
+    def test_a_view_masquerading_as_installed_plugin_index_is_refused(self, tmp_path):
+        """The bug's own reproduction: a decoy table plus a VIEW named
+        ``installed_plugin_index`` that projects a spoofed install_records_json/
+        plugins_json pair. No ``config_machine_state`` table exists at all, so Probe A
+        is genuinely absent and Probes B/C are reached. Before the fix this landed
+        straight into ``ctx.plugin_trust_found``/``ctx.plugin_index_found`` sourced from
+        a table this reader never named, with no disclosure at all. After the fix the
+        row must be refused outright -- not silently trusted, and not silently merged
+        into the quieter 'table predates this feature' absent case."""
+        home = tmp_path / "openclaw"
+        state = home / "state"
+        state.mkdir(parents=True)
+        (home / "openclaw.json").write_text("{}", encoding="utf-8")
+
+        spoofed_trust = json.dumps({"evil-plugin": {"clawhubTrustDisposition": "clean"}})
+        spoofed_index = json.dumps([{"pluginId": "evil-plugin", "origin": "bundled"}])
+
+        conn = sqlite3.connect(state / "openclaw.sqlite")
+        try:
+            conn.execute(
+                "CREATE TABLE decoy_plugin_index "
+                "(decoy_key TEXT, decoy_install_records TEXT, decoy_plugins TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO decoy_plugin_index VALUES (?, ?, ?)",
+                ("installed-plugin-index", spoofed_trust, spoofed_index),
+            )
+            conn.execute(
+                "CREATE VIEW installed_plugin_index AS "
+                "SELECT decoy_key AS index_key, "
+                "decoy_install_records AS install_records_json, "
+                "decoy_plugins AS plugins_json "
+                "FROM decoy_plugin_index"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        ctx = Context(home=home)
+        _collect_plugin_trust(home, ctx)
+
+        assert ctx.plugin_trust_found is True
+        assert ctx.plugin_trust_parse_error is True
+        assert ctx.plugin_trust_records == []
+        assert ctx.plugin_index_found is True
+        assert ctx.plugin_index_parse_error is True
+        assert ctx.plugin_index_records == []
+        assert any(
+            "installed_plugin_index" in e and "did not resolve to a real table" in e
+            for e in ctx.errors
+        ), ctx.errors
+
+    def test_a_genuine_legacy_table_still_reads_correctly_after_the_hardening(self, tmp_path):
+        """Clean-fixture control: an ordinary, honest ``installed_plugin_index`` TABLE
+        (the real shape a pre-OC-82 or mid-migration machine has) must still be read
+        exactly as before -- the hardening must not turn every legitimate Probes B/C
+        read into a refusal."""
+        legacy = (
+            json.dumps({"p1": {"clawhubTrustDisposition": "clean"}}),
+            json.dumps([{"pluginId": "p1", "origin": "bundled", "enabled": True}]),
+        )
+        ctx = _build_home(tmp_path, modern_row=None, legacy_row=legacy)
+        assert ctx.plugin_trust_found is True
+        assert ctx.plugin_trust_parse_error is False
+        assert len(ctx.plugin_trust_records) == 1
+        assert ctx.plugin_index_found is True
+        assert ctx.plugin_index_parse_error is False
+        assert not any(
+            "did not resolve to a real table" in e for e in ctx.errors
+        ), ctx.errors
+
+    def test_absent_installed_plugin_index_stays_quiet_unknown(self, tmp_path):
+        """Regression guard: NEITHER config_machine_state NOR installed_plugin_index
+        exists at all (a state DB predating both shapes) -- the clean-slate case this
+        function has always handled (test_neither_shape_present_stays_unknown above)
+        must stay a quiet UNKNOWN, with no NEW disclosure introduced by this hardening.
+        The `_table_kind` check must resolve 'absent' here and fall through exactly as
+        the existing per-SELECT 'no such table' handling already did."""
+        ctx = _build_home(tmp_path, modern_row=None, legacy_row=None)
+        assert ctx.plugin_trust_found is False
+        assert ctx.plugin_trust_parse_error is False
+        assert ctx.plugin_index_found is False
+        assert ctx.plugin_index_parse_error is False
+        assert ctx.plugin_trust_records == []
+        assert ctx.plugin_index_records == []
+        assert not any(
+            "did not resolve to a real table" in e for e in ctx.errors
+        ), ctx.errors

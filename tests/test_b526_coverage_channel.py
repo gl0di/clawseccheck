@@ -47,6 +47,35 @@ def _skill(tmp_path: Path, name: str, body: str) -> Path:
     return d
 
 
+def _skill_with_other_file_fence(tmp_path: Path, name: str, body: str) -> Path:
+    """Same shape as `_skill`, but the fenced payload lives in a bundled file
+    OTHER than SKILL.md (a NOTES.md the skill also ships), not in SKILL.md
+    itself.
+
+    CLAWSECCHECK-B-879 (round 4): a fenced authorized_keys match INSIDE the
+    skill's OWN SKILL.md is now read grammatically (`_authkey_block_intent`,
+    checks/_vet.py) instead of through this module's bare-fence coverage-note
+    path — a bare, unannotated fence directly in SKILL.md is exactly the B-508
+    bypass shape B-879 exists to close, so it now surfaces as a real WARN
+    finding, not a silent INSTALL-plus-disclosure. The coverage-note channel
+    this test module pins is unchanged for a match in some OTHER bundled file
+    (a README, an install.sh, a NOTES.md) — which is what this helper exercises
+    instead, keeping this module's purpose (the disclosure CHANNEL's own
+    properties) independent of B-879's SKILL.md-specific behavior change."""
+    d = tmp_path / name
+    d.mkdir()
+    (d / "SKILL.md").write_text(
+        "---\nname: probe\ndescription: A helper skill.\n---\n\n"
+        "# Probe\n\nSee NOTES.md for background.\n",
+        encoding="utf-8",
+    )
+    notes = d / "NOTES.md"
+    notes.write_text(_HDR + body, encoding="utf-8")
+    os.chmod(d / "SKILL.md", 0o600)
+    os.chmod(notes, 0o600)
+    return d
+
+
 def _vet(d: Path, *extra: str) -> tuple[int, str]:
     r = subprocess.run(
         [sys.executable, "-m", "clawseccheck.cli", "--vet-skill", str(d), *extra],
@@ -64,7 +93,7 @@ def test_the_disclosure_reaches_the_default_human_output(tmp_path):
     (C-358's dependency-tree note had been shipping invisible since it was added) — the
     second instance of B-553.
     """
-    d = _skill(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
+    d = _skill_with_other_file_fence(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
     rc, out = _vet(d)
     assert "Not assessed" in out, out[:1500]
     assert "authorized_keys" in out, out[:1500]
@@ -76,7 +105,7 @@ def test_the_disclosure_moves_neither_verdict_nor_exit_code(tmp_path):
     """The other half, and the one a future change is most likely to break: making the
     note louder by giving it a status would re-open every failure listed in the module
     docstring."""
-    fenced = _skill(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
+    fenced = _skill_with_other_file_fence(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
     quiet = _skill(tmp_path, "quiet", "Nothing interesting here.\n")
     rc_f, out_f = _vet(fenced)
     rc_q, out_q = _vet(quiet)
@@ -91,7 +120,7 @@ def test_the_note_does_not_become_a_finding(tmp_path):
     """`Finding.detail` is what `baseline.fingerprint()` hashes and what the render leads
     with. A coverage note must never reach it, or every drift baseline moves and the
     headline starts describing what was skipped instead of what was found."""
-    d = _skill(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
+    d = _skill_with_other_file_fence(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
     r = subprocess.run(
         [sys.executable, "-m", "clawseccheck.cli", "--vet-skill", str(d), "--json"],
         capture_output=True,
@@ -120,7 +149,7 @@ def test_a_standing_limitation_is_not_printed_as_a_per_target_note(tmp_path):
     bury the situational notes it exists to surface. It stays in --json; nothing is
     hidden, it is just not repeated at the reader forever.
     """
-    d = _skill(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
+    d = _skill_with_other_file_fence(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
     _, out = _vet(d)
     assert "Not assessed" in out, out[:1500]
     assert "dependency tree" not in out, (
@@ -131,7 +160,7 @@ def test_a_standing_limitation_is_not_printed_as_a_per_target_note(tmp_path):
 def test_the_block_survives_ascii_mode(tmp_path):
     """--ascii folds the whole render through asciify(); a block added after that call
     would silently keep non-ASCII bytes (the C-179 shape)."""
-    d = _skill(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
+    d = _skill_with_other_file_fence(tmp_path, "fenced", f"```bash\n{_PAYLOAD}```\n")
     rc, out = _vet(d, "--ascii")
     assert rc == 0
     assert "Not assessed" in out, out[:1500]

@@ -70,6 +70,7 @@ from .integrity import (
     NOTE_UNCHECKED_PYC,
     NOTE_UNREADABLE,
     NOTE_VANISHED,
+    build_fingerprint,
     package_digest,
 )
 from .report import _missing_layers_sentence
@@ -273,7 +274,8 @@ _COMPACT_NEXT_POINTER = "\nWhat you can do next: run --next for the ranked list.
 
 
 def _with_next_actions(card: str, findings, score, ascii_only: bool,
-                       compact: bool = False) -> str:
+                       compact: bool = False, home: "str | None" = None,
+                       data_dir: "str | None" = None) -> str:
     """B-604: the Dashboard was the one verdict surface that offered the user nothing.
 
     `--next` (`cli.py`) and the default report both render `guide.render_next_actions`;
@@ -307,8 +309,13 @@ def _with_next_actions(card: str, findings, score, ascii_only: bool,
     for its pipeline detail ("Full pipeline detail: --save <path> or --html <path>."). The
     pointer is a fixed string on purpose: naming the top action would make its length vary
     with the finding, and the whole problem here is a budget with no room to vary.
+
+    *home*/*data_dir* (B-873): forwarded verbatim to `suggest_actions` — see its own
+    docstring. Both call sites below pass the run's real `args.home`/
+    `_effective_data_dir(args)`; the defaults here exist only so a test or a future
+    caller that omits them keeps getting the pre-B-873 default-path commands.
     """
-    actions = suggest_actions(findings, score)
+    actions = suggest_actions(findings, score, home=home, data_dir=data_dir)
     if not actions:
         return card
     if compact:
@@ -396,6 +403,16 @@ def _coverage_path(args) -> str:
     return str(_store_dir(args) / "coverage.json")
 
 
+def _effective_data_dir(args) -> str:
+    """The --data-dir this run actually used, resolved the same way --cron-recipe's
+    call site already does (`args.data_dir or "~/.clawseccheck"`) — a plain string for
+    display, not a resolved Path. B-873: the one other reader of this value is
+    `guide.suggest_actions`/`report.render_json`'s new `data_dir=` param, so this is the
+    single place that literal gets typed for that purpose rather than repeated at each
+    call site."""
+    return args.data_dir or "~/.clawseccheck"
+
+
 def _runs_path(args) -> str:
     """C-524: this run's --save-run/--diff store — beside its history, never elsewhere.
     No dedicated --runs flag (same reasoning as _coverage_path: --data-dir already moves
@@ -423,6 +440,54 @@ def _watch_heartbeat_path(args) -> Path:
     """C-517: --watch's liveness surface — same reasoning as _runs_path/_incidents_path:
     no dedicated override flag, --data-dir already moves it with everything else."""
     return _store_dir(args) / "watch_heartbeat.json"
+
+
+def _watch_extra_monitor_args(args) -> "tuple[str, ...]":
+    """B-880: restate the operator's OWN audit-scope/monitor-modifier flags as argv for
+    the nested ``--monitor`` re-scan ``watch._run_monitor_once`` spawns on every
+    debounced change.
+
+    Before this, a ``--watch --no-deptree`` invocation silently dropped ``--no-deptree``
+    on every re-scan — ``_run_watch_cli`` never forwarded anything, so each nested
+    ``--monitor`` subprocess ran with bare CLI defaults regardless of what the outer
+    ``--watch`` invocation was actually asked to do (confirmed: a full, slow npm
+    dependency-tree walk on every debounced cycle even with ``--no-deptree`` given).
+
+    Scope is exactly the flags a single ``--monitor`` pass genuinely honors: the base
+    ``audit()`` scope flags (always respected, see the identical ``ctx.cli_opt_outs``
+    list built from ``audit()``'s own call site below) plus the modifiers
+    ``_MODE_HONORS["monitor"]`` declares (``--probe``/``--json``/``--exit-code``/
+    ``--fail-on``/``--judged-bundle``). Deliberately excludes every --watch-only flag
+    (``--watch-debounce``, ``--watch-status``, ``--watch-log``) and every flag
+    ``--monitor`` itself has no effect under (``--full``, ``--quiet``, ``--fast``,
+    ``--trend``, ``--badge``, ...) — forwarding those would be inert at best and
+    misleading at worst. ``--monitor``/``--verbose``/``--home``/``--state``/``--events``/
+    ``--history`` are never restated here: ``_run_monitor_once`` already appends those
+    itself, explicitly, so duplicating them here would double them up in the spawned
+    argv.
+
+    Empty by construction whenever the operator passed none of these — a `--watch` run
+    given no extra flags forwards nothing, byte-identical to the prior behavior.
+    """
+    extra: list = []
+    for flag, passed in (
+        ("--no-native", args.no_native),
+        ("--no-host", args.no_host),
+        ("--no-sockets", args.no_sockets),
+        ("--no-deptree", args.no_deptree),
+        ("--no-dist", args.no_dist),
+        ("--exhaustive", args.exhaustive),
+        ("--probe", args.probe),
+        ("--json", args.json),
+        ("--exit-code", args.exit_code),
+    ):
+        if passed:
+            extra.append(flag)
+    if args.fail_on is not None:
+        extra += ["--fail-on", args.fail_on]
+    if args.judged_bundle is not None:
+        extra += ["--judged-bundle", args.judged_bundle]
+    return tuple(extra)
 
 
 def _record_run(capability: str, args) -> None:
@@ -727,9 +792,32 @@ class SkillSweep:
         """Tally buckets. Unscanned targets get their OWN buckets and are kept out
         of ``safe`` — folding them in (as ``total - fails - warns`` would, since
         they are neither FAIL nor WARN) is exactly the reassuring-but-false number
-        Golden Rule #4 forbids."""
+        Golden Rule #4 forbids.
+
+        B-888: ``unknown`` is its own bucket for the same reason —
+        the bare ``except Exception`` around ``vet_skill(...)`` above (when a
+        skill's own analysis raises mid-scan, most commonly an uncaught exception
+        in an AST-walking helper) appends the row as status ``"UNKNOWN"``, which
+        used to fall through this arithmetic uncounted: neither FAIL-weight, nor
+        WARN, nor TRUNCATED, so the old ``total - fails - warns - truncated``
+        silently counted it as safe — a skill the engine could not even assess
+        printed as "no known issue". A legitimate ``vet_skill()`` return whose OWN
+        status is UNKNOWN (an engine-degraded coverage gap that
+        ``_vet_coverage_incomplete`` recognises) is already demoted to
+        ``"TRUNCATED"`` before it ever reaches ``rows`` — see the demotion right
+        after that helper's call site above — so an UNKNOWN row seen here is,
+        today, always the crash-exception path. Bucketed separately from
+        ``truncated`` rather than folded into it: a crash means the engine could
+        not assess the skill AT ALL (no partial result), which is a different
+        claim from "assessed part of it before a cap/budget cut it short" —
+        conflating the two would mislabel which one happened, the same reason
+        B-888's ``crashed_skills`` cascade arm in
+        ``checks/_vet.py:check_installed_skills`` keeps that bucket separate from
+        ``parse_error_paths`` rather than folding into it.
+        """
         scanned = [r for r in self.rows if r[1] != "SKIPPED"]
         truncated_n = sum(1 for _n, s, _e in scanned if s == "TRUNCATED")
+        unknown_n = sum(1 for _n, s, _e in scanned if s == "UNKNOWN")
         fails = sum(1 for _n, s, _e in scanned if s in _SWEEP_FAIL_STATUSES)
         warns = sum(1 for _n, s, _e in scanned if s == "WARN")
         total = len(scanned)
@@ -738,14 +826,25 @@ class SkillSweep:
             "fails": fails,
             "warns": warns,
             "truncated": truncated_n,
+            "unknown": unknown_n,
             "skipped": len(self.rows) - total,
-            "safe": total - fails - warns - truncated_n,
+            "safe": total - fails - warns - truncated_n - unknown_n,
         }
 
     def not_scanned(self) -> list[str]:
         """Every target this sweep cannot vouch for, named. No silent caps here —
-        the narrative print may elide with "(+N more)", this may not."""
-        return [n for n, s, _e in self.rows if s in ("SKIPPED", "TRUNCATED")]
+        the narrative print may elide with "(+N more)", this may not.
+
+        B-888: "UNKNOWN" (a skill whose own scan raised mid-analysis —
+        see ``counts()``'s docstring) belongs here for the same reason SKIPPED and
+        TRUNCATED already do: the sweep reached no verdict for that target. Every
+        consumer built on this list to derive a "scanned" count —
+        ``coverage.py:_sweep_coverage`` (``scanned = total - len(not_scanned())``)
+        and ``pipeline.py``'s ledger — inherited the identical "crashed skill counted
+        as covered" gap ``counts()['safe']`` had, for the identical reason: an
+        UNKNOWN row fell through every named exclusion.
+        """
+        return [n for n, s, _e in self.rows if s in ("SKIPPED", "TRUNCATED", "UNKNOWN")]
 
 
 def _discovery_gap_note(reasons: list[str]) -> str:
@@ -985,6 +1084,15 @@ def sweep_installed_skills(
             if narrate:
                 _emit(f"  (error vetting {skill_name}: {_sanitize(str(exc))})")
             results.append((skill_name, "UNKNOWN", 0))
+            # B-937: same reasoning as the ScanBudgetExceeded arm above — "the
+            # engine crashed on this target" is, like "the target's own budget ran
+            # out", no basis to claim this sweep is clean. Without this, the row was
+            # named and tagged UNKNOWN, but `sweep.truncated` never flipped, so
+            # `vet_all`'s return-code check (`if sweep.truncated: return 1`) fell
+            # through to `sweep.worst` — which every OTHER, cleanly-scanned skill
+            # left at "PASS" — and a sweep that never actually assessed this target
+            # still returned 0.
+            truncated = True
             continue
 
         if f.status in _SWEEP_FAIL_STATUSES:
@@ -1091,11 +1199,18 @@ def _sweep_summary_lines(sweep: SkillSweep, ascii_only: bool = False) -> list[st
     # problem (it is neither FAIL nor WARN either) and gets the same treatment —
     # it stays in "skill(s) checked" (it WAS attempted, unlike a SKIPPED row) but
     # is subtracted out of "safe" via its own named bucket.
+    # B-888: a skill whose own scan raised (row status "UNKNOWN", the
+    # bare `except Exception` branch above) is the same shape of problem again —
+    # named and subtracted out of "safe" via its own bucket, same as truncated/
+    # skipped just above, rather than silently landing in "safe" the way
+    # `total - fails - warns - truncated` alone used to.
     c = sweep.counts()
     tally = (f"\n  {c['total']} skill(s) checked | {c['safe']} safe | "
              f"{c['warns']} suspicious | {c['fails']} dangerous")
     if c["truncated"]:
         tally += f" | {c['truncated']} partially scanned"
+    if c["unknown"]:
+        tally += f" | {c['unknown']} could not be analyzed (engine error)"
     if c["skipped"]:
         tally += f" | {c['skipped']} not scanned (budget exceeded)"
     lines.append(tally)
@@ -1130,6 +1245,10 @@ def _sweep_quiet_line(sweep: SkillSweep) -> str:
             f"{c['fails']} dangerous, {c['warns']} suspicious, {c['safe']} no known issue")
     if c["truncated"]:
         line += f", {c['truncated']} partially scanned"
+    if c["unknown"]:
+        # B-888: see _sweep_summary_lines's identical arm — a crashed
+        # skill's row is UNKNOWN, not safe.
+        line += f", {c['unknown']} could not be analyzed (engine error)"
     if c["skipped"]:
         line += f", {c['skipped']} not scanned (budget exceeded)"
     line += "."
@@ -2605,6 +2724,7 @@ def _run_watch_cli(args) -> int:
         history_path=args.history,
         heartbeat_path=_watch_heartbeat_path(args),
         debounce_s=args.watch_debounce,
+        extra_monitor_args=_watch_extra_monitor_args(args),
         stream=sys.stdout,
     )
 
@@ -3202,6 +3322,14 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False, score=
     never resolved a ledger (a duck-typed `score`, or simply omitting the kwarg) passes
     `score=None`, which reads as "nothing errored" — the same permissive default every
     other `getattr(score, ...)` read in this module already uses.
+
+    C-563 item 2 (accepted as-is): a second-pass review flagged that this `STATUS_ERROR`-
+    only reading is a narrower "incomplete required layer" than an earlier, informally
+    approved bucket-1 wording, and that a `--full` run whose layers are `not_reached` or
+    budget-cut still gets 0 or 3 under graduated rather than 1. The review marked this
+    non-blocking and asked only that Dave confirm the reading — it did not find the
+    documented behavior (this docstring, matching the code) inaccurate. Left unchanged
+    here; see the C-563 task history for the open confirmation.
     """
     _graduated = getattr(args, "exit_code_scheme", "binary") == "graduated"
     _errored_layer = any(
@@ -3367,9 +3495,29 @@ def _default_pdf_target(home: str) -> "tuple[str, bool]":
     return "~/.clawseccheck/report.pdf", False
 
 
+class _SuggestingParser(argparse.ArgumentParser):
+    """ArgumentParser that adds a did-you-mean hint for a misspelled flag."""
+
+    def error(self, message):
+        import difflib
+        import re as _re
+        m = _re.search(r"unrecognized arguments: (.*)", message)
+        if m:
+            known = [o for a in self._actions for o in a.option_strings]
+            hints = []
+            for tok in m.group(1).split():
+                if tok.startswith("--"):
+                    near = difflib.get_close_matches(tok.split("=")[0], known, n=1)
+                    if near:
+                        hints.append(f"{tok} -> did you mean {near[0]}?")
+            if hints:
+                message += "\n" + "\n".join(hints)
+        super().error(message)
+
+
 def _main(argv=None) -> int:
     _JUDGED_BUNDLE_CACHE.clear()
-    p = argparse.ArgumentParser(
+    p = _SuggestingParser(
         prog="clawseccheck",
         description=(
             "ClawSecCheck OpenClaw security self-audit — read-only with respect to your "
@@ -3431,7 +3579,7 @@ def _main(argv=None) -> int:
     p.add_argument("--watch-log", action="store_true",
                    help="print the Agent Watch event journal (timeline of what changed)")
     p.add_argument("--watch", action="store_true",
-                   help="continuous watch mode (C-517): stay running, and re-run "
+                   help="continuous watch mode (CONTINUOUS-WATCH): stay running, and re-run "
                         "--monitor --verbose automatically on a relevant filesystem "
                         "change under --home (debounced) — real-time inotify on Linux, "
                         "a bounded stat-poll fallback elsewhere; see "
@@ -3478,17 +3626,17 @@ def _main(argv=None) -> int:
                         "(recorded in the pack as monitor_events_source) — never rotates "
                         "or deletes anything itself")
     p.add_argument("--incident-open", action="store_true", dest="incident_open",
-                   help="C-520: open a PERSISTED incident record (status=open) linked to "
+                   help="INCIDENT-LIFECYCLE: open a PERSISTED incident record (status=open) linked to "
                         "this run's actionable findings, a best-effort PID when one of them "
                         "names one, and the current --events journal position — stored under "
                         "--data-dir, never in the audited home. Refuses if nothing actionable "
                         "was found this run")
     p.add_argument("--incident-mark", nargs=2, metavar=("ID", "STATUS"), dest="incident_mark",
-                   help="C-520: transition a --incident-open record's status. STATUS is one "
+                   help="INCIDENT-LIFECYCLE: transition a --incident-open record's status. STATUS is one "
                         "of open/investigating/mitigated/closed — forward moves one step at "
                         "a time, backward moves freely (mirrors Pulse's own task lifecycle)")
     p.add_argument("--incident-show", metavar="ID", dest="incident_show",
-                   help="C-520: print one incident record's current status, transition "
+                   help="INCIDENT-LIFECYCLE: print one incident record's current status, transition "
                         "history, and the live --monitor timeline since it opened")
     p.add_argument("--analyze-trajectory", nargs="?", const="", default=None, metavar="PATH",
                    dest="analyze_trajectory",
@@ -3568,7 +3716,7 @@ def _main(argv=None) -> int:
                         "--full shape, for CI runs the deep phases are too slow for. The "
                         "judge packet is still emitted; it re-runs no check and is free")
     p.add_argument("--exhaustive", action="store_true",
-                   help="F-164: raise the trajectory-file / log-sink / per-line scan caps "
+                   help="EXHAUSTIVE-SCAN-CAPS: raise the trajectory-file / log-sink / per-line scan caps "
                         "instead of today's interactive-fast defaults, and scan the full "
                         "byte range of over-length log lines via overlapping windows instead "
                         "of only their head/tail. Applies to B164/B180, which run on every "
@@ -3635,19 +3783,32 @@ def _main(argv=None) -> int:
     # I-038: purely additive and opt-in. `binary` (the default) is BYTE-FOR-BYTE what
     # `--fail-on`/`--exit-code` have always done, on every path that calls
     # `_findings_exit_gate` — a real threshold-tripping FAIL and a run that could not
-    # produce a trustworthy verdict at all (a crash, `ScanBudgetExceeded`, an unusable
-    # `--vet` path, or an unreadable/absent config) are both exit 1, indistinguishable
-    # to a CI/cron consumer reading only `$?`. `graduated` reuses `--monitor`'s own
+    # produce a trustworthy verdict at all (a crash, `ScanBudgetExceeded`, or an
+    # unreadable/absent config) are both exit 1, indistinguishable to a CI/cron
+    # consumer reading only `$?`. `graduated` reuses `--monitor`'s own
     # 0/1/3 convention (never 2 — argparse itself owns that code for a usage error,
     # the identical reservation `--monitor` already makes and documents) so the two
     # can be told apart: 1 stays "could not complete", 3 is the real FAIL.
+    #
+    # C-563: an "unusable --vet path" does NOT belong in either bucket above. `--vet`/
+    # `--vet-skill`/`--vet-plugin`/`--vet-mcp`/`--advise` never reach `_findings_exit_gate`
+    # at all — "vet" is not in `_MODE_HONORS`'s "exit_code"/"fail_on" set, so this flag
+    # (and `--exit-code`/`--fail-on` themselves) have no effect on a vet invocation, which
+    # keeps its own separate contract: 1 on CAUTION/DO-NOT-INSTALL, 2 when the target
+    # cannot be assessed at all (see `_report_unassessable`). The prior wording claimed an
+    # unusable --vet path was exit 1 under both schemes; measured, it is exit 2, on a code
+    # path this flag never touches.
     p.add_argument("--exit-code-scheme", choices=["binary", "graduated"], default="binary",
                    help="how --fail-on/--exit-code map a trip to a process exit code. "
                         "'binary' (default, unchanged from every release before this flag "
                         "existed): 1 on either a real FAIL or a run that could not produce "
                         "a trustworthy verdict (crash, a scan cut short by its own time "
-                        "budget, an unusable --vet path, or an unreadable/absent config) — "
-                        "the two are not distinguishable by exit code alone. 'graduated': "
+                        "budget, or an unreadable/absent config) — "
+                        "the two are not distinguishable by exit code alone. Has no effect "
+                        "on --vet/--vet-skill/--vet-plugin/--vet-mcp/--advise, which keep "
+                        "their own separate 1/2 contract (docs/USAGE.md, \"--vet's exit "
+                        "code is a separate contract\"). "
+                        "'graduated': "
                         "reuses --monitor's own convention instead — 0 clean, 1 "
                         "could-not-produce-a-trustworthy-verdict, 3 a real threshold-"
                         "tripping FAIL; 2 is never returned by this logic (argparse owns "
@@ -4053,7 +4214,11 @@ def _main(argv=None) -> int:
         lines.append("")
         lines.append("  cosign verify-blob \\")
         lines.append("    --bundle SHA256SUMS.txt.bundle \\")
-        lines.append('    --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \\')
+        lines.append(
+            '    --certificate-identity-regexp '
+            '"^https://github\\.com/gl0di/clawseccheck/\\.github/workflows/'
+            'clawhub-publish\\.yml@refs/tags/v" \\'
+        )
         lines.append("    --certificate-oidc-issuer https://token.actions.githubusercontent.com \\")
         lines.append("    SHA256SUMS.txt")
         _self_text = "\n".join(lines)
@@ -4375,8 +4540,12 @@ def _main(argv=None) -> int:
         last_check = rows[-1]["date"] if rows else None
         build_age, last_days = compute_ages(released=__released__, last_check=last_check)
         stale = bool(update_notice(__version__, released=__released__))
+        # B-869: a self-computed content fingerprint, distinct from __version__ — see
+        # integrity.build_fingerprint()'s docstring for why the version string alone
+        # cannot tell a dev checkout apart from the release it diverged from.
         _emit(render_menu(version=__version__, build_age_days=build_age,
-                          last_check_days=last_days, stale=stale, ascii_only=ascii_only))
+                          last_check_days=last_days, stale=stale, ascii_only=ascii_only,
+                          build_digest=build_fingerprint()))
         return 0
 
     if _mode == "brief":
@@ -5434,7 +5603,9 @@ def _main(argv=None) -> int:
         # B-379: same cap-resolution gap as --percentile above — suggested next actions
         # should reflect the capped grade, not an uncapped one.
         score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
-        _emit(render_next_actions(suggest_actions(findings, score), ascii_only))
+        _emit(render_next_actions(suggest_actions(
+            findings, score, home=args.home, data_dir=_effective_data_dir(args)),
+            ascii_only))
         # B-601: advice is what this mode RENDERS, but it measured a full verdict to get
         # there. The timeline records runs, not renderings.
         _record_history_point(score, args, _live_signal, findings)
@@ -5461,7 +5632,8 @@ def _main(argv=None) -> int:
             _card = _with_next_actions(
                 render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
                                  pdf_path=pdf_written),
-                findings, score, ascii_only)
+                findings, score, ascii_only,
+                home=args.home, data_dir=_effective_data_dir(args))
             _emit_paste_instruction(pdf_written, len(_card))
             _emit(_card)
             _emit_attach_instruction(pdf_written)
@@ -5667,7 +5839,8 @@ def _main(argv=None) -> int:
                 # Reserve what _with_next_actions is about to append, so the card's own
                 # severity-ordered ladder absorbs it rather than the cap being exceeded.
                 compact_reserve=len(_COMPACT_NEXT_POINTER) if args.compact else 0),
-            findings, score, ascii_only, compact=args.compact)
+            findings, score, ascii_only, compact=args.compact,
+            home=args.home, data_dir=_effective_data_dir(args))
         _emit_paste_instruction(pdf_written, len(_card))
         _emit(_card)
         _emit_attach_instruction(pdf_written)
@@ -6298,10 +6471,13 @@ def _main(argv=None) -> int:
                            findings=findings, version=__version__)
         # F-180: a probe must SAY it did not record, or the user reads the alert as filed
         # and then sees the identical alert on the next ordinary run with no explanation.
+        # With nothing to report it must not promise a repeat alert that will never come.
         if _probe:
             print("\nThis was a probe: nothing was recorded, so your baseline still points "
-                  "at the last ordinary check.\n  The change above is still outstanding and "
-                  "the next ordinary run will report it again.")
+                  "at the last ordinary check.")
+            if alerts:
+                print("  The change above is still outstanding and the next ordinary run "
+                      "will report it again.")
         # B-271/B-278: a write mode that could not write must not report success. --badge /
         # --html / --sarif / --save all return 1 on OSError; --monitor was the sole outlier,
         # returning 0 forever while persisting nothing, so cron saw a healthy job.
@@ -6464,7 +6640,8 @@ def _main(argv=None) -> int:
                            live_test_reason=live_signal.reason,
                            behavioral_fired_ids=behavioral_fired_ids,
                            ledger=layer_ledger,
-                           version=__version__)
+                           version=__version__,
+                           home=args.home, data_dir=_effective_data_dir(args))
         if full_pipeline is not None:
             # Additive merge, done here rather than by widening render_json's signature:
             # these keys belong to the pipeline, not to the audit payload, and every
@@ -6595,6 +6772,9 @@ def _main(argv=None) -> int:
                                risk=paths, update_notice=notice, freshness_notice=f_notice,
                                openclaw_detected=ctx.config_found, ctx=ctx, color=use_color,
                                tamper=tamper,
+                               # B-869: self-computed content fingerprint, so a dev
+                               # checkout says so even when __version__ is unchanged.
+                               build_digest=build_fingerprint(),
                                # B-473: the plugin sweep is pipeline phase P7, which runs
                                # BELOW this body (the tee block). There is no sweep object
                                # to render here, but "not scanned — run --full" is a lie on
@@ -6608,7 +6788,9 @@ def _main(argv=None) -> int:
             parts.append("\nnotes:\n" + "\n".join(f"  - {_sanitize(e)}" for e in ctx.errors))
         parts.append("")
         parts.append(render_next_actions(
-            suggest_actions(findings, score), ascii_only))
+            suggest_actions(findings, score, home=args.home,
+                            data_dir=_effective_data_dir(args)),
+            ascii_only))
         body = "\n".join(parts)
 
     _emit(body)

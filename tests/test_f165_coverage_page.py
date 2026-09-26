@@ -84,6 +84,83 @@ def test_subject_coverage_an_unknown_finding_counts_as_not_scanned():
 
 
 # ---------------------------------------------------------------------------
+# not_scanned_reasons (C-566: "named with its reason", not just a bare id)
+# ---------------------------------------------------------------------------
+
+def test_not_scanned_reasons_covers_every_not_scanned_id():
+    """Every id in `not_scanned` has a matching entry in `not_scanned_reasons` —
+    the two lists must never drift apart."""
+    result = cov.subject_coverage([])
+    for subject, entry in result.items():
+        assert set(entry["not_scanned_reasons"]) == set(entry["not_scanned"]), subject
+
+
+def test_not_scanned_reason_is_the_findings_own_unknown_detail():
+    """A check that DID fire (UNKNOWN) already explained itself in `detail`
+    (docs/CHECK_AUTHORING.md's "UNKNOWN details name why" rule) — that real reason
+    is reused, not replaced by a generic placeholder."""
+    host_id = next(cid for cid, meta in BY_ID.items() if SUBJECT_OF.get(meta.surface) == "host")
+    result = cov.subject_coverage([_finding(host_id, "UNKNOWN")])
+    assert result["host"]["not_scanned_reasons"][host_id] == "synthetic detail"
+
+
+def test_not_scanned_reason_names_absence_when_no_finding_exists_at_all():
+    """A check that never fired this run (no Finding object whatsoever — e.g. an
+    off-CHECKS behavioral detector that stayed inconclusive, B-558) has no
+    producer-supplied reason to draw on: say so honestly rather than inventing one."""
+    result = cov.subject_coverage([])
+    host_id = next(cid for cid, meta in BY_ID.items() if SUBJECT_OF.get(meta.surface) == "host")
+    assert result["host"]["not_scanned_reasons"][host_id] == "not evaluated this run"
+
+
+def test_not_scanned_reason_is_sanitized_and_shortened():
+    """A long, newline-bearing detail (the shape trajectory-sourced text can take,
+    per behavioral.py's own `_sanitize` note on T1/T2/T3/B191) is folded to one
+    plain-ASCII clause, never reproduced verbatim into a one-line list."""
+    host_id = next(cid for cid, meta in BY_ID.items() if SUBJECT_OF.get(meta.surface) == "host")
+    long_detail = ("first line of the reason\nsecond line, injected " + "x" * 80)
+    findings = [Finding(id=host_id, title="t", severity="LOW", status="UNKNOWN",
+                        detail=long_detail, fix="f", framework="Test")]
+    result = cov.subject_coverage(findings)
+    reason = result["host"]["not_scanned_reasons"][host_id]
+    assert "\n" not in reason
+    assert len(reason) <= 60
+    assert reason.endswith("...")
+
+
+def test_coverage_page_lines_renders_the_reason_in_parens():
+    page = {"host": {"total": 1, "scanned": 0, "not_scanned": ["B50"],
+                     "not_scanned_reasons": {"B50": "no network IDS configured"}}}
+    lines = cov.coverage_page_lines(page)
+    joined = "\n".join(lines)
+    assert "B50 (no network IDS configured)" in joined
+
+
+def test_coverage_page_lines_falls_back_to_bare_id_without_reasons():
+    """Backward compatible: a page built without `not_scanned_reasons` (e.g. a
+    hand-rolled dict, or the skills/plugins INSTANCE list) renders bare ids exactly
+    as before this feature existed."""
+    page = {"host": {"total": 2, "scanned": 0, "not_scanned": ["B50", "B51"]}}
+    lines = cov.coverage_page_lines(page)
+    joined = "\n".join(lines)
+    assert "B50, B51" in joined
+    assert "(" not in joined
+
+
+def test_coverage_page_lines_show_reasons_false_omits_the_parens():
+    """`show_reasons=False` (what `render_dashboard` passes under `--compact` —
+    see its own C-566 comment) renders the exact same bare-id line a page with no
+    `not_scanned_reasons` at all would, regardless of what the page dict carries."""
+    page = {"host": {"total": 1, "scanned": 0, "not_scanned": ["B50"],
+                     "not_scanned_reasons": {"B50": "no network IDS configured"}}}
+    lines = cov.coverage_page_lines(page, show_reasons=False)
+    joined = "\n".join(lines)
+    assert "B50" in joined
+    assert "no network IDS configured" not in joined
+    assert "(" not in joined
+
+
+# ---------------------------------------------------------------------------
 # build_coverage_page — skills/plugins/mcp
 # ---------------------------------------------------------------------------
 
@@ -138,6 +215,48 @@ def test_build_coverage_page_truncated_targets_count_as_not_scanned():
     assert page["skills"]["total"] == 4  # counts.total(3) + counts.skipped(1)
     assert page["skills"]["scanned"] == 2  # 4 - len(not_scanned)
     assert page["skills"]["not_scanned"] == ["skipped-one", "truncated-one"]
+
+
+def test_build_coverage_page_crashed_skill_not_counted_as_scanned(tmp_path, monkeypatch):
+    """CLAWSECCHECK-B-888, at the coverage-page integration level.
+
+    `_sweep_coverage` derives "scanned" as ``total - len(sweep.not_scanned())``, using
+    the REAL ``cli.SkillSweep`` here (not a hand-built `_FakeSweep`, unlike the other
+    tests in this module) — this is the one test that would have stayed green on the
+    pre-fix ``not_scanned()`` (SKIPPED/TRUNCATED only), since a crashed skill's UNKNOWN
+    row fell through it exactly the way it fell through ``counts()['safe']``.
+    """
+    import clawseccheck.cli as cli_mod
+
+    home = tmp_path / "home"
+    skills = home / "workspace" / "skills"
+    for name in ("crashy", "clean"):
+        d = skills / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: A helper skill.\n---\nHelper.\n",
+            encoding="utf-8",
+        )
+
+    def _flaky_vet_skill(p):
+        if Path(p).name == "crashy":
+            raise RecursionError("simulated engine crash (B-888 test)")
+        return Finding(id="B13", title="Installed skill sweep", severity="INFO",
+                        status="PASS", detail="nothing found", fix="n/a",
+                        framework="Skill Trust")
+
+    monkeypatch.setattr(cli_mod, "vet_skill", _flaky_vet_skill)
+    sweep = cli_mod.sweep_installed_skills(home, narrate=False)
+
+    ctx = collect(FIXTURES / "clean_full")
+    page = cov.build_coverage_page(ctx, [], skill_sweep=sweep)
+
+    assert page["skills"]["total"] == 2, page["skills"]
+    assert page["skills"]["scanned"] == 1, (
+        "a crashed skill was counted as scanned/covered (CLAWSECCHECK-B-888): "
+        f"{page['skills']}"
+    )
+    assert "crashy" in page["skills"]["not_scanned"], page["skills"]
 
 
 def test_build_coverage_page_mcp_none_configured():
@@ -228,6 +347,59 @@ def test_run_pipeline_ctx_none_page_absent_from_sections():
     result = pl.PipelineResult()
     assert result.coverage_page == {}
     assert not any("COVERAGE" in line for line in pl.render_sections(result))
+
+
+# ---------------------------------------------------------------------------
+# C-566 test-plan item 4: tie `coveragePage` totals to `phases[]`/`notScanned` —
+# the two answer DIFFERENT questions and can legitimately diverge; this pins the
+# real divergence an F-165 second-pass review found on fixtures/home_vuln rather
+# than leaving it unreconciled and untested.
+# ---------------------------------------------------------------------------
+
+def test_coveragepage_logs_can_diverge_from_the_behavioral_phases_own_notscanned():
+    """`phases[].behavioral.complete`/`notScanned` answers "did the behavioral PHASE
+    run to conclusion" (yes, even when there was nothing to replay — an empty home
+    is not a phase failure). `coveragePage.logs.not_scanned` answers a narrower
+    question: "did each CATALOG check routed to `logs` reach a conclusive verdict
+    THIS run" (T1/T2/T3/B191 only count as scanned via `evaluated_findings`, gated
+    on `behavioral.analysis_is_conclusive` — see `build_coverage_page`'s B-558
+    comment). "Nothing to replay" is conclusive for neither, so the phase can be
+    `complete: true` with an empty `notScanned` while the SAME run's coverage page
+    still lists those very check ids as not scanned. Pinned on fixtures/home_vuln,
+    the exact fixture the divergence was first reproduced against — a hand-built
+    minimal case would not prove the real pipeline still produces it.
+
+    This is intentional, not a bug (same "still a gap" precedent docs/OUTPUT_SCHEMA.md
+    already documents for a `not_applicable` UNKNOWN under the `openclaw` subject) —
+    but until now nothing pinned it, so a future change that made either side silently
+    "fix" the mismatch by UNDER-reporting (e.g. `logs` claiming full coverage on an
+    empty home) would go unnoticed. Proven to have teeth by mutation: commenting out
+    the `behavioral_is_conclusive(analysis)` gate in `pipeline.run_behavioral` (so an
+    inconclusive replay's findings get merged as if scanned) makes this test's second
+    assertion fail, since B191/T1/T2/T3 would then read as scanned.
+    """
+    from clawseccheck.checks import run_all
+    ctx = collect(FIXTURES / "home_vuln")
+    findings = run_all(ctx)
+    result = pl.run_pipeline(ctx, findings, home_dir=ctx.home, fast=False)
+    doc = result.to_json()
+
+    behavioral_phase = next(p for p in doc["phases"] if p["name"] == "behavioral")
+    assert behavioral_phase["status"] == "ran"
+    assert behavioral_phase["complete"] is True
+    assert behavioral_phase["notScanned"] == []
+
+    logs_entry = doc["coveragePage"]["logs"]
+    not_scanned = set(logs_entry["not_scanned"])
+    # The off-CHECKS behavioral ids: not conclusive on this empty-of-trajectory
+    # fixture, so `evaluated_findings` stayed empty and none of them reached the
+    # coverage page's numerator — the divergence with the phase above.
+    assert {"T1", "T2", "T3", "B191"} <= not_scanned
+    # Each still carries an honest, non-fabricated reason (C-566 item 3) —
+    # "not evaluated this run", since no Finding exists for any of them at all.
+    reasons = logs_entry["not_scanned_reasons"]
+    for cid in ("T1", "T2", "T3", "B191"):
+        assert reasons[cid] == "not evaluated this run"
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,15 @@
+import sys
+
+
+def main(paths):
+    bad = 0
+    for path in paths:
+        with open(path, encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                if line.rstrip("\n").endswith((" ", "\t")):
+                    print(f"{path}:{n}: trailing whitespace")
+                    bad += 1
+    return 1 if bad else 0
+
+
+sys.exit(main(sys.argv[1:]))

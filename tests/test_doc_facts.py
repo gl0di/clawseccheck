@@ -27,9 +27,13 @@ import sys
 import sysconfig
 from pathlib import Path
 
+import pytest
+
 from clawseccheck import __released__, __version__
 from clawseccheck.behavioral import BEHAVIORAL_CHECK_IDS
 from clawseccheck.catalog import CATALOG
+
+pytestmark = pytest.mark.mechanical
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -1149,6 +1153,18 @@ def test_the_whole_suite_decision_reads_no_filesystem_state():
 _VENDOR_TABLES = REPO / "tests" / "vendor_state_tables.txt"
 _BADGE_VERSION_RE = re.compile(r'<text class="num"[^>]*>(\d{4}\.\d+\.\d+)</text>')
 
+# The "this build was verified" claim appears in two mirrored word orders across the
+# shipped surfaces: "OpenClaw <version> verified" (the README <img alt="…"> text for the
+# stats badge) and "<version> OpenClaw verified" (the SVGs' own aria-label/title, e.g.
+# "… 0 network calls · 2026.9.5 OpenClaw verified"). CLAWSECCHECK-B-843: matching only the
+# bare "OpenClaw {want}" substring anywhere in README.md is not a guard, because README.md
+# *also* says "OpenClaw 2026.9.5" two lines below in unrelated prose — that substring check
+# stayed green while the alt text two lines above it sat on the previous release's 2026.9.4.
+_VERIFIED_CLAIM_RES = (
+    re.compile(r"OpenClaw\s+(\d{4}\.\d+\.\d+)\s+verified", re.IGNORECASE),
+    re.compile(r"(\d{4}\.\d+\.\d+)\s+OpenClaw\s+verified", re.IGNORECASE),
+)
+
 
 def _stamped_openclaw_version() -> str:
     """The OpenClaw the shipped snapshots were actually taken against."""
@@ -1156,6 +1172,20 @@ def _stamped_openclaw_version() -> str:
     m = re.search(r"^#\s*openclaw-version:\s*(\S+)", header, re.M)
     assert m, f"{_VENDOR_TABLES.name} has no `openclaw-version:` header to pin against"
     return m.group(1)
+
+
+def _openclaw_verified_claim_disagreements(text: str, want: str) -> list:
+    """Every "OpenClaw <ver> verified" / "<ver> OpenClaw verified" claim in *text* that
+    disagrees with *want*, as ready-to-report strings (no path prefix — the caller adds
+    one, since this also runs standalone in the guard-bites test below)."""
+    out = []
+    for rx in _VERIFIED_CLAIM_RES:
+        for m in rx.finditer(text):
+            found = m.group(1)
+            if found != want:
+                line = text[: m.start()].count("\n") + 1
+                out.append(f"line {line}: says 'OpenClaw {found} verified' (want {want})")
+    return out
 
 
 def test_the_badge_openclaw_version_matches_the_shipped_snapshot():
@@ -1169,6 +1199,13 @@ def test_the_badge_openclaw_version_matches_the_shipped_snapshot():
 
     Not pinned to the INSTALLED OpenClaw: CI has none, and a guard that skips wherever it
     matters is not a guard.
+
+    Checks the version claim in FOUR places, not three (CLAWSECCHECK-B-843): the SVGs'
+    bare `<text class="num">` element, their aria-label/title "verified" sentence, the
+    README `<img alt="…">` "verified" sentence, and — via `_openclaw_verified_claim_disagreements`
+    scanning every `_shipped_files()` entry, not just README.md — any other shipped doc that
+    states the same claim. A suffix-anchored fix to the SVGs alone leaves the README alt
+    behind, which is exactly how this drifted.
     """
     want = _stamped_openclaw_version()
     wrong = []
@@ -1179,10 +1216,39 @@ def test_the_badge_openclaw_version_matches_the_shipped_snapshot():
             wrong.append(f"{name}: states no OpenClaw version at all")
         elif found != [want]:
             wrong.append(f"{name}: badge says {found}, snapshots were taken against {want}")
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
-    if f"OpenClaw {want}" not in readme:
-        wrong.append(f"README.md does not say 'OpenClaw {want}'")
+    claims_seen = False
+    for path in _shipped_files():
+        text = path.read_text(encoding="utf-8")
+        disagreements = _openclaw_verified_claim_disagreements(text, want)
+        if _VERIFIED_CLAIM_RES[0].search(text) or _VERIFIED_CLAIM_RES[1].search(text):
+            claims_seen = True
+        wrong.extend(f"{path.relative_to(REPO)} {d}" for d in disagreements)
+    assert claims_seen, (
+        "no shipped surface states an 'OpenClaw <version> verified' claim at all — "
+        "has the wording changed? update _VERIFIED_CLAIM_RES to match"
+    )
     assert not wrong, (
         "the OpenClaw version claimed in the badge has drifted from the one the shipped "
         "schema/state snapshots were generated against:\n  " + "\n  ".join(wrong)
     )
+
+
+def test_the_verified_claim_guard_bites_on_a_stale_readme_alt():
+    """Guard the guard (CLAWSECCHECK-B-843): a mutation that restores the exact stale alt
+    text this bug shipped — "OpenClaw 2026.9.4 verified" while the SVGs say 2026.9.5 — must
+    turn the claim scan red. Proves the fix is the regex catching it and not a coincidence
+    of the current file contents."""
+    want = _stamped_openclaw_version()
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert not _openclaw_verified_claim_disagreements(readme, want), (
+        "the real README.md must start clean"
+    )
+
+    older = "2026.9.4"
+    assert older != want, "fixture assumes the stamped version has since moved past 2026.9.4"
+    mutated = readme.replace(f"OpenClaw {want} verified", f"OpenClaw {older} verified", 1)
+    assert mutated != readme, "mutation did not find the alt text to corrupt"
+
+    complaints = _openclaw_verified_claim_disagreements(mutated, want)
+    assert complaints, "guard is blind to a stale 'OpenClaw <ver> verified' alt claim"
+    assert any(older in c for c in complaints), complaints

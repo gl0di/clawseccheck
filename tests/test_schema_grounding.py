@@ -116,9 +116,9 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
-from _distgrounding import _spellings
+from _distgrounding import OPENCLAW_DIST, _spellings
 
-from _realhome import REAL_HOME
+pytestmark = pytest.mark.mechanical
 
 # The skill repo root is the parent of tests/ — in BOTH layouts (locally it is
 # <workspace>/skill/, in CI the checkout root itself). Resolve the source dir and manifest
@@ -155,10 +155,12 @@ MANIFEST_FILE = Path(__file__).resolve().parent / "grounded_schema_paths.txt"
 
 # C-249 third authority: the INSTALLED OpenClaw package. Local-only, like the recon —
 # absent in CI and on a machine without OpenClaw, where the layer skips. Read-only.
-# B-519: REAL_HOME, not Path.home(). This line happens to run at import, before the
-# suite's $HOME redirect takes effect, so Path.home() would still be correct today --
-# by accident of collection order. Stating the intent removes that dependency.
-OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+# Imported from `_distgrounding`, not hand-rolled here: it is the single reader of
+# CLAWSECCHECK-C-583's test-only CSC_OPENCLAW_DIST override, so grounding against a
+# candidate OpenClaw's extracted tarball needs no fake-$HOME symlink (see
+# `_write_dist_snapshot` below, and `tests/_distgrounding.py` for the override itself).
+# Unset, this is byte-identical to the REAL_HOME-derived path it always was (B-519:
+# REAL_HOME, not Path.home() — see `_distgrounding.py`).
 # The zod object the whole openclaw.json is parsed against. Anchoring the walk here is what
 # makes a ROOT-namespace manifest entry a checkable claim ("this is a real top-level key").
 DIST_ROOT_SCHEMA = "OpenClawSchema"
@@ -175,6 +177,12 @@ DIST_ROOT_SCHEMA = "OpenClawSchema"
 # This file records which manifest paths a real dist accepted, so the strongest authority
 # still has a voice where it cannot be present. It is generated, never hand-edited:
 #     PYTHONPATH=tests:. python3 tests/test_schema_grounding.py --write-dist-snapshot
+#
+# To re-baseline against a CANDIDATE OpenClaw before upgrading the real machine (part of
+# the upgrade protocol's re-baseline, CLAWSECCHECK-C-583): extract its tarball anywhere
+# and point CSC_OPENCLAW_DIST at its dist/ dir instead of symlinking a fake $HOME over it:
+#     CSC_OPENCLAW_DIST=/path/to/candidate/package/dist PYTHONPATH=tests:. python3 \
+#         tests/test_schema_grounding.py --write-dist-snapshot
 DIST_SNAPSHOT_FILE = Path(__file__).resolve().parent / "dist_verified_paths.txt"
 
 # Allowlist for configuration paths that are allowed even if not parsed from markdown
@@ -1439,6 +1447,13 @@ _NOT_IN_CURRENT_SCHEMA = {
         "is gateway.nodes.commands.deny. Same accessor and same precedence as "
         "allowCommands above — B-698."
     ),
+    "gateway.nodes.skills.enabled": (
+        "safeParse: unrecognized_keys@gateway.nodes keys=[\"skills\"]; the object no "
+        "longer declares a `skills` key at all (not merely a changed leaf under one) — "
+        "the real path is gateway.nodes.allowSkills. `_shared._node_allow_skills` reads "
+        "both, with the vendor's precedence (`allowSkills === void 0` guards the copy) "
+        "— F-199."
+    ),
     "hooks.internal.installs": (
         "safeParse: unrecognized_keys@hooks.internal keys=[\"installs\"]; the value moved "
         "into the machine-owned state store. B179 reads the state first and this key as "
@@ -1446,9 +1461,11 @@ _NOT_IN_CURRENT_SCHEMA = {
     ),
     "logging.redactSensitive": (
         "safeParse: unrecognized_keys@logging keys=[\"redactSensitive\"]; REMOVED with no "
-        "replacement. Redaction is unconditional on 2026.8.1 — `DEFAULT_REDACT_MODE` is a "
-        "constant config never feeds, and custom `redactPatterns` are UNIONED with the "
-        "built-ins. B9 keeps the read for 2026.7.x — B-700."
+        "replacement. Redaction MODE is unconditional on 2026.8.1 — `DEFAULT_REDACT_MODE` "
+        "is a constant config never feeds; a custom `redactPatterns` list only UNIONS with "
+        "the built-ins on the tool-payload/transcript path -- it REPLACES them outright on "
+        "console output, warnings, and `openclaw logs` (CLAWSECCHECK-B-836). B9 keeps the "
+        "read for 2026.7.x — B-700."
     ),
     "marketplaces.feeds": (
         "safeParse: unrecognized_keys@<root> keys=[\"marketplaces\"]; the whole block was "
@@ -1537,6 +1554,48 @@ _NOT_IN_CURRENT_SCHEMA = {
     RELATIVE_PREFIX + "config.appServer.command": (
         "Read off an MCP server entry (checks/_mcp.py::check_plugin_app_server_command) — same open server-defined "
         "config object as config.permissionMode above."
+    ),
+    RELATIVE_PREFIX + "config.appServer.mode": (
+        "CLAWSECCHECK-B-831. Read off a plugins.entries.codex entry "
+        "(checks/_mcp.py::_codex_appserver_yolo_reach) — same open, plugin-defined "
+        "PluginEntrySchema.config bag as config.appServer.command above, so the CORE "
+        "openclaw schema has no key for it either way. Grounded instead against the "
+        "CODEX PLUGIN's OWN config, which lives in a SEPARATE npm package "
+        "(`@openclaw/codex`, not bundled in `openclaw` core — see "
+        "docs/research/openclaw-schema-recon.md §44 for the full citation trail): "
+        "`resolvePolicyMode`, dist/.setup/config-security-*.mjs, "
+        "`@openclaw/codex@2026.9.5`."
+    ),
+    RELATIVE_PREFIX + "config.appServer.approvalPolicy": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveApprovalPolicy` (dist/.setup/config-security-*.mjs) — see "
+        "docs/research/openclaw-schema-recon.md §44."
+    ),
+    RELATIVE_PREFIX + "config.appServer.sandbox": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveSandbox` (dist/.setup/config-security-*.mjs) — see "
+        "docs/research/openclaw-schema-recon.md §44."
+    ),
+    RELATIVE_PREFIX + "config.appServer.networkProxy": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveCodexAppServerNetworkProxy` (dist/.setup/config-security-*.mjs) — "
+        "see docs/research/openclaw-schema-recon.md §44."
+    ),
+    RELATIVE_PREFIX + "config.appServer.approvalsReviewer": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveApprovalsReviewer` (dist/.setup/config-security-*.mjs) — see "
+        "docs/research/openclaw-schema-recon.md §44."
+    ),
+    RELATIVE_PREFIX + "config.appServer.transport": (
+        "CLAWSECCHECK-B-831. Same open PluginEntrySchema.config bag as "
+        "config.appServer.command above; grounded against `@openclaw/codex@2026.9.5`'s "
+        "own `resolveTransport`/`resolveDefaultCodexAppServerPolicy` "
+        "(dist/.setup/config-security-*.mjs, dist/.setup/config-options-*.mjs) — see "
+        "docs/research/openclaw-schema-recon.md §44."
     ),
     RELATIVE_PREFIX + "network.dangerouslyAllowPrivateNetwork": (
         "Read off a channel's node entries (checks/_config.py::check_dangerous_overrides). ChannelsSchema is "

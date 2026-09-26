@@ -35,6 +35,7 @@ from ._shared import (
     _channels,
     _config_unreadable,
     _custom,
+    _detail_path,
     _enabled_tools,
     _openclaw_generation,
     _pattern_hits_real_secret,
@@ -383,24 +384,24 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     # same migration doctor uses (applyLegacyDoctorMigrations, which folds
     # normalizeLegacyBrowserConfig from doctor-config-flow-BoTzHMKN.mjs:216-229) and boots
     # with the repaired config -- silently, on EVERY startup, with no explicit
-    # "openclaw doctor" invocation needed. The disk WRITE-back of that repair, however,
-    # only happens through the separate `doctor` command flow
-    # (doctor-config-preflight-BOxHQnVM.mjs), which pre-bootstrap does not call. So the
-    # raw config file this check reads can show the legacy key indefinitely while the
-    # running daemon already granted private-network access on every boot -- a config
-    # setting ONLY the legacy key is a live, silent bypass, not a theoretical one, and
-    # was previously invisible to this check (dangerouslyAllowPrivateNetwork alone).
+    # "openclaw doctor" invocation needed. The disk WRITE-back is a separate step,
+    # commitAutomaticConfigRepair, called only from runDoctorConfigPreflight
+    # (doctor-config-preflight-clU90J9x.mjs, 2026.9.5): pre-bootstrap never calls it, but
+    # the CLI config guard does, incl. for `gateway run`, and only for a single-file config
+    # the repair plan admits (re-checked 2026.9.5; an earlier note here said doctor-only).
+    # So the raw file can show the legacy key until that write lands while every boot
+    # honours it: ONLY the legacy key set = live bypass, previously invisible to this check.
     # Read both, `is True` on each -- not a truthy check, matching the coercion-proof
     # gate below and risk.py's own C-135-B722-followup note.
     #
     # Two OTHER candidate keys were checked and do NOT apply here, so they are
     # deliberately NOT read: OpenClaw's isPrivateNetworkOptInEnabled
-    # (ssrf-policy-CFLWuj1r.mjs) also reads a nested `network.allowPrivateNetwork` /
+    # (ssrf-policy-bu9unXwu.mjs) also reads a nested `network.allowPrivateNetwork` /
     # `network.dangerouslyAllowPrivateNetwork` shape, but that shape belongs to CHANNEL
     # configs only (channels.<provider>.network.*; its own migration in
-    # legacy-private-network-migration-BOjQqQum.mjs is scoped to `channels.<channelKey>`,
+    # legacy-private-network-migration-t-YHta0_.mjs is scoped to `channels.<channelKey>`,
     # never to `browser`). The canonical browser/tools.web.fetch schema,
-    # SsrFPolicyConfigSchema (zod-schema.core-mVpnhNqD.mjs:70-77, a `.strict()` object),
+    # SsrFPolicyConfigSchema (zod-schema.core-CZ0zDyHR.mjs:268-274, a `.strict()` object),
     # has exactly 5 fields and no `network` member, and resolveBrowserSsrFPolicy never
     # reads `cfg?.ssrfPolicy?.network`. Reading it here would fabricate a field path that
     # does not exist for this subsystem (Golden Rule #4).
@@ -456,6 +457,20 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         # with neither flag ever set, and advice about "if the flag cannot be turned off"
         # would be confusing noise pointed at a flag this config never enabled. C-135
         # (independent adversarial pass) found this unconditional in the first draft.
+        #
+        # B-853: blockedHostnames is matched by HOSTNAME/IP TEXT only
+        # (resolveHostnamePolicyChecks, ssrf-B1sxrDMt.mjs:189 in the installed 2026.9.5
+        # dist, "denied before DNS"). With the private-network flag on,
+        # shouldSkipPrivateNetworkChecks (same file, lines 114-115) makes
+        # resolveHostnamePolicyChecks skip assertAllowedHostOrIpOrThrow, and
+        # resolvePinnedHostnameWithPolicy (lines 280/330) skips
+        # assertAllowedResolvedAddressesOrThrow too -- so a request naming an
+        # attacker-controlled hostname that itself RESOLVES to 169.254.169.254 is never
+        # checked against the blocked IP at all. blockedHostnames therefore blocks only a
+        # request that names one of the listed hosts/IPs directly; it does not close the
+        # resolved-IP gap the private-network flag opened. The wording below must not
+        # claim it "blocks them" (the addresses) -- only that it blocks direct use of the
+        # literal names/IPs.
         if allow_private:
             fix += (
                 " If the private-network flag cannot be turned off, an "
@@ -464,8 +479,12 @@ def check_browser_ssrf(ctx: Context) -> Finding:
                 "naming at least the cloud-metadata addresses — 169.254.169.254, "
                 "metadata.google.internal, 100.100.100.200 — OpenClaw checks that deny "
                 "list before DNS and allow rules, even with private-network access "
-                "enabled, so it is the one lever that still blocks them while the flag "
-                "stays on."
+                "enabled, so it still blocks a request that names one of those hosts or "
+                "IP literals directly. It matches by hostname/IP text only, not by the "
+                "address a name resolves to, so an attacker-chosen hostname that resolves "
+                "to one of those addresses is NOT caught by this deny list while the flag "
+                "stays on — turning dangerouslyAllowPrivateNetwork off is the only way to "
+                "block that."
             )
         return _finding(
             "B38",
@@ -1605,10 +1624,10 @@ def check_provider_baseurl(ctx: Context) -> Finding:
 def _otel_undeterminable(cid: str, path: str, value: object, expected: str) -> Finding:
     """Shared UNKNOWN shape for B365's malformed-container branches — same reasoning as
     B82's ``_b82_undeterminable`` (this module): ``diagnostics``/``diagnostics.otel`` are
-    declared inside ``.strict()`` zod objects (zod-schema-Q1KXOooO.mjs:1255-1281) with no
-    ``.nullable()`` anywhere, so a malformed shape means the config does not load at all
-    and the real state cannot be determined from this file — UNKNOWN, never an
-    affirmative claim in either direction.
+    declared inside ``.strict()`` zod objects (``DiagnosticsConfigSchema``,
+    zod-schema-DN2u5FdA.mjs:1281-1315) with no ``.nullable()`` anywhere, so a malformed
+    shape means the config does not load at all and the real state cannot be determined
+    from this file — UNKNOWN, never an affirmative claim in either direction.
     """
     return _finding(
         cid,
@@ -1659,9 +1678,9 @@ def check_otel_content_capture_egress(ctx: Context) -> Finding:
     _b178_classify_host) rather than a second copy. Content capture piggybacks on the
     TRACE signal specifically (the gate checks otel.traces, not .metrics/.logs), so the
     destination is tracesEndpoint if set, else the shared endpoint — per-signal-overrides
-    -shared is grounded from the schema descriptions map (schema-DbKC3IUo.mjs:
-    "diagnostics.otel.tracesEndpoint": "... overrides diagnostics.otel.endpoint and
-    OTEL_EXPORTER_OTLP_ENDPOINT for trace export only."). Neither set -> the exporter
+    -shared is grounded from the schema descriptions map (schema-CwAIqZVE.mjs:937,
+    2026.9.5: "diagnostics.otel.tracesEndpoint": "... overrides diagnostics.otel.endpoint
+    and OTEL_EXPORTER_OTLP_ENDPOINT for trace export only."). Neither set -> the exporter
     falls back to the standard OTEL_EXPORTER_OTLP_ENDPOINT environment variable, which
     this config-only audit cannot observe (no on-disk dotenv witness the way
     B82/OPENCLAW_CACHE_TRACE has) — reported as WARN with the gap disclosed, never an
@@ -1982,6 +2001,123 @@ def check_memory_search_remote_egress(ctx: Context) -> Finding:
     )
 
 
+def check_secrets_egress_proxy(ctx: Context) -> Finding:
+    """B387 (F-196) — secrets.egressProxy traffic-allowlist gap.
+
+    ``secrets.egressProxy`` (new in OpenClaw 2026.8.1; re-grounded here against the
+    installed 2026.9.5 dist and unchanged) is a loopback HTTP(S) forward proxy OpenClaw
+    injects into Gateway-hosted agent exec environments (``HTTPS_PROXY``/``HTTP_PROXY``,
+    per-run Basic-auth credentials) that substitutes an ``oc-sent-v2...end`` sentinel for
+    a real secret value, but only toward the destination host(s) that secret is bound to
+    (``openclaw secrets store set NAME --allow-host HOST``). Schema:
+    ``SecretsConfigSchema`` (`dist/zod-schema.core-CZ0zDyHR.mjs:326-339`) —
+    ``{enabled?: boolean, allowedHosts?: string[], bypassHosts?: string[]}.strict()``,
+    all optional, default ``enabled: false``. Off by default is not a gap (Golden
+    Rule #5: absence of an opt-in feature is never a FAIL).
+
+    ``allowedHosts`` and ``bypassHosts`` both validate through the SAME
+    ``EgressProxyExactHostSchema`` (same file, lines 329-330), which calls
+    ``normalizeExactAllowedHost`` (`dist/exact-hostname-B5MIU7_E.mjs`) and REJECTS any
+    entry containing ``*`` at config-load time: "Allowed host ... cannot contain a
+    wildcard; use one exact hostname." The filed task asked whether an unscoped wildcard
+    in ``bypassHosts`` was itself the FAIL-worthy shape, the way other allowlist checks
+    in this module (e.g. ``check_browser_ssrf``) treat one — it is not: the schema makes
+    that value impossible to persist through ``openclaw config set``, and a hand-edited
+    config carrying it would fail the SAME validation on the next config load, so this
+    check does not look for one.
+
+    What the vendor docs (`docs/gateway/secrets/secret-store-and-egress.md`, re-read
+    against 2026.9.5) actually describe is the OPPOSITE of the "empty allowlist is wide
+    open" shape several sibling checks in this module use for THEIR allowlists: "An
+    empty array is lockdown mode: only per-secret bound hosts and bypassHosts remain
+    reachable. Omitting allowedHosts leaves traffic unrestricted." So
+    ``allowedHosts: []`` is the MOST restrictive setting here, not the least — the real
+    gap is ``allowedHosts`` being ABSENT while the proxy is enabled, which leaves
+    non-sentinel traffic through the proxy unrestricted: any host, once a Gateway-hosted
+    run holds proxy credentials. Per-secret destination binding still protects the bound
+    secret VALUES either way; this check is only about that separate traffic surface,
+    which the vendor's own docs call "defense in depth" (a subprocess that ignores the
+    proxy environment variables and opens a raw socket bypasses it entirely) — which is
+    why this stays WARN-only and never escalates to FAIL.
+
+    PASS    — ``enabled`` is not ``true`` (the default; nothing runs, nothing to
+              assess), OR ``enabled: true`` and ``allowedHosts`` is a list (empty =
+              lockdown, non-empty = scoped — either way the vendor's own semantics call
+              this restricted).
+    WARN    — ``enabled: true`` and ``allowedHosts`` is absent, ``null``, or any other
+              non-list shape (a shape the real ``array().optional()`` schema would also
+              refuse, so it never enacts a restriction either) — the proxy's traffic
+              allowlist is not in effect.
+    UNKNOWN — config unreadable.
+    """
+    unreadable = _config_unreadable("B387", ctx)
+    if unreadable is not None:
+        return unreadable
+    # B-661: without this guard an unread config reads as `enabled is not True` and
+    # returns the "not enabled (the default)" PASS -- a fail-open, since the real
+    # config on that host may well have the proxy on with no allowlist. Same shape as
+    # checks/_config.py's own config_found guards.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B387", UNKNOWN,
+            "No config was read, so whether secrets.egressProxy is enabled -- and "
+            "whether its traffic allowlist is set -- could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    cfg = ctx.config
+    enabled = dig(cfg, "secrets.egressProxy.enabled")
+
+    if enabled is not True:
+        return _finding(
+            "B387", PASS,
+            "secrets.egressProxy is not enabled (the default) — no secret-egress "
+            "substitution proxy runs for Gateway-hosted agent exec, so there is no "
+            "proxy traffic allowlist to assess.",
+            "If you enable secrets.egressProxy, also set "
+            "secrets.egressProxy.allowedHosts so non-sentinel proxy traffic is "
+            "restricted to the hosts this workload actually needs, instead of left "
+            "open.",
+            config_field_paths=frozenset({"secrets.egressProxy.enabled"}),
+        )
+
+    allowed_hosts = dig(cfg, "secrets.egressProxy.allowedHosts")
+
+    if not isinstance(allowed_hosts, list):
+        return _finding(
+            "B387", WARN,
+            "secrets.egressProxy.enabled is true but secrets.egressProxy.allowedHosts "
+            "is not set. OpenClaw's own default then applies: non-sentinel traffic "
+            "through the secret-egress proxy can reach any host once a Gateway-hosted "
+            "agent run holds proxy credentials. Secrets bound to a specific host via "
+            "the store stay protected either way — this is about the separate traffic "
+            "surface.",
+            "Set secrets.egressProxy.allowedHosts to the exact hosts this workload "
+            "needs (an empty array locks down everything not already bound to a "
+            "secret). Treat this as defense in depth alongside per-secret "
+            "--allow-host binding, since a subprocess that ignores the proxy "
+            "environment variables bypasses the allowlist entirely.",
+            evidence=[f"secrets.egressProxy.allowedHosts={allowed_hosts!r}"],
+            config_field_paths=frozenset({
+                "secrets.egressProxy.enabled", "secrets.egressProxy.allowedHosts",
+            }),
+        )
+
+    return _finding(
+        "B387", PASS,
+        "secrets.egressProxy is enabled and secrets.egressProxy.allowedHosts is set, "
+        "so non-sentinel proxy traffic is restricted to the declared hosts (an empty "
+        "list locks it down to nothing but per-secret bound hosts).",
+        "Keep secrets.egressProxy.allowedHosts scoped to only the hosts this "
+        "workload needs.",
+        evidence=[f"secrets.egressProxy.allowedHosts={allowed_hosts!r}"],
+        config_field_paths=frozenset({
+            "secrets.egressProxy.enabled", "secrets.egressProxy.allowedHosts",
+        }),
+    )
+
+
 def _b82_undeterminable(path: str, value: object, expected: str) -> Finding:
     """B82's single UNKNOWN shape, shared by all three malformed levels.
 
@@ -2072,7 +2208,7 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
                 "config's setting is the one that applies. The config alone cannot turn "
                 "this off while the variable is set.",
                 evidence=[
-                    f"OPENCLAW_CACHE_TRACE={raw!r} in {source}",
+                    f"OPENCLAW_CACHE_TRACE={raw!r} in {_detail_path(source, ctx.home)}",
                     f"transcripts written to {where}",
                 ],
             )
@@ -2089,7 +2225,10 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
             "here do not settle the question either way.",
             "Run the audit on the machine and account the agent runs as, with no --home "
             "argument, so the environment that actually applies can be read.",
-            evidence=[f"global dotenv present: {', '.join(ctx.dotenv_files)}"],
+            evidence=[
+                "global dotenv present: "
+                + ", ".join(_detail_path(p, ctx.home) for p in ctx.dotenv_files)
+            ],
         )
     # B-657: on the common audited-home-is-own path (the branch above only
     # guards the OTHER-home case), `raw is None` can mean OPENCLAW_CACHE_TRACE sits past
@@ -2115,7 +2254,10 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
             "Keep OpenClaw's global dotenv files (~/.openclaw/.env, "
             "~/.config/openclaw/gateway.env) under the collector's size cap, then "
             "re-run the audit.",
-            evidence=[f"global dotenv present: {', '.join(ctx.dotenv_files)}"],
+            evidence=[
+                "global dotenv present: "
+                + ", ".join(_detail_path(p, ctx.home) for p in ctx.dotenv_files)
+            ],
             engine_degraded=True,
         )
     return None
@@ -2741,6 +2883,104 @@ def _ancestors_allow_other_access(home: Path, stop: "Path | None" = None) -> boo
 _B188_DB_NAMES = ("openclaw.sqlite", "openclaw.sqlite-wal", "openclaw.sqlite-shm")
 
 
+def _b188_collect_state_copies(
+    state_dir: Path, primary_names: "tuple[str, ...]", cap: int = 200
+) -> "tuple[list[Path], bool]":
+    """Bounded, symlink-safe scan for sqlite-shaped files under ``state/`` beyond the
+    primary DB/-wal/-shm trio ``_B188_DB_NAMES`` already covers (C-555). Exists because
+    OpenClaw's own 9.5
+    ``recoverOrphanTaskDeliveryRows`` (dist openclaw-state-db-DS2iNFy4.mjs:3868-3946) drops a
+    FULL copy of the state database under ``state/openclaw-task-delivery-recovery-*/`` at the
+    same 0600/0700 vendor-default modes as the original — a copy is exactly as exposed as its
+    parent chain, and the checks above never looked past the three fixed top-level names.
+    ``cap`` mirrors the 200-file bound ``_collect_atrest_transcripts`` uses for the same
+    reason: a pathological tree must not turn a permission check into an unbounded walk.
+
+    Returns ``(files, listing_failed)``. ``listing_failed`` is True only when the recursive
+    walk itself raised (e.g. a permission-denied subdirectory partway through), which the
+    caller turns into UNKNOWN rather than a silent PASS — Golden Rule #4: a walk that could
+    not complete is not evidence that nothing is there."""
+    out: list[Path] = []
+    if not state_dir.is_dir():
+        return out, False
+    try:
+        for f in state_dir.rglob("*.sqlite*"):
+            if len(out) >= cap:
+                break
+            try:
+                if not f.is_file() or f.is_symlink():
+                    continue
+                if f.parent == state_dir and f.name in primary_names:
+                    continue  # already covered by the primary FAIL-capable check above
+                out.append(f)
+            except OSError:
+                continue
+    except OSError:
+        return out, True
+    return sorted(out), False
+
+
+def _b188_collect_backups(home: Path, cap: int = 200) -> "tuple[list[Path], bool]":
+    """Bounded, symlink-safe scan of ``<home>/backups/**`` — OpenClaw's own pre-repair and
+    migration backup tree (C-555). Distinct from F-120's ``.openclaw-install-backups/**``
+    (covered by B19 above): measured on the reference machine, ``backups/`` holds a full
+    pre-repair ``openclaw.sqlite(.bak)`` trio AND unrelated migration snapshots (e.g.
+    ``heartbeat-migration/*.md``) side by side, so this walks every file under it rather than
+    filtering by name — any of them can be a retained copy of something sensitive, and the
+    directory is a deliberate backup location, not an incidental one. Same cap and
+    listing-failure contract as ``_b188_collect_state_copies``."""
+    out: list[Path] = []
+    backups_dir = home / "backups"
+    if not backups_dir.is_dir():
+        return out, False
+    try:
+        for f in backups_dir.rglob("*"):
+            if len(out) >= cap:
+                break
+            try:
+                if not f.is_file() or f.is_symlink():
+                    continue
+                out.append(f)
+            except OSError:
+                continue
+    except OSError:
+        return out, True
+    return sorted(out), False
+
+
+def _b188_dir_traversable_by_other(home: Path, target_dir: Path) -> bool:
+    """True when a non-owner can traverse every directory from *home* down INTO *target_dir*
+    itself (needs *target_dir*'s own o+x-or-known-shared-g+x bit too, unlike the chain-only
+    leg in ``_other_can_reach_read`` above, which stops one level short because it already
+    has a specific file to test). Used only to decide whether an un-listable directory's
+    UNKNOWN contents could actually matter — if *target_dir* is not reachable at all, its
+    contents are moot regardless of whether they could be enumerated. POSIX stat-only; never
+    raises."""
+    try:
+        rel = target_dir.relative_to(home)
+    except ValueError:
+        return False
+    chain: list[Path] = [home]
+    cur = home
+    for part in rel.parts:
+        cur = cur / part
+        chain.append(cur)
+    world_ok = True
+    group_ok = True
+    for d in chain:
+        try:
+            st = d.stat()
+        except OSError:
+            return False
+        m = st.st_mode
+        world_ok = world_ok and bool(m & 0o001)
+        grp_other = _shared._group_has_other_members(st.st_gid, st.st_uid)
+        group_ok = group_ok and bool(m & 0o010) and (grp_other is True)
+        if not world_ok and not group_ok:
+            return False
+    return True
+
+
 def check_state_db_atrest(ctx: Context) -> Finding:
     """B188 (B-293, DISK-2) — the shared state SQLite database's at-rest permissions.
 
@@ -2794,8 +3034,18 @@ def check_state_db_atrest(ctx: Context) -> Finding:
               with the whole directory chain (above and below ~/.openclaw) permitting it.
     WARN    — ``state/`` is reachable and writable by another user: they cannot read the
               secrets, but they can swap the database under the agent (mirrors B182's
-              ``swappable`` branch).
-    UNKNOWN — no state DB present, or non-POSIX (NTFS ACLs make st_mode meaningless).
+              ``swappable`` branch). ALSO WARN (C-555, never escalated to FAIL) — a
+              RETAINED COPY is reachable and readable: a recovery snapshot elsewhere under
+              ``state/**/*.sqlite*`` (e.g. OpenClaw 9.5's orphan-task-delivery-recovery
+              copy), or any file under ``~/.openclaw/backups/**`` (pre-repair/migration
+              backups). Capped at WARN rather than the device-keys FAIL wording above
+              because a copy's provenance and freshness are less certain than the live DB —
+              same ancestor-reach gate, so a 0600 copy sealed inside a 0700 chain does not
+              fire, only a group/world-readable one does.
+    UNKNOWN — no state DB present, non-POSIX (NTFS ACLs make st_mode meaningless), or a
+              subdirectory under ``state/`` or ``backups/`` could not be listed (permission
+              denied) while itself being reachable by other users — never a false PASS over
+              a walk that could not complete.
     PASS    — present and not reachable-and-readable by others. Loose in-tree modes sealed
               by a restrictive parent directory PASS with a distinct message that names the
               seal, rather than silently reading like a clean 0600 install.
@@ -2853,6 +3103,28 @@ def check_state_db_atrest(ctx: Context) -> Finding:
     ancestors_open = _ancestors_allow_other_access(ctx.home)
     writable_dir = _other_can_reach_write(ctx.home, state_dir)
 
+    # C-555: retained copies of the state database — a recovery snapshot under state/, or a
+    # file under ~/.openclaw/backups/ — are exactly as exposed as their parent chain, so this
+    # reuses the same path-aware `_other_can_reach_read` + ancestor gate as the primary DB
+    # above. Capped at WARN below regardless of what is found (never the device-keys FAIL
+    # wording): a copy's provenance and freshness are less certain than the live DB.
+    extra_files, state_listing_failed = _b188_collect_state_copies(state_dir, _B188_DB_NAMES)
+    backup_files, backups_listing_failed = _b188_collect_backups(ctx.home)
+    listing_failed = state_listing_failed or backups_listing_failed
+
+    exposed_extra: list[str] = []
+    for p in extra_files + backup_files:
+        if _other_can_reach_read(ctx.home, p):
+            try:
+                mode = p.stat().st_mode & 0o777
+            except OSError:
+                continue
+            try:
+                rel = p.relative_to(ctx.home)
+            except ValueError:
+                rel = p
+            exposed_extra.append(f"{rel} (mode {oct(mode)[-3:]}) is readable by other users")
+
     if exposed and ancestors_open:
         return _finding(
             "B188",
@@ -2890,8 +3162,48 @@ def check_state_db_atrest(ctx: Context) -> Finding:
             evidence=[f"state/ (mode {dmode}) is writable by other users"],
         )
 
+    # C-555: a retained copy (recovery snapshot or backup) is reachable and readable.
+    # WARN-only by design — never escalated to the device-keys FAIL wording above, since a
+    # copy's provenance and freshness are less certain than the live database.
+    if exposed_extra and ancestors_open:
+        joined = "; ".join(exposed_extra[:8])
+        more = f" (+{len(exposed_extra) - 8} more)" if len(exposed_extra) > 8 else ""
+        return _finding(
+            "B188",
+            WARN,
+            "A retained copy of the state database is readable by another local user: "
+            + joined + more + ". OpenClaw's own recovery snapshots (state/**) and "
+            "pre-repair/migration backups (~/.openclaw/backups/**) default to the same "
+            "0600/0700 protection as the live database, so a readable copy means that "
+            "protection slipped somewhere — and a copy can carry the same device keys and "
+            "auth tokens as the original.",
+            "Run `chmod 600` on the listed file(s) and `chmod 700` on their containing "
+            "directory. If the copy is no longer needed, delete it instead of just "
+            "tightening it.",
+            evidence=exposed_extra,
+        )
+
+    # C-555: a directory under state/ or backups/ could not be listed (permission denied)
+    # while itself being reachable by other users — an incomplete walk must not read as a
+    # clean PASS (Golden Rule #4). If it is unreachable, its unlistable contents are moot,
+    # so PASS still stands below.
+    if listing_failed and ancestors_open and (
+        _b188_dir_traversable_by_other(ctx.home, state_dir)
+        or _b188_dir_traversable_by_other(ctx.home, ctx.home / "backups")
+    ):
+        return _finding(
+            "B188",
+            UNKNOWN,
+            "state/ or ~/.openclaw/backups/ contains a subdirectory this audit could not "
+            "list (permission denied), and that directory is itself reachable by other "
+            "local users, so whether it holds an exposed copy of the state database cannot "
+            "be determined.",
+            "Check permissions on the unreadable subdirectory yourself, or run this audit "
+            "as the account that owns ~/.openclaw.",
+        )
+
     names = ", ".join(f"state/{p.name}" for p in present)
-    if (exposed or writable_dir) and not ancestors_open:
+    if (exposed or writable_dir or exposed_extra) and not ancestors_open:
         # Loose modes inside ~/.openclaw, but a directory above it (typically $HOME at 0700)
         # denies traversal to every non-owner, so nothing here is actually reachable. Not a
         # finding — but say so plainly, because the seal is one `chmod 755 ~` away from gone.
@@ -3002,13 +3314,13 @@ def check_debug_proxy_capture(ctx: Context) -> Finding:
     for name, what in _B190_TRUTHY_VARS:
         raw, source = dotenv_override(ctx, name)
         if raw is not None and is_truthy_env_value(raw):
-            hits.append(f"{name} is on ({source}) — it {what}")
+            hits.append(f"{name} is on ({_detail_path(source, ctx.home)}) — it {what}")
     for name, what in _B190_VALUE_VARS:
         raw, source = dotenv_override(ctx, name)
         if isinstance(raw, str) and raw.strip():
             # The VALUE is deliberately not echoed: a proxy URL can embed credentials
             # (http://user:pass@host). Naming the variable and its source is enough.
-            hits.append(f"{name} is set ({source}) — it {what}")
+            hits.append(f"{name} is set ({_detail_path(source, ctx.home)}) — it {what}")
 
     rows = ctx.capture_event_rows if ctx.capture_tables_found else 0
     blobs = ctx.capture_blob_rows if ctx.capture_tables_found else 0
@@ -3309,10 +3621,17 @@ def check_leak(ctx: Context) -> Finding:
         }
 
     `mode` is a CONSTANT -- config feeds only `patterns`, so no configuration reaches the
-    module's `mode === "off"` branch. And custom patterns are UNIONED with the built-ins,
-    so a user list adds to the redaction set and cannot replace it; an empty list falls
-    through to the defaults. No env var disables it either -- the only `OPENCLAW_REDACT*`
-    symbol in the dist is the `OPENCLAW_REDACTED__` output marker.
+    module's `mode === "off"` branch. But a non-empty custom list does not add to the
+    built-ins on every path -- only `resolveToolPayloadRedaction` above unions it in
+    (transcripts, tool payloads, structured file-log fields). `resolveConfigRedaction`
+    hands `cfg?.redactPatterns` straight through, and the shared `resolvePatterns()` it
+    feeds REPLACES `DEFAULT_REDACT_PATTERNS` outright for a non-empty list -- that is the
+    console-output, warnings, and `openclaw logs` path. Identical on OpenClaw 2026.9.4
+    (`dist/redact-Ck-hjLec.mjs:1432-1441`) and 2026.9.5 (`dist/redact-CrCCqliq.mjs:1977-
+    1987`, `:2327-2333`) -- B-836; an earlier version of this docstring
+    described the union as universal, which it is not. An empty list falls through to
+    the defaults on every path. No env var disables it either -- the only
+    `OPENCLAW_REDACT*` symbol in the dist is the `OPENCLAW_REDACTED__` output marker.
 
     That made this check actively harmful on a current build: the field is always absent,
     so it emitted WARN on EVERY 2026.8.1 config, telling the user to "pin
@@ -3343,8 +3662,11 @@ def check_leak(ctx: Context) -> Finding:
             PASS,
             "Sensitive redaction is unconditional on this OpenClaw build — the logging "
             "block has no setting that turns it off.",
-            "Nothing to set. Use logging.redactPatterns only to ADD patterns; it cannot "
-            "disable the built-in redaction.",
+            "Nothing to set. If you do set logging.redactPatterns, note it REPLACES the "
+            "built-in patterns on console output, warnings, and `openclaw logs` (it only "
+            "adds to them for transcripts/tool payloads) -- include the built-in shapes "
+            "in your list, or leave the field unset, unless you have verified your "
+            "list's own coverage.",
         )
     # A PRESENT value keeps its original verdict on every build. An earlier version of this
     # fix collapsed "off" and "tools" into one WARN on a modern build, reasoning that an
@@ -3731,7 +4053,8 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     from ..logscan import scan_log_file, summarize_truncation  # noqa: PLC0415
     from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
-    sinks = discover_log_sinks(ctx)
+    unreadable_sinks: list = []
+    sinks = discover_log_sinks(ctx, unreadable_sinks)
 
     # B-817: this discovery has no notion of the SQLite-backed trajectory store
     # (trajectorystore.py) — a `kind="trajectory"` sink here is a JSONL sidecar only.
@@ -3755,14 +4078,28 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             )
 
     if not sinks:
+        # B-913: an unreadable source dir (e.g. a `chmod 000` workspace's memory/) is a
+        # distinct fact from "nothing configured" — name it rather than letting the
+        # reader assume there is genuinely no log corpus.
+        unreadable_note = (
+            f" Could not read: {'; '.join(unreadable_sinks[:8])}"
+            f"{f' (+{len(unreadable_sinks) - 8} more)' if len(unreadable_sinks) > 8 else ''}."
+            if unreadable_sinks
+            else ""
+        )
         return _finding(
             "B164",
             UNKNOWN,
             "No agent log/transcript sinks found (no logging.file, cacheTrace, trajectory "
             "sidecar, session transcript, config-audit log, memory file, or install backup) "
-            f"— nothing to content-scan.{sqlite_trajectory_disclosure}",
+            f"— nothing to content-scan.{sqlite_trajectory_disclosure}{unreadable_note}",
             "Enable OpenClaw's default trajectory sidecar (on by default) and/or "
-            "logging.file so a future run has a log corpus to threat-hunt.",
+            "logging.file so a future run has a log corpus to threat-hunt."
+            + (
+                " Fix permissions on the listed unreadable path(s) and re-run."
+                if unreadable_sinks
+                else ""
+            ),
         )
 
     # C-221: cross-artifact correlation — a skill NAMING a high-specificity IOC (a known
@@ -5032,4 +5369,282 @@ def check_browser_cdp_control_port(ctx: Context) -> Finding:
         "managed profile rather than one holding live logins (B322/B196), and set "
         "browser.enabled=false whenever the browser tool is not needed.",
         pass_confidence="no_signal",
+    )
+
+
+# F-195: browser.extensionRelay.allowLegacyAuth -- new in OpenClaw 2026.8.1, re-grounded
+# against the installed 2026.9.5 dist. Runtime resolution is IDENTICAL on both call sites
+# that read it -- config-Bv9CXmGW.mjs:230 `cfg?.extensionRelay?.allowLegacyAuth ?? true`
+# (resolveBrowserConfig, feeding the actual relay-server startup in
+# relay-lifecycle-BNLtuauY.mjs) and gateway-relay-route-2phSkPrI.mjs:116
+# `... !== false` (the Gateway HTTP route's own auth gate) -- so absent and explicit
+# `true` are the SAME runtime state, not two severities apart. zod-schema-DN2u5FdA.mjs:
+# 1601-1604 and schema-CwAIqZVE.mjs:766 confirm the field path and the vendor's own
+# "Default: true for one migration window" description still hold at 2026.9.5; the field
+# has not been retired or flipped since the tracker entry was scoped.
+#
+# Capped at WARN, never FAIL, by design -- this is not a FAIL-capable check and C-135's
+# adversarial FAIL-review does not gate it:
+#   1. It is a vendor-declared, time-bound COMPATIBILITY default, not a state the
+#      operator chose. A FAIL would fire on essentially every fresh 2026.8.1+ install.
+#   2. OpenClaw's own bundled audit rates the identical condition `warn`
+#      (docs/gateway/security/audit-checks.md: `browser.extension_relay_legacy_auth`).
+#   3. The legacy path still requires the correct relay token
+#      (safeEqualSecret(token, legacyToken), gateway-relay-route-2phSkPrI.mjs:118) -- it
+#      is a protocol-strength downgrade (no replay-bound HMAC proof), not an
+#      authentication bypass.
+# Inputs deliberately NOT escalated past WARN (false-FAIL surface excluded by design,
+# not left undiagnosed): explicit `true` (identical runtime effect to absent, see above);
+# any non-boolean/malformed value (dig() returns it as-is; only literal `False` reaches
+# the PASS branch, mirroring the runtime's own `!== false`); a config where `browser` is
+# configured only through the bundled-plugin path (`plugins.entries.browser`) with no
+# `browser` object at all -- this reports UNKNOWN (via `_browser_surface_absent`), not a
+# presumed WARN, matching B38/B195/B196/B321/B322/B330's shared idiom for "no browser
+# dict to read" rather than resolving a default this check cannot see corroborated.
+def check_browser_extension_relay_legacy_auth(ctx: Context) -> Finding:
+    """B383 — browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default.
+
+    WARN    — browser is configured/intended and not disabled, and
+              browser.extensionRelay.allowLegacyAuth is absent, explicitly `true`, or any
+              other non-`false` value. The Chrome extension/CDP relay then accepts legacy
+              Bearer, Basic, and token-subprotocol authentication alongside Browser Relay
+              Authentication v2 -- a weaker, non-replay-bound credential shape the vendor
+              ships on by default "for one migration window" with no stated expiry.
+    PASS    — browser.extensionRelay.allowLegacyAuth is explicitly `false` (legacy auth
+              refused, v2 only), or browser.enabled is `false` (no browser capability
+              wiring in the gateway at all, so the relay never starts).
+    UNKNOWN — no openclaw.json, an unparseable one, or no browser config to read (the
+              browser tool is not in use, or is reachable only through a path this check
+              cannot corroborate — see `_browser_surface_absent`).
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B383",
+            UNKNOWN,
+            "No openclaw.json found — browser.extensionRelay.allowLegacyAuth cannot be "
+            "assessed.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B383", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    browser = ctx.config.get("browser")
+    if not isinstance(browser, dict):
+        return _finding(
+            "B383",
+            UNKNOWN,
+            "No browser config — the browser tool is not in use, so no Chrome extension "
+            "relay ever listens and there is nothing to assess.",
+            "—",
+            not_applicable=_browser_surface_absent(ctx),
+        )
+
+    if browser.get("enabled") is False:
+        return _finding(
+            "B383",
+            PASS,
+            "browser.enabled=false — OpenClaw wires up no browser capability in the "
+            "gateway at all, so the Chrome extension relay never starts and "
+            "browser.extensionRelay.allowLegacyAuth has nothing to weaken.",
+            "Keep browser.enabled=false while no workflow needs the browser tool.",
+            pass_confidence="verified",
+        )
+
+    allow_legacy = dig(ctx.config, "browser.extensionRelay.allowLegacyAuth")
+    if allow_legacy is False:
+        return _finding(
+            "B383",
+            PASS,
+            "browser.extensionRelay.allowLegacyAuth=false — the Chrome extension/CDP "
+            "relay accepts only Browser Relay Authentication v2 (a replay-bound, "
+            "connection-scoped HMAC proof); legacy Bearer/Basic/token-subprotocol "
+            "credentials are refused.",
+            "Nothing to change. Keep every paired extension and external CDP client on "
+            "v2 before revisiting this.",
+            pass_confidence="verified",
+        )
+
+    state = "explicitly true" if allow_legacy is True else "unset (the vendor default)"
+    return _finding(
+        "B383",
+        WARN,
+        "The browser tool is configured, so OpenClaw's Chrome extension/CDP relay is in "
+        f"play, and browser.extensionRelay.allowLegacyAuth is {state}. The relay accepts "
+        "legacy Bearer, Basic, and token-subprotocol authentication alongside Browser "
+        "Relay Authentication v2 — a weaker, non-replay-bound credential shape the "
+        "vendor ships on for one undated migration window. Every fresh 2026.8.1+ "
+        "install starts here; nothing in openclaw.json currently says otherwise.",
+        "Once every paired Chrome extension and external CDP client speaks Browser "
+        "Relay Authentication v2, set browser.extensionRelay.allowLegacyAuth to false "
+        "so the relay stops accepting the legacy credential shape.",
+        evidence=[f"browser.extensionRelay.allowLegacyAuth={allow_legacy!r}"],
+    )
+
+
+def check_attachments_ttl(ctx: Context) -> Finding:
+    """B390 (F-201) -- attachments.ttlHours unset means no media-retention sweep.
+
+    ``attachments.ttlHours`` is a straight rename of the pre-2026.8.1
+    ``media.ttlHours`` -- same field, same semantics (compare
+    ``docs/research/openclaw-8.1-schema-removed-paths.txt:1145`` against
+    ``openclaw-8.1-schema-added-paths.txt:358``, both workspace-root recon; unchanged
+    through every schema-paths snapshot up to the installed 2026.9.5). Grounded
+    directly against the installed 2026.9.5 dist rather than the internal recon prose,
+    because that recon's descriptions map omits the ``attachments`` namespace entirely
+    (a known gap in that map -- CLAUDE.md Golden Rule #4(c)):
+
+      - Type: ``ttlHours: z.ZodOptional<z.ZodNumber>``
+        (``cli-backend.types-DEEWiHUs.d.ts:8652``, mirrored at
+        ``types-B16fzBZc.d.ts:8487``) -- a plain optional number, no enum/min/max.
+      - Vendor description (``schema-CwAIqZVE.mjs:904-905``): "Top-level retention
+        behavior shared across providers and tools that persist media... Optional
+        retention window in hours for persisted media handled by the general mtime
+        sweep. Leave unset to disable that sweep, or set values like 24 (1 day) or 168
+        (7 days) to periodically remove older staged media. Managed outgoing media
+        (chat-generated attachments) is excluded and follows its own SQLite- and
+        transcript-aware retention."
+      - Runtime sweep gate (``server-maintenance-Cl2cKcaI.mjs:359-366``, the
+        server's own periodic ``runMediaMaintenance``/``runMediaCleanup`` tick,
+        confirmed invoked at line 379):
+        ``const ttlHours = params.getRuntimeConfig().attachments?.ttlHours;
+        mediaCleanupInFlight = (ttlHours !== void 0 ? cleanOldMedia(ttlHours * 60 *
+        6e4, {recursive: true, pruneEmptyDirs: true}) : pruneOutboundMedia())...`` --
+        when ``ttlHours`` is unset, ``cleanOldMedia`` (which sweeps the shared
+        ``media/inbound`` directory -- ``pruneNonPlaybackMedia``,
+        ``store-SPnAoW3B.mjs:150-165``/``208-212``, walks every subdirectory of
+        ``media/`` except ``playback-transcode``/``outgoing``) never runs at all;
+        only the unrelated, fixed-TTL ``pruneOutboundMedia()`` staging sweep runs
+        instead. Any set number (0 included -- no documented floor) makes
+        ``cleanOldMedia`` run on that interval. Neither ``cleanOldMedia`` nor
+        ``pruneNonPlaybackMedia`` reads ``attachments.ttlHours`` itself --
+        ``grep ttlHours store-SPnAoW3B.mjs`` returns nothing; the whole gating
+        conjunction lives in ``runMediaCleanup`` above, which converts hours to a
+        max-age in ms and passes it in. (An EARLIER version of this grounding cited
+        ``telegram-ingress-drain-factory-DbVZxBjw.mjs:3823`` as the gate -- that was
+        wrong. That file's ``resolveRetainedTelegramMedia`` also reads
+        ``cfg.attachments?.ttlHours`` (fed via its own line 3937), but only to decide
+        whether to reuse a cached media reference while rebuilding a Telegram reply
+        chain; it is Telegram-only and unrelated to the accumulation-preventing sweep
+        above. Do not follow that citation expecting to find the sweep.)
+
+    So the gap is exactly the filed task's premise: staged INCOMING media
+    (screenshots, voice notes, forwarded files landed by any channel provider)
+    accumulates on local disk indefinitely when unset. Managed OUTGOING media is
+    explicitly out of scope -- the vendor's own description excludes it -- so this
+    check's claim never extends to that surface.
+
+    PASS    -- ``attachments.ttlHours`` is set to a real number (any int/float, per
+               the plain ``ZodNumber`` schema -- this check does not second-guess a
+               concrete operator-chosen value).
+    WARN    -- at least one live channel provider is configured (so something could
+               actually stage inbound media) AND ``attachments.ttlHours`` is absent,
+               ``null``, or any other non-number shape (a shape the real
+               ``ZodOptional<ZodNumber>`` schema would also refuse, so it never
+               enacts a sweep either -- same idiom as B387's ``allowedHosts`` check).
+               Never FAIL: an unswept disk is a data-hygiene gap the operator can act
+               on at any time, not a proven compromise.
+    UNKNOWN -- three distinct reasons, each preserved separately rather than
+               collapsed into one:
+                 (a) config unreadable (parse error), or
+                 (b) never read at all (B-661: a config that was never actually read
+                     must not silently read as "unset", which would misreport this as
+                     a real gap on a host that was simply never scanned), or
+                 (c) F-201 follow-up: the config WAS read completely and simply has no
+                     live channel provider configured (``channels`` absent, or only
+                     ``defaults``/non-dict entries) -- ``not_applicable`` set via
+                     ``_surface_absent``. With no channel able to receive an inbound
+                     message at all, nothing can ever be staged into OpenClaw's
+                     shared ``media/inbound`` directory in the first place, so the
+                     "staged media accumulates" risk this check warns about cannot
+                     exist yet. Grounded against the installed 2026.9.5 dist:
+                     inbound attachments from EVERY channel -- native Telegram
+                     (``resolveTelegramInboundMediaUri`` builds a
+                     ``media://inbound/<id>`` URI, ``bot-message-BoqoOw2A.mjs:521-523``)
+                     and every plugin-SDK channel alike (``saveMediaBuffer(...,
+                     "inbound")``, exposed generically to any channel plugin via
+                     ``createRuntimeChannel``, ``runtime-channel-BvaQLHei.mjs:220``) --
+                     land in that SAME shared ``media/inbound`` subdirectory, and the
+                     general sweep this check is about (``cleanOldMedia`` /
+                     ``pruneNonPlaybackMedia``, ``store-SPnAoW3B.mjs:150-165``,
+                     invoked from the server's own maintenance tick,
+                     ``server-maintenance-Cl2cKcaI.mjs:362-363``) walks every
+                     subdirectory of ``media/`` except ``playback-transcode`` and
+                     ``outgoing`` -- it is channel-agnostic, not Telegram-specific.
+                     (The one Telegram-only consumer of ``attachments.ttlHours``,
+                     ``resolveRetainedTelegramMedia`` in
+                     ``telegram-ingress-drain-factory-DbVZxBjw.mjs:3823-3937``, is a
+                     narrower reply-chain media-reuse decision, not the
+                     accumulation-preventing sweep itself.) So the deciding factor is
+                     not "which channel type", but whether ANY live channel exists to
+                     originate an inbound message at all -- the same "no channels
+                     configured" test B25/B26/B30 already use
+                     (``k != "defaults"`` filtering of ``channels.*``): individual
+                     plugins can still lag the platforms they wrap (e.g. Buzz's own
+                     docs currently disclaim media support), but that is a
+                     per-plugin feature gap, not a distinction this check can soundly
+                     enumerate and keep current -- so it is not drawn here.
+    """
+    unreadable = _config_unreadable("B390", ctx)
+    if unreadable is not None:
+        return unreadable
+    # B-661: an unread config (config={}, config_found=False) would otherwise dig()
+    # straight to None and read exactly like a real "unset" WARN -- the same fail-open
+    # shape B387's own B-661 guard exists to close. Report UNKNOWN instead of
+    # asserting a fact about a host that was never actually scanned.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B390", UNKNOWN,
+            "No config was read, so whether attachments.ttlHours is set could not be "
+            "determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    cfg = ctx.config
+
+    # F-201 follow-up: a config that WAS read completely but configures no live
+    # channel provider at all (e.g. `{}`) has no ingress path that could ever stage
+    # an inbound attachment -- the "media accumulates" risk below cannot exist yet.
+    # Same "real provider" filter as B25/B26/B30 (channels.<id> dict entries other
+    # than the `defaults` policy block).
+    providers = {
+        k: v for k, v in _channels(cfg).items() if k != "defaults" and isinstance(v, dict)
+    }
+    if not providers:
+        return _finding(
+            "B390", UNKNOWN,
+            "No channels are configured, so nothing can stage inbound media in the "
+            "first place -- attachments.ttlHours' retention sweep is not applicable.",
+            "Once a channel that can receive incoming attachments is configured, "
+            "set attachments.ttlHours to a bounded retention window.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    ttl = dig(cfg, "attachments.ttlHours")
+
+    if isinstance(ttl, (int, float)) and not isinstance(ttl, bool):
+        return _finding(
+            "B390", PASS,
+            f"attachments.ttlHours is set ({ttl!r}) — OpenClaw's general mtime sweep "
+            "periodically removes staged incoming media older than that window.",
+            "Keep attachments.ttlHours at a value that matches how long this "
+            "workload actually needs staged media (voice notes, screenshots, "
+            "forwarded files) on disk.",
+            evidence=[f"attachments.ttlHours={ttl!r}"],
+            config_field_paths=frozenset({"attachments.ttlHours"}),
+        )
+
+    return _finding(
+        "B390", WARN,
+        "attachments.ttlHours is unset, so OpenClaw's general mtime sweep for staged "
+        "media never runs — incoming attachments (screenshots, voice notes, "
+        "forwarded files) accumulate on local disk indefinitely. (Managed "
+        "outgoing/chat-generated media is unaffected — it follows its own separate "
+        "retention.)",
+        "Set attachments.ttlHours to a bounded retention window in hours (e.g. 24 "
+        "for one day, 168 for one week) so staged incoming media is periodically "
+        "swept.",
+        evidence=[f"attachments.ttlHours={ttl!r}"],
+        config_field_paths=frozenset({"attachments.ttlHours"}),
     )

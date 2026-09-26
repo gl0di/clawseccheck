@@ -3,6 +3,390 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.3.0] — 2026-09-26
+
+**OpenClaw 2026.9.5 changed a safe default to an unsafe one without touching a config
+path or a schema entry, and the audit kept calling the unset key the shipped default.**
+This release re-grounds against 2026.9.5. B363 now follows that change, the collector
+reads the build's new subagent-run payload shape, and every report now says so when the
+installed OpenClaw is newer than the build the checks were last verified against.
+Comparing paths and schemas can't catch this kind of change. The release also adds new
+checks for the gateway-host desktop listener, skills published by paired nodes, the
+browser extension relay, the secrets egress proxy, attachment retention, worker-run
+isolation, telemetry, and a Gateway computer-use route. It adds a Codex harness
+determination behind B333/B353, extends release signing to the whole install bundle, and
+fixes a batch of false positives, false negatives, redaction gaps and wording problems.
+
+It is also verified against OpenClaw 2026.9.6, and it was checked against a real
+installed set of several hundred vendor plugin skills: every false FAIL that set surfaced
+is either fixed or, for three narrowly-named static-analysis limits, kept failing with the
+limit disclosed in the finding's own advice text.
+
+### Added — new checks (B382-B391, B393, B396, B397)
+
+- **B382** — warns when `openclaw.json` still holds a key that the installed OpenClaw
+  build has removed from its strict schema. That build treats the config as invalid
+  (`openclaw config validate` and other CLI commands report it) until
+  `openclaw doctor --fix` runs.
+- **B383** — flags `browser.extensionRelay.allowLegacyAuth`, which OpenClaw defaults to
+  `true`. Unless it is explicitly turned off, the Chrome-extension/CDP relay accepts
+  legacy Bearer/Basic/token-subprotocol auth alongside Relay Auth v2. The check is
+  capped at WARN because this is a vendor compatibility default, and OpenClaw's own
+  bundled audit also rates it as a warning.
+- **B384/B385** — cover the gateway-host desktop VNC listener (`desktop.host`), which
+  the audit did not read before. B384 checks OpenClaw's always-loopback design against
+  the socket that is actually listening. It FAILs only when a non-loopback listener is
+  confirmed as OpenClaw's own Xtigervnc process and `desktop.host.managed` is `true`.
+  Otherwise it WARNs: Xtigervnc is also the stock Debian/Ubuntu binary, so an operator's
+  own separately-run VNC server gives the same signal, and the finding names that
+  ambiguity. B385 flags a `desktop.host.passwordFile` that another local account can
+  read.
+- **B386** — flags `gateway.nodes.allowSkills` left at its default `true`. With that
+  setting, a paired gateway node can publish executable skills into the setup as soon as
+  it connects, with no operator opt-in. The check reads both the current key spelling
+  and the pre-2026.8.1 one.
+- **B387** — WARNs when `secrets.egressProxy` is enabled with no `allowedHosts` entry,
+  which leaves the proxy open by omission. It never FAILs, because OpenClaw already
+  rejects a wildcard host at config load. When no config was read, it answers UNKNOWN,
+  not PASS.
+- **B388** — an unscored advisory for prose-only instructions telling an agent to
+  collect a host/hardware fingerprint (CPU, RAM, disk, GPU, hostname, kernel version)
+  and send it to a third party, with no bundled code. It fires only when the artifact
+  and the send verb share a sentence or are linked by a direct backreference.
+- **B389** — an unscored advisory for the Gateway `computer.invoke`/`computer.status`
+  route added in OpenClaw 2026.9.5. The route never consults
+  `gateway.nodes.commands.deny` and asks for no per-action confirmation, so denying
+  `computer.act` does not close it. The check fires when the `cua-computer` plugin is
+  explicitly enabled and a declared agent scope has the `computer` tool without proof of
+  full sandboxing.
+- **B390** — WARNs when `attachments.ttlHours` is unset. In that case the
+  media-retention sweep never runs, and staged incoming attachments pile up on disk
+  indefinitely. Any number PASSes. A config with no channel provider can't receive
+  incoming media at all, so it gets UNKNOWN instead of a WARN.
+- **B391** — an unscored advisory that WARNs when `nodeHost.workerRuns` is enabled
+  without `isolation: "container"`. In that case, worker sessions sent by a paired
+  Gateway run directly on this node host, which the sandbox checks do not cover. The
+  less-isolated setting is OpenClaw's own default, so this check never FAILs.
+- **B393** — an unscored disclosure, never a WARN or FAIL, naming what OpenClaw's
+  `telemetry.enabled` payload actually sends when a user opts in: the OpenClaw version,
+  platform/architecture, Node
+  version, the surface that invoked it, channel/provider names, plugin and session
+  counts, and the id of every enabled plugin. That is more than the setting's own help
+  text lists.
+- **B396** — paired-node skills outside this audit's skill content scan. A paired
+  gateway node can publish its own machine's skills into your setup while connected,
+  but OpenClaw only ever keeps that published content in the gateway's memory and on
+  the node's own disk — never on the machine this audit runs on — so the existing
+  skill content checks can never see it, however thoroughly they scan the skills
+  actually installed locally. This advisory check discloses whether such a node
+  currently exists (a paired device holding a live node token that is allowed to run
+  commands) so that gap in coverage is visible instead of silent; it never fails the
+  audit and does not change your security score.
+- **B397** — agent-opened Gateway portals (`gateway.portals`, the `portal`
+  tool) are gated only by a per-portal bearer token in the URL, never by the Gateway's
+  own authentication, trusted-proxy identity, or any access layer in front of it. This
+  holds across all three ways a portal can be published — a wildcard-proxy ingress
+  route, a managed Tailscale Serve route, or a direct listener on whatever address the
+  Gateway itself binds — so a hardened gateway on a LAN bind is flagged the same way an
+  ingress or Tailscale setup is. Reports only when a non-sandboxed agent is actually
+  granted the `portal` tool; otherwise it notes that only an authenticated Gateway
+  operator could open one. Unscored, WARN-capped advisory — never a hard failure.
+
+### Added — new capabilities
+
+- **A Codex app-server harness determination now gates B333 and B353.** Both checks only
+  matter when that harness is in use, and until now they could only hedge. A proven
+  "yes" is now stated as fact, a proven "no" becomes a PASS, and everything else keeps
+  the hedged wording. The answer is trusted only on the OpenClaw build it was validated
+  against by running the vendor's own code: 2026.9.5. 2026.9.4 handles some inputs
+  differently, so the validated range moved to 2026.9.5 instead of growing to cover
+  both. Any other build gets the hedged wording. Even on 2026.9.5, the determination
+  answers UNKNOWN rather than "no" for inputs it cannot actually see: legacy Codex
+  provider spellings, an installed build version it can't compare,
+  `models[ref].pickerRuntimes` entries, model references across plugins, and `${VAR}`
+  substitutions. Two shapes that can't involve Codex no longer block a verdict: a
+  provider's own local model-catalog label, and an `agents.list` next to a real
+  `agents.entries` record. A list next to `entries: null` still counts, because
+  OpenClaw's legacy migration moves it into `entries`.
+- **Reports now say when the installed OpenClaw is newer than the build the checks were
+  last verified against.** The line appears ahead of the score and never affects the
+  score or grade. It does not claim to know which checks might be affected.
+- **A `Build: <12-hex-digest>` line** on `--menu` and in the default report header. The
+  digest is recomputed from the files on disk on every run, so a local checkout can be
+  told apart from the release whose version string it shares. This line and the one
+  above are text-report additions only; neither is added to the `--json` payload.
+- **`SKILL.md` gained a suspected-sandbox rule.** An agent that only suspects it cannot
+  see the host's real OpenClaw setup must run one plain default audit first rather than
+  rely on its own guess.
+
+### Fixed
+
+- **B363 follows OpenClaw 2026.9.5's silent default change.** 2026.9.5 changed how the
+  runtime reads `tools.message.crossContext.allowAcrossProviders`, from `=== true` to
+  `!== false`. An unset key went from deny to allow, while the config path and schema
+  stayed the same. B363 kept passing an unset key, calling it the shipped default. It
+  now WARNs on 2026.9.5+ when the key is unset, and PASSes only on an explicit `false`
+  or a build older than 2026.9.5. When the build can't be determined, it answers UNKNOWN
+  instead of a hedged PASS. It also stays quiet when a global or per-agent message-tool
+  allow-list already limits the tool to actions outside the cross-context-guarded set,
+  because cross-provider sends can't happen in that case whatever the setting says.
+- **Collector and ingestion gaps.** The collector now unwraps 2026.9.5's
+  `{"parentCompletion": <record>}` subagent-run payload. Before, any check that read a
+  run's model, timeout, outcome or end reason from such a row got empty values with no
+  warning. Findings imported from a real `openclaw security audit --json` run now keep
+  their own ids. The tool did not recognise their `checkId` key, so every finding in a
+  run ended up under the same `native` id. Inside an OpenClaw sandbox, the real skill
+  tree can sit in a `skills` directory next to the audited state directory rather than
+  under it. The audit now says so instead of reporting no skills installed (in one real
+  case, it had counted 29 skills as 0).
+- **Write-access verdicts now come from the vendor-validated tool-grant model.** B55
+  used a keyword guess that was wrong in both directions. It FAILed allow+deny
+  combinations that could not write at all, and it downgraded a real write grant (a
+  `messaging` profile plus an `alsoAllow` write) to a WARN. It now combines the
+  validated grant resolver with per-scope confinement. Separately, an agent whose id is
+  literally `"global"` had its own `tools` block ignored, because the tool used that
+  same literal string as its own placeholder for the global scope. As a result, B55
+  could flag an agent that cannot write, and B68 could PASS one that can. The check for
+  `alsoAllow` widening had the same gap.
+- **B353 now sees the Codex plugin's own app-server default.** When the Codex app-server
+  harness is in use, the plugin's app-server posture of `approvalPolicy: "never"` with
+  a `danger-full-access` sandbox and no network proxy, which is its implicit default,
+  pre-approves every tool on every MCP server that sets no approval mode of its own,
+  per-requester OAuth servers included. B353 did not report this. It now does, working
+  out the effective `tools.exec` mode the way OpenClaw does (the `mode` field, otherwise
+  `security` plus `ask`, layered per roster agent) and honouring `plugins.enabled`,
+  `plugins.deny` and `plugins.allow`. Where the outcome depends on something a config
+  read cannot see (an exec-approvals floor, agents that disagree about their exec mode,
+  a reviewer that depends on the model chosen at run time, environment overrides), the
+  finding says so instead of asserting it.
+- **Findings that contradicted OpenClaw's real gating, or each other.** B18 WARNed, and
+  a RISK-07/B8/B46 chain fired, whenever `tools.elevated.allowFrom` was set alongside a
+  real `tools.exec` approval gate. The code assumed `tools.elevated` is never gated, but
+  OpenClaw gates the approval bypass for an elevated `full` request behind those same
+  `tools.exec` fields. Separately, A1 could report "Active legs 2/3" PASS next to a
+  RISK-02 finding saying all three trifecta legs were active. A1 now counts a configured
+  `gateway.auth.password` as sensitive data, as the risk chains and capability graph
+  already did.
+- **Detection gaps in config checks were closed.** B32 missed `gateway.tools.allow`
+  entries of `plugins` (which is on OpenClaw's own control-plane list and default HTTP
+  deny) and of `automations`, the current name. The list held the older alias `cron` and
+  compared raw strings. Entries are now normalized and matched the same way OpenClaw
+  matches them, and findings still quote the operator's own spelling. B370 now also
+  scans `models.providers.<p>.agentRuntime.id` and
+  `models.providers.<p>.models[].agentRuntime.id`, real fields that were previously
+  documented as not existing. RISK-12 now also looks at `sandbox.browser.binds` when the
+  browser sandbox is enabled. A writable host mount there had been reported as fully
+  contained. B168 now scans a cron entry's payload `cwd` and `env` values, which were
+  collected but never inspected.
+- **Content-scan false negatives.** Five places still let a plain Markdown code fence
+  suppress a real match, with no negation or "example" marker needed: B165's
+  hex-private-key check, a heuristic for insecure temp-file writes, and the Tor
+  `.onion`, public-IP-URL and H6 scans inside B13. For example, a `curl | bash`
+  installer that downloads from a bare public IP was slipping through. B65, B66 and B170
+  were trimming the text their detection patterns search, not just the snippet shown to
+  the user, so a real destination or trigger at the edge of that text could be cut off
+  before matching. The search now uses the untrimmed text, and only the displayed
+  snippet is trimmed.
+- **A confirmed archive path traversal is no longer hidden behind a coverage gap.** When
+  B13 reported that a skill could not be fully analysed because of a parse error, a
+  scan-size limit or padding, a confirmed archive path traversal found in the same scan
+  was left out of the finding. It is now named, as the unreadable-file case already was.
+  On an audit covering several skills, each disclosed traversal now names the skill that
+  ships it; before, the text could read as if it belonged to whichever skill had the
+  coverage gap. Verdicts are unchanged; only the finding text is. Because the text is
+  what an ignore entry matches, a `.clawseccheckignore` entry written for the coverage
+  gap alone stops matching once a traversal is also present, on purpose.
+- **Advice text that overstated or misdescribed a mitigation.** B9's PASS advice said a
+  custom `logging.redactPatterns` list always adds to OpenClaw's built-in redaction. In
+  fact, a non-empty custom list replaces the built-ins on the console, warnings and
+  `openclaw logs` path, and only the tool-payload/transcript path combines the two. B38
+  and RISK-15 now say that `blockedHostnames` blocks only literal hostnames and IP
+  addresses. The list is checked before DNS lookup, so a hostname that resolves to a
+  blocked address gets through. B61's "might be your own bundled module" caveat no
+  longer appears on a wildcard sweep of every skill's files such as `skills/*/.env`,
+  where it does not apply; the FAIL itself is unchanged. A hedged A1 WARN no longer
+  shows the catalog's CRITICAL severity without qualification, or a confirmed "0/3 legs"
+  count. `docs/USAGE.md`'s note on multilingual detection said Japanese and Korean were
+  not covered. It now states the real reach: four override families across Chinese,
+  Russian, Japanese and Korean, plus a narrow Russian bare-secrecy list in one check,
+  with B63, B66, B156 and B160 still English-only. `--help`, `docs/USAGE.md` and
+  `references/cli-flags.md` no longer claim that an unusable `--vet`/`--advise` path
+  falls under `--exit-code-scheme`'s exit-1 bucket. Vet invocations keep their own exit
+  codes (1 for caution/do-not-install, 2 when unassessable) and ignore `--exit-code`,
+  `--fail-on` and `--exit-code-scheme`.
+- **`--vet` accuracy.** The report on a vetted skill no longer says "no executable code
+  to analyze" about a skill that bundles only JavaScript or shell, next to a Danger
+  verdict against that same file. It now says that capability-family detection only
+  covers Python so far. Notes about stowaways and bundled native executables now name
+  the skill each file belongs to, because one flat list covers every skill in a sweep.
+  Automatic type detection now reports a saved HTML page as `unknown`, not
+  `detected type: skill`. A `--vet` run on a single file names the file rather than its
+  parent directory. The content ring no longer lists a check that already produced a
+  FAIL/WARN as "did not run" when its time limit runs out at an unlucky moment.
+- **Reporting and CLI polish.** Plain-text output no longer shows literal markdown
+  asterisks. The graded card keeps a consistent right margin without dropping below its
+  minimum width. A misspelled flag now gets a did-you-mean suggestion instead of a usage
+  dump. Suggested follow-up commands (`--monitor`, `--vet-mcp`, `--trend`, `--badge`, …)
+  now carry the run's own `--home`/`--data-dir` when they differ from the defaults.
+  Before, they quietly pointed at `~/.openclaw` or `~/.clawseccheck` instead.
+  `--monitor`'s default lock no longer creates a literal
+  `./~/.clawseccheck/state.json.lock` in the directory it was launched from, so runs
+  started from different directories now share the same lock. When a retention marker is
+  present, `--trend` and `--watch-log --all` output is again byte-for-byte identical to
+  the format used before windowing. `docs/OUTPUT_SCHEMA.md` now documents
+  `pluginSweep`'s `dangerous`/`suspicious` arrays. The README stats badge's alt text no
+  longer names an older verified OpenClaw build than the badge itself.
+- B25 (update / pinning hygiene) no longer warns when OpenClaw's own background
+  auto-update (`update.auto.enabled`) is turned on. That setting updates OpenClaw
+  itself (the core update also refreshes plugins that follow a floating version, which
+  B25 already reports as unpinned; skills are not touched), so flagging it as a
+  skill/plugin supply-chain risk was a false claim — and it contradicted this project's
+  own advice (C4) to keep OpenClaw updated. B25 still warns on a pre-release update
+  channel (`update.channel` = `dev`/`beta`) and on an unpinned/floating skill or plugin
+  ref. If you ignored B25's pre-release-channel warning in `.clawseccheckignore`,
+  re-add that entry: its wording changed, so the old fingerprint no longer matches.
+- Closed a bypass in the shell credential-exfiltration check's `for`-loop handling.
+  When a loop variable that legitimately holds an in-cluster Kubernetes service-account
+  token was referenced through a shell parameter-expansion operator (for example
+  stripping or rewriting part of the value) rather than referenced plainly, the check
+  could still treat the reference as the safe token and miss that the operator made the
+  script actually read a different, real credential file at run time. Any such operator
+  reference outside a TLS-certificate-argument position now refuses the safe exemption
+  outright. A related gap let a live, executing command hidden inside a `curl`
+  TLS-certificate/key argument's value go unnoticed because that argument position is
+  normally treated as safe; a match is now only treated as safe there when it is a plain
+  file path, not when it contains an executing subcommand.
+- The installed-skill safety scan no longer fails a skill that describes untrusted
+  input as something that "may contain" an injection-style phrase — the existing
+  "might contain" example wording now also recognizes this synonym.
+- The installed-skill safety scan no longer fails ordinary editorial use of the word
+  "caveat(s)" (for example, advice to keep caveats near the claim they affect, or to
+  omit ones that don't change interpretation); it still catches a directive to omit
+  warnings or disclaimers.
+- A "do not break things without warning" style instruction — an instruction to
+  always warn before a destructive action — now warns instead of failing outright,
+  matching how the scan already treats other safety-constraint phrasing; a directive
+  that actually tells the assistant to act without any warning still fails.
+- The installed-skill safety scan no longer fails a code comment that merely notes
+  running arbitrary code afterward "is not recommended"; a live directive to run
+  arbitrary code still fails.
+- The installed-skill safety scan no longer fails a live-looking directive phrase when
+  it appears inside a third-party automated scanner's own finding-report line (a
+  bulleted, severity-tagged line citing a different file), rather than as an actual
+  instruction in the skill's own prose.
+- Fixed a false FAIL on the runtime-external-fetch skill check when a documentation
+  table's own row named a fetch step in one column and a reference to its rules,
+  patterns, or instructions in another column of the same row: a markdown table row is
+  one line with no sentence-ending punctuation, so the two previously read as a single
+  fetch-and-follow directive. A cell boundary is now treated as its own break, so a
+  directive that only comes together across table cells is downgraded to the existing
+  advisory band instead of failing outright; a directive written entirely within one
+  cell still fails as before. Table detection follows the real GFM tables-extension
+  rule exactly: a table only begins where a delimiter row (one or more hyphens per
+  cell — not just three or more) immediately follows and column-count-matches the line
+  above it, and only that line onward gets cell-boundary splitting — so a directive line
+  that merely sits next to an unrelated real table, with no blank line between them, is
+  left whole and still fails, instead of being wrongly pulled into the neighboring
+  table's advisory downgrade.
+- The installed-skill scanner no longer fails a skill on scheduled-task/boot
+  persistence when "crontab" appears only inside the clickable text of a genuine
+  markdown inline link (e.g. a link to a crontab syntax validator); it is downgraded to
+  a warning instead of dropped. Whether a hit is inside a real link is judged the way a
+  CommonMark renderer would: backslash-escaped brackets, a destination that never closes
+  on the line, or a code span are not links and still fail. A command written as the
+  text of a real link also lands on that warning, so read any such link yourself.
+- The silent-instruction check (B63) no longer reads an ordinary hyphen compound such
+  as "post-setup", "post-install" or "post-mortem" as the HTTP verb POST, which had
+  turned routine UX prose ("Do not show post-setup flow-control choices") into a
+  critical failure. Only a short reviewed list of words ending at a real word boundary
+  is exempt; an uppercase POST, any other compound, or a word chained onto a listed one
+  ("post-setup-attacker", "post-setup.attacker.example") still counts. A skill that uses
+  a listed word for its own exfiltration step is still flagged for review (WARN), never
+  passed. Every other check that looks for exfiltration transports is unchanged.
+- The obfuscation check no longer flags a skill just because decoding some unrelated,
+  incidentally percent-encoded-looking text elsewhere in the file (for example a Python
+  modulo operator) happens to touch the same document as an already plainly visible quote
+  of a suspicious phrase. It still fails when decoding genuinely reveals a new occurrence
+  of the phrase that was not visible before.
+- `--monitor --probe` no longer tells you a change is "still outstanding" and will be
+  reported again when the probe found no drift at all.
+
+### Security
+
+- **A malicious skill can no longer pass itself off as ClawSecCheck's own source.**
+  `--vet` skips ClawSecCheck's own source, and it recognised that source by matching
+  engine markers as plain text. A skill carrying those markers, even only in comments,
+  strings or docstrings, could be waved through as INSTALL / Danger PASS, or left out of
+  the installed-skills scan, instead of being flagged DO-NOT-INSTALL. Several successive
+  fixes closed marker placement in comments and strings, plus f-string parsing
+  differences between Python versions. The check now matches on code structure instead
+  of text. A size limit stops a planted oversized decoy file from stalling every audit,
+  and the self-vet explanation no longer claims a scan took place.
+- **Disguised path-traversal reads through a reassigned path module are now caught.**
+  The skill code scanner stopped trusting a name as a path module only after a plain
+  assignment. Reassigning it any other way left it trusted: a `for` target,
+  `with ... as`, walrus, `except ... as`, a function definition, a second import,
+  tuple/list unpacking, a comprehension variable, or `os.path = <obj>`. A read disguised
+  this way was rated a low-severity dangerous sink instead of a critical obfuscated-exec
+  finding.
+- **Path redaction gaps were closed.** `--html` now redacts real home-directory paths in
+  a finding's detail and evidence, as `--json` and `--pdf` already did. When `$HOME`
+  pointed elsewhere, the same finding exposed the account username or not depending on
+  the output format. B82 and B190 included the raw absolute dotenv or systemd-unit path,
+  and the same unredacted value reached B41, B2 and B80 through a shared helper. All
+  five now redact the home directory. SARIF output shortened a path only up to its first
+  space, quote or bracket, so the middle of such paths, and of Windows network (UNC)
+  paths, leaked through. They are now reduced to their final file name, and one
+  collector diagnostic no longer inserts a raw, unquoted path.
+- **Release verification was tightened.** Release signing now covers the whole staged
+  install bundle (`SKILL.md`, `audit.py`, `pyproject.toml`, `docs/` and the rest), not
+  just the `clawseccheck/` package, and CI checks it. The old digest was also taken
+  before the bundle was staged. `SHA256SUMS.txt` has a new labelled bundle section,
+  documented in `README.md`, `docs/USAGE.md` and `docs/RELEASING.md`. The Release step
+  now fails unless both release assets are attached. The documented identity pattern for
+  `cosign verify-blob` was anchored only at the start and left the dots in `github.com`
+  unescaped. It therefore accepted a signature from any workflow on any branch or tag of
+  the repo, or from a lookalike host. It now pins the exact publish workflow file and a
+  `refs/tags/v` ref. README no longer overstates what a passing check proves, and
+  `--verify-self` and `docs/USAGE.md` now print the same tightened command.
+
+### Changed
+
+- **Re-grounded against OpenClaw 2026.9.5.** README, `docs/USAGE.md` and the stats
+  badges now name 2026.9.5 as the verified build, and the check and test counts in the
+  docs were updated. `--monitor`'s fingerprint of the installed OpenClaw program files,
+  which is what catches a build swapped under an unchanged version number, now covers up
+  to 25,000 files and 500 MiB. 2026.9.5 already filled two-thirds of the old byte limit,
+  and an install past the limit is only partly fingerprinted, so a same-version swap
+  would go unreported.
+- **B188 also inspects retained state-database copies and backups**
+  (`state/**/*.sqlite*` and the backups directory), capped at WARN. OpenClaw's recovery
+  path for orphaned task deliveries, and a real machine's backups directory, can hold
+  full copies of the database with the same sensitive permissions as the live one.
+- **Coverage output now says why each check was not scanned**, as `id (reason)`, in
+  text, `--dashboard`, HTML and PDF. `--full --json` carries the same reasons in a new
+  `not_scanned_reasons` map inside `coveragePage`. `--dashboard --full --compact` keeps
+  its fixed character budget.
+- **The "Most urgent" headline no longer prints a bracketed check id** in the text
+  report, HTML report or dashboard. On a run with no installed skills or MCP servers,
+  that headline was the only place the dashboard showed an id, so the dashboard now adds
+  a line pointing to the full report for it.
+- **`docs/THREAT_COVERAGE.md` lists surfaces from the 2026.9.5 review that have no check
+  yet** as a named, dated set of open follow-ups. It also dates its known-advisories
+  table, because "at or past all known-advisory fixes" means no row in the table reaches
+  this version, not that the version was checked and cleared.
+- Three known static-analysis limits are now disclosed in the affected finding's advice
+  text instead of left implicit: a TT5 command-injection hit whose program path comes
+  from external configuration (an env var, CLI flag, or config value) rather than a
+  literal, or is composed by a wrapper from a module-level command table and a
+  same-module prefix helper; a credential-path mention sitting alongside an
+  exfil/transport keyword with no proven data flow between them; and a silent-instruction
+  hit whose only anchor is "do not tell the user to <do something>", which can mean "do
+  this step yourself" rather than concealment. No disclosure changes the verdict — all
+  keep failing exactly as before — it only tells you the signal can't rule out an
+  attacker-chosen path or a genuinely split exfiltration, so you know to read the
+  flagged line yourself.
+
 ## [4.2.1] — 2026-09-18
 
 **Trajectory evidence on a current OpenClaw install was still going missing in places

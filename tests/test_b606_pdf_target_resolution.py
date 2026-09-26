@@ -91,7 +91,7 @@ def _stderr_note(tmp_path: Path, home: Path, pdf_args: list) -> str:
     fake_home.mkdir(exist_ok=True)
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home), "--no-history",
-         "--data-dir", str(tmp_path / "store"), "--dashboard", *pdf_args],
+         "--data-dir", str(tmp_path / "store"), "--no-deptree", "--no-host", "--dashboard", *pdf_args],
         cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "HOME": str(fake_home)})
     return proc.stderr

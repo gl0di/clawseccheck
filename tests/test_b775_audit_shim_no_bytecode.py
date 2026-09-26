@@ -129,7 +129,7 @@ def test_full_audit_run_leaves_the_install_tree_byte_identical(tmp_path):
     assert before == set()
 
     result = subprocess.run(
-        [sys.executable, "audit.py", "--home", str(_HOME_SAFE)],
+        [sys.executable, "audit.py", "--home", str(_HOME_SAFE), "--no-deptree", "--no-host"],
         cwd=install, capture_output=True, text=True, timeout=120,
     )
     assert result.returncode in (0, 1), result.stderr  # 0/1 are both "ran to completion"

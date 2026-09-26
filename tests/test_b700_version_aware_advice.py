@@ -25,7 +25,6 @@ cries wolf gets weakened until it means nothing.
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -64,9 +63,24 @@ _QUALIFIERS = ("2026.8.1", "2026.7")
 _MODERN = "2026.8.1"
 _LEGACY = "2026.7.1-2"
 
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_findings()`/`_risk_paths()` below, plain helpers called from many
+    test bodies rather than fixtures themselves — keeps every throwaway home inside
+    pytest's own tmp tree instead of system /tmp. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
+
 
 def _findings(cfg: dict, installed):
-    home = Path(tempfile.mkdtemp(prefix="b700-"))
+    home = _TMP_PATH_FACTORY.mktemp("b700")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg))
     os.chmod(path, 0o600)
@@ -553,6 +567,24 @@ def test_b9_absent_is_the_only_thing_that_changed_on_a_modern_build():
 #   browser.ssrfPolicy.hostnameAllowlist  -> REJECTED  unrecognized_keys@browser.ssrfPolicy
 #   browser.ssrfPolicy.zzzBogusControl    -> REJECTED  unrecognized_keys@browser.ssrfPolicy
 #   browser.ssrfPolicy.allowedHostnames   -> ACCEPTED
+#
+# CLAWSECCHECK-C-585 (2026-09-22): "only 2026.9.1 was available here" left 2026.9.2 and
+# 2026.9.3 unmeasured, even though checks/_shared.py's _RETIRED_CONFIG_KEYS gates this same
+# key at the same 2026.9.1 floor for every later build too -- the floor was right, but 9.2/9.3
+# had never actually been asked. Re-ran the identical safeParse probe (plus the same
+# bogus-key control) against the real 2026.9.2 and 2026.9.3 tarballs, extracted read-only via
+# `npm pack openclaw@2026.9.2 --offline` / `npm pack openclaw@2026.9.3 --offline` (the
+# installed dist above was never touched):
+#
+#   2026.9.2  browser.ssrfPolicy.hostnameAllowlist  -> REJECTED  unrecognized_keys@browser.ssrfPolicy
+#   2026.9.2  browser.ssrfPolicy.zzzBogusControl    -> REJECTED  unrecognized_keys@browser.ssrfPolicy
+#   2026.9.2  browser.ssrfPolicy.allowedHostnames   -> ACCEPTED
+#   2026.9.3  browser.ssrfPolicy.hostnameAllowlist  -> REJECTED  unrecognized_keys@browser.ssrfPolicy
+#   2026.9.3  browser.ssrfPolicy.zzzBogusControl    -> REJECTED  unrecognized_keys@browser.ssrfPolicy
+#   2026.9.3  browser.ssrfPolicy.allowedHostnames   -> ACCEPTED
+#
+# Same issue shape on both as 2026.9.1. The table and its 2026.9.1 floor needed no change --
+# this only replaces an assumption with a measurement.
 REJECTED_BY_2026_9_1 = {
     "browser.ssrfPolicy.hostnameAllowlist": "browser.ssrfPolicy.allowedHostnames",
 }
@@ -576,7 +608,7 @@ _RISK_CONFIGS = [
 
 def _risk_paths(cfg: dict, installed):
     from clawseccheck.risk import risk_paths
-    home = Path(tempfile.mkdtemp(prefix="b714-"))
+    home = _TMP_PATH_FACTORY.mktemp("b714")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg))
     os.chmod(path, 0o600)

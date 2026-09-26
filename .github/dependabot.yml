@@ -9,7 +9,7 @@ updates:
     schedule:
       interval: "weekly"
     labels:
-      - "ci"
+      - "dependencies"
     commit-message:
       prefix: "ci"
     # Bundle all GitHub Actions bumps into a single weekly PR instead of one
@@ -19,3 +19,44 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  # C-548: before this, clawhub/markdownlint-cli (npm, installed with `npm i -g`)
+  # and pytest/ruff (pip, installed inline in `run:` steps) had NO update channel or
+  # advisory path — Dependabot only parses `uses:` lines on the github-actions
+  # ecosystem above, never a bare `npm i -g x@y` / `pip install x==y` string inside a
+  # `run:` script. Both tools now have real manifests under .github/tools/ (npm
+  # lockfile for clawhub + markdownlint-cli, pip-compile-generated hashed
+  # requirements for pytest + ruff), so both ecosystems can watch them directly.
+  # Directory is scoped to .github/tools, not "/", so this does NOT pick up
+  # pyproject.toml (zero runtime deps already) or the intentionally-vulnerable
+  # fixtures/**/requirements.txt test vectors above.
+  - package-ecosystem: "npm"
+    directory: "/.github/tools"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "ci"
+    groups:
+      ci-tools-npm:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/.github/tools"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "ci"
+    groups:
+      ci-tools-pip:
+        patterns:
+          - "*"
+
+  # gitleaks (ci.yml, secret-scan job) is a digest-pinned release tarball, not a
+  # package-manager dependency — no ecosystem above (or any Dependabot ecosystem)
+  # can watch a raw GitHub Releases download. See the "Install gitleaks" step's own
+  # comment in ci.yml for the owner + manual review cadence that covers it instead.

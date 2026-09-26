@@ -334,6 +334,13 @@ def check_audit_log(ctx: Context) -> Finding:
     # already reads. `_shared.py`'s own B-700 note measured B9's fix string
     # (`logging.redactSensitive: "tools"`) as `REJECTED unrecognized_keys@logging` on a
     # modern build, and this check's fix string was the same one.
+    # B-836: that "unconditional" fact is about MODE only, never about a
+    # custom `logging.redactPatterns` list -- such a list REPLACES the built-in patterns
+    # on the console/log-tail/`openclaw logs` paths (only the tool-payload/transcript
+    # path unions it in). B9's docstring carries the full grounding; this check reads
+    # neither `logging.redactPatterns` nor a value that depends on it, so no verdict
+    # here changes -- this note exists only so a future edit doesn't reintroduce B9's
+    # retracted "cannot replace the built-ins" claim by cross-reference.
     stale = _retired_key_note(ctx, "logging.redactSensitive")
     redact_note = (
         ' logging.redactSensitive is also "off", so what is written may expose '

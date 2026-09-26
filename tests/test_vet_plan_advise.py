@@ -150,6 +150,9 @@ def test_advise_suggests_direct_cleanup_for_a_real_quarantine_path():
     # tmp_path is NOT under tempfile.gettempdir() necessarily on every platform, so
     # build the fixture profile with a target explicitly inside the system temp dir.
     import tempfile
+    # tempfile.mkdtemp, not tmp_path: this test asserts the rendered advice names a path
+    # inside tempfile.gettempdir() specifically (the real quarantine-path branch), which
+    # pytest's tmp_path is not guaranteed to be — see the comment above. Cleaned up below.
     real_tmp = Path(tempfile.mkdtemp())
     try:
         f = vet_skill(str(FIXTURES / "bad_b13_runtime_fetch" / "skills" / "evil-fetch-skill"))

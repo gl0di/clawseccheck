@@ -28,13 +28,15 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
-import pathlib
-import tempfile
 from collections import Counter
+
+import pytest
 
 from clawseccheck.catalog import PASS, UNKNOWN
 from clawseccheck.checks import CHECKS
 from clawseccheck.collector import Context
+
+pytestmark = pytest.mark.mechanical
 
 # The 5 checks whose PASS is legitimately independent of ctx.config — each reads a
 # DIFFERENT file under ctx.home by presence/content alone, and each carries its own
@@ -43,18 +45,19 @@ _INDEPENDENT_OF_CONFIG = frozenset({
     "check_clawhub_lock_verification",       # .clawhub/lock.json
     "check_legacy_state_migration_pending",  # credentials/*-allowFrom.json, identity/device-auth.json
     "check_paired_device_operator_authority",  # devices/paired.json
+    "check_paired_node_skill_coverage",  # pairing store; PASS only when no skill-capable node is paired (config-gate PASSes need config)
     "check_pending_device_pairing_scope",    # devices/pending.json
     "check_restart_handoff_stale",           # gateway-supervisor-restart-handoff.json
 })
 
 
-def _unread_ctx() -> Context:
+def _unread_ctx(tmp_path) -> Context:
     # Mirrors B-661's own repro exactly: a real, empty tmp home, nothing found.
-    return Context(home=pathlib.Path(tempfile.mkdtemp()), config={}, config_found=False)
+    return Context(home=tmp_path, config={}, config_found=False)
 
 
-def test_no_new_check_passes_on_an_unread_config():
-    ctx = _unread_ctx()
+def test_no_new_check_passes_on_an_unread_config(tmp_path):
+    ctx = _unread_ctx(tmp_path)
     passing = {fn.__name__ for fn in CHECKS if fn(ctx).status == PASS}
     unexpected = passing - _INDEPENDENT_OF_CONFIG
     assert not unexpected, (
@@ -66,10 +69,10 @@ def test_no_new_check_passes_on_an_unread_config():
     )
 
 
-def test_every_documented_independent_check_still_exists_and_still_passes():
+def test_every_documented_independent_check_still_exists_and_still_passes(tmp_path):
     """The other direction: a name in the allowlist that no longer PASSes (renamed,
     behavior changed, or removed) means the allowlist itself has gone stale."""
-    ctx = _unread_ctx()
+    ctx = _unread_ctx(tmp_path)
     by_name = {fn.__name__: fn for fn in CHECKS}
     missing = _INDEPENDENT_OF_CONFIG - by_name.keys()
     assert not missing, f"allowlisted check(s) no longer registered: {sorted(missing)}"
@@ -81,11 +84,11 @@ def test_every_documented_independent_check_still_exists_and_still_passes():
         )
 
 
-def test_the_vast_majority_now_report_unknown():
+def test_the_vast_majority_now_report_unknown(tmp_path):
     """Anti-vacuity: proves the fix actually landed, not just that nothing NEW broke.
     Pinned as a floor (>=170 of 185), not an exact count, so an unrelated new check
     that correctly defaults to UNKNOWN doesn't need to touch this number."""
-    ctx = _unread_ctx()
+    ctx = _unread_ctx(tmp_path)
     counts = Counter(fn(ctx).status for fn in CHECKS)
     assert counts[UNKNOWN] >= 170, (
         f"only {counts[UNKNOWN]} of {len(CHECKS)} checks reported UNKNOWN on an "

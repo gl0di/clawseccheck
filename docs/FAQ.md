@@ -86,7 +86,7 @@ capped one, not a partial one. You get the findings, led by the most urgent one 
 line naming exactly which layers did not run and why:
 
 ```text
-Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
+Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)
 No grade yet — 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).
 ```
 

@@ -186,6 +186,11 @@ channel. The **canonical, deterministic output is always a saved file**: `--save
 (or attach as a real file, in the badge/PDF case), use the saved file, not the chat paste. On a
 phone/mobile chat client specifically, prefer `--pdf` over `--html` — most mobile clients hand an
 HTML attachment over as a download, while a PDF opens inline in the client's own viewer.
+Choosing between them is about format and mobile rendering, not exposure risk: `--json`,
+`--pdf`, and `--html` all fold a leading account-home path to `~` before writing, the same
+protection the shareable card above already gets — `--html` is still labelled "owner view"
+below because nothing about it is trimmed or de-branded for a wider audience the way the
+card and `--badge` are, not because it is less redacted than `--pdf`.
 
 **`--pdf` given with no PATH picks the one place OpenClaw can attach from.** OpenClaw parses a
 `MEDIA:<path>` directive off the agent's own reply and turns it into a real attachment, but only
@@ -451,7 +456,7 @@ curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SU
 
 cosign verify-blob \
   --bundle SHA256SUMS.txt.bundle \
-  --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \
+  --certificate-identity-regexp "^https://github\.com/gl0di/clawseccheck/\.github/workflows/clawhub-publish\.yml@refs/tags/v" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS.txt
 ```
@@ -460,6 +465,12 @@ A passing `cosign verify-blob` proves `SHA256SUMS.txt` was produced by *this rep
 workflow and hasn't been altered since — not that the CI pipeline itself is uncompromisable.
 This closes the loop against opportunistic tampering of a downloaded copy; it is not a
 guarantee against a targeted adversary who also compromises the CI pipeline.
+
+The same file also lists the files shipped beside the engine package (`SKILL.md`,
+`audit.py`, `pyproject.toml`, `references/cli-flags.md`, `docs/`, …) under a separate,
+labelled section, as they sit in the installed bundle. `--verify-self` covers only the
+package, so compare those with `sha256sum <file>` from the install directory. The
+published `CHANGELOG.md` is the trimmed copy, so its digest is of that copy.
 
 **What the digest covers, and when the command exits non-zero.** The walk hashes every file
 in the package tree at every depth, *except* the contents of the regenerated-artifact
@@ -519,11 +530,10 @@ openclaw skills update clawseccheck   # pull the latest from its source (Git/Cla
 clawhub update --all                  # update every installed skill
 ```
 
-(Or re-run the install command.) An auto-updater skill / `update.auto.enabled` in
-`~/.openclaw/openclaw.json` can update on a schedule. Because skills run with the agent's full
-permissions, a malicious *update* is a real supply-chain risk — so each release here is tagged
-and the source is public to read **before** updating. Prefer reviewing/pinning a tag over blind
-auto-update for anything security-sensitive.
+(Or re-run the install command.) A scheduler or an auto-updater skill can also apply updates
+unattended. Because skills run with the agent's full permissions, a malicious *update* is a real
+supply-chain risk — so each release here is tagged and the source is public to read **before**
+updating. Prefer reviewing/pinning a tag over blind auto-update for anything security-sensitive.
 
 > **First call after an update looks empty?** Some OpenClaw versions reload a freshly-updated
 > skill lazily, so the *first* invocation right after an update can return nothing; just run it
@@ -654,8 +664,8 @@ clean gets no extra line — the change itself is already reported.
 > agent's runtime — which this skill deliberately does not do (see [Trust &
 > provenance](#trust--provenance): it is Python, stdlib-only, and never executes what it reads).
 > So the honest posture is three tiers, and only the third works without you doing anything:
-> **warn early** (B25/B95/C4 report that auto-update is on today — they do not speak about
-> any particular future update), **check on demand**
+> **warn early** (B25/B95/C4 report today's pinning, dependency-confusion, and build-freshness
+> hygiene — they do not speak about any particular future update), **check on demand**
 > (`--advise <target>` before you install — INSTALL / CAUTION / DO-NOT-INSTALL), and **catch
 > afterwards** (this). Anything claiming to stop an install from here would be describing a
 > capability the architecture does not have.
@@ -1295,14 +1305,16 @@ non-zero exit can never be read as "the artifact is there and clean".
 (`--exit-code-scheme graduated`).** By default (`--exit-code-scheme binary` — unchanged from
 every release before this flag existed), a genuine severity-tripping FAIL and a run that
 never produced a trustworthy verdict at all — a tool crash, a scan cut short by its own time
-budget, an unusable `--vet` path, or an unreadable/absent config — are the same exit code
+budget, or an unreadable/absent config — are the same exit code
 (1). A CI job reading only `$?` cannot tell "your setup has a real problem" apart from "the
 tool itself did not finish". `--exit-code-scheme graduated` reuses `--monitor`'s own 0/1/3
-convention instead of inventing a second one:
+convention instead of inventing a second one. This flag, like `--fail-on`/`--exit-code`
+themselves, has **no effect** on `--vet`/`--vet-skill`/`--vet-plugin`/`--vet-mcp`/`--advise`
+(a note on stderr says so): vet keeps its own separate contract, described below:
 
 - **0** — clean; the gate did not trip.
-- **1** — could not produce a trustworthy verdict: a crash, `ScanBudgetExceeded`, an unusable
-  `--vet` path, an unreadable/absent config, or (under `--full`) a layer that was actually
+- **1** — could not produce a trustworthy verdict: a crash, `ScanBudgetExceeded`,
+  an unreadable/absent config, or (under `--full`) a layer that was actually
   attempted and errored out.
 - **3** — a real, severity-tripping FAIL at the `--fail-on`/`--exit-code` gate.
 - **2 is never returned by this logic** — argparse itself owns exit code 2 for a usage error
@@ -1579,7 +1591,7 @@ python3 audit.py --canary                   # active prompt-injection self-test 
 python3 audit.py --redteam                   # a multi-scenario adversarial payload suite (incl. tool-poisoning, MCP-response injection, memory-poisoning, multi-agent, approval-bypass, dirty-to-exfil)
 python3 audit.py --dryrun                     # runtime behavioral test (fake secret + fake tools; sources: email, web, MCP response, memory, subagent)
 python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
-python3 audit.py --html report.html         # standalone HTML report (private — owner view)
+python3 audit.py --html report.html         # standalone HTML report (private — owner view; folds home paths the same as --json/--pdf)
 python3 audit.py --pdf report.pdf           # complete audit as a paginated PDF — attach the file; never a link; name the path only if you cannot attach
 python3 audit.py --verify-self               # SHA-256 of ClawSecCheck's own source (anti-tamper)
 python3 audit.py --trend                     # print local score trend (stored in ~/.clawseccheck/history.jsonl)
@@ -1773,8 +1785,9 @@ python3 audit.py --log audit.log            # also write log to a local file
     `/100` and no score-bar:
 
     ```text
-    🦞 ClawSecCheck · OpenClaw Security Audit · Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
+    🦞 ClawSecCheck · OpenClaw Security Audit · Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)
     No grade yet — 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).  ·  27 issues
+    For that finding's check id (needed for `--explain <id>`), see the full report — plain `clawseccheck` or `--save <path>` / `--html <path>`.
     Not fully covered: no trajectory sidecar was read
     ⚠️ open CRITICAL finding — it would have capped the grade, but this run has no grade to cap.
 
@@ -1790,7 +1803,14 @@ python3 audit.py --log audit.log            # also write log to a local file
     ```
 
     That header is what the common case looks like: `--full` closes the installed sweep,
-    so 2 of the 5 layers are still open and no letter is issued. Supply `--attest` and
+    so 2 of the 5 layers are still open and no letter is issued. The "Most urgent" clause
+    states the risk, never the check id (findings are never labelled `[B2]` in owner-facing
+    prose) — the follow-up line above points at the full report instead, since that is
+    where an ungraded run's check ids reliably live (its by-subject inventory index), and
+    this card's own Skills/MCP sections only carry one when an installed skill or
+    configured MCP server is actually implicated. That follow-up line is skipped when
+    nothing is open (`Nothing urgent found in what was checked.`) — there is no id to point
+    at. Supply `--attest` and
     `--judged-bundle` in the same command and the header carries `Grade X · NN/100`
     instead.
 
@@ -1880,8 +1900,13 @@ python3 audit.py --log audit.log            # also write log to a local file
   is the wrong answer to "am I improving?". Nothing is hidden *silently*: when the window cuts
   the table, the line right above it states exactly how many rows are not printed
   (`Showing the last 30 of 4,604 run(s) — 4,574 older run(s) not shown here`), and pass
-  `--all` to print every row instead, byte-for-byte the same as this tool's output before
-  this default window existed.
+  `--all` to print every row instead — each row byte-for-byte the same as this tool printed
+  before this default window existed. The handful of sentences below the table (the
+  ungraded-runs ratio, the pass-rate-fall notes, the retention notice) were reworded in the
+  same change that added the window, because they used to say "shown above" — no longer true
+  once a hidden row could be one of the ones being counted. `--all` does not revert that
+  wording; it is a correctness fix independent of the window, not something the window
+  toggles (B-847).
   The window affects **only what is printed** — the ungraded ratio, every arrow, and the
   pass-rate-fall counts described below are always computed over the **whole** history file,
   never just the visible slice, the same way the score arrows already look past an ungraded
@@ -1901,21 +1926,37 @@ python3 audit.py --log audit.log            # also write log to a local file
   A version of this tool older than 4.0 silently omits such rows from its own `--trend` rather
   than showing them; the rows themselves are intact and re-appear on a current build.
 
+  **The arrow on a GRADED row is itself a claim, not just decoration on its score and
+  letter — a claim that the run being compared against is the same subject.** It renders
+  **blank** — no glyph at all, never the flat one — in two cases: the first graded row in the
+  store, which has no predecessor to claim anything against; and any later graded row whose
+  predecessor does not pass the same comparability gate the pass-rate footnote below already
+  used — a different agent `home`, a different build of this tool, a different set of checks,
+  a `test`/`dev`-tagged predecessor, or a predecessor recorded before this gate existed at all
+  (it carries no subject info to compare, which counts as **not** comparable rather than as
+  agreement — the identical "presence before equality" rule the footnote applies). A store
+  holding only such legacy rows renders every arrow blank; a line under the table names the
+  count once and says plainly that this self-heals — the arrow returns on its own, with no
+  rewrite of what is already on disk, as soon as two comparable graded runs land back to back.
+  No new symbol was added for this: the existing arrow set (`▲▼·` / `^v=`) is unchanged, and
+  the fix withholds the character rather than inventing a different one.
+
   The arrow answers "did the **letter** move", and an open FAIL pins the score at a floor —
-  so it can read flat across a run that got materially worse. Each graded row therefore also
-  records the **uncapped pass-rate**, the check set behind it and the build that produced it,
-  and any row where that figure FELL is marked `(pass-rate fell 92 -> 74)`, whether or not the
-  letter moved with it, with a line under the table saying what it means. Which line depends on
-  the score's own direction: a run that kept or raised its score is the case the mark exists
-  for, and is explained as a score pinned at a cap by an open FAIL; a run whose score fell too
-  is counted separately and simply told that both measures fell, because the pinned-score
-  wording would contradict the down arrow on that row's own line. Only a fall is
-  ever stated: the figure is a rounded percentage, so a small real regression can leave it
-  standing still, and "pass-rate unchanged" would be the same false reassurance one step down.
-  When two rows cannot be lined up — one of them predates this field, or they were recorded for
-  a different agent home, under a different version of this tool, or over a different set of
-  checks — the comparison is skipped and counted, never guessed. Rows recorded before this
-  existed simply say so once and stop as soon as two comparable runs are on file.
+  so it can read flat across a run that got materially worse, on a pair the arrow itself
+  already considers comparable. Each graded row therefore also records the **uncapped
+  pass-rate**, the check set behind it and the build that produced it, and any row where that
+  figure FELL is marked `(pass-rate fell 92 -> 74)`, whether or not the letter moved with it,
+  with a line under the table saying what it means. Which line depends on the score's own
+  direction: a run that kept or raised its score is the case the mark exists for, and is
+  explained as a score pinned at a cap by an open FAIL; a run whose score fell too is counted
+  separately and simply told that both measures fell, because the pinned-score wording would
+  contradict the down arrow on that row's own line. Only a fall is ever stated: the figure is
+  a rounded percentage, so a small real regression can leave it standing still, and "pass-rate
+  unchanged" would be the same false reassurance one step down. This footnote uses the
+  identical comparability gate the arrow itself now does, so a pair the arrow already left
+  blank is, separately, also counted here as "not compared" rather than guessed at. Rows
+  recorded before this existed simply say so once and stop as soon as two comparable runs are
+  on file.
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,
   no telemetry. A run with no score is never ranked on its own number: it names the layers still to
   close, then ranks your most recent *complete* check from local history instead, labelled with
@@ -2110,10 +2151,13 @@ hard false positives on real configs.
   (SkillTrustBench, malicious-class recall). Most misses were attacks *described in prose*
   rather than shipped as code — a blind spot dedicated detectors have since started closing,
   though the fix hasn't been re-measured against the same benchmark yet. Detection patterns
-  are English-word literals plus a narrow hand-authored Chinese/Russian override table for
-  one high-signal family (blanket "ignore previous instructions"-style overrides); other
-  scripts and languages — Japanese, Korean, Arabic, and Russian/Chinese outside that one
-  family — are not covered, so a PASS on non-English/non-covered content proves nothing
+  are English-word literals plus a hand-authored override table covering Chinese, Russian,
+  Japanese and Korean for four families only (B64's blanket "ignore previous
+  instructions"-style override, developer-mode, "no longer bound" and reveal-the-system-prompt
+  phrasings), plus a narrow Russian bare-secrecy phrase list in B63 that reaches WARN at most.
+  B63 (Chinese/Japanese/Korean), B66, B156 and B160 remain English-only, and every other
+  script and language, Arabic included, is not covered, so a PASS on non-English/non-covered
+  content proves nothing
   about it. A PASS tells you what the scanner recognized, not that nothing is wrong.
 - **Does not replace runtime red-teaming.** Static configuration analysis is a starting
   point, not a substitute for adversarial testing against a running agent.
@@ -2148,15 +2192,6 @@ hard false positives on real configs.
   above — not as independent proof.
 - **May produce false positives and false negatives.** Evidence-gating keeps noise low,
   but heuristics can miss novel attack patterns and can misread edge-case configurations.
-- **A config setting and the runtime's *effective* behaviour can differ — the audit
-  reports the former.** B25 warns when `update.auto.enabled` is set, because that is
-  what the config file says. OpenClaw's own runtime also gates auto-update on
-  `OPENCLAW_NO_AUTO_UPDATE`, an environment variable in the *gateway's* own process —
-  invisible to this offline, config-only audit, which runs as a different process with
-  its own environment. Reading *this* process's `os.environ` instead would answer a
-  different, wrong question (whichever shell happened to run the audit, not the
-  gateway), so B25's wording states what the config requests, not a claim about
-  whether auto-update is actually running on your host.
 - **Read scope is bounded:** config, bootstrap markdown, installed-skill text, OpenClaw log
   files, agent session logs, the cron job store, the two global OpenClaw dotenv files,
   OpenClaw-related systemd user-unit environment lines, host OS recon (security-tool paths,
@@ -2198,7 +2233,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 861 test files and 24,370
+A security tool should be heavily tested — so it is: 974 test files and 30,585
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

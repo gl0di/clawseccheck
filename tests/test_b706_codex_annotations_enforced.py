@@ -17,7 +17,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -172,7 +171,7 @@ def _dist_module():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no node on this machine")
-def test_the_port_agrees_with_the_installed_dist_on_every_case():
+def test_the_port_agrees_with_the_installed_dist_on_every_case(tmp_path):
     """The whole basis of this check. Reading the module would have got three of these
     wrong: an invalid camelCase mode falls THROUGH to the snake_case spelling instead of
     ending the lookup; `destructiveHint: false` + `openWorldHint: false` waives the gate
@@ -181,7 +180,7 @@ def test_the_port_agrees_with_the_installed_dist_on_every_case():
     """
     module = _dist_module()
 
-    work = Path(tempfile.mkdtemp(prefix="b706-"))
+    work = tmp_path
     (work / "diff.mjs").write_text(_DIFF_SCRIPT, encoding="utf-8")
     (work / "cases.json").write_text(json.dumps({
         "approval": [[m, a] for m, a in _APPROVAL_CASES],
@@ -303,8 +302,24 @@ def _cfg(tools, *, codex=None):
     return {"mcp": {"servers": {"srv": server}}}
 
 
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_finding()` below, a plain helper called from ~20 test bodies rather
+    than a fixture itself — keeps every throwaway home inside pytest's own tmp tree
+    instead of system /tmp. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
+
+
 def _finding(cfg, installed, cid="B333"):
-    home = Path(tempfile.mkdtemp(prefix="b706-home-"))
+    home = _TMP_PATH_FACTORY.mktemp("b706-home")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg), encoding="utf-8")
     os.chmod(path, 0o600)
@@ -746,7 +761,7 @@ console.log(JSON.stringify(cases.map(([raw, name]) => {
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no node on this machine")
-def test_the_tool_filter_port_agrees_with_the_installed_dist():
+def test_the_tool_filter_port_agrees_with_the_installed_dist(tmp_path):
     """`matchesMcpToolFilterPattern` is a hand-rolled glob with a cursor and an end-bound,
     NOT fnmatch and not a regex — `a*a` against `a` is the case where the difference shows.
     Ported by reading it once and then checked by running it, because the reachability gate
@@ -755,7 +770,7 @@ def test_the_tool_filter_port_agrees_with_the_installed_dist():
     module = dist_file("mcp-tool-filter-*.js", symbol="isMcpToolAllowed",
                        contains="isMcpToolAllowed")
 
-    work = Path(tempfile.mkdtemp(prefix="b706-filter-"))
+    work = tmp_path
     (work / "f.mjs").write_text(_FILTER_SCRIPT, encoding="utf-8")
     (work / "cases.json").write_text(json.dumps([[r, n] for r, n in _FILTER_CASES]),
                                      encoding="utf-8")

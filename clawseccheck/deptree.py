@@ -25,7 +25,11 @@ WHAT IT DOES NOT DO, and why the boundary is permanent:
     (2026-08-04) OpenClaw's own root manifest declares two, and flagging a vendor's own
     installer would be a false positive on every single install.
   * **No verdict on the hook alone.** Measured on the same box: of 380 packages in
-    OpenClaw's tree, 3 declare an install-lifecycle hook and all 3 are benign. A rule
+    OpenClaw's tree, 3 declare an install-lifecycle hook and all 3 are benign (re-measured
+    2026-09-19 on the installed 2026.9.5: 398 packages, 4 hooks plus 1 build directive —
+    `@google/genai` preinstall `echo`, `koffi` install `cnoke.cjs`, `protobufjs` postinstall,
+    `tree-sitter-bash` install `node-gyp-build` with an inline gyp expansion; targets readable
+    for two of those five sites). A rule
     keyed on the hook's presence would therefore start life with three false positives,
     which is three more than Golden Rule #5 permits for a FAIL. The hook is the cheap
     half of a conjunction; the consumer supplies the other half.
@@ -71,7 +75,8 @@ from pathlib import Path
 
 from .safeio import walk_dir_safely
 
-# Bounds. OpenClaw's real tree measured 380 packages and ClawHub's 39 (2026-08-04), so
+# Bounds. OpenClaw's real tree measured 380 packages and ClawHub's 39 (2026-08-04; 398 for
+# OpenClaw on 2026.9.5, 2026-09-19), so
 # these leave generous headroom while still refusing to walk an unbounded tree. A cap
 # that is HIT is disclosed (`truncated`), never silently absorbed — see GR#4.
 MAX_PACKAGES = 2000

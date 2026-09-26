@@ -1,0 +1,26 @@
+# Findings that exist only in already-published history. Every value is a dummy,
+# and each is fixed at HEAD; published history is never rewritten. A fingerprint is
+# bound to one commit, so it cannot excuse the same value in any new commit.
+8f274c2879548fc42fa0f0293238c8be71c11e10:fixtures/clean_b13_hardcoded_plain_assignment_comment/skills/s/runner.py:stripe-access-token:7
+8f274c2879548fc42fa0f0293238c8be71c11e10:fixtures/clean_b13_hardcoded_plain_assignment_comment/skills/s/runner.py:stripe-access-token:12
+8f274c2879548fc42fa0f0293238c8be71c11e10:tests/test_b740_plain_assignment_secret.py:stripe-access-token:128
+8f274c2879548fc42fa0f0293238c8be71c11e10:tests/test_b740_plain_assignment_secret.py:stripe-access-token:141
+24995977c5e45bf0221ad56348cc28b79da12fd2:tests/test_logsafe.py:gcp-api-key:58
+24995977c5e45bf0221ad56348cc28b79da12fd2:tests/test_logsafe.py:gcp-api-key:60
+
+# C-575 split these four dummy literals into runtime-assembled fragments at HEAD and
+# dropped their value-anchored `generic-api-key` allowlist entries. The values survive in
+# the commits that introduced them, and published history is never rewritten, so they are
+# pinned here instead: a fingerprint is bound to one commit, so — unlike the value-anchored
+# allowlist it replaces — it cannot excuse the same literal in any new commit.
+0e23b8f7cec69e80d91e24f7f2017e2a4dab0630:tests/test_logscan.py:generic-api-key:993
+d5daee01d3fe9d28bf57d713dc52695f0d7b1f7d:tests/test_logscan.py:generic-api-key:96
+7d75cba4b8bddf11e1d3d45e962228356e6f84aa:tests/test_checks.py:generic-api-key:61
+7d75cba4b8bddf11e1d3d45e962228356e6f84aa:tests/test_windows.py:generic-api-key:23
+
+# Two test inputs published on dev before the release scan caught them: a placeholder
+# default ("sk-REPLACE_ME-…", which the check under test must treat as clean) and a
+# curl Authorization header whose bearer value is the shell variable $f. Neither is a
+# secret; both are split into fragments at HEAD and pinned to their introducing commits.
+47fb954d43148120217c6373353be1e868da1542:tests/test_b997_placeholder_patterns.py:generic-api-key:91
+234c5577f980a73ac772a509221b6fa99caac6c3:tests/test_b894_shell_loop_cred_taint.py:curl-auth-header:720

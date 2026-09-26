@@ -240,3 +240,35 @@ def test_b190_never_returns_pass_on_any_input(tmp_path):
         f = check_debug_proxy_capture(_ctx(tmp_path / str(abs(hash(str(kwargs)))), **kwargs))
         assert f.status in (WARN, UNKNOWN)
         assert f.status not in (PASS, FAIL)
+
+
+# --------------------------------------------------------------------------------------
+# B-856 — Finding.detail must not quote the absolute, home-rooted dotenv path.
+# --------------------------------------------------------------------------------------
+
+def test_truthy_var_source_does_not_leak_the_absolute_dotenv_path(tmp_path):
+    """The truthy-var branch (OPENCLAW_DEBUG_PROXY_ENABLED) names WHERE the override came
+    from in the WARN detail — `baseline.fingerprint()` hashes that detail, so an absolute,
+    machine/checkout-specific path baked in there would silently orphan a user's
+    `.clawseccheckignore` suppression the moment their workspace or home moved, on top of
+    disclosing their real directory layout in any report they share (B-856, item 2)."""
+    ctx = _ctx(tmp_path, env={"OPENCLAW_DEBUG_PROXY_ENABLED": "1"})
+    f = check_debug_proxy_capture(ctx)
+    assert f.status == WARN
+    assert str(tmp_path) not in f.detail
+    assert str(tmp_path) not in " ".join(f.evidence)
+    # The redacted, home-relative form must still be present: this is a redaction of the
+    # path, not a deletion of the "where" disclosure B190's WARN detail promises.
+    assert ".env" in f.detail
+
+
+def test_value_var_source_does_not_leak_the_absolute_dotenv_path(tmp_path):
+    """Same leak, the other branch (OPENCLAW_DEBUG_PROXY_URL/_DB_PATH) — the VALUE is
+    already deliberately withheld (a proxy URL can embed credentials); the SOURCE path
+    must be redacted the same way."""
+    ctx = _ctx(tmp_path, env={"OPENCLAW_DEBUG_PROXY_DB_PATH": "/tmp/elsewhere.sqlite"})
+    f = check_debug_proxy_capture(ctx)
+    assert f.status == WARN
+    assert str(tmp_path) not in f.detail
+    assert str(tmp_path) not in " ".join(f.evidence)
+    assert ".env" in f.detail

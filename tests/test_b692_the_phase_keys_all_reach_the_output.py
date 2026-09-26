@@ -169,7 +169,7 @@ def test_a_key_the_phase_never_set_is_not_invented():
 def _full_json(tmp_path: Path, *extra: str) -> dict:
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", SAFE, "--full", "--fast",
-         "--json", "--data-dir", str(tmp_path / "state"), "--no-history", *extra],
+         "--json", "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host", *extra],
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=600)
     assert proc.returncode in (0, 1), proc.stderr[-2000:]
     return json.loads(proc.stdout)
@@ -259,7 +259,7 @@ def test_both_envelopes_describe_the_run_the_same_way(tmp_path):
     composed = _full_json(tmp_path)["runState"]
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", SAFE, "--judge-packet",
-         "--data-dir", str(tmp_path / "s2"), "--no-history"],
+         "--data-dir", str(tmp_path / "s2"), "--no-history", "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=600)
     standalone = json.loads(proc.stdout)["runState"]
     assert set(composed) == set(standalone), (sorted(composed), sorted(standalone))

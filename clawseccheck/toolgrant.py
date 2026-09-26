@@ -2,11 +2,12 @@
 runtime tool-policy resolver?
 
 A full, faithful port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies``
-(dist ``agent-tools.policy-CRukL5lS.js:97-110`` / ``tool-policy-match-DS7InkLt.js``,
-grounded on the installed **openclaw@2026.9.1**), not the narrower FS-only model
-``checks/_capability.py``'s ``_tool_policy_view`` + ``_agent_profile_widenings`` carry.
-That pair answers "does an fs tool leak" for four specific checks and deliberately
-approximates two things this module does not:
+(the ``agent-tools.policy-*`` and ``tool-policy-match-*`` dist bundles — content-hashed names
+that rotate every release, so they are cited by symbol; ``tests/_toolgrantoracle.py`` locates
+them by declaration; grounded on the installed **openclaw@2026.9.5**, 2026-09-19), not the
+narrower FS-only model ``checks/_capability.py``'s ``_tool_policy_view`` +
+``_agent_profile_widenings`` carry. That pair answers "does an fs tool leak" for four
+specific checks and deliberately approximates two things this module does not:
 
 * it SUPPRESSES the global ``tools.allow``/``alsoAllow`` layer whenever ``tools.profile``
   is set (``_tool_policy_view``'s own docstring, part (a)) — sound for that narrower
@@ -24,8 +25,7 @@ approximates two things this module does not:
   ``tools.alsoAllow: ["write"]`` genuinely widens that agent's write grant, and neither
   ``B55`` nor ``B68`` could see it (measured — see ``tests/test_toolscope_per_scope_grants.py``).
 
-RESOLUTION ORDER (``resolveConfiguredToolPolicies``, dist lines 97-110, reproduced here for
-the citation)::
+RESOLUTION ORDER (``resolveConfiguredToolPolicies``, reproduced here for the citation)::
 
     profile = agentTools?.profile ?? cfg.tools?.profile
     profileAlsoAllow = agentTools?.alsoAllow ?? cfg.tools?.alsoAllow   # independent coalesce
@@ -35,14 +35,14 @@ the citation)::
     #  see "NOT MODELLED" below)
     granted = policies.every(p => isToolAllowedByPolicyName(tool, p))   # deny wins, then allow
 
-``agentTools`` itself is resolved the way ``resolveEffectiveToolPolicy`` resolves it (dist
-lines 236-238): the matching roster entry's own ``tools`` block (``collector.agent_roster``,
-which already reads both the 2026.8.1 ``agents.entries`` record and legacy ``agents.list`` —
-B-699), falling back to ``agents.defaults.tools`` **only when the config declares no roster
-at all** (``hasAgentRosterProperty`` — checked by whether ``agents.entries``/``agents.list``
-is a KEY the config owns, not by whether the roster is non-empty). Verified by executing the
-real function, not by reading it: two things this port might otherwise have gotten wrong from
-reading alone —
+``agentTools`` itself is resolved the way ``resolveEffectiveToolPolicy`` resolves it (its
+``agentTools`` derivation, three lines): the matching roster entry's own ``tools`` block
+(``collector.agent_roster``, which already reads both the 2026.8.1 ``agents.entries`` record
+and legacy ``agents.list`` — B-699), falling back to ``agents.defaults.tools`` **only when
+the config declares no roster at all** (``hasAgentRosterProperty`` — checked by whether
+``agents.entries``/``agents.list`` is a KEY the config owns, not by whether the roster is
+non-empty). Verified by executing the real function, not by reading it: two things this port
+might otherwise have gotten wrong from reading alone —
 
 * the fallback applies to the SCOPE param equally whether it names the default agent
   ("main") or any other id, and equally to the ``GLOBAL_SCOPE`` query (no explicit agent at
@@ -55,27 +55,41 @@ reading alone —
   ``agents.defaults.tools`` is then dead weight (``toolscope_case9``).
 
 GROUNDED TABLES. ``CORE_TOOL_PROFILES`` / ``CORE_TOOL_GROUPS`` below are not hand-transcribed
-off ``CORE_TOOL_DEFINITIONS`` (dist ``tool-catalog-79RBtNnN.js``) — they are the two tables
-that module ITSELF builds (``CORE_TOOL_PROFILES`` object literal; ``CORE_TOOL_GROUPS`` via
-``buildCoreToolGroupMap()``), dumped by executing them against the installed dist so a
-mis-transcription of ~50 tool ids across 11 groups cannot happen. Re-grind by re-running that
-dump on upgrade, not by re-reading the source. Re-ground against openclaw@2026.9.2
-(2026-09-06): both tables were re-dumped by executing the installed dist and compared
-field-for-field against the literals below — 12/12 groups and all four profiles IDENTICAL.
-Only the content-hashed filenames cited here moved.
+off ``CORE_TOOL_DEFINITIONS`` (the ``tool-catalog`` bundle) — they are the two tables that
+module ITSELF builds (the ``CORE_TOOL_PROFILES`` object literal; ``CORE_TOOL_GROUPS`` via
+``buildCoreToolGroupMap()``, spread into ``TOOL_GROUPS`` by ``tool-policy-shared``), dumped by
+executing them against the installed dist so a mis-transcription of ~55 tool ids across 12
+groups cannot happen. Re-grind by re-running the dump on upgrade, not by re-reading the
+source: ``python3.12 tests/_toolgrantoracle.py --tables``.
+
+The upgrade check is now WHOLE-TABLE and executed, not spot-checked. It used to assert five
+tool ids and ``group:fs`` against a literal, which stayed green through 2026.9.5 while the
+tables were wrong about ``gateway``, ``plugins``, ``ls``, ``openclaw`` and ``pdf``
+(``tests/test_toolgrant_dist_grounding.py``). It now compares every profile, every group and
+the alias map with a fresh execution of the vendor, and sweeps ``granted()`` against the vendor
+over every tool name the catalog mentions. Re-ground history: 2026.9.2 (2026-09-06) identical
+to the 2026.9.1 literals; 2026.9.5 (2026-09-19) moved three profiles and four groups — see the
+comments on the two tables — and changed NO verdict for the six-tool family
+``{read, write, edit, apply_patch, exec, automations}`` (0 of 3,354 previously pinned cells;
+0 of 4,266 across the regenerated corpus and synthetic configs). That is why the drift was
+invisible: ``checks/_capability.py`` (B55/B68) asks only about the four fs tools. The other
+caller, the ``alsoAllow`` candidate filter in ``checks/_shared.py``, asks about whatever
+names a user wrote, so it alone can see the moved tables — for ``gateway``, ``plugins``,
+``ls``, ``openclaw`` and ``pdf`` reached through a group-level allow/deny. None of the 8
+``alsoAllow`` entries in the fixture corpus changes its answer.
 
 ALIAS TABLE — THREE ENTRIES, GROUNDED, NOT TWO. ``checks/_shared.py``'s ``_TOOL_NAME_ALIASES``
 and ``toolpolicy.py``'s copy of the same table both carry only ``{"bash": "exec",
-"apply-patch": "apply_patch"}``. The real ``TOOL_NAME_ALIASES`` (dist
-``tool-policy-shared-DIyS0iQC.js:10-14``) has a third: ``"cron": "automations"`` — a
-"permanently accepted alias ... same contract as bash -> exec" per the dist's own comment
-(``automations-tool-name-*.js``). Neither existing copy is wrong for what it covers (bash/
-apply-patch), but a guard comparing them to EACH OTHER (a peer) would stay green while both
-are missing the same third entry — the "anchor a guard on the producer" lesson. This module's
-own three-entry table is grounded against the dist directly in
-``tests/test_toolgrant_dist_grounding.py``, not against either sibling copy.
+"apply-patch": "apply_patch"}``. The real ``TOOL_NAME_ALIASES`` (the ``tool-policy-shared``
+bundle) has a third: ``"cron": "automations"`` — a "permanently accepted alias ... same
+contract as bash -> exec" per the dist's own comment (``automations-tool-name-*``). Neither
+existing copy is wrong for what it covers (bash/apply-patch), but a guard comparing them to
+EACH OTHER (a peer) would stay green while both are missing the same third entry — the
+"anchor a guard on the producer" lesson. This module's own three-entry table is grounded
+against the dist directly in ``tests/test_toolgrant_dist_grounding.py``, not against either
+sibling copy.
 
-``write`` IMPLIES ``apply_patch`` (dist ``tool-policy-match-DS7InkLt.js:24``,
+``write`` IMPLIES ``apply_patch`` (the ``tool-policy-match`` bundle,
 ``createToolPolicyMatcher``'s ``writeAllowsApplyPatch`` parameter, default ``true``): a
 policy whose allow list names ``write`` but not ``apply_patch`` still lets ``apply_patch``
 through THAT policy. It is evaluated per policy, inside the AND — a policy that denies
@@ -86,7 +100,7 @@ resolver, not an approximation choice.
 
 NOT MODELLED, deliberately, because each is a SEPARATE axis from "is TOOL granted" and
 narrowing this module's own consumer question would need a vetted model of its own (the
-same "don't invent a positive" discipline ``toolpolicy.py``'s ``_tools_may_remove_write``
+same "don't invent a positive" discipline ``toolpolicy.py``'s ``unconfined_write_scopes``
 docstring explains):
 
 * ``sandboxMode`` / ``resolveSandboxToolPolicyForAgent`` — the sandbox-containment layer the
@@ -98,6 +112,15 @@ docstring explains):
   (``toolsBySender`` / plugin group policy) layers a caller can inject; none of this module's
   two inputs (global ``cfg.tools``, one resolved ``agentTools``) supply them, so they are
   simply absent from the AND, never approximated.
+* the shipped-name expansions in ``expandShippedCoreToolPolicyNames`` (``tool-policy`` bundle,
+  ``SHIPPED_PLUGIN_POLICY_FAMILY_CORE_TOOLS`` / ``SHIPPED_CORE_POLICY_RENAMES``): ``canvas`` ->
+  ``[canvas, show_widget]`` and ``update_plan`` -> ``progress_card``. They run in the tool-
+  CONSTRUCTION pipeline, after the resolver this module ports, so ``isToolAllowedByPolicies``
+  never sees them — measured by execution on 2026.9.5: ``allow: ["canvas"]`` does not grant
+  ``show_widget`` at this layer (``tests/test_toolgrant_dist_grounding.py``). No check asks
+  about either target by name (only the ``alsoAllow`` filter could, with a user-written
+  entry); a consumer that starts to would need this modelled and its own differential (the
+  three-entry alias map above is unaffected — that is a different table).
 * glob patterns other than a bare ``*`` interior wildcard are handled (``_matches`` below is
   the same compiled-regex approach ``toolpolicy.py::_matches`` already carries, grounded
   against ``glob-pattern-DFVWJ-hh.mjs`` — openclaw@2026.9.3) — this is modelled, not
@@ -112,12 +135,14 @@ a config this tool never actually parsed must not read as "everything is granted
 battery only exercises non-empty fixture configs, so this divergence sits outside its scope
 by construction, not as an exception carved out of a disagreement.
 
-Verified against the vendor: ``tests/test_toolgrant_battery.py`` replays 3354
-``(fixture, scope, tool) -> bool`` assertions captured by EXECUTING
-``resolveConfiguredToolPolicies``/``isToolAllowedByPolicies`` over every non-empty
-``fixtures/*/openclaw.json`` (536 configs) plus the nine ``fixtures/toolscope_case*`` edge
-fixtures, pinned offline as data (``tests/data/toolgrant_battery.json``) so the suite needs
-neither node nor the installed dist to run.
+Verified against the vendor: ``tests/test_toolgrant_battery.py`` replays assertions captured
+by EXECUTING ``resolveConfiguredToolPolicies``/``isToolAllowedByPolicies`` — the six-tool
+family one case per ``(fixture, scope, tool)`` over every plain-JSON, non-empty
+``fixtures/*/openclaw.json`` (3,648 cases, including the nine ``fixtures/toolscope_case*`` edge
+fixtures), and ``gateway``/``plugins``/``ls``/``openclaw``/``pdf`` plus 96 synthetic configs
+(every group, profile, alias spelling and roster shape) in aggregate — pinned offline as data
+(``tests/data/toolgrant_battery.json``) so the suite needs neither node nor the installed dist
+to run. ``tests/_toolgrantoracle.py`` is the committed generator (``--write`` / ``--check``).
 """
 
 from __future__ import annotations
@@ -126,75 +151,125 @@ import re
 
 from .collector import agent_roster, dig
 
-GLOBAL_SCOPE = "global"
+class _GlobalScope:
+    """The type of ``GLOBAL_SCOPE`` — a private sentinel, not a string, so the global scope
+    is UNSPELLABLE by any config value or copy-pasted literal (C-561).
 
-# TOOL_NAME_ALIASES (dist tool-policy-shared-DIyS0iQC.js:10, grounded against
-# openclaw@2026.9.2 on 2026-09-06). Three entries — see the
-# module docstring's "ALIAS TABLE" section for why this is not a copy of
-# checks/_shared.py's/_toolpolicy.py's two-entry tables. Grounded directly against the dist
+    Before this, ``GLOBAL_SCOPE`` was the plain string ``"global"``, which is also a legal
+    agent id: ``granted(cfg, tool, "global")`` for a roster row spelled ``global`` collided
+    with the global-scope query itself (F-186), and a caller holding that roster id had to
+    remember a keyword (``agent=True``) to disambiguate. A caller who forgot it got the
+    WRONG scope silently — no exception, no log line, just a resolved policy for the wrong
+    entity, with nothing short of a differential battery able to catch it.
+
+    A ``_GlobalScope`` instance has no ``__eq__`` of its own, so equality falls back to
+    identity — it is never equal to any string a config or a caller could produce.
+    Disambiguation is therefore structural, not a caller-supplied flag: ``scope is
+    GLOBAL_SCOPE`` means "the global scope"; any other value — including the string
+    ``"global"`` — means "look this id up in the agent roster", which is the CORRECT
+    reading for an agent actually named ``global`` (the vendor gives that id no special
+    meaning; it resolves exactly like one named ``w``). The ``agent: bool`` keyword
+    ``granted()`` used to carry is gone: there is no longer a flag to forget.
+
+    The one new way to get this backwards is the mirror image of the old bug: passing the
+    STRING ``"global"`` where the SENTINEL was meant (asking about the true global scope by
+    its old spelling instead of importing this constant). ``tests/
+    test_toolgrant_caller_audit.py`` AST-walks every call to ``granted`` in ``clawseccheck/``
+    and fails on exactly that literal, so a future caller cannot reintroduce either
+    direction of the collision without a test naming the offending line.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "GLOBAL_SCOPE"
+
+
+GLOBAL_SCOPE = _GlobalScope()
+
+# TOOL_NAME_ALIASES (the tool-policy-shared bundle; a Map since 2026.9.2, its three pairs
+# unchanged through openclaw@2026.9.6 — compared whole against the EXECUTED Map on 2026-09-25).
+# Three entries — see the module docstring's "ALIAS TABLE" section for why this is not a copy
+# of checks/_shared.py's/toolpolicy.py's two-entry tables. Grounded directly against the dist
 # in tests/test_toolgrant_dist_grounding.py, never against either sibling copy.
 _TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch", "cron": "automations"}
 
-# CORE_TOOL_GROUPS (dist tool-catalog-79RBtNnN.js, buildCoreToolGroupMap() — executed, not
-# transcribed from CORE_TOOL_DEFINITIONS by hand). "group:openclaw" plus one "group:<section>"
-# per CORE_TOOL_SECTION_ORDER entry.
+# CORE_TOOL_GROUPS — the object the vendor's ``expandToolGroups`` actually consults
+# (``TOOL_GROUPS = { ...CORE_TOOL_GROUPS }`` in tool-policy-shared, built by
+# ``buildCoreToolGroupMap()`` in tool-catalog): "group:openclaw" plus one "group:<section>"
+# per CORE_TOOL_SECTION_ORDER entry. Dumped by EXECUTING the installed dist, not transcribed —
+# grounded against openclaw@2026.9.6 on 2026-09-25 (tests/_toolgrantoracle.py --tables), and
+# compared WHOLE against a fresh execution by tests/test_toolgrant_dist_grounding.py. Versus
+# 2026.9.2: group:fs gained "ls"; group:automation gained "plugins" and "openclaw";
+# group:media gained "pdf"; group:openclaw gained "plugins", "openclaw" and "pdf".
+# Versus 2026.9.5: group:openclaw and group:ui gained "theme" (a UI appearance tool).
 _CORE_TOOL_GROUPS = {
     "group:openclaw": [
         "code_execution", "secrets", "web_search", "web_fetch", "x_search", "memory_search",
         "memory_get", "sessions", "sessions_list", "sessions_history", "sessions_search",
         "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
         "sessions_spawn", "github_identity_status", "github_publish", "agents_wait",
-        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task",
-        "browser", "screen", "dashboard", "terminal", "portal", "show_widget", "message",
-        "heartbeat_respond", "automations", "gateway", "nodes", "computer", "mobile_ui",
+        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task", "browser",
+        "screen", "theme", "dashboard", "terminal", "portal", "show_widget", "message",
+        "heartbeat_respond",
+        "automations", "gateway", "plugins", "openclaw", "nodes", "computer", "mobile_ui",
         "agents_list", "get_goal", "create_goal", "update_goal", "progress_card", "ask_user",
-        "skill_workshop", "view_image", "image_generate", "music_generate", "video_generate",
-        "tts",
+        "skill_workshop", "view_image", "image_generate", "music_generate", "video_generate", "tts",
+        "pdf",
     ],
-    "group:fs": ["read", "write", "edit", "apply_patch"],
+    "group:fs": ["ls", "read", "write", "edit", "apply_patch"],
     "group:runtime": ["exec", "process", "code_execution", "secrets"],
     "group:web": ["web_search", "web_fetch", "x_search"],
     "group:memory": ["memory_search", "memory_get"],
     "group:sessions": [
-        "sessions", "sessions_list", "sessions_history", "sessions_search",
-        "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
-        "sessions_spawn", "github_identity_status", "github_publish", "agents_wait",
-        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task",
+        "sessions", "sessions_list", "sessions_history", "sessions_search", "conversations_list",
+        "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
+        "github_identity_status", "github_publish", "agents_wait", "sessions_yield", "subagents",
+        "session_status", "suggest_task", "dismiss_task",
     ],
-    "group:ui": ["browser", "screen", "dashboard", "terminal", "portal", "canvas", "show_widget"],
+    "group:ui": [
+        "browser", "screen", "theme", "dashboard", "terminal", "portal", "canvas", "show_widget",
+    ],
     "group:messaging": ["message"],
-    "group:automation": ["heartbeat_respond", "automations", "gateway"],
+    "group:automation": ["heartbeat_respond", "automations", "gateway", "plugins", "openclaw"],
     "group:nodes": ["nodes", "computer", "mobile_ui"],
     "group:agents": [
         "agents_list", "get_goal", "create_goal", "update_goal", "progress_card", "ask_user",
         "skill_workshop",
     ],
-    "group:media": ["view_image", "image_generate", "music_generate", "video_generate", "tts"],
+    "group:media": [
+        "view_image", "image_generate", "music_generate", "video_generate", "tts", "pdf",
+    ],
 }
 
-# CORE_TOOL_PROFILES (dist tool-catalog-79RBtNnN.js, grounded against openclaw@2026.9.2 on
-# 2026-09-06 — the literal object, dumped by calling
-# resolveCoreToolProfilePolicy(profile) for each of the four known profiles against the
-# installed dist). "full" is allow-all; the other three are the exact tool-id lists the
-# runtime grants, not a hand-picked "these are the fs/exec ones" subset.
+# CORE_TOOL_PROFILES — the literal object in tool-catalog, read through
+# ``resolveCoreToolProfilePolicy(profile)`` for each key (an exact, case-sensitive object
+# index). "full" is allow-all; the other three are the exact tool-id lists the runtime grants.
+# Grounded against openclaw@2026.9.6 on 2026-09-25 by execution, and compared WHOLE against a
+# fresh execution by tests/test_toolgrant_dist_grounding.py. Versus 2026.9.2: "gateway" joined
+# minimal, coding AND messaging (the agent-facing gateway tool is now a default grant, which
+# is why a "coding" agent can reach ``gateway``/``plugins`` without any allow entry);
+# "plugins" joined coding; "ls" joined coding (already so on 2026.9.4). Versus 2026.9.5:
+# "theme" joined coding and messaging.
 _CORE_TOOL_PROFILES = {
-    "minimal": ["session_status"],
+    "minimal": ["session_status", "gateway"],
     "coding": [
-        "read", "write", "edit", "apply_patch", "exec", "process", "code_execution",
-        "secrets", "web_search", "web_fetch", "x_search", "memory_search", "memory_get",
-        "sessions", "sessions_list", "sessions_history", "sessions_search",
-        "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
-        "sessions_spawn", "github_identity_status", "github_publish", "agents_wait",
-        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task",
-        "screen", "dashboard", "terminal", "portal", "automations", "get_goal", "create_goal",
-        "update_goal", "progress_card", "ask_user", "skill_workshop", "view_image",
-        "image_generate", "music_generate", "video_generate", "bundle-mcp",
+        "ls", "read", "write", "edit", "apply_patch", "exec", "process", "code_execution",
+        "secrets", "web_search", "web_fetch", "x_search", "memory_search", "memory_get", "sessions",
+        "sessions_list", "sessions_history", "sessions_search", "conversations_list",
+        "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
+        "github_identity_status", "github_publish", "agents_wait", "sessions_yield", "subagents",
+        "session_status", "suggest_task", "dismiss_task", "screen", "theme", "dashboard",
+        "terminal",
+        "portal", "automations", "gateway", "plugins", "get_goal", "create_goal", "update_goal",
+        "progress_card", "ask_user", "skill_workshop", "view_image", "image_generate",
+        "music_generate", "video_generate", "bundle-mcp",
     ],
     "messaging": [
         "secrets", "sessions", "sessions_list", "sessions_history", "sessions_search",
         "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
-        "sessions_spawn", "sessions_yield", "subagents", "session_status", "message",
-        "ask_user", "bundle-mcp",
+        "sessions_spawn", "sessions_yield", "subagents", "session_status", "theme", "message",
+        "gateway", "ask_user", "bundle-mcp",
     ],
     "full": ["*"],
 }
@@ -274,8 +349,8 @@ def _policy_allows(name: str, policy) -> bool:
 
 
 def _union_allow(base, extra):
-    """unionAllow (sandbox-tool-policy-G7E6RfNN.js, grounded against openclaw@2026.9.2 on
-    2026-09-06): alsoAllow-only (or onto an empty allow)
+    """unionAllow (the sandbox-tool-policy bundle, re-read against openclaw@2026.9.5 on
+    2026-09-19; behaviour covered by the battery): alsoAllow-only (or onto an empty allow)
     injects an implicit "*"; alsoAllow onto a real non-empty allow just unions in."""
     if not isinstance(extra, list) or not extra:
         return base
@@ -347,34 +422,75 @@ def _agent_entry_tools(cfg: dict, agent_id: str):
     return None
 
 
-def _agent_tools(cfg: dict, scope: str):
-    """resolveEffectiveToolPolicy's agentTools derivation (dist lines 236-238): the
+def _agent_tools(cfg: dict, scope):
+    """resolveEffectiveToolPolicy's agentTools derivation (the `agentTools` lines of
+    agent-tools.policy-*.mjs, as of openclaw@2026.9.5): the
     resolved roster entry's tools, or -- ONLY when the config declares no roster at all,
-    for ANY scope including GLOBAL_SCOPE -- agents.defaults.tools."""
+    for ANY scope including GLOBAL_SCOPE -- agents.defaults.tools.
+
+    ``scope`` is either the ``GLOBAL_SCOPE`` sentinel (``scope is GLOBAL_SCOPE``) or a
+    declared agent id — any other value, including the string ``"global"``, a legal id the
+    vendor treats like any other. The identity check is what makes the scope unspellable:
+    no string a config can hold is ever ``is`` the sentinel object, so this branch can no
+    longer be told the wrong answer by a caller forgetting a flag (there is none to forget)."""
     tools = None
-    if scope != GLOBAL_SCOPE:
+    if scope is not GLOBAL_SCOPE:
         tools = _agent_entry_tools(cfg, scope)
     if tools is None and not _has_agent_roster(cfg):
         tools = dig(cfg, "agents.defaults.tools")
     return tools
 
 
-def granted(cfg: dict, tool: str, scope: str = GLOBAL_SCOPE) -> bool:
-    """Is ``tool`` granted at ``scope`` ("global", or a declared agent id) by ``cfg``?
-
-    The port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` — see the
-    module docstring for the resolution order, the grounded tables, and what is
-    deliberately not modelled (sandboxMode, extraPolicies).
-    """
-    if not isinstance(cfg, dict) or not cfg:
-        return False
-
-    agent_tools = _agent_tools(cfg, scope)
-    global_tools = cfg.get("tools")
-
+def _resolved_profile(agent_tools, global_tools):
+    """``agentTools?.profile ?? cfg.tools?.profile`` -- the ``tools.profile`` value that
+    actually feeds resolution for one scope, split out of ``_policies`` (B-941)
+    so ``_unresolved_profile`` below can ask about it without re-deriving the coalesce
+    order. Never AND-ed with the global one -- an agent's own profile REPLACES it, exactly
+    as ``_policies`` (and the module docstring's RESOLUTION ORDER) already document."""
     profile = agent_tools.get("profile") if isinstance(agent_tools, dict) else None
     if profile is None:
         profile = global_tools.get("profile") if isinstance(global_tools, dict) else None
+    return profile
+
+
+def _unresolved_profile(cfg: dict, scope=GLOBAL_SCOPE) -> bool:
+    """True when the ``tools.profile`` value feeding ``scope``'s resolution
+    (``_resolved_profile``) is PRESENT but not a real, resolvable profile -- ``_profile_
+    policy`` returns ``None`` for it (wrong case, an unhashable list/dict, or simply not
+    one of the four known names). A real OpenClaw could never load such a config
+    (``ToolProfileSchema`` is a string enum), so this is the malformed-input class, not an
+    ordinary "no profile set" (which is ``profile is None`` and returns ``False`` here).
+
+    B-941: exists for ``checks/_capability.py``'s G1
+    (``_b68_fs_tools_granted``) to tell THIS specific reason ``_policies(cfg, scope)`` can
+    come back empty -- an unrecognised profile silently dropping out of the AND-ed list,
+    the same way an absent one would -- apart from every OTHER reason it can be empty (a
+    real config whose only ``tools`` key is an opaque ``byProvider``/``toolsBySender``
+    layer this module cannot read at all, or genuinely nothing declared for that scope).
+    Those other shapes are NOT this function's job -- conflating them would silently
+    widen what "unresolved profile" means, a different malformed-input claim than the
+    one this function makes. The ``byProvider``/``toolsBySender`` shape is a SEPARATE
+    concern, handled by G1 consulting ``resolved_scopes(...).opaque`` directly instead
+    (B-938) -- see ``tests/test_b737_permissive_default_scope.py::
+    test_r3_named_byprovider_only_is_unknown_opaque``."""
+    profile = _resolved_profile(_agent_tools(cfg, scope), cfg.get("tools"))
+    return profile is not None and _profile_policy(profile) is None
+
+
+def _policies(cfg: dict, scope=GLOBAL_SCOPE) -> list:
+    """The exact ``[profilePolicy, globalPolicy, agentPolicy]`` list
+    ``resolveConfiguredToolPolicies`` builds and ANDs together — split out of ``granted()``
+    (B-737) so ``policy_layers()`` can ask which of these three layers actually constrains
+    anything, without a second, driftable copy of the resolution order. ``granted()``'s
+    answers are unchanged: it is now ``all(_policy_allows(name, p) for p in _policies(...))``,
+    the same computation as before, just named.
+
+    Caller's responsibility: ``cfg`` must already be a non-empty ``dict`` (``granted()`` and
+    ``policy_layers()`` both guard this before calling in)."""
+    agent_tools = _agent_tools(cfg, scope)
+    global_tools = cfg.get("tools")
+
+    profile = _resolved_profile(agent_tools, global_tools)
 
     also_allow = _explicit_also_allow(agent_tools)
     if also_allow is None:
@@ -390,6 +506,193 @@ def granted(cfg: dict, tool: str, scope: str = GLOBAL_SCOPE) -> bool:
     agent_policy = _pick_policy(agent_tools)
     if agent_policy:
         policies.append(agent_policy)
+    return policies
 
+
+def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE) -> bool:
+    """Is ``tool`` granted at ``scope`` (``GLOBAL_SCOPE``, or a declared agent id) by ``cfg``?
+
+    The port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` — see the
+    module docstring for the resolution order, the grounded tables, and what is
+    deliberately not modelled (sandboxMode, extraPolicies).
+
+    ``scope`` disambiguates by TYPE, not by a caller-supplied flag (C-561):
+    pass the ``GLOBAL_SCOPE`` sentinel for the global scope, or any string (a roster id)
+    otherwise — including the string ``"global"``, which the vendor treats as an ordinary
+    agent id, never the global scope (executed: an agent with that id resolves exactly like
+    one named ``w``). See ``GLOBAL_SCOPE``'s own docstring (the ``_GlobalScope`` class) for
+    why this replaced an earlier ``agent: bool`` keyword a caller could forget to pass.
+    """
+    if not isinstance(cfg, dict) or not cfg:
+        return False
     name = _normalize_tool_name(tool)
-    return all(_policy_allows(name, policy) for policy in policies)
+    return all(_policy_allows(name, policy) for policy in _policies(cfg, scope))
+
+
+# Layers `resolved_scopes()`/`checks/_capability.py` cannot resolve and that CAN restrict.
+# Their presence is treated as possible narrowing -- the quiet direction: it can cost a
+# finding (an UNKNOWN in place of a WARN), never invent one. Moved here from `toolpolicy.py`
+# by B-737 so there is one source of truth; `toolpolicy._OPAQUE_NARROWING_KEYS` is now an
+# alias of this tuple, not a second copy that can drift out of sync with it (the drift that
+# broke round 3 of B-737: `toolpolicy` already treated `byProvider`/`toolsBySender` as
+# possible narrowing, but the checks-layer "declared" vocabulary being fixed here did not).
+OPAQUE_NARROWING_KEYS = ("byProvider", "toolsBySender")
+
+# The three list-valued policy keys `_pick_policy`/`_policy_allows` read. Used by
+# `_block_well_formed` to reject a config whose `allow`/`alsoAllow`/`deny` is present but not
+# actually a list (`"write"`, `{}`, ...) -- a shape `granted()` itself tolerates silently (via
+# `isinstance(..., list)` guards that just drop it), but one `resolved_scopes()` must not
+# treat as "no policy" the same way it treats a genuinely absent key.
+_POLICY_LIST_KEYS = ("allow", "alsoAllow", "deny")
+
+
+def policy_layers(cfg: dict, scope=GLOBAL_SCOPE) -> list:
+    """The layers of ``_policies(cfg, scope)`` where a real, non-empty ``allow`` or ``deny``
+    value constrains anything -- B-737's provenance test, over the SAME three-layer
+    resolution order ``granted()`` ANDs together, never a fourth vocabulary of its own.
+
+    An ``allow: []`` or a ``deny: []`` is a no-op in ``_policy_allows`` (an empty allow means
+    "allow everything"; an empty deny denies nothing), so it is not counted as a layer here
+    either -- the semantic test is "would the vendor answer differently with this layer
+    removed?", not "is a key present". A profile policy built from ``alsoAllow`` alone (no
+    ``profile`` set) still counts when its merged allow list is non-empty.
+
+    Provenance is exactly "default" (``resolved_scopes``) when this list comes back empty:
+    the vendor would resolve identically with every operator-written tool-policy input
+    stripped out, so the grant this scope carries is OpenClaw's own permissive default, not
+    anything the operator declared.
+    """
+    if not isinstance(cfg, dict) or not cfg:
+        return []
+    return [
+        policy for policy in _policies(cfg, scope)
+        if _expand_groups(policy.get("allow")) or _expand_groups(policy.get("deny"))
+    ]
+
+
+def _block_well_formed(tools) -> bool:
+    """Is ``tools`` (a global, per-agent, or ``agents.defaults`` tools block) a shape
+    ``resolved_scopes()`` can reason about at all? A schema-valid config can never fail this
+    (``ToolProfileSchema`` is an enum and ``allow``/``alsoAllow``/``deny`` are arrays), so a
+    failure here means the value is unparseable by the vendor too -- the quiet UNKNOWN
+    direction, not a guess at what the operator meant."""
+    if not isinstance(tools, dict):
+        return False
+    for key in _POLICY_LIST_KEYS:
+        if key in tools and not isinstance(tools[key], list):
+            return False
+    if "profile" in tools:
+        profile = tools["profile"]
+        # An unhashable `profile` (a list or dict, same as a malformed `allow`/`deny`
+        # above) must take the same quiet-UNKNOWN direction, not raise -- `in` against
+        # the `_CORE_TOOL_PROFILES` dict below requires a hashable key. Mirrors the
+        # isinstance(str) guard `_profile_policy` already uses for the same field.
+        if not isinstance(profile, str) or profile not in _CORE_TOOL_PROFILES:
+            return False
+    return True
+
+
+class ScopeResolution:
+    """One scope the vendor actually resolves a tool policy for, plus B-737's provenance and
+    opaqueness verdicts about it. Built only by ``resolved_scopes()``.
+
+    ``label`` -- a short, human-readable name for wording a finding ("main", "ops", "default
+    agent"); ``scope`` -- the value to pass as ``toolgrant.granted(cfg, tool, scope)``'s
+    ``scope`` argument for THIS row (``GLOBAL_SCOPE``, a raw roster id, or ``""`` for an
+    id-less ``agents.list`` element -- see ``resolved_scopes``); ``own_tools`` -- this scope's
+    own ``tools`` block (or ``None``); ``entry`` -- the raw roster entry dict (``{}`` for the
+    synthesised default agent); ``provenance`` -- ``"default"`` or ``"declared"``
+    (``policy_layers(cfg, scope)`` non-empty); ``opaque`` -- true when the global or this
+    scope's own tools carry an ``OPAQUE_NARROWING_KEYS`` key."""
+
+    __slots__ = ("label", "scope", "own_tools", "entry", "provenance", "opaque")
+
+    def __init__(self, label, scope, own_tools, entry, provenance, opaque):
+        self.label = label
+        self.scope = scope
+        self.own_tools = own_tools
+        self.entry = entry
+        self.provenance = provenance
+        self.opaque = opaque
+
+    def __repr__(self) -> str:
+        return f"ScopeResolution({self.label!r}, provenance={self.provenance!r}, opaque={self.opaque!r})"
+
+
+def resolved_scopes(cfg: dict) -> "list[ScopeResolution] | None":
+    """Every scope the vendor's resolver actually resolves a tool policy for, with B-737's
+    provenance (``policy_layers``) and opaqueness (``OPAQUE_NARROWING_KEYS``) verdicts already
+    attached -- the single place ``checks/_capability.py``'s not-enumerable B55/B68 branches
+    ask "does *anything* the operator wrote decide this scope?" instead of each maintaining
+    its own syntactic "declared" vocabulary (the bug class B-737 closes; see the module's
+    ``toolgrant.py`` docstring's sibling in ``checks/_capability.py`` for the history).
+
+    **Scope set = what the vendor resolves**, never an invented one:
+
+    * A non-empty ``agent_roster(cfg)`` -- one scope per roster agent, queried by its raw id,
+      or by ``""`` for an id-less ``agents.list`` element (``_agent_entry_tools`` normalises
+      that to ``"main"`` and self-matches it, exactly as ``_agent_tools`` does for
+      ``granted()``). ``GLOBAL_SCOPE`` is never included here: a session naming no explicit
+      agent resolves to the DEFAULT roster agent (``resolveEffectiveToolPolicy``'s
+      ``sessionAgentId``), not to a policy-free global scope.
+    * An empty roster, or no roster key at all -- a single ``GLOBAL_SCOPE`` scope, whose own
+      tools are ``agents.defaults.tools`` only when ``not _has_agent_roster(cfg)`` (matching
+      ``_agent_tools`` exactly: the moment a roster key exists, even empty,
+      ``agents.defaults.tools`` is dead weight).
+
+    Returns ``None`` -- the caller keeps its base UNKNOWN, never a guess -- for any of:
+
+    * ``cfg`` is not a non-empty ``dict`` (matches ``granted()``'s own deliberate divergence);
+    * the global ``tools`` block, an agent's own ``tools`` block, or (with no roster)
+      ``agents.defaults.tools`` is present but not a well-formed policy block
+      (``_block_well_formed``: not a mapping, a list/allow/deny key that isn't a list, or a
+      ``profile`` string outside ``_CORE_TOOL_PROFILES``);
+    * two roster agents normalise (``_normalize_agent_id``) to the same id -- the vendor takes
+      the FIRST match and silently shadows the second, so which policy governs is ambiguous;
+      the quiet direction is UNKNOWN, not a guess at which one the operator meant.
+
+    A scope this function DOES return may still be **opaque** (a ``byProvider``/
+    ``toolsBySender`` layer neither this module nor ``toolgrant.granted`` models) -- callers
+    must skip those rows rather than treat their ``granted()`` answer as ground truth; this
+    function only marks them, it does not filter them out, so a caller that wants a strict
+    per-scope answer set (``checks/_capability.py``'s ``_fs_scope_grants``) does that itself.
+    """
+    if not isinstance(cfg, dict) or not cfg:
+        return None
+    if "tools" in cfg and not _block_well_formed(cfg["tools"]):
+        return None
+    global_tools = cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {}
+    global_opaque = any(key in global_tools for key in OPAQUE_NARROWING_KEYS)
+
+    roster = agent_roster(cfg)
+    rows = []
+    if roster:
+        seen_ids = set()
+        for agent in roster:
+            if not isinstance(agent.entry, dict):
+                return None
+            raw_id = agent.id if isinstance(agent.id, str) else ""
+            normalized_id = _normalize_agent_id(raw_id)
+            if normalized_id in seen_ids:
+                return None
+            seen_ids.add(normalized_id)
+            own_tools = agent.entry.get("tools")
+            if "tools" in agent.entry and not _block_well_formed(own_tools):
+                return None
+            rows.append((normalized_id, raw_id, own_tools, agent.entry))
+    else:
+        own_tools = None
+        if not _has_agent_roster(cfg):
+            own_tools = dig(cfg, "agents.defaults.tools")
+            if own_tools is not None and not _block_well_formed(own_tools):
+                return None
+        rows.append(("default agent", GLOBAL_SCOPE, own_tools, {}))
+
+    out = []
+    for label, scope, own_tools, entry in rows:
+        opaque = global_opaque or (
+            isinstance(own_tools, dict) and any(key in own_tools for key in OPAQUE_NARROWING_KEYS)
+        )
+        provenance = "declared" if policy_layers(cfg, scope) else "default"
+        out.append(ScopeResolution(label, scope, own_tools, entry, provenance, opaque))
+    return out

@@ -49,6 +49,7 @@ Offline, read-only, stdlib only.
 from __future__ import annotations
 
 import json
+import time
 
 from clawseccheck.checks import vet_mcp, vet_skill
 from clawseccheck.textnorm import (
@@ -59,6 +60,7 @@ from clawseccheck.textnorm import (
     _VS_SUPPLEMENT_CLASS_SRC,
     _VS_SUPPLEMENT_SIGNAL_MIN_COUNT,
     _ZERO_WIDTH_CLASS_SRC,
+    _has_dense_vs_supplement_channel,
     confusable_in_ascii_context,
     normalize_for_scan,
     obfuscation_signals,
@@ -369,6 +371,216 @@ def test_vs_supplement_ordinary_skill_content_stays_quiet(tmp_path):
     finding = vet_skill(str(skill_dir))
     assert _SIGNAL_VS_SUPPLEMENT not in finding.detail
     assert not any(_SIGNAL_VS_SUPPLEMENT in e for e in (finding.evidence or []))
+
+
+# --------------------------------------------------------------------------- B-859: the
+# CJK-ideograph-base exemption for the IVS (Variation Selectors Supplement) sub-range.
+# The reviewer of B-646 reproduced a false positive on ordinary Japanese-name content
+# (48 IVS-tagged kanji names, nothing else unusual) and traced an UNGATED CRITICAL FAIL
+# reachable from it through B349's install-time path. These tests pin the exemption:
+# it fires ONLY for a real base+selector pair, and everything else about the count
+# gate — including the corpus's own genuine attack shape (many selectors stacked
+# behind one non-ideograph anchor) — is unchanged. The exemption is the default for
+# the WARN-tier consumers only; B349 opts out (`excuse_ivs=False`) after the C-135
+# pass showed ideograph-padded payloads evade it for free — see the tests after the
+# end-to-end one below, and tests/test_f167_deptree_hooks.py.
+
+# 48 distinct, real CJK Unified Ideographs — common Japanese surname/place kanji —
+# each paired with its OWN Variation Selectors Supplement selector, mirroring the
+# reported false positive exactly (a name table, not a single repeated character).
+_JP_NAME_KANJI = (
+    "葛辻花田中山村橋林池"
+    "梅松竹東西南北新古井"
+    "上下千百万九八七六五"
+    "四三二一青白黒赤黄緑"
+    "紫橘灰銀金銅鉄石"
+)
+assert len(_JP_NAME_KANJI) == 48
+
+
+def _jp_names_payload(count: int = 48) -> str:
+    return "".join(
+        _JP_NAME_KANJI[i % len(_JP_NAME_KANJI)] + chr(0xE0100 + i) for i in range(count)
+    )
+
+
+def test_ivs_attached_to_cjk_base_is_excused_jp_names_shape():
+    """The reported false positive, reproduced then fixed: 48 distinct kanji, each
+    with its own IVS selector, must not raise the dense-channel signal — every
+    selector is excused because it immediately follows a real CJK ideograph."""
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(_jp_names_payload(48))
+
+
+def test_ivs_not_attached_to_cjk_base_still_fires():
+    """The corpus's own genuine positive shape, unchanged by the exemption: many
+    selectors stacked behind ONE non-ideograph anchor (an emoji) — only a selector
+    immediately following a CJK ideograph is excused, so a run stacked behind
+    something else keeps counting in full."""
+    payload = "\U0001F600" + "".join(
+        chr(0xE0100 + (i % 240)) for i in range(_VS_SUPPLEMENT_SIGNAL_MIN_COUNT)
+    )
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(payload)
+
+
+def test_ivs_stacked_behind_one_cjk_base_still_fires():
+    """A single real ideograph followed by many selectors is NOT the well-formed
+    base+selector shape this exemption recognises (only the FIRST selector directly
+    follows the ideograph; the rest follow another selector, never a CJK base) — so
+    stacking many behind one kanji does not launder a payload through the exemption.
+    Only the first of the run is excused, so the count still crosses the gate one
+    past it (+1 below tests the boundary is exact, not just "fires eventually")."""
+    payload = "葛" + "".join(
+        chr(0xE0100 + (i % 240)) for i in range(_VS_SUPPLEMENT_SIGNAL_MIN_COUNT + 1)
+    )
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(payload)
+    # One short of that boundary: 1 excused (the first) + 30 counted = 31, still quiet.
+    just_under = "葛" + "".join(
+        chr(0xE0100 + (i % 240)) for i in range(_VS_SUPPLEMENT_SIGNAL_MIN_COUNT)
+    )
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(just_under)
+
+
+def test_ivs_mixed_excused_and_unattached_only_the_unattached_count():
+    """A blend of the two shapes: only the selectors NOT attached to a CJK base
+    contribute to the gate. Twenty excused (a small name list) plus twenty
+    unattached stays under the 32 threshold; the same twenty excused plus
+    thirty-five unattached crosses it."""
+    excused_20 = "".join(
+        _JP_NAME_KANJI[i] + chr(0xE0100 + i) for i in range(20)
+    )
+    unattached_20 = "".join(chr(0xE0100 + (i % 240)) for i in range(20))
+    unattached_35 = "".join(chr(0xE0100 + (i % 240)) for i in range(35))
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(excused_20 + unattached_20)
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(excused_20 + unattached_35)
+
+
+def test_ivs_exemption_does_not_widen_to_fe00_or_hangul_filler():
+    """The exemption is scoped to the E0100-E01EF sub-range only, so a CJK ideograph
+    in front of an FE00-FE0D selector or a Hangul filler does not excuse it. (Not
+    because FE00 has no legitimate base -- see the standardized-sequence tests below
+    -- but because widening the excusal is a separate decision nobody has made.)"""
+    fe00_after_cjk = "葛" + (chr(0xFE00) * _VS_SUPPLEMENT_SIGNAL_MIN_COUNT)
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(fe00_after_cjk)
+    hangul_after_cjk = "葛" + (chr(0x3164) * _VS_SUPPLEMENT_SIGNAL_MIN_COUNT)
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(hangul_after_cjk)
+
+
+def test_ivs_jp_names_end_to_end_through_vet_skill_stays_quiet(tmp_path):
+    """End to end through the shipped entry point, reproducing the reported shape
+    (CLAWSECCHECK-B-859): a skill bundling a benign kanji-name table with IVS
+    selectors must not raise the dense-channel signal via `vet_skill`."""
+    skill_dir = tmp_path / "jp-names-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: jp-names-skill\ndescription: A test skill\n---\n\n"
+        "# Test Skill\n\nThis is a benign skill description.\n",
+        encoding="utf-8",
+    )
+    data_dir = skill_dir / "data"
+    data_dir.mkdir()
+    (data_dir / "names.txt").write_text(_jp_names_payload(48), encoding="utf-8")
+
+    finding = vet_skill(str(skill_dir))
+    assert _SIGNAL_VS_SUPPLEMENT not in (finding.detail or "")
+    assert not any(_SIGNAL_VS_SUPPLEMENT in e for e in (finding.evidence or []))
+
+
+# Ordinary Chinese prose (written for this test), the carrier in the C-135 round-1
+# reproduction: every character is a unified ideograph, so a selector placed after
+# each one forms a well-formed IVS pair and costs the sender nothing visible.
+_ZH_PROSE = (
+    "今天天气很好我们一起去公园散步看看花草树木然后回家吃饭晚上读书写字休息"
+    "这个工具用来安装依赖文件并且检查版本是否正确如果有问题请联系维护人员谢谢大家的支持与帮助"
+    "明天继续工作"
+)
+
+
+def _zh_prose_payload() -> str:
+    """One pseudo-random Variation-Selectors-Supplement selector after each ideograph:
+    8 bits per character, the reviewer's shape."""
+    return "".join(c + chr(0xE0100 + (i * 37 % 240)) for i, c in enumerate(_ZH_PROSE))
+
+
+def test_ivs_padded_payload_is_excused_by_default_but_not_for_a_fail_capable_caller():
+    """The exemption's residual, and where it is allowed to apply. Chinese prose with a
+    payload selector after every ideograph is all well-formed IVS pairs, so the DEFAULT
+    (advisory, WARN-tier consumers such as B58) excuses it. That is the accepted cost
+    of not WARNing on Japanese name tables. A caller that can spend a FAIL passes
+    `excuse_ivs=False` and must still see the channel (B349 does -- see
+    tests/test_f167_deptree_hooks.py for the end-to-end half)."""
+    payload = _zh_prose_payload()
+    assert len(_ZH_PROSE) >= _VS_SUPPLEMENT_SIGNAL_MIN_COUNT
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(payload)
+    assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(payload, excuse_ivs=False)
+    # Paired controls: the same prose with no selectors is quiet either way, and a
+    # payload one selector short of the gate is quiet even with the exemption off.
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(_ZH_PROSE, excuse_ivs=False)
+    short = "".join(
+        c + chr(0xE0100 + i) for i, c in enumerate(_ZH_PROSE[: _VS_SUPPLEMENT_SIGNAL_MIN_COUNT - 1])
+    )
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(short, excuse_ivs=False)
+
+
+# C-135 round 1, defect 4: the first cut of the base test was a block-range table, so
+# it excused selectors after UNASSIGNED code points inside those blocks and after CJK
+# compatibility ideographs. UTS #37 only allows a base that is not canonically or
+# compatibly decomposable, and an unassigned code point is not a character at all.
+_NOT_AN_IVS_BASE = (
+    0x2A6E0,  # unassigned, inside the old 0x20000-0x2EBEF span
+    0x2EBE5,  # unassigned gap before Extension I
+    0xF900,   # CJK COMPATIBILITY IDEOGRAPH-F900, canonically decomposable
+    0x2F800,  # CJK COMPATIBILITY IDEOGRAPH-2F800, canonically decomposable
+)
+# Unified ideographs: two ordinary ones, one from Extension B, and U+FA11, which sits
+# in the Compatibility Ideographs BLOCK but is itself a unified ideograph (a common
+# Japanese surname character) with no decomposition.
+_IVS_BASES = (0x845B, 0x6F22, 0x20B9F, 0xFA11)
+
+
+def _pairs_after(base_cp: int, n: int = 40) -> str:
+    return "".join(chr(base_cp) + chr(0xE0100 + (i % 240)) for i in range(n))
+
+
+def test_ivs_exemption_requires_a_real_unified_ideograph_base():
+    for cp in _NOT_AN_IVS_BASE:
+        assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(_pairs_after(cp)), hex(cp)
+    for cp in _IVS_BASES:
+        assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals(_pairs_after(cp)), hex(cp)
+
+
+# C-135 round 1, defect 2: FE00-FE06 DO have standardized base characters
+# (StandardizedVariants.txt): FE00-FE02 after CJK unified ideographs (the
+# CJK-compatibility-ideograph sequences) and after math symbols -- HTML's named
+# character references alone carry about twenty math-symbol + FE00 entries. The
+# count gate does not excuse them. These pin that state honestly, as a known benign
+# shape the gate cannot separate from a payload, so any widening of the exemption to
+# cover them is a deliberate, reviewed change rather than a drift.
+def test_standardized_fe00_sequences_are_counted_not_excused():
+    cjk_compat_seq = "\u6f22\ufe00" * 40          # the reviewer's reproduction
+    html_entity_seq = "\u2229\ufe00\u222a\ufe00" * 20  # &caps; &cups; -- math + FE00
+    for text in (cjk_compat_seq, html_entity_seq):
+        assert _SIGNAL_VS_SUPPLEMENT in obfuscation_signals(text)
+    # Paired control: the same standardized sequences below the gate stay quiet.
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals("\u6f22\ufe00" * 31)
+    assert _SIGNAL_VS_SUPPLEMENT not in obfuscation_signals("\u2229\ufe00" * 31)
+
+
+# C-135 round 1, defect 3: the first cut walked every character of the text through a
+# regex match, about 60x slower than the plain count on large ASCII text (1.3 s per
+# MB). The count now comes from one C-level findall and returns early under the gate.
+# Ceiling is generous against today's ~0.02 s for 2 MB so it is not CI-flaky, and well
+# under the ~2.6 s the per-character walk takes.
+def test_dense_channel_helper_is_linear_on_large_plain_text():
+    big = "abcdefghij" * 200_000  # 2 MB of ASCII
+    t = time.perf_counter()
+    assert _has_dense_vs_supplement_channel(big) is False
+    assert time.perf_counter() - t < 0.5
+    # The walk still reads selectors buried deep in a large text correctly.
+    excused = "".join("\u845b" + chr(0xE0100 + i) for i in range(40))
+    loose = "".join(chr(0xE0100 + i) for i in range(_VS_SUPPLEMENT_SIGNAL_MIN_COUNT))
+    assert _has_dense_vs_supplement_channel(big + excused) is False
+    assert _has_dense_vs_supplement_channel(big + excused + loose) is True
+    assert _has_dense_vs_supplement_channel(big + excused, excuse_ivs=False) is True
 
 
 # --------------------------------------------------------------------------- recorded consequences

@@ -377,6 +377,46 @@ def test_risk07_with_approval_no_fire():
     assert not any(p.id == "RISK-07" for p in paths)
 
 
+def test_risk07_non_exec_write_tool_with_exec_mode_ask_still_fires():
+    # B-848 flagship negative control: "write" (see `_NON_EXEC_WRITE_TOKENS`) is a
+    # genuinely non-exec write tool that tools.exec.mode/security/ask does not
+    # reach, so an exec-scoped gate must not suppress RISK-07 just because it is
+    # present. This must not be conflated with "elevated", which B-848 fixed in the
+    # opposite direction (see test_risk07_elevated_only_with_exec_gate_no_fire below).
+    from clawseccheck.catalog import Finding
+    fake_b20 = Finding(
+        id="B20", title="Bootstrap writable", severity=HIGH,
+        status=FAIL, detail="test", fix="test",
+        framework="Write Integrity", scored=True,
+    )
+    cfg = {"tools": {"allow": ["write"], "exec": {"mode": "ask"}}}
+    ctx = _ctx(cfg)
+    f = _findings(ctx) + [fake_b20]
+    paths = risk_paths(ctx, f)
+    assert any(p.id == "RISK-07" for p in paths)
+
+
+def test_risk07_elevated_only_with_exec_gate_no_fire():
+    # B-848: a bare tools.elevated.allowFrom grant IS reached by tools.exec.mode/
+    # security/ask (the installed OpenClaw dist gates an elevated "full" request's
+    # approval bypass behind those same fields — bash-tools-BBKNLrRH.mjs:4085,4090),
+    # so it must not make RISK-07 fire just because "elevated" happens to be in the
+    # enabled-tools list alongside a real exec gate. This used to fire (the exact
+    # bug B-848 fixes) because "elevated" was wrongly treated the same as a
+    # genuinely non-exec write tool like "write" above.
+    from clawseccheck.catalog import Finding
+    fake_b20 = Finding(
+        id="B20", title="Bootstrap writable", severity=HIGH,
+        status=FAIL, detail="test", fix="test",
+        framework="Write Integrity", scored=True,
+    )
+    cfg = {"tools": {"elevated": {"allowFrom": ["o"]}, "exec": {"mode": "ask"}}}
+    ctx = _ctx(cfg)
+    f = _findings(ctx) + [fake_b20]
+    paths = risk_paths(ctx, f)
+    assert not any(p.id == "RISK-07" for p in paths)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule RISK-08: session cross-user + multi-user channel  -> MEDIUM
 # ──────────────────────────────────────────────────────────────────────────────
@@ -430,16 +470,62 @@ def test_minimal_config_no_paths():
     # to their riskiest value when unset ("main"/"all"), so a config with an allowlist
     # channel and no explicit session isolation genuinely trips RISK-08 -- this test's
     # own "minimal, no paths" intent needs the explicit safe values to hold.
+    #
+    # tools.allow=["read"] pinned safe (CLAWSECCHECK-B-737, test-suite-drift sweep):
+    # with no tools.allow declared at all, B55 reads OpenClaw's own implicit-wildcard
+    # default as granting write/edit/apply_patch (tools.allow/tools.profile both
+    # absent), which -- per B55's own in-source B-737 note -- is armed for RISK-12
+    # exactly like an id'd agent's inert `tools` block: a default-provenance grant is
+    # the SAME vendor state, not a narrower one. B55 stays WARN even with an added
+    # tools.exec.mode="ask" (that gate is non-write-specific; B55's own WARN text says
+    # so), and adding tools.exec.mode at all also makes risk._enabled_tools synthesize
+    # an "exec" tag purely from the KEY being present (regardless of "ask" being the
+    # safe value), which newly arms RISK-03 (no sandbox + untrusted ingress + exec/
+    # write tools) too. The genuinely minimal, safe fix is upstream of both: declare
+    # tools.allow explicitly as a real, non-empty, non-wildcard allowlist that never
+    # names a write-capable tool (write/edit/apply_patch) -- "read" is exactly that,
+    # the same safe grant test_b55.py's own PASS fixtures use -- so B55 resolves to
+    # its "No filesystem-write tool ... is granted" PASS and RISK-12 never reaches its
+    # B55-status gate at all. An EMPTY tools.allow=[] does NOT do this: B55 still
+    # reads it as the same implicit-wildcard default (reproduced directly against
+    # check_fs_write_exposure), so the allowlist must be non-empty.
     cfg = {
         "gateway": {"bind": "127.0.0.1:8080", "auth": {"mode": "token",
                     "token": "a-very-long-token-of-32-characters"}},
         "channels": {"telegram": {"dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
         "logging": {"redactSensitive": "tools"},
         "session": {"dmScope": "per-peer"},
-        "tools": {"sessions": {"visibility": "self"}},
+        "tools": {"sessions": {"visibility": "self"}, "allow": ["read"]},
     }
     paths = _paths(cfg)
     assert paths == []
+
+
+def test_risk12_fix_text_recommendations_actually_clear_the_chain():
+    """CLAWSECCHECK test-suite-drift sweep: RISK-12's own `fix` text used to recommend
+    tools.exec.mode='ask' + tools.elevated.allowFrom + locking channels to 'allowlist'
+    -- none of which actually clears the chain (see
+    test_b55.py::test_risk12_fires_on_declared_allowlist_channel_gated_config, whose
+    clean_b55_fs_write_scoped fixture is exactly that shape and still fires RISK-12).
+    The fix text was corrected in the same change that added this test, to recommend
+    what the engine actually honors: genuine sandbox containment (B-497,
+    test_b497_risk12_containment.py) or narrowing/removing the write-tool grant. Pin
+    both positively here so a future edit to risk.py can't silently re-break the
+    advice without a test noticing."""
+    base = {
+        "channels": {"telegram": {"dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
+        "tools": {"allow": ["fs_write"], "exec": {"mode": "ask"}},
+    }
+    assert "RISK-12" in {p.id for p in _paths(base)}, "sanity: base shape must still arm RISK-12"
+
+    contained = {
+        **base,
+        "agents": {"defaults": {"sandbox": {"mode": "all", "workspaceAccess": "ro"}}},
+    }
+    assert "RISK-12" not in {p.id for p in _paths(contained)}
+
+    narrowed = {**base, "tools": {"allow": ["read"], "exec": {"mode": "ask"}}}
+    assert "RISK-12" not in {p.id for p in _paths(narrowed)}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1102,6 +1188,52 @@ def test_risk15_truthy_nonbool_string_no_fire():
     cfg["browser"]["ssrfPolicy"]["dangerouslyAllowPrivateNetwork"] = "true"
     paths = _paths(cfg)
     assert not any(p.id == "RISK-15" for p in paths), [p.id for p in paths]
+
+
+# --- B-853: the blockedHostnames lever in RISK-15's OWN fix text (not just whether
+# RISK-15 fires) must be gated on the real private-network trigger -- flag on, legacy
+# alias alone, and absent on a noSandbox-only FAIL. The earlier alias test above
+# (test_risk15_legacy_allow_private_network_alias_fires) only pinned that RISK-15
+# fires; it says nothing about what the fix text recommends, which is the exact gap
+# C-135 found twice (checks/_egress.py's own allow_private gate, and this one).
+
+def _risk15_path(cfg):
+    paths = _paths(cfg)
+    p = next((x for x in paths if x.id == "RISK-15"), None)
+    assert p is not None, [x.id for x in paths]
+    return p
+
+
+def test_risk15_fix_mentions_blockedhostnames_when_flag_on():
+    p = _risk15_path(_risk15_cfg())
+    assert "blockedHostnames" in p.fix
+
+
+def test_risk15_fix_mentions_blockedhostnames_for_legacy_alias_alone():
+    cfg = _risk15_cfg(ssrf=False)
+    cfg["browser"] = {"ssrfPolicy": {"allowPrivateNetwork": True}}
+    p = _risk15_path(cfg)
+    assert "blockedHostnames" in p.fix
+
+
+def test_risk15_fix_omits_blockedhostnames_on_nosandbox_only():
+    # Neither private-network flag is set -- B38 (and so RISK-15 via _browser_ssrf)
+    # fires on browser.noSandbox alone. blockedHostnames is a private-network-flag
+    # lever; it must not appear as noise pointed at a flag this config never enabled.
+    cfg = _risk15_cfg(ssrf=False)
+    cfg["browser"] = {"noSandbox": True}
+    p = _risk15_path(cfg)
+    assert "blockedHostnames" not in p.fix
+
+
+def test_risk15_fix_qualifies_name_only_not_resolved_ip():
+    # The fix text must disclose that blockedHostnames matches by hostname/IP text
+    # only -- an attacker-chosen hostname that resolves to a listed address is not
+    # caught by it while dangerouslyAllowPrivateNetwork stays on -- and must not claim
+    # it "still blocks them" (the addresses themselves).
+    p = _risk15_path(_risk15_cfg())
+    assert "resolves to" in p.fix
+    assert "still blocks them" not in p.fix
 
 
 # ──────────────────────────────────────────────────────────────────────────────

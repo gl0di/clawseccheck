@@ -187,7 +187,7 @@ def _ids(entries):
 def _cap_line(surface: str, text: str) -> str:
     """Isolate just the cap-reason sentence from a rendered surface.
 
-    Both renderers ALSO print an unconditional "Runtime exception (I-025)" narrative
+    Both renderers ALSO print an unconditional "Runtime exception (RUNTIME-CAP)" narrative
     paragraph that names "a trajectory-indicator match" as the KIND of thing that
     could ever cap a grade — unrelated to whether one actually fired this run. Tests
     that assert a phrase is ABSENT must scope to the cap-reason line itself, or that

@@ -68,7 +68,7 @@ def _run(home: Path, tmp_path: Path, *extra: str) -> subprocess.CompletedProcess
     data.mkdir(exist_ok=True)
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck.cli", "--home", str(home),
-         "--data-dir", str(data), "--no-history", *extra],
+         "--data-dir", str(data), "--no-history", "--no-deptree", "--no-host", *extra],
         capture_output=True, text=True, cwd=str(_REPO),
     )
 
