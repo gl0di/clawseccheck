@@ -87,6 +87,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   CommonMark renderer would: backslash-escaped brackets, a destination that never closes
   on the line, or a code span are not links and still fail. A command written as the
   text of a real link also lands on that warning, so read any such link yourself.
+- The silent-instruction check (B63) no longer reads an ordinary hyphen compound such
+  as "post-setup", "post-install" or "post-mortem" as the HTTP verb POST, which had
+  turned routine UX prose ("Do not show post-setup flow-control choices") into a
+  critical failure. Only a short reviewed list of words ending at a real word boundary
+  is exempt; an uppercase POST, any other compound, or a word chained onto a listed one
+  ("post-setup-attacker", "post-setup.attacker.example") still counts. A skill that uses
+  a listed word for its own exfiltration step is still flagged for review (WARN), never
+  passed. Every other check that looks for exfiltration transports is unchanged.
 
 ### Changed
 

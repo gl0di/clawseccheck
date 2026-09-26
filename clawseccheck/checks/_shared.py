@@ -680,6 +680,22 @@ _CRED_RE = re.compile(
 #
 # F-124/E-044 layer-fix: moved here VERBATIM from checks/_content.py (see _CRED_RE note
 # above for why).
+#
+# CLAWSECCHECK-exfil-post: rounds 1 and 2 of this fix narrowed the bare `\bPOST\b`
+# alternative below (it matches the English prefix "post" inside ordinary hyphen
+# compounds like "post-setup" under this pattern's re.I flag; real-fleet repro: a
+# data-analytics skill's "Do not show post-setup flow-control choices" anchored B63 on
+# "post" alone). Both narrowings were retracted on C-135 grounds: this pattern is
+# SHARED by 15+ consumers across _vet.py/_content.py/_config.py/_lifecycle.py/
+# logscan.py/trajaudit.py, and several of them (B13's same-line cred+exfil rule, its
+# cross-skill split-stage sibling) have NO independent floor of their own — narrowing
+# the shared pattern silenced those consumers as a side effect, and each round's fix
+# for one silenced consumer revealed another. The real false positive is B63-only,
+# so round 3 restores this pattern to its original, unnarrowed form (see git history
+# prior to the exfil-post ticket) and fixes B63 alone with a sibling of its own
+# anchor helper in checks/_content.py (`_b63_outbound_exfil_anchor`) instead. Every
+# other consumer of this pattern is therefore unaffected, structurally, not by
+# enumeration.
 _EXFIL_RE = re.compile(
     r"\bcurl\b|\bwget\b|\bnc\b|netcat|requests?\.post|fetch\(|\bPOST\b|\bscp\b|base64|"
     r"glot\.io|webhook\.site|transfer\.sh|pastebin|"

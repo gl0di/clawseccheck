@@ -2082,6 +2082,82 @@ def _has_outbound_exfil(window: str) -> bool:
     )
 
 
+# CLAWSECCHECK-exfil-post ROUND 3 (redesign — stop narrowing the shared _EXFIL_RE):
+# rounds 1 and 2 each narrowed `_EXFIL_RE` itself (checks/_shared.py) to chase this
+# single real-fleet false positive. `_EXFIL_RE` is SHARED by 15+ consumers across
+# _vet.py/_content.py/_config.py/_lifecycle.py/logscan.py/trajaudit.py, and several of
+# them (B13's same-line cred+exfil rule, `_has_cred_exfil_outside_fence`; its
+# cross-skill split-stage sibling, the inline `_has_cross` check in
+# `check_installed_skills`) have NO independent floor of their own once the shared
+# pattern's POST/post leg goes quiet. Round 1's open `post(?!-\w)` lookahead silenced
+# B13 same-line entirely for any made-up continuation ("post-forward"); round 2's
+# fix — a closed continuation list PLUS a per-consumer `_BARE_POST_RE` hardening of
+# B13 same-line — left the split-stage sibling unhardened, so the exact same class of
+# bypass reappeared one call site over. Two independent C-135 rounds narrowing (or
+# patching around narrowing of) the shared pattern each broke a different consumer;
+# the real false positive was B63-only the whole time (data-analytics/skills/index:
+# "Do not show post-setup flow-control choices" — no other real-fleet consumer of
+# `_EXFIL_RE` was ever shown to false-FAIL). So `_EXFIL_RE` is restored to its
+# pre-ticket definition, unmodified, and every one of its other consumers is
+# therefore unaffected STRUCTURALLY (nothing about them changed), not by enumeration.
+# This sibling is the ONLY thing this ticket adds, and it has exactly one caller:
+# `_b63_scan` below, itself the only path into B63 (`check_silent_instruction`).
+#
+# Post-review closure: the pattern originally ended in a bare `\b`, which is a
+# word/non-word boundary, not an end-of-compound marker — a following hyphen is
+# itself non-word, so `\b` is satisfied there too. That let a CHAINED compound
+# ("post-setup-attacker", "post-install-drop", "post-mortem-bot", …) match the
+# same as the bare listed word, laundering an attacker-appended continuation
+# through the exemption. Replaced with `(?![\w-])`: a following hyphen or word
+# character now disqualifies the match, so only the exact listed word ending at
+# a real boundary (space, punctuation, EOL) is tolerated; any further
+# `-<word>` suffix keeps the whole "post"-match live and falls through to the
+# `return True` below, same as any other unlisted continuation.
+# A deny-list of following characters still let other glue through ("post-setup.x",
+# "post-setup/x", "post-setup:x", a Unicode dash), so the word must be followed by
+# something that ends it as a word: whitespace, clause punctuation, a closing
+# quote/paren, sentence punctuation before whitespace, or the end of the text.
+_B63_POST_COMPOUND_BENIGN_RE = re.compile(
+    r"^-(?:set-?up|install(?:ation)?|process(?:ing)?|mortem|selection)"
+    r"(?=[\s,;)\"'’]|[.!?](?:\s|$)|$)",
+    re.IGNORECASE,
+)
+
+
+def _b63_outbound_exfil_anchor(window: str) -> bool:
+    """B63-only sibling of `_has_outbound_exfil`, used ONLY by `_b63_scan`'s secrecy-
+    phrase anchor. Identical to `_has_outbound_exfil` except that a lowercase/mixed-
+    case "post" match from `_EXFIL_RE`'s bare `\\bPOST\\b` alternative does not, by
+    itself, count as a transport anchor when it is immediately followed by one of a
+    closed, reviewed list of ordinary English hyphen-compound continuations — "setup",
+    "install(ation)", "process(ing)", "mortem", "selection" — the exact five the real-
+    fleet repro and this fix's own test suite establish as benign, non-transport
+    nouns. All-caps `POST` (the real HTTP verb's own spelling, case-SENSITIVE) always
+    counts, same as `_EXFIL_RE` itself. Any OTHER `_EXFIL_RE` alternative matching
+    anywhere in the window (curl, wget, a paste host, an unlisted or mixed-case "post"
+    compound such as "Post-request"/"post-forward", …) still counts — this only
+    demotes the exact narrow shape the real fleet target produces.
+
+    B63 has its own WARN floor: a secrecy-phrase hit with no anchor still records
+    `has_action=False` in `_b63_scan` and surfaces as WARN, never silently PASSes. So
+    the worst case from this demotion is FAIL -> WARN, never FAIL -> PASS — including
+    when an attacker deliberately spells their own exfil step using one of the five
+    exempt words, which is an accepted, disclosed floor, not a new hole.
+    """
+    if _CRED_RE.search(window) or (
+        _B63_SEND_VERB_RE.search(window) and _B63_DEST_RE.search(window)
+    ):
+        return True
+    for m in _EXFIL_RE.finditer(window):
+        token = m.group()
+        if len(token) == 4 and token.lower() == "post" and not token.isupper():
+            tail = window[m.end() : m.end() + 24]
+            if _B63_POST_COMPOUND_BENIGN_RE.match(tail):
+                continue  # this one match is a benign compound — keep scanning
+        return True  # some other _EXFIL_RE alternative, or an unlisted/upper "post"
+    return False
+
+
 _B64URL_BLOB_RE = re.compile(r"[A-Za-z0-9_-]{40,}")
 
 
@@ -5064,7 +5140,7 @@ def _b63_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[str,
             secret_read_anchor = False
         anchored = bool(
             _B63_FAIL_ANCHOR_RE.search(window)             # person-conceal / covert / exfil-prose
-            or _has_outbound_exfil(window)                  # send-verb→2nd-party dest / sink / cred path
+            or _b63_outbound_exfil_anchor(window)           # send-verb→2nd-party dest / sink / cred path
             or secret_read_anchor
         )
         # Keep a readable snippet for evidence (truncate long matches).

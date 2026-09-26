@@ -4739,6 +4739,14 @@ def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]
     whenever THIS rule is what convicted — see `check_installed_skills`'s
     `if crit:` branch. tests/test_fleetfp_cred_exfil_cooccurrence_residual.py pins
     both real lines and a malicious twin as CRITICAL.
+
+    CLAWSECCHECK-exfil-post round 3: rounds 1/2 each narrowed the shared _EXFIL_RE
+    (or added a bare-post fallback here) to chase a B63-only false positive; both
+    were retracted on C-135 grounds because this rule has no other floor and went
+    silent as an accidental side effect. _EXFIL_RE is back to its pre-ticket
+    definition and this rule uses it unmodified — see checks/_shared.py's _EXFIL_RE
+    comment and checks/_content.py's _b63_outbound_exfil_anchor for where the real
+    fix now lives.
     """
     pos = 0
     for ln in blob.splitlines():
