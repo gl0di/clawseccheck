@@ -363,8 +363,9 @@ def self_reported_version(config: "dict | None") -> str:
 # bumped by hand whenever a re-grounding pass (CLAUDE.md's C-125) touches a check against
 # a newer dist — the same discipline the code-digest measurements above already keep
 # release over release. Bump it only when a check was actually re-grounded that far, never
-# just because a newer OpenClaw exists.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 5)
+# just because a newer OpenClaw exists. Raised to 2026.9.6 for 4.3.0: the 9.6 pass
+# re-recorded the dist citation baseline and widened the harness oracle to 9.6.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 6)
 
 
 def grounding_gap(installed_version: "str | None"):
