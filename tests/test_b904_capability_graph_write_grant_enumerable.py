@@ -1,29 +1,34 @@
 """CLAWSECCHECK-B-904 -- the capability graph must not assert a confident
 `can_write_memory=False` when the underlying grant could not actually be resolved.
 
-The bug: on a config with no `tools` policy declared anywhere (e.g.
-``{"channels": {"telegram": {"enabled": true, "dmPolicy": "pairing"}}}``), B55
-(`check_fs_write_exposure`) reports `UNKNOWN` -- "cannot be assessed" -- because
-`tools.allow`/`tools.alsoAllow`/`tools.profile` are all absent, so the write-tool grant
-is not enumerable from static config at all. The capability graph, however, printed a
-flat `can_write_memory=False` for the same `main` node: a confident "no" the check
-itself never claimed. A reader comparing the two sees B55 explicitly decline to answer
-right next to a graph line that looks like a settled answer.
+The original bug: on a config with no `tools` policy declared anywhere (e.g.
+``{"channels": {"telegram": {"enabled": true, "dmPolicy": "pairing"}}}``), the
+capability graph called `_b55_write_tools_granted` alone and never applied the B-737
+not-enumerable-scope fallback (`_fs_scope_grants`, OpenClaw's own per-scope tool-policy
+resolution) that `check_fs_write_exposure` (B55) itself falls back to -- so the graph
+printed a flat `can_write_memory=False, write_grant_enumerable=False` right next to a
+B55 finding that, once B-737 landed, no longer agreed with that reading at all. This is
+the same *class* of bug B-503 fixed (`test_b503_capability_graph_invariant.py`) one
+level down: two grant resolvers, only one of them (the check's own) applying the full
+model.
 
-This is the same *class* of bug B-503 fixed (`test_b503_capability_graph_invariant.py`)
-one level down: B-503 was a FAIL-vs-False disagreement (two grant resolvers, only one
-profile-aware); B-904 is an UNKNOWN-vs-False one (one resolver, but the graph discarded
-its own "not enumerable" bit).
+Fixed by `_b55_resolved_write_grant` (checks/_capability.py): the SAME resolution B55
+performs -- `_b55_write_tools_granted` PLUS its B-737 not-enumerable fallback -- shared
+between B55 and the graph, so the two can no longer disagree. On the repro config above,
+OpenClaw's own permissive default now resolves the grant, so B55 reports WARN (not
+UNKNOWN) and the graph agrees: `can_write_memory=True, write_grant_enumerable=True`.
 
-No new grant-resolution model is introduced here. `write_grant_enumerable` on the `main`
-node is exactly the `enumerable` flag `_b55_write_tools_granted` already returns and
-`check_fs_write_exposure` already branches its own UNKNOWN verdict on
-(checks/_capability.py) -- surfaced, not re-derived. `can_write_memory`'s own value and
-the logic that computes it are completely untouched by this fix; this file's control
-tests exist to prove that (a real, explicit restrictive policy must still read as a
-confident, enumerable "no").
+A genuine B55 UNKNOWN still exists -- a config with at least one opaque scope
+(`tools.byProvider` only, no other resolvable scope) that the shared resolver truly
+cannot resolve either way -- and the graph must still show `write_grant_enumerable=False`
+there, not invent a confident answer B55 itself declined to give.
 
-`write_grant_enumerable` is an additive field (docs/OUTPUT_SCHEMA.md 17, "Stable
+The three-way outcome (config resolves to a real "granted", a real "resolved to
+nothing", or "cannot resolve") is exercised here in all three shapes, plus the
+agreement invariant `write_grant_enumerable == (B55.status != UNKNOWN)` on the
+adversarial edge case B55 itself decides.
+
+`write_grant_enumerable` is an additive field (docs/OUTPUT_SCHEMA.md, "Stable
 additions") -- `can_write_memory` keeps its documented `bool` type and every existing
 `is True`/`is False` assertion on it elsewhere in the suite is unaffected.
 
@@ -33,7 +38,7 @@ Offline, no fixtures on disk -- every config below is a plain dict, matching the
 """
 from __future__ import annotations
 
-from clawseccheck.catalog import UNKNOWN
+from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_fs_write_exposure
 from clawseccheck.collector import Context
 from clawseccheck.report import _capability_graph
@@ -54,12 +59,42 @@ def _main_node(ctx) -> dict:
 
 
 class TestReproNoPolicyDeclared:
-    """The exact repro from the bug report: a channel declared, no `tools` block at
-    all anywhere in config."""
+    """The original bug report's repro: a channel declared, no `tools` block at all
+    anywhere in config. OpenClaw's own permissive default resolves a write grant here
+    (B-737), so B55 now reports WARN, not UNKNOWN -- the graph must agree with THAT,
+    not with the pre-B-737 UNKNOWN this class used to pin."""
 
     _CFG = {"channels": {"telegram": {"enabled": True, "dmPolicy": "pairing"}}}
 
-    def test_b55_reports_unknown(self):
+    def test_b55_reports_warn_on_the_permissive_default(self):
+        assert check_fs_write_exposure(_ctx(self._CFG)).status == WARN
+
+    def test_graph_agrees_with_b55s_resolved_grant(self):
+        node = _main_node(_ctx(self._CFG))
+        assert node["can_write_memory"] is True
+        assert node["write_grant_enumerable"] is True
+
+    def test_text_render_no_longer_flags_uncertainty(self):
+        """The text render only annotates `write_grant_enumerable` when it is False
+        (report.py's own "flag it exactly when it is False" comment) -- now that the
+        grant resolves, the resolved-uncertainty annotation must not appear."""
+        from clawseccheck.report import _capability_graph_lines
+
+        lines = _capability_graph_lines(_ctx(self._CFG))
+        main_line = next(line for line in lines if line.startswith("- main "))
+        assert "write_grant_enumerable=no" not in main_line
+
+
+class TestGenuineUnknownRemainsUnknown:
+    """Not every config resolves. A global `tools.byProvider`-only policy is opaque to
+    both `_b55_write_tools_granted` and the B-737 per-scope residual (no other scope to
+    fall back to) -- a real "cannot tell", and the graph must still show that as
+    `write_grant_enumerable=False` rather than manufacturing a confident answer neither
+    resolver actually has."""
+
+    _CFG = {"tools": {"byProvider": {"openai": {"profile": "minimal"}}}}
+
+    def test_b55_stays_unknown(self):
         assert check_fs_write_exposure(_ctx(self._CFG)).status == UNKNOWN
 
     def test_graph_flags_the_same_uncertainty_b55_has(self):
@@ -73,6 +108,27 @@ class TestReproNoPolicyDeclared:
         lines = _capability_graph_lines(_ctx(self._CFG))
         main_line = next(line for line in lines if line.startswith("- main "))
         assert "write_grant_enumerable=no" in main_line
+
+
+class TestResolvedToNothing:
+    """The B-737 residual's third outcome: every scope it could examine WAS examined
+    (none opaque) and none of them grants a write-capable tool -- a real, positive
+    "resolved, and resolved to nothing" answer. B55 reports PASS (naming the scope
+    checked), and the graph must read this as a confident "no", not "unknown": grant
+    resolution genuinely completed, it just found nothing."""
+
+    _CFG = {
+        "agents": {"list": [{"id": "main", "tools": {"profile": "minimal"}}]},
+        "channels": {"telegram": {"enabled": True, "dmPolicy": "pairing"}},
+    }
+
+    def test_b55_passes_naming_the_checked_scope(self):
+        assert check_fs_write_exposure(_ctx(self._CFG)).status == PASS
+
+    def test_graph_reads_it_as_a_confident_no(self):
+        node = _main_node(_ctx(self._CFG))
+        assert node["can_write_memory"] is False
+        assert node["write_grant_enumerable"] is True
 
 
 class TestControlExplicitRestrictivePolicy:
@@ -123,10 +179,13 @@ class TestAdversarial:
         assert node["can_write_memory"] is False
         assert node["write_grant_enumerable"] is True
 
-    def test_explicit_empty_allow_list_matches_b55s_own_unknown(self):
-        """`tools.allow: []` is schema-edge-case territory. Whatever B55 itself
-        decides for it (UNKNOWN here, same as no tools block at all), the graph must
-        agree -- not invent its own reading of an edge case B55 already resolved."""
+    def test_explicit_empty_allow_list_matches_b55s_own_reading(self):
+        """`tools.allow: []` is schema-edge-case territory: OpenClaw's own permissive
+        default resolves it via the same B-737 residual as the no-policy-declared
+        shape above, so B55 reports WARN here too, not UNKNOWN. Whatever B55 itself
+        decides for it, the graph must agree -- not invent its own reading of an edge
+        case B55 already resolved. Kept as an invariant assertion (not a hardcoded
+        status) so it stays meaningful regardless of which status B55 lands on."""
         cfg = {"tools": {"allow": []}}
         finding = check_fs_write_exposure(_ctx(cfg))
         node = _main_node(_ctx(cfg))

@@ -1381,6 +1381,60 @@ def _b55_write_tools_granted(
     return write_tools, enumerable, view, legacy_write
 
 
+def _b55_resolved_write_grant(
+    cfg: dict,
+) -> "tuple[list[str], bool, _ToolPolicyView, frozenset, _FsScopeGrants | None]":
+    """B-904: `_b55_write_tools_granted` PLUS the B-737 not-enumerable fallback
+    (`_fs_scope_grants`), factored into one shared resolver so a non-check consumer
+    (report.py's capability graph) sees the exact same three-way outcome
+    `check_fs_write_exposure` (B55) itself branches on, instead of calling
+    `_b55_write_tools_granted` alone and silently missing the fallback -- the same
+    graph/check divergence class B-503 fixed one level up for
+    `_enabled_tools` vs. `_b68_fs_tools_granted`.
+
+    Runs `_b55_write_tools_granted` first; if it is not enumerable, applies
+    `_fs_scope_grants` over ``_B55_FS_WRITE_TOOLS & _B68_FS_TOOLS`` exactly as
+    `check_fs_write_exposure` does, with the same three outcomes:
+
+    (a) `_fs_scope_grants` found a grant (default and/or declared tools) -- `write_tools`
+        becomes their union, `enumerable` becomes True, `scope_grants` is the result
+        (its provenance backs B55's own evidence sentences).
+    (b) `_fs_scope_grants` fully resolved every scope it could and none of them grants a
+        write-capable tool -- a real "resolved, and resolved to nothing" answer:
+        `write_tools` is `[]`, `enumerable` becomes True, and `scope_grants` is kept (its
+        `checked_scopes` is what backs B55's own "no filesystem-write tool ... in any
+        resolvable scope (...)" PASS text and must be carried out to the caller so it
+        can print the same claim rather than re-deriving it).
+    (c) Otherwise (at least one opaque scope, or nothing left to check) --
+        `_fs_scope_grants` itself returned `None`, or resolved nothing without being
+        fully resolved: `enumerable` stays False and `scope_grants` is `None`, same as
+        `_b55_write_tools_granted` alone would have left it.
+
+    A caller can tell (a) and (b) apart from the ordinary G1-enumerable case (where
+    `scope_grants` is never touched, so it stays `None`) by `scope_grants is not None`;
+    it can tell (b) apart from (a) by `write_tools` being empty -- (a) only reaches this
+    branch when `_fs_scope_grants` found something to union in.
+
+    Returns ``(write_tools, enumerable, view, legacy_write, scope_grants)``. B55 itself
+    must keep reading `scope_grants` for its own evidence wording (the caller, not this
+    helper, owns exactly which sentence a given outcome earns) -- this only unifies GRANT
+    RESOLUTION, never the wording built on top of it.
+    """
+    write_tools, enumerable, view, legacy_write = _b55_write_tools_granted(cfg)
+    scope_grants = None
+    if not enumerable:
+        scope_grants = _fs_scope_grants(cfg, _B55_FS_WRITE_TOOLS & set(_B68_FS_TOOLS))
+        if scope_grants is not None and (scope_grants.default_tools or scope_grants.declared_tools):
+            write_tools = sorted(scope_grants.default_tools | scope_grants.declared_tools)
+            enumerable = True
+        elif scope_grants is not None and scope_grants.fully_resolved and scope_grants.checked_scopes:
+            write_tools = []
+            enumerable = True
+        else:
+            scope_grants = None
+    return write_tools, enumerable, view, legacy_write, scope_grants
+
+
 def check_exec_applypatch_workspace(ctx: Context) -> Finding:
     """B68 — filesystem workspace-only confinement (apply_patch + the fs tool family).
 
@@ -1855,48 +1909,38 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     open-group config.
     """
     cfg = ctx.config
-    # B-503: grant resolution delegated to `_b55_write_tools_granted`, the same
-    # write/edit/apply_patch model report.py's capability graph now also calls, so
-    # the two can no longer disagree the way `_enabled_tools` vs.
-    # `_b68_fs_tools_granted` did. `view`/`legacy_write` are still needed below for
+    # B-503/B-904: grant resolution delegated to `_b55_resolved_write_grant`, the same
+    # `_b55_write_tools_granted` PLUS B-737 not-enumerable-fallback resolution
+    # report.py's capability graph now also calls, so the two can no longer disagree
+    # the way `_enabled_tools` vs. `_b68_fs_tools_granted` did (B-503) nor the way the
+    # graph's own bare `_b55_write_tools_granted` call missed this fallback entirely
+    # (B-904). `view`/`legacy_write` are still needed below for
     # `explicit_write_grant`'s EXPLICIT/WIDENED/IMPLICIT-WILDCARD distinction.
-    write_tools, enumerable, view, legacy_write = _b55_write_tools_granted(cfg)
+    # `scope_grants` stays `None` unless the B-737 residual is what supplied
+    # `write_tools`, so every later branch can tell whether it is reasoning about a G1
+    # grant (unchanged) or a B-737 per-scope one (needs provenance wording) purely from
+    # `scope_grants is not None`.
+    write_tools, enumerable, view, legacy_write, scope_grants = _b55_resolved_write_grant(cfg)
     widenings = _agent_profile_widenings(cfg)
 
-    # B-737: G1 (`_b68_fs_tools_granted`, via `_b55_write_tools_granted`) already resolves
-    # every shape it covers; this residual asks `toolgrant.resolved_scopes` -- per SCOPE,
-    # over the vendor's own policy layers -- instead of guessing from a syntactic "declared"
-    # vocabulary (see `toolgrant.py`'s and `_fs_scope_grants`'s docstrings for why the three
-    # earlier predicates here drifted). `scope_grants` stays `None` unless this residual is
-    # what supplied `write_tools` below, so every later branch can tell whether it is
-    # reasoning about a G1 grant (unchanged) or a B-737 per-scope one (needs provenance
-    # wording) purely from `scope_grants is not None`.
-    scope_grants = None
-    if not enumerable:
-        scope_grants = _fs_scope_grants(cfg, _B55_FS_WRITE_TOOLS & set(_B68_FS_TOOLS))
-        if scope_grants is not None and (scope_grants.default_tools or scope_grants.declared_tools):
-            write_tools = sorted(scope_grants.default_tools | scope_grants.declared_tools)
-            enumerable = True
-        elif scope_grants is not None and scope_grants.fully_resolved and scope_grants.checked_scopes:
-            # B-943: every scope this could resolve WAS resolved (none opaque), and none
-            # of them grants a write-capable tool -- a real, positive "resolved to
-            # nothing" answer, not the "could not resolve" UNKNOWN below. Named scopes
-            # back the claim instead of a bare "trust me" (see `_fs_scope_grants`'s
-            # docstring for why an all-confined/empty-checked-scopes config deliberately
-            # does NOT take this branch).
-            checked = ", ".join(scope_grants.checked_scopes)
-            return _finding(
-                "B55",
-                PASS,
-                "No filesystem-write tool (write / edit / apply_patch) is granted in "
-                f"any resolvable scope ({checked}), per OpenClaw's own tool-policy "
-                "resolution.",
-                "Keep write-capable tools out of the allowlist unless they are "
-                "required.",
-                evidence=[f"scopes checked, nothing granted: {checked}"],
-            )
-        else:
-            scope_grants = None
+    if scope_grants is not None and not write_tools:
+        # B-943: every scope this could resolve WAS resolved (none opaque), and none
+        # of them grants a write-capable tool -- a real, positive "resolved to
+        # nothing" answer, not the "could not resolve" UNKNOWN below. Named scopes
+        # back the claim instead of a bare "trust me" (see `_fs_scope_grants`'s
+        # docstring for why an all-confined/empty-checked-scopes config deliberately
+        # does NOT take this branch).
+        checked = ", ".join(scope_grants.checked_scopes)
+        return _finding(
+            "B55",
+            PASS,
+            "No filesystem-write tool (write / edit / apply_patch) is granted in "
+            f"any resolvable scope ({checked}), per OpenClaw's own tool-policy "
+            "resolution.",
+            "Keep write-capable tools out of the allowlist unless they are "
+            "required.",
+            evidence=[f"scopes checked, nothing granted: {checked}"],
+        )
 
     if not enumerable:
         return _finding(

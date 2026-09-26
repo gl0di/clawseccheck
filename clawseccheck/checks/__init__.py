@@ -316,6 +316,7 @@ from ._capability import (
     _agent_profile_widenings,
     _approval_bypass_actors,
     _b31_collect_deny_lists,
+    _b55_resolved_write_grant,
     _b55_write_tools_granted,
     _b68_fs_tools_granted,
     _b737_provenance,

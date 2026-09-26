@@ -1621,7 +1621,7 @@ def _capability_graph(ctx) -> dict:
         SENSITIVE_TOOL_HINTS,
         _B55_FS_WRITE_TOOLS,
         _agent_legs,
-        _b55_write_tools_granted,
+        _b55_resolved_write_grant,
         _b351_resolvable_agents,
         _canon_tool,
         _credential_store_state,
@@ -1652,17 +1652,19 @@ def _capability_graph(ctx) -> dict:
         *[t for t in _enabled_tools(cfg) if _hint([t], INPUT_TOOL_HINTS)],
         *(["web.fetch"] if _web_fetch_enabled(cfg) else []),
     })
-    # B-503: `_enabled_tools` collapses a powerful `tools.profile` down to the single
-    # synthetic "exec" token and never sees a write/edit/apply_patch grant it implies
-    # (it only widens from explicitly-listed tools.allow/gateway.tools.allow names) --
-    # exactly the divergence from B55 (check_fs_write_exposure) that let this graph
-    # print `can_write_memory=no` right next to a B55 FAIL on the same run. Union in
-    # `_b55_write_tools_granted`'s resolution -- the same profile-aware
-    # write/edit/apply_patch model B55/B68/B84 already share, including B55's own
-    # legacy-alias fallback -- rather than re-deriving a second, divergent model here.
-    # `_enabled_tools` itself is untouched: every OTHER caller (exec/input/egress
-    # hints) keeps reading exactly what it read before.
-    write_tools, write_enumerable, _view, _legacy_write = _b55_write_tools_granted(cfg)
+    # B-503/B-904: `_enabled_tools` collapses a powerful `tools.profile` down to the
+    # single synthetic "exec" token and never sees a write/edit/apply_patch grant it
+    # implies (it only widens from explicitly-listed tools.allow/gateway.tools.allow
+    # names) -- exactly the divergence from B55 (check_fs_write_exposure) that let this
+    # graph print `can_write_memory=no` right next to a B55 FAIL on the same run. Union
+    # in `_b55_resolved_write_grant`'s resolution -- the same profile-aware
+    # write/edit/apply_patch model B55/B68/B84 already share, INCLUDING B55's own
+    # B-737 not-enumerable-scope fallback (`_fs_scope_grants`, OpenClaw's own per-scope
+    # tool-policy resolution, e.g. its permissive default) -- rather than re-deriving a
+    # second, divergent model here or calling only the G1 half B55 itself no longer
+    # stops at. `_enabled_tools` itself is untouched: every OTHER caller (exec/input/
+    # egress hints) keeps reading exactly what it read before.
+    write_tools, write_enumerable, _view, _legacy_write, _scope_grants = _b55_resolved_write_grant(cfg)
     main_tools = sorted({t for t in _enabled_tools(cfg)} | set(write_tools))
     # B-730: the credential term read `(ctx.home / "credentials").is_dir()` -- the
     # directory-existence test B-666 disproved and replaced in A1's leg. The store is
@@ -1750,35 +1752,16 @@ def _capability_graph(ctx) -> dict:
             main_access = agent_sandbox.get("workspaceAccess")
         break
     main_write = bool(write_tools or main_access == "rw")
-    # B-904: `write_enumerable` (renamed from the discarded `_write_enumerable` above)
-    # is the SAME flag `check_fs_write_exposure` (B55) itself branches on for its own
-    # UNKNOWN verdict (`if not enumerable: return UNKNOWN`, checks/_capability.py). On
-    # a config with no tools policy declared anywhere, `write_tools` resolves empty
-    # AND `write_enumerable` is False -- B55 reports UNKNOWN ("cannot be assessed"),
-    # but this graph was collapsing that same uncertainty to a flat
-    # `can_write_memory=False`, i.e. a confident "no" the underlying check never
-    # claimed. That is the B-503 divergence class recurring one level down: not a
-    # FAIL-vs-False disagreement (B-503, already fixed by unioning in
-    # `_b55_write_tools_granted` above) but an UNKNOWN-vs-False one.
-    #
-    # Not fixed by re-deriving a resolution: there is no OpenClaw-permissive-default
-    # write-grant model in this codebase for the graph to union in (no
-    # `_permissive_default_fs_tools` or equivalent exists here — grep confirms it, and
-    # `git log --all` traces the one function of that shape to an unmerged branch,
-    # commit 8aaaee72 on `fix/b-737`, which sits behind ~170 unrelated files' worth of
-    # unmerged history and cannot be cherry-picked in isolation for this fix). Nor is
-    # `can_write_memory` itself widened to a tri-state: it is a documented `bool` field
-    # (docs/OUTPUT_SCHEMA.md §5) that dozens of existing tests assert with strict
-    # `is True`/`is False`, so silently changing its value space would be its own,
-    # separately-reviewed breaking change.
-    #
-    # Instead: surface the SAME enumerability signal B55 already keys its own verdict
-    # on, as an additive sibling field on the `main` node only (the one node this
-    # ambiguity applies to — subagent/mcp/input nodes derive `can_write_memory` from
-    # data that is always fully known). A reader who sees
-    # `can_write_memory=False, write_grant_enumerable=False` now gets the same
-    # "we genuinely don't know" signal B55's UNKNOWN carries, instead of a false
-    # certainty — without the graph claiming to know a resolution it does not have.
+    # B-904: `write_enumerable` is the SAME flag `check_fs_write_exposure` (B55) itself
+    # branches on for its own UNKNOWN verdict, now via the SAME `_b55_resolved_write_grant`
+    # resolution -- including its B-737 not-enumerable-scope fallback -- so a config whose
+    # only grant is OpenClaw's own permissive default (no operator tool policy anywhere)
+    # reads as `can_write_memory=True, write_grant_enumerable=True` here exactly as B55
+    # reads it as a real (WARN) grant, not the flat `False`/`False` "no" this graph used
+    # to show next to a B55 finding that was never that confident. `can_write_memory`
+    # stays a strict `bool` (docs/OUTPUT_SCHEMA.md §5); this field only says whether that
+    # bool is a resolved answer or a genuine "cannot tell" -- the same distinction B55's
+    # own UNKNOWN vs. PASS/WARN/FAIL already carries.
     main_write_enumerable = write_enumerable or main_write
     main_egress = bool(
         any(_hint([t], OUTBOUND_TOOL_HINTS) for t in main_tools)
