@@ -7333,73 +7333,47 @@ def check_update_pinning(ctx: Context) -> Finding:
 
     A malicious skill UPDATE is a supply-chain risk (runs with agent permissions).
 
-    WARN  — the config REQUESTS auto-update for skills/plugins (update.auto.enabled /
-            update.auto / autoUpdate / auto_update) — worded as configured intent, not
-            effective behaviour (C-376): OpenClaw's own
-            runtime also gates auto-update on OPENCLAW_NO_AUTO_UPDATE in the gateway's
-            own environment, which this config-only, offline audit cannot observe, so a
-            host with that variable set gets this WARN even though auto-update will not
-            actually run there — a disclosed, sound limitation (reading THIS process's
-            own environment instead would answer a different question and was rejected,
-            see the code comment at the call site);
-            OR update.channel is "dev"/"beta" (C-413 — the same blind-trust risk
-            applied to OpenClaw's own build, not just skills/plugins);
+    WARN  — update.channel is "dev"/"beta" (C-413 — the blind-trust-in-upstream risk
+            applied to OpenClaw's own build);
             OR a plugin/skill entry records a floating ref (branch name / 'latest').
     PASS  — at least one entry is present and all have a pinned tag/commit or an
-            integrity hash; no auto-update requested; update.channel is unset,
-            "stable", or "extended-stable".
-    UNKNOWN — no plugin/skill config from which pinning can be determined.
+            integrity hash; update.channel is unset, "stable", or "extended-stable".
+    UNKNOWN — no plugin/skill config from which pinning can be determined, and
+            update.channel is not on a pre-release tier.
+
+    Removed (2026-09-26): this check used to also WARN on `update.auto.enabled` /
+    `update.auto` / top-level `autoUpdate` / `auto_update` as if it were skills/plugin
+    auto-update. Re-grounded against the installed dist (C-125): `update.auto.enabled`
+    (schema-*.mjs: "Enable background auto-update for stable and beta package
+    installs"; update-startup*.mjs: gates `runAutoUpdateCommand`) drives OpenClaw's OWN
+    `openclaw update` for its core package. That update's finalize step
+    (`updatePluginsAfterCoreUpdate`) also refreshes installed plugins that follow a
+    floating spec — exactly the installs signal 2 below already reports as unpinned —
+    and it never touches skills. The WARN text ("auto-update for skills/plugins") was a
+    false claim and directly contradicted C4's advice to keep OpenClaw itself updated.
+    `update.auto` (bare),
+    top-level `autoUpdate`, and `auto_update` were never real schema paths either — the
+    real shape is only `update.auto.enabled` (a boolean nested under a strictObject),
+    verified against the installed dist's zod schema before removal.
     """
     cfg = ctx.config
 
     warn_ev: list[str] = []
 
-    # ---- signal 1: auto-update enabled ----
-    # Supported key shapes (conservative — only flag when clearly true):
-    #   update.auto.enabled / update.auto / autoUpdate / auto_update
-    auto_update = (
-        dig(cfg, "update.auto.enabled")
-        or dig(cfg, "update.auto")
-        or cfg.get("autoUpdate")
-        or cfg.get("auto_update")
-    )
-    # Only flag when the value is explicitly truthy (not just "present").
-    if auto_update is True or (
-        isinstance(auto_update, str) and auto_update.lower() in ("true", "yes", "1", "on")
-    ):
-        # C-376: worded as configured INTENT, not effective behaviour. Grounded against
-        # the installed dist (update-startup*.js): OpenClaw's own runtime ANDs
-        # `update.auto.enabled` with `!isTruthyEnvValue(process.env.OPENCLAW_NO_AUTO_
-        # UPDATE)` before auto-update actually runs — a variable set in the GATEWAY's
-        # own environment, which this config-only, offline audit has no way to observe
-        # (reading THIS process's os.environ would answer a different, wrong question —
-        # whichever shell happened to run the audit — not the gateway's; C-303 exists to
-        # stop exactly that kind of unsound-but-plausible move). The old wording asserted
-        # "is enabled" (effective behaviour) over a config-only observation; this states
-        # only what was actually read.
-        warn_ev.append(
-            "the config requests auto-update for skills/plugins (update.auto.enabled / "
-            "update.auto / autoUpdate / auto_update) — blind trust in upstream is a "
-            "supply-chain risk if it actually runs. OpenClaw's own runtime also gates "
-            "this on the OPENCLAW_NO_AUTO_UPDATE environment variable in the gateway's "
-            "own environment, which this config-only audit cannot observe — this "
-            "reports what the config requests, not necessarily what is running."
-        )
-
-    # ---- signal 1b (C-413): update.channel on a pre-release tier ----
+    # ---- signal 1 (C-413): update.channel on a pre-release tier ----
     # Grounded against the INSTALLED dist (openclaw@2026.9.3): update.channel is a
     # strictObject sibling of update.auto.enabled (zod-schema-Q1KXOooO.mjs:1299-1308),
     # union(["stable","extended-stable","beta","dev"]).optional() — four literals, not
     # the stub's assumed two ("dev"/"beta"); "extended-stable" is a real, safe tier and
     # must not be swept in as if it were a pre-release channel. dev/beta pull
     # bleeding-edge git+npm installs the same way an unpinned skill/plugin ref does —
-    # same signal family as signal 1, so it is folded into this check rather than a new
-    # one, per the stub's own "extend B25" framing.
+    # same signal family as the per-entry pinning signal below, so it is folded into
+    # this check rather than a new one, per the stub's own "extend B25" framing.
     channel = dig(cfg, "update.channel")
     if isinstance(channel, str) and channel.strip().lower() in ("dev", "beta"):
         warn_ev.append(
-            f"update.channel={channel!r} pulls pre-release builds — the same "
-            "blind-trust-in-upstream risk as auto-update, applied to OpenClaw itself"
+            f"update.channel={channel!r} pulls pre-release builds — blind trust in "
+            "upstream is a supply-chain risk, applied here to OpenClaw's own build"
         )
 
     # ---- signal 2: per-entry pinning ----
@@ -7453,7 +7427,7 @@ def check_update_pinning(ctx: Context) -> Finding:
             # No version and no floating branch in URL — cannot determine pinning.
 
     # ---- verdict ----
-    if not warn_ev and total_with_source == 0 and not auto_update:
+    if not warn_ev and total_with_source == 0:
         return _finding(
             "B25",
             UNKNOWN,
@@ -7470,8 +7444,8 @@ def check_update_pinning(ctx: Context) -> Finding:
             WARN,
             detail,
             "Pin every skill/plugin to a specific tag or commit SHA and record an "
-            "integrity hash (sha256/checksum). Disable auto-update for skills "
-            "(update.auto.enabled = false) and review updates manually before applying.",
+            "integrity hash (sha256/checksum), and review updates manually before "
+            "applying.",
             evidence=warn_ev[:6],
         )
 
@@ -7480,7 +7454,7 @@ def check_update_pinning(ctx: Context) -> Finding:
             "B25",
             PASS,
             f"{pinned_count} plugin/skill entry(s) are pinned to a specific version/tag or "
-            "integrity hash; no auto-update detected.",
+            "integrity hash.",
             "Keep all entries pinned and review updates manually.",
         )
 

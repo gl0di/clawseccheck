@@ -530,11 +530,10 @@ openclaw skills update clawseccheck   # pull the latest from its source (Git/Cla
 clawhub update --all                  # update every installed skill
 ```
 
-(Or re-run the install command.) An auto-updater skill / `update.auto.enabled` in
-`~/.openclaw/openclaw.json` can update on a schedule. Because skills run with the agent's full
-permissions, a malicious *update* is a real supply-chain risk — so each release here is tagged
-and the source is public to read **before** updating. Prefer reviewing/pinning a tag over blind
-auto-update for anything security-sensitive.
+(Or re-run the install command.) A scheduler or an auto-updater skill can also apply updates
+unattended. Because skills run with the agent's full permissions, a malicious *update* is a real
+supply-chain risk — so each release here is tagged and the source is public to read **before**
+updating. Prefer reviewing/pinning a tag over blind auto-update for anything security-sensitive.
 
 > **First call after an update looks empty?** Some OpenClaw versions reload a freshly-updated
 > skill lazily, so the *first* invocation right after an update can return nothing; just run it
@@ -665,8 +664,8 @@ clean gets no extra line — the change itself is already reported.
 > agent's runtime — which this skill deliberately does not do (see [Trust &
 > provenance](#trust--provenance): it is Python, stdlib-only, and never executes what it reads).
 > So the honest posture is three tiers, and only the third works without you doing anything:
-> **warn early** (B25/B95/C4 report that auto-update is on today — they do not speak about
-> any particular future update), **check on demand**
+> **warn early** (B25/B95/C4 report today's pinning, dependency-confusion, and build-freshness
+> hygiene — they do not speak about any particular future update), **check on demand**
 > (`--advise <target>` before you install — INSTALL / CAUTION / DO-NOT-INSTALL), and **catch
 > afterwards** (this). Anything claiming to stop an install from here would be describing a
 > capability the architecture does not have.
@@ -2193,15 +2192,6 @@ hard false positives on real configs.
   above — not as independent proof.
 - **May produce false positives and false negatives.** Evidence-gating keeps noise low,
   but heuristics can miss novel attack patterns and can misread edge-case configurations.
-- **A config setting and the runtime's *effective* behaviour can differ — the audit
-  reports the former.** B25 warns when `update.auto.enabled` is set, because that is
-  what the config file says. OpenClaw's own runtime also gates auto-update on
-  `OPENCLAW_NO_AUTO_UPDATE`, an environment variable in the *gateway's* own process —
-  invisible to this offline, config-only audit, which runs as a different process with
-  its own environment. Reading *this* process's `os.environ` instead would answer a
-  different, wrong question (whichever shell happened to run the audit, not the
-  gateway), so B25's wording states what the config requests, not a claim about
-  whether auto-update is actually running on your host.
 - **Read scope is bounded:** config, bootstrap markdown, installed-skill text, OpenClaw log
   files, agent session logs, the cron job store, the two global OpenClaw dotenv files,
   OpenClaw-related systemd user-unit environment lines, host OS recon (security-tool paths,

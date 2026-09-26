@@ -183,8 +183,6 @@ tools.web
 tools.web.fetch.enabled
 tools.web.fetch.maxRedirects
 tools.web.fetch.useTrustedEnvProxy
-update.auto
-update.auto.enabled
 update.channel
 
 # --- read off a NESTED object, not the config root ---------------------------------
