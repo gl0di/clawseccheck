@@ -4135,27 +4135,6 @@ def _has_non_negated_cred_match(blob: str) -> bool:
     )
 
 
-# CLAWSECCHECK-exfil-post round 2 (C-135 B13 blocker): _EXFIL_RE's POST/post leg now
-# exempts a small, closed list of hyphen compounds ("post-setup", "post-mortem", …) —
-# see checks/_shared.py's _EXFIL_RE comment for the full history. _has_cred_exfil_
-# outside_fence below is the highest-severity SAME-LINE cred+exfil CRITICAL detector
-# and has NO other floor once that leg goes quiet: unlike every other _EXFIL_RE
-# consumer (B63's _has_outbound_exfil, _has_cred_exfil_cross_skill, B64's continuation
-# scan, the B-748 own-destination scan, …), each of which retains an independent
-# anchor of its own (a secrecy/action window, a document-wide correlation, a
-# credential-source/destination pairing), this rule's ENTIRE signal is _CRED_RE plus
-# this one _EXFIL_RE leg. A real adversarial repro showed "post-forward" — an
-# arbitrary, unlisted continuation — fully silencing this rule. Widening the closed
-# list in checks/_shared.py would only shrink, never eliminate, an unbounded-attacker-
-# choice problem for a rule with no fallback, so this rule instead never routes
-# through the compound-tolerant leg at all: a bare "post"/"POST", any case, compound
-# or not, on the same line as a credential path always counts here. This consumer was
-# never the false positive the shared-regex change targeted in the first place — the
-# real-fleet repro was B63-only (tests/test_fleetfp_exfil_post.py) — it was swept into
-# the narrower behavior only as an accidental side effect of sharing the pattern.
-_BARE_POST_RE = re.compile(r"\bpost\b", re.IGNORECASE)
-
-
 def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]) -> bool:
     """Same-line cred+exfil rule, fence-aware (C-041).
 
@@ -4176,16 +4155,19 @@ def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]
     extend to this one. case_04843 is a known, accepted, unfixed spurious FAIL as a
     result.
 
-    CLAWSECCHECK-exfil-post round 2 (C-135): the same-line exfil match also tries
-    _BARE_POST_RE (see its own comment above) so that a hyphen-compound exemption
-    meant for prose-scanning consumers with their own floor can never fully silence
-    this zero-floor rule.
+    CLAWSECCHECK-exfil-post round 3: rounds 1/2 each narrowed the shared _EXFIL_RE
+    (or added a bare-post fallback here) to chase a B63-only false positive; both
+    were retracted on C-135 grounds because this rule has no other floor and went
+    silent as an accidental side effect. _EXFIL_RE is back to its pre-ticket
+    definition and this rule uses it unmodified — see checks/_shared.py's _EXFIL_RE
+    comment and checks/_content.py's _b63_outbound_exfil_anchor for where the real
+    fix now lives.
     """
     pos = 0
     for ln in blob.splitlines():
         ln_start = pos
         if not _in_fence(ln_start, fence_ranges):
-            if _CRED_RE.search(ln) and (_EXFIL_RE.search(ln) or _BARE_POST_RE.search(ln)):
+            if _CRED_RE.search(ln) and _EXFIL_RE.search(ln):
                 return True
         pos += len(ln) + 1  # +1 for the stripped newline
     return False

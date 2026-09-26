@@ -48,21 +48,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   TLS-certificate/key argument's value go unnoticed because that argument position is
   normally treated as safe; a match is now only treated as safe there when it is a plain
   file path, not when it contains an executing subcommand.
-- The outbound-exfiltration-transport detector no longer flags an ordinary English
-  hyphen compound like "post-setup", "post-install", or "post-mortem" as the HTTP verb
-  POST. A skill's own UX prose ("Do not show post-setup flow-control choices") could
-  turn a routine, low-severity note into a critical silent-instruction failure. A real
-  POST (uppercase, or lowercase with no hyphenated word following it) is unaffected.
-  A follow-up review found the first version of this fix accepted an open-ended
-  exemption — any hyphenated word after "post", in any case — that could itself be
-  turned around: an attacker-chosen continuation ("post-forward") could fully silence
-  the same-line credential+exfiltration CRITICAL check, which has no independent
-  fallback signal of its own, and any non-full-caps spelling of "post" bypassed a
-  separate downgrade more broadly than first assessed. The exemption is now a small,
-  reviewed list of the specific benign continuations this fix needs (setup, install,
-  process, mortem, selection) instead of "any word," and the same-line
-  credential+exfiltration check no longer uses the exemption at all, so a same-line
-  credential path plus "post" (any case, hyphenated or not) always counts there.
+- The silent-instruction check (B63) no longer flags an ordinary English hyphen
+  compound like "post-setup", "post-install", or "post-mortem" as the HTTP verb POST.
+  A skill's own UX prose ("Do not show post-setup flow-control choices") could turn a
+  routine, low-severity note into a critical silent-instruction failure. A real POST
+  (uppercase, or lowercase with no hyphenated word following it) is unaffected, and so
+  is any other hyphenated word not on this small, reviewed list (setup, install,
+  process, mortem, selection). Two earlier attempts at this fix narrowed the
+  underlying exfiltration-transport pattern itself, which is shared by over a dozen
+  other checks; each one accidentally silenced a different, unrelated check that has
+  no fallback signal of its own (the same-line and cross-skill credential+exfiltration
+  CRITICAL/HIGH checks). The final fix touches only the silent-instruction check: the
+  shared pattern is unchanged everywhere else, so a credential path next to "post" (any
+  case, hyphenated or not) always counts for those checks, same as before this fix
+  existed. A skill that adopts one of the five exempt words for its own exfiltration
+  step still gets flagged for human review (WARN), never silently passed.
 
 ## [4.3.0] — 2026-09-23
 

@@ -681,43 +681,23 @@ _CRED_RE = re.compile(
 # F-124/E-044 layer-fix: moved here VERBATIM from checks/_content.py (see _CRED_RE note
 # above for why).
 #
-# CLAWSECCHECK-exfil-post: the bare `\bPOST\b` alternative, under this pattern's re.I
-# flag, matched the English prefix "post" inside ordinary hyphen compounds
-# ("post-setup", "post-process", "post-mortem") — the real HTTP verb is never spelled
-# with a trailing hyphen. Real-fleet repro: a data-analytics skill's "Do not show
-# post-setup flow-control choices" line anchored B63 (_has_outbound_exfil) on "post"
-# alone, turning a WARN-tier "Do not show" into a CRITICAL FAIL. Narrowed to: uppercase
-# `POST` always counts (case-sensitive, via the scoped `(?-i:...)` flag — an attacker
-# gains nothing from this, since "post"/"POST" was never the only transport word this
-# pattern looks for).
-#
-# ROUND 2 (this ticket — CLAWSECCHECK C-135 B13/B63 blockers): round 1 exempted any-case
-# "post" before ANY hyphen+word (`post(?!-\w)`), disclosed as accepting one narrow FN
-# risk ("a lowercase hyphenated 'post-request'"). Two independent adversarial repros
-# showed the real bypass surface was much wider than disclosed, because the lookahead
-# never inspected WHAT the continuation word was:
-#   - B13 (checks/_vet.py, _has_cred_exfil_outside_fence, the same-line cred+exfil
-#     CRITICAL rule): an attacker's own made-up continuation ("post-forward") silenced
-#     the rule's ENTIRE anchor with zero fallback — see that function's own comment for
-#     why this consumer is hardened separately (_BARE_POST_RE) rather than by narrowing
-#     this pattern alone.
-#   - B63 (_has_outbound_exfil below): ANY non-full-caps spelling ("Post-sync",
-#     "PoSt-collect"), not just literal lowercase "post-request", bypassed the
-#     FAIL->WARN downgrade the same way, because the case-insensitive leg matches
-#     "post" in any case and the open lookahead accepted any continuation.
-# Fixed by replacing the open `(?!-\w)` lookahead with a CLOSED, reviewed list of the
-# specific English continuations this fix actually needs — exactly the ones the
-# real-fleet repro and this pattern's own test suite establish as benign, non-transport
-# nouns: "setup", "install(ation)", "process(ing)", "mortem", "selection". An attacker
-# can no longer supply an arbitrary word to manufacture the compound shape; only these
-# five already-vetted continuations are exempt, in any case, with or without a hyphen
-# before "up" in "set-up". Extend this list only with the same rigor as any other
-# closed enumeration in this codebase (e.g. curlgrammar.py) — confirm a candidate word
-# is never itself a live outbound-transport verb before adding it.
+# CLAWSECCHECK-exfil-post: rounds 1 and 2 of this fix narrowed the bare `\bPOST\b`
+# alternative below (it matches the English prefix "post" inside ordinary hyphen
+# compounds like "post-setup" under this pattern's re.I flag; real-fleet repro: a
+# data-analytics skill's "Do not show post-setup flow-control choices" anchored B63 on
+# "post" alone). Both narrowings were retracted on C-135 grounds: this pattern is
+# SHARED by 15+ consumers across _vet.py/_content.py/_config.py/_lifecycle.py/
+# logscan.py/trajaudit.py, and several of them (B13's same-line cred+exfil rule, its
+# cross-skill split-stage sibling) have NO independent floor of their own — narrowing
+# the shared pattern silenced those consumers as a side effect, and each round's fix
+# for one silenced consumer revealed another. The real false positive is B63-only,
+# so round 3 restores this pattern to its original, unnarrowed form (see git history
+# prior to the exfil-post ticket) and fixes B63 alone with a sibling of its own
+# anchor helper in checks/_content.py (`_b63_outbound_exfil_anchor`) instead. Every
+# other consumer of this pattern is therefore unaffected, structurally, not by
+# enumeration.
 _EXFIL_RE = re.compile(
-    r"\bcurl\b|\bwget\b|\bnc\b|netcat|requests?\.post|fetch\(|"
-    r"\b(?:(?-i:POST)|post(?!-(?:set-?up|install(?:ation)?|process(?:ing)?|mortem|"
-    r"selection)\b))\b|\bscp\b|base64|"
+    r"\bcurl\b|\bwget\b|\bnc\b|netcat|requests?\.post|fetch\(|\bPOST\b|\bscp\b|base64|"
     r"glot\.io|webhook\.site|transfer\.sh|pastebin|"
     r"rentry\.co|rentry\.org|"
     r"beeceptor\.com|interactsh\.com|oast\.|canarytokens\.|file\.io|"
