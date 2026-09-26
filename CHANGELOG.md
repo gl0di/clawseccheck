@@ -55,7 +55,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   fetch-and-follow directive. A cell boundary is now treated as its own break, so a
   directive that only comes together across table cells is downgraded to the existing
   advisory band instead of failing outright; a directive written entirely within one
-  cell still fails as before.
+  cell still fails as before. Follow-up fix: the cell-boundary detection above did not
+  know about inline code spans, so a `|` sitting inside a *later*, unrelated
+  backtick-quoted value in the same cell (not the fetched URL's own) was wrongly read as
+  a cell boundary too, silently downgrading a genuine same-cell directive to the
+  advisory band. Every real inline code span on the line — single- or multi-backtick
+  delimited — is now excluded from cell-boundary detection, so a same-cell directive
+  stays a FAIL regardless of what else the cell quotes.
 
 ## [4.3.0] — 2026-09-23
 

@@ -3347,6 +3347,73 @@ _RUNTIME_FETCH_TABLE_DELIM_LINE_RE = re.compile(
 _RUNTIME_FETCH_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
 
 
+def _gfm_line_code_span_ranges(line: str) -> "list[tuple[int, int]]":
+    """table-cells fix (round 2, C-135 blocker): the (start, end) spans of every real GFM
+    inline code span on a single *line* -- delimiter backticks included -- so a caller can
+    treat a `|` landing inside one as protected, not a real cell boundary.
+
+    Follows CommonMark/GFM's own code-span rule (a backtick STRING -- a run of one or more
+    backticks -- opens a span, and the span is closed by the NEXT backtick string of the
+    EXACT SAME length; a run of a different length is not a closer and is skipped over).
+    That is what lets a code span contain a literal backtick of its own by using a longer
+    delimiter run, e.g. `` `` `a|b` `` `` (a double-backtick delimiter around a single
+    embedded backtick) -- the reviewer's own blocker repro. Unlike
+    `_content._inline_code_ranges` (B-148, single-backtick delimiters only), this handles
+    multi-backtick delimiters, matching the real GFM rule the blocker exercised.
+
+    Deliberately per-LINE, never per-blob: a GFM table cell cannot itself contain a hard
+    line break -- each row is exactly one physical line, with no continuation-line concept
+    (see the round-3 note above `_RUNTIME_FETCH_BQ_LINE_RE`) -- so a code span opened on
+    one row line can never close on a different one, and this function is never asked to
+    look past a single line.
+
+    Fails CLOSED by construction: a backtick run with no same-length closer anywhere later
+    on the line produces NO span for that run (the scan simply resumes right after it), so
+    a pipe following an unterminated/odd-count code-span opener is still read as a REAL
+    cell boundary -- the safe direction, never swallowing the rest of the row."""
+    spans: "list[tuple[int, int]]" = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] != "`":
+            i += 1
+            continue
+        j = i
+        while j < n and line[j] == "`":
+            j += 1
+        run_len = j - i
+        k = j
+        closer_end = None
+        while k < n:
+            if line[k] != "`":
+                k += 1
+                continue
+            k2 = k
+            while k2 < n and line[k2] == "`":
+                k2 += 1
+            if k2 - k == run_len:
+                closer_end = k2
+                break
+            k = k2  # a run of a different length is never a valid closer here
+        if closer_end is None:
+            i = j  # unterminated: this run's backticks are literal; resume right after it
+        else:
+            spans.append((i, closer_end))
+            i = closer_end
+    return spans
+
+
+def _offset_in_code_span(pos: int, spans: "list[tuple[int, int]]") -> bool:
+    """True when *pos* (an offset within the SAME LINE *spans* was computed from, via
+    `_gfm_line_code_span_ranges`) falls inside one of them. *spans* are produced in
+    increasing-start order, so this stops at the first span starting past *pos*."""
+    for s, e in spans:
+        if s <= pos < e:
+            return True
+        if pos < s:
+            break
+    return False
+
+
 def _runtime_fetch_table_pipe_breaks(blob: str) -> "set[int]":
     """table-cells fix (F-021 real-fleet FP on the real `workers-best-practices` skill):
     a GFM table row is one line with no sentence punctuation, so before this a verb in
@@ -3360,12 +3427,20 @@ def _runtime_fetch_table_pipe_breaks(blob: str) -> "set[int]":
     table/adjacent WARN band (_runtime_fetch_line_kind's "table" bucket,
     _runtime_fetch_block) via these SAME cell-level segments, never PASS -- a same-cell
     directive ("Fetch <url> and follow its rules" in ONE cell) is unaffected and still
-    binds at FAIL. Accepted, un-tested scope limits (documented, not defended): a code
-    span's own `|` inside a cell is not distinguished from a real cell boundary, and a
-    table nested inside a blockquote (`> | a | b |`) never matches
-    _RUNTIME_FETCH_TABLE_LINE_RE in the first place (the leading `>` wins), so it is
-    unaffected by this function either way -- the same FN trade already accepted for
-    list/sentence splits elsewhere in this module."""
+    binds at FAIL.
+
+    Round 2 (C-135 blocker on round 1): a `|` landing inside ANY real inline code span on
+    the line -- not only the URL's own -- is excluded from the cell-boundary scan via
+    `_gfm_line_code_span_ranges`/`_offset_in_code_span`. Round 1 only ever protected the
+    URL match's own regex span, so a pipe sitting inside a LATER, unrelated code span in
+    the same cell (e.g. a second, separately-backtick-quoted flag value) still split the
+    row and wrongly demoted a genuine same-cell directive to the adjacent WARN band --
+    falsifying the very same-cell invariant this function promises above. Excluding every
+    code span on the line, not just the URL's, closes that gap structurally. A table
+    nested inside a blockquote (`> | a | b |`) never matches _RUNTIME_FETCH_TABLE_LINE_RE
+    in the first place (the leading `>` wins), so it is unaffected by this function either
+    way -- the same FN trade already accepted for list/sentence splits elsewhere in this
+    module."""
     breaks: "set[int]" = set()
     spans = _runtime_fetch_line_spans(blob)
     i, n = 0, len(spans)
@@ -3388,7 +3463,10 @@ def _runtime_fetch_table_pipe_breaks(blob: str) -> "set[int]":
             for k in range(i, j):
                 ks, ke = spans[k]
                 line = blob[ks:ke]
+                code_spans = _gfm_line_code_span_ranges(line)
                 for pm in _RUNTIME_FETCH_UNESCAPED_PIPE_RE.finditer(line):
+                    if _offset_in_code_span(pm.start(), code_spans):
+                        continue
                     breaks.add(ks + pm.end())
         i = j
     return breaks
