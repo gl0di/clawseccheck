@@ -144,8 +144,14 @@ from .collector import agent_roster
 #: optional chain guards null and undefined but not a non-string. So the two builds are NOT
 #: interchangeable here, and after the regeneration nothing pins 9.4 any more. Keeping it in
 #: the window would have asserted a validation this repo no longer holds evidence for.
+#:
+#: The ceiling moved to 2026.9.6 on 2026-09-25 and the floor deliberately did NOT: the
+#: battery regenerated on 2026.9.6 answers identically to the 2026.9.5 one on all 771 rows
+#: (only its ``build`` stamp differs), so the evidence for 9.5 is still measured, not
+#: assumed. Raising the floor would have turned every 9.5 install's answer into ``unknown``
+#: with no divergence to justify it.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 9, 5)
+ORACLE_MAX = (2026, 9, 6)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 
