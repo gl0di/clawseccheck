@@ -4198,7 +4198,11 @@ _LIFECYCLE_HOOK_RE = re.compile(
 # sentences containing them ("You can paste anything like the following into your
 # config", "Feel free to contact this endpoint") to confirm the trailing-verb
 # requirement alone doesn't launder instructional prose into a disclaimer — see
-# tests/test_b525_fenced_persistence.py's adversarial paste/contact cases.
+# tests/test_b525_fenced_persistence.py's adversarial paste/contact cases. Since this
+# regex is shared across every consumer of _is_code_example/_example_governance (~31
+# call sites, not just B165/the IOC pair), the review also confirmed "do not paste"/
+# "do not contact" now dampens B59/B339/B156/etc. identically to how the pre-existing
+# verbs already did — the same accepted trade-off widening, not a new category of risk.
 _NEGATION_RE = re.compile(
     r"\bfor\s+example\b|e\.g\.|(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|"
     r"\bdo\s+not\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start|paste|contact)\b|"
