@@ -1093,7 +1093,7 @@ _CRON_PERSIST_RE = re.compile(
         crontab\s+-[eur]\b                          |  # crontab -e/-u/-r (not -l)
         crontab\s+-(?!\w)                           |  # crontab - (stdin install, no flag)
         ["']crontab["']\s*,\s*["']-["']             |  # subprocess argv: ["crontab","-"]
-        crontab\s+[^-\s]                            |  # crontab <file>
+        crontab\s+(?:[/~.$"'`<{(%\\@]|[\w][\w.-]*(?=[^\S\n]*(?:\n|\Z|[;&|)#<>`'"\\]|2>|\.(?=\s|\Z)))) |  # crontab <file> (operand-shaped)
         @reboot\b                                   |  # cron @reboot directive
         systemctl\s+(?:--\w[\w-]*\s+)*enable\b      |  # systemd enable (incl. --user/--now)
         launchctl\s+load\b                          |  # macOS launchd load
@@ -1103,6 +1103,14 @@ _CRON_PERSIST_RE = re.compile(
     )""",
     re.I | re.VERBOSE,
 )
+
+# B13 fleetfp fix: the operand alternative above now requires operand SHAPE (a path/
+# var/quote opener, or a bare word ending the command) instead of "any non-space,
+# non-dash char" — the old gate matched mere prose naming crontab (a markdown link
+# "[Crontab Guru](...)", "crontab syntax is..."). A bare-word mention that fails this
+# gate is not dropped silently: _cron_persistence_hits routes it to WARN via this
+# regex (ambiguous-suppression-to-WARN, never a silent PASS).
+_CRON_PROSE_MENTION_RE = re.compile(r"crontab\s+[A-Za-z]", re.I)
 
 # KNOWN RESIDUAL (B-534 -- NARROWED, NOT CLOSED). Three of the ten alternatives above
 # are bare PATH mentions with no install/enable verb requirement -- Library/LaunchAgents,
@@ -1290,11 +1298,20 @@ def _cron_persistence_hits(
     reputable_label = "cron/startup persistence (reputable service): enables a well-known system daemon"
     disclosed_label = "cron/startup persistence (disclosed): a documented watchdog/monitoring job"
     fixture_label = "cron/startup persistence (test fixture): inside the skill's own test file"
+    prose_label = (
+        "cron/startup persistence (prose mention): crontab named in prose, "
+        "not an install command"
+    )
     saw_test_fixture = False
+    # B13 fleetfp fix: every _CRON_PERSIST_RE match span, regardless of which branch
+    # below it took (high/warn/suppressed/test-fixture) — the prose-mention pass after
+    # this loop must not re-label an occurrence this loop already resolved.
+    _persist_spans: list[tuple[int, int]] = []
     # C-204/C-135 (performance): compute ONCE per blob, not once per match — see
     # _manifest_header_matches' docstring.
     _header_matches = _manifest_header_matches(blob)
     for m in _CRON_PERSIST_RE.finditer(blob):
+        _persist_spans.append((m.start(), m.end()))
         # B-525: `fence_needs_negation=True` — an UNANNOTATED fence does not dampen this
         # detector on its own; a negation nearby is additionally required.
         #
@@ -1398,6 +1415,19 @@ def _cron_persistence_hits(
         # ONLY when no live (non-fixture) match produced any hit.
         if saw_test_fixture and not high_hits and not warn_hits:
             warn_hits.append(fixture_label)
+    # B13 fleetfp fix: a bare-word "crontab X" that failed the operand gate above is
+    # surfaced here as WARN instead of vanishing — same fence/test-fixture guards as
+    # the main loop, and skipped wherever the main loop already resolved this exact
+    # occurrence (fixed FAIL, down-ranked WARN, or suppressed).
+    for pm in _CRON_PROSE_MENTION_RE.finditer(blob):
+        if any(s <= pm.start() < e for s, e in _persist_spans):
+            continue
+        if _pos_in_test_fixture_file(blob, pm.start(), _header_matches):
+            continue
+        if _is_code_example(blob, pm.start(), fence_ranges, fence_needs_negation=True):
+            continue
+        if prose_label not in warn_hits:
+            warn_hits.append(prose_label)
     return high_hits, warn_hits
 
 
