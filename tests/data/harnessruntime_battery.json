@@ -1,5 +1,5 @@
 {
- "build": "2026.9.5",
+ "build": "2026.9.6",
  "rows": [
   {
    "label": "empty",
@@ -24441,6 +24441,34 @@
    }
   },
   {
+   "label": "fixture:bad_b351_codemode_defaults_model_override",
+   "cfg": {
+    "agents": {
+     "defaults": {
+      "models": {
+       "anthropic/claude-opus-4-8": {
+        "codeMode": true
+       }
+      }
+     }
+    },
+    "models": {
+     "main": {
+      "provider": "ollama/llama3"
+     }
+    },
+    "tools": {}
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [
+     "anthropic/claude-opus-4-8"
+    ],
+    "runtimes": []
+   }
+  },
+  {
    "label": "fixture:bad_b351_codemode_global_on_agent_narrowed",
    "cfg": {
     "agents": {
@@ -25266,6 +25294,34 @@
    "oracle": {
     "collect": [],
     "refs": [],
+    "runtimes": []
+   }
+  },
+  {
+   "label": "fixture:clean_b351_codemode_defaults_model_disabled",
+   "cfg": {
+    "agents": {
+     "defaults": {
+      "models": {
+       "anthropic/claude-opus-4-8": {
+        "codeMode": false
+       }
+      }
+     }
+    },
+    "models": {
+     "main": {
+      "provider": "ollama/llama3"
+     }
+    },
+    "tools": {}
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [
+     "anthropic/claude-opus-4-8"
+    ],
     "runtimes": []
    }
   },

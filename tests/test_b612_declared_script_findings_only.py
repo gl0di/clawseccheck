@@ -356,7 +356,8 @@ def test_the_full_audit_inventory_row_agrees_with_b13(tmp_path):
            {"bin/lint": EXFIL_PY})
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home),
-         "--data-dir", str(tmp_path / "state"), "--json", "--no-history", "--no-deptree"],
+         "--data-dir", str(tmp_path / "state"), "--json", "--no-history", "--no-deptree",
+         "--no-host"],
         cwd=REPO, capture_output=True, text=True, timeout=600,
     )
     d = json.loads(proc.stdout)

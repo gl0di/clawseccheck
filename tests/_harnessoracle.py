@@ -48,7 +48,7 @@ BATTERY_PATH = HERE / "data" / "harnessruntime_battery.json"
 FIXTURES = HERE.parent / "fixtures"
 
 #: The build the battery was generated against (recorded in the battery header).
-ORACLE_BUILD = "2026.9.5"
+ORACLE_BUILD = "2026.9.6"
 
 # --------------------------------------------------------------------------------------
 # node side

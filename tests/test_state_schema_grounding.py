@@ -940,6 +940,23 @@ _B909_IMMUTABLE_DEMO_DECOY = (
     "never opened through collect() or any per-agent-DB reader, never a real OpenClaw "
     "table name, never meant to resolve against any vendor shape."
 )
+_B176_SOMETHING_ELSE_PREDATES_TABLE = (
+    "a single-column table named `something_else`, used only to prove "
+    "_collect_paired_devices_sqlite treats a database that predates the "
+    "device_pairing_paired table entirely as \"not found\" (found=False), never as a "
+    "parse error and never as a confident absence -- never a real OpenClaw table name, "
+    "never meant to resolve against any vendor shape."
+)
+_B176_VIEW_MASQUERADE_DECOY = (
+    "a `decoy` table backing a VIEW named `device_pairing_paired`, used by this file's "
+    "two view-masquerade hardening tests (fabricate a false WARN by giving the view a "
+    "full column set with a spoofed high-scope row; suppress a genuine WARN by giving it "
+    "a minimal one-column shape) -- same `_table_kind` sqlite_master-type refusal already "
+    "proven for config_machine_state/installed_plugin_index. The decoy's own column shape "
+    "is incidental to what each test actually checks (that the VIEW is refused by type "
+    "before any row is read), so both sites share this entry despite differing column "
+    "counts. Never a real OpenClaw table name itself."
+)
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
     # source scanner sees. Pinned by a full fingerprint row at
@@ -1193,6 +1210,18 @@ _REGISTRY: "dict[str, _Entry]" = {
     # update_runs is a real, current vendor table (state schema v15+, 2026.9.2) that
     # genuinely matches the vendor shape now that the snapshot actually carries it.
     "tests/test_f192_update_runs.py:30": _Entry(MODERN),
+
+    # ---- device_pairing_paired (B176 -- OpenClaw 2026.9.6 devices/paired.json migration) ----
+    "tests/test_b176_paired_devices_sqlite_migration.py:51": _Entry(MODERN),
+    "tests/test_b176_paired_devices_sqlite_migration.py:153": _Entry(
+        LEGACY_TABLE, _B176_SOMETHING_ELSE_PREDATES_TABLE
+    ),
+    "tests/test_b176_paired_devices_sqlite_migration.py:258": _Entry(
+        LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
+    ),
+    "tests/test_b176_paired_devices_sqlite_migration.py:570": _Entry(
+        LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
+    ),
 }
 
 # B-889: +2 (69, was 67) -- round 1's view-masquerade decoy-table DDL site
@@ -1206,7 +1235,10 @@ _REGISTRY: "dict[str, _Entry]" = {
 # B-994: +1 -- the identical view-masquerade decoy-table DDL site for
 # _collect_plugin_trust's legacy installed_plugin_index probes (tests/test_b177_installed_index_shapes.py:557).
 # Combined: 72, was 71.
-assert len(_REGISTRY) == 72, f"registry has {len(_REGISTRY)} entries, expected 72"
+# B176 (OpenClaw 2026.9.6 upgrade re-baseline): +4 -- device_pairing_paired's own real DDL
+# site (MODERN, verbatim from a live 2026.9.6 install) plus the three decoy/pre-migration
+# sites in the same new test file. 76, was 72.
+assert len(_REGISTRY) == 76, f"registry has {len(_REGISTRY)} entries, expected 76"
 
 
 # ========================================================================================

@@ -1,9 +1,9 @@
 -- state_schema_snapshot.sql -- GENERATED. Do not hand-edit.
 --
--- openclaw-version: 2026.9.5
--- state-schema-version: 17
--- generated: 2026-09-19
--- tables: 10
+-- openclaw-version: 2026.9.6
+-- state-schema-version: 18
+-- generated: 2026-09-26
+-- tables: 11
 --
 -- What this is
 -- ------------
@@ -11,7 +11,7 @@
 -- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
 -- declares in a test DDL or that clawseccheck/ reads.
 --
--- source-bundle: openclaw-state-db-DS2iNFy4.mjs
+-- source-bundle: openclaw-state-db-read-connection-Beg0AZE7.mjs
 --   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
 --   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
 --   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still
@@ -123,12 +123,40 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   agent_id TEXT,
   payload_kind TEXT NOT NULL,
   job_json TEXT NOT NULL,
+  grant_definition_revision TEXT,
+  grant_definition_generation INTEGER,
+  grant_definition_updated_at INTEGER,
   state_json TEXT NOT NULL DEFAULT '{}',
   runtime_updated_at_ms INTEGER,
   schedule_identity TEXT,
   sort_order INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (store_key, job_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS device_pairing_paired (
+  device_id TEXT NOT NULL PRIMARY KEY,
+  public_key TEXT NOT NULL,
+  display_name TEXT,
+  operator_label TEXT,
+  platform TEXT,
+  device_family TEXT,
+  client_id TEXT,
+  client_mode TEXT,
+  browser_origin TEXT,
+  role TEXT,
+  roles_json TEXT,
+  scopes_json TEXT,
+  approved_scopes_json TEXT,
+  remote_ip TEXT,
+  tokens_json TEXT,
+  approved_via TEXT,
+  node_surface_json TEXT,
+  pending_node_surface_json TEXT,
+  created_at_ms INTEGER NOT NULL,
+  approved_at_ms INTEGER NOT NULL,
+  last_seen_at_ms INTEGER,
+  last_seen_reason TEXT
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS skill_library_entries (
@@ -165,7 +193,9 @@ CREATE TABLE IF NOT EXISTS subagent_runs (
   run_id TEXT NOT NULL PRIMARY KEY,
   child_session_key TEXT NOT NULL,
   controller_session_key TEXT,
+  controller_store_path TEXT,
   requester_session_key TEXT NOT NULL,
+  requester_store_path TEXT,
   created_at INTEGER NOT NULL,
   payload_json TEXT NOT NULL DEFAULT '{}'
 ) STRICT;
