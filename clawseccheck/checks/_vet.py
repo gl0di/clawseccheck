@@ -7121,17 +7121,22 @@ def check_installed_skills(ctx: Context) -> Finding:
                 )
         if tt5_cmd_injection_skills:
             # Accepted §2.5 residual (TT5 configured-executable class), Dave ruling
-            # 2026-09-26. See the retracted-fix note above the argv[0] taint check
-            # in skillast.py's `_subprocess_taint_is_command_injection`.
+            # 2026-09-26, widened 2026-09-26 to also cover the wrapper/fixed-table
+            # shape. See the retracted-fix note above the argv[0] taint check in
+            # skillast.py's `_subprocess_taint_is_command_injection`.
             fix += (
                 " One or more of the crit findings above is a TT5 command-injection "
                 "hit whose executed program path comes from external configuration "
                 "(an env var, a CLI flag, or a config/manifest value) rather than a "
-                "string literal. Static analysis cannot tell an operator-configured "
-                "executable path from an attacker-chosen one — both look identical "
-                "(a name resolved at runtime flowing into subprocess/exec). If you "
-                "authored this skill or already trust its source, review whether "
-                "that configuration input can be influenced by untrusted content "
+                "string literal, or is built by a wrapper that composes it from a "
+                "module-level command table and a same-module prefix helper. "
+                "Static analysis cannot tell an operator-configured executable path "
+                "from an attacker-chosen one, and the same is true of a table- or "
+                "helper-composed one — all look identical (a name resolved at "
+                "runtime, or assembled from source elsewhere in the same file, "
+                "flowing into subprocess/exec). If you authored this skill or "
+                "already trust its source, review whether that configuration "
+                "input, table, or helper can be influenced by untrusted content "
                 "before installing."
             )
         if same_line_cred_exfil_skills:
