@@ -5780,6 +5780,50 @@ def _subprocess_taint_is_command_injection(
         # checks/_vet.py for where the resulting FAIL is disclosed, never
         # suppressed. tests/test_fleetfp_tt5_configured_executable_residual.py
         # pins both the benign shape and its malicious twin as CRITICAL.
+        #
+        # Folded into the SAME residual, Dave ruling 2026-09-26: a wrapper that
+        # composes argv from a module-level command table and a same-module
+        # prefix helper — `NODE_PROBES: list[tuple[str, list[str]]] = [...]` at
+        # module scope, `exec_prefix()` returning a prefix list, and
+        # `for name, argv in NODE_PROBES: run(prefix + argv)` — real target:
+        # dynamo-interconnect-check
+        # (~/.openclaw/agents/main/agent/codex-home/.tmp/plugins/plugins/nvidia/
+        # skills/dynamo-interconnect-check/scripts/check_interconnect.py:121).
+        # A dedicated resolver for this shape (branch fix/fleetfp-argv0-resolver)
+        # went through four C-135 rounds and was dropped, never merged:
+        #   Round 1/2: `_argv0_for_target_reassigned_in_scope` tried to prove a
+        #     for-loop target unmodified before the sink, but missed a plain
+        #     reassignment of the loop variable in the loop body, missed a
+        #     nested `for`/`with ... as` rebind of the same name, and missed an
+        #     `AugAssign` on a subscript of the same name — three separate
+        #     false-clear bypasses on the identical resolver.
+        #   Round 3: once those were patched, the resolver still trusted the
+        #     table/helper's OWN name binding — a same-module `globals()[...]
+        #     = ...`, `setattr(module, ..., ...)`, or `exec(...)` rebind of the
+        #     table or helper name before the loop runs cleared right past it
+        #     (TT5_CMD_INJECTION false-clear).
+        #   Round 4: patched round 3's reflection-word list, but the list
+        #     omitted `__globals__` (a plain function attribute, not a frame
+        #     attribute like the already-listed `f_globals`) — so
+        #     `some_func.__globals__[key] = ...` rebinds the table with zero
+        #     reflection-word tokens in sight, and a computed key
+        #     (string-concatenated at runtime) defeats the occurrence-count
+        #     cross-check too, since the identifier text never appears twice in
+        #     the source. Corroborating: this same file's
+        #     `_CONTAINMENT_UNSAFE_DUNDER_ATTRS` (B-850) already treats
+        #     `__globals__`/`__code__`/`__defaults__`/`__kwdefaults__` as
+        #     first-class dangerous reflection primitives elsewhere — round 4
+        #     built a fresh word list for the argv0 resolver and independently
+        #     omitted it, with zero test coverage on any of the four names.
+        # No round fixed the root cause: Python's dynamism means a source-level
+        # table or helper binding is never provably fixed without whole-program
+        # analysis (every attribute/global/frame-reflection primitive that can
+        # rebind a name, transitively, at any point before the sink runs) — a
+        # scope this static, single-pass, stdlib-only analyzer does not have and
+        # is not taking on. The dynamo-interconnect-check FAIL stays
+        # TT5_CMD_INJECTION crit, unresolved rather than falsely cleared;
+        # checks/_vet.py's disclosure text is widened to name this shape
+        # alongside the operator-configured-executable one.
         # C-135 (B-413 round 1): argv[0] being untainted is not enough when argv[0]
         # is ITSELF a shell/indirect-execution interpreter -- the rest of the argv
         # list is text that interpreter parses and runs, not inert execve data (see

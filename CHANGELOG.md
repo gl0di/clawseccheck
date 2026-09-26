@@ -106,10 +106,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 - Three known static-analysis limits are now disclosed in the affected finding's advice
   text instead of left implicit: a TT5 command-injection hit whose program path comes
   from external configuration (an env var, CLI flag, or config value) rather than a
-  literal; a credential-path mention sitting alongside an exfil/transport keyword
-  with no proven data flow between them; and a silent-instruction hit whose only anchor
-  is "do not tell the user to <do something>", which can mean "do this step yourself"
-  rather than concealment. No disclosure changes the verdict — all
+  literal, or is composed by a wrapper from a module-level command table and a
+  same-module prefix helper; a credential-path mention sitting alongside an
+  exfil/transport keyword with no proven data flow between them; and a silent-instruction
+  hit whose only anchor is "do not tell the user to <do something>", which can mean "do
+  this step yourself" rather than concealment. No disclosure changes the verdict — all
   keep failing exactly as before — it only tells you the signal can't rule out an
   attacker-chosen path or a genuinely split exfiltration, so you know to read the
   flagged line yourself.
