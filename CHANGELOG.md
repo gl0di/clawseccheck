@@ -310,6 +310,8 @@ limit disclosed in the finding's own advice text.
   of the phrase that was not visible before.
 - `--monitor --probe` no longer tells you a change is "still outstanding" and will be
   reported again when the probe found no drift at all.
+- On an OpenClaw 2026.9.6 install the report no longer warns that its checks were only
+  grounded up to 2026.9.5: the grounding ceiling now matches the 9.6 re-grounding pass.
 
 ### Security
 

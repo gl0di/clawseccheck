@@ -55,6 +55,14 @@ updates:
       ci-tools-pip:
         patterns:
           - "*"
+    # requirements-ci.txt must also install on the Python 3.9 CI floor. pytest 9 and
+    # iniconfig 2.2+ require Python 3.10, so a bump to either breaks the 3.9 job at
+    # install time. Drop both entries once 3.9 is no longer supported.
+    ignore:
+      - dependency-name: "pytest"
+        versions: [">=9"]
+      - dependency-name: "iniconfig"
+        versions: [">=2.2"]
 
   # gitleaks (ci.yml, secret-scan job) is a digest-pinned release tarball, not a
   # package-manager dependency — no ecosystem above (or any Dependabot ecosystem)

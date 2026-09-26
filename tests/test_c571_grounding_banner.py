@@ -31,6 +31,10 @@ from clawseccheck.report import render_report
 from clawseccheck.scoring import compute
 
 _GROUNDED_STR = ".".join(str(p) for p in GROUNDED_MAX_VERSION)
+# Versions around the ceiling, derived from it so a re-grounding bump needs no test edit.
+_Y, _M, _P = GROUNDED_MAX_VERSION
+_NEWER = f"{_Y}.{_M}.{_P + 1}"
+_OLDER = f"{_Y}.{_M}.{_P - 1}"
 
 
 # ── the pure function ─────────────────────────────────────────────────────────────────
@@ -39,23 +43,23 @@ class TestGroundingGap:
     @pytest.mark.parametrize("installed", [
         None,
         "",
-        "2026.9.5",     # exactly the grounded ceiling -> no gap
-        "2026.9.4",     # older -> no gap
+        _GROUNDED_STR,  # exactly the grounded ceiling -> no gap
+        _OLDER,         # older -> no gap
         "2026.7.1-2",   # much older -> no gap
-        "2026.9.5-1",   # a correction release of the grounded build -> still no gap
+        f"{_GROUNDED_STR}-1",  # a correction release of the grounded build -> still no gap
         "2026.9",       # too short to be a calendar release -> unknown, not a gap
         "0.0.0",        # not a calendar release either
-        "2026.9.6-rc1", # pre-release token -> unorderable, never a fabricated gap
+        f"{_NEWER}-rc1",  # pre-release token -> unorderable, never a fabricated gap
         123,            # not even a string
     ])
     def test_no_gap_reported(self, installed):
         assert grounding_gap(installed) is None
 
     @pytest.mark.parametrize("installed, expected", [
-        ("2026.9.6", (2026, 9, 6)),
-        ("2026.10.1", (2026, 10, 1)),
-        ("2027.1.1", (2027, 1, 1)),
-        ("2026.9.6-1", (2026, 9, 6)),   # a correction release of a NEWER build still gaps
+        (_NEWER, (_Y, _M, _P + 1)),
+        (f"{_Y}.{_M + 1}.1", (_Y, _M + 1, 1)),
+        (f"{_Y + 1}.1.1", (_Y + 1, 1, 1)),
+        (f"{_NEWER}-1", (_Y, _M, _P + 1)),   # a correction release of a NEWER build still gaps
     ])
     def test_gap_reported_when_strictly_newer(self, installed, expected):
         assert grounding_gap(installed) == expected
@@ -79,9 +83,9 @@ def _report(installed_dist_version):
 
 class TestGroundingBanner:
     def test_fires_when_installed_is_newer_than_grounded(self):
-        text = _report("2026.9.6")
+        text = _report(_NEWER)
         assert f"grounded against OpenClaw up to {_GROUNDED_STR}" in text
-        assert "you are running 2026.9.6" in text
+        assert f"you are running {_NEWER}" in text
         assert "may be mis-grounded" in text
 
     def test_silent_when_installed_equals_the_grounded_ceiling(self):
@@ -97,8 +101,8 @@ class TestGroundingBanner:
         assert "grounded against OpenClaw up to" not in text
 
     def test_never_touches_score_or_grade(self):
-        stale = _ctx("2026.9.6")
-        current = _ctx("2026.9.5")
+        stale = _ctx(_NEWER)
+        current = _ctx(_GROUNDED_STR)
         score_stale = compute(_FINDINGS, ctx=stale)
         score_current = compute(_FINDINGS, ctx=current)
         assert score_stale.score == score_current.score
@@ -109,6 +113,6 @@ class TestGroundingBanner:
         """The banner must not invent a specific check list/count — B363's own fix shows
         the affected set is not soundly enumerable (no schema-path diff catches the
         hazard, only executing the vendor does)."""
-        text = _report("2026.9.6")
+        text = _report(_NEWER)
         line = next(ln for ln in text.splitlines() if "grounded against OpenClaw" in ln)
         assert "checks may be mis-grounded" not in line  # no fabricated "N checks"
