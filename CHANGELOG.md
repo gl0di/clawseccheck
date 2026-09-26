@@ -66,6 +66,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   it appears inside a third-party automated scanner's own finding-report line (a
   bulleted, severity-tagged line citing a different file), rather than as an actual
   instruction in the skill's own prose.
+- Fixed a false FAIL on the runtime-external-fetch skill check when a documentation
+  table's own row named a fetch step in one column and a reference to its rules,
+  patterns, or instructions in another column of the same row: a markdown table row is
+  one line with no sentence-ending punctuation, so the two previously read as a single
+  fetch-and-follow directive. A cell boundary is now treated as its own break, so a
+  directive that only comes together across table cells is downgraded to the existing
+  advisory band instead of failing outright; a directive written entirely within one
+  cell still fails as before. Table detection follows the real GFM tables-extension
+  rule exactly: a table only begins where a delimiter row (one or more hyphens per
+  cell — not just three or more) immediately follows and column-count-matches the line
+  above it, and only that line onward gets cell-boundary splitting — so a directive line
+  that merely sits next to an unrelated real table, with no blank line between them, is
+  left whole and still fails, instead of being wrongly pulled into the neighboring
+  table's advisory downgrade.
 
 ### Changed
 
