@@ -49,6 +49,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   normally treated as safe; a match is now only treated as safe there when it is a plain
   file path, not when it contains an executing subcommand.
 
+### Changed
+
+- Two known static-analysis limits are now disclosed in the affected finding's advice
+  text instead of left implicit: a TT5 command-injection hit whose program path comes
+  from external configuration (an env var, CLI flag, or config value) rather than a
+  literal, and a credential-path mention sitting alongside an exfil/transport keyword
+  with no proven data flow between them. Neither disclosure changes the verdict — both
+  keep failing exactly as before — it only tells you the signal can't rule out an
+  attacker-chosen path or a genuinely split exfiltration, so you know to read the
+  flagged line yourself.
+
 ## [4.3.0] — 2026-09-23
 
 **OpenClaw 2026.9.5 changed a safe default to an unsafe one without touching a config

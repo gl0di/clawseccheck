@@ -5764,6 +5764,22 @@ def _subprocess_taint_is_command_injection(
             (_names_in(prog) & tainted) or (ref_res is not None and ref_res.source_in(prog))
         ):
             return True  # tainted program name -> arbitrary program execution
+        # Accepted §2.5 residual (TT5 configured-executable class), Dave ruling
+        # 2026-09-26: a RETRACTED fix was drafted here — treat an env/CLI-derived
+        # argv[0] as non-injectable, or as safe once it is joined to a fixed
+        # basename (e.g. `Path(os.environ["X_VENV"]) / "bin" / "python"`). It was
+        # never landed: `subprocess.run([os.environ["C2_BIN"]])` is the canonical
+        # TT5 true positive, and a venv-DIRECTORY override joined to a fixed
+        # "bin/python" tail still executes an attacker-controlled interpreter if
+        # the directory is attacker-influenced (e.g. an agent steered by prompt
+        # injection sets the variable) — both would clear right alongside the
+        # benign omniverse-cad-to-simready operator-configuration knob
+        # (PHYSICAL_AI_SIMREADY_VALIDATE_VENV / --kit-executable / shutil.which)
+        # this residual accepts as a disclosed false positive. Trading that real
+        # FN for this FP was rejected; see the TT5_CMD_INJECTION `crit` bucket in
+        # checks/_vet.py for where the resulting FAIL is disclosed, never
+        # suppressed. tests/test_fleetfp_tt5_configured_executable_residual.py
+        # pins both the benign shape and its malicious twin as CRITICAL.
         # C-135 (B-413 round 1): argv[0] being untainted is not enough when argv[0]
         # is ITSELF a shell/indirect-execution interpreter -- the rest of the argv
         # list is text that interpreter parses and runs, not inert execve data (see
