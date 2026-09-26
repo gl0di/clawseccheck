@@ -41,79 +41,55 @@ def test_b25_skills_entries_no_source_unknown():
     assert check_update_pinning(_ctx(cfg)).status == "UNKNOWN"
 
 
-# ---- WARN: auto-update enabled ----
+# ---- Regression: update.auto.enabled is OpenClaw's own core auto-update, not a
+# ---- skills/plugin signal (removed 2026-09-26) ----
+#
+# `update.auto.enabled` drives OpenClaw's OWN `openclaw update` for its core package
+# installs (dist: schema-*.mjs "Enable background auto-update for stable and beta
+# package installs"; update-startup*.mjs gates `runAutoUpdateCommand`) -- it is not a
+# skill/plugin auto-update mechanism, so it must not, by itself, produce a WARN here.
+# `update.auto` (bare boolean), top-level `autoUpdate`, and `auto_update` were never
+# real OpenClaw schema paths either -- they must never resurrect this signal.
 
-def test_b25_auto_update_enabled_true_warns():
+def test_b25_core_auto_update_enabled_alone_does_not_warn():
+    # No plugin/skill entries and no pre-release channel -> nothing else to flag ->
+    # UNKNOWN, not WARN. This is the regression case: enabling OpenClaw's own
+    # background auto-update for itself must not read as a supply-chain risk.
     cfg = {"update": {"auto": {"enabled": True}}}
     f = check_update_pinning(_ctx(cfg))
-    assert f.status == "WARN"
-    assert "auto-update" in f.detail.lower()
+    assert f.status == "UNKNOWN"
+    assert "auto-update" not in f.detail.lower()
 
 
-def test_b25_update_auto_true_warns():
-    cfg = {"update": {"auto": True}}
-    f = check_update_pinning(_ctx(cfg))
-    assert f.status == "WARN"
-    assert "auto-update" in f.detail.lower()
+def test_b25_phantom_auto_update_shapes_do_not_warn():
+    """update.auto (bare), autoUpdate, auto_update are not real schema paths; even if
+    present they must never trigger a WARN by themselves."""
+    for cfg in (
+        {"update": {"auto": True}},
+        {"autoUpdate": True},
+        {"autoUpdate": "true"},
+        {"auto_update": True},
+    ):
+        f = check_update_pinning(_ctx(cfg))
+        assert f.status == "UNKNOWN"
 
 
-def test_b25_autoupdate_key_warns():
-    cfg = {"autoUpdate": True}
-    f = check_update_pinning(_ctx(cfg))
-    assert f.status == "WARN"
-
-
-def test_b25_auto_update_string_true_warns():
-    cfg = {"autoUpdate": "true"}
-    assert check_update_pinning(_ctx(cfg)).status == "WARN"
-
-
-def test_b25_auto_update_false_does_not_warn():
+def test_b25_core_auto_update_disabled_does_not_warn():
     # explicitly disabled — no entries to check -> UNKNOWN (not WARN)
     cfg = {"update": {"auto": {"enabled": False}}}
     assert check_update_pinning(_ctx(cfg)).status == "UNKNOWN"
 
 
-# ---- C-376: wording states configured intent, not effective behaviour ----
-#
-# OpenClaw's own runtime ANDs `update.auto.enabled` with `!isTruthyEnvValue(process.
-# env.OPENCLAW_NO_AUTO_UPDATE)` (the gateway's own environment, invisible to this
-# offline, config-only audit) before auto-update actually runs. The old wording said
-# "is enabled" — a claim about effective runtime behaviour this audit cannot verify.
-# It must instead say only what it actually read: the config REQUESTS auto-update.
-
-def test_b25_auto_update_wording_states_config_requests_not_effective_state():
-    cfg = {"update": {"auto": {"enabled": True}}}
+def test_b25_core_auto_update_plus_beta_channel_still_warns_via_channel_only():
+    """update.auto.enabled=true alongside update.channel=beta must still WARN (via
+    the channel signal) but must not mention auto-update in the detail/evidence --
+    the removed signal must not resurface piggybacked on a different WARN."""
+    cfg = {"update": {"auto": {"enabled": True}, "channel": "beta"}}
     f = check_update_pinning(_ctx(cfg))
     assert f.status == "WARN"
-    assert "requests" in f.detail.lower()
-    # The old, retired claim of EFFECTIVE runtime state — must not reappear.
-    assert "is enabled" not in f.detail.lower()
-
-
-def test_b25_auto_update_wording_discloses_the_env_var_blind_spot():
-    """The WARN evidence must name the specific reason it can be wrong (the runtime
-    also gates on an environment variable this audit cannot see) — not just soften the
-    verb without explaining why."""
-    cfg = {"update": {"auto": {"enabled": True}}}
-    f = check_update_pinning(_ctx(cfg))
-    assert f.status == "WARN"
-    assert "OPENCLAW_NO_AUTO_UPDATE" in f.detail
-
-
-def test_b25_auto_update_wording_consistent_across_all_truthy_shapes():
-    """Every truthy shape of the auto-update key reaches the SAME reworded evidence
-    line -- not just the update.auto.enabled form."""
-    for cfg in (
-        {"update": {"auto": {"enabled": True}}},
-        {"update": {"auto": True}},
-        {"autoUpdate": True},
-        {"auto_update": True},
-    ):
-        f = check_update_pinning(_ctx(cfg))
-        assert f.status == "WARN"
-        assert "requests" in f.detail.lower()
-        assert "OPENCLAW_NO_AUTO_UPDATE" in f.detail
+    assert "update.channel" in f.detail
+    assert "auto-update" not in f.detail.lower()
+    assert all("auto-update" not in ev.lower() for ev in f.evidence)
 
 
 # ---- WARN: floating ref in version/ref field ----

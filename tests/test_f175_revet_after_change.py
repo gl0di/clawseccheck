@@ -10,8 +10,8 @@ Measured before writing a line: `--advise` is described in its own source as "th
 engines/profile as --vet, reframed as an install decision" and renders INSTALL / CAUTION /
 DO-NOT-INSTALL; run against `fixtures/bad_b100_clickfix_setup` it reaches the identical
 CAUTION verdict `--vet-skill` does. SKILL.md already carries "Mode C · Before you install"
-with that verdict. B25 already detects unpinned entries and auto-update, and its own fix
-text already names `update.auto.enabled = false`. A `--preflight` mode would have been a
+with that verdict. B25 already detects unpinned entries and floating refs, and its own fix
+text already names pinning a tag/commit SHA. A `--preflight` mode would have been a
 second name for `--advise`.
 
 **What this cannot do, and never claims:** it does not block an install. OpenClaw's real
