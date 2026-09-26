@@ -80,6 +80,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   that merely sits next to an unrelated real table, with no blank line between them, is
   left whole and still fails, instead of being wrongly pulled into the neighboring
   table's advisory downgrade.
+- The installed-skill scanner no longer fails a skill on scheduled-task/boot
+  persistence when "crontab" appears only inside the clickable text of a genuine
+  markdown inline link (e.g. a link to a crontab syntax validator); it is downgraded to
+  a warning instead of dropped. Whether a hit is inside a real link is judged the way a
+  CommonMark renderer would: backslash-escaped brackets, a destination that never closes
+  on the line, or a code span are not links and still fail. A command written as the
+  text of a real link also lands on that warning, so read any such link yourself.
 
 ### Changed
 
