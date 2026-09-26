@@ -3984,37 +3984,95 @@ def _pos_in_scanner_finding_line(blob: str, pos: int) -> bool:
     return bool(_SCANNER_FINDING_LINE_RE.match(blob[line_start:line_end]))
 
 
-def _in_example_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]) -> bool:
+def _in_example_context(
+    blob: str,
+    pos: int,
+    fence_ranges: list[tuple[int, int]],
+    *,
+    scanner_finding_line_ok: bool = False,
+) -> bool:
     """True when the match at *pos* is a documented example, not a live directive —
-    inside a fence / negation window (_is_code_example), on a third-party scanner
-    finding-report line (_pos_in_scanner_finding_line), or surrounded by security-doc
-    vocabulary (_SAFETY_EXAMPLE_RE) within _SAFETY_EXAMPLE_WINDOW chars."""
+    inside a fence / negation window (_is_code_example), surrounded by security-doc
+    vocabulary (_SAFETY_EXAMPLE_RE) within _SAFETY_EXAMPLE_WINDOW chars, or — only when
+    the caller opts in via `scanner_finding_line_ok=True` — on a third-party scanner
+    finding-report line (_pos_in_scanner_finding_line).
+
+    CLAWSECCHECK fleetfp-fixes/vet-example-prohibition round 2 (C-135 blocker): the
+    scanner-finding-line recognizer was designed for, and adversarially reviewed
+    against, exactly ONE caller — the F-052 'no-warnings directive' arm below, where a
+    real third-party automated-scanner report (NVIDIA BENCHMARK.md) quotes a
+    live-directive-shaped phrase while describing, in the third person, a DIFFERENT
+    file. Round 1 wired it in unconditionally, so it also silently dampened the
+    injection-directive standalone arm and the TR1 broad-trigger arm, which share this
+    helper but were never reviewed for it — a bare 'ignore previous instructions'
+    wrapped in a fabricated severity/category/citation bullet line PASSed B13 outright
+    (a false negative, not the false positive this recognizer exists to fix). Default
+    is False so those two arms get exactly their pre-existing (pre-recognizer)
+    behaviour; only a caller that opts in sees the scanner-finding-line dampening."""
     if _is_code_example(blob, pos, fence_ranges):
         return True
-    if _pos_in_scanner_finding_line(blob, pos):
+    if scanner_finding_line_ok and _pos_in_scanner_finding_line(blob, pos):
         return True
     seg = blob[max(0, pos - _SAFETY_EXAMPLE_WINDOW) : pos + _SAFETY_EXAMPLE_WINDOW]
     return bool(_SAFETY_EXAMPLE_RE.search(seg))
 
 
 def _example_context_is_fence_only(
-    blob: str, pos: int, fence_ranges: list[tuple[int, int]]
+    blob: str,
+    pos: int,
+    fence_ranges: list[tuple[int, int]],
+    *,
+    scanner_finding_line_ok: bool = False,
 ) -> bool:
     """B-526: of the reasons `_in_example_context` suppresses, is it ONLY the bare fence?
 
     A sibling rather than a signature change, so the three existing consumers keep their
     control flow and only the FAIL-capable two consult this. Security-doc vocabulary
-    (`_SAFETY_EXAMPLE_RE`) and the scanner-finding-line shape are left alone deliberately:
-    each is the documented benign case those checks exist for, and demoting either would
-    reintroduce exactly the false positive it was added to remove."""
+    (`_SAFETY_EXAMPLE_RE`) is left alone deliberately: it is the documented benign case
+    those checks exist for, and demoting it would reintroduce exactly the false positive
+    it was added to remove. `scanner_finding_line_ok` must mirror the value the caller
+    passed to `_in_example_context` for this same position/label — see that function's
+    docstring; passing True here for an arm that passed False there (or vice versa)
+    would ask "is this fence-only" about a reason the caller never actually consulted."""
     if not _is_code_example(blob, pos, fence_ranges):
         return False
     seg = blob[max(0, pos - _SAFETY_EXAMPLE_WINDOW) : pos + _SAFETY_EXAMPLE_WINDOW]
     if _SAFETY_EXAMPLE_RE.search(seg):
         return False
-    if _pos_in_scanner_finding_line(blob, pos):
+    if scanner_finding_line_ok and _pos_in_scanner_finding_line(blob, pos):
         return False
     return _fence_only_suppression(blob, pos, fence_ranges)
+
+
+def _example_context_is_scanner_finding_line_only(
+    blob: str, pos: int, fence_ranges: list[tuple[int, int]]
+) -> bool:
+    """True when the ONLY reason a match at *pos* reads as example context is the
+    scanner-finding-line shape — not a fence, not `_SAFETY_EXAMPLE_RE` vocabulary.
+
+    CLAWSECCHECK fleetfp-fixes/vet-example-prohibition round 2: scoping the recognizer
+    to the 'no-warnings directive' label (see `_in_example_context`) stops it leaking
+    into other arms, but does not make it sound *within* that arm — the shape is a
+    structural pattern (bullet + severity + CATEGORY/id + colon + trailing backtick
+    citation), not a mood/intent read (the B-202 lesson: mood detection is unsound), so
+    a malicious 'no-warnings directive' phrase dressed in the identical shape reads the
+    same as the genuine third-party NVIDIA BENCHMARK.md quote it was built for. The
+    original design doc pre-registered exactly this near-miss ("an attacker-formatted
+    finding line wrapping a live directive") as an accepted floor to document, not to
+    solve with more regex — solving it would need the mood detection already rejected,
+    or dropping the recognizer entirely and reopening the physical-ai-neural-
+    reconstruction false positive it exists to fix. So instead of a silent PASS, the
+    sole caller (the F-052 loop) demotes a match suppressed only this way to WARN and
+    keeps scanning for a genuine ungoverned match — the same "stay visible, never
+    silently disappear" treatment `_prohibition_governs_clause` already gives a
+    governed double-negative a few lines below (CLAUDE.md Golden Rule 5: ambiguous
+    suppression goes to WARN, never silently PASS)."""
+    if _is_code_example(blob, pos, fence_ranges):
+        return False
+    seg = blob[max(0, pos - _SAFETY_EXAMPLE_WINDOW) : pos + _SAFETY_EXAMPLE_WINDOW]
+    if _SAFETY_EXAMPLE_RE.search(seg):
+        return False
+    return _pos_in_scanner_finding_line(blob, pos)
 
 
 # B-132/_skill_own_host/_url_matches_own_host/_FM_HOMEPAGE_RE/_URL_HOST_RE/
@@ -5690,6 +5748,11 @@ def check_installed_skills(ctx: Context) -> Finding:
             # that quotes them as examples stays clean. Fence-position-aware -> search raw blob.
             for label, rx in _SKILL_SAFETY_SUBVERSION:
                 _sub_fence_only = False
+                # CLAWSECCHECK fleetfp-fixes/vet-example-prohibition round 2: the
+                # scanner-finding-line recognizer is scoped to this ONE label — see
+                # _in_example_context's docstring. The other four labels get exactly
+                # their pre-existing behaviour (fence / vocabulary only).
+                _is_no_warnings = label == "no-warnings directive"
                 # CLAWSECCHECK fleetfp-fixes/vet-example-prohibition: True when every
                 # live (non-example) 'no-warnings directive' match seen so far was the
                 # `without ...` alternative AND governed by a same-sentence prohibition
@@ -5698,10 +5761,18 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # Mirrors _agency_prohibited_only (B-197): demote to WARN, keep scanning
                 # for a genuine ungoverned match instead of PASSing outright.
                 _no_warnings_governed_only = False
+                # CLAWSECCHECK fleetfp-fixes/vet-example-prohibition round 2: True when
+                # every live match seen so far was dampened ONLY by the scanner-finding-
+                # line shape (see _example_context_is_scanner_finding_line_only) — an
+                # accepted, documented near-miss of that recognizer, not a fixable bug.
+                # Demoted to WARN rather than a silent PASS.
+                _no_warnings_scanner_line_only = False
                 for m in rx.finditer(blob):
-                    if not _in_example_context(blob, m.start(), _fr):
+                    if not _in_example_context(
+                        blob, m.start(), _fr, scanner_finding_line_ok=_is_no_warnings
+                    ):
                         if (
-                            label == "no-warnings directive"
+                            _is_no_warnings
                             and _NO_WARNINGS_WITHOUT_RE.match(m.group(0))
                             and _prohibition_governs_clause(blob, m)
                         ):
@@ -5710,8 +5781,15 @@ def check_installed_skills(ctx: Context) -> Finding:
                         _no_warnings_governed_only = False
                         high.append(f"{name}: injection directive — {label}")
                         break
+                    if _is_no_warnings and _example_context_is_scanner_finding_line_only(
+                        blob, m.start(), _fr
+                    ):
+                        _no_warnings_scanner_line_only = True
+                        continue
                     if not _sub_fence_only:
-                        _sub_fence_only = _example_context_is_fence_only(blob, m.start(), _fr)
+                        _sub_fence_only = _example_context_is_fence_only(
+                            blob, m.start(), _fr, scanner_finding_line_ok=_is_no_warnings
+                        )
                 else:
                     if _sub_fence_only:
                         coverage_fence.append(
@@ -5721,6 +5799,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                     elif _no_warnings_governed_only:
                         warns_content.append(
                             f"{name}: {label} (prohibition-governed: requires a warning)"
+                        )
+                    elif _no_warnings_scanner_line_only:
+                        warns_content.append(
+                            f"{name}: {label} (matched inside a third-party scanner-finding-"
+                            "line citation — cannot confirm this is not a live directive)"
                         )
 
             # F-051 / F-060 / F-062: soft content signals -> WARN (never FAIL on their own).
