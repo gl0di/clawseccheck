@@ -6471,10 +6471,13 @@ def _main(argv=None) -> int:
                            findings=findings, version=__version__)
         # F-180: a probe must SAY it did not record, or the user reads the alert as filed
         # and then sees the identical alert on the next ordinary run with no explanation.
+        # With nothing to report it must not promise a repeat alert that will never come.
         if _probe:
             print("\nThis was a probe: nothing was recorded, so your baseline still points "
-                  "at the last ordinary check.\n  The change above is still outstanding and "
-                  "the next ordinary run will report it again.")
+                  "at the last ordinary check.")
+            if alerts:
+                print("  The change above is still outstanding and the next ordinary run "
+                      "will report it again.")
         # B-271/B-278: a write mode that could not write must not report success. --badge /
         # --html / --sarif / --save all return 1 on OSError; --monitor was the sole outlier,
         # returning 0 forever while persisting nothing, so cron saw a healthy job.
