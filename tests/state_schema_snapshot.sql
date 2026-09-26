@@ -1,8 +1,8 @@
 -- state_schema_snapshot.sql -- GENERATED. Do not hand-edit.
 --
--- openclaw-version: 2026.9.5
--- state-schema-version: 17
--- generated: 2026-09-19
+-- openclaw-version: 2026.9.6
+-- state-schema-version: 18
+-- generated: 2026-09-25
 -- tables: 10
 --
 -- What this is
@@ -11,7 +11,7 @@
 -- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
 -- declares in a test DDL or that clawseccheck/ reads.
 --
--- source-bundle: openclaw-state-db-DS2iNFy4.mjs
+-- source-bundle: openclaw-state-db-read-connection-Beg0AZE7.mjs
 --   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
 --   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
 --   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still
@@ -123,6 +123,9 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   agent_id TEXT,
   payload_kind TEXT NOT NULL,
   job_json TEXT NOT NULL,
+  grant_definition_revision TEXT,
+  grant_definition_generation INTEGER,
+  grant_definition_updated_at INTEGER,
   state_json TEXT NOT NULL DEFAULT '{}',
   runtime_updated_at_ms INTEGER,
   schedule_identity TEXT,
@@ -165,7 +168,9 @@ CREATE TABLE IF NOT EXISTS subagent_runs (
   run_id TEXT NOT NULL PRIMARY KEY,
   child_session_key TEXT NOT NULL,
   controller_session_key TEXT,
+  controller_store_path TEXT,
   requester_session_key TEXT NOT NULL,
+  requester_store_path TEXT,
   created_at INTEGER NOT NULL,
   payload_json TEXT NOT NULL DEFAULT '{}'
 ) STRICT;

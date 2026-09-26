@@ -53,9 +53,9 @@ from clawseccheck.collector import (
 _MODERN_DDL = (
     "CREATE TABLE subagent_runs ("
     "run_id TEXT NOT NULL PRIMARY KEY, child_session_key TEXT NOT NULL, "
-    "controller_session_key TEXT, requester_session_key TEXT NOT NULL, "
-    "created_at INTEGER NOT NULL, "
-    "payload_json TEXT NOT NULL DEFAULT '{}'"
+    "controller_session_key TEXT, controller_store_path TEXT, "
+    "requester_session_key TEXT NOT NULL, requester_store_path TEXT, "
+    "created_at INTEGER NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}'"
     ")"
 )
 
