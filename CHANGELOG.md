@@ -308,6 +308,8 @@ limit disclosed in the finding's own advice text.
   modulo operator) happens to touch the same document as an already plainly visible quote
   of a suspicious phrase. It still fails when decoding genuinely reveals a new occurrence
   of the phrase that was not visible before.
+- `--monitor --probe` no longer tells you a change is "still outstanding" and will be
+  reported again when the probe found no drift at all.
 
 ### Security
 
