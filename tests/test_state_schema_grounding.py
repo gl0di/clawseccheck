@@ -1222,6 +1222,18 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b176_paired_devices_sqlite_migration.py:570": _Entry(
         LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
     ),
+
+    # ---- device_pairing_paired (B396 -- same view-masquerade decoy, new consumer) ----
+    # check_paired_node_skill_coverage reads the SAME table via the SAME collector
+    # reader (_collect_paired_devices_sqlite) B176 already exercises above, so its own
+    # two view-masquerade tests build the identical `decoy` table backing a VIEW named
+    # `device_pairing_paired` -- same entry, same reasoning, new call sites.
+    "tests/test_b396_paired_node_skill_coverage.py:487": _Entry(
+        LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
+    ),
+    "tests/test_b396_paired_node_skill_coverage.py:505": _Entry(
+        LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
+    ),
 }
 
 # B-889: +2 (69, was 67) -- round 1's view-masquerade decoy-table DDL site
@@ -1238,7 +1250,11 @@ _REGISTRY: "dict[str, _Entry]" = {
 # B176 (OpenClaw 2026.9.6 upgrade re-baseline): +4 -- device_pairing_paired's own real DDL
 # site (MODERN, verbatim from a live 2026.9.6 install) plus the three decoy/pre-migration
 # sites in the same new test file. 76, was 72.
-assert len(_REGISTRY) == 76, f"registry has {len(_REGISTRY)} entries, expected 76"
+# B396: +2 -- check_paired_node_skill_coverage's own two view-masquerade hardening tests
+# build the identical `decoy` table backing a VIEW named `device_pairing_paired` B176's
+# own tests already register above; new call sites, same _B176_VIEW_MASQUERADE_DECOY
+# reason. 78, was 76.
+assert len(_REGISTRY) == 78, f"registry has {len(_REGISTRY)} entries, expected 78"
 
 
 # ========================================================================================

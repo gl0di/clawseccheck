@@ -27,6 +27,7 @@ from ..collector import (
     LIMIT_DOMAIN_CONFIG,
     LIMIT_DOMAIN_PAIRED,
     Context,
+    _JS_TRIM_CHARS,  # B396: JS trim-set reuse for role/roles/nodeSurface string matches
     _safe_is_dir,  # B-913
     _safe_is_file,  # B-913
     agent_roster,
@@ -68,6 +69,9 @@ from ._shared import (
     _detail_path,
     _enabled_tools,
     _key_advice,
+    _node_allow_skills,  # B396 — shared with B386
+    _node_commands,  # B396 — shared with B71
+    _numeric_version,  # B396
     _openclaw_generation,
     _finding,
     _has_approval_gate,
@@ -4889,8 +4893,8 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                     "paired device holds standing operator.admin/operator.write "
                     "authority.",
                     "Investigate why device_pairing_paired holds an oversized row "
-                    "(scopes/approvedScopes/tokens past the size cap) or more rows "
-                    "than the collector's cap, then re-run the audit.",
+                    "(scopes/approvedScopes/tokens/role/roles/nodeSurface past the size cap) or "
+                    "more rows than the collector's cap, then re-run the audit.",
                     engine_degraded=True,
                 )
             return _finding(
@@ -4966,8 +4970,8 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                 "collector's size/row cap — some paired-device rows were never read, "
                 "so a clean bill of health cannot be given.",
                 "Investigate why device_pairing_paired holds an oversized row "
-                "(scopes/approvedScopes/tokens past the size cap) or more rows than "
-                "the collector's cap, then re-run the audit.",
+                "(scopes/approvedScopes/tokens/role/roles/nodeSurface past the size cap) or "
+                "more rows than the collector's cap, then re-run the audit.",
                 engine_degraded=True,
             )
         return _finding(
@@ -4994,6 +4998,615 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
         evidence=high_scope_ev[:6],
     )
 
+
+# B396 helpers -- faithful ports of the vendor's own JS semantics (see the check's own
+# comment block above for the dist grounding). Kept as small, independently testable
+# functions rather than inlined into the check body, matching this file's own idiom for
+# every other multi-branch predicate (e.g. B176's revoked-token loop).
+_B396_MODEL_MIN = (2026, 9, 6)                 # build the node-admission model was read on
+_B396_MAX_LEGACY_STORE_BYTES = 4 * 1024 * 1024
+
+
+def _b396_build_modelled(ctx) -> bool:
+    """Whether this run's OpenClaw build is the one B396's node-admission chain (canExec,
+    the deny-list precedence, the pairing/token admission rule) was actually grounded
+    against -- same source order as `_shared._openclaw_generation`: the installed build
+    decides outright when known; else `meta.lastTouchedVersion` only when it lands in
+    the modelled range (a stale stamp proves nothing about what is installed NOW); else
+    unmodelled (unknown build)."""
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        return installed >= _B396_MODEL_MIN
+    stamped = _numeric_version(_openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    return stamped is not None and stamped >= _B396_MODEL_MIN
+
+
+def _b396_js_truthy(v) -> bool:
+    """JS truthiness -- `{}` and `[]` are truthy (unlike Python's own bool() on them)."""
+    if v is None or v is False:
+        return False
+    if v is True:
+        return True
+    if isinstance(v, (int, float)):
+        return v == v and v != 0  # `v == v` excludes NaN, which JS also treats as falsy
+    if isinstance(v, str):
+        return v != ""
+    return True
+
+
+def _b396_role_list(v) -> list:
+    """`normalizeUniqueSingleOrTrimmedStringList` (string-normalization-_gRhJUDw.mjs:
+    74-82): a list keeps only its non-blank, JS-trimmed string items; a bare non-blank
+    string becomes a one-item list; anything else is empty."""
+    if isinstance(v, list):
+        return [s.strip(_JS_TRIM_CHARS) for s in v if isinstance(s, str) and s.strip(_JS_TRIM_CHARS)]
+    if isinstance(v, str) and v.strip(_JS_TRIM_CHARS):
+        return [v.strip(_JS_TRIM_CHARS)]
+    return []
+
+
+def _b396_safe_int(v) -> bool:
+    """`Number.isSafeInteger` after `JSON.parse` -- a JSON `1.0` parses to an integer-
+    valued JS Number, so a Python float that IS integral must count too."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return abs(v) <= 2**53 - 1
+    return isinstance(v, float) and v.is_integer() and abs(v) <= 2**53 - 1
+
+
+def _b396_legacy_record_valid(rec) -> bool:
+    """`normalizeLegacyPairedDevice` (state-migrations.pairing:24-41): the 9.6 migration
+    silently DROPS a legacy `devices/paired.json` record missing a non-blank
+    `publicKey` or a safe-integer `createdAtMs`/`approvedAtMs` -- so this check, which
+    models the post-migration merge (unlike B176's own "legacy wins outright"), must
+    drop it too rather than treat it as a live device the runtime would actually admit."""
+    return (
+        isinstance(rec, dict) and isinstance(rec.get("publicKey"), str)
+        and bool(rec["publicKey"].strip(_JS_TRIM_CHARS))
+        and _b396_safe_int(rec.get("createdAtMs")) and _b396_safe_int(rec.get("approvedAtMs"))
+    )
+
+
+def _b396_approved_state(rec) -> str:
+    """Whether *rec* carries an APPROVED "node" role -- `"node" in roles ∪ role` per
+    `mergeDevicePairingRoles`. Returns "undet" (not "no") when the role LIST itself
+    could not be parsed, since a device whose real roles are unknown is not provably
+    unapproved."""
+    if "node" in _b396_role_list(rec.get("role")):
+        return "yes"
+    if rec.get("rolesUnparsed"):
+        return "undet"
+    return "yes" if "node" in _b396_role_list(rec.get("roles")) else "no"
+
+
+def _b396_admission_state(rec) -> str:
+    """`hasEffectivePairedDeviceRole(device, "node")` AND a truthy `tokens.node`
+    (`resolveNodePairingIdentity`) -- active roles are the `role` of each token entry
+    without a truthy `revokedAtMs`; effective = active ∩ approved. "no" wins over
+    "undet" in either half (a decisive negative -- e.g. an explicitly non-node role
+    list, or no live token at all -- settles the record even if the OTHER half is
+    unparseable); both halves "yes" is the only "yes"."""
+    r = _b396_approved_state(rec)
+    if rec.get("tokensUnparsed"):
+        t = "undet"
+    else:
+        tokens = rec.get("tokens")
+        if not isinstance(tokens, dict) or not _b396_js_truthy(tokens.get("node")):
+            t = "no"
+        else:
+            active: set = set()
+            for tok in tokens.values():
+                if isinstance(tok, dict) and not _b396_js_truthy(tok.get("revokedAtMs")):
+                    active.update(_b396_role_list(tok.get("role")))
+            t = "yes" if "node" in active else "no"
+    if "no" in (r, t):
+        return "no"
+    return "yes" if (r, t) == ("yes", "yes") else "undet"
+
+
+def _b396_surface_state(rec, folded) -> str:
+    """Whether *rec*'s approved surface carries `system.run` -- `approvedSurface
+    .commands = nodeSurface?.commands ?? []`. *folded* is the legacy `nodes/paired.json`
+    fold result for this same device id (see the check's own merge step), consulted
+    ONLY when *rec* itself carries no truthy `nodeSurface` at all. The JS-trimmed
+    string match over-approximates the runtime's own exact-string check -- deliberately,
+    since that only ever pushes a borderline entry toward WARN, never away from it."""
+    if rec.get("nodeSurfaceUnparsed"):
+        return "undet"
+    surface = rec.get("nodeSurface")
+    if not _b396_js_truthy(surface) and folded is not None:
+        if folded == "undet":
+            return "undet"
+        surface = folded
+    if not _b396_js_truthy(surface) or not isinstance(surface, dict):
+        return "no"
+    cmds = surface.get("commands")
+    if cmds is None:
+        return "no"
+    if not isinstance(cmds, list):
+        return "undet"  # the runtime's own `.filter()` on a non-array shape is not modelled
+    return "yes" if any(
+        isinstance(c, str) and c.strip(_JS_TRIM_CHARS) == "system.run" for c in cmds
+    ) else "no"
+
+
+def _b396_node_candidate(rec) -> bool:
+    """Version-agnostic "any node indication at all" -- used only when the run's build
+    is outside this check's node-admission model (`_b396_build_modelled` is False), as a
+    deliberate over-approximation: every record carrying ANY node-role/token/surface
+    signal counts, including one whose node token may in fact be revoked."""
+    if "node" in _b396_role_list(rec.get("role")) or "node" in _b396_role_list(rec.get("roles")):
+        return True
+    tokens = rec.get("tokens")
+    if isinstance(tokens, dict):
+        if "node" in tokens:
+            return True
+        if any(
+            isinstance(t, dict) and "node" in _b396_role_list(t.get("role"))
+            for t in tokens.values()
+        ):
+            return True
+    return _b396_js_truthy(rec.get("nodeSurface"))
+
+
+def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
+    """A bounded, defensive read of a legacy pairing JSON file under *ctx.home*.
+    Returns (parsed dict, None) on success, (None, None) when the file is simply
+    absent, or (None, reason) for every other outcome -- unreadable, over the 4MB cap,
+    invalid JSON, or not a JSON object. *parts* are joined with "/" for the reason
+    string ONLY -- never an absolute path (fingerprint/privacy discipline)."""
+    import json as _json  # noqa: PLC0415 -- lazy, matches this module's own local-import idiom
+
+    rel = "/".join(parts)
+    p = ctx.home.joinpath(*parts)
+    try:
+        if not p.is_file():
+            return None, None
+        with p.open("rb") as fh:
+            raw = fh.read(_B396_MAX_LEGACY_STORE_BYTES + 1)
+    except OSError:
+        return None, f"{rel} is present but could not be read"
+    if len(raw) > _B396_MAX_LEGACY_STORE_BYTES:
+        return None, f"{rel} is larger than the 4 MB read cap"
+    try:
+        data = _json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return None, f"{rel} is present but is not valid JSON"
+    if not isinstance(data, dict):
+        return None, f"{rel} is present but is not a JSON object"
+    return data, None
+
+
+# ---------- B396: paired-node skills outside the skill content scan (coverage disclosure) ----------
+# Every dist claim below was read on the installed openclaw@2026.9.6 (2026-09-26), under
+# ~/.npm-global/lib/node_modules/openclaw/dist/. Citations name the symbol first;
+# file:line is only a convenience, since bundle names rotate (CHECK_AUTHORING.md).
+#
+# The gap: a paired NODE (not an operator device -- B176/B138 already cover operator
+# authority) can publish its own machine's ~/.openclaw/skills content into this gateway
+# while connected. `scanNodeHostedSkills` (startup-state-migrations-BqKx_IWS.mjs:
+# 3674-3729) scans the node's own `resolveConfigDir()/skills`
+# (utils-aKqR_F_U.mjs:14-20) and pushes the result via RPC `node.skills.update`
+# (`publishInventory`, :352-355). The gateway's handler
+# (nodes.read-CBW8WUjQ.mjs:205-221) calls `NodeRegistry.updateNodeSkills`
+# (node-registry-zajLqj5_.mjs:703-712), which writes `NODE_SESSION_POLICIES.skills`
+# (in-memory only) and, via `refreshSessionPolicy` (:313), sets
+# `node.nodeSkills = cfg?.gateway?.nodes?.allowSkills === false ? [] : policy.skills`
+# before calling `replaceRemoteNodeSkills` (:314-319) into the process-memory
+# `remoteSkillNodes` Map (remote-skills-CZuGGEXx.mjs:10) -- cleared on disconnect
+# (node-registry:437,505). `mergeRemoteNodeSkillEntries` (remote-skills:101-104) is the
+# ONLY reader of that content, gated on `options.canExec === true` (agent-side, runtime/
+# session-decided -- not modelled here) AND, node-side, `node.canExec` = `node.commands
+# ?.includes("system.run")` (remote-skills:49), where `node.commands` is the paired
+# device's OWN approved surface (`resolveNodeCommandAllowlist`, node-registry:282) minus
+# `gateway.nodes.commands.deny` (node-command-policy-CnGfXM76.mjs:294,312-315).
+#
+# So the content this gateway would offer an agent from a paired node is NEVER written to
+# this machine's disk and never reaches B13/B5/B25/SKILL_CONTENT_RING (all of which read
+# `ctx.installed_skills` from `skilldiscovery.py`, a local-disk walk only --
+# `grep -rn "node://\|openclaw-node\|nodeSurface" clawseccheck/` returns nothing before
+# this change). The content is unauditable by construction (see this task's own §2
+# evidence table); this check therefore never reports UNKNOWN merely because it cannot
+# see content -- that would fire on every install. It reports the CAPABILITY: whether a
+# skill-capable paired node exists at all (WARN — advisory coverage disclosure, never a
+# config weakness in itself; B386 already covers the gate default) or not (PASS).
+#
+# Node admission itself requires a persisted pairing record
+# (`captureAuthenticatedNodePairingState`, device-pairing-node-state-BxpHZHxS.mjs:35-47):
+# `hasEffectivePairedDeviceRole(device, "node")` (active role ∩ approved role,
+# device-pairing-identity-BnU9nqx2.mjs:603-625) AND a truthy `tokens.node`
+# (`resolveNodePairingIdentity`, :627-643), with `approvedSurface.commands` sourced from
+# `device.nodeSurface?.commands ?? []` (node-registry:400). That record lives in
+# `state/openclaw.sqlite`'s `device_pairing_paired` table (`role`, `roles_json`,
+# `tokens_json`, `node_surface_json` -- confirmed in the real 9.6 DDL on this machine),
+# or, pre-migration / not yet imported, in the legacy `devices/paired.json` +
+# `nodes/paired.json` pair (`listLegacyPairingStoreFiles`,
+# pairing-files-BJQEMPCI.mjs:20-35; folded in by `migrateLegacyNodePairingStore`,
+# state-migrations.pairing-CC8_e_xh.mjs:58-170 -- SQLite wins per device id, legacy node
+# rows folded in only for an id SQLite does not already have).
+#
+# Unlike B176 (which uses "legacy JSON wins outright" -- the RUNTIME's OWN behavior
+# before it ever runs `doctor --fix`), this check deliberately models the 9.6 MIGRATION
+# MERGE instead: what the runtime sees NOW, or after the `doctor --fix` its own startup
+# log demands (`server-startup-plugins-PEmmbrVx.mjs:53-58`). The two checks read the same
+# store with two different, each individually correct, merge rules -- see
+# `_b396_admission_state`'s own docstring below and B176's for the contrast.
+#
+# Design decisions (fixed, do not revisit without re-reading this comment block):
+#   - Unscored (scored=False, block="advisory"), MEDIUM, confidence MEDIUM, surface
+#     "skills": this discloses the AUDIT's OWN reach, not a config weakness (B386 already
+#     scores/reports the gate default); scoring it would double-count B386's gate.
+#   - Never FAILs (B-315 invariant) -- WARN is its ceiling.
+#   - Confidence is MEDIUM because of two deliberate over-approximations: the platform
+#     filter (`filterApprovedRuntimeCommands`, node-command-policy:264-271) and the
+#     agent-side exec policy are NOT modelled, and a node sharing THIS machine's home is
+#     not distinguishable from a genuinely remote one (disclosed in the WARN detail).
+#   - `engine_degraded` mirrors B176 exactly: True ONLY for a LIMIT_DOMAIN_PAIRED hit (an
+#     oversized/truncated row, or a capped state-dir walk that never reached the DB) --
+#     never for a plain parse/read failure, which is a plain UNKNOWN.
+#   - No new dig() paths: config is read only through the already-grounded
+#     `_node_allow_skills`/`_node_commands` accessors B386/B71 already use.
+def check_paired_node_skill_coverage(ctx: Context) -> Finding:
+    """B396 — paired-node skills outside this audit's skill content scan (coverage
+    disclosure).
+
+    See this check's own preceding comment block for the full dist grounding (every
+    claim there was read on the installed openclaw@2026.9.6, 2026-09-26) and for why
+    this check reports the CAPABILITY (a skill-capable paired node exists) rather than
+    UNKNOWN-for-unreadable-content: the content a paired node would publish is held only
+    in gateway memory and on the node's own machine, never on this machine's disk
+    (§2 of the design task), so an UNKNOWN-on-every-run would carry no information.
+
+    Verdict matrix (checked in this order):
+      1. openclaw.json present but unparseable -> UNKNOWN, engine_degraded=True
+         (`_config_unreadable`).
+      2. The effective ``gateway.nodes.allowSkills`` (or its pre-2026.8.1 spelling
+         ``gateway.nodes.skills.enabled``) is the literal ``False`` -> PASS. This check
+         precedes every store read below: OpenClaw's own runtime applies the SAME gate
+         before ever consulting a node's approved commands
+         (`node.nodeSkills = allowSkills === false ? [] : policy.skills`,
+         node-registry:313), so the pairing store's content is irrelevant once the gate
+         is shut.
+      3. On a build this check's node-admission model was actually read on (2026.9.6 and
+         later, judged the same way `_openclaw_generation` judges the config schema
+         generation: installed dist version first, else ``meta.lastTouchedVersion`` only
+         when it lands in the modelled range) AND the effective node command deny list
+         (``gateway.nodes.commands.deny``, pre-2026.8.1 ``denyCommands``) has an entry
+         that JS-trims to exactly ``"system.run"`` -> PASS. `node.canExec` requires
+         ``system.run`` in the node's OWN approved commands (`remote-skills:49`), and the
+         deny list is subtracted from every node's allowlist
+         (node-command-policy:294,312-315) -- so no paired node can ever satisfy the
+         canExec gate, whatever its own pairing record says. NOT taken on an unmodelled
+         build: the canExec/deny-precedence chain above is only grounded on 9.6.
+      4/5/6. Otherwise, the paired-device store (SQLite `device_pairing_paired`, folded
+         with any legacy `devices/paired.json` + `nodes/paired.json` per the 9.6
+         migration merge -- see the preceding comment block) is read for node-capable
+         records:
+           - >=1 node found capable of publishing skills that would reach an agent
+             (modelled: live node token AND system.run in its approved surface;
+             unmodelled: any node-role/token/surface indication at all, a deliberate
+             over-approximation since the exact admission chain is unverified pre-9.6)
+             -> WARN. A WARN found in what WAS read stands regardless of any gap below.
+           - No capable node found, but a store gap (unreadable SQLite table, a
+             LIMIT_DOMAIN_PAIRED size/row-cap hit, an unreadable/oversized/malformed
+             legacy file) or an undeterminable record (unparseable role/roles/node
+             surface) exists -> UNKNOWN. `engine_degraded=True` ONLY for the
+             LIMIT_DOMAIN_PAIRED case (the same hostile-padding evasion class B176's own
+             C-135 round 2 already closes for its own verdict); a plain parse/read
+             failure is a plain UNKNOWN.
+           - Otherwise (store read cleanly, nothing capable, nothing undeterminable) ->
+             PASS.
+
+    Never echoes a token/publicKey value (same contract as B176); every id-bearing
+    string is redacted before it reaches a Finding. `detail` carries no volatile data
+    (no ages, no timestamps, no absolute paths) so `baseline.fingerprint()` stays stable
+    run to run on an unchanged store; ids are sorted and capped at 6 (+N more).
+    """
+    from ..logsafe import redact as _redact  # noqa: PLC0415
+
+    f = _config_unreadable("B396", ctx)
+    if f is not None:
+        return f
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+
+    allow, allow_path = _node_allow_skills(cfg)
+    if allow is False:
+        return _finding(
+            "B396",
+            PASS,
+            f"{allow_path}=false — OpenClaw discards every skill a paired node "
+            "publishes, so no node-hosted skill can reach an agent outside this "
+            "audit's skill content scan.",
+            f"Keep {allow_path}=false unless this setup genuinely relies on a paired "
+            "node publishing skills.",
+            pass_confidence="verified",
+        )
+
+    modelled = _b396_build_modelled(ctx)
+    deny, deny_path = _node_commands(cfg, "deny")
+    if (
+        modelled
+        and isinstance(deny, list)
+        and any(
+            isinstance(e, str) and e.strip(_JS_TRIM_CHARS) == "system.run" for e in deny
+        )
+    ):
+        return _finding(
+            "B396",
+            PASS,
+            f"{deny_path} lists system.run — no paired node can run commands, and "
+            "OpenClaw only offers a node's published skills to an agent when that node "
+            "can run commands, so no node-hosted skill can reach an agent outside this "
+            "audit's skill content scan.",
+            f"Keep system.run in {deny_path} unless a paired node genuinely needs to "
+            "run commands.",
+            pass_confidence="verified",
+        )
+
+    # Gate open (or undetermined) and the deny short-cut does not apply -- consult the
+    # paired-device store. Deliberately deferred until here: neither read above needed
+    # it, and OpenClaw's own gate check (step 2) precedes every store read at runtime too.
+    degraded = False
+    gaps: list = []
+    if ctx.paired_devices_sqlite_parse_error:
+        gaps.append(
+            "the paired-device table in state/openclaw.sqlite is present but could "
+            "not be read"
+        )
+    if limit_hits_for(ctx, LIMIT_DOMAIN_PAIRED):
+        gaps.append(
+            "some paired-device rows in state/openclaw.sqlite exceeded the "
+            "collector's size or row cap and were not read"
+        )
+        degraded = True
+    s2, g2 = _b396_read_legacy_store(ctx, "devices", "paired.json")
+    s3, g3 = _b396_read_legacy_store(ctx, "nodes", "paired.json")
+    if g2:
+        gaps.append(g2)
+    if g3:
+        gaps.append(g3)
+
+    # ---- merge (9.6 migration semantics: SQLite wins per device id, legacy node rows
+    # folded in only for an id SQLite does not already carry a node surface for) ----
+    records: dict = {
+        did: (rec, "state database")
+        for did, rec in ctx.paired_devices_sqlite.items()
+        if isinstance(rec, dict)
+    }
+    if isinstance(s2, dict):
+        for raw_id, rec in s2.items():
+            if not isinstance(raw_id, str):
+                continue
+            did = raw_id.strip(_JS_TRIM_CHARS)
+            if not did or did in records:
+                continue  # SQLite wins outright when it already has this device
+            if modelled and not _b396_legacy_record_valid(rec):
+                continue  # the migration itself drops a malformed legacy record
+            if not isinstance(rec, dict):
+                continue
+            records[did] = (rec, "legacy devices/paired.json")
+
+    s3_ids: set = set()
+    fold: dict = {}
+    orphans: set = set()
+    if isinstance(s3, dict):
+        for raw_id, row in s3.items():
+            if not isinstance(raw_id, str):
+                continue
+            nid = raw_id.strip(_JS_TRIM_CHARS)
+            s3_ids.add(nid)
+            entry = records.get(nid)
+            if entry is None:
+                orphans.add(nid)
+                continue
+            if _b396_js_truthy(entry[0].get("nodeSurface")):
+                continue  # the existing surface wins outright, including a truthy {}
+            a = _b396_approved_state(entry[0])
+            if a == "no":
+                orphans.add(nid)
+                continue
+            cmds = row.get("commands") if isinstance(row, dict) else None
+            fold[nid] = (
+                {"commands": cmds if isinstance(cmds, list) else None}
+                if a == "yes" else "undet"
+            )
+
+    # ---- evaluate ----
+    node_record_ids = {
+        did for did, (rec, _src) in records.items() if _b396_node_candidate(rec)
+    } | s3_ids
+
+    warn_ids: list
+    undet: set
+    if modelled:
+        capable: set = set()
+        undet = set()
+        for did, (rec, _src) in records.items():
+            surface_state = _b396_surface_state(rec, fold.get(did))
+            admission_state = _b396_admission_state(rec)
+            if "no" in (surface_state, admission_state):
+                continue
+            if surface_state == admission_state == "yes":
+                capable.add(did)
+            else:
+                undet.add(did)
+        warn_ids = sorted(capable)
+    else:
+        warn_ids = sorted(node_record_ids)
+        undet = {
+            did for did, (rec, _src) in records.items()
+            if did not in warn_ids
+            and (
+                rec.get("rolesUnparsed")
+                or rec.get("tokensUnparsed")
+                or rec.get("nodeSurfaceUnparsed")
+            )
+        }
+
+    platform_by_id: dict = {}
+    source_by_id: dict = {}
+    for did, (rec, src) in records.items():
+        platform_by_id[did] = rec.get("platform") if isinstance(rec, dict) else None
+        source_by_id[did] = src
+    if isinstance(s3, dict):
+        for raw_id, row in s3.items():
+            if not isinstance(raw_id, str):
+                continue
+            nid = raw_id.strip(_JS_TRIM_CHARS)
+            if nid not in source_by_id:
+                source_by_id[nid] = "legacy nodes/paired.json"
+                if isinstance(row, dict):
+                    platform_by_id[nid] = row.get("platform")
+
+    def _platform(did: str) -> str:
+        p = platform_by_id.get(did)
+        return p if isinstance(p, str) and p else "unknown"
+
+    def _node_desc(did: str) -> str:
+        return _redact(f"deviceId={did} (platform={_platform(did)})")
+
+    def _node_ev(did: str) -> str:
+        return _redact(
+            f"deviceId={did} platform={_platform(did)} "
+            f"source={source_by_id.get(did, 'legacy nodes/paired.json')}"
+        )
+
+    if not ctx.config_found:
+        gate_desc = (
+            "no openclaw.json was found, so OpenClaw's default (accept "
+            "node-published skills) applies"
+        )
+    elif allow is None:
+        gate_desc = (
+            f"{allow_path} is not set, so OpenClaw's default (accept node-published "
+            "skills) applies"
+        )
+    elif allow is True:
+        gate_desc = f"{allow_path}=true"
+    else:
+        gate_desc = (
+            f"{allow_path} is set to a value other than false, which OpenClaw treats "
+            "as on"
+        )
+
+    allow_advice = _key_advice(
+        ctx, "gateway.nodes.skills.enabled=false", "gateway.nodes.allowSkills=false"
+    )
+    deny_advice = _key_advice(
+        ctx, "gateway.nodes.denyCommands", "gateway.nodes.commands.deny"
+    )
+
+    if warn_ids:
+        n = len(warn_ids)
+        descs = [_node_desc(did) for did in warn_ids]
+        shown = "; ".join(descs[:6])
+        extra = f" (+{len(descs) - 6} more)" if len(descs) > 6 else ""
+        if modelled:
+            detail = (
+                f"{n} paired node(s) can publish skills that reach this gateway's "
+                f"agents ({gate_desc}; each listed node holds a live node token and "
+                "has system.run in its approved commands), but OpenClaw keeps "
+                "node-published skill content only in gateway memory and on the "
+                "node's own machine, never on this machine's disk, so this audit's "
+                f"skill content checks never saw it: {shown}{extra}. Unless a listed "
+                "node runs on this machine from this same OpenClaw home, the skills "
+                "it publishes were not scanned."
+            )
+        else:
+            detail = (
+                f"{n} paired node record(s) may be able to publish skills that reach "
+                f"this gateway's agents ({gate_desc}), but OpenClaw keeps "
+                "node-published skill content only in gateway memory and on the "
+                "node's own machine, never on this machine's disk, so this audit's "
+                f"skill content checks never saw it: {shown}{extra}. Unless a listed "
+                "node runs on this machine from this same OpenClaw home, the skills "
+                "it publishes were not scanned."
+            )
+
+        evidence_lines = [_node_ev(did) for did in warn_ids]
+        evidence_lines.append(f"gate: {gate_desc}")
+        if modelled:
+            evidence_lines.append(f"{deny_path} does not list system.run")
+        else:
+            ver = getattr(ctx, "installed_dist_version", None)
+            evidence_lines.append(
+                f"installed OpenClaw build {ver or 'unknown'} is outside the build "
+                "this check's node-admission model was read on (2026.9.6 and later); "
+                "every paired node record is counted, including ones whose node token "
+                "may be revoked"
+            )
+        for gap in gaps:
+            evidence_lines.append(f"also not read: {gap}")
+
+        fix = (
+            "Review what each listed node publishes on that node's own machine: a "
+            "node publishes the skills in its own OpenClaw home's skills folder "
+            "(~/.openclaw/skills unless OPENCLAW_STATE_DIR or OPENCLAW_CONFIG_PATH "
+            f"moves it), so run ClawSecCheck there — a full audit, or "
+            f"{command_prefix()} --vet-skill <path> for each skill. `openclaw skills "
+            "list --agent <id>` asks the running gateway and lists node-published "
+            "skills next to local ones. If you do not rely on node-published skills, "
+            f"set {allow_advice}; to stop a node from running commands at all (which "
+            f"also keeps its skills away from every agent), add \"system.run\" to "
+            f"{deny_advice}; remove a node you no longer use with `openclaw nodes "
+            "remove --node <id>`. Limits of this check: it reads the node side only "
+            "— whether a particular agent may run commands on a node (tools.exec "
+            "host, sandbox and per-session overrides) is decided at run time and is "
+            "not modelled here."
+        )
+        return _finding(
+            "B396",
+            WARN,
+            detail,
+            fix,
+            evidence=evidence_lines[:12],
+        )
+
+    if undet or gaps:
+        reasons = list(gaps)
+        if undet:
+            reasons.append(
+                f"{len(undet)} paired-device record(s) have a node surface, role list "
+                "or token list that could not be parsed or is in an unexpected shape"
+            )
+        return _finding(
+            "B396",
+            UNKNOWN,
+            "Could not determine whether any paired node can publish skills that "
+            f"this audit's skill content checks cannot see: {'; '.join(reasons)}.",
+            "Make the affected pairing store readable (fix file/database "
+            "permissions, or re-run once state/openclaw.sqlite is not locked by "
+            "another process), and until then treat any node-published skill as "
+            "unscanned by this audit. `openclaw nodes list` shows currently paired "
+            "nodes; `openclaw skills list --agent <id>` asks the running gateway "
+            "which skills (including node-published ones) reach a given agent.",
+            engine_degraded=degraded,
+        )
+
+    if not node_record_ids:
+        return _finding(
+            "B396",
+            PASS,
+            "No paired node found in this OpenClaw home's pairing store — there are "
+            "no node-published skills outside this audit's skill content scan.",
+            "Re-run this audit after pairing a node — node-published skills are "
+            "never scanned by the skill content checks, whatever this audit finds "
+            "today.",
+            pass_confidence="no_signal",
+        )
+
+    return _finding(
+        "B396",
+        PASS,
+        f"{len(node_record_ids)} paired node record(s) found, but none can publish "
+        "skills that reach an agent (none holds a live node token with system.run in "
+        "its approved commands).",
+        "Re-run this audit if a paired node's token is renewed or its approved "
+        "commands change — node-published skills are never scanned by the skill "
+        "content checks.",
+        pass_confidence="no_signal",
+    )
 
 # ---------- B135: accepted-despite-failed-verification skill install (.clawhub/lock.json) ----------
 # Real shape (docs/research/openclaw-schema-recon.md §14.5): {"version": ..., "skills":

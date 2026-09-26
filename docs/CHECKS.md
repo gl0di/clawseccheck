@@ -2905,6 +2905,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B396 - Paired-node skills outside this audit's skill content scan
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Supply Chain / Node Skills
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM03 Supply Chain
+- What it checks: Paired-node skills outside this audit's skill content scan
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

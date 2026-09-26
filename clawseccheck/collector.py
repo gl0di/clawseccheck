@@ -5642,14 +5642,25 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
 _MAX_PAIRED_DEVICE_JSON_BYTES = 256 * 1024
 _MAX_PAIRED_DEVICES = 500
 
+# B396: the row-within-cap predicate and the SELECT gained three more columns —
+# role/roles_json/node_surface_json — the ones a paired NODE's admission (as opposed to
+# a paired OPERATOR's authority, which is all B176 itself ever needed) turns on. Bounded
+# the exact same way as the original three: at the SQL level, per column, so a hostile
+# oversized value on any of the six never reaches this process (see this table's own
+# module docstring below for the full C-135 round 1 grounding — only a hostile row's
+# behaviour changes; a real device's role/roles/nodeSurface is a few bytes at most).
 _PAIRED_DEVICE_ROW_WITHIN_CAP = (
     "(scopes_json IS NULL OR length(CAST(scopes_json AS BLOB)) <= ?) "
     "AND (approved_scopes_json IS NULL OR length(CAST(approved_scopes_json AS BLOB)) <= ?) "
-    "AND (tokens_json IS NULL OR length(CAST(tokens_json AS BLOB)) <= ?)"
+    "AND (tokens_json IS NULL OR length(CAST(tokens_json AS BLOB)) <= ?) "
+    "AND (role IS NULL OR length(CAST(role AS BLOB)) <= ?) "
+    "AND (roles_json IS NULL OR length(CAST(roles_json AS BLOB)) <= ?) "
+    "AND (node_surface_json IS NULL OR length(CAST(node_surface_json AS BLOB)) <= ?)"
 )
 _PAIRED_DEVICE_SQLITE_SELECT = (
     "SELECT device_id, platform, scopes_json, approved_scopes_json, tokens_json, "
-    "created_at_ms, approved_at_ms, last_seen_at_ms FROM device_pairing_paired "
+    "created_at_ms, approved_at_ms, last_seen_at_ms, role, roles_json, node_surface_json "
+    "FROM device_pairing_paired "
     f"WHERE {_PAIRED_DEVICE_ROW_WITHIN_CAP} LIMIT ?"
 )
 _PAIRED_DEVICE_SQLITE_OVERSIZED_COUNT = (
@@ -5689,10 +5700,13 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     client_id, client_mode, browser_origin, role, roles_json, scopes_json,
     approved_scopes_json, remote_ip, tokens_json, approved_via, node_surface_json,
     pending_node_surface_json, created_at_ms, approved_at_ms, last_seen_at_ms,
-    last_seen_reason``. Only the columns B176's own per-entry evaluation loop
-    actually consumes are ever selected -- never ``public_key``, ``remote_ip``,
-    ``browser_origin``, or either ``node_surface_json`` column, none of which the
-    legacy JSON shape carried either.
+    last_seen_reason``. Only the columns B176's own per-entry evaluation loop, plus
+    (B396) ``role``/``roles_json``/``node_surface_json`` -- the node-admission
+    predicate ``check_paired_node_skill_coverage`` needs -- are ever selected; never
+    ``public_key``, ``display_name``, ``operator_label``, ``device_family``,
+    ``client_id``, ``client_mode``, ``browser_origin``, ``remote_ip``, ``approved_via``,
+    ``pending_node_surface_json``, or ``last_seen_reason``, none of which either
+    consumer's shape carries.
 
     Each row is normalised into the SAME per-entry dict shape the legacy
     ``devices/paired.json`` envelope already uses (``deviceId``, ``platform``,
@@ -5714,11 +5728,27 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     ``revokedAtMs`` survive -- exactly what the check's own revoked-token logic
     (B-243) needs, and nothing else.
 
+    B396 fields, added to the SAME per-entry dict (never a second dict, never a second
+    reader): ``role`` (the bare column, or ``None``), ``roles`` (the parsed
+    ``roles_json`` -- a list keeps only its string items, a bare string is kept as-is,
+    anything else or a parse failure is ``None``), ``rolesUnparsed`` (``True`` iff
+    ``roles_json`` was present and failed to parse), ``nodeSurface`` (an ALLOWLIST
+    projection of the parsed ``node_surface_json`` -- only ``commands`` survives from a
+    dict shape; a truthy non-dict JSON value collapses to ``{}``, a falsy one to
+    ``None``, matching JS truthiness since only PRESENCE of a surface matters to a
+    non-dict shape, never its content), ``nodeSurfaceUnparsed`` (parse failure), and
+    ``tokensUnparsed`` (``True`` iff ``tokens_json`` was present and failed to parse --
+    the existing ``tokens`` value B176 already reads is UNCHANGED by this addition).
+    None of these six ever holds token-secret material; ``nodeSurface`` in particular
+    drops ``displayName``/``bins``/host stats/every other vendor field the real
+    ``nodeSurface`` object may carry, by construction (an allowlist, not a denylist).
+
     Bounded, defense in depth against a hostile state DB (C-135 round 1, see
     ``_PAIRED_DEVICE_SQLITE_SELECT``'s own comment for the full grounding): a row
-    whose ``scopes_json``/``approved_scopes_json``/``tokens_json`` exceeds
-    ``_MAX_PAIRED_DEVICE_JSON_BYTES`` on any of the three is excluded AT THE SQL
-    LEVEL (never fetched into this process at all) and counted via
+    whose ``scopes_json``/``approved_scopes_json``/``tokens_json``/``role``/
+    ``roles_json``/``node_surface_json`` exceeds ``_MAX_PAIRED_DEVICE_JSON_BYTES`` on
+    any of the six is excluded AT THE SQL LEVEL (never fetched into this process at
+    all) and counted via
     ``_PAIRED_DEVICE_SQLITE_OVERSIZED_COUNT`` for disclosure -- "present but not
     read", never silently absent. The row set itself is capped at
     ``_MAX_PAIRED_DEVICES`` (the classic one-extra-row probe: requesting one more
@@ -5765,10 +5795,18 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         # capped walk that never reached the DB is not the same fact as "no state
         # store" (GR#4 -- no silent completeness claim over a capped scan).
         if capped:
-            ctx.errors.append(
+            message = (
                 f"stopped listing '{state_dir}' after 100 entries without finding "
                 "openclaw.sqlite; the paired-device store presence was not read"
             )
+            ctx.errors.append(message)
+            # B396: previously disclosed via ctx.errors alone, which
+            # check_paired_device_operator_authority (B176) never reads -- so a state
+            # dir crowded past the walk cap read as a silent, honest-looking PASS ("no
+            # devices/paired.json found") on a store this collector never actually
+            # reached. note_limit is the channel both B176 and B396 consult via
+            # limit_hits_for to downgrade a verdict-by-absence to UNKNOWN instead.
+            note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
         return  # no state DB -> paired_devices_sqlite_found stays False (UNKNOWN, not a fake PASS)
 
     try:
@@ -5798,6 +5836,9 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
             # request one more row than the cap allows, purely to detect "more exist"
             # -- discarded below, never evaluated.
             cap_params = (
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
                 _MAX_PAIRED_DEVICE_JSON_BYTES,
                 _MAX_PAIRED_DEVICE_JSON_BYTES,
                 _MAX_PAIRED_DEVICE_JSON_BYTES,
@@ -5840,8 +5881,8 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         # the same B172/LIMIT_DOMAIN_APPROVALS precedent for its own collector cap.
         message = (
             f"device_pairing_paired in {db_path} has {oversized_count} paired-device "
-            f"row(s) whose scopes/approvedScopes/tokens exceed the "
-            f"{_MAX_PAIRED_DEVICE_JSON_BYTES // 1024}KB cap; those rows were not read"
+            f"row(s) whose scopes/approvedScopes/tokens/role/roles/nodeSurface exceed "
+            f"the {_MAX_PAIRED_DEVICE_JSON_BYTES // 1024}KB cap; those rows were not read"
         )
         ctx.errors.append(message)
         note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
@@ -5871,16 +5912,23 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     for (
         device_id, platform, scopes_json, approved_scopes_json, tokens_json,
         created_at_ms, approved_at_ms, last_seen_at_ms,
+        role, roles_json, node_surface_json,
     ) in rows:
         if not isinstance(device_id, str) or not device_id:
             continue
 
+        # B396: RecursionError is caught here too (not just ValueError) -- "harden it
+        # in the same style as the new keys" (see this reader's own follow-up note in
+        # its docstring) -- so a deeply-nested tokens_json sets tokensUnparsed rather
+        # than propagating an uncaught exception out of a read-only collector.
         tokens: dict = {}
+        tokens_unparsed = False
         if tokens_json:
             try:
                 raw_tokens = json.loads(tokens_json)
-            except ValueError:
+            except (ValueError, RecursionError):
                 raw_tokens = None
+                tokens_unparsed = True
             if isinstance(raw_tokens, dict):
                 for role_key, tok in raw_tokens.items():
                     if isinstance(tok, dict):
@@ -5893,11 +5941,69 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
                             k: v for k, v in tok.items() if k in _SAFE_TOKEN_SUBKEYS
                         }
 
+        # B396: `role` is the bare column value; `roles` is the same
+        # normaliseUniqueSingleOrTrimmedStringList-shaped JSON column B176's own
+        # `scopes`/`approvedScopes` columns already use, so it is parsed the same way
+        # -- a list keeps only its string items, a bare string is kept as-is, anything
+        # else (and any parse failure) is None, with the failure ALSO recorded via
+        # `rolesUnparsed` so a check can tell "no roles" from "could not read roles".
+        role_value = role if isinstance(role, str) else None
+
+        roles_value = None
+        roles_unparsed = False
+        if roles_json is not None:
+            try:
+                raw_roles = json.loads(roles_json)
+            except (ValueError, RecursionError):
+                roles_unparsed = True
+            else:
+                if isinstance(raw_roles, list):
+                    roles_value = [s for s in raw_roles if isinstance(s, str)]
+                elif isinstance(raw_roles, str):
+                    roles_value = raw_roles
+
+        # B396: `nodeSurface` is an ALLOWLIST projection of the parsed
+        # node_surface_json object -- only `commands` survives (never displayName,
+        # bins, host stats, or any other vendor field a node's approved surface may
+        # carry). A non-dict JSON value collapses to a bare JS-truthiness signal
+        # (`{}` for truthy, `None` for falsy) because only PRESENCE of a surface
+        # matters to a non-dict shape, never its content -- inlined here (not via a
+        # shared helper) so this leaf collector never depends on the checks layer.
+        node_surface_value = None
+        node_surface_unparsed = False
+        if node_surface_json is not None:
+            try:
+                raw_surface = json.loads(node_surface_json)
+            except (ValueError, RecursionError):
+                node_surface_unparsed = True
+            else:
+                if isinstance(raw_surface, dict):
+                    node_surface_value = (
+                        {"commands": raw_surface["commands"]}
+                        if "commands" in raw_surface else {}
+                    )
+                elif isinstance(raw_surface, bool):
+                    node_surface_value = {} if raw_surface else None
+                elif isinstance(raw_surface, (int, float)):
+                    node_surface_value = (
+                        {} if (raw_surface == raw_surface and raw_surface != 0) else None
+                    )
+                elif isinstance(raw_surface, str):
+                    node_surface_value = {} if raw_surface != "" else None
+                elif raw_surface is not None:
+                    node_surface_value = {}  # any other truthy JSON shape (e.g. a list)
+
         entries[device_id] = {
             "deviceId": device_id,
             "platform": platform,
             "scopes": _json_list(scopes_json),
             "approvedScopes": _json_list(approved_scopes_json),
+            "role": role_value,
+            "roles": roles_value,
+            "rolesUnparsed": roles_unparsed,
+            "nodeSurface": node_surface_value,
+            "nodeSurfaceUnparsed": node_surface_unparsed,
+            "tokensUnparsed": tokens_unparsed,
             "tokens": tokens,
             "createdAtMs": created_at_ms,
             "approvedAtMs": approved_at_ms,

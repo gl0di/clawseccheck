@@ -177,10 +177,13 @@ _EXEMPT = {
     # says it is not alone — `checks/_mcp.py` sits at 97% of its own tolerance, and five
     # more modules are past 70%. That whole table needs a restate-and-reconsider pass, not
     # one entry at a time as each next commit trips it.
-    "checks/_lifecycle.py": "~7,329 lines (restated 2026-09-17 — was ~6,779) — the "
-                            "approval / update-pinning / self-modification / supply-chain "
-                            "topic (17 checks + helpers); topic-faithful and over budget "
-                            "by design. A finer split is a later cycle.",
+    "checks/_lifecycle.py": "~8,208 lines (restated 2026-09-26, B396 — was ~7,329; "
+                            "check_paired_node_skill_coverage plus its own faithful-port "
+                            "helpers and a dense dist-grounding comment block added "
+                            "~880 lines) — the approval / update-pinning / "
+                            "self-modification / supply-chain topic (18 checks + "
+                            "helpers); topic-faithful and over budget by design. A finer "
+                            "split is a later cycle.",
     "checks/_content.py": "~16,589 lines (restated 2026-09-23, B-886 fence leg — was ~16,459) — the "
                           "content-security ring: 51 check functions, 178 "
                           "private helpers and 241 module regexes. Restated 2026-09-06 "

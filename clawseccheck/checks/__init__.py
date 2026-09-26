@@ -420,6 +420,8 @@ from ._lifecycle import (
     _B182_ENV_OVERRIDES,
     _B184_CODELOAD_ENV_VARS,
     _B184_REGISTRY_ENV_VARS,
+    _B396_MAX_LEGACY_STORE_BYTES,
+    _B396_MODEL_MIN,
     _CRITICAL_BOOTSTRAP,
     _FLOATING_REF_RE,
     _HOOK_POLICY_FIX_VERSION,
@@ -439,6 +441,16 @@ from ._lifecycle import (
     _b182_candidate_stores,
     _b182_readable_by_others,
     _b184_is_canonical,
+    _b396_admission_state,
+    _b396_approved_state,
+    _b396_build_modelled,
+    _b396_js_truthy,
+    _b396_legacy_record_valid,
+    _b396_node_candidate,
+    _b396_read_legacy_store,
+    _b396_role_list,
+    _b396_safe_int,
+    _b396_surface_state,
     _iter_entries,
     _parse_version,
     _writable_identity_files,
@@ -472,6 +484,7 @@ from ._lifecycle import (
     check_memory_reconsumption_injection,
     check_offboarding_hygiene,
     check_paired_device_operator_authority,
+    check_paired_node_skill_coverage,
     check_pending_device_pairing_scope,
     check_restart_handoff_stale,
     check_self_modification,
@@ -1623,6 +1636,7 @@ CHECKS = [
     check_codex_project_trust,  # B136 — Codex CLI project trust_level="trusted"
     check_pending_device_pairing_scope,  # B138 — dangling high-scope pending device pairing
     check_paired_device_operator_authority,  # B176 — standing operator authority in devices/paired.json (B-243)
+    check_paired_node_skill_coverage,  # B396 — paired-node skills outside the skill content scan (coverage disclosure)
     check_systemd_persistence,  # B150 — systemd user-unit Restart=always persistence
     check_host_scheduled_persistence,  # B379 — systemd timer / system cron naming OpenClaw, outside C048's scope (F-178)
     check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
