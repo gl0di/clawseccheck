@@ -95,14 +95,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   ("post-setup-attacker", "post-setup.attacker.example") still counts. A skill that uses
   a listed word for its own exfiltration step is still flagged for review (WARN), never
   passed. Every other check that looks for exfiltration transports is unchanged.
+- The obfuscation check no longer flags a skill just because decoding some unrelated,
+  incidentally percent-encoded-looking text elsewhere in the file (for example a Python
+  modulo operator) happens to touch the same document as an already plainly visible quote
+  of a suspicious phrase. It still fails when decoding genuinely reveals a new occurrence
+  of the phrase that was not visible before.
 
 ### Changed
 
-- Two known static-analysis limits are now disclosed in the affected finding's advice
+- Three known static-analysis limits are now disclosed in the affected finding's advice
   text instead of left implicit: a TT5 command-injection hit whose program path comes
   from external configuration (an env var, CLI flag, or config value) rather than a
-  literal, and a credential-path mention sitting alongside an exfil/transport keyword
-  with no proven data flow between them. Neither disclosure changes the verdict — both
+  literal; a credential-path mention sitting alongside an exfil/transport keyword
+  with no proven data flow between them; and a silent-instruction hit whose only anchor
+  is "do not tell the user to <do something>", which can mean "do this step yourself"
+  rather than concealment. No disclosure changes the verdict — all
   keep failing exactly as before — it only tells you the signal can't rule out an
   attacker-chosen path or a genuinely split exfiltration, so you know to read the
   flagged line yourself.
