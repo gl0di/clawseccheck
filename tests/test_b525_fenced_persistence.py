@@ -284,6 +284,21 @@ def test_hex_private_key_negated_fence_is_not_vacuous():
     assert f.status == WARN, f.detail
 
 
+def test_hex_private_key_affirmative_paste_prose_still_warns():
+    """Adversarial control for the `paste` verb widening: an AFFIRMATIVE sentence
+    that merely contains the word "paste" — not a "do not paste" disclaimer — must
+    not accidentally launder into a dampener just because the widened vocabulary now
+    recognizes that verb. `_NEGATION_RE` requires the literal "do not paste"/"do NOT
+    paste" sequence, so ordinary instructional prose using the same verb the other
+    direction ("you can paste ...") must keep convicting."""
+    blob = (
+        "You can paste anything like the following into your config to finish "
+        f"setup:\n\n```\n{_WALLET_KEY_LINE}\n```\n"
+    )
+    f = check_hex_private_key_exposure(_content_ctx({"s": blob}))
+    assert f.status == WARN, f.detail
+
+
 # --- 2/3. IOC_IPURL / IOC_ONION, via vet_skill() (check_installed_skills / B13),
 # matching tests/test_content_signals.py's own _vet() harness exactly.
 
@@ -327,6 +342,19 @@ def test_ioc_negated_fence_is_not_vacuous(tmp_path):
         f = vet_skill(
             _skill(tmp_path, "nonegioc" + label, teach_without_negation.format(payload=payload))
         )
+        assert f.status == WARN, f"{label}: {f.detail}"
+
+
+def test_ioc_affirmative_contact_prose_still_warns(tmp_path):
+    """Adversarial control for the `contact` verb widening: an AFFIRMATIVE sentence
+    that merely contains the word "contact" — not a "do not contact" disclaimer —
+    must keep convicting. `_NEGATION_RE` requires the literal "do not contact"/"do
+    NOT contact" sequence, so ordinary instructional prose using the same verb the
+    other direction ("feel free to contact ...") must not be laundered into a
+    dampener just because the widened vocabulary now recognizes that verb."""
+    teach = "Feel free to contact this endpoint for support:\n\n```\n{payload}\n```\n"
+    for label, payload in (("ipurl", _PUBLIC_IP_URL), ("onion", _ONION_URL)):
+        f = vet_skill(_skill(tmp_path, "affirmioc" + label, teach.format(payload=payload)))
         assert f.status == WARN, f"{label}: {f.detail}"
 
 

@@ -4181,10 +4181,28 @@ _LIFECYCLE_HOOK_RE = re.compile(
 # confirmed this residual gap doesn't fire on the real fleet (fleet_fp_gate.py
 # compare, clean) and is the same bounded class of imprecision every sibling
 # alternative above already accepts — widen the list here if a real instance surfaces.
+#
+# Widened again (paste/contact): the B-525 fenced-persistence test family added two
+# non-shell content-ring checks (B165 hex-private-key exposure, the IOC public-IP-URL/
+# .onion pair in check_installed_skills) whose OWN natural "don't do this" disclaimer
+# doesn't name a command-execution verb at all — a wallet key is *pasted* into a chat
+# by a compromised skill, and a rogue skill *contacts* an exfil host, so the genuine,
+# already-fixture-exercised disclaimers read "Do not paste anything like the
+# following" / "Do not contact anything like the following", not "run" or "curl".
+# Same widening-only discipline as above: neither word was reachable via any existing
+# alternative, so every shape that matched before still matches, and this adds exactly
+# the two verbs the new checks' own disclaimer prose actually uses — not a general
+# "any verb" grant (see the B-656 note above this one for why that failed before: a
+# bare topic word, not tied to an ACT, once absolved a live payload by accident).
+# C-135 review: both verbs adversarially probed against affirmative (non-negated)
+# sentences containing them ("You can paste anything like the following into your
+# config", "Feel free to contact this endpoint") to confirm the trailing-verb
+# requirement alone doesn't launder instructional prose into a disclaimer — see
+# tests/test_b525_fenced_persistence.py's adversarial paste/contact cases.
 _NEGATION_RE = re.compile(
     r"\bfor\s+example\b|e\.g\.|(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|"
-    r"\bdo\s+not\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start)\b|"
-    r"\bdo\s+NOT\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start)\b|"
+    r"\bdo\s+not\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start|paste|contact)\b|"
+    r"\bdo\s+NOT\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start|paste|contact)\b|"
     r"\bdon'?t\s+(?:do|run|use|execute)\b|"
     r"\bnever\s+run\b|\bnever\s+use\b|\bavoid\s+(?:running|using|this)\b|"
     r"\bexample:\s*$|\bwhat\s+not\s+to\s+do\b|"
