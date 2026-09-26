@@ -48,6 +48,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   TLS-certificate/key argument's value go unnoticed because that argument position is
   normally treated as safe; a match is now only treated as safe there when it is a plain
   file path, not when it contains an executing subcommand.
+- The installed-skill safety scan no longer fails a skill that describes untrusted
+  input as something that "may contain" an injection-style phrase — the existing
+  "might contain" example wording now also recognizes this synonym.
+- The installed-skill safety scan no longer fails ordinary editorial use of the word
+  "caveat(s)" (for example, advice to keep caveats near the claim they affect, or to
+  omit ones that don't change interpretation); it still catches a directive to omit
+  warnings or disclaimers.
+- A "do not break things without warning" style instruction — an instruction to
+  always warn before a destructive action — now warns instead of failing outright,
+  matching how the scan already treats other safety-constraint phrasing; a directive
+  that actually tells the assistant to act without any warning still fails.
+- The installed-skill safety scan no longer fails a code comment that merely notes
+  running arbitrary code afterward "is not recommended"; a live directive to run
+  arbitrary code still fails.
+- The installed-skill safety scan no longer fails a live-looking directive phrase when
+  it appears inside a third-party automated scanner's own finding-report line (a
+  bulleted, severity-tagged line citing a different file), rather than as an actual
+  instruction in the skill's own prose.
 
 ### Changed
 
