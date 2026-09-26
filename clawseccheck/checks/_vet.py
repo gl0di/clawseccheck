@@ -3360,8 +3360,31 @@ def _runtime_fetch_table_pipe_breaks(blob: str) -> "set[int]":
     table/adjacent WARN band (_runtime_fetch_line_kind's "table" bucket,
     _runtime_fetch_block) via these SAME cell-level segments, never PASS -- a same-cell
     directive ("Fetch <url> and follow its rules" in ONE cell) is unaffected and still
-    binds at FAIL. Accepted, un-tested scope limits (documented, not defended): a code
-    span's own `|` inside a cell is not distinguished from a real cell boundary, and a
+    binds at FAIL.
+
+    table-cells round 3 (C-135, re-adjudicated -- NOT a bug): a `|` inside a backtick
+    code span is STILL a real cell boundary and is deliberately NOT excluded. Round 2
+    once excluded it (treating a code-span `|` as protected, mirroring how `\\|`
+    protects an escaped pipe) to close a round-1 "blocker" where a pipe inside a later
+    code span in the same cell (e.g. a second, separately-quoted flag value) demoted a
+    genuine same-cell directive from FAIL to the table/adjacent WARN band. That
+    exclusion had no basis in the real GFM tables extension: per the GFM spec, "It is
+    possible to include a pipe in a cell's content by escaping it ... including inside
+    other inline spans" -- ONLY a backslash-escaped `\\|` is protected; an unescaped `|`
+    inside a code span still splits the cell, exactly like everywhere else in this
+    function. Modeling code-span protection was also exploitable: an attacker can open
+    a single backtick in a governance/prohibition-shaped decoy cell with no fetch verb
+    of its own, close it after a real runtime-fetch directive in the NEXT cell, and the
+    (spec-incorrect) exclusion then reads the real inter-cell boundary pipe as
+    "inside a code span" and merges the two cells into one governed window -- silently
+    demoting a genuine OWASP AST05 hijack directive from FAIL to WARN (round-2 C-135
+    blocker; see tests/test_fleetfp_table_cells.py's governance-bypass twin). Round 2
+    was reverted for this reason. So the round-1 "blocker" is spec-correct behavior,
+    not a defect: an unescaped pipe in a code span IS a GFM cell boundary, the
+    directive is genuinely split across cells, and it lands on the same cross-cell WARN
+    floor as a directive split by a literal pipe -- the identical class already accepted
+    for list/sentence splits elsewhere in this module (B-284). Only `\\|` (backslash-
+    escaped) is not a boundary, and that is unchanged and unaffected by this note. A
     table nested inside a blockquote (`> | a | b |`) never matches
     _RUNTIME_FETCH_TABLE_LINE_RE in the first place (the leading `>` wins), so it is
     unaffected by this function either way -- the same FN trade already accepted for
