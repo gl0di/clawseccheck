@@ -2,8 +2,8 @@
 --
 -- openclaw-version: 2026.9.6
 -- state-schema-version: 18
--- generated: 2026-09-25
--- tables: 10
+-- generated: 2026-09-26
+-- tables: 11
 --
 -- What this is
 -- ------------
@@ -132,6 +132,31 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   sort_order INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (store_key, job_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS device_pairing_paired (
+  device_id TEXT NOT NULL PRIMARY KEY,
+  public_key TEXT NOT NULL,
+  display_name TEXT,
+  operator_label TEXT,
+  platform TEXT,
+  device_family TEXT,
+  client_id TEXT,
+  client_mode TEXT,
+  browser_origin TEXT,
+  role TEXT,
+  roles_json TEXT,
+  scopes_json TEXT,
+  approved_scopes_json TEXT,
+  remote_ip TEXT,
+  tokens_json TEXT,
+  approved_via TEXT,
+  node_surface_json TEXT,
+  pending_node_surface_json TEXT,
+  created_at_ms INTEGER NOT NULL,
+  approved_at_ms INTEGER NOT NULL,
+  last_seen_at_ms INTEGER,
+  last_seen_reason TEXT
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS skill_library_entries (
