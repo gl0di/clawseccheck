@@ -30,11 +30,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 
 - B25 (update / pinning hygiene) no longer warns when OpenClaw's own background
   auto-update (`update.auto.enabled`) is turned on. That setting updates OpenClaw
-  itself, not a skill or a plugin, so flagging it as a skill/plugin supply-chain risk
-  was a false claim — and it contradicted this project's own advice (C4) to keep
-  OpenClaw updated. B25 still warns on a pre-release update channel
-  (`update.channel` = `dev`/`beta`) and on an unpinned/floating skill or plugin ref;
-  those signals are unchanged.
+  itself (the core update also refreshes plugins that follow a floating version, which
+  B25 already reports as unpinned; skills are not touched), so flagging it as a
+  skill/plugin supply-chain risk was a false claim — and it contradicted this project's
+  own advice (C4) to keep OpenClaw updated. B25 still warns on a pre-release update
+  channel (`update.channel` = `dev`/`beta`) and on an unpinned/floating skill or plugin
+  ref. If you ignored B25's pre-release-channel warning in `.clawseccheckignore`,
+  re-add that entry: its wording changed, so the old fingerprint no longer matches.
 - Closed a bypass in the shell credential-exfiltration check's `for`-loop handling.
   When a loop variable that legitimately holds an in-cluster Kubernetes service-account
   token was referenced through a shell parameter-expansion operator (for example

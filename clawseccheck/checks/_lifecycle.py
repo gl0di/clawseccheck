@@ -7346,9 +7346,12 @@ def check_update_pinning(ctx: Context) -> Finding:
     auto-update. Re-grounded against the installed dist (C-125): `update.auto.enabled`
     (schema-*.mjs: "Enable background auto-update for stable and beta package
     installs"; update-startup*.mjs: gates `runAutoUpdateCommand`) drives OpenClaw's OWN
-    `openclaw update` for its core package — not a skill or plugin update mechanism. The
-    WARN text ("auto-update for skills/plugins") was a false claim and directly
-    contradicted C4's advice to keep OpenClaw itself updated. `update.auto` (bare),
+    `openclaw update` for its core package. That update's finalize step
+    (`updatePluginsAfterCoreUpdate`) also refreshes installed plugins that follow a
+    floating spec — exactly the installs signal 2 below already reports as unpinned —
+    and it never touches skills. The WARN text ("auto-update for skills/plugins") was a
+    false claim and directly contradicted C4's advice to keep OpenClaw itself updated.
+    `update.auto` (bare),
     top-level `autoUpdate`, and `auto_update` were never real schema paths either — the
     real shape is only `update.auto.enabled` (a boolean nested under a strictObject),
     verified against the installed dist's zod schema before removal.
