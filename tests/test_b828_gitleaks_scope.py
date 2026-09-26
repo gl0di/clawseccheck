@@ -51,6 +51,11 @@ _PINNED_FINGERPRINTS = {
     "d5daee01d3fe9d28bf57d713dc52695f0d7b1f7d:tests/test_logscan.py:generic-api-key:96",
     "7d75cba4b8bddf11e1d3d45e962228356e6f84aa:tests/test_checks.py:generic-api-key:61",
     "7d75cba4b8bddf11e1d3d45e962228356e6f84aa:tests/test_windows.py:generic-api-key:23",
+    # Two non-secret test inputs published on dev before the 4.3.0 release scan caught
+    # them (a "sk-REPLACE_ME-…" placeholder default and a bearer header whose value is
+    # the shell variable $f); both are split into fragments at HEAD.
+    "47fb954d43148120217c6373353be1e868da1542:tests/test_b997_placeholder_patterns.py:generic-api-key:91",
+    "234c5577f980a73ac772a509221b6fa99caac6c3:tests/test_b894_shell_loop_cred_taint.py:curl-auth-header:720",
 }
 
 # gitleaks allowlist keys that broaden an exemption beyond one exact, anchored value:

@@ -88,7 +88,7 @@ def test_replace_placeholder_suffix_is_clean():
 
 
 def test_replace_me_phrase_is_clean():
-    src = 'import os\nk = os.getenv("API_KEY", "sk-REPLACE_ME-0123456789abcdef")\n'
+    src = 'import os\nk = os.getenv("API_KEY", "sk-' + 'REPLACE_ME-0123456789abcdef")\n'
     assert "HARDCODED_PROVIDER_SECRET" not in _rules(src)
 
 
