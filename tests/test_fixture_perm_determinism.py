@@ -10,30 +10,30 @@ tamper-resistance) -- which made 95 of the 496 fixture homes produce a DIFFERENT
 green local run consequently shipped a red CI on
 ``tests/test_finding_fingerprint_manifest.py``.
 
-The same class had already been patched three times one path at a time (B182, B188, the
-three B-309 follow-ups) and grew straight back each time, because the defect is not in any
-particular path -- it is that an unpinned path inherits the umask. ``conftest.py`` now pins
-the whole corpus (0700 dirs / 0600 files, owner-execute preserved) with a short exception
-table; this file is what stops the next fix from being a fourth one-path patch.
+The same class had already been patched four times, one path (or one entry point) at a
+time (B182, B188, the three B-309 follow-ups, B-842) and grew straight back each time,
+because the defect is not in any particular path -- it is that an unpinned path inherits
+the umask (or checkout mechanism). ``tests/_fixtureperms.py`` now pins the whole corpus
+(0700 dirs / 0600 files, owner-execute preserved) with a short exception table, called
+from both ``conftest.py``'s autouse pytest fixture and the standalone ``tests/
+test_finding_fingerprint_manifest.py --write`` path (B-842); this file is what stops the
+next fix from being a fifth one-path (or one-entry-point) patch.
 
 Nothing here needs the audit engine: these are properties of the corpus on disk, asserted
-after ``conftest.py``'s session-scoped ``_deterministic_fixture_perms`` has run.
+after ``conftest.py``'s session-scoped ``_deterministic_fixture_perms`` fixture -- which
+just calls ``_fixtureperms.pin_fixture_modes()`` -- has run.
 """
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
+# Asserted directly against `_fixtureperms`, the actual owner of the pinning logic since
+# B-842 -- not through `conftest.py` (which only calls `pin_fixture_modes()`) and not by
+# `import conftest`: `fixtures/conftest.py` (the collect_ignore_glob shim) is also
+# basenamed `conftest`, and on a full-suite run it is the one that wins the bare name, so
+# `import conftest` resolves to whichever pytest imported last -- works on a scoped run,
+# fails on the full one. `_fixtureperms` has no such collision.
+import _fixtureperms
 
-# Load the ROOT conftest by path, deliberately not `import conftest`: `fixtures/conftest.py`
-# (the collect_ignore_glob shim) is also basenamed `conftest`, and on a full-suite run it is
-# the one that wins the bare name -- so `import conftest` resolves to whichever pytest
-# imported last, i.e. it works on a scoped run and fails on the full one.
-_ROOT = Path(__file__).resolve().parent.parent
-_SPEC = importlib.util.spec_from_file_location("_root_conftest", _ROOT / "conftest.py")
-conftest = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(conftest)
-
-FIXTURES = conftest._FIXTURES
+FIXTURES = _fixtureperms._FIXTURES
 
 
 def _rel(p) -> str:
@@ -43,12 +43,12 @@ def _rel(p) -> str:
 def test_every_fixture_path_carries_its_deterministic_mode():
     """The pin actually landed, on every path, not just the ones someone remembered."""
     wrong = {
-        _rel(p): (oct(p.stat().st_mode & 0o777), oct(conftest.expected_mode(p)))
-        for p in conftest.iter_fixture_paths()
-        if (p.stat().st_mode & 0o777) != conftest.expected_mode(p)
+        _rel(p): (oct(p.stat().st_mode & 0o777), oct(_fixtureperms.expected_mode(p)))
+        for p in _fixtureperms.iter_fixture_paths()
+        if (p.stat().st_mode & 0o777) != _fixtureperms.expected_mode(p)
     }
     assert not wrong, (
-        "fixture paths whose mode is not the deterministic one conftest.py pins "
+        "fixture paths whose mode is not the deterministic one _fixtureperms.py pins "
         f"(got, want): {sorted(wrong.items())[:10]}"
     )
 
@@ -68,7 +68,7 @@ def test_no_fixture_path_is_group_or_world_writable():
     ``tests/test_new_checks.py``) -- the corpus does not need to be loose to exercise them.
     """
     loose = sorted(
-        _rel(p) for p in conftest.iter_fixture_paths() if p.stat().st_mode & 0o022
+        _rel(p) for p in _fixtureperms.iter_fixture_paths() if p.stat().st_mode & 0o022
     )
     assert not loose, (
         "fixture paths writable by group or world -- their B19/B20/B85 verdict is a "
@@ -80,7 +80,7 @@ def test_the_pinned_exception_table_has_no_stale_entries():
     """An exception is a claim that some test asserts a permission-derived outcome on
     that exact shipped path. A key that no longer exists is a claim about nothing."""
     missing = sorted(
-        rel for rel in conftest._PINNED_FIXTURE_MODES if not (FIXTURES / rel).exists()
+        rel for rel in _fixtureperms._PINNED_FIXTURE_MODES if not (FIXTURES / rel).exists()
     )
     assert not missing, f"_PINNED_FIXTURE_MODES names paths that do not exist: {missing}"
 
@@ -97,7 +97,7 @@ def test_the_two_pinned_paths_keep_the_exact_modes_their_owning_tests_need():
       restores after chmod'ing it 0664 to drive B20's singleton branch. A pin that
       disagreed would make the corpus fingerprint depend on test ordering.
     """
-    assert conftest._PINNED_FIXTURE_MODES == {
+    assert _fixtureperms._PINNED_FIXTURE_MODES == {
         "bad_b182_clawhub_token_store/.config/clawhub/config.json": 0o644,
         "clean_b127_singleton_group_write/workspace/MEMORY.md": 0o644,
     }
@@ -109,8 +109,8 @@ def test_the_pin_preserves_the_one_bit_git_records():
     test run. It is also the only bit a umask cannot plausibly clear, which is why the
     rule may safely read it back off disk."""
     dropped = sorted(
-        _rel(p) for p in conftest.iter_fixture_paths()
+        _rel(p) for p in _fixtureperms.iter_fixture_paths()
         if p.is_file() and (p.stat().st_mode & 0o100)
-        and not (conftest.expected_mode(p) & 0o100)
+        and not (_fixtureperms.expected_mode(p) & 0o100)
     )
     assert not dropped, f"the pin would clear a tracked executable bit on: {dropped}"

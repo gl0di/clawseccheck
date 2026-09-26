@@ -70,6 +70,11 @@ class ToolDef:
     params: list = field(default_factory=list)
     annotations: "dict | None" = None
     server: str = ""
+    #: The name was cut at the ingest cap, so it is NOT the server's real tool name.
+    #: A consumer that MATCHES on the name (a toolFilter) must not trust a truncated one:
+    #: it would compare the operator's full pattern against a prefix and answer both ways
+    #: wrong. Additive, defaulted, and not part of any verdict unless a caller reads it.
+    name_truncated: bool = False
 
 
 @dataclass
@@ -118,12 +123,14 @@ def _tool_def_from_dict(raw: object, server: str) -> tuple["ToolDef | None", boo
     if not isinstance(raw, dict):
         return None, False
     name = raw.get("name")
-    if not isinstance(name, str) or not name.strip():
+    trimmed = name.strip() if isinstance(name, str) else ""
+    if not trimmed:
         return None, False
     params, truncated = _params_from_schema(raw.get("inputSchema"))
     annotations = raw.get("annotations")
     tool = ToolDef(
-        name=_bounded_text(name.strip(), 200),
+        name=_bounded_text(trimmed, 200),
+        name_truncated=len(trimmed) > 200,
         title=_bounded_text(raw.get("title")),
         description=_bounded_text(raw.get("description")),
         params=params,
@@ -283,6 +290,7 @@ def from_trajectory(home: "str | Path", *, max_files: int | None = None,
         by_server.setdefault(server, []).append(
             ToolDef(
                 name=_bounded_text(name, 200),
+                name_truncated=len(name) > 200,
                 description=_bounded_text(entry.get("description")),
                 params=params,
                 server=server,
@@ -348,7 +356,7 @@ def from_probe_json(path: "str | Path") -> list:
             continue
         if known_servers is not None and server not in known_servers:
             continue
-        by_server.setdefault(server, []).append(_bounded_text(raw, 200))
+        by_server.setdefault(server, []).append((_bounded_text(raw, 200), len(raw) > 200))
 
     surfaces = []
     for server, tool_names in sorted(by_server.items()):
@@ -357,7 +365,8 @@ def from_probe_json(path: "str | Path") -> list:
             ToolSurface(
                 server=server,
                 tools=[
-                    ToolDef(name=n, server=server) for n in tool_names[:_MAX_TOOLS_PER_SERVER]
+                    ToolDef(name=n, server=server, name_truncated=cut)
+                    for n, cut in tool_names[:_MAX_TOOLS_PER_SERVER]
                 ],
                 source="probe-names",
                 completeness="names-only",

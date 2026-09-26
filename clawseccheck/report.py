@@ -46,6 +46,7 @@ from .layers import (
     LAYER_ORDER,
     describe_layer,
 )
+from . import openclawdist as _openclawdist
 from .scoring import ScoreResult, assessment_coverage
 from .skillast import capability_families
 from .invocation import command_prefix
@@ -105,14 +106,20 @@ def _redact_home_paths(text: str) -> str:
     First written for one caller only: the --dashboard --full "Worth a glance" card
     section (the MEDIUM/ATTESTED-confidence findings render_dashboard_findings's own
     HIGH-confidence filter deliberately excludes), because that card is explicitly
-    designed to be pasted into chat -- the rest of report/--save/--html keeps full
-    paths, correctly: those stay on the owner's own machine and a real path is exactly
-    what an owner debugging their own config needs to see. This docstring used to say
-    "applied only to" that card, describing the first caller as if it were a scope
-    limit. It is not one, and by now several callers outside this module have found
-    the same shape independently -- an error message or a finding's `detail` is
-    exactly where an operator's OS username escapes, and CLAUDE.md §8 ("No PII... in
-    logs") is not scoped to one card:
+    designed to be pasted into chat. This docstring used to say "applied only to" that
+    card, describing the first caller as if it were a scope limit, and went on to claim
+    the rest of report/--save/--html keeps full paths "correctly" because those stay on
+    the owner's own machine. That second claim held for the plain text report and
+    --save (a text file a user would grep their own username out of before pasting, a
+    different threat model from a rendered artifact handed to someone else whole) but
+    was simply wrong for --html: docs/USAGE.md groups --html with --json/--sarif/--pdf/
+    --badge as the canonical, attachable saved-report formats, and --pdf (a rendered,
+    non-tree artifact with no other username-bearing text field) already got this exact
+    fix in the same C-456 commit that covered --json, leaving --html as the one
+    surface in that group nobody had gone back to check (B-825). Several
+    callers outside this module have found the same shape independently -- an error
+    message or a finding's `detail` is exactly where an operator's OS username
+    escapes, and CLAUDE.md §8 ("No PII... in logs") is not scoped to one card:
 
     * `sarif.py`'s `_sarif_text` (B-620) wraps every string that reaches SARIF
       `results[]` -- `message.text`, `properties.evidence`,
@@ -139,6 +146,63 @@ def _redact_home_paths(text: str) -> str:
       `_finding_to_dict` directly and `json.dumps`s its own payload) and is therefore
       NOT redacted here, matching that module's own "verbatim... never mutates"
       doctrine for a forensic-preservation artifact.
+    * `render_html`'s `_finding_card` (B-825) wraps a finding's `detail` and each
+      surviving evidence row right before they are HTML-escaped -- after, not
+      instead of, the `_evidence_bullets` cap/dedup step, so the `already_shown`
+      containment check there keeps comparing like-for-like (pre-redaction) text;
+      redacting first would let a real-home path collapsed to `~` in `detail` stop
+      matching the still-raw copy of the same text in `evidence`, undoing the dedup.
+      Reproduced without this: `_username_safe_path` (checks/_shared.py) collapses a
+      path against `Path.home()`, i.e. `$HOME` -- so under a `$HOME` spoofed away
+      from the real account home it correctly declines to collapse a real-home path
+      and returns it verbatim, exactly the input this function exists to catch on
+      the way out. `--json` already caught that verbatim path here (`_sanitize_tree`
+      runs on every JSON tree unconditionally); `--html` did not, so the identical
+      `Finding.evidence` string reached the two formats looking different depending
+      solely on which one was asked for -- see tests/test_b825_html_path_redaction.py.
+    * `pdf.py`'s `_pipeline_block` (B-866) wraps every line of all eight `--full`
+      pipeline blocks (Skills/Plugins/MCP/RISK chains/Behavioural/Second opinion/
+      Coverage/Worth a glance) right before they are drawn into the PDF page --
+      report.py's own per-block line renderers below (`_plugins_inventory_lines`,
+      `_mcp_inventory_lines`, `_behavioral_block_lines`, `_second_opinion_item_lines`
+      among them) build their text straight from `Finding.detail`/roster data with NO
+      redaction of their own, because they are shared with the plain-text
+      `--full`/`--dashboard` chat card's OWN tail block (`render_dashboard`), which
+      keeps full paths deliberately -- same "owner's own machine" reasoning as the
+      plain report above, not this function's business to override for a shared
+      renderer. `_worth_a_glance_lines` is the one exception: it has redacted itself
+      since this function's very first caller (see the docstring's opening
+      paragraph), so `_pipeline_block` redacting it a second time is a no-op, not a
+      double redaction. See tests/test_c456_json_pdf_path_redaction.py's
+      `test_pipeline_block_redacts_home_paths_in_every_line`.
+
+    * `render_dashboard`'s own `tail_block` assembly (B-892) wraps every line of the
+      Plugins/MCP/Behavioural/Second-opinion blocks right before they are joined into
+      the `--dashboard --full` chat card -- the SAME card `_worth_a_glance_lines`
+      redacts itself for, just below it in that card's own tail. Those four blocks'
+      line renderers (`_plugins_inventory_lines`, `_mcp_inventory_lines`,
+      `_behavioral_block_lines`, `_second_opinion_lines`) do NOT redact themselves,
+      same choice `_sanitize_tree`'s siblings above already made: they are shared with
+      the plain-text `--full` report (`render_subject_inventory`), which stays
+      unredacted by design (the owner's own machine). Folding inside the shared
+      renderer would have redacted the terminal report too; folding here, at the
+      chat-card-only render boundary, does not -- the same choice `pdf.py`'s
+      `_pipeline_block` (B-866, above) makes at the PDF's own render boundary for the
+      same four blocks (plus four more PDF-only blocks).
+
+    Known real producers of an absolute path reaching a `Finding.detail`/`.fix`
+    (B-866's own producer sweep, kept here rather than only in a Pulse
+    comment so it survives a `checks/_*.py` reshuffle): `checks/_config.py`'s B1 and
+    B11 fixes (a `chmod 700 {ctx.home}` suggestion built from the real audited home),
+    and `checks/_egress.py`'s B82 (an evidence line built through
+    `checks/_shared.py::_detail_path`, which already renders paths INSIDE `ctx.home`
+    relative to it -- see that helper's own docstring -- so B82 is the weaker case of
+    the three, evidence of the shape rather than a confirmed raw leak). None of the
+    three were found to reach `--json`/`--pdf`/`--html` with a raw path in a live,
+    end-to-end run over this repo's 732 fixtures; the gap this enumeration closes is
+    structural (an unaudited renderer), not a demonstrated leak on a real config. The
+    same two producers (B1/B11, B82) are the ones B-892 confirmed live for the
+    dashboard chat card above.
 
     Each caller applies this function itself, at its own render boundary, rather than
     this module reaching out to redact on their behalf -- for everything except the
@@ -534,6 +598,12 @@ def _cap_also_clause(extras: list[str]) -> str:
 # render_report's F-155 and F-154 ungraded paragraphs and render_dashboard's card line --
 # share the constant, so they cannot drift into three different sentences again.
 _UNGRADED_CAP_TAIL = "it would have capped the grade, but this run has no grade to cap."
+
+# CLAWSECCHECK headline-id-leak: `_urgent_headline`'s all-clear sentence, named so
+# `render_dashboard` can tell "a real FAIL/WARN backed this headline" apart from
+# "nothing was open" without re-running `_urgent_headline`'s own FAIL/WARN waterfall —
+# see render_dashboard's `_id_hint_line` use for why that distinction matters.
+_NOTHING_URGENT_SENTENCE = "Nothing urgent found in what was checked."
 _UNGRADED_CAP_TAIL_SENTENCE = _UNGRADED_CAP_TAIL[0].upper() + _UNGRADED_CAP_TAIL[1:]
 
 # B-761: the text report renders the "Highest-risk paths" attack-chain synthesis, the
@@ -696,14 +766,31 @@ def _missing_layers_sentence(score: ScoreResult) -> str:
 
 
 def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
-    """``"Most urgent: CRITICAL — Lethal trifecta reachable  [B1]"``, or the all-clear
+    """``"Most urgent: CRITICAL — Lethal trifecta reachable"``, or the all-clear
     variant when there is no unsuppressed FAIL.
 
     An ungraded run has still told the reader the most important thing it knows, so
     this leads every ungraded surface — it must read as a result, never as an error.
     Selection mirrors `render_report`'s own `issues` sort (severity first), narrowed to
     FAIL only (a WARN is not "urgent" in the sense this headline means), with the
-    finding id as the tie-break for determinism.
+    finding id used ONLY as the tie-break for determinism — never printed. This
+    headline states the risk, not which check number found it (design-system.md
+    Layer 0: "never internal codes"); on `render_report` the id remains one scroll
+    away regardless of grading, in the by-subject inventory index
+    (`render_subject_inventory`, the one surface deliberately allowed to carry ids,
+    gated on `ctx` being available rather than on `score.graded`) — see this
+    function's call sites for the two callers where that is not true.
+
+    CLAWSECCHECK headline-id-leak: `render_html` never carried a check id anywhere
+    (graded or ungraded — unaffected, pre-existing). `render_dashboard` is the real
+    gap this headline being id-free opens: its own Skills/MCP detail blocks only ever
+    carry an id when `ctx` is available AND the relevant roster is non-empty (B-506
+    kept the card off `by_id` otherwise, a budget-bound call this fix does not
+    reopen), so a plain `--dashboard` reader holding only this headline had no path
+    to a check id at all. `render_dashboard` compensates with its own follow-up
+    line (`_NOTHING_URGENT_SENTENCE` marks the one case — genuinely nothing open —
+    where that line is skipped) pointing at the full report for the id, rather than
+    printing one here.
 
     B-758 item #1: a RISK-* dangerous-capability CHAIN carries its own severity —
     a property of the combination, not summed from its legs — and this report renders
@@ -739,9 +826,9 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     kind, top = _pick(fail_candidates, live_risk)
     if kind == "risk":
         return (f"Most urgent: {top.severity} — dangerous capability chain: "
-                f"{_sanitize(top.title)}  [{top.id}]")
+                f"{_sanitize(top.title)}")
     if kind == "finding":
-        return f"Most urgent: {top.severity} — {_sanitize(top.title)}  [{top.id}]"
+        return f"Most urgent: {top.severity} — {_sanitize(top.title)}"
 
     # C-426: the all-clear must not out-run the evidence. This headline leads every
     # ungraded surface, including the card, whose own "Most urgent" section lists
@@ -759,11 +846,29 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     kind, top = _pick(warns, live_risk)
     if kind == "risk":
         return (f"Nothing failed outright — most serious open item: {top.severity} — "
-                f"dangerous capability chain: {_sanitize(top.title)}  [{top.id}]")
+                f"dangerous capability chain: {_sanitize(top.title)}")
     if kind == "finding":
+        if top.id == "A1":
+            # B-877: A1's catalog severity is CRITICAL regardless of which of its four
+            # WARN hedges fired (thin-surface / resolved-default / substituted-dm /
+            # sensitive-data undetermined — checks/_config.py::check_trifecta), so
+            # printing "{severity} — {title}" verbatim here read as an ACTIVE CRITICAL
+            # Lethal Trifecta directly above the finding's own "Active legs 0/3: none"
+            # row — the opposite of what a WARN (vs. FAIL) means. A1 WARN never states a
+            # confirmed leg count (the same reading `_trifecta_ratio` already gives it:
+            # "?/3", never a number, on anything but PASS/FAIL) — it means the legs
+            # could not be fully determined this run. Reworded for this id only; A1's
+            # status/severity/score and the B-803/C-426 pins are untouched (Dave,
+            # 2026-09-20). A real 3-leg FAIL is a different status and never reaches this
+            # branch, so its unqualified "Most urgent: CRITICAL — …" wording is unaffected.
+            return (
+                "Nothing failed outright — most serious open item: could not determine "
+                f"whether the {_sanitize(top.title)} is active this run "
+                f"(catalog severity {top.severity} if it is — see the full report for why)"
+            )
         return (f"Nothing failed outright — most serious open item: {top.severity} — "
-                f"{_sanitize(top.title)}  [{top.id}]")
-    return "Nothing urgent found in what was checked."
+                f"{_sanitize(top.title)}")
+    return _NOTHING_URGENT_SENTENCE
 
 
 def _not_fully_covered_line(score: ScoreResult) -> str:
@@ -1516,7 +1621,7 @@ def _capability_graph(ctx) -> dict:
         SENSITIVE_TOOL_HINTS,
         _B55_FS_WRITE_TOOLS,
         _agent_legs,
-        _b55_write_tools_granted,
+        _b55_resolved_write_grant,
         _b351_resolvable_agents,
         _canon_tool,
         _credential_store_state,
@@ -1547,17 +1652,19 @@ def _capability_graph(ctx) -> dict:
         *[t for t in _enabled_tools(cfg) if _hint([t], INPUT_TOOL_HINTS)],
         *(["web.fetch"] if _web_fetch_enabled(cfg) else []),
     })
-    # B-503: `_enabled_tools` collapses a powerful `tools.profile` down to the single
-    # synthetic "exec" token and never sees a write/edit/apply_patch grant it implies
-    # (it only widens from explicitly-listed tools.allow/gateway.tools.allow names) --
-    # exactly the divergence from B55 (check_fs_write_exposure) that let this graph
-    # print `can_write_memory=no` right next to a B55 FAIL on the same run. Union in
-    # `_b55_write_tools_granted`'s resolution -- the same profile-aware
-    # write/edit/apply_patch model B55/B68/B84 already share, including B55's own
-    # legacy-alias fallback -- rather than re-deriving a second, divergent model here.
-    # `_enabled_tools` itself is untouched: every OTHER caller (exec/input/egress
-    # hints) keeps reading exactly what it read before.
-    write_tools, _write_enumerable, _view, _legacy_write = _b55_write_tools_granted(cfg)
+    # B-503/B-904: `_enabled_tools` collapses a powerful `tools.profile` down to the
+    # single synthetic "exec" token and never sees a write/edit/apply_patch grant it
+    # implies (it only widens from explicitly-listed tools.allow/gateway.tools.allow
+    # names) -- exactly the divergence from B55 (check_fs_write_exposure) that let this
+    # graph print `can_write_memory=no` right next to a B55 FAIL on the same run. Union
+    # in `_b55_resolved_write_grant`'s resolution -- the same profile-aware
+    # write/edit/apply_patch model B55/B68/B84 already share, INCLUDING B55's own
+    # B-737 not-enumerable-scope fallback (`_fs_scope_grants`, OpenClaw's own per-scope
+    # tool-policy resolution, e.g. its permissive default) -- rather than re-deriving a
+    # second, divergent model here or calling only the G1 half B55 itself no longer
+    # stops at. `_enabled_tools` itself is untouched: every OTHER caller (exec/input/
+    # egress hints) keeps reading exactly what it read before.
+    write_tools, write_enumerable, _view, _legacy_write, _scope_grants = _b55_resolved_write_grant(cfg)
     main_tools = sorted({t for t in _enabled_tools(cfg)} | set(write_tools))
     # B-730: the credential term read `(ctx.home / "credentials").is_dir()` -- the
     # directory-existence test B-666 disproved and replaced in A1's leg. The store is
@@ -1597,10 +1704,10 @@ def _capability_graph(ctx) -> dict:
     # rejected means the term is unreachable, ignored means the key is not agent-reachable
     # either -- but the stronger claim is not made here.
     #
-    # `gateway.auth.password` deliberately STAYS, and stays divergent from A1. It is the
-    # same question as this one and it is tracked as B-730 item 2; settling it is a
-    # narrowing on a key that IS in the schema, so it needs its own measurement and its
-    # own C-135, not a ride on this change.
+    # `gateway.auth.password` STAYS, unchanged -- B-876 settled its
+    # divergence from A1 by widening A1 to match this term (see
+    # `checks/_shared.py::_trifecta_leg_sources`) rather than narrowing this one away.
+    # The three models agree again.
     main_secrets = bool(
         dig(cfg, "gateway.auth.password")
         or _credential_store_state(getattr(ctx, "home", None))["secret_files"]
@@ -1645,6 +1752,17 @@ def _capability_graph(ctx) -> dict:
             main_access = agent_sandbox.get("workspaceAccess")
         break
     main_write = bool(write_tools or main_access == "rw")
+    # B-904: `write_enumerable` is the SAME flag `check_fs_write_exposure` (B55) itself
+    # branches on for its own UNKNOWN verdict, now via the SAME `_b55_resolved_write_grant`
+    # resolution -- including its B-737 not-enumerable-scope fallback -- so a config whose
+    # only grant is OpenClaw's own permissive default (no operator tool policy anywhere)
+    # reads as `can_write_memory=True, write_grant_enumerable=True` here exactly as B55
+    # reads it as a real (WARN) grant, not the flat `False`/`False` "no" this graph used
+    # to show next to a B55 finding that was never that confident. `can_write_memory`
+    # stays a strict `bool` (docs/OUTPUT_SCHEMA.md §5); this field only says whether that
+    # bool is a resolved answer or a genuine "cannot tell" -- the same distinction B55's
+    # own UNKNOWN vs. PASS/WARN/FAIL already carries.
+    main_write_enumerable = write_enumerable or main_write
     main_egress = bool(
         any(_hint([t], OUTBOUND_TOOL_HINTS) for t in main_tools)
         or dig(cfg, "tools.elevated.allowFrom")
@@ -1667,6 +1785,7 @@ def _capability_graph(ctx) -> dict:
         "tools": main_tools,
         "secrets_visible": main_secrets,
         "can_write_memory": main_write,
+        "write_grant_enumerable": main_write_enumerable,
         "can_egress": main_egress,
     })
     if input_surfaces:
@@ -1733,12 +1852,19 @@ def _capability_graph_lines(ctx) -> list[str]:
         # strip terminal-control sequences so they can't spoof/erase the terminal (B-164).
         label = _sanitize(str(node["label"]))
         tools = _sanitize(", ".join(node["tools"])) if node["tools"] else "none"
-        lines.append(
+        line = (
             f"- {label} ({node['kind']}): tools={tools}; "
             f"secrets_visible={_bool_word(node['secrets_visible'])}; "
             f"can_write_memory={_bool_word(node['can_write_memory'])}; "
             f"can_egress={_bool_word(node['can_egress'])}"
         )
+        # B-904: only the `main` node carries `write_grant_enumerable`; flag it in the
+        # text render exactly when it is False, so a reader sees the same "we cannot
+        # actually tell" uncertainty B55 reports as UNKNOWN for the identical config
+        # shape, instead of reading `can_write_memory=no` as a settled answer.
+        if node.get("write_grant_enumerable") is False:
+            line += "; write_grant_enumerable=no (not resolvable from static config; see B55)"
+        lines.append(line)
     if graph["edges"]:
         lines.append("flow: input -> main -> subagents -> MCP -> fs/network")
     return lines
@@ -2325,11 +2451,35 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in ACTIONABLE_STATUSES else ""
     pc = getattr(f, "pass_confidence", None)
     pass_tag = f"  ({pc.replace('_', ' ')})" if f.status == PASS and pc else ""
+    # B-877: A1 WARN (any of its four hedges — checks/_config.py::check_trifecta) means
+    # the trifecta legs could not be fully determined this run, never a confirmed active
+    # trifecta at A1's catalog CRITICAL severity — the same reading `_urgent_headline`
+    # gives it above and `_trifecta_ratio` already gives it ("?/3", not a count). Without
+    # this tag the severity dot below (still CRITICAL — untouched, Dave 2026-09-20) sat
+    # next to a bare title with no hint this is a hedge, directly above the finding's own
+    # "Active legs 0/3: none" line, which reads as "0 active" rather than "undetermined".
+    # Scoped to A1/WARN only: a real 3-leg FAIL is a different status and keeps its
+    # unqualified strong wording (the metamorphic case this fix must not touch).
+    undetermined_tag = (
+        "  (legs undetermined this run — not a confirmed active trifecta)"
+        if f.id == "A1" and f.status == WARN else ""
+    )
     # Issue lines lead with the severity dot (B-077 / Component-2 mock); PASS/UNKNOWN
     # roster lines keep the status icons via _render_finding_compact.
     lines.append(f"{_sev_token(f.severity, ascii_only=ascii_only, color=color)}  "
-                 f"{_sanitize(f.title)}{tag}{pass_tag}")
+                 f"{_sanitize(f.title)}{tag}{pass_tag}{undetermined_tag}")
     why_text = _sanitize(f.detail) if f.detail else ""
+    if f.id == "A1" and f.status == WARN and why_text:
+        # Same B-877 reasoning as the tag above, applied to the row's own "why" line:
+        # `f.detail` (unchanged — checks/_config.py owns it, and baseline.fingerprint()
+        # hashes it, so it must not move) leads with "Active legs N/3: <list or 'none'>",
+        # worded for the PASS/FAIL cases where that count is a determination. On a WARN
+        # it is a floor, not a count, so this display-only clause is prepended in front
+        # of it — never written back into `f.detail` itself.
+        why_text = (
+            "The trifecta legs could not be fully determined this run, not a confirmed "
+            "active trifecta — " + why_text
+        )
     # B-405: when the per-item --compact trim below still isn't enough to fit the
     # documented 4096-char budget on a large real config, render_dashboard retries
     # with progressively larger `why_drop_severities` sets -- dropping the why line
@@ -2499,6 +2649,7 @@ def _skill_inventory(ctx) -> list[dict]:
     py_map = getattr(ctx, "installed_skill_py", None) or {}
     sh_map = getattr(ctx, "installed_skill_shell", None) or {}
     js_map = getattr(ctx, "installed_skill_js", None) or {}
+    declared_map = getattr(ctx, "installed_skill_declared", None) or {}
     dir_map = getattr(ctx, "installed_skill_dirs", None) or {}
     out: list[dict] = []
     # One check-sized cooperative budget for the WHOLE per-skill loop (mirrors run_all
@@ -2516,6 +2667,9 @@ def _skill_inventory(ctx) -> list[dict]:
         skill_ctx.installed_skill_py = {name: py_map.get(name, [])}
         skill_ctx.installed_skill_shell = {name: sh_map.get(name, [])}
         skill_ctx.installed_skill_js = {name: js_map.get(name, [])}
+        # B-612: without this the row reads a declared-file finding the full audit's own
+        # B13 already reported — the same bytes, two answers on one screen.
+        skill_ctx.installed_skill_declared = {name: declared_map.get(name, [])}
         # B-751: carry this skill's archive-traversal violations across the same bridge
         # B-551 built for coverage gaps. Without it the cascade in check_installed_skills
         # cannot see the escape and falls through to the next arm, so the row for a skill
@@ -3091,7 +3245,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
                   openclaw_detected: bool = True, ctx=None,
                   verbose: bool = False, color: bool = False,
                   tamper: ScoreResult | None = None, plugin_sweep=None,
-                  plugins_deferred: bool = False) -> str:
+                  plugins_deferred: bool = False,
+                  build_digest: str | None = None) -> str:
     findings = deduplicate_findings(findings)
     icon = _color_icons(_ICON_ASCII if ascii_only else _ICON, color)
     ok = "[OK]" if ascii_only else "✅"
@@ -3108,7 +3263,40 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # Mascot + wordmark: header line only, once (design-system Foundations);
     # --ascii drops the mascot and folds the separator (brand.header()).
     head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
-    lines = [head, "=" * 44]
+    lines = [head]
+    # B-869: an optional self-computed content fingerprint (integrity.build_fingerprint(),
+    # wired in by cli.py), distinct from __version__/__released__ — strings a human edits
+    # by hand and can forget to bump, so a dev checkout can print the exact release
+    # version while its files differ. Omitted by every pre-existing caller/test, which
+    # reproduces the prior header unchanged.
+    if build_digest:
+        lines.append(f"Build: {build_digest}")
+    lines.append("=" * 44)
+    # C-571: run-level grounding disclosure, ahead of everything else — this is a fact
+    # about the BUILD, not about this run's findings, so it belongs above the per-run
+    # disclosures that follow. `openclawdist.grounding_gap` answers None on anything it
+    # cannot place past GROUNDED_MAX_VERSION (unknown install, unparseable/pre-release
+    # string, a version too short to be a calendar release), so this never fires on
+    # "we don't know" — only on a build genuinely newer than any check here was measured
+    # against. Presentation-only: never touches score/grade/cap (¶2.4/Golden Rule #5 —
+    # this is honesty about a gap, not a manufactured FAIL), and it does not name which
+    # checks are affected because that set is not sound to enumerate — see B363's B-833
+    # fix for the one flip that WAS found, entirely inside the check, with no schema-path
+    # diff to hang a static list on.
+    _gap = _openclawdist.grounding_gap(
+        getattr(ctx, "installed_dist_version", None) if ctx is not None else None
+    )
+    if _gap is not None:
+        gap_icon = "[!]" if ascii_only else "⚠️ "
+        _grounded_str = ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION)
+        _running_str = ".".join(str(p) for p in _gap)
+        lines.append(
+            f"{gap_icon}This build's checks were last grounded against OpenClaw up to "
+            f"{_grounded_str}; you are running {_running_str}. Some checks assume "
+            "behavior measured on the older build and may be mis-grounded on this one — "
+            "a real gap can still read as a clean PASS. Not a finding; the score below "
+            "is unchanged."
+        )
     # B-313/B-399: disclosed ABOVE the grade, unconditionally whenever any check degraded
     # this run (crashed, timed out, or — B-399 — ran to completion but could not reach a
     # verdict for an engine-side reason, e.g. an input it expected to read that turned out
@@ -3380,7 +3568,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     _live_tail = ("The live-behaviour result above is what speaks to that."
                   if _live_tested else "Use the live tests above to probe actual resistance.")
     lines.append(
-        "Static audit — this bounds what your agent *can* do, not how it *behaves* under a"
+        "Static audit — this bounds what your agent CAN do, not how it BEHAVES under a"
         " live attack. OpenClaw core has no runtime egress/taint gate, so even a clean"
         f" Lethal Trifecta here can still be chained by prompt-injection at runtime: {_clean_subject}"
         " means \"not statically lethal-capable\", not \"runtime-proof\". " + _live_tail
@@ -3401,7 +3589,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # treatment the cap sentence and the "Why N/100" line already get above.
     if getattr(score, "graded", True):
         lines.append(
-            "Runtime exception (I-025): a trajectory-indicator match MAY CAP this grade"
+            "Runtime exception (RUNTIME-CAP): a trajectory-indicator match MAY CAP this grade"
             " (never raise it) — every other capability-vs-runtime corroboration still"
             " cannot move the grade at all; the behavioral verb-sequence/audit-trail layer"
             " below has a separate exception of its own."
@@ -3425,7 +3613,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 # ordering the card, the HTML and the PDF print. This paragraph keeps its
                 # own framing and its reason phrase; a private copy of the shared sentence
                 # is what made 56 of the 64 signal combinations say it two to four times.
-                "Runtime signal (I-025): a trajectory-indicator match fired — "
+                "Runtime signal (RUNTIME-CAP): a trajectory-indicator match fired — "
                 f"{_runtime_cap_phrase(score.runtime_cap_reason)}."
             )
     # F-155: a SECOND exception to "this grade never reflects runtime behaviour" — a
@@ -3444,7 +3632,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         _live_phrase = _live_injection_cap_phrase(score.live_injection_cap_reason)
         if getattr(score, "graded", True):
             lines.append(
-                "Live-test exception (F-155): this run's grade WAS capped by a submitted "
+                "Live-test exception (LIVE-TEST-CAP): this run's grade WAS capped by a submitted "
                 f"VULNERABLE verdict — {_live_phrase}."
                 " RESISTANT or no submission would have changed nothing."
             )
@@ -3452,7 +3640,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
             # C-423: a submitted VULNERABLE verdict is the single most serious thing this
             # report can carry. It is stated whether or not a grade was issued.
             lines.append(
-                "Live-test result (F-155): a submitted VULNERABLE verdict — "
+                "Live-test result (LIVE-TEST-CAP): a submitted VULNERABLE verdict — "
                 # B-600 follow-up: the tail sentence deliberately does NOT live here.
                 # The cascade line above already states the cap ONCE, with rank (which
                 # signal led, which merely also fired) — the same sentence and the same
@@ -3475,13 +3663,13 @@ def render_report(findings: list[Finding], score: ScoreResult,
         _beh_phrase = _behavioral_cap_phrase(score.behavioral_cap_reason)
         if getattr(score, "graded", True):
             lines.append(
-                "Behavioral exception (F-154): this run's grade WAS capped by a fired "
+                "Behavioral exception (BEHAVIORAL-CAP): this run's grade WAS capped by a fired "
                 f"behavioral detector — {_beh_phrase}."
                 " A clean --behavioral/--full replay would have changed nothing."
             )
         else:
             lines.append(
-                "Behavioral result (F-154): a behavioral detector fired — "
+                "Behavioral result (BEHAVIORAL-CAP): a behavioral detector fired — "
                 # B-600 follow-up: the tail sentence deliberately does NOT live here.
                 # The cascade line above already states the cap ONCE, with rank (which
                 # signal led, which merely also fired) — the same sentence and the same
@@ -3502,16 +3690,16 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # The graded branch below gets this from `_cap_primary_reason_text`; the ungraded
         # branch was written flat and said the unreadable thing in both cases.
         if _sandbox_config_blind(ctx, score):
-            lines.append(f"Config visibility (B-776): {_SANDBOX_BLIND_SENTENCE}")
+            lines.append(f"Config visibility (CONFIG-SANDBOX): {_SANDBOX_BLIND_SENTENCE}")
         elif getattr(score, "config_blind_reason", None) == "absent":
             lines.append(
-                "Config visibility (B-306): no OpenClaw config found in this home, so"
+                "Config visibility (CONFIG-BLIND): no OpenClaw config found in this home, so"
                 " config-derived checks degraded to UNKNOWN. Point --home at the"
                 " directory that holds your openclaw.json and re-run."
             )
         else:
             lines.append(
-                "Config visibility (B-306): openclaw.json could not be read/parsed this run,"
+                "Config visibility (CONFIG-BLIND): openclaw.json could not be read/parsed this run,"
                 " so config-derived checks degraded to UNKNOWN. Fix openclaw.json (valid"
                 " JSON, owner-readable) and re-run."
             )
@@ -3520,10 +3708,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # "absent" from "unreadable" — both said "could not be read/parsed", which is
         # simply untrue when nothing was ever found. The sandboxed case needs its own
         # wording regardless, so it is checked first rather than folded into that gap.
-        lines.append(f"Config visibility (B-776): {_SANDBOX_BLIND_SENTENCE}")
+        lines.append(f"Config visibility (CONFIG-SANDBOX): {_SANDBOX_BLIND_SENTENCE}")
     elif score.config_blind_capped:
         lines.append(
-            "Config visibility (B-306): openclaw.json could not be read/parsed this run, so"
+            "Config visibility (CONFIG-BLIND): openclaw.json could not be read/parsed this run, so"
             " this grade was hard-capped rather than let a config-derived check's honest"
             " UNKNOWN quietly raise it. Fix openclaw.json (valid JSON, owner-readable) and"
             " re-run for a real verdict."
@@ -4360,10 +4548,25 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             f"  {sep}  {n_issues} {issues_word}",
         ]
     else:
+        _headline = _urgent_headline(findings, risk=risk)
         grade_lines = [
-            f"{head} {sep} {_urgent_headline(findings, risk=risk)}",
+            f"{head} {sep} {_headline}",
             f"{_missing_layers_sentence(score)}  {sep}  {n_issues} {issues_word}",
         ]
+        if _headline != _NOTHING_URGENT_SENTENCE:
+            # CLAWSECCHECK headline-id-leak: this headline states the risk, never the
+            # check id (design-system.md Layer 0), and this card's own Skills/MCP
+            # detail blocks only ever carry an id when `ctx` is available AND that
+            # roster is non-empty (B-506) — so a plain `--dashboard` reader holding
+            # only this card, on a run whose findings never touch an installed skill
+            # or configured MCP server, had no path to a check id at all. One line,
+            # no id, pointing at where the id reliably lives instead — the full text
+            # report, which carries it one scroll below its own headline regardless
+            # of grading (`_urgent_headline`'s docstring).
+            grade_lines.append(
+                "For that finding's check id (needed for `--explain <id>`), see the "
+                "full report — plain `clawseccheck` or `--save <path>` / `--html <path>`."
+            )
     _covered_line = _not_fully_covered_line(score)
     if _covered_line:
         grade_lines.append(_covered_line)
@@ -4501,14 +4704,29 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # omitted when there is genuinely nothing to show for it (see the docstring).
     # None of these depend on why_drop_severities, so they're computed once, outside
     # the budget-retry loop below.
+    # B-892: this tail block is the SAME "--dashboard --full" chat card
+    # `_worth_a_glance_lines` redacts itself for below (see that function's own
+    # docstring: "this card is explicitly designed to be pasted into chat"), so the
+    # four blocks below get the identical `_redact_home_paths` fold, applied here at
+    # this render boundary rather than inside `_plugins_inventory_lines` /
+    # `_mcp_inventory_lines` / `_behavioral_block_lines` / `_second_opinion_lines`
+    # themselves -- those renderers are shared with the plain-text `--full` report
+    # (`render_subject_inventory`), which stays unredacted by design (the owner's own
+    # machine -- see `_redact_home_paths`'s own docstring). Confirmed producers of an
+    # absolute path reaching these blocks: checks/_config.py's B1/B11 fixes (a
+    # `chmod 700 {ctx.home}` suggestion) and checks/_egress.py's B82 evidence.
+    # `_risk_chain_lines`/`_coverage_lines`/coverage-page lines below are untouched --
+    # out of scope for B-892, no confirmed path-bearing producer traced to them.
     tail_block = ""
     plugin_lines = _plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only, compact=compact)
     if plugin_lines:
-        tail_block += "\n" + f"{sep} Plugins {sep}" + "\n" + "\n".join(plugin_lines) + "\n"
+        tail_block += ("\n" + f"{sep} Plugins {sep}" + "\n"
+               + "\n".join(_redact_home_paths(ln) for ln in plugin_lines) + "\n")
 
     if inv is not None and inv["mcp"]:
         mcp_lines = _mcp_inventory_lines(inv, ascii_only=ascii_only, compact=compact)
-        tail_block += "\n" + f"{sep} MCP {sep}" + "\n" + "\n".join(mcp_lines) + "\n"
+        tail_block += ("\n" + f"{sep} MCP {sep}" + "\n"
+               + "\n".join(_redact_home_paths(ln) for ln in mcp_lines) + "\n")
 
     risk_lines = _risk_chain_lines(risk or [], ascii_only=ascii_only, compact=compact)
     if risk_lines:
@@ -4516,12 +4734,13 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
 
     behavioral_lines = _behavioral_block_lines(behavioral, ascii_only=ascii_only)
     if behavioral_lines:
-        tail_block += "\n" + f"{sep} Behavioural {sep}" + "\n" + "\n".join(behavioral_lines) + "\n"
+        tail_block += ("\n" + f"{sep} Behavioural {sep}" + "\n"
+               + "\n".join(_redact_home_paths(ln) for ln in behavioral_lines) + "\n")
 
     second_opinion_lines = _second_opinion_lines(adjudication, ascii_only=ascii_only)
     if second_opinion_lines:
         tail_block += ("\n" + f"{sep} Second opinion (advisory) {sep}" + "\n"
-               + "\n".join(second_opinion_lines) + "\n")
+               + "\n".join(_redact_home_paths(ln) for ln in second_opinion_lines) + "\n")
 
     coverage_lines = _coverage_lines(findings, ascii_only=ascii_only)
     if coverage_lines:
@@ -4534,7 +4753,14 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # caller passes nothing and reproduces the exact prior card, byte-identical.
     if coverage_page:
         from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
-        cov_page_lines = _coverage_page_lines(coverage_page, ascii_only=ascii_only)
+        # C-566: reasons are dropped under --compact, same "budget beats extra detail"
+        # rule --compact already applies everywhere else on this card (see
+        # `coverage_page_lines`'s own `show_reasons` note) — a fixed small budget and
+        # per-id reason text otherwise compound into `_hard_truncate_compact` cutting
+        # this card's tail blind, up to and including the "Full pipeline detail"
+        # pointer below.
+        cov_page_lines = _coverage_page_lines(coverage_page, ascii_only=ascii_only,
+                                              show_reasons=not compact)
         if cov_page_lines:
             tail_block += ("\n" + f"{sep} Coverage page {sep}" + "\n"
                           + "\n".join(cov_page_lines) + "\n")
@@ -4634,7 +4860,7 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     # longer than that, and `:<39` pads but never truncates — so the box art broke open
     # on exactly the runs the ungraded work introduced. Grow to fit; never shrink below
     # the established 39 so a graded, uncapped card renders byte-identically to before.
-    width = max([39] + [len(ln) for ln in lines])
+    width = max([39] + [len(ln) + 1 for ln in lines])  # widest line keeps one column of margin
     # Mascot header line, once (design-system Foundations); --ascii drops it to
     # stay pure-ASCII, matching render_dashboard's convention.
     header = "" if ascii_only else f"{brand.header()}\n"
@@ -4895,7 +5121,17 @@ def render_events(events, ascii_only: bool = False, *,
     else:
         header = f"showing {len(body)} event(s) (most recent last)"
     if pruned_note is not None:
-        header += f"; {_sanitize(str(pruned_note.get('message', '')))}"
+        # B-847: the windowed header above already ends mid-sentence ("...see them"), so
+        # joining the pruning note with "; " reads naturally there. But this branch also
+        # runs when `shown_from` is 0 -- i.e. the UNWINDOWED case (a short journal, or an
+        # explicit `--all`) -- where the header ends a full sentence ("(most recent
+        # last)") and the pre-C-448 text joined the note with " -- " instead. C-448
+        # promised `--all` reproduces the pre-C-448 output byte-for-byte; unconditionally
+        # switching to "; " broke that promise for exactly the real-machine case (a
+        # rotated journal) that promise exists to cover. Only the windowed sentence is
+        # new text with no pre-C-448 form to match, so only it gets the new separator.
+        sep = "; " if shown_from else " — "
+        header += f"{sep}{_sanitize(str(pruned_note.get('message', '')))}"
     lines = ["Agent Watch journal", "=" * 30, header + ":", ""]
     for e in visible:
         ts = str(e.get("ts", "?"))
@@ -5915,8 +6151,13 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
                 ctx=None, skill_sweep: dict | None = None, plugin_sweep=None,
                 live_test_vulnerable: bool = False, live_test_reason: str | None = None,
                 behavioral_fired_ids=frozenset(), ledger=None,
-                version: str | None = None) -> str:
-    actions = suggest_actions(findings, score)
+                version: str | None = None,
+                home: "str | None" = None, data_dir: "str | None" = None) -> str:
+    # B-873: forwarded verbatim to suggest_actions, same optional/None-default shape as
+    # `version` above — a caller that omits them (the public library shape; every
+    # pre-existing call, incl. adjudication.render_judged_json's internal one) gets
+    # exactly the pre-B-873 "next_actions" commands, unchanged.
+    actions = suggest_actions(findings, score, home=home, data_dir=data_dir)
     _json_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if ctx is not None else None
 
     def _finding_dict_json(f: Finding) -> dict:
@@ -6185,8 +6426,21 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         icon_char = "✕" if f.status in FAIL_WEIGHT_STATUSES else "⚠"
         card_cls = "finding is-fail" if f.status in FAIL_WEIGHT_STATUSES else "finding"
         f_title = esc(_sanitize(f.title))
+        # B-825: `detail_plain` (unredacted) stays the `already_shown` comparison key below
+        # -- evidence de-dup has to match against the SAME text `_evidence_bullets` sees, or
+        # an entry that is only a duplicate after redaction collapses two different-looking
+        # raw strings into one would slip past the check and print twice. `_redact_home_paths`
+        # is applied once, at the final display step, exactly where `_sanitize_tree` (the
+        # `--json` family) and `pdf.py`'s `_finding_block` already apply it -- composed the
+        # same way, `_redact_home_paths(_sanitize(...))`. Before this, this renderer was the
+        # one shareable/attachable surface (docs/USAGE.md groups `--html` with `--pdf`/
+        # `--sarif`/`--badge` as the "canonical, deterministic output") that skipped the
+        # second pass: a real-account-home path that `_username_safe_path` did not
+        # collapse against a spoofed `$HOME` reached `--html` raw while `--json`'s
+        # `_sanitize_tree` and `--pdf`'s own call still caught it via the same regex, which
+        # is $HOME-independent (B-825; tests/test_b825_html_path_redaction.py).
         detail_plain = _sanitize(f.detail) if f.detail else ""
-        f_detail = esc(detail_plain)
+        f_detail = esc(_redact_home_paths(detail_plain))
         why_html = (f'<p class="finding-line"><span class="finding-key">{esc(label_why)}</span> '
                     f'{f_detail}</p>') if f.detail else ""
 
@@ -6209,9 +6463,11 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
                 f.evidence, limit=12, indent="", bullet="", already_shown=detail_plain,
             )
         ] if (f.evidence and f.status in ACTIONABLE_STATUSES) else []
+        # B-825: same final-step redaction as `f_detail` above, applied after the cap/dedup
+        # decision so `already_shown` still compares like-for-like (see the comment there).
         ev_html = ("" if not ev_rows else
                    '<ul class="finding-evidence">'
-                   + "".join(f"<li>{esc(r)}</li>" for r in ev_rows)
+                   + "".join(f"<li>{esc(_redact_home_paths(r))}</li>" for r in ev_rows)
                    + "</ul>")
 
         # B-622: the same condition the text report applies (`report.py`'s _render_finding)

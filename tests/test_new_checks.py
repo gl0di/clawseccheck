@@ -111,18 +111,23 @@ def test_b18_subagents_exec_risky_with_approval_passes():
     assert check_subagents(c).status == "PASS"
 
 
-def test_b18_subagents_elevated_only_with_exec_gate_still_warns():
-    # B-644 negative control: tools.exec.mode/security/ask is scoped to the exec/bash
-    # surface only (grounded in _capability.py's B-395 comment: "tools.elevated gates
-    # the exec/bash privileged-command escalation surface ... it is not one of
-    # OpenClaw's tool-policy resolution layers") -- it has no bearing on a bare
-    # tools.elevated.allowFrom grant, so setting tools.exec.mode='ask' must not read
-    # as "elevated/exec actions require approval" when the only risky tool present is
-    # "elevated". This used to assert PASS, which was pinning the exact bug B-644
-    # describes.
+def test_b18_subagents_elevated_only_with_exec_gate_passes():
+    # B-848: this used to assert WARN, pinning a wrong premise from B-644's own
+    # negative control. The comment it cited (_capability.py's B-395 note,
+    # "tools.elevated gates the exec/bash privileged-command escalation surface ...
+    # it is not one of OpenClaw's tool-policy resolution layers") answers a
+    # different question -- whether `tools.elevated` is one of the layers that
+    # decide which tools an agent can even REACH, not whether tools.exec.* governs
+    # elevated's own approval bypass. It does: the installed OpenClaw dist
+    # (2026.9.5) gates an elevated "full" request's approval bypass behind the same
+    # tools.exec fields (`bash-tools-BBKNLrRH.mjs:4085,4090` --
+    # `modePolicyAllowsFullBypass = modePolicy.security === "full" && modePolicy.ask
+    # === "off"`), so tools.exec.mode='ask' DOES force human approval on it. A bare
+    # tools.elevated.allowFrom grant (no other risky tool) with a real exec gate set
+    # must therefore read as PASS, not WARN.
     c = _ctx({"agents": {"subagents": {"maxConcurrent": 4}},
               "tools": {"elevated": {"allowFrom": ["o"]}, "exec": {"mode": "ask"}}})
-    assert check_subagents(c).status == "WARN"
+    assert check_subagents(c).status == "PASS"
 
 
 def test_b18_subagents_no_risky_unknown():

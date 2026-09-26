@@ -86,19 +86,69 @@ def _sarif_text(s: str) -> str:
 # OTHER root (e.g. `--home /mnt/backup`, or this suite's own /tmp HOME-isolation
 # sandbox) still reached `analysis_completeness.limit_hits` verbatim after that fix --
 # pinned as a known residual by `tests/test_b620_sarif_limit_hits_path.py` until this
-# change. Matches an absolute-path TOKEN (POSIX or Windows) embedded anywhere in a
-# `limit_hits` sentence -- the real producers wrap it in parens or single quotes
-# (`collector.py`'s `"... ({resolved})"` and `"cron store '{jobs_json}' ..."`), never
-# bare, so stopping at the first whitespace/quote/paren captures exactly the path and
-# nothing either side of it. The leading `(?<![\w~])` matters: without it this matched
+# change. Matches an absolute-path TOKEN (POSIX, Windows-drive or Windows-UNC) embedded
+# anywhere in a `limit_hits` sentence.
+#
+# B-862: the first version of this regex stopped at the first whitespace/quote/paren
+# unconditionally, on the claim that a real producer "never" embeds a bare path and
+# always wraps it in parens or single quotes (`collector.py`'s `"... ({resolved})"` and
+# `"cron store '{jobs_json}' ..."`). Both halves of that claim were false and a review
+# reproduced it directly against this function: (a) a path CONTAINING a space is the
+# common case for either wrapper (`"... (/mnt/backup/Acme Corp Client/workspace) ..."`),
+# and the old char class stopped at that internal space, leaking every segment after
+# it; (b) collector.py did have bare (unwrapped) producers after all -- the
+# `_collect_plugin_trust` cluster interpolated `db_path` with no delimiter at all,
+# unlike every other producer in the file. (b) is fixed at the source instead of here:
+# those call sites now quote `db_path` like their siblings do (`'{db_path}'`), so the
+# invariant this regex leans on -- a REAL path is always delimited -- is restored by
+# construction rather than re-asserted in a comment; `tests/test_module_layout.py`-style
+# drift back to a bare interpolation would only be caught by review, same as before.
+#
+# (a) is fixed here: the two delimited shapes (`(...)` and `'...'`) each get their own
+# lookaround alternative that matches up to the delimiter's own close, not the first
+# space/quote-lookalike character inside it -- so an embedded space no longer truncates
+# the match. A bare, undelimited token (no longer expected, but kept as a fallback in
+# case a future producer forgets to quote one) still stops at the first whitespace/
+# quote/paren, same limitation as before, since there is no closing delimiter to match
+# up to. The alternatives are ordered delimited-first: at a position right after `(` or
+# `'`, Python's `|` takes the FIRST alternative that matches at that position, not the
+# longest, so the bare fallback must never come before its delimited counterpart or it
+# would win the shorter, wrong match.
+#
+# NOT fixed, and accepted as a residual (C-135 attempted and retracted): a path that
+# itself contains the SAME character used to delimit it, e.g. an apostrophe inside a
+# single-quoted path (`"cron store '/mnt/backup/Bob's stuff/jobs.json' ..."`). The
+# lookaround match for `'...'` correctly stops at the FIRST `'` after the opening one,
+# which here is the apostrophe in "Bob's", not the real closing quote -- so "Bob's
+# stuff" still survives. The obvious-looking fix, matching to the LAST `'` in the
+# sentence instead, was tried and is unsound: at least one real producer
+# (`_flag_shadowed_cron_store`) embeds TWO separately-quoted paths in one message
+# (`"legacy cron store '{jobs_json}' ... cron_jobs table in '{db_path}' holds ..."`), so
+# a greedy last-quote match would span across both paths and the prose between them,
+# mangling a message that was not even leaking anything extra -- trading this FP for a
+# worse one. A parenthesized path has the same theoretical exposure if the path itself
+# contains `)`, though no producer does that today. `resolved.name` / `jobs_json.name`-
+# only producer text is unaffected (never a full path, so never reaches this class).
+# There is no `.clawseccheckignore`/fingerprint entry to preserve here (this is not a
+# `--vet`/audit FAIL id, just an internal string transform), so the disclosure is this
+# comment plus `tests/test_b862_sarif_limit_hits_delimited_paths.py`, which pins the
+# residual in both directions (closes on a plain space, stays open -- and named -- on an
+# embedded delimiter character).
+#
+# The leading `(?<![\w~])` on the bare alternatives matters: without it this matched
 # "/skills" out of ordinary prose like "bootstrap/skills" (mangling it to
 # "bootstrapskills") and matched the "/.cache/x" tail of an ALREADY-folded
 # "~/.cache/x" (leaving a stray "~" and a truncated path) -- both found by construction
-# while writing this, not by a separate review pass. Requiring the character before the
-# slash be neither a word character nor "~" restricts matches to a path that starts a
-# token (after whitespace, an opening paren/quote, or the string start).
+# while writing B-633, not by a separate review pass. Requiring the character before the
+# slash be neither a word character nor "~" restricts a bare match to a path that starts
+# a token (after whitespace, an opening paren/quote, or the string start). The delimited
+# alternatives need no such guard: the lookbehind on `(` or `'` already anchors them.
 _NON_HOME_ABS_PATH_RE = re.compile(
-    r"(?<![\w~])/[^\s'\"()]+|(?<![\w~])[A-Za-z]:\\[^\s'\"()]+"
+    r"(?<=\()(?:/[^()]*|[A-Za-z]:\\[^()]*|\\\\[^()]*)(?=\))"
+    r"|(?<=')(?:/[^']*|[A-Za-z]:\\[^']*|\\\\[^']*)(?=')"
+    r"|(?<![\w~])/[^\s'\"()]+"
+    r"|(?<![\w~])[A-Za-z]:\\[^\s'\"()]+"
+    r"|(?<![\w~])\\\\[^\s'\"()]+"
 )
 
 

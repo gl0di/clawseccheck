@@ -134,6 +134,15 @@ def test_a_probe_says_it_did_not_record(bed):
     assert "report it again" in out, out
 
 
+def test_a_probe_with_no_drift_promises_no_repeat_alert(bed):
+    """With the baseline unchanged there is nothing outstanding; saying the next run will
+    "report it again" would send a poller looking for an alert that never comes."""
+    home, store = bed
+    _rc, out = _run(home, store, "--probe")
+    assert "This was a probe" in out, out
+    assert "report it again" not in out, out
+
+
 def test_a_probe_on_a_first_ever_run_creates_no_baseline(tmp_path):
     """A probe must not quietly establish monitoring. Someone polling before ever running
     the check would otherwise get a baseline they never asked for — and, worse, one taken

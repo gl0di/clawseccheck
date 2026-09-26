@@ -38,11 +38,9 @@ Stdlib-only, offline, writes nothing outside pytest's own machinery.
 """
 from __future__ import annotations
 
-import re
-import zlib
-
 import pytest
 
+from _pdftext import shown_strings
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, LOW, PASS, UNKNOWN, Finding
 from clawseccheck.layers import (
     LAYER_LIVE_BEHAVIOUR,
@@ -96,30 +94,17 @@ def _graded():
 
 
 def _searchable(artifact) -> str:
-    """The artifact as text, with any Flate-compressed stream inflated alongside it.
+    """The artifact as text, decompressing a PDF's content streams by ``/Length``.
 
     Same idiom as tests/test_b512_ungraded_writers.py::_searchable — without it a PDF
     assertion silently tests nothing, because the strings live inside a deflate stream.
-
-    One step further than that module needs: a whole SENTENCE (rather than a short
-    token like ``Capped from 100``) is never contiguous in a PDF — `_PageFlow.wrapped`
-    breaks it across several ``(...) Tj`` show operators, and ``(``/``)`` arrive escaped.
-    So the drawn strings are also unescaped, re-joined and whitespace-collapsed; without
-    that, every PDF assertion here would fail on a correct renderer.
+    Uses ``tests/_pdftext.py``'s ``shown_strings``, which already unescapes each drawn
+    string's ``(``/``)`` — see that module's docstring for why parsing by ``/Length``
+    (not scanning for ``endstream``) matters.
     """
-    text = artifact.decode("latin-1") if isinstance(artifact, bytes) else artifact
-    if not isinstance(artifact, bytes) or b"FlateDecode" not in artifact:
-        return text
-    for match in re.finditer(rb"stream\r?\n(.*?)endstream", artifact, re.S):
-        try:
-            text += zlib.decompress(match.group(1)).decode("latin-1")
-        except Exception:  # not every stream is deflate, and a bad one proves nothing
-            continue
-    drawn = " ".join(
-        re.sub(r"\\([()\\])", r"\1", m.group(1))
-        for m in re.finditer(r"\(((?:[^()\\]|\\.)*)\)\s*Tj", text)
-    )
-    return text + "\n" + re.sub(r"\s+", " ", drawn)
+    if not isinstance(artifact, bytes):
+        return artifact
+    return shown_strings(artifact)
 
 
 def _surfaces(score) -> dict:

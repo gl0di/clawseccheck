@@ -314,12 +314,130 @@ def test_b32_fail_evidence_populated():
 
 
 # ============================================================
+# B-835 — plugins (openclaw@2026.9.5 GATEWAY_CONTROL_PLANE_TOOLS), the reversed
+# cron/automations alias, and normalisation (case/whitespace).
+# ============================================================
+
+def test_b32_plugins_in_allow_fails():
+    """openclaw@2026.9.5 added "plugins" to GATEWAY_CONTROL_PLANE_TOOLS AND to
+    DEFAULT_GATEWAY_HTTP_TOOL_DENY (dangerous-tools-D5_2xo_6.mjs:25,35-39) — the exact
+    CLI-measured regression this task fixes: gateway.tools.allow:["plugins"] used to
+    PASS."""
+    cfg = {"gateway": {
+        "bind": "loopback",
+        "tools": {"allow": ["plugins"]},
+    }}
+    f = check_control_plane_mutation(_ctx(cfg))
+    assert f.status == FAIL
+    assert "plugins" in f.detail
+
+
+def test_b32_canonical_automations_in_allow_fails():
+    """Before this fix the set held only the legacy alias "cron", so the CANONICAL
+    name "automations" (the more likely spelling in a real config) PASSED — backwards
+    from the vendor's own TOOL_NAME_ALIASES direction (cron -> automations)."""
+    cfg = {"gateway": {
+        "bind": "loopback",
+        "tools": {"allow": ["automations"]},
+    }}
+    f = check_control_plane_mutation(_ctx(cfg))
+    assert f.status == FAIL
+    assert "automations" in f.detail
+
+
+def test_b32_cron_alias_still_fails_and_is_reported_as_written():
+    """Regression guard for the alias fix: "cron" must still FAIL (it resolves to the
+    canonical "automations"), and — since matching is now by normalised identity but
+    reporting is by the operator's own spelling — the detail must say "cron", not the
+    canonical form the operator never wrote."""
+    cfg = {"gateway": {
+        "bind": "loopback",
+        "tools": {"allow": ["cron"]},
+    }}
+    f = check_control_plane_mutation(_ctx(cfg))
+    assert f.status == FAIL
+    assert "cron" in f.detail
+    assert "cron" in f.evidence
+
+
+def test_b32_mixed_case_and_whitespace_names_fail():
+    cfg = {"gateway": {
+        "bind": "loopback",
+        "tools": {"allow": [" Plugins ", "AUTOMATIONS", "  CRON"]},
+    }}
+    f = check_control_plane_mutation(_ctx(cfg))
+    assert f.status == FAIL
+    # normalised-dedup: three spellings straddling two canonical tools (cron and
+    # AUTOMATIONS both resolve to "automations") still report each written spelling.
+    assert set(f.evidence) == {"Plugins", "AUTOMATIONS", "CRON"}
+
+
+def test_b32_nodes_alone_in_allow_does_not_fail():
+    """Deliberate scope decision (B-835): "nodes" ("Nodes + devices" — device control)
+    is in the vendor's DEFAULT_GATEWAY_HTTP_TOOL_DENY and GATEWAY_OWNER_ONLY_CORE_TOOLS
+    but NOT in GATEWAY_CONTROL_PLANE_TOOLS — the vendor itself does not call it a
+    control-plane tool, and neither does this check. Locks the decision in so a future
+    change does not silently widen B32's scope past what it is named for."""
+    cfg = {"gateway": {
+        "bind": "loopback",
+        "tools": {"allow": ["nodes"]},
+    }}
+    f = check_control_plane_mutation(_ctx(cfg))
+    assert f.status != FAIL
+
+
+def test_b32_openclaw_alone_in_allow_does_not_fail():
+    """Same scope decision as "nodes" above, for the "openclaw" tool ("Delegate
+    OpenClaw setup and repair") — present in GATEWAY_OWNER_ONLY_CORE_TOOLS, absent
+    from GATEWAY_CONTROL_PLANE_TOOLS."""
+    cfg = {"gateway": {
+        "bind": "loopback",
+        "tools": {"allow": ["openclaw"]},
+    }}
+    f = check_control_plane_mutation(_ctx(cfg))
+    assert f.status != FAIL
+
+
+def test_b32_harmless_tool_name_does_not_fail():
+    cfg = {"gateway": {
+        "bind": "loopback",
+        "tools": {"allow": ["weather_lookup"]},
+    }}
+    f = check_control_plane_mutation(_ctx(cfg))
+    assert f.status != FAIL
+
+
+def test_b32_non_string_allow_entry_does_not_crash():
+    cfg = {"gateway": {
+        "bind": "loopback",
+        "tools": {"allow": [None, 42, "weather_lookup"]},
+    }}
+    f = check_control_plane_mutation(_ctx(cfg))
+    assert f.status != FAIL
+
+
+def test_b32_deny_normalises_cron_alias_to_automations():
+    """gateway.tools.deny:["cron"] must be recognised as denying the canonical
+    "automations" control-plane tool (an exposed gateway that denies the alias is
+    just as covered as one that denies the canonical name)."""
+    cfg = {"gateway": {
+        "bind": "0.0.0.0:8080",
+        "auth": {"mode": "token", "token": "a" * 32},
+        "tools": {"deny": ["gateway", "cron", "plugins", "sessions_spawn",
+                            "sessions_send", "config.apply", "update.run"]},
+    }}
+    f = check_control_plane_mutation(_ctx(cfg))
+    assert f.status == PASS
+
+
+# ============================================================
 # Reliability: fixture-based end-to-end
 # ============================================================
 
 from clawseccheck import audit  # noqa: E402
 
-RELIABILITY = Path(__file__).resolve().parent.parent / "fixtures" / "reliability"
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
+RELIABILITY = FIXTURES / "reliability"
 
 
 def test_b30_bad_fixture_fails():
@@ -332,3 +450,21 @@ def test_b32_bad_fixture_fails():
     _, findings, _ = audit(RELIABILITY / "bad_b32_allow_control_plane")
     by_id = {f.id: f for f in findings}
     assert by_id["B32"].status == FAIL
+
+
+def test_b32_bad_plugins_fixture_fails_end_to_end():
+    """B-835 end-to-end: gateway.tools.allow:["plugins"] over a real audit() run."""
+    _, findings, _ = audit(FIXTURES / "bad_b32_plugins_gateway_allow")
+    by_id = {f.id: f for f in findings}
+    assert by_id["B32"].status == FAIL
+    assert "plugins" in by_id["B32"].detail
+
+
+def test_b32_clean_control_plane_denied_fixture_passes_end_to_end():
+    """B-835: enrolled in the zero-FAIL clean corpus (tests/test_fp_corpus.py) by the
+    clean_* naming convention — a full audit() run must not FAIL B32 (or anything
+    else) on a config that explicitly denies every control-plane tool this fix
+    grounds, spelled out under their canonical (not alias) names."""
+    _, findings, _ = audit(FIXTURES / "clean_b32_control_plane_denied")
+    by_id = {f.id: f for f in findings}
+    assert by_id["B32"].status == PASS

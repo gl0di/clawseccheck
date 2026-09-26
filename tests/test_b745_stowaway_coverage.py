@@ -110,3 +110,32 @@ def test_no_stowaway_means_no_note_at_all(tmp_path):
     f = check_installed_skills(collect(home))
     assert f.status == WARN, f.status
     assert not any("stowaway" in e for e in f.evidence), f.evidence
+
+
+def test_coverage_note_names_the_owning_skill_not_just_the_cascade_winner(tmp_path):
+    """CLAWSECCHECK-B-857 item 3: `ctx.stowaway_files` entries used to be bare paths
+    relative to their OWN skill, with no skill name — indistinguishable from another
+    skill's file of the same relative path once flattened into one shared list
+    (collector.py calls `collect_skill_files` once per skill against the same `ctx`).
+
+    Reproduced: `both` (JS dlopen, WARN, wins the cascade) and a SEPARATE skill `other`
+    that merely bundles `tool.node` with no dlopen call at all. Before the fix the
+    coverage note read "...: addon.node (ELF), tool.node (ELF)" right beside a detail
+    naming `both` — nothing told a reader `tool.node` belongs to `other`."""
+    home = tmp_path / "home"
+    _skill_dir(home / "workspace" / "skills", "both", _DLOPEN)
+    other = home / "workspace" / "skills" / "other"
+    other.mkdir(parents=True)
+    (other / "SKILL.md").write_text(
+        "---\nname: other\ndescription: A skill.\n---\nno dlopen here\n", encoding="utf-8"
+    )
+    (other / "tool.node").write_bytes(_ELF)
+
+    f = check_installed_skills(collect(home))
+    assert f.status == WARN, f.status
+    assert "dlopen" in f.detail, f.detail  # precondition: `both`'s JS bucket still wins
+    note = next(
+        e for e in f.evidence if e.startswith("coverage:") and "native executable" in e
+    )
+    assert "both: addon.node (ELF)" in note, note
+    assert "other: tool.node (ELF)" in note, note

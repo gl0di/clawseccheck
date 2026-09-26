@@ -129,7 +129,8 @@ _MARKER = {
     "uncorroborated": "not compared against the underlying",
     "scope-moved": "not compared against the underlying",
     "ungraded-hole": "have no grade",
-    "retention": "Not every recorded run is above",
+    # B-847: reworded off the stale "is above" framing (see history.render_trend).
+    "retention": "already dropped some of what it recorded",
     "chain-provenance": "Chain does not verify",
 }
 

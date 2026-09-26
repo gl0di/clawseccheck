@@ -70,13 +70,21 @@ def test_b68_true_passes():
 
 def test_b68_fs_grants_unenumerable_unknown():
     # No tools.allow / gateway.tools.allow and no tools.profile: fs grants come from
-    # OpenClaw's runtime defaults, which static config cannot resolve. tools.fs.workspaceOnly
-    # defaults to FALSE, so claiming PASS here would be a fake clean verdict (GR#4).
+    # OpenClaw's runtime defaults, which static config cannot resolve BY THIS CHECK'S OWN
+    # allow/alsoAllow/profile model. tools.fs.workspaceOnly defaults to FALSE, so claiming
+    # PASS here would be a fake clean verdict (GR#4).
+    #
+    # CLAWSECCHECK-B-737: this used to stop at UNKNOWN because G1 (`_b68_fs_tools_granted`)
+    # is the only model this check consulted. It now falls through to `_fs_scope_grants`,
+    # which resolves the same config through `toolgrant.resolved_scopes` -- no tools policy
+    # is declared anywhere, so the single default-agent scope has `provenance="default"`,
+    # and OpenClaw's own permissive default grants every fs tool there. UNKNOWN would now
+    # be the fake-ignorance verdict, not the honest one.
     f = check_exec_applypatch_workspace(
         _ctx({"tools": {"exec": {"applyPatch": {"workspaceOnly": True}}}})
     )
-    assert f.status == UNKNOWN
-    assert "not" in f.detail and "enumerable" in f.detail
+    assert f.status == WARN, f.detail
+    assert any("permissive default" in e or "provenance=default" in e for e in f.evidence)
 
 
 def test_b68_unset_passes():
@@ -134,6 +142,256 @@ def test_b68_agent_profile_narrowing_does_not_falsely_warn_via_widening_path():
     # Vacuous after the widening evidence's tracker-id suffix was dropped -- assert the
     # actual phrase is absent, not a marker that no longer appears either way.
     assert not any("widens beyond" in e for e in f.evidence)
+
+
+# B-942: G1 (_b68_fs_tools_granted) used to read workspace confinement at the GLOBAL
+# scope only (`dig(cfg, "tools.fs.workspaceOnly")`), even for a grant G1 itself resolved
+# from a SPECIFIC per-agent scope -- so an agent that grants itself write via its own
+# tools.allow (or a widening tools.profile) AND declares its own
+# tools.fs.workspaceOnly=true still produced a blanket WARN, because nothing ever read
+# THAT agent's own confinement declaration. `_b68_scope_confined` (shared with
+# `_fs_scope_grants`'s own confinement=True test, B-737) now resolves confinement per
+# scope instead, mirroring exactly what that sibling residual already did for its own
+# NOT-ENUMERABLE branch.
+def test_b68_per_agent_workspace_only_confines_own_scoped_grant():
+    # The confirmed repro: "worker"'s own tools.allow grants write (and, via B-736's
+    # write=>apply_patch implication, apply_patch) but its own tools.fs.workspaceOnly
+    # confines it -- no global tools.fs.workspaceOnly, no global sandbox="all". Before
+    # the fix this was a blanket WARN citing "tools.fs.workspaceOnly unset"; the field
+    # is not unset for this agent, it is just declared under its own scope.
+    f = check_exec_applypatch_workspace(
+        _ctx(
+            {
+                "agents": {
+                    "list": [
+                        {
+                            "id": "worker",
+                            "tools": {"allow": ["write"], "fs": {"workspaceOnly": True}},
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    assert f.status == PASS, f.detail
+
+
+def test_b68_per_agent_workspace_only_confines_widened_grant():
+    # Same repro through the OTHER vector the ticket named: a per-agent tools.profile
+    # WIDENING (`??`-coalesced past a non-powerful global profile) instead of a direct
+    # tools.allow. "worker" grants itself the full fs family via its powerful profile
+    # but also declares its own tools.fs.workspaceOnly=true.
+    f = check_exec_applypatch_workspace(
+        _ctx(
+            {
+                "tools": {"profile": "minimal"},
+                "agents": {
+                    "list": [
+                        {
+                            "id": "worker",
+                            "tools": {"profile": "coding", "fs": {"workspaceOnly": True}},
+                        }
+                    ]
+                },
+            }
+        )
+    )
+    assert f.status == PASS, f.detail
+
+
+def test_b68_per_agent_own_sandbox_all_also_confines_scoped_grant():
+    # The composite's OTHER confinement leg: an agent's own sandbox.mode="all" (falling
+    # back to agents.defaults.sandbox.mode when absent) confines it exactly like its own
+    # tools.fs.workspaceOnly=true does -- `_b68_scope_confined` reads both.
+    f = check_exec_applypatch_workspace(
+        _ctx(
+            {
+                "agents": {
+                    "list": [
+                        {
+                            "id": "worker",
+                            "tools": {"allow": ["write"]},
+                            "sandbox": {"mode": "all"},
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    assert f.status == PASS, f.detail
+
+
+def test_b68_per_agent_grant_without_own_confinement_still_warns():
+    # Control: the identical per-agent tools.allow grant, minus the agent's own
+    # tools.fs.workspaceOnly declaration -- nothing confines this scope (no global
+    # tools.fs.workspaceOnly, no global or per-agent sandbox="all"), so the WARN must
+    # still fire. Pins that B-942 narrows the false positive without opening a false
+    # negative for the genuinely-unconfined case.
+    f = check_exec_applypatch_workspace(
+        _ctx({"agents": {"list": [{"id": "worker", "tools": {"allow": ["write"]}}]}})
+    )
+    assert f.status == WARN, f.detail
+    assert any("filesystem tools granted" in e for e in f.evidence)
+
+
+def test_b68_mixed_agents_one_confined_one_not_still_warns():
+    # A second, genuinely unconfined agent in the SAME roster must still trigger the
+    # WARN even though the first agent's own grant is individually confined -- B-942's
+    # fix is per-scope, not a blanket "any confinement anywhere" downgrade.
+    f = check_exec_applypatch_workspace(
+        _ctx(
+            {
+                "agents": {
+                    "list": [
+                        {
+                            "id": "confined",
+                            "tools": {"allow": ["write"], "fs": {"workspaceOnly": True}},
+                        },
+                        {"id": "open", "tools": {"allow": ["write"]}},
+                    ]
+                }
+            }
+        )
+    )
+    assert f.status == WARN, f.detail
+
+
+def test_b68_malformed_confinement_values_fail_closed():
+    # C-135 follow-up: `_b68_scope_confined` must never treat a malformed/non-boolean
+    # confinement value as confining -- only a LITERAL `True` (workspaceOnly) or the
+    # LITERAL string `"all"` (sandbox mode) counts. A schema-invalid config could never
+    # reach OpenClaw's runtime with these shapes, but a static reader has to decide
+    # SOMETHING, and the fail-closed choice (still WARN) is the honest one -- silently
+    # reading a truthy-looking value as confinement would manufacture a PASS the vendor
+    # never actually grants. Covers a representative few of the malformed shapes
+    # (string "true", non-string sandbox mode, wrong-case sandbox mode "ALL") rather
+    # than every combination.
+    for tools in (
+        {"allow": ["write"], "fs": {"workspaceOnly": "true"}},  # string, not bool
+        {"allow": ["write"], "fs": {"workspaceOnly": 1}},  # int, not bool
+        {"allow": ["write"], "fs": {}},  # present but empty -- no workspaceOnly key
+        {"allow": ["write"], "fs": {"workspaceOnly": None}},  # explicit null
+    ):
+        f = check_exec_applypatch_workspace(
+            _ctx({"agents": {"list": [{"id": "worker", "tools": tools}]}})
+        )
+        assert f.status == WARN, (tools, f.detail)
+
+    for sandbox_mode in (1, "ALL"):  # non-string, and wrong-case literal
+        f = check_exec_applypatch_workspace(
+            _ctx(
+                {
+                    "agents": {
+                        "list": [
+                            {
+                                "id": "worker",
+                                "tools": {"allow": ["write"]},
+                                "sandbox": {"mode": sandbox_mode},
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+        assert f.status == WARN, (sandbox_mode, f.detail)
+
+
+def test_b68_three_agent_mixed_confinement_warns_on_the_open_one():
+    # C-135 follow-up: a THIRD roster agent, confined through the OTHER vector
+    # (widening tools.profile + its own workspaceOnly), alongside the existing
+    # 2-agent mixed test's direct-grant-confined agent and a genuinely open one --
+    # still WARNs, because at least one scope (the open one) remains unconfined.
+    # No global tools.profile is set here (deliberately): setting one to make
+    # "confined_widened" a real widening would also AND-narrow "open"'s own plain
+    # tools.allow grant through the SAME global profile layer, which would test a
+    # different thing than "one open agent among confined ones".
+    f = check_exec_applypatch_workspace(
+        _ctx(
+            {
+                "agents": {
+                    "list": [
+                        {
+                            "id": "confined_direct",
+                            "tools": {"allow": ["write"], "fs": {"workspaceOnly": True}},
+                        },
+                        {
+                            "id": "confined_widened",
+                            "tools": {"profile": "coding", "fs": {"workspaceOnly": True}},
+                        },
+                        {"id": "open", "tools": {"allow": ["write"]}},
+                    ]
+                }
+            }
+        )
+    )
+    assert f.status == WARN, f.detail
+
+
+def test_b68_three_agent_all_confined_passes():
+    # The all-confined counterpart: same three-agent shape, but the third agent is now
+    # ALSO confined (via its own sandbox.mode="all" this time, the third confinement
+    # vector) instead of left open -- every contributing scope confines itself, so the
+    # verdict is PASS.
+    f = check_exec_applypatch_workspace(
+        _ctx(
+            {
+                "agents": {
+                    "list": [
+                        {
+                            "id": "confined_direct",
+                            "tools": {"allow": ["write"], "fs": {"workspaceOnly": True}},
+                        },
+                        {
+                            "id": "confined_widened",
+                            "tools": {"profile": "coding", "fs": {"workspaceOnly": True}},
+                        },
+                        {
+                            "id": "confined_sandbox",
+                            "tools": {"allow": ["write"]},
+                            "sandbox": {"mode": "all"},
+                        },
+                    ]
+                }
+            }
+        )
+    )
+    assert f.status == PASS, f.detail
+
+
+def test_b68_confine_per_agent_g1_direct_call():
+    # G1 itself, confinement-aware: the SAME confined-scope repro resolves to an empty
+    # grant under confine_per_agent=True (still enumerable=True -- the config WAS
+    # resolvable, it just resolves to "confined, nothing left unconfined"), while the
+    # default (unfiltered) call -- the one B44/B55/B84 still use -- keeps reporting the
+    # raw grant, unaffected by this flag.
+    from clawseccheck.checks._capability import _b68_fs_tools_granted
+
+    cfg = {
+        "agents": {
+            "list": [
+                {"id": "worker", "tools": {"allow": ["write"], "fs": {"workspaceOnly": True}}}
+            ]
+        }
+    }
+    assert _b68_fs_tools_granted(cfg) == (["apply_patch", "write"], True)
+    assert _b68_fs_tools_granted(cfg, confine_per_agent=True) == ([], True)
+
+
+def test_b68_confine_per_agent_does_not_affect_b55():
+    # Requirement (c): B55 never passes confine_per_agent, so the identical
+    # individually-confined-scope config must still WARN there exactly as before --
+    # B55's own question (is a write tool reachable at all) is orthogonal to workspace
+    # confinement, which is B68's question alone.
+    from clawseccheck.checks import check_fs_write_exposure
+
+    cfg = {
+        "agents": {
+            "list": [
+                {"id": "worker", "tools": {"allow": ["write"], "fs": {"workspaceOnly": True}}}
+            ]
+        }
+    }
+    assert check_fs_write_exposure(_ctx(cfg)).status == WARN
 
 
 # ---------------------------------------------------------------------------

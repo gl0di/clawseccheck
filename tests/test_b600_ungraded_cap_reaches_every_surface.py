@@ -27,11 +27,11 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-import zlib
 from pathlib import Path
 
 import pytest
 
+from _pdftext import shown_strings
 from clawseccheck.catalog import CRITICAL, Finding
 from clawseccheck.report import _UNGRADED_CAP_TAIL, render_html
 from clawseccheck.scoring import compute
@@ -56,7 +56,7 @@ def _run(tmp_path: Path, *args: str, home: str = VULN):
     fake_home.mkdir(exist_ok=True)
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", home,
-         "--data-dir", str(tmp_path / "state"), "--no-history", *args],
+         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host", *args],
         cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "HOME": str(fake_home)})
 
@@ -68,18 +68,8 @@ def _file(tmp_path: Path, name: str, body: str) -> str:
 
 
 def _pdf_text(path: Path) -> list[str]:
-    raw = path.read_bytes()
-    out: list[str] = []
-    for m in re.finditer(rb"stream\r?\n(.*?)endstream", raw, re.S):
-        data = m.group(1)
-        try:
-            data = zlib.decompress(data)
-        except Exception:
-            pass
-        for tj in re.finditer(rb"\((?:\\.|[^\\()])*\)\s*Tj", data):
-            parts = re.findall(rb"\((?:\\.|[^\\()])*\)", tj.group(0))
-            out.append(b"".join(p[1:-1] for p in parts).decode("latin-1"))
-    return out
+    """Every `(...) Tj` show operand, one per list entry, in document order."""
+    return shown_strings(path.read_bytes()).split("\n")
 
 
 # ------------------------------------------------------------------ the headline case

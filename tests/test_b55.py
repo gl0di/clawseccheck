@@ -470,12 +470,18 @@ def test_b55_paired_channel_does_not_escalate_to_fail(tmp_path):
 
 
 # --------------------------------------------------------------------------- UNKNOWN
-def test_no_tool_allowlist_is_unknown(tmp_path):
+def test_no_tool_allowlist_is_now_warn_not_unknown(tmp_path):
+    """CLAWSECCHECK-B-737: this exact shape -- a non-trivial config with no `tools`
+    block anywhere -- used to read as UNKNOWN ("cannot be enumerated"). OpenClaw's own
+    default for an undeclared tools policy is permissive (grants read/write/edit/
+    apply_patch), so `toolgrant.resolved_scopes` now resolves the single default-agent
+    scope with `provenance="default"`, and this is a WARN naming that provenance --
+    never the OLD "cannot be enumerated" UNKNOWN text, and never a silent PASS."""
     home = _write_config(tmp_path, '{"gateway": {"bind": "127.0.0.1:8080"}}')
     f = _b55(home)
-    assert f.status == UNKNOWN
-    assert "not determinable" not in f.detail  # uses "cannot be enumerated" phrasing
-    assert "enumerated" in f.detail
+    assert f.status == WARN, f.detail
+    assert "enumerated" not in f.detail
+    assert any("permissive default grants" in e for e in f.evidence)
 
 
 # --------------------------------------------------------------------------- RISK-12
@@ -795,7 +801,18 @@ def test_b44_b55_b68_b84_all_agree_alsoallow_and_gateway_shapes():
     given config's alsoAllow-only implicit-wildcard grant (B-411) or gateway.tools.allow
     de-denylist (B-423, never an additive grant) reaches "everything is granted" --
     covering exactly the two shapes the fixture corpus has zero coverage of
-    (`grep -rl alsoAllow fixtures/` -> 0 files)."""
+    (`grep -rl alsoAllow fixtures/` -> 0 files).
+
+    CLAWSECCHECK-B-737 note on the gateway-only matrix entry: `gateway.tools.allow` is
+    not a global tools-policy declaration (see `_tool_policy_view`'s own docstring,
+    part (b)), so a config carrying ONLY that key still has NO tools policy declared
+    anywhere -- exactly the shape B55/B68's permissive-default WARN now resolves via
+    `toolgrant.resolved_scopes`/`_fs_scope_grants` (the config declares no roster and
+    no global tools block, so the single synthesised default-agent scope has no
+    policy layer at all -- `provenance="default"`). B44/B84 do not implement that
+    branch, so `b55_b68_expected_fs` below is folded in for the B55/B68 assertions
+    only, leaving B44/B84's own evidence checks (untouched by this test) reading the
+    un-widened `expected_fs`."""
     from clawseccheck.checks import (
         _profile_is_powerful,
         _tool_policy_view,
@@ -803,13 +820,17 @@ def test_b44_b55_b68_b84_all_agree_alsoallow_and_gateway_shapes():
         check_declared_effective_proven,
         check_exec_applypatch_workspace,
     )
+    from clawseccheck.checks._capability import _B68_FS_TOOLS, _fs_scope_grants
 
     matrix = [
         {"tools": {"alsoAllow": ["read"]}},  # implicit wildcard: grants everything
         {"tools": {"alsoAllow": ["write"]}},  # implicit wildcard: grants everything
         {"tools": {"profile": "minimal", "alsoAllow": ["read"]}},  # profile guard: narrow
         {"tools": {"profile": "coding", "alsoAllow": ["read"]}},  # powerful profile: full
-        {"gateway": {"tools": {"allow": ["write", "exec"]}}},  # de-denylist only: no grant
+        # No GLOBAL tools policy is declared here at all -- gateway.tools.allow is a
+        # de-denylist, not a policy (see the docstring note above) -- so B55/B68 now
+        # WARN via OpenClaw's permissive default (B-737); B44/B84 are unaffected.
+        {"gateway": {"tools": {"allow": ["write", "exec"]}}},
         {"tools": {"allow": ["read"]}, "gateway": {"tools": {"allow": ["exec"]}}},  # gateway ignored
         {"tools": {"allow": ["apply_patch"], "deny": ["apply-patch"]}},  # alias-folded deny
     ]
@@ -829,14 +850,24 @@ def test_b44_b55_b68_b84_all_agree_alsoallow_and_gateway_shapes():
         granted, enumerable = _b68_fs_tools_granted(cfg)
         assert not enumerable or set(granted) == expected_fs, (cfg, granted, expected_fs)
 
+        # B-737: B55/B68 additionally resolve OpenClaw's permissive default when NO
+        # tools policy is declared anywhere (`not enumerable`) -- fold that into the
+        # expectation used for their two assertions below only.
+        b55_b68_expected_fs = expected_fs
+        if not enumerable:
+            scope_grants = _fs_scope_grants(cfg, _B68_FS_TOOLS)
+            if scope_grants is not None:
+                b55_b68_expected_fs = set(scope_grants.default_tools | scope_grants.declared_tools)
+
         b55 = _b55_cfg(cfg)
         b55_says_write = b55.status not in (UNKNOWN, PASS)
-        expects_write = bool(expected_fs & {"write", "edit", "apply_patch"})
-        assert b55_says_write == expects_write, (cfg, b55.status, expected_fs)
+        expects_write = bool(b55_b68_expected_fs & {"write", "edit", "apply_patch"})
+        assert b55_says_write == expects_write, (cfg, b55.status, b55_b68_expected_fs)
 
         b68 = check_exec_applypatch_workspace(Context(home=None, config=cfg))
-        b68_says_granted = b68.status == WARN and enumerable and bool(granted)
-        assert b68_says_granted == (enumerable and bool(expected_fs)), (cfg, b68.status, expected_fs)
+        assert (b68.status == WARN) == bool(b55_b68_expected_fs), (
+            cfg, b68.status, b55_b68_expected_fs,
+        )
 
         # B44/B84 never claim a tool absent from view.named -- grants_all has no
         # enumerable token, so it never appears in either check's evidence.
@@ -863,9 +894,11 @@ def test_b44_b55_b68_b84_all_agree_alsoallow_and_gateway_shapes():
 # adding a second, narrowing entry, so a global "minimal" + per-agent "coding" grants
 # write/edit/apply_patch to that agent even though the global layer alone grants
 # nothing. Deliberately WARN-only: this can push a verdict from PASS toward WARN, but
-# it never sets explicit_write_grant, so it cannot alone drive a FAIL -- the seven
-# still-unread narrowing layers (per-agent allow/deny, channel/group, toolsBySender,
-# byProvider) could remove the grant for that specific agent, unseen by this check.
+# it never sets explicit_write_grant, so it cannot alone drive a FAIL -- the channel/
+# group and toolsBySender layers (still unread) could remove the grant for that
+# specific agent, unseen by this check; byProvider and subagent/inherited session
+# policy are permanently unreadable from static config regardless. Per-agent
+# allow/deny/profile narrowing is no longer one of the unread layers (B-668/S3).
 
 
 def test_agent_profile_widenings_empty_with_no_agents_declared():

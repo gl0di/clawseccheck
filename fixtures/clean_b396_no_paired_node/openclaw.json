@@ -1,0 +1,13 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.9.6"
+  },
+  "skills": {
+    "workshop": {
+      "autonomous": {
+        "mode": "off"
+      },
+      "approvalPolicy": "pending"
+    }
+  }
+}

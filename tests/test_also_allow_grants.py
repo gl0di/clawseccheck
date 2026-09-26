@@ -214,11 +214,25 @@ def test_b68_check_bad_empty_allow_alsoallow_broad_fs_tool_warns():
     granted_evidence = next(e for e in f.evidence if e.startswith("filesystem tools granted"))
     assert granted_evidence == "filesystem tools granted: apply_patch, edit, read, write"
 
-    # Equivalent old-or-chain-visible config: EMPTY tools.allow, no profile, alsoAllow
-    # wasn't a recognised grant source pre-I-028 -> not enumerable, so the old code
-    # could not have produced this WARN for the schema-recommended allow-empty shape.
+    # Equivalent old-or-chain-visible config: EMPTY tools.allow, no profile, no
+    # alsoAllow -- alsoAllow wasn't a recognised grant source pre-I-028, and G1
+    # (`_b68_fs_tools_granted`) alone still calls this "not enumerable" today (an
+    # empty `allow: []` names no token and sets no profile). Old code stopped at
+    # UNKNOWN for the schema-recommended allow-empty shape.
+    #
+    # CLAWSECCHECK-B-737: `tools.allow: []` is a real config key, but `_policy_allows`
+    # treats an empty allow as "allow everything" (same as no allow at all) -- so it is
+    # a NO-OP layer, and `toolgrant.policy_layers` correctly does not count it as
+    # provenance (design: "a no-op layer is not provenance"). `toolgrant.resolved_scopes`
+    # therefore reports the single default-agent scope as `provenance="default"`, and
+    # `_fs_scope_grants` resolves the same permissive-default grant this check's G1 path
+    # already gives the alsoAllow-only sibling above -- so this is WARN too, worded as a
+    # DEFAULT grant (distinct evidence shape from G1's own "filesystem tools granted:"
+    # line, which never fires here since G1 itself still finds this not enumerable).
     f_old = check_exec_applypatch_workspace(_ctx({"tools": {"allow": []}}))
-    assert f_old.status == UNKNOWN
+    assert f_old.status == WARN, f_old.detail
+    assert not any(e.startswith("filesystem tools granted:") for e in f_old.evidence)
+    assert any("provenance=default" in e for e in f_old.evidence)
 
 
 def test_b68_check_dedupes_same_tool_in_allow_and_alsoallow():

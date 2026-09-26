@@ -276,7 +276,9 @@ def test_elf_stowaway_still_lands_in_both_binary_files_and_stowaway_files(tmp_pa
     ctx = Context(home=sk.parent)
     collect_skill_files(sk, ctx)
     assert ctx.binary_files == ["helper.bin"], ctx.binary_files
-    assert ctx.stowaway_files == ["helper.bin (ELF)"], ctx.stowaway_files
+    # B-857: stowaway entries now carry the owning skill's name (`sk.name` == "media",
+    # `_skill`'s default) — see collector.py's `_stowaway_owner` comment.
+    assert ctx.stowaway_files == ["media: helper.bin (ELF)"], ctx.stowaway_files
     assert ctx.disclosures == [], "a native executable is not inert media, no disclosure"
 
 

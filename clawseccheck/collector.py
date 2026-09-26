@@ -12,6 +12,7 @@ surface. No network. No writes. Pure stdlib.
 """
 from __future__ import annotations
 
+import ast
 import codecs
 import errno
 import math
@@ -41,6 +42,21 @@ from .skilldiscovery import (
     iter_discovered_skill_dirs as _iter_discovered_skill_dirs,
 )
 from .textnorm import normalize_for_scan, obfuscation_signals
+# B-845: bounded, reviewed discovery of per-agent trajectory-database
+# paths (`agents/<agent-id>/agent/openclaw-agent.sqlite`) -- reused, not
+# re-implemented, so this reader shares trajectorystore's own `_MAX_SQLITE_DBS` cap,
+# its cap-disclosure (`sqlite_db_paths_capped`, follow-up), and its glob-error handling
+# rather than carrying a second copy of any of them. A sibling Layer-1 leaf (see CLAUDE.md
+# §3's dependency map); trajectorystore.py never imports collector, so this is a one-way
+# edge, not a cycle. The follow-up review that closed a hang here (a planted recursive
+# VIEW named `auth_profile_store`) also reuses trajectorystore's own schema verification
+# (`_open_and_verify_table`/`_table_kind`) rather than opening the connection directly --
+# only the actual SELECT query stays local to this file, matching every other sqlite
+# reader here. B-889's hardening of `_collect_auth_profile_store_presence`'s own query
+# against `config_machine_state`, and B-977's identical hardening of
+# `_collect_config_machine_state` itself (below), both reuse the same `_table_kind` via
+# this one module import rather than a second, separate import.
+from . import trajectorystore as _trajectorystore
 
 # Bootstrap / prompt files injected into the system prompt as "trusted context".
 # The native `openclaw security audit` does not inspect these files; checks
@@ -109,7 +125,24 @@ _OWN_SKILL_NAMES = {"clawseccheck"}
 # Distinctive symbols that only ClawSecCheck's own signature engine (the checks/ package)
 # contains. Used to recognise our own source so neither --vet nor the installed-skill audit
 # flags the scanner's embedded attack signatures + red-team payloads as malware.
+# B-846 ROUND 5: `_is_own_source` matches these as AST STRUCTURE (a real FunctionDef
+# name / Assign target), not as literal text — see its docstring. `_OWN_ENGINE_MARKERS`
+# itself is still plain text: it remains correct as a human-readable label (also used
+# by tests to build FORGED comment/string/f-string spoofs, where the point is that the
+# text is NOT real code) and `_marker_identifier()` strips it down to the bare
+# identifier for the raw-text short-circuit.
 _OWN_ENGINE_MARKERS = ("def check_installed_skills", "def vet_skill", "_SKILL_CRIT")
+# Real, syntactically-complete statements shaped like the genuine engine's own
+# definitions, one per `_OWN_ENGINE_MARKERS` entry (same order, same identifiers) —
+# for tests to build a "genuine own source" fixture that a real AST FunctionDef/Assign
+# search actually recognises, instead of the bare marker TEXT above (which has no
+# `():`/`=` and is not valid Python on its own — it was only ever a stand-in for the
+# pre-round-5 substring match, and would silently fail to parse if used here).
+_OWN_ENGINE_MARKER_STATEMENTS = (
+    "def check_installed_skills(ctx):\n    pass\n",
+    "def vet_skill(path):\n    pass\n",
+    "_SKILL_CRIT = []\n",
+)
 _MAX_SKILLS = 300
 # B-268: how many cap-evicted skill NAMES are retained as the truncation frontier. Names
 # are cheap (a directory basename), but the frontier must not itself become an unbounded
@@ -144,6 +177,21 @@ _ARCHIVE_MAX_EXPANSION_RATIO = 100
 # so a larger single cap doesn't reopen the memory-scaling hole B-153 closes. Still
 # bounded — a 500MB config caps at 5MB read, not unbounded RSS growth.
 _MAX_CONFIG_BYTES = 5_000_000
+
+# B-846: `_is_own_source` parses candidate engine sources with `ast.parse`, which costs
+# strictly more than the text scan it replaced, and it runs per candidate skill directory
+# during discovery. Without a cap, planting one huge .py under `<root>/clawseccheck/
+# checks/` in any real skill root makes every later audit and every --monitor run pay a
+# parse proportional to that file's size, unbounded -- a denial-of-audit surface, found
+# by the C-135 pass on the AST round (measured ~3s against sub-ms). A file over this cap
+# is skipped WHOLE, never truncated: truncation would feed a partial prefix to the
+# parser, which can only ever LOSE a marker node, so both paths fail in the safe
+# direction (answer "not our source", scan the tree) -- but dropping it whole matches
+# what collect_skill_files already does for _MAX_FILE_BYTES and needs no reasoning about
+# partial parses. Deliberately larger than _MAX_FILE_BYTES: our own biggest engine module
+# is ~808KB today and the topic modules grew ~11% in a single release, so a 1MB cap would
+# start dropping real sources -- which would cost RECOGNITION of our own tree, not safety.
+_MAX_OWN_SOURCE_BYTES = 2_000_000
 
 # B-231 sub-item 1: the cron job store (~/.openclaw/cron/jobs.json, or the SQLite-backed
 # cron_jobs table when the legacy JSON file is absent) is read-only, symlink-safe, and
@@ -205,11 +253,13 @@ _MAX_SUBAGENT_RUNS = 50
 # (see its docstring), but the collector caps it independently so nothing downstream can
 # accidentally hold or print an unbounded blob.
 _MAX_SUBAGENT_TASK_CHARS = 500
-# B-709: on the MODERN (OpenClaw 2026.8.2+) subagent_runs shape, the only outcome signal is
-# `$.execution.outcome.status`, and the vendor itself constrains it to exactly these four
-# values (subagent-registry.store.sqlite-B_lUfEus.js:362). Anything else — including the
-# key being entirely absent, which is the normal in-flight-run shape — is treated as "no
-# outcome yet", never as a fifth value.
+# B-709: on the MODERN (payload_json column present) subagent_runs shape, the only outcome
+# signal is `$.execution.outcome.status`, and the vendor itself constrains it to exactly
+# these four values (subagent-registry.store.sqlite-B_lUfEus.js:362, grounded against
+# openclaw@2026.8.2 -- that bundle name is historical and no longer in the installed dist;
+# the shape this comment keys on is the column, not the version). Anything else --
+# including the key being entirely absent, which is the normal in-flight-run shape -- is
+# treated as "no outcome yet", never as a fifth value.
 _SUBAGENT_OUTCOME_STATUSES = frozenset({"ok", "error", "timeout", "unknown"})
 
 # F-134 (DISK-1, B191): OpenClaw's OWN runtime audit trail (``audit_events`` in the shared
@@ -320,6 +370,7 @@ LIMIT_DOMAIN_CONFIG = "config"        # openclaw.json itself
 LIMIT_DOMAIN_BOOTSTRAP = "bootstrap"  # AGENTS.md / SOUL.md & friends
 LIMIT_DOMAIN_AGENTS = "agents"        # subagent_runs disk-disclosure (B-296 / B18)
 LIMIT_DOMAIN_AUDIT = "audit"          # audit_events runtime trail (F-134 / B191)
+LIMIT_DOMAIN_PAIRED = "paired"        # migrated paired-device store size/row caps (B176)
 
 LIMIT_DOMAINS = (
     LIMIT_DOMAIN_SKILL,
@@ -331,6 +382,7 @@ LIMIT_DOMAINS = (
     LIMIT_DOMAIN_BOOTSTRAP,
     LIMIT_DOMAIN_AGENTS,
     LIMIT_DOMAIN_AUDIT,
+    LIMIT_DOMAIN_PAIRED,
 )
 
 
@@ -768,6 +820,31 @@ class Context:
     # themselves. See `_collect_auth_profile_store_presence`.
     auth_profile_store_read: bool = False
     auth_profile_store_length: int | None = None
+    # B-845: the SAME presence-only signal, for the PER-AGENT database
+    # (`agents/<agent-id>/agent/openclaw-agent.sqlite`, table `auth_profile_store`) --
+    # grounded against the installed dist (2026.9.5: sqlite-Cp6HSWY4.mjs) to be a
+    # DIFFERENT store from `authProfiles.store` above, not a duplicate of it: the shared
+    # state DB's `config_machine_state["authProfiles.store"]` row and each agent's own
+    # `auth_profile_store` table are written by the same `writePersistedAuthProfileStoreRaw`
+    # dispatcher but land in different files depending on `agentDir`/`database`, and a home
+    # can hold real material in the per-agent table while the shared row is absent or
+    # empty. Same three-state disclosure as `auth_profile_store_read`/`_length` above, but
+    # aggregated across every per-agent DB found: `_read` True once at least one per-agent
+    # database was opened and queried; `_length` holds the LARGEST row length seen across
+    # all of them (None if every queried database had no row) -- enough for the caller to
+    # decide "at least one agent's store holds more than the empty shell" without needing
+    # to know which agent. See `_collect_agent_auth_profile_store_presence`.
+    agent_auth_profile_store_read: bool = False
+    agent_auth_profile_store_length: int | None = None
+    # B-845 (follow-up, 2026-09-23): True when more per-agent trajectory
+    # databases exist under `agents/*/agent/openclaw-agent.sqlite` than
+    # `trajectorystore._MAX_SQLITE_DBS` allows -- i.e. `sqlite_db_paths` returned a
+    # truncated sample, so at least one agent's own auth-profile store was never
+    # checked. Disclosed by `checks/_config.py::check_trifecta` alongside the hedge
+    # above so a home that WARNs on real per-agent material also says the sweep was
+    # incomplete, rather than reading as an exhaustive check of every agent. See
+    # `_collect_agent_auth_profile_store_presence`.
+    agent_auth_profile_store_capped: bool = False
     # F-192: OpenClaw's own self-update ledger (`update_runs` in the state DB, new at
     # 2026.9.2). Three fields, same "could not look" / "looked, nothing there" /
     # "looked, found data" distinction as `config_machine_state` / `_read` / its error
@@ -838,6 +915,10 @@ class Context:
     # regardless of whether allow_always_count is 0 -- the consuming check filters.
     exec_approvals_grants: list = field(default_factory=list)
     exec_approvals_found: bool = False        # exec-approvals.json present and read
+    # B-831: the store's top-level `defaults` {security, ask} (str or None each) -- the
+    # floor OpenClaw applies to every agent the `agents` map does not override. Empty
+    # when the file is absent or has no `defaults` object.
+    exec_approvals_defaults: dict = field(default_factory=dict)
     exec_approvals_parse_error: bool = False  # present but could not be parsed/read
     # B-240 (B177): OpenClaw's OWN persisted per-plugin ClawHub trust verdict, read from
     # the installed_plugin_index.install_records_json column in the shared state SQLite DB
@@ -873,7 +954,7 @@ class Context:
     # child_session_key, model, agent_dir, workspace_dir, spawn_mode, run_timeout_seconds,
     # task (capped, see _MAX_SUBAGENT_TASK_CHARS), outcome (parsed outcome_json dict, or None
     # when the run has not ended / no outcome was recorded yet), ended_reason, created_at.
-    # B-709: on the MODERN (OpenClaw 2026.8.2+) table shape, agent_dir/workspace_dir/
+    # B-709: on the MODERN (payload_json column present) table shape, agent_dir/workspace_dir/
     # spawn_mode/task are permanently None -- that schema does not carry them at all (see
     # _collect_subagent_runs's docstring). A one-time LIMIT_DOMAIN_AGENTS disclosure names
     # this per collection run; a consumer must not read the None as "no workspace recorded".
@@ -883,6 +964,23 @@ class Context:
     subagent_runs: list = field(default_factory=list)
     subagent_runs_found: bool = False        # state DB + subagent_runs table present and read
     subagent_runs_parse_error: bool = False  # present but no row could be reliably parsed
+    # B176 follow-up (2026-09-25): OpenClaw 2026.9.6 migrates the legacy
+    # devices/paired.json store into a dedicated device_pairing_paired table in
+    # state/openclaw.sqlite, leaving only devices/paired.json.migrated behind --
+    # measured directly against this machine's own installed OpenClaw (2026.9.6),
+    # not decompiled from a dist bundle. checks/_lifecycle.py's
+    # check_paired_device_operator_authority still reads the legacy JSON file
+    # itself (unchanged); this dict is consulted ONLY as a fallback when that file
+    # is absent, so a migrated install is not silently read as "nothing paired".
+    # Keyed by device_id, one entry per row, using the SAME field names the legacy
+    # JSON shape already uses (deviceId, platform, scopes, approvedScopes, tokens,
+    # createdAtMs, approvedAtMs, lastSeenAtMs) so the check's existing per-entry
+    # evaluation loop works unmodified against either source. `tokens` never
+    # carries the live token secret string -- see
+    # `_collect_paired_devices_sqlite`'s docstring.
+    paired_devices_sqlite: dict = field(default_factory=dict)
+    paired_devices_sqlite_found: bool = False        # table present and read (0 rows still counts)
+    paired_devices_sqlite_parse_error: bool = False  # present but could not be reliably read
     # F-134 (DISK-1, B191): rows from OpenClaw's OWN runtime audit trail (``audit_events`` in
     # the shared state SQLite DB), most-recent first. Each entry is a plain dict: kind,
     # action, status, error_code, actor_type, actor_id, agent_id, session_key, session_id,
@@ -904,6 +1002,10 @@ class Context:
     installed_skill_py: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for AST
     installed_skill_shell: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .sh/.bash
     installed_skill_js: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .js/.ts
+    # B-612: skill name -> [(relpath, language, source)] for files only a SKILL.md names
+    # with an interpreter (`read_skill_declared`). FINDINGS ONLY: read by B13's danger pass
+    # and nothing else — never folded into the three lists above, which coverage reads.
+    installed_skill_declared: dict = field(default_factory=dict)
     # skill name -> that skill's own resolved directory (the dir containing its SKILL.md).
     # F-131: lets a per-skill Context be scoped to JUST that skill (mirrors vet_skill's
     # Context(home=<skill dir>)) instead of the whole OpenClaw home, so home-wide-walking
@@ -2275,6 +2377,32 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         if cached is not None:
             return cached
 
+    # B-857: the skill a stowaway entry recorded below belongs to. `ctx.stowaway_files`
+    # is one FLAT list shared across every skill a sweep scans (collector.py's
+    # `_read_installed_skills` calls this function once per skill against the same
+    # `ctx`), and each entry used to be only the file's path RELATIVE TO ITS OWN skill
+    # dir — indistinguishable from another skill's `lib/x.node` bearing the same
+    # relative path.
+    #
+    # Deliberately `skill_dir.name` in BOTH branches (not `_note_skill_gap`'s
+    # directory-only `skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name`
+    # convention): `skill_dir` here is also, per B-152, sometimes a bare skill ARCHIVE
+    # FILE passed straight to --vet-skill, and `.name` on a file path is already that
+    # file's own basename (e.g. "malicious-skill.zip") — no ".parent" needed, and taking
+    # it would instead name the archive's CONTAINING FOLDER (e.g. "downloads"), which is
+    # not a skill at all and disagrees with the identity `_vet_resolved_skill` gives the
+    # very same target (`p.name`, checks/_vet.py). Verified: the parent-dir form printed
+    # "downloads: malicious-skill.zip::helper.bin (ELF)" for exactly that target — wrong
+    # AND redundant, since `sub_relpath` already spells out the archive as
+    # "malicious-skill.zip::helper.bin" in this path. Using `skill_dir.name` instead
+    # fixes "wrong" (it now names the archive itself, matching `_vet_resolved_skill`);
+    # it stays cosmetically redundant in that one single-archive-target shape
+    # ("malicious-skill.zip: malicious-skill.zip::helper.bin (ELF)") — accepted rather
+    # than special-cased, since the ONLY place that redundancy can occur is a single-
+    # target vet call with exactly one candidate owner, where there is nothing to
+    # actually misattribute to.
+    _stowaway_owner = skill_dir.name
+
     if skill_dir.is_file():
         # Anchor relative paths / traversal checks on the parent dir, same as
         # is_safe_tar_member expects a directory, never the archive file itself.
@@ -2593,8 +2721,17 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     # F-054: a native executable (ELF/PE/Mach-O/JVM class) bundled inside a
                     # skill is a stowaway — skills are text/config; a compiled binary the
                     # prose doesn't need has no business here. Recorded for a WARN.
+                    #
+                    # B-857: prefixed with `_stowaway_owner` — see that variable's own
+                    # comment above. Before this, a two-skill home (one with a benign
+                    # `process.dlopen()` WARN, a separate one merely bundling `tool.node`)
+                    # rendered "both: process.dlopen() ..." beside "coverage: native
+                    # executable(s) bundled in the skill ... tool.node (ELF)" with nothing
+                    # to stop a reader attributing `tool.node` to `both`. Reproduced
+                    # end-to-end in tests/test_b745_stowaway_coverage.py::
+                    # test_coverage_note_names_the_owning_skill_not_just_the_cascade_winner.
                     if sub_fmt in ("ELF", "PE", "class", "pyc", "wasm") or (sub_fmt or "").startswith("Mach-O"):
-                        ctx.stowaway_files.append(f"{sub_relpath} ({sub_fmt})")
+                        ctx.stowaway_files.append(f"{_stowaway_owner}: {sub_relpath} ({sub_fmt})")
             
             # B-538: decode ONCE, here, and carry the text forward. The manifest entry
             # below is a claim about what the readers will actually receive, so it has to
@@ -3015,17 +3152,16 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
 # transit and a benign file gains one by accident.
 #
 # WHAT THIS DELIBERATELY DOES NOT CLOSE (independent C-135, 2026-08-23). A file
-# with NEITHER an extension nor a shebang is still collected by nothing, and
-# skills name the interpreter in SKILL.md prose (`Run `python3 bin/lint``), so
-# that shape is the common one, not the exotic one. Measured: a bundled
-# `bin/lint` that reads ~/.openclaw/credentials.json and posts it to a remote
-# host still renders INSTALL with Danger PASS. The same holds for a payload
-# given a data suffix (`setup.json` carrying `#!/bin/bash`), which the
-# _NON_CODE_SUFFIXES gate below excludes before the shebang is read. Both are
-# exactly as invisible as they were before this change — neither is a regression
-# — and both are B-612, which routes on the interpreter the SKILL.md names.
-# `tests/test_b548_language_by_content.py` pins both as open, so this fix cannot
-# be read as broader than it is.
+# with NEITHER an extension nor a shebang is still claimed by none of these three
+# readers, and neither is a payload given a data suffix (`setup.json` carrying
+# `#!/bin/bash`), which the _NON_CODE_SUFFIXES gate below excludes before the
+# shebang is read. Neither was a regression. When the skill's own SKILL.md runs such
+# a file with a named interpreter (`python3 bin/lint`, `bash scripts/setup.json`),
+# B-612's `read_skill_declared` below now hands it to B13's danger pass — for
+# FINDINGS ONLY, never into these three readers' lists, which is what keeps it from
+# touching coverage (see that block for why the distinction is the whole design). A
+# file nothing declares at all stays unread, and
+# `tests/test_b548_language_by_content.py` still pins that as open.
 #
 # A DISCLOSURE ARM WAS BUILT HERE AND RETRACTED, same review. It recorded a
 # `note_limit` for a shebang naming an interpreter we do not parse (perl, ruby).
@@ -3239,6 +3375,265 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
             "js content beyond the cap was NOT scanned",
         )
 
+    return out
+
+
+# ── B-612: a file whose language only the skill's SKILL.md declares ──────────
+# `bin/lint` with no extension and no `#!`, which SKILL.md tells the agent to run as
+# `python3 bin/lint`, is claimed by none of the three readers above. Measured before
+# this: the same credential-exfil bytes read CAUTION as `bin/lint.py`, CAUTION with a
+# shebang, and INSTALL / Danger PASS bare.
+#
+# THE CONTRACT, and the only reason this route is allowed to exist: a prose-declared
+# file is analysed for FINDINGS ONLY, never for COVERAGE. It is returned here, in its
+# own list, and deliberately NOT added to `installed_skill_py/_shell/_js`. Those three
+# lists are what every coverage predicate reads — `dossier._skill_capabilities`
+# (`has_code` / capability families), `_skill_has_unread_language_code`, the effect
+# simulator behind `ctx.effect_profiles`, and every content-ring check's code pass —
+# so none of them sees a declared file AS CODE (its text still reaches the prose scan,
+# exactly as before), and nothing a declared file contains can move a Persistence /
+# Connections axis from UNKNOWN to PASS. Two consumers, both one-directional: B13's
+# per-file danger pass (`checks/_vet.py::check_installed_skills`), which can only ADD a
+# FAIL/WARN finding, and `dossier._pool_has_declared_code`, which can only WITHDRAW an
+# axis PASS the scan cannot back. A declared Python file that fails to parse is not a
+# parse error there — that carries verdict weight (`engine_degraded`, B-485) and the
+# baseline never read the file — it is disclosed as evidence and nothing else.
+#
+# Why that contract and not the one B-612 was filed with. Routing on the declared
+# interpreter was built and retracted after seven C-135 rounds (2026-08-23), on one
+# decisive measurement: a benign decoy config named in one line of prose moved a real
+# exfiltrator's two coverage axes from honest UNKNOWN to PASS, because the route fed
+# the coverage lists. Every premise tried for telling an invocation from a mention
+# (adjacency, code spans, `ast.parse` success, AST node types) was refuted, and none
+# is needed here: whatever a declared file makes this scanner say, the SAME bytes
+# shipped as `bin/lint.py` already make it say, plus coverage. An attacker gains
+# nothing from this route they did not have by adding a `.py` suffix, and a benign
+# skill pays only what it would pay for naming that file `.py`.
+#
+# What the prose must say, stated as tokens rather than grammar: an interpreter token
+# (`python3`, `/usr/bin/python3`, `pypy3`, `bash`, `sh`, `node`, `deno run`, …) handed
+# a path — as its script argument after its own flags, on stdin (`< path`), or from a
+# `cat path |` — that names a file THIS collection already holds as text. Nothing is
+# ever opened from a prose path: it is looked up in the collected set, so
+# `python3 ../../etc/x` and `/etc/x` cannot reach a read. `-m` / `-c` / `-e` mean the
+# program is a module or a string, and route nothing.
+#
+# Measured reach, the FP bound the task asked for (2026-09-23, 7,203 skill dirs: the
+# fixtures, the author's ~/.openclaw, OpenClaw's bundled skills, SkillTrustBench, peer
+# corpora): 14,906 prose invocations resolve to a bundled file, a reader above already
+# claims every one of them by extension (8 under a different interpreter than the prose
+# names — never re-routed), and ZERO route here (the `*_b612_*` fixture
+# pair added with this route is the only exception). So on every measured target this
+# list is empty and nothing moves; it exists for the shape the corpus does not contain
+# and an attacker can write in one line.
+#
+# A data suffix (`_NON_CODE_SUFFIXES`) is the second shape B-612 filed: `bash
+# scripts/setup.json` over a file carrying `#!/bin/bash`. It is routed only when the
+# file's OWN `#!` names the same language as the prose — two independent statements
+# agreeing — so `the node package.json` routes nothing, and B-548's `README.md`-
+# opening-with-`#!` argument does not arise (that heading names no interpreter).
+# A word, a `<placeholder>/…` path (kept whole, see below), or one of the shell
+# operators the extractor has to see: `|`, `||`, `&&`, `;` end a command, `<` feeds stdin.
+# Backticks, quotes, brackets, parens and commas are pure separators.
+_DECLARED_TOKEN_RE = re.compile(
+    r"\|\||&&|<[\w-]+>[^\s`'\"()\[\],;|&<>]*|[|;<]|[^\s`'\"()\[\],;|&<>]+"
+)
+_DECLARED_SEPARATORS = frozenset({"|", "||", "&&", ";"})
+_DECLARED_PY_STEM_RE = re.compile(r"(?:python|pypy)(?:[0-9]+(?:\.[0-9]+)*)?")
+# `bash -euo pipefail x`: a clustered short-flag group ending in `o` takes an argument.
+_DECLARED_SH_OPT_CLUSTER_RE = re.compile(r"[-+][A-Za-z]*[oO]")
+_DECLARED_NODE_STEMS = frozenset({"node", "nodejs", "bun", "tsx", "ts-node"})
+_DECLARED_FAMILY_LANG = {"py": "py", "sh": "sh", "node": "js", "deno": "js"}
+# Per interpreter family, because the same letter means different things: `-O` is an
+# optimisation switch to python3 and takes an argument in bash; `-c` is a program string
+# to python3 and a config FILE to deno.
+#   no_file — the program is an argument string or a module, so there is no file to route
+#   stdin   — the program is read from stdin; later words are its arguments
+#   arg     — the flag consumes the next word, which is therefore not the script
+_DECLARED_FLAGS = {
+    "py": {
+        "no_file": frozenset({"-c", "-m"}),
+        "stdin": frozenset({"-"}),
+        "arg": frozenset({"-W", "-X", "--check-hash-based-pycs"}),
+    },
+    "sh": {
+        "no_file": frozenset({"-c"}),
+        "stdin": frozenset({"-", "-s"}),
+        "arg": frozenset({"-o", "-O", "+o", "+O"}),
+    },
+    "node": {
+        "no_file": frozenset({"-e", "-p", "--eval", "--print"}),
+        "stdin": frozenset({"-"}),
+        "arg": frozenset({
+            "-r", "--require", "--import", "--loader", "--experimental-loader",
+            "-C", "--conditions", "--env-file", "--title",
+        }),
+    },
+    "deno": {
+        "no_file": frozenset({"eval", "repl"}),
+        "stdin": frozenset({"-"}),
+        "arg": frozenset({
+            "-c", "--config", "--import-map", "--lock", "--cert", "--location",
+            "--seed", "-L", "--log-level",
+        }),
+    },
+}
+_DECLARED_NEVER_A_FILE = frozenset({"-h", "--help", "-V", "--version"})
+# How SKILL.md files say "relative to this skill", counted across the author's installed
+# fleet, OpenClaw's bundled skills and SkillTrustBench: `{baseDir}/` 3,168, `<skill_dir>/`
+# 123, `<skill-dir>/` 115, `$SKILL_DIR/` 97, `${CLAUDE_SKILL_DIR}/` 41. `{{x}}/` is the
+# same shape in template syntax and costs nothing to accept.
+_DECLARED_PLACEHOLDER_RE = re.compile(
+    r"(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\{\{?\s*[A-Za-z_][\w-]*\s*\}?\}|<[\w-]+>)/"
+)
+_DECLARED_MAX_FLAGS = 6
+
+
+def _declared_family(token: str) -> str | None:
+    """The interpreter family a token names ("py"/"sh"/"node"/"deno"), or None."""
+    stem = token.rsplit("/", 1)[-1].lower()
+    if _DECLARED_PY_STEM_RE.fullmatch(stem):
+        return "py"
+    if stem in _SHEBANG_SH_STEMS:
+        return "sh"
+    if stem in _DECLARED_NODE_STEMS:
+        return "node"
+    if stem == "deno":
+        return "deno"
+    return None
+
+
+def _declared_invocations(manifest: str) -> list[tuple[str, str]]:
+    """(language, path-token) for every file *manifest* hands an interpreter to run.
+
+    Three forms: the script argument (`python3 [flags] bin/lint`), stdin redirection
+    (`python3 < bin/lint`, `bash -s < install`), and a `cat` piped into an interpreter
+    that was given no script (`cat bin/lint | python3`). Token-based on purpose:
+    backticks, quotes, brackets and parens are separators, so `` `python3 bin/lint` ``,
+    `CMD ["python3", "bin/lint"]` and `$(which python3) bin/lint` all yield their path.
+    Whether the path names a real bundled file is the caller's question, not this one's.
+    """
+    out: list[tuple[str, str]] = []
+    for line in manifest.replace("\\\r\n", " ").replace("\\\n", " ").splitlines():
+        toks = _DECLARED_TOKEN_RE.findall(line)
+        n = len(toks)
+        for i, tok in enumerate(toks):
+            fam = _declared_family(tok)
+            if fam is None:
+                continue
+            table = _DECLARED_FLAGS[fam]
+            lang = _DECLARED_FAMILY_LANG[fam]
+            end = next((k for k in range(i + 1, n) if toks[k] in _DECLARED_SEPARATORS), n)
+            j = i + 1
+            if fam in ("node", "deno") and j < end and toks[j] == "run":
+                j += 1  # `deno run x.ts` / `bun run x`
+            stdin = no_file = False
+            flags = 0
+            while j < end and flags < _DECLARED_MAX_FLAGS:
+                t = toks[j]
+                if t in table["no_file"] or t in _DECLARED_NEVER_A_FILE:
+                    no_file = True
+                    break
+                if t in table["stdin"]:
+                    stdin = True
+                    break
+                if not t.startswith(("-", "+")) or t == "+":
+                    break
+                flags += 1
+                takes_arg = t in table["arg"] or (
+                    fam == "sh" and _DECLARED_SH_OPT_CLUSTER_RE.fullmatch(t)
+                )
+                j += 2 if takes_arg else 1
+            if no_file:
+                continue
+            if not stdin and j < end and toks[j] != "<" and not toks[j].startswith(("-", "+")):
+                out.append((lang, toks[j]))
+                continue
+            # No script argument: the interpreter reads its program from stdin.
+            lt = next((k for k in range(i + 1, end) if toks[k] == "<"), None)
+            if lt is not None and lt + 1 < end and toks[lt + 1] != "<":  # `<<EOF` is inline
+                out.append((lang, toks[lt + 1]))
+            elif i >= 3 and toks[i - 1] == "|" and toks[i - 3] == "cat":
+                out.append((lang, toks[i - 2]))
+    return out
+
+
+def _declared_relpath(token: str, base: str, known) -> str | None:
+    """The collected relpath *token* names relative to the manifest's dir, or None.
+
+    Lookup only — the result must already be a key of *known*. Absolute paths, `~`,
+    and any `..` / `.` / empty component are refused before the lookup.
+    """
+    m = _DECLARED_PLACEHOLDER_RE.match(token)
+    if m:
+        token = token[m.end():]
+    while token.startswith("./"):
+        token = token[2:]
+    for cand in (token, token.rstrip(".:!?")):
+        if not cand or cand.startswith(("/", "~")) or "\\" in cand:
+            continue
+        if any(part in ("", ".", "..") for part in cand.split("/")):
+            continue
+        rel = base + cand
+        if rel in known:
+            return rel
+    return None
+
+
+def read_skill_declared(
+    skill_dir: Path, ctx: Context | None = None
+) -> list[tuple[str, str, str]]:
+    """B-612: (relpath, language, source) for each bundled file that NO extension or
+    shebang claims but a SKILL.md in this skill runs with a named interpreter.
+
+    FINDINGS ONLY (see the block comment above): callers must never fold this into
+    `installed_skill_py/_shell/_js` or any coverage predicate.
+
+    Capped like `read_skill_python`, and recorded the same way when the cap cuts a
+    declared file off (B-074): a silent cap would let named decoys ahead of the payload
+    buy back the INSTALL this route exists to remove. Measured, that is defence in depth
+    at today's constants — padding big enough to reach this cap also overflows the text
+    blob's own 1 MB cap (`_MAX_BYTES_PER_SKILL`), and the 500-file walk leaves at most
+    499 declared candidates, so an existing limit hit already fires; this one keeps the
+    route honest on its own terms if those constants ever move apart. A limit hit can
+    only move the verdict toward UNKNOWN — the direction the contract allows — and it is
+    what the same bytes named `.py` would have produced.
+    """
+    collected = collect_skill_files(skill_dir, ctx)
+    known = {
+        item["relpath"]: item for item in collected if item["classification"] == "TEXT"
+    }
+    wanted: dict[tuple[str, str], None] = {}
+    for rel, item in known.items():
+        leaf = rel.rsplit("/", 1)[-1].rsplit("::", 1)[-1]
+        if leaf.lower() != "skill.md":
+            continue
+        base = rel[: len(rel) - len(leaf)]
+        for lang, token in _declared_invocations(_collected_text(item)):
+            target = _declared_relpath(token, base, known)
+            if target is not None:
+                wanted[(target, lang)] = None
+    out: list[tuple[str, str, str]] = []
+    total = 0
+    truncated = False
+    for target, lang in wanted:
+        text = _collected_text(known[target])
+        if _file_language(target, text) is not None:
+            continue  # a reader above already owns it — never analyse a file twice
+        if target.lower().endswith(_NON_CODE_SUFFIXES) and _shebang_language(text) != lang:
+            continue
+        if total >= _MAX_PY_BYTES_PER_SKILL or len(out) >= _MAX_FILES_PER_SKILL:
+            truncated = True
+            break
+        out.append((target, lang, text))
+        total += len(text)
+    if truncated and ctx is not None:
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+            f"declared-script scan of skill '{skill_dir.name}' hit the "
+            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
+            "files its SKILL.md runs beyond the cap were NOT analyzed",
+        )
     return out
 
 
@@ -3618,34 +4013,109 @@ def _config_workspace_dirs(
     return out
 
 
+# B-846 ROUND 5: `_OWN_ENGINE_MARKERS` used to be matched as TEXT (first a bare
+# substring, then a substring of a hand-blanked/tokenize-blanked reconstruction — see
+# the ROUND 1-4 history in `_is_own_source`'s docstring). Every one of those rounds
+# was eventually broken by a lexer/grammar quirk version-specific to either CPython
+# 3.9 or 3.12 (PEP 701 changed f-string tokenizing in 3.12; a pre-PEP-701 lexer has no
+# notion of `{}` nesting at all, so a source that is not even valid Python — e.g.
+# `f"{"def vet_skill"}"`, a same-quote nested f-string — can still lex on 3.9 into
+# real, un-blanked `NAME` tokens spelling out a marker). Reconstructing "real code
+# text" from a lexer that does not validate grammar and then substring-matching it is
+# unfixable in kind: the next lexer/grammar-vs-lexer mismatch fails somewhere else.
+#
+# `_marker_identifier` extracts the bare Python identifier each marker names, e.g.
+# "def vet_skill" -> "vet_skill", "_SKILL_CRIT" -> "_SKILL_CRIT" (no space, so the
+# whole string). Used only for the raw-text short-circuit below the matching function
+# — this remains sound because it does not care about a marker's surrounding
+# whitespace at all, only whether the identifier's exact spelling occurs somewhere in
+# the file (a real `ast.FunctionDef`/`Name` node can only ever be spelled exactly as
+# it appears in the source: the parser reads the identifier's characters directly, no
+# lexer trick renames one).
+def _marker_identifier(marker: str) -> str:
+    return marker.rsplit(" ", 1)[-1]
+
+
+def _own_engine_symbols_in_ast(tree: ast.AST) -> set:
+    """Return the subset of `_OWN_ENGINE_MARKERS` structurally present as real AST
+    nodes in `tree` — never a substring/text match, so no lexer or grammar quirk
+    (comment, string, f-string, PEP-701 nesting edge case, ...) can forge a hit:
+    forging one means literally writing the function/assignment, which is the
+    documented, accepted residual (see `_is_own_source`'s class docstring) and no
+    cheaper than it already was.
+
+    Same idiom as `clawseccheck/skillast.py` (read-only `ast.parse()` analysis of
+    scanned skill code, never eval/exec) — this function never executes `tree` either,
+    it only walks the node graph `ast.parse` already built.
+    """
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == "check_installed_skills":
+                found.add("def check_installed_skills")
+            elif node.name == "vet_skill":
+                found.add("def vet_skill")
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "_SKILL_CRIT":
+                    found.add("_SKILL_CRIT")
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == "_SKILL_CRIT":
+                found.add("_SKILL_CRIT")
+    return found
+
+
 def _is_own_source(p: Path) -> bool:
     """True if `p` is ClawSecCheck's own source tree (repo root, install dir, or the
     package dir itself). A security auditor necessarily ships attack signatures and
     red-team payloads as *data*, so a naive malware scan of its own source self-flags.
 
-    Recognition is by structure (package layout) AND distinctive engine symbols — not
-    by name alone — so a look-alike skill that merely calls itself "clawseccheck" is
-    still scanned normally and cannot use the name to dodge detection.
+    Recognition is by structure (package layout) AND real AST STRUCTURE of the
+    engine's distinctive symbols (`_own_engine_symbols_in_ast`, above) — never by name
+    and never by TEXT: `_SKILL_CRIT` must be the target of a genuine
+    `Assign`/`AnnAssign`, and `check_installed_skills`/`vet_skill` must each be a real
+    `FunctionDef`/`AsyncFunctionDef` name. `ast.parse` is the same read-only-AST idiom
+    `clawseccheck/skillast.py` already uses for scanned skill code (never eval/exec).
+    Because a marker is only credited when the source actually PARSES into that exact
+    node, neither a look-alike skill that merely calls itself "clawseccheck", nor a
+    comment/string/f-string/lexer-confusing construct embedding the marker TEXT, can
+    dodge or forge detection.
 
-    B-265: this is the single self-identity oracle for BOTH surfaces. It used to be
-    reachable only from `vet_skill` (it lived in `checks/_shared.py`, a Layer-2 module
-    the Layer-1 collector must not import), while skill *discovery* self-excluded on the
-    bare directory basename. That let `mv evil-skill clawshield` erase a skill from
-    `ctx.installed_skills` — and therefore from the whole audit and from --monitor —
-    with no frontmatter edit, while --vet pointed at the same bytes still said
-    "F (DANGEROUS)". Moving it down here (the same precedent as `_OWN_SKILL_NAMES`,
-    already collector-resident) keeps the import direction legal and makes the two
-    surfaces agree. `checks/_shared.py` re-imports it, so `vet_skill`'s behaviour and
-    the `clawseccheck.checks` aggregator re-export (§3.1-a) are unchanged.
+    B-265: this is the single self-identity oracle for BOTH surfaces (`--vet`'s
+    `_vet_resolved_skill` short-circuit, and skill discovery's self-exclusion below) —
+    both must agree, or `mv evil-skill clawshield` (or any other rename) could erase a
+    skill from `ctx.installed_skills`/`--monitor` while `--vet` on the same bytes still
+    convicted it. `checks/_shared.py` re-imports this function so `vet_skill` and the
+    `clawseccheck.checks` aggregator re-export (§3.1-a) stay unchanged.
 
-    HONEST SCOPE — this CLOSES the rename-only cloak but does not make self-exclusion
-    unforgeable: an attacker who copies our actual engine sources (all of
-    `_OWN_ENGINE_MARKERS` present, in a `checks/` package laid out like ours) alongside
-    a payload would still be excluded. That residual is strictly narrower than the old
-    one — it costs the attacker shipping our whole engine rather than one `mv` — and it
-    is bounded further by `check_installed_skills` being only one of the surfaces that
-    sees a skill. Making exclusion tamper-proof needs a signed/attested identity, not a
-    content heuristic; tracked separately, not solvable inside a static string test.
+    ACCEPTED RESIDUAL (B-846, not solvable by parsing, deliberately out of scope): a
+    forger who writes three real, trivial `def`/assignment statements (a `def
+    vet_skill(): pass` stub, say) instead of any lexical trick still passes — forging
+    a `FunctionDef`/`Assign` node means literally writing the function/assignment,
+    which is no cheaper than the genuine engine's own definitions. Closing this needs
+    a signed/attested identity, not a content heuristic. Separately, `check_installed_
+    skills` is only one of the surfaces that sees a skill at all. Pinned by
+    `tests/test_b846_self_source_axis_and_marker_forgery.py`.
+
+    RETRACTED APPROACHES (B-846 — do not reintroduce; each was tried and defeated by a
+    C-135 reviewer, reproduced end-to-end against the real DO-NOT-INSTALL fixture
+    `fixtures/bad_b335_runtime_persist_install/skills/envtools`, flipping its verdict
+    to INSTALL / Danger PASS every time):
+    - Bare substring match on `_OWN_ENGINE_MARKERS` text: a single `#`-commented line
+      of marker text granted identity for free — no real code needed at all.
+    - Stripping only comment-ONLY lines before the substring match: missed inline/
+      trailing comments, comments after `;`, and markers inside strings/docstrings.
+    - Tokenizing (stdlib `tokenize`) and blanking COMMENT/STRING[/FSTRING_MIDDLE on
+      3.12+] tokens before the substring match: still fundamentally text-based, so it
+      inherited every lexer-vs-grammar mismatch — PEP 701 changed f-string tokenizing
+      on 3.12 (a marker sailed through unblanked there before that was patched), and
+      separately a pre-PEP-701 lexer's total lack of `{}`-nesting awareness lets a
+      source that is NOT even valid Python (a same-quote nested f-string,
+      `f"{"def vet_skill"}"`) still LEX cleanly into real, un-blanked `NAME` tokens on
+      3.9-3.11, with no exception raised to trip any fail-closed path. A pure lexer
+      has no grammar validation, so reconstructing "real code text" from one and
+      substring-matching it is unfixable in kind — only AST structure is sound, since
+      forging a node requires the source to actually PARSE as that node.
 
     C-135 residual, accepted deliberately: an own install that ships the DOCS but not the
     engine (a hand-made partial copy — `SKILL.md` + `README.md` + `docs/` under a
@@ -3683,11 +4153,62 @@ def _is_own_source(p: Path) -> bool:
         sources = [p / "checks.py"]
     else:
         return False
-    try:
-        head = "\n".join(s.read_text(encoding="utf-8", errors="replace") for s in sources)
-    except OSError:
-        return False
-    return all(m in head for m in _OWN_ENGINE_MARKERS)
+    heads = []
+    for src in sources:
+        try:
+            if src.stat().st_size > _MAX_OWN_SOURCE_BYTES:
+                continue  # see _MAX_OWN_SOURCE_BYTES: skipped whole, never truncated
+            heads.append(src.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return False
+    # B-846: see the class docstring. A marker is matched by AST STRUCTURE
+    # (`_own_engine_symbols_in_ast`) — a real `FunctionDef`/`Assign` node — never by
+    # substring text, so no lexer/grammar mismatch (comment, string, f-string, or a
+    # source that lexes differently from how it parses) can forge one.
+    #
+    # PERFORMANCE: `ast.parse` is real parsing, not a cheap scan, and the real engine
+    # is ~3.4M characters across 11 files. The short-circuit below skips parsing a file
+    # outright when none of the still-missing markers' bare IDENTIFIERS appear
+    # anywhere in that file's raw text — sound, not a heuristic: an `ast.FunctionDef`
+    # or `ast.Name` node's identifier is always spelled EXACTLY as it appears in the
+    # source (the parser reads the characters directly; no lexer/grammar trick renames
+    # one), so "identifier absent from raw text" soundly implies "no such node exists
+    # in this file", in the safe direction only (a file can be skipped, never wrongly
+    # excluded from parsing). The loop also stops entirely once every marker has been
+    # confirmed present in some file's AST — later files (sorted, so this is
+    # deterministic) are never even considered. Measured on the real `checks/`
+    # package (11 files): 5 get parsed (`__init__.py`, `_content.py`, `_mcp.py`,
+    # `_shared.py`, `_vet.py` — every file whose text mentions `vet_skill`/
+    # `check_installed_skills` at all, including plain imports/re-exports that never
+    # define them), the other 6 are skipped on the raw-text check alone. `heads`
+    # above is still read in full regardless (reading is cheap and preserves the
+    # existing fail-closed-on-any-unreadable-file behaviour unchanged).
+    # `ast.parse` costs more than tokenizing (parsing does strictly more work than
+    # lexing): ~0.39s/call on
+    # python3.12.3 and ~0.26s/call on python3.9.25 against the real repo root (a
+    # directory that genuinely impersonates our layout) — against ~0.02ms/call on
+    # BOTH versions for an ordinary candidate skill directory with no
+    # `clawseccheck`-shaped layout at all. The short-circuit's actual job — keeping
+    # the expensive path off the vast majority of directories discovery ever looks
+    # at — still holds; only a directory already claiming to BE our package pays the
+    # parse cost, exactly as before this round.
+    remaining = set(_OWN_ENGINE_MARKERS)
+    for text in heads:
+        if not remaining:
+            break
+        if not any(_marker_identifier(m) in text for m in remaining):
+            continue
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            # Fails CLOSED, not open: a file that does not PARSE (whether genuinely
+            # malformed, or a lexer-confusing construct like a same-quote nested
+            # f-string that only pre-PEP-701 tokenizers mis-lex — see ROUND 5)
+            # contributes NO markers, rather than falling back to any weaker text
+            # match. Our own engine sources always parse cleanly (they compile).
+            continue
+        remaining -= _own_engine_symbols_in_ast(tree)
+    return not remaining
 
 
 def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
@@ -3764,6 +4285,62 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         and audited_home.name.startswith(".openclaw")
     ):
         roots.append((user_home / ".agents" / "skills", False))
+    # B-872: sandbox-layout awareness. Under `sandbox_exec` the state dir this run is
+    # pointed at (e.g. `$HOME/.openclaw`) has no config in it -- there is none to find,
+    # the container is empty from OpenClaw's own point of view -- but OpenClaw's REAL
+    # skill tree sits one level up, at `$HOME/skills`: a SIBLING of the state dir, never
+    # a child, so none of the home-relative `SKILL_DIRS` roots above can ever reach it
+    # (the incident this fixes: 29 real skills, 0 found, no hint the run looked in the
+    # wrong place). `ctx.sandboxed` is `collect()`'s own compound signal for exactly this
+    # shape -- the sync marker present AND no config resolvable this run -- so gating on
+    # it here means an ordinary `--home` with simply no sibling `skills/` (nothing
+    # unusual about that) never trips this. Reuses the SAME `user_home`/`audited_home`
+    # pair just resolved for the `.agents/skills` root above rather than re-deriving
+    # them, so the two sandbox-shape checks cannot drift apart.
+    #
+    # Deliberately a DISCLOSURE, never an extra root: silently folding `$HOME/skills`
+    # into this run's population would audit a directory the user never named with
+    # --home, which is the exact surprise this project refuses (Golden Rule #2). The
+    # count below is a cheap, bounded PROBE only -- `iter_discovered_skill_dirs` is the
+    # same walker every real root uses, so "sees a group layout" behaves identically,
+    # but its `limit_hits`/`unassessable` sinks are thrown away rather than fed to `ctx`:
+    # a truncation or an unreadable manifest inside a tree this run never actually
+    # scans must not contaminate this run's own coverage bookkeeping for content it
+    # never read.
+    if (
+        ctx.sandboxed
+        and user_home is not None
+        and audited_home is not None
+        and audited_home.parent == user_home
+        and audited_home.name.startswith(".openclaw")
+    ):
+        _sibling_skills = user_home / "skills"
+        if _safe_is_dir(_sibling_skills):
+            _sibling_count = sum(
+                1 for _ in _iter_discovered_skill_dirs(
+                    _sibling_skills, allow_symlink_entries=False, limit_hits=[],
+                )
+            )
+            if _sibling_count:
+                # Disclosure.subject/.detail carry no path and no "/" at all (only a
+                # bare quoted directory NAME) -- collector's own precedent
+                # (`_config_workspace_dirs`'s `workspace_outside_home` disclosure) and
+                # `tests/test_b617_disclosure_channel.py::
+                # test_no_absolute_path_reaches_any_rendered_surface`, which greps the
+                # rendered block for `os.sep`. "Re-run with --home one level up" says
+                # what to do without ever naming a directory this run did not audit.
+                note_disclosure(
+                    ctx.disclosures,
+                    "skills_beside_state_dir",
+                    "skills",
+                    f"{_sibling_count} skill "
+                    f"director{'y' if _sibling_count == 1 else 'ies'} found in a "
+                    "'skills' directory that sits beside the audited state directory, "
+                    "not inside it, so this run's --home never reached them (none "
+                    "installed vs. could not look are collapsed here today). Re-run "
+                    "with --home pointing one level up, at that directory's parent, "
+                    "to include them.",
+                )
     for cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits,
                                     disclosures=ctx.disclosures):
         roots.append((cw / "skills", False))
@@ -3883,6 +4460,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 ctx.installed_skill_py[key] = read_skill_python(target, ctx)
                 ctx.installed_skill_shell[key] = read_skill_shell(target, ctx)
                 ctx.installed_skill_js[key] = read_skill_js(target, ctx)
+                ctx.installed_skill_declared[key] = read_skill_declared(target, ctx)
                 ctx.installed_skill_dirs[key] = target
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
@@ -4108,7 +4686,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
 
     * LEGACY -- ``job_id``, ``name``, ``enabled``, ``delete_after_run``, ``trigger_script``,
       ``payload_kind``, ``payload_message`` columns, each holding its own scalar.
-    * MODERN (OpenClaw 2026.8.2+) -- ``delete_after_run``/``trigger_script``/
+    * MODERN (``job_json`` column present) -- ``delete_after_run``/``trigger_script``/
       ``payload_message`` no longer exist as columns; they live inside the ``job_json``
       TEXT column (``deleteAfterRun`` top-level, ``payload.script``/``payload.message``/
       ``payload.text`` depending on ``payload.kind``). ``job_id``/``name``/``enabled``/
@@ -4217,6 +4795,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
         return  # neither store present -> cron_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -4234,7 +4813,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 return  # no cron_jobs table at all -- same honest "not found" as before
 
             if "job_json" in columns:
-                # MODERN shape (OpenClaw 2026.8.2+). delete_after_run/trigger_script/
+                # MODERN shape (job_json column present). delete_after_run/trigger_script/
                 # payload_message no longer have their own columns -- they live inside the
                 # job_json blob, grounded against the installed dist:
                 #   deleteAfterRun  top-level bool, optional (plugin-entry-DhKN3bwq.d.ts:6380
@@ -4244,6 +4823,24 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 #                   payload.text when payload.kind == "systemEvent"
                 #                   (both: persisted-shape-C6m3w-m0.js:100)
                 # job_id/name/enabled/payload_kind stay real, unchanged columns.
+                #
+                # C-586 (2026-09-22): a review sweep flagged that the dist's
+                # `CRON_JOB_READ_COLUMNS` list (schema-DrFXGeAf.mjs, used by the vendor's
+                # own `loadCronRows`) omits `name`, and read that as `name` having been
+                # dropped from the table on 2026.9.5. Reproduced and NOT confirmed: that
+                # constant is just the projection `loadCronRows` needs for its own
+                # config-order reconciliation (job_id/declaration_key/enabled/agent_id/
+                # payload_kind/job_json/state_json/runtime_updated_at_ms/
+                # schedule_identity/sort_order/updated_at) -- a narrower list than the
+                # table, not the table's column set. The vendor's own `CREATE TABLE
+                # cron_jobs` in `OPENCLAW_STATE_SCHEMA_SQL` (openclaw-state-db-DS2iNFy4.mjs,
+                # installed 2026.9.5) still declares `name TEXT NOT NULL`, matching this
+                # tree's own grounded, regenerated `tests/state_schema_snapshot.sql`
+                # (stamped `openclaw-version: 2026.9.5`) and its local-only re-derivation
+                # against the live dist in `tests/test_state_schema_grounding.py`. No
+                # `CRON_JOB_READ_COLUMNS`-shaped developer comment predating this one was
+                # found anywhere in this repo's history either. Watch item only, closed
+                # by reproduction -- the SELECT below is unchanged.
                 cur = conn.execute(
                     "SELECT job_id, name, enabled, payload_kind, job_json "
                     "FROM cron_jobs LIMIT ?",
@@ -4444,8 +5041,8 @@ def _flag_cron_store_config_mismatch(ctx: Context, jobs_json: Path) -> None:
     runtime actually uses, full stop -- no SQLite lookup can rescue that, because the
     configured store might not even be SQLite-backed. Flag it unconditionally.
     """
-    # F-183: `cron.store` left openclaw.json for the machine-owned state store in
-    # OpenClaw 2026.8.1, so reading only the config silently stopped this check firing on
+    # F-183: `cron.store` left openclaw.json for the machine-owned state store
+    # (`config_machine_state`), so reading only the config silently stopped this check firing on
     # a current build — the shadow it exists to catch would go unreported. The state value
     # wins where present; the config key remains authoritative on builds that still have
     # one, and on any machine whose state store could not be read.
@@ -4515,6 +5112,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     keys = _cron_store_key_candidates(jobs_json)
     placeholders = ",".join("?" * len(keys))
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -4566,10 +5164,10 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     added, ran, and self-erased leaves no definition for B168 to scan, but its run trail
     survives here.
 
-    B-709: on the installed OpenClaw 2026.8.2, ``cron_run_logs`` DOES NOT EXIST AT ALL. The
-    live state DB carries a completed migration record whose id is literally
+    B-709: where the state DB carries a completed migration record whose id is literally
     ``state:cron-run-logs-to-task-runs:v1`` — the vendor naming its own destination, not an
-    inference — and cron executions now live as rows in the generic ``task_runs`` table
+    inference — ``cron_run_logs`` DOES NOT EXIST AT ALL and cron executions instead live as
+    rows in the generic ``task_runs`` table
     (``runtime = 'cron'``, also ``task_kind = 'automation_run'``). Verified empirically: a
     live ``task_runs`` row's ``source_id`` equals the ``job_id`` of a live ``cron_jobs`` row
     for the same job, so ``source_id`` is the cron job_id. Column mapping onto the SAME
@@ -4629,6 +5227,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
         return  # no state DB -> cron_run_logs_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -4664,7 +5263,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
                 rows = cur.fetchall()
                 modern = False
             elif modern_present:
-                # MODERN successor (OpenClaw 2026.8.2+). Filtered to runtime='cron' so a
+                # MODERN successor (``task_runs`` table present). Filtered to runtime='cron' so a
                 # non-cron task_runs row (e.g. runtime='subagent') is never mistaken for a
                 # cron execution -- that would invent cron history that never happened.
                 cur = conn.execute(
@@ -4723,8 +5322,8 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
         )
 
 
-# F-183. The three machine-owned config values OpenClaw 2026.8.1 moved OUT of
-# openclaw.json and into its own state database. This is a new CATEGORY of schema change:
+# F-183. Three machine-owned config values moved OUT of openclaw.json and into the shared
+# state database's `config_machine_state` table. This is a new CATEGORY of schema change:
 # the setting did not move within the JSON, it left the JSON, so every `dig(cfg, ...)`
 # reader of these keys is looking somewhere the runtime no longer writes.
 #
@@ -4790,6 +5389,24 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
     rather than sharing `_collect_config_machine_state`'s connection, matching this
     file's own one-reader-per-concern idiom (`_collect_update_runs`,
     `_collect_capture_state`, ...).
+
+    B-889: before B-811 (trajectorystore.py, 2026-09-15), the query below trusted
+    `config_machine_state` to name the real table SQLite would resolve at read time --
+    but name resolution is a property of the FILE'S OWN schema, attacker-controlled if
+    anything can write into `state/openclaw.sqlite`. A crafted
+    `CREATE VIEW config_machine_state AS SELECT ... FROM <decoy>` makes `SELECT
+    LENGTH(value_json) FROM config_machine_state ...` execute that view body instead,
+    spoofing the presence/length signal in either direction (forcing a false WARN, or
+    suppressing a real one via a view returning NULL) -- bounded impact only, since
+    LENGTH() alone can never leak the value itself. `trajectorystore._table_kind`
+    (its own docstring has the full four-round history of what "a real TABLE" has to
+    rule out beyond a plain VIEW: virtual tables, rootpage aliasing, generated
+    columns) is reused here verbatim rather than re-derived, and the schema check is
+    run inside the SAME transaction as the real read, closing the TOCTOU gap the same
+    way `trajectorystore._open_and_verify_table` does. A name that does not resolve to
+    a real table is refused, disclosed via `ctx.errors`, and never silently trusted --
+    it is neither treated as a genuinely absent table (that stays its own, quieter
+    "predates the table" case below) nor as a readable one.
     """
     state_dir = home / "state"
     capped: list = []
@@ -4809,14 +5426,49 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
         return
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
+            # BEGIN before the schema check, held open across it AND the read below --
+            # closes the same TOCTOU gap `trajectorystore._open_and_verify_table`
+            # documents (a concurrent writer swapping the schema between the check and
+            # the query).
+            conn.execute("BEGIN")
             conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "config_machine_state")
+            if kind == "absent":
+                # Genuinely no such table yet -- same honest UNDETERMINED as the
+                # `sqlite3.Error` "no such table" branch below, not a refusal.
+                return
+            if kind != "table":
+                # B-889: present, but not a real TABLE (view / virtual table /
+                # rootpage-aliased / generated-column row -- see `_table_kind`'s
+                # docstring for the demonstrated shapes). Refuse to query it. Disclosed,
+                # never silently trusted: NOT the same outcome as "absent" above, and
+                # NOT read as if it were a genuine row.
+                ctx.errors.append(
+                    f"'config_machine_state' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the auth-profile store presence was not read"
+                )
+                return
             # LENGTH(value_json), never value_json itself: the secret payload is never
             # fetched into this process, only its byte count. One literal key is bound,
             # never interpolated, and there is no SELECT *.
+            #
+            # `CAST(value_json AS BLOB)` before `LENGTH()` -- the identical B-811 round-2
+            # fix trajectorystore.py already carries for `session_id`/`event_json`
+            # (see that module's `_SELECT_TRAJECTORY_ROWS`/`_SELECT_TRAJECTORY_EVENT_JSON`
+            # comments). A bare `LENGTH()` on a TEXT value stops at the first embedded
+            # NUL byte (computed as if by C's `strlen()`), so a genuine, honestly-stored
+            # row whose value happens to start with a NUL byte reads as length 0/near-0
+            # regardless of its true size -- silently suppressing the hedge this
+            # function exists to raise, with zero disclosure, and without needing the
+            # view-masquerade trick at all. Casting to BLOB first makes `LENGTH()`
+            # return the true byte count, embedded NULs included.
             row = conn.execute(
-                "SELECT LENGTH(value_json) FROM config_machine_state WHERE state_key = ?",
+                "SELECT LENGTH(CAST(value_json AS BLOB)) FROM config_machine_state "
+                "WHERE state_key = ?",
                 (_AUTH_PROFILE_STORE_KEY,),
             ).fetchone()
         finally:
@@ -4833,6 +5485,532 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
     ctx.auth_profile_store_read = True
     if row is not None and row[0] is not None:
         ctx.auth_profile_store_length = int(row[0])
+
+
+# B-845: the row key every real read/write of the per-agent store uses.
+# Grounded against the installed dist (2026.9.5, sqlite-Cp6HSWY4.mjs): `PRIMARY_ROW_KEY
+# = "primary"`, and every one of `readPersistedAuthProfileStoreRaw` /
+# `writePersistedAuthProfileStoreRaw` / `deletePersistedAuthProfileStoreRaw`'s non-shared
+# branches binds `.where("store_key", "=", PRIMARY_ROW_KEY)` / upserts with
+# `store_key: PRIMARY_ROW_KEY` -- the table holds at most one row that the runtime itself
+# ever reads. Binding this literal (never SELECT *) keeps the same "never fetch the value,
+# only its length" discipline `_AUTH_PROFILE_STORE_KEY` above already established.
+_AGENT_AUTH_PROFILE_STORE_ROW_KEY = "primary"
+
+
+def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None:
+    """B-845: does any agent's OWN auth-profile store hold more than an
+    empty shell?
+
+    `_collect_auth_profile_store_presence` (above) only ever asked the SHARED state
+    database (`state/openclaw.sqlite`) about `config_machine_state["authProfiles.store"]`.
+    OpenClaw ALSO persists credentials directly into each agent's own database
+    (`agents/<agent-id>/agent/openclaw-agent.sqlite`, table `auth_profile_store`) --
+    grounded against the installed dist (2026.9.5, sqlite-Cp6HSWY4.mjs): both are written
+    through the same `writePersistedAuthProfileStoreRaw` dispatcher, which picks the
+    per-agent table whenever the save is not for the shared/main store. A home with an
+    empty `credentials/` directory AND an empty-or-absent shared-store row can still hold
+    real, usable credentials in an agent's own database -- reproduced directly: an
+    otherwise-clean home with a single non-empty per-agent `auth_profile_store` row read
+    as a confident, unhedged PASS before this function existed.
+
+    Same length-only discipline as the shared-store sibling: `LENGTH(store_json)` is
+    selected, never `store_json` itself, so the secret payload never reaches this
+    process. `_AGENT_AUTH_PROFILE_STORE_ROW_KEY` is bound as a parameter, never
+    interpolated, and there is no ``SELECT *``.
+
+    Iterates every per-agent database `trajectorystore.sqlite_db_paths` finds (bounded by
+    that function's own `_MAX_SQLITE_DBS` cap, so this reader inherits the same ceiling
+    rather than adding a second one) and aggregates across all of them: `_read` is True
+    once at least one database was opened and queried at all (independent of whether it
+    held a row); `_length` holds the LARGEST row length observed across every database
+    queried, so one agent with real material is not hidden behind another agent's empty
+    or absent row. `_length` stays None only when every database queried had no row for
+    this key -- the same "looked, nothing there" vs. "could not look" distinction the
+    shared-store sibling and every other reader in this file already draws.
+
+    Opened READ-ONLY and schema-verified via `trajectorystore._open_and_verify_table`
+    (reused, not reimplemented) before this function ever queries `auth_profile_store`:
+    that function's `_open_readonly` URL-quotes the database path before embedding it in
+    the `file:` URI (an agent id is a path COMPONENT this reader does not control, and an
+    unquoted `?`/`%2f` inside one could otherwise splice its own query parameter ahead of
+    the trailing `?mode=ro` and defeat it), and its `_table_kind` check refuses to query
+    `auth_profile_store` at all unless the file's OWN `sqlite_master` schema says it is a
+    genuine table -- not a VIEW, a virtual table, a rootpage-aliased row, or a table with
+    a `GENERATED ALWAYS AS` column on `store_json`.
+
+    B-845 (follow-up, 2026-09-23): a first version of this function opened
+    the database directly (`sqlite3.connect(...)`) and issued the SELECT below without
+    that verification. A hostile `agents/<id>/agent/openclaw-agent.sqlite` whose
+    `auth_profile_store` is actually a `CREATE VIEW ... AS WITH RECURSIVE ...` hung this
+    function -- and therefore `collect()` -- forever, because a recursive VIEW body has no
+    row/byte bound the way a real table's SELECT does. Reusing `_open_and_verify_table`
+    closes this the same way `trajectorystore.py`'s own trajectory-table readers already
+    close it for `trajectory_runtime_events`: the VIEW is refused before any row is ever
+    fetched from it, so this behaves like "could not read this store" (the same
+    `continue`-and-move-on path a genuinely unreadable or absent table already took), not
+    like a hang. A database that cannot be opened, whose `auth_profile_store` does not
+    resolve to a real table, or that predates the table entirely, is skipped rather than
+    treated as a global failure -- one hostile or corrupt per-agent database must not
+    blind this reader to every other agent's own store.
+
+    Also sets `ctx.agent_auth_profile_store_capped` (B-845 follow-up) when
+    `trajectorystore.sqlite_db_paths` under-counts the real number of per-agent databases
+    because more than its own `_MAX_SQLITE_DBS` cap exist -- so a caller knows the sweep
+    below is a bounded sample, not an exhaustive one.
+    """
+    ctx.agent_auth_profile_store_capped = _trajectorystore.sqlite_db_paths_capped(home)
+    for db_path in _trajectorystore.sqlite_db_paths(home):
+        conn, _kind, unreadable = _trajectorystore._open_and_verify_table(
+            db_path, table_name="auth_profile_store"
+        )
+        if conn is None:
+            # `_kind == "absent"` (unreadable=False) is not corrupt -- same honest
+            # UNDETERMINED-for-THIS-db as the shared-store sibling. `unreadable=True`
+            # covers several distinct causes -- a genuine open/lock-timeout failure, a
+            # non-regular main/sidecar path refused before open (B-845, round 3), AND
+            # `auth_profile_store` resolving to something other than a real table (the
+            # hang this fix closes) -- so the message below stays generic rather than
+            # naming only the VIEW/non-table case (B-845, round 3: a prior wording said
+            # "did not resolve to a real table" for every one of these, which is simply
+            # false for a plain open failure or a lock timeout). Either way this db is
+            # skipped, other agents' own databases are still tried below.
+            if unreadable:
+                ctx.errors.append(
+                    f"could not read agent auth-profile store presence from {db_path}: "
+                    "the database could not be read"
+                )
+            continue
+
+        try:
+            row = conn.execute(
+                "SELECT LENGTH(store_json) FROM auth_profile_store WHERE store_key = ?",
+                (_AGENT_AUTH_PROFILE_STORE_ROW_KEY,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            ctx.errors.append(
+                f"could not read agent auth-profile store presence from {db_path}: {exc}"
+            )
+            continue
+        finally:
+            conn.close()
+
+        ctx.agent_auth_profile_store_read = True
+        if row is not None and row[0] is not None:
+            length = int(row[0])
+            if (
+                ctx.agent_auth_profile_store_length is None
+                or length > ctx.agent_auth_profile_store_length
+            ):
+                ctx.agent_auth_profile_store_length = length
+
+
+# B176 follow-up (2026-09-25): legacy devices/paired.json -> device_pairing_paired
+# (state/openclaw.sqlite) migration.
+#
+# C-135 round 1 (2026-09-25): the first version of this reader had neither a row-count
+# limit nor a per-value byte cap on scopes_json/approved_scopes_json/tokens_json --
+# reproduced concretely by the reviewer: a single row with a 50MB tokens_json string (a
+# plain stored TEXT value, not a generated column) was fetched and processed whole, no
+# truncation, no disclosure. `device_pairing_paired` is written by the SAME runtime that
+# writes `config_machine_state`/`trajectory_runtime_events`, so it carries the identical
+# precondition (an attacker who already has write access to state/openclaw.sqlite) those
+# two tables' own bounds already treat as worth defending against -- and this table had
+# none. `_MAX_PAIRED_DEVICE_JSON_BYTES` is generous headroom, not a realistic size (a
+# real device's scope list or per-role token dict is a few hundred bytes at most), same
+# "generous enough to never clip real data" spirit as `_MAX_MACHINE_STATE_VALUE_BYTES`.
+# `_MAX_PAIRED_DEVICES` is likewise generous for a store real installs populate with a
+# handful of devices at most.
+#
+# The bound is enforced AT THE SQL LEVEL (`length(CAST(col AS BLOB)) <= ?`), not by
+# fetching the value and measuring it in Python: the same B-811 lesson
+# `trajectorystore._SELECT_TRAJECTORY_EVENT_JSON` documents at length applies here
+# verbatim -- a bound checked only AFTER `.fetchall()` has already materialized the
+# oversized value never had a chance to stop the allocation. `CAST(... AS BLOB)` matters,
+# not just style: a bare `length()` on TEXT stops at the first embedded NUL byte (computed
+# as if by C's `strlen()`), so an oversized value engineered to start with a NUL byte
+# would otherwise report a tiny length while still being arbitrarily large.
+#
+# A ROW is the natural unit here (one paired device), not a column -- the same
+# granularity `_collect_config_machine_state` uses for its own per-KEY
+# present-but-unparsed tracking (`config_machine_state_unparsed`). A row whose scopes/
+# approvedScopes/tokens value exceeds the cap on ANY of the three columns is excluded
+# from the main SELECT (never partially parsed -- the same all-or-nothing per-row
+# treatment `trajectorystore`'s own excluded-count queries already establish for their
+# own oversized rows) and counted separately below, so it is disclosed as "present but
+# not read", never silently missing as if it had never existed (GR#4).
+_MAX_PAIRED_DEVICE_JSON_BYTES = 256 * 1024
+_MAX_PAIRED_DEVICES = 500
+
+# B396: the row-within-cap predicate and the SELECT gained three more columns —
+# role/roles_json/node_surface_json — the ones a paired NODE's admission (as opposed to
+# a paired OPERATOR's authority, which is all B176 itself ever needed) turns on. Bounded
+# the exact same way as the original three: at the SQL level, per column, so a hostile
+# oversized value on any of the six never reaches this process (see this table's own
+# module docstring below for the full C-135 round 1 grounding — only a hostile row's
+# behaviour changes; a real device's role/roles/nodeSurface is a few bytes at most).
+_PAIRED_DEVICE_ROW_WITHIN_CAP = (
+    "(scopes_json IS NULL OR length(CAST(scopes_json AS BLOB)) <= ?) "
+    "AND (approved_scopes_json IS NULL OR length(CAST(approved_scopes_json AS BLOB)) <= ?) "
+    "AND (tokens_json IS NULL OR length(CAST(tokens_json AS BLOB)) <= ?) "
+    "AND (role IS NULL OR length(CAST(role AS BLOB)) <= ?) "
+    "AND (roles_json IS NULL OR length(CAST(roles_json AS BLOB)) <= ?) "
+    "AND (node_surface_json IS NULL OR length(CAST(node_surface_json AS BLOB)) <= ?)"
+)
+_PAIRED_DEVICE_SQLITE_SELECT = (
+    "SELECT device_id, platform, scopes_json, approved_scopes_json, tokens_json, "
+    "created_at_ms, approved_at_ms, last_seen_at_ms, role, roles_json, node_surface_json "
+    "FROM device_pairing_paired "
+    f"WHERE {_PAIRED_DEVICE_ROW_WITHIN_CAP} LIMIT ?"
+)
+_PAIRED_DEVICE_SQLITE_OVERSIZED_COUNT = (
+    "SELECT count(*) FROM device_pairing_paired "
+    f"WHERE NOT ({_PAIRED_DEVICE_ROW_WITHIN_CAP})"
+)
+
+# B176 follow-up, C-135 round 1: an ALLOWLIST, not a denylist, of the sub-keys that
+# survive out of each `tokens_json[role]` entry -- tightened from "strip only `token`"
+# after review found everything else in that dict passed through unfiltered, so a future
+# vendor field (a hypothetical `refreshToken`/`deviceFingerprint`) would silently ride
+# along even though this reader's own docstring claimed only these six survive. Matches
+# this file's own field-select precedent (`_collect_update_runs`'s named-key extraction).
+_SAFE_TOKEN_SUBKEYS = frozenset({
+    "role", "scopes", "createdAtMs", "rotatedAtMs", "lastUsedAtMs", "revokedAtMs",
+})
+
+
+def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
+    """Read-only collection of the migrated paired-device store
+    (``device_pairing_paired`` in ``~/.openclaw/state/openclaw.sqlite``) into
+    ``ctx.paired_devices_sqlite``.
+
+    Grounded by DIRECT SCHEMA INSPECTION of a real, installed OpenClaw 2026.9.6
+    (``sqlite3 ~/.openclaw/state/openclaw.sqlite ".schema device_pairing_paired"``),
+    not decompiled from a dist bundle -- filed the same day this was found live: the
+    legacy ``devices/paired.json`` file this machine used to carry is now
+    ``devices/paired.json.migrated`` (inert, never read by the runtime again), and its
+    2 real paired devices live ONLY in this table. Before this fix,
+    ``check_paired_device_operator_authority`` (B176) checked ``paired_path.is_file()``
+    on the legacy path alone, found it absent, and reported a confident PASS ("no
+    paired devices to evaluate") on a machine that genuinely has 2 -- a false negative
+    on a security-relevant standing-authority check.
+
+    Columns actually seen (STRICT table, one row per device, ``device_id`` the PK):
+    ``device_id, public_key, display_name, operator_label, platform, device_family,
+    client_id, client_mode, browser_origin, role, roles_json, scopes_json,
+    approved_scopes_json, remote_ip, tokens_json, approved_via, node_surface_json,
+    pending_node_surface_json, created_at_ms, approved_at_ms, last_seen_at_ms,
+    last_seen_reason``. Only the columns B176's own per-entry evaluation loop, plus
+    (B396) ``role``/``roles_json``/``node_surface_json`` -- the node-admission
+    predicate ``check_paired_node_skill_coverage`` needs -- are ever selected; never
+    ``public_key``, ``display_name``, ``operator_label``, ``device_family``,
+    ``client_id``, ``client_mode``, ``browser_origin``, ``remote_ip``, ``approved_via``,
+    ``pending_node_surface_json``, or ``last_seen_reason``, none of which either
+    consumer's shape carries.
+
+    Each row is normalised into the SAME per-entry dict shape the legacy
+    ``devices/paired.json`` envelope already uses (``deviceId``, ``platform``,
+    ``scopes``, ``approvedScopes``, ``tokens``, ``createdAtMs``, ``approvedAtMs``,
+    ``lastSeenAtMs``), keyed by ``device_id``, so
+    ``check_paired_device_operator_authority``'s existing scope/revoked-token
+    evaluation runs unmodified against either source -- see that check's docstring
+    for the merge rule (legacy JSON wins outright when present; this table is
+    consulted only when it is absent, the same "legacy wins" precedent
+    ``_collect_cron`` already established for its own JSON-vs-SQLite pair).
+
+    Never-echo-the-token contract, defense in depth: unlike the legacy JSON path
+    (which loads the whole file, secret token strings included, and relies on the
+    check's own logic never printing them), this reader keeps only an ALLOWLIST of
+    each token's sub-keys (``_SAFE_TOKEN_SUBKEYS``) while parsing ``tokens_json``, so
+    the live secret string -- and any future vendor sub-field this reader has not been
+    taught about -- never enters a Python object this reader hands back at all. Only
+    ``role``/``scopes``/``createdAtMs``/``rotatedAtMs``/``lastUsedAtMs``/
+    ``revokedAtMs`` survive -- exactly what the check's own revoked-token logic
+    (B-243) needs, and nothing else.
+
+    B396 fields, added to the SAME per-entry dict (never a second dict, never a second
+    reader): ``role`` (the bare column, or ``None``), ``roles`` (the parsed
+    ``roles_json`` -- a list keeps only its string items, a bare string is kept as-is,
+    anything else or a parse failure is ``None``), ``rolesUnparsed`` (``True`` iff
+    ``roles_json`` was present and failed to parse), ``nodeSurface`` (an ALLOWLIST
+    projection of the parsed ``node_surface_json`` -- only ``commands`` survives from a
+    dict shape; a truthy non-dict JSON value collapses to ``{}``, a falsy one to
+    ``None``, matching JS truthiness since only PRESENCE of a surface matters to a
+    non-dict shape, never its content), ``nodeSurfaceUnparsed`` (parse failure), and
+    ``tokensUnparsed`` (``True`` iff ``tokens_json`` was present and failed to parse --
+    the existing ``tokens`` value B176 already reads is UNCHANGED by this addition).
+    None of these six ever holds token-secret material; ``nodeSurface`` in particular
+    drops ``displayName``/``bins``/host stats/every other vendor field the real
+    ``nodeSurface`` object may carry, by construction (an allowlist, not a denylist).
+
+    Bounded, defense in depth against a hostile state DB (C-135 round 1, see
+    ``_PAIRED_DEVICE_SQLITE_SELECT``'s own comment for the full grounding): a row
+    whose ``scopes_json``/``approved_scopes_json``/``tokens_json``/``role``/
+    ``roles_json``/``node_surface_json`` exceeds ``_MAX_PAIRED_DEVICE_JSON_BYTES`` on
+    any of the six is excluded AT THE SQL LEVEL (never fetched into this process at
+    all) and counted via
+    ``_PAIRED_DEVICE_SQLITE_OVERSIZED_COUNT`` for disclosure -- "present but not
+    read", never silently absent. The row set itself is capped at
+    ``_MAX_PAIRED_DEVICES`` (the classic one-extra-row probe: requesting one more
+    than the cap and discarding it distinguishes "truncated" from "exactly at the
+    cap" without a second query), with truncation disclosed the same way.
+
+    Same view-masquerade defense as the other security-plane tables in this module
+    (``config_machine_state``, ``installed_plugin_index``): resolved via
+    ``trajectorystore._table_kind`` before being queried, so a crafted
+    ``CREATE VIEW device_pairing_paired AS ...`` cannot spoof, in either direction,
+    whether a standing operator-authority grant exists.
+
+    Three-state disclosure, matching every sibling reader on this database:
+    ``paired_devices_sqlite_found`` False means undetermined (no state DB, or one
+    predating this table); True with an empty ``paired_devices_sqlite`` means
+    "looked, table exists, genuinely zero rows" (a real, correctly-reported clean
+    PASS on a migrated-but-never-paired install); ``paired_devices_sqlite_parse_error``
+    means present but not reliably readable (a schema this reader does not
+    recognise, a locked file, or a masquerading view) -- the caller must report
+    UNKNOWN for that case, never a fake PASS. An oversized/truncated row is a
+    THIRD, narrower case: the other, well-formed rows are still evaluated
+    normally, exactly as ``config_machine_state_unparsed`` does not block reading
+    the OTHER allowlisted keys -- but (C-135 round 2) it is NOT enough to disclose
+    this only via ``ctx.errors``, which ``check_paired_device_operator_authority``
+    never reads. A row excluded for size/count is ALSO recorded via
+    ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, ...)``, the same channel
+    B172/``LIMIT_DOMAIN_APPROVALS`` already uses for its own collector-cap case, so
+    the check can call ``limit_hits_for(ctx, LIMIT_DOMAIN_PAIRED)`` and downgrade a
+    verdict-by-absence to UNKNOWN instead of silently trusting a PASS built over
+    data an attacker with state-DB write access could have padded out of the
+    result on purpose -- reproduced concretely: padding a live high-scope device's
+    own ``tokens_json`` just over the cap turned a correct WARN into a silent PASS
+    before this fix.
+    """
+    state_dir = home / "state"
+    capped: list = []
+    sqlite_candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # Same disclosure discipline as `_collect_auth_profile_store_presence`: a
+        # capped walk that never reached the DB is not the same fact as "no state
+        # store" (GR#4 -- no silent completeness claim over a capped scan).
+        if capped:
+            message = (
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the paired-device store presence was not read"
+            )
+            ctx.errors.append(message)
+            # B396: previously disclosed via ctx.errors alone, which
+            # check_paired_device_operator_authority (B176) never reads -- so a state
+            # dir crowded past the walk cap read as a silent, honest-looking PASS ("no
+            # devices/paired.json found") on a store this collector never actually
+            # reached. note_limit is the channel both B176 and B396 consult via
+            # limit_hits_for to downgrade a verdict-by-absence to UNKNOWN instead.
+            note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
+        return  # no state DB -> paired_devices_sqlite_found stays False (UNKNOWN, not a fake PASS)
+
+    try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("BEGIN")
+            conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "device_pairing_paired")
+            if kind == "absent":
+                # Genuinely no such table yet (pre-migration install) -- same honest
+                # UNDETERMINED as the sqlite3.Error "no such table" branch below.
+                return
+            if kind != "table":
+                # Present, but not a real TABLE (view / virtual table / rootpage-
+                # aliased / generated-column row). Refuse to query it -- disclosed,
+                # never silently trusted, and never conflated with "absent".
+                ctx.errors.append(
+                    f"'device_pairing_paired' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the paired-device store was not read"
+                )
+                ctx.paired_devices_sqlite_found = True
+                ctx.paired_devices_sqlite_parse_error = True
+                return
+            # The classic one-extra-row probe (matching `_collect_subagent_runs`):
+            # request one more row than the cap allows, purely to detect "more exist"
+            # -- discarded below, never evaluated.
+            cap_params = (
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+                _MAX_PAIRED_DEVICE_JSON_BYTES,
+            )
+            rows = conn.execute(
+                _PAIRED_DEVICE_SQLITE_SELECT, (*cap_params, _MAX_PAIRED_DEVICES + 1),
+            ).fetchall()
+            # A SEPARATE, cheap count of the rows the WHERE clause above excluded for
+            # being oversized -- read only to disclose that count, never to recover the
+            # excluded rows' own content (same "excluded-count query never selects the
+            # row itself" discipline `trajectorystore`'s own sibling queries use).
+            oversized_count = conn.execute(
+                _PAIRED_DEVICE_SQLITE_OVERSIZED_COUNT, cap_params,
+            ).fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(
+                f"could not read device_pairing_paired from {db_path}: {exc}"
+            )
+            ctx.paired_devices_sqlite_found = True
+            ctx.paired_devices_sqlite_parse_error = True
+        return
+
+    if oversized_count:
+        # Present, but not read -- never conflated with "this device does not exist"
+        # (GR#4). The other, well-formed rows below are still evaluated normally.
+        #
+        # C-135 round 2 (2026-09-26): ctx.errors alone is not enough here -- it is
+        # text-report-only disclosure that check_paired_device_operator_authority
+        # never consults. Reviewer's concrete repro: an attacker who already has
+        # write access to state/openclaw.sqlite pads their OWN high-scope paired
+        # device's tokens_json past the cap, so it is excluded here -- without a
+        # verdict-visible signal, the check silently falls through to PASS ("no
+        # paired devices to evaluate"), trading the DoS bug for a targeted evasion
+        # primitive against exactly the attacker class B176 exists to catch.
+        # note_limit's LIMIT_DOMAIN_PAIRED bucket is the channel the check actually
+        # reads (limit_hits_for) to downgrade a verdict-by-absence to UNKNOWN --
+        # the same B172/LIMIT_DOMAIN_APPROVALS precedent for its own collector cap.
+        message = (
+            f"device_pairing_paired in {db_path} has {oversized_count} paired-device "
+            f"row(s) whose scopes/approvedScopes/tokens/role/roles/nodeSurface exceed "
+            f"the {_MAX_PAIRED_DEVICE_JSON_BYTES // 1024}KB cap; those rows were not read"
+        )
+        ctx.errors.append(message)
+        note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
+
+    truncated = len(rows) > _MAX_PAIRED_DEVICES
+    rows = rows[:_MAX_PAIRED_DEVICES]  # discard the probe row; scanned set stays capped
+    if truncated:
+        message = (
+            f"device_pairing_paired in {db_path} has more than {_MAX_PAIRED_DEVICES} "
+            "paired-device rows within the size cap; only the first "
+            f"{_MAX_PAIRED_DEVICES} were read"
+        )
+        ctx.errors.append(message)
+        note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
+
+    def _json_list(raw):
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return None
+        return value if isinstance(value, list) else None
+
+    ctx.paired_devices_sqlite_found = True
+    entries: dict = {}
+    for (
+        device_id, platform, scopes_json, approved_scopes_json, tokens_json,
+        created_at_ms, approved_at_ms, last_seen_at_ms,
+        role, roles_json, node_surface_json,
+    ) in rows:
+        if not isinstance(device_id, str) or not device_id:
+            continue
+
+        # B396: RecursionError is caught here too (not just ValueError) -- "harden it
+        # in the same style as the new keys" (see this reader's own follow-up note in
+        # its docstring) -- so a deeply-nested tokens_json sets tokensUnparsed rather
+        # than propagating an uncaught exception out of a read-only collector.
+        tokens: dict = {}
+        tokens_unparsed = False
+        if tokens_json:
+            try:
+                raw_tokens = json.loads(tokens_json)
+            except (ValueError, RecursionError):
+                raw_tokens = None
+                tokens_unparsed = True
+            if isinstance(raw_tokens, dict):
+                for role_key, tok in raw_tokens.items():
+                    if isinstance(tok, dict):
+                        # Allowlist, not denylist -- see docstring's never-echo-the-
+                        # token contract. Keeps only the sub-keys the check's own
+                        # revoked-token logic (B-243) actually needs; a future vendor
+                        # sub-field (e.g. a hypothetical refreshToken) is dropped by
+                        # default rather than silently riding along.
+                        tokens[role_key] = {
+                            k: v for k, v in tok.items() if k in _SAFE_TOKEN_SUBKEYS
+                        }
+
+        # B396: `role` is the bare column value; `roles` is the same
+        # normaliseUniqueSingleOrTrimmedStringList-shaped JSON column B176's own
+        # `scopes`/`approvedScopes` columns already use, so it is parsed the same way
+        # -- a list keeps only its string items, a bare string is kept as-is, anything
+        # else (and any parse failure) is None, with the failure ALSO recorded via
+        # `rolesUnparsed` so a check can tell "no roles" from "could not read roles".
+        role_value = role if isinstance(role, str) else None
+
+        roles_value = None
+        roles_unparsed = False
+        if roles_json is not None:
+            try:
+                raw_roles = json.loads(roles_json)
+            except (ValueError, RecursionError):
+                roles_unparsed = True
+            else:
+                if isinstance(raw_roles, list):
+                    roles_value = [s for s in raw_roles if isinstance(s, str)]
+                elif isinstance(raw_roles, str):
+                    roles_value = raw_roles
+
+        # B396: `nodeSurface` is an ALLOWLIST projection of the parsed
+        # node_surface_json object -- only `commands` survives (never displayName,
+        # bins, host stats, or any other vendor field a node's approved surface may
+        # carry). A non-dict JSON value collapses to a bare JS-truthiness signal
+        # (`{}` for truthy, `None` for falsy) because only PRESENCE of a surface
+        # matters to a non-dict shape, never its content -- inlined here (not via a
+        # shared helper) so this leaf collector never depends on the checks layer.
+        node_surface_value = None
+        node_surface_unparsed = False
+        if node_surface_json is not None:
+            try:
+                raw_surface = json.loads(node_surface_json)
+            except (ValueError, RecursionError):
+                node_surface_unparsed = True
+            else:
+                if isinstance(raw_surface, dict):
+                    node_surface_value = (
+                        {"commands": raw_surface["commands"]}
+                        if "commands" in raw_surface else {}
+                    )
+                elif isinstance(raw_surface, bool):
+                    node_surface_value = {} if raw_surface else None
+                elif isinstance(raw_surface, (int, float)):
+                    node_surface_value = (
+                        {} if (raw_surface == raw_surface and raw_surface != 0) else None
+                    )
+                elif isinstance(raw_surface, str):
+                    node_surface_value = {} if raw_surface != "" else None
+                elif raw_surface is not None:
+                    node_surface_value = {}  # any other truthy JSON shape (e.g. a list)
+
+        entries[device_id] = {
+            "deviceId": device_id,
+            "platform": platform,
+            "scopes": _json_list(scopes_json),
+            "approvedScopes": _json_list(approved_scopes_json),
+            "role": role_value,
+            "roles": roles_value,
+            "rolesUnparsed": roles_unparsed,
+            "nodeSurface": node_surface_value,
+            "nodeSurfaceUnparsed": node_surface_unparsed,
+            "tokensUnparsed": tokens_unparsed,
+            "tokens": tokens,
+            "createdAtMs": created_at_ms,
+            "approvedAtMs": approved_at_ms,
+            "lastSeenAtMs": last_seen_at_ms,
+        }
+
+    ctx.paired_devices_sqlite = entries
 
 
 def _collect_config_machine_state(home: Path, ctx: Context) -> None:
@@ -4862,6 +6040,27 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     ``meta.lastTouchedVersion`` predates ``BUNDLED_DISCOVERY_STATE_CUTOVER_VERSION =
     "2026.7.2"``. So the population that loses its allowlist is exactly the population that
     took the trouble to write one.
+
+    B-977: the SAME gap B-889 hardened for ``_collect_auth_profile_store_presence`` --
+    querying ``config_machine_state`` by bare name trusts SQLite to resolve it against a
+    real TABLE, but name resolution is a property of the FILE'S OWN schema, attacker-
+    controlled if anything can write into ``state/openclaw.sqlite``. A crafted
+    ``CREATE VIEW config_machine_state AS SELECT ... FROM <decoy>`` makes the SELECT below
+    execute that view body instead. Worse here than in B-889: that sibling only ever
+    selected ``LENGTH(value_json)``, an integer, so a successful spoof could only flip a
+    presence/length signal. This reader selects and RETURNS the parsed ``value_json``
+    CONTENT for three keys -- an attacker-controlled row can inject an arbitrary
+    ``plugins.bundledDiscovery`` / ``cron.store`` / ``hooks.internal.installs`` value into
+    every one of this function's downstream consumers (the B179 hooks-inventory evidence,
+    the cron-store-shadow detector that demotes a stale-scan PASS to UNKNOWN, and the
+    plugin-discovery drift monitor). Same fix as B-889, reusing
+    ``trajectorystore._table_kind`` verbatim via this module's existing import (see the
+    import-site comment above): the schema check runs inside the SAME transaction as the
+    real read (closing the TOCTOU gap the same way
+    ``trajectorystore._open_and_verify_table`` does), a name that resolves to ``"absent"``
+    stays the existing quiet UNDETERMINED path, and a name that resolves to anything other
+    than a real table is refused and disclosed via ``ctx.errors`` -- never silently
+    trusted.
     """
     state_dir = home / "state"
     capped: list = []
@@ -4885,9 +6084,32 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
 
     placeholders = ",".join("?" for _ in CONFIG_MACHINE_STATE_KEYS)
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
+            # BEGIN before the schema check, held open across it AND the read below --
+            # closes the same TOCTOU gap `trajectorystore._open_and_verify_table`
+            # documents (a concurrent writer swapping the schema between the check and
+            # the query).
+            conn.execute("BEGIN")
             conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "config_machine_state")
+            if kind == "absent":
+                # Genuinely no such table yet -- same honest UNDETERMINED as the
+                # `sqlite3.Error` "no such table" branch below, not a refusal.
+                return
+            if kind != "table":
+                # B-977: present, but not a real TABLE (view / virtual table /
+                # rootpage-aliased / generated-column row -- see `_table_kind`'s
+                # docstring for the demonstrated shapes). Refuse to query it. Disclosed,
+                # never silently trusted: NOT the same outcome as "absent" above, and
+                # NOT read as if it were a genuine row.
+                ctx.errors.append(
+                    f"'config_machine_state' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the machine-owned config store was not read"
+                )
+                return
             rows = conn.execute(
                 # The key list is bound, not interpolated, and there is no `SELECT *`:
                 # this query cannot return a row this tool is not allowed to see.
@@ -4924,8 +6146,7 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
 
 def _collect_update_runs(home: Path, ctx: Context) -> None:
     """F-192: read-only collection of OpenClaw's OWN self-update ledger (`update_runs` in
-    the shared state database), new at OpenClaw 2026.9.2 (state schema `PRAGMA user_version`
-    15).
+    the shared state database), new at state schema `PRAGMA user_version` 15.
 
     Grounded against the installed dist's `OPENCLAW_STATE_SCHEMA_SQL` literal (verbatim,
     task description) -- located by SYMBOL across
@@ -4997,6 +6218,7 @@ def _collect_update_runs(home: Path, ctx: Context) -> None:
         return
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -5081,6 +6303,7 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
         return  # no state DB -> capture_tables_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -5154,6 +6377,7 @@ def _collect_skill_library_state(home: Path, ctx: Context) -> None:
         return
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     except sqlite3.Error as exc:
         ctx.errors.append(f"could not open '{db_path}': {exc}")
@@ -5268,6 +6492,12 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         if not isinstance(agents, dict):
             agents = {}
         ctx.exec_approvals_found = True
+        defaults = store.get("defaults")
+        if isinstance(defaults, dict):
+            ctx.exec_approvals_defaults = {
+                key: defaults.get(key) if isinstance(defaults.get(key), str) else None
+                for key in ("security", "ask")
+            }
         # B-657: this cap had NO disclosure at all -- unlike the byte-size cap seven
         # lines up, a store under the byte cap but with more than
         # _MAX_EXEC_APPROVALS_AGENTS agents parsed fine, and every agent past the cap
@@ -5442,7 +6672,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
 
     TWO backing shapes exist, probed in this order over the SAME read-only connection:
 
-    A. (OC-82, OpenClaw 2026.8.2+) ``config_machine_state.value_json`` where
+    A. (OC-82) ``config_machine_state.value_json`` where
        ``state_key = 'plugins.installedIndex'``. The ``state-consolidation-v13``
        migration folded the whole ``installed_plugin_index`` table into this one KV row.
        Grounded against the installed dist: writer
@@ -5481,6 +6711,21 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
       generation row be trusted here and ignored by the runtime).
     * A absent (no ``config_machine_state`` table, or no row for that key, or the SELECT
       itself failed) -> legacy path, byte-for-byte as before OC-82.
+    * B-990: A present but ``config_machine_state`` does not resolve to a real TABLE (a
+      VIEW, virtual table, rootpage-aliased, or generated-column row masquerading under
+      that name -- see ``trajectorystore._table_kind``'s docstring) -> refused and
+      disclosed via ``ctx.errors``, ``plugin_trust_found = plugin_trust_parse_error =
+      True`` (and likewise the index pair) -- the SAME "present-and-unreadable, never
+      silently treated as absent" outcome the bullet below already defines for a
+      structurally-invalid modern row, checked BEFORE Probe A's own SELECT runs, inside
+      the same transaction as that read (TOCTOU-closed). This is deliberately NOT the
+      same outcome as "A absent" above: a spoofed row must never be silently swapped for
+      a legacy read that happens to still succeed.
+    * B-994: the SAME check, reused verbatim for ``installed_plugin_index``, gates
+      Probes B/C -- reached only once A is genuinely absent. A name that does not
+      resolve to a real table there is refused and disclosed the identical way, never
+      silently read; a genuinely absent table falls through to the existing quiet
+      UNKNOWN both SELECTs below already produce for "no such table".
     * Neither present -> both ``*_found`` pairs stay False -> UNKNOWN, exactly as today.
       This must never regress into a fake PASS (Golden Rule #4).
     * A PRESENT but its ``value_json`` is not valid JSON, or parses to something other
@@ -5583,6 +6828,18 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     ``walk_dir_safely(state_dir)`` + filename-match pattern ``_collect_cron`` already uses
     for the same file (symlink-safe, path-escape-safe).
 
+    B-909: this ``mode=ro`` open still creates (or, if they already exist, rewrites) the
+    state DB's ``-shm``/``-wal`` WAL sidecars -- a property of SQLite's WAL protocol
+    itself, shared by every ``mode=ro`` opener of this file in this module (not specific
+    to this reader), and not something ``mode=ro``/``query_only`` can suppress.
+    Deliberately NOT ``immutable=1``: it does stop the sidecar write, but only by
+    bypassing the WAL entirely, which makes any row committed to the WAL but not yet
+    checkpointed back into the main file invisible -- silently wrong evidence during the
+    common case this audit exists to observe (OpenClaw actively running and writing to
+    this exact database). See SECURITY_MODEL.md's "Allowed behavior" section for the
+    full writeup and ``tests/test_b909_wal_sidecar_creation.py`` for the repro and the
+    ``immutable=1`` rejection, demonstrated.
+
     ``ctx.plugin_trust_found`` / ``ctx.plugin_index_found`` stay False when the state DB,
     the table, or the index row is absent — a consuming check reports UNKNOWN, never a fake
     PASS (Golden Rule #4). ``ctx.plugin_trust_parse_error`` / ``ctx.plugin_index_parse_error``
@@ -5609,6 +6866,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         return  # no state DB -> both *_found stay False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     except sqlite3.Error as exc:
         # Cannot even open the file as a database -- a shared root cause (not sqlite,
@@ -5639,6 +6897,73 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             ctx.plugin_index_parse_error = True
             return
 
+        # B-990: the SAME view-masquerade gap B-889/B-977 hardened for the other two
+        # config_machine_state readers in this file (_collect_auth_profile_store_presence,
+        # _collect_config_machine_state) -- querying config_machine_state by bare name
+        # trusts SQLite to resolve it against a real TABLE, but name resolution is a
+        # property of the FILE'S OWN schema, attacker-controlled if anything can write
+        # into state/openclaw.sqlite. A crafted `CREATE VIEW config_machine_state AS
+        # SELECT ... FROM <decoy>` makes Probe A's SELECT below execute that view body
+        # instead. Worse than B-889 here: that sibling only ever selected
+        # LENGTH(value_json), an integer, so a successful spoof could only flip a
+        # presence/length signal. This reader selects and RETURNS the parsed
+        # value_json CONTENT, so a successful spoof injects an attacker-chosen
+        # plugins.installedIndex row straight into ctx.plugin_trust_records /
+        # ctx.plugin_index_records -- and from there into B177's FAIL evidence (a
+        # fabricated 'blocked' plugin id, or a spoofed 'clean' row masking a genuinely
+        # blocked one), B187's tool-result-interception middleware WARN, and the SBOM's
+        # plugin-supplier attribution (sbom.py's root_dir/plugin_id matching) -- the
+        # same content-injection severity class B-977 documented, not B-889's bounded
+        # presence-only one.
+        #
+        # BEGIN before the schema check, held open across it AND Probe A's read below --
+        # closes the same TOCTOU gap trajectorystore._open_and_verify_table documents (a
+        # concurrent writer swapping the schema between the check and the query). This
+        # transaction is held open through Probes B/C below too: legacy Probes B/C query
+        # a DIFFERENT table (installed_plugin_index), resolved by the SAME
+        # attacker-controlled-schema mechanism -- B-994 gives it the identical
+        # _table_kind guard, reusing this same transaction rather than opening a second
+        # one (see that guard, just below Probe A's SELECT).
+        try:
+            conn.execute("BEGIN")
+        except sqlite3.Error as exc:
+            # Same shared-root-cause handling as the PRAGMA query_only failure just
+            # above -- a BEGIN failure here means the database is unusable for both
+            # columns, not just one, so this degrades to UNKNOWN the same way every
+            # other failure in this function already does, rather than propagating
+            # uncaught out of collect()/audit() (B-889's structurally identical sibling
+            # nests its own BEGIN inside this same outer guard; this one now matches).
+            ctx.errors.append(f"could not begin a transaction on {db_path}: {exc}")
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+            ctx.plugin_index_found = True
+            ctx.plugin_index_parse_error = True
+            return
+        kind = _trajectorystore._table_kind(conn, "config_machine_state")
+        if kind not in ("absent", "table"):
+            # Present, but not a real TABLE (view / virtual table / rootpage-aliased /
+            # generated-column row -- see _table_kind's docstring for the demonstrated
+            # shapes). Refuse to query it. Disclosed, never silently trusted, and --
+            # UNLIKE a genuinely absent table -- NEVER falls through to the legacy B/C
+            # probes: a spoofed row must not be silently swapped for a legacy read that
+            # happens to still succeed (the same "present-and-unreadable, never treated
+            # as absent" rule this function's own docstring already states for a
+            # structurally-invalid modern row).
+            ctx.errors.append(
+                f"'config_machine_state' in {db_path} did not resolve to a real "
+                "table (found a view, virtual table, or other schema object "
+                "instead); plugins.installedIndex was not read"
+            )
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+            ctx.plugin_index_found = True
+            ctx.plugin_index_parse_error = True
+            return
+        # kind == "absent" falls through unchanged: Probe A's own SELECT below already
+        # treats "no such table" the same honest way (state_row stays None, falling
+        # through to Probes B/C) -- this check adds a NEW refusal branch above, it does
+        # not change the existing absent-table path below.
+
         # ---- Probe A (OC-82, tried FIRST): the config_machine_state successor row.
         # Named column only, key bound as a parameter -- never SELECT * (see docstring).
         try:
@@ -5662,6 +6987,41 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         state_value_json = state_row[0] if state_row is not None else None
 
         if state_value_json is None:
+            # B-994: the SAME view-masquerade gap B-990 hardened for config_machine_state
+            # (Probe A) -- installed_plugin_index is queried by bare name below, and name
+            # resolution is a property of the FILE'S OWN schema, attacker-controlled if
+            # anything can write into state/openclaw.sqlite. A crafted `CREATE VIEW
+            # installed_plugin_index AS SELECT ... FROM <decoy>` makes Probes B/C's
+            # SELECTs below execute that view body instead, injecting an attacker-chosen
+            # install_records_json/plugins_json pair straight into
+            # ctx.plugin_trust_records/ctx.plugin_index_records -- the SAME
+            # content-injection severity class Probe A's own guard above closes (B177's
+            # FAIL evidence, B187's tool-result-interception middleware WARN, the SBOM's
+            # plugin-supplier attribution), just reached only once Probe A is genuinely
+            # absent. Reuses the transaction Probe A's own BEGIN already opened above --
+            # no second BEGIN (SQLite refuses a nested one on the same connection) -- so
+            # the TOCTOU gap stays closed across both probes, not just Probe A's.
+            kind = _trajectorystore._table_kind(conn, "installed_plugin_index")
+            if kind not in ("absent", "table"):
+                # Present, but not a real TABLE (view / virtual table / rootpage-aliased
+                # / generated-column row -- see _table_kind's docstring for the
+                # demonstrated shapes). Refuse to query it. Disclosed, never silently
+                # trusted -- the same "present-and-unreadable, never treated as absent"
+                # rule Probe A's own guard above already applies.
+                ctx.errors.append(
+                    f"'installed_plugin_index' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the legacy plugin trust/index data was not read"
+                )
+                ctx.plugin_trust_found = True
+                ctx.plugin_trust_parse_error = True
+                ctx.plugin_index_found = True
+                ctx.plugin_index_parse_error = True
+                return
+            # kind == "absent" falls through unchanged: a genuinely absent table is the
+            # same honest UNKNOWN both SELECTs below already produce for "no such table"
+            # -- this check adds a NEW refusal branch above, it does not change that.
+
             # ---- Probes B/C (legacy): install_records_json's OWN SELECT, independent of
             # plugins_json. B-292/RT-2 fix: a merged single-query read let a schema shape
             # missing ONE column (e.g. "no such column: plugins_json") take down BOTH
@@ -5726,7 +7086,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                 "config_machine_state['plugins.installedIndex'] in "
-                f"{db_path} exceeded the {_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — "
+                f"'{db_path}' exceeded the {_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — "
                 "content was NOT scanned (no partial parse was attempted)",
             )
             ctx.plugin_trust_found = True
@@ -5781,7 +7141,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                     "plugin trust/index data comes from a persisted CACHE -- "
-                    f"config_machine_state['plugins.installedIndex'] in {db_path}, "
+                    f"config_machine_state['plugins.installedIndex'] in '{db_path}', "
                     "written at the runtime's last refresh -- this collector reads "
                     "that row and cannot certify it still matches what the gateway "
                     "currently has loaded",
@@ -5820,7 +7180,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                         "config_machine_state['plugins.installedIndex'] in "
-                        f"{db_path} has {len(installs)} install record(s) — only the "
+                        f"'{db_path}' has {len(installs)} install record(s) — only the "
                         f"first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
                     )
 
@@ -5833,7 +7193,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                         "config_machine_state['plugins.installedIndex'] in "
-                        f"{db_path} has {len(plugins_list)} plugin record(s) — only "
+                        f"'{db_path}' has {len(plugins_list)} plugin record(s) — only "
                         f"the first {_MAX_PLUGIN_INDEX_RECORDS} were scanned",
                     )
 
@@ -5846,7 +7206,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                         "config_machine_state['plugins.installedIndex'] in "
-                        f"{db_path} lists {len(plugins_list)} plugin(s) but carries "
+                        f"'{db_path}' lists {len(plugins_list)} plugin(s) but carries "
                         f"install records for only {len(installs)} — the ClawHub "
                         "trust verdict is only defined over those; the rest have no "
                         "verdict on record",
@@ -5865,7 +7225,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         if len(raw) > _MAX_PLUGIN_TRUST_BYTES:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-                f"installed_plugin_index.install_records_json in {db_path} exceeded the "
+                f"installed_plugin_index.install_records_json in '{db_path}' exceeded the "
                 f"{_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — content beyond the cap was "
                 "NOT scanned",
             )
@@ -5892,7 +7252,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             if len(installs) > _MAX_PLUGIN_TRUST_RECORDS:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-                    f"installed_plugin_index in {db_path} has {len(installs)} install "
+                    f"installed_plugin_index in '{db_path}' has {len(installs)} install "
                     f"record(s) — only the first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
                 )
 
@@ -5902,7 +7262,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         if len(raw2) > _MAX_PLUGIN_INDEX_BYTES:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-                f"installed_plugin_index.plugins_json in {db_path} exceeded the "
+                f"installed_plugin_index.plugins_json in '{db_path}' exceeded the "
                 f"{_MAX_PLUGIN_INDEX_BYTES // 1_000_000}MB cap — content beyond the cap "
                 "was NOT scanned",
             )
@@ -5929,7 +7289,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             if len(plugins) > _MAX_PLUGIN_INDEX_RECORDS:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-                    f"installed_plugin_index.plugins_json in {db_path} has "
+                    f"installed_plugin_index.plugins_json in '{db_path}' has "
                     f"{len(plugins)} plugin record(s) — only the first "
                     f"{_MAX_PLUGIN_INDEX_RECORDS} were scanned",
                 )
@@ -5962,10 +7322,10 @@ def _parse_subagent_outcome(raw) -> "tuple[dict | None, bool]":
 def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
     """B-709: parse one MODERN ``subagent_runs.payload_json`` cell (the consolidated blob
     that replaced the ``model``/``run_timeout_seconds``/``outcome_json``/``ended_reason``
-    columns on OpenClaw 2026.8.2+) into a plain dict, for named-key extraction only (§8 —
-    the blob carries far more than the handful of keys this collector takes, and the same
-    state DB holds live OAuth tokens under ``authProfiles.store``/``auth.sharedStore``, so
-    it is never stored or emitted whole).
+    columns when the ``payload_json`` column is present) into a plain dict, for named-key
+    extraction only (§8 — the blob carries far more than the handful of keys this collector
+    takes, and the same state DB holds live OAuth tokens under
+    ``authProfiles.store``/``auth.sharedStore``, so it is never stored or emitted whole).
 
     Returns ``(fields, ok)``, mirroring ``_parse_subagent_outcome``'s contract but over the
     WHOLE row rather than one sub-field: ``ok`` is False ONLY when *raw* is a non-empty
@@ -5989,6 +7349,17 @@ def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
     except ValueError:
         return {}, False
     if isinstance(parsed, dict):
+        # A run whose `completionTarget` is "parent" is stored wrapped as
+        # `{"parentCompletion": <record>}` (`bindSubagentRunRecord`) rather than as the flat
+        # record older rows carry; the vendor's own reader unwraps it first
+        # (`subagentMetadataPayload`, and the guard in `isRecord(stored.parentCompletion) &&
+        # ...completionTarget === "parent"`). Reading the top level of a wrapped row returned
+        # None for model / timeout / outcome / ended_reason with no error and no disclosure
+        # that the shape had moved. The rule below is the vendor's, conjunct for conjunct:
+        # a wrapper naming any OTHER target is left alone, exactly as the runtime leaves it.
+        wrapped = parsed.get("parentCompletion")
+        if isinstance(wrapped, dict) and wrapped.get("completionTarget") == "parent":
+            return wrapped, True
         return parsed, True
     return {}, True
 
@@ -6047,14 +7418,17 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     style ``_collect_plugin_trust`` already uses, rather than letting one corrupt cell blind
     the whole disclosure to otherwise-trustworthy sibling rows).
 
-    B-709: on the installed OpenClaw 2026.8.2, the real ``subagent_runs`` columns are ONLY
+    B-709: on the MODERN shape (``payload_json`` column present, no ``model`` column), the
+    real ``subagent_runs`` columns are ONLY
     ``run_id, child_session_key, controller_session_key, requester_session_key, created_at,
     payload_json`` — the old SELECT above threw ``sqlite3.OperationalError: no such column:
     model`` on every run, so ``ctx.errors`` carried that line and B18 reported UNKNOWN even
     on a machine that had really spawned subagents. Grounded against the vendor's OWN
     canonical read of this table (``dist/subagent-registry.store.sqlite-B_lUfEus.js:341-351``,
-    which aliases the JSON payload straight back to the retired column names — as
-    authoritative a mapping as exists):
+    grounded against openclaw@2026.8.2 — that bundle name is historical and no longer in the
+    installed dist; the shape this keys on is the column, not the version), which aliases the
+    JSON payload straight back to the retired column names — as authoritative a mapping as
+    exists:
 
     ===================  =========================================
     old (legacy) column   MODERN payload_json JSON path
@@ -6104,6 +7478,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
         return  # no state DB -> subagent_runs_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -6128,7 +7503,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
                 rows = cur.fetchall()
                 modern = False
             elif "payload_json" in columns:
-                # MODERN shape (OpenClaw 2026.8.2+). Only the real columns
+                # MODERN shape (payload_json column present). Only the real columns
                 # (child_session_key, created_at) plus the opaque payload_json blob exist;
                 # model/run_timeout_seconds/outcome_json/ended_reason are extracted from
                 # the blob per-row below (named-key extraction only, §8).
@@ -6309,6 +7684,7 @@ def _collect_audit_events(home: Path, ctx: Context) -> None:
         return  # no state DB -> audit_events_found stays False (UNKNOWN, not a fake PASS)
 
     try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
@@ -7519,6 +8895,8 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     # F-183: before _collect_cron -- its cron.store shadow check reads this.
     _collect_config_machine_state(home, ctx)
     _collect_auth_profile_store_presence(home, ctx)  # B-749: length-only, never the value
+    _collect_agent_auth_profile_store_presence(home, ctx)  # B-845: same, per-agent DBs
+    _collect_paired_devices_sqlite(home, ctx)  # B176: migrated devices/paired.json fallback
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)

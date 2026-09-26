@@ -39,7 +39,7 @@ def _run_sarif(tmp_path: Path, home: str, name: str = "out.sarif") -> dict:
     out = tmp_path / name
     subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", home, "--sarif", str(out),
-         "--data-dir", str(tmp_path / "state"), "--no-history"],
+         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True)
     return json.loads(out.read_text(encoding="utf-8"))["runs"][0]["properties"]
 

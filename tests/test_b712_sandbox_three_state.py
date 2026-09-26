@@ -54,9 +54,10 @@ from clawseccheck.toolpolicy import (
     confined_scopes,
     confinement_undecided_only,
     scopes_reaching_outside_workspace,
-    undecided_inheriting_scopes,
+    undecided_write_scopes,
 )
 
+_WRITE_TOOLS = ["write", "edit", "apply_patch"]
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 BATTERY = Path(__file__).resolve().parent / "data" / "sandbox_battery.json"
@@ -238,7 +239,7 @@ def test_closing_the_escape_removes_it_entirely():
     name = "warn_b712_every_scope_sandboxed"
     cfg = json.loads((FIXTURES / name / "openclaw.json").read_text())
     assert confined_scopes(cfg) == [True, True]
-    assert undecided_inheriting_scopes(cfg) == []
+    assert undecided_write_scopes(cfg, _WRITE_TOOLS) == []
     assert confinement_undecided_only(cfg) is False
     s = _statuses(name)
     assert s["A1"] == "PASS", s
@@ -273,4 +274,4 @@ def test_a_proven_unconfined_scope_gets_no_hedge():
         "channels": {"telegram": {"dmPolicy": "open"}},
     }
     assert confinement_undecided_only(cfg) is False
-    assert undecided_inheriting_scopes(cfg) == []
+    assert undecided_write_scopes(cfg, _WRITE_TOOLS) == []

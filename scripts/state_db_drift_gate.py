@@ -81,12 +81,61 @@ _SELECT_RE = re.compile(r"SELECT\s+(.+?)\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)", re.
 _SQLITE_RESERVED_TABLE_PREFIX = "sqlite_"
 # Bare identifiers inside the column list, minus SQL noise words.
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A single-quoted SQL string literal, with the '' escape. Its CONTENT is data, not schema:
+# `json_extract(payload_json, '$.mode')` reads the column `payload_json` and nothing named
+# `mode`.
+_STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
+# SQL SYNTAX words only. Function names are NOT listed: an identifier followed by `(` is
+# skipped structurally by `_column_idents`, and listing `count`/`min`/`max`/`sum`/`total`
+# here would hide a real column that happens to carry one of those names. `strlit_` is the
+# placeholder `_column_idents` leaves where a string literal was.
 _SQL_NOISE = {
-    "select", "from", "where", "count", "min", "max", "sum", "total", "distinct",
+    "select", "from", "where", "distinct",
     "as", "and", "or", "not", "null", "is", "in", "like", "order", "by", "group",
     "limit", "offset", "asc", "desc", "case", "when", "then", "else", "end",
-    "join", "left", "inner", "outer", "on", "union", "all", "coalesce", "cast",
+    "join", "left", "inner", "outer", "on", "union", "all", "strlit_",
 }
+
+
+def _column_idents(collist: str) -> set:
+    """The column names a SELECT list reads -- and ONLY those.
+
+    B-834. The list used to be `_IDENT_RE.findall` minus a hand-kept noise set, so every
+    SQL function we started using was a new false `BLIND` until someone added its name:
+    `LENGTH(value_json)` reported "config_machine_state is missing LENGTH" on a perfectly
+    healthy database, the gate exited 1 on baseline, and a gate that is red on a clean
+    build teaches people to ignore it. Enumerating names is the fragile design, so the
+    rule is structural instead:
+
+      * an identifier followed by `(` is a FUNCTION CALL, never a column
+      * the identifier after `AS` is an ALIAS (or a CAST target type), never a column
+      * a single-quoted string is data, so its content contributes nothing (it is replaced
+        by a placeholder, not deleted, so `AS 'n'` still consumes the alias flag and the
+        column after it is not swallowed)
+      * the remaining SQL SYNTAX words stay in `_SQL_NOISE`
+
+    Deliberately NOT done: adding `length` (or `count`, `min`, `max`, `sum`, `total`, which
+    used to be listed) to `_SQL_NOISE`. That would hide a real column that happens to carry
+    the name, which is exactly the false negative this gate exists to prevent.
+
+    Known limits, measured by an independent review and not reachable from any reader in
+    this package today: qualified names (`t.col` yields `t` as well), `rowid`/`oid`, an alias
+    written without `AS`, and identifiers inside double quotes, backticks or comments are
+    not modelled. Each can only produce a false BLIND, never a false pass.
+    """
+    text = _STRING_LITERAL_RE.sub(" strlit_ ", collist)
+    columns = set()
+    previous = ""
+    for match in _IDENT_RE.finditer(text):
+        ident = match.group(0)
+        lowered = ident.lower()
+        is_call = text[match.end():].lstrip()[:1] == "("
+        is_alias = previous == "as"
+        previous = lowered
+        if is_call or is_alias or lowered in _SQL_NOISE:
+            continue
+        columns.add(ident)
+    return columns
 
 
 def _static_str(node):
@@ -173,9 +222,13 @@ def expected_reads(pkg_root: Path) -> dict[str, list]:
             if table.lower().startswith(_SQLITE_RESERVED_TABLE_PREFIX):
                 continue
             columns = set()
-            if "*" not in collist:
-                columns = {i for i in _IDENT_RE.findall(collist)
-                           if i.lower() not in _SQL_NOISE}
+            # B-834: ONLY a bare select-all skips the parser. This used to be
+            # `"*" not in collist`, so the `*` inside `COUNT(*)` discarded every column in
+            # the list: `SELECT COUNT(*), MIN(occurred_at), MAX(occurred_at) FROM
+            # audit_events` was read as naming NO column, and renaming `occurred_at` left
+            # the gate printing OK. Found by the independent review of this very change.
+            if collist.strip() != "*":
+                columns = _column_idents(collist)
             # `SELECT *` and `SELECT COUNT(*)` both yield an empty column set,
             # and they are OPPOSITES for the reverse difference: the first reads
             # every column, the second reads none. Collapsing them would make the

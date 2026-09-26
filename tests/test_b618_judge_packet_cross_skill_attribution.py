@@ -99,7 +99,7 @@ def _packet(tmp_path: pathlib.Path, skills: dict) -> dict:
         [
             sys.executable, "-m", "clawseccheck",
             "--home", str(home), "--data-dir", str(data),
-            "--no-history", "--judge-packet",
+            "--no-history", "--no-deptree", "--no-host", "--judge-packet",
         ],
         capture_output=True, text=True, cwd=str(_REPO),
     )

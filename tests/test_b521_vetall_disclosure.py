@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from clawseccheck.cli import _sweep_summary_lines, main, sweep_installed_skills, vet_all
-from clawseccheck.collector import _OWN_ENGINE_MARKERS, collect
+from clawseccheck.collector import _OWN_ENGINE_MARKER_STATEMENTS, collect
 from clawseccheck.report import build_inventory
 from clawseccheck.sbom import build_sbom
 
@@ -46,7 +46,7 @@ def _write_own_engine(skill_dir: Path) -> None:
     _skill_md(skill_dir, "clawseccheck")
     checks = skill_dir / "checks"
     checks.mkdir(parents=True, exist_ok=True)
-    (checks / "_engine.py").write_text("\n".join(_OWN_ENGINE_MARKERS), encoding="utf-8")
+    (checks / "_engine.py").write_text("\n".join(_OWN_ENGINE_MARKER_STATEMENTS), encoding="utf-8")
 
 
 def _two_skill_home(tmp_path: Path) -> Path:

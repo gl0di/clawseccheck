@@ -1,6 +1,6 @@
 🦞 ClawSecCheck · OpenClaw Security Audit
 ============================================
-Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
+Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)
 No grade yet — 3 of 5 layers did not run: installed skills and plugins (not reached), agent self-report (not submitted), live behaviour test (not submitted).
 open CRITICAL finding — it would have capped the grade, but this run has no grade to cap.
         …

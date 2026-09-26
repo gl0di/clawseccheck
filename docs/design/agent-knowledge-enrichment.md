@@ -77,7 +77,7 @@ Each half is safe for its own reason:
   configuration, not attacker-authored, and because suppression is structurally clamped
   anyway — `build_ignore_proposals` can only ever select items already in the borderline
   band, so a `FAIL` can never be proposed for suppression regardless of what a verdicts
-  file claims (`clawseccheck/adjudication.py:820-832`).
+  file claims (`clawseccheck/adjudication/_builder.py:1209-1228`).
 - **Escalate-only on untrusted content** is safe because the attacker's goal there is "say
   it's clean", so a judge that structurally cannot downgrade makes a successful injection
   against it worthless ([SKILL.md:252-255](../../SKILL.md)).
@@ -101,14 +101,14 @@ that is hard to tell from a genuine recall.
   vendor advisory", "the official successor of X" — which the agent then repeats as
   background knowledge. This only reaches the agent when the agent has read the target's
   prose. On the audit path it structurally cannot: `_evidence_locations`
-  (`clawseccheck/adjudication.py:274-302`) reduces content-ring evidence to a
+  (`clawseccheck/adjudication/_builder.py:494-531`) reduces content-ring evidence to a
   `(relpath:lineno)` location or a `dig()` field path, and the only other free-ish field,
   `safe_facts.destination_host`, survives a strict URL parse plus an LDH charset and a
-  100-character cap (`clawseccheck/adjudication.py:331-382`). On the `--vet` prose path it
+  100-character cap (`clawseccheck/adjudication/_builder.py:560-653`). On the `--vet` prose path it
   reaches the agent directly and by design ([SKILL.md:282-286](../../SKILL.md)).
 - **Name-keyed recall.** The target's *name* alone triggers the recall. This works on every
   path, including the audit path, because a packet item's `target` is a bare name
-  (`clawseccheck/adjudication.py:961-967`) and the name is attacker-chosen. The dangerous
+  (`clawseccheck/adjudication/_builder.py:396-427`) and the name is attacker-chosen. The dangerous
   direction is not "name it after known malware" (that produces a false alarm) but "name
   it after something famous and trusted", so the agent's recall reads as reassurance. This
   is typosquatting aimed at the reviewer instead of the installer, and it is why
@@ -151,8 +151,8 @@ It composes cleanly with both existing scopes rather than replacing them:
   `--propose-ignore` eligibility, which is the safe direction;
 - `--vet`: an enrichment-informed escalation rides the already-shipped, fingerprint-bound,
   disclosed path — `_escalate_finding` attributes the raise in `detail`
-  (`clawseccheck/adjudication.py:1059-1075`) and can only touch a finding already in the
-  borderline band (`clawseccheck/adjudication.py:1065-1066`), so enrichment can never
+  (`clawseccheck/adjudication/_verdicts.py:636-640`) and can only touch a finding already in the
+  borderline band (`clawseccheck/adjudication/_verdicts.py:628-629`), so enrichment can never
   invent a finding.
 
 ### 4.4 Gate B — the overlap test, not introspection
@@ -233,20 +233,20 @@ reach it today. That is not an accident of layout — it is the same firewall as
 else in this subsystem:
 
 - `_parse_verdicts` extracts exactly `finding_id`, `target`, `verdict` and `votes`
-  (`clawseccheck/adjudication.py:736-753`). The answer contract advertises a `reason`
+  (`clawseccheck/adjudication/_verdicts.py:193-211`). The answer contract advertises a `reason`
   free-text field ([OUTPUT_SCHEMA.md:718](../OUTPUT_SCHEMA.md),
-  `clawseccheck/adjudication.py:90`) and the parser **never reads it**;
+  `clawseccheck/adjudication/_builder.py:97`) and the parser **never reads it**;
 - `_annotate` builds its line from fixed strings plus a validated verdict and integer vote
-  counts (`clawseccheck/adjudication.py:761-780`);
+  counts (`clawseccheck/adjudication/_verdicts.py:238-249`);
 - so `secondOpinion` carries zero judge-authored free text
-  (`clawseccheck/adjudication.py:783-798`).
+  (`clawseccheck/adjudication/_verdicts.py:252-267`).
 
 Putting enrichment prose there requires either the agent editing the pasted card — banned
 outright ([SKILL.md:486-492](../../SKILL.md), [SKILL.md:521-523](../../SKILL.md)) — or a new
 free-text field flowing from a verdicts file into a renderer. The second is the one that
 matters: it would make attacker-influenceable prose reach a report the user reads and may
 save, publish or attach (`--save`, `--html`, `--pdf`, `--sarif`), which is precisely what
-`_evidence_locations` was written to prevent (`clawseccheck/adjudication.py:279-286`), and
+`_evidence_locations` was written to prevent (`clawseccheck/adjudication/_builder.py:499-506`), and
 it would land in a schema whose stability policy then carries it indefinitely
 ([OUTPUT_SCHEMA.md:1051-1077](../OUTPUT_SCHEMA.md)).
 
@@ -261,7 +261,7 @@ that invariant is that it holds without exception.
 **Decision.** Enrichment surfaces in two places, neither of them new:
 
 1. its *effect*, on the `--vet` path only, through the existing disclosed escalation
-   (`[escalated by host-agent judge: ...]`, `clawseccheck/adjudication.py:1074`);
+   (`[escalated by host-agent judge: ...]`, `clawseccheck/adjudication/_verdicts.py:639`);
 2. its *content*, only in the agent's own prose outside the pasted card — the same region
    [SKILL.md:602-606](../../SKILL.md) already designates for confirm-before-acting framing —
    under a fixed lead-in that names it as not-from-the-scanner.

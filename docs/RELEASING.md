@@ -70,10 +70,86 @@ CHANGELOG prose by hand.
 
 ## 6) Tag and publish
 
-Tag `vX.Y.Z` and push the tag. The publish workflow runs tests again, generates
-`SHA256SUMS.txt`, signs it with keyless cosign, creates the GitHub Release with
-those assets, and publishes to ClawHub. Publishing is deliberately tag-gated —
-there is no auto-release.
+Tag `vX.Y.Z` and push the tag. The publish workflow runs tests again, stages the
+bundle, and only then generates `SHA256SUMS.txt` (the engine package plus every
+staged file beside it), signs it with keyless cosign, and verifies the bundle
+with the documented user command. After publishing to ClawHub it creates the
+GitHub Release with both assets and fails the run unless both are attached.
+Publishing is deliberately tag-gated — there is no auto-release.
+
+### If "Create GitHub Release" hard-exits on a half-created release
+
+The step retries `gh release create`/`gh release upload` up to 3 times, but a
+release left with exactly **one** of the two expected assets
+(`SHA256SUMS.txt`, `SHA256SUMS.txt.bundle`) — e.g. a partial upload from an
+earlier, interrupted run — is treated as a mismatch it will not silently
+"complete": it exits immediately with
+`::error::Release vX.Y.Z has only one of the two signed assets; a human must
+resolve the mismatch.` A release left with **zero** of the two, or a `gh`
+call that keeps failing, exhausts its 3 retries and exits with
+`::error::Could not create or complete the GitHub Release for vX.Y.Z.`
+Either way this needs a human, not a re-run of CI alone:
+
+1. Check what is actually attached:
+   `gh release view vX.Y.Z --json assets --jq '.assets[].name'`.
+2. Fix the mismatch by hand — either attach the missing asset(s)
+   (`gh release upload vX.Y.Z SHA256SUMS.txt SHA256SUMS.txt.bundle`, run
+   locally from the tagged tree so the files match the digest cosign signed),
+   or, if the release is otherwise unusable, delete it entirely
+   (`gh release delete vX.Y.Z`). Never force-replace assets on an existing
+   release with mismatched bytes — a `DUPLICATE` verdict must not let a later
+   run's upload overwrite a prior, honestly-signed one.
+3. **Only if ClawHub does not yet have this version**, re-run the workflow
+   (`workflow_dispatch`, or push the tag again) so it verifies (or recreates)
+   the release cleanly — this also re-checks `isDraft` and publishes a
+   lingering draft automatically. Confirm afterwards with
+   `gh release view vX.Y.Z --json isDraft,assets`.
+
+   **A bare re-run does NOT recover this once ClawHub has already accepted
+   the version** (`curl .../versions/vX.Y.Z` answers 200) — "Preflight —
+   confirm the CURRENT version is not already published" hard-fails the run
+   before it ever reaches staging or signing again, on every attempt.
+   `clawhub publish`'s own duplicate rejection is never even reached, so
+   there is nothing to retry through the workflow. In practice this is the
+   more common shape of the failure: the fail-closed "Create GitHub Release"
+   step (B-837/C-368) means ClawHub can succeed while the GitHub Release is
+   the thing that fails afterward, or the whole job dies (cancelled run,
+   runner failure) once ClawHub already has the version. See the next
+   section for that case.
+
+### No GitHub Release, but ClawHub already has it
+
+This is the state left behind when the ClawHub publish — this job's own, or
+an earlier run's — succeeded and something after it did not: "Create GitHub
+Release" itself, or the whole job (a cancelled run, a runner failure). A
+re-run cannot recover it (see the caveat at the end of the previous section):
+the "not already published" preflight refuses every subsequent attempt for
+this version regardless of the GitHub Release's state, and release tags are
+immutable here, so there is no way to point this version's tag at a fresh
+run either.
+
+The signed `SHA256SUMS.txt` and `SHA256SUMS.txt.bundle` are not lost,
+though. Every run uploads them as a workflow artifact
+(`signed-release-assets-X.Y.Z`, 90-day retention) immediately after they are
+verified — before the ClawHub publish that a later step's failure could
+follow. Recover by hand from the run that actually published this version:
+
+1. Open that run in the Actions tab and download the
+   `signed-release-assets-X.Y.Z` artifact from its Summary page.
+2. Attach it to a new (or existing) GitHub Release for the tag:
+   `gh release create vX.Y.Z SHA256SUMS.txt SHA256SUMS.txt.bundle` (or
+   `gh release upload` if the release already exists as a draft or partial —
+   see the previous section's step 2 for the mismatched-bytes rule).
+3. Confirm: `gh release view vX.Y.Z --json isDraft,assets` shows both assets
+   and `isDraft: false`, and the documented `cosign verify-blob --bundle`
+   command (README, "🔒 Safe to run") passes against the downloaded files.
+
+If the artifact has already expired with no GitHub Release ever created, the
+signed bytes cannot be reproduced outside the workflow: a valid signature can
+only be produced by that exact tag-triggered workflow run, and the preflight
+above refuses to run it again for this version. Burn the patch number (§4)
+and ship the content under a new version instead of trying to backfill the
+old one.
 
 ## Release-notes template
 

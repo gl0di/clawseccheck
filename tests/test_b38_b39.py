@@ -128,6 +128,59 @@ def test_b38_legacy_allow_private_network_fix_mentions_both_keys():
     assert "doctor --fix" in f.fix
 
 
+# --- B-853: blockedHostnames lever is gated on the actual private-network trigger,
+# never unconditional, and its wording must not claim it "blocks" the addresses --
+# it matches by hostname/IP text only (resolveHostnamePolicyChecks, installed 2026.9.5
+# dist ssrf-B1sxrDMt.mjs:189), and shouldSkipPrivateNetworkChecks (same file, 114-115)
+# skips the resolved-IP check entirely while the flag is on -- an attacker-chosen
+# hostname that RESOLVES to one of the listed addresses is not caught by it. C-135
+# (B-722) already found the unconditional-mention defect once; this pins all three
+# branches so it cannot regress silently.
+
+def test_b38_blockedhostnames_advice_present_when_flag_on():
+    cfg = {"browser": {
+        "ssrfPolicy": {"dangerouslyAllowPrivateNetwork": True},
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == FAIL
+    assert "blockedHostnames" in f.fix
+
+
+def test_b38_blockedhostnames_advice_present_for_legacy_alias_alone():
+    cfg = {"browser": {
+        "ssrfPolicy": {"allowPrivateNetwork": True},
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == FAIL
+    assert "blockedHostnames" in f.fix
+
+
+def test_b38_blockedhostnames_advice_absent_on_nosandbox_only():
+    # Neither private-network flag is set -- B38 FAILs on noSandbox alone, and the
+    # blockedHostnames lever (which only makes sense when the flag is on) must not
+    # appear as noise pointed at a flag this config never enabled.
+    cfg = {"browser": {"noSandbox": True}}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == FAIL
+    assert "blockedHostnames" not in f.fix
+
+
+def test_b38_blockedhostnames_advice_qualifies_name_only_not_resolved_ip():
+    # The wording must disclose the name-only-match gap, not just tell the operator to
+    # add the key -- an attacker-chosen hostname that resolves to a listed IP is not
+    # caught by blockedHostnames while the private-network flag stays on.
+    cfg = {"browser": {
+        "ssrfPolicy": {"dangerouslyAllowPrivateNetwork": True},
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == FAIL
+    assert "resolves to" in f.fix
+    assert "NOT caught" in f.fix or "not caught" in f.fix.lower()
+    # Must not overclaim it blocks the addresses themselves (rather than the literal
+    # names/IPs an attacker would have to type verbatim).
+    assert "still blocks them" not in f.fix
+
+
 # --- Grounded non-applicability: nested network.* shape is channel-scoped, not browser
 # (isPrivateNetworkOptInEnabled, ssrf-policy-CFLWuj1r.mjs, reads it for CHANNEL config;
 # browser.ssrfPolicy's own canonical schema, SsrFPolicyConfigSchema, has no `network`

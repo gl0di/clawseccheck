@@ -130,10 +130,14 @@ def _dedupe_by_name(pairs):
 
     Keying targets by basename silently drops the second directory sharing a name, so the
     gate would vet one of them and report its target count as if it had vetted both.
-    Nothing collides on this machine today -- measured, 0 of 3 skill basenames and 0 of 70
-    plugin basenames -- which is exactly why the drop has never been noticed. "Not reached
-    on this fleet today" is not "cannot happen", and a gate that covers less than it
-    reports is the failure this task exists to close, so a drop is now COUNTED and printed.
+    Before B-946 widened ``discover_targets()`` to the Codex CLI plugin doc-cache tree,
+    nothing collided on this machine -- measured, 0 of 3 skill basenames and 0 of 70
+    plugin basenames -- which is exactly why the drop had never been noticed. B-946's own
+    measurement is the proof that "not reached on this fleet today" is not "cannot
+    happen": the doc-cache tree alone carries 502 bundled skill dirs on this machine, 5
+    of which collide on a bare name (generic names like ``index``/``user-context`` repeat
+    across unrelated vendored plugins). A gate that covers less than it reports is the
+    failure this task exists to close, so a drop is now COUNTED and printed.
 
     The dedupe POLICY is deliberately unchanged: vetting both would move the target set and
     therefore the FAIL set, which is a different decision from disclosing that a target was
@@ -178,6 +182,62 @@ def discover_plugin_roots(ctx):
     return _dedupe_by_name(pairs)
 
 
+# Directory parts marking the Codex CLI's own vendored third-party plugin doc-cache, one
+# level under each agent dir: agents/<agent>/agent/codex-home/.tmp/plugins/plugins/. Same
+# path shape as ``_C015_CODEX_PLUGIN_MARKER`` in ``clawseccheck/checks/_mcp.py`` (there:
+# B151's informational hooks.json scan) and ``_c015_is_codex_plugin_doc_cache`` in
+# ``clawseccheck/checks/_config.py`` (there: excludes the tree from C015's at-rest
+# secrets scan, B-124 -- placeholder examples in vendored docs are not real secrets).
+# B-946 is a THIRD, independent reason to know this same tree: making it a real-fleet
+# FP-gate DISCOVERY TARGET, not a third copy of either check's verdict logic. This does
+# not change what C015 or B151 convict, and does not touch checks/_config.py or
+# checks/_mcp.py -- it only widens what this script scans. Keep this literal in sync with
+# theirs if the vendored path shape ever moves.
+_CODEX_PLUGIN_CACHE_MARKER = ("agent", "codex-home", ".tmp", "plugins", "plugins")
+
+
+def _child_dirs(root):
+    """Every plain (non-dot, non-skip-listed) child directory of *root*, or ``[]`` if
+    *root* is absent or unreadable. Shared by every discovery walk below so "what counts
+    as a skippable child" cannot drift between them."""
+    if not root.is_dir():
+        return []
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return []
+    return [
+        c for c in children
+        if c.is_dir() and not c.name.startswith(".") and c.name not in _SKIP_DIR_NAMES
+    ]
+
+
+def _codex_plugin_doc_cache_skill_pairs(home):
+    """``(name, path)`` for every skill bundled inside the Codex CLI's plugin doc-cache,
+    under every agent: ``agents/*/agent/codex-home/.tmp/plugins/plugins/*/skills/*``.
+
+    B-946: neither the config-declared-roots walk below (``skill_load_roots`` only knows
+    what OpenClaw's own config declares) nor ``discover_plugin_roots()`` (reads only
+    OpenClaw's plugin-index SQLite table) reaches this tree -- it is the Codex CLI
+    integration's own vendored cache of THIRD-PARTY plugins' reference documentation,
+    never registered as an "installed plugin" the way ``plugins.load.paths`` entries are.
+    Measured on a real machine: the tree is large (dozens of vendored plugin dirs, 502
+    bundled skill dirs total) and at least one bundled skill genuinely FAILs CRITICAL
+    through ``vet_skill()`` (the zoom plugin's ``zoom-apps-sdk``) -- an entire class of
+    real detections that was invisible to this gate before this function existed.
+    """
+    pairs = []
+    agents_root = Path(home).expanduser() / "agents"
+    for agent_dir in _child_dirs(agents_root):
+        cache_dir = agent_dir
+        for part in _CODEX_PLUGIN_CACHE_MARKER:
+            cache_dir = cache_dir / part
+        for plugin_dir in _child_dirs(cache_dir):
+            for skill_dir in _child_dirs(plugin_dir / "skills"):
+                pairs.append((skill_dir.name, skill_dir))
+    return pairs
+
+
 def discover_targets(home):
     """Every real installed-skill directory the audit itself can see, as sorted
     ``(name, path)`` pairs.
@@ -186,30 +246,34 @@ def discover_targets(home):
     than a hand-written path list, so a root the tool learns about later is covered here
     without editing this script. Resolved-path de-duped (one physical dir vetted once,
     even when two roots alias it); dot-directories and build/vendor dirs are skipped.
+
+    B-946: also walks the Codex CLI plugin doc-cache tree
+    (``_codex_plugin_doc_cache_skill_pairs``), alongside -- not instead of -- the
+    config-declared roots above. That tree carries genuinely installed, genuinely
+    scannable skill content (Codex CLI loads and executes it); it was simply invisible to
+    both discovery walks in this file until now.
     """
     home = Path(home).expanduser()
     pairs = []
     seen_resolved = set()
-    for root, _tier in skill_load_roots(home, {}, user_home=Path.home()):
-        if not root.is_dir():
-            continue
+
+    def _add(name, path):
         try:
-            children = sorted(root.iterdir())
-        except OSError:
-            continue
-        for child in children:
-            if not child.is_dir():
-                continue
-            if child.name.startswith(".") or child.name in _SKIP_DIR_NAMES:
-                continue
-            try:
-                key = child.resolve()
-            except (OSError, ValueError, RuntimeError):
-                key = child
-            if key in seen_resolved:
-                continue
-            seen_resolved.add(key)
-            pairs.append((child.name, child))
+            key = path.resolve()
+        except (OSError, ValueError, RuntimeError):
+            key = path
+        if key in seen_resolved:
+            return
+        seen_resolved.add(key)
+        pairs.append((name, path))
+
+    for root, _tier in skill_load_roots(home, {}, user_home=Path.home()):
+        for child in _child_dirs(root):
+            _add(child.name, child)
+
+    for name, path in _codex_plugin_doc_cache_skill_pairs(home):
+        _add(name, path)
+
     return _dedupe_by_name(pairs)
 
 

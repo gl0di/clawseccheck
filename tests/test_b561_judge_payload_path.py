@@ -63,7 +63,7 @@ MISSING = "/nope/typo.json"
 def _run(tmp_path: Path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--data-dir", str(tmp_path / "state"),
-         *args],
+         "--no-deptree", "--no-host", *args],
         cwd=REPO_ROOT, capture_output=True, text=True, input=stdin)
 
 

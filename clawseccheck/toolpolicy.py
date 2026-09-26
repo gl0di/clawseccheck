@@ -88,18 +88,61 @@ list that just appended one entry per declared channel would silently answer a D
 unsound question ("does ANY channel anywhere narrow write") instead of the one this module
 actually needs ("does THIS agent's effective policy get narrowed").
 
-Left undone, deliberately, rather than shipped as a partial fix that reads as complete:
-porting the plugin-hook shape (Discord's ``guilds``/``channels`` nesting specifically)
-without first finding and reading its own resolver would be exactly the kind of
-schema-inferred, unexecuted guess this task's own instructions forbid. This needs its own
-scoped follow-up: (a) locate and read the channel-plugin ``groups.resolveToolPolicy`` hook
-for at least Discord (the provider C-484's recovered paths named) to ground the
-guild/channel-nesting shape rather than inferring it from ``resolveChannelGroupToolsPolicy``
-alone; (b) design an agent-channel attribution model sound enough that a channel's
-narrowing is only ever credited to a scope it can actually gate; (c) differential-validate
-against the dist the way B-666/B-670 were. ``_OPAQUE_NARROWING_KEYS`` is unchanged — the
-gap is the scope enumeration lacking a channel dimension at all, not a key this module
-already visits and mishandles, exactly as the task's own developer comment concluded.
+STILL OPEN — and the ROUTING model named above is the wrong axis (re-read and partly
+executed against the installed openclaw@2026.9.5, 2026-09-23). An attempt to credit a
+per-channel block to the DEFAULT agent's scope whenever no route binding is declared
+(with no matching binding ``resolveAgentRoute`` does fall back to the default agent) was
+built, reviewed and reverted: it turned three real FAILs into WARNs. Knowing which AGENT a
+message reaches is not the question, because the vendor applies the block per TURN, not
+per agent:
+
+* ``resolveGroupToolPolicyOutcome`` takes group ids ONLY from the server-built session key
+  (a caller-supplied group id the key does not name is dropped) and returns no policy when
+  there are none — so a DM turn gets no group policy at all (executed: an open-DM turn
+  resolved to no policy beside a ``groups["*"]`` block that denied the write family), and
+  a group block on one provider never reaches another provider's turn.
+* inside ``resolveScopeToolsPolicy`` a specific group's own ``tools`` (or a matching
+  ``toolsBySender`` entry) REPLACES the ``groups["*"]`` answer instead of stacking on it,
+  and ``tools: {}`` still counts as an answer — ``pickSandboxToolPolicy({})`` is undefined,
+  so that group gets no narrowing at all (executed). A block's presence proves nothing;
+  only its resolved allow/deny, over every node and sender entry, could.
+
+So the only sound shape is per INGRESS: drop an open channel from B55's ``open_ch`` only
+when its DM ingress is not open and every group turn on every account resolves to a policy
+that removes each write tool. Even that is not shippable today, for three reasons found on
+the way (none reachable from the schema):
+
+1. provider hooks: of the channel plugins the npm package bundles, only Telegram declares
+   a ``groups.resolveToolPolicy`` hook (``resolveTelegramGroupToolPolicy`` → the same
+   shared ``buildChannelGroupsScopeTree``/``resolveScopeToolsPolicy`` tree), and it passes
+   no ``access.toolPolicy`` for group turns. Most others — Discord (whose
+   ``guilds.<id>.channels.<id>`` nesting is the shape that opened this), Slack, WhatsApp,
+   Signal and more — are excluded from the package (``"!dist/extensions/<name>/**"``), and
+   a plugin's ``access.toolPolicy`` REPLACES the config group policy outright
+   (``conversationPolicy ?? resolveGroupToolPolicy(...)`` in
+   ``resolveRequesterToolPolicies``), so no config reading can bound those providers.
+2. ``session.groupScope: "main"`` — or a binding's ``session.groupScope: "main"`` — makes
+   ``buildAgentPeerSessionKey`` put group turns in the agent's MAIN session key, which
+   names no group, so no group policy applies to any group (executed).
+3. laundering: ``sessions_send`` is not an owner-only tool and
+   ``tools.sessions.visibility`` defaults to ``"all"``, so a narrowed group turn can inject
+   a turn into a session with no group policy (read, not executed — that needs a running
+   gateway). ``sessions_spawn`` is not such a path: the tool builder hands a spawned child
+   the parent's explicit denylist (group policy included) and, under a restrictive allow,
+   its effective allowlist. Closing this needs a vetted list of which tools can start an
+   unnarrowed turn, which no vendor port provides.
+
+Until those are resolved, the config's channel blocks stay unread here and a config whose
+group block really does remove write keeps its FAIL — the loud direction, never a missed
+one. ``tests/test_b726_channel_tools_narrowing.py`` pins the three shapes the reverted
+attempt got wrong. ``_OPAQUE_NARROWING_KEYS`` is unchanged: the gap is a missing
+per-ingress model, not a key this module visits and mishandles.
+
+THE WRITE QUESTION (F-186) is not answered by the read stack above -- its profile and alias
+tables are read-specific. ``unconfined_write_scopes`` composes ``confined_scopes`` with
+``toolgrant.granted`` (a sibling leaf, itself validated against the vendor for any tool), so
+this module imports exactly one other package module besides ``collector``.
+Validated by ``tests/test_f186_write_reach.py`` against a vendor-executed battery.
 
 Verified against the vendor: this module's answer was compared with a real
 ``resolveEffectiveToolFsRootExpansionAllowed`` call over all 581 local corpus configs
@@ -111,6 +154,15 @@ from __future__ import annotations
 import re
 
 from .collector import agent_roster, dig
+from .toolgrant import GLOBAL_SCOPE, granted
+
+# B-737: an alias, not a second copy. This module's own `_OPAQUE_NARROWING_KEYS` used to be a
+# separate literal tuple that happened to match `toolgrant`'s -- until it didn't: round 3 of
+# B-737 found `checks/_capability.py` keying on its OWN, narrower "declared" key set while this
+# module already treated `byProvider`/`toolsBySender` as possible narrowing, and nothing forced
+# the two to agree. `toolgrant.OPAQUE_NARROWING_KEYS` is now the one place either module reads
+# this tuple from.
+from .toolgrant import OPAQUE_NARROWING_KEYS as _OPAQUE_NARROWING_KEYS
 
 # ``TOOL_NAME_ALIASES`` (dist tool-policy-*.js). Nothing aliases TO "read", so this
 # matters here only so an aliased entry in allow/deny normalizes the way the dist
@@ -127,8 +179,21 @@ _TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch"}
 # Only the one group that contains "read" is modelled: a group entry is expanded to its
 # members before matching, so `allow: ["group:fs"]` grants read and `deny: ["group:fs"]`
 # removes it. Other groups cannot change this predicate's answer.
+#
+# C-584: this had gone stale by one member. "ls" carries `sectionId: "fs"` in
+# CORE_TOOL_DEFINITIONS (tool-catalog-*.js) alongside read/write/edit/apply_patch, and
+# ``toolgrant.py``'s own whole-table-grounded copy already recorded "2026.9.2: group:fs
+# gained 'ls'" — but this module's independent literal was never updated to match. Verified
+# by EXECUTING the vendor (``tests/_toolgrantoracle.py --tables`` against openclaw@2026.9.5,
+# 2026-09-21): ``groups["group:fs"] == ["ls", "read", "write", "edit", "apply_patch"]``.
+# Confirmed inert rather than a lying-PASS: this table is consulted (`_expand`) only to
+# decide whether the fixed tool name "read" matches an expanded allow/deny list, and "read"
+# was already a member either way, so no config changed verdict — but it is corrected here
+# to keep this a faithful port rather than a table trusted to happen not to matter, and
+# ``test_dist_group_fs_membership_matches_core_tool_definitions`` now grounds the full set
+# so the next vendor addition is caught mechanically instead of by inspection.
 _GROUP_FS = "group:fs"
-_GROUP_FS_MEMBERS = ("read", "write", "edit", "apply_patch")
+_GROUP_FS_MEMBERS = ("ls", "read", "write", "edit", "apply_patch")
 
 # ``CORE_TOOL_PROFILES`` (dist tool-catalog-*.js). Only the read-grant answer is kept
 # rather than all four tool lists: the full tables are ~40 tool ids whose only use here
@@ -321,7 +386,8 @@ def _scope_reaches_outside(global_tools, agent_tools) -> bool:
     ``tools.allow: ["fs_write"]`` -- which a real fixture uses -- resolved to "write not
     granted" and turned a designed-bad config into a WARN. ``confined_scopes`` documents this
     exact trap one tool over (``fs_read``); the write family needs its own vetted model, not
-    a parameter here. See F-186.
+    a parameter here. The write answer is ``unconfined_write_scopes`` below, which composes
+    the vendor-validated ``toolgrant.granted`` with ``confined_scopes`` instead.
     """
     fs_scope = agent_tools if _has_fs_flag(agent_tools) else global_tools
     if _workspace_only_of(fs_scope):
@@ -459,117 +525,129 @@ def _sandbox_confines(cfg: dict, agent_id: str, entry) -> "bool | None":
     return None
 
 
-# Tokens whose presence in an allow/deny list touches the file-write family. `*` and the
-# fs group are included because they move the whole family at once. The legacy spellings come
-# from B55's own `_FS_WRITE_TOOL_HINTS`, which exists because real fixtures use them --
-# `fixtures/bad_b55_fs_write_broad` grants `fs_write`, and missing that alias is what made an
-# earlier version of this module downgrade a designed-bad config (see F-186).
-_WRITE_FAMILY_TOKENS = frozenset({
-    "write", "edit", "apply_patch", "fs_write", "write_file", "writefile",
-    "*", _GROUP_FS,
-})
+def _scope_rows(cfg: dict) -> list:
+    """The scopes every per-scope answer here ranges over, in ONE order.
 
-# Keys that can only ADD, never remove. `alsoAllow` is unioned into the allow side
-# (`pickSandboxToolPolicy` stamps IMPLICIT_ALLOW_ALL_FROM_ALSO_ALLOW for a non-empty one), and
-# `fs` carries confinement rather than tool grants -- `confined_scopes` already reads it.
-_NON_NARROWING_TOOL_KEYS = ("alsoAllow", "fs")
+    ``(normalized name, entry, grant id)`` for the default agent first, then every other
+    declared agent. The grant id is what ``toolgrant.granted`` must be asked with: the RAW
+    roster id for a declared agent (its own normaliser is two-branch and differs from this
+    module's -- ``a-`` stays ``a-`` there and becomes ``a`` here, so re-normalising our name
+    would miss the entry), Python ``None`` for the synthesised default agent that has no
+    roster row (the caller asks the ``GLOBAL_SCOPE`` sentinel instead -- see
+    ``_write_scopes`` below). ``None`` is this module's OWN internal marker, not
+    ``toolgrant.GLOBAL_SCOPE`` itself, only so a plain ``is None`` tells "no roster row"
+    apart from "a roster row" without reaching into ``toolgrant`` -- C-561 made
+    ``GLOBAL_SCOPE`` a private sentinel TYPE (not the string ``"global"``), so storing it
+    here directly would no longer even risk the collision this docstring used to warn about;
+    ``None`` is kept anyway because it is this module's own, narrower distinction.
+    ``confined_scopes`` walks the same rows, so index N of its answer is scope N of this
+    list.
 
-# Layers this module does not resolve and that CAN restrict. Their presence is treated as
-# possible narrowing, which is the quiet direction: it can cost a finding, never invent one.
-_OPAQUE_NARROWING_KEYS = ("byProvider", "toolsBySender")
-
-
-def _tools_may_remove_write(tools) -> bool:
-    """Could this scope's own ``tools`` block have taken the write family away?
-
-    NOT a write-grant resolver and deliberately not one -- it never claims a scope CAN write,
-    only whether the block plausibly REMOVES the family. Answering the positive question needs
-    the vetted model F-186 tracks; two attempts to fake it here were retracted.
-
-    The rule replaces a much coarser one -- "the entry has a ``tools`` key at all" -- that an
-    adversarial pass broke seven ways by executing the vendor's own
-    ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies``: for ``tools: {}``,
-    ``{"deny": ["exec"]}``, ``{"alsoAllow": [...]}``, ``{"allow": ["write"]}`` and
-    ``{"fs": {"workspaceOnly": false}}`` the vendor answered ``writeAllowed=true`` while the
-    caller downgraded to WARN. The worst of those is the last: a per-agent
-    ``tools.fs.workspaceOnly: false`` IS one of the two escapes B-670 exists to catch, and it
-    can only be written inside a ``tools`` key -- so the coarse rule closed the sandbox half of
-    that task and silently left the workspaceOnly half open.
+    B-940: two roster agents that normalise to the same id (two id-less ``agents.list``
+    entries both fold to ``main`` -- see ``_normalize_agent_id``) used to be collapsed by a
+    LAST-wins dict comprehension, silently keeping the later declaration and discarding the
+    earlier one entirely -- not just for the entry ``by_name`` looked up, but from the
+    returned row list altogether, since the tail append also matched on name. The real
+    vendor's ``resolveAgentEntry`` takes the FIRST match on a duplicate id and silently
+    shadows the rest (``toolgrant.resolved_scopes`` documents the same fact); this module's
+    callers need a concrete row per scope rather than an ``undecided`` answer, so it mirrors
+    that FIRST-wins resolution directly instead of ``toolgrant``'s more conservative
+    "ambiguous -> None" -- deduplicate once, in declaration order, before either using it.
     """
-    if not isinstance(tools, dict):
-        return False
-    if any(key in tools for key in _OPAQUE_NARROWING_KEYS):
-        return True
-    # A profile replaces the tool set wholesale, so it can remove the family whatever else
-    # is set. `tools.profile: "coding"` reaches here too — that one GRANTS write, and the
-    # caller's separate widening check is what keeps it a FAIL.
-    if isinstance(tools.get("profile"), str):
-        return True
-    allow = tools.get("allow")
-    if isinstance(allow, list):
-        return not any(_normalize(a) in _WRITE_FAMILY_TOKENS for a in allow)
-    deny = tools.get("deny")
-    if isinstance(deny, list):
-        return any(_normalize(d) in _WRITE_FAMILY_TOKENS for d in deny)
-    return False
+    main = _default_agent_id(cfg)
+    rows = [(_normalize_agent_id(agent.id), agent.entry,
+             agent.id if isinstance(agent.id, str) else "")
+            for agent in agent_roster(cfg)]
+    seen = set()
+    deduped = []
+    for row in rows:
+        if row[0] in seen:
+            continue
+        seen.add(row[0])
+        deduped.append(row)
+    by_name = {name: (entry, raw) for name, entry, raw in deduped}
+    entry, raw = by_name.get(main, ({}, None))
+    return [(main, entry, raw)] + [row for row in deduped if row[0] != main]
 
 
-def unconfined_scopes_inheriting_global_tools(cfg: dict):
-    """Scopes that are UNCONFINED and carry no tool override of their own. ``None`` with no config.
+def _has_opaque_narrowing(entry) -> bool:
+    tools = entry.get("tools") if isinstance(entry, dict) else None
+    return isinstance(tools, dict) and any(k in tools for k in _OPAQUE_NARROWING_KEYS)
 
-    The sound half of B-670. Its caller (B55) already knows, from its own vetted resolver,
-    that a write tool is granted GLOBALLY; what it could not see was that the confinement it
-    checked was read from `agents.defaults` and `tools.fs` globally, so a per-agent escape
-    read as safe. `confined_scopes` supplies the missing per-scope confinement answer.
 
-    Two fixes were tried and retracted before this one, and both retractions are the reason
-    it is shaped this way:
-
-    * Gating on `confined_scopes` alone made a hard FAIL out of an unconfined agent that
-      cannot write at all -- one whose own `tools.deny` removes the write family, or which
-      runs `tools.profile: "messaging"`, an ordinary notifier-bot layout.
-    * Answering "can this scope write" here, by parametrising `_scope_reaches_outside`, was
-      unsound: that predicate's profile table and alias table are both read-specific, and it
-      immediately downgraded `fixtures/bad_b55_fs_write_broad` -- a designed-bad config -- to
-      WARN, because its `tools.allow: ["fs_write"]` uses a legacy alias the read stack does
-      not resolve. Trading a constructed false FAIL for a real suppression is the worse deal.
-
-    So this asks a question it CAN answer soundly: does the scope inherit the global tool
-    grant unchanged? A scope with no `tools` key of its own does, by the runtime's own
-    nullish-coalesce; a scope that sets `tools` may narrow the write family, and we decline
-    to guess which. That is deliberately conservative -- an escaping agent whose `tools`
-    override does NOT remove write is a false negative here -- but it is strictly narrower
-    than the behaviour it replaces, which missed EVERY per-agent escape, and it adds no
-    false positive. The remaining gap is F-186's, and it wants a vetted write model rather
-    than another reading of this one.
-
-    Returns NAMES, so the caller can say which scope escaped.
-    """
+def _write_scopes(cfg: dict, tools, undecided_only: bool):
     if not isinstance(cfg, dict) or not cfg:
         return None
     confined = confined_scopes(cfg)
     if confined is None:
         return None
-    main = _default_agent_id(cfg)
-    entries = _agent_entries(cfg)
-    by_id = dict(entries)
-    scopes = [(main, by_id.get(main) or {})]
-    scopes += [(name, entry) for name, entry in entries if name != main]
+    # B-939: a GLOBAL byProvider/toolsBySender block narrows every scope, not only one that
+    # sets its own -- `toolgrant.resolved_scopes` already folds this in (its `global_opaque`),
+    # but this function used to ask `_has_opaque_narrowing` about `entry`/`agents.defaults.tools`
+    # only, so a config with no roster and no per-scope tools block, but an opaque root-level
+    # `tools`, was never recognised as opaque at all: `entry` is `{}` and
+    # `agents.defaults.tools` is absent, so both checks below silently passed. Computed once,
+    # same as `toolgrant`'s, and OR'd into every row.
+    global_opaque = _has_opaque_narrowing({"tools": cfg.get("tools")})
     out = []
-    for is_confined, (name, entry) in zip(confined, scopes):
-        # B-712: `is True`, not truthiness. `confined_scopes` now yields None for a scope the
-        # config does not decide, and a bare `if is_confined:` read that as "not confined"
-        # without anyone choosing it. The choice IS to keep such a scope — declining to prove
-        # confinement is not the same as proving exposure, but silently subtracting it would
-        # restore exactly the fabricated containment this change removes. Which of them were
-        # undecided is available from `undecided_inheriting_scopes` below, so a caller
-        # driving a FAIL off this list can hedge instead of asserting what we did not resolve.
+    for is_confined, (name, entry, grant_id) in zip(confined, _scope_rows(cfg)):
+        # `is True`, not truthiness: `confined_scopes` yields None for a scope the config does
+        # not decide (sandbox.mode "non-main"). Such a scope is KEPT -- declining to prove
+        # confinement is not proving exposure, but subtracting it would fabricate the
+        # containment B-712 removed. `undecided_write_scopes` says which ones they were, so a
+        # caller driving a FAIL can hedge instead of asserting what was not resolved.
         if is_confined is True:
             continue
-        if _tools_may_remove_write(entry.get("tools") if isinstance(entry, dict) else None):
+        if undecided_only and is_confined is not None:
+            continue
+        if global_opaque or _has_opaque_narrowing(entry):
+            continue
+        if grant_id is None and _has_opaque_narrowing(
+                {"tools": dig(cfg, "agents.defaults.tools")}):
+            # No roster: `agents.defaults.tools` IS this scope's own tools (toolgrant reads it
+            # the same way), so its byProvider/toolsBySender are that scope's unresolved layers.
+            continue
+        if not any(granted(cfg, tool, GLOBAL_SCOPE if grant_id is None else grant_id)
+                   for tool in tools):
             continue
         out.append(name)
     return out
+
+
+def unconfined_write_scopes(cfg: dict, tools):
+    """Scopes that are NOT workspace-confined AND are granted at least one of ``tools``.
+
+    ``None`` with no config. F-186: the answer to "which agent can actually write outside
+    its workspace", by COMPOSING two models that were each validated against the vendor on
+    their own -- ``toolgrant.granted`` (the resolved per-scope grant: profile, allow,
+    alsoAllow, deny, the agent-replaces-global asymmetry) and ``confined_scopes``
+    (``tools.fs.workspaceOnly`` / sandbox, per scope). It replaces a token heuristic that
+    guessed whether a scope's own ``tools`` block "could remove" the write family and was
+    wrong both ways: it convicted ``allow:[write]`` + ``deny:[write,...]`` (cannot write) and
+    acquitted ``profile:messaging`` + ``alsoAllow:[write]`` (can).
+
+    ``tools`` is the caller's own list of write-capable tool names, not a table kept here:
+    B55 decides which names count (its legacy spellings included) and this module must not
+    grow a third list of them. ``granted`` runs the vendor's matcher over whatever string it
+    is given, so a legacy name needs no alias entry.
+
+    A scope is left out when either the config's GLOBAL ``tools`` block or the scope's own
+    tools carry ``byProvider``/``toolsBySender`` (B-939, mirroring
+    ``toolgrant.resolved_scopes``'s ``global_opaque``): those layers can remove a grant and
+    are not resolved here, and the quiet direction may cost a finding but never invents one.
+    Returns scope NAMES (this module's normalised form).
+    """
+    return _write_scopes(cfg, tools, undecided_only=False)
+
+
+def undecided_write_scopes(cfg: dict, tools):
+    """Of ``unconfined_write_scopes``, those UNDECIDED rather than proven unconfined.
+
+    B-712. A scope kept because ``sandbox.mode: "non-main"`` gives no static answer is not
+    the same evidence as one kept because the sandbox is demonstrably off, and a verdict that
+    cannot tell them apart words itself as though it could. ``None`` with no config.
+    """
+    return _write_scopes(cfg, tools, undecided_only=True)
 
 
 def confinement_undecided_only(cfg: dict) -> bool:
@@ -586,40 +664,6 @@ def confinement_undecided_only(cfg: dict) -> bool:
     if not scopes:
         return False
     return any(s is None for s in scopes) and not any(s is False for s in scopes)
-
-
-def undecided_inheriting_scopes(cfg: dict):
-    """Of `unconfined_scopes_inheriting_global_tools`, which are UNDECIDED rather than proven
-    unconfined? ``None`` when there is no config.
-
-    B-712. The sibling above returns one flat list because its callers ask "did anything
-    escape". A caller that turns that list into a FAIL needs the finer answer: a scope kept
-    because `sandbox.mode: "non-main"` gives no static answer is not the same evidence as a
-    scope kept because the sandbox is demonstrably off, and a verdict that cannot tell them
-    apart will word itself as though it could.
-
-    Deliberately a second function rather than a richer return type: three call sites already
-    consume the flat list, and widening their contract to fix a wording problem would be a
-    larger change than the wording problem.
-    """
-    if not isinstance(cfg, dict) or not cfg:
-        return None
-    confined = confined_scopes(cfg)
-    if confined is None:
-        return None
-    main = _default_agent_id(cfg)
-    entries = _agent_entries(cfg)
-    by_id = dict(entries)
-    scopes = [(main, by_id.get(main) or {})]
-    scopes += [(name, entry) for name, entry in entries if name != main]
-    out = []
-    for is_confined, (name, entry) in zip(confined, scopes):
-        if is_confined is not None:
-            continue
-        if _tools_may_remove_write(entry.get("tools") if isinstance(entry, dict) else None):
-            continue
-        out.append(name)
-    return out
 
 
 def confined_scopes(cfg: dict):
@@ -645,13 +689,8 @@ def confined_scopes(cfg: dict):
     """
     if not isinstance(cfg, dict) or not cfg:
         return None
-    main = _default_agent_id(cfg)
-    entries = _agent_entries(cfg)
-    by_id = dict(entries)
-    scopes = [(main, by_id.get(main) or {})]
-    scopes += [(name, entry) for name, entry in entries if name != main]
     out = []
-    for name, entry in scopes:
+    for name, entry, _grant_id in _scope_rows(cfg):
         tools = entry.get("tools") if isinstance(entry, dict) else None
         fs_scope = tools if _has_fs_flag(tools) else cfg.get("tools")
         # B-712: three-state. `workspaceOnly: true` is proof on its own, so it wins outright;

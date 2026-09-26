@@ -18,9 +18,12 @@ def test_posix_perm_checks_are_skipped_on_windows(monkeypatch, tmp_path):
     monkeypatch.setattr(checks._shared, "_is_posix", lambda: False)
 
     cfg = tmp_path / "openclaw.json"
+    # C-575: fragments, not a contiguous secret-shaped literal (CLAUDE.md golden rule 3).
+    # No intermediate `..._token = "..."`-shaped variable -- see test_checks.py's
+    # equivalent line for why that shape itself gets flagged.
     cfg.write_text(
         '{"channels":{"telegram":{"accounts":{"main":'
-        '{"botToken":"1234567890abcdef1234567890"}}}}}'
+        '{"botToken":"' + "1234567890abcdef" + "1234567890" + '"}}}}}'
     )
     cfg.chmod(0o644)  # "loose" on POSIX, but we are pretending to be Windows
     f = _by_id(audit(tmp_path)[1])

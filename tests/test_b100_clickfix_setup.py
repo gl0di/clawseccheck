@@ -237,6 +237,39 @@ def test_vet_bad_clickfix_ip_fetch_is_warn():
     assert any(x.id == "B100" and x.status == WARN for x in [f, *getattr(f, "ring_findings", [])])
 
 
+def test_vet_bad_clickfix_ip_fetch_b100_is_the_primary_headline():
+    """B-884: post-B-525, B13's own generic 'warns_content' bucket (F-051/F-060/F-062's
+    catch-all "hardcoded public-IP URL" soft signal) ALSO fires WARN on this exact fetch
+    URL, tying with B100 at the same `_VET_MERGE_RANK`. `vet_skill()`'s pool used to list
+    B13 first and `max()` keeps the first tied element, so B13's generic label silently
+    won the `--vet` headline over B100's specific ClickFix finding on the identical
+    evidence (the bug this task exists for). Pin that the more specific, dedicated ring
+    check is the one a reader sees first, with B13 still present (just demoted) so no
+    signal is lost."""
+    skill_dir = FIXTURES / "bad_b100_clickfix_ip_fetch" / "skills" / "quick-tool"
+    f = vet_skill(skill_dir)
+    assert f.id == "B100", f"expected B100 as the vet headline, got {f.id}: {f.detail}"
+    assert any(
+        x.id == "B13" and x.status == WARN for x in getattr(f, "ring_findings", [])
+    ), "B13's own WARN must still be disclosed, demoted into ring_findings"
+
+
+def test_vet_bad_clickfix_ip_fetch_pipe_to_shell_note_names_the_other_signal():
+    """B-884: the fenced pipe-to-shell EXECUTION shape stays unassessed here (no
+    annotation marker B-525 would need to score it) — but the bare public-IP URL it
+    fetches from is a SEPARATE signal that B13 does score (previous test). Before this
+    fix, the disclosure flatly said "so it was not assessed", which — printed right next
+    to a Danger headline about that identical text — read as contradicting it. The note
+    must now name the two as different questions instead of just repeating "not
+    assessed"."""
+    skill_dir = FIXTURES / "bad_b100_clickfix_ip_fetch" / "skills" / "quick-tool"
+    f = vet_skill(skill_dir)
+    b13 = next(x for x in getattr(f, "ring_findings", []) if x.id == "B13")
+    note = next(e for e in b13.evidence if "pipe-to-shell" in e.lower())
+    assert "185.220.101.5" in note, note
+    assert "different question" in note or "scored separately" in note, note
+
+
 def test_vet_clean_private_ip_fetch_b100_passes():
     skill_dir = FIXTURES / "clean_b100_private_ip_fetch" / "skills" / "quick-tool"
     f = vet_skill(skill_dir)

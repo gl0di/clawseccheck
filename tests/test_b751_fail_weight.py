@@ -34,7 +34,6 @@ from __future__ import annotations
 import json
 import re
 import zipfile
-import zlib
 from pathlib import Path
 
 from clawseccheck.catalog import ACTIONABLE_STATUSES, FAIL_WEIGHT_STATUSES
@@ -177,20 +176,15 @@ def test_the_pdf_contains_the_escape():
     A plain ``b"traversal" in pdf`` reports False on a document that does contain it — that
     false negative cost a diagnosis during this fix.
     """
+    from _pdftext import content_text
     from clawseccheck.pdf import render_pdf
     from clawseccheck.scoring import compute
 
     _, fs = _findings(TRAVERSAL_HOME)
     blob = render_pdf(fs, compute(fs))
 
-    text = b""
-    for m in re.finditer(rb"stream\r?\n(.*?)endstream", blob, re.S):
-        chunk = m.group(1)
-        try:
-            text += zlib.decompress(chunk)
-        except zlib.error:
-            text += chunk
-    assert b"traversal" in text.lower(), "the escape is absent from the rendered PDF"
+    text = content_text(blob)
+    assert "traversal" in text.lower(), "the escape is absent from the rendered PDF"
 
 
 def test_the_default_report_row_is_dangerous():

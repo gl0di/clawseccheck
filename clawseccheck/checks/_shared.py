@@ -7,6 +7,7 @@ Moved verbatim from the former single-file checks.py; no logic changes.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import ipaddress
 import os
@@ -48,6 +49,42 @@ from .. import openclawdist as _openclawdist
 
 def _is_posix() -> bool:
     return os.name == "posix"
+
+
+# Errnos meaning "the path is simply gone", not "permission denied" -- a build/pytest/npm
+# temp dir being cleaned, a git checkout, a concurrent (re)install. `os.walk`'s default
+# `onerror=None` already treats these the same as every other scandir failure (silent
+# skip, no verdict impact); a caller that wants to fail closed on a real permission gap
+# WITHOUT counting a merely-vanished path against the scan filters `exc.errno` against
+# this set before recording anything. First introduced for B-899 (checks/_content.py's
+# B87 symlink-escape sweep, `_enumerate_symlinks`/`_symlink_scan_roots`); reused verbatim
+# by B-902 (checks/_mcp.py's `vet_plugin` tree sweep) rather than re-derived, per this
+# package's "helper reused by 2+ topics belongs in the shared leaf" rule (CLAUDE.md 3.1).
+WALK_VANISHED_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
+
+
+def note_walk_gap(gaps: dict, gate, exc: OSError) -> None:
+    """Record one filesystem-walk coverage gap, keyed on *gate* -- the directory whose
+    permission stopped the walk (for an `os.walk` `onerror` callback, the directory it
+    could not list; for a per-entry `is_symlink()`/`lstat()` failure, that entry's
+    PARENT -- the one missing the search bit). First reason wins: a directory missing
+    `x` fails identically for every entry it hides, so one recorded reason speaks for
+    all of them instead of repeating the same fact once per file.
+
+    Callers are expected to have already screened *exc* against
+    `WALK_VANISHED_ERRNOS` (a vanished path is not a gap at all -- see that constant's
+    docstring) before calling this; this function itself records unconditionally
+    whatever it is handed, so it stays a plain recorder with no policy of its own.
+
+    `gaps` maps ``str(gate) -> (gate, reason, errno)``. What a caller DOES with a
+    non-empty `gaps` is its own Finding's contract to define -- B-899 splits each gap
+    into graded (`engine_degraded`) vs. merely disclosed via its own uid/ownership
+    rule; B-902 folds every recorded gap into a single `coverage_gap_finding()`, the
+    same way it already does for its `truncated`/`budget_hit` partial-scan causes.
+    """
+    key = str(gate)
+    if key not in gaps:
+        gaps[key] = (Path(gate), exc.strerror or str(exc), exc.errno)
 
 
 def _username_safe_path(path) -> str:
@@ -562,8 +599,21 @@ def _c015_has_secret(text: str) -> bool:
 # F-124/E-044 layer-fix: moved here VERBATIM from checks/_content.py so logscan.py (a
 # Layer-1 leaf) can reuse it without importing a Layer-2 topic module — _content.py now
 # imports it back from here like every other cross-topic name.
+#
+# B-976: same missing exclusion B-898 (ea6db77d) fixed for skillast.py's AST-level
+# `_CRED_PATH_RE` — `.ssh/id_[a-z0-9]+` matched a PUBLIC-key filename too (id_rsa.pub,
+# id_ed25519.pub, an OpenSSH cert id_rsa-cert.pub), since nothing excluded the
+# `.pub`/`-cert.pub` suffix. A public key is meant to be shared (uploaded to a git host,
+# handed to a key-provisioning flow), not a credential leak, so a skill's own prose
+# documenting exactly that flow (mentioning the pubkey filename near a network verb)
+# false-positived this SHARED regex's several consumers — up to and including a same-line
+# CRITICAL "secret/credential exfiltration" verdict in check_installed_skills (B13) when
+# the mention and the upload verb share a line, or a HIGH "split-stage" finding via
+# `_has_cross` when they sit on different lines. Same negative-lookahead discipline as
+# B-898: "no more identifier chars, and not immediately followed by .pub/-cert.pub".
 _CRED_RE = re.compile(
-    r"find-generic-password|login\.keychain|\.ssh/id_[a-z0-9]+|\.aws/credentials|"
+    r"find-generic-password|login\.keychain|"
+    r"\.ssh/id_[a-z0-9]+(?![a-z0-9]|\.pub\b|-cert\.pub\b)|\.aws/credentials|"
     r"wallet\.dat|keystore\.json|MetaMask|"
     r"\.npmrc|\.pypirc|\.netrc|\.docker/config\.json|"
     r"\.kube/config|\.config/gcloud|"
@@ -630,6 +680,22 @@ _CRED_RE = re.compile(
 #
 # F-124/E-044 layer-fix: moved here VERBATIM from checks/_content.py (see _CRED_RE note
 # above for why).
+#
+# CLAWSECCHECK-exfil-post: rounds 1 and 2 of this fix narrowed the bare `\bPOST\b`
+# alternative below (it matches the English prefix "post" inside ordinary hyphen
+# compounds like "post-setup" under this pattern's re.I flag; real-fleet repro: a
+# data-analytics skill's "Do not show post-setup flow-control choices" anchored B63 on
+# "post" alone). Both narrowings were retracted on C-135 grounds: this pattern is
+# SHARED by 15+ consumers across _vet.py/_content.py/_config.py/_lifecycle.py/
+# logscan.py/trajaudit.py, and several of them (B13's same-line cred+exfil rule, its
+# cross-skill split-stage sibling) have NO independent floor of their own — narrowing
+# the shared pattern silenced those consumers as a side effect, and each round's fix
+# for one silenced consumer revealed another. The real false positive is B63-only,
+# so round 3 restores this pattern to its original, unnarrowed form (see git history
+# prior to the exfil-post ticket) and fixes B63 alone with a sibling of its own
+# anchor helper in checks/_content.py (`_b63_outbound_exfil_anchor`) instead. Every
+# other consumer of this pattern is therefore unaffected, structurally, not by
+# enumeration.
 _EXFIL_RE = re.compile(
     r"\bcurl\b|\bwget\b|\bnc\b|netcat|requests?\.post|fetch\(|\bPOST\b|\bscp\b|base64|"
     r"glot\.io|webhook\.site|transfer\.sh|pastebin|"
@@ -832,9 +898,12 @@ SENSITIVE_TOOL_IDS = frozenset({"read", "memory_get", "memory_search"})
 
 
 # B-674 decision: keep the bare "fs_read" / "fs_write" substring hints below rather than
-# deleting them, even though neither is a real OpenClaw tool id (grounded against the
-# installed dist's `tool-catalog-*.js` CORE_TOOL_DEFINITIONS, sectionId "fs" — the real
-# ids are `read`/`write`/`edit`/`apply_patch`; see SENSITIVE_TOOL_IDS / OUTBOUND_TOOL_IDS
+# deleting them, even though neither is in CORE_TOOL_DEFINITIONS (installed dist
+# `tool-catalog-*.js`, sectionId "fs" — the core ids are `read`/`write`/`edit`/`apply_patch`).
+# `fs_write` is not absent from the dist altogether: it is named in two vendor deny lists
+# (DEFAULT_GATEWAY_HTTP_TOOL_DENY, ACP_UNSUPPORTED_INHERITED_TOOL_DENY), so whether it is
+# ever dispatchable is UNPROVEN, not disproven — B55's own notes treat it as a real id.
+# See SENSITIVE_TOOL_IDS / OUTBOUND_TOOL_IDS
 # below for the exact-id layer that answers "did the runtime actually grant this"). Two
 # reasons to keep the substring, not one: it still catches a REAL namespaced MCP tool such
 # as `mcp__files__fs_read`, and a bare invented id in a core `tools.allow` still shows the
@@ -1080,6 +1149,287 @@ def _workshop_symlink_knob(ctx) -> str:
     return "unknown"
 
 
+# B-833: the build that FLIPPED tools.message.crossContext.allowAcrossProviders from
+# default-DENY to default-ALLOW. The config PATH did not move and the schema's own
+# default/enum did not move, so no path diff sees it -- only the resolver line does:
+#
+#   2026.9.4  dist/outbound-policy-*.mjs:122  ...allowAcrossProviders === true   (unset = deny)
+#   2026.9.5  dist/outbound-policy-*.mjs:122  ...allowAcrossProviders !== false  (unset = allow)
+#
+# Both trees were read AND their verbatim ``enforceCrossContextPolicy`` executed in node
+# (unset + bound conversation: DENIED on 9.4, ALLOWED on 9.5). The vendor's own 9.5 help text
+# says "default: true", ``docs/gateway/security/tool-permissions.md`` says "Upgrades adopt
+# this default when the setting is omitted", and there is no migration that pins the old
+# value. 9.4 and 9.5 are CONSECUTIVE releases and both were measured, so -- as with
+# _SYMLINK_KNOB_RETIRED_MIN -- one threshold is honest where the 8.1 split needed two. A
+# correction suffix sorts at or above it: (2026,9,5,1) >= (2026,9,5), (2026,9,4,1) below.
+_CROSS_CONTEXT_DEFAULT_ALLOW_MIN = (2026, 9, 5)
+
+# The oldest release whose resolver was actually READ. The line is `=== true` (unset = deny)
+# in the cached tarballs of 2026.6.9, 6.10, 6.11, 6.34 (extended-stable), 7.1, 7.1-2,
+# 7.2-beta.5, 8.1, 8.2, 9.1, 9.2, 9.3 and 9.4 -- an unbroken series -- and `!== false` only
+# from 9.5. "deny" is the direction that PASSes, so it is the one answer that must not be
+# extrapolated: a build older than this, or an installed-version string that is not a
+# `YYYY.M.P` calendar release ("0.0.0", "2026.9"), answers "unknown", never a confident safe
+# verdict.
+_CROSS_CONTEXT_DENY_MEASURED_MIN = (2026, 6, 9)
+
+
+def _cross_context_default(ctx) -> str:
+    """What does an UNSET tools.message.crossContext.allowAcrossProviders mean on the
+    reader's OpenClaw? ``"deny"`` / ``"allow"`` / ``"unknown"``.
+
+    Three answers for the reason ``_workshop_symlink_knob`` has three: "we could not see the
+    build" is not "the build denies it", and collapsing them is what made B363 report a
+    default-allow install as clean.
+
+    Sources are ``_openclaw_generation``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose
+    resolver runs. ``meta.lastTouchedVersion`` is consulted ONLY when it lands at 2026.9.5 or
+    later: that stamp proves a 9.5 build once SAVED the config, so the default is allow. A
+    stamp BELOW the threshold proves nothing about what is installed now (the user may have
+    upgraded five minutes ago and not re-saved), so it answers ``"unknown"``, never
+    ``"deny"``. Parsing goes through ``_numeric_version`` (not ``_parse_version``, B-264): a
+    pre-release such as 2026.9.5-beta.1 orders as None and lands on ``"unknown"``.
+
+    ``"deny"`` is the one answer that PASSes, so it is only given for an installed version
+    shaped like a calendar release (``YYYY.M.P``, three or more numeric parts) at or after
+    ``_CROSS_CONTEXT_DENY_MEASURED_MIN`` -- the oldest release whose resolver was read.
+    Anything else that sorts below 2026.9.5 ("0.0.0", "2026.9", a build older than the
+    measured series) is ``"unknown"``: a version string we cannot place on the timeline is
+    not evidence of a safe default.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- that predicate is compared at
+    two dozen sites, most of them ``== "modern"``, and a new member would silently flip them.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _CROSS_CONTEXT_DEFAULT_ALLOW_MIN:
+            return "allow"
+        if len(installed) >= 3 and installed >= _CROSS_CONTEXT_DENY_MEASURED_MIN:
+            return "deny"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _CROSS_CONTEXT_DEFAULT_ALLOW_MIN:
+        return "allow"
+    return "unknown"
+
+
+# B351 (re-grounded): the build that flipped an UNSET tools.codeMode from hardcoded-off to
+# an automatic-activation default. Executed against the real resolver, not read from the
+# descriptions map: 2026.9.6's code-mode resolver fills a missing `tools.codeMode` with
+# `{enabled: "auto", executor: "node"}`, where `"auto"` engages Code Mode for any model
+# whose provider-manifest `compat.codeMode` field is `"preferred"`. Every release from
+# 2026.7.1 (the oldest cached tarball whose resolver was read) through 2026.9.5 leaves an
+# unset key OFF -- there is no separate "off-measured-but-unmeasured" straddle here the way
+# _SCHEMA_LEGACY_MAX/_SCHEMA_MODERN_MIN needed one, because the whole 7.1-9.5 span was read
+# as one hardcoded-off block and 9.6 is the single, consecutive release that changed it.
+_CODE_MODE_AUTO_DEFAULT_MIN = (2026, 9, 6)      # unset -> "auto", executor default -> node
+_CODE_MODE_OFF_MEASURED_MIN = (2026, 7, 1)      # oldest resolver read
+
+
+def _code_mode_default(ctx) -> str:
+    """What does an UNSET ``tools.codeMode`` mean on the reader's OpenClaw? ``"off"`` /
+    ``"auto"`` / ``"unknown"``.
+
+    Three answers for the reason ``_cross_context_default`` has three: "we could not see
+    the build" is not "the build leaves it off", and collapsing them is how an "auto"
+    -activating 2026.9.6+ install would report a clean surface.
+
+    Sources are ``_cross_context_default``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose
+    resolver actually fills the missing key. ``meta.lastTouchedVersion`` is consulted ONLY
+    when it lands at 2026.9.6 or later: that stamp proves a 2026.9.6+ build once SAVED the
+    config, so the default is ``"auto"``. A stamp BELOW the threshold proves nothing about
+    what is installed now (the user may have upgraded five minutes ago and not re-saved),
+    so it answers ``"unknown"``, never ``"off"``.
+
+    ``"off"`` is the one answer that PASSes an otherwise-unset config, so it is only given
+    for an installed version shaped like a calendar release (``YYYY.M.P``, three or more
+    numeric parts) at or after ``_CODE_MODE_OFF_MEASURED_MIN`` -- the oldest release whose
+    resolver was read. Anything else that sorts below 2026.9.6 ("0.0.0", "2026.9", a build
+    older than the measured series) is ``"unknown"``: a version string we cannot place on
+    the timeline is not evidence of a safe default.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _CODE_MODE_AUTO_DEFAULT_MIN:
+            return "auto"
+        if len(installed) >= 3 and installed >= _CODE_MODE_OFF_MEASURED_MIN:
+            return "off"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _CODE_MODE_AUTO_DEFAULT_MIN:
+        return "auto"
+    return "unknown"
+
+
+# B397: the build that FIRST shipped `gateway.portals` (and its only child,
+# `gateway.portals.ingress`) in the root config schema. Grounded against the installed
+# dist (openclaw@2026.9.6): `GatewayConfigSchema`, `zod-schema-B-u3AXjg.mjs:992-996`.
+# The key is absent from every schema-path walk from 2026.7.1-2 through 2026.9.5
+# (`docs/research/openclaw-schema-paths-2026.{7.1-2,8.1,8.2,9.1,9.2,9.3,9.4,9.5}.txt`
+# at the workspace root -- a grep for "portal" matches nothing in any of them), so 9.6 is
+# the single, consecutive release that added it, the same shape `_CODE_MODE_AUTO_DEFAULT_MIN`
+# and `_SYMLINK_KNOB_RETIRED_MIN` already use for a clean one-release jump.
+_PORTALS_GROUNDED_MIN = (2026, 9, 6)      # gateway.portals first exists in the schema
+_PORTALS_ABSENT_MEASURED_MIN = (2026, 7, 1, 2)  # oldest schema-path walk that was read
+
+
+def _portal_model_version(ctx) -> str:
+    """Does the reader's OpenClaw model portal publishing the way B397 was verified?
+    ``"grounded"`` / ``"predates"`` / ``"unknown"``.
+
+    Three answers for the reason ``_code_mode_default`` has three: "we could not see the
+    build" is not "the build predates portals", and collapsing them would let an
+    unmeasured or future build silently inherit the 2026.9.6 model.
+
+    Sources are ``_code_mode_default``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose
+    Gateway process actually implements (or lacks) `gateway.portals`.
+    ``meta.lastTouchedVersion`` is consulted ONLY when it lands at 2026.9.6 or later: that
+    stamp proves a 2026.9.6+ build once SAVED the config, so portal publishing is grounded.
+    A stamp BELOW the threshold proves nothing about what is installed now (the user may
+    have upgraded five minutes ago and not re-saved), so it answers ``"unknown"``, never
+    ``"predates"``.
+
+    ``"predates"`` leads to UNKNOWN, never PASS -- it is only given for a calendar release
+    in the MEASURED-ABSENT window (``_PORTALS_ABSENT_MEASURED_MIN`` and above, below
+    ``_PORTALS_GROUNDED_MIN``): a build that provably cannot have `gateway.portals` at all
+    still cannot tell us how *this* check's model applies, because the check exists to
+    describe 2026.9.6's transport/reach behavior, not merely the key's presence. A stamp
+    below 2026.9.6 proves nothing about what is installed now, so it is not treated as a
+    safe answer either. A pre-release string (e.g. ``2026.9.6-beta.1``) parses to ``None``
+    via ``_numeric_version`` (not ``_parse_version``, B-264) and falls through to the
+    ``meta.lastTouchedVersion`` stamp, same as every sibling helper in this family.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _PORTALS_GROUNDED_MIN:
+            return "grounded"
+        if len(installed) >= 3 and installed >= _PORTALS_ABSENT_MEASURED_MIN:
+            return "predates"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _PORTALS_GROUNDED_MIN:
+        return "grounded"
+    return "unknown"
+
+
+# B382: keys a newer OpenClaw build REMOVED from its strict root config schema, so a file
+# that still holds one is rejected by `openclaw config validate` and by every CLI command
+# that loads the config, until `openclaw doctor --fix` migrates it.
+#
+# dotted key -> (replacement key or None when removed outright, first build that rejects it).
+# Every entry was MEASURED by executing the installed root schema's `safeParse` (see
+# tests/test_f184_retired_key_config_invalid.py, whose local-only oracle re-asks the vendor,
+# and tests/test_b700_version_aware_advice.py, which owns the 8.1 and 9.3 subsets). A key the
+# vendor still accepts must not be added. Deliberately leaves out the bare `marketplaces`
+# root: only the measured leaves are listed. The min build is per key because retirement is
+# per build -- eleven keys left in 2026.8.1, the symlink knob left in 2026.9.3.
+#
+# C-585: the ssrf key's min build (2026.9.1) was correctly SET, but until
+# 2026-09-22 only 2026.9.1 itself had actually been EXECUTED (test_b700_version_aware_advice.py's
+# REJECTED_BY_2026_9_1, measured 2026-09-04) -- 2026.9.2 and 2026.9.3 were carried on the
+# assumption that a retired key stays retired, not on a measurement. Closed by extracting the
+# real 2026.9.1/9.2/9.3 tarballs (`npm pack openclaw@<ver> --offline`, read-only, the
+# installed dist untouched) and running each one's own zod root schema's
+# `safeParse({browser:{ssrfPolicy:{hostnameAllowlist:[]}}})` directly: all three reject it
+# with the same `unrecognized_keys@browser.ssrfPolicy` issue 2026.9.1 was measured with (see
+# the dated note next to REJECTED_BY_2026_9_1 in test_b700_version_aware_advice.py for the
+# full readout). The table's 2026.9.1 floor was already right; 8.x is still unmeasured, so
+# the gate's lower bound is unchanged.
+_RETIRED_CONFIG_KEYS = {
+    "audit.enabled": ("logging.audit.enabled", (2026, 8, 1)),
+    "gateway.nodes.allowCommands": ("gateway.nodes.commands.allow", (2026, 8, 1)),
+    "gateway.nodes.denyCommands": ("gateway.nodes.commands.deny", (2026, 8, 1)),
+    "skills.workshop.autonomous.enabled": ("skills.workshop.autonomous.mode", (2026, 8, 1)),
+    "agents.list": ("agents.entries", (2026, 8, 1)),
+    "logging.redactSensitive": (None, (2026, 8, 1)),
+    "commands.useAccessGroups": (None, (2026, 8, 1)),
+    "gateway.controlUi.allowInsecureAuth": (None, (2026, 8, 1)),
+    "diagnostics.cacheTrace.filePath": (None, (2026, 8, 1)),
+    "marketplaces.feeds": (None, (2026, 8, 1)),
+    "marketplaces.sources": (None, (2026, 8, 1)),
+    "browser.ssrfPolicy.hostnameAllowlist": ("browser.ssrfPolicy.allowedHostnames",
+                                             (2026, 9, 1)),
+    "skills.workshop.allowSymlinkTargetWrites": (None, _SYMLINK_KNOB_RETIRED_MIN),
+}
+
+
+def _has_key_path(cfg, dotted: str) -> bool:
+    """Structural presence of a dotted key: walks dicts with ``in``, any value counts
+    (``false`` and ``null`` included), and a non-dict intermediate ends the walk."""
+    node = cfg
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
+    """Retired keys (with replacement) that the config holds AND the installed build rejects.
+
+    Reads ONLY ``ctx.installed_dist_version``. ``meta.lastTouchedVersion`` is never
+    consulted: it records which build last SAVED the file, and a user who downgraded since
+    would be told the file is invalid on a build that still reads every key. An unknown
+    installed build returns ``[]`` -- silence, not a guess.
+
+    C-577 (F-184 hand-off): does a retired key behave differently when it lives inside an
+    ``$include``d fragment instead of directly in ``openclaw.json``, and does this helper
+    need to be told an ``$include`` is present? Reproduced against the installed 2026.9.5
+    dist, both live and by source:
+
+    * ``ctx.config`` (read above) is what ``collector.collect()`` gets back from
+      ``configloader.load_openclaw_config()`` -- already the fully ``$include``-resolved,
+      deep-merged dict, never the raw root file. So ``_has_key_path`` sees a retired key
+      exactly the same way whether it sits in ``openclaw.json`` or in an included fragment;
+      there is nothing for a presence flag to add here.
+    * Confirmed live against the installed CLI too: a retired key placed directly in
+      ``openclaw.json`` and the same key moved into an ``$include``d fragment both make
+      `openclaw config validate` report the file invalid with the same
+      `Unrecognized key` message -- the only difference is the vendor drops the
+      `openclaw.json:<line>` citation prefix when the key resolves from a fragment, which
+      is cosmetic (a *where*, never a *whether*). That is the schema-validity claim B382
+      actually makes, and it is untouched by the file's shape either way.
+    * There IS a real, reproduced ``$include`` asymmetry, but at a layer B382 explicitly
+      disclaims: OpenClaw's own silent startup self-heal. The installed dist's
+      `admitAutomaticConfigRepairSnapshot` (`automatic-startup-config-repair-*.mjs`) --
+      wired into the real `gateway run` bootstrap path (`pre-bootstrap-*.mjs`) -- refuses
+      to engage whenever `containsConfigIncludeDirective(snapshot.parsed)` is true or any
+      include was actually resolved, so a plain `openclaw.json` with a retired key gets
+      silently auto-migrated and the gateway starts anyway, while the identical key behind
+      an ``$include`` leaves the gateway blocked on the same invalid config `config
+      validate` reports. This grounds (for the first time -- it shipped as an unverified
+      hedge in 10d766a) the existing `fix` text below: "a config that uses $include may be
+      refused automatic repair, so run the command explicitly". It is a fact about the
+      GATEWAY, which B382's own docstring already disclaims making any claim about, so it
+      changes no verdict here. See ``tests/test_f184_retired_key_config_invalid.py`` for
+      the ``$include``-invariance regression and the dist-grounding pin.
+
+    Decision: no ``$include``-presence field is added to ``Context``. A separate, unstarted
+    piece of work also touches ``collector.py``, but in the skill-content language-routing
+    section (`_file_language`/prose-declared interpreters, ~L2995-3020) -- a different part
+    of the module from config loading, so there is no field or line to actually collide on.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    cfg = getattr(ctx, "config", None)
+    if installed is None or not isinstance(cfg, dict):
+        return []
+    return [(key, repl) for key, (repl, min_build) in _RETIRED_CONFIG_KEYS.items()
+            if installed >= min_build and _has_key_path(cfg, key)]
+
+
 def _meta(cid: str):
     return BY_ID[cid]
 
@@ -1163,6 +1513,93 @@ def _sandbox_docker_binds(sandbox: dict) -> "list | None":
     return None
 
 
+def _sandbox_browser_binds(sandbox: dict) -> "list | None":
+    """Normalize `sandbox.browser.binds` -- same real schema as `sandbox.docker.binds`
+    (a bind-spec string, or a list of them) -- to a plain `list[str]`. Mirrors
+    `_sandbox_docker_binds` exactly, one field over; see that function's docstring
+    for the `[]` vs `list[str]` vs `None` return contract.
+
+    B-641: ``resolveSandboxBrowserConfig`` (dist/config-Bo2B3kKQ.mjs:85-103,
+    installed OpenClaw 2026.9.5) is a SECOND, distinct bind surface with the
+    identical shape and resolution semantics as ``docker.binds``: global+agent are
+    CONCATENATED (``binds = [...globalBrowser?.binds ?? [], ...agentBrowser?.binds
+    ?? []]``, :95-96) and the agent leg is discarded entirely under ``scope:
+    "shared"`` (``agentBrowser = params.scope === "shared" ? void 0 :
+    params.agentBrowser``, :86 -- the SAME ``scope`` value ``_resolve_sandbox_scope``
+    already computes for ``docker.binds``, since both are read off the one per-agent
+    ``sandbox`` object OpenClaw resolves once via ``resolveSandboxConfigForAgent``).
+
+    This reaches a REAL host mount, not just the resolved config object:
+    ``ensureSandboxBrowserContainer`` builds
+    ``resolveSandboxBrowserDockerCreateConfig({docker: cfg.docker, browser:
+    cfg.browser})`` (dist/config-Bo2B3kKQ.mjs:31-39), which REPLACES -- not merges
+    -- the docker bind list with ``browser.binds`` whenever ``browser.binds`` is
+    configured (``params.browser.binds !== void 0 ? {...base, binds:
+    params.browser.binds} : base``), then feeds that straight into
+    ``prepareSandboxMountPlan({..., binds: browserDockerCfg.binds})``
+    (dist/context-D_TiLPsh.mjs:263-279) -- the SAME mount-selection pipeline
+    ``docker.binds`` goes through (``resolveSandboxMountSelection`` ->
+    ``resolveSandboxBindMounts``, dist/workspace-mounts-DY5rC3hd.mjs:99-110), whose
+    ``readOnly`` is ``options.toLowerCase().split(",").some(o => o.trim() ===
+    "ro")`` -- the identical comma-separated-option-list shape ``_bind_mode_is_ro``
+    already parses. So a writable ``browser.binds`` entry is exactly as
+    host-writable as a writable ``docker.binds`` entry, through the same parser,
+    with no new mode-string handling needed.
+    """
+    browser = sandbox.get("browser") if isinstance(sandbox, dict) else None
+    if browser is None:
+        return []
+    if not isinstance(browser, dict):
+        return None
+    binds = browser.get("binds")
+    if not binds:
+        return []
+    if isinstance(binds, str):
+        return [binds]
+    if isinstance(binds, list):
+        return [str(b) for b in binds]
+    return None
+
+
+def _sandbox_browser_enabled(sandbox: dict, fallback: bool) -> bool:
+    """Mirrors ``resolveSandboxBrowserConfig``'s ``enabled`` resolution
+    (dist/config-Bo2B3kKQ.mjs:88,93, installed OpenClaw 2026.9.5): ``agentBrowser
+    ?.enabled ?? globalBrowser?.enabled ?? false`` -- JS ``??``, so an explicit
+    ``False`` declared on *sandbox* itself STICKS and does not fall through to
+    *fallback*; only a missing/non-boolean value does. The same
+    discard-the-whole-sub-object-under-``scope: "shared"`` rule that gates
+    ``browser.binds`` (see ``_sandbox_browser_binds``) also gates ``browser.enabled``
+    -- both are read off the one ``agentBrowser`` reference the vendor code
+    scope-gates once -- so a caller resolves *sandbox* to the empty/skipped case
+    under shared scope the same way it already does for the binds leg via
+    ``_resolve_sandbox_scope``, and this function itself does not need scope.
+
+    Only relevant to whether a declared ``browser.binds`` can ever reach a host
+    mount: ``ensureSandboxBrowser`` returns before creating any container when
+    ``!params.cfg.browser.enabled`` (dist/context-D_TiLPsh.mjs:245) -- a browser
+    sandbox that never launches leaves its binds inert, not a containment defeater.
+
+    A non-dict ``browser`` (the whole sub-object malformed) correctly falls through
+    to *fallback* rather than failing closed: real JS property access on a
+    non-object primitive (``"foo"?.enabled``) yields ``undefined``, which ``??``
+    ALSO falls through on -- so this matches the vendor's own behaviour, not just
+    this function's convenience. Left uninvestigated, and narrower: ``enabled``
+    present as a non-null, non-boolean value (e.g. a stray string) inside an
+    otherwise-well-formed ``browser`` dict. Real JS ``??`` would NOT fall through
+    there (only null/undefined do) and would use that literal value's truthiness
+    instead -- diverging from this function's *fallback* return in that one shape.
+    Believed unreachable in practice (mirrors why ``_resolve_sandbox_backend``
+    does not handle a non-string ``backend`` either: OpenClaw's own resolver calls
+    ``.trim()`` on it unconditionally and would throw before ever reaching a check
+    like this one, implying its config schema already rejects the wrong type at
+    load time) but not proven against the vendor's zod schema, so recorded here
+    rather than silently assumed.
+    """
+    browser = sandbox.get("browser") if isinstance(sandbox, dict) else None
+    v = browser.get("enabled") if isinstance(browser, dict) else None
+    return v if isinstance(v, bool) else fallback
+
+
 def _bind_mentions_docker_sock(binds: "list | None") -> bool:
     """True if any bind spec in *binds* (as returned by `_sandbox_docker_binds`)
     references `docker.sock` — full host control / container-escape signal. The one
@@ -1237,34 +1674,51 @@ def _bind_mode_is_ro(bind: object) -> bool:
     return "ro" in opts and "rw" not in opts
 
 
-def _sandbox_has_writable_bind(sandbox: dict) -> bool:
+def _sandbox_has_writable_bind(sandbox: dict, browser_enabled: bool = False) -> bool:
     """True when this ONE sandbox node (defaults, or one agent's own override)
-    declares at least one ``docker.binds`` entry that is NOT verifiably read-only
-    -- see ``_bind_mode_is_ro`` and ``_fs_writes_contained``'s ROUND 3/4 notes for
-    why a writable bind at either level defeats containment and why the two levels
-    are checked independently rather than merged first.
+    declares at least one ``docker.binds`` OR (when *browser_enabled*)
+    ``browser.binds`` entry that is NOT verifiably read-only -- see
+    ``_bind_mode_is_ro`` and ``_fs_writes_contained``'s ROUND 3/4 notes for why a
+    writable bind at either level defeats containment and why the two levels
+    (defaults vs. per-agent) are checked independently rather than merged first.
 
-    A ``docker`` key that is PRESENT but not a dict (a string, list, etc.) is
-    malformed/unparseable and, per this function's fail-closed-on-ambiguity
-    philosophy, is treated as a defeater rather than silently ignored -- an
-    ABSENT ``docker`` key (the normal case) is not, and returns False.
-
-    NOT READ HERE (flagged, filed separately, deliberately not chased in this
-    round): ``sandbox.browser.binds`` (``resolveSandboxBrowserConfig``) is a
-    SECOND, distinct bind surface this function never examines -- an unexamined
-    false-negative candidate independent of the ``docker.binds`` leg above.
+    A ``docker`` (or, when checked, ``browser``) key that is PRESENT but not a dict
+    (a string, list, etc.) is malformed/unparseable and, per this function's
+    fail-closed-on-ambiguity philosophy, is treated as a defeater rather than
+    silently ignored -- an ABSENT key (the normal case) is not, and does not by
+    itself return True.
 
     C-454: normalization delegated to ``_sandbox_docker_binds`` -- its ``None``
     return (malformed ``docker``/``binds`` shape) maps to this function's own
     fail-closed ``True``, preserving the exact behaviour this docstring already
     documented before the extraction.
+
+    B-641: ``sandbox.browser.binds`` (``resolveSandboxBrowserConfig``) is a SECOND,
+    distinct bind surface -- flagged in a prior round as unexamined, now folded in
+    via ``_sandbox_browser_binds`` (see its docstring for the dist grounding of why
+    it is exactly as host-writable as ``docker.binds``). It is gated on
+    *browser_enabled* rather than checked unconditionally: the browser sandbox
+    container -- and therefore any host mount ``browser.binds`` would produce --
+    is only ever created when the resolved ``browser.enabled`` is true
+    (``_sandbox_browser_enabled``, grounded on ``ensureSandboxBrowser``'s own early
+    return). An inert, declared-but-never-launched ``browser.binds`` must NOT
+    defeat containment -- that would be a new, undiagnosed false positive of
+    exactly the kind CLAUDE.md §2.5 forbids -- so the caller (``_fs_writes_contained``)
+    resolves the effective ``browser.enabled`` per level, the same per-field
+    default/agent fallback already used for ``mode``/``workspaceAccess``/``backend``,
+    and passes it in here.
     """
-    binds = _sandbox_docker_binds(sandbox)
-    if binds is None:
+    docker_binds = _sandbox_docker_binds(sandbox)
+    if docker_binds is None:
         return True  # present but malformed -- fail closed, cannot verify safety
-    if not binds:
+    if any(not _bind_mode_is_ro(b) for b in docker_binds):
+        return True
+    if not browser_enabled:
         return False
-    return any(not _bind_mode_is_ro(b) for b in binds)
+    browser_binds = _sandbox_browser_binds(sandbox)
+    if browser_binds is None:
+        return True  # same fail-closed rule as the docker leg, one field over
+    return any(not _bind_mode_is_ro(b) for b in browser_binds)
 
 
 def _resolve_sandbox_scope(agent_sandbox: dict, default_sandbox: dict) -> str:
@@ -2962,13 +3416,13 @@ def _agent_legs(tools: list) -> dict:
     ATTESTED roster on purpose — attestation can reflect session-granted runtime tools
     that static per-agent config fields can't (see check_agent_separation for why). The
     config-level signals A1 also consults (the credential store's CONTENT -- B-666, not
-    the directory's existence -- and elevated.allowFrom) are GLOBAL, not attributable to
-    one agent, so they are intentionally not applied here. This sentence used to read
-    "credentials dir, gateway password": both were stale. A1 has not raised this leg on
-    the gateway password since B-666 (it is the gateway's own auth secret, not
-    agent-readable data, and B1 flags it), and the credential signal is a content scan.
-    report.py's capability graph applies these global signals to the `main` node only,
-    for the reason above; see B-730.
+    the directory's existence -- `gateway.auth.password` -- B-876 -- and
+    elevated.allowFrom) are GLOBAL, not attributable to one agent, so they are
+    intentionally not applied here — not because A1 excludes them (it now counts all of
+    them; see `_trifecta_leg_sources`), but because a per-agent classification has no
+    single agent to attribute a config-level signal to. report.py's capability graph
+    applies these global signals to the `main` node only, for the same reason; see
+    B-730/B-876.
     """
     return {
         "untrusted input": _hint(tools, INPUT_TOOL_HINTS),
@@ -3032,9 +3486,25 @@ def _unclassified_leg_verbs(tools: list) -> list:
 # "fs_delete"/"fs_move" collide with "refs_delete"/"prefs_delete" as substrings).
 # Deliberately narrower than OUTBOUND_TOOL_HINTS: "send"/"webhook"/"http_post"/
 # "publish" are a different tool family (messaging/network) that this fix does not
-# touch — only the write-to-local-files/elevated-escalation family the B20/B22/RISK-07
-# self-modification shape actually depends on.
-_NON_EXEC_WRITE_TOKENS = ("write", "edit", "fs_delete", "fs_move", "elevated")
+# touch — only the write-to-local-files family the B20/B22/RISK-07 self-modification
+# shape actually depends on.
+#
+# B-848: "elevated" does NOT belong here and has been removed. B-644 added it on the
+# premise that `tools.elevated.allowFrom` is entirely outside tools.exec.*'s reach,
+# citing _capability.py's B-395 note — but that note answers a different question
+# (whether `tools.elevated` is one of OpenClaw's tool-*policy-resolution* layers that
+# decide which tools an agent can reach at all; it is not). Exec *approval* is a
+# separate mechanism: the installed OpenClaw dist (2026.9.5) shows an "elevated
+# full" request's approval bypass is gated by the SAME tools.exec fields —
+# `bash-tools-BBKNLrRH.mjs:4085` (`modePolicyAllowsFullBypass = modePolicy.security
+# === "full" && modePolicy.ask === "off"`) and `:4090` (the bypass only applies when
+# `elevatedMode === "full" && modePolicyAllowsFullBypass && hostPolicyAllowsFullBypass`).
+# So tools.exec.mode='ask' (or any non-"full"/"off" security/ask combination) DOES
+# block the elevated-escalation bypass and forces the same human-approval path as an
+# ordinary exec command. Treating "elevated" as ungated by tools.exec.* was the wrong
+# premise and produced a false WARN (B18) and a false new RISK-07/B8/B46 chain
+# wherever `tools.elevated.allowFrom` was set alongside a real tools.exec gate.
+_NON_EXEC_WRITE_TOKENS = ("write", "edit", "fs_delete", "fs_move")
 
 
 def _exec_gate_covers_tools(tools) -> bool:
@@ -3042,13 +3512,17 @@ def _exec_gate_covers_tools(tools) -> bool:
     `tools.exec.mode/security/ask` to have any bearing on it at all.
 
     False when *tools* contains a non-exec write tool (fs_write/write/edit/
-    fs_delete/fs_move/elevated) — none of those are reached by tools.exec.* (see
+    fs_delete/fs_move) — none of those are reached by tools.exec.* (see
     `_has_approval_gate`'s own grounded field list), so an exec-scoped gate does not
     cover them regardless of its own value. True otherwise, INCLUDING when *tools*
     is empty/None: a caller that has not established a non-exec write tool is
     present gets the plain exec-only reading `_has_approval_gate(cfg)` already gave
     before this fix — this helper only ever narrows, never widens, what counts as
     gated.
+
+    B-848: "elevated" is deliberately NOT in `_NON_EXEC_WRITE_TOKENS` (see that
+    tuple's comment) — a bare `tools.elevated.allowFrom` grant IS reached by
+    tools.exec.mode/security/ask, so it must not make this return False.
     """
     if not tools:
         return True
@@ -3061,8 +3535,11 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
     """Return True when the config has a meaningful exec approval gate.
 
     Real fields — grounded against the installed OpenClaw dist's Zod schema
-    (`zod-schema.agent-runtime-C02vY4RT.js:358-381`, ToolExecBaseShape), which
-    corrects the field-list doc at docs.openclaw.ai/tools/permission-modes:
+    (`zod-schema.agent-runtime-DQfiImgc.mjs:511-538`, ToolExecBaseShape; B-848
+    re-grounded this citation — the file the docstring previously named,
+    `zod-schema.agent-runtime-C02vY4RT.js`, does not exist in the installed
+    2026.9.5 dist, though the schema fact itself still held), which corrects the
+    field-list doc at docs.openclaw.ai/tools/permission-modes:
       tools.exec.mode     — deny/allowlist/ask/auto/full
       tools.exec.security — deny/allowlist/full   ("ask" is NOT a valid value of THIS
                              field — it belongs to tools.exec.ask below; a Zod
@@ -3070,6 +3547,13 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
                              security/ask, see addExecPolicyModeConflictIssue)
       tools.exec.ask      — off/on-miss/always
     Non-existent: tools.confirm, tools.requireApproval, tools.elevated.requireApproval
+
+    B-848: these same fields also gate `tools.elevated`'s own "full" escalation
+    bypass, not just plain exec — `bash-tools-BBKNLrRH.mjs:4085,4090` shows an
+    elevated "full" request skips approval only when
+    `modePolicy.security === "full" && modePolicy.ask === "off"`. So a bare
+    `tools.elevated.allowFrom` grant IS covered by this function's reading; see
+    `_exec_gate_covers_tools`'s B-848 note.
 
     security="allowlist" is a real gate even with an empty/default allowlist and even
     when tools.exec.ask is unset (default "off"): verified against the live runtime
@@ -3971,8 +4455,8 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
 
     # Agent-readable private data: a data tool (db/credential/vault/fs_read/...), a
     # plaintext credential inside the credentials/ store (B-666 — its content, not the
-    # directory's existence), or ungated exec (NOT gateway.auth.password —
-    # that is the gateway's own auth secret, not agent-readable data; B1 flags it).
+    # directory's existence), the gateway's own auth password (B-876, see below), or
+    # ungated exec.
     sensitive: list = []
     sensitive.extend(_tool_hint_sources(cfg, SENSITIVE_TOOL_HINTS))
     # B-667: the generic hints above cannot see OpenClaw's own tool ids — see
@@ -4021,6 +4505,22 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
             f"(+{len(names) - _CRED_STORE_MAX_NAMES} more file(s) in credentials/ "
             "hold a plaintext credential)"
         )
+    # B-876: this leg used to exclude `gateway.auth.password` on the stated
+    # ground that it is "the gateway's own auth secret, not agent-readable data" — true of
+    # WHO minted it, not of whether the agent can reach it, and `risk.py::_has_sensitive_data`
+    # / report.py's capability graph (`main_secrets`) both already counted it. Reproduced by
+    # the B-730 review: a home with an empty credentials store, `fs.workspaceOnly=true` and
+    # only this key set gave A1 PASS "Active legs 2/3" next to a RISK-02 HIGH asserting all
+    # three legs active in the SAME run — the exact contradiction B-730 fixed for the
+    # credential store, reached through a different term (pinned, until this task, by
+    # `tests/test_b730_sensitive_data_model_agreement.py::
+    # test_the_gateway_password_asymmetry_is_the_one_known_divergence`). Dave's decision
+    # (2026-09-20): widen A1 to match the other two consumers, not narrow them. B1
+    # (`check_secrets`) still separately FAILs/CRITICALs on the same key — that is a
+    # different question (a plaintext secret sitting in the config file) from this leg's
+    # question (data the agent can reach), and both answers can be true at once.
+    if dig(cfg, "gateway.auth.password"):
+        sensitive.append("gateway.auth.password is set")
     # B-061: ungated exec/shell can read any private file. Approval-gated exec (see
     # _has_approval_gate) is NOT autonomous, so it must not raise this leg — matches
     # _trifecta_legs' exec_enabled = _real_exec_enabled(cfg) and not _has_approval_gate(cfg).
@@ -4036,8 +4536,10 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # B-674: the generic hints above cannot see OpenClaw's own write-capable tool ids —
     # see OUTBOUND_TOOL_IDS. Exact match, alias-folded, over the config's grants and over
     # an attested roster, mirroring B-667's SENSITIVE_TOOL_IDS treatment of the inbound
-    # leg exactly (same helpers, same shape, no confinement guard — no vetted per-scope
-    # write-confinement model exists yet, see F-186).
+    # leg exactly (same helpers, same shape). No confinement guard, by decision: a write
+    # confined to the workspace can still tamper SOUL.md / memory / skills, which is what
+    # this leg exists to catch, so the outbound leg does not honour confinement (B55 does,
+    # because it asks a different question — reach outside the workspace).
     outbound.extend(_tool_id_sources(cfg, OUTBOUND_TOOL_IDS))
     outbound.extend(_attested_tool_id_sources(ctx, OUTBOUND_TOOL_IDS))
     if dig(cfg, "tools.elevated.allowFrom"):
@@ -4454,6 +4956,60 @@ def _node_commands(cfg: dict, kind: str) -> "tuple[object, str]":
     return None, new_path
 
 
+def _node_allow_skills(cfg: dict) -> "tuple[object, str]":
+    """Whether paired gateway nodes may publish skills, from EITHER config shape.
+
+    Returns ``(value, path)`` — the value exactly as found (the caller type-checks it
+    itself, as callers did when reading ``dig()`` directly) and the config path to name
+    in evidence.
+
+    F-199. OpenClaw 2026.8.1 moved ``gateway.nodes.skills.enabled`` to a flat
+    ``gateway.nodes.allowSkills`` (docs/nodes/mcp-and-skills.md's own migration table
+    lists the two renames back to back, this one and the sibling ``commands`` rename
+    ``_node_commands`` above already handles per B-698). The DIRECTION is the mirror
+    image of that sibling: commands went flat -> nested (``allowCommands`` ->
+    ``commands.allow``), this one goes nested -> flat (``skills.enabled`` ->
+    ``allowSkills``). Re-verified against the installed 2026.9.5 dist (not merely the
+    docs page): ``zod-schema*.mjs`` types ``allowSkills`` as a plain
+    ``boolean().optional()`` sibling of ``commands`` on the ``nodes`` object, and
+    ``legacy-*.mjs``'s own migration (``if (nodes.allowSkills === void 0) nodes
+    .allowSkills = skills.enabled``) confirms both the rename and its precedence.
+
+    Both shapes are read, permanently — same rule as ``_node_commands``: the vendor's
+    own migration is DEFERRED (``openclaw doctor --fix``), so an un-migrated config
+    still carries the legacy nested key, and an operator on an older OpenClaw is not
+    migrating at all.
+
+    Precedence mirrors the vendor's own migration verbatim (``legacy-*.mjs``)::
+
+        const skills = getRecord(nodes.skills);
+        if (skills && Object.hasOwn(skills, "enabled")) {
+            if (nodes.allowSkills === void 0) nodes.allowSkills = skills.enabled;
+
+    so the NEW key wins whenever it is PRESENT — including an explicit ``null``, which
+    ``=== void 0`` does not treat as absent. Same "present, not truthy" precedence as
+    ``_node_commands``, so a config carrying both during a mid-migration window is read
+    the same way OpenClaw itself reads it, not "new key if truthy".
+
+    BOTH spellings are read through ``dig`` so both keep an entry in
+    ``tests/grounded_schema_paths.txt``. The legacy path does not resolve against the
+    installed dist (``t.safeParse`` on a config carrying it fails with
+    ``unrecognized_keys@gateway.nodes keys=["skills"]`` — the object no longer declares
+    a ``skills`` key at all, not merely a changed leaf under one), so it is registered in
+    ``tests/test_schema_grounding.py``'s ``_NOT_IN_CURRENT_SCHEMA`` with that measured
+    disproof, the same way ``gateway.nodes.allowCommands``/``denyCommands`` are.
+    """
+    gateway = cfg.get("gateway") if isinstance(cfg, dict) else None
+    nodes = gateway.get("nodes") if isinstance(gateway, dict) else None
+    new_path = "gateway.nodes.allowSkills"
+    if isinstance(nodes, dict) and "allowSkills" in nodes:
+        return dig(cfg, "gateway.nodes.allowSkills"), new_path
+    legacy = dig(cfg, "gateway.nodes.skills.enabled")
+    if legacy is not None:
+        return legacy, "gateway.nodes.skills.enabled"
+    return None, new_path
+
+
 _CANONICAL_IPV4_RE = re.compile(r"\A(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\Z", re.ASCII)
 
 
@@ -4679,3 +5235,1097 @@ def _canon_tool(token) -> str:
         return ""
     s = token.strip().lower()
     return _TOOL_NAME_ALIASES.get(s, s)
+
+
+# =============================================================================
+# B-879 (round 4 design): prose binding — does a token GOVERN an
+# EXEC verb, or merely sit NEAR it? `_authkey_persistence_hits` (checks/_vet.py)
+# used bare proximity (`_is_code_example`'s fence/negation-marker path) to decide
+# whether a fenced authorized_keys write is a documented example, which a
+# positive instruction wrapped around a negation word ("Don't forget to run
+# this...", "You cannot proceed without running this...") bypasses outright —
+# the negator is present, but it does not GOVERN the EXEC verb.
+#
+# Rounds 1-3 tried to resolve, from local punctuation alone, whether a negator
+# separated from its verb by a comma/dash/paren aside still governs it. That
+# question has no token-level answer: the same shape ("Never, X, run the
+# following:") means a real prohibition when X is a non-predicate aside
+# ("under any circumstances") and a spliced-in order when X contains its own
+# verb ("skip this step"). Guessing either way is either a false FAIL (a real
+# prohibition convicts) or a false PASS (a spliced order is read as negated).
+#
+# The round-4 fix is a third value: when a negator is immediately followed by
+# a comma/dash/paren, its clause is UNRESOLVED ("clouded") rather than guessed
+# bound or unbound. A clouded EXEC verb is neither a confirmed prohibition nor
+# a confirmed order — callers route it to the WARN band that already exists for
+# soft/ambiguous signal, never to a PASS/FAIL guess.
+# =============================================================================
+
+from typing import NamedTuple as _NamedTuple  # noqa: E402
+
+
+class ProseBinding(_NamedTuple):
+    """Classification-only result of `_prose_binding`. See the block comment
+    above. Callers (checks/_vet.py's authkey site) map this to a verdict; this
+    primitive never sees keys, hosts or severities."""
+
+    directed: bool
+    forbids: str | None  # "governs" | "scoped" | None
+    marker: bool
+    described: bool
+    unreadable: bool
+    has_prose: bool
+    conflict: bool
+    unresolved: bool  # B-879 round 4: a clouded EXEC verb reaches the block
+
+
+_PB_TOK_RE = re.compile(
+    r"\$\{?\w+\}?|\{\{[^}]*\}\}|<[A-Za-z_][\w-]*>|`[^`\n]*`|https?://\S+|"
+    r"[A-Za-z][A-Za-z'’]*(?:\.[a-z]{2,}(?:/\S*)?)?|—|–|--|[,;:()]|\S"
+)
+_PB_EMPH_RE = re.compile(r"\*\*|__|(?<!\w)[*_](?=\w)|(?<=\w)[*_](?!\w)")
+
+_PB_DELIM = {",", ";", ":", "(", ")", "—", "–", "--"}
+
+# B-879 round 5: a bare ASCII "-" is a mid-word compound hyphen far more often
+# than stand-alone punctuation ("cross-session"), and the word-token pattern in
+# `_PB_TOK_RE` does not itself include "-", so the tokenizer would otherwise
+# split a compound word into three tokens (word, "-", word) with nothing at the
+# token level to tell that "-" apart from a real delimiter. `_pb_tokens`
+# recognises exactly this shape — a hyphen glued to an alphabetic character on
+# both sides, with no surrounding whitespace — and emits the `_PB_GLUED`
+# sentinel instead of a literal "-", so `_neg_scan`'s class rule (below) never
+# mistakes an ordinary compound word for an unresolved-negation delimiter.
+_PB_GLUED = "\x00-"
+_PB_HYPHENS = {"-", "‐", "‑"}
+
+# The closed EXEC vocabulary — "run it"/"paste it"/"type it"/"source it" — the
+# family of "apply this SKILL.md block to your machine" verbs. Base forms only
+# for `_directive` (do/does/did and every -ing/-s/-ed form are excluded there);
+# the wider form set here is used to find the verb AT ALL, for negation and
+# description purposes, which is mood-agnostic.
+_PB_EXEC_RE = re.compile(
+    r"^(?:run|runs|running|ran|execute[sd]?|executing|paste[sd]?|pasting|type[sd]?|"
+    r"typing|enter(?:s|ed|ing)?|invoke[sd]?|invoking|copy|copies|copied|copying|"
+    r"apply|applies|applied|applying|install(?:s|ed|ing)?|add(?:s|ed|ing)?|"
+    r"append(?:s|ed|ing)?|launch(?:es|ed|ing)?|source[sd]?|sourcing|eval|try|tries|"
+    r"tried|trying|do|does|doing|done|did|use[sd]?|using)$"
+)
+_PB_EXEC_BASE_RE = re.compile(
+    r"^(?:run|execute|paste|type|enter|invoke|copy|apply|install|add|append|"
+    r"launch|source|eval|try|use)$"
+)
+_PB_PASSIVE_PART_RE = re.compile(
+    r"^(?:run|executed|used|done|pasted|typed|entered|invoked|copied|applied|"
+    r"installed|added|appended|launched|sourced|tried)$"
+)
+_PB_INVERT = {"forget", "hesitate", "fail", "skip", "omit", "neglect", "miss", "ignore"}
+_PB_NEG1 = {
+    "never", "cannot", "avoid", "don't", "dont", "mustn't", "shouldn't", "can't",
+    "won't", "wouldn't", "not", "refuse", "nobody",
+}
+_PB_NEG_PP = [
+    ("under", "no", "circumstances"), ("in", "no", "case"), ("at", "no", "time"),
+    ("at", "no", "point"), ("on", "no", "account"), ("by", "no", "means"),
+    ("in", "no", "way"), ("no", "one"),
+]
+_PB_AUX = {
+    "should", "must", "do", "does", "can", "may", "will", "would", "shall", "could",
+    "is", "are", "ever",
+}
+_PB_INV_SUBJ = {"you", "anyone", "anybody", "one", "we", "they", "users", "the", "agent", "it"}
+_PB_ADV_WORDS = {"ever", "even", "again", "really", "seriously", "once", "at", "all"}
+
+# B-879 round 6 (see `_neg_scan_ex`'s docstring): a closed, single-word
+# preposition list — empirically confirmed (a "Never PREP X, run the
+# following:" probe for each) to make the negator's clause walk stop at a
+# fronted PP's head instead of its real object. Deliberately excludes "at":
+# "at" is already in `_PB_ADV_WORDS` above (for "not at all") and is skipped
+# as an adverb before the walk ever reaches this stop-point, so a fronted
+# "at"-PP ("Never at work, run...") is a related, still-open, out-of-scope
+# gap this round does not touch, not a case that would ever reach this set.
+#
+# Round 7: round 6's own docstring called this "a small, closed" set and
+# stopped at ten members. A pre-merge review probed the same "Never PREP X,
+# run the following:" shape against six more ordinary single-word
+# prepositions and found the IDENTICAL fronted-PP-stop bug on every one:
+# "by", "for", "from", "over", "through", "within". This is not meant to be
+# an exhaustive part-of-speech classifier — English has more single-word
+# prepositions than this set will ever enumerate, and a future probe will
+# likely find more (the same "any enumeration is missing a member" lesson
+# round 5's class rule drew for punctuation applies here too, just not
+# solved the same way, because "is this word a preposition" has no
+# alphanumeric-content class rule to fall back on) — it is simply the
+# complete list of single-word prepositions actually probed and confirmed to
+# reproduce this exact mechanism so far.
+_PB_FRONTED_PREP = {
+    "in", "as", "on", "under", "with", "without", "during", "before", "after", "since",
+    "by", "for", "from", "over", "through", "within",
+}
+_PB_OPENERS = {
+    "then", "now", "next", "first", "finally", "also", "just", "simply", "please",
+    "and", "so", "afterwards", "again", "quickly", "quietly", "silently", "lastly",
+    "second", "third", "immediately", "always",
+}
+# B-879 round 7: the subset of `_PB_OPENERS` that is a genuine COORDINATING
+# CONJUNCTION — a word that can introduce a grammatically independent second
+# clause with its own subject and modal, as opposed to a plain sequencing
+# adverb ("then"/"now"/"immediately"/...) that merely orders steps WITHIN the
+# same clause a negator already governs. See `_sentence_directed`'s (d″) for
+# why this distinction is load-bearing: a bare comma-splice aside ("Never,
+# under any circumstances, run...") must stay unresolved, but "..., so you
+# must run..." is a real, separate directive clause. "but" is deliberately
+# NOT in `_PB_OPENERS` itself (a pre-existing, out-of-scope gap — see
+# `_pb_directive_mood`) but IS a coordinating conjunction for this narrower
+# purpose.
+_PB_COORD = {"and", "so", "but"}
+_PB_ADDRESSEE = [
+    ("you",), ("your", "agent"), ("the", "agent"), ("this", "skill"),
+    ("the", "skill"), ("the", "assistant"), ("we",), ("i",),
+]
+_PB_MODALISH = {
+    "must", "should", "will", "can", "may", "need", "needs", "to", "has", "have",
+    "shall", "then", "also", "always", "now", "just", "'ll", "quietly",
+}
+_PB_MATRIX_FRAMES = [
+    ("make", "sure", "to"), ("be", "sure", "to"), ("remember", "to"),
+    ("go", "ahead", "and"), ("proceed", "to"),
+]
+_PB_BLOCK_NOUN = {
+    "command", "commands", "snippet", "snippets", "line", "lines", "block",
+    "blocks", "code", "script", "one", "ones", "example", "examples", "payload",
+    "step",
+}
+_PB_STOP = {
+    "not", "never", "but", "unless", "except", "instead", "than", "other",
+    "besides", "apart", ";", ".", "!", "?", ",", "—", "–", "--", "(", ")",
+}
+_PB_TAIL_OK = {
+    "below", "above", "here", "command", "commands", "snippet", "snippets", "block",
+    "blocks", "line", "lines", "code", "example", "examples", "one", "ones",
+    "script", "payload", "ever", "again", "yourself", ":", ".", "!", ",", "—",
+    "--", "–",
+}
+_PB_FWD_DEIXIS = frozenset({"this", "these", "following", "below"})
+_PB_BACK_DEIXIS = frozenset({"above", "this", "that", "these", "it"})
+_PB_MARKER_RE = re.compile(
+    r"\bexamples?\b|\bfor\s+instance\b|\bsample\b|\bfor\s+example\b|e\.g\.|"
+    r"(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|[✅❌]",
+    re.I | re.M,
+)
+_PB_STRUCT_LINE_RE = re.compile(
+    r"^[ \t>]*(?:`{3,}|~{3,})[\w+-]*[ \t]*$|^[ \t>]*</?pre>[ \t]*$", re.M
+)
+
+# B-879 round 4 §4.f: "e.g."/"i.e."/"etc."/"vs."/"cf." followed by a lowercase
+# word is not a sentence or clause boundary for this primitive — a preceding
+# aside like "(e.g. in staging)" must not split the intro into two sentences
+# (or, at the token level, end a negator's clause early) just because it
+# contains an abbreviation's period. "e.g. Run" with a capital next word still
+# splits normally (the lookahead requires a lowercase follower).
+#
+# B-879 round 5: the whole pattern is compiled with re.I so the abbreviation
+# itself matches any case ("E.g."/"E.G."), but that also made the lookahead's
+# `[a-z]` match an upper-case follower too — "e.g. Run the following" was
+# silently protected as if "Run" were lowercase, which is exactly backwards
+# (a capital follower IS a genuine new sentence). `(?-i:[a-z])` turns
+# case-insensitivity back OFF for just that one group, so the lookahead is
+# strict-lowercase again while the abbreviation match stays case-insensitive.
+_PB_ABBREV_RE = re.compile(r"\b(?:e\.g|i\.e|etc|vs|cf)\.(?=\s+(?-i:[a-z]))", re.I)
+
+
+def _pb_protect_abbrev(text: str) -> str:
+    """Strip every period out of a non-boundary abbreviation match (both the
+    internal period in "e.g"/"i.e" and the trailing one) so neither
+    `_SENTENCE_BREAK_RE` nor the token-level class rule in `_neg_scan` ever
+    reads it as a sentence/clause boundary. Used by both `_pb_sentences` and
+    `_pb_tokens` (round 4 §4.f applies it at both call sites)."""
+    return _PB_ABBREV_RE.sub(lambda m: m.group(0).replace(".", ""), text)
+
+
+def _pb_tokens(s: str) -> list[str]:
+    """Tokenize *s* for every B-879 primitive in this module.
+
+    Two round-5 refinements over the plain `_PB_TOK_RE.finditer` walk:
+
+    * GLUED compounds — a "-" token sandwiched between two other tokens with
+      no whitespace on either side, both of them alphabetic at the join, is a
+      mid-word hyphen ("cross-session"), never stand-alone punctuation. It is
+      emitted as the `_PB_GLUED` sentinel instead of a bare "-" so `_neg_scan`
+      (which treats any non-content token as a class-rule cloud opener) does
+      not misread an ordinary compound word as a negator's delimiter.
+    * Trailing-apostrophe split (decision (a′)/A2) — the word-token pattern's
+      character class includes the apostrophe so a WORD-INTERNAL one
+      ("don't") stays glued on, but that means a CLOSING quote mark glued
+      onto a word's end ("Never'") is swallowed into the word too, and a
+      token like "never'" no longer matches the bare negator vocabulary
+      (`_PB_NEG1`). A trailing "'" is always a closing quote, never part of
+      the word, so it is split into its own token here.
+    """
+    s = _pb_protect_abbrev(s)
+    matches = list(_PB_TOK_RE.finditer(s))
+    out: list[str] = []
+    for k, m in enumerate(matches):
+        raw = m.group(0)
+        if (
+            raw in _PB_HYPHENS
+            and 0 < k < len(matches) - 1
+            and matches[k - 1].end() == m.start()
+            and matches[k + 1].start() == m.end()
+            and matches[k - 1].group(0)[-1:].isalpha()
+            and matches[k + 1].group(0)[:1].isalpha()
+        ):
+            out.append(_PB_GLUED)
+            continue
+        t = raw.lower().replace("’", "'")
+        if len(t) > 1 and t[0].isalpha() and t[-1] == "'":
+            out.append(t.rstrip("'"))
+            out.append("'")
+        else:
+            out.append(t)
+    return out
+
+
+def _pb_sentences(text: str) -> list[str]:
+    text = _pb_protect_abbrev(text)
+    out, last = [], 0
+    for m in _SENTENCE_BREAK_RE.finditer(text):
+        out.append(text[last : m.end()])
+        last = m.end()
+    out.append(text[last:])
+    return [s for s in out if s.strip()]
+
+
+def _pb_is_word(t: str) -> bool:
+    return bool(t[:1].isalpha())
+
+
+def _pb_is_adverb(t: str) -> bool:
+    """B-879 round 4 §4.a fix: an EXEC verb is never an adverb, no matter how it
+    ends. Several EXEC verbs end in a letter sequence that also matches the
+    generic '-ly, len>3' adverb shape — most notably "apply"/"supply"/"reply",
+    which all end in "...ply" (which ends in "ly"). Before this guard, a
+    negator's clause-scan treated "apply" as a skippable adverb and walked
+    straight past it, losing the negation event on "Never, under any
+    circumstances, apply the following:" and reading "apply" as a free-standing
+    directive (a false FAIL)."""
+    if _PB_EXEC_RE.match(t):
+        return False
+    return t in _PB_ADV_WORDS or (t.endswith("ly") and len(t) > 3)
+
+
+def _pb_proform(ts: list[str], j: int) -> bool:
+    """This/these/that/following count only as PRO-FORMS standing in for the
+    block, never as determiners of some other noun ("this audit", "the following
+    steps" do not count)."""
+    w = ts[j]
+    nxt = ts[j + 1] if j + 1 < len(ts) else ""
+    if w in ("this", "these", "that", "following"):
+        return (
+            (not _pb_is_word(nxt))
+            or nxt in _PB_BLOCK_NOUN
+            or nxt in _PB_TAIL_OK
+            or nxt
+            in (
+                "is", "are", "was", "will", "must", "should", "can", "to", "as",
+                "on", "in", "once", "before", "after", "into", "when", "for", "at",
+                "under", "outside", "without", "with", "instead", "now", "first",
+            )
+        )
+    return True
+
+
+def _reaches_block(
+    tokens: list[str], i: int, deixis: frozenset, introducer: bool, *, allow_final: bool = True
+) -> int | None:
+    """Does the verb at tokens[i] take the block as its object? A deixis word
+    within 7 words, with the walk STOPPING at any clause delimiter and at
+    not/never/but/unless/except/instead/than/other/besides/apart (this is what
+    closes "run anything OTHER THAN the following" and "If not already done, run
+    the following" — a verb that ends its sentence ("run:") also reaches."""
+    dx = deixis | ({"it", "that"} if introducer else set())
+    steps = 0
+    j = i + 1
+    if allow_final and (j >= len(tokens) or tokens[j] in {":", ".", "!"}):
+        return j
+    while j < len(tokens) and steps < 7:
+        t = tokens[j]
+        if t in _PB_STOP:
+            return None
+        if t in dx and _pb_proform(tokens, j):
+            return j
+        if _pb_is_word(t):
+            steps += 1
+        j += 1
+    return None
+
+
+def _pb_tail_unscoped(ts: list[str]) -> bool:
+    """The tail after a bound prohibition's deixis, up to sentence end: any word
+    outside the closed "still talking about the same block, unconditionally"
+    vocabulary (`_PB_TAIL_OK`, or "under/on/in/at/for any|no|all ...") makes the
+    prohibition SCOPED rather than fully governing."""
+    i = 0
+    while i < len(ts):
+        t = ts[i]
+        if t in _PB_TAIL_OK or not _pb_is_word(t):
+            i += 1
+            continue
+        if t in ("under", "on", "in", "at", "for") and i + 1 < len(ts) and ts[i + 1] in (
+            "any", "no", "all",
+        ):
+            i += 2
+            while i < len(ts) and _pb_is_word(ts[i]):
+                i += 1
+            continue
+        return False
+    return True
+
+
+def _pb_has_content(t: str) -> bool:
+    """Does *t* contain at least one alphanumeric character? The round-5 class
+    rule (see `_neg_scan_ex`) tests this instead of enumerating a punctuation
+    set: any token that FAILS it is, by construction, punctuation of some
+    kind — a comma, a dash, a bracket, an ellipsis, an emoji, a full stop, a
+    box-drawing character, any of the several thousand Unicode punctuation
+    code points nobody sat down and enumerated — and a token this shape can
+    always open a negator's clause the same way a comma can."""
+    return any(c.isalnum() for c in t)
+
+
+def _neg_scan_ex(
+    tokens: list[str], carry: bool | None = None
+) -> tuple[list[tuple[int, int]], dict[int, int], bool | None]:
+    """B-879 round 5: resolve each negator in *tokens* to either a GOVERNED
+    event, or an UNRESOLVED ("clouded") span, never a guess — and, new in round
+    5, do it with a CLASS rule instead of an enumerated delimiter set.
+
+    Rounds 1-3 tried to resolve, from local punctuation alone, whether a
+    negator separated from its verb by a comma/dash/paren aside still governs
+    it, and guessed either way was unsound (see the module design comment).
+    Round 4's fix was a third value — UNRESOLVED — but it opened the cloud only
+    on an enumerated set of delimiters (comma/dash/open-paren). Any enumerated
+    set is exactly the kind of thing this bug keeps recurring on: a sweep of
+    3,666 Unicode punctuation characters glued directly after "Never" found a
+    false FAIL on all but 5 of them — round 4's own set. The round-5 rule
+    replaces the enumeration with its own justification: a negator's clause
+    walk (see below) is looking for either a skippable filler word or the verb
+    it governs; the FIRST token that is neither — i.e. the first token with NO
+    alphanumeric content at all (`_pb_has_content`) — is definitionally
+    punctuation of some kind, and punctuation right after a negator is an
+    aside-or-splice shape no token-level scanner can resolve, whatever
+    character it happens to be spelled with. `Never, X, run...` is a real
+    prohibition when X is a non-predicate aside and a spliced-in order when X
+    contains its own verb; only open-class part-of-speech knowledge tells them
+    apart, and a class rule at least never depends on which punctuation
+    character X started with, which point-of-Unicode enumeration always did.
+
+    A compound word's mid-word hyphen is not this kind of punctuation — see
+    `_pb_tokens`'s `_PB_GLUED` sentinel, which the walk below special-cases so
+    an ordinary word like "cross-session" is never mistaken for a delimiter.
+
+    Sentence-spanning (round 5, Dave's R3 decision, 2026-09-24): the cloud
+    spans the rest of the LOGICAL sentence, not just the rest of the clause up
+    to the next terminator — a splice's own aside can itself contain a clause
+    terminator ("Never, as Mr. Smith explained: run the following.") without
+    closing the cloud early. *carry* threads an already-open cloud (and the
+    directive-mood of the negator that opened it) in from a PREVIOUS sentence
+    that never resolved before its own sentence boundary — see `_carries` and
+    `_soft_break`, which decide whether that boundary was a genuine full stop
+    or an artifact (an abbreviation `_pb_sentences` did not protect) worth
+    carrying a cloud across. Returns ``(events, clouded, carry_out)``:
+
+      * ``events``: ``(negator_index, governed_index)`` pairs — the negator
+        binds directly to its governed word, unambiguously.
+      * ``clouded``: ``{token_index: owning_negator_index}`` — every token from
+        the first non-content token after a negator (or, for a cloud carried
+        in from a previous sentence, every token in *this* sentence) to the
+        end of the sentence. The owner is the opening negator's index, or -1
+        when the cloud's owner lived in a previous sentence (carried in).
+      * ``carry_out``: the directive-mood of the still-open cloud to hand to
+        the NEXT sentence, or None when nothing is open at sentence end.
+
+    Negators: never/not/cannot/can't/don't/won't/avoid/refuse to/mustn't/
+    shouldn't/nobody, plus negative PPs ("under no circumstances", "at no
+    point", ...) with subject-aux inversion ("...should you/anyone run...").
+
+    After the negator: skip adverbs (ever/even/once/-ly..., but never an EXEC
+    verb — `_pb_is_adverb`), try/attempt to, "to be" and "to <EXEC>".
+
+    Negative PPs: a comma right after the PP is skipped ONLY as part of a full
+    subject-aux inversion (comma, AUX, INV_SUBJ) — "Under no circumstances,
+    should you run..." A bare comma with no following inversion is UNRESOLVED,
+    same as any other negator ("By no means, run the following.").
+
+    Adjacent-negation-wins: a later negator's GOVERNED event on a token removes
+    that token from any earlier cloud, so "Never, ever, never run the
+    following" still resolves to a genuine, unscoped prohibition.
+
+    Fronted prepositional phrases (round 6): the walk's stop-word is not
+    always the negator's true object. "Never under any circumstances, run..."
+    (no comma after "Never"), "Not even in a sandbox, run...", "Never as
+    root, run..." each stop at a PREPOSITION ("under"/"in"/"as") that heads a
+    whole fronted PP the comma closes — the negation's real scope is that
+    whole phrase, not just its first word, so recording a GOVERNED event on
+    the preposition let the verb after the phrase's comma escape negation
+    entirely. `_PB_FRONTED_PREP` (below) is a small, closed, empirically
+    -confirmed set of single-word prepositions this happens with, gated on
+    `_pb_negator_mood` exactly like the class rule's own carry-mood — the
+    misreading only matters when the negator is itself addressed to the
+    reader as an imperative ("If not in a container, run..." keeps its real
+    directive reading, since "if" makes the negator's own mood non-directive).
+    """
+    events: list[tuple[int, int]] = []
+    clouded: dict[int, int] = {}
+    n = len(tokens)
+    carry_mood = carry
+    if carry is not None:
+        # The whole sentence is already inside a cloud carried in from before
+        # it started; owner -1 marks "opened in a previous sentence" so
+        # `_sentence_directed`/`_has_clouded_exec_reaching` can tell it apart
+        # from a cloud this sentence opened itself.
+        for k in range(n):
+            clouded.setdefault(k, -1)
+
+    def _open_cloud(neg_i: int, from_j: int) -> None:
+        # Shared by the class rule's non-content branch and round 6's
+        # fronted-PP branch below: cloud every token from *from_j* to the
+        # sentence's end, owned by the negator at *neg_i*, and remember that
+        # negator's own mood as the carry candidate for the next sentence.
+        nonlocal carry_mood
+        for k in range(from_j, n):
+            clouded.setdefault(k, neg_i)
+        carry_mood = _pb_negator_mood(tokens, neg_i)
+
+    i = 0
+    while i < n:
+        t = tokens[i]
+        start = None
+        pp_len = 0
+        for pp in _PB_NEG_PP:
+            if tuple(tokens[i : i + len(pp)]) == pp:
+                pp_len = len(pp)
+                start = i + pp_len
+                break
+        if start is None and t in _PB_NEG1:
+            start = i + 1
+            if t == "refuse" and start < n and tokens[start] == "to":
+                start += 1
+            if t == "nobody" and start < n and tokens[start] in _PB_AUX:
+                start += 1
+        if start is None:
+            i += 1
+            continue
+
+        if pp_len:
+            if start < n and tokens[start] == ",":
+                # A comma right after the PP is consumed ONLY as part of a full
+                # subject-aux inversion; otherwise it is left in place for the
+                # generic class-rule scan below, which clouds it.
+                if (
+                    start + 2 < n
+                    and tokens[start + 1] in _PB_AUX
+                    and tokens[start + 2] in _PB_INV_SUBJ
+                ):
+                    start += 3
+                    if start < n and tokens[start] == "agent":
+                        start += 1
+            elif start + 1 < n and tokens[start] in _PB_AUX and tokens[start + 1] in _PB_INV_SUBJ:
+                start += 2
+                if start < n and tokens[start] == "agent":
+                    start += 1
+            elif start < n and tokens[start] in _PB_AUX:
+                start += 1
+
+        j = start
+        clouded_here = False
+        while j is not None and j < n:
+            tj = tokens[j]
+            if tj == _PB_GLUED:
+                # An intra-word hyphen is not a delimiter (see `_pb_tokens`) —
+                # stop the skip-walk here and let the negator govern it, the
+                # same neutral (non-EXEC, non-eventful) outcome round 4 gave a
+                # bare "-" that happened to land in this position.
+                break
+            if _pb_is_adverb(tj):
+                j += 1
+                continue
+            if tj in ("try", "attempt") and j + 1 < n and tokens[j + 1] == "to":
+                j += 2
+                continue
+            if tj == "to" and j + 1 < n and (
+                tokens[j + 1] == "be" or _PB_EXEC_RE.match(tokens[j + 1])
+            ):
+                j += 1
+                continue
+            if not _pb_has_content(tj):
+                # The class rule: nothing between the negator and here has
+                # been a real word, and *this* token has no alphanumeric
+                # content either, so it is punctuation of some kind. Cloud
+                # the rest of the sentence and remember this negator's own
+                # mood as the carry candidate, in case the cloud is still open
+                # at the sentence's end.
+                _open_cloud(i, j)
+                clouded_here = True
+                j = None
+                continue
+            if tj in _PB_FRONTED_PREP and _pb_negator_mood(tokens, i):
+                # Round 6: *tj* is not the negator's object — it is the head
+                # of a FRONTED PREPOSITIONAL PHRASE the negation scopes over
+                # as a whole (see the docstring above and `_PB_FRONTED_PREP`'s
+                # own comment). Cloud the rest of the sentence exactly like
+                # the class rule's punctuation branch, rather than recording a
+                # GOVERNED event on the preposition that would let a real
+                # directive verb after the phrase's own comma escape
+                # negation.
+                _open_cloud(i, j)
+                clouded_here = True
+                j = None
+                continue
+            break
+        if not clouded_here and j is not None and j < n:
+            events.append((i, j))
+        i += 1
+
+    governed = {g for _n, g in events}
+    for g in governed:
+        clouded.pop(g, None)
+    return events, clouded, carry_mood
+
+
+def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]:
+    """Single-sentence convenience wrapper over `_neg_scan_ex` — no carry in,
+    carry discarded — kept for callers (and tests) that only ever look at one
+    sentence in isolation."""
+    events, clouded, _carry_out = _neg_scan_ex(tokens)
+    return events, clouded
+
+
+def _neg_events(tokens: list[str]) -> list[tuple[int, int]]:
+    """Thin wrapper over `_neg_scan` kept for the aggregator export contract
+    (§3.1-a: a name importable today stays importable) — returns only the
+    unambiguously GOVERNED events, discarding cloud information."""
+    return _neg_scan(tokens)[0]
+
+
+def _pb_chunk_raw_pre(ts: list[str], i: int) -> tuple[list[str], int]:
+    """The word-only span from the start of *ts[i]*'s clause up to (not
+    including) *ts[i]*, with NOTHING stripped — the raw material
+    `_pb_chunk_pre` immediately throws away by stripping leading openers and a
+    "Step N" prefix. B-879 round 7's cloud-recovery mechanism
+    (`_sentence_directed`'s (d″)) needs to see whether that raw span itself
+    OPENS with a genuine opener/coordinator BEFORE any stripping happens —
+    `_pb_chunk_pre` alone cannot answer that, since by the time it returns,
+    the very evidence of what the chunk started with is already gone."""
+    s = 0
+    for k in range(i - 1, -1, -1):
+        if ts[k] in _PB_DELIM:
+            s = k + 1
+            break
+    return [t for t in ts[s:i] if _pb_is_word(t)], s
+
+
+def _pb_strip_chunk_openers(pre: list[str]) -> list[str]:
+    """Strip leading OPENERS (then/now/next/.../please/and/so/...), any
+    "-ly" adverb, and a leading "Step N" off the front of *pre* — the
+    stripping half of `_pb_chunk_pre`, factored out so B-879 round 7's (d″)
+    can apply the SAME stripping after first removing a coordinator
+    (`_PB_COORD`) that is not itself in `_PB_OPENERS` ("but" — see
+    `_PB_COORD`'s own comment)."""
+    while pre and (pre[0] in _PB_OPENERS or (pre[0].endswith("ly") and len(pre[0]) > 3)):
+        pre = pre[1:]
+    if pre and pre[0] == "step":
+        pre = pre[1:]
+    return pre
+
+
+def _pb_chunk_pre(ts: list[str], i: int) -> tuple[list[str], int]:
+    """The word-only span from the start of *ts[i]*'s clause up to (not
+    including) ts[i], with leading OPENERS (then/now/next/.../please/and/so/...)
+    and a leading "Step N" stripped."""
+    pre, s = _pb_chunk_raw_pre(ts, i)
+    return _pb_strip_chunk_openers(pre), s
+
+
+def _pb_addressee_len(pre: list[str]) -> int:
+    for a in _PB_ADDRESSEE:
+        if tuple(pre[: len(a)]) == a:
+            return len(a)
+    return 0
+
+
+def _pb_directive_mood(ts: list[str], i: int) -> bool:
+    """Frames (a)/(b)/(c): chunk-initial after an opener, an addressee (you/the
+    agent/this skill/we/i) plus modal filler, or a matrix verb (make sure to,
+    be sure to, remember to, go ahead and, proceed to)."""
+    pre, _s = _pb_chunk_pre(ts, i)
+    if not pre:
+        return True
+    n = _pb_addressee_len(pre)
+    if n and all(w in _PB_MODALISH or _pb_is_adverb(w) for w in pre[n:]):
+        return True
+    return any(tuple(pre) == m for m in _PB_MATRIX_FRAMES)
+
+
+def _pb_negator_mood(ts: list[str], n: int) -> bool:
+    """B-879 round 4 §4.d: is the NEGATOR at ts[n] itself in directive mood —
+    "after stripping do-support, the chunk-pre is empty, or it is an addressee
+    plus modal filler"? Same test as `_pb_directive_mood`, but a leading
+    periphrastic "do"/"does"/"did" is stripped from the chunk-pre first: "Do
+    not hesitate to run..." has chunk-pre ["do"] in front of "not", which is
+    do-support with no real subject, not a third-person subject, so it must
+    not read as non-directive the way "Attackers never fail..." (chunk-pre
+    ["attackers"]) does."""
+    pre, _s = _pb_chunk_pre(ts, n)
+    if pre and pre[0] in ("do", "does", "did"):
+        pre = pre[1:]
+    if not pre:
+        return True
+    p = _pb_addressee_len(pre)
+    if p and all(w in _PB_MODALISH or _pb_is_adverb(w) for w in pre[p:]):
+        return True
+    return any(tuple(pre) == m for m in _PB_MATRIX_FRAMES)
+
+
+def _directive(tokens: list[str], i: int, deixis: frozenset, introducer: bool) -> bool:
+    """Is tokens[i] a DIRECTIVE EXEC verb that reaches the block? Base-form EXEC
+    only (`_PB_EXEC_BASE_RE`) — do/does/did and every -ing/-s/-ed form are
+    EXCLUDED here (they are still recognised by the wider `_PB_EXEC_RE` for
+    negation/description purposes).
+
+    Frames, all closed classes:
+      (a) chunk-initial after an opener — `_pb_directive_mood`
+      (b) addressee + modal filler — `_pb_directive_mood`
+      (c) matrix verb (make sure to/be sure to/...) — `_pb_directive_mood`
+      (d) a negator governing an INVERTING verb (forget/hesitate/fail/skip/
+          omit/neglect/miss/ignore) followed by "to <EXEC>" or a block object —
+          handled in `_sentence_directed`, not here (it needs the negation
+          scan, and round 4 gates it on the negator's own mood).
+      (e) "without <EXEC-ing>" inside a sentence whose negation event governs a
+          NON-exec word (necessity: "cannot proceed WITHOUT RUNNING this").
+      (f) "by <EXEC-ing>" in a chunk containing you/your, not starting with a
+          subject word — the addressed means-clause "register your key BY
+          COPYING it below".
+    """
+    t = tokens[i]
+    if not _PB_EXEC_RE.match(t) or t in ("do", "does", "did", "done", "doing"):
+        return False
+    if i > 0 and tokens[i - 1] in ("not", "never", "don't", "dont"):
+        return False
+    ok = bool(_PB_EXEC_BASE_RE.match(t)) and _pb_directive_mood(tokens, i)
+    if not ok and i > 0 and tokens[i - 1] == "without" and t.endswith("ing"):
+        evs = _neg_events(tokens)
+        ok = any(n < i and not _PB_EXEC_RE.match(tokens[g]) for n, g in evs)
+    if not ok and i > 0 and tokens[i - 1] == "by" and t.endswith("ing"):
+        pre, s = _pb_chunk_pre(tokens, i)
+        ok = (
+            bool(pre)
+            and ("your" in tokens[s:] or "you" in tokens[s:])
+            and pre[0]
+            not in ("the", "a", "an", "this", "that", "these", "those", "it", "they", "he",
+                    "she", "attackers", "someone")
+        )
+    return ok and _reaches_block(tokens, i, deixis, introducer) is not None
+
+
+def _sentence_directed(
+    sent: str, deixis: frozenset, introducer: bool, carry: bool | None = None
+) -> bool:
+    """Is there a live, free-standing directive EXEC verb in *sent*? Round 4
+    additions over the base frames: (d) is gated on the NEGATOR's own mood
+    (`_pb_directive_mood`) — "Attackers never fail to run the following:" has a
+    third-person subject before "never", so it no longer counts as an order;
+    and (d′) recovers an inverting verb found INSIDE a cloud when it opens its
+    own chunk and the cloud's own negator is in directive mood ("Never, under
+    any circumstances, forget to run the following:"). Round 5 adds *carry*
+    (see `_neg_scan_ex`/`_carries`): a cloud still open from a previous
+    sentence, threaded in so (d′) can judge an inverting verb sitting in it.
+    Round 7 adds (d″), below: the same "opens its own chunk" recovery
+    principle as (d′), generalized from INVERTING verbs to ordinary EXEC
+    verbs, for a token whose OWN local grammar proves it belongs to a
+    different clause/sentence than the one an unrelated cloud nominally still
+    covers — see (d″)'s own comment for the two different bars (coordinator +
+    subject/modal for a same-sentence cloud; a marked, already-established
+    directive frame for a cross-sentence carry)."""
+    ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
+    evs, clouded, _carry_out = _neg_scan_ex(ts, carry)
+    governed = {g for _n, g in evs}
+    cloud_idx = set(clouded)
+    # (d) negator + inverting verb — only when the negator itself is addressed
+    # to the reader (round 4 §4.d).
+    for _n, g in evs:
+        if ts[g] in _PB_INVERT and _pb_negator_mood(ts, _n):
+            k = g + 1
+            if k < len(ts) and ts[k] == "to":
+                k += 1
+            if k < len(ts) and _PB_EXEC_RE.match(ts[k]) and _reaches_block(
+                ts, k, deixis, introducer
+            ) is not None:
+                return True
+            if _reaches_block(ts, g, deixis, introducer) is not None:
+                return True
+    # (d′) round 4 §4.e, recommended and included in the measured candidate: an
+    # inverting verb INSIDE a cloud still directs when it opens its own chunk
+    # (nothing but the cloud's own delimiter precedes it) and the cloud's
+    # negator is itself in directive mood. A cloud CARRIED IN from a previous
+    # sentence has no negator token in *ts* to re-read (`neg_idx == -1`); its
+    # mood is whatever `_carries` threaded in as *carry*.
+    for i in sorted(cloud_idx):
+        t = ts[i]
+        if t not in _PB_INVERT:
+            continue
+        pre, _s = _pb_chunk_pre(ts, i)
+        if pre:
+            continue
+        k = i + 1
+        if k < len(ts) and ts[k] == "to":
+            k += 1
+        if not (k < len(ts) and _PB_EXEC_RE.match(ts[k])):
+            continue
+        if _reaches_block(ts, k, deixis, introducer) is None:
+            continue
+        neg_idx = clouded.get(i)
+        if neg_idx == -1:
+            mood = bool(carry)
+        else:
+            mood = neg_idx is not None and _pb_negator_mood(ts, neg_idx)
+        if mood:
+            return True
+    # (d″) round 7: generalize (d′)'s "opens its own chunk" recovery from
+    # INVERTING verbs to ordinary EXEC verbs. An earlier, unrelated negator's
+    # cloud being nominally still "open" over a token does not mean that
+    # token is really part of the SAME clause the negator governs — a token
+    # that independently proves it belongs to a different, grammatically
+    # independent clause (or a different SENTENCE) must not be suppressed
+    # just because the cloud's technical span happens to still cover it. The
+    # bar differs by how the token ended up clouded, because a comma and a
+    # period are not equally strong independence signals:
+    #
+    #   * Same-sentence cloud (`neg_idx >= 0`, opened by a comma/dash/etc.
+    #     INSIDE this sentence): only a genuine COORDINATING CONJUNCTION
+    #     (`_PB_COORD` — "and"/"so"/"but", never a plain sequencing adverb
+    #     like "then"/"now") can introduce an independent second clause, and
+    #     even then only when what follows it is a real subject+modal
+    #     ("so you must run...") or a matrix frame ("so make sure to
+    #     run..."). A bare "so run"/"and run" with nothing else stays
+    #     suppressed — that shape is indistinguishable at the token level
+    #     from an ordinary same-clause comma splice ("Never, under any
+    #     circumstances, run..."), which is exactly the false-FAIL shape
+    #     this whole design exists to avoid, so it is deliberately NOT
+    #     recovered just because a coordinator happens to be present.
+    #   * Carried-in cloud (`neg_idx == -1`, threaded in from a PREVIOUS
+    #     sentence via `_carries`/`_soft_break`): this sentence already sits
+    #     on the far side of a genuine `_pb_sentences` PERIOD split — the
+    #     only reason it is still "clouded" at all is `_soft_break`'s casing
+    #     heuristic (the next sentence merely starts lowercase, which could
+    #     mean the period was not a real full stop, or could just as easily
+    #     mean an author wrote a fresh, informally-cased new instruction). A
+    #     period is a much stronger independence signal than a mid-sentence
+    #     comma, so the bar is the ordinary, already-established directive
+    #     test (`_pb_directive_mood`, frames (a)/(b)/(c) — which already
+    #     accepts a bare chunk-initial imperative) — BUT gated on the raw
+    #     chunk finding a genuine `_PB_OPENERS` marker first, so a bare,
+    #     filler-less continuation ("Never, ever. run the following:", the
+    #     C01-C06 accepted-cost group) stays exactly as unresolved as it
+    #     always was: nothing marks it as a deliberate new step rather than
+    #     the unmarked tail end of the same splice.
+    for i in sorted(cloud_idx):
+        t = ts[i]
+        if (
+            not _PB_EXEC_BASE_RE.match(t)
+            or t in ("do", "does", "did", "done", "doing")
+            or (i > 0 and ts[i - 1] in ("not", "never", "don't", "dont"))
+        ):
+            continue
+        raw_pre, _rs = _pb_chunk_raw_pre(ts, i)
+        if not raw_pre:
+            continue
+        neg_idx = clouded.get(i)
+        if neg_idx == -1:
+            if raw_pre[0] not in _PB_OPENERS or not _pb_directive_mood(ts, i):
+                continue
+        else:
+            if raw_pre[0] not in _PB_COORD:
+                continue
+            # Strip the coordinator itself by hand first — plain
+            # `_pb_chunk_pre` would not do it for us here, because "but" is
+            # deliberately NOT a member of `_PB_OPENERS` (its own stripping
+            # loop would leave it in place, and the addressee check below
+            # would never match a pre starting with "but"). Once it is gone,
+            # apply the SAME opener-stripping `_pb_chunk_pre` uses to
+            # whatever follows it ("so now you must run..." still needs
+            # "now" gone too).
+            pre = _pb_strip_chunk_openers(raw_pre[1:])
+            if not pre:
+                continue
+            n = _pb_addressee_len(pre)
+            has_struct = (
+                n and all(w in _PB_MODALISH or _pb_is_adverb(w) for w in pre[n:])
+            ) or any(tuple(pre) == m for m in _PB_MATRIX_FRAMES)
+            if not has_struct:
+                continue
+        if _reaches_block(ts, i, deixis, introducer) is None:
+            continue
+        return True
+    for i, t in enumerate(ts):
+        if (
+            not _PB_EXEC_RE.match(t)
+            or i in governed
+            or i in cloud_idx
+            or t in ("do", "does", "did", "done", "doing")
+        ):
+            continue
+        if _directive(ts, i, deixis, introducer):
+            return True
+    return False
+
+
+def _forbids(sentence: str, deixis: frozenset) -> str | None:
+    """"governs" (fully, unscoped) / "scoped" / None for one sentence: a
+    negation event whose governed word is EXEC and reaches the block, the
+    passive form ("the above must never be run"), or "what not to do".
+
+    Round 4 §4.b: unchanged from the base design — this only ever sees bound
+    `_neg_scan` EVENTS, never cloud information, so a clouded verb can never
+    read as a prohibition (no false PASS)."""
+    ts = _pb_tokens(_PB_EMPH_RE.sub("", sentence))
+    best = None
+    events, _clouded = _neg_scan(ts)
+    for n, g in events:
+        if _PB_EXEC_RE.match(ts[g]):
+            r = _reaches_block(ts, g, deixis, False, allow_final=False)
+            if r is not None:
+                res = "governs" if _pb_tail_unscoped(ts[r + 1 :]) else "scoped"
+                if res == "governs":
+                    return res
+                best = best or res
+        if ts[g] == "be" and g + 1 < len(ts) and _PB_PASSIVE_PART_RE.match(ts[g + 1]):
+            subj = [w for w in ts[:n] if _pb_is_word(w)]
+            if subj and (
+                subj[0] in deixis
+                or (subj[0] == "the" and len(subj) > 1 and (subj[1] in deixis or subj[-1] in _PB_BLOCK_NOUN))
+            ):
+                res = "governs" if _pb_tail_unscoped(ts[g + 2 :]) else "scoped"
+                if res == "governs":
+                    return res
+                best = best or res
+    if re.search(r"\bwhat\s+not\s+to\s+do\b", " ".join(ts)):
+        return "governs"
+    return best
+
+
+def _pb_described(sent: str, deixis: frozenset) -> bool:
+    """A non-base EXEC verb (using/running/executed/...) with a non-addressee
+    subject 1-4 words long, whose object REACHES the block — third-person
+    DESCRIPTION, not a directive to the reader: "Attackers persist by appending
+    a line like this"."""
+    ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
+    for i, t in enumerate(ts):
+        if _PB_EXEC_RE.match(t) and not _PB_EXEC_BASE_RE.match(t) and t != "using":
+            pre, _s = _pb_chunk_pre(ts, i)
+            if (
+                pre
+                and not _pb_addressee_len(pre)
+                and len(pre) <= 4
+                and _reaches_block(ts, i, deixis, False) is not None
+            ):
+                return True
+    return False
+
+
+def _pb_unreadable(text: str) -> bool:
+    return len(re.findall(r"[^\W\d_A-Za-z]", text)) > len(re.findall(r"[A-Za-z]", text))
+
+
+def _block_para_before(blob: str, start: int, cap: int = 400) -> str:
+    """The paragraph before *start*, stripped of layout (frontmatter, heading
+    lines, fence/`<pre>` marker lines, blockquote `>` prefixes) — those are not
+    prose."""
+    seg = blob[max(0, start - cap) : start]
+    seg = _PB_STRUCT_LINE_RE.sub("", seg)
+    seg = re.sub(r"(?m)^[ \t]*>[ \t]?", "", seg).rstrip()
+    last = None
+    for m in re.finditer(r"\n[^\S\n]*\n", seg):
+        last = m
+    seg = seg[last.end() :] if last else seg
+    fm = list(re.finditer(r"^---[ \t]*$", seg, re.M))
+    if fm:
+        seg = seg[fm[-1].end() :]
+    return "\n".join(
+        ln for ln in seg.splitlines()
+        if not re.match(r"\s*#{1,6}\s", ln) and not ln.strip().startswith("---")
+    ).strip()
+
+
+def _block_para_after(blob: str, end: int, cap: int = 400) -> str:
+    seg = blob[end : end + cap].lstrip()
+    m = re.search(r"\n[^\S\n]*\n", seg)
+    seg = seg[: m.start()] if m else seg
+    if re.match(r"\s*#{1,6}\s", seg) or seg.startswith("```") or seg.startswith("# file:"):
+        return ""
+    return seg.strip()
+
+
+def _pb_has_clouded_exec_reaching(
+    sent: str, deixis: frozenset, introducer: bool, carry: bool | None = None
+) -> bool:
+    """B-879 round 4 §4.c: is there a CLOUDED EXEC verb in *sent* that reaches
+    the block? Used to compute `ProseBinding.unresolved` over every intro
+    sentence and the first trailer sentence — not just the one `directed`/
+    `forbids` inspect — so a splice earlier in the intro plus a clean
+    prohibition as the last sentence ("Never, ever skip this, run the following
+    to register your key. Never run the following:") is still unresolved
+    rather than a confirmed FORBIDDEN prohibition. Round 5 adds *carry*: a
+    cloud left open by a previous sentence (see `_neg_scan_ex`/`_carries`)."""
+    ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
+    _events, clouded, _carry_out = _neg_scan_ex(ts, carry)
+    for i in clouded:
+        if _PB_EXEC_RE.match(ts[i]) and _reaches_block(ts, i, deixis, introducer) is not None:
+            return True
+    return False
+
+
+# B-879 round 5: abbreviations `_pb_sentences` does not already protect (that
+# list, `_PB_ABBREV_RE`, only covers e.g./i.e./etc./vs./cf. — the ones that
+# would otherwise strand a lowercase continuation mid-sentence). This wider
+# list feeds `_soft_break`'s fallback, which decides whether a period
+# `_pb_sentences` DID split on was a genuine sentence end or an abbreviation
+# nobody protected — the same "closed enumeration will always be missing a
+# member" problem `_neg_scan_ex`'s class rule solves for punctuation, mirrored
+# here with a shape-based fallback (`_soft_break`'s last clause) for whatever
+# this list itself still misses.
+_PB_SOFT_ABBREV = {
+    "e.g", "i.e", "etc", "vs", "cf", "al", "approx", "ca", "viz", "ibid",
+    "prof", "gen", "col", "capt", "maj", "adm", "rev", "hon", "sen", "rep", "gov", "pres",
+    "supt", "insp", "messrs", "mme", "mlle", "fr", "no", "nos", "vol", "fig", "figs", "sec",
+    "ch", "art", "ed", "eds", "op", "inc", "co", "corp", "univ", "assoc", "asst", "est", "dept",
+    "govt", "ave", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct",
+    "nov", "dec", "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+}
+
+
+def _soft_break(prev: str, rest: str) -> bool:
+    """Should an already-open negation cloud carry FROM *prev* (the sentence
+    `_pb_sentences` just ended) INTO *rest* (everything after it)? A carry-only
+    decision — this never merges two sentences back into one, it only decides
+    whether the CLOUD survives the boundary between them.
+
+    Two paths to "yes":
+
+    1. *rest* starts with a lowercase letter or digit. `_pb_sentences` splits
+       on any ``. `` regardless of what follows (only the small, explicitly
+       protected abbreviation list is exempted beforehand), so a genuine new
+       sentence almost always starts capitalized — if it does not, the period
+       that ended *prev* was not really a full stop.
+    2. *prev* ends in a single, un-doubled period, and the word immediately
+       before it looks like an abbreviation `_pb_sentences` did not protect —
+       a single letter (an initial), an internal period ("U.S"), a member of
+       `_PB_SOFT_ABBREV`, or (the class-rule fallback, for whatever that list
+       itself still misses) a short, non-uppercase, vowel-less token, the same
+       shape common abbreviations like "Blvd"/"Mfg" take. Guarded off when the
+       very next word is a base-form EXEC verb ("e.g. Run the following:" is a
+       real new sentence, capital or not — this only matters for the small
+       sliver `_pb_protect_abbrev` did not already catch)."""
+    m = re.search(r"[A-Za-z0-9]", rest)
+    if m and m.group(0).islower():
+        return True
+    p = prev.rstrip()
+    if not p.endswith(".") or p.endswith(".."):
+        return False
+    wm = re.search(r"([A-Za-z](?:[A-Za-z.]*[A-Za-z])?)\.$", p)
+    if not wm:
+        return False
+    w = wm.group(1)
+    fw = re.match(r"\W*([A-Za-z]+)", rest)
+    if fw and _PB_EXEC_BASE_RE.match(fw.group(1).lower()):
+        return False
+    return (
+        len(w) == 1
+        or "." in w
+        or w.lower() in _PB_SOFT_ABBREV
+        or (2 <= len(w) <= 5 and not w.isupper() and not re.search(r"[aeiouyAEIOUY]", w))
+    )
+
+
+def _carries(sents: list[str]) -> list[bool | None]:
+    """The carry-IN value for each sentence in *sents* (round 5's sentence
+    spanning, Dave's R3 decision): ``out[k]`` is whatever cloud was still open
+    when sentence *k* started, or None when nothing was. Threads `_neg_scan_ex`
+    across the whole sequence, consulting `_soft_break` after each sentence to
+    decide whether its own carry-out should reach the NEXT one."""
+    out: list[bool | None] = []
+    carry: bool | None = None
+    for k, s in enumerate(sents):
+        out.append(carry)
+        ts = _pb_tokens(_PB_EMPH_RE.sub("", s))
+        _events, _clouded, carry_out = _neg_scan_ex(ts, carry)
+        rest = "".join(sents[k + 1 :])
+        carry = carry_out if (carry_out is not None and rest and _soft_break(s, rest)) else None
+    return out
+
+
+def _prose_binding(blob: str, start: int, end: int, *, heading_matches=None) -> ProseBinding:
+    """Classify the prose around one block (SKILL.md fence/line/span) spanning
+    [start, end) in *blob*. CLASSIFICATION ONLY — see the module-level design
+    comment. *heading_matches* is accepted for call-site symmetry with the
+    heading-aware helpers callers combine this with; the primitive itself does
+    not need it.
+    """
+    intro = _block_para_before(blob, start)
+    trail = _block_para_after(blob, end)
+    isents = _pb_sentences(intro)
+    tsents = _pb_sentences(trail)
+    last = isents[-1] if isents else ""
+    first_t = tsents[0] if tsents else ""
+    # B-879 round 5: an unresolved cloud can span more than one `_pb_sentences`
+    # split (a splice's own aside may itself contain what looks like a clause
+    # terminator) — `carry_in[k]` is the cloud state, if any, still open when
+    # intro sentence k starts. The trailer's first sentence never inherits a
+    # carry: it sits on the OTHER side of the code block itself, a real
+    # boundary no aside crosses.
+    carry_in = _carries(isents)
+
+    directed = False
+    conflict = False
+    for k, s in enumerate(isents):
+        intro_last = k == len(isents) - 1
+        if _sentence_directed(s, _PB_FWD_DEIXIS, intro_last, carry_in[k]):
+            directed = True
+            if intro_last and _forbids(s, _PB_FWD_DEIXIS) == "governs":
+                conflict = True  # directive + unscoped prohibition, SAME sentence
+            break
+    if not directed and first_t and _sentence_directed(first_t, _PB_BACK_DEIXIS, introducer=True):
+        directed = True
+
+    forbids_intro = _forbids(last, _PB_FWD_DEIXIS) if last else None
+    forbids_trail = _forbids(first_t, _PB_BACK_DEIXIS) if first_t else None
+    forbids = "governs" if "governs" in (forbids_intro, forbids_trail) else (
+        "scoped" if "scoped" in (forbids_intro, forbids_trail) else None
+    )
+
+    # B-879 round 4 §4.c: a clouded EXEC verb ANYWHERE in the intro (not just
+    # the last sentence) or in the first trailer sentence means the block's
+    # governance is unresolved, even when the LAST intro sentence reads as a
+    # clean, unscoped prohibition.
+    unresolved = any(
+        _pb_has_clouded_exec_reaching(s, _PB_FWD_DEIXIS, k == len(isents) - 1, carry_in[k])
+        for k, s in enumerate(isents)
+    ) or bool(first_t and _pb_has_clouded_exec_reaching(first_t, _PB_BACK_DEIXIS, introducer=True))
+
+    ctx = (intro + " " + trail).strip()
+    marker = bool(_PB_MARKER_RE.search(ctx))
+    described = _pb_described(last, _PB_FWD_DEIXIS) if last else False
+    if not described and first_t:
+        described = _pb_described(first_t, _PB_BACK_DEIXIS)
+    unreadable = _pb_unreadable(last + " " + first_t)
+    has_prose = bool(intro or trail)
+    return ProseBinding(
+        directed=directed,
+        forbids=forbids,
+        marker=marker,
+        described=described,
+        unreadable=unreadable,
+        has_prose=has_prose,
+        conflict=conflict,
+        unresolved=unresolved,
+    )

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import textwrap
 from pathlib import Path
+from typing import List, NamedTuple
 
 import pytest
 
@@ -219,25 +220,91 @@ def _real_publish_invocation() -> dict:
     return real[0]
 
 
-def test_publish_workflow_pins_clawhub() -> None:
-    """clawhub must be installed at an exact pinned version (clawhub@X.Y.Z).
+TOOLS_DIR = REPO_ROOT / ".github" / "tools"
 
-    A bare 'npm i -g clawhub' line (with no '@' version suffix) must not exist.
+
+def test_publish_workflow_pins_clawhub() -> None:
+    """clawhub is installed via a pinned, script-free lockfile install.
+
+    CLAWSECCHECK-C-548: 'npm i -g clawhub@X.Y.Z' pins one package name+version, but
+    npm still resolves clawhub's WHOLE transitive dependency tree fresh at install
+    time and may run any package's lifecycle scripts — inside the job that holds
+    CLAWHUB_TOKEN, contents:write and id-token:write. 'npm ci --ignore-scripts'
+    against the committed .github/tools/package-lock.json pins that entire tree and
+    refuses to execute any lifecycle script. A future edit that quietly reverts to
+    'npm i -g' (global, unpinned tree, scripts allowed) must fail this test.
     """
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    # The pinned form must be present.
-    assert "clawhub@" in text, (
-        "Expected 'clawhub@<version>' pin in workflow but found none."
+    assert "npm ci --ignore-scripts" in text, (
+        "Expected clawhub to be installed with 'npm ci --ignore-scripts' against "
+        "the committed .github/tools lockfile, but found no such line."
     )
-    # No bare unpinned install line (the pattern: contains 'npm' and 'clawhub'
-    # but lacks '@' on the same line as 'clawhub').
+    # No bare global npm install may reappear anywhere in the workflow (comments
+    # excluded, so prose mentioning the old form doesn't false-positive here).
     for line in _lines():
         stripped = line.strip()
-        if "npm" in stripped and "clawhub" in stripped:
-            assert "@" in stripped, (
-                f"Found unpinned clawhub install line: {line!r}\n"
-                "Change it to 'npm i -g clawhub@<version>'."
+        if stripped.startswith("#"):
+            continue
+        if re.search(r"\bnpm\s+(i|install)\b", stripped) and "-g" in stripped:
+            raise AssertionError(
+                f"Found a global npm install line: {line!r}\n"
+                "clawhub/markdownlint-cli must be installed from the pinned "
+                ".github/tools lockfile with 'npm ci --ignore-scripts', not '-g'."
             )
+    # The manifest itself pins an exact version — no caret/tilde/range — so the
+    # committed lockfile's resolved tree is reproducible, not just "some 0.23.x".
+    manifest = json.loads((TOOLS_DIR / "package.json").read_text(encoding="utf-8"))
+    clawhub_spec = manifest.get("devDependencies", {}).get("clawhub", "")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", clawhub_spec), (
+        f".github/tools/package.json must pin clawhub to an exact version, "
+        f"got {clawhub_spec!r}"
+    )
+    lock = json.loads((TOOLS_DIR / "package-lock.json").read_text(encoding="utf-8"))
+    locked_spec = lock["packages"][""]["devDependencies"]["clawhub"]
+    assert locked_spec == clawhub_spec, (
+        f"package.json pins clawhub@{clawhub_spec} but package-lock.json's root "
+        f"devDependencies entry says {locked_spec!r} — regenerate the lockfile."
+    )
+
+
+def test_publish_workflow_pins_pytest_ruff_with_hashes() -> None:
+    """The smoke-gate pip install is hash-pinned against a committed lockfile.
+
+    CLAWSECCHECK-C-548: a bare 'pip install pytest==X ruff==Y' pins the two direct
+    packages but still resolves their transitive deps (iniconfig/packaging/pluggy)
+    unpinned, with no hash check — the same job that holds CLAWHUB_TOKEN /
+    contents:write / id-token:write. '--require-hashes -r .github/tools/
+    requirements-ci.txt' refuses to install anything whose hash isn't in the
+    committed, pip-compile-generated manifest.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "pip install --require-hashes -r .github/tools/requirements-ci.txt" in text, (
+        "Expected the smoke gate to install pytest/ruff via "
+        "'pip install --require-hashes -r .github/tools/requirements-ci.txt'."
+    )
+    for line in _lines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        assert not re.search(r"pip install (?!--require-hashes)\S*pytest==", stripped), (
+            f"Found an unhashed pytest install line: {line!r}"
+        )
+    req_txt = (TOOLS_DIR / "requirements-ci.txt").read_text(encoding="utf-8")
+    for pkg in ("pytest==7.4.4", "ruff==0.15.20"):
+        assert pkg in req_txt, f"{pkg!r} missing from .github/tools/requirements-ci.txt"
+    # --require-hashes refuses the WHOLE install if even one resolved package (direct
+    # or transitive) lacks a hash — so every "name==version" block, up to the next
+    # such line or EOF, must carry at least one --hash=sha256: line.
+    lines = req_txt.splitlines()
+    pkg_starts = [i for i, ln in enumerate(lines) if re.match(r"^[A-Za-z0-9_.-]+==", ln)]
+    assert pkg_starts, "requirements-ci.txt has no pinned '==' package lines at all."
+    for idx, start in enumerate(pkg_starts):
+        end = pkg_starts[idx + 1] if idx + 1 < len(pkg_starts) else len(lines)
+        block = "\n".join(lines[start:end])
+        assert "--hash=sha256:" in block, (
+            f"Package pinned at line {start + 1} ({lines[start]!r}) has no "
+            "--hash=sha256: entry; --require-hashes would refuse this file."
+        )
 
 
 def test_publish_workflow_runs_smoke_before_publish() -> None:
@@ -1018,6 +1085,323 @@ def test_previous_release_gate_separates_never_released_from_never_surfaced() ->
     )
 
 
+_PREV_RELEASE_GATE_STEP = (
+    "Preflight — confirm the PREVIOUS release actually surfaced on ClawHub"
+)
+
+# Stub gh for the previous-release gate tests below. The gate makes two gh calls and
+# each gets its OWN mode — $GH_TAG_MODE drives `gh api .../git/ref/tags/v<PREV>`,
+# $GH_REL_MODE drives `gh release view`. An earlier stub failed both calls at once, so
+# either not-found discriminator alone satisfied every test: reverting just the tag
+# grep, or just the release grep, left the suite green (CLAWSECCHECK-B-851 review).
+# Each mode is one of:
+#   ok          — the call succeeds: exit 0 with a plausible stdout body.
+#   not_found   — gh's own genuine not-found signal, in the shape the installed gh
+#                 2.86.0 prints it. `gh api` renders an HTTP error through its "gh: %s"
+#                 and "%s (HTTP %d)" format strings, so a missing ref is exactly
+#                 `gh: Not Found (HTTP 404)` on stderr, with the JSON error body on
+#                 stdout. `gh release view` raises the literal "release not found"
+#                 only when the release genuinely does not exist.
+#   lookup_fail — a failure that is NOT a not-found: a rate limit, in each command's
+#                 real error shape. It deliberately still carries an HTTP status (403),
+#                 so a discriminator loosened to "any HTTP error" is caught too.
+# Every invocation is appended to $GH_CALL_LOG so a test can prove the stub was
+# actually reached. An unrecognised mode exits 98, and _run_previous_release_gate
+# rejects unknown modes up front, so a typo can never pass as a lookup failure.
+_GH_LOOKUP_STUB = r"""#!/bin/bash
+printf '%s\n' "$*" >> "$GH_CALL_LOG"
+if [ "$1" = "api" ]; then
+  case "$GH_TAG_MODE" in
+    ok)
+      printf '{"ref":"refs/tags/v9.9.8","object":{"type":"commit"}}\n'
+      exit 0 ;;
+    not_found)
+      printf '{"message":"Not Found","status":"404"}\n'
+      echo "gh: Not Found (HTTP 404)" >&2
+      exit 1 ;;
+    lookup_fail)
+      printf '{"message":"API rate limit exceeded for installation ID 40401234.","status":"403"}\n'
+      echo "gh: API rate limit exceeded for installation ID 40401234. (HTTP 403)" >&2
+      exit 1 ;;
+  esac
+elif [ "$1" = "release" ] && [ "$2" = "view" ]; then
+  case "$GH_REL_MODE" in
+    ok)
+      printf 'title:\tv9.9.8\ntag:\tv9.9.8\ndraft:\tfalse\n'
+      exit 0 ;;
+    not_found)
+      echo "release not found" >&2
+      exit 1 ;;
+    lookup_fail)
+      echo "HTTP 403: API rate limit exceeded for installation ID 999999. (https://api.github.com/repos/owner/repo/releases/tags/v9.9.8)" >&2
+      exit 1 ;;
+  esac
+fi
+echo "gh stub: unrecognised call or mode: $*" >&2
+exit 98
+"""
+
+_GH_MODES = ("ok", "not_found", "lookup_fail")
+
+# One marker per verdict the gate can write after a real 404. Each is a fragment of that
+# verdict's own ::error:: line and of no other, so asserting "exactly one of these is
+# present" pins which branch ran, not merely that the job failed.
+_GATE_VERDICTS = {
+    "registry_lookup_fail": "Unexpected ClawHub registry response",
+    "gh_lookup_fail": "the gh CLI lookup itself failed",
+    "never_released": "that version was never released",
+    "no_gh_release": "is tagged but has no GitHub Release",
+    "never_surfaced": "published and never surfaced",
+}
+
+
+class _GateRun(NamedTuple):
+    proc: subprocess.CompletedProcess
+    gh_calls: List[str]
+    clawhub_calls: List[str]
+
+
+def _run_previous_release_gate(
+    tmp_path, curl_code: str, tag_mode: str, rel_mode: str
+) -> _GateRun:
+    """Run the REAL previous-release gate shell against stub curl/gh/clawhub binaries.
+
+    Same pattern as _run_verify_step / _run_create_step: the literal `run: |` body is
+    extracted from the workflow (via _step_shell_block, itself the same extraction
+    idiom as _preflight_shell_block/_size_guard_shell_block) and executed, so what's
+    under test is the real workflow shell, not a paraphrase that could quietly stop
+    matching (CLAWSECCHECK-B-440). The block already opens with its own
+    `set -euo pipefail`, so it needs no extra bash flags here.
+
+    One deliberate, narrow rewrite: the never-surfaced branch auto-diagnoses into
+    hard-coded `/tmp/scandl.txt` and `/tmp/scanrep`, and tests must write nothing
+    outside tmp_path, so every `/tmp/` is relocated into tmp_path before the run.
+    `clawhub` is stubbed for EVERY run, not only the never-surfaced one: the real
+    CLI may be on the developer's PATH, and reaching it would be a network call.
+    """
+    assert tag_mode in _GH_MODES and rel_mode in _GH_MODES, (tag_mode, rel_mode)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # -o /dev/null discards the body and -w '%{http_code}' writes only the code to
+    # stdout, so a stub that just prints the desired code and exits 0 reproduces both
+    # a real HTTP response (e.g. 503) and a total transport failure (000, which real
+    # curl also reports via -w while exiting non-zero — the workflow's own
+    # `|| CODE="000"` fallback exists for that path and is exercised for free here
+    # too, since CODE is read purely from the captured stdout either way).
+    (bindir / "curl").write_text(
+        "#!/bin/bash\nprintf '%s' \"$CURL_STUB_CODE\"\nexit 0\n", encoding="utf-8",
+    )
+    (bindir / "gh").write_text(_GH_LOOKUP_STUB, encoding="utf-8")
+    # Records the call and fails without output, which sends the gate down its
+    # "could not download the stored scan report" arm and on to its final `exit 1`.
+    (bindir / "clawhub").write_text(
+        "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$CLAWHUB_CALL_LOG\"\nexit 1\n",
+        encoding="utf-8",
+    )
+    for f in bindir.iterdir():
+        f.chmod(0o755)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "CHANGELOG.md").write_text(
+        "## [9.9.9] - 2026-09-22\n- current\n\n"
+        "## [9.9.8] - 2026-09-15\n- previous\n",
+        encoding="utf-8",
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    gh_log = tmp_path / "gh-calls.log"
+    clawhub_log = tmp_path / "clawhub-calls.log"
+
+    script = _step_shell_block(_PREV_RELEASE_GATE_STEP)
+    assert script.count("/tmp") == script.count("/tmp/"), (
+        "The gate uses a bare /tmp path the relocation below would miss."
+    )
+    script = script.replace("/tmp/", f"{scratch}/")
+
+    env = dict(
+        os.environ,
+        PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        CURL_STUB_CODE=curl_code,
+        GH_TAG_MODE=tag_mode,
+        GH_REL_MODE=rel_mode,
+        GH_CALL_LOG=str(gh_log),
+        CLAWHUB_CALL_LOG=str(clawhub_log),
+        GITHUB_REPOSITORY="owner/repo",
+        GH_TOKEN="x",
+        SKIP_CHECK="false",
+    )
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        cwd=str(work), capture_output=True, text=True, env=env,
+    )
+
+    def _calls(log):
+        return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+    return _GateRun(proc, _calls(gh_log), _calls(clawhub_log))
+
+
+def _verdicts_in(stdout: str) -> List[str]:
+    return [name for name, marker in _GATE_VERDICTS.items() if marker in stdout]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_previous_release_gate_passes_when_the_previous_release_is_live(tmp_path) -> None:
+    """Control for the tests below: the harness can produce a PASS, not only failures.
+
+    A 200 from ClawHub is the gate's single exit-0 path. If the stubs or the script
+    extraction were broken so that every run failed, every "must fail with verdict X"
+    test below could still pass for the wrong reason; this one would not.
+    """
+    run = _run_previous_release_gate(tmp_path, "200", tag_mode="ok", rel_mode="ok")
+    assert run.proc.returncode == 0, f"stdout: {run.proc.stdout!r}\nstderr: {run.proc.stderr!r}"
+    assert "Previous release 9.9.8 is live on ClawHub and its GitHub Release exists." in run.proc.stdout
+    assert _verdicts_in(run.proc.stdout) == []
+    assert run.gh_calls == ["release view v9.9.8 --repo owner/repo"] and run.clawhub_calls == [], (
+        "A live previous release needs exactly one GitHub Release lookup, no tag lookup "
+        "and no scan diagnosis."
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_previous_release_gate_live_but_release_missing_warns_and_passes(tmp_path) -> None:
+    """ClawHub 200 + gh's own `release not found`: the documented recovery-gap warning,
+    never a failure of the CURRENT release."""
+    run = _run_previous_release_gate(tmp_path, "200", tag_mode="ok", rel_mode="not_found")
+    assert run.proc.returncode == 0, f"stdout: {run.proc.stdout!r}\nstderr: {run.proc.stderr!r}"
+    assert "has NO" in run.proc.stdout and "NOT the never-published case" in run.proc.stdout
+    assert "could not be checked" not in run.proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_previous_release_gate_live_but_release_lookup_failed_is_not_reported_missing(tmp_path) -> None:
+    """ClawHub 200 + a gh lookup failure (rate limit): must NOT claim the GitHub Release
+    is missing, which is the misreport the 404 path already refuses to make."""
+    run = _run_previous_release_gate(tmp_path, "200", tag_mode="ok", rel_mode="lookup_fail")
+    assert run.proc.returncode == 0, f"stdout: {run.proc.stdout!r}\nstderr: {run.proc.stderr!r}"
+    assert "could not be checked" in run.proc.stdout
+    assert "has NO" not in run.proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize("curl_code", ["000", "503", "429", "403", "410", "301"])
+def test_previous_release_gate_treats_non_404_registry_response_as_lookup_failure(
+    tmp_path, curl_code,
+) -> None:
+    """Any registry answer other than 200/404 is a lookup failure, not a verdict.
+
+    Before B-851 this gate only tested `CODE = "200"`; anything else — a total
+    transport failure (000), a server error (503), a rate limit (429), or a 3xx/4xx the
+    registry answered with (301/403/410) — fell into the same branches as a genuine
+    404. The tag and release are both stubbed as existing, which is the original
+    reproduction: a tagged, released version plus a registry blip printed "published
+    and never surfaced", blaming the release for the registry.
+
+    The message must also not claim the registry was unreachable: for every code but
+    000 it answered, and "could not reach" sends the operator to debug the network.
+    """
+    run = _run_previous_release_gate(tmp_path, curl_code, tag_mode="ok", rel_mode="ok")
+    out = run.proc.stdout
+    assert run.proc.returncode == 1, f"stdout: {out!r}\nstderr: {run.proc.stderr!r}"
+    assert _verdicts_in(out) == ["registry_lookup_fail"], (
+        f"HTTP {curl_code} must produce only the registry-lookup-failure verdict.\n"
+        f"stdout: {out!r}"
+    )
+    assert f"Unexpected ClawHub registry response (HTTP {curl_code};" in out, out
+    assert "registry lookup failure, not a" in out, out
+    assert "Could not reach" not in out, (
+        f"HTTP {curl_code}: the registry was reached (or, for 000, the message already "
+        f"says no response arrived); 'could not reach' misdirects the operator.\n{out!r}"
+    )
+    assert run.gh_calls == [] and run.clawhub_calls == [], (
+        "A non-404 registry answer must stop the gate before any tag/release lookup."
+    )
+
+
+# Every combination of the two gh lookups behind a real registry 404, with the verdict
+# the gate must write. A lookup failure on EITHER call outranks every other answer: a
+# half-known state is not a verdict. Otherwise the tag is consulted first, because §6
+# tags before publishing — no tag means no release attempt was ever made, whatever a
+# (draft) release object says; then the GitHub Release, which only the publish path
+# creates.
+_GH_MATRIX = [
+    ("ok", "ok", "never_surfaced"),
+    ("ok", "not_found", "no_gh_release"),
+    ("ok", "lookup_fail", "gh_lookup_fail"),
+    ("not_found", "ok", "never_released"),
+    ("not_found", "not_found", "never_released"),
+    ("not_found", "lookup_fail", "gh_lookup_fail"),
+    ("lookup_fail", "ok", "gh_lookup_fail"),
+    ("lookup_fail", "not_found", "gh_lookup_fail"),
+    ("lookup_fail", "lookup_fail", "gh_lookup_fail"),
+]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize(
+    "tag_mode,rel_mode,expected", _GH_MATRIX,
+    ids=[f"tag_{t}-rel_{r}" for t, r, _ in _GH_MATRIX],
+)
+def test_previous_release_gate_verdict_after_a_real_404(
+    tmp_path, tag_mode, rel_mode, expected,
+) -> None:
+    """Behind a genuine 404, each gh lookup outcome must land on its own verdict.
+
+    Driving the two calls independently is what makes each discriminator testable on
+    its own (CLAWSECCHECK-B-851):
+    - tag rate-limited + release present must be a lookup failure. With the tag
+      grep loosened to match any error, it read as "no tag v9.9.8 exists — that
+      version was never released ... Do NOT reach for skip_previous_release_check",
+      the exact misdiagnosis this task was filed for.
+    - tag 404 + release rate-limited pins the release grep the same way.
+    - tag + release present is the gate's main true positive, "published and never
+      surfaced", and the only path that runs the scan diagnosis.
+    """
+    run = _run_previous_release_gate(tmp_path, "404", tag_mode, rel_mode)
+    out = run.proc.stdout
+    assert run.proc.returncode == 1, f"stdout: {out!r}\nstderr: {run.proc.stderr!r}"
+    assert _verdicts_in(out) == [expected], (
+        f"tag={tag_mode}, release={rel_mode}: expected only the {expected!r} verdict, "
+        f"got {_verdicts_in(out)!r}.\nstdout: {out!r}\nstderr: {run.proc.stderr!r}"
+    )
+
+    # Both lookups actually reached the stub, in the gate's order — so every verdict
+    # above was computed from these modes, not from a call that never happened.
+    assert len(run.gh_calls) == 2, run.gh_calls
+    assert run.gh_calls[0] == "api repos/owner/repo/git/ref/tags/v9.9.8", run.gh_calls
+    assert run.gh_calls[1] == "release view v9.9.8 --repo owner/repo", run.gh_calls
+
+    # A lookup failure names the call that failed, with gh's own error, and only that one.
+    assert ("tag check: " in out) == (tag_mode == "lookup_fail"), out
+    assert ("release check: " in out) == (rel_mode == "lookup_fail"), out
+    if expected == "gh_lookup_fail":
+        assert "API rate limit exceeded" in out, out
+
+    # Only a version that was tagged, released and still 404s gets its stored scan
+    # report pulled; every other verdict already explains the 404.
+    if expected == "never_surfaced":
+        assert run.clawhub_calls == ["scan download clawseccheck --version 9.9.8"], (
+            run.clawhub_calls
+        )
+    else:
+        assert run.clawhub_calls == [], run.clawhub_calls
+
+
+def test_previous_release_gate_stub_speaks_the_gh_formats_the_gate_cites() -> None:
+    """The gh stub's not-found strings must be the ones the workflow says it verified.
+
+    The gate's discriminators are greps for gh's own not-found text, and the workflow
+    comment records the exact strings they were grounded against. If the stub drifts
+    from them, the matrix above tests a gh that does not exist — which is how an
+    earlier stub came to emit a 404 format the workflow had already retracted.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    for real in ("gh: Not Found (HTTP 404)", "release not found"):
+        assert f"`{real}`" in text, f"The workflow no longer cites gh's {real!r} format."
+        assert real in _GH_LOOKUP_STUB, f"The gh stub does not emit {real!r}."
+
+
 def test_publish_workflow_post_publish_check_is_warn_only() -> None:
     """The post-publish visibility poll must warn, never fail the build.
 
@@ -1169,7 +1553,7 @@ def test_size_guard_threshold_clears_the_last_known_good_publish() -> None:
     # Measured from the v3.59.0 tag by replaying the staging step above, not quoted from a
     # `du -sh` figure: du reports allocated blocks, the guard sums real file bytes, and
     # conflating the two is what put the original threshold on the wrong side of this tree.
-    last_known_good_publish = 5_235_253   # v3.59.0, published 2026-08-05 via the Convex route
+    last_known_good_publish = 8_092_721   # v4.1.0, replayed from the tag; published to ClawHub 2026-09
     assert threshold > last_known_good_publish, (
         f"MAX_STAGED_BYTES={threshold} is at or below {last_known_good_publish} bytes — a "
         "staged tree that is known to have published successfully. A guard set below a "
@@ -1249,6 +1633,534 @@ def test_size_guard_passes_on_a_staged_bundle_within_budget(tmp_path) -> None:
     assert "Staged bundle size OK" in proc.stdout, (
         f"Expected the OK confirmation line in stdout.\nstdout: {proc.stdout!r}"
     )
+
+
+def _staging_shell_block() -> str:
+    """Extract the literal `run: |` body of the 'Stage publishable files' step."""
+    lines = _lines()
+    start = next(
+        (
+            i for i, ln in enumerate(lines)
+            if ln.strip().startswith("- name:") and "Stage publishable files" in ln
+        ),
+        None,
+    )
+    assert start is not None, (
+        "No '- name: Stage publishable files' step in the workflow; update this extractor."
+    )
+    run_i = None
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip().startswith("- name:"):
+            break
+        if lines[i].strip() == "run: |":
+            run_i = i
+            break
+    assert run_i is not None, (
+        "The staging step no longer uses a 'run: |' literal block; update this extractor."
+    )
+    indent = len(lines[run_i]) - len(lines[run_i].lstrip())
+    body = []
+    for ln in lines[run_i + 1:]:
+        if ln.strip() and (len(ln) - len(ln.lstrip())) <= indent:
+            break
+        body.append(ln)
+    return textwrap.dedent("\n".join(body))
+
+
+def _replay_staged_tree(tmp_path: Path):
+    """Replay the REAL staging step over the working tree; return (work_dir, total, per_top).
+
+    Copies exactly the paths the step stages (repo-visible files only, so ignored caches
+    stay out) into a scratch dir and runs the workflow's own shell there. The changelog
+    scratch file is redirected into tmp_path so nothing is written outside it.
+    """
+    staged = sorted(_staged_paths(WORKFLOW_PATH.read_text(encoding="utf-8")))
+    assert staged, "No staged root paths derived from the workflow; the parser is vacuous."
+    listed = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", *staged],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    work = tmp_path / "work"
+    work.mkdir()
+    for rel in listed:
+        src = REPO_ROOT / rel
+        if not src.is_file():
+            continue  # deleted-but-still-indexed
+        dst = work / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    block = _staging_shell_block()
+    assert "/tmp/changelog-trimmed.md" in block, (
+        "The staging step no longer uses /tmp/changelog-trimmed.md; update this replay so "
+        "it still redirects the scratch file into tmp_path."
+    )
+    block = block.replace("/tmp/changelog-trimmed.md", str(tmp_path / "changelog-trimmed.md"))
+    proc = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", block],
+        cwd=str(work), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, (
+        f"Replaying the staging step failed.\nstdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+    root = work / "dist" / "clawseccheck"
+    assert (root / "SKILL.md").is_file(), "Replay staged no SKILL.md; the replay is broken."
+    per_top: dict = {}
+    total = 0
+    for f in root.rglob("*"):
+        if f.is_file():
+            size = f.stat().st_size
+            total += size
+            top = f.relative_to(root).parts[0]
+            per_top[top] = per_top.get(top, 0) + size
+    assert total > 1024 * 1024, "Replayed staged tree is implausibly small; replay is broken."
+    return work, total, per_top
+
+
+def _size_budget_verdict(measured: int, threshold: int, tripwire: float = 0.8):
+    """(within_limit, under_tripwire) for a measured staged size."""
+    return measured <= threshold, measured <= tripwire * threshold
+
+
+def test_size_budget_verdict_has_teeth_at_the_tripwire() -> None:
+    limit = 1_000_000
+    assert _size_budget_verdict(int(limit * 0.79), limit) == (True, True)
+    assert _size_budget_verdict(int(limit * 0.81), limit) == (True, False)
+    assert _size_budget_verdict(int(limit * 1.01), limit) == (False, False)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_staged_bundle_is_within_the_publish_guard(tmp_path) -> None:
+    """Measure the REAL staged tree, so the guard cannot surprise a release.
+
+    The workflow guard only runs after the approval click. This replays the staging step
+    in the suite and fails a release early: over the limit is a hard failure, over 80% of
+    it is the tripwire that gives a release of lead time to respond.
+    """
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True,
+    )
+    if inside.returncode != 0:
+        pytest.skip("not a git checkout (source tarball): nothing to replay")
+    threshold = _size_guard_threshold_bytes()
+    work, total, per_top = _replay_staged_tree(tmp_path)
+    within, under_tripwire = _size_budget_verdict(total, threshold)
+    breakdown = ", ".join(
+        f"{k}={v:,}" for k, v in sorted(per_top.items(), key=lambda kv: -kv[1])[:6]
+    )
+    context = (
+        f"Staged bundle is {total:,} bytes = {100 * total / threshold:.1f}% of "
+        f"MAX_STAGED_BYTES={threshold:,}. Largest entries: {breakdown}. Reference: the "
+        "last published bundle (v4.1.0) staged 8,092,721 bytes and growth is about 0.5 MB "
+        "per release, so growth in clawseccheck/ is normal; compare with the previous "
+        "release before assuming bloat. Either raise MAX_STAGED_BYTES in the workflow "
+        "(keep it <= 25 MiB, see test_size_guard_threshold_clears_the_last_known_good_publish) "
+        "and re-ground its comment, or trim the bundle."
+    )
+    assert within, "The release would hard-fail at the size guard AFTER approval. " + context
+    assert under_tripwire, "Over 80% of the guard: tripwire, act one release early. " + context
+
+    # The exact CI guard must also pass on the replayed real tree.
+    script = tmp_path / "guard.sh"
+    script.write_text(_size_guard_shell_block(), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=str(work), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+
+
+# ---------------------------------------------------------------------------------
+# C-545: the release tail — sign after staging, verify the bundle in CI, and never let a
+# GitHub Release go green without both signed assets.
+# ---------------------------------------------------------------------------------
+
+_SIGN_TAIL = (
+    "Generate trusted engine digest (SHA256SUMS.txt)",
+    "sigstore/cosign-installer",
+    "Sign SHA256SUMS.txt (cosign keyless/OIDC)",
+    "Verify the signed bundle with the documented command",
+)
+
+
+def _step_index(names: list, needle: str) -> int:
+    idx = next((i for i, n in enumerate(names) if needle in n), None)
+    assert idx is not None, f"No step containing {needle!r} in {names!r}"
+    return idx
+
+
+def test_signing_runs_after_staging_and_the_size_guard_and_before_any_publish() -> None:
+    steps = _steps()
+    names = [_step_name(s) for s in steps]
+    stage_i = _step_index(names, "Stage publishable files")
+    guard_i = _step_index(names, "Guard")
+    assert guard_i == stage_i + 1, "the size guard must stay the step right after staging"
+
+    idxs = [_step_index(names, n) for n in _SIGN_TAIL]
+    assert idxs == list(range(idxs[0], idxs[0] + len(idxs))), (
+        "digest, cosign-installer, sign and verify must be consecutive steps, verify "
+        f"immediately after sign; got positions {idxs}"
+    )
+    assert idxs[0] > guard_i, "signing must attest the STAGED tree: run it after staging"
+    probe_i = _step_index(names, "Probe pre-publish liveness")
+    assert idxs[-1] < probe_i, "signing and verification must finish before publishing starts"
+    verify_lines = [ln for ln, _ in steps[idxs[-1]]]
+    assert max(verify_lines) < _real_publish_invocation()["line"], (
+        "the bundle must be verified before the real (non dry-run) publish."
+    )
+
+
+def _cosign_tokens(text: str) -> list:
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if "cosign verify-blob" in ln)
+    tokens = []
+    for ln in lines[start:]:
+        tok = ln.strip().rstrip("\\").strip()
+        tok = tok.removeprefix("if ") if hasattr(tok, "removeprefix") else (
+            tok[3:] if tok.startswith("if ") else tok
+        )
+        tok = tok.strip()
+        tokens.append(tok)
+        if tok.startswith("SHA256SUMS.txt"):
+            break
+    else:
+        raise AssertionError("cosign command block never reached SHA256SUMS.txt")
+    tokens[-1] = "SHA256SUMS.txt"
+    return tokens
+
+
+def test_ci_verifies_the_bundle_with_exactly_the_readme_command() -> None:
+    block = _step_shell_block("Verify the signed bundle with the documented command")
+    ci_cmd = _cosign_tokens(block)
+    readme_cmd = _cosign_tokens((REPO_ROOT / "README.md").read_text(encoding="utf-8"))
+    assert ci_cmd == readme_cmd
+    assert len(ci_cmd) == 5, ci_cmd
+    assert "insecure" not in block.lower()
+    assert "set -euo pipefail" in block
+
+
+def _extract_identity_regexp(tokens: list) -> str:
+    tok = next(t for t in tokens if t.startswith("--certificate-identity-regexp"))
+    m = re.search(r'"([^"]+)"', tok)
+    assert m, f"Could not parse the identity regexp out of {tok!r}"
+    return m.group(1)
+
+
+def test_certificate_identity_regexp_pins_workflow_and_tag_ref() -> None:
+    """CLAWSECCHECK-B-875 regression test.
+
+    Pre-fix, both CI and README used `^https://github.com/gl0di/clawseccheck/`:
+    anchored only at the START, with unescaped dots. cosign's `--certificate-
+    identity-regexp` match (Go's regexp.MatchString, a substring/prefix search, not
+    a full-string match — mirrored here with Python's `re.match`, which has the same
+    "anchor at start, don't require consuming the whole string" semantics) therefore
+    accepted a signature from ANY workflow on ANY ref of this repo, and let any
+    single character stand in for a literal '.'. Neither half is what the README
+    claims the check proves ("the release workflow produced it").
+    """
+    block = _step_shell_block("Verify the signed bundle with the documented command")
+    ci_tokens = _cosign_tokens(block)
+    readme_tokens = _cosign_tokens(README_PATH.read_text(encoding="utf-8"))
+    new_pattern = _extract_identity_regexp(ci_tokens)
+    assert new_pattern == _extract_identity_regexp(readme_tokens), (
+        "CI and README must use the identical identity regexp"
+    )
+    # Pin the exact fixed shape so a future edit can't quietly re-loosen either end.
+    assert new_pattern == (
+        r"^https://github\.com/gl0di/clawseccheck/\.github/workflows/"
+        r"clawhub-publish\.yml@refs/tags/v"
+    ), new_pattern
+
+    # The exact pre-fix pattern this bug report was filed against.
+    old_pattern = "^https://github.com/gl0di/clawseccheck/"
+
+    # A signature from a DIFFERENT workflow, on a non-tag ref of the SAME repo —
+    # exactly the "any workflow, any ref" shape the bug report describes. This is
+    # what a `workflow_dispatch` run off a branch (or a compromised workflow added
+    # to some other ref of this same repo) would present.
+    forged_workflow_and_ref = (
+        "https://github.com/gl0di/clawseccheck/.github/workflows/"
+        "some-other-workflow.yml@refs/heads/attacker-controlled-branch"
+    )
+    # Unescaped-dot half of the same defect: a non-'.' character standing in for the
+    # literal dot in "github.com".
+    forged_host = (
+        "https://githubXcom/gl0di/clawseccheck/.github/workflows/"
+        "clawhub-publish.yml@refs/tags/v4.2.1"
+    )
+    # The genuine identity a real tag-triggered release run signs with.
+    genuine_identity = (
+        "https://github.com/gl0di/clawseccheck/.github/workflows/"
+        "clawhub-publish.yml@refs/tags/v4.2.1"
+    )
+
+    assert re.match(old_pattern, forged_workflow_and_ref), (
+        "sanity check: the pre-fix pattern must reproduce the reported defect by "
+        "accepting a different workflow on a different ref"
+    )
+    assert re.match(old_pattern, forged_host), (
+        "sanity check: the pre-fix pattern must reproduce the reported defect by "
+        "accepting a non-'.' character where the pattern intends a literal dot"
+    )
+
+    assert not re.match(new_pattern, forged_workflow_and_ref), (
+        f"tightened pattern {new_pattern!r} must reject a different workflow/ref"
+    )
+    assert not re.match(new_pattern, forged_host), (
+        f"tightened pattern {new_pattern!r} must reject an unescaped-dot lookalike host"
+    )
+    assert re.match(new_pattern, genuine_identity), (
+        f"tightened pattern {new_pattern!r} must still accept the genuine "
+        "tag-triggered identity"
+    )
+
+
+def _run_verify_step(tmp_path, results: list) -> subprocess.CompletedProcess:
+    """Run the verify step with a stub cosign that returns *results* per attempt."""
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    counter = tmp_path / "calls"
+    (stub / "cosign").write_text(
+        "#!/bin/bash\n"
+        'echo "$*" >> "' + str(counter) + '"\n'
+        'n=$(wc -l < "' + str(counter) + '")\n'
+        'codes=(' + " ".join(str(r) for r in results) + ')\n'
+        'exit "${codes[$((n - 1))]:-1}"\n',
+        encoding="utf-8",
+    )
+    (stub / "sleep").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    for f in stub.iterdir():
+        f.chmod(0o755)
+    env = dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}")
+    return subprocess.run(
+        ["bash", "-eo", "pipefail", "-c",
+         _step_shell_block("Verify the signed bundle with the documented command")],
+        cwd=str(tmp_path), capture_output=True, text=True, env=env,
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize(
+    "results,ok,calls",
+    [([0], True, 1), ([1, 1, 0], True, 3), ([1, 1, 1], False, 3)],
+)
+def test_verify_step_retries_flake_but_fails_a_bad_signature(tmp_path, results, ok, calls):
+    proc = _run_verify_step(tmp_path, results)
+    assert (proc.returncode == 0) is ok, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    assert len((tmp_path / "calls").read_text().splitlines()) == calls
+
+
+_GH_STUB = r"""#!/bin/bash
+echo "$*" >> "$STUB/argv.log"
+case "$1 $2" in
+  "release view")
+    [ -f "$STUB/exists" ] || exit 1
+    case " $* " in
+      *" --json isDraft "*)
+        if [ -f "$STUB/draft" ]; then echo true; else echo false; fi ;;
+      *" --json "*) cat "$STUB/assets" ;;
+    esac
+    exit 0 ;;
+  "release create")
+    if [ -n "${GH_FAIL_CREATE_TIMES:-}" ]; then
+      n=$(( $(cat "$STUB/create_calls" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$STUB/create_calls"
+      [ "$n" -gt "$GH_FAIL_CREATE_TIMES" ] || exit 1
+    fi
+    [ -z "${GH_FAIL_CREATE:-}" ] || exit 1
+    touch "$STUB/exists"
+    if [ -z "${GH_NO_ASSETS_ADDED:-}" ]; then
+      for a in "$@"; do case "$a" in SHA256SUMS*) echo "$a" >> "$STUB/assets" ;; esac; done
+    fi
+    exit 0 ;;
+  "release upload")
+    [ -z "${GH_FAIL_UPLOAD:-}" ] || exit 1
+    if [ -z "${GH_NO_ASSETS_ADDED:-}" ]; then
+      for a in "$@"; do case "$a" in SHA256SUMS*) echo "$a" >> "$STUB/assets" ;; esac; done
+    fi
+    exit 0 ;;
+  "release edit")
+    [ -z "${GH_FAIL_EDIT:-}" ] || exit 1
+    rm -f "$STUB/draft"
+    exit 0 ;;
+esac
+exit 99
+"""
+
+
+def _run_create_step(tmp_path, existing=None, draft=False, **flags):
+    """Run the real Create GitHub Release shell against a stateful stub gh."""
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "gh").write_text(_GH_STUB, encoding="utf-8")
+    (bindir / "sleep").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    for f in bindir.iterdir():
+        f.chmod(0o755)
+    (stub / "assets").write_text("", encoding="utf-8")
+    if existing is not None:
+        (stub / "exists").write_text("", encoding="utf-8")
+        (stub / "assets").write_text("".join(f"{a}\n" for a in existing), encoding="utf-8")
+    if draft:
+        (stub / "draft").write_text("", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "CHANGELOG.md").write_text("## [9.9.9]\n- something\n", encoding="utf-8")
+    env = dict(
+        os.environ, PATH=f"{bindir}:{os.environ['PATH']}", STUB=str(stub),
+        GITHUB_REF_NAME="v9.9.9", GITHUB_REPOSITORY="owner/repo", GH_TOKEN="x",
+    )
+    env.update({k: str(v) for k, v in flags.items() if v})
+    proc = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", _step_shell_block("Create GitHub Release")],
+        cwd=str(work), capture_output=True, text=True, env=env,
+    )
+    log = (stub / "argv.log").read_text(encoding="utf-8") if (stub / "argv.log").exists() else ""
+    return proc, log
+
+
+_BOTH = ["SHA256SUMS.txt", "SHA256SUMS.txt.bundle"]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize(
+    "case_id,existing,flags,ok,expect_in_log,expect_not_in_log",
+    [
+        ("no-release-creates-with-both-assets", None, {}, True,
+         ["release create v9.9.9", "SHA256SUMS.txt SHA256SUMS.txt.bundle"], ["release upload"]),
+        ("create-fails", None, {"GH_FAIL_CREATE": 1}, False, ["release create"], []),
+        ("create-succeeds-but-assets-absent", None, {"GH_NO_ASSETS_ADDED": 1}, False,
+         ["release create"], []),
+        ("exists-with-both-assets-is-left-alone", _BOTH, {}, True, [],
+         ["release create", "release upload"]),
+        ("exists-with-neither-gets-an-upload", [], {}, True, ["release upload"],
+         ["release create"]),
+        ("upload-fails", [], {"GH_FAIL_UPLOAD": 1}, False, ["release upload"], []),
+        ("upload-claims-success-but-assets-absent", [], {"GH_NO_ASSETS_ADDED": 1}, False,
+         ["release upload"], []),
+        ("exactly-one-asset-present", ["SHA256SUMS.txt"], {}, False, [],
+         ["release create", "release upload"]),
+    ],
+)
+def test_create_release_step_fails_loudly_and_asserts_both_assets(
+    tmp_path, case_id, existing, flags, ok, expect_in_log, expect_not_in_log,
+) -> None:
+    proc, log = _run_create_step(tmp_path, existing, **flags)
+    ctx = f"[{case_id}] stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert (proc.returncode == 0) is ok, ctx
+    for needle in expect_in_log:
+        assert needle in log, ctx
+    for needle in expect_not_in_log:
+        assert needle not in log, ctx
+    assert "--clobber" not in log, ctx
+    if not ok:
+        assert "::error::" in proc.stdout, ctx
+
+
+
+# ---------------------------------------------------------------------------------
+# CLAWSECCHECK-B-837: `gh release create` with assets is several API calls under the
+# hood (create as a draft, upload the assets, then publish). If the publish call
+# fails after the upload, the release is left as a DRAFT that already carries both
+# asset names — the retry's "already carries both assets" short-circuit, and the
+# final name-only assertion, both used to treat that as success. These prove the
+# step now also reads isDraft and either publishes the lingering draft or fails.
+# ---------------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_fails_on_a_lingering_draft_it_cannot_publish(tmp_path) -> None:
+    """Both assets already present but the release is still a draft, and the recovery
+    `gh release edit --draft=false` call also fails: the job must turn red, not
+    report success on asset-names-alone."""
+    proc, log = _run_create_step(tmp_path, existing=_BOTH, draft=True, GH_FAIL_EDIT=1)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode != 0, ctx
+    assert "::error::" in proc.stdout, ctx
+    assert "release edit" in log, ctx
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_publishes_a_lingering_draft_when_it_can(tmp_path) -> None:
+    """Same starting state, but `gh release edit --draft=false` succeeds: the step
+    recovers the draft and the job passes."""
+    proc, log = _run_create_step(tmp_path, existing=_BOTH, draft=True)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode == 0, ctx
+    assert "release edit" in log, ctx
+    assert "isDraft=false" in proc.stdout, ctx
+
+
+# ---------------------------------------------------------------------------------
+# CLAWSECCHECK-B-874: the outer `for attempt in 1 2 3; do ... done` retry loop around
+# `ensure_release` was never pinned by a test. A test that only checks pass/fail (as
+# the existing `create-fails` parametrized case does) cannot distinguish a correctly
+# bounded 3-attempt retry from one that gives up after a single try, or from one that
+# would loop forever on a permanent failure -- all three "look the same" from a bare
+# return-code assertion when the failure is permanent. These count the actual number
+# of `gh release create` invocations to pin the bound in both directions: retries
+# really happen (a transient failure recovers) and they are capped (a permanent
+# failure exits non-zero after exactly 3 attempts, not 1 and not forever).
+# ---------------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_retries_a_transient_failure_then_succeeds(tmp_path) -> None:
+    """`gh release create` fails once, then succeeds: the job must pass, and it must
+    have actually retried (two calls), not failed outright on the first try."""
+    proc, log = _run_create_step(tmp_path, existing=None, GH_FAIL_CREATE_TIMES=1)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode == 0, ctx
+    calls = log.count("release create v9.9.9")
+    assert calls == 2, f"expected exactly one retry (2 calls), got {calls}\n{ctx}"
+    assert "Release attempt 1 failed." in proc.stdout, ctx
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_retry_loop_is_bounded_and_fails_red(tmp_path) -> None:
+    """A permanent `gh release create` failure must exhaust a BOUNDED number of
+    attempts (3, per the workflow's `for attempt in 1 2 3`) and then fail the job --
+    not retry once and give up, and not retry indefinitely."""
+    proc, log = _run_create_step(tmp_path, existing=None, GH_FAIL_CREATE=1)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode != 0, ctx
+    calls = log.count("release create v9.9.9")
+    assert calls == 3, f"expected exactly 3 bounded attempts, got {calls}\n{ctx}"
+    assert "Release attempt 1 failed." in proc.stdout, ctx
+    assert "Release attempt 2 failed." in proc.stdout, ctx
+    assert "Release attempt 3 failed." in proc.stdout, ctx
+    assert "Release attempt 4 failed." not in proc.stdout, (
+        "a 4th attempt means the retry bound was loosened or removed" + f"\n{ctx}"
+    )
+    assert "::error::Could not create or complete the GitHub Release for v9.9.9." in proc.stdout, ctx
+
+
+def test_create_release_step_never_swallows_errors_or_clobbers() -> None:
+    block = _step_shell_block("Create GitHub Release")
+    code = [ln for ln in block.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("|| echo" in ln for ln in code), "an error path is being swallowed"
+    assert not any("--clobber" in ln for ln in code)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_generator_accepts_the_real_replayed_staged_tree(tmp_path) -> None:
+    """End to end on the real tree: the staged package equals the checkout the digest reads."""
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True,
+    )
+    if inside.returncode != 0:
+        pytest.skip("not a git checkout (source tarball): nothing to replay")
+    work, _total, _per_top = _replay_staged_tree(tmp_path)
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    block = text.split("python3 - <<'PYEOF'\n")[1].split("          PYEOF")[0]
+    proc = subprocess.run(
+        ["python3", "-c", textwrap.dedent(block)],
+        cwd=str(work), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    published = (work / "SHA256SUMS.txt").read_text(encoding="utf-8")
+    section2 = published.split("Bundle files outside the engine package", 1)[1]
+    for rel in ("SKILL.md", "audit.py", "pyproject.toml", "references/cli-flags.md"):
+        assert f"  {rel}" in section2, rel
 
 
 # ---------------------------------------------------------------------------------
@@ -1650,3 +2562,263 @@ def test_decide_release_action_truth_table(
         f"[{case_id}] fail_job: expected {expected_fail!r}, got "
         f"{outputs.get('fail_job')!r}."
     )
+
+
+# ---------------------------------------------------------------------------------
+# B-838: the signed release assets exist only on the runner and inside this one job.
+# If a step downstream of signing fails — the ClawHub publish itself, or "Create
+# GitHub Release" — nothing preserved them, and once ClawHub has accepted the
+# version a re-run cannot regenerate them ("Preflight — confirm the CURRENT version
+# is not already published" hard-fails first, before staging or signing run again).
+# A workflow-artifact upload right after the bundle verifies is the recovery path;
+# the two duplicate-version preflights must name it instead of leaving the operator
+# to rediscover this from scratch.
+# ---------------------------------------------------------------------------------
+
+
+def test_signed_assets_are_uploaded_as_a_recovery_artifact_before_publish() -> None:
+    """The recovery artifact must exist, carry both signed files, and land before
+    the real (non dry-run) ClawHub publish — otherwise a failure IN that publish
+    step, not just downstream of it, would still lose the bytes."""
+    steps = _steps()
+    names = [_step_name(s) for s in steps]
+    verify_i = _step_index(names, "Verify the signed bundle with the documented command")
+    upload_i = _step_index(names, "Upload signed release assets")
+    assert upload_i == verify_i + 1, (
+        "the recovery-artifact upload must be the step immediately after the bundle "
+        "is verified, so nothing between signing and this upload can lose the bytes"
+    )
+
+    body = "\n".join(text for _, text in steps[upload_i])
+    assert "uses: actions/upload-artifact@" in body, (
+        "the recovery-artifact step must use actions/upload-artifact, not a "
+        "hand-rolled upload"
+    )
+    assert "SHA256SUMS.txt" in body and "SHA256SUMS.txt.bundle" in body, (
+        "the recovery artifact must carry BOTH signed files — one alone cannot be "
+        "verified with the documented cosign command"
+    )
+    assert "if-no-files-found: error" in body, (
+        "a missing signed file here must fail the step loudly, not silently ship an "
+        "empty or partial recovery artifact"
+    )
+    assert "${{ steps.ver.outputs.version }}" in body, (
+        "the artifact name must carry the version being released, so a human can "
+        "find the right one among many workflow runs"
+    )
+
+    upload_line = min(ln for ln, _ in steps[upload_i])
+    assert upload_line < _real_publish_invocation()["line"], (
+        "the recovery artifact must be uploaded BEFORE the real ClawHub publish, so "
+        "it exists even if the publish step itself is what fails"
+    )
+
+
+def test_current_version_preflight_names_the_recovery_command() -> None:
+    """The 'already published' hard-fail is not always an accidental re-trigger.
+
+    It is also exactly the state left behind when an earlier run's GitHub Release
+    step failed after that run's ClawHub publish succeeded — and this preflight is
+    precisely what stops a bare re-run from reaching signing again. Its error must
+    name the recovery artifact and the manual command, not just gesture at "a human
+    must resolve this".
+    """
+    block = _step_shell_block(
+        "Preflight — confirm the CURRENT version is not already published"
+    )
+    assert "already published on ClawHub" in block
+    assert "signed-release-assets-${VER}" in block, (
+        "the error must name the actual recovery-artifact naming pattern from the "
+        "upload step, not a vague pointer"
+    )
+    assert "gh release create" in block and "SHA256SUMS.txt.bundle" in block, (
+        "the error must give the literal recovery command, not just a doc pointer"
+    )
+    assert "docs/RELEASING.md" in block
+
+
+def test_previous_release_gate_flags_a_missing_github_release_even_when_live() -> None:
+    """Before this fix, CODE=200 short-circuited straight to 'fine, exit 0' without
+    ever checking whether the PREVIOUS release's GitHub Release exists — so the
+    exact state B-838 documents (published to ClawHub, GitHub Release step failed)
+    was reported identically to a completely healthy previous release. The two must
+    now be told apart, without turning this into a hard failure for the CURRENT
+    release: an older release's missing GitHub Release is not this run's fault to
+    fix.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    live_branch_start = text.index('if [ "$CODE" = "200" ]; then')
+    # Bound the slice to just the CODE=200 branch so these assertions cannot be
+    # satisfied by the unrelated `gh release view` call in the 404 trichotomy below
+    # (already covered by test_previous_release_gate_separates_never_released_from_
+    # never_surfaced).
+    trichotomy_start = text.index('if [ "$CODE" != "404" ]; then')
+    branch = text[live_branch_start:trichotomy_start]
+
+    assert 'gh release view "v${PREV}"' in branch, (
+        "the CODE=200 branch must itself check for the previous release's GitHub "
+        "Release before declaring the previous release fine"
+    )
+    assert "::warning::" in branch, (
+        "a previous release that is live on ClawHub but missing its GitHub Release "
+        "must be surfaced, not silently folded into the healthy case"
+    )
+    assert "NOT the never-published case" in branch, (
+        "the warning must say this is a DIFFERENT state from the 404 trichotomy "
+        "below, not a rediscovery of it"
+    )
+    assert "exit 1" not in branch, (
+        "the CODE=200 branch must stay non-fatal for the CURRENT release — an "
+        "older release's missing GitHub Release is not this run's failure to fix"
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_previous_release_gate_shell_warns_on_live_but_unreleased_previous(
+    tmp_path,
+) -> None:
+    """Exercise the real shell: ClawHub 200 for PREV + no GitHub Release for PREV
+    must warn and still exit 0 (never block the CURRENT release)."""
+    block = _step_shell_block(
+        "Preflight — confirm the PREVIOUS release actually surfaced on ClawHub"
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "CHANGELOG.md").write_text(
+        "## [2.0.0]\n- current\n\n## [1.0.0]\n- previous\n", encoding="utf-8"
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # curl always answers 200 (PREV is live on ClawHub).
+    (bindir / "curl").write_text(
+        "#!/bin/bash\necho -n 200\nexit 0\n", encoding="utf-8"
+    )
+    # gh: `release view` fails (no GitHub Release for PREV); anything else succeeds.
+    (bindir / "gh").write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "release" ] && [ "$2" = "view" ]; then echo "release not found" >&2; exit 1; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    for f in bindir.iterdir():
+        f.chmod(0o755)
+    env = dict(
+        os.environ,
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        GITHUB_REPOSITORY="owner/repo",
+        GH_TOKEN="x",
+        SKIP_CHECK="false",
+    )
+    proc = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", block],
+        cwd=str(work), capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 0, (
+        f"must exit 0 (never block the current release): stdout={proc.stdout!r} "
+        f"stderr={proc.stderr!r}"
+    )
+    assert "::warning::" in proc.stdout, proc.stdout
+    assert "1.0.0" in proc.stdout
+
+
+def test_releasing_doc_no_longer_claims_a_bare_rerun_always_recovers() -> None:
+    """docs/RELEASING.md's own recovery section used to tell a maintainer to
+    "re-run the workflow ... so it verifies (or recreates) the release cleanly"
+    with no caveat — which is false once ClawHub already has the version: the
+    "not already published" preflight hard-fails every such re-run before it can
+    reach staging or signing again. The doc must say so, and must describe the
+    actual recovery (the signed-assets workflow artifact).
+    """
+    text = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+    rerun_idx = text.index("re-run the workflow")
+    caveat_idx = text.index("does NOT recover this once ClawHub")
+    assert rerun_idx < caveat_idx, (
+        "the re-run instruction must be immediately qualified by the caveat that it "
+        "does not work once ClawHub already has the version"
+    )
+    assert "No GitHub Release, but ClawHub already has it" in text, (
+        "the doc must have a dedicated recovery section for this exact state, named "
+        "the way the workflow's own error messages point to it"
+    )
+    assert "signed-release-assets-X.Y.Z" in text, (
+        "the doc must name the actual recovery-artifact naming pattern, not just "
+        "gesture at 'the workflow artifact'"
+    )
+    assert "90-day retention" in text
+
+
+# CLAWSECCHECK-B-905: bash line-buffers its own stdout, so a multi-line `printf '%s\n'
+# "$multiline"` can issue MORE THAN ONE write() into a pipe. A reader on the other end
+# that can exit after its first match/line (`grep -q`/`-m`, `head`, an `awk` action with
+# `exit`) may close that pipe before the writer's later write()s land. If the writer gets
+# descheduled in the gap, its next write() gets EPIPE and the writer is killed by
+# SIGPIPE; under `set -o pipefail` that turns a pipeline that ALREADY found its match
+# into a false failure (or, for the `awk ...; exit` shape, a fail-OPEN that silently
+# drops the rest of the input). Confirmed with fault injection (LD_PRELOAD delaying
+# bash's own printf, and strace write-delay injection): the real "Create GitHub
+# Release" step failed 10/10 with the exact reported message
+# ("::error::Release ... is missing SHA256SUMS.txt after the upload.") before the fix,
+# and 0/40 after switching the pipeline to a here-string. A here-string has no pipeline
+# and no concurrent writer, so an early-exiting reader cannot SIGPIPE anything.
+_EARLY_EXIT_READER_RE = re.compile(
+    r"(?<!\|)\|(?!\|)\s*(?:"
+    r"grep\b(?=[^|]*(?:\s-[A-Za-z]*[qm]|\s--(?:quiet|silent|max-count)|>\s*/dev/null))"
+    r"|head\b"
+    r"|awk\b[^|]*\bexit\b"
+    r")"
+)
+
+
+def _workflow_files() -> List[Path]:
+    return sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+
+
+def test_no_pipeline_feeds_an_early_exiting_reader_from_a_multiline_writer() -> None:
+    """Regression guard for CLAWSECCHECK-B-905.
+
+    Scans every `run:` shell line in every workflow (whole-line comments stripped, the
+    same discipline `_code_lines()` uses above — a comment merely discussing a pattern
+    must not trip this) for a pipeline ending in a reader that can stop consuming input
+    before EOF. That shape is the SIGPIPE race's precondition regardless of which
+    variable happens to be multi-line today; prefer a here-string (`cmd <<<"$var"`), or
+    for a real file source, drop the extra `| head`/`| grep -q` stage and take the first
+    match in-shell (e.g. `${var%%$'\\n'*}` or awk's own `-F`/pattern matching without a
+    piped-in early-exiting reader).
+    """
+    offenders = []
+    for path in _workflow_files():
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            if _EARLY_EXIT_READER_RE.search(line):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{i}: {line.strip()!r}")
+    assert not offenders, (
+        "Found a pipeline feeding an early-exiting reader (grep -q/-m, head, or an awk "
+        "action with 'exit') from what may be a multi-line writer — this is the "
+        "CLAWSECCHECK-B-905 SIGPIPE-under-pipefail race. Use a here-string, or read the "
+        "first match without a second early-exiting stage:\n" + "\n".join(offenders)
+    )
+
+
+def test_early_exit_reader_regex_flags_the_original_b905_sites() -> None:
+    """Pins the guard's own detection surface against the exact pre-fix shape.
+
+    Not a behavioral repro (strace/LD_PRELOAD fault injection isn't reliable in CI —
+    see the B-905 task notes), but confirms the static regex actually catches the eight
+    sites that were audited and fixed, so a future refactor of the regex can't silently
+    stop covering them.
+    """
+    ORIGINAL_RACY_LINES = [
+        (190, 'if printf \'%s\\n\' "$ROWS" | awk -F\'\\t\' \'$2!="completed"\' | grep -q .; then'),
+        (192, 'elif BAD="$(printf \'%s\\n\' "$ROWS" | awk -F\'\\t\' \'$3!="success" {print $3; exit}\')" \\'),
+        (317, 'elif ! printf \'%s\' "$LIVE_RELEASE_ERR" | grep -qi \'release not found\'; then'),
+        (378, 'if printf \'%s\' "$TAG_ERR" | grep -q \'HTTP 404\'; then'),
+        (390, 'if printf \'%s\' "$RELEASE_ERR" | grep -qi \'release not found\'; then'),
+        (444, 'ZIP="$(sed -n \'s/^Report ZIP: //p\' /tmp/scandl.txt | head -1)"'),
+        (1087, 'if printf \'%s\\n\' "$names" | grep -qxF "$a"; then have=$((have + 1)); fi'),
+        (1117, 'if ! printf \'%s\\n\' "$final" | grep -qxF "$a"; then'),
+    ]
+    for lineno, snippet in ORIGINAL_RACY_LINES:
+        assert _EARLY_EXIT_READER_RE.search(snippet), (
+            f"guard regex no longer flags the original B-905 line {lineno}: {snippet!r}"
+        )

@@ -42,6 +42,7 @@ Both tests are offline and read/write only `tmp_path` / bundled fixtures.
 """
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -145,11 +146,17 @@ def test_dot_target_basename_matches_the_empty_string_self_exclusion_records():
 # ─────────────────────────────────────────────── the verdict-flip bisection (severe half)
 
 def _own_engine_markers_before_and_after():
-    """Locate the live `def vet_skill` marker line in the real `checks/_vet.py` and
-    return (before_prefix, after_prefix) — the file's own text up to, and including,
-    that line. Dynamic on purpose: the original report's line numbers (6178/6186) are
-    already stale (the file has grown substantially since), and a hardcoded pin would
-    silently stop testing the real boundary the day it next moves.
+    """Locate the live `vet_skill` function in the real `checks/_vet.py` and return
+    (before_prefix, after_prefix) — the file's own text up to, and up to the end of,
+    that function. Dynamic on purpose: the original report's line numbers (6178/6186)
+    are already stale (the file has grown substantially since), and a hardcoded pin
+    would silently stop testing the real boundary the day it next moves.
+
+    `_is_own_source` matches AST structure (B-846), so the boundary that flips it is
+    the whole `vet_skill` FunctionDef, not merely its signature line — a bare
+    signature with no body is not valid Python at all. Found via the file's own AST
+    (`end_lineno`), not a hardcoded line count, so this keeps tracking the true
+    boundary as the file grows.
     """
     text = _VET_SRC.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
@@ -158,12 +165,17 @@ def _own_engine_markers_before_and_after():
         if "def vet_skill(path: str | Path) -> Finding:" in line
     )
     # Sanity: the other two _OWN_ENGINE_MARKERS strings must already sit earlier in the
-    # file, or this bisection would not isolate a single-line boundary.
+    # file, or this bisection would not isolate a single boundary.
     before_text = "".join(lines[:marker_idx])
     assert "def check_installed_skills" in before_text
     assert "_SKILL_CRIT" in before_text
     assert "def vet_skill" not in before_text
-    after_text = before_text + lines[marker_idx]
+    tree = ast.parse(text)
+    vet_skill_def = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "vet_skill"
+    )
+    after_text = "".join(lines[:vet_skill_def.end_lineno])
     assert "def vet_skill" in after_text
     return before_text, after_text
 
@@ -178,7 +190,7 @@ def _build_partial_own_source_tree(root: Path, vet_py_content: str) -> Path:
 
 
 def test_marker_boundary_flips_self_exclusion(tmp_path):
-    """One line — the literal `def vet_skill` marker text — flips `_is_own_source`, and
+    """The complete `vet_skill` function definition flips `_is_own_source`, and
     the dossier must stay honest on BOTH sides of that boundary:
 
       * below the marker: a real scan runs (the chunk is genuinely not our whole engine,

@@ -18,12 +18,12 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="214 security checks · 26 attack-chain detectors · 24,370 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.4 verified" width="900">
+    <img src="docs/assets/stats-light.svg" alt="229 security checks · 26 attack-chain detectors · 30,585 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.6 verified" width="900">
   </picture>
 </p>
 
 <p align="center">
-  <sub>Verified against <b>OpenClaw 2026.9.4</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.9+ · <a href="#-compatibility">details</a></sub>
+  <sub>Verified against <b>OpenClaw 2026.9.6</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.9+ · <a href="#-compatibility">details</a></sub>
 </p>
 
 ---
@@ -229,7 +229,7 @@ These are the areas a full check covers across its five layers:
 | 🔐 **Secrets & data at rest** | Are your tokens, keys, and conversations lying around readable? |
 | 📡 **Monitoring & readiness** | Would you even notice a compromise — and could you investigate it? |
 
-On top of the 214 individual checks, a **risk engine** hunts for deadly
+On top of the 229 individual checks, a **risk engine** hunts for deadly
 *combinations* — chains like "untrusted input → reachable secrets → outbound
 tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)**.
 
@@ -262,7 +262,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   capabilities — plus a documented zero-false-positive-FAIL release
   discipline: an alarm reaching you is a specific, reproducible, test-pinned
   condition in your own config, not a keyword match dressed up as a scan.
-- **Built like it matters.** 24,370 automated tests run on every change, a
+- **Built like it matters.** 30,585 automated tests run on every change, a
   false alarm is treated as a release-blocking bug, and every release is
   cryptographically signed.
 - **Free and readable.** MIT-licensed, pure Python standard library, zero
@@ -324,13 +324,22 @@ curl -LO https://github.com/gl0di/clawseccheck/releases/download/vX.Y.Z/SHA256SU
 
 cosign verify-blob \
   --bundle SHA256SUMS.txt.bundle \
-  --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \
+  --certificate-identity-regexp "^https://github\.com/gl0di/clawseccheck/\.github/workflows/clawhub-publish\.yml@refs/tags/v" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS.txt
 ```
 
-A passing verification proves the reference digest was produced by this repo's
-release workflow and hasn't been altered since.
+A passing verification proves the reference digest was produced by *this* repo's
+`clawhub-publish.yml` workflow running on a `vX.Y.Z` release tag, and hasn't been
+altered since — not merely that some workflow, on some branch, in this repo signed
+it. (The identity pins the workflow file and the `refs/tags/v` ref prefix; the
+version suffix varies per release and cannot be pinned here.)
+
+`SHA256SUMS.txt` also lists the files shipped beside the engine package
+(`SKILL.md`, `audit.py`, `pyproject.toml`, `references/cli-flags.md`, `docs/`, …)
+under a separate, labelled section, as they sit in the installed bundle. Compare
+any of them with `sha256sum <file>` from the install directory. The published
+`CHANGELOG.md` is the trimmed copy, so its digest is of that copy.
 
 </details>
 
@@ -433,7 +442,7 @@ pipx install git+https://github.com/gl0di/clawseccheck             # or track th
 clawseccheck                         # audits ~/.openclaw by default
 clawseccheck --json                  # machine-readable result
 clawseccheck --sarif results.sarif   # SARIF 2.1.0 for GitHub Code Scanning
-clawseccheck --html report.html      # standalone HTML report (private)
+clawseccheck --html report.html      # standalone HTML report (private; folds home paths like --json/--pdf)
 clawseccheck --pdf report.pdf        # complete audit as a paginated PDF (attach into chat)
 clawseccheck --exhaustive            # raise the scan caps: slower, maximum coverage
 clawseccheck --fail-on high          # CI gate: exit 1 if an unsuppressed FAIL at/above HIGH exists
@@ -477,7 +486,7 @@ not the same claim as "we ran it".
 
 | | |
 |---|---|
-| **Verified against a running install** | **OpenClaw 2026.9.4.** The schema snapshots this repo ships — `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/vendor_state_tables.txt` — are generated from an installed 2026.9.4 and each carries that version in its header. The state-schema snapshot's stamp is enforced: on a machine with OpenClaw installed, the suite re-derives the schema and fails if the stamp does not match the running build. `tests/dist_citation_baseline.txt` is deliberately NOT in that set and still stamps 2026.9.1: it is a frozen ledger of pre-existing citation debt, re-recorded as a separate deliberate act rather than on every upgrade, so a lagging stamp there is its design and not drift. |
+| **Verified against a running install** | **OpenClaw 2026.9.6.** The schema snapshots this repo ships — `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/vendor_state_tables.txt`, `tests/dm_policy_shape_manifest.txt` — are generated from an installed 2026.9.6 and each carries that version in its header. The state-schema snapshot's stamp is enforced: on a machine with OpenClaw installed, the suite re-derives the schema and fails if the stamp does not match the running build. `tests/dist_citation_baseline.txt` (a frozen ledger of pre-existing citation debt) is stamped and enforced the same way: its stamp must equal the installed build, and it is re-recorded as a deliberate act after each upgrade's citations have been re-grounded, never to absorb a new stale citation. |
 | **Read by the code, each measured against a running install while it was written** | **2026.7.1-2, 2026.8.1, 2026.8.2** — the three builds that moved settings the audit reads. Every moved key is read in *both* spellings: the agent roster as `agents.list` *and* `agents.entries`, the gateway command lists under their old and new parents, and the three settings 2026.8.1 moved out of `openclaw.json` into OpenClaw's machine-owned store. An older or not-yet-migrated config is read, not silently skipped. |
 | **On anything else** | The audit still runs. This is deliberately *not* a claim of a contiguous supported range: the builds between the measured points (2026.7.2 – 2026.8.0) were never run against, so the tool treats a config it cannot date as undated — it names **both** key spellings in its fix advice rather than guessing which one your build accepts, and a key whose home this build does not have is reported as retired or `UNKNOWN`, never resolved to nothing and given a verdict anyway. |
 
@@ -493,7 +502,7 @@ as unprotected on Windows — see the [User guide](docs/USAGE.md) for the detail
 | Document | What it covers |
 |---|---|
 | [User guide](docs/USAGE.md) | Recipes, monitoring modes, and trust details |
-| [Check catalog](docs/CHECKS.md) | All 214 checks: what they verify and how to remediate |
+| [Check catalog](docs/CHECKS.md) | All 229 checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Bundled IOC dataset](docs/IOC_DATA.md) | Provenance policy, refresh cadence, and freshness discipline for the known-bad catalog |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |

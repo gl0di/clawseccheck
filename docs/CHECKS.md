@@ -79,6 +79,22 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `agents.defaults.sandbox.mode` = `"all"` - run exec tools in a sandbox — 'all' sandboxes every session; 'non-main' leaves the agent's own main session on the host
 
+## Advisory checks
+
+### B391 - Node-host worker-run execution isolation (nodeHost.workerRuns)
+
+- Severity: LOW
+- Block: advisory
+- Framework: Least Privilege / Sandbox
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Node-host worker-run execution isolation (nodeHost.workerRuns)
+- Remediation:
+  - none
+
+## Hardening checks
+
 ### B5 - Plugin / skill supply-chain integrity
 
 - Severity: HIGH
@@ -505,6 +521,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `browser.extraArgs` - remove --remote-allow-origins; keep browser.cdpUrl and every profile cdpUrl on loopback
 
+### B383 - browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Browser / SSRF
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default
+- Remediation:
+  - config: `browser.extensionRelay.allowLegacyAuth` = `false` - only after every paired Chrome extension and external CDP client speaks Browser Relay Authentication v2
+
 ### B321 - browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs
 
 - Severity: HIGH
@@ -640,6 +668,22 @@ Advisory checks are recorded for coverage but are not scored.
 - What it checks: memory.search.remote sends embedded memory chunks to a third-party endpoint over cleartext http://
 - Remediation:
   - none
+
+## Advisory checks
+
+### B387 - secrets.egressProxy enabled with no traffic allowlist (allowedHosts unset)
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Proxy / Egress Hardening
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: secrets.egressProxy enabled with no traffic allowlist (allowedHosts unset)
+- Remediation:
+  - none
+
+## Hardening checks
 
 ### B39 - Session visibility / cross-user transcript leak
 
@@ -1205,6 +1249,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B388 - Prose-intent host/hardware-fingerprint exfiltration directive
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Data Exfiltration / Prompt Injection
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Prose-intent host/hardware-fingerprint exfiltration directive
+- Remediation:
+  - none
+
 ### B161 - Identity-file injection (override/jailbreak directive in bootstrap files)
 
 - Severity: CRITICAL
@@ -1314,6 +1370,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: LLM06 Excessive Agency
 - What it checks: Node command deny-list entries that are silently ineffective
+- Remediation:
+  - none
+
+### B386 - gateway.nodes.allowSkills defaults to accepting paired-node skill publishing
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Node Skills
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM06 Excessive Agency
+- What it checks: gateway.nodes.allowSkills defaults to accepting paired-node skill publishing
 - Remediation:
   - none
 
@@ -1628,6 +1696,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: MEDIUM
 - OWASP: none
 - What it checks: Chunked multi-file-read assembly executed via exec()/eval() (split-by-file payload loader)
+- Remediation:
+  - none
+
+### B394 - Artifact-relative decode-then-exec read with an unprovable (runtime-computed) path segment
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Obfuscation / Malicious Skill
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Artifact-relative decode-then-exec read with an unprovable (runtime-computed) path segment
 - Remediation:
   - none
 
@@ -2145,6 +2225,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B385 - desktop.host.passwordFile (VNC credential) readable by others
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Secrets Vault
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: desktop.host.passwordFile (VNC credential) readable by others
+- Remediation:
+  - none
+
 ### B183 - Audited config file differs from the one OpenClaw resolves
 
 - Severity: MEDIUM
@@ -2361,6 +2453,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B384 - Gateway-host desktop (VNC/RFB) listener exposure (loopback-only design vs. actual)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Zero Trust / Gateway
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Gateway-host desktop (VNC/RFB) listener exposure (loopback-only design vs. actual)
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### B341 - plugins.entries.<id>.hooks.allowPromptInjection / .allowConversationAccess grants
@@ -2514,6 +2618,34 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: none
 - What it checks: Gateway operator terminal (browser/mobile shell) enabled
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B389 - Gateway unmanaged-desktop computer control bypasses node command policy
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Zero Trust / Gateway
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Gateway unmanaged-desktop computer control bypasses node command policy
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B390 - attachments.ttlHours unset -- no sweep, staged media accumulates indefinitely
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Data Retention
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: attachments.ttlHours unset -- no sweep, staged media accumulates indefinitely
 - Remediation:
   - none
 
@@ -2695,6 +2827,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B382 - openclaw.json holds a key the installed OpenClaw build removed
+
+- Severity: LOW
+- Block: advisory
+- Framework: Config Validity / Update Hygiene
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: openclaw.json holds a key the installed OpenClaw build removed
+- Remediation:
+  - none
+
 ### B374 - cloudWorkers prepared-pool default-on warm reserve
 
 - Severity: LOW
@@ -2730,6 +2874,60 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: none
 - What it checks: agents.*.cwd relocates the task/exec working directory outside the workspace
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B393 - telemetry.enabled — name what leaves the machine when a user opts in
+
+- Severity: LOW
+- Block: advisory
+- Framework: Telemetry / Data Sharing
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: telemetry.enabled — name what leaves the machine when a user opts in
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B395 - Installed-skill content-read coverage (independent of B13's own verdict)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain / ClawHavoc
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Installed-skill content-read coverage (independent of B13's own verdict)
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B396 - Paired-node skills outside this audit's skill content scan
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Supply Chain / Node Skills
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: LLM03 Supply Chain
+- What it checks: Paired-node skills outside this audit's skill content scan
+- Remediation:
+  - none
+
+### B397 - Agent-opened portals reachable off-host outside gateway authentication
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Zero Trust / Gateway
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM06 Excessive Agency
+- What it checks: Agent-opened portals reachable off-host outside gateway authentication
 - Remediation:
   - none
 
@@ -2927,10 +3125,14 @@ These paths are computed from multiple checks. They fire only when every leg is 
   file writes — overwriting bootstrap or skill files to implant persistent instructions,
   or tampering with data the agent later trusts.
 - Fix:
-  Scope the write capability: set tools.exec.mode='ask' so writes need human sign-off,
-  restrict tools.elevated.allowFrom to an explicit allowlist (no '*'), and lock ingress
-  channels to 'allowlist'. Removing the fs_write/apply_patch grant entirely also breaks
-  the chain.
+  tools.exec.mode='ask', tools.elevated.allowFrom, and locking ingress channels to
+  'allowlist' do NOT scope write-capable tools and do NOT clear this chain on their own
+  (B55 stays WARN; RISK-12 arms on WARN, not just FAIL). What actually clears it: contain
+  the writes with agents.defaults.sandbox.mode='all' AND workspaceAccess='ro' (or 'none')
+  -- verified per agent, with a docker backend, tools.exec.host left at 'auto'/'sandbox',
+  and no docker/browser bind that re-exposes a writable host path (see
+  _fs_writes_contained) -- OR narrow tools.allow so it never names write/edit/apply_patch,
+  OR remove the fs_write/apply_patch grant entirely.
 
 ### RISK-13 - Markdown-image exfil + writable memory/bootstrap = persistence / exfil
 

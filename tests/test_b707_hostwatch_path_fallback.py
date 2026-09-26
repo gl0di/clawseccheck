@@ -22,7 +22,6 @@ PATH set then emptied, produced different baseline references and a coverage-los
 import os
 import shutil
 import stat
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -89,12 +88,12 @@ def _fake_bin(directory: Path, name: str) -> Path:
     return exe
 
 
-def test_the_resolver_prefers_path_over_the_fallback(path_env, monkeypatch):
+def test_the_resolver_prefers_path_over_the_fallback(path_env, monkeypatch, tmp_path):
     """PATH first, always. An operator who put a monitor earlier on PATH than the system copy
     means that one, and the fallback must not silently prefer a different binary — that would
     make the fix a correctness regression dressed as a robustness win.
     """
-    tmp = Path(tempfile.mkdtemp(prefix="b707-"))
+    tmp = tmp_path
     on_path = _fake_bin(tmp / "early", "suricata")
     fallback_dir = tmp / "sysbin"
     _fake_bin(fallback_dir, "suricata")
@@ -105,10 +104,10 @@ def test_the_resolver_prefers_path_over_the_fallback(path_env, monkeypatch):
     assert resolve("suricata") == str(on_path)
 
 
-def test_the_resolver_finds_a_system_binary_that_path_omits(path_env, monkeypatch):
+def test_the_resolver_finds_a_system_binary_that_path_omits(path_env, monkeypatch, tmp_path):
     """The case the fix exists for: the binary is installed in a conventional system
     directory and the process PATH does not list it."""
-    tmp = Path(tempfile.mkdtemp(prefix="b707-"))
+    tmp = tmp_path
     fallback_dir = tmp / "sysbin"
     planted = _fake_bin(fallback_dir, "auditctl")
 
@@ -118,11 +117,11 @@ def test_the_resolver_finds_a_system_binary_that_path_omits(path_env, monkeypatc
     assert resolve("auditctl") == str(planted)
 
 
-def test_the_resolver_still_answers_none_for_a_binary_that_is_not_there(path_env, monkeypatch):
+def test_the_resolver_still_answers_none_for_a_binary_that_is_not_there(path_env, monkeypatch, tmp_path):
     """The control. Without it, "always return a path" satisfies both tests above, and an
     absent monitor would be reported as present — the direction that actually harms, since
     this scan's output feeds "is anyone watching?"."""
-    tmp = Path(tempfile.mkdtemp(prefix="b707-"))
+    tmp = tmp_path
     (tmp / "sysbin").mkdir(parents=True)
     path_env(str(tmp / "nothing-here"))
     monkeypatch.setattr(hostwatch, "_SYSTEM_PATH_FALLBACK", (str(tmp / "sysbin"),))
@@ -180,10 +179,10 @@ def test_the_default_resolver_runs_no_subprocess():
         assert forbidden not in code.lower(), forbidden
 
 
-def test_the_fallback_does_not_consult_the_environment_it_is_replacing(monkeypatch):
+def test_the_fallback_does_not_consult_the_environment_it_is_replacing(monkeypatch, tmp_path):
     """The fallback must be a fixed list, not something derived from PATH — deriving it from
     the very variable that is missing would make it a no-op exactly when it is needed."""
-    tmp = Path(tempfile.mkdtemp(prefix="b707-"))
+    tmp = tmp_path
     planted = _fake_bin(tmp / "sysbin", "zeek")
     monkeypatch.setattr(hostwatch, "_SYSTEM_PATH_FALLBACK", (str(tmp / "sysbin"),))
     resolve = hostwatch._default_path_resolver("Linux")

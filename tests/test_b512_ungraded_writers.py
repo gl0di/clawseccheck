@@ -140,6 +140,20 @@ def _searchable(artifact) -> str:
     where the previous bump's had not; 4.1.1 itself was never released). Substituting
     each stream's raw bytes with its decompressed text, instead of keeping both, removes
     that binary from the search entirely rather than just adding real text alongside it.
+
+    CLAWSECCHECK-C-542 looked at moving this onto `tests/_pdftext.py`'s shared
+    `content_text`/`shown_strings` and deliberately did NOT: those return only the
+    concatenated page-content-stream text, discarding everything else in the document
+    (headers, object structure, non-content streams). This function's whole point is the
+    opposite — search the artifact AS AN OPAQUE BYTE STRING, with only the compressed
+    bytes swapped for their own plaintext, precisely so a leak hiding outside a page's
+    drawn text (the CSS-in-a-stylesheet shape this module was filed for, on another
+    surface entirely) is not defined away. Narrowing to "what the page drew" would
+    silently shrink what this sweep can catch. It also isn't the same hand-rolled bug
+    `_pdftext.py` exists to fix: this regex captures one harmless extra trailing byte
+    after a stream's compressed payload (`zlib.decompress` ignores it) rather than
+    stealing one FROM it, and a failed decompression here falls back to the stream's own
+    raw bytes rather than silently reading as "nothing found".
     """
     if not isinstance(artifact, bytes):
         return artifact

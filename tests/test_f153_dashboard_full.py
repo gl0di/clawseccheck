@@ -367,7 +367,11 @@ def _sqlite_plugin_home(tmp_path: Path, config: dict, plugin_bad: bool) -> Path:
 
 _RISK_CFG = {
     "gateway": {"bind": "127.0.0.1:8080", "auth": {"mode": "token", "token": "x"}},
-    "tools": {"profile": "full", "exec": {"security": "full"}},
+    # codeMode explicit off: B351 now correctly resolves an ABSENT key against the real
+    # installed OpenClaw (this suite runs with no --no-dist, so a 2026.9.6+ machine
+    # resolves an unset key to "auto" -> WARN), and this fixture's own findings/section
+    # ordering, not B351's, is what these dashboard tests pin.
+    "tools": {"profile": "full", "exec": {"security": "full"}, "codeMode": False},
     "agents": {"defaults": {"sandbox": {"mode": "off"}}},
     "channels": {"telegram": {"dmPolicy": "open", "groupPolicy": "open"}},
     "mcp": {"servers": {"bad-server": {"command": "sh",

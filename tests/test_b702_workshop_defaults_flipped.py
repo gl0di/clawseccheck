@@ -293,16 +293,13 @@ def test_the_absent_case_does_not_claim_the_ENGINE_was_degraded():
     assert f.engine_degraded is False
 
 
-def test_the_cap_that_actually_protects_the_grade_still_fires():
+def test_the_cap_that_actually_protects_the_grade_still_fires(tmp_path):
     """The control for the test above: without it, "never set engine_degraded" reads as if
     the config-blind case went unprotected. Measured end to end through the real audit."""
-    import tempfile
-    from pathlib import Path as _P
-
     import clawseccheck
     from clawseccheck.scoring import _config_blind_signal
 
-    home = _P(tempfile.mkdtemp()) / "no-config"
+    home = tmp_path / "no-config"
     home.mkdir(parents=True)
     ctx, _findings, score = clawseccheck.audit(home)
     assert _config_blind_signal(ctx) == (True, "absent")

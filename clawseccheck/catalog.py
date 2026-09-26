@@ -248,6 +248,24 @@ CATALOG: list[CheckMeta] = [
     CheckMeta(
         "B4", "Execution sandbox", HIGH, "hardening", "Least Privilege / Sandbox", surface="agents"
     ),
+    # B391: nodeHost.workerRuns.isolation, re-grounded directly against the
+    # installed 2026.9.5 dist (schema-CwAIqZVE.mjs:892-896 / zod-schema-DN2u5FdA.mjs:
+    # 576-580) since the internal recon's descriptions map has no `nodeHost.workerRuns`
+    # entry at all -- same documented gap class as B390/attachments. Confirms an
+    # earlier shortlist reading still holds three releases later: "none" is
+    # the vendor's own default, not a user-introduced weakening, so this is a report
+    # (advisory, scored=False, LOW) beside B4's sandbox checks -- see
+    # checks/_config.py::check_nodehost_workerruns_isolation for the full grounding.
+    CheckMeta(
+        "B391",
+        "Node-host worker-run execution isolation (nodeHost.workerRuns)",
+        LOW,
+        "advisory",
+        "Least Privilege / Sandbox",
+        scored=False,
+        confidence="HIGH",
+        surface="agents",
+    ),
     CheckMeta(
         "B5",
         "Plugin / skill supply-chain integrity",
@@ -466,13 +484,32 @@ CATALOG: list[CheckMeta] = [
     # The value's NAME reads like the safe one and is the dangerous one, which is why this
     # is a check rather than a documentation line.
     #
-    # WARN, not FAIL, and for a reason that is expected to change: the mechanism lives on
-    # the Codex app-server path only — OpenClaw's own schema calls the block "projection
-    # metadata for Codex app-server threads only" — and this audit does not yet determine
-    # whether any configured agent runs that harness (B-708). A FAIL would
-    # assert a live grant on a setup where the block is inert. Once the harness can be
-    # determined, the confirmed case is FAIL-worthy: it is a break-glass override in the
-    # same family as B48/B171, differing only in that those are unconditionally live.
+    # WARN, not FAIL: the mechanism lives on the Codex app-server path only — OpenClaw's
+    # own schema calls the block "projection metadata for Codex app-server threads only".
+    # Whether any configured agent runs that harness is now decided by
+    # `harnessruntime.codex_harness_reach` (B-708), a three-valued determination validated
+    # by executing the vendor: `yes` states the harness as fact and drops the hedge, `no`
+    # is a PASS that says only openclaw.json was read (a cron model override or a /model
+    # switch is invisible), `unknown` — including every build below the validated floor —
+    # keeps the original conditional wording byte for byte. The confirmed-Codex case is
+    # FAIL-worthy in principle (a break-glass override in the same family as B48/B171,
+    # differing only in that those are unconditionally live), but it stays WARN until a
+    # fleet has been measured and it has had its own adversarial round.
+    #
+    # B-831: the Codex plugin's OWN `appServer` posture is now modelled too, as a SECOND
+    # branch of this same check (not a new id — this is a config-level pre-approval, i.e.
+    # what the OPERATOR set, the same shape B353 already owns). `appServer.approvalPolicy
+    # === "never" && appServer.sandbox === "danger-full-access" && appServer.networkProxy
+    # === void 0` (`shouldAutoApproveCodexAppServerApprovals`, grounded against the
+    # installed `@openclaw/codex@2026.9.5` plugin bundle — a SEPARATE npm package from
+    # `openclaw` core, `dist/.setup/config-security-*.mjs`) pre-approves every MCP server
+    # that sets no `codex.defaultToolsApprovalMode` of its own — a per-requester OAuth
+    # server included by the same rule, because the OpenClaw-side runtime catalog reads
+    # its mode for both connection scopes. The appServer fields are RESOLVED before that
+    # predicate runs (plugin activation, each agent's effective tools.exec mode, the
+    # reviewer/requirements-file defaults), so the branch ports that resolution and says
+    # which input it could not see instead of guessing (B-831 round 1). Still tracked separately:
+    # provider-level `agentRuntime` pins (B370).
     CheckMeta(
         "B353",
         "MCP server pre-approves every tool for unattended runs",
@@ -521,12 +558,15 @@ CATALOG: list[CheckMeta] = [
     # as safe/risky, only discloses it. acp.backend/fallbacks/runtime.installCommand
     # (openclaw@2026.9.4, zod-schema-Q1KXOooO.mjs:1390-1403) are real, current,
     # top-level fields — a richer surface than the filed task's stub named.
-    # agentRuntime.id's real path is
-    # agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id
-    # (openclaw@2026.9.4, zod-schema.agent-runtime-Ca6cjqf9.mjs:28-32), NOT the stub's cited
-    # models.providers.*.agentRuntime.id — B331's own pre-existing grounding note
-    # (above) already declined to characterize this field's value vocabulary as
-    # safe/risky for the same reasons B370 inherits.
+    # agentRuntime.id's real paths (B-832, re-grounded against openclaw@2026.9.5) are
+    # agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id AND
+    # models.providers.<p>.{agentRuntime.id, models[].agentRuntime.id}
+    # (zod-schema.agent-runtime-DQfiImgc.mjs:28, zod-schema.core-CZ0zDyHR.mjs:528,594,643)
+    # — an earlier pass (openclaw@2026.9.3-2026.9.4) wrongly declared the provider-level
+    # pair NOT real; B370 was blind to them even though B-708's harnessruntime.py already
+    # reads both. B331's own pre-existing grounding note (above) already declined to
+    # characterize this field's value vocabulary as safe/risky for the same reasons B370
+    # inherits.
     CheckMeta(
         "B369",
         "acp.backend routes agent turn execution to a plugin backend",
@@ -612,6 +652,25 @@ CATALOG: list[CheckMeta] = [
         "B330",
         "browser CDP control port — unauthenticated, and how far it reaches",
         HIGH,
+        "hardening",
+        "Browser / SSRF",
+        confidence="HIGH",
+        surface="sessions",
+    ),
+    # B383 (F-195): browser.extensionRelay.allowLegacyAuth (new in OpenClaw 2026.8.1,
+    # re-grounded at 2026.9.5) defaults to true "for one migration window" -- absent and
+    # explicit true are the SAME runtime state (config-Bv9CXmGW.mjs:230
+    # `?? true`; gateway-relay-route-2phSkPrI.mjs:116 `!== false`), so the relay accepts
+    # legacy Bearer/Basic/token-subprotocol auth alongside v2 on every fresh install.
+    # WARN-max by design, not FAIL-capable: it's a vendor-declared compatibility default
+    # an operator did not choose, OpenClaw's own bundled audit rates the identical
+    # condition `warn`, and the legacy path still requires the correct relay token (a
+    # protocol downgrade, not an auth bypass) -- see check_browser_extension_relay_
+    # legacy_auth's docstring/leading comment in checks/_egress.py for the full record.
+    CheckMeta(
+        "B383",
+        "browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default",
+        MEDIUM,
         "hardening",
         "Browser / SSRF",
         confidence="HIGH",
@@ -779,6 +838,32 @@ CATALOG: list[CheckMeta] = [
         "hardening",
         "Proxy / Egress Hardening",
         surface="tools",
+    ),
+    # B387 (F-196): secrets.egressProxy — new in OpenClaw 2026.8.1, re-grounded here
+    # against the installed 2026.9.5 dist (SecretsConfigSchema,
+    # dist/zod-schema.core-CZ0zDyHR.mjs:326-339). A loopback secret-substitution forward
+    # proxy for Gateway-hosted agent exec, off by default. The filed task's own
+    # hypothesis — flag an unscoped wildcard in bypassHosts, the way other allowlist
+    # checks in this module treat one — is DISPROVEN by the schema: both allowedHosts
+    # and bypassHosts validate through EgressProxyExactHostSchema /
+    # normalizeExactAllowedHost (dist/exact-hostname-B5MIU7_E.mjs), which rejects any
+    # "*" at config-load time. The real, vendor-documented gap is also the OPPOSITE of
+    # this module's usual "empty allowlist = wide open" shape: per
+    # docs/gateway/secrets/secret-store-and-egress.md, omitting allowedHosts (not an
+    # empty array — that is lockdown mode) leaves non-sentinel proxy traffic
+    # unrestricted once the proxy is enabled. Per-secret destination binding still
+    # protects bound secret VALUES either way, and the docs call the traffic allowlist
+    # itself "defense in depth" (a subprocess that ignores the proxy env vars bypasses
+    # it entirely) — so this stays WARN-only, never FAIL.
+    CheckMeta(
+        "B387",
+        "secrets.egressProxy enabled with no traffic allowlist (allowedHosts unset)",
+        MEDIUM,
+        "advisory",
+        "Proxy / Egress Hardening",
+        scored=False,
+        confidence="HIGH",
+        surface="secrets",
     ),
     CheckMeta(
         "B39",
@@ -1356,6 +1441,41 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B388 (C-538): prose-side sibling of B160 for a DIFFERENT object class -- the
+    # current machine's hardware/OS fingerprint (CPU core count, RAM, disk, GPU,
+    # machine/compute type, kernel/uname version string, hostname) described in a
+    # skill's prose and sent to a non-first-party endpoint. Also the prose-side
+    # analogue of skillast.py's HOST_INFO_EXFIL_FLOW (C-203), which only recognizes
+    # this behaviour in bundled CODE, not natural-language onboarding instructions
+    # (a real vendor sample, moltfounders.com). Always WARN,
+    # never FAIL -- a hardware fingerprint is a real tracking/targeting signal but
+    # not the credential-theft severity B160's own is_cred leg carries.
+    #
+    # scored=False (C-135 round 4): four rounds of adversarial review found this is
+    # a purely STRUCTURAL/positional heuristic ("is the hardware description in the
+    # same document section as the send"), and a structural check cannot always
+    # distinguish "this section's hardware mention is what gets sent" from "this
+    # section happens to also mention hardware, unrelated to what gets sent" -- an
+    # un-punctuated bullet/Q&A block with no blank line or heading between an
+    # unrelated pair of lines (round 4's own un-closed residual: see
+    # `_host_fp_same_block` in checks/_content.py) reads as one section either way,
+    # and a negated/disclaimed mention ("never transmits it anywhere") in the same
+    # section as a genuine, unrelated send is likewise indistinguishable from the
+    # real thing without content-level judgment a regex cannot make soundly. A new,
+    # three-times-broken prose heuristic docking a real A-F grade on a residual its
+    # own author cannot close is the B68-B73 WARN-only-advisory shape, not a scored
+    # check's. See the WARN finding's own `fix` text (check_prose_host_fingerprint_
+    # exfil, checks/_content.py) for the user-facing disclosure of the same residual.
+    CheckMeta(
+        "B388",
+        "Prose-intent host/hardware-fingerprint exfiltration directive",
+        MEDIUM,
+        "hardening",
+        "Data Exfiltration / Prompt Injection",
+        confidence="MEDIUM",
+        scored=False,
+        surface="skills",
+    ),
     # B161 (C-217): identity-file injection -- an override/jailbreak directive planted
     # in the agent's OWN identity/bootstrap files (SOUL.md, AGENTS.md, system-prompt
     # equivalents), distinct from B64 (generic override phrases across bootstrap +
@@ -1514,6 +1634,15 @@ CATALOG: list[CheckMeta] = [
         MEDIUM,
         "hardening",
         "Least Privilege / Node Commands",
+        scored=False,
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B386",
+        "gateway.nodes.allowSkills defaults to accepting paired-node skill publishing",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Node Skills",
         scored=False,
         surface="gateway",
     ),
@@ -1822,6 +1951,24 @@ CATALOG: list[CheckMeta] = [
         "B336",
         "Chunked multi-file-read assembly executed via exec()/eval() (split-by-file payload loader)",
         HIGH,
+        "advisory",
+        "Obfuscation / Malicious Skill",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
+    # B394 (B-850): a __file__-relative decode-then-exec read the artifact-containment
+    # ALLOWLIST recognizer (skillast.py) positively anchors on the scanned file's own
+    # location but cannot statically bound, because a tail segment is computed at
+    # runtime (an env var, a caller-supplied name, ...) — the recognizer's UNPROVEN
+    # verdict, as opposed to BOUNDED (silently exempt) or ESCAPES/NOT_ANCHORED (the
+    # pre-existing OBFUSCATED_EXEC/TT5_CMD_INJECTION crit stands). Reuses skillast.py's
+    # ARTIFACT_READ_UNPROVEN AST rule — pure wiring, no separate logic here. Advisory
+    # (scored=False); WARN-only, never FAIL-capable.
+    CheckMeta(
+        "B394",
+        "Artifact-relative decode-then-exec read with an unprovable (runtime-computed) path segment",
+        MEDIUM,
         "advisory",
         "Obfuscation / Malicious Skill",
         scored=False,
@@ -2199,6 +2346,13 @@ CATALOG: list[CheckMeta] = [
     # normal install (the user's own phone/laptop) — never FAIL; matches B138's
     # advisory precedent exactly (a pending high-scope request is also common/expected
     # and still only WARNs). Never reads the `tokens` field's value.
+    #
+    # 2026-09-25 follow-up: OpenClaw 2026.9.6 migrates this store into a
+    # device_pairing_paired table in state/openclaw.sqlite, leaving only an inert
+    # devices/paired.json.migrated behind -- the legacy-JSON-only check false-PASSed
+    # on a machine with 2 real paired devices. collector._collect_paired_devices_sqlite
+    # is now consulted as a fallback when the legacy file is absent (see that
+    # collector's and this check's own docstrings for the merge rule and grounding).
     CheckMeta(
         "B176",
         "Standing operator authority in paired device store (devices/paired.json)",
@@ -2484,6 +2638,24 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="secrets",
     ),
+    # B385 (F-197): desktop.host.passwordFile's at-rest permissions -- the sole VNC
+    # credential gating the B384 listener (TigerVNC's -SecurityTypes VncAuth
+    # -PasswordFile, buildTigerVncArgv, host-source-v64nW4u1.mjs; VncAuth's DES-based
+    # obfuscation is not a real secret boundary once the file itself is readable). FAIL
+    # only when the file exists and is readable by another local account
+    # (_file_readable_by_others, same B182/B193 idiom -- a user-private group is not
+    # flagged, per B-127). HIGH: an exposed password file hands remote desktop control to
+    # any local account that can read it.
+    CheckMeta(
+        "B385",
+        "desktop.host.passwordFile (VNC credential) readable by others",
+        HIGH,
+        "hardening",
+        "Secrets Vault",
+        scored=True,
+        confidence="HIGH",
+        surface="secrets",
+    ),
     # B183 (B-281, ENV-1): the audited config file may not be the one the agent loads.
     # scored=False and WARN-capable only — a divergence means "this report may describe
     # the wrong subject", which is a reason to re-run, not a proven misconfiguration.
@@ -2714,12 +2886,19 @@ CATALOG: list[CheckMeta] = [
     # CWgFGnm0.js, installed-plugin-index-records-C_n191FN.js, types.openclaw-CXjMEWAQ.d.ts,
     # clawhub-install-trust-DdnykQnp.js) and against the real file
     # (~/.openclaw/state/openclaw.sqlite: table present, schema matches exactly). FAIL only
-    # on the unambiguous "blocked" disposition (OpenClaw's own moderation explicitly
-    # blocked the install); WARN on any other non-clean disposition ("review-required",
-    # "review-recommended", or a future value) and on clawhubTrustPending/Stale (an
-    # unverified/outdated verdict). UNKNOWN when the state DB, the index row, or the
-    # column is absent/locked/unreadable (Golden Rule #4) -- never a fake PASS. Read-only
-    # (file:...?mode=ro + PRAGMA query_only=1), never writes to the shared state DB.
+    # on the unambiguous "blocked" disposition -- OpenClaw's own persisted install-record
+    # store, not a user-typed string (a four-literal enum). C-479 FOLLOW-UP, EXECUTED
+    # against the installed dist (see check_plugin_clawhub_trust's docstring in
+    # checks/_mcp.py): the live ClawHub-download install path can never persist "blocked"
+    # to a record at all -- it returns before the record-builder is ever called -- so the
+    # one reachable route to a FAIL-qualifying record is a retired
+    # plugins.installs.<id>.clawhubTrustDisposition config record imported by a doctor or
+    # startup config-repair pass, not a live moderation verdict on this install. WARN on
+    # any other non-clean disposition ("review-required", "review-recommended", or a future
+    # value) and on clawhubTrustPending/Stale (an unverified/outdated verdict). UNKNOWN when
+    # the state DB, the index row, or the column is absent/locked/unreadable (Golden Rule
+    # #4) -- never a fake PASS. Read-only (file:...?mode=ro + PRAGMA query_only=1), never
+    # writes to the shared state DB.
     CheckMeta(
         "B177",
         "OpenClaw's own persisted ClawHub trust verdict for an installed plugin",
@@ -2934,6 +3113,26 @@ CATALOG: list[CheckMeta] = [
         "Zero Trust / Gateway",
         surface="gateway",
     ),
+    # B384 (F-197): desktop.host is a second network listener beside the gateway (a
+    # VNC/RFB service opted into by desktop.host.enabled, default port 5900) --
+    # completely unread before this. Grounded against the installed OpenClaw 2026.9.5
+    # dist (zod-schema-DN2u5FdA.mjs + host-source-v64nW4u1.mjs): the schema has no
+    # host-restriction field to "declare" (unlike gateway.bind) -- OpenClaw's own managed
+    # desktop is unconditionally spawned `-localhost yes`, so this corroborates that
+    # always-loopback assumption against the ACTUAL listening socket via sockets.py, same
+    # spirit as B340. FAIL-capable only when the non-loopback listener is POSITIVELY
+    # confirmed (kernel-resolved /proc/<pid>/exe) as OpenClaw's own managed `Xtigervnc`
+    # child; an unconfirmed/unmanaged non-loopback listener WARNs instead (scored=False)
+    # to avoid the exact port-sharing false-FAIL C-135 caught for B340. HIGH: a confirmed
+    # exposure is a second, less-audited path to full remote desktop control.
+    CheckMeta(
+        "B384",
+        "Gateway-host desktop (VNC/RFB) listener exposure (loopback-only design vs. actual)",
+        HIGH,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
     # B341: disclosure advisory for plugins.entries.<id>.hooks.allowPromptInjection /
     # .hooks.allowConversationAccess (PluginEntrySchema, zod-schema-O9ml_nmo.js:788-806 in
     # the installed openclaw npm dist) -- a per-plugin-entry grant to mutate the in-flight
@@ -3112,10 +3311,18 @@ CATALOG: list[CheckMeta] = [
     # (config-schema.d.ts:4499-4503, description :129-131), default false. WARN-only:
     # enabling it is the owner's explicit act, so it is a capability disclosure, not a
     # compromise. A FAIL tier would need its own C-135 pass.
-    # B351: code mode swaps the model's tool surface for exec+wait behind a QuickJS-WASI
-    # catalog bridge. MEDIUM, not HIGH: the guest is sandboxed and the feature fails
-    # closed, so this is a disclosure that recontextualises every other tool-policy
-    # verdict, not a hole. Grounded on the vendor's own resolver (code-mode-D5mNEiYV.js).
+    # B351: code mode swaps the model's tool surface for exec+wait behind a catalog
+    # bridge. MEDIUM, not HIGH: on releases before 2026.9.6 the guest is sandboxed
+    # (QuickJS-WASI) and the feature fails closed, so this is a disclosure that
+    # recontextualises every other tool-policy verdict, not a hole by itself.
+    # NOT unconditionally true from 2026.9.6 on: an unset tools.codeMode now defaults
+    # to automatic activation with the UNSANDBOXED `node:vm` executor (OpenClaw's own
+    # docs: "not a security boundary", sharing the Gateway process's OS-level
+    # privileges) -- QuickJS-WASI still ships but now needs an explicit
+    # executor: "quickjs". The check's own WARN text names which executor actually
+    # applies; this severity was kept MEDIUM rather than re-litigated per build, since
+    # that would need its own independent C-135 pass. Grounded on the vendor's own
+    # resolver (code-mode-D5mNEiYV.js), executed across openclaw@7.1-9.6.
     # B352: tools.exec.pathPrepend — directories exported AHEAD of $PATH for every exec
     # run, deliberately outranking the operator's own shell startup files
     # (wrapPosixCommandWithPathPrepend). A writable entry there is a standing
@@ -3143,6 +3350,65 @@ CATALOG: list[CheckMeta] = [
         "hardening",
         "Zero Trust / Gateway",
         surface="gateway",
+    ),
+    # B389: the Gateway's own unmanaged-desktop `computer` control
+    # route (computer.invoke/computer.status), reachable without passing through
+    # gateway.nodes.commands.deny or any per-action confirmation. Requires an explicit
+    # plugins.entries.cua-computer.enabled: true (it does NOT fire on the plugin's own
+    # enabledByDefault alone) AND an agent scope granted the `computer` tool while
+    # unsandboxed — advisory, WARN-cap-only, never FAIL. See
+    # checks/_config.py::check_gateway_computer_plugin_reach for the full grounding.
+    CheckMeta(
+        "B389",
+        "Gateway unmanaged-desktop computer control bypasses node command policy",
+        HIGH,
+        "advisory",
+        "Zero Trust / Gateway",
+        scored=False,
+        surface="gateway",
+    ),
+    # B390 (F-201): attachments.ttlHours -- grounded directly against the installed
+    # 2026.9.5 dist, since the internal recon's descriptions map omits the
+    # `attachments` namespace entirely (a known gap in that map -- CLAUDE.md §4(c)).
+    # Type: `ttlHours: z.ZodOptional<z.ZodNumber>` (cli-backend.types-DEEWiHUs.d.ts:8652,
+    # mirrored at types-B16fzBZc.d.ts:8487). Vendor description
+    # (schema-CwAIqZVE.mjs:904-905): "Leave unset to disable that sweep, or set values
+    # like 24 (1 day) or 168 (7 days) to periodically remove older staged media.
+    # Managed outgoing media (chat-generated attachments) is excluded and follows its
+    # own SQLite- and transcript-aware retention." The runtime sweep gate itself lives
+    # in the server's own periodic maintenance tick (server-maintenance-Cl2cKcaI.mjs:
+    # 359-366, invoked at :379): `const ttlHours = params.getRuntimeConfig()
+    # .attachments?.ttlHours; mediaCleanupInFlight = (ttlHours !== void 0 ?
+    # cleanOldMedia(ttlHours * 60 * 6e4, {...}) : pruneOutboundMedia())` -- unset skips
+    # `cleanOldMedia` (which sweeps the shared media/inbound directory,
+    # store-SPnAoW3B.mjs's `pruneNonPlaybackMedia`) entirely, so staged incoming media
+    # (screenshots, voice notes, forwarded files) accumulates on disk with no sweep at
+    # all; any set number (0 included, no documented floor) makes it run on that
+    # interval. (An earlier revision of this grounding, and the original F-201 commit,
+    # wrongly cited telegram-ingress-drain-factory-DbVZxBjw.mjs:3823 as this gate --
+    # that file's `resolveRetainedTelegramMedia` also reads `attachments.ttlHours`, but
+    # only to decide whether to reuse a cached reference while rebuilding a Telegram
+    # reply chain; it is Telegram-only and is not the accumulation-preventing sweep.
+    # See the check's own docstring in checks/_egress.py for the full correction.)
+    # Straight rename
+    # from the pre-8.1 `media.ttlHours` (openclaw-8.1-schema-{removed,added}-paths.txt:
+    # same field, same semantics, confirmed unchanged through the installed 2026.9.5
+    # dist). WARN-only: an unswept local disk is a data-hygiene gap the operator can
+    # act on at any time, not a proven compromise -- no FAIL tier.
+    # F-201 follow-up: the WARN above fired on a config with NO channels configured at
+    # all, where nothing can ever stage inbound media in the first place -- broke
+    # tests/test_b472_b477_self_contradiction.py's Channels-row self-contradiction
+    # guard. Now UNKNOWN+not_applicable when no live channel provider is configured
+    # (same "real provider" filter as B25/B26/B30) -- see the check's own docstring in
+    # checks/_egress.py for the dist grounding of why this is channel-agnostic, not
+    # Telegram-only.
+    CheckMeta(
+        "B390",
+        "attachments.ttlHours unset -- no sweep, staged media accumulates indefinitely",
+        MEDIUM,
+        "hardening",
+        "Data Retention",
+        surface="channels",
     ),
     # B354 (B-725): the state DB's shared skill-library/upload surface -- a skill
     # install/enable channel our filesystem-based skill discovery never sees at all.
@@ -3302,6 +3568,23 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         surface="monitoring",
     ),
+    # B382 (F-184): openclaw.json still holds a key the INSTALLED OpenClaw build removed
+    # from its strict root schema (measured by executing safeParse per key; see the
+    # table in checks/_shared.py). The claim is only that the file fails schema
+    # validation -- `openclaw config validate` and CLI commands that load it report it
+    # invalid until `openclaw doctor --fix` runs -- and makes no gateway claim. Reads the
+    # installed build only, never the last-saved stamp. WARN-only, unscored, never FAIL
+    # (B-315).
+    CheckMeta(
+        "B382",
+        "openclaw.json holds a key the installed OpenClaw build removed",
+        LOW,
+        "advisory",
+        "Config Validity / Update Hygiene",
+        scored=False,
+        confidence="HIGH",
+        surface="update",
+    ),
     # B374 (C-526): cloudWorkers prepared-pool — new in OpenClaw 2026.9.4, grounded
     # against the live installed 9.4 dist. See the module comment above
     # check_cloudworkers_prepared_pool (checks/_config.py) for the full
@@ -3357,6 +3640,97 @@ CATALOG: list[CheckMeta] = [
         "hardening",
         "Least Privilege / Sandbox",
         surface="agents",
+    ),
+    # B393 (F-202, C-473 shortlist item 8): telemetry.enabled — name what
+    # leaves the machine when a user opts in to OpenClaw's anonymous feature-usage
+    # statistics. Re-grounded directly against the installed 2026.9.5 dist since the
+    # internal recon's descriptions map has no `telemetry` entry at all — same
+    # documented gap class as B389/B390/B391 (CLAUDE.md §4(c)). See
+    # checks/_config.py::check_telemetry_enabled for the full grounding.
+    #
+    # INFO/report only, never FAIL or WARN — settled by C-473's shortlist and
+    # re-confirmed here against the current dist: `telemetry.enabled` is disabled by
+    # default, unconditionally suppressed when DO_NOT_TRACK=1 is set in the gateway's
+    # own environment, and the vendor's own description of the payload (feature-usage
+    # counts, never messages/credentials/identifiers) is already the benign one this
+    # check quotes verbatim. There is no weakening for a static audit to flag, so this
+    # never escalates past PASS and needed no C-135 pass — there is no FAIL/WARN branch
+    # for one to adversarially test.
+    CheckMeta(
+        "B393",
+        "telemetry.enabled — name what leaves the machine when a user opts in",
+        LOW,
+        "advisory",
+        "Telemetry / Data Sharing",
+        scored=False,
+        confidence="HIGH",
+        surface="update",
+    ),
+    # B395 (ported from an earlier feature branch that used B383 — taken on this base
+    # by an unrelated check at line ~671, browser.extensionRelay.allowLegacyAuth — so
+    # re-IDed during the integration/4.3.0 port; B392/B394 are reserved by other
+    # in-flight work): a per-skill content-read coverage gap, scored
+    # INDEPENDENTLY of whatever check_installed_skills (B13) itself concludes for the
+    # run. B13 emits exactly ONE Finding for the whole run -- its cascade `return`s as
+    # soon as any skill wins a crit/high verdict, so a DIFFERENT skill's own unreadable
+    # file (`ctx.skill_coverage_gaps`, collector.py) never reaches its own UNKNOWN/
+    # engine_degraded Finding that run: it only rides along as evidence text on
+    # whichever OTHER skill's Finding won. `scoring._degraded_signal` gates on
+    # `f.status == UNKNOWN and f.engine_degraded`, so a FAILing skill silently ate a
+    # sibling skill's coverage gap out of the score. This check reads the exact same
+    # `ctx.skill_coverage_gaps` collector state B13 already reads, but reports it as
+    # its own PASS/UNKNOWN independent of which skill (if any) wins B13's cascade --
+    # never `engine_degraded=True` on a FAIL, which `Finding.engine_degraded`'s own
+    # docstring says is meaningless outside `status == UNKNOWN` (the route B13's own
+    # unreadable-file branch already takes, see check_installed_skills). HIGH/hardening/
+    # scored, mirroring B13's own severity and surface for the identical subject.
+    CheckMeta(
+        "B395",
+        "Installed-skill content-read coverage (independent of B13's own verdict)",
+        HIGH,
+        "hardening",
+        "Supply Chain / ClawHavoc",
+        confidence="HIGH",
+        surface="skills",
+    ),
+    # B396: a paired gateway NODE (not an operator device — B176/B138 already cover
+    # operator authority) can publish its own machine's skills into this gateway while
+    # connected; OpenClaw keeps that content in gateway memory and on the node's own
+    # disk ONLY (never written here), so B13/B5/B25/SKILL_CONTENT_RING — every one of
+    # which reads only the local on-disk skill corpus — never see it. This check does
+    # not report on that content (unauditable by construction); it discloses whether a
+    # skill-capable paired node exists at all, a coverage-blind-spot advisory
+    # independent of B386's own (scored=False) config-default report. Unscored,
+    # never FAILs (B-315), MEDIUM severity/confidence matching B386/B176's own
+    # neighbourhood — see checks/_lifecycle.py::check_paired_node_skill_coverage for
+    # the full dist grounding.
+    CheckMeta(
+        "B396",
+        "Paired-node skills outside this audit's skill content scan",
+        MEDIUM,
+        "advisory",
+        "Supply Chain / Node Skills",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
+    # B397: agent-opened Gateway portals (gateway.portals, the `portal` tool) are gated
+    # only by a per-portal bearer token in the URL, never by gateway.auth, trusted-proxy
+    # identity or any access layer in front of the Gateway -- true for all three
+    # transports (ingress, Tailscale Serve, direct). Advisory, WARN-cap-only, never FAIL:
+    # no config shape weakens portal auth, and how far a portal reaches off-host is set
+    # by an external proxy (ingress) or the Gateway's own bind (direct) that this check
+    # can only describe, not prove exploited. See
+    # checks/_config.py::check_gateway_portal_reach for the full grounding.
+    CheckMeta(
+        "B397",
+        "Agent-opened portals reachable off-host outside gateway authentication",
+        MEDIUM,
+        "advisory",
+        "Zero Trust / Gateway",
+        scored=False,
+        confidence="HIGH",
+        surface="gateway",
     ),
 ]
 
@@ -3426,6 +3800,7 @@ AST_MAP = {
     "B68": ("AST03",),
     "B69": ("AST03",),
     "B71": ("AST03",),
+    "B386": ("AST03",),
     "B72": ("AST03",),
     "B75": ("AST03",),
     "B6": ("AST04", "AST05"),
@@ -3478,6 +3853,7 @@ AST_MAP = {
     "B195": ("AST06",),  # extraArgs disables same-origin/loads extensions = Weak Isolation
     "B196": ("AST06",),  # arbitrary-JS eval sink reachable from page content = Weak Isolation
     "B330": ("AST06",),  # unauthenticated CDP control channel reachable off-host/cross-origin
+    "B383": ("AST06",),  # extension relay accepts legacy (weaker) auth by default = Weak Isolation (cf. B330)
     "B73": ("AST06",),  # mDNS full advertise on non-loopback exposes the agent (cf. B70)
     "B74": ("AST05",),  # forged role/provenance = untrusted external instructions (cf. B64)
     "B76": ("AST03",),  # MCP tool-inheritance bypass = over-privileged reach (cf. B75)
@@ -3510,6 +3886,7 @@ AST_MAP = {
     "B91": ("AST01",),  # dynamic-dispatch sink obfuscation = hidden malicious code / scanner evasion (cf. B89/B90)
     "B92": ("AST02",),  # unsafe deserialization sink = RCE-from-data supply-chain tamper (cf. B86)
     "B336": ("AST01",),  # chunked file-read assembly -> exec/eval = hidden malicious code / scanner evasion (cf. B90/B91)
+    "B394": ("AST01",),  # unprovable artifact-relative decode-then-exec read = hidden malicious code / scanner evasion (cf. B336)
     "B338": ("AST01",),  # covert tunnel / mesh-VPN enrollment primitive = C2 infrastructure (cf. B13)
     "B339": ("AST01",),  # cloud instance-metadata credential fetch = active credential theft (cf. B13)
     "B93": ("AST04",),  # confusable trigger description = insecure metadata / trigger-squat (cf. B88)
@@ -3543,6 +3920,8 @@ AST_MAP = {
     "B187": ("AST02",),  # non-bundled plugin declares agentToolResultMiddleware = supply-chain interception capability disclosure (cf. B151/B152/B177)
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
     "B348": ("AST02",),  # plugins.load.paths entry not in plugins.entries = supply-chain visibility gap (cf. B152/B158)
+    "B396": ("AST08",),  # node-published skill content never reaches the content scanners = Poor Scanning (cf. B16)
+    "B397": ("AST06",),  # second HTTP ingress outside gateway.auth = weak isolation (cf. B340/B358)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -3634,6 +4013,7 @@ OWASP_MAP = {
     "B68": ("LLM06",),
     "B69": ("LLM06",),
     "B71": ("LLM06",),
+    "B386": ("LLM06",),
     "B72": ("LLM06",),
     "C074": ("LLM01",),
     "C047": ("LLM03",),
@@ -3677,6 +4057,8 @@ OWASP_MAP = {
     "B368": ("LLM03",),  # skills.load.watch hot-reloads live from an extraDir = Supply Chain (cf. B186/B367)
     "B187": ("LLM03", "LLM05"),  # non-bundled plugin declares agentToolResultMiddleware = Supply Chain + Improper Output Handling
     "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
+    "B396": ("LLM03",),  # paired-node skills outside the skill content scan = Supply Chain (cf. B386)
+    "B397": ("LLM06",),  # an agent can publish any local port off-host behind a bearer URL = Excessive Agency (cf. B32)
 }
 
 
@@ -3822,6 +4204,16 @@ REMEDIATION = {
                 "set": False,
                 "note": "disable the browser's arbitrary-JS evaluate sink unless a "
                 "workflow genuinely requires it",
+            }
+        ]
+    },
+    "B383": {
+        "config": [
+            {
+                "path": "browser.extensionRelay.allowLegacyAuth",
+                "set": False,
+                "note": "only after every paired Chrome extension and external CDP "
+                "client speaks Browser Relay Authentication v2",
             }
         ]
     },

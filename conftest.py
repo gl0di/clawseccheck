@@ -1,5 +1,7 @@
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -18,158 +20,77 @@ _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # full-suite run. Re-exported for readability at the fixture's use site.
 from _realhome import REAL_HOME  # noqa: E402  (must follow the sys.path insert above)
 
+# B-842: the fixture mode-pinning logic itself (constants, `expected_mode()`,
+# `iter_fixture_paths()`, `pin_fixture_modes()`) lives in tests/_fixtureperms.py, not
+# here -- so the standalone `tests/test_finding_fingerprint_manifest.py --write` path
+# (which runs OUTSIDE pytest and therefore never sees the autouse fixture below) can
+# import and call the exact same pinning code instead of duplicating it.
+# `tests/test_fixture_perm_determinism.py` asserts the pin directly against
+# `_fixtureperms` too (not through this module) -- see its own docstring.
+from _fixtureperms import pin_fixture_modes  # noqa: E402  (must follow the sys.path insert above)
+
+# CSC_HERMETICITY_LEDGER (see pytest_configure below) -- the opt-in sys.addaudithook
+# instrument. Import only the template/classifier module here; the hook itself is
+# installed conditionally in pytest_configure, never at import time.
+import _hermledger  # noqa: E402  (must follow the sys.path insert above)
+
 
 # ==========================================================================================
 # FIXTURE PERMISSIONS ARE PINNED CORPUS-WIDE, NOT PATH BY PATH.
 #
 # git records exactly ONE permission bit -- the owner-execute bit. Every other mode bit on
-# a checked-out fixture is decided by the umask of whoever checked it out. That turns three
-# checks -- B19 (data at rest), B20 (bootstrap write protection) and B85 (trajectory
-# tamper-resistance) -- into readers of a property of the MACHINE rather than of the
-# fixture:
+# a checked-out fixture is decided by the umask (or checkout mechanism) of whoever checked
+# it out. That turns three checks -- B19 (data at rest), B20 (bootstrap write protection)
+# and B85 (trajectory tamper-resistance) -- into readers of a property of the MACHINE
+# rather than of the fixture:
 #
 #     umask 002 (a typical dev box)   -> 0775 dirs / 0664 files -> their group-write
 #                                        branches fire
 #     umask 022 (a GitHub runner)     -> 0755 dirs / 0644 files -> they do not
+#     fresh `git worktree` checkout   -> 0755 dirs / 0644 files -> ditto (B-842)
 #
 # Same commit, different findings, different ``Finding.detail``, different
 # ``baseline.fingerprint()``. That is not hypothetical: it is exactly how a fully green
 # local run shipped a red CI on ``tests/test_finding_fingerprint_manifest.py`` -- 95 of the
-# 496 fixture homes disagreed between the two umasks (65 on B20, 34 on B19, 26 on B85).
-# The same variance also reached ``_group_has_other_members()``: while anything in the
-# corpus is group-writable, B20/B85 additionally consult the RUNNING MACHINE's group
-# database to decide between a MEDIUM WARN and the B-127 LOW downgrade, so the corpus
-# depended on /etc/group too.
+# 496 fixture homes disagreed between the two umasks (65 on B20, 34 on B19, 26 on B85), and
+# later how a fresh worktree's checkout modes made a hand-run ``--write`` regeneration
+# there disagree with this very fixture on 608 of 757 rows (B-842). The same variance also
+# reached ``_group_has_other_members()``: while anything in the corpus is group-writable,
+# B20/B85 additionally consult the RUNNING MACHINE's group database to decide between a
+# MEDIUM WARN and the B-127 LOW downgrade, so the corpus depended on /etc/group too.
 #
-# This class of defect had already been patched three times, one path at a time (B182,
-# B188, and the three B-309 follow-ups) and grew straight back, because the bug is not in
-# those paths: it is that ANY unpinned fixture path inherits the ambient umask. So the rule
-# is corpus-wide now, and the exception table below is the small part:
+# This class of defect had already been patched four times, one path (or one entry point)
+# at a time (B182, B188, the three B-309 follow-ups, B-842) and grew straight back, because
+# the bug is not in those paths: it is that ANY unpinned fixture path, fingerprinted from
+# ANY entry point, inherits the ambient umask or checkout mechanism. So the rule is
+# corpus-wide, applied by ONE function (``tests/_fixtureperms.pin_fixture_modes()``, so a
+# new entry point calls it rather than re-deriving the chmod loop) -- and the exception
+# table there is the small part:
 #
 #     every directory  ->  0700
-#     every file       ->  0600     (0700 when git records it executable -- see below)
+#     every file       ->  0600     (0700 when git records it executable)
 #
 # Consequence, and the point of the exercise: a fixture's audit verdict is a function of
 # its CONTENT alone. No finding anywhere in the corpus is permission-derived unless a
-# fixture explicitly asks for that in ``_PINNED_FIXTURE_MODES``. ``tests/
-# test_fixture_perm_determinism.py`` enforces it, so patch number five cannot be a
+# fixture explicitly asks for that in ``tests/_fixtureperms._PINNED_FIXTURE_MODES``.
+# ``tests/test_fixture_perm_determinism.py`` enforces it, so patch number five cannot be a
 # one-path patch.
 #
-# WHY THE EXECUTABLE BIT IS PRESERVED RATHER THAN FLATTENED TO 0600: owner-execute is the
-# one bit git DOES track. Clearing it on a tracked-executable fixture would flip its index
-# mode 100755 -> 100644, so every test run would leave the working tree dirty. Deriving the
-# replacement mode from the bit already on disk is safe for the same reason it is
-# necessary: umask can only ever CLEAR bits, and no plausible umask clears owner-execute,
-# so this bit -- unlike every other -- means the same thing on every machine.
-#
-# WHY TIGHT (0700/0600) RATHER THAN THE RUNNER'S 0755/0644: tight is the mode a real
-# OpenClaw home should have, it is what the pre-existing pins (openclaw.json, B188's state
-# DB, the three B-309 log dirs) already chose, and it is the only choice that leaves NO
-# permission-derived finding in the corpus for a future umask to flip. Under 0755/0644 the
-# B19 "group/world-readable at rest" branch still fires on 34 homes purely as an artifact
-# of the checkout, which is noise in every score comparison those fixtures take part in.
+# The mode values, the exception table, ``expected_mode()`` and ``iter_fixture_paths()``
+# all live in ``tests/_fixtureperms.py`` now (imported above), not here -- see that
+# module's docstring for why (B-842: the standalone ``tests/
+# test_finding_fingerprint_manifest.py --write`` path must pin the exact same modes this
+# fixture does, and can only do that by calling the same function).
 # ==========================================================================================
-
-_DIR_MODE = 0o700
-_FILE_MODE = 0o600
-_EXEC_FILE_MODE = 0o700
-
-
-# The exceptions: fixtures whose POINT is a specific mode, so the corpus-wide rule above
-# would silently disarm them. Keep this list SHORT -- an entry here is a claim that some
-# test asserts a permission-derived outcome on this exact shipped path, and
-# ``test_fixture_perm_determinism.py`` fails on a stale entry.
-#
-# Note what is NOT here, because the names invite the mistake:
-# ``bad_b283_group_allowall``, ``bad_risk21_group_proven_exec``,
-# ``clean_risk21_group_allowlisted``, ``clean_risk21_group_low_blast`` and
-# ``traj_channel_group_ingress`` are all about a CHAT-channel group policy / a
-# ``telegram:group:`` session-key origin -- not about POSIX groups -- and
-# ``bad_b86_import_from_writable`` is a static-AST finding about a writable sys.path
-# entry, which never stat()s anything. None of them needs a loose mode; the group-write
-# findings they used to emit here were pure umask noise (and were already absent on CI).
-_PINNED_FIXTURE_MODES = {
-    # B182 -- LOOSE ON PURPOSE. The ClawHub CLI token store this fixture exposes to other
-    # local users IS the finding, so under the corpus-wide 0600 the bad fixture would
-    # stop being bad and B182 would return PASS.
-    # ``tests/test_b182_clawhub_token_store.py::
-    #   test_the_shipped_bad_fixture_demonstrates_the_finding_in_place`` holds this pin.
-    "bad_b182_clawhub_token_store/.config/clawhub/config.json": 0o644,
-
-    # B-127 -- an ORDINARY pin now, and the history is worth keeping because the coupling
-    # it used to describe was a real hazard.
-    #
-    # ``tests/test_b20.py::test_b20_clean_fixture_singleton_group_write_end_to_end`` used
-    # to be the only test that chmod'd a SHIPPED fixture at runtime -- 0664 to drive B20's
-    # singleton group-write branch through the real collect() path, restored to 0644 in a
-    # ``finally``. So this pin had to AGREE with that restore value, or the file's mode --
-    # and therefore the whole corpus fingerprint -- depended on whether test_b20 had
-    # already run, i.e. on test selection and ordering.
-    #
-    # Isolated 2026-09-03: that test now copies the fixture into ``tmp_path`` and chmods
-    # the COPY, so nothing mutates the corpus in place and this value stands on its own.
-    # The ordering dependency is gone, and with it a race that a parallel runner would
-    # have made non-deterministic rather than merely order-dependent: a ``finally``
-    # restores within one process, but cannot hold a shared file steady while another
-    # worker walks the corpus for the fingerprint manifest.
-    #
-    # Verified by measurement, not by reading: the corpus mode-fingerprint is byte-equal
-    # before and after running test_b20, test_b182 and the fingerprint manifest together
-    # (729 tests), and no test anywhere still chmods a path rooted at ``fixtures/``.
-    "clean_b127_singleton_group_write/workspace/MEMORY.md": 0o644,
-}
-
-# Superseded by the corpus-wide rule, recorded so the history is not lost: openclaw.json
-# (pinned 0600 since the first at-rest check), ``clean_b188_state_db/state`` + its
-# ``openclaw.sqlite`` (0700/0600, so the corpus actually EXERCISES B188 instead of exiting
-# at its "no state database found" branch), and the three B-309 C-135 follow-ups
-# ``clean_i025_b164_{residual,own_api_log,host_mention_no_verb}_no_cap/logs`` + their
-# ``app.log`` (0700/0600, to keep an unrelated umask-dependent B19 WARN out of the score
-# comparison against ``clean_i025_b164_baseline``). All five now get exactly those modes
-# from the default, so they need no entry -- which is the whole point.
-
-
-def expected_mode(path: Path) -> int:
-    """The deterministic mode *path* must carry, by the rule documented above.
-
-    Shared with ``tests/test_fixture_perm_determinism.py`` so the pin and its guard can
-    never drift apart -- they are the same function.
-    """
-    rel = path.relative_to(_FIXTURES).as_posix()
-    pinned = _PINNED_FIXTURE_MODES.get(rel)
-    if pinned is not None:
-        return pinned
-    if path.is_dir():
-        return _DIR_MODE
-    return _EXEC_FILE_MODE if (path.stat().st_mode & 0o100) else _FILE_MODE
-
-
-def iter_fixture_paths():
-    """Every real fixture path, deepest-last. Symlinks are skipped: ``Path.chmod()``
-    follows them, so chmod'ing one would change the mode of its target rather than of the
-    link, and a link that ever points outside ``fixtures/`` would reach out of the corpus.
-
-    There ARE symlinks now -- B-747 added two (the editable-checkout-beside-a-wheel pair),
-    where the symlink is not incidental but the whole subject of the fixture. Both point
-    inside their own home, and ``tests/test_b746_b747_corpus_fixtures.py`` asserts that
-    property so a future one cannot quietly point elsewhere. Skipping them stays correct
-    either way, and costs nothing: ``rglob`` does not descend into a symlinked directory,
-    so each target is still visited by its own real path and still gets its mode pinned.
-    """
-    for p in sorted(_FIXTURES.rglob("*")):
-        if p.is_symlink():
-            continue
-        if p.is_dir() or p.is_file():
-            yield p
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _deterministic_fixture_perms():
     """Pin fixture perms corpus-wide so at-rest permission checks are deterministic
-    regardless of the umask at checkout time."""
-    _FIXTURES.chmod(_DIR_MODE)
-    for p in iter_fixture_paths():
-        p.chmod(expected_mode(p))
+    regardless of the umask (or checkout mechanism) at checkout time. Delegates to
+    ``tests/_fixtureperms.pin_fixture_modes()`` -- see that module for why this must be
+    the only place the chmod loop is written."""
+    pin_fixture_modes()
     yield
 
 
@@ -256,3 +177,107 @@ def _isolate_local_store(tmp_path_factory):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+# ==========================================================================================
+# HERMETICITY LEDGER -- opt-in, two halves, one sys.addaudithook (PEP 578) per process.
+#
+# Off by default: CSC_HERMETICITY_LEDGER unset means pytest_configure returns immediately
+# and nothing else in this block runs -- zero cost on the default `pytest -q` path, and
+# NOT wired into it. This is a `pytest_configure(config)` HOOK, not a fixture: it must run
+# before any module-level subprocess call, and fixtures (even session-scoped, autouse ones)
+# run per-test, too late for that.
+#
+# PARENT HALF (here): write tests/_hermledger.SITECUSTOMIZE_SOURCE to a fresh session temp
+# dir, point CSC_HERM_LEDGER_PATH + PYTHONPATH at it so every CHILD Python process picks it
+# up via the interpreter's own sitecustomize auto-import, and exec the identical source
+# in-process too, so the parent's own filesystem calls are captured too.
+#
+# CLAWSECCHECK-hermeticity (2026-09-21) shipped this half INERT AS A GATE, despite the
+# comment above's original claim that the parent's calls are "on the ledger as well": the
+# exec'd hook buffered events in memory and only ever flushed them via `atexit`, which
+# fires after the WHOLE pytest process exits -- i.e. after tests/test_hermeticity_gate.py's
+# comparator test had already run and passed. An in-process violation (a test calling
+# `open()`/`os.mkdir()` directly, no subprocess involved -- as opposed to the CHILD half's
+# subprocess events, which land in ledger.tsv well before the comparator runs, because the
+# child process has already exited by the time `subprocess.run`/`Popen.wait` returns to the
+# test that spawned it) never reached the same invocation's verdict. Fixed the same day:
+# `pytest_runtest_teardown` below calls the exec'd namespace's own `_csc_herm_flush` after
+# EVERY test, so by the time the comparator (itself just another test, running only after
+# every earlier test's teardown has completed) reads ledger.tsv, the parent's own
+# filesystem calls are genuinely on it -- feeding the gate, not just after-the-fact
+# forensics recovered once the process has already exited.
+# See tests/test_hermeticity_gate.py::test_parent_side_read_violation_caught_same_invocation
+# and ::test_parent_side_write_violation_caught_same_invocation for the regression tests.
+#
+# CHILD HALF: tests/_hermledger.py's module docstring -- the generated sitecustomize.py
+# installs one audit hook on a small fixed event set, buffers unique (category, path)
+# pairs in memory, and flushes via atexit (once, at process exit) with a single
+# append-mode write; the PARENT below reuses the identical `_csc_herm_flush` but calls it
+# repeatedly (once per test) instead, which is why `_hermledger._csc_herm_flush` clears its
+# buffer after a successful write -- see that module for why. See tests/_hermledger.py's
+# module docstring for the full "what this does and does not cover" account too, including
+# why this pattern is safe here despite matching a shape (sitecustomize.py + PYTHONPATH
+# injection) this project's OWN product treats as a supply-chain persistence red flag
+# (B99/B335/B375).
+#
+# tests/test_hermeticity_gate.py is the comparison; it no-ops (skip) whenever this is off.
+def pytest_configure(config):
+    if not os.environ.get("CSC_HERMETICITY_LEDGER"):
+        return
+    herm_dir = tempfile.mkdtemp(prefix="csc-herm-")
+    sitecustomize_path = Path(herm_dir) / "sitecustomize.py"
+    sitecustomize_path.write_text(_hermledger.SITECUSTOMIZE_SOURCE, encoding="utf-8")
+    ledger_path = str(Path(herm_dir) / "ledger.tsv")
+    os.environ["CSC_HERM_LEDGER_PATH"] = ledger_path
+    # Prepended (not appended): a child's own sitecustomize.py, if any, should not shadow
+    # this one -- there being none in this repo's own tests today, but PYTHONPATH order is
+    # the whole mechanism, so it is deliberate rather than incidental.
+    os.environ["PYTHONPATH"] = herm_dir + os.pathsep + os.environ.get("PYTHONPATH", "")
+    # Installed by EXEC of the exact source, not `import sitecustomize` -- a real
+    # sitecustomize module elsewhere on sys.path may already be cached in sys.modules from
+    # interpreter startup, and a plain `import` would silently return that cached module
+    # instead of ours. exec() against a private namespace has no such cache to collide with.
+    parent_ns = {"__name__": "csc_herm_parent_sitecustomize"}
+    exec(  # intentional: runs the identical source written out for children, here too
+        compile(_hermledger.SITECUSTOMIZE_SOURCE, str(sitecustomize_path), "exec"),
+        parent_ns,
+    )
+    # Stashed so `pytest_runtest_teardown` below can call the SAME function repeatedly
+    # (once per test) instead of relying solely on its `atexit` registration, which is
+    # what makes this half of the ledger usable as a gate rather than only forensics --
+    # see the parent-gating fix note above.
+    config._csc_herm_flush = parent_ns["_csc_herm_flush"]
+    config._csc_herm_dir = herm_dir
+
+
+def pytest_runtest_teardown(item):
+    """Flush the PARENT half's buffered hermeticity events after every test.
+
+    CLAWSECCHECK-hermeticity's parent-gating fix (see the comment block above
+    ``pytest_configure``): the exec'd hook's own ``atexit`` registration fires only once
+    the whole pytest process exits, which is after the comparator test has already run.
+    Flushing here, after every test's teardown, means that by the time ANY later test in
+    the same invocation runs -- in particular the comparator, which is itself just another
+    test -- every earlier test's parent-side filesystem calls are already in ledger.tsv.
+
+    Flushing per test (rather than once, lazily, right before the comparator reads the
+    file) also keeps each recorded event's ``PYTEST_CURRENT_TEST`` attribution accurate:
+    a single end-of-run flush would stamp every prior test's events with whatever test
+    happened to trigger that one flush -- the comparator's own node id -- which would
+    make every parent-attributed violation across an entire run look like it came from
+    the comparator itself.
+
+    A single ``getattr`` is the only cost when the ledger is off (``config`` then has no
+    ``_csc_herm_flush`` attribute at all), keeping the "zero cost on the default `pytest
+    -q` path" property this instrument is built around.
+    """
+    flush = getattr(item.config, "_csc_herm_flush", None)
+    if flush is not None:
+        flush()
+
+
+def pytest_unconfigure(config):
+    herm_dir = getattr(config, "_csc_herm_dir", None)
+    if herm_dir:
+        shutil.rmtree(herm_dir, ignore_errors=True)

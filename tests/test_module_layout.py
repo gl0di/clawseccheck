@@ -28,7 +28,11 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 import clawseccheck.checks as checks_mod
+
+pytestmark = pytest.mark.mechanical
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PKG = REPO_ROOT / "clawseccheck"
@@ -40,6 +44,62 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
+    # CLAWSECCHECK-B-887 (2026-09-23): 1,102 -> 1,263 lines (net +161). Closes the
+    # case-fold gap that let three prior rounds each break the invariant that a
+    # re.I-compiled pattern's confusable fold must commute with case: capital
+    # Cyrillic/Greek lookalikes added to _CONFUSABLES (14 code points, mirroring
+    # existing lowercase entries), the I1 upper-closure assert that keeps the table
+    # honest, the derived _PATTERN_CASE_CLOSURE map for capital-only lookalikes, and
+    # `fold_pattern()` — the single function every B63-family regex now compiles
+    # through instead of `normalize_for_scan`. Over budget by 56 lines; not trimmed
+    # because the added comments are the proof-of-invariant documentation the design
+    # review asked for (three retracted prior attempts are exactly what this module's
+    # own docstrings warn the next editor away from repeating) — shortening them to
+    # slip under the cap would remove the reasoning, not the risk. Split candidate:
+    # none identified — this is one cohesive de-obfuscation table plus its two
+    # derived closure structures, and splitting the invariant assert from the table
+    # it guards would just relocate the coupling, not remove it.
+    "textnorm.py": "~1,263 lines — the confusable-fold table (_CONFUSABLES), its "
+                   "case-closure invariant and derived pattern-closure map, and "
+                   "fold_pattern(). Over budget by 63 lines since CLAWSECCHECK-B-887. "
+                   "Tracked debt, not a design statement.",
+    # B-917 (2026-09-23): 1,200 -> 1,461 lines. `_FileFacts` gained `locate()`/`Loc`/
+    # `loc_eq` -- a SECOND path resolver alongside `resolve()`/`_Path` (the B-638 proof,
+    # which stays byte-identical and untouched), because a loader-sink/staged-import
+    # correlation needs to know WHERE a path is anchored (FILE/CWD/ABS/TEMP/HOME/SYM),
+    # not just whether it resolves inside the artifact. `ShippedArtifact.classify()` and
+    # the `PathFacts` single-file convenience wrapper are the other two public additions.
+    # Kept in this one module rather than split out: `locate()` shares `sole()`/`dotted()`/
+    # `literal()`/the import table with `resolve()` on the same `_FileFacts` instance, and
+    # a caller (skillast.py's new pass) needs both together.
+    # Restated 2026-09-23, B-917 fix round 1 -- was ~1,461; +59 lines for the two review
+    # gaps: `locate()`'s Name branch gained the LEGB fallback b917-design.md 2.1 itself
+    # specifies (`_legb_lookup`), guarded by `_legb_blocked` (an attribute store or a
+    # `_tampers()` spelling anywhere in the file refuses the fallback rather than risk an
+    # unsound resolution) -- `resolve()` is untouched, so B-638's proof is unaffected.
+    # Restated 2026-09-23, B-917 fix round 2 -- was ~1,520; +29 lines for a single
+    # C-135 review finding (BLOCKER, introduced by fix round 1 above): the LEGB fallback
+    # gated itself on `sole() is None`, which is also true of a scope that DOES bind the
+    # name via a non-assign form (a parameter, a for/with/comprehension target, an
+    # except-as name, a nested def/class, an import) -- that binding makes the name local
+    # to the WHOLE scope in real Python, so the fallback must stop there, never walk past
+    # it into an enclosing/module scope. Both the `locate()` call site and each step of
+    # `_legb_lookup()`'s own walk now gate on "does this scope have any record for the
+    # name at all" (`records(scope).get(name)`) instead. No new helper; both sites grew a
+    # few lines of guard plus documentation of why sole()-is-None was the wrong condition.
+    "shippedexec.py": "~1,549 lines — B-638's shipped-exec containment proof "
+                       "(`resolve()`/`_Path`, untouched) plus B-917's location resolver "
+                       "(`locate()`/`Loc`/`loc_eq`, `ShippedArtifact.classify()`, "
+                       "`PathFacts`) for the loader-sink/staged-import correlation, plus "
+                       "the fix-round-1 LEGB fallback (`_legb_lookup`/`_legb_blocked`), "
+                       "plus fix-round-2's any-record scope gate on that same fallback. "
+                       "Over budget by 349 lines since B-917. Split candidate: the two "
+                       "resolvers do not share state beyond `_FileFacts` itself and could "
+                       "separate into a `locations.py` leaf; not attempted here because "
+                       "`locate()` reuses `resolve()`'s exact `sole()`/`dotted()`/"
+                       "`literal()`/import-table machinery, and the B-917 Pulse task's "
+                       "own consistency pin (locate() vs resolve() over the same sources) "
+                       "reads clearer with both on one instance.",
     # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
     # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
     # into self_test_corroboration()/render_self_test_corroboration()/
@@ -76,10 +136,41 @@ _EXEMPT = {
                   "`assessment_coverage()`. Over budget by 17 lines since B-558 added "
                   "`layer_coverage`. Split candidate named above; tracked debt, not a "
                   "design statement.",
-    "checks/_config.py": "~5,743 lines (restated 2026-09-16, B-795 — was ~5,191, +11% "
-                         "stale) — the config-hardening topic (29 checks + helpers); "
-                         "topic-faithful and over budget by design. A finer split is a "
-                         "later cycle (I-022 secondary target).",
+    # Restated 2026-09-23 for the task/b-852 -> integration/4.3.0 merge: two independent
+    # per-branch entries had each gone stale in isolation, neither seeing the other's
+    # growth. B-852's own lineage (rounds 3, 7-11) reached ~1,970 lines (over budget by
+    # 718) via a total cross-database byte budget for read_compiled_tool_descriptions(),
+    # the sequential SQLite content-drain phase, and that drain's own
+    # ordering/fairness fixes (cum_bytes-descending, EARNED-bytes keying, a per-pass
+    # equal-share cap replacing a fixed-fraction one, then a two-sweep
+    # equal-share-then-smallest-first pass) — see git history for that lineage's own
+    # entry text before this restatement. CLAWSECCHECK-B-845's own lineage (round 3)
+    # reached ~1,251 lines (over budget by 51) via the FIFO/sidecar stat-guard
+    # (`_refuse_non_regular_sqlite_paths`, wired into `_open_readonly`) closing a hang
+    # in the same per-agent auth-profile-store code path its own VIEW-refusal fix
+    # closed. Merging both branches' code into one file lands at the actual combined
+    # total below — restating the count, not excusing new debt.
+    "trajectorystore.py": "~2,168 lines — SQLite-trajectory-container corroboration "
+                          "(corroborate()), the B-811/B-852 event_json content readers "
+                          "(read_compiled_tool_descriptions() and its streaming/drain "
+                          "core), and the shared schema-verification/hardened-open "
+                          "layer (`_open_readonly`/`_table_kind`/"
+                          "`_open_and_verify_table`) a second table "
+                          "(`auth_profile_store`) now reuses. Over budget by 968 lines. "
+                          "Split candidates, neither attempted here (mid-merge is not "
+                          "the moment to also restructure the module): a "
+                          "`trajectorycontent.py` leaf for the event_json content "
+                          "readers (~950 lines would remain, per B-852's own analysis), "
+                          "or a `trajectoryschema.py` leaf for just the "
+                          "schema-verification layer (~900 lines would remain, per "
+                          "B-845's own analysis) — either narrows this file with no "
+                          "import cycle.",
+    "checks/_config.py": "~8,019 lines (restated 2026-09-26, B397 — was ~6,986, +15% "
+                         "stale; earlier 2026-09-21 for the 4.3.0 wave build — was "
+                         "~6,302, +11% stale; earlier 2026-09-18, B382 — ~5,743) — the "
+                         "config-hardening topic (30 checks + helpers); topic-faithful "
+                         "and over budget by design. A finer split is a later cycle "
+                         "(I-022 secondary target).",
     # Restated 2026-09-04 (B-727): 5,662 -> 6,172. The tolerance is min(25%, 500 LINES),
     # so on a file this size it is the 500-line cap that binds, and the claim had already
     # drifted ~490 before this change added ~20 — i.e. the number is being corrected, not
@@ -88,11 +179,17 @@ _EXEMPT = {
     # says it is not alone — `checks/_mcp.py` sits at 97% of its own tolerance, and five
     # more modules are past 70%. That whole table needs a restate-and-reconsider pass, not
     # one entry at a time as each next commit trips it.
-    "checks/_lifecycle.py": "~7,329 lines (restated 2026-09-17 — was ~6,779) — the "
-                            "approval / update-pinning / self-modification / supply-chain "
-                            "topic (17 checks + helpers); topic-faithful and over budget "
-                            "by design. A finer split is a later cycle.",
-    "checks/_content.py": "~15,129 lines (restated 2026-09-16, C-437 — was ~14,623) — the "
+    "checks/_lifecycle.py": "~8,208 lines (restated 2026-09-26, B396 — was ~7,329; "
+                            "check_paired_node_skill_coverage plus its own faithful-port "
+                            "helpers and a dense dist-grounding comment block added "
+                            "~880 lines) — the approval / update-pinning / "
+                            "self-modification / supply-chain topic (18 checks + "
+                            "helpers); topic-faithful and over budget by design. A finer "
+                            "split is a later cycle.",
+    "checks/_content.py": "~17,155 lines (restated 2026-09-26 on integration/4.3.0 after the "
+                          "fleet-FP fixes — B63 post-compound anchor, B63 tell-directive "
+                          "residual disclosure, B58 occurrence count; was ~16,589, and "
+                          "~16,459 before B-886's fence leg) — the "
                           "content-security ring: 51 check functions, 178 "
                           "private helpers and 241 module regexes. Restated 2026-09-06 "
                           "(C-432), and the previous reason is RETRACTED rather than "
@@ -120,11 +217,40 @@ _EXEMPT = {
                           "own change with its own verification (byte-identical audit "
                           "output at every step, as I-022-R2 did); this entry's job is to "
                           "stop recording a non-reason as a decision.",
-    "checks/_vet.py": "~7,080 lines — the --vet entry engine (vet_skill/vet_source/"
+    "checks/_vet.py": "~10,236 lines (restated 2026-09-26 on integration/4.3.0 after "
+                      "merging three fleet-FP fixes — was ~9,185: the vet-example-prohibition "
+                      "round 2 scoping of the scanner-finding-line recognizer into a caller-"
+                      "opt-in `scanner_finding_line_ok` parameter plus its WARN-not-PASS "
+                      "sibling (~540 lines, mostly docstring), the table-cells GFM "
+                      "header/delimiter pair walk with _gfm_row_cell_count (~52 lines), and "
+                      "the crontab link-label demotion's small CommonMark-faithful parser "
+                      "(escape parity, destination close, code spans; ~206 net lines) — "
+                      "no new detection, existing arms' dampening made sound); "
+                      "and before that restated 2026-09-24, B-879 round 5 — was ~9,165; "
+                      "decision (e)'s `_authkey_block_intent` DOC_SIGNAL fold for the "
+                      "inline-code-span path, plus its docstring, added ~20 lines); and "
+                      "before that restated 2026-09-24, CLAWSECCHECK-B-879 round 4 — "
+                      "was ~8,461; the authkey grammatical read "
+                      "(_authkey_block_intent/_pos_in_skill_md_section/"
+                      "_literal_key_functional and the _authkey_persistence_hits rewiring) "
+                      "added ~300 lines); and before that "
+                      "restated 2026-09-23, CLAWSECCHECK-B-895 — was "
+                      "~7,922, see the B-895 restatement below; and before that "
+                      "restated 2026-09-23, CLAWSECCHECK-B-649 port to "
+                      "integration/4.3.0 — was ~7,638) — the --vet entry engine "
+                      "(vet_skill/vet_source/"
                       "detect_vet_type/check_installed_skills + SKILL_CONTENT_RING + the "
-                      "shared effect/sink analysis); consumes the content ring. Restated "
+                      "shared effect/sink analysis); consumes the content ring. Crossed "
+                      "the tolerance with B395 (check_installed_skill_content_coverage; "
+                      "ported from task/b-649's B383, re-IDed because B383 was already "
+                      "taken on this base), "
+                      "placed next to check_installed_skills because it reads the exact "
+                      "same ctx.skill_coverage_gaps collector state B13 does — a genuine "
+                      "second check, not padding — the module now holds TWO check "
+                      "functions, not one. Restated "
                       "2026-09-07 with the shape measured rather than described: "
-                      "ONE check function, TWO vet entry points, 62 private helpers. For a "
+                      "(at the time) ONE check function, TWO vet entry points, 62 private "
+                      "helpers. For a "
                       "file in checks/, that ratio is the finding — this is not a place "
                       "where checks live, it is the machinery one entry point needs, and "
                       "the earlier reading of it as an over-budget check module was the "
@@ -142,7 +268,25 @@ _EXEMPT = {
                       "So the split argument stands and is now specific: the honesty and "
                       "fence layers are what to lift out, not an arbitrary halving. Same "
                       "sequencing as checks/_content.py — that one is twice this size and "
-                      "has the simpler seam, so it goes first.",
+                      "has the simpler seam, so it goes first. "
+                      "Restated 2026-09-22 (B-857): 7,080 -> 7,638. The module had already "
+                      "drifted to 7,578 (unrestated since the count above) before this task; "
+                      "it added the ~60 lines closing a B-745 review gap — "
+                      "_B13_WINNER_ONLY_BUCKETS and its per-site pointer comments, "
+                      "explicitly declaring three late-registered B13 buckets as "
+                      "winner-only rather than leaving that undeclared. Verdict text and a "
+                      "named contract, not new detection; the split argument above is "
+                      "unchanged. "
+                      "Restated 2026-09-23 (CLAWSECCHECK-B-895): 7,922 -> 8,461. Split "
+                      "the paste/exfiltration-host reach check into an anchor-provenance "
+                      "form (_exfil_host_reach_anchors, the _exfil_host_hits crit_anchors "
+                      "sink, exfil_crit_anchors_by_skill in check_installed_skills) plus a "
+                      "same-sized residual comment recording three retracted carve-outs and "
+                      "a reproduced evasion. No verdict moved — every existing FAIL/WARN is "
+                      "byte-identical — only which disclosure sentence, if any, a paste-host "
+                      "CRITICAL's `fix` text carries. Same HONESTY family as the rest of "
+                      "this entry, not new detection; the split argument above is "
+                      "unchanged.",
     "checks/_host.py": "~1,779 lines — the host-monitor / incident-readiness topic "
                        "(B10/B16/B50-B54 + the attestation helpers). Sat at EXACTLY 1,200 "
                        "for a while, i.e. one line under a tripwire, and crossed it with "
@@ -171,8 +315,17 @@ _EXEMPT = {
     # `_mcp.py` has owed since I-022 is still owed and is now the second-largest piece of
     # structural debt in the tree after `_content.py`; vet_plugin alone (the dispatcher,
     # its tree sweep and the plugin sweep) is a coherent unit that could leave.
-    "checks/_mcp.py": "~8,625 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
-                      "topic-faithful and over budget by design. Restated 2026-09-16 "
+    "checks/_mcp.py": "~9,871 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
+                      "topic-faithful and over budget by design. Restated 2026-09-24 "
+                      "(+515 lines since the 2026-09-23 restatement below, accumulated "
+                      "across many small fixes landing in the 4.3.0 wave rather than one "
+                      "large change — B-948's normalize-before-scan fix among the most "
+                      "recent — not investigated commit-by-commit; the trend itself is the "
+                      "signal, not any single contributor). Previously restated 2026-09-23 "
+                      "(B-831 added a second, appServer-level detection branch to B353 "
+                      "plus its grounding helpers, +517 lines, and its round-1 fix ported "
+                      "the vendor's exec-policy layering, +214) — previously restated "
+                      "2026-09-16 "
                       "(B-661 added a config-found guard to three checks, +510 lines) — "
                       "originally restated 2026-09-06 "
                       "(C-432) with the measurement the old 'a finer split is a later "
@@ -193,7 +346,8 @@ _EXEMPT = {
                       "_content.py first, learn what the shared-machinery module wants to "
                       "look like, then decide here. That is a sequencing decision, not a "
                       "deferral for its own sake.",
-    "checks/_egress.py": "~4,736 lines (restated 2026-09-12, C-412 — was ~4,077) — the "
+    "checks/_egress.py": "~5,267 lines (restated 2026-09-21 for the 4.3.0 wave build — "
+                         "was ~4,736) — the "
                          "egress-hardening topic (proxy/TLS/SSRF/data-at-rest + "
                          "web-fetch/log checks). Crossed the budget with B178's "
                          "check_provider_baseurl (models.providers.<id>.baseUrl "
@@ -201,7 +355,29 @@ _EXEMPT = {
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~4,458 lines (restated 2026-09-13, B-672/B-663 — was ~3,932) — "
+    "checks/_shared.py": "~6,205 lines (restated 2026-09-24, B-879 round 7 — was ~6,074; "
+                         "generalized (d′)'s cloud-recovery principle from INVERTING verbs "
+                         "to ordinary EXEC verbs (_pb_chunk_raw_pre/_pb_strip_chunk_openers/"
+                         "_PB_COORD and _sentence_directed's new (d″) loop) to close a "
+                         "severity-downgrade evasion the final pre-merge review found in "
+                         "rounds 5/6's shared _open_cloud, and added six more single-word "
+                         "prepositions to _PB_FRONTED_PREP — ~131 net lines) and before "
+                         "that (round 6 added the fronted-preposition-scope fix without "
+                         "restating this entry — the drift stayed within "
+                         "test_exempt_line_claims_match_reality's tolerance) and before "
+                         "that (restated 2026-09-24, B-879 round 5 — was ~5,805; "
+                         "replaced round 4's enumerated negation-delimiter set with a "
+                         "CLASS rule (_neg_scan_ex/_pb_has_content), added the GLUED-"
+                         "compound/apostrophe-split tokenizer refinements, fixed "
+                         "_PB_ABBREV_RE's case-sensitivity bug, and added the "
+                         "_carries/_soft_break cross-sentence carry machinery — ~220 net "
+                         "lines) and before that (restated 2026-09-24, CLAWSECCHECK-B-879 "
+                         "round 4 — was ~5,014; added the ProseBinding clause-role primitive "
+                         "(_neg_scan/_prose_binding and their tokenizer/grammar helpers) "
+                         "the authkey grammatical read in checks/_vet.py is built on — "
+                         "~700 lines) and before that (restated 2026-09-21 for the 4.3.0 "
+                         "wave build — "
+                         "was ~4,458) — "
                          "the leaf every checks/_<topic> module (and "
                          "risk.py) imports from: tool-hint constants, MCP-server helpers, "
                          "and _trifecta_legs, the single shared leg definition A1 and B46 "
@@ -222,7 +398,8 @@ _EXEMPT = {
                          "and risk.py, the same cross-topic-leaf shape B-247 already "
                          "established. A finer split (the grounding prose into a doc, the "
                          "tables kept here) is a later cycle, not this one.",
-    "checks/_capability.py": "~2,460 lines — the declared-vs-effective capability / "
+    "checks/_capability.py": "~3,514 lines (restated 2026-09-25, B-942 — was ~2,977) — "
+                             "the declared-vs-effective capability /"
                              "manifest topic (B44/B55/B68/B84/B326 + helpers). Crossed the "
                              "budget with CLAWSECCHECK-B-376/B-369's B55 WARN->FAIL "
                              "escalation: an independent C-135 adversarial pass found and "
@@ -241,8 +418,20 @@ _EXEMPT = {
                              "wired into _b68_fs_tools_granted plus grounding comments on "
                              "why it's WARN-only and correcting a prior false "
                              "\"per-agent layers can only narrow\" claim in two docstrings. "
+                             "Grew again with CLAWSECCHECK-F-199: check_node_"
+                             "allowskills_default_on (B386), the sibling of B71's "
+                             "gateway.nodes.commands dual-shape read for the "
+                             "gateway.nodes.allowSkills / legacy skills.enabled rename. Grew "
+                             "again with B-942: G1 (_b68_fs_tools_granted) previously read "
+                             "workspace confinement at the GLOBAL scope only, so a per-agent "
+                             "tools.allow/profile grant paired with that same agent's own "
+                             "tools.fs.workspaceOnly stayed a blanket WARN; a new "
+                             "confine_per_agent flag plus the shared _b68_scope_confined "
+                             "helper (also now reused by _fs_scope_grants, replacing its "
+                             "own inline copy) resolve confinement per scope instead, with "
+                             "the grounding comments that decision needed to stay auditable. "
                              "A finer split is a later cycle.",
-    "checks/_agents.py": "~1,798 lines (restated 2026-09-11, C-411 — was ~1,358) — "
+    "checks/_agents.py": "~2,239 lines (restated 2026-09-19, B-833 — was ~1,798 on 2026-09-11, ~1,358 before C-411) — "
                         "the multi-agent / subagent-exposure topic "
                         "(check_agent_separation, check_untrusted_context, "
                         "check_subagents_allow_agents, etc.). Crossed the budget with "
@@ -251,7 +440,10 @@ _EXEMPT = {
                         "(an embedded sub-agent trusting untrusted WORKSPACE content) "
                         "matches this module's existing threat model, not a capability/"
                         "blast-radius one. A finer split is a later cycle.",
-    "checks/__init__.py": "~1,490 lines — the aggregator (every check import + the CHECKS "
+    "checks/__init__.py": "~1,869 lines (restated 2026-09-24, CLAWSECCHECK-B-879 round 4 — "
+                          "was ~1,490; added the two _shared/_vet import blocks for "
+                          "ProseBinding/_prose_binding and the authkey grammatical-read "
+                          "names) — the aggregator (every check import + the CHECKS "
                           "list + run_all). Its length is driven directly by the NUMBER OF "
                           "CHECKS (one import line per check, by design — see §3.1-a: no "
                           "narrow __all__, every name must stay importable), so it grows by "
@@ -299,23 +491,193 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~7,875 lines (restated 2026-09-16, B-643 — was ~7,267; the addition is "
-                   "two more taint-propagation node types, with/for statement bindings in "
-                   "_external_tainted_names, not a new parser family) — the "
+    "skillast.py": "~17,660 lines (further restated 2026-09-25, merging two concurrent "
+                   "growth lines from a common 16,439-line baseline: B-998 (+676, landed "
+                   "on integration/4.3.0 first) added `hardcoded_env_secret_is_inert` and "
+                   "its G0-G4 helper functions -- a self-contained positive reachability "
+                   "proof, in checks/_vet.py's own B-998 arm, that every "
+                   "HARDCODED_PROVIDER_SECRET env-write a test-fixture-named file was "
+                   "flagged for never reaches a network-send call, a return/yield, or any "
+                   "other node the proof cannot positively clear -- replacing the two "
+                   "earlier, retracted rounds (a bare basename carve-out, then a "
+                   "file-wide _EXFIL_RE token scan) neither of which could distinguish a "
+                   "genuinely inert test fixture from one that actually laundered the "
+                   "value to a sink. B-986 round 5 (+545 across P1-P5, merged in from "
+                   "fix/b-986-v2) closed an operator-reference exemption bypass in the "
+                   "loop-path in-cluster-credential exemption's DIRECT role: the splice "
+                   "only ever recognized a bare $var/${var} reference, leaving a "
+                   "parameter-expansion operator's own suffix as dangling literal text "
+                   "once substituted, which still read as the clean certified token to "
+                   "the credential-path regex's own substring-search content check. Fix: "
+                   "a real bare-vs-operator classifier (shellwords.param_refs, in "
+                   "shellwords.py, not counted here, itself built on P1-P3's real curl "
+                   "argv parser and shell word/command splitter added the same round) "
+                   "replaces the splice's use of the loose legacy regex, an "
+                   "operator-reference-span refusal was added to the shared exemption "
+                   "engine (fail-closed-convict outside every TLS-material value span), "
+                   "and a TLS-material flag's own position-only excusal was narrowed to "
+                   "exclude a live command substitution hiding inside that same value; "
+                   "three now-dead enumeration-based helper functions (~180 lines) were "
+                   "retired in the same change, offsetting most of the new mechanism's "
+                   "own size (this is round 5 of the same bypass class; each prior "
+                   "round's own repro and fix stays in place as a regression record, the "
+                   "same convention the rest of this file already follows). Neither line "
+                   "adds a new parser family -- B-998 extends checks/_vet.py's existing "
+                   "reachability layer and B-986 extends the existing shell "
+                   "loop-credential-taint engine's exemption logic in place -- so no "
+                   "split is reconsidered for either. "
+                   "Restated 2026-09-24d on top of "
+                   "the 2026-09-24c restatement immediately below: B-953's fix (+107 net) "
+                   "added two disjoint list-mutating-method sets to "
+                   "`_single_list_bindings_local` -- `_ARGV0_INVALIDATING_MUTATORS` "
+                   "(`.insert`/`.remove`/`.pop`/`.sort`/`.reverse`/`.clear`, unconditionally "
+                   "disqualifying, same treatment `.insert()` alone already had) and "
+                   "`_TRAILING_ONLY_MUTATORS` (`.append`/`.extend`/`cmd += [...]`, which "
+                   "never touch argv[0] so only disqualify when the recorded literal's own "
+                   "argv[0] could become shell-indirect -- `_prog_name_could_become_shell_"
+                   "indirect`, a new small helper). The narrower unconditional design was "
+                   "tried first and retracted: it reproducibly turned two real-fleet-shaped "
+                   "pinned regression tests (a `command = [sys.executable, ...]` CLI-flag "
+                   "builder mutated only via `.append()`) from their correct info into a "
+                   "false crit, because `_all_call_sites_bind_fixed_argv` -- a DIFFERENT "
+                   "consumer of this same per-scope binding dict -- never inspects trailing "
+                   "elements unless argv[0] is itself shell-indirect. Same TT5 subprocess-"
+                   "taint family every entry below already touches -- not a new parser "
+                   "family. "
+                   "Restated 2026-09-24c on top of "
+                   "the 2026-09-24b restatement immediately below: this branch's own "
+                   "B-965 fix rounds 4-5 (+151) landed independently of, and were "
+                   "rebased on top of, B-956's own +112 restatement -- narrowing "
+                   "`_b863_classify_head`'s `BinOp`/`Add` branch so `H+X` "
+                   "(`args = args + [payload]`) no longer silently drops `X`, then "
+                   "generalising the fix to CHAINED `H+X+Y+...` reassignments after a "
+                   "same-day C-135 catch found round 4 regressed a genuinely-safe "
+                   "co-param shape (`cmd = cmd + ['-C', cwd] + [...]`) one `+` deeper "
+                   "than round 4's own test covered; see the module comment above "
+                   "`_B863_HEAD_WRAP_CALLS` and `_b863_classify_assign_value`'s own "
+                   "docstring. Same TT5 wrapper-position-grammar family B-956 and the "
+                   "restated 2026-09-24b entry below both already touch -- not a new "
+                   "parser family. "
+                   "Restated 2026-09-24b, was ~14,877 +112 for "
+                   "CLAWSECCHECK-B-956: `_subprocess_taint_is_command_injection`'s "
+                   "literal-list branch treated a leading `ast.Starred(Name(vararg))` "
+                   "argv[0] -- `check_output([*args, \"--flag\"])` -- as an ordinary "
+                   "expression, so `_names_in()` walked INTO the Starred and found the "
+                   "vararg's own unconditionally-tainted Name, convicting crit without "
+                   "ever trying the call-site-resolution layer 2 the bare-Name vararg "
+                   "case already gets. Fix reuses the EXISTING `_param_argv_call_sites`/"
+                   "`_all_call_sites_bind_fixed_argv` primitives on the vararg's own "
+                   "per-call-site binding (plus a small new `_b863_param_body_is_pure_"
+                   "identity` predicate gating it to a body that never transforms the "
+                   "vararg, and a shell-indirect-exec tail-taint check for whatever is "
+                   "written after the splice) -- an extension of the existing TT5 "
+                   "subprocess-taint layer in place, not a new parser family, so no "
+                   "split is reconsidered for it. Restated 2026-09-24, merging four "
+                   "concurrent growth "
+                   "lines from a common ~11,796-line baseline: CLAWSECCHECK-B-906, "
+                   "CLAWSECCHECK-B-935 (4 rounds), B-863 round 4, and B-894. B-906 (+523) "
+                   "added `_RefResolver` — positive-only "
+                   "import-provenance resolution for TT5's os.getenv/os.environ vocabulary "
+                   "(an aliased import, a plain local alias, or a foldable indirect access "
+                   "through getattr/__dict__/vars/sys.modules/__import__/"
+                   "importlib.import_module resolves to a canonical dotted name; reuses "
+                   "shippedexec._FileFacts.dotted()/sole()/_legb_lookup() rather than "
+                   "re-deriving reaching definitions), its env vocabulary and mutated-path "
+                   "guard, and threading `ref_res` through the seven existing TT5 call "
+                   "sites as an additional `or` disjunct (never a replacement) so the "
+                   "change is provably monotone — see "
+                   "tests/test_b906_ref_resolver.py's test_monotone_* guards. Replaces "
+                   "round 4's Part B/C suppressor attempt (PF1/PF2, a must-NOT-alias proof "
+                   "used to SUPPRESS a base conviction), which was built and abandoned on "
+                   "a separate branch without ever landing here — this restatement is "
+                   "B-906's only line-count effect on this file. "
+                   "B-935 (+501 combined across 4 rounds): the literal, "
+                   "non-loop SHELL_CRED_EXFIL sink check's `cred_vars` was a flat, "
+                   "file-global variable-name set with no notion of which specific "
+                   "reference actually still held a credential-read value -- round 1 "
+                   "(`_sh_cred_assign_taint_lines`) replaced it with the same nearest-"
+                   "prior-binding/bisect mechanism B-894's own loop HOP role already "
+                   "used; round 2 (`_sh_parse_branch_tree` / `_sh_cred_replay`) found "
+                   "that lookup was branch-blind (an if/elif/else or case is mutually "
+                   "exclusive branches, not textually-ordered code) and added a "
+                   "stack-based if/case construct parser plus a recursive, "
+                   "branch-scoped OR-merge replay, with reference resolution "
+                   "interleaved into the SAME walk rather than a separate flat bisect "
+                   "(a flat trace, even one whose bindings were correctly merged, "
+                   "still let a reference inside one branch see a sibling's own "
+                   "binding); round 3 gave a `case` subject its own shared, "
+                   "single-execution scope threaded into every arm instead of arm[0]'s "
+                   "alone, and added a recursion-depth guard so adversarial NESTING "
+                   "(not sequential stacking, which was already fine) cannot crash the "
+                   "caller; round 4 (`_sh_case_find_in`) closed a narrower boundary gap "
+                   "in round 3's own `case ... in` terminator search, where a bare "
+                   "`$in`/`${in}` reference or an `in` inside an unrelated `${...}` "
+                   "parameter expansion in the subject was mistaken for the real "
+                   "terminator. All four rounds extend the existing shell taint family "
+                   "in place (same parser, same lexical layer) -- no new parser family, "
+                   "and no split reconsidered for the same reason the entries below "
+                   "already give: extending an existing, self-contained taint engine "
+                   "in its own module is not the growth signal this guard exists to "
+                   "catch. "
+                   "B-863 round 4 (+1,129: 735 for the design plus ~190 more from "
+                   "real-corpus fixes and a shape-branching cost cap, plus the "
+                   "per-name-aliasing state model and its head_src snapshot fix from the "
+                   "architect-first redesign's own C-135 rounds — see that block's own "
+                   "module comment) added the position-aware TT5 vararg/param wrapper "
+                   "guard, self-contained ahead of "
+                   "_subprocess_taint_is_command_injection: a "
+                   "tier-1 content-independence check (every real call site is a literal, "
+                   "and the parameter reaches no taint OTHER than its own ordinary "
+                   "per-function parameter taint, per a mutation-aware "
+                   "_external_tainted_names fixpoint that excludes the parameter from its "
+                   "own seed) and a tier-2 position grammar (a closed set of "
+                   "reassignment/append/extend/insert(len(P))/copy channels, judged "
+                   "against whichever argv[0] a call site or a fresh literal supplies) — "
+                   "replacing three retracted early rounds (8e43fe22/c7c2df9c/c07fe53e) "
+                   "that each traded a false positive for a false negative by conflating "
+                   "the two questions in one whitelist. B-894 (+650) added the shell "
+                   "for-loop credential-taint engine for SHELL_CRED_EXFIL "
+                   "(continuation-join/heredoc-blank/code-mask lexical prep, "
+                   "the do/done-paired loop-region finder, and the three-role direct/hop/"
+                   "pipe consumer that unrolls a loop onto the EXISTING literal cred-read "
+                   "rules rather than adding a second taint model, plus a round-4 fix "
+                   "splitting the in-cluster/TLS exemption's position-only TLS-flag arm "
+                   "from its content-dependent in-cluster-token arm, since the flag arm "
+                   "alone is safe to check with one representative word per line but the "
+                   "token arm is not, and must itself use `_SH_CRED_FILE_RE`'s OWN match "
+                   "within a word rather than the whole word text, or a truncated generic-"
+                   "secrets-mount match can make the loop form exempt a spelling its own "
+                   "literal twin still convicts) -- the shell family, not python/js. "
+                   "None of the three lines adds a new parser family. Previously restated "
+                   "2026-09-23, merging three concurrent growth lines from a common "
+                   "~7,267-line B-643 baseline (2026-09-16): B-830 round 2, "
+                   "B-850 rounds 3-5, and B-917's build plus its two fix rounds. B-830 round 2 (+538) added a RecursionError guard around the two B-830 fold call "
+                   "sites (analyze_python's credential-taint pass, capability_families) so a pathological path-join/arithmetic chain falls back to "
+                   "ctx=None instead of crashing --vet-skill with no verdict, plus threading the fold context into the in-cluster credential classifier so a folded "
+                   "extension of the in-cluster token literal cannot misclassify as exempt — the same taint layer this note already tracks, not a new parser "
+                   "family. B-850 rounds 3-5 (+1,711 combined) replaced the old B-752 token-presence proxy with the artifact-containment ALLOWLIST recognizer: "
+                   "round 4 (9fc20cc9) added the ambiguous-fires provenance walker backing the fail-closed guard's mutation-target check (~395 lines), and round 5 "
+                   "wired the .__dict__/subscript-store gates onto that same combinator plus traced the Call branch's function-return/class-constructor "
+                   "provenance (~120 lines) — both inside the same self-contained abstract-interpretation engine, not a new parser family. B-917 (its build plus fix "
+                   "rounds 1-2, combined) added the loader-sink / staged-import correlation pass (runpy/importlib/zipimport modelled as code-execution sinks, "
+                   "plus a write-then-import location correlation reusing shippedexec's `locate()`/`loc_eq()` resolver rather than a spelling-keyed "
+                   "predicate), the artifact-wide staged-write cache (`_b917_artifact_staged_writes`, a `weakref.WeakKeyDictionary` keyed on the "
+                   "`ShippedArtifact` instance so a write in one file of an artifact correlates with an import in another without leaking across artifacts "
+                   "or re-parsing every sibling file per pass), the LEGB fallback for `locate()`'s Name branch (`_legb_lookup`, guarded by `_legb_blocked`), and "
+                   "the any-record scope gate that round 2's own C-135 review required (`records(scope).get(name)` replacing the sole()-is-None test, since a "
+                   "non-assign binding — a parameter, a for/with/comprehension target, an except-as name, a nested def/class, an import — makes a name local to "
+                   "the whole scope and must stop the fallback there). None of this adds a new "
+                   "parser family — the file's split is still along the existing "
                    "python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target). Restated "
-                   "2026-09-06 (B-752), and the guard's own instruction is to reconsider "
-                   "the split rather than bump the number, so here is where the growth "
-                   "actually came from, measured: the last ten commits touching this file "
-                   "added ~1,230 lines, of which ~1,225 landed in the PYTHON taint / "
-                   "decode / exec-sink layer and 5 in the js bucket. The shell family does "
-                   "not appear in that window at all. The three parser families are not "
-                   "growing together — one of them is the file, and the other two are "
-                   "along for the ride. That is a seam the original deferral could not "
-                   "see, and it is cheap to state: python-taint out, shell/js parsers "
-                   "left behind. Recorded because the previous restate (B-727, 5,662 -> "
-                   "6,172) logged the drift without logging its source, and a debt record "
-                   "that cannot say which half is growing cannot argue for where to cut.",
+                   "2026-09-16 (B-643), and the guard's own instruction is to reconsider "
+                   "the split rather than bump the number: the B-850 engine (constants "
+                   "through the classify_* predicates, ~700 lines) is itself a candidate "
+                   "extraction — it depends on nothing else in this module and nothing "
+                   "else in this module depends on it except the four small wrapper "
+                   "functions that call into it — deferred here for the same reason the "
+                   "python-taint layer was: this change is already large enough to review "
+                   "on its own without also moving it to a new file in the same commit.",
     # Restated 2026-09-08: 5,641 -> 6,178. The claim had already drifted ~467 lines before
     # this touch; two commits adding ~70 (a mark swap, an ungraded-state block, and the
     # credential-surface env fix — most of it the comment explaining each) crossed the
@@ -339,7 +701,7 @@ _EXEMPT = {
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~7,542 lines (restated 2026-09-17 — was ~6,951) — the read-only "
+    "collector.py": "~8,787 lines (restated 2026-09-25 — was ~8,254) — the read-only "
                     "collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
@@ -365,8 +727,24 @@ _EXEMPT = {
                     "~5,907 against a real 6,034 before that change. A threshold bills the "
                     "growth to whoever crosses the line, not to whoever accumulated it, so "
                     "the commit a staleness guard fires on is rarely the commit that caused "
-                    "most of the drift.",
-    "cli.py": "~6,489 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+                    "most of the drift. FIFTH growth (+263, B-612): `read_skill_declared` — "
+                    "a file only a skill's SKILL.md names with an interpreter, collected for "
+                    "B13's danger pass alone, kept out of the three coverage lists on purpose "
+                    "(the seven-round retraction history is why). That is a fourth candidate "
+                    "seam, and the leaf-most one of the four: it depends on nothing else this "
+                    "file collects and nothing else depends on it, unlike the byte-format and "
+                    "state-DB seams above. SIXTH growth (+533, B176): a new state-DB reader "
+                    "(_collect_paired_devices_sqlite) for the devices/paired.json -> "
+                    "device_pairing_paired SQLite migration, following the SAME dual-source "
+                    "(legacy JSON wins, SQLite is the fallback) shape _collect_cron already "
+                    "established — so it belongs with the THIRD candidate seam (the state-DB "
+                    "readers) above, not a new one. A C-135 round-1 review then added a "
+                    "row-count cap, a SQL-level per-column byte bound (the same "
+                    "length(CAST(...AS BLOB)) <= ? shape trajectorystore.py uses for the "
+                    "identical B-811 DoS class), and an allowlist-not-denylist tightening of "
+                    "the token sub-key filter — all of it belongs in the SAME state-DB-readers "
+                    "seam, reinforcing that boundary rather than arguing for a fifth.",
+    "cli.py": "~7,009 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
               "the dispatch cascade: each `_mode` branch that returns early has to repeat "
@@ -384,7 +762,11 @@ _EXEMPT = {
               "mode this entry already names; not a new argument, the same one landing again. "
               "Restated a fourth time after C-517's --watch/--watch-status: two new primary "
               "modes plus their argparse registration and CLI-side helpers (the loop itself "
-              "lives in the new watch.py, not here) — same shape, same cause.",
+              "lives in the new watch.py, not here) — same shape, same cause. Restated a "
+              "fifth time after B-888: SkillSweep.counts()/not_scanned() gained a bucket for "
+              "a skill whose own vet_skill() scan raised, plus the matching disclosure in "
+              "both tally renderers — this is the coverage-accounting side of the shell, not "
+              "the dispatch cascade, but it lives in the same exempted file.",
     "pipeline.py": "~1,961 lines — the --full P7-P10 orchestration. Crossed the budget with "
                    "C-425's PipelineResult.to_ledger(), which projects the run's phases onto "
                    "the five-layer ledger (layers.py). It belongs here and nowhere else: it "
@@ -405,28 +787,37 @@ _EXEMPT = {
                      "detectors from the renderer would separate each verdict from the text "
                      "that discloses its own limits, which is the pairing B-245 and B-559 "
                      "both exist to keep. A finer split is a later cycle.",
-    "adjudication.py": "~2,433 lines — the judge-packet builder. Restated from ~1,920 on "
-                       "2026-09-16 by B-452: a sixth judge-packet-only evidence source "
-                       "(_keyword_gated_trigger_items, the antecedent/consequent structural "
-                       "detector for a keyword-gated hidden-trigger directive, plus its file-"
-                       "section/sentence-boundary helpers found necessary by two independent "
-                       "C-135 passes), the same shape as the pre-existing "
-                       "_recover_dropped_taint/_env_auth_kwarg_items sources — never a Finding, "
-                       "never scored, so it belongs beside its siblings rather than in "
-                       "checks/. Crossed the budget with the "
-                       "ESET H1 2026 gap-closure pass (C-361: config field-path extraction so "
-                       "the audit-path majority of findings, which cite a dig() path rather "
-                       "than a file:line, stop always hitting the contentless evidence "
-                       "fallback) and grew again with B-406 (duplicate (finding_id, target) "
-                       "verdict-entry resolution, order-independent by severity rank). "
-                       "Restated from ~1,570 on 2026-08-30 by B-689, which added the "
-                       "_CAP_LADDER constant and the comment block explaining why its "
-                       "wording is deliberately not shared with report._CAP_SIGNAL_TABLE. "
-                       "Restated from ~1,247 on 2026-08-24: it had drifted to 1,543 unnoticed "
-                       "(+24%, one point under this guard's tripwire) and B-618's cross-skill "
-                       "host attribution took it over. The guard fired for the right reason and "
-                       "the split is filed rather than waved off — restating the number without "
-                       "recording that would be the exact evasion this test exists to catch.",
+    # B-983 (2026-09-24): 1,199 -> 1,209 lines (net +10). `_declared_file_bars_measurability`'s
+    # sh/js branch gained the same try/except its py branch already had (a SyntaxError from a
+    # malformed declared file was already caught there) -- analyze_shell/analyze_javascript are
+    # large recursive parsers with no general depth bound, so an adversarial declared file could
+    # raise RecursionError (or SyntaxError/ValueError/MemoryError/OverflowError) the same way a
+    # malformed Python file already could. 9 lines over budget, not trimmed: the new comment is
+    # the reasoning for why this mirrors the py branch, and shortening it to slip under would
+    # remove that, not the risk. No split candidate: this is one function's guard clause, not a
+    # cohesive sub-concern that could move to its own module.
+    "dossier.py": "~1,209 lines — the vet-dossier renderer; _declared_file_bars_measurability's "
+                  "sh/js analyzer call now mirrors its py branch's exception containment. Over "
+                  "budget by 9 lines since B-983. Tracked debt, not a design statement.",
+    # CLAWSECCHECK-C-455: adjudication.py (2,478 lines; the _EXEMPT reason had been
+    # restated three times since 2026-08-24 — ~1,247 -> ~1,570 -> ~1,920 -> ~2,433,
+    # each restatement filing the split rather than doing it, and the file grew again
+    # to 2,478 before this task landed) is now the `adjudication/` package below.
+    # `_verdicts.py` (804 lines) and `__init__.py` (163 lines, the aggregator) both came
+    # out under the 1,200-line budget and need no exemption; only the builder half does.
+    "adjudication/_builder.py": "~1,736 lines — the judge-packet BUILDER half of the "
+                                "C-455 split: the evidence sources (recovered taint, "
+                                "env-auth-kwarg exfil, the B-452 keyword-gated-trigger "
+                                "detector, B62 mismatches), evidence/target/host "
+                                "redaction, corroboration, and "
+                                "build_judge_packet/render_judge_packet_json. Checked "
+                                "mechanically before the split: nothing here calls into "
+                                "_verdicts.py (the dependency runs one way, verdicts -> "
+                                "builder), so the two are a leaf and a consumer, not an "
+                                "arbitrary halving. A finer split (the B-452 keyword-"
+                                "gated-trigger detector is a self-contained chunk near "
+                                "the end of this file) is a later cycle, not attempted "
+                                "here.",
 }
 
 
@@ -436,9 +827,10 @@ def _line_count(path: Path) -> int:
 
 
 def _package_py_files() -> list[Path]:
-    """Top-level package modules + the checks/ subpackage (empty until I-022 R2)."""
+    """Top-level package modules + the checks/ and adjudication/ subpackages."""
     files = sorted(PKG.glob("*.py"))
     files += sorted((PKG / "checks").glob("*.py"))
+    files += sorted((PKG / "adjudication").glob("*.py"))
     return files
 
 

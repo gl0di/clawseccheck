@@ -644,9 +644,47 @@ _COMPILED_TOOL_FIELDS = ("tools", "providerVisibleTools")
 # DoS bounds (B-192's OOM lesson: bound the parse, not just the walk). Real events
 # measured 40–61 KB with <=20 tools and a <=4.1 KB longest description, so these caps
 # sit far above legitimate traffic and only bite on a padded/hostile line.
+#
+# _MAX_TOOL_DEFS is two-tier (B-933): a global-only cap let one source (whichever
+# `find_trajectory_files` orders first) exhaust the whole budget before a later,
+# genuinely poisoned source was ever read — the cap check sat outside the per-file
+# loop, so `truncated=True` fired for every subsequent file while silently dropping
+# all of its defs. `_MAX_TOOL_DEFS_PER_SOURCE` resets at the top of each `for path in
+# files:` iteration so no single source can starve another. `_MAX_TOOL_DEFS_TOTAL` is
+# a separate outer ceiling kept because `--exhaustive` makes `max_files` /
+# `max_bytes_per_file` unbounded (scanbudget.py), so a per-source-only cap could still
+# retain unbounded total memory across many sources; the total ceiling bounds that
+# worst case. Real host measured (this machine, 2 agent sources): 16 distinct tool
+# defs total — both tiers sit ~100x/~1000x above real usage, no FP-avoidance concern.
+# Accepted residual: a SINGLE source with >_MAX_TOOL_DEFS_PER_SOURCE distinct defs can
+# still truncate its own late content (e.g. a poisoned def appearing after its own
+# source's cap is hit) — this narrows the B-933 attack surface, it does not eliminate
+# every truncation path.
+#
+# Round 2 (B-933 continued, C-135 review of round 1): the shared TOTAL ceiling reopened
+# the SAME starvation shape one level up — enough individually-under-cap decoy sources
+# (11 x 2,000 benign defs each, reachable well within DEFAULT `traj_max_files=60` /
+# `_MAX_SQLITE_DBS=50`) could still exhaust `_MAX_TOOL_DEFS_TOTAL` before a later victim
+# source was ever read. Fixed by replacing the strictly-sequential per-source scan with
+# a quota-bounded round-robin driver (`_MAX_TOOL_DEFS_ROUND_QUOTA` defs granted per
+# source per round, up to `_MAX_ROUND_ROBIN_SOURCES` sources get the fairness
+# guarantee) — every source in that group gets at least one full round before the TOTAL
+# ceiling can be exhausted. This narrows the residual above from "any later source can
+# be starved" to: starvation now requires either (a) more than
+# `_MAX_ROUND_ROBIN_SOURCES` real trajectory sources beyond the round-robin guarantee
+# (only reachable under `--exhaustive`), or (b) the fair-share threshold where
+# active_sources * `_MAX_TOOL_DEFS_PER_SOURCE` > `_MAX_TOOL_DEFS_TOTAL` (~10
+# fully-maxed decoy sources), causing graceful proportional degradation across all
+# active sources rather than a hard lockout of any one of them.
 _MAX_COMPILED_LINE_LEN = 1_000_000
 _MAX_TOOLS_PER_EVENT = 200
-_MAX_TOOL_DEFS = 2_000
+_MAX_TOOL_DEFS_PER_SOURCE = 2_000   # unchanged value, now scoped per file/db
+_MAX_TOOL_DEFS_TOTAL = 20_000       # new outer safety ceiling (10x), see note above
+_MAX_TOOL_DEFS_ROUND_QUOTA = 100    # per-source defs granted per round-robin round
+_MAX_ROUND_ROBIN_SOURCES = 200      # TOTAL // QUOTA -- guarantees every source in this
+                                     # many gets at least one full round before TOTAL
+                                     # can be exhausted; always slack today since
+                                     # traj_max_files caps out at 60 under DEFAULT limits
 _MAX_DESC_CHARS = 20_000
 _MAX_PARAMS_PER_TOOL = 100
 
@@ -693,6 +731,78 @@ def _compiled_tool_entry(tool, field: str) -> dict | None:
     }
 
 
+def _iter_source_tool_candidates(path, max_bytes_per_file: int, meta: dict):
+    """Yield each candidate tool-definition dict found in the JSONL sidecar *path*.
+
+    Extracted from ``read_compiled_tool_descriptions`` (B-933 round 2) so the
+    round-robin driver there can pull candidates from many sources one at a time
+    instead of draining one source to completion before moving to the next. Same
+    parsing, byte/line/event-type gating and ``meta[...]`` disclosure as before the
+    split; the ONE thing this generator does NOT do is cross-source dedup or either
+    def-count cap -- the caller owns both (``seen``, `_MAX_TOOL_DEFS_PER_SOURCE`,
+    `_MAX_TOOL_DEFS_TOTAL``), since a generator has no way to know "this source is over
+    quota for THIS round" without the driver telling it; the driver just stops calling
+    ``next()`` when that happens.
+
+    Mirrors ``meta["files_scanned"]``'s existing semantics exactly: incremented once,
+    after the file has been read to completion (or hit its own byte cap) -- NOT
+    incremented if the driver abandons this generator early (a per-source/TOTAL cap
+    hit) or if the file raised ``OSError``.
+    """
+    try:
+        read = 0
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                read += len(line)
+                if read > max_bytes_per_file:
+                    meta["truncated"] = True
+                    break
+                # Cheap pre-filter: never JSON-parse the many other event types.
+                if f'"{_COMPILED_EVENT_TYPE}"' not in line:
+                    continue
+                # Bound the parse itself (B-192): a padded line is skipped and
+                # DISCLOSED, never silently dropped and never parsed.
+                if len(line) > _MAX_COMPILED_LINE_LEN:
+                    meta["truncated"] = True
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("traceSchema") != _TRACE_SCHEMA:
+                    # B-716: mirrors schemaVersion's own disclosure just below --
+                    # see that task for why a bare drop here was the bug.
+                    meta["unknown_schema"] = True
+                    continue
+                if rec.get("schemaVersion") != _SCHEMA_VERSION:
+                    meta["unknown_version"] = True
+                    continue
+                if rec.get("type") != _COMPILED_EVENT_TYPE:
+                    continue
+                data = rec.get("data")
+                if not isinstance(data, dict):
+                    continue
+                meta["events"] += 1
+                # §8: ONLY the tool-definition fields are touched. The sibling
+                # systemPrompt / prompt / messages keys are never referenced.
+                for field in _COMPILED_TOOL_FIELDS:
+                    tools = data.get(field)
+                    if not isinstance(tools, list):
+                        continue
+                    if len(tools) > _MAX_TOOLS_PER_EVENT:
+                        meta["truncated"] = True
+                    for tool in tools[:_MAX_TOOLS_PER_EVENT]:
+                        entry = _compiled_tool_entry(tool, field)
+                        if entry is None:
+                            continue
+                        yield entry
+    except OSError:
+        return
+    meta["files_scanned"] += 1
+
+
 def read_compiled_tool_descriptions(
     home: Path,
     *,
@@ -715,9 +825,17 @@ def read_compiled_tool_descriptions(
 
     ``meta`` reports ``present`` (any trajectory file found), ``files_scanned``,
     ``events`` (``context.compiled`` records parsed), ``unknown_version``, and
-    ``truncated`` (a per-file byte cap, an oversized line, or a per-scan definition cap
-    was hit — the extracted set is then incomplete, so a clean verdict on it must not
-    read as confidently complete).
+    ``truncated`` (a per-file byte cap, an oversized line, a per-SOURCE definition cap
+    — ``_MAX_TOOL_DEFS_PER_SOURCE``, reset for each file — or the outer TOTAL
+    definition ceiling — ``_MAX_TOOL_DEFS_TOTAL``, shared across all files — was hit).
+    Either way the extracted set is then incomplete, so a clean verdict on it must not
+    read as confidently complete. Sources are visited in a quota-bounded ROUND-ROBIN
+    (B-933 round 2, see the DoS-bounds comment above `_MAX_TOOL_DEFS_ROUND_QUOTA`), not
+    strictly sequentially, so ``files_scanned`` only counts a file read to completion —
+    a file abandoned early because ITS OWN per-source cap (or the shared TOTAL ceiling)
+    was reached does not increment it, a deliberate efficiency change from round 1 (that
+    file's remaining `context.compiled` events are no longer parsed-and-discarded once
+    nothing more from it could be kept).
 
     §8: only the named sub-fields above are read. ``systemPrompt``, ``prompt`` and
     ``messages`` — the user's own conversation — are never read or returned.
@@ -749,69 +867,71 @@ def read_compiled_tool_descriptions(
     meta["present"] = True
 
     seen: set[tuple] = set()
-    for path in files:
-        try:
-            read = 0
-            with path.open("r", encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    read += len(line)
-                    if read > max_bytes_per_file:
-                        meta["truncated"] = True
-                        break
-                    # Cheap pre-filter: never JSON-parse the many other event types.
-                    if f'"{_COMPILED_EVENT_TYPE}"' not in line:
-                        continue
-                    # Bound the parse itself (B-192): a padded line is skipped and
-                    # DISCLOSED, never silently dropped and never parsed.
-                    if len(line) > _MAX_COMPILED_LINE_LEN:
-                        meta["truncated"] = True
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(rec, dict):
-                        continue
-                    if rec.get("traceSchema") != _TRACE_SCHEMA:
-                        # B-716: mirrors schemaVersion's own disclosure just below --
-                        # see that task for why a bare drop here was the bug.
-                        meta["unknown_schema"] = True
-                        continue
-                    if rec.get("schemaVersion") != _SCHEMA_VERSION:
-                        meta["unknown_version"] = True
-                        continue
-                    if rec.get("type") != _COMPILED_EVENT_TYPE:
-                        continue
-                    data = rec.get("data")
-                    if not isinstance(data, dict):
-                        continue
-                    meta["events"] += 1
-                    # §8: ONLY the tool-definition fields are touched. The sibling
-                    # systemPrompt / prompt / messages keys are never referenced.
-                    for field in _COMPILED_TOOL_FIELDS:
-                        tools = data.get(field)
-                        if not isinstance(tools, list):
-                            continue
-                        if len(tools) > _MAX_TOOLS_PER_EVENT:
-                            meta["truncated"] = True
-                        for tool in tools[:_MAX_TOOLS_PER_EVENT]:
-                            entry = _compiled_tool_entry(tool, field)
-                            if entry is None:
-                                continue
-                            key = (
-                                entry["name"], entry["description"],
-                                tuple(entry["params"]), entry["field"],
-                            )
-                            if key in seen:
-                                continue
-                            if len(tool_defs) >= _MAX_TOOL_DEFS:
-                                meta["truncated"] = True
-                                break
-                            seen.add(key)
-                            tool_defs.append(entry)
-        except OSError:
-            continue
-        meta["files_scanned"] += 1
+
+    # B-933 round 2: round-robin across sources instead of draining them strictly
+    # sequentially, so no group of decoy sources under `_MAX_ROUND_ROBIN_SOURCES` can
+    # exhaust `_MAX_TOOL_DEFS_TOTAL` before every source has had a fair turn (see the
+    # DoS-bounds comment above `_MAX_TOOL_DEFS_ROUND_QUOTA`).
+    fair_group, overflow = files[:_MAX_ROUND_ROBIN_SOURCES], files[_MAX_ROUND_ROBIN_SOURCES:]
+    gens = {s: _iter_source_tool_candidates(s, max_bytes_per_file, meta) for s in fair_group}
+    source_new_defs = {s: 0 for s in fair_group}
+    done: set = set()
+    n, round_num = len(fair_group), 0
+    while (gens.keys() - done) and len(tool_defs) < _MAX_TOOL_DEFS_TOTAL:
+        progressed = False
+        order = fair_group[round_num % n:] + fair_group[:round_num % n] if n else []
+        for s in order:
+            if s in done:
+                continue
+            if len(tool_defs) >= _MAX_TOOL_DEFS_TOTAL:
+                break
+            quota_used = 0
+            while quota_used < _MAX_TOOL_DEFS_ROUND_QUOTA and len(tool_defs) < _MAX_TOOL_DEFS_TOTAL:
+                if source_new_defs[s] >= _MAX_TOOL_DEFS_PER_SOURCE:
+                    meta["truncated"] = True
+                    done.add(s)
+                    break
+                try:
+                    entry = next(gens[s])
+                except StopIteration:
+                    done.add(s)
+                    break
+                key = (
+                    entry["name"], entry["description"],
+                    tuple(entry["params"]), entry["field"],
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                tool_defs.append(entry)
+                source_new_defs[s] += 1
+                quota_used += 1
+                progressed = True
+        round_num += 1
+        if not progressed:
+            break
+    if gens.keys() - done:
+        meta["truncated"] = True
+
+    # Beyond the fair-share guarantee -- only reachable under `--exhaustive` (which
+    # lifts `max_files`): today's pre-round-2 sequential per-source scan, verbatim,
+    # reusing the same generator so the two never diverge on parsing/gating.
+    for path in overflow:
+        source_new_defs_overflow = 0
+        for entry in _iter_source_tool_candidates(path, max_bytes_per_file, meta):
+            key = (
+                entry["name"], entry["description"],
+                tuple(entry["params"]), entry["field"],
+            )
+            if key in seen:
+                continue
+            if (len(tool_defs) >= _MAX_TOOL_DEFS_TOTAL
+                    or source_new_defs_overflow >= _MAX_TOOL_DEFS_PER_SOURCE):
+                meta["truncated"] = True
+                continue
+            seen.add(key)
+            tool_defs.append(entry)
+            source_new_defs_overflow += 1
 
     return tool_defs, meta
 

@@ -107,7 +107,7 @@ def test_the_card_no_longer_denies_the_finding_it_is_reporting(tmp_path):
     """The defect end to end, through the real CLI on a shipped fixture."""
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", VULN, "--dashboard",
-         "--data-dir", str(tmp_path / "state"), "--no-history"],
+         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True, env={**_env(), "HOME": str(tmp_path)})
     out = proc.stdout
     line = _cap_line(out)

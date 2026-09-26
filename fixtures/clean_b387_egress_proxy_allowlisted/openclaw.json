@@ -1,0 +1,8 @@
+{
+  "secrets": {
+    "egressProxy": {
+      "enabled": true,
+      "allowedHosts": ["api.example.com"]
+    }
+  }
+}

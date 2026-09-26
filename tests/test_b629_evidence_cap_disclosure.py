@@ -37,9 +37,11 @@ _PKG = _REPO / "clawseccheck"
 # what a finding CARRIES, at construction time, which is a different decision from what a
 # renderer PRINTS — and those findings state their own totals in `detail`. Conflating the
 # two would make this guard fire ~15 times on code it has nothing to say about.
+# "adjudication" (not "adjudication.py"): C-455 split it into a package, and the loop
+# below reads every .py file under a directory entry rather than treating it as one file.
 _RENDERERS = (
     "report.py", "cli.py", "sarif.py", "pdf.py", "guide.py",
-    "dossier.py", "sar.py", "adjudication.py", "menu.py",
+    "dossier.py", "sar.py", "adjudication", "menu.py",
 )
 
 
@@ -207,11 +209,16 @@ def test_no_renderer_cuts_an_evidence_list_on_its_own():
     offenders = []
     for name in _RENDERERS:
         path = _PKG / name
-        if not path.is_file():
+        if path.is_dir():
+            sources = [(f"{name}/{p.name}", p.read_text(encoding="utf-8"))
+                       for p in sorted(path.glob("*.py"))]
+        elif path.is_file():
+            sources = [(name, path.read_text(encoding="utf-8"))]
+        else:
             continue
-        src = path.read_text(encoding="utf-8")
-        for m in slicer.finditer(src):
-            offenders.append(f"{name}:{src[: m.start()].count(chr(10)) + 1}")
+        for label, src in sources:
+            for m in slicer.finditer(src):
+                offenders.append(f"{label}:{src[: m.start()].count(chr(10)) + 1}")
     assert not offenders, (
         "a renderer slices an evidence list inline instead of going through "
         f"_evidence_bullets, so its cut is silent again: {offenders}"

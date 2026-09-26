@@ -124,10 +124,16 @@ def test_score_key_always_present_on_returned_rows(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_render_trend_mixed_chain_hole_has_no_arrow_and_next_compares_across_it():
+    # B-695: the two graded rows share home/raw_scope/raw_ver so the comparability gate
+    # holds across the hole -- without matching subject fields the arrow would render
+    # blank regardless of the hole-skipping this test is about (see the legacy-row tests).
+    _subject = {"home": "~/.openclaw", "raw_scope": "scope-a", "raw_ver": "4.0.0"}
     rows = [
-        {"date": "2026-08-01", "score": 60, "grade": "D", "graded": True, "source": "audit"},
+        {"date": "2026-08-01", "score": 60, "grade": "D", "graded": True, "source": "audit",
+         **_subject},
         {"date": "2026-08-02", "score": None, "grade": None, "graded": False, "source": "audit"},
-        {"date": "2026-08-03", "score": 80, "grade": "B", "graded": True, "source": "audit"},
+        {"date": "2026-08-03", "score": 80, "grade": "B", "graded": True, "source": "audit",
+         **_subject},
     ]
     out = render_trend(rows, ascii_only=False)
 

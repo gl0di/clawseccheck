@@ -15,8 +15,8 @@ of them at all.
 import json
 import os
 import sqlite3
-import tempfile
-from pathlib import Path
+
+import pytest
 
 from clawseccheck.collector import (
     Context,
@@ -66,8 +66,24 @@ _ROW_DEFAULTS = dict(
 )
 
 
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_home()` below, a plain helper called from many test bodies rather
+    than a fixture itself — keeps every throwaway home inside pytest's own tmp tree
+    instead of system /tmp. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
+
+
 def _home(rows=None, *, table="update_runs", make_db=True, extra_tables=()):
-    home = Path(tempfile.mkdtemp(prefix="f192-"))
+    home = _TMP_PATH_FACTORY.mktemp("f192")
     path = home / "openclaw.json"
     path.write_text(json.dumps({}))
     os.chmod(path, 0o600)

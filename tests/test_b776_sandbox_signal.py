@@ -289,9 +289,9 @@ class TestConfigBlindMessagingWording:
         score = compute(findings, ctx)
         assert score.config_blind_reason == "absent"
         text = render_report(findings, score, ctx=ctx)
-        assert "Config visibility (B-306)" in text
+        assert "Config visibility (CONFIG-BLIND)" in text
         assert "sandboxed container" not in text
-        assert "Config visibility (B-776)" not in text
+        assert "Config visibility (CONFIG-SANDBOX)" not in text
 
     def test_render_dashboard_card_states_sandboxed_plainly(self, tmp_path):
         ctx = Context(home=tmp_path)

@@ -37,7 +37,7 @@ def _note(tmp_path: Path, store: str = "state") -> str:
     fake_home.mkdir(exist_ok=True)
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", VULN, "--no-history",
-         "--data-dir", str(tmp_path / store), "--dashboard",
+         "--data-dir", str(tmp_path / store), "--no-deptree", "--no-host", "--dashboard",
          "--pdf", str(tmp_path / f"{store}.pdf")],
         cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "HOME": str(fake_home)})
@@ -100,7 +100,7 @@ def test_the_note_stays_on_stderr(tmp_path):
     fake_home.mkdir(exist_ok=True)
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", VULN, "--no-history",
-         "--data-dir", str(tmp_path / "s6"), "--dashboard", "--pdf", str(tmp_path / "o.pdf")],
+         "--data-dir", str(tmp_path / "s6"), "--no-deptree", "--no-host", "--dashboard", "--pdf", str(tmp_path / "o.pdf")],
         cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "HOME": str(fake_home)})
     assert "Markdown link syntax" not in proc.stdout

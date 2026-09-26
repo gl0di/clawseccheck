@@ -40,10 +40,16 @@ Issues = "https://github.com/gl0di/clawseccheck/issues"
 clawseccheck = "clawseccheck.cli:main"
 
 [tool.setuptools]
-packages = ["clawseccheck", "clawseccheck.checks", "clawseccheck.monitordims"]
+packages = ["clawseccheck", "clawseccheck.checks", "clawseccheck.monitordims", "clawseccheck.adjudication"]
 
 [tool.setuptools.dynamic]
 version = { attr = "clawseccheck.__version__" }
+
+[tool.pytest.ini_options]
+markers = [
+    "mechanical: fast, dependency-free structural/documentation guards (module layout, public-boundary drift, schema grounding, unread-config fail-open, doc-facts) -- no fixtures, no subprocess, no npm/host state. Safe and useful to run before anything else; see docs/CHECKS.md / CLAUDE.md Testing protocol for the full gate list.",
+    "real_machine: test intentionally reads this machine's real home/fleet state",
+]
 
 [tool.ruff]
 # F-159/B347: this fixture's .py is INTENTIONALLY syntactically invalid — it is the

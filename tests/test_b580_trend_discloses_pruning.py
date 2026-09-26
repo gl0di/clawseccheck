@@ -55,7 +55,7 @@ def _history(tmp_path, *, with_marker: bool, name="history.jsonl"):
 def _trend(path, tmp_path):
     out = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--trend", "--history", str(path),
-         "--data-dir", str(tmp_path / "d")],
+         "--data-dir", str(tmp_path / "d"), "--no-deptree", "--no-host"],
         capture_output=True, text=True,
     )
     return out.stdout + out.stderr

@@ -27,6 +27,8 @@ Honesty rules (project law §2.4 / §5):
 """
 from __future__ import annotations
 
+import ast
+
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from pathlib import Path
@@ -36,7 +38,7 @@ from .catalog import (
 )
 
 from .scoring import grade_for
-from .skillast import capability_families
+from .skillast import analyze_javascript, analyze_shell, capability_families
 
 #: B-755: 'a definite verdict of any kind'. Derived, so a status added to the FAIL cascade
 #: counts as an assessment without an edit here.
@@ -459,9 +461,20 @@ def _route_axis_reasons(f, buckets: dict, *, fallback_axis: str | None) -> bool:
 def _skill_capabilities(ctx) -> tuple[bool, set]:
     """(has_executable_code, capability_families_PRESENT) for the vetted skill(s).
 
-    Reads only ctx data populated by the engine (ctx.installed_skill_py) — no re-scan of
-    disk, no checks import. Families are `skillast.CAPABILITY_FAMILIES`: network / exec /
-    write / read / cred.
+    Reads only ctx data populated by the engine (ctx.installed_skill_py/_js/_shell) — no
+    re-scan of disk, no checks import. Families are `skillast.CAPABILITY_FAMILIES`:
+    network / exec / write / read / cred.
+
+    B-878: `has_code` used to ask only `installed_skill_py`, so a skill
+    bundling nothing but JS or shell answered `has_code=False` -- indistinguishable from
+    a skill with no code at all -- and the Persistence/Connections axes printed "no
+    executable code to analyze" about a directory containing exactly that (repro: a
+    `SKILL.md` plus an `a.js` running `require('child_process').exec(...)`). It now folds
+    in `installed_skill_js`/`installed_skill_shell` too, so presence is honest across every
+    language the collector reads. `families`, below, is unchanged and still Python-only —
+    `capability_families` walks a Python AST and has no JS/shell equivalent; see
+    `_skill_has_unread_language_code` for how `build_profile` keeps THAT gap from being
+    read as an affirmative PASS over content it never examined for capability presence.
 
     B-592: this used to return the union of `ctx.effect_profiles[*]["reachable_effects"]`,
     which is TAINT reachability — "did untrusted data reach this sink". The only consumer
@@ -478,11 +491,17 @@ def _skill_capabilities(ctx) -> tuple[bool, set]:
         return (False, set())
     installed = getattr(ctx, "installed_skills", None) or {}
     py_map = getattr(ctx, "installed_skill_py", None) or {}
-    has_py = any(py_map.get(name) for name in installed)
+    js_map = getattr(ctx, "installed_skill_js", None) or {}
+    sh_map = getattr(ctx, "installed_skill_shell", None) or {}
+    has_code = (
+        any(py_map.get(name) for name in installed)
+        or any(js_map.get(name) for name in installed)
+        or any(sh_map.get(name) for name in installed)
+    )
     families: set[str] = set()
     for name in installed:
         families |= capability_families(py_map.get(name))
-    return (has_py, families)
+    return (has_code, families)
 
 
 def _pool_contexts(pool) -> list:
@@ -544,6 +563,112 @@ def _pool_capabilities(pool) -> tuple[bool, set]:
         has_code = has_code or code
         families |= fams
     return (has_code, families)
+
+
+def _skill_has_unread_language_code(ctx) -> bool:
+    """True when ``ctx`` bundles JS or shell source for an installed skill -- code
+    ``_skill_capabilities.has_code`` now counts as PRESENT (B-878) but whose
+    capability families this scan cannot compute: ``capability_families`` walks a Python
+    AST and has no JS/shell reader, and `analyze_javascript`/`analyze_shell` are narrow,
+    rule-shaped danger scanners (specific RCE/exfil patterns), not general network / exec /
+    write / read / cred presence detectors -- so they cannot license the affirmative
+    "no dormant or staged code detected" / "no outbound network call found" the PASS
+    wording asserts either.
+
+    Same family of defect B-628 fixed one layer up: finding code in ONE language must not
+    license an affirmative claim over code in ANOTHER the scan never opened for THIS axis.
+    ``build_profile`` folds this into the same "unmeasurable, honest reason" path as
+    ``unread_code`` (a plugin's un-dispatched loose file) rather than inventing a new
+    outcome -- both are "code is present, this scan has no reader for it here".
+    """
+    if ctx is None:
+        return False
+    installed = getattr(ctx, "installed_skills", None) or {}
+    js_map = getattr(ctx, "installed_skill_js", None) or {}
+    sh_map = getattr(ctx, "installed_skill_shell", None) or {}
+    return any(js_map.get(name) for name in installed) or any(sh_map.get(name) for name in installed)
+
+
+def _pool_has_unread_language_code(pool) -> bool:
+    """``_skill_has_unread_language_code`` folded over every Context in ``pool`` — same
+    two-source fold as ``_pool_capabilities`` (see its docstring), via ``_pool_contexts``.
+    """
+    return any(_skill_has_unread_language_code(ctx) for ctx in _pool_contexts(pool))
+
+
+def _declared_file_bars_measurability(relpath: str, lang: str, source: str) -> bool:
+    """B-612: whether ONE declared file (``read_skill_declared``'s ``(relpath, lang,
+    source)``) is itself enough to withdraw a Persistence/Connections PASS this scan
+    cannot back.
+
+    Content-gated, not content-blind — the first cut (retracted, see B-612's fix-round
+    history) returned True for ANY declared file, so a benign decoy named in one line of
+    prose dropped a clean skill's axes from PASS to UNKNOWN for no visible reason. The bar
+    is the one already applied to a REAL bundled file of the same language:
+
+    * Python: it must PARSE (``ast.parse``) and have a non-empty ``capability_families``
+      result over ITS OWN bytes — the same predicate ``_skill_capabilities`` applies to
+      every ``.py`` file already. Non-parsing, or parsing with no capability family
+      (an INI-ish config, a docstring), bars nothing, same as a real ``.py`` would.
+    * sh/js: either its OWN ``#!`` independently names the declared language
+      ("verified" — B-878's existing bar for a real bundled ``.sh``/``.js``); OR
+      ``analyze_shell``/``analyze_javascript`` itself flags the file's OWN bytes,
+      verified or not (fix-round-1: an unverified file that trips a rule already
+      contributes a `warns_declared_unverified` WARN on the danger axis — see
+      ``checks/_vet.py``'s declared loop — so a Persistence/Connections PASS over bytes
+      this scan just read for danger would contradict that WARN in the same report; the
+      first cut fired on "verified" alone and missed this). Neither verified nor
+      analyzer-flagged bars nothing — nothing here read anything to contradict.
+    """
+    if lang == "py":
+        try:
+            ast.parse(source)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            return False
+        return bool(capability_families([(relpath, source)]))
+    if lang in ("sh", "js"):
+        from .collector import _shebang_language  # noqa: PLC0415
+
+        if _shebang_language(source) == lang:
+            return True
+        analyzer = analyze_shell if lang == "sh" else analyze_javascript
+        try:
+            result = analyzer(source, relpath)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            # B-983: `analyze_shell`/`analyze_javascript` are large recursive parsers with
+            # no general depth bound (unlike the `py` branch's `ast.parse`, which this
+            # `try`/`except` already mirrors) -- an adversarial declared file with deeply
+            # nested constructs could raise the same exceptions here that a malformed
+            # Python file raises above. Same non-crashing outcome either way: nothing was
+            # read that could contradict a PASS, so this bars nothing (see docstring).
+            return False
+        return bool(result)
+    return False
+
+
+def _pool_has_declared_code(pool) -> bool:
+    """B-612: True when any installed skill in ``pool`` carries a file that only its
+    SKILL.md declares as code (``ctx.installed_skill_declared``, collector's
+    ``read_skill_declared``) AND whose own content clears the bar in
+    ``_declared_file_bars_measurability`` above.
+
+    That file was read by B13's danger pass and by nothing that measures these two axes,
+    so a qualifying one bars measurability exactly as ``danger_only_code`` does (B-636): it
+    can move an axis from PASS to an honest UNKNOWN, never the other way. Without this, a
+    skill bundling one clean ``helper.py`` plus a declared ``bin/sync`` printed "no
+    outbound network call found in the analysed code" -- and ``bin/sync`` was analysed
+    code. Content-gated (not "any declared file at all") so that a benign decoy named in
+    one line of prose cannot, by itself, turn an honest PASS into an UNKNOWN — the exact
+    trade a content-blind version of this predicate made and had retracted.
+    """
+    for ctx in _pool_contexts(pool):
+        installed = getattr(ctx, "installed_skills", None) or {}
+        declared = getattr(ctx, "installed_skill_declared", None) or {}
+        for name in installed:
+            for relpath, lang, source in declared.get(name) or []:
+                if _declared_file_bars_measurability(relpath, lang, source):
+                    return True
+    return False
 
 
 def _reason_and_fix(bucket: list, axis: str, *, empty_reason: str) -> tuple[str, str]:
@@ -714,8 +839,23 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # caught it. Reading a file for dangerous patterns is not measuring its persistence or
     # its outbound surface; those are computed from bundled-skill Contexts, and a loose
     # plugin file has none.
+    # B-878: same bar for a bundled skill's JS/shell — `has_code` now counts
+    # it as code present (see `_skill_capabilities`), but `capability_families` still
+    # cannot read it, so it must not be measurable either. See
+    # `_skill_has_unread_language_code` for why this is the same "code present, no reader
+    # for THIS axis" shape as `unread_code`/`danger_only_code`, not a fresh state.
+    unread_language_code = _pool_has_unread_language_code(pool)
+    # B-612: a file only SKILL.md declares as code — read for danger, never measured here.
+    declared_code = _pool_has_declared_code(pool)
     code_measurable = (
-        (has_code and not scan_truncated and not unread_code and not danger_only_code)
+        (
+            has_code
+            and not scan_truncated
+            and not unread_code
+            and not danger_only_code
+            and not unread_language_code
+            and not declared_code
+        )
         or target_type not in ("skill", "plugin")
     )
     # Was anything actually assessed? A definite finding (PASS/WARN/FAIL) anywhere, or —
@@ -787,11 +927,19 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         if not applicable:
             reason, fix = _na_reason(axis, target_type), ""
         elif status == PASS:
-            reason, fix = _clean_reason(axis, families), ""
+            # B-846: danger's PASS on the self-source path is this function's own
+            # canned Finding (see `self_source` above), not a scan result — the
+            # generic `_clean_reason` text would falsely claim a completed scan.
+            if self_source and axis == "danger":
+                reason, fix = _self_source_danger_reason(), ""
+            else:
+                reason, fix = _clean_reason(axis, families), ""
         elif status == UNKNOWN and not bucket:
             reason, fix = _unmeasurable_reason(
-                axis, truncated=scan_truncated, unanalysed=bool(unread_code),
+                axis, truncated=scan_truncated,
+                unanalysed=bool(unread_code) or unread_language_code,
                 danger_only=bool(danger_only_code), self_source=self_source,
+                declared_only=declared_code,
                 assumed_encoding=assumed_encoding if prose_gap else ()), ""
         else:
             reason, fix = _reason_and_fix(bucket, axis, empty_reason=_clean_reason(axis, families))
@@ -922,9 +1070,24 @@ def _clean_reason(axis: str, families: set) -> str:
     return "no issue found"
 
 
+def _self_source_danger_reason() -> str:
+    """B-846: the danger axis's PASS on the self-source path is a POLICY default, not a
+    scan result. `_vet_resolved_skill` (checks/_vet.py) returns this canned B13 PASS
+    Finding on `_is_own_source(p)` BEFORE any read_skill_python/shell/js call runs, so
+    `_clean_reason`'s "no malware signature or known-bad indicator [found]" would
+    falsely claim a scan ran and came back clean over ClawSecCheck's own ~7,000-line
+    engine. Say what actually happened instead: nothing was read.
+    """
+    return (
+        "not scanned at all — this is ClawSecCheck's own source, so it is treated as "
+        "safe by policy rather than by a completed malware scan (scanning it would "
+        "self-flag on its own attack-signature data)"
+    )
+
+
 def _unmeasurable_reason(axis: str, *, truncated: bool = False,
                         unanalysed: bool = False, danger_only: bool = False,
-                        self_source: bool = False,
+                        self_source: bool = False, declared_only: bool = False,
                         assumed_encoding: tuple = ()) -> str:
     """Why an axis could not be measured -- and the six reasons are not one reason.
 
@@ -943,6 +1106,11 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
       Python is analysed only inside a dispatched skill dir. A plugin shipping
       fetch-to-exec as a root-level `install.py` is opened by nobody, and the reviewer
       measured this axis printing an affirmative PASS over exactly that.
+      B-878 adds a second producer of this same state: a dispatched
+      SKILL's bundled JS/shell (`_skill_has_unread_language_code`). `capability_families`
+      is Python-AST-only, so a JS- or shell-only skill has no reader for THIS axis either,
+      even though the file itself was read (has_code=True) and may already carry a Danger
+      verdict from `analyze_javascript`/`analyze_shell` four lines above.
 
     * ``danger_only`` (B-636) -- a reader now EXISTS for that Python, and it ran: the
       plugin sweep runs the AST/taint pass over .py outside a dispatched skill dir. But
@@ -960,6 +1128,12 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
       artifact (B-628, same as the other two), and build/behavior fell through to an
       unearned PASS ("no issue found") instead of even reaching this function, since only
       `connections`/`persistence` gated on code-measurability -- see `build_profile`.
+      B-846: the first version of THIS string still overclaimed on the danger axis's
+      behalf -- "only the danger axis ran, by design" -- when danger did not run either
+      (`_vet_resolved_skill` returns the canned B13 PASS before any read_skill_* call).
+      The wording below, and the danger axis's own PASS reason (`build_profile`'s PASS
+      branch), now both say nothing ran; danger's PASS is a policy default, not a
+      completed scan.
 
     Truncation wins the wording when several hold: "we stopped early" already implies the
     rest is unknown, while naming an unread file would suggest the rest WAS read.
@@ -997,6 +1171,16 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
             return ("code outside the declared skills was read for dangerous patterns "
                     "only, so its staged / persistent behavior was not separately measured")
         return "code outside the declared skills was read for dangerous patterns only"
+    if declared_only:
+        # B-612: after `danger_only` for the same reason `danger_only` follows
+        # `unanalysed` — the more specific statement of what was not read wins.
+        head = ("a bundled file that only SKILL.md declares as code was read for "
+                "dangerous patterns only, so ")
+        if axis == "connections":
+            return head + "the outbound surface was not measured"
+        if axis == "persistence":
+            return head + "staged / persistent behavior was not measured"
+        return head + "this was not measured"
     if self_source:
         tail = {
             "connections": "so the outbound surface was not measured",
@@ -1007,7 +1191,8 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
         return (
             "this is ClawSecCheck's own source; a security auditor necessarily ships "
             "attack signatures and payload text as data, so scanning it for malware "
-            f"would self-flag — only the danger axis ran, by design, {tail}"
+            f"would self-flag — nothing here was scanned at all, not even the danger "
+            f"axis (its PASS is a policy default, not a completed scan), {tail}"
         )
     if axis == "connections":
         return "no executable code to analyze for outbound connections"

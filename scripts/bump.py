@@ -117,12 +117,27 @@ def _commits_since_last_tag() -> "tuple[list[str], str | None, str]":
     return commits, base_tag, compared_against
 
 
+#  Anchored at the start of a line (`re.M`) and requires the trailing colon, so prose
+#  that merely discusses the convention -- including prose where line-wrapping alone
+#  puts "BREAKING CHANGE" at the start of a line, as in commit 33d78af's own body --
+#  cannot match: real prose does not follow it immediately with ":" (CLAWSECCHECK-B-858).
+_BREAKING_FOOTER = re.compile(r"^BREAKING[ -]CHANGE:", re.M)
+_BREAKING_SUBJECT = re.compile(r"^\w+(\([^)]*\))?!:")
+
+
 def _suggest_level(commits: list[str]) -> str:
-    """Map Conventional Commits to a bump level (highest wins)."""
+    """Map Conventional Commits to a bump level (highest wins).
+
+    A major recommendation requires one of the two real Conventional Commits
+    breaking-change markers: a `type(scope)!:` subject marker, or a `BREAKING CHANGE:`
+    / `BREAKING-CHANGE:` footer token anchored at the start of a line. A bare mention
+    of the words "BREAKING CHANGE" in ordinary prose -- e.g. a commit body that talks
+    about the convention itself -- must not force a false "major" (CLAWSECCHECK-B-858).
+    """
     level = None
     for c in commits:
         subject = c.splitlines()[0]
-        if "BREAKING CHANGE" in c or re.match(r"^\w+(\([^)]*\))?!:", subject):
+        if _BREAKING_SUBJECT.match(subject) or _BREAKING_FOOTER.search(c):
             return "major"
         if re.match(r"^feat(\([^)]*\))?:", subject):
             level = "minor"

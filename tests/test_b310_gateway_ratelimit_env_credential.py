@@ -102,6 +102,18 @@ def test_dotenv_supplied_token_without_ratelimit_is_a_warn(tmp_path):
     assert _VALUE not in _blob(f)
 
 
+def test_dotenv_supplied_token_evidence_does_not_leak_the_absolute_path(tmp_path):
+    """B-856: the 'gateway.auth.mode is not set ... but <cred_src> authenticates the
+    gateway' evidence must name the dotenv file relative to the audited home, not as an
+    absolute, home-rooted machine path."""
+    f = check_gateway_rate_limit(
+        collect(_home(tmp_path, EXPOSED_NO_MODE, dotenv=f"{TOKEN_VAR}={_VALUE}"))
+    )
+    assert f.status == WARN
+    assert str(tmp_path) not in _blob(f)
+    assert ".env" in _blob(f)
+
+
 # ---------------------------------------------------------------------------
 # Clean fixture: env-authenticated WITH a rate limit configured -> unaffected PASS
 # ---------------------------------------------------------------------------

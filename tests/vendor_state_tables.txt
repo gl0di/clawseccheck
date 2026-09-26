@@ -1,11 +1,11 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.9.4
-# state-schema-version: 17
-# generated: 2026-09-12
-# tables: 126
+# openclaw-version: 2026.9.6
+# state-schema-version: 18
+# generated: 2026-09-25
+# tables: 131
 #
-# source-bundle: openclaw-state-db-DoQEJuhr.mjs
+# source-bundle: openclaw-state-db-read-connection-Beg0AZE7.mjs
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
 #   is build output and rotates between releases, so it is evidence, not a locator.
 #
@@ -58,6 +58,7 @@ cron_job_runtime_authorities
 cron_job_scratch
 cron_jobs
 cron_run_receipts
+cron_run_trigger_state_retirements
 current_conversation_bindings
 delivery_queue_entries
 device_auth_tokens
@@ -83,6 +84,7 @@ github_personal_publication_requests
 github_publication_requests
 github_publication_session_lifecycles
 github_repository_publication_requests
+local_workspace_projections
 macos_port_guardian_records
 managed_outgoing_image_records
 mcp_oauth_pending_authorizations
@@ -93,12 +95,14 @@ meeting_transcript_utterances
 migration_runs
 migration_sources
 native_hook_relay_bridges
+node_worker_launch_cleanup
 node_worker_launch_containers
 node_worker_launches
 node_worker_prepared_workspaces
 node_worker_turns
 official_external_plugin_catalog_snapshots
 operator_approval_execution_identities
+operator_approval_standing_grant_generations
 operator_approval_standing_grants
 operator_approvals
 outbound_media_provenance
@@ -152,4 +156,5 @@ workspace_generated_bootstrap_hashes
 workspace_path_aliases
 workspace_setup_state
 worktree_provisioned_file_chunks
+worktree_templates
 worktrees

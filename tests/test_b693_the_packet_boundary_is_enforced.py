@@ -41,7 +41,15 @@ from clawseccheck.report import _sanitize_tree
 from clawseccheck.scoring import compute
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-_ADJUDICATION_SRC = (REPO_ROOT / "clawseccheck" / "adjudication.py").read_text(encoding="utf-8")
+# C-455 split the single adjudication.py file into a package (_builder.py + _verdicts.py +
+# an __init__.py aggregator with no function defs of its own). The census below needs
+# every check function from BOTH submodules, so read them all rather than one file.
+_ADJUDICATION_PKG = REPO_ROOT / "clawseccheck" / "adjudication"
+_ADJUDICATION_SRCS = [
+    p.read_text(encoding="utf-8")
+    for p in sorted(_ADJUDICATION_PKG.glob("*.py"))
+    if p.name != "__init__.py"
+]
 
 _FINDINGS = [Finding(id="B2", title="ok", severity="LOW", status="PASS",
                      detail="d", fix="f", framework="x")]
@@ -135,8 +143,11 @@ def test_a_real_packet_carries_no_redaction_marker(fixture):
 # --------------------------------------------------------------------- the census
 
 def _module_level_functions():
-    tree = ast.parse(_ADJUDICATION_SRC)
-    return [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    fns = []
+    for src in _ADJUDICATION_SRCS:
+        tree = ast.parse(src)
+        fns.extend(n for n in tree.body if isinstance(n, ast.FunctionDef))
+    return fns
 
 
 def test_no_emitter_bypasses_the_helper():

@@ -1,3 +1,4 @@
 # ClawSecCheck — all files owned by gl0di.
-# GitHub requires review from gl0di for any PR to main.
+# Auto-requests review from gl0di on every PR. This file alone enforces nothing:
+# blocking a merge needs branch protection's "Require review from Code Owners".
 * @gl0di

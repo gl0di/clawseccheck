@@ -15,7 +15,6 @@ authoritative — is a subprocess the doctrine forbids.
 """
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -23,9 +22,25 @@ from _realhome import REAL_HOME
 
 from clawseccheck.deptree import _conventional_package_roots, find_package_root
 
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_fake_package()`/`_nvm_home()` below, plain helpers called from many
+    test bodies rather than fixtures themselves — keeps every throwaway home/package root
+    inside pytest's own tmp tree instead of system /tmp. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
+
+
 def _fake_package(name, manifest_name=None):
     """A directory that looks like an installed npm package."""
-    root = Path(tempfile.mkdtemp(prefix="b703-"))
+    root = _TMP_PATH_FACTORY.mktemp("b703")
     (root / "package.json").write_text(
         json.dumps({"name": manifest_name if manifest_name is not None else name,
                     "version": "1.0.0"}))
@@ -61,7 +76,7 @@ def test_the_generation_does_not_flicker_between_run_shapes(real_home):
     if find_package_root("openclaw") is None:
         pytest.skip("no installed OpenClaw to resolve")
 
-    home = Path(tempfile.mkdtemp(prefix="b703-home-"))
+    home = _TMP_PATH_FACTORY.mktemp("b703-home")
     config = home / "openclaw.json"
     config.write_text("{}")
     os.chmod(config, 0o600)
@@ -159,7 +174,7 @@ def test_the_resolver_runs_no_subprocess():
 
 def _nvm_home(versions, package="openclaw", manifest_name=None):
     """A home whose only install lives under an nvm-style per-version prefix."""
-    home = Path(tempfile.mkdtemp(prefix="b703-nvm-"))
+    home = _TMP_PATH_FACTORY.mktemp("b703-nvm")
     for version in versions:
         root = home / ".nvm" / "versions" / "node" / version / "lib" / "node_modules" / package
         root.mkdir(parents=True)
@@ -208,7 +223,7 @@ def test_the_version_enumeration_is_bounded(monkeypatch):
 def test_a_home_with_no_version_manager_at_all_is_not_an_error(monkeypatch):
     """The absent-directory path: `iterdir` on a missing base raises, and a resolver that
     let that escape would take down every consumer on the majority of machines."""
-    monkeypatch.setenv("HOME", str(Path(tempfile.mkdtemp(prefix="b703-bare-"))))
+    monkeypatch.setenv("HOME", str(_TMP_PATH_FACTORY.mktemp("b703-bare")))
     assert _conventional_package_roots("openclaw"), "the flat prefixes must still be listed"
 
 

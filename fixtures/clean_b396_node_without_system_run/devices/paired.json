@@ -1,0 +1,38 @@
+{
+  "node-studio-b396": {
+    "deviceId": "node-studio-b396",
+    "publicKey": "REDACTED",
+    "platform": "darwin",
+    "clientId": "node-host",
+    "clientMode": "node",
+    "role": "node",
+    "roles": ["node"],
+    "scopes": [],
+    "tokens": {
+      "node": {
+        "token": "REDACTED",
+        "role": "node",
+        "scopes": [],
+        "createdAtMs": 1757000000000
+      }
+    },
+    "createdAtMs": 1757000000000,
+    "approvedAtMs": 1757000000000,
+    "lastSeenAtMs": 1757000000000
+  },
+  "operator-web-b396": {
+    "deviceId": "operator-web-b396",
+    "publicKey": "REDACTED",
+    "platform": "web",
+    "clientId": "clawwebchat",
+    "clientMode": "normal",
+    "role": "operator",
+    "roles": ["operator"],
+    "scopes": ["operator.read"],
+    "approvedScopes": ["operator.read"],
+    "tokens": {"operator": {"token": "REDACTED"}},
+    "createdAtMs": 1757000000000,
+    "approvedAtMs": 1757000000000,
+    "lastSeenAtMs": 1757000000000
+  }
+}

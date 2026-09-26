@@ -36,8 +36,10 @@ agents.defaults.tools
 agents.defaults.workspace
 agents.list
 agents.subagents
+attachments.ttlHours
 audit.enabled
 auth.profiles
+browser.extensionRelay.allowLegacyAuth
 browser.ssrfPolicy.allowPrivateNetwork
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
@@ -54,6 +56,7 @@ commands.plugins
 commands.useAccessGroups
 cron
 cron.store
+desktop.host
 diagnostics.cacheTrace.filePath
 discovery.mdns.mode
 env.shellEnv.enabled
@@ -83,13 +86,18 @@ gateway.http.endpoints.chatCompletions.images
 gateway.http.endpoints.chatCompletions.images.allowUrl
 gateway.http.endpoints.chatCompletions.images.urlAllowlist
 gateway.nodes.allowCommands
+gateway.nodes.allowSkills
 gateway.nodes.commands.allow
 gateway.nodes.commands.deny
 gateway.nodes.denyCommands
 gateway.nodes.pairing.autoApproveCidrs
+gateway.nodes.skills.enabled
 gateway.port
+gateway.portals
+gateway.portals.ingress
 gateway.remote
 gateway.remote.sshHostKeyPolicy
+gateway.tailscale
 gateway.tailscale.mode
 gateway.terminal.enabled
 gateway.terminal.shell
@@ -118,6 +126,9 @@ marketplaces.sources
 memory.search.remote
 meta.lastTouchedVersion
 models.providers
+nodeHost.workerRuns.containerImage
+nodeHost.workerRuns.enabled
+nodeHost.workerRuns.isolation
 plugins.allow
 plugins.bundledDiscovery
 plugins.deny
@@ -128,6 +139,8 @@ plugins.slots
 proxy
 proxy.enabled
 proxy.proxyUrl
+secrets.egressProxy.allowedHosts
+secrets.egressProxy.enabled
 secrets.providers
 security.audit.suppressions
 security.installPolicy
@@ -140,6 +153,7 @@ skills.load.watch
 skills.workshop.allowSymlinkTargetWrites
 skills.workshop.approvalPolicy
 skills.workshop.autonomous.enabled
+telemetry.enabled
 tools.agentToAgent
 tools.agentToAgent.allow
 tools.agentToAgent.enabled
@@ -160,6 +174,8 @@ tools.exec.safeBins
 tools.exec.security
 tools.exec.strictInlineEval
 tools.mcp
+tools.message.actions
+tools.message.actions.allow
 tools.message.crossContext
 tools.message.crossContext.allowAcrossProviders
 tools.profile
@@ -167,8 +183,6 @@ tools.web
 tools.web.fetch.enabled
 tools.web.fetch.maxRedirects
 tools.web.fetch.useTrustedEnvProxy
-update.auto
-update.auto.enabled
 update.channel
 
 # --- read off a NESTED object, not the config root ---------------------------------
@@ -178,7 +192,13 @@ update.channel
 # used against the config root (and the reverse). See CLAWSECCHECK B-251.
 relative:agentRuntime.id
 relative:config.allowPrivateNetwork
+relative:config.appServer.approvalPolicy
+relative:config.appServer.approvalsReviewer
 relative:config.appServer.command
+relative:config.appServer.mode
+relative:config.appServer.networkProxy
+relative:config.appServer.sandbox
+relative:config.appServer.transport
 relative:config.permissionMode
 relative:heartbeat
 relative:mcp.servers
@@ -199,6 +219,8 @@ relative:tools.codeMode
 relative:tools.deny
 relative:tools.exec
 relative:tools.fs.workspaceOnly
+relative:tools.message.actions
+relative:tools.message.actions.allow
 relative:tools.message.crossContext
 relative:tools.message.crossContext.allowAcrossProviders
 relative:tools.profile

@@ -107,7 +107,7 @@ def test_coverage_notice_is_absent_from_json_output():
     """--json is a machine contract; advisory presentation metadata stays out of it."""
     out = subprocess.run(
         [sys.executable, "-m", "clawseccheck.cli", "--home", str(FIXTURES / "home_safe"),
-         "--json"],
+         "--json", "--no-deptree", "--no-host"],
         capture_output=True, text=True, cwd=REPO, timeout=300,
     ).stdout
     assert "carries no indicators" not in out
@@ -120,7 +120,7 @@ def test_coverage_notice_is_absent_from_json_output():
 def _run(*extra):
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck.cli", "--home", str(FIXTURES / "home_safe"),
-         "--no-color", *extra],
+         "--no-color", "--no-deptree", "--no-host", *extra],
         capture_output=True, text=True, cwd=REPO, timeout=300,
     ).stdout
 

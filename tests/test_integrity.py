@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck.integrity import package_digest
+from clawseccheck.integrity import build_fingerprint, package_digest
 from clawseccheck.cli import main
 
 REPO = Path(__file__).resolve().parents[1]
@@ -182,6 +182,57 @@ def test_empty_pkg_dir_returns_empty_map_and_valid_digest(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# build_fingerprint() — unit tests (B-869)
+# ---------------------------------------------------------------------------
+
+def test_build_fingerprint_is_a_prefix_of_the_combined_digest(tmp_path):
+    (tmp_path / "a.py").write_text("# a", encoding="utf-8")
+    combined, _ = package_digest(pkg_dir=tmp_path)
+    assert build_fingerprint(pkg_dir=tmp_path) == combined[:12]
+
+
+def test_build_fingerprint_is_12_lowercase_hex_chars(tmp_path):
+    (tmp_path / "a.py").write_text("# a", encoding="utf-8")
+    fp = build_fingerprint(pkg_dir=tmp_path)
+    assert len(fp) == 12
+    assert all(c in "0123456789abcdef" for c in fp)
+
+
+def test_build_fingerprint_changes_when_file_content_changes(tmp_path):
+    """The whole point of B-869: two builds with identical __version__/__released__
+    but different file content must not report the same identity."""
+    (tmp_path / "a.py").write_text("# original", encoding="utf-8")
+    before = build_fingerprint(pkg_dir=tmp_path)
+
+    (tmp_path / "a.py").write_text("# TAMPERED / a real local fix", encoding="utf-8")
+    after = build_fingerprint(pkg_dir=tmp_path)
+
+    assert before != after
+
+
+def test_build_fingerprint_survives_an_unreadable_file(tmp_path):
+    """--verify-self's package_digest(notes=None) raises OSError on an unreadable
+    path so the security comparison is never silently partial — but a one-line
+    status surface must not crash the whole --menu/report run over it (that
+    diagnosis is --verify-self's job). build_fingerprint() passes notes=[] through,
+    so it degrades to a digest over the readable tree instead of raising."""
+    (tmp_path / "a.py").write_text("# a", encoding="utf-8")
+    locked = tmp_path / "locked.py"
+    locked.write_text("# secret", encoding="utf-8")
+    locked.chmod(0)
+    try:
+        fp = build_fingerprint(pkg_dir=tmp_path)  # must not raise
+        assert len(fp) == 12
+    finally:
+        locked.chmod(0o644)  # restore so tmp_path cleanup can remove it
+
+
+def test_build_fingerprint_on_the_real_package_matches_the_real_digest():
+    combined, _ = package_digest()
+    assert build_fingerprint() == combined[:12]
+
+
+# ---------------------------------------------------------------------------
 # CLI --verify-self integration tests
 # ---------------------------------------------------------------------------
 
@@ -266,7 +317,10 @@ def test_cli_verify_self_prints_exact_cosign_verify_command(capsys):
     assert "cosign verify-blob" in out
     assert "--bundle SHA256SUMS.txt.bundle" in out
     assert "--certificate-identity-regexp" in out
-    assert "^https://github.com/gl0di/clawseccheck/" in out
+    assert (
+        r"^https://github\.com/gl0di/clawseccheck/\.github/workflows/"
+        r"clawhub-publish\.yml@refs/tags/v"
+    ) in out
     assert "--certificate-oidc-issuer" in out
     assert "https://token.actions.githubusercontent.com" in out
     # The full invocation ends on the digest file being verified, not just named earlier.

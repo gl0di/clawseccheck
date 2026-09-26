@@ -58,7 +58,10 @@ _RANK = {"FAIL": 3, "SKILL_ARCHIVE_PATH_TRAVERSAL": 3, "WARN": 2, "UNKNOWN": 1, 
 #: Arms whose job is to say "the scan could not see everything", deliberately adjudicated
 #: before any positive finding. Named rather than inferred: their rank is LOWER than the
 #: traversal arm's, so a rank-only rule would flag them, and flagging them would be wrong.
-_COVERAGE_FIRST = frozenset({"parse_error_paths", "skill_limit_hits"})
+#: CLAWSECCHECK-B-888 added `crashed_skills` as a third member of this tier — "a skill's
+#: analysis crashed partway through" is the same kind of engine-side gap as a parse error
+#: or a truncation cap, ranked and disclosed the same way (UNKNOWN, engine_degraded=True).
+_COVERAGE_FIRST = frozenset({"parse_error_paths", "skill_limit_hits", "crashed_skills"})
 
 _TRAVERSAL_MEMBER = "../../../tmp/escape_via_zip.txt"
 _BENIGN_TEMPFILE = 'open("/tmp/demo_cache.txt", "w").write("x")\n'

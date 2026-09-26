@@ -31,8 +31,6 @@ together would have traded one false FAIL for a false negative on a genuinely op
 """
 import json
 import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -45,9 +43,24 @@ LEGACY = "2026.7.1-2"
 
 _OPEN_CHANNEL = {"channels": {"telegram": {"dmPolicy": "open", "groupPolicy": "open"}}}
 
+_TMP_PATH_FACTORY = None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _tmp_path_factory_bridge(tmp_path_factory):
+    """Bridge for `_finding()` below, a plain helper called from many test bodies rather
+    than a fixture itself — keeps every throwaway home inside pytest's own tmp tree
+    instead of system /tmp. Mirrors `_oracle_scratch` in
+    tests/test_toolgrant_dist_grounding.py."""
+    global _TMP_PATH_FACTORY
+    previous = _TMP_PATH_FACTORY
+    _TMP_PATH_FACTORY = tmp_path_factory
+    yield
+    _TMP_PATH_FACTORY = previous
+
 
 def _finding(cfg, installed, cid):
-    home = Path(tempfile.mkdtemp(prefix="b705-"))
+    home = _TMP_PATH_FACTORY.mktemp("b705")
     path = home / "openclaw.json"
     path.write_text(json.dumps(cfg))
     os.chmod(path, 0o600)

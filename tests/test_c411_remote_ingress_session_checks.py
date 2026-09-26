@@ -25,7 +25,9 @@ dropped entirely:
   the real path is ``tools.message.crossContext.allowAcrossProviders``, with a
   per-agent override (``agents.entries.<id>.tools.message.crossContext.
   allowAcrossProviders``) that WINS over the global value key-by-key — reading only
-  the global key would miss an agent that widens past a safe default on its own.
+  the global key would miss an agent that widens past a safe global value on its own.
+  (B-833: the DEFAULT of this key flipped from deny to allow in 2026.9.5 — see
+  tests/test_b833_cross_context_default_flip.py.)
 - **session.resetTriggers** ships as a disclosure-only WARN (never a "does this
   phrase look guessable" judgment call — Golden Rule #4), same reasoning B341
   already uses for a comparable grant.
@@ -49,8 +51,9 @@ _OPEN_CHANNEL = {"channels": {"telegram": {"dmPolicy": "open"}}}
 _TWO_AGENTS = {"agents": {"entries": {"a": {}, "b": {}}}}
 
 
-def _ctx(cfg, tmp_path, *, found=True):
-    return Context(home=tmp_path, config=cfg, config_found=found)
+def _ctx(cfg, tmp_path, *, found=True, version=None):
+    return Context(home=tmp_path, config=cfg, config_found=found,
+                   installed_dist_version=version)
 
 
 def _merged(*dicts):
@@ -162,8 +165,11 @@ class TestSessionScopeGlobal:
 
 # =============================================================================== B363
 class TestCrossContextSend:
-    def test_absent_is_pass(self, tmp_path):
-        f = check_cross_context_send(_ctx({"tools": {}}, tmp_path))
+    def test_absent_is_pass_only_on_a_build_that_denies_by_default(self, tmp_path):
+        """B-833: an unset key used to PASS unconditionally ("the shipped default"). That
+        is only true up to 2026.9.4; the full version matrix lives in
+        tests/test_b833_cross_context_default_flip.py."""
+        f = check_cross_context_send(_ctx({"tools": {}}, tmp_path, version="2026.9.4"))
         assert f.status == PASS
 
     def test_global_false_is_pass(self, tmp_path):

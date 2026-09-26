@@ -1,0 +1,132 @@
+# Hermeticity ledger allowlist -- read by tests/test_hermeticity_gate.py.
+#
+# READ-shaped paths only. A WRITE-shaped event outside the repo/tmp/interpreter-root
+# categories is ALWAYS a hard FAIL, in both `CSC_HERMETICITY_LEDGER=1` and `=strict` --
+# no allowlist, no grandfathering (there is no legitimate reason for a hermetic test to
+# write anywhere else). This file only ever widens what an otherwise-unexplained READ
+# may touch, and even then only turns into a hard FAIL under `=strict`; a plain `=1` run
+# just reports a diff for local investigation.
+#
+# One fnmatch-style glob pattern per line ('*' matches any run of characters, including
+# '/' -- fnmatch has no path-segment concept, so 'x/**' and 'x/*' match the same set;
+# both spellings appear below purely to say what is meant). '$HOME' is a literal token,
+# substituted at comparison time for whichever real path this ledger line's recorded
+# $HOME actually was (the ledger's own child, or -- when that path is independent of
+# $HOME entirely, e.g. resolved via $PATH -- this machine's real home). NEVER write a
+# raw '/home/<user>/...' path here; test_allowlist_file_parses_and_is_nonempty() fails
+# the build if one leaks in.
+#
+# Every entry below also carries a "Last confirmed exercised: YYYY-MM-DD via
+# `<command>`" line UNLESS every one of its patterns is on
+# tests/test_hermeticity_allowlist_staleness.py's own hardcoded _UNIVERSAL_PATTERNS set
+# (the /proc, /dev/null, /dev/urandom, /dev/random lines below) -- that guard's default
+# is "must explain," not "exempt unless flagged," and it does not trust THIS FILE's own
+# comments or section headers to decide what counts as universal: only the guard
+# module's own literal, hardcoded set does, checked against whichever comments actually
+# sit in a block regardless of their order. Extending what counts as universal means
+# editing that module's source, not this file. The guard fails the build if a marker is
+# missing, malformed, or names a tests/test_*.py file that no longer exists -- it does
+# NOT re-run the command (CSC_HERMETICITY_LEDGER is opt-in and pytest_unconfigure
+# deletes the ledger tmpdir before a normal run ends, so a live re-check is not
+# available to an always-on gate; see that module's own docstring).
+
+# ---- genuinely universal (observed on every real run, not machine-specific) --------
+#
+# Both the bare directory AND its "/**" contents are listed for every directory below --
+# an fnmatch '*' matches zero-or-more characters but NOT the literal '/' the "/**" form
+# requires, so a listdir/scandir/stat of the BARE directory (raw path "/proc", no
+# trailing slash) does not match "/proc/**" on its own. Missing this the first time
+# around is exactly the kind of gap this ledger exists to catch -- see the "found the
+# actual surface is wider" note on the host-detect entry below, which is what surfaced
+# it (test_no_unexplained_paths_outside_tmp_and_repo initially failed on bare "/proc"
+# and bare "/etc/cron.d" et al even with the "/**" entries already present).
+/proc
+/proc/**
+/proc/*/fd
+/proc/*/fd/**
+/dev/null
+# /dev/urandom: CPython's os.urandom()/secrets/uuid fall back to reading this device
+# directly on some platforms and interpreter versions rather than the getrandom(2)
+# syscall -- observed empirically on the Python 3.9 floor (uv run --python 3.9) but not
+# on the 3.12 system interpreter on this same box, confirming this really is
+# interpreter-version-dependent and not something to special-case for 3.9 alone.
+/dev/urandom
+/dev/random
+
+# ---- known, diagnosed violations, each dated and pointed at what removes it --------
+
+# CLAWSECCHECK-hermeticity, 2026-09-21. Any CLI end-to-end test that spawns a real
+# `python -m clawseccheck` subprocess without `--no-deptree` (e.g.
+# tests/test_b582_viewer_chain_provenance.py) walks the REAL machine's global npm
+# install: deptree.find_package_root() resolves `openclaw` via shutil.which()/$PATH,
+# which is independent of $HOME -- including when the test overrides $HOME for an
+# unrelated reason (isolating OpenClaw config), so the walked path is this machine's
+# real home, not whatever fake $HOME that subprocess was given. Measured on the box
+# this ledger was built on: 578MB / 37,220 files under the real package root, 6,717
+# distinct paths touched by test_b582_viewer_chain_provenance.py alone.
+# conftest.py's `_stub_deptree_scan` fixture only patches the IN-PROCESS
+# `clawseccheck._deptree_scan` and cannot reach a separate subprocess -- which is the
+# reason this ledger exists at all: a parent-only audit hook recorded ZERO hits from
+# the same run this caught 6,717 of.
+#
+# CORRECTED, same day. This entry originally blamed the WHOLE surface on the deptree
+# walk above and said the fix was "scoped to branch perf/test-subprocess-deptree ...
+# not this change" -- reading as "once that branch merges, this entry is obsolete." It
+# is not. A cross-branch probe measured this on the tree with that branch already
+# merged in: the deptree half IS closed there (test_b582_viewer_chain_provenance.py
+# dropped from 6,717 distinct npm-global paths to 1), but test_watch.py,
+# test_b769_concurrent_monitor.py and test_b870_journal_lock_tilde.py -- each ALREADY
+# passing --no-deptree in its own argv on that tree -- still generated 76,289 / 43,274
+# / 41,036 real npm-global reads apiece. Sampled across the subprocess-CLI files, this
+# one line fired 160,683 times over 12,497 distinct paths -- the most-exercised entry
+# in this file.
+#
+# Root cause of that second half, confirmed in clawseccheck/cli.py: `--monitor` mode
+# unconditionally calls `openclawdist.describe_install("openclaw")` -- its own
+# content-digest walk of the real npm-global install (~7,717 files / 77.8MB, for the
+# F-174 supply-chain-identity dimension) -- gated only by `if _mode == "monitor":` and
+# NEVER by `args.no_deptree`. That is a separate mechanism from deptree.py's own scan,
+# has no autouse stub covering it the way `_stub_deptree_scan` covers the in-process
+# case, and no `--no-deptree`-shaped flag reaches it at all.
+#
+# So: the deptree half of this entry's cause is fixed; the describe_install half is
+# not -- tracked as C-598. Removing this entry on the strength of the deptree branch
+# merging alone reintroduces hard strict-mode failures on the three tests named above.
+#
+# Last confirmed exercised: 2026-09-21 via `CSC_HERMETICITY_LEDGER=1 python3.12 -m pytest tests/test_watch.py tests/test_b769_concurrent_monitor.py tests/test_b870_journal_lock_tilde.py tests/test_b582_viewer_chain_provenance.py -q`
+$HOME/.npm-global/**
+
+# CLAWSECCHECK-B-881, 2026-09-21 through 2026-09-23. Sibling of the entry above, same
+# shape, found while building this ledger: `_stub_host_detect` also only patches the
+# in-process `clawseccheck._host_detect` and does not cross into a subprocess, so the
+# same CLI end-to-end tests made real, absolute-path host-posture reads (cron, systemd
+# unit dirs, and the firewall (ufw/nftables) config this box happened to have).
+#
+# CLOSED, 2026-09-23. Unlike the deptree entry above (whose --monitor-mode residual is
+# a SEPARATE, still-open mechanism -- `describe_install()` called directly by cli.py,
+# never gated by any flag at all -- tracked as C-598), host-posture reads only ever
+# happen through checks/_host.py's ordinary check functions inside audit()'s own
+# registry, which the pre-existing `--no-host` flag (`cli.py`'s
+# `include_host=not args.no_host`) already gated correctly at all three call sites --
+# it simply was not being PASSED by the affected tests. Fixed by adding `--no-host`
+# to every subprocess CLI spawn on the audit path (the same 47 files/55 call sites
+# that already carry `--no-deptree`, plus two this fix's own static guard caught that
+# the initial pass missed: tests/test_b870_journal_lock_tilde.py and
+# tests/test_b877_a1_warn_wording.py, both of which already carried --no-deptree but
+# not --no-host). Durably enforced going forward by
+# tests/test_subprocess_host_hermeticity.py (mirrors
+# tests/test_subprocess_deptree_hermeticity.py's static AST guard, sharing its engine
+# via tests/_subprocess_argv.py) rather than left to a future strict hermeticity run to
+# rediscover cold.
+#
+# Verified removed, 2026-09-23 via `CSC_HERMETICITY_LEDGER=strict python3.12 -m pytest
+# tests/test_b582_viewer_chain_provenance.py tests/test_hermeticity_gate.py -q` with
+# these patterns already deleted: zero READ-shaped hits for any of
+# /etc/cron.d, /etc/cron.daily, /etc/cron.hourly, /etc/cron.monthly, /etc/cron.weekly,
+# /etc/crontab, /etc/default/ufw, /etc/nftables.conf, /etc/systemd/system,
+# /etc/ufw/ufw.conf (down from the surface this entry used to document), and
+# test_no_unexplained_paths_outside_tmp_and_repo passes under `=strict` rather than
+# only warning under `=1`. If a future hostpersist.py probe reintroduces one of these
+# paths (or a new one) from a subprocess spawn missing --no-host,
+# test_subprocess_host_hermeticity.py fails first, loudly, naming the exact call site
+# -- re-diagnose there rather than re-adding a blanket allowlist entry here.

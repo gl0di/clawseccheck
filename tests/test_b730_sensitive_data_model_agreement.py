@@ -32,10 +32,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from clawseccheck.checks import _trifecta_legs
+from clawseccheck.catalog import FAIL_WEIGHT_STATUSES, PASS, WARN
+from clawseccheck.checks import _trifecta_legs, check_trifecta
 from clawseccheck.collector import Context
 from clawseccheck.report import _capability_graph
 from clawseccheck.risk import risk_paths
+
+# Lower rank = more severe. Only three statuses are reachable from check_trifecta, but
+# the map is built off FAIL_WEIGHT_STATUSES rather than a bare "FAIL" literal so a future
+# renamed/added FAIL-weight status (SKILL_ARCHIVE_PATH_TRAVERSAL is the other one today,
+# unreachable from A1) doesn't silently fall through to the `dict.get` default in
+# `_a1_status_rank` below.
+_A1_STATUS_RANK = {**{s: 0 for s in FAIL_WEIGHT_STATUSES}, WARN: 1, PASS: 2}
+
+
+def _a1_status_rank(ctx: Context) -> int:
+    return _A1_STATUS_RANK[check_trifecta(ctx).status]
 
 # Untrusted ingress + outbound both active, so the trifecta's OTHER two legs are held
 # constant and the sensitive-data leg is the only thing that can move a verdict. Verified
@@ -234,21 +246,105 @@ def test_respelling_the_dead_token_key_would_break_agreement(tmp_path):
     assert _graph_main_secrets(ctx) == _risk02_present(ctx) == _a1_leg(ctx)
 
 
-def test_the_gateway_password_asymmetry_is_the_one_known_divergence(tmp_path):
-    """Pinned as a DELIBERATE state, not left unmeasured -- B-730 item 2.
+def test_the_gateway_password_leg_now_agrees_across_all_three_models(tmp_path):
+    """CLAWSECCHECK-B-876 settled the one divergence this file used to pin as deliberate
+    (B-730 item 2) -- flipped on purpose, not left to drift in silently.
 
-    `risk.py` and `report.py` both count `gateway.auth.password`; A1 excludes it, on the
-    stated ground that it is the gateway's own auth secret rather than agent-readable
-    data, and that B1 already emits FAIL/CRITICAL on it. That is a real divergence and it
-    is NOT fixed here: unlike the token term, this key IS in the schema, so removing it is
-    an observable narrowing that needs its own measurement and its own C-135 pass.
-
-    Asserting the disagreement rather than skipping it means the day someone settles it,
-    this test reddens and forces the decision to be recorded instead of drifting in.
+    `risk.py` and `report.py` always counted `gateway.auth.password`; A1 used to exclude
+    it, on the stated ground that it is the gateway's own auth secret rather than
+    agent-readable data, and that B1 already emits FAIL/CRITICAL on it. That reasoning is
+    true of confidentiality but incomplete for this leg's question (agent REACH), and it
+    reproduced B-730's exact contradiction through a different term: a home with an empty
+    credentials store and only this key set gave A1 PASS "Active legs 2/3" next to a
+    RISK-02 HIGH asserting all three legs active in the same run. Dave's decision
+    (2026-09-20): widen A1 to match the other two consumers, not narrow them away --
+    unlike the dead token term below, this key IS in the schema, so it needed its own
+    measurement and its own C-135 pass rather than a ride on the token fix.
     """
     ctx = _gw_ctx(tmp_path, {"auth": {"password": _token("E")}})
-    assert _a1_leg(ctx) is False, "A1 excludes the gateway's own auth secret"
+    assert _a1_leg(ctx) is True, "A1 now counts the gateway's own auth secret too (B-876)"
     assert _graph_main_secrets(ctx) is True, "the capability graph counts it"
-    assert _risk02_present(ctx) == _graph_main_secrets(ctx), (
-        "whatever is decided, the chain and the graph must not diverge from each other"
+    assert _risk02_present(ctx) is True, "the RISK chain counts it"
+    assert _a1_leg(ctx) == _graph_main_secrets(ctx) == _risk02_present(ctx), (
+        "all three models must agree on the gateway password"
     )
+
+
+def test_no_run_prints_a_lower_trifecta_ratio_than_a_risk_chain_asserts(tmp_path):
+    """The GLOBAL invariant B-730's own DoD asked for and never asserted, until now
+    (CLAWSECCHECK-B-876): a run's own `"trifecta": "N/3"` field (`report.py::
+    _trifecta_ratio`, read straight off A1's `Finding.evidence`) must never print fewer
+    than 3 legs in the SAME run where a RISK chain's own why-text asserts all three are
+    active -- today that is RISK-02 alone, whose why-text literally says "All three legs
+    of the Lethal Trifecta are active simultaneously". Every test above this one checks
+    one of the three internal models in isolation (`_trifecta_legs`, `risk_paths`,
+    `_capability_graph`); this one instead drives the full `audit()` pipeline and reads
+    the exact fields a `--json` consumer sees, because that is the shape B-730's
+    measurement on the real fleet home was actually about -- a single document printing
+    `"trifecta": "2/3"` right next to a live `RISK-02 HIGH`.
+
+    Before CLAWSECCHECK-B-876 this fails on exactly the config below: A1 could not see
+    `gateway.auth.password` as sensitive data (2/3, PASS) while risk.py's own copy of the
+    same predicate already could, so RISK-02 fired anyway -- reddening this assertion.
+    """
+    from clawseccheck import audit
+    from clawseccheck.report import _trifecta_ratio
+
+    home = _home(tmp_path)
+    (home / "openclaw.json").write_text(
+        json.dumps({**CFG, "gateway": {"auth": {"password": _token("G")}}})
+    )
+    (home / "openclaw.json").chmod(0o600)
+    ctx, findings, _score = audit(home)
+    ratio = _trifecta_ratio(findings)
+    risk02_chains = [p for p in risk_paths(ctx, findings) if p.id == "RISK-02"]
+    assert risk02_chains, "setup check: this config must reproduce a live RISK-02 chain"
+    assert len(risk02_chains[0].chain) == 3, "setup check: RISK-02 always asserts 3 legs"
+    assert ratio == "3/3", (
+        f"RISK-02 asserts all three legs active but the run's own trifecta ratio is "
+        f"{ratio!r} -- a run must never disagree with itself about the leg count"
+    )
+
+
+def test_adding_the_gateway_password_never_lowers_a1s_severity(tmp_path):
+    """Metamorphic guard the task brief asked for: widening a FAIL/WARN-capable check
+    must never make it MORE lenient. Whatever A1's severity was WITHOUT
+    `gateway.auth.password` set, adding that one key to the same config must come out the
+    same or WORSE, never better -- checked across a spread of leg combinations rather than
+    one fixed config, since a status-ranking regression could easily hide behind the single
+    scenario the other tests in this file use.
+    """
+    # NOTE: a base with the sensitive-data leg OFF and BOTH other legs also undetermined
+    # (e.g. bare `elevated.allowFrom` alone) is deliberately excluded here. Resolving an
+    # undetermined leg to a known-active one there flips WARN->PASS by DESIGN -- proven by
+    # construction to be identical for a `fs_read` tool hint or a credential-store file, the
+    # two sensitive-data sources that predate this task -- so it is an existing property of
+    # check_trifecta's hedge precedence, not something this change could regress or is
+    # responsible for fixing.
+    bases = [
+        CFG,  # this file's own 2/3 (untrusted + outbound already active) -> must reach 3/3
+        {  # already 3/3 via OTHER legs -- adding the password must not "improve" this
+            "channels": {"telegram": {"dmPolicy": "open"}},
+            "tools": {"allow": ["fs_read", "send_email"]},
+        },
+    ]
+    for i, base in enumerate(bases):
+        ctx_without = _ctx(_home(tmp_path / f"base{i}_without"))
+        ctx_without.config = base
+        ctx_with = _ctx(_home(tmp_path / f"base{i}_with"))
+        ctx_with.config = {**base, "gateway": {"auth": {"password": _token("H")}}}
+        rank_without = _a1_status_rank(ctx_without)
+        rank_with = _a1_status_rank(ctx_with)
+        assert rank_with <= rank_without, (
+            f"adding gateway.auth.password made A1 LESS severe for base={base!r}: "
+            f"{check_trifecta(ctx_without).status!r} -> {check_trifecta(ctx_with).status!r}"
+        )
+    # And the sharpest instance of the property, stated as a direct assertion rather than
+    # inferred from ranks: this file's own base config must cross the FAIL line exactly
+    # as CLAWSECCHECK-B-876 intends, not merely "not get better".
+    ctx_without = _ctx(_home(tmp_path / "sharp_without"))
+    ctx_without.config = CFG
+    ctx_with = _ctx(_home(tmp_path / "sharp_with"))
+    ctx_with.config = {**CFG, "gateway": {"auth": {"password": _token("I")}}}
+    assert check_trifecta(ctx_without).status == PASS
+    assert check_trifecta(ctx_with).status in FAIL_WEIGHT_STATUSES

@@ -209,3 +209,38 @@ def test_a_complete_and_a_truncated_sweep_are_distinguishable():
     assert whole.not_reached == ()
     assert part.not_reached != ()
     assert (whole.status, whole.not_reached) != (part.status, part.not_reached)
+
+
+# ---------------------------------------------------------------------------
+# B-888: a crashed skill's disclosure must reach the ledger's own detail text too,
+# not just cli.py's tally — record_skill_sweep() builds its own sentence from the
+# same counts() dict.
+# ---------------------------------------------------------------------------
+
+def test_record_skill_sweep_names_a_crashed_skill(tmp_path, monkeypatch):
+    import clawseccheck.cli as cli_mod
+    from clawseccheck.catalog import Finding
+
+    skills = tmp_path / "workspace" / "skills"
+    for name in ("crashy", "clean"):
+        d = skills / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: A helper skill.\n---\nHelper.\n",
+            encoding="utf-8",
+        )
+
+    def _flaky(p):
+        if Path(p).name == "crashy":
+            raise RecursionError("simulated engine crash (B-888 test)")
+        return Finding("B13", "Installed skill sweep", "INFO", "PASS",
+                        "nothing found", "n/a", "Skill Trust")
+
+    monkeypatch.setattr(cli_mod, "vet_skill", _flaky)
+    sweep = cli_mod.sweep_installed_skills(tmp_path, narrate=False)
+
+    phase = P.record_skill_sweep(sweep)
+
+    assert "1 could not be analyzed (engine error)" in phase.detail, phase.detail
+    assert "0 no known issue" not in phase.detail  # sanity: only "clean" is safe
+    assert "1 no known issue" in phase.detail, phase.detail

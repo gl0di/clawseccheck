@@ -1,5 +1,5 @@
 """B-452: keyword-gated hidden trigger ("if the user mentions X, you MUST first run
-...") surfaced as a judge-packet-only item (clawseccheck/adjudication.py).
+...") surfaced as a judge-packet-only item (clawseccheck/adjudication/_builder.py).
 
 Two static-detector attempts at this shape were built and RETRACTED on C-135 grounds
 (CLAWSECCHECK-B-452 task history, 2026-08-25 and 2026-09-05): widening

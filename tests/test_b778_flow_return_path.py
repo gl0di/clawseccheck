@@ -163,7 +163,7 @@ def test_feedback_command_survives_ascii_mode():
 def _run_full_json(tmp_path: Path, *extra: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", _SAFE_HOME, "--full", "--json",
-         "--data-dir", str(tmp_path / "state"), "--no-history", *extra],
+         "--data-dir", str(tmp_path / "state"), "--no-history", "--no-deptree", "--no-host", *extra],
         cwd=_REPO, capture_output=True, text=True, timeout=600)
 
 

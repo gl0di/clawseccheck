@@ -20,7 +20,8 @@ def _ctx(config):
 #   open DM channel  -> untrusted input
 #   fs_read tool     -> sensitive data (agent-readable private data)
 #   send tool        -> outbound
-# (gateway.auth.password is a B1 plaintext-secret signal, NOT an A1 sensitive-data leg.)
+# (gateway.auth.password is ALSO a sensitive-data leg source as of B-876, in addition to
+# being a B1 plaintext-secret signal; this fixture doesn't set it, so that is untested here.)
 def _full_trifecta():
     return {
         "channels": {"tg": {"dmPolicy": "open"}},
@@ -58,6 +59,20 @@ def test_b46_gate_present_passes():
     cfg["tools"] = {"allow": ["send_email"], "exec": {"mode": "ask"}}
     r = check_multiagent_exposure(_ctx(cfg))
     assert r.status == "PASS"
+
+
+def test_b46_non_exec_write_tool_with_exec_mode_ask_still_warns():
+    # B-848 flagship negative control: a genuinely non-exec write tool ("write" —
+    # see `_NON_EXEC_WRITE_TOKENS`) is not reached by tools.exec.mode/security/ask,
+    # so a full trifecta + exec.mode='ask' must NOT be suppressed to PASS just
+    # because an unrelated exec-scoped gate happens to be set. Contrast with
+    # test_b46_gate_present_passes above, which correctly DOES PASS: "send_email"
+    # is not a write token, so the same exec gate legitimately covers it.
+    cfg = _full_trifecta()
+    cfg["agents"] = {"subagents": {"maxConcurrent": 4}}
+    cfg["tools"] = {"allow": ["fs_read", "send_email", "write"], "exec": {"mode": "ask"}}
+    r = check_multiagent_exposure(_ctx(cfg))
+    assert r.status == "WARN"
 
 
 # ---- subagents but trifecta incomplete + elevated sender delegation -> WARN ----

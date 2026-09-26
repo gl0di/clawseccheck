@@ -398,3 +398,149 @@ def test_mutants_are_caught_by_the_positive_controls(monkeypatch):
         "list": [{"id": "main", "name": "main", "tools": {"exec": {"host": "gateway"}}}],
     }
     assert _fires_full(agents) is False, "mutant did not flip the FN test -- that test is vacuous"
+
+
+# ── C-135 round 5 (B-641): sandbox.browser.binds is a SECOND bind surface ─────────
+#
+# `resolveSandboxBrowserConfig` (dist/config-Bo2B3kKQ.mjs:85-103, installed OpenClaw
+# 2026.9.5) resolves `browser.binds` with the same concatenation/scope-discard
+# semantics as `docker.binds`, and those binds reach a real host mount through the
+# same mount-selection pipeline whenever the browser sandbox is enabled -- see
+# `_sandbox_browser_binds`/`_sandbox_browser_enabled` (checks/_shared.py) and
+# `_fs_writes_contained`'s ROUND 5 docstring note (risk.py) for the full grounding.
+
+
+def test_risk12_fires_when_defaults_declare_a_writable_browser_bind():
+    sandbox = {
+        "mode": "all", "workspaceAccess": "ro",
+        "browser": {"enabled": True, "binds": ["/:/host:rw"]},
+    }
+    assert _fires_full({"defaults": {"sandbox": sandbox}}) is True
+
+
+def test_risk12_stays_suppressed_for_a_readonly_browser_bind():
+    sandbox = {
+        "mode": "all", "workspaceAccess": "ro",
+        "browser": {"enabled": True, "binds": ["/srv/data:/data:ro"]},
+    }
+    assert _fires_full({"defaults": {"sandbox": sandbox}}) is False
+
+
+def test_risk12_stays_suppressed_when_browser_sandbox_is_not_enabled():
+    """The FP guard this task exists to add: a declared `browser.binds` is inert --
+    never reaches a host mount -- when the browser sandbox itself never launches
+    (`ensureSandboxBrowser` returns before creating any container when
+    `!cfg.browser.enabled`, dist/context-D_TiLPsh.mjs:245). Unconditionally treating
+    a declared-but-unreachable `browser.binds` as a defeater would be a NEW,
+    undiagnosed false positive (CLAUDE.md §2.5)."""
+    sandbox = {
+        "mode": "all", "workspaceAccess": "ro",
+        "browser": {"binds": ["/:/host:rw"]},  # enabled omitted -> resolves to False
+    }
+    assert _fires_full({"defaults": {"sandbox": sandbox}}) is False
+
+
+def test_risk12_stays_suppressed_when_browser_sandbox_is_explicitly_disabled():
+    sandbox = {
+        "mode": "all", "workspaceAccess": "ro",
+        "browser": {"enabled": False, "binds": ["/:/host:rw"]},
+    }
+    assert _fires_full({"defaults": {"sandbox": sandbox}}) is False
+
+
+def test_risk12_fires_when_only_per_agent_declares_a_writable_browser_bind():
+    # Safe default (no browser declared at all), the agent's OWN browser.enabled +
+    # binds are concatenated onto it (same rule as docker.binds) -- not shared-scope.
+    agent_list = [
+        {"id": "main", "name": "main",
+         "sandbox": {"browser": {"enabled": True, "binds": ["/data:/data:rw"]}}},
+    ]
+    assert _fires_with_default_sandbox(_SAFE_DEFAULT, agent_list) is True
+
+
+def test_risk12_stays_suppressed_when_shared_scope_discards_the_browser_bind():
+    # scope:"shared" discards the WHOLE agentBrowser object (enabled AND binds),
+    # exactly like it discards agentDocker for docker.binds.
+    agents = {
+        "defaults": {"sandbox": _SAFE_DEFAULT},
+        "list": [{
+            "id": "main", "name": "main",
+            "sandbox": {"scope": "shared",
+                        "browser": {"enabled": True, "binds": ["/data:/data:rw"]}},
+        }],
+    }
+    assert _fires_full(agents) is False
+
+
+def test_risk12_fp3_positive_control_non_shared_scope_browser_bind_still_fires():
+    """Required positive control for the scope guard above: a NON-shared scope's
+    own writable browser bind must still fire."""
+    agents = {
+        "defaults": {"sandbox": _SAFE_DEFAULT},
+        "list": [{
+            "id": "main", "name": "main",
+            "sandbox": {"scope": "agent",
+                        "browser": {"enabled": True, "binds": ["/data:/data:rw"]}},
+        }],
+    }
+    assert _fires_full(agents) is True
+
+
+def test_risk12_agent_can_disable_browser_even_when_default_enables_it():
+    # An agent's own `browser.enabled: False` sticks (JS `??` only replaces
+    # null/undefined, not an explicit false) even though the DEFAULT enables the
+    # browser sandbox. The default itself declares no binds, so nothing defeats
+    # containment at that level either -- this isolates the per-agent `enabled`
+    # override from the defaults-level check.
+    agents = {
+        "defaults": {"sandbox": {**_SAFE_DEFAULT, "browser": {"enabled": True}}},
+        "list": [{
+            "id": "main", "name": "main",
+            "sandbox": {"browser": {"enabled": False, "binds": ["/data:/data:rw"]}},
+        }],
+    }
+    assert _fires_full(agents) is False
+
+
+def test_risk12_stays_suppressed_when_defaults_browser_field_is_malformed_shape():
+    # A malformed, non-dict `browser` cannot report `enabled` as True (it resolves
+    # to the fallback, False) -- so on its own it must NOT defeat containment.
+    sandbox = {"mode": "all", "workspaceAccess": "ro", "browser": "not-a-dict"}
+    assert _fires_full({"defaults": {"sandbox": sandbox}}) is False
+
+
+def test_risk12_fires_when_agent_browser_field_is_malformed_but_enabled_via_default():
+    # The narrow edge case `_sandbox_has_writable_bind`'s B-641 note documents: this
+    # agent's OWN `sandbox.browser` is malformed (not a dict), but the DEFAULT'S
+    # `browser.enabled: True` is the effective value for this agent too (the agent
+    # declares no boolean of its own to override it) -- so the malformed shape must
+    # fail closed rather than be silently read as "no binds".
+    agents = {
+        "defaults": {"sandbox": {**_SAFE_DEFAULT, "browser": {"enabled": True}}},
+        "list": [{"id": "main", "name": "main", "sandbox": {"browser": "not-a-dict"}}],
+    }
+    assert _fires_full(agents) is True
+
+
+def test_risk12_browser_mutant_is_caught_by_the_positive_control(monkeypatch):
+    """Mutation proof for this round: pretend `_sandbox_browser_enabled` always
+    returns False (i.e. the browser leg is never checked) -- must flip the
+    writable-browser-bind positive control from "fires" to "wrongly silent".
+
+    Patched at `risk`, not at `checks._shared`: unlike `_bind_mode_is_ro` (called
+    from WITHIN `_shared.py`'s own `_sandbox_has_writable_bind`), the effective
+    `browser_enabled` value is resolved by `_fs_writes_contained` in `risk.py`
+    itself and passed IN -- so the name to patch is the one `risk.py` calls,
+    same reasoning as mutant-test style above, applied to the module that
+    actually holds this call site.
+    """
+    import clawseccheck.risk as risk_mod
+
+    monkeypatch.setattr(risk_mod, "_sandbox_browser_enabled", lambda sandbox, fallback: False)
+    sandbox = {
+        "mode": "all", "workspaceAccess": "ro",
+        "browser": {"enabled": True, "binds": ["/:/host:rw"]},
+    }
+    assert _fires_full({"defaults": {"sandbox": sandbox}}) is False, (
+        "mutant did not flip the browser-bind positive control -- that control is vacuous"
+    )

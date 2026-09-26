@@ -580,7 +580,25 @@ def _pipeline_block(flow: "_PageFlow", title: str, lines) -> None:
     formatters that can drift, and every glyph is already base-14-safe ([X]/[!]/[OK]/[?]
     instead of the unicode markers, which would each become '?'). Leading indentation is
     preserved as a left inset so nested roster/reason lines still read as nested; the text
-    itself word-wraps rather than overflowing (nothing is ever dropped)."""
+    itself word-wraps rather than overflowing (nothing is ever dropped).
+
+    B-866: this is the ONE place every pipeline block's text reaches the PDF page, so
+    it is where `_redact_home_paths` is applied — once, for all eight blocks — rather
+    than inside each of report.py's per-block line renderers. `_worth_a_glance_lines`
+    already redacts itself (it is also the `--dashboard --full` chat card's own line;
+    re-running the regex on its already-'~'-folded text here is a no-op, not a double
+    redaction). The other seven renderers (`_skills_inventory_lines`,
+    `_plugins_inventory_lines`, `_mcp_inventory_lines`, `_risk_chain_lines`,
+    `_behavioral_block_lines`, `_second_opinion_item_lines`, `_coverage_lines`) do NOT
+    redact themselves — same choice `_finding_block` above already made for a finding's
+    `detail`, and for the identical reason: those renderers are shared with the plain
+    `--full`/`--dashboard` TEXT report (`render_report`/`render_subject_inventory`),
+    which stays unredacted by design (the owner's own machine — see
+    `_redact_home_paths`'s own docstring). Folding inside the shared renderer would
+    have redacted the terminal report too; folding here, at the PDF-only render
+    boundary, does not. Confirmed live at checks/_config.py's B1/B11 fixes (an
+    absolute config path in a `chmod` suggestion) and checks/_egress.py's B82
+    evidence (an absolute `.env` path) — B-866."""
     if not lines:
         return
     # One renderer (_coverage_lines) already opens with its own text rule
@@ -592,7 +610,7 @@ def _pipeline_block(flow: "_PageFlow", title: str, lines) -> None:
         lines = lines[1:]
     _draw_section_header(flow, title)
     for raw in lines:
-        text = raw.rstrip()
+        text = _redact_home_paths(raw.rstrip())
         if not text.strip():
             flow.spacer(4.0)
             continue

@@ -1,0 +1,12 @@
+{
+  "node-studio-b396": {
+    "nodeId": "node-studio-b396",
+    "displayName": "Studio Mac",
+    "platform": "darwin",
+    "version": "2026.9.6",
+    "caps": ["system"],
+    "commands": ["system.run", "system.which", "system.notify"],
+    "createdAtMs": 1757000000000,
+    "approvedAtMs": 1757000000000
+  }
+}

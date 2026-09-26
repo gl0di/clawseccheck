@@ -45,6 +45,15 @@ from clawseccheck.catalog import BY_ID, CRITICAL, FAIL, Finding
 from clawseccheck.dedup import deduplicate_findings
 from clawseccheck.guide import render_next_actions, suggest_actions
 from clawseccheck.history import render_trend
+from clawseccheck.layers import (
+    LAYER_LIVE_BEHAVIOUR,
+    LAYER_ORDER,
+    LAYER_SELF_REPORT,
+    STATUS_RAN,
+    STATUS_UNAVAILABLE,
+    LayerLedger,
+    LayerState,
+)
 from clawseccheck.menu import render_menu, render_onboarding
 from clawseccheck.palette import render_palette
 from clawseccheck.report import (
@@ -720,14 +729,60 @@ def _audit_fixture():
     return audit(home=str(_FIXTURES / "home_vuln"))
 
 
+def _ungraded_ledger() -> LayerLedger:
+    """Same idiom as `tests/test_c423_ungraded_render.py`'s helper of the same name —
+    self_report + live_behaviour UNAVAILABLE, everything else RAN. Duplicated locally
+    rather than imported: this is the house pattern for a small ledger-builder shared
+    across test modules (test_b512/_b518/_b532/_b625/_c428 each carry their own copy
+    too), not a shared-fixtures module. There is no third way to build an ungraded
+    score in this suite — reuse the shape, don't invent one."""
+    states = {layer: LayerState(status=STATUS_RAN) for layer in LAYER_ORDER}
+    states[LAYER_SELF_REPORT] = LayerState(status=STATUS_UNAVAILABLE)
+    states[LAYER_LIVE_BEHAVIOUR] = LayerState(status=STATUS_UNAVAILABLE)
+    return LayerLedger(states=states)
+
+
 def _owner_facing_surfaces(ctx, findings, score) -> dict:
+    """Every owner-facing rendering surface — the graded ones, plus an UNGRADED
+    rendering of every surface `report.py::_urgent_headline` actually reaches.
+
+    `_audit_fixture()`'s `home_vuln` fixture always grades (5 of 5 layers ran), so
+    before this widening every invariant below only ever saw `_urgent_headline`'s
+    GRADED branch — the branch that never carried the defect. `_urgent_headline` has
+    exactly three callers (render_report, render_dashboard, render_html), and those
+    are the only three surfaces whose rendered prose can differ, by FINDING content,
+    between gradings — so those three are rendered a second time here, ungraded, over
+    the SAME real `findings`/`ctx` this fixture already produced (`compute(..,
+    ledger=_ungraded_ledger())`, not a second, unrelated finding set — a defect that
+    only shows up on a different fixture would tell us nothing about this branch).
+
+    `render_card`, `render_monitor` and `render_next_actions` are deliberately left
+    GRADED-ONLY:
+    - `render_card` is "grade + score + trifecta ONLY. No findings, ever." by its own
+      docstring — neither grading ever interpolates a finding's title or id.
+    - `render_monitor`'s ungraded branch (`_missing_layers_sentence`) is layer/status
+      wording only (`layers.describe_layer`), never a finding's title or id.
+    - `render_next_actions`/`suggest_actions` do vary their prose by `score.graded`
+      (B-757/C-428), but every word of it is hand-authored copy in `guide.py` —
+      `Action.title`/`.why` are never interpolated from `Finding.title`/`.id`.
+    None of the three can leak a check id, shout, stack `!`, or reach for hype
+    phrasing differently across gradings, so a second, ungraded copy of any of them
+    would not add coverage for what this class checks — only double the fixed cost of
+    building every surface for every test in the two classes below.
+    """
+    ungraded_score = compute(findings, ctx, ledger=_ungraded_ledger())
     return {
         "render_report": render_report(findings, score, ctx=ctx),
+        "render_report [ungraded]": render_report(findings, ungraded_score, ctx=ctx),
         "render_report --ascii": render_report(findings, score, ascii_only=True, ctx=ctx),
+        "render_report --ascii [ungraded]": render_report(
+            findings, ungraded_score, ascii_only=True, ctx=ctx),
         "render_dashboard": render_dashboard(findings, score),
+        "render_dashboard [ungraded]": render_dashboard(findings, ungraded_score),
         "render_card": render_card(score, findings),
         "render_monitor": render_monitor([("HIGH", "a check changed")], score),
         "render_html": _visible_text(render_html(findings, score)),
+        "render_html [ungraded]": _visible_text(render_html(findings, ungraded_score)),
         # A standalone CLI surface in its own right (`--next`, and appended to the
         # default run), so the voice contract has to hold over it too.
         "render_next_actions": render_next_actions(suggest_actions(findings, score)),

@@ -226,6 +226,66 @@ def test_b82_is_unknown_when_a_dotenv_exists_but_settles_nothing(tmp_path):
     assert "cannot confirm" in f.detail or "cannot" in f.detail
 
 
+# ---------------------------------------------------------------------------
+# B-856 — Finding.evidence must not quote the absolute, home-rooted dotenv path.
+# ---------------------------------------------------------------------------
+
+def test_b82_warn_evidence_does_not_leak_the_absolute_dotenv_path(tmp_path):
+    """The WARN evidence names WHERE OPENCLAW_CACHE_TRACE was found. An absolute,
+    home-rooted path there discloses the operator's real directory layout in any report
+    they share, and is unstable across checkouts/worktrees -- the same hazard
+    `_detail_path()` already exists to close for `Finding.detail` elsewhere (B-856,
+    item 1)."""
+    home = tmp_path / ".openclaw"
+    home.mkdir(parents=True)
+    (home / "openclaw.json").write_text(
+        '{"diagnostics": {"cacheTrace": {"enabled": false}}}')
+    (home / ".env").write_text("OPENCLAW_CACHE_TRACE=1\n")
+    f = check_cachetrace_redaction(collect(home))
+    assert f.status == WARN
+    blob = " ".join(f.evidence)
+    assert str(tmp_path) not in blob
+    assert ".env" in blob
+
+
+def test_b82_unknown_other_home_evidence_does_not_leak_the_absolute_dotenv_path(tmp_path):
+    """Same leak, the 'global dotenv present but settles nothing, audited home is not
+    this user's own' UNKNOWN branch (GR#4)."""
+    home = tmp_path / ".openclaw"
+    home.mkdir(parents=True)
+    (home / "openclaw.json").write_text(
+        '{"diagnostics": {"cacheTrace": {"enabled": false}}}')
+    (home / ".env").write_text("OPENCLAW_LOG_LEVEL=info\n")
+    f = check_cachetrace_redaction(collect(home))
+    assert f.status == UNKNOWN
+    blob = " ".join(f.evidence)
+    assert str(tmp_path) not in blob
+    assert ".env" in blob
+
+
+def test_b82_unknown_truncated_evidence_does_not_leak_the_absolute_dotenv_path(
+    tmp_path, monkeypatch,
+):
+    """Same leak, the B-657 truncated-dotenv UNKNOWN branch (own-home path)."""
+    from clawseccheck.collector import _MAX_DOTENV_BYTES  # noqa: PLC0415
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("OPENCLAW_CACHE_TRACE", raising=False)
+    home = tmp_path / ".openclaw"
+    home.mkdir(parents=True)
+    (home / "openclaw.json").write_text(
+        '{"diagnostics": {"cacheTrace": {"enabled": false}}}')
+    (home / ".env").write_text("# padding\n" * (_MAX_DOTENV_BYTES // 10 + 100))
+    ctx = collect(home)
+    assert ctx.dotenv_truncated is True
+    f = check_cachetrace_redaction(ctx)
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
+    blob = " ".join(f.evidence)
+    assert str(tmp_path) not in blob
+    assert ".env" in blob
+
+
 def test_b82_stays_pass_for_a_self_audit_with_an_unrelated_dotenv(tmp_path, monkeypatch):
     """The UNKNOWN branch must NOT fire on a real self-audit.
 

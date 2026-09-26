@@ -12,7 +12,7 @@
 # Regenerate ONLY on a machine with the matching OpenClaw installed, as part of the
 # upgrade protocol's re-baseline step. Hand-adding a line here defeats the guard.
 #
-# openclaw-version: 2026.9.4
+# openclaw-version: 2026.9.6
 #
 acp.runtime.installCommand
 agents.defaults.cwd
@@ -34,7 +34,9 @@ agents.defaults.subagents.maxChildrenPerAgent
 agents.defaults.subagents.maxConcurrent
 agents.defaults.subagents.maxSpawnDepth
 agents.defaults.workspace
+attachments.ttlHours
 auth.profiles
+browser.extensionRelay.allowLegacyAuth
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
 channels.defaults.contextVisibility
@@ -48,6 +50,7 @@ commands.mcp
 commands.ownerAllowFrom
 commands.plugins
 cron
+desktop.host
 discovery.mdns.mode
 env.shellEnv.enabled
 gateway.allowRealIpFallback
@@ -73,12 +76,16 @@ gateway.http.endpoints.chatCompletions.enabled
 gateway.http.endpoints.chatCompletions.images
 gateway.http.endpoints.chatCompletions.images.allowUrl
 gateway.http.endpoints.chatCompletions.images.urlAllowlist
+gateway.nodes.allowSkills
 gateway.nodes.commands.allow
 gateway.nodes.commands.deny
 gateway.nodes.pairing.autoApproveCidrs
 gateway.port
+gateway.portals
+gateway.portals.ingress
 gateway.remote
 gateway.remote.sshHostKeyPolicy
+gateway.tailscale
 gateway.tailscale.mode
 gateway.terminal.enabled
 gateway.terminal.shell
@@ -101,6 +108,9 @@ logging.file
 memory.search.remote
 meta.lastTouchedVersion
 models.providers
+nodeHost.workerRuns.containerImage
+nodeHost.workerRuns.enabled
+nodeHost.workerRuns.isolation
 plugins.allow
 plugins.deny
 plugins.enabled
@@ -124,9 +134,13 @@ relative:tools.codeMode
 relative:tools.deny
 relative:tools.exec
 relative:tools.fs.workspaceOnly
+relative:tools.message.actions
+relative:tools.message.actions.allow
 relative:tools.message.crossContext
 relative:tools.message.crossContext.allowAcrossProviders
 relative:tools.profile
+secrets.egressProxy.allowedHosts
+secrets.egressProxy.enabled
 secrets.providers
 security.audit.suppressions
 security.installPolicy
@@ -137,6 +151,7 @@ skills.load.allowSymlinkTargets
 skills.load.extraDirs
 skills.load.watch
 skills.workshop.approvalPolicy
+telemetry.enabled
 tools.agentToAgent
 tools.agentToAgent.allow
 tools.agentToAgent.enabled
@@ -156,6 +171,8 @@ tools.exec.safeBins
 tools.exec.security
 tools.exec.strictInlineEval
 tools.fs.workspaceOnly
+tools.message.actions
+tools.message.actions.allow
 tools.message.crossContext
 tools.message.crossContext.allowAcrossProviders
 tools.profile
@@ -163,6 +180,4 @@ tools.web
 tools.web.fetch.enabled
 tools.web.fetch.maxRedirects
 tools.web.fetch.useTrustedEnvProxy
-update.auto
-update.auto.enabled
 update.channel

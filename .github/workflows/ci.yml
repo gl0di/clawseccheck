@@ -24,9 +24,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# checkout and dependency-review need read access only; nothing here writes to the repo.
+permissions:
+  contents: read
+
 jobs:
   # -- L1: lint + test ----------------------------------------------------------
   test:
+    timeout-minutes: 60
     # C-160: SKILL.md advertises os:[darwin,linux,win32]. Add a macOS (darwin) axis so the
     # advertised POSIX platform is actually proven to run + pass, not just assumed. Windows
     # is still advertised for the read-only audit but its local-store hardening degrades
@@ -46,29 +51,37 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install test tools (the package itself has zero runtime deps)
-        # pytest/ruff pinned to exact versions (not latest) so a compromised or
-        # typosquatted release can't execute in CI — same supply-chain discipline as the
-        # pinned markdownlint-cli@ / clawhub@ installs (C-183). Bump these deliberately.
-        run: python -m pip install --upgrade pip && python -m pip install pytest==7.4.4 ruff==0.15.20
+        # C-548: pinned to exact versions AND exact hashes (--require-hashes), against
+        # the committed .github/tools/requirements-ci.txt lockfile — pytest's own
+        # transitive deps (iniconfig/packaging/pluggy) are pinned too, not just pytest
+        # and ruff themselves — so a compromised or typosquatted release anywhere in
+        # that tree can't execute in CI. Same supply-chain discipline as the
+        # lockfile-pinned markdownlint-cli@ / clawhub@ installs (C-183/C-548). Bump
+        # deliberately: edit .github/tools/requirements-ci.in and regenerate
+        # requirements-ci.txt with pip-compile (see that file's header).
+        run: python -m pip install --require-hashes -r .github/tools/requirements-ci.txt
       - name: Lint
         run: ruff check .
       - name: Tests
         run: python -m pytest -q
-      - name: Hunt advisory (ClawRange L2)
-        run: |
-          if [ -f "${{ github.workspace }}/../clawrange/hunt.py" ]; then
-            python ../clawrange/hunt.py --all || true
-          else
-            echo "ClawRange hunt.py not available in this CI context (private repo) -- skipped"
-          fi
 
   # -- L2: markdown quality -----------------------------------------------------
   markdownlint:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install markdownlint-cli
-        run: npm install -g markdownlint-cli@0.44.0
+        # C-548: `npm install -g markdownlint-cli@X` resolves its whole transitive
+        # tree fresh at install time and may run lifecycle scripts. Installed instead
+        # from the committed .github/tools lockfile with `npm ci --ignore-scripts`
+        # (same manifest the publish workflow uses for clawhub), which pins the tree
+        # and refuses to run any package's install scripts. Bump the pin in
+        # .github/tools/package.json (then regenerate package-lock.json), not here.
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --prefix .github/tools
+          echo "$PWD/.github/tools/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Lint Markdown
         # CHANGELOG.md stays ignored (high-churn release log, repeated structures).
         # SKILL.md/SECURITY.md/SECURITY_MODEL.md are linted like everything else —
@@ -82,16 +95,21 @@ jobs:
 
   # -- L3: dependency review (PRs only) ----------------------------------------
   dependency-review:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
+        # The action has no path scoping: a PR adding a fixtures/ manifest pinned to a
+        # vulnerable version will fail this job. That is accepted; the override is the
+        # action's own advisory allow-list, added in that PR with a justification.
         with:
           fail-on-severity: high
 
   # -- L4: secret scan ----------------------------------------------------------
   secret-scan:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -103,6 +121,16 @@ jobs:
         # (same supply-chain discipline as the SHA-pinned actions). Bump SHA256
         # together with VERSION — it's the linux_x64 line of the release's
         # gitleaks_<VERSION>_checksums.txt.
+        #
+        # C-548: this is a digest-pinned release download, not a package-manager
+        # dependency, so Dependabot (github-actions/npm/pip ecosystems only — see
+        # .github/dependabot.yml) cannot watch it; a stale pin here has no update
+        # channel or advisory path at all. gitleaks is the only mechanical
+        # enforcement of Golden Rule #3 (no secrets in source), so a stale pin is a
+        # real gap, not cosmetic. Owner: gl0di. Review cadence: check
+        # https://github.com/gitleaks/gitleaks/releases at least quarterly, or
+        # immediately on a CVE advisory against gitleaks/go-git, and bump
+        # VERSION+SHA256 by hand.
         run: |
           VERSION="8.27.2"
           SHA256="141c3b2dede46d8b3a53b47116da756bd223decc0374797559a6b50ecba5590c"
@@ -116,56 +144,145 @@ jobs:
 
   # -- L5: commit integrity -----------------------------------------------------
   commit-integrity:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: No AI-agent co-author in commits
+      - name: Resolve the commit range under inspection
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            RANGE="origin/${{ github.base_ref }}..HEAD"
-          else
-            RANGE="HEAD~1..HEAD"
+          set -euo pipefail
+          resolves() { git rev-parse --verify --quiet "$1^{commit}" >/dev/null; }
+          fallback() {
+            if resolves origin/main; then RANGE="origin/main..$SHA"; else RANGE="$SHA"; fi
+          }
+          case "$EVENT" in
+            pull_request)
+              if ! resolves "origin/$BASE_REF"; then
+                echo "::error::Cannot resolve origin/$BASE_REF; refusing to pass on an unknown range"
+                exit 1
+              fi
+              RANGE="origin/$BASE_REF..HEAD"
+              ;;
+            push)
+              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                fallback
+              elif resolves "$BEFORE"; then
+                RANGE="$BEFORE..$SHA"
+              else
+                # B-840 accepted residual: on a force-push onto main, $BEFORE is the
+                # pre-push tip SHA, but that commit is no longer reachable from any ref
+                # on origin, and `actions/checkout` with fetch-depth: 0 only fetches
+                # history reachable from refs/tags — not orphaned objects. A `git fetch
+                # origin "$BEFORE"` here would depend on GitHub still serving an
+                # unreachable SHA (retention-window behaviour, not a guaranteed git
+                # protocol feature), so a "fix" here is unverifiable rather than sound;
+                # `fallback` inspects the branch against main instead, which sees a
+                # NON-tip commit only when the range it produces is non-empty. When it
+                # is empty too (a straight force-push onto main, the exact case a
+                # rewrite is used for), the range step below falls back to `HEAD^!`
+                # and a non-tip offending commit goes uninspected. Warned, not silent
+                # (see below); no sound static fix identified.
+                echo "::warning::Previous tip $BEFORE is not reachable (force push?); inspecting the branch against main"
+                fallback
+              fi
+              ;;
+            *)
+              echo "::error::Unsupported event '$EVENT' for commit-integrity"
+              exit 1
+              ;;
+          esac
+          COUNT=$(git rev-list --count "$RANGE")
+          if [ "$COUNT" -eq 0 ]; then
+            # An empty range (re-run, force push onto main, head == base) would let
+            # the checks below pass without examining anything; inspect the tip.
+            echo "::warning::Range $RANGE is empty; inspecting the tip commit only"
+            RANGE="HEAD^!"
+            COUNT=$(git rev-list --count "$RANGE")
+            if [ "$COUNT" -eq 0 ]; then
+              echo "::error::Nothing to inspect; refusing to pass vacuously"
+              exit 1
+            fi
           fi
-          FOUND=$(git log "$RANGE" --format="%H %B" \
-            | grep -iE "co-authored-by:.*(claude|anthropic|cursor|copilot|aider|codeium)" || true)
-          if [ -n "$FOUND" ]; then
+          echo "Inspecting $COUNT commit(s) in $RANGE"
+          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+
+      - name: No AI-agent co-author in commits
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          set -euo pipefail
+          LOG=$(git log "$RANGE" --format="%H %B")
+          if FOUND=$(grep -iE "co-authored-by:.*(claude|anthropic|cursor|copilot|aider|codeium)" <<<"$LOG"); then
             echo "::error::AI co-author tag detected in commit(s):"
             echo "$FOUND"
             exit 1
+          else
+            rc=$?
+            [ "$rc" -eq 1 ] || { echo "::error::grep failed (rc=$rc)"; exit 1; }
           fi
           echo "OK: no AI co-author tags"
 
       - name: No agent config files in git tree
+        # B-840: this used to run `git ls-files CLAUDE.md ...` — a bare pathspec matches
+        # only the repo ROOT, so a tracked sub/CLAUDE.md or sub/.claude/settings.json
+        # passed silently (reproduced in a scratch repo). Scanning the full tracked-file
+        # list with a path-component regex catches a match at any depth, and `set -e`
+        # (absent before) makes the step fail closed instead of `|| true`-ing past a
+        # `git` error.
         run: |
-          FORBIDDEN="CLAUDE.md CLAUDE.local.md .claude .cursorrules .cursor .aider .copilot"
-          FOUND=""
-          for f in $FORBIDDEN; do
-            MATCH=$(git ls-files "$f" 2>/dev/null || true)
-            [ -n "$MATCH" ] && FOUND="$FOUND $f"
-          done
+          set -euo pipefail
+          FORBIDDEN_RE='(^|/)(CLAUDE\.md|CLAUDE\.local\.md|\.cursorrules|\.claude|\.cursor|\.aider|\.copilot)(/|$)'
+          # Sole legitimate tracked match: a fixture exercising a check against a skill's
+          # OWN CLAUDE.md content — not an agent config for this repo.
+          ALLOWLIST_RE='^fixtures/clean_b13_cross_file_window_boundary/skills/data-hub/CLAUDE\.md$'
+          ALL_FILES=$(git ls-files)
+          if MATCHES=$(grep -E "$FORBIDDEN_RE" <<<"$ALL_FILES"); then
+            FOUND=$(grep -vE "$ALLOWLIST_RE" <<<"$MATCHES" || true)
+          else
+            rc=$?
+            [ "$rc" -eq 1 ] || { echo "::error::grep failed (rc=$rc)"; exit 1; }
+            FOUND=""
+          fi
           if [ -n "$FOUND" ]; then
-            echo "::error::Agent config file(s) found in git tree:$FOUND"
-            echo "Add them to .gitignore and untrack with 'git rm --cached'."
+            echo "::error::Agent config file(s) found in git tree:"
+            echo "$FOUND"
+            echo "Add them to .gitignore and untrack with 'git rm --cached', or extend the allowlist if legitimate."
             exit 1
           fi
           echo "OK: no agent config files in git tree"
 
       - name: Author identity check (gl0di only)
+        # Advisory by design: a hard failure on a push to main cannot be fixed without
+        # rewriting history. dependabot[bot] is expected and allowed.
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            RANGE="origin/${{ github.base_ref }}..HEAD"
-          else
-            RANGE="HEAD~1..HEAD"
+          set -euo pipefail
+          LOG=$(git log --no-merges "$RANGE" --format="%an <%ae>")
+          # B-840: an empty LOG (e.g. a merge-only range, such as the "Resolve the commit
+          # range" step's HEAD^! fallback landing on a merge tip) used to still feed one
+          # blank line to grep -v, which "matched" (didn't match $OK) and printed
+          # "Non-canonical author(s)" with nothing listed. Skip outright on no commits.
+          if [ -z "$LOG" ]; then
+            echo "OK: no non-merge commits in range to check"
+            exit 0
           fi
-          OTHERS=$(git log "$RANGE" --format="%an <%ae>" \
-            | grep -v "gl0di" || true)
-          if [ -n "$OTHERS" ]; then
+          OK='^(gl0di|dependabot\[bot\]) <([0-9]+\+)?(gl0di|dependabot\[bot\])@users\.noreply\.github\.com>$'
+          if OTHERS=$(grep -vE "$OK" <<<"$LOG"); then
             echo "::warning::Non-canonical author(s) in this push:"
             echo "$OTHERS"
             echo "Expected: gl0di <gl0di@users.noreply.github.com>"
           else
+            rc=$?
+            [ "$rc" -eq 1 ] || { echo "::error::grep failed (rc=$rc)"; exit 1; }
             echo "OK: author identity canonical (gl0di)"
           fi

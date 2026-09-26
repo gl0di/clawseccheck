@@ -22,6 +22,43 @@ def _exists_as_entry(path: Path) -> bool:
     return True
 
 
+def _discovery_gap_label(display: Path, depth: int) -> str:
+    """The human-readable name for a directory a discovery-time enumeration failure hit.
+
+    At any ``depth > 0`` node, ``display.name`` is that node's own name, already
+    distinguishing (it is the entry the walk descended into, e.g. a skill directory).
+
+    At ``depth == 0`` (the failure is on the ROOT itself), ``display`` IS the configured
+    load root passed in by the caller, and that root's own basename is not always a name
+    anyone chose. ``collector.config_plugin_load_paths`` unconditionally appends a literal
+    ``/skills`` to every ``plugins.load.paths`` entry before it reaches here, and the same
+    fixed ``/skills`` leaf is appended by every other load-root source collector.py builds
+    (every entry in ``collector.SKILL_DIRS`` — ``skills``, ``workspace/skills``,
+    ``workspace-home/skills``, ... — and each ``agents.defaults.workspace`` /
+    per-agent ``workspace`` override collector._config_workspace_dirs resolves) — so two
+    different failing plugin roots (or a plugin root failing beside the standard ``skills``
+    root, or beside a custom agent workspace) would otherwise collapse to the identical bare
+    ``"skills"`` subject with nothing left to tell them apart. Falling back to the PARENT
+    directory's name (the plugin directory itself, or "workspace" / "workspace-home" / the
+    home directory / the custom workspace's own name) restores the part that actually
+    distinguishes one root from another. A root whose basename is genuinely distinguishing
+    on its own (e.g. a ``skills.load.extraDirs`` entry named "extra") is returned unchanged —
+    this only fires on the literal, convention-driven "skills" leaf.
+
+    Degenerate case, accepted rather than chased further: a plugin directory that is
+    ITSELF named "skills" (``plugins.load.paths: [".../skills"]``, resolving to
+    ``.../skills/skills``) falls back to a parent whose name is ALSO "skills" — no worse
+    than the un-fixed behaviour, and this one shape is left ambiguous on purpose rather
+    than climbing an unbounded number of parents to chase a name that might not exist.
+    """
+    name = display.name
+    if depth == 0 and name == "skills":
+        parent_name = display.parent.name
+        if parent_name:
+            return parent_name
+    return name
+
+
 def config_extra_skill_dirs(home: Path, cfg: dict) -> list[Path]:
     """Resolve ``skills.load.extraDirs`` without guessing outside the audited config."""
     skills = cfg.get("skills") if isinstance(cfg, dict) else None
@@ -141,7 +178,8 @@ def iter_discovered_skill_dirs(
             # walk-layer crash filed separately; this is the discovery-layer instance, and it
             # is the one that takes the entire run down.
             limit_hits.append(
-                f"skill discovery could not read '{display.name}/SKILL.md': {exc.strerror or exc}"
+                f"skill discovery could not read "
+                f"'{_discovery_gap_label(display, depth)}/SKILL.md': {exc.strerror or exc}"
             )
             continue
         if is_manifest:
@@ -193,7 +231,8 @@ def iter_discovered_skill_dirs(
             # under a skill root disappeared from discovery with no bookkeeping at all.
             # The domain-scoped sink is already in scope, so the disclosure costs nothing.
             limit_hits.append(
-                f"skill discovery could not list '{display.name}/': {exc.strerror or exc}"
+                f"skill discovery could not list "
+                f"'{_discovery_gap_label(display, depth)}/': {exc.strerror or exc}"
             )
             continue
         for entry in entries:

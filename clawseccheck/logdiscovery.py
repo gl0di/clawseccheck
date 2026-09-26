@@ -43,7 +43,7 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .collector import Context, WORKSPACE_DIRS, dig
+from .collector import Context, WORKSPACE_DIRS, _safe_is_dir, _safe_is_symlink, dig
 from .safeio import walk_dir_safely
 from .trajectory import find_trajectory_files
 
@@ -208,15 +208,31 @@ def _generic_log_sinks(home: Path, budget: int) -> list[LogSink]:
     return out
 
 
-def _memory_sinks(home: Path, budget: int) -> list[LogSink]:
+def _memory_sinks(
+    home: Path, budget: int, ctx: Context | None = None, unreadable: list | None = None,
+) -> list[LogSink]:
     """Workspace memory-dir files — the same ``<workspace>/memory`` convention
-    ``check_data_atrest`` (B19, checks/_egress.py) already knows. Symlink-safe, capped."""
+    ``check_data_atrest`` (B19, checks/_egress.py) already knows. Symlink-safe, capped.
+
+    B-913: a workspace dir made non-traversable (`chmod 000`) raises `PermissionError`
+    on the bare `mem_dir.is_dir()` this used to call directly — needs +x on `mem_dir`'s
+    PARENT (the workspace dir), which a hostile/misconfigured permission on the
+    workspace removes. Routed through `_safe_is_dir`/`_safe_is_symlink` so that
+    degrades to a disclosed miss instead of an uncaught crash; *unreadable*, when
+    given, collects which memory dir(s) could not be confirmed so the calling check
+    can name them rather than reporting a bare "no sinks found".
+    """
     out: list[LogSink] = []
     for ws in WORKSPACE_DIRS:
         if len(out) >= budget:
             break
         mem_dir = home / ws / "memory"
-        if not mem_dir.is_dir() or mem_dir.is_symlink():
+        errs_before = len(ctx.errors) if ctx is not None else 0
+        if not _safe_is_dir(mem_dir, ctx, what=f"memory dir '{mem_dir}'"):
+            if ctx is not None and unreadable is not None and len(ctx.errors) > errs_before:
+                unreadable.append(str(mem_dir))
+            continue
+        if _safe_is_symlink(mem_dir, ctx, what=f"memory dir '{mem_dir}'"):
             continue
         remaining = budget - len(out)
         for f in walk_dir_safely(mem_dir, exclude_pycache=True, exclude_vcs=True, max_files=remaining):
@@ -236,11 +252,15 @@ def _backup_sinks(home: Path, budget: int) -> list[LogSink]:
     ]
 
 
-def discover_log_sinks(ctx: Context) -> list[LogSink]:
+def discover_log_sinks(ctx: Context, unreadable: list | None = None) -> list[LogSink]:
     """Enumerate the agent's own log/transcript sinks — paths only, nothing is read.
 
     Bounded to ``_MAX_SINKS`` total; deduplicated by resolved path so the same file is
     never counted twice across sources. Returns ``[]`` when ``ctx.home`` is not usable.
+
+    *unreadable*, when given (B-913), collects the path(s) of any source directory
+    this discovery could not even stat (e.g. a `chmod 000` workspace dir) — additive,
+    optional, so every existing caller/test passing only *ctx* is unaffected.
     """
     home = getattr(ctx, "home", None)
     if not isinstance(home, Path):
@@ -313,7 +333,7 @@ def discover_log_sinks(ctx: Context) -> list[LogSink]:
 
     _add_many(_transcript_sinks(home, _MAX_PER_SOURCE))
     _add_many(_generic_log_sinks(home, _MAX_PER_SOURCE))
-    _add_many(_memory_sinks(home, _MAX_PER_SOURCE))
+    _add_many(_memory_sinks(home, _MAX_PER_SOURCE, ctx=ctx, unreadable=unreadable))
     _add_many(_backup_sinks(home, _MAX_PER_SOURCE))
 
     return sinks

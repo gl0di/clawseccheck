@@ -605,7 +605,7 @@ class TestReportRendering:
         assert (
             "(capped from 98 - a behavioral detector fired (T1 behavioral trifecta))"
         ) in out
-        assert "Behavioral exception (F-154): this run's grade WAS capped" in out
+        assert "Behavioral exception (BEHAVIORAL-CAP): this run's grade WAS capped" in out
         assert "T1 behavioral trifecta" in out
 
     def test_html_no_new_text_when_not_capped(self):
@@ -778,8 +778,8 @@ class TestCliEndToEnd:
         # This run is ungraded (no --attest/--judged-bundle), so the "grade WAS
         # capped" framing is reworded rather than suppressed (C-423): the fact that a
         # behavioral detector fired is stated whether or not a grade was issued.
-        assert "Behavioral exception (F-154)" not in out
-        assert "Behavioral result (F-154): a behavioral detector fired" in out
+        assert "Behavioral exception (BEHAVIORAL-CAP)" not in out
+        assert "Behavioral result (BEHAVIORAL-CAP): a behavioral detector fired" in out
         # B-600 follow-up: the sentence moved OFF this paragraph and onto the single
         # cascade line above it, which is the only site that can say WHICH signal led.
         # The invariant this test pins is unchanged and is the one that matters: on an

@@ -455,7 +455,7 @@ def test_report_states_the_runtime_exception_exhaustively():
 
     _, findings, score = audit(FIXTURES / "home_safe")
     text = render_report(findings, score, ascii_only=True)
-    assert "Runtime exception (I-025)" in text
+    assert "Runtime exception (RUNTIME-CAP)" in text
     # the one eligible cap producer named in plain English…
     assert "trajectory-indicator match" in text
     # …and the exhaustive "everything else cannot move the grade" clause…

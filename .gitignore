@@ -3,6 +3,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# CI toolchain: package.json/package-lock.json and requirements-ci.{in,txt} are
+# committed (they pin the resolved tree); the local install itself is not.
+.github/tools/node_modules/
+
 # CI publish staging dir (clawhub-publish.yml stages the artifact here).
 /dist/
 

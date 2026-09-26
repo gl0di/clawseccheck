@@ -166,7 +166,8 @@ def test_full_json_carries_skill_sweep(capsys):
     assert sweep["worst"] == "PASS"
     assert sweep["truncated"] is False
     assert sweep["counts"] == {
-        "total": 2, "fails": 0, "warns": 0, "truncated": 0, "skipped": 0, "safe": 2,
+        "total": 2, "fails": 0, "warns": 0, "truncated": 0, "unknown": 0,
+        "skipped": 0, "safe": 2,
     }
     names = {t["name"] for t in sweep["targets"]}
     assert names == {"alpha", "beta"}
@@ -546,14 +547,21 @@ def test_has_fail_is_fail_only():
 
 
 def test_counts_keep_unscanned_targets_out_of_safe():
+    # CLAWSECCHECK-B-888: "f" (UNKNOWN — a skill whose own scan raised, the bare
+    # `except Exception` row in sweep_installed_skills) gets the same treatment as
+    # "d" (TRUNCATED) here — attempted, so still in "skill(s) checked", but excluded
+    # from "safe", not silently folded into it.
     sweep = SkillSweep(home_dir=Path("/nonexistent"), rows=[
         ("a", "PASS", 0), ("b", "FAIL", 2), ("c", "WARN", 1),
-        ("d", "TRUNCATED", 0), ("e", "SKIPPED", 0),
+        ("d", "TRUNCATED", 0), ("e", "SKIPPED", 0), ("f", "UNKNOWN", 0),
     ], truncated=True)
     c = sweep.counts()
-    assert c == {"total": 4, "fails": 1, "warns": 1, "truncated": 1,
+    assert c == {"total": 5, "fails": 1, "warns": 1, "truncated": 1, "unknown": 1,
                  "skipped": 1, "safe": 1}
-    assert sweep.not_scanned() == ["d", "e"]
+    # CLAWSECCHECK-B-888: "f" (UNKNOWN) joins "d"/"e" here too — coverage.py's
+    # `_sweep_coverage` derives "scanned" from this list, so a crashed skill left
+    # out of it would still read as fully covered there.
+    assert sweep.not_scanned() == ["d", "e", "f"]
     assert sweep.complete is False
 
 

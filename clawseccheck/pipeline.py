@@ -300,6 +300,11 @@ def record_skill_sweep(sweep, *, elapsed_s: float = 0.0) -> PhaseResult:
                   f"{c['warns']} suspicious, {c['safe']} no known issue")
         if c["truncated"]:
             detail += f", {c['truncated']} partially scanned"
+        # B-888: a skill whose own scan raised (already excluded from
+        # `safe` by cli.SkillSweep.counts()) named here too — `.get()`, not `[...]`,
+        # since a duck-typed `sweep` predating this key must not KeyError.
+        if c.get("unknown"):
+            detail += f", {c['unknown']} could not be analyzed (engine error)"
         if c["skipped"]:
             detail += f", {c['skipped']} not scanned (budget exceeded)"
     # B-787: `complete` (below) can be False from `discovery_incomplete_reasons` alone
@@ -410,6 +415,10 @@ def _sweep_phase_from(name: str, sweep, *, unit: str, elapsed_s: float,
                   f"{c['warns']} suspicious, {c['safe']} no known issue")
         if c.get("truncated"):
             detail += f", {c['truncated']} partially scanned"
+        # B-888: a skill sweep row can carry "unknown" (its own scan raised); a
+        # plugin sweep has no such bucket today, so this is inert there.
+        if c.get("unknown"):
+            detail += f", {c['unknown']} could not be analyzed (engine error)"
         if c.get("skipped"):
             detail += f", {c['skipped']} not scanned (budget exceeded)"
         detail += "."
@@ -630,17 +639,17 @@ def run_behavioral(ctx, *, ascii_only: bool = False,
         detail = ("trajectory replay complete — an INCIDENT SIGNAL was found in the "
                   "trajectory incident analysis below (that signal itself is advisory "
                   "only; a fired behavioral detector above it may separately have "
-                  "capped the grade — see F-154).")
+                  "capped the grade — see BEHAVIORAL-CAP).")
         quiet_line = ("behavioural replay complete — INCIDENT SIGNAL found (advisory). "
                      "Full detail: --analyze-trajectory.")
     elif incompleteness_reason is not None:
         detail = (f"trajectory replay found nothing to replay: {incompleteness_reason}; "
-                  "this replay itself never scores a FAIL (F-154).")
+                  "this replay itself never scores a FAIL (BEHAVIORAL-CAP).")
         quiet_line = (f"behavioural replay found nothing to replay: "
                      f"{incompleteness_reason}.")
     else:
         detail = ("trajectory replay complete — a fired behavioral detector may have "
-                  "capped the grade (F-154); this replay itself never scores a FAIL.")
+                  "capped the grade (BEHAVIORAL-CAP); this replay itself never scores a FAIL.")
         quiet_line = ("behavioural replay complete (advisory). Full detail: --behavioral "
                      "/ --analyze-trajectory.")
 

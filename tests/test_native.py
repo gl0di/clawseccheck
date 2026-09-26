@@ -41,6 +41,22 @@ def test_native_parses_and_normalizes_findings(monkeypatch):
     assert res.findings[0].title == "Gateway exposed"
 
 
+def test_native_checkid_key_yields_distinct_finding_ids(monkeypatch):
+    # B-818: a real `openclaw security audit --json` finding keys its id as
+    # "checkId" (not "id"/"check"/"rule"), which `_pick` used to miss entirely —
+    # every finding fell through to the shared "native" default, so a whole
+    # run's worth of native findings collapsed onto the same Finding.id.
+    payload = json.dumps({"findings": [
+        {"checkId": "gateway.trusted_proxies_missing", "severity": "high", "title": "A"},
+        {"checkId": "logging.redaction_disabled", "severity": "medium", "title": "B"},
+    ]})
+    _mock(monkeypatch, payload)
+    res = run_native_audit()
+    ids = [f.id for f in res.findings]
+    assert ids == ["N:gateway.trusted_proxies_", "N:logging.redaction_disabl"]
+    assert len(set(ids)) == len(ids)
+
+
 def test_native_uses_fixed_safe_args_no_shell(monkeypatch):
     rec = {}
     _mock(monkeypatch, "[]", recorder=rec)

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from clawseccheck.collector import _OWN_ENGINE_MARKERS, Context, collect
+from clawseccheck.collector import _OWN_ENGINE_MARKER_STATEMENTS, Context, collect
 from clawseccheck.report import build_inventory, render_json, render_subject_inventory
 from clawseccheck.scoring import compute
 
@@ -47,7 +47,7 @@ def _write_own_engine(skill_dir: Path) -> None:
     _skill_md(skill_dir, "clawseccheck")
     checks = skill_dir / "checks"
     checks.mkdir(parents=True, exist_ok=True)
-    (checks / "_engine.py").write_text("\n".join(_OWN_ENGINE_MARKERS), encoding="utf-8")
+    (checks / "_engine.py").write_text("\n".join(_OWN_ENGINE_MARKER_STATEMENTS), encoding="utf-8")
 
 
 def _render(ctx) -> tuple[str, dict]:

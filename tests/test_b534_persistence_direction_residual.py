@@ -166,3 +166,80 @@ def test_high_finding_fix_stays_undisclosed_for_a_purely_verb_anchored_install()
     detection is ambiguous when it is not."""
     fix = _b13_fix("crontab -e")
     assert "bare path mention" not in fix
+
+
+# --------------------------------------------- B-849: mixed bare-path + verb-anchored hits
+
+def test_verb_anchored_sink_populated_alongside_bare_path_sink_on_a_mixed_blob():
+    """The canonical real install shape from CLAWSECCHECK-B-849: a bare-path `cp` line
+    installing a plist, plus a `launchctl load` line for that same path. Both sinks must
+    fire — `_CRON_PERSIST_RE.finditer` finds both as separate matches — so the caller has
+    what it needs to tell a genuine mixed install apart from a bare-path-only one."""
+    bare_sink: list = []
+    verb_sink: list = []
+    high, _ = _cron_persistence_hits(
+        "cp a.plist ~/Library/LaunchAgents/evil.plist\n"
+        "launchctl load ~/Library/LaunchAgents/evil.plist",
+        [],
+        None,
+        bare_sink,
+        verb_sink,
+    )
+    assert high
+    assert bare_sink, "the bare-path `cp` line must still populate bare_path_sink"
+    assert verb_sink, "the `launchctl load` line must populate verb_anchored_sink"
+
+
+def test_high_finding_fix_stays_undisclosed_for_a_mixed_bare_path_and_verb_install():
+    """B-849: a skill that installs via `cp` into ~/Library/LaunchAgents/ AND loads it
+    with `launchctl load` is an unambiguous, genuine install — not the accepted
+    read-vs-write residual. The disclosure text ("no install/enable verb") would be
+    false for this skill, since an install/enable verb (`launchctl load`) did fire.
+    This is the exact case `test_bare_path_sink_not_populated_for_verb_anchored_matches`
+    above notes but does not itself assert on."""
+    fix = _b13_fix(
+        "cp a.plist ~/Library/LaunchAgents/evil.plist\n"
+        "launchctl load ~/Library/LaunchAgents/evil.plist"
+    )
+    assert "bare path mention" not in fix, (
+        "a genuine mixed install must not carry the bare-path-residual disclosure"
+    )
+
+
+def test_high_finding_fix_still_discloses_with_an_unrelated_clean_skill_present():
+    """Guards against an over-broad fix: an unrelated, non-matching second skill in the
+    same scan must not affect the disclosure -- nothing in it is verb-anchored (it has
+    no cron/persistence hit at all), so the accepted-residual disclosure for the first
+    skill's bare-path-only hit still applies."""
+    ctx = Context(home=Path("/nonexistent-home-b534"))
+    ctx.config = {}
+    ctx.installed_skills = {
+        "s": 'cp ~/Library/LaunchAgents/com.openclaw.*.plist "$PROTON/Vault/" 2>/dev/null',
+        "clean": "echo hello world",
+    }
+    f = check_installed_skills(ctx)
+    assert f.status == FAIL, (f.status, f.detail)
+    assert "bare path mention" in f.fix
+
+
+def test_disclosure_scope_is_the_whole_run_not_per_skill():
+    """Known, accepted scope limit (not a new one -- `_cron_bare_path_hits` was already
+    documented as accumulating "across every skill scanned below, mirroring `high`'s
+    own scope" before B-849). The `fix` text is generated ONCE for the whole aggregated
+    HIGH finding (`check_installed_skills` has no per-skill `fix`), so B-849's gate is
+    necessarily whole-run too: a second, unrelated skill with a genuine verb-anchored
+    install suppresses the disclosure for a first skill's bare-path-only accepted
+    residual, even though that first skill's hit is still genuinely ambiguous. This is
+    strictly better than before B-849 (a real install no longer gets the disclosure
+    misapplied to IT), and does not change any verdict -- both skills still FAIL either
+    way. Splitting the disclosure per skill would need `fix` text to vary per
+    contributing skill, which the aggregated-finding shape does not support today."""
+    ctx = Context(home=Path("/nonexistent-home-b534"))
+    ctx.config = {}
+    ctx.installed_skills = {
+        "backup-skill": 'cp ~/Library/LaunchAgents/com.openclaw.*.plist "$PROTON/Vault/" 2>/dev/null',
+        "installer-skill": "launchctl load ~/Library/evil-agent.plist",
+    }
+    f = check_installed_skills(ctx)
+    assert f.status == FAIL, (f.status, f.detail)
+    assert "bare path mention" not in f.fix
