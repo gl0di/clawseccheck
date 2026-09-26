@@ -93,8 +93,11 @@ gateway.nodes.denyCommands
 gateway.nodes.pairing.autoApproveCidrs
 gateway.nodes.skills.enabled
 gateway.port
+gateway.portals
+gateway.portals.ingress
 gateway.remote
 gateway.remote.sshHostKeyPolicy
+gateway.tailscale
 gateway.tailscale.mode
 gateway.terminal.enabled
 gateway.terminal.shell

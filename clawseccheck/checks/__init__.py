@@ -369,6 +369,8 @@ from ._config import (
     _is_native_unconditional_critical_check_id,
     _ENV6_TOGGLES,
     _b323_is_literal_path_override,
+    _b397_direct_reach,
+    _b397_ingress_domain_ok,
     check_env_vars_path_override,
     check_audit_target_divergence,
     check_audit_suppressions,
@@ -389,6 +391,7 @@ from ._config import (
     check_gateway,
     check_gateway_computer_plugin_reach,
     check_gateway_operator_terminal,
+    check_gateway_portal_reach,
     check_gateway_rate_limit,
     check_gateway_remote_ssh_host_key_policy,
     check_hook_template_content,
@@ -415,6 +418,7 @@ from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_con
 from ._shared import (_SYMLINK_KNOB_RETIRED_MIN, _workshop_symlink_knob,)  # B-783
 from ._shared import (_CROSS_CONTEXT_DEFAULT_ALLOW_MIN, _CROSS_CONTEXT_DENY_MEASURED_MIN, _cross_context_default,)  # B-833
 from ._shared import (_CODE_MODE_AUTO_DEFAULT_MIN, _CODE_MODE_OFF_MEASURED_MIN, _code_mode_default,)  # B351 re-grounded
+from ._shared import (_PORTALS_ABSENT_MEASURED_MIN, _PORTALS_GROUNDED_MIN, _portal_model_version,)  # B397
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
     _B182_ENV_OVERRIDES,
@@ -1592,6 +1596,12 @@ CHECKS = [
     # unscored advisory; requires both the plugin's explicit opt-in and an agent
     # scope granted `computer` while unsandboxed.
     check_gateway_computer_plugin_reach,
+    # B397 — agent-opened Gateway portals (gateway.portals, the `portal` tool) are
+    # gated only by a per-portal bearer token in the URL, never by gateway.auth,
+    # trusted-proxy identity or any access layer in front of the Gateway, across all
+    # three transports (ingress / Tailscale Serve / direct). WARN-only, unscored
+    # advisory; requires an agent scope granted `portal` while unsandboxed.
+    check_gateway_portal_reach,
     # B351 — code mode: the model is handed exec+wait over a catalog bridge instead of
     # the ordinary tool surface. Walks agents.list, which can enable it independently.
     check_code_mode_tool_surface,

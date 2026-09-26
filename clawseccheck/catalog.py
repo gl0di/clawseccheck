@@ -3714,6 +3714,24 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B397: agent-opened Gateway portals (gateway.portals, the `portal` tool) are gated
+    # only by a per-portal bearer token in the URL, never by gateway.auth, trusted-proxy
+    # identity or any access layer in front of the Gateway -- true for all three
+    # transports (ingress, Tailscale Serve, direct). Advisory, WARN-cap-only, never FAIL:
+    # no config shape weakens portal auth, and how far a portal reaches off-host is set
+    # by an external proxy (ingress) or the Gateway's own bind (direct) that this check
+    # can only describe, not prove exploited. See
+    # checks/_config.py::check_gateway_portal_reach for the full grounding.
+    CheckMeta(
+        "B397",
+        "Agent-opened portals reachable off-host outside gateway authentication",
+        MEDIUM,
+        "advisory",
+        "Zero Trust / Gateway",
+        scored=False,
+        confidence="HIGH",
+        surface="gateway",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3903,6 +3921,7 @@ AST_MAP = {
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
     "B348": ("AST02",),  # plugins.load.paths entry not in plugins.entries = supply-chain visibility gap (cf. B152/B158)
     "B396": ("AST08",),  # node-published skill content never reaches the content scanners = Poor Scanning (cf. B16)
+    "B397": ("AST06",),  # second HTTP ingress outside gateway.auth = weak isolation (cf. B340/B358)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -4039,6 +4058,7 @@ OWASP_MAP = {
     "B187": ("LLM03", "LLM05"),  # non-bundled plugin declares agentToolResultMiddleware = Supply Chain + Improper Output Handling
     "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
     "B396": ("LLM03",),  # paired-node skills outside the skill content scan = Supply Chain (cf. B386)
+    "B397": ("LLM06",),  # an agent can publish any local port off-host behind a bearer URL = Excessive Agency (cf. B32)
 }
 
 

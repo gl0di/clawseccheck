@@ -2919,6 +2919,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B397 - Agent-opened portals reachable off-host outside gateway authentication
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Zero Trust / Gateway
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM06 Excessive Agency
+- What it checks: Agent-opened portals reachable off-host outside gateway authentication
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.
