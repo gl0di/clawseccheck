@@ -48,6 +48,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   TLS-certificate/key argument's value go unnoticed because that argument position is
   normally treated as safe; a match is now only treated as safe there when it is a plain
   file path, not when it contains an executing subcommand.
+- The outbound-exfiltration-transport detector no longer flags an ordinary English
+  hyphen compound like "post-setup", "post-install", or "post-mortem" as the HTTP verb
+  POST. A skill's own UX prose ("Do not show post-setup flow-control choices") could
+  turn a routine, low-severity note into a critical silent-instruction failure. A real
+  POST (uppercase, or lowercase with no hyphenated word following it) is unaffected.
 
 ## [4.3.0] — 2026-09-23
 

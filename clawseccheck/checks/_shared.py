@@ -680,8 +680,21 @@ _CRED_RE = re.compile(
 #
 # F-124/E-044 layer-fix: moved here VERBATIM from checks/_content.py (see _CRED_RE note
 # above for why).
+#
+# CLAWSECCHECK-exfil-post: the bare `\bPOST\b` alternative, under this pattern's re.I
+# flag, matched the English prefix "post" inside ordinary hyphen compounds
+# ("post-setup", "post-process", "post-mortem") — the real HTTP verb is never spelled
+# with a trailing hyphen. Real-fleet repro: a data-analytics skill's "Do not show
+# post-setup flow-control choices" line anchored B63 (_has_outbound_exfil) on "post"
+# alone, turning a WARN-tier "Do not show" into a CRITICAL FAIL. Narrowed to: uppercase
+# `POST` always counts (case-sensitive, via the scoped `(?-i:...)` flag — an attacker
+# gains nothing from this, since "post"/"POST" was never the only transport word this
+# pattern looks for); any-case "post" counts UNLESS immediately followed by a
+# hyphen+word (the compound shape). Scoped inline flags (`(?-i:...)`) are supported on
+# Python 3.9+.
 _EXFIL_RE = re.compile(
-    r"\bcurl\b|\bwget\b|\bnc\b|netcat|requests?\.post|fetch\(|\bPOST\b|\bscp\b|base64|"
+    r"\bcurl\b|\bwget\b|\bnc\b|netcat|requests?\.post|fetch\(|"
+    r"\b(?:(?-i:POST)|post(?!-\w))\b|\bscp\b|base64|"
     r"glot\.io|webhook\.site|transfer\.sh|pastebin|"
     r"rentry\.co|rentry\.org|"
     r"beeceptor\.com|interactsh\.com|oast\.|canarytokens\.|file\.io|"
