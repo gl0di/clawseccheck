@@ -114,7 +114,7 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     architect audit — the corpus test above is what actually enforces the invariant."""
     unscored = {c.id for c in BY_ID.values() if not c.scored}
     assert {"B43", "B55", "B70", "B185", "B186", "B193", "B324", "B322", "B323", "B325"} <= unscored
-    assert len(unscored) == 105  # +3: B379/B380/B381 (host scheduled persistence,
+    assert len(unscored) == 106  # +3: B379/B380/B381 (host scheduled persistence,
     # hooks transform modules, redactor-blind secret paths) and +1: B382 (retired config
     # key) — all WARN-only/disclosure checks, added unscored like every other advisory
     # check in this set. +1 more: B386 (F-199, gateway.nodes.allowSkills) — grouped into
@@ -147,6 +147,12 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     # it shares is a transparency line, not a verdict. +1: B176 (paired-device operator
     # authority) — MEDIUM, advisory, WARN/UNKNOWN only, never FAIL; a standing-authority
     # disclosure in the same spirit as B172, not a deterministic compromise proof.
+    # +1: B396 (paired-node skills outside this audit's skill content scan) —
+    # MEDIUM, advisory, WARN/UNKNOWN/PASS only, never FAIL — a coverage-blind-spot
+    # disclosure (this audit cannot see node-published skill content, which lives only
+    # in gateway memory and on the node's own disk), independent of B386's own
+    # (also scored=False) config-default report, so scoring it would double-count
+    # B386's gate.
 
 
 # ── Targeted: the two downgrades (FAIL -> WARN, CheckMeta unchanged) ──────────────────

@@ -3693,6 +3693,27 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="skills",
     ),
+    # B396: a paired gateway NODE (not an operator device — B176/B138 already cover
+    # operator authority) can publish its own machine's skills into this gateway while
+    # connected; OpenClaw keeps that content in gateway memory and on the node's own
+    # disk ONLY (never written here), so B13/B5/B25/SKILL_CONTENT_RING — every one of
+    # which reads only the local on-disk skill corpus — never see it. This check does
+    # not report on that content (unauditable by construction); it discloses whether a
+    # skill-capable paired node exists at all, a coverage-blind-spot advisory
+    # independent of B386's own (scored=False) config-default report. Unscored,
+    # never FAILs (B-315), MEDIUM severity/confidence matching B386/B176's own
+    # neighbourhood — see checks/_lifecycle.py::check_paired_node_skill_coverage for
+    # the full dist grounding.
+    CheckMeta(
+        "B396",
+        "Paired-node skills outside this audit's skill content scan",
+        MEDIUM,
+        "advisory",
+        "Supply Chain / Node Skills",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3881,6 +3902,7 @@ AST_MAP = {
     "B187": ("AST02",),  # non-bundled plugin declares agentToolResultMiddleware = supply-chain interception capability disclosure (cf. B151/B152/B177)
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
     "B348": ("AST02",),  # plugins.load.paths entry not in plugins.entries = supply-chain visibility gap (cf. B152/B158)
+    "B396": ("AST08",),  # node-published skill content never reaches the content scanners = Poor Scanning (cf. B16)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT
@@ -4016,6 +4038,7 @@ OWASP_MAP = {
     "B368": ("LLM03",),  # skills.load.watch hot-reloads live from an extraDir = Supply Chain (cf. B186/B367)
     "B187": ("LLM03", "LLM05"),  # non-bundled plugin declares agentToolResultMiddleware = Supply Chain + Improper Output Handling
     "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
+    "B396": ("LLM03",),  # paired-node skills outside the skill content scan = Supply Chain (cf. B386)
 }
 
 

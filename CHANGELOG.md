@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 
 ## [Unreleased]
 
+### Added
+
+- New check: paired-node skills outside this audit's skill content scan. A paired
+  gateway node can publish its own machine's skills into your setup while connected,
+  but OpenClaw only ever keeps that published content in the gateway's memory and on
+  the node's own disk — never on the machine this audit runs on — so the existing
+  skill content checks can never see it, however thoroughly they scan the skills
+  actually installed locally. This advisory check discloses whether such a node
+  currently exists (a paired device holding a live node token that is allowed to run
+  commands) so that gap in coverage is visible instead of silent; it never fails the
+  audit and does not change your security score.
+
 ### Fixed
 
 - Closed a bypass in the shell credential-exfiltration check's `for`-loop handling.

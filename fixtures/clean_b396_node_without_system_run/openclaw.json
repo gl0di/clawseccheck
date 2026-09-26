@@ -1,0 +1,8 @@
+{
+  "meta": {"lastTouchedVersion": "2026.9.6"},
+  "gateway": {
+    "nodes": {
+      "commands": {"deny": ["camera.snap", "screen.record"]}
+    }
+  }
+}
