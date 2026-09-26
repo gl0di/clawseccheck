@@ -2113,8 +2113,13 @@ def _has_outbound_exfil(window: str) -> bool:
 # a real boundary (space, punctuation, EOL) is tolerated; any further
 # `-<word>` suffix keeps the whole "post"-match live and falls through to the
 # `return True` below, same as any other unlisted continuation.
+# A deny-list of following characters still let other glue through ("post-setup.x",
+# "post-setup/x", "post-setup:x", a Unicode dash), so the word must be followed by
+# something that ends it as a word: whitespace, clause punctuation, a closing
+# quote/paren, sentence punctuation before whitespace, or the end of the text.
 _B63_POST_COMPOUND_BENIGN_RE = re.compile(
-    r"^-(?:set-?up|install(?:ation)?|process(?:ing)?|mortem|selection)(?![\w-])",
+    r"^-(?:set-?up|install(?:ation)?|process(?:ing)?|mortem|selection)"
+    r"(?=[\s,;)\"'’]|[.!?](?:\s|$)|$)",
     re.IGNORECASE,
 )
 
