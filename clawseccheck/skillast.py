@@ -14763,6 +14763,15 @@ _SH_CRED_ASSIGN_RE = re.compile(
     re.I,
 )
 
+# B-982 COUPLING GUARD: `_SH_CRED_READ_PATH_SRC` deliberately does NOT include the
+# K8s ServiceAccount token path (`_SH_CRED_FILE_RE` above does). Adding it here
+# without ALSO landing a HOP-role in-cluster exemption in the same change turns the
+# var-based helper `TOKEN=$(cat .../serviceaccount/token); curl -H "Authorization:
+# Bearer ${TOKEN}" https://kubernetes.default.svc/...` into a false-positive
+# SHELL_CRED_EXFIL FAIL -- `_sh_cred_assign_taint_lines` below applies no exemption
+# at all to a `cred_var_lines` hit. Pinned by
+# tests/test_b982_hop_vocab_incluster_coupling.py.
+
 # B-415: shell-side counterparts of the Python in-cluster-auth exemption above
 # (_INCLUSTER_TOKEN_PATH_RE / _INCLUSTER_API_HOST_RE are shared, module-level --
 # same narrow token path, same narrow destination signal, defined once near
@@ -15804,6 +15813,11 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
 # curl --data "$D" https://own/backup`), and the destination is not an input to this
 # scanner — so no rule can convict on that signal without convicting the benign
 # backup too. Both stay PASS under this design.
+#
+# B-982: this alignment must NEVER be extended to the K8s ServiceAccount token path
+# without a HOP-role in-cluster exemption landing in the same change -- see the
+# coupling-guard comment above `_SH_CRED_READ_PATH_SRC`/`_SH_CRED_ASSIGN_RE` and
+# tests/test_b982_hop_vocab_incluster_coupling.py.
 _SH_LOOP_CONTINUATION_RE = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
 # A heredoc body is not code that runs as a `for` loop in THIS shell — it is either
 # inert data, or (if later fed to a shell) a CHILD shell's code, same reasoning as
