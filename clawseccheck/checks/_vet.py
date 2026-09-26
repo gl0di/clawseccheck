@@ -1118,37 +1118,252 @@ _CRON_PERSIST_RE = re.compile(
 # this line exists to fix is a markdown inline-link LABEL naming the word "crontab" —
 # "- [Crontab Guru](https://crontab.guru/) - Validator" (cloudflare skill,
 # references/cron-triggers/gotchas.md:198) — which is not an operand-shape problem at
-# all: the match sits inside a link's clickable TEXT, which is never executed. That is
-# a CLOSED, structural condition (a `[`...`]` immediately followed by `(`, no nesting,
-# confined to one line) with no enumeration surface, unlike "which characters can
-# start a shell operand". `_cron_hit_in_link_label` below tests it; `_cron_persistence_
-# hits` routes a hit inside one to WARN (never a silent PASS, never HIGH) via
-# `_CRON_LINK_LABEL_RE`. An attacker writing `[crontab /tmp/.job](https://x)` also
-# lands on WARN — the accepted floor per Golden Rule #5 (ambiguous suppression goes to
-# WARN, never PASS), the same idiom the fence/test-fixture checks already use here.
-_CRON_LINK_LABEL_RE = re.compile(r"\[([^\[\]\n]*)\]\(")
+# all: the match sits inside a link's clickable TEXT, which is never executed.
+# `_cron_hit_in_link_label` below tests it; `_cron_persistence_hits` routes a hit
+# inside one to WARN (never a silent PASS, never HIGH). An attacker writing
+# `[crontab /tmp/.job](https://x)` also lands on WARN — the accepted floor per Golden
+# Rule #5 (ambiguous suppression goes to WARN, never PASS), the same idiom the
+# fence/test-fixture checks already use here.
+#
+# Round 3's own `_CRON_LINK_LABEL_RE = re.compile(r"\[([^\[\]\n]*)\]\(")` matched
+# bracket/paren SHAPE only, with no idea what CommonMark actually renders. A fresh
+# C-135 pass (round 4) found two live bypasses, both letting an executable crontab
+# install with a shell terminator drop FAIL->WARN although neither renders as a link:
+# (1) escaped brackets — `\[crontab ...;rm -rf ~/.ssh/known_hosts\](https://x)` — the
+# brackets are backslash-escaped, so CommonMark never treats them as link delimiters
+# at all, but the bare-shape regex could not tell an escaped `\[` from a real one; and
+# (2) an unclosed destination — `[crontab ...;rm -rf ~/.ssh/known_hosts](https://x/
+# never-closes-on-this-line` — the regex only required `](` to appear and never
+# checked that the destination actually closes with a `)`.
+#
+# Round 4 replaces the shape regex with a small CommonMark-faithful structural parser
+# below: `[`/`]` count as link delimiters only with an EVEN number of immediately
+# preceding backslashes (odd = the backslash escapes it, per CommonMark's own
+# backslash-escape rule, which is itself escape-aware — `\\[` is an escaped backslash
+# followed by a REAL bracket, not an escaped one); the label must be followed
+# immediately by `(`; the destination must close with an unescaped `)` on the same
+# line, honouring both the `<...>` bracketed destination form and the bare form
+# (CommonMark explicitly allows a balanced pair of unescaped parens, nested, inside a
+# bare destination), plus an optional whitespace + quoted/parenthesised title before
+# the close; and a hit sitting inside an inline code span (a backtick run) is never
+# demoted, because a code span's content binds tighter than link brackets in
+# CommonMark and is never link syntax. Anything else — including either C-135 bypass
+# above — is not a real link and stays FAIL exactly as on base. Still confined to a
+# single line by construction (matching round 3's scope): a label a real newline
+# splits, or a destination that only closes on a later line, is not a link either.
+_CRON_LINK_WHITESPACE = " \t"
+# CommonMark: "Any ASCII punctuation character may be backslash-escaped" -- a
+# backslash followed by anything else (a letter, a digit, whitespace) is NOT an
+# escape at all; the backslash is a literal character and the following character
+# is evaluated normally. `_cron_link_destination_close` below must honour this: a
+# bare destination with `\ ` (backslash-space) still ends at that unescaped
+# whitespace, per the CommonMark reference renderer -- treating every backslash as
+# consuming the next character regardless of what it is would wrongly let such a
+# case run on to a later `)` and be misread as a genuine link.
+_CRON_LINK_ESCAPABLE_PUNCTUATION = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+
+
+def _cron_link_preceding_backslash_count(line: str, idx: int) -> int:
+    """Count the run of consecutive backslashes immediately before *idx*."""
+    n = 0
+    j = idx - 1
+    while j >= 0 and line[j] == "\\":
+        n += 1
+        j -= 1
+    return n
+
+
+def _cron_link_is_escaped(line: str, idx: int) -> bool:
+    """CommonMark backslash-escape rule: the character at *idx* is escaped iff an
+    ODD number of backslashes immediately precede it (an even count, including
+    zero, pairs off into escaped-backslash-plus-real-character — `\\\\[` is an
+    escaped backslash followed by a REAL `[`, not an escaped one).
+    """
+    return _cron_link_preceding_backslash_count(line, idx) % 2 == 1
+
+
+def _cron_link_code_span_ranges(line: str) -> list:
+    """Return (start, end) index ranges of every CommonMark inline code span in
+    *line*, each covering its opening AND closing backtick run. A code span opens
+    with a run of one or more backticks and closes at the first later run of
+    exactly the same length (a shorter or longer run does not close it and is
+    just more literal backtick text) — backslash escapes do not apply inside or
+    around backtick runs, per CommonMark ("backslash escapes do not work in code
+    spans"). An unmatched opening run is not a code span at all.
+    """
+    spans = []
+    n = len(line)
+    i = 0
+    while i < n:
+        if line[i] != "`":
+            i += 1
+            continue
+        j = i
+        while j < n and line[j] == "`":
+            j += 1
+        open_len = j - i
+        k = j
+        closed = False
+        while k < n:
+            if line[k] != "`":
+                k += 1
+                continue
+            m = k
+            while m < n and line[m] == "`":
+                m += 1
+            if m - k == open_len:
+                spans.append((i, m))
+                i = m
+                closed = True
+                break
+            k = m
+        if not closed:
+            i = j
+    return spans
+
+
+def _cron_link_pos_in_spans(spans, idx: int) -> bool:
+    return any(s <= idx < e for s, e in spans)
+
+
+def _cron_link_destination_close(line: str, open_paren_idx: int):
+    """Given the index of a link label's immediately-following `(`, return the
+    index of the `)` that closes the destination (+ optional title) on this same
+    line, or None if the destination never validly closes here. Implements
+    CommonMark's two destination forms: `<...>` (no unescaped `<`/`>` inside) and
+    a bare form (no unescaped whitespace; parentheses allowed only escaped or as
+    a balanced unescaped pair — nesting is honoured, not just one level), each
+    optionally followed by whitespace and a `"..."`/`'...'`/`(...)` title before
+    the close.
+    """
+    n = len(line)
+    i = open_paren_idx + 1
+    while i < n and line[i] in _CRON_LINK_WHITESPACE:
+        i += 1
+    if i < n and line[i] == "<":
+        i += 1
+        closed = False
+        while i < n:
+            c = line[i]
+            if c == "\\" and i + 1 < n and line[i + 1] in _CRON_LINK_ESCAPABLE_PUNCTUATION:
+                i += 2
+                continue
+            if c == ">":
+                i += 1
+                closed = True
+                break
+            i += 1
+        if not closed:
+            return None
+    else:
+        depth = 0
+        while i < n:
+            c = line[i]
+            if c == "\\" and i + 1 < n and line[i + 1] in _CRON_LINK_ESCAPABLE_PUNCTUATION:
+                i += 2
+                continue
+            if c == "(":
+                depth += 1
+                i += 1
+                continue
+            if c == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+                i += 1
+                continue
+            if c in _CRON_LINK_WHITESPACE:
+                break
+            i += 1
+        if depth != 0:
+            return None
+    while i < n and line[i] in _CRON_LINK_WHITESPACE:
+        i += 1
+    if i < n and line[i] in ("\"", "'", "("):
+        opener = line[i]
+        closer = ")" if opener == "(" else opener
+        i += 1
+        closed = False
+        while i < n:
+            c = line[i]
+            if c == "\\" and i + 1 < n and line[i + 1] in _CRON_LINK_ESCAPABLE_PUNCTUATION:
+                i += 2
+                continue
+            if c == closer:
+                i += 1
+                closed = True
+                break
+            i += 1
+        if not closed:
+            return None
+        while i < n and line[i] in _CRON_LINK_WHITESPACE:
+            i += 1
+    if i < n and line[i] == ")":
+        return i
+    return None
 
 
 def _cron_hit_in_link_label(blob: str, pos: int) -> bool:
-    """True iff *pos* (a `_CRON_PERSIST_RE` match start) sits inside a markdown
-    inline link's LABEL — the text between `[` and a `]` that is immediately
-    followed by `(` on the same line, with no nested `[`/`]` and not crossing a
-    newline. Confined to a single line by construction (`_CRON_LINK_LABEL_RE`'s
-    content class excludes `\\n`, so it never matches across one) — this is what
-    keeps a label that closes before *pos*, an unclosed `[` with no `](`, or a label
-    a real newline splits from being mistaken for containing *pos*: none of those
-    produce a match whose captured span covers *pos*, so the normal FAIL path for
-    those shapes is untouched.
+    """True iff *pos* (a `_CRON_PERSIST_RE` match start) sits inside a genuine
+    CommonMark inline link's LABEL on a single line — see the design comment
+    above for what "genuine" excludes (escaped brackets, an unclosed
+    destination, a code-span-wrapped hit).
     """
     line_start = blob.rfind("\n", 0, pos) + 1
     line_end = blob.find("\n", line_start)
     if line_end == -1:
         line_end = len(blob)
     line = blob[line_start:line_end]
+    if line.endswith("\r"):
+        line = line[:-1]
     rel = pos - line_start
-    for lm in _CRON_LINK_LABEL_RE.finditer(line):
-        if lm.start(1) <= rel < lm.end(1):
+
+    code_spans = _cron_link_code_span_ranges(line)
+    if _cron_link_pos_in_spans(code_spans, rel):
+        # A hit inside an inline code span is never link syntax, even if
+        # brackets happen to surround it -- code spans bind tighter than link
+        # brackets in CommonMark.
+        return False
+
+    n = len(line)
+    i = 0
+    while i < n:
+        if (
+            _cron_link_pos_in_spans(code_spans, i)
+            or line[i] != "["
+            or _cron_link_is_escaped(line, i)
+        ):
+            i += 1
+            continue
+        label_start = i + 1
+        j = label_start
+        closed_at = None
+        while j < n:
+            if _cron_link_pos_in_spans(code_spans, j):
+                j += 1
+                continue
+            c = line[j]
+            if c == "[" and not _cron_link_is_escaped(line, j):
+                break  # nested unescaped '[' -- not a well-formed label; retry past it
+            if c == "]" and not _cron_link_is_escaped(line, j):
+                closed_at = j
+                break
+            j += 1
+        if closed_at is None:
+            i += 1
+            continue
+        label_end = closed_at
+        paren_idx = closed_at + 1
+        if paren_idx >= n or line[paren_idx] != "(":
+            i += 1
+            continue
+        dest_end = _cron_link_destination_close(line, paren_idx)
+        if dest_end is None:
+            i += 1
+            continue
+        if label_start <= rel < label_end:
             return True
+        i = dest_end + 1
     return False
 
 # KNOWN RESIDUAL (B-534 -- NARROWED, NOT CLOSED). Three of the ten alternatives above

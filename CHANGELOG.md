@@ -49,10 +49,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   normally treated as safe; a match is now only treated as safe there when it is a plain
   file path, not when it contains an executing subcommand.
 - The installed-skill scanner no longer flags a scheduled-task/boot-persistence FAIL when
-  "crontab" appears only inside a markdown link's clickable label (e.g. a link to a
-  crontab syntax validator) — that text is never executed; it is downgraded to a warning
-  instead of dropped, and every actual crontab install command still fails exactly as
-  before.
+  "crontab" appears only inside a genuine markdown inline link's clickable label (e.g. a
+  link to a crontab syntax validator) — that text is never executed; it is downgraded to
+  a warning instead of dropped. Whether a hit is inside a real link is now judged the way
+  a CommonMark renderer would: backslash-escaped brackets and a destination that never
+  closes with a `)` on the line are not real links and still fail, exactly as before —
+  and every actual crontab install command, including one dressed up to merely look like
+  a link, still fails exactly as before.
 
 ## [4.3.0] — 2026-09-23
 
