@@ -48,12 +48,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
   TLS-certificate/key argument's value go unnoticed because that argument position is
   normally treated as safe; a match is now only treated as safe there when it is a plain
   file path, not when it contains an executing subcommand.
-- The installed-skill scanner no longer flags a scheduled-task/boot-persistence FAIL on
-  ordinary prose that merely mentions "crontab" (a link to a crontab syntax validator, a
-  sentence about how crontab works) without actually installing anything. A bare mention
-  like that is still surfaced as a lower-severity warning rather than dropped silently;
-  an actual install command (a real file, variable, or command boundary right after
-  "crontab") still fails exactly as before.
+- The installed-skill scanner no longer flags a scheduled-task/boot-persistence FAIL when
+  "crontab" appears only inside a markdown link's clickable label (e.g. a link to a
+  crontab syntax validator) — that text is never executed; it is downgraded to a warning
+  instead of dropped, and every actual crontab install command still fails exactly as
+  before.
 
 ## [4.3.0] — 2026-09-23
 
