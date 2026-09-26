@@ -2745,3 +2745,80 @@ def test_releasing_doc_no_longer_claims_a_bare_rerun_always_recovers() -> None:
         "gesture at 'the workflow artifact'"
     )
     assert "90-day retention" in text
+
+
+# CLAWSECCHECK-B-905: bash line-buffers its own stdout, so a multi-line `printf '%s\n'
+# "$multiline"` can issue MORE THAN ONE write() into a pipe. A reader on the other end
+# that can exit after its first match/line (`grep -q`/`-m`, `head`, an `awk` action with
+# `exit`) may close that pipe before the writer's later write()s land. If the writer gets
+# descheduled in the gap, its next write() gets EPIPE and the writer is killed by
+# SIGPIPE; under `set -o pipefail` that turns a pipeline that ALREADY found its match
+# into a false failure (or, for the `awk ...; exit` shape, a fail-OPEN that silently
+# drops the rest of the input). Confirmed with fault injection (LD_PRELOAD delaying
+# bash's own printf, and strace write-delay injection): the real "Create GitHub
+# Release" step failed 10/10 with the exact reported message
+# ("::error::Release ... is missing SHA256SUMS.txt after the upload.") before the fix,
+# and 0/40 after switching the pipeline to a here-string. A here-string has no pipeline
+# and no concurrent writer, so an early-exiting reader cannot SIGPIPE anything.
+_EARLY_EXIT_READER_RE = re.compile(
+    r"(?<!\|)\|(?!\|)\s*(?:"
+    r"grep\b(?=[^|]*(?:\s-[A-Za-z]*[qm]|\s--(?:quiet|silent|max-count)|>\s*/dev/null))"
+    r"|head\b"
+    r"|awk\b[^|]*\bexit\b"
+    r")"
+)
+
+
+def _workflow_files() -> List[Path]:
+    return sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+
+
+def test_no_pipeline_feeds_an_early_exiting_reader_from_a_multiline_writer() -> None:
+    """Regression guard for CLAWSECCHECK-B-905.
+
+    Scans every `run:` shell line in every workflow (whole-line comments stripped, the
+    same discipline `_code_lines()` uses above — a comment merely discussing a pattern
+    must not trip this) for a pipeline ending in a reader that can stop consuming input
+    before EOF. That shape is the SIGPIPE race's precondition regardless of which
+    variable happens to be multi-line today; prefer a here-string (`cmd <<<"$var"`), or
+    for a real file source, drop the extra `| head`/`| grep -q` stage and take the first
+    match in-shell (e.g. `${var%%$'\\n'*}` or awk's own `-F`/pattern matching without a
+    piped-in early-exiting reader).
+    """
+    offenders = []
+    for path in _workflow_files():
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            if _EARLY_EXIT_READER_RE.search(line):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{i}: {line.strip()!r}")
+    assert not offenders, (
+        "Found a pipeline feeding an early-exiting reader (grep -q/-m, head, or an awk "
+        "action with 'exit') from what may be a multi-line writer — this is the "
+        "CLAWSECCHECK-B-905 SIGPIPE-under-pipefail race. Use a here-string, or read the "
+        "first match without a second early-exiting stage:\n" + "\n".join(offenders)
+    )
+
+
+def test_early_exit_reader_regex_flags_the_original_b905_sites() -> None:
+    """Pins the guard's own detection surface against the exact pre-fix shape.
+
+    Not a behavioral repro (strace/LD_PRELOAD fault injection isn't reliable in CI —
+    see the B-905 task notes), but confirms the static regex actually catches the eight
+    sites that were audited and fixed, so a future refactor of the regex can't silently
+    stop covering them.
+    """
+    ORIGINAL_RACY_LINES = [
+        (190, 'if printf \'%s\\n\' "$ROWS" | awk -F\'\\t\' \'$2!="completed"\' | grep -q .; then'),
+        (192, 'elif BAD="$(printf \'%s\\n\' "$ROWS" | awk -F\'\\t\' \'$3!="success" {print $3; exit}\')" \\'),
+        (317, 'elif ! printf \'%s\' "$LIVE_RELEASE_ERR" | grep -qi \'release not found\'; then'),
+        (378, 'if printf \'%s\' "$TAG_ERR" | grep -q \'HTTP 404\'; then'),
+        (390, 'if printf \'%s\' "$RELEASE_ERR" | grep -qi \'release not found\'; then'),
+        (444, 'ZIP="$(sed -n \'s/^Report ZIP: //p\' /tmp/scandl.txt | head -1)"'),
+        (1087, 'if printf \'%s\\n\' "$names" | grep -qxF "$a"; then have=$((have + 1)); fi'),
+        (1117, 'if ! printf \'%s\\n\' "$final" | grep -qxF "$a"; then'),
+    ]
+    for lineno, snippet in ORIGINAL_RACY_LINES:
+        assert _EARLY_EXIT_READER_RE.search(snippet), (
+            f"guard regex no longer flags the original B-905 line {lineno}: {snippet!r}"
+        )

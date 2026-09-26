@@ -187,9 +187,16 @@ jobs:
               # So every matching row is folded and the WORST outcome wins.
               ROWS="$(printf '%s\n' "$RUNS" | awk -F'\t' -v c="$ctx" '$1==c')"
               if [ -z "$ROWS" ]; then MISSING="${MISSING}${ctx}; "; continue; fi
-              if printf '%s\n' "$ROWS" | awk -F'\t' '$2!="completed"' | grep -q .; then
+              # B-905: here-strings, not `| awk | grep -q` / `| awk {...;exit}` pipelines.
+              # Same SIGPIPE-on-early-exit race as the release-asset check above: `grep -q`
+              # can stop reading after its first match, and awk's `exit` action stops
+              # reading after its first hit, so either can close the pipe out from under a
+              # multi-line `printf` writer mid-write. The awk `exit` form is the more
+              # dangerous of the two — it fails OPEN (a truly failed check would silently
+              # not get recorded) rather than raising a false alarm.
+              if [ -n "$(awk -F'\t' '$2!="completed"' <<<"$ROWS")" ]; then
                 PENDING="${PENDING}${ctx}; "
-              elif BAD="$(printf '%s\n' "$ROWS" | awk -F'\t' '$3!="success" {print $3; exit}')" \
+              elif BAD="$(awk -F'\t' '$3!="success" {print $3; exit}' <<<"$ROWS")" \
                    && [ -n "$BAD" ]; then
                 FAILED="${FAILED}${ctx}=${BAD}; "
               fi
@@ -314,7 +321,9 @@ jobs:
             # lookup failure and must not be reported as a missing release.
             if LIVE_RELEASE_ERR="$(gh release view "v${PREV}" --repo "${GITHUB_REPOSITORY}" 2>&1)"; then
               echo "Previous release ${PREV} is live on ClawHub and its GitHub Release exists."
-            elif ! printf '%s' "$LIVE_RELEASE_ERR" | grep -qi 'release not found'; then
+            # B-905: here-string — same early-exit-vs-line-buffered-writer race as above,
+            # reachable here if a multi-line gh error message splits across writes.
+            elif ! grep -qi -- 'release not found' <<<"$LIVE_RELEASE_ERR"; then
               echo "::warning::Previous release ${PREV} is live on ClawHub, but whether its" \
                    "GitHub Release exists could not be checked — the gh lookup itself failed" \
                    "(rate limit, network, or auth), which is not a verdict on ${PREV}. This" \
@@ -375,7 +384,8 @@ jobs:
           # genuinely doesn't exist. Anything else (a rate-limit or network message) is a
           # lookup failure, not a "does not exist" verdict.
           if ! TAG_ERR="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${PREV}" 2>&1)"; then
-            if printf '%s' "$TAG_ERR" | grep -q 'HTTP 404'; then
+            # B-905: here-string, same race class as above.
+            if grep -q -- 'HTTP 404' <<<"$TAG_ERR"; then
               PREV_TAGGED=false
               TAG_LOOKUP_FAILED=false
             else
@@ -387,7 +397,8 @@ jobs:
             TAG_LOOKUP_FAILED=false
           fi
           if ! RELEASE_ERR="$(gh release view "v${PREV}" --repo "${GITHUB_REPOSITORY}" 2>&1)"; then
-            if printf '%s' "$RELEASE_ERR" | grep -qi 'release not found'; then
+            # B-905: here-string, same race class as above.
+            if grep -qi -- 'release not found' <<<"$RELEASE_ERR"; then
               PREV_RELEASED=false
               RELEASE_LOOKUP_FAILED=false
             else
@@ -441,7 +452,12 @@ jobs:
           echo "--- stored scan report for ${PREV} ---"
           if clawhub scan download clawseccheck --version "$PREV" >/tmp/scandl.txt 2>&1; then
             cat /tmp/scandl.txt
-            ZIP="$(sed -n 's/^Report ZIP: //p' /tmp/scandl.txt | head -1)"
+            # B-905: no `| head -1`. `head` closing the pipe after the first line can
+            # SIGPIPE `sed` mid-write under `pipefail`, aborting this whole step under
+            # `set -e` even though sed already produced the line we wanted. Take the
+            # first line in-shell instead of via a second early-exiting reader.
+            ZIP="$(sed -n 's/^Report ZIP: //p' /tmp/scandl.txt)"
+            ZIP="${ZIP%%$'\n'*}"
             if [ -n "$ZIP" ] && [ -f "$ZIP" ] && unzip -o -q "$ZIP" -d /tmp/scanrep; then
               echo "scanner outputs (a ~5-byte file is a null verdict):"
               for f in /tmp/scanrep/*.json; do
@@ -1084,7 +1100,15 @@ jobs:
               names="$(asset_names)" || return 1
               have=0
               for a in "${ASSETS[@]}"; do
-                if printf '%s\n' "$names" | grep -qxF "$a"; then have=$((have + 1)); fi
+                # B-905: a here-string, not a `| grep` pipeline. bash line-buffers its
+                # own stdout, so `printf '%s\n' "$names"` on 2+ names can issue two
+                # separate write()s into a pipe; grep -q exits right after matching the
+                # first, and if the writer gets descheduled between its writes the second
+                # one hits a reader-gone SIGPIPE, which pipefail turns into a false
+                # failure here even though grep already found the match. A here-string
+                # has no pipeline and no concurrent writer, so grep exiting early cannot
+                # SIGPIPE anything.
+                if grep -qxF -- "$a" <<<"$names"; then have=$((have + 1)); fi
               done
               if [ "$have" -eq 2 ]; then
                 echo "Release ${TAG} already carries both assets; not touching them."
@@ -1114,7 +1138,8 @@ jobs:
           fi
           final="$(asset_names)"
           for a in "${ASSETS[@]}"; do
-            if ! printf '%s\n' "$final" | grep -qxF "$a"; then
+            # B-905: here-string, same race as the loop above — see the comment there.
+            if ! grep -qxF -- "$a" <<<"$final"; then
               echo "::error::Release ${TAG} is missing ${a} after the upload."
               exit 1
             fi
