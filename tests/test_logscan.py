@@ -17,16 +17,6 @@ from clawseccheck import logscan
 from clawseccheck.logdiscovery import LogSink
 
 
-def _maxrss_kb() -> int:
-    """Peak RSS in KB. ru_maxrss is KB on Linux but BYTES on macOS, so the KB ceilings
-    these tests assert were 1024x stricter there and failed on ordinary growth."""
-    import resource
-    import sys
-
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return rss // 1024 if sys.platform == "darwin" else rss
-
-
 def _sink(path, kind="config_log") -> LogSink:
     return LogSink(path=path, kind=kind, source="convention")
 
@@ -1252,3 +1242,13 @@ def test_c357_dense_nested_candidates_stay_fast(tmp_path):
     elapsed = time.perf_counter() - start
     assert elapsed < 2.0, f"dense nested-candidate line took {elapsed:.3f}s — O(n^2) cap regressed"
     assert result.counts.get("env_compromise_ioc", 0) >= 1
+
+
+def _maxrss_kb() -> int:
+    """Peak RSS in KB. ru_maxrss is KB on Linux but BYTES on macOS, so the KB ceilings
+    these tests assert were 1024x stricter there and failed on ordinary growth."""
+    import resource
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss // 1024 if sys.platform == "darwin" else rss

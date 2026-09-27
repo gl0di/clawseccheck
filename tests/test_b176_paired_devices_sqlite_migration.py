@@ -31,6 +31,7 @@ touches a real ``~/.openclaw``.
 from __future__ import annotations
 
 import json
+import resource
 import sqlite3
 from pathlib import Path
 
@@ -43,16 +44,6 @@ from clawseccheck.collector import (
     _collect_paired_devices_sqlite,
     collect,
 )
-
-
-def _maxrss_kb() -> int:
-    """Peak RSS in KB. ru_maxrss is KB on Linux but BYTES on macOS, so the KB ceilings
-    these tests assert were 1024x stricter there and failed on ordinary growth."""
-    import resource
-    import sys
-
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return rss // 1024 if sys.platform == "darwin" else rss
 
 # DDL copied verbatim from `sqlite3 ~/.openclaw/state/openclaw.sqlite ".schema
 # device_pairing_paired"` against a real, installed OpenClaw 2026.9.6 -- see this
@@ -686,3 +677,12 @@ class TestB176DualSourceCheck:
         assert secret not in finding.detail
         assert not any(secret in e for e in finding.evidence)
         assert not any("token" in e.lower() for e in finding.evidence)
+
+
+def _maxrss_kb() -> int:
+    """Peak RSS in KB. ru_maxrss is KB on Linux but BYTES on macOS, so the KB ceilings
+    these tests assert were 1024x stricter there and failed on ordinary growth."""
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss // 1024 if sys.platform == "darwin" else rss

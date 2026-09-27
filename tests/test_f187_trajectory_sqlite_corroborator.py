@@ -24,16 +24,6 @@ from clawseccheck.trajectorystore import (
     corroborate,
 )
 
-
-def _maxrss_kb() -> int:
-    """Peak RSS in KB. ru_maxrss is KB on Linux but BYTES on macOS, so the KB ceilings
-    these tests assert were 1024x stricter there and failed on ordinary growth."""
-    import resource
-    import sys
-
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return rss // 1024 if sys.platform == "darwin" else rss
-
 SECRET = "oauth-refresh-token-that-must-never-be-read"
 
 _TMP_PATH_FACTORY = None
@@ -2812,3 +2802,13 @@ def test_streaming_reader_does_not_materialize_the_whole_admitted_set_in_memory(
         f"RSS grew {grew_kb} KB reading {admitted_kb} KB of admitted content "
         "-- looks like the whole set is still being materialized at once"
     )
+
+
+def _maxrss_kb() -> int:
+    """Peak RSS in KB. ru_maxrss is KB on Linux but BYTES on macOS, so the KB ceilings
+    these tests assert were 1024x stricter there and failed on ordinary growth."""
+    import resource
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss // 1024 if sys.platform == "darwin" else rss
