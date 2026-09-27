@@ -290,8 +290,17 @@ def test_publish_workflow_pins_pytest_ruff_with_hashes() -> None:
             f"Found an unhashed pytest install line: {line!r}"
         )
     req_txt = (TOOLS_DIR / "requirements-ci.txt").read_text(encoding="utf-8")
-    for pkg in ("pytest==7.4.4", "ruff==0.15.20"):
-        assert pkg in req_txt, f"{pkg!r} missing from .github/tools/requirements-ci.txt"
+    # Every direct pin declared in requirements-ci.in (pytest is pinned per interpreter,
+    # so it appears twice) must be present in the generated lock.
+    req_in = (TOOLS_DIR / "requirements-ci.in").read_text(encoding="utf-8")
+    direct = [ln.split(";")[0].strip() for ln in req_in.splitlines()
+              if ln.strip() and not ln.lstrip().startswith("#")]
+    assert any(p.startswith("pytest==") for p in direct), direct
+    assert any(p.startswith("ruff==") for p in direct), direct
+    for pkg in direct:
+        assert re.search(rf"(?m)^{re.escape(pkg)}\b", req_txt), (
+            f"{pkg!r} missing from .github/tools/requirements-ci.txt"
+        )
     # --require-hashes refuses the WHOLE install if even one resolved package (direct
     # or transitive) lacks a hash — so every "name==version" block, up to the next
     # such line or EOF, must carry at least one --hash=sha256: line.
