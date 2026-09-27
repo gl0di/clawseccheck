@@ -24,6 +24,16 @@ from clawseccheck.trajectorystore import (
     corroborate,
 )
 
+
+def _maxrss_kb() -> int:
+    """Peak RSS in KB. ru_maxrss is KB on Linux but BYTES on macOS, so the KB ceilings
+    these tests assert were 1024x stricter there and failed on ordinary growth."""
+    import resource
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss // 1024 if sys.platform == "darwin" else rss
+
 SECRET = "oauth-refresh-token-that-must-never-be-read"
 
 _TMP_PATH_FACTORY = None
@@ -2768,7 +2778,7 @@ def test_streaming_reader_does_not_materialize_the_whole_admitted_set_in_memory(
     ran. RSS growth is bounded well below the admitted content size, proving no
     whole-database-sized list survives the read.
     """
-    resource = pytest.importorskip("resource")
+    pytest.importorskip("resource")
 
     home = _home()
     row_count = 30
@@ -2781,13 +2791,13 @@ def test_streaming_reader_does_not_materialize_the_whole_admitted_set_in_memory(
 
     from clawseccheck.trajectorystore import read_compiled_tool_descriptions
 
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    before = _maxrss_kb()
     tool_defs, meta = read_compiled_tool_descriptions(
         home,
         max_content_bytes_per_db=50_000_000,
         max_content_total_bytes=50_000_000,
     )
-    after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    after = _maxrss_kb()
 
     assert meta["dbs_read"] == 1
     assert meta["truncated"] is False
