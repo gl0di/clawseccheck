@@ -385,10 +385,10 @@ class TestSizeCapHardening:
         conn.close()
         del oversized_tokens  # drop this process's own copy before measuring
 
-        before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        before = _maxrss_kb()
         ctx = Context(home=home)
         _collect_paired_devices_sqlite(home, ctx)
-        after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        after = _maxrss_kb()
 
         assert "d1" not in ctx.paired_devices_sqlite
         grew_kb = after - before
@@ -677,3 +677,12 @@ class TestB176DualSourceCheck:
         assert secret not in finding.detail
         assert not any(secret in e for e in finding.evidence)
         assert not any("token" in e.lower() for e in finding.evidence)
+
+
+def _maxrss_kb() -> int:
+    """Peak RSS in KB. ru_maxrss is KB on Linux but BYTES on macOS, so the KB ceilings
+    these tests assert were 1024x stricter there and failed on ordinary growth."""
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss // 1024 if sys.platform == "darwin" else rss

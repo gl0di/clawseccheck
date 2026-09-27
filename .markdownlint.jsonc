@@ -27,6 +27,9 @@
   // MD031: blanks around fences -- disabled; SKILL.md script blocks are embedded
   // in list items where surrounding blank lines break list parsing.
   "MD031": false,
+  // MD060: table column style -- disabled; new in markdownlint 0.41 (markdownlint-cli
+  // 0.49), a pipe-spacing style rule the tables were never written to.
+  "MD060": false,
   // MD007: unordered list indent -- 2-space indent (project standard).
   "MD007": { "indent": 2 }
 }

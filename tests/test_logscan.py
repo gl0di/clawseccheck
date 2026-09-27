@@ -931,14 +931,14 @@ def test_c327_decompression_bomb_is_capped_not_raised(tmp_path):
 def test_c327_decompression_bomb_peak_memory_is_bounded(tmp_path):
     """Same real bomb as above, but asserting bounded PEAK MEMORY directly (not just
     wall-clock) wherever the stdlib `resource` module is available (POSIX)."""
-    resource = pytest.importorskip("resource")
+    pytest.importorskip("resource")
 
     bomb = base64.b64encode(gzip.compress(b"0" * 10_000_000)).decode()
     sink = _write(tmp_path, "a.log", f"bombline: {bomb} end\n")
 
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    before = _maxrss_kb()
     logscan.scan_log_file(sink, None)
-    after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    after = _maxrss_kb()
     # ru_maxrss is KB on Linux; a real (uncapped) decompress of this bomb would have
     # allocated ~10 MB for the payload alone plus overhead. Give a generous ceiling
     # (50 MB) well below what an unbounded decompress of this bomb would cost, and far
@@ -1242,3 +1242,13 @@ def test_c357_dense_nested_candidates_stay_fast(tmp_path):
     elapsed = time.perf_counter() - start
     assert elapsed < 2.0, f"dense nested-candidate line took {elapsed:.3f}s — O(n^2) cap regressed"
     assert result.counts.get("env_compromise_ioc", 0) >= 1
+
+
+def _maxrss_kb() -> int:
+    """Peak RSS in KB. ru_maxrss is KB on Linux but BYTES on macOS, so the KB ceilings
+    these tests assert were 1024x stricter there and failed on ordinary growth."""
+    import resource
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss // 1024 if sys.platform == "darwin" else rss

@@ -10,6 +10,10 @@
 # could not install at all. The environment markers below select the right pin per
 # interpreter; every line is still hash-pinned for --require-hashes.
 #
+# pytest is pinned per interpreter in requirements-ci.in: the tmpdir advisory
+# GHSA-6w46-j5rx-g56g is fixed only in pytest 9.0.3, which requires Python 3.10, so
+# the 3.9 leg stays on 8.4.2 (the last release that supports it).
+#
 # Every hash below was cross-checked against the sha256 digests PyPI's JSON API
 # reports for the corresponding file (GET /pypi/<name>/<version>/json, `.urls[].digests.sha256`) —
 # not just accepted from a local resolver run.
@@ -38,9 +42,17 @@ pluggy==1.6.0 \
     --hash=sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3 \
     --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
     # via pytest
-pytest==7.4.4 \
-    --hash=sha256:2cf0005922c6ace4a3e2ec8b4080eb0d9753fdc93107415332f50ce9e7994280 \
-    --hash=sha256:b090cdf5ed60bf4c45261be03239c2c1c22df034fbffe691abe93cd80cea01d8
+pygments==2.21.0 \
+    --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9 \
+    --hash=sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c
+    # via pytest
+pytest==8.4.2 ; python_full_version < '3.10' \
+    --hash=sha256:86c0d0b93306b961d58d62a4db4879f27fe25513d4b969df351abdddb3c30e01 \
+    --hash=sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79
+    # via -r .github/tools/requirements-ci.in
+pytest==9.0.3 ; python_full_version >= '3.10' \
+    --hash=sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9 \
+    --hash=sha256:b86ada508af81d19edeb213c681b1d48246c1a91d304c6c81a427674c17eb91c
     # via -r .github/tools/requirements-ci.in
 ruff==0.15.20 \
     --hash=sha256:00e188c53e499c3c1637f73c91dcf2fb56d576cab76ce1be50a27c4e80e37078 \
