@@ -1,14 +1,14 @@
-"""The `exec_policy` dimension — the approval gate on unattended shell execution.
+"""The `exec_policy` dimension - the approval gate on unattended shell execution.
 
 B-664. `tools.exec` decides whether the agent may run a shell command, whether the command
 must be on an allow list, and whether a human is asked when it is not. Before this, none of
 that was a watched dimension: `_CONFIG_DIMENSIONS` held `mcp`, `mcp_detail`, `channels`,
 `gateway_bind` and `plugins`, and `tools.exec` reached the monitor only if some check's
-STATUS happened to move — which on `fixtures/home_safe` it does not. Flipping
+STATUS happened to move - which on `fixtures/home_safe` it does not. Flipping
 `tools.exec.mode` from `"ask"` to `"auto"` produced `rc=0` and "No new threats among what
 was compared."
 
-## The resolution is OpenClaw's, ported — and the port was checked by EXECUTION
+## The resolution is OpenClaw's, ported - and the port was checked by EXECUTION
 
 `resolveExecPolicyForMode` (`dist/exec-approvals-BIKWP8_V.js`) maps a mode to the triple
 the exec tool actually enforces:
@@ -27,11 +27,11 @@ reading them was not enough twice over:
 
   * read alone, the `DEFAULT_SECURITY = "full"` / `DEFAULT_ASK = "off"` constants sitting
     beside the resolver suggest an absent `tools.exec` resolves to `full`;
-  * executed alone, `resolveExecModePolicy({})` returns `"ask"` — the constants are NOT
+  * executed alone, `resolveExecModePolicy({})` returns `"ask"` - the constants are NOT
     applied inside it;
   * the CALL SITE settles it (`dist/bash-tools-DHyGpWCr.js`):
     `configuredSecurity = explicitSecurity ?? (host === "sandbox" ? "deny" : "full")`,
-    `ask: defaults?.ask ?? "off"` — so an absent `tools.exec` really does resolve to
+    `ask: defaults?.ask ?? "off"` - so an absent `tools.exec` really does resolve to
     `full`/`off`, i.e. the most permissive state.
 
 Either half alone gives the wrong default, and a wrong default would have inverted the
@@ -42,13 +42,13 @@ alert.
 The first version of this module said exactly that about the layers it skipped. An
 independent C-135 pass disproved it with four reproducible false alarms, and the reason is
 worth stating because it generalises: **an unread layer does not only remove signal, it
-changes what the DEFAULT is** — and the default here is `full`, the top of the rank. Every
+changes what the DEFAULT is** - and the default here is `full`, the top of the rank. Every
 skipped layer that lowers the real policy turns a benign edit into a `-> full` HIGH.
 
   * **`agents.defaults.sandbox.mode`** decides `effectiveHost`, and
     `defaultSecurity = effectiveHost === "sandbox" ? "deny" : "full"`
     (`exec-defaults-BLH0Yltk.js`). Under `sandbox.mode: "all"`, deleting a now-redundant
-    `tools.exec.security: "allowlist"` TIGHTENS the policy to `deny` — and the old code
+    `tools.exec.security: "allowlist"` TIGHTENS the policy to `deny` - and the old code
     called it `allowlist -> full`, an inverted verdict at HIGH.
   * **`agents.list[].tools.exec`** replaces the global for that agent
     (`applyExecPolicyLayer`, and `resolveAgentConfig` passes `tools: entry.tools` with no
@@ -57,21 +57,21 @@ skipped layer that lowers the real policy turns a benign edit into a `-> full` H
 
 So both are now MODELLED rather than skipped, per scope. What remains genuinely out of
 static reach is named at `_undetermined_reason`, and each such case returns `undetermined`
-— never a policy, and never the permissive default.
+- never a policy, and never the permissive default.
 
 ## What is still out of scope, and now says so rather than guessing
 
-  * `~/.openclaw/exec-approvals.json` — mutable RUNTIME state OpenClaw writes (B326 excludes
+  * `~/.openclaw/exec-approvals.json` - mutable RUNTIME state OpenClaw writes (B326 excludes
     it for the same reason). It can only make the real policy TIGHTER (`minSecurity` /
     `maxAsk`), so it is a false-negative direction only.
-  * the session layer (`applySessionLegacyExecPolicyLayer`) — per-session, not on disk.
+  * the session layer (`applySessionLegacyExecPolicyLayer`) - per-session, not on disk.
   * `sandbox.mode: "non-main"`, where `shouldSandboxSession` is genuinely session-dependent
     and the default security cannot be decided statically.
 
 ## Why not reuse `_b326_exec_policy_blocking_reason`
 
 It looks like the right primitive and is not: `_B326_BLOCKING_MODES` includes `"auto"`,
-because B326 asks "does anything block the elevated-`full` override" — a different question
+because B326 asks "does anything block the elevated-`full` override" - a different question
 from "is a human asked". Reusing it would have made the B-664 case invisible for a second
 time, from the other direction.
 """
@@ -115,7 +115,7 @@ def _undetermined_reason(exec_cfg, sandbox_mode) -> "str | None":
     """Why this scope's policy cannot be decided from static config, or None.
 
     Every branch here exists because the alternative is guessing, and the guess would land
-    on `full` — the top of the rank — which is how an unread layer becomes a false alarm.
+    on `full` - the top of the rank - which is how an unread layer becomes a false alarm.
     """
     from ..checks import _b323_contains_env_var_reference  # noqa: PLC0415
 
@@ -126,7 +126,7 @@ def _undetermined_reason(exec_cfg, sandbox_mode) -> "str | None":
         if not isinstance(value, str):
             # A number, list, dict or bool. `resolveExecPolicyForMode` THROWS on a
             # non-string mode and the zod schema is a strict enum, so OpenClaw would refuse
-            # to start — but the old code let non-strings fall past its `isinstance` guards
+            # to start - but the old code let non-strings fall past its `isinstance` guards
             # to the permissive default and alerted `deny -> full`. The TYPE of the garbage
             # decided whether the arm stood down or fired HIGH.
             return f"tools.exec.{field} is not a string"
@@ -141,13 +141,13 @@ def _undetermined_reason(exec_cfg, sandbox_mode) -> "str | None":
     # The sandbox only decides the DEFAULT security, so it is irrelevant once a mode is set:
     # `applyExecPolicyLayer` replaces the whole triple from the mode table. Checking it
     # unconditionally is what made every sandbox user with an explicit mode permanently
-    # silent — a false negative introduced by an over-eager honesty guard.
+    # silent - a false negative introduced by an over-eager honesty guard.
     if isinstance(mode, str) and mode:
         return None
     host = exec_cfg.get("host")
     if isinstance(host, str) and host and host != "auto":
         # An EXPLICIT target never enters the `sandboxAvailable` ternary in
-        # `resolveExecTarget`, so it is fully determined — the opposite of what the first
+        # `resolveExecTarget`, so it is fully determined - the opposite of what the first
         # version of this guard assumed. Note: compared RAW, because the dist does not trim.
         return None
     if sandbox_mode is None or sandbox_mode == _SANDBOX_NEVER:
@@ -159,7 +159,7 @@ def _undetermined_reason(exec_cfg, sandbox_mode) -> "str | None":
 
 
 def _resolve_scope(exec_cfg, sandbox_mode) -> dict:
-    """One scope's effective policy — the global one, or one agent's.
+    """One scope's effective policy - the global one, or one agent's.
 
     `effectiveHost` comes from `resolveExecTarget`: an explicit target wins, and an absent
     or `"auto"` target falls to `sandboxAvailable ? "sandbox" : "gateway"`. Then
@@ -172,7 +172,7 @@ def _resolve_scope(exec_cfg, sandbox_mode) -> dict:
     mode = exec_cfg.get("mode")
     if isinstance(mode, str) and mode:
         # `if (layer.mode)` in `applyExecPolicyLayer` is a TRUTHINESS test, so an empty
-        # string is treated as absent by the dist — hence the `and mode` rather than a
+        # string is treated as absent by the dist - hence the `and mode` rather than a
         # bare presence check.
         security, ask, auto_review = _MODE_POLICY[mode]
         return {"mode": mode, "security": security, "ask": ask,
@@ -194,7 +194,7 @@ def _resolve_scope(exec_cfg, sandbox_mode) -> dict:
 
 
 def _exec_policy_sig(ctx) -> dict:
-    """The effective exec policy PER SCOPE — the global one, and each agent that overrides it.
+    """The effective exec policy PER SCOPE - the global one, and each agent that overrides it.
 
     Records the RESOLVED triple rather than the raw fields, because the raw fields do not
     compare meaningfully: `{"mode": "ask"}` and `{"security": "allowlist", "ask": "on-miss"}`
@@ -217,13 +217,13 @@ def _exec_policy_sig(ctx) -> dict:
     scopes = {}
 
     # B-699: the roster comes from `agent_roster`, so a 2026.8.1 `agents.entries` record is
-    # read as well as the legacy `agents.list`. The scope KEY is unchanged in both shapes —
-    # it is built from the agent id, which `agent_roster` injects from the record key — so a
+    # read as well as the legacy `agents.list`. The scope KEY is unchanged in both shapes -
+    # it is built from the agent id, which `agent_roster` injects from the record key - so a
     # user migrating their config does not get a spurious "scope moved" alert out of it.
     _listed = agent_roster(cfg)
     # The global scope is only recorded when something actually RUNS under it. With a
     # non-empty roster whose every entry carries its own `tools.exec`, the global is
-    # inert — and recording it anyway meant an edit to it produced a `deny -> full` HIGH
+    # inert - and recording it anyway meant an edit to it produced a `deny -> full` HIGH
     # about a policy no agent uses. When the roster is empty, or has any entry without
     # an override, the global is what that agent runs, so it stays.
     _all_overridden = bool(_listed) and all(
@@ -267,7 +267,7 @@ def _every_request_is_prompted(rec: dict) -> bool:
     """`ask: "always"` prompts a human on EVERY exec request, not only on an allow-list miss.
 
     Which means the set of commands the agent can run unattended is empty, whatever
-    `security` says — and `resolveExecModeFromPolicy` has a clause (`security === "full" &&
+    `security` says - and `resolveExecModeFromPolicy` has a clause (`security === "full" &&
     ask !== "always"`) that exists for exactly this. Dropping an allow list while keeping
     universal prompting is an operator trading one control for a stricter one; the first
     version of this arm called it "any command, with no allow list at all" at HIGH.
@@ -278,7 +278,7 @@ def _every_request_is_prompted(rec: dict) -> bool:
 def _misses_can_still_run(rec: dict) -> bool:
     """True when a command outside the allow list can run at all.
 
-    Under `allowlist`/`deny` a miss is refused, so there is no approval to lose — which is
+    Under `allowlist`/`deny` a miss is refused, so there is no approval to lose - which is
     why tightening from `ask` to `allowlist` must NOT alert even though it removes the
     prompt. That direction was a false alarm in the first draft of this arm.
     """
@@ -290,7 +290,7 @@ def _describe(rec: dict) -> str:
 
     The mode label alone is not enough: `{"security":"allowlist","ask":"always"}` and
     `{"security":"full","ask":"always"}` are both mode `ask`, so an alert about the second
-    rendered as "(tools.exec: ask -> ask)" — a sentence that refutes itself while claiming a
+    rendered as "(tools.exec: ask -> ask)" - a sentence that refutes itself while claiming a
     widening.
     """
     mode = rec.get("mode")
@@ -314,7 +314,7 @@ def _diff_scope(scope: str, prev_rec: dict, curr_rec: dict, alerts, note) -> Non
     c_sec = _SECURITY_RANK.get(curr_rec.get("security"))
     if p_sec is None or c_sec is None:
         note(NOTE_RECORD_DAMAGED,
-             f"The shell-approval policy{where} was not compared — one of the two records "
+             f"The shell-approval policy{where} was not compared \u2014 one of the two records "
              "names a confinement level this build does not recognise.")
         return
 
@@ -334,7 +334,7 @@ def _diff_scope(scope: str, prev_rec: dict, curr_rec: dict, alerts, note) -> Non
     # `and not widened`: on `ask` -> `full` BOTH facts are true, and this repo treats
     # reporting one edit twice as a defect in its own right (the bootstrap/memory overlap,
     # the new-file overlap, the args_pkg/args0 collapse). The widening sentence already
-    # says 'full' means any command with no allow list, which subsumes this one — so this
+    # says 'full' means any command with no allow list, which subsumes this one - so this
     # alert is for the case the first cannot see: the confinement did NOT move and the
     # human left the loop anyway, which is exactly `ask` -> `auto`.
     if (not widened and _human_reviews_a_miss(prev_rec)
@@ -354,7 +354,7 @@ def _diff_exec_policy(pair, alerts, compare_config, note) -> None:
     must be DISCLOSED rather than silently skipped, the same way the gateway address is.
 
     Only scopes present on BOTH sides are compared. A scope that appeared is a new agent,
-    which is a different fact from an existing agent's policy being relaxed — and a scope
+    which is a different fact from an existing agent's policy being relaxed - and a scope
     that vanished took its agent with it.
     """
     if not compare_config or pair is None:
@@ -364,7 +364,7 @@ def _diff_exec_policy(pair, alerts, compare_config, note) -> None:
     curr_scopes = curr_rec.get("scopes")
     if not isinstance(prev_scopes, dict) or not isinstance(curr_scopes, dict):
         # A baseline written before this dimension recorded scopes, or a damaged record.
-        # `pair_or_note` cannot see this — its guard is on the dimension, not its shape.
+        # `pair_or_note` cannot see this - its guard is on the dimension, not its shape.
         return
     for scope in sorted(set(prev_scopes) & set(curr_scopes)):
         p, c = prev_scopes[scope], curr_scopes[scope]

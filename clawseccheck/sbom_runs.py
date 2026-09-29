@@ -1,7 +1,7 @@
 """Local per-run SBOM snapshots for --sbom-diff (C-521): OPT-IN, append-only JSONL,
 chmod 600, stdlib only.
 
-Same idiom as runstore.py (--save-run/--diff, C-524) — reuses monitorstore.py's
+Same idiom as runstore.py (--save-run/--diff, C-524) - reuses monitorstore.py's
 generic hash-chain primitives (_chain_hash/_rotate_journal/_iter_jsonl/_last_chain_hash/
 _schema_ok, all proven to operate on an arbitrary dict row, not just Finding shapes)
 rather than reinventing them. But a SEPARATE store and SEPARATE diff function, not a
@@ -9,18 +9,18 @@ parameterization of runstore.py: runstore.diff_runs() is hard-coded to Finding f
 (id/status/detail/severity/title, plus baseline.fingerprint()'s finding-identity
 concept) throughout, and an SBOM component (name/version/hash, no severity or status
 at all) is a different enough shape that bolting it onto that function would mean
-threading a shape-selector through code that currently has none — the same call this
+threading a shape-selector through code that currently has none - the same call this
 project made when C-524 itself reused monitorstore.py's primitives without touching
 history.py's or monitor.py's own, more specific, call sites.
 
 Stores the NATIVE build_sbom(ctx) payload (sbom.py), never a format-specific
 CycloneDX/SPDX rendering: --format is a presentation-time transform (see
 render_sbom_cyclonedx/render_sbom_spdx), and SPDX's own creationInfo.created is
-wall-clock "now" by SPDX convention — diffing rendered TEXT would manufacture a
+wall-clock "now" by SPDX convention - diffing rendered TEXT would manufacture a
 difference on every run of an unchanged setup. Diffing the underlying component list
 instead is immune to that: two runs of one unchanged setup diff to empty.
 
-Run id = the same 'ts' stamp runstore.save_run() already stamps its own rows with —
+Run id = the same 'ts' stamp runstore.save_run() already stamps its own rows with -
 no second identity invented, same reasoning that module gave for reusing history.py's
 timestamp shape.
 """
@@ -52,7 +52,7 @@ _COMPONENT_KINDS = ("skills", "mcp_servers", "plugins")
 def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" = None, *,
                   version: "str | None" = None) -> "str | None":
     """Persist one --sbom snapshot (the native build_sbom(ctx) dict). Returns the run
-    id ('ts') on success, or None on write failure — never raises, same contract as
+    id ('ts') on success, or None on write failure - never raises, same contract as
     runstore.save_run."""
     ts = when if when is not None else datetime.now().isoformat(timespec="seconds")
     p = Path(path).expanduser()
@@ -101,12 +101,12 @@ def list_sbom_run_ids(path: str = DEFAULT_SBOM_RUNS) -> "list[str]":
 
 
 def _component_identity(kind: str, entry: dict) -> tuple:
-    """(kind, name) — except a component build_sbom() never actually produces: one
+    """(kind, name) - except a component build_sbom() never actually produces: one
     missing its own "name" (a malformed/legacy-schema stored row; every real
     _skill_entry/_mcp_entry/_plugin_entry sets it unconditionally). Every such entry
     used to collapse onto the SAME (kind, "") identity, which silently turned a real
     add-one/remove-one pair into a false "changed" report on whichever fields
-    happened to differ between the two unrelated nameless entries (C-135) — exactly
+    happened to differ between the two unrelated nameless entries (C-135) - exactly
     the shape this feature exists to catch, reported about the wrong thing. Falling
     back to the entry's own hash keeps two DIFFERENT nameless entries distinct;
     two with the SAME hash (byte-identical content) collapsing is the one residual
@@ -132,7 +132,7 @@ def diff_sbom_runs(run1: dict, run2: dict) -> dict:
     runs into added/removed/changed by (kind, name) identity.
 
     'changed' names exactly which fields moved (version and/or hash) rather than just
-    flagging that something did — a hash change with an UNCHANGED version is precisely
+    flagging that something did - a hash change with an UNCHANGED version is precisely
     the supply-chain-swap signal this feature exists to catch (same content-identity a
     version bump alone cannot express), and reporting both means a reader is never left
     guessing which one moved.
@@ -152,7 +152,7 @@ def diff_sbom_runs(run1: dict, run2: dict) -> dict:
         if moved:
             # C-135: "name" comes from the entry's OWN field, not the identity tuple
             # (k[1] can be the synthetic "<unnamed:...>" fallback _component_identity
-            # uses for a nameless entry) — added/removed already do this by spreading
+            # uses for a nameless entry) - added/removed already do this by spreading
             # the original entry; changed must not assert the internal fallback marker
             # as if it were real component data.
             changed.append({"kind": k[0], "name": e1.get("name"), "changed": moved})
@@ -170,7 +170,7 @@ def diff_sbom_runs(run1: dict, run2: dict) -> dict:
 def render_sbom_diff_json(diff: dict, *, version: str) -> str:
     """The standalone --sbom-diff --json artifact. Routed through
     adjudication._emit_json (sanitize-on-emit over the whole tree), same as
-    runstore.render_diff_json — the shared boundary every machine-readable artifact
+    runstore.render_diff_json - the shared boundary every machine-readable artifact
     this tool emits goes through."""
     from .adjudication import _emit_json  # noqa: PLC0415
 

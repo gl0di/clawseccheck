@@ -1,4 +1,4 @@
-"""Read OpenClaw's own config-write journal — a second witness we did not author.
+"""Read OpenClaw's own config-write journal - a second witness we did not author.
 
 A snapshot diff answers "what is different now". It structurally cannot see a change that
 was made and then put back between two runs, and it cannot say WHO made one. OpenClaw
@@ -7,11 +7,11 @@ already records both and we ignored the file.
 ``~/.openclaw/logs/config-audit.jsonl`` carries one record per config write, each with a
 ``previousHash``/``nextHash`` pair over the config bytes. Measured on a live install: the
 newest record's ``nextHash`` equals ``sha256(openclaw.json)`` exactly, and ``nextBytes``
-equals its size — so the chain is real and it is authored by a different program than
+equals its size - so the chain is real and it is authored by a different program than
 this one, which is what makes it worth reading.
 
 **What this module refuses to conclude.** A broken chain link is NOT evidence of tampering.
-Measured on a healthy real machine: 2 of 42 links were already broken, both benignly — one
+Measured on a healthy real machine: 2 of 42 links were already broken, both benignly - one
 where the config was hand-edited outside OpenClaw's own writer (so no record exists for
 that write), and one where two writes share the same ``previousHash``, i.e. they raced from
 a common base or something was reverted and re-applied. Log rotation produces the same
@@ -20,7 +20,7 @@ shape. An honest reader reports a gap as *unknown provenance*, never as an attac
 Two more field caveats, measured rather than assumed on the same 43 records:
 ``changedPathCount`` was ``None`` on **every** one, so an absent value must never be read as
 "0 paths changed"; and ``suspicious`` was present but empty on every one, which is a clean
-false-positive baseline but also zero positive evidence that it ever fires — nothing
+false-positive baseline but also zero positive evidence that it ever fires - nothing
 high-severity may rest on it alone.
 
 Layer 1 leaf: stdlib plus ``logsafe`` only. Read-only, offline, bounded.
@@ -42,7 +42,7 @@ JOURNAL_RELPATH = "logs/config-audit.jsonl"
 # Chain verdicts. Three, not two: "we could not check" is a distinct answer from "the chain
 # holds", and collapsing them is how a monitor ends up reporting silence as safety.
 CHAIN_OK = "ok"
-CHAIN_GAP = "gap"            # a link does not join — provenance unknown, NOT tampering
+CHAIN_GAP = "gap"            # a link does not join - provenance unknown, NOT tampering
 CHAIN_UNKNOWN = "unknown"    # no journal, unreadable, or too few records to say anything
 
 
@@ -63,7 +63,7 @@ class ConfigWrite:
     gateway_mode_before: "str | None" = None
     gateway_mode_after: "str | None" = None
     suspicious: tuple = ()
-    # None means the field was absent — which is what it always is on a real install. Never
+    # None means the field was absent - which is what it always is on a real install. Never
     # coerce to 0: "no paths changed" is a claim, and absence is not that claim.
     changed_path_count: "int | None" = None
 
@@ -89,8 +89,8 @@ def _basename(argv) -> str:
     if not isinstance(first, str):
         return ""
     # Split on BOTH separators. `os.path.basename` is `posixpath` on a POSIX host and does
-    # not treat "\\" as a separator, so a Windows-style argv[0] — reachable from WSL, or a
-    # home copied from Windows — survived whole: "C:\\Users\\dave\\secret\\x.exe" came out
+    # not treat "\\" as a separator, so a Windows-style argv[0] - reachable from WSL, or a
+    # home copied from Windows - survived whole: "C:\\Users\\dave\\secret\\x.exe" came out
     # unchanged and reached the alert string and the event journal with the user's
     # directory layout in it.
     tail = first.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
@@ -126,7 +126,7 @@ def _same_config(record_path, wanted) -> bool:
 
     The journal carries a ``configPath`` per record and OpenClaw would not carry it if one
     install could only ever have one. A write to a DIFFERENT config would otherwise move
-    the journal head with no change to the file we are watching — which is exactly the
+    the journal head with no change to the file we are watching - which is exactly the
     shape the "changed and reverted" arm keys on, so it would fire on someone else's edit.
 
     A record with no ``configPath`` at all is KEPT: an older journal format saying nothing
@@ -148,11 +148,11 @@ def read_writes(home, since: "str | None" = None,
                 config_path=None) -> Journal:
     """Bounded, read-only tail of the config-write journal, oldest record first.
 
-    *config_path* — when given, records describing a different config file are dropped.
+    *config_path* - when given, records describing a different config file are dropped.
     See ``_same_config``: without it, a write to an unrelated config moves the journal head
     and the "changed and reverted" arm fires on someone else's edit.
 
-    *since* — an ISO timestamp; records at or before it are dropped. The comparison is a
+    *since* - an ISO timestamp; records at or before it are dropped. The comparison is a
     plain string compare, which is correct for the fixed-width ISO-8601 UTC form OpenClaw
     writes and avoids parsing a foreign program's timestamps into our own clock.
 

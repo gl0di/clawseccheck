@@ -1,6 +1,6 @@
 """Offline, illustrative percentile ranking for ClawSecCheck scores.
 
-This module provides a BUILT-IN reference distribution — it is NOT telemetry,
+This module provides a BUILT-IN reference distribution - it is NOT telemetry,
 NOT collected from real users, and involves NO network calls whatsoever.
 Everything is computed locally, deterministically, from a hand-crafted
 illustrative CDF that represents a plausible spread of security postures.
@@ -8,7 +8,7 @@ illustrative CDF that represents a plausible spread of security postures.
 The REFERENCE list is a sorted sequence of (score, cumulative_percentile) pairs
 that together define a piecewise-linear cumulative distribution function (CDF).
 It encodes the assumption that most unconfigured installations cluster in the
-40-70 score range, with few at the extremes — a defensible shape for a first-
+40-70 score range, with few at the extremes - a defensible shape for a first-
 run self-audit tool whose users have not yet acted on any recommendations.
 
 This is an OFFLINE, ILLUSTRATIVE reference profile. It must never be presented
@@ -51,7 +51,7 @@ def percentile(score: int) -> int:
     The result is the percentage of the reference distribution at or below
     *score*. The function is monotone non-decreasing; percentile(100) == 100.
 
-    This is a purely local computation — no network, no telemetry.
+    This is a purely local computation - no network, no telemetry.
 
     Args:
         score: An integer in 0..100 (clamped silently if out of range).

@@ -55,7 +55,7 @@ from ._content import (
 from ._shared import (
     _b323_contains_env_var_reference,
     _B55_FS_WRITE_TOOLS,
-    _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 — re-exported (moved to _shared, B-666)
+    _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 - re-exported (moved to _shared, B-666)
     _c015_has_secret,
     _canonical_ipv4,
     _channel_has_implicit_default_account,
@@ -75,7 +75,7 @@ from ._shared import (
     _hooks_session_key_exposures,
     INPUT_TOOL_HINTS,
     _is_posix,
-    _is_secret_reference,  # noqa: F401 — re-exported for existing importers
+    _is_secret_reference,  # noqa: F401 - re-exported for existing importers
     _LEG_KEYS,
     LOOPBACK,
     _mcp_leg_contributions,
@@ -126,23 +126,23 @@ CLOUD_PROVIDERS = (
 
 
 # ---------- B32: Control-Plane Mutation Reachability ----------
-# gateway.tools.allow — explicit re-enablement of a tool over the HTTP gateway.
-# gateway.tools.deny  — explicit denial list.
+# gateway.tools.allow - explicit re-enablement of a tool over the HTTP gateway.
+# gateway.tools.deny  - explicit denial list.
 #
 # B-835: this set is now grounded on the installed openclaw@2026.9.5 dist's own
-# GATEWAY_CONTROL_PLANE_TOOLS (dangerous-tools-D5_2xo_6.mjs:35-39 — "Sensitive
+# GATEWAY_CONTROL_PLANE_TOOLS (dangerous-tools-D5_2xo_6.mjs:35-39 - "Sensitive
 # control-plane tools. `automations` can persist scheduled runs; `gateway` exposes
 # config and self-update; `plugins` manages executable plugin lifecycles."), resolving
 # its AUTOMATIONS_TOOL_NAME import to the canonical id "automations"
 # (automations-tool-name-DBMZPbPL.mjs). Entries compared against this set MUST go
 # through _normalize_tool_name (below) first, the same normalizeToolPolicyName the
 # vendor itself applies (toolgrant._normalize_tool_name, reused rather than a third
-# copy — toolgrant.py's own docstring names checks/_shared.py's and toolpolicy.py's
+# copy - toolgrant.py's own docstring names checks/_shared.py's and toolpolicy.py's
 # two-entry alias tables as the narrower siblings NOT to copy from). Before this fix
 # the set held the literal alias "cron" instead of the canonical "automations" and
 # compared it against raw (non-normalised) config strings, so `gateway.tools.allow:
 # ["automations"]` (the canonical, more likely spelling) PASSED while only the legacy
-# alias "cron" FAILed — backwards from the vendor's own alias direction
+# alias "cron" FAILed - backwards from the vendor's own alias direction
 # (TOOL_NAME_ALIASES maps "cron" -> "automations", tool-policy-shared bundle).
 #
 # "plugins" is new here (B-835): 9.5 added it to GATEWAY_CONTROL_PLANE_TOOLS AND to
@@ -150,7 +150,7 @@ CLOUD_PROVIDERS = (
 # in that release) it was neither, so gateway.tools.allow:["plugins"] was inert there.
 # Deliberately NOT made version-aware (contrast the version-gated
 # `_workshop_symlink_knob`, checks/_shared.py:1049): "plugins" manages executable
-# plugin lifecycles (dist comment above) — an explicit allow of it over the HTTP
+# plugin lifecycles (dist comment above) - an explicit allow of it over the HTTP
 # gateway is a real control-plane exposure on every build this check can see, whether
 # or not the running OpenClaw version happens to default-deny it. A stale PASS on an
 # old build is a worse failure mode than an occasional inert-but-flagged allow.
@@ -164,21 +164,21 @@ CLOUD_PROVIDERS = (
 # control-plane identifiers (method-scopes-CF6Mdynq.mjs, tagged CONTROL_PLANE_WRITE,
 # operator.admin scope) even though they name JSON-RPC *methods* on a different
 # gateway authorization axis (operator scopes) than the *tool* ids gateway.tools.
-# allow/deny governs — kept as a defensive, deliberately-conservative extra match on
+# allow/deny governs - kept as a defensive, deliberately-conservative extra match on
 # the (harmless if never hit) chance a config string is set to look like one of them.
 #
 # Deliberately EXCLUDED despite being real tool ids in the same two vendor deny lists
 # (DEFAULT_GATEWAY_HTTP_TOOL_DENY and GATEWAY_OWNER_ONLY_CORE_TOOLS,
-# dangerous-tools-D5_2xo_6.mjs:8-30,45-58): "nodes" ("Nodes + devices" — device
+# dangerous-tools-D5_2xo_6.mjs:8-30,45-58): "nodes" ("Nodes + devices" - device
 # pairing/control, tool-catalog-BAOwO8Un.mjs:369) and "openclaw" ("Delegate OpenClaw
 # setup and repair", ibid:362). The vendor itself keeps both OUT of
 # GATEWAY_CONTROL_PLANE_TOOLS while putting them in the broader, differently-justified
 # GATEWAY_OWNER_ONLY_CORE_TOOLS (owner-identity requirement, not "control-plane
-# mutation" — that list also adds sessions/screen/terminal/portal/conversations_*/
+# mutation" - that list also adds sessions/screen/terminal/portal/conversations_*/
 # computer/mobile_ui, none of which this check's "config mutation / cron scheduling /
 # cross-session spawn-send" framing covers either). Folding device control or
 # setup-delegation into a check specifically named "control-plane mutation" would
-# assert a vendor classification the vendor's own source does not make — filed as an
+# assert a vendor classification the vendor's own source does not make - filed as an
 # open question for a future check (owner-only-tool exposure is a different, real
 # question) rather than smuggled into B32.
 _B32_CONTROL_PLANE_TOOLS = frozenset(
@@ -196,7 +196,7 @@ _B32_CONTROL_PLANE_TOOLS = frozenset(
 
 def _b32_normalize_tools(raw) -> set:
     """Normalise a gateway.tools.allow/deny entry list the same way the vendor's
-    resolver does (trim + lowercase + alias fold — toolgrant._normalize_tool_name,
+    resolver does (trim + lowercase + alias fold - toolgrant._normalize_tool_name,
     itself grounded against the installed dist's TOOL_NAME_ALIASES) before comparing
     against _B32_CONTROL_PLANE_TOOLS. Non-string entries fold to "" (dropped), matching
     normalizeLowercaseStringOrEmpty rather than Python's str() (a stray int/dict/list
@@ -232,7 +232,7 @@ _C015_TEXT_EXTS = {
 }
 
 
-# per-agent sandbox docker flags (FAIL) — same leaf names under agents.list[]
+# per-agent sandbox docker flags (FAIL) - same leaf names under agents.list[]
 _DANGER_AGENT_SANDBOX = (
     ("dangerouslyAllowContainerNamespaceJoin", "namespace join"),
     ("dangerouslyAllowExternalBindSources", "external bind sources"),
@@ -273,19 +273,19 @@ _DANGER_FIXED = [
     ),
     (
         # C-507: grounded 2026-09-06 against the installed dist (openclaw@2026.9.2,
-        # re-confirmed on 2026.9.4) — schema description, verbatim: "Allow user-
+        # re-confirmed on 2026.9.4) - schema description, verbatim: "Allow user-
         # installed plugins to execute native JavaScript in the Control UI (default:
         # false). Bundled plugin views remain available. Custom UI shares the
         # signed-in operator's Gateway permissions; enable only for trusted plugins."
         # Runtime gate (dist/github-user-identity-*.js, isControlUiPluginAllowed):
-        # `plugin.origin === "bundled" || ...customPlugins === true` — with the flag
+        # `plugin.origin === "bundled" || ...customPlugins === true` - with the flag
         # on, a NON-bundled, user-installed plugin runs native JS in the Control UI at
         # the signed-in operator's own Gateway authority. WARN, not FAIL, matching the
         # sibling allowExternalEmbedUrls row directly above: opt-in, defaults false, so
         # a config setting it true is a deliberate operator act (same shape, same
-        # severity) — the flag alone is not yet an attack, it needs an untrusted
+        # severity) - the flag alone is not yet an attack, it needs an untrusted
         # installed plugin to combine with (tracked separately, not modelled as a
-        # RISK-* chain here — see C-507's own comment for why).
+        # RISK-* chain here - see C-507's own comment for why).
         "gateway.controlUi.experimental.customPlugins",
         "control-plane: user-installed plugins may run native JS in the Control UI "
         "with the signed-in operator's Gateway permissions",
@@ -305,15 +305,15 @@ _DANGER_FIXED = [
 
 
 # B-701. Two SSRF break-glass flags that exist ONLY in the 2026.8.1+ schema, so B48 said
-# "No dangerous break-glass override flags enabled." with one of them on — measured, not
+# "No dangerous break-glass override flags enabled." with one of them on - measured, not
 # inferred. Both were confirmed by `safeParse` against the installed 2026.8.1 dist AND
 # absent from 2026.7.1-2, each with a bogus-key control at the same parent (`gateway.tls`
 # is a passthrough and accepts junk, so an ACCEPTED probe alone proves nothing).
 #
 # Vendor's own descriptions:
-#   cron.webhookSsrfPolicy.dangerouslyAllowPrivateNetwork — "Allows automation webhooks
+#   cron.webhookSsrfPolicy.dangerouslyAllowPrivateNetwork - "Allows automation webhooks
 #     to private and internal network targets."
-#   tools.web.fetch.ssrfPolicy.dangerouslyAllowPrivateNetwork — "Allows web_fetch access
+#   tools.web.fetch.ssrfPolicy.dangerouslyAllowPrivateNetwork - "Allows web_fetch access
 #     to private and internal network targets. Keep disabled unless model-selected URLs
 #     are trusted in this deployment."  <- model-SELECTED, i.e. an injected prompt turns
 #     this into an SSRF primitive against the host's private network.
@@ -366,7 +366,7 @@ _DANGER_FIXED_2026_8_1 = [
 # (openclaw@2026.9.3, legacy-*.mjs): a `defineLegacyConfigMigration` entry named
 # "dangerouslyDisableDeviceAuth" whose message reads "gateway.controlUi.
 # dangerouslyDisableDeviceAuth is retired and ignored. Control UI browsers pair through
-# the normal device flow; run \"openclaw doctor --fix\" to remove the legacy key." —
+# the normal device flow; run \"openclaw doctor --fix\" to remove the legacy key." -
 # re-confirmed present, unchanged, on the installed 2026.9.4 dist. Setting the key no
 # longer disables Control-UI device-identity auth or does anything else; the old
 # unconditional FAIL/HIGH row named a live security exposure that does not exist on
@@ -376,13 +376,13 @@ _DANGER_FIXED_2026_8_1 = [
 # `installed_dist_version` decides outright (it is the build that reads or ignores the
 # key right now); `meta.lastTouchedVersion` is consulted only once it already lands at
 # or after the retirement release, because a stale stamp proves nothing about what is
-# installed now. Not folded into `_openclaw_generation`'s modern/legacy split — that
+# installed now. Not folded into `_openclaw_generation`'s modern/legacy split - that
 # threshold is pinned to 2026.8.1 and is compared at two dozen other call sites; a wrong
 # answer for THIS key must not move any of them.
 #
 # Caveat, recorded rather than hidden: 2026.9.3 is the first release this was actually
 # grounded against, not independently proven to be the release that introduced the
-# retirement — 2026.9.1/9.2 were not checked. If the real cutover lands earlier, this
+# retirement - 2026.9.1/9.2 were not checked. If the real cutover lands earlier, this
 # constant is too conservative in the safe direction (it still treats those builds as
 # "honoured" and keeps the original FAIL), the same direction B-783 chose when it had
 # the identical gap.
@@ -392,7 +392,7 @@ _DEVICE_AUTH_KNOB_RETIRED_MIN = (2026, 9, 3)
 def _device_auth_knob(ctx) -> str:
     """Does the reader's OpenClaw still HONOUR gateway.controlUi.dangerouslyDisableDeviceAuth?
 
-    ``"retired"`` / ``"honoured"`` / ``"unknown"`` — three answers for the same reason
+    ``"retired"`` / ``"honoured"`` / ``"unknown"`` - three answers for the same reason
     ``_workshop_symlink_knob`` has three: "we could not see the build" is not "the build
     still reads it", and collapsing them manufactures a claim. Only ``"retired"`` may
     silence the FAIL below; the other two both preserve today's behavior exactly.
@@ -463,7 +463,7 @@ def _device_auth_knob(ctx) -> str:
 def _is_owner_wildcard_allow_from(value) -> bool:
     """True when *value* (``commands.ownerAllowFrom``) contains the literal ``"*"`` entry.
 
-    PURE PREDICATE — it says what is in the list, not what OpenClaw does with it, because
+    PURE PREDICATE - it says what is in the list, not what OpenClaw does with it, because
     that differs by build (B-705, see the grounding block above): on 2026.7.x the entry
     sets `ownerAllowAll` and every sender becomes an owner; on 2026.8.1
     `stripWildcardAllowFrom` removes it before anything reads it, leaving the same state
@@ -481,7 +481,7 @@ def _is_world_open_cidr_entry(entry) -> bool:
     """True when *entry* is a literal 'match any address' CIDR (0.0.0.0/0, ::/0) or the
     bare "*" sentinel -- not merely broad, a genuine zero-constraint wildcard. A scoped
     CIDR of any other prefix length (including a wide public range) is NOT flagged
-    here — only the unambiguous, unconstrained case."""
+    here - only the unambiguous, unconstrained case."""
     if not isinstance(entry, str):
         return False
     s = entry.strip()
@@ -520,11 +520,11 @@ _MISSING_LEG_ACTIVATORS = {
         "or tools.web.fetch.enabled"
     ),
     "sensitive data": (
-        "a private-data tool named in tools.allow (read/db/sql/vault/credential — a file "
+        "a private-data tool named in tools.allow (read/db/sql/vault/credential \u2014 a file "
         "`read` counts only while it is unconfined: tools.fs.workspaceOnly is not true "
-        "and the agent is not fully sandboxed), ungated exec — "
+        "and the agent is not fully sandboxed), ungated exec \u2014 "
         "tools.exec.mode/security/ask absent, or set to a non-gating value (e.g. "
-        "mode='full') — or a plaintext credential in the credentials/ store"
+        "mode='full') \u2014 or a plaintext credential in the credentials/ store"
     ),
     "outbound actions": (
         "an outbound tool (tools.allow: send/webhook/http_post/fs_write/deploy), "
@@ -541,8 +541,8 @@ def _c015_is_codex_plugin_doc_cache(parts: tuple) -> bool:
     documentation into this cache (see ``codex-home/sessions`` in _lifecycle.py for
     the sibling ``agent/codex-home`` shape). Those `.md` files routinely contain
     placeholder examples like ``API_KEY=abc123`` or ``password:"..."`` that are not
-    secrets — they were shipped by the plugin author, not created by the user or
-    agent — so C015's generic keyword pattern false-positives on them (B-124).
+    secrets - they were shipped by the plugin author, not created by the user or
+    agent - so C015's generic keyword pattern false-positives on them (B-124).
     """
     marker = ("agent", "codex-home", ".tmp", "plugins", "plugins")
     n = len(marker)
@@ -550,23 +550,23 @@ def _c015_is_codex_plugin_doc_cache(parts: tuple) -> bool:
 
 
 # B-244 round 2: a false WARN on the user's REAL ~/.openclaw. ``agent/plugins/<id>/
-# catalog.json`` is OpenClaw's own machine-generated plugin model-catalog cache — not
-# user-authored — grounded in the dist (not the recon):
+# catalog.json`` is OpenClaw's own machine-generated plugin model-catalog cache - not
+# user-authored - grounded in the dist (not the recon):
 #   dist/plugin-model-catalog-*.js  isPluginModelCatalogRelativePath(): the canonical
 #     path shape is exactly ``plugins/<pluginId>/catalog.json`` relative to the agent
 #     dir; isGeneratedPluginModelCatalog(): the written object's top-level
 #     ``generatedBy`` is the literal string ``"openclaw-plugin-model-catalog-v1"``.
 #   dist/models-config-*.js  buildPluginCatalogWrites(): writes exactly
-#     ``{generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY, providers}`` to that path —
+#     ``{generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY, providers}`` to that path -
 #     no other code path writes this file.
 #   dist/provider-catalog-*.js: the bundled nvidia provider's catalog entry ships
-#     ``apiKey: "NVIDIA_API_KEY"`` verbatim — the env-var NAME, not a secret value —
+#     ``apiKey: "NVIDIA_API_KEY"`` verbatim - the env-var NAME, not a secret value -
 #     confirmed at runtime by dist/extensions/nvidia/index.js reading
 #     ``ctx.env.NVIDIA_API_KEY``.
 # So a plugin-catalog ``apiKey`` field commonly holds a bare env-var name, which is
 # not a C-226 SecretRef indirection in the narrow ``$NAME``/``${NAME}``/
 # ``secretref-env:`` sense _is_secret_reference recognises, so C015's generic
-# keyword pattern false-positived on it — same B-124 class as the codex plugin
+# keyword pattern false-positived on it - same B-124 class as the codex plugin
 # doc-cache exclusion above, at a different path.
 #
 # Deliberately requires BOTH the canonical path shape AND the ``generatedBy``
@@ -596,7 +596,7 @@ def _c015_is_generated_plugin_model_catalog(parts: tuple, text: str) -> bool:
 
 # ---------------------------------------------------------------- Block B
 # B-244: the codex-doc-cache / skill-dir exclusions used to run AFTER walk_dir_safely
-# already spent the _C015_MAX_SCAN_FILES budget on every raw file it saw — so a large
+# already spent the _C015_MAX_SCAN_FILES budget on every raw file it saw - so a large
 # excluded subtree (e.g. a vendored codex plugin doc cache) could exhaust the whole
 # budget before the walk ever reached real candidate directories that sort later
 # alphabetically (workspace/, credentials/, identity/, ...), and the resulting
@@ -605,15 +605,15 @@ def _c015_is_generated_plugin_model_catalog(parts: tuple, text: str) -> bool:
 # budget, and `capped` is threaded through so the caller can disclose a genuine
 # truncation instead of reading a partial scan as a complete one.
 #
-# B-915: `unreadable_dirs` is opted into for the same reason — a nested directory that
+# B-915: `unreadable_dirs` is opted into for the same reason - a nested directory that
 # is listable but unsearchable (`chmod 0644`: readable, no `x`) used to make
 # `walk_dir_safely`'s internal `os.walk()` raise straight out of this function
 # (`Path.is_symlink()` needs `x` on the parent to stat the entry, and `_note_unlistable`
-# re-raises when the caller did not opt in — see safeio.py). Left uncaught, that crash
+# re-raises when the caller did not opt in - see safeio.py). Left uncaught, that crash
 # was only ever caught by `run_all`'s generic `except Exception`, which reports the WHOLE
 # check as an ENGINE-SIDE UNKNOWN (`engine_degraded=True`) and caps the entire audit at
 # `DEGRADED_CHECK_CAP` (49/F) over one directory. Opting in turns that into a scoped,
-# disclosed gap instead — see `check_secrets_at_rest_home`'s `gap_note` for why it is
+# disclosed gap instead - see `check_secrets_at_rest_home`'s `gap_note` for why it is
 # graded the same as the walk-cap branch above (UNKNOWN, never engine_degraded).
 def _c015_candidate_files(
     ctx: Context,
@@ -622,8 +622,8 @@ def _c015_candidate_files(
     unreadable_dirs: list | None = None,
 ) -> list[Path]:
     """*unreadable*, when given, collects the SKILL_DIRS skip-root(s) whose existence
-    could not be confirmed (B-913: a `chmod 000` ancestor — e.g. the workspace dir or
-    `.agents` — raises `PermissionError` on `.exists()`, which used to escape
+    could not be confirmed (B-913: a `chmod 000` ancestor - e.g. the workspace dir or
+    `.agents` - raises `PermissionError` on `.exists()`, which used to escape
     uncaught). Computed ONCE up front (skip_roots is a handful of fixed candidates)
     rather than per candidate file, both for cost and so a single unreadable root is
     recorded once, not once per file examined.
@@ -689,11 +689,11 @@ def _distance_note(active: list, *, ingress_resolved_by_default: bool = False) -
     any other count, so it is a no-op for already-3/3 (FAIL) and for <2/3.
 
     B-499: *ingress_resolved_by_default* says the untrusted-input leg is not cleanly
-    missing — no channel DECLARED an ingress policy, but OpenClaw resolves the absent
+    missing - no channel DECLARED an ingress policy, but OpenClaw resolves the absent
     ``dmPolicy`` to "pairing", so at runtime that leg may already be live. Without this,
     the two sentences contradicted each other inside one paragraph: this note told the
     reader to "avoid enabling a non-owner channel" immediately before
-    ``_resolved_default_note`` reported that a channel is already running on "pairing" —
+    ``_resolved_default_note`` reported that a channel is already running on "pairing" -
     advice to avoid a state the same paragraph says is in force. The imperative is
     dropped in that case and the consequence kept, because the consequence is still true
     and is the part the reader needs."""
@@ -707,13 +707,13 @@ def _distance_note(active: list, *, ingress_resolved_by_default: bool = False) -
     if ingress_resolved_by_default and missing == "untrusted input":
         return (
             lead + " No channel declares an ingress policy, so this leg is undeclared"
-            " rather than closed — see the resolved-default note below. If it is live at"
+            " rather than closed \u2014 see the resolved-default note below. If it is live at"
             " runtime this is already 3/3: one injected prompt is enough to exfiltrate"
             " everything."
         )
     return (
         lead + f" Avoid enabling"
-        f" {_MISSING_LEG_ACTIVATORS[missing]}, which would complete 3/3 — if a third leg"
+        f" {_MISSING_LEG_ACTIVATORS[missing]}, which would complete 3/3 \u2014 if a third leg"
         f" activates it becomes immediately exploitable: one injected prompt is enough"
         f" to exfiltrate everything."
     )
@@ -721,8 +721,8 @@ def _distance_note(active: list, *, ingress_resolved_by_default: bool = False) -
 
 def _mcp_leg_note(ctx: Context) -> str:
     """B-229 (+B-247): when an MCP server contributes to a trifecta leg, name it in the
-    detail text (evidence stays the fixed 3 leg-name keys — see _trifecta_legs/_LEG_KEYS
-    — so the MCP server names live here instead)."""
+    detail text (evidence stays the fixed 3 leg-name keys - see _trifecta_legs/_LEG_KEYS
+    - so the MCP server names live here instead)."""
     mcp_legs = _mcp_leg_contributions(ctx.config)
     reasons = (
         mcp_legs["untrusted input"] + mcp_legs["sensitive data"] + mcp_legs["outbound actions"]
@@ -735,20 +735,20 @@ def _mcp_leg_note(ctx: Context) -> str:
 def _leg_attribution_note(active: list, leg_sources: dict) -> str:
     """B-493: name the SPECIFIC config entries behind each active leg. `evidence` stays
     the fixed leg-name keys (see `_trifecta_legs`/`_LEG_KEYS`, and `_mcp_leg_note`'s own
-    note above for why — `report.py`'s trifecta-ratio card reads `len(finding.evidence)`
+    note above for why - `report.py`'s trifecta-ratio card reads `len(finding.evidence)`
     as the leg COUNT, and a dozen tests pin its exact leg-name membership, so it cannot
     become a per-entry list without corrupting both), so the per-entry attribution lives
     here instead, same idiom as `_mcp_leg_note`/`_resolved_default_note`.
 
-    A leg can be OVER-DETERMINED — several independent suppliers, each sufficient alone
-    — so every contributing entry is named, not just the first: removing only one from
+    A leg can be OVER-DETERMINED - several independent suppliers, each sufficient alone
+    - so every contributing entry is named, not just the first: removing only one from
     an over-determined leg leaves it active, and a reader needs to know that up front.
     """
     parts = []
     for leg in active:
         sources = leg_sources.get(leg) or []
         if sources:
-            parts.append(f"{leg} — {'; '.join(sources)}")
+            parts.append(f"{leg} \u2014 {'; '.join(sources)}")
     if not parts:
         return ""
     return " Sources: " + ". ".join(parts) + "."
@@ -756,10 +756,10 @@ def _leg_attribution_note(active: list, leg_sources: dict) -> str:
 
 def _resolved_default_fix(names: list) -> str:
     """B-619: the remediation for ``_resolved_default_note`` must recommend a key the
-    TARGET channel's own schema actually accepts — googlechat and matrix are ``.strict()``
+    TARGET channel's own schema actually accepts - googlechat and matrix are ``.strict()``
     with no flat ``dmPolicy`` field at all (see ``_DM_POLICY_NESTED_ONLY_CHANNELS``'s
     grounding comment in ``_shared.py``), so recommending flat `dmPolicy: "disabled"` to
-    them is advice the config loader itself rejects — the exact "advice OpenClaw rejects"
+    them is advice the config loader itself rejects - the exact "advice OpenClaw rejects"
     defect ``test_the_remediation_never_recommends_a_value_the_schema_rejects`` (B-499)
     already pins for the *value* axis (``"owner"``), now applied to the *path* axis.
     """
@@ -767,11 +767,11 @@ def _resolved_default_fix(names: list) -> str:
     # half of that is verified: matrix genuinely declares no flat `dmPolicy` (measured
     # against the vendor's generated schema), but `MatrixConfigSchema` is NOT `.strict()`,
     # and its wrapper's strictness was not traced. Absent `.strict()`, zod STRIPS an
-    # unknown key rather than rejecting it — so the user would get silence, not an error.
+    # unknown key rather than rejecting it - so the user would get silence, not an error.
     #
     # "does not close anything" is true under BOTH behaviours, and it is also the safer
     # message: told they would get an error, a user who sees none concludes it worked.
-    # Do not restore the stronger claim without tracing buildChannelConfigSchema — this
+    # Do not restore the stronger claim without tracing buildChannelConfigSchema - this
     # whole check is being repaired from exactly one un-traced `.strict()` claim.
     nested_only = sorted(n for n in names if n in _DM_POLICY_NESTED_ONLY_CHANNELS)
     other = sorted(n for n in names if n not in _DM_POLICY_NESTED_ONLY_CHANNELS)
@@ -783,14 +783,14 @@ def _resolved_default_fix(names: list) -> str:
     if nested_only:
         parts.append(
             f'On {", ".join(nested_only)}, set the nested `dm.policy: "disabled"`'
-            " instead — a flat `dmPolicy` is not part of that schema, so writing it"
+            " instead \u2014 a flat `dmPolicy` is not part of that schema, so writing it"
             " there does not close anything."
         )
     return (
-        " ".join(parts) + ' Leaving it unset is not a restriction — OpenClaw resolves'
+        " ".join(parts) + ' Leaving it unset is not a restriction \u2014 OpenClaw resolves'
         ' it to "pairing". Do not invent a value: `DmPolicySchema` accepts only open /'
         " pairing / allowlist / disabled (Feishu and Lark's own schema defines only the"
-        ' first three — but `dmPolicy: "disabled"` is still honored by their runtime and'
+        ' first three \u2014 but `dmPolicy: "disabled"` is still honored by their runtime and'
         " blocks DMs, so it is the correct value to write there too), and the other"
         " three all admit a non-owner sender."
     )
@@ -801,7 +801,7 @@ def _resolved_default_note(ctx: Context) -> str:
     resolved default is NOT counted as a leg.
 
     Without this the reader cannot tell a config that restricts ingress from one that
-    simply never wrote the field — the two look identical in A1's output, while OpenClaw
+    simply never wrote the field - the two look identical in A1's output, while OpenClaw
     runs the second one on "pairing". Disclosing the reading is what the leg count
     deliberately does not do; see _resolved_default_input_channels."""
     names = _resolved_default_input_channels(ctx.config)
@@ -809,7 +809,7 @@ def _resolved_default_note(ctx: Context) -> str:
         return ""
     return (
         f" Resolved default: {', '.join(sorted(names))} set no dmPolicy, so OpenClaw"
-        ' runs them on its default "pairing" — a sender it has approved once can send'
+        ' runs them on its default "pairing" \u2014 a sender it has approved once can send'
         " again. Not counted as a leg above, because the config never asked for it."
     )
 
@@ -819,23 +819,23 @@ def _substituted_dm_policy_note(ctx: Context) -> str:
     recognizes for them, AND the value it actually runs on instead.
 
     Without this the reader cannot tell a config that wrote an unrecognized dmPolicy
-    from one that restricted ingress correctly — both looked identical (PASS) in A1's
+    from one that restricted ingress correctly - both looked identical (PASS) in A1's
     output, while OpenClaw silently substitutes "pairing" for the two channels this can
     currently be grounded on (see ``_norm_dm_policy``). Naming only the string the user
     wrote, without naming what is in effect instead, would leave them knowing this tool
-    was confused without knowing they are exposed — so both are always named together.
+    was confused without knowing they are exposed - so both are always named together.
     """
     subs = _substituted_dm_policy_channels(ctx.config)
     if not subs:
         return ""
     parts = [
-        f"{name!r} wrote dmPolicy={written!r}, which {name} does not accept — OpenClaw"
+        f"{name!r} wrote dmPolicy={written!r}, which {name} does not accept \u2014 OpenClaw"
         f' runs it on "{resolved}" instead'
         for name, (written, resolved) in sorted(subs.items())
     ]
     return (
         " Unmodeled dmPolicy: " + "; ".join(parts) + ". Not counted as a leg above,"
-        " because a typo is not a deliberate choice — but the effective posture is not"
+        " because a typo is not a deliberate choice \u2014 but the effective posture is not"
         " the one written; a sender it has approved once can send again."
     )
 
@@ -844,7 +844,7 @@ def _meaningful_tool_surface(ctx: Context) -> bool:
     """Whether the config exposes a RECOGNIZED capability surface (or the user has
     attested the agent's tools), so the A1 legs can be trusted instead of hedged with
     the thin-surface WARN. A no-op tools.allow entry that matches no capability hint
-    does NOT count — that was the old PASS-wash (add 'noop' → WARN flips to PASS).
+    does NOT count - that was the old PASS-wash (add 'noop' -> WARN flips to PASS).
 
     Note: this is single-agent A1's notion of 'tool config is visible'; cross-agent
     aggregation deliberately stays out (B45/B46/B47 own the multi-agent reassembly)."""
@@ -883,14 +883,14 @@ def _model_names(cfg: dict) -> list[str]:
 
 # F-040: OpenClaw DOES resolve a default agent at runtime (defaultId ??
 # sessionDefaults.defaultAgentId ?? "main") and DOES expose per-agent tool config
-# (agents.list[].tools.{alsoAllow, profile, byProvider, toolsBySender}) — this check
+# (agents.list[].tools.{alsoAllow, profile, byProvider, toolsBySender}) - this check
 # consults neither. A1's legs are computed from the GLOBAL config surface, so a
 # multi-agent install's trifecta view stays an aggregate, not any single agent's real
 # exposure; reading a specific agent's effective grants here is a deferred enhancement
 # (check_agent_separation already offers an attested per-agent alternative today).
 # Reframed from an interactive guide.py question (F-039) to this static note: a
 # blocking input() prompt would hang under headless CLI invocation (the tool's primary
-# usage — see SKILL.md), so this stays a caveat, not an attempt to resolve one agent.
+# usage - see SKILL.md), so this stays a caveat, not an attempt to resolve one agent.
 def _persistence_note(ctx: Context) -> str:
     """F-169: breaking a leg does not remove what is already in the identity files.
 
@@ -898,12 +898,12 @@ def _persistence_note(ctx: Context) -> str:
     already written into one of them keeps loading no matter what the config says
     afterwards. Palo Alto (Mishra & Morgan, 2026-01-29) call persistent memory an
     accelerant on the trifecta; Zenity (Cohen & Donato, 2026-02-04) demonstrated the whole
-    chain against OpenClaw — indirect injection, then a scheduled task rewriting SOUL.md
-    every two minutes — under the framing "no software vulnerability is required".
+    chain against OpenClaw - indirect injection, then a scheduled task rewriting SOUL.md
+    every two minutes - under the framing "no software vulnerability is required".
 
     The user-visible gap this closes: someone who breaks a leg watches A1 flip to PASS and
     is told nothing about the directive still sitting in SOUL.md. Config hardening cannot
-    clear a content finding — measured at v3.60.0, a content_injection home with every
+    clear a content finding - measured at v3.60.0, a content_injection home with every
     hardening lever applied at once (sandbox all, workspaceAccess ro, fs.workspaceOnly,
     exec gated, trifecta broken so A1 PASSes) still graded F/49 with B6 FAIL.
 
@@ -918,9 +918,9 @@ def _persistence_note(ctx: Context) -> str:
     `_enabled_tools` alone: measured on this machine, the real config resolves to
     ``['exec']`` with no write tool in `_B55_FS_WRITE_TOOLS`, so keying on the write set
     alone would silence the note on precisely the setup it was written for. An exec
-    capability IS a write path — a shell writes files.
+    capability IS a write path - a shell writes files.
     """
-    # ctx.bootstrap is keyed by PATH ("workspace/AGENTS.md"), not by bare filename — a
+    # ctx.bootstrap is keyed by PATH ("workspace/AGENTS.md"), not by bare filename - a
     # membership test against BOOTSTRAP_FILES matches nothing at all. Measured: the first
     # version of this note never fired on any home, including the real one.
     # getattr, not attribute access: a caller can hand this a Context-shaped stub that
@@ -939,18 +939,18 @@ def _persistence_note(ctx: Context) -> str:
     # content ring (B6/B161)" and the first version printed those ids verbatim into
     # owner-facing output, which tests/test_brand_consistency.py rejects: a reader is
     # owed what to look at, not our internal numbering.
-    named = ", ".join(present[:3]) + (", …" if len(present) > 3 else "")
+    named = ", ".join(present[:3]) + (", \u2026" if len(present) > 3 else "")
     return (
         f" Note: {len(present)} identity/bootstrap file(s) ({named}) load into context"
         " every turn, and this config grants a write path to them. Breaking a trifecta leg"
-        " changes what the agent can do NEXT — it does not remove a directive already"
+        " changes what the agent can do NEXT \u2014 it does not remove a directive already"
         " written into those files, which keeps loading either way. Read what those files"
         " actually say, not just the config."
     )
 
 
 def _multi_agent_note(ctx: Context) -> str:
-    # B-699: both roster shapes, and the note names the one this config actually uses —
+    # B-699: both roster shapes, and the note names the one this config actually uses -
     # telling a 2026.8.1 user their agents are "under agents.list" names a key their file
     # does not contain.
     roster = agent_roster(ctx.config)
@@ -959,7 +959,7 @@ def _multi_agent_note(ctx: Context) -> str:
         return ""
     where = "agents.entries" if roster[0].path.startswith("agents.entries.") else "agents.list"
     return (
-        f" Note: config declares {n} agents under {where} — this trifecta view is"
+        f" Note: config declares {n} agents under {where} \u2014 this trifecta view is"
         f" the aggregated global surface, not any single agent's effective grants. This"
         f" check does not resolve or read a specific agent's own tool config, so if you"
         f" run one named agent, its real exposure may differ from this global reading."
@@ -990,7 +990,7 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         if not isinstance(sb, dict):
             continue
         # `id` is the record key on the 2026.8.1 shape, so it names the agent even when
-        # the entry carries no `name` — better evidence than "<unnamed>" for every agent.
+        # the entry carries no `name` - better evidence than "<unnamed>" for every agent.
         name = a.get("name") or _agent.id or "<unnamed>"
         if sb.get("mode") == "off":
             out.append(f"agent '{name}': sandbox.mode=off (exec runs on the host)")
@@ -1065,7 +1065,7 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         if binds is None and _scope != "shared":
             out.append(
                 f"agent '{name}': sandbox.docker.binds is present but not a recognizable "
-                "shape (expected a bind-spec string or a list of them) — cannot rule out "
+                "shape (expected a bind-spec string or a list of them) \u2014 cannot rule out "
                 "a host-path bind"
             )
         elif binds and _scope != "shared":
@@ -1073,7 +1073,7 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
             if _bind_mentions_docker_sock(binds):
                 out.append(
                     f"agent '{name}': sandbox.docker.binds mounts docker.sock "
-                    "(grants host control to the sandbox — container escape)"
+                    "(grants host control to the sandbox \u2014 container escape)"
                 )
         if sb.get("workspaceAccess") == "rw":
             out.append(
@@ -1083,26 +1083,26 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
 
 
 # B-233 round 3 (C-135): world-open / near-catch-all PUBLIC CIDRs (e.g. 0.0.0.0/0,
-# ::/0, 0.0.0.0/1) are NOT a genuine trust boundary — every source IP matches, so the
+# ::/0, 0.0.0.0/1) are NOT a genuine trust boundary - every source IP matches, so the
 # trusted-proxy identity header stays attacker-spoofable by anyone. Grounded against
 # dist isTrustedProxyAddress -> isIpInCidr -> ipaddr.parseCIDR (prefix-len 0 matches
 # all). A single host always constrains, and so does any PRIVATE range regardless of
-# prefix length — a private range (RFC1918 IPv4, or an IPv6 ULA like fc00::/7 / RFC4193)
+# prefix length - a private range (RFC1918 IPv4, or an IPv6 ULA like fc00::/7 / RFC4193)
 # is not globally routable, so an external attacker cannot source a connection from it,
 # whatever its prefix. Only reject over-broad PUBLIC ranges: IPv4 prefixes shorter than
-# /8 and IPv6 prefixes shorter than /16 — short enough that a genuine corp-sized public
+# /8 and IPv6 prefixes shorter than /16 - short enough that a genuine corp-sized public
 # allocation (a /24, a /32 LB IP) still passes, while anything spanning (or nearly
 # spanning) the public internet does not.
 _MIN_IPV4_PREFIXLEN = 8
 _MIN_IPV6_PREFIXLEN = 16
 
-# Do NOT use ``ipaddress.*Network.is_private`` here — its meaning changed across the
+# Do NOT use ``ipaddress.*Network.is_private`` here - its meaning changed across the
 # Python versions we support (3.9+). On older interpreters it was computed as
 # "network address is private AND broadcast address is private", which makes
 # ``0.0.0.0/0`` report is_private=True (0.0.0.0 falls in 0.0.0.0/8 and
 # 255.255.255.255 is itself special-cased), and likewise ``0.0.0.0/1`` (broadcast
 # 127.255.255.255 is loopback). Trusting it would accept a world-open proxy list as a
-# genuine constraint on those interpreters — reinstating the exact spoofable-gateway
+# genuine constraint on those interpreters - reinstating the exact spoofable-gateway
 # lying-PASS this check exists to prevent. Test the containment explicitly instead, so
 # the verdict is identical on every supported Python.
 _PRIVATE_NETS = (
@@ -1137,7 +1137,7 @@ def _is_constraining_proxy_entry(entry) -> bool:
     try:
         net = ipaddress.ip_network(s, strict=False)
     except ValueError:
-        # Not a parseable IP/CIDR (e.g. a hostname) — a specific, non-wildcard
+        # Not a parseable IP/CIDR (e.g. a hostname) - a specific, non-wildcard
         # identifier is still a genuine constraint.
         return True
     if net.num_addresses == 1 or _net_is_private(net):
@@ -1151,7 +1151,7 @@ def _is_constraining_proxy_entry(entry) -> bool:
 
 def _trusted_proxies_ok(value) -> bool:
     """True when *value* (``gateway.trustedProxies``) contains at least one
-    genuinely-constraining entry once blank/wildcard/over-broad entries are ignored —
+    genuinely-constraining entry once blank/wildcard/over-broad entries are ignored -
     e.g. ``["10.0.0.5", ""]`` is OK (OpenClaw ignores the blank candidate and still
     enforces 10.0.0.5); ``[]``, ``["*"]``, and ``["0.0.0.0/0"]`` are not."""
     if isinstance(value, str):
@@ -1162,18 +1162,18 @@ def _trusted_proxies_ok(value) -> bool:
 
 
 def check_control_plane_mutation(ctx: Context) -> Finding:
-    """B32 — Control-plane mutation reachability via gateway.
+    """B32 - Control-plane mutation reachability via gateway.
 
-    FAIL   — gateway.tools.allow re-enables a control-plane tool (plugin lifecycle,
+    FAIL   - gateway.tools.allow re-enables a control-plane tool (plugin lifecycle,
              config mutation, cron/automations scheduling, or cross-session spawn/send
              exposed over HTTP).
-    WARN   — gateway is exposed (non-loopback bind or auth.mode=="none") AND
+    WARN   - gateway is exposed (non-loopback bind or auth.mode=="none") AND
              control-plane tools are not explicitly denied in gateway.tools.deny.
-    PASS   — control-plane tools are denied / not re-enabled.
-    UNKNOWN — no gateway config present.
+    PASS   - control-plane tools are denied / not re-enabled.
+    UNKNOWN - no gateway config present.
               F-140: sets ``not_applicable`` only when the config locus was read
               COMPLETELY and ``gateway`` is still not a dict. The HTTP gateway is the
-              ONLY reachability path this check models — with no gateway there is no
+              ONLY reachability path this check models - with no gateway there is no
               HTTP surface over which a control-plane tool could be reached, so absence
               here is genuine inapplicability rather than an unassessed risk. The whole
               read is ``ctx.config``, so config-locus completeness is the entire proof
@@ -1181,9 +1181,9 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
               to ordinary UNKNOWN and the check keeps its blind-spot posture.
 
     B-835: allow/deny entries are matched by NORMALISED identity (trim + lowercase +
-    the vendor's own alias fold — ``toolgrant._normalize_tool_name``), the same way
+    the vendor's own alias fold - ``toolgrant._normalize_tool_name``), the same way
     OpenClaw's own ``normalizeToolPolicyName`` resolves ``gateway.tools.allow``/
-    ``deny`` before comparing — so ``"Automations"``, ``" automations "`` and the
+    ``deny`` before comparing - so ``"Automations"``, ``" automations "`` and the
     legacy alias ``"cron"`` are all recognised as the one canonical control-plane
     tool. The FAIL message still shows each entry in the SPELLING the operator wrote
     (not the canonical form), so a config that names the legacy alias is not reported
@@ -1195,8 +1195,8 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
         return _finding(
             "B32",
             UNKNOWN,
-            "No gateway config — control-plane mutation reachability not applicable.",
-            "—",
+            "No gateway config \u2014 control-plane mutation reachability not applicable.",
+            "\u2014",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
 
@@ -1213,7 +1213,7 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
 
     # FAIL: a control-plane tool is explicitly re-enabled in gateway.tools.allow.
     # Matched by normalised (canonical) identity, but reported back in the spelling
-    # the operator actually wrote (raw, merely trimmed) — see the docstring's B-835
+    # the operator actually wrote (raw, merely trimmed) - see the docstring's B-835
     # note. Deduplicated + sorted so two spellings of the same tool (e.g. "cron" and
     # "Automations" both present) do not repeat the same canonical finding twice.
     re_enabled = sorted(
@@ -1229,7 +1229,7 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
             "B32",
             FAIL,
             "gateway.tools.allow re-enables control-plane tool(s) over the HTTP "
-            "gateway — config mutation / cron / cross-session send is reachable via "
+            "gateway \u2014 config mutation / cron / cross-session send is reachable via "
             f"HTTP: {', '.join(re_enabled)}",
             "Remove control-plane tools ("
             + ", ".join(sorted(_B32_CONTROL_PLANE_TOOLS))
@@ -1249,7 +1249,7 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
     if is_exposed and cp_not_denied:
         warn_detail = (
             f"Gateway is network-exposed (bind={bind or '?'}, auth.mode={auth_mode!r}) "
-            "and control-plane tools are not explicitly in gateway.tools.deny — "
+            "and control-plane tools are not explicitly in gateway.tools.deny \u2014 "
             "an authenticated caller could reach mutation endpoints"
         )
         return _finding(
@@ -1279,17 +1279,17 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
 
 
 def check_controlui_origins(ctx: Context) -> Finding:
-    """B56 (NC-4) — Control-UI cross-origin allow-all.
+    """B56 (NC-4) - Control-UI cross-origin allow-all.
 
     Grounded (docs.openclaw.ai/gateway/security): for non-loopback Control UI
     deployments `gateway.controlUi.allowedOrigins` is required by default, and
     `["*"]` is "an explicit allow-all browser-origin policy, not a hardened default."
     A wildcard lets any website drive the Control UI (CSRF / origin bypass).
 
-    UNKNOWN — allowedOrigins not set: the default is restrictive, and whether the
+    UNKNOWN - allowedOrigins not set: the default is restrictive, and whether the
               Control UI is exposed beyond loopback is not determinable from config.
-    FAIL    — the list contains "*".
-    PASS    — an explicit non-wildcard origin allowlist.
+    FAIL    - the list contains "*".
+    PASS    - an explicit non-wildcard origin allowlist.
     """
     cfg = ctx.config
     origins = dig(cfg, "gateway.controlUi.allowedOrigins")
@@ -1297,7 +1297,7 @@ def check_controlui_origins(ctx: Context) -> Finding:
         return _finding(
             "B56",
             UNKNOWN,
-            "gateway.controlUi.allowedOrigins is not set — its default is restrictive "
+            "gateway.controlUi.allowedOrigins is not set \u2014 its default is restrictive "
             "(cross-origin denied), and whether the Control UI is exposed beyond loopback "
             "cannot be determined from config alone.",
             "If you expose the Control UI beyond loopback, set "
@@ -1310,7 +1310,7 @@ def check_controlui_origins(ctx: Context) -> Finding:
         return _finding(
             "B56",
             FAIL,
-            'gateway.controlUi.allowedOrigins contains "*" — an allow-all browser-origin '
+            'gateway.controlUi.allowedOrigins contains "*" \u2014 an allow-all browser-origin '
             "policy, so any website can drive the Control UI (CSRF / origin bypass).",
             'Replace the "*" wildcard in gateway.controlUi.allowedOrigins with an '
             "explicit list of trusted origins.",
@@ -1326,7 +1326,7 @@ def check_controlui_origins(ctx: Context) -> Finding:
 
 # ---------------------------------------------------------------------------
 # B-290 (ENV-4): the gateway's auth credential can come from the ENVIRONMENT, not the
-# config — and when it does, it supplies the auth MODE as well.
+# config - and when it does, it supplies the auth MODE as well.
 #
 # resolveGatewayAuth (auth-resolve-NyPBrh8F.js:19-46) resolves the credential first, then
 # derives the mode:
@@ -1339,7 +1339,7 @@ def check_controlui_origins(ctx: Context) -> Finding:
 #
 # The consequence is decisive for B2: server-runtime-config-r5ejxORO.js:78 refuses a
 # non-loopback bind unless `hasSharedSecret`, and that shared secret may be entirely
-# env-supplied — so a host with `gateway.bind=0.0.0.0` and NO `gateway.auth` block is
+# env-supplied - so a host with `gateway.bind=0.0.0.0` and NO `gateway.auth` block is
 # genuinely authenticated, and B2's FAIL on it was a false positive on a correctly
 # secured host.
 #
@@ -1347,10 +1347,10 @@ def check_controlui_origins(ctx: Context) -> Finding:
 #
 # 1. It is ASYMMETRIC. Presence of an env credential is a POSITIVE signal only; ABSENCE
 #    is never read as "no auth". The auditing process's environment is not the gateway
-#    service's, so a check that FAILed on env absence would false-positive massively —
+#    service's, so a check that FAILed on env absence would false-positive massively -
 #    and B2's existing FAIL when nothing is observable is the CORRECT, deliberate
 #    false-negative boundary (Golden Rule #5).
-# 2. Evidence must be PERSISTENT and on disk — a systemd unit's Environment=/
+# 2. Evidence must be PERSISTENT and on disk - a systemd unit's Environment=/
 #    EnvironmentFile=, or a global runtime dotenv file. `persistent_env_evidence`
 #    explicitly does NOT fall back to os.environ: a token exported in the operator's
 #    terminal says nothing about a service started months ago by systemd, and letting it
@@ -1361,21 +1361,21 @@ def check_controlui_origins(ctx: Context) -> Finding:
 #    (auth-resolve-NyPBrh8F.js:23-24), so a configured token beats the env one. The gap
 #    is only the config-LESS path, which is exactly what the softening is scoped to.
 #
-# WHY THIS CANNOT PRODUCE A LYING PASS — the argument that justifies softening a CRITICAL
+# WHY THIS CANNOT PRODUCE A LYING PASS - the argument that justifies softening a CRITICAL
 # check at all. Suppose an observed credential does NOT actually reach the running
 # gateway (say it sits only in ~/.config/openclaw/gateway.env, which
 # loadGlobalRuntimeDotEnvFiles loads by default, dotenv-global-mWLbBl_z.js:87-100, but
-# which resolveGatewayRunDotEnvPaths — pre-bootstrap-8G8HyMEQ.js:55-62, <stateDir>/.env
-# plus <configDir>/.env — does not name for `gateway run`). Then `hasSharedSecret` is
+# which resolveGatewayRunDotEnvPaths - pre-bootstrap-8G8HyMEQ.js:55-62, <stateDir>/.env
+# plus <configDir>/.env - does not name for `gateway run`). Then `hasSharedSecret` is
 # false, and server-runtime-config-r5ejxORO.js:78 throws
-# "refusing to bind gateway to <host>:<port> without auth" — an UNCONDITIONAL guard with
+# "refusing to bind gateway to <host>:<port> without auth" - an UNCONDITIONAL guard with
 # no bypass flag anywhere in the dist. So the gateway does not start.
 #
 # The two outcomes are therefore: the credential reaches the gateway (it is authenticated,
 # and the old FAIL was the false positive), or it does not (there is no listener at all).
 # Neither leaves a live, exposed, unauthenticated gateway that this check has been talked
 # out of reporting. That is the whole reason the softening is sound; if a future change to
-# OpenClaw made that bind guard conditional, this reasoning — and this softening — would
+# OpenClaw made that bind guard conditional, this reasoning - and this softening - would
 # have to be revisited.
 _GATEWAY_ENV_CREDENTIAL_VARS = ("OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD")
 
@@ -1384,12 +1384,12 @@ def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
     """An env-supplied gateway credential observed in a persistent artifact.
 
     Returns ``(value, source)`` or ``(None, None)``. The value is returned only so the
-    caller can test presence — it is a secret and must never reach a message, evidence
+    caller can test presence - it is a secret and must never reach a message, evidence
     entry, or log (§8).
 
     ``source`` IS meant to reach evidence/detail (every caller names it so the operator
     knows where to go fix the setting), so it is redacted here, once, for all three
-    callers (B41/B2/B80) rather than at each call site — the same home-rooted-absolute-
+    callers (B41/B2/B80) rather than at each call site - the same home-rooted-absolute-
     path hazard ``_detail_path`` exists for (B-856; ``persistent_env_evidence`` can hand
     back either a global dotenv's absolute path or a systemd unit path, and both can be
     home-rooted). ``_detail_path`` already renders the composite unit form
@@ -1409,16 +1409,16 @@ def _gateway_config_token(cfg: dict, auth_mode) -> "tuple[str | None, bool]":
     B-312: `resolveGatewayAuth` derives `mode="token"` from `gateway.auth.token` /
     `gateway.token` whenever `authConfig.mode` is falsy (auth-resolve-NyPBrh8F.js:34-42),
     read config-FIRST (:23-24) ahead of any environment variable. This is the single
-    source of truth for that derivation — B2 (`check_gateway`) and B80
+    source of truth for that derivation - B2 (`check_gateway`) and B80
     (`check_gateway_rate_limit`) both call it so they can never disagree about what
     counts as an authenticated config-token gateway (B-310 round 2 / C-135).
 
     Returns ``(token, strong)``: ``token`` is the stripped credential, or ``None`` when
     absent OR when ``auth_mode`` is not ``None`` (an explicit mode means OpenClaw is not
-    deriving the mode from mere token presence — the caller already has ``auth_mode``
+    deriving the mode from mere token presence - the caller already has ``auth_mode``
     directly). ``strong`` is whether the credential meets the same >=24-char bar as the
     env leg and as B2's own token-length clause (`hasSharedSecret` accepts ANY non-empty
-    value — no minimum length exists in the dist — so only length is a signal; the value
+    value - no minimum length exists in the dist - so only length is a signal; the value
     itself must never reach a message, evidence entry, fix string, or log, §8).
     """
     token = dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
@@ -1432,22 +1432,22 @@ def _gateway_config_token(cfg: dict, auth_mode) -> "tuple[str | None, bool]":
 
 
 def check_credential_blast_radius(ctx: Context) -> Finding:
-    """B41 — Credential blast-radius assessment.
+    """B41 - Credential blast-radius assessment.
 
     Inventories the credential surface exposed in this OpenClaw config and
     assesses whether an attacker with untrusted ingress + outbound capability
     could reach ALL of them in a single compromise.
 
-    WARN    — credentials exist AND the agent has an untrusted-ingress path
+    WARN    - credentials exist AND the agent has an untrusted-ingress path
               (open channels or an input tool) AND an outbound/exec capability
-              — one compromise's blast radius spans every listed provider.
-    PASS    — credentials exist but the ingress+outbound combination is not
-              present — blast radius is not broadly reachable.
-    UNKNOWN — no auth.profiles and no gateway.auth.token found to assess. When the ONLY
+              - one compromise's blast radius spans every listed provider.
+    PASS    - credentials exist but the ingress+outbound combination is not
+              present - blast radius is not broadly reachable.
+    UNKNOWN - no auth.profiles and no gateway.auth.token found to assess. When the ONLY
               reason none was found is that a systemd unit or global dotenv file the
               collector read was truncated by its byte cap
-              (``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``) — so an env-supplied
-              OPENCLAW_GATEWAY_TOKEN/_PASSWORD could sit past the cut — this UNKNOWN is
+              (``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``) - so an env-supplied
+              OPENCLAW_GATEWAY_TOKEN/_PASSWORD could sit past the cut - this UNKNOWN is
               ``engine_degraded=True`` (B-657): the credential surface this
               check inventories may be non-empty and simply unread, not genuinely absent.
 
@@ -1463,13 +1463,13 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     # resolveGatewayCredentialsFromValues (credentials-DesN22Ui.js:32-33) reads
     # OPENCLAW_GATEWAY_TOKEN / OPENCLAW_GATEWAY_PASSWORD straight from the environment, so
     # a config-only inventory undercounts a host whose gateway secret lives in its systemd
-    # unit or a global dotenv file. Persistent artifacts only — never os.environ, whose
+    # unit or a global dotenv file. Persistent artifacts only - never os.environ, whose
     # contents belong to the auditing shell rather than to the gateway service.
     _env_gw_token, _env_gw_src = _gateway_env_credential(ctx)
     has_env_gateway_token = _env_gw_token is not None
 
     # Collect unique provider names from profile keys of the form "<provider>:<account>"
-    # CRITICAL: extract only the part BEFORE the first ":" — never the account/email.
+    # CRITICAL: extract only the part BEFORE the first ":" - never the account/email.
     providers: list[str] = []
     if isinstance(profiles, dict):
         seen: set[str] = set()
@@ -1486,7 +1486,7 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
         # (has_env_gateway_token, via _gateway_env_credential -> persistent_env_evidence)
         # was read to completion. A systemd unit or global dotenv file the collector DID
         # read but truncated at its byte cap can hide a real OPENCLAW_GATEWAY_TOKEN/
-        # _PASSWORD past the cut, so this is present-but-unread, not genuinely absent —
+        # _PASSWORD past the cut, so this is present-but-unread, not genuinely absent -
         # the exact contrast catalog.py's Finding.engine_degraded exists for, same
         # DEGRADED_CHECK_CAP consequence as the B6/B172 fix (f748869).
         if limit_hits_for(ctx, LIMIT_DOMAIN_ENV):
@@ -1495,7 +1495,7 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
                 "UNKNOWN",
                 "No auth.profiles or gateway.auth.token found in the config, and no "
                 "environment-supplied gateway credential was found in the systemd unit(s) "
-                "or global dotenv file(s) that were read — but at least one of them "
+                "or global dotenv file(s) that were read \u2014 but at least one of them "
                 "exceeded the collector's byte cap, so a credential past the cut would not "
                 "have been seen. The credential surface cannot be ruled empty.",
                 "Keep OpenClaw's systemd unit files and global dotenv files "
@@ -1507,7 +1507,7 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
             "B41",
             "UNKNOWN",
             "No credential profiles found to assess.",
-            "—",
+            "\u2014",
         )
 
     # --- assess reachability ---
@@ -1520,7 +1520,7 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     provider_list = ", ".join(sorted(providers))
     gateway_note = " + gateway token" if any_gateway_token else ""
 
-    # Build evidence list — provider names and gateway marker only, never emails/values.
+    # Build evidence list - provider names and gateway marker only, never emails/values.
     # B-290: the env-supplied case records only WHERE the credential is configured, never
     # its value; `_gateway_env_credential` returns the value solely so presence can be
     # tested, and it is never placed in a message or in evidence (§8).
@@ -1535,7 +1535,7 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     # The subject is built from what is actually present, never from `n` alone.
     # `n` counts the gateway token alongside the provider profiles, so a home with a
     # gateway token and no profiles used to render "1 provider credential(s)
-    # (providers: )" — an empty parenthetical, and a count attached to the wrong noun.
+    # (providers: )" - an empty parenthetical, and a count attached to the wrong noun.
     # The evidence list two blocks below has always been guarded this way; the prose
     # was not.
     if providers:
@@ -1553,7 +1553,7 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     if reachable:
         detail = (
             f"{subject} {verb} reachable by an agent with untrusted ingress and "
-            f"outbound tools — {blast}. Use least-privilege scopes, isolate "
+            f"outbound tools \u2014 {blast}. Use least-privilege scopes, isolate "
             "high-value profiles, and keep them rotatable."
         )
         return _finding(
@@ -1569,11 +1569,11 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
 
     # B-306: `has_credentials`/`reachable` are not equally config-dependent.
     # `has_env_gateway_token` (above) is read from a PERSISTENT, config-INDEPENDENT
-    # artifact (a systemd unit or global dotenv file — see _gateway_env_credential), so a
+    # artifact (a systemd unit or global dotenv file - see _gateway_env_credential), so a
     # real credential can still be legitimately found even when openclaw.json itself is
     # unparseable/unreadable. `reachable`, however, is derived entirely from
     # ctx.config (_external_input_channels/_enabled_tools/tools.elevated.allowFrom) and
-    # therefore collapses to False whenever ctx.config == {} — so the "not reachable" PASS
+    # therefore collapses to False whenever ctx.config == {} - so the "not reachable" PASS
     # below is not actually known on a blind config, only assumed. Guarded here, right
     # before that PASS: the `reachable` WARN above needs no guard of its own because
     # `reachable` can never be True with ctx.config == {} in the first place.
@@ -1602,7 +1602,7 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
 
 
 # ---------------------------------------------------------------------------
-# B373 (C-527): OPENCLAW_CONFIG_READONLY — an externally-managed,
+# B373 (C-527): OPENCLAW_CONFIG_READONLY - an externally-managed,
 # read-only config posture. New in the OpenClaw 2026.9.4 release; grounded against the
 # LIVE installed 9.4 dist (not the changelog), verbatim:
 #
@@ -1619,13 +1619,13 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
 # ("Config is externally managed (`OPENCLAW_CONFIG_READONLY=1`), so OpenClaw treats
 # openclaw.json as immutable.") from every config-mutating command path
 # (`management-mutations`, `plugins-{install,update,uninstall}-command`,
-# `update-repair-command`, `onboarding-plugin-install`, …) — this is wired through the
+# `update-repair-command`, `onboarding-plugin-install`, ...) - this is wired through the
 # whole write surface, not a single guarded call site.
 #
 # The vendor treats the variable as security-relevant itself: `isBlockedConfigEnvVar`
 # (config-env-vars-BeYgbFTQ.mjs:43-45) refuses to let `config.env` set
 # OPENCLAW_CONFIG_READONLY (alongside OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS /
-# OPENCLAW_INCLUDE_ROOTS / the isDangerousHostEnvVarName family) — a config cannot switch
+# OPENCLAW_INCLUDE_ROOTS / the isDangerousHostEnvVarName family) - a config cannot switch
 # off its own read-only protection. It also sits in the path/identity env allowlist
 # (`GATEWAY_CONFIG_SELECTION_ENV_KEYS`, io.read-helpers-Bj0GwcNP.mjs:23-42) next to
 # OPENCLAW_AGENT_DIR/OPENCLAW_CONFIG_PATH/OPENCLAW_HOME/OPENCLAW_STATE_DIR/
@@ -1641,23 +1641,23 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
 # config mutation, wizard flows, plugin install/update) that is wrong advice for the
 # overwhelming majority of installs.
 #
-# DETECTION CHANNEL: identical to B186/B41 — `persistent_env_evidence` (systemd
+# DETECTION CHANNEL: identical to B186/B41 - `persistent_env_evidence` (systemd
 # Environment=/EnvironmentFile= for an OpenClaw-related unit, then the two global runtime
 # dotenv files). Never `os.environ`: that is the auditing shell's environment, not the
 # audited gateway process's, and the ambient-shell channel (an interactive export) is
-# consciously left as the same permanent PASS-confidence ceiling B186 documents — it can
+# consciously left as the same permanent PASS-confidence ceiling B186 documents - it can
 # never be seen by a persistent, on-disk read, however complete.
 #
 # CONSUMER CONTEXT (angle 1 of C-527, deliberately NOT wired into verdict logic here):
 # under this mode OpenClaw itself never writes openclaw.json, so configjournal.py's
 # journal-head comparison and the monitor's config-file identity dimension
 # (monitordims/_configfile.py) both lose their usual "no journal entry between two runs"
-# baseline — a config that DOES change while this mode is active is a STRONGER signal
+# baseline - a config that DOES change while this mode is active is a STRONGER signal
 # (nothing OpenClaw does should touch the file at all), not a weaker one. This check
 # surfaces the mode itself, every run, which gives a reader the context needed to
 # reinterpret a config-drift alert correctly without threading mode-awareness into
 # configjournal.py or the monitordims C-433 dimension package (a materially larger,
-# differentially-tested surface) — deferred, not implemented, see the C-527 Pulse
+# differentially-tested surface) - deferred, not implemented, see the C-527 Pulse
 # comment for the full reasoning.
 _CONFIG_READONLY_MODE_VARS = (
     ("OPENCLAW_CONFIG_READONLY", "read-only"),
@@ -1666,23 +1666,23 @@ _CONFIG_READONLY_MODE_VARS = (
 
 
 def check_config_externally_managed(ctx: Context) -> Finding:
-    """B373 — externally-managed, read-only config posture (OPENCLAW_CONFIG_READONLY /
+    """B373 - externally-managed, read-only config posture (OPENCLAW_CONFIG_READONLY /
     OPENCLAW_NIX_MODE), new in OpenClaw 2026.9.4.
 
-    PASS    — a persistent artifact (systemd unit or global runtime dotenv file) shows
+    PASS    - a persistent artifact (systemd unit or global runtime dotenv file) shows
               OPENCLAW_CONFIG_READONLY=1 or OPENCLAW_NIX_MODE=1: OpenClaw refuses to
               rewrite openclaw.json while this is active. This is a positive, hardening
               observation, not a risk.
-    PASS    — no such value was observed, but at least one persistent artifact was
+    PASS    - no such value was observed, but at least one persistent artifact was
               actually read (``env_evidence_readable``). Absence is the default OpenClaw
               posture and is not itself a finding; carries ``pass_confidence="no_signal"``
               because an ambient-shell export is invisible to any on-disk read, the same
               permanent ceiling B186 documents.
-    UNKNOWN — no persistent artifact was even present to read (no OpenClaw-related
+    UNKNOWN - no persistent artifact was even present to read (no OpenClaw-related
               systemd unit, no global dotenv file). There is no evidence to build a PASS
               on at all.
 
-    Never WARN/FAIL — see the module comment above this function for why no adverse
+    Never WARN/FAIL - see the module comment above this function for why no adverse
     state exists for this signal.
     """
     hits: "list[tuple[str, str, str, str]]" = []  # (var, mode_label, value, source)
@@ -1705,7 +1705,7 @@ def check_config_externally_managed(ctx: Context) -> Finding:
             "and treats openclaw.json as immutable. Because OpenClaw itself will not "
             "write this file, a config change observed while this mode is active did not "
             "come from OpenClaw's own writer and is worth confirming, not dismissing.",
-            "No action needed — this is a deliberate hardening posture. Manage "
+            "No action needed \u2014 this is a deliberate hardening posture. Manage "
             "openclaw.json through your external deployment source (Nix module, "
             "container image, config-management tool) rather than through OpenClaw's "
             "own wizard/plugin-install flows, which will refuse to write while this is "
@@ -1720,8 +1720,8 @@ def check_config_externally_managed(ctx: Context) -> Finding:
             PASS,
             "No externally-managed read-only config mode (OPENCLAW_CONFIG_READONLY / "
             "OPENCLAW_NIX_MODE) was found in the systemd user unit(s) and global dotenv "
-            "file(s) that were readable. This is the default OpenClaw posture — OpenClaw "
-            "manages openclaw.json directly — and is not itself a finding. This PASS "
+            "file(s) that were readable. This is the default OpenClaw posture \u2014 OpenClaw "
+            "manages openclaw.json directly \u2014 and is not itself a finding. This PASS "
             "carries reduced confidence on purpose and can never reach full confidence: "
             "either variable can also be exported into the interactive shell that "
             "launches the agent, which leaves no artifact on disk for any local, "
@@ -1738,7 +1738,7 @@ def check_config_externally_managed(ctx: Context) -> Finding:
         "B373",
         UNKNOWN,
         "No externally-managed read-only config mode was found, but no systemd user "
-        "unit or global dotenv file was present to read — so there is no evidence to "
+        "unit or global dotenv file was present to read \u2014 so there is no evidence to "
         "build even a reduced-confidence PASS on.",
         "No action needed unless you intend to run OpenClaw under an externally-managed "
         "read-only config (Nix, a container-managed deployment).",
@@ -1747,7 +1747,7 @@ def check_config_externally_managed(ctx: Context) -> Finding:
 
 
 def check_retired_config_keys_invalid(ctx: Context) -> Finding:
-    """B382 — openclaw.json still holds a key the installed OpenClaw build removed.
+    """B382 - openclaw.json still holds a key the installed OpenClaw build removed.
 
     The claim is deliberately narrow: the build's strict config schema rejects the file, so
     `openclaw config validate` and CLI commands that load it report it invalid until
@@ -1755,9 +1755,9 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
     being in force, or about other findings being unreliable. Names are reported, never
     values. Gated on the INSTALLED build only (see ``_retired_keys_present``).
 
-    WARN    — one or more retired keys are present and the installed build rejects them.
-    UNKNOWN — no config was read (or it was unreadable).
-    PASS    — none present; ``no_signal`` when the installed build could not be determined,
+    WARN    - one or more retired keys are present and the installed build rejects them.
+    UNKNOWN - no config was read (or it was unreadable).
+    PASS    - none present; ``no_signal`` when the installed build could not be determined,
               because then "not present" was never actually assessable.
 
     Never FAIL: advisory, unscored (B-315).
@@ -1810,19 +1810,19 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
 
 
 def check_dangerous_overrides(ctx: Context) -> Finding:
-    """B48 — flag OpenClaw 'dangerously*/allowUnsafe*' break-glass toggles that are ACTIVE.
+    """B48 - flag OpenClaw 'dangerously*/allowUnsafe*' break-glass toggles that are ACTIVE.
 
     These are explicit opt-in overrides OpenClaw documents as 'keep disabled'. Absent /
-    false = nothing flagged (so a default config is a clean PASS — zero false positives).
+    false = nothing flagged (so a default config is a clean PASS - zero false positives).
     FAIL/CRITICAL when a wildcard-authority entry is active (commands.ownerAllowFrom or
-    gateway.nodes.pairing.autoApproveCidrs contains an unscoped "*"/0.0.0.0/0/::/0 —
+    gateway.nodes.pairing.autoApproveCidrs contains an unscoped "*"/0.0.0.0/0/::/0 -
     B-231); FAIL/HIGH when a sandbox-escape or control-plane-auth-disable flag is on;
     WARN for the rest (including a *scoped*, non-wildcard override of the same fields).
     """
     unreadable = _config_unreadable("B48", ctx)
     if unreadable is not None:
         return unreadable
-    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # B-661: `_config_unreadable` only covers "present but unparseable" - on a host
     # with no openclaw.json at all, config_parse_error is False and ctx.config is
     # `{}`, so every dig() below would silently degrade to "absent" and fall through
     # to the PASS about a config nobody read.
@@ -1838,33 +1838,33 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     cfg = ctx.config
     fails: list[str] = []
     warns: list[str] = []
-    # B-231: wildcard-authority entries — genuinely worse than the scoped-list case
+    # B-231: wildcard-authority entries - genuinely worse than the scoped-list case
     # below (an explicit, grounded "any sender"/"any IP" grant, not merely "a break-
-    # glass toggle is on") — tracked separately so the verdict can escalate FAIL/
+    # glass toggle is on") - tracked separately so the verdict can escalate FAIL/
     # CRITICAL above the plain FAIL/HIGH the rest of this check returns.
     wildcard_fails: list[str] = []
 
     for path, label, is_fail in _DANGER_FIXED:
         if dig(cfg, path):
-            (fails if is_fail else warns).append(f"{path} — {label}")
+            (fails if is_fail else warns).append(f"{path} \u2014 {label}")
 
     # B-795: pulled out of _DANGER_FIXED's flat unconditional table because, unlike
     # every other row there, whether this one means anything at all depends on the
-    # build — see `_device_auth_knob`. A build we could not identify keeps the
-    # original FAIL (Golden Rule #4 — do not drop a real finding for a build we did
+    # build - see `_device_auth_knob`. A build we could not identify keeps the
+    # original FAIL (Golden Rule #4 - do not drop a real finding for a build we did
     # not see).
     device_auth_note = ""
     if dig(cfg, "gateway.controlUi.dangerouslyDisableDeviceAuth"):
         if _device_auth_knob(ctx) == "retired":
             device_auth_note = (
                 " NOTE: gateway.controlUi.dangerouslyDisableDeviceAuth is present in "
-                "the config, but OpenClaw 2026.9.3+ retired the key — it is ignored "
+                "the config, but OpenClaw 2026.9.3+ retired the key \u2014 it is ignored "
                 "and grants nothing; Control UI browsers pair through the normal "
                 "device flow instead. `openclaw doctor --fix` removes the stale line."
             )
         else:
             fails.append(
-                "gateway.controlUi.dangerouslyDisableDeviceAuth — control-plane: "
+                "gateway.controlUi.dangerouslyDisableDeviceAuth \u2014 control-plane: "
                 "Control-UI device identity auth disabled"
             )
 
@@ -1873,28 +1873,28 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         for key in path.split("."):
             node = node.get(key) if isinstance(node, dict) else None
         if node:
-            warns.append(f"{path} — {label}")
+            warns.append(f"{path} \u2014 {label}")
 
     # B-705: gated on the build, because the same entry means opposite things. On
     # 2026.8.1 the wildcard is stripped before any authorization decision reads it, so
-    # `["*"]` is the same configuration as no key at all — which this check calls PASS.
+    # `["*"]` is the same configuration as no key at all - which this check calls PASS.
     # Nothing is emitted in its place: B48 is SCORED, and a warning about an entry that
     # is inert AND safe would cost the user grade for a state that carries no risk.
     owner_allow_from = dig(cfg, "commands.ownerAllowFrom")
     if (_is_owner_wildcard_allow_from(owner_allow_from)
             and _openclaw_generation(ctx) != "modern"):
         wildcard_fails.append(
-            "commands.ownerAllowFrom contains '*' — owner-only command authority is "
+            "commands.ownerAllowFrom contains '*' \u2014 owner-only command authority is "
             "granted to ANY sender on any channel (not a scoped allowlist)"
         )
 
     auto_approve_cidrs = dig(cfg, "gateway.nodes.pairing.autoApproveCidrs")
     if _has_world_open_cidr(auto_approve_cidrs):
         # NC-11 (recon): OpenClaw's own "not a vulnerability by design" list names this
-        # exact field — stays WARN, never escalates to FAIL/wildcard_fails.
+        # exact field - stays WARN, never escalates to FAIL/wildcard_fails.
         warns.append(
             "gateway.nodes.pairing.autoApproveCidrs contains a world-open CIDR "
-            "(0.0.0.0/0 / ::/0 / '*') — first-time, zero-scope node-device pairing is "
+            "(0.0.0.0/0 / ::/0 / '*') \u2014 first-time, zero-scope node-device pairing is "
             "auto-approved from ANY IP address (role/scope/metadata/key-upgrade pairing "
             "still requires manual approval)"
         )
@@ -1902,15 +1902,15 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     nc, nc_path = _node_commands(cfg, "allow")
     if isinstance(nc, list) and nc:
         # B-231: a literal "*" entry here is NOT given the wildcard-authority
-        # treatment above — grounded against node-command-policy-*.js, the allow list
+        # treatment above - grounded against node-command-policy-*.js, the allow list
         # is folded into a plain Set of exact command-name strings with no wildcard
         # special-case (`allow.has(command)`), so "*" never matches a real node
         # command and is strictly inert, not a broader grant than a named command.
         # Re-checked on 2026.8.1 (register-*.js): the new `commands.allow` spelling is
-        # read the same way — `allowCommands.forEach` over exact trimmed strings — so
+        # read the same way - `allowCommands.forEach` over exact trimmed strings - so
         # the inertness holds for both shapes, not just the one B-231 measured.
         warns.append(
-            f"{nc_path} — extra node.invoke commands enabled "
+            f"{nc_path} \u2014 extra node.invoke commands enabled "
             "(beyond gateway defaults; possible RCE surface)"
         )
 
@@ -1918,7 +1918,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         for flag, lbl in _DANGER_AGENT_SANDBOX:
             if dig(agent.entry, f"sandbox.docker.{flag}"):
                 fails.append(
-                    f"{agent.path}.sandbox.docker.{flag} — sandbox escape: {lbl}")
+                    f"{agent.path}.sandbox.docker.{flag} \u2014 sandbox escape: {lbl}")
 
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict):
@@ -1931,17 +1931,17 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             nodes.extend(v for v in accounts.values() if isinstance(v, dict))
         if any(n.get("dangerouslyDisableSignatureValidation") for n in nodes):
             warns.append(
-                f"channels.{name}.dangerouslyDisableSignatureValidation — "
+                f"channels.{name}.dangerouslyDisableSignatureValidation \u2014 "
                 "webhook signature validation disabled (spoofable untrusted input)"
             )
         if any(n.get("dangerouslyAllowInheritedWebhookPath") for n in nodes):
             warns.append(
-                f"channels.{name}.dangerouslyAllowInheritedWebhookPath — "
+                f"channels.{name}.dangerouslyAllowInheritedWebhookPath \u2014 "
                 "inherited webhook path accepted"
             )
         if any(dig(n, "network.dangerouslyAllowPrivateNetwork") for n in nodes):
             warns.append(
-                f"channels.{name}.network.dangerouslyAllowPrivateNetwork — "
+                f"channels.{name}.network.dangerouslyAllowPrivateNetwork \u2014 "
                 "private-network access from this channel (SSRF)"
             )
 
@@ -1950,19 +1950,19 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         for i, m in enumerate(mappings):
             if isinstance(m, dict) and m.get("allowUnsafeExternalContent"):
                 warns.append(
-                    f"hooks.mappings[{i}].allowUnsafeExternalContent — "
+                    f"hooks.mappings[{i}].allowUnsafeExternalContent \u2014 "
                     "less-sanitized external content (injection surface)"
                 )
 
     for name, p in _plugins(cfg).items():
         if isinstance(p, dict) and dig(p, "config.allowPrivateNetwork"):
             warns.append(
-                f"plugins.entries.{name}.config.allowPrivateNetwork — "
+                f"plugins.entries.{name}.config.allowPrivateNetwork \u2014 "
                 "plugin private-network access (SSRF)"
             )
 
     if wildcard_fails:
-        # B-231: severity ABOVE the scoped-list / other-break-glass FAIL — an explicit
+        # B-231: severity ABOVE the scoped-list / other-break-glass FAIL - an explicit
         # wildcard grant of owner authority or auto-approved device pairing to anyone
         # is a step beyond a single break-glass toggle being left on.
         return _finding(
@@ -1970,7 +1970,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             FAIL,
             "Wildcard-authority override(s) grant owner command authority or device "
             "auto-pairing to ANY sender/IP (see evidence)." + device_auth_note,
-            "Replace the wildcard with an explicit, scoped allowlist — e.g. "
+            "Replace the wildcard with an explicit, scoped allowlist \u2014 e.g. "
             "commands.ownerAllowFrom to your own channel-native ID(s), or "
             "gateway.nodes.pairing.autoApproveCidrs to a specific host/private range. "
             "Never leave either as an unscoped wildcard.",
@@ -1983,7 +1983,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             FAIL,
             "Dangerous break-glass override(s) that enable sandbox escape or control-plane "
             "auth bypass are active (see evidence)." + device_auth_note,
-            "Disable these unless a specific, temporary break-glass need requires one — each "
+            "Disable these unless a specific, temporary break-glass need requires one \u2014 each "
             "opens sandbox escape or control-plane authentication bypass. Restore the safe "
             "default (set to false / remove).",
             evidence=fails + warns,
@@ -1994,7 +1994,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             WARN,
             "One or more dangerous break-glass override flag(s) are enabled (see "
             "evidence)." + device_auth_note,
-            "Review each — OpenClaw documents these as 'keep disabled' break-glass toggles. "
+            "Review each \u2014 OpenClaw documents these as 'keep disabled' break-glass toggles. "
             "Turn off any you do not actively need.",
             evidence=warns,
         )
@@ -2104,11 +2104,11 @@ def _b171_open_channels(cfg: dict) -> list[str]:
                 node.get("allowFrom")
             )
             # B-283 (a): normalize a Feishu channel's "allowall" alias, which Feishu's
-            # GroupPolicySchema transforms to "open" (channel-PR3XHV0V.js:89-93) — without
+            # GroupPolicySchema transforms to "open" (channel-PR3XHV0V.js:89-93) - without
             # this a Feishu channel written as groupPolicy:"allowall" ran wide open but
             # read as unrecognised. Feishu-scoped only: every other channel schema in the
             # dist rejects "allowall" outright, so it cannot appear on them in a config
-            # that actually loaded — see _norm_group_policy's docstring for the grounding.
+            # that actually loaded - see _norm_group_policy's docstring for the grounding.
             group_open = _norm_group_policy(name, node.get("groupPolicy")) == "open" and not (
                 _b171_scoped_list(node.get("groupAllowFrom"))
                 or _b171_scoped_list(node.get("allowFrom"))
@@ -2155,40 +2155,40 @@ def _b171_wildcard_allow_from_evidence(cfg: dict, modern: bool = False) -> list[
 
 
 def check_privileged_commands_exposure(ctx: Context) -> Finding:
-    """B171 (B-235) — commands.bash/config/mcp/plugins in-chat privileged-command surface.
+    """B171 (B-235) - commands.bash/config/mcp/plugins in-chat privileged-command surface.
 
     OpenClaw's root ``commands.*`` block exposes raw shell (``bash``), full config
     read/write (``config``), MCP-server-registry rewrite (``mcp``), and plugin-enablement
     toggling (``plugins``) as IN-CHAT commands, gated only by their own owner/elevated
     allow-from mechanism (``commands.ownerAllowFrom`` / ``commands.allowFrom`` /
-    ``commands.useAccessGroups``) — entirely separate from B2's channel dmPolicy/
+    ``commands.useAccessGroups``) - entirely separate from B2's channel dmPolicy/
     groupPolicy gate and B3's agent-tool allowlist. Before this check, ClawSecCheck had
     ZERO references to commands.bash/config/mcp/plugins (B-235): a config with all four
     enabled plus an open channel scored identically to the closed-channel baseline.
 
-    FAIL/CRITICAL — ``bash`` or ``config`` is enabled and the gate is wildcard-open
+    FAIL/CRITICAL - ``bash`` or ``config`` is enabled and the gate is wildcard-open
         (``commands.ownerAllowFrom`` or an ``commands.allowFrom`` list contains ``"*"``),
-        or is completely unconfigured on a channel with an open dmPolicy/groupPolicy —
+        or is completely unconfigured on a channel with an open dmPolicy/groupPolicy -
         either way ANY chat sender who reaches that channel gets raw shell or full
         config-mutation.
-    FAIL/HIGH — ``mcp`` or ``plugins`` is enabled under the same wildcard/open-channel-
+    FAIL/HIGH - ``mcp`` or ``plugins`` is enabled under the same wildcard/open-channel-
         with-no-gate condition (still unauthenticated, narrower blast radius).
-    WARN — a privileged command (incl. ``debug``) is enabled with no
+    WARN - a privileged command (incl. ``debug``) is enabled with no
         ownerAllowFrom/allowFrom configured, on a channel that is NOT open (allowlist/
         pairing/disabled still constrains who reaches the command layer, but no
-        owner-scoped allowlist narrows it further — see docs/research §18); or
+        owner-scoped allowlist narrows it further - see docs/research §18); or
         ``commands.useAccessGroups`` is explicitly ``false`` alongside an enabled
         privileged command.
-    UNKNOWN — a privileged command is enabled with no gate configured and no channels are
+    UNKNOWN - a privileged command is enabled with no gate configured and no channels are
         configured at all (reachability genuinely can't be determined), or openclaw.json
         is unreadable.
-    PASS — no privileged commands.* subflag is enabled, or every enabled one has a
+    PASS - no privileged commands.* subflag is enabled, or every enabled one has a
         scoped, non-wildcard ownerAllowFrom/allowFrom.
     """
     unreadable = _config_unreadable("B171", ctx)
     if unreadable is not None:
         return unreadable
-    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # B-661: `_config_unreadable` only covers "present but unparseable" - on a host
     # with no openclaw.json at all, config_parse_error is False and ctx.config is
     # `{}`, so every commands.* dig() below would silently degrade to "absent" and
     # fall through to the PASS about a config nobody read.
@@ -2239,9 +2239,9 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
             "B171",
             FAIL,
             "Privileged in-chat command(s) enabled with a wildcard-open owner/allow-from "
-            "gate — ANY chat sender who reaches the gate is authorized: "
+            "gate \u2014 ANY chat sender who reaches the gate is authorized: "
             + "; ".join(descriptions),
-            "Replace the wildcard with an explicit, scoped allowlist — e.g. "
+            "Replace the wildcard with an explicit, scoped allowlist \u2014 e.g. "
             "commands.ownerAllowFrom / commands.allowFrom to your own channel-native "
             "ID(s). Never leave either as an unscoped '*'.",
             evidence=descriptions + wildcard_ev,
@@ -2252,14 +2252,14 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
     allow_from = dig(cfg, "commands.allowFrom")
     # B-705: the EFFECTIVE owner list, not the raw one. On 2026.8.1 the runtime strips
     # every "*" entry (`stripWildcardAllowFrom`) before deciding whether an owner allowlist
-    # exists, so `ownerAllowFrom: ["*"]` leaves `explicitOwners = []` — no gate at all.
+    # exists, so `ownerAllowFrom: ["*"]` leaves `explicitOwners = []` - no gate at all.
     # Testing the RAW list's truthiness counted that as a configured gate and, on an open
     # channel, turned a CRITICAL FAIL into a PASS.
     #
     # This false negative did not exist before, and it is not hypothetical: it was created
     # by the fix above, which removed the wildcard FAIL that used to catch this shape on
     # its way past. Measured on `{channels.telegram.dmPolicy=open, commands.bash=true,
-    # ownerAllowFrom=["*"]}` — FAIL/CRITICAL on 2026.7.x, PASS on 2026.8.1 until this line.
+    # ownerAllowFrom=["*"]}` - FAIL/CRITICAL on 2026.7.x, PASS on 2026.8.1 until this line.
     # On 2026.7.x nothing changes: the wildcard FAILs earlier and never reaches here.
     effective_owner_allow_from = owner_allow_from
     if _openclaw_generation(ctx) == "modern" and isinstance(owner_allow_from, list):
@@ -2276,7 +2276,7 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
             "B171",
             FAIL,
             "Privileged in-chat command(s) enabled with NO owner/allow-from gate "
-            "configured, on a channel with an open dm/group policy — ANY sender on that "
+            "configured, on a channel with an open dm/group policy \u2014 ANY sender on that "
             "channel is authorized (an empty commands.ownerAllowFrom/allowFrom removes "
             "the owner-only check; see docs/research §18): " + "; ".join(descriptions),
             "Set commands.ownerAllowFrom or commands.allowFrom to your own channel-native "
@@ -2301,13 +2301,13 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
     warn_ev = list(descriptions)
     if not gate_configured:
         warn_ev.append(
-            "commands.ownerAllowFrom/allowFrom not configured — any sender the connected, "
+            "commands.ownerAllowFrom/allowFrom not configured \u2014 any sender the connected, "
             "non-open channel(s) already authorize is treated as command-owner"
         )
     # C-471: removed in OpenClaw 2026.8.1, and removed fail-SAFE. `useAccessGroups` appears
     # in ZERO of the 5,254 paths of the 2026.8.1 config schema (one in 2026.7.1-2), so no
     # config can turn it off any more, and the runtime reads
-    # `const useAccessGroups = command.useAccessGroups ?? true` — enforcement on by default
+    # `const useAccessGroups = command.useAccessGroups ?? true` - enforcement on by default
     # with nothing left to override it. A key left on disk after an upgrade is inert, so
     # counting it as a gap would manufacture a WARN about a layer that cannot be disabled.
     #
@@ -2317,7 +2317,7 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
     if (dig(cfg, "commands.useAccessGroups") is False
             and _openclaw_generation(ctx) != "modern"):
         warn_ev.append(
-            "commands.useAccessGroups=false — access-group enforcement layer disabled"
+            "commands.useAccessGroups=false \u2014 access-group enforcement layer disabled"
         )
     if warn_ev != descriptions:
         return _finding(
@@ -2347,33 +2347,33 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
         pass_confidence="verified",
     )
 # ---------- B173 (B-237): security.audit.suppressions self-blinds the native audit ----------
-# Grounded: zod-schema-O9ml_nmo.js SecuritySchema — security.audit.suppressions is an array
+# Grounded: zod-schema-O9ml_nmo.js SecuritySchema - security.audit.suppressions is an array
 # of { checkId: string().min(1), titleIncludes?, detailIncludes?, reason? } (all `.strict()`).
 # audit-UjVvFwCi.js's runSecurityAudit() applies these via applySecurityAuditSuppressions()
-# BEFORE returning `openclaw security audit --json`'s output — so a suppressed finding never
+# BEFORE returning `openclaw security audit --json`'s output - so a suppressed finding never
 # reaches native.py's fold-in either (native.py execs that exact command and only ever sees
-# the post-suppression `findings` array). A non-empty list is not itself a vulnerability —
-# it is how an operator knowingly accepts a specific, reviewed native finding — so this stays
+# the post-suppression `findings` array). A non-empty list is not itself a vulnerability -
+# it is how an operator knowingly accepts a specific, reviewed native finding - so this stays
 # WARN/disclosure by default. It escalates to FAIL only when a suppressed checkId is one this
 # project has grounded, directly against audit-UjVvFwCi.js, as UNCONDITIONALLY
 # severity:"critical" there (a literal `severity: "critical"` in the source, never a
 # `cond ? "critical" : "warn"` ternary whose true branch we cannot re-derive statically without
-# duplicating OpenClaw's own runtime-exposure logic — and a wrong guess would be exactly the
+# duplicating OpenClaw's own runtime-exposure logic - and a wrong guess would be exactly the
 # false-FAIL Golden Rule #5 forbids) AND that literal-critical finding fires on an actual
-# DEFECT with actionable remediation — not merely on a feature being enabled at all. Literal
+# DEFECT with actionable remediation - not merely on a feature being enabled at all. Literal
 # `severity: "critical"` in the native source is necessary but not sufficient: B-237 found
 # `gateway.trusted_proxy_auth` is literally critical yet fires unconditionally whenever
 # `gateway.auth.mode === "trusted-proxy"` (audit-UjVvFwCi.js:245-254), with a remediation that
 # is a verification checklist ("Verify: (1)... (2)... (3)...", see the trusted-proxy setup
 # guide), not a config change. There is no underlying condition a correctly-configured
-# trusted-proxy operator (e.g. behind Pomerium/Caddy/nginx SSO) can fix to clear it — it is
+# trusted-proxy operator (e.g. behind Pomerium/Caddy/nginx SSO) can fix to clear it - it is
 # OpenClaw's own documented enterprise auth mode, and every operator running it will see this
 # finding forever. Escalating a knowing, reviewed suppression of that notice to FAIL/CRITICAL
 # is a false positive (an operator correctly using a supported feature gets told to abandon
-# it) — so `gateway.trusted_proxy_auth` is deliberately excluded here and stays WARN-only via
+# it) - so `gateway.trusted_proxy_auth` is deliberately excluded here and stays WARN-only via
 # the disclosure path below. The three checkIds that fire on REAL trusted-proxy
 # misconfiguration remain in the set and keep escalating: `gateway.trusted_proxy_no_proxies`
-# ("All requests will be rejected" — empty trustedProxies), `gateway.trusted_proxy_no_user_header`
+# ("All requests will be rejected" - empty trustedProxies), `gateway.trusted_proxy_no_user_header`
 # (missing userHeader), and the generic `gateway.bind_no_auth` catch-all when trusted-proxy
 # auth itself is misconfigured badly enough to not count as a shared secret. Deliberately
 # scoped to the core `runSecurityAudit` orchestrator in audit-UjVvFwCi.js only; checkIds from
@@ -2394,10 +2394,10 @@ _NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS = frozenset({
 
 
 def _is_native_unconditional_critical_check_id(check_id: str) -> bool:
-    """True for a grounded always-critical native-audit checkId — an exact match from
+    """True for a grounded always-critical native-audit checkId - an exact match from
     ``_NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS``, or the templated
     ``tools.elevated.allowFrom.<provider>.wildcard`` shape (audit-UjVvFwCi.js
-    collectElevatedFindings — the provider name varies, the ``.wildcard`` suffix and
+    collectElevatedFindings - the provider name varies, the ``.wildcard`` suffix and
     unconditional ``severity: "critical"`` do not)."""
     return (
         check_id in _NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS
@@ -2409,21 +2409,21 @@ def _is_native_unconditional_critical_check_id(check_id: str) -> bool:
 
 
 def check_audit_suppressions(ctx: Context) -> Finding:
-    """B173 (B-237) — ``security.audit.suppressions`` permanently silences specific findings
+    """B173 (B-237) - ``security.audit.suppressions`` permanently silences specific findings
     of OpenClaw's OWN built-in ``openclaw security audit`` (and therefore native.py's
     fold-in of it too), with nothing previously disclosing that a suppression list exists.
 
-    Absent/empty list → PASS (nothing suppressed). Non-empty → WARN, naming the suppressed
-    checkId(s) — a suppression is a knowingly-accepted native finding, not itself a
+    Absent/empty list -> PASS (nothing suppressed). Non-empty -> WARN, naming the suppressed
+    checkId(s) - a suppression is a knowingly-accepted native finding, not itself a
     vulnerability. FAIL/CRITICAL only when a suppressed checkId is one this project has
     grounded as unconditionally critical in the native audit source (see
-    ``_NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS``) — a config write that permanently quiets one
+    ``_NATIVE_UNCONDITIONAL_CRITICAL_CHECK_IDS``) - a config write that permanently quiets one
     of those is positive evidence, not a guess.
     """
     unreadable = _config_unreadable("B173", ctx)
     if unreadable is not None:
         return unreadable
-    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # B-661: `_config_unreadable` only covers "present but unparseable" - on a host
     # with no openclaw.json at all, config_parse_error is False and ctx.config is
     # `{}`, so `dig(cfg, "security.audit.suppressions")` would silently resolve to
     # None and fall through to the (previously `pass_confidence="verified"`) PASS
@@ -2443,7 +2443,7 @@ def check_audit_suppressions(ctx: Context) -> Finding:
         return _finding(
             "B173",
             PASS,
-            "No security.audit.suppressions configured — OpenClaw's built-in "
+            "No security.audit.suppressions configured \u2014 OpenClaw's built-in "
             "`openclaw security audit` runs unfiltered.",
             "Keep security.audit.suppressions empty unless you are knowingly accepting a "
             "specific, reviewed native-audit finding.",
@@ -2470,14 +2470,14 @@ def check_audit_suppressions(ctx: Context) -> Finding:
             critical_hits.append(check_id)
 
     if not disclosed:
-        # Non-empty list but no entry had a recognizable checkId (malformed hand-edit —
+        # Non-empty list but no entry had a recognizable checkId (malformed hand-edit -
         # OpenClaw's own schema requires checkId, so a real config always has one). Still
-        # worth a look, but there is nothing concrete to name — WARN, not a guess FAIL.
+        # worth a look, but there is nothing concrete to name - WARN, not a guess FAIL.
         return _finding(
             "B173",
             WARN,
             "security.audit.suppressions is non-empty but no entry has a usable checkId.",
-            "Check security.audit.suppressions for malformed entries — each needs a "
+            "Check security.audit.suppressions for malformed entries \u2014 each needs a "
             "non-empty checkId string.",
             evidence=[f"security.audit.suppressions has {len(suppressions)} entrie(s)"],
         )
@@ -2490,7 +2490,7 @@ def check_audit_suppressions(ctx: Context) -> Finding:
             "grounded as unconditionally critical: "
             f"{', '.join(sorted(set(critical_hits)))}.",
             "Remove the suppression for the critical checkId(s) above and fix the underlying "
-            "condition instead — do not permanently silence a critical finding of OpenClaw's "
+            "condition instead \u2014 do not permanently silence a critical finding of OpenClaw's "
             "own built-in security audit.",
             evidence=disclosed,
             severity=CRITICAL,
@@ -2498,7 +2498,7 @@ def check_audit_suppressions(ctx: Context) -> Finding:
     return _finding(
         "B173",
         WARN,
-        f"security.audit.suppressions has {len(disclosed)} configured entry/entries — "
+        f"security.audit.suppressions has {len(disclosed)} configured entry/entries \u2014 "
         "OpenClaw's built-in `openclaw security audit` (and ClawSecCheck's fold-in of it) "
         "will never show these findings again.",
         "Review each suppressed checkId periodically and remove it once the accepted risk "
@@ -2509,7 +2509,7 @@ def check_audit_suppressions(ctx: Context) -> Finding:
 
 
 def check_hook_template_content(ctx: Context) -> Finding:
-    """B169 (B-231 sub-item 2) — hooks.mappings[].messageTemplate / textTemplate content scan.
+    """B169 (B-231 sub-item 2) - hooks.mappings[].messageTemplate / textTemplate content scan.
 
     A hook mapping's ``messageTemplate``/``textTemplate`` splices an untrusted external
     webhook payload into text the agent will read as part of a live turn (B48 only checks
@@ -2523,15 +2523,15 @@ def check_hook_template_content(ctx: Context) -> Finding:
     - ``_CLICKFIX_REMOTE_FETCH_RE`` + ``_clickfix_trusted_installer`` (the same remote-fetch/
       pipe-to-shell install-directive pattern B167 already reuses for appServer.command).
 
-    FAIL    — a template string matches a high-confidence override/install directive.
-    WARN    — a template string matches a weaker/ambiguous signal.
-    UNKNOWN — openclaw.json present but unparseable/unreadable.
-    PASS    — hooks.mappings has no messageTemplate/textTemplate, or none match.
+    FAIL    - a template string matches a high-confidence override/install directive.
+    WARN    - a template string matches a weaker/ambiguous signal.
+    UNKNOWN - openclaw.json present but unparseable/unreadable.
+    PASS    - hooks.mappings has no messageTemplate/textTemplate, or none match.
     """
     unreadable = _config_unreadable("B169", ctx)
     if unreadable is not None:
         return unreadable
-    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # B-661: `_config_unreadable` only covers "present but unparseable" - on a host
     # with no openclaw.json at all, config_parse_error is False and ctx.config is
     # `{}`, so `dig(cfg, "hooks.mappings")` would silently resolve to None and fall
     # through to the PASS about a config nobody read.
@@ -2565,10 +2565,10 @@ def check_hook_template_content(ctx: Context) -> Finding:
                 # grade-cap on this hook-template surface. A bare secrecy phrase + a bare
                 # _EXFIL_RE keyword ("post") is AMBIGUOUS (a benign relayed digest that
                 # withholds a detail vs a covert-exfil directive), so per project doctrine
-                # (§5 — ambiguous suppression → WARN, not FAIL) it stays WARN unless a B64
+                # (§5 - ambiguous suppression -> WARN, not FAIL) it stays WARN unless a B64
                 # instruction-override, a curl|bash pipe-to-shell install directive, or a
                 # credential-path co-occurs in the same template field. (The former
-                # base64-blob anchor was dropped in Wave-2 round-4 — a blob can't be told
+                # base64-blob anchor was dropped in Wave-2 round-4 - a blob can't be told
                 # apart from a URL/path/hash in short text; see _content.py.)
                 field_has_strong = False
 
@@ -2620,7 +2620,7 @@ def check_hook_template_content(ctx: Context) -> Finding:
             "A hooks.mappings[] messageTemplate/textTemplate carries an embedded "
             "instruction-override or install directive: " + ev_summary + extra,
             "Remove the embedded directive from the template, and treat inbound webhook "
-            "payload fields spliced into the template as untrusted content — never let a "
+            "payload fields spliced into the template as untrusted content \u2014 never let a "
             "hook template carry a live instruction to the agent.",
             fail_ev + warn_ev,
         )
@@ -2646,7 +2646,7 @@ def check_hook_template_content(ctx: Context) -> Finding:
 
 
 def check_hook_transform_modules(ctx: Context) -> Finding:
-    """B380 (C-406) — hooks.mappings[].transform.module: config-loaded code run on
+    """B380 (C-406) - hooks.mappings[].transform.module: config-loaded code run on
     every matching message/event.
 
     A configured hook transform is a relative module path OpenClaw dynamically
@@ -2681,18 +2681,18 @@ def check_hook_transform_modules(ctx: Context) -> Finding:
     an arbitrary path). So there is no `../`-escape or arbitrary-absolute-path vector
     to FAIL on -- this is disclosure only, the same advisory shape as B150/B171/B341.
 
-    WARN    — a transform module is configured AND the resolved transforms directory
+    WARN    - a transform module is configured AND the resolved transforms directory
               is group- or world-writable (`_dir_replaceable_by_others`) -- another
               local account could plant or replace a transform module that then runs
               on the next matching message, unrelated to the confinement above (which
               only bounds WHERE the path resolves, not WHO can write there).
-    WARN    — a transform module is configured but the directory is not writable by
+    WARN    - a transform module is configured but the directory is not writable by
               others (or its permissions could not be determined) -- still disclosed,
               since this is config-loaded local code executing on live messages
               regardless of directory permissions; MEDIUM only escalates when the
               writability exposure is also present.
-    UNKNOWN — openclaw.json present but unparseable/unreadable, or not read at all.
-    PASS    — no hooks.mappings[] declares a transform.module.
+    UNKNOWN - openclaw.json present but unparseable/unreadable, or not read at all.
+    PASS    - no hooks.mappings[] declares a transform.module.
     """
     unreadable = _config_unreadable("B380", ctx)
     if unreadable is not None:
@@ -2769,9 +2769,9 @@ def check_hook_transform_modules(ctx: Context) -> Finding:
         return _finding(
             "B380",
             WARN,
-            f"{len(modules)} hooks.mappings[] transform.module(s) configured — "
+            f"{len(modules)} hooks.mappings[] transform.module(s) configured \u2014 "
             "config-loaded local code that runs on every matching message/event, "
-            f"before the agent sees it — and the resolved transforms directory "
+            f"before the agent sees it \u2014 and the resolved transforms directory "
             f"({transforms_dir}) is {why}, so another local account could plant or "
             "replace a transform module: " + label + extra,
             "Restrict the transforms directory to owner-only (chmod 700), or move "
@@ -2783,7 +2783,7 @@ def check_hook_transform_modules(ctx: Context) -> Finding:
     return _finding(
         "B380",
         WARN,
-        f"{len(modules)} hooks.mappings[] transform.module(s) configured — "
+        f"{len(modules)} hooks.mappings[] transform.module(s) configured \u2014 "
         "config-loaded local code that runs on every matching message/event, "
         "before the agent sees it: " + label + extra,
         "Review each transform module's source. The module path is confined to "
@@ -2800,23 +2800,23 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
 
     Grounded against the installed dist (2026.7.1): the native audit's own inventory
     line labels its `hooks.enabled` reading "hooks.webhooks" for display purposes only
-    (`audit.nondeep.runtime-C3y1Q5Fi.js:205-212` — `webhooksEnabled = cfg.hooks?.enabled
+    (`audit.nondeep.runtime-C3y1Q5Fi.js:205-212` - `webhooksEnabled = cfg.hooks?.enabled
     === true`); there is no separate `hooks.webhooks` config key in
     `schema-DRyO1XBt.js`. The real internal-hooks surface is `hooks.internal.enabled`,
     `.entries`, `.installs`, and `.load.extraDirs` (`schema-DRyO1XBt.js:1063-1068`,
     mirrored by `hasConfiguredInternalHooks()` in `configured-pV8SaeM2.js:20-28`). Before
     this check, clawseccheck had zero references to any of these five fields (B169 only
-    content-scans `hooks.mappings[].messageTemplate`/`textTemplate` — the template TEXT,
+    content-scans `hooks.mappings[].messageTemplate`/`textTemplate` - the template TEXT,
     not these enable-toggles).
 
     `hooks.internal.load.extraDirs` gets the sharpest wording: it names extra
-    directories OpenClaw searches for internal hook MODULES at startup — a startup
+    directories OpenClaw searches for internal hook MODULES at startup - a startup
     arbitrary-module-load / persistence surface, not merely an enable flag.
 
     B-288 widened the inventory from the ENABLE toggles to the root-`hooks`
-    SESSION-KEY / AGENT-ROUTING policy family — `hooks.defaultSessionKey`,
+    SESSION-KEY / AGENT-ROUTING policy family - `hooks.defaultSessionKey`,
     `hooks.allowRequestSessionKey`, `hooks.allowedSessionKeyPrefixes`,
-    `hooks.allowedAgentIds` — which nothing in the package read before (grep: 0 hits
+    `hooks.allowedAgentIds` - which nothing in the package read before (grep: 0 hits
     each). See `_hooks_session_key_exposures` in `checks/_shared.py` for the dist
     grounding. Those lines are evidence only: they can never change this check's
     status, because they are gated on the same `hooks.enabled is True` that has
@@ -2825,21 +2825,21 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     HONEST SCOPE. This covers the ROOT `hooks` object only. The plugin-scoped
     `plugins.entries.*.hooks.allowPromptInjection` / `.allowConversationAccess`
     (zod-schema-O9ml_nmo.js:789-795) are a DIFFERENT surface at a different path and
-    remain uncovered — a separate task. Standalone this check also stays advisory: the
+    remain uncovered - a separate task. Standalone this check also stays advisory: the
     escalation to a scored, FAIL-capable verdict happens only in RISK-20, which joins
     this posture with remote gateway exposure.
 
-    WARN    — any of hooks.enabled, hooks.internal.enabled, an enabled
+    WARN    - any of hooks.enabled, hooks.internal.enabled, an enabled
               hooks.internal.entries[] item, a hooks.internal.installs[] record, or a
               non-blank hooks.internal.load.extraDirs entry is configured (see evidence).
-    UNKNOWN — openclaw.json present but unparseable/unreadable.
-    PASS    — none of the above is configured (the common case — the real fleet config
+    UNKNOWN - openclaw.json present but unparseable/unreadable.
+    PASS    - none of the above is configured (the common case - the real fleet config
               has no `hooks` key at all).
     """
     unreadable = _config_unreadable("B179", ctx)
     if unreadable is not None:
         return unreadable
-    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # B-661: `_config_unreadable` only covers "present but unparseable" - on a host
     # with no openclaw.json at all, config_parse_error is False and ctx.config is
     # `{}`, so every hooks.* dig() below would silently degrade to "absent" and fall
     # through to the PASS about a config nobody read.
@@ -2858,14 +2858,14 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
 
     if dig(cfg, "hooks.enabled") is True:
         evidence.append(
-            "hooks.enabled — inbound webhook hooks endpoint + mapping execution "
+            "hooks.enabled \u2014 inbound webhook hooks endpoint + mapping execution "
             "pipeline enabled"
         )
 
     internal_enabled = dig(cfg, "hooks.internal.enabled")
     if internal_enabled is True:
         evidence.append(
-            "hooks.internal.enabled — internal hook runtime enabled (all configured "
+            "hooks.internal.enabled \u2014 internal hook runtime enabled (all configured "
             "internal hooks may load)"
         )
 
@@ -2887,19 +2887,19 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
                 shown = ", ".join(enabled_names[:6])
                 more = f" (+{len(enabled_names) - 6} more)" if len(enabled_names) > 6 else ""
                 plural = "y" if len(enabled_names) == 1 else "ies"
-                evidence.append(f"hooks.internal.entries — enabled entr{plural}: {shown}{more}")
+                evidence.append(f"hooks.internal.entries \u2014 enabled entr{plural}: {shown}{more}")
 
         # F-183: `hooks.internal.installs` moved into OpenClaw's machine-owned state store
         # in 2026.8.1, so the config read alone stops seeing registered internal hooks on a
         # current build. Both are consulted; the state wins where present. Only the COUNT
-        # reaches the evidence line — the record's contents are never echoed (§8).
+        # reaches the evidence line - the record's contents are never echoed (§8).
         installs = (getattr(ctx, "config_machine_state", None) or {}).get(
             "hooks.internal.installs")
         if not isinstance(installs, dict) or not installs:
             installs = dig(cfg, "hooks.internal.installs")
         if isinstance(installs, dict) and installs:
             evidence.append(
-                f"hooks.internal.installs — {len(installs)} internal hook install(s) registered"
+                f"hooks.internal.installs \u2014 {len(installs)} internal hook install(s) registered"
             )
 
         extra_dirs = dig(cfg, "hooks.internal.load.extraDirs")
@@ -2911,20 +2911,20 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
                 more = f" (+{len(named) - 6} more)" if len(named) > 6 else ""
                 plural = "y" if len(named) == 1 else "ies"
                 evidence.append(
-                    "hooks.internal.load.extraDirs — additional startup module-load "
+                    "hooks.internal.load.extraDirs \u2014 additional startup module-load "
                     f"director{plural} searched for internal hooks: {shown}{more}"
                 )
 
     # B-288: the SESSION-KEY / AGENT-ROUTING policy siblings under the same root
     # `hooks` object (defaultSessionKey, allowRequestSessionKey,
     # allowedSessionKeyPrefixes, allowedAgentIds). Deliberately OUTSIDE the
-    # `internal_enabled is not False` block above — these govern the inbound webhook
+    # `internal_enabled is not False` block above - these govern the inbound webhook
     # endpoint, not internal-hook module loading, so an explicitly disabled
     # hooks.internal must not hide them.
     #
     # This cannot change B179's STATUS, only enrich its evidence:
     # _hooks_session_key_exposures returns [] unless `hooks.enabled is True`, and that
-    # same condition has already appended the "hooks.enabled" evidence line above — so
+    # same condition has already appended the "hooks.enabled" evidence line above - so
     # every config these lines can reach was WARN before this change too. That is what
     # makes the extension free of any new false-positive surface, and it is pinned by
     # tests/test_b288_hooks_session_key.py::test_b179_status_never_changes_*.
@@ -2939,7 +2939,7 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
             "flag, an enabled entry, an install record, or load.extraDirs) is "
             "configured.",
             "No action needed. If hooks are enabled later, review "
-            "hooks.internal.load.extraDirs closely — OpenClaw loads and executes any "
+            "hooks.internal.load.extraDirs closely \u2014 OpenClaw loads and executes any "
             "internal hook module it discovers in those directories at startup.",
             pass_confidence="verified",
         )
@@ -2948,7 +2948,7 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     if extra_dirs_hit:
         detail = (
             "hooks.internal.load.extraDirs configures additional startup module-load "
-            "directories for internal hooks — a code-exec/persistence surface: "
+            "directories for internal hooks \u2014 a code-exec/persistence surface: "
             + ev_summary
         )
         fix = (
@@ -2962,7 +2962,7 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
             "Inbound webhook hooks and/or internal hook loading is enabled: " + ev_summary
         )
         fix = (
-            "This is a visibility inventory, not a misconfiguration finding — "
+            "This is a visibility inventory, not a misconfiguration finding \u2014 "
             "hooks.enabled and hooks.internal are legitimate automation features. "
             "Confirm the enabled surface is intentional; hooks.token (B1), "
             "hooks.mappings[].allowUnsafeExternalContent (B48), and hook-template "
@@ -2985,7 +2985,7 @@ def check_gateway(ctx: Context) -> Finding:
     bind = parse_bind_host(dig(cfg, "gateway.bind", ""))
     auth = dig(cfg, "gateway.auth.mode")
     if bind and bind not in LOOPBACK and auth in (None, "none"):
-        # B-290 (ENV-4): `auth is None` — i.e. gateway.auth.mode absent or null — is
+        # B-290 (ENV-4): `auth is None` - i.e. gateway.auth.mode absent or null - is
         # EXACTLY the condition under which resolveGatewayAuth derives the mode from an
         # env-resolved credential instead (auth-resolve-NyPBrh8F.js:34-42, `else if
         # (authConfig.mode)`). So when a persistent artifact carries
@@ -2998,7 +2998,7 @@ def check_gateway(ctx: Context) -> Finding:
         # An explicit mode=none is a decision, not an omission.
         #
         # B-312: a config-supplied `gateway.auth.token` with no `auth.mode` is the SAME
-        # shape as the env case above — resolveGatewayAuth derives mode="token" from the
+        # shape as the env case above - resolveGatewayAuth derives mode="token" from the
         # credential itself when authConfig.mode is falsy (auth-resolve-NyPBrh8F.js:34-42),
         # and the credential is read config-FIRST (:23-24). So when a config token exists,
         # it is what OpenClaw actually authenticates with, and the env variables below are
@@ -3011,7 +3011,7 @@ def check_gateway(ctx: Context) -> Finding:
         )
         # C-135 (independent adversarial pass on B-290): presence alone is NOT enough to
         # clear this FAIL, and softening on truthiness made the scanner lie. The bind guard
-        # that justifies the softening at all — server-runtime-config-r5ejxORO.js:66,78 —
+        # that justifies the softening at all - server-runtime-config-r5ejxORO.js:66,78 -
         # tests `hasSharedSecret`, which is satisfied by a ONE-CHARACTER token: mode derives
         # to "token", the throw does not fire, and the gateway binds to 0.0.0.0 and listens.
         # `assertGatewayAuthConfigured` (auth-B27MflKU.js:183-197) rejects only a MISSING
@@ -3020,21 +3020,21 @@ def check_gateway(ctx: Context) -> Finding:
         # credential-WEAK case, which is a live, world-reachable gateway one guess deep.
         #
         # The bar is the one this very check already applies to a config token below
-        # (`0 < len(token) < 24`) — identical posture must not get opposite verdicts
+        # (`0 < len(token) < 24`) - identical posture must not get opposite verdicts
         # depending on where the credential is stored. It also realigns us with OpenClaw's
         # own audit, which fires `gateway.token_too_short` on exactly this input
-        # (audit-UjVvFwCi.js:239, `auth.mode === "token" && token.length < 24`) — being
+        # (audit-UjVvFwCi.js:239, `auth.mode === "token" && token.length < 24`) - being
         # weaker than the vendor's audit on a CRITICAL check is not a defensible position.
         #
         # Only the LENGTH of the credential is read. The value never reaches evidence, a
         # message, a fix string, or a log (§8). The same bar applies to the config-token
-        # leg (B-312) for the identical reason — a sub-24-char config token binds and
+        # leg (B-312) for the identical reason - a sub-24-char config token binds and
         # listens exactly like a sub-24-char env token.
         _env_cred_strong = _env_cred is not None and len(_env_cred.strip()) >= 24
         if _cfg_token is not None and _cfg_token_strong:
             soft_ev.append(
                 f"gateway.bind={bind} is non-loopback and the config sets no "
-                f"gateway.auth.mode, but gateway.auth.token is set — OpenClaw derives "
+                f"gateway.auth.mode, but gateway.auth.token is set \u2014 OpenClaw derives "
                 "auth.mode from it, so the gateway is authenticated. Reported as "
                 "disclosure, not exposure"
             )
@@ -3046,7 +3046,7 @@ def check_gateway(ctx: Context) -> Finding:
         elif _cfg_token is not None:
             ev.append(
                 f"gateway.bind={bind} is non-loopback and the only gateway credential is "
-                "a config-supplied gateway.auth.token shorter than 24 chars — OpenClaw "
+                "a config-supplied gateway.auth.token shorter than 24 chars \u2014 OpenClaw "
                 "binds and listens on it, so the gateway is world-reachable behind a "
                 "guessable secret"
             )
@@ -3058,7 +3058,7 @@ def check_gateway(ctx: Context) -> Finding:
             soft_ev.append(
                 f"gateway.bind={bind} is non-loopback and the config sets no "
                 f"gateway.auth.mode, but a gateway credential is supplied by the "
-                f"environment ({_env_cred_src}) — OpenClaw derives auth.mode from it, so "
+                f"environment ({_env_cred_src}) \u2014 OpenClaw derives auth.mode from it, so "
                 "the gateway is authenticated. Reported as disclosure, not exposure"
             )
             fixes.append(
@@ -3069,7 +3069,7 @@ def check_gateway(ctx: Context) -> Finding:
         elif _env_cred is not None:
             ev.append(
                 f"gateway.bind={bind} is non-loopback and the only gateway credential is "
-                f"an environment-supplied secret shorter than 24 chars ({_env_cred_src}) — "
+                f"an environment-supplied secret shorter than 24 chars ({_env_cred_src}) \u2014 "
                 "OpenClaw binds and listens on it, so the gateway is world-reachable "
                 "behind a guessable secret"
             )
@@ -3085,7 +3085,7 @@ def check_gateway(ctx: Context) -> Finding:
             )
     # gateway.http.no_auth does NOT exist in OpenClaw schema (auth is enforced by default)
     # C-471: `gateway.controlUi.allowInsecureAuth` was REMOVED in OpenClaw 2026.8.1, and
-    # the removal is fail-SAFE — unusual enough to state, because the usual shape is the
+    # the removal is fail-SAFE - unusual enough to state, because the usual shape is the
     # opposite. The escape hatch went from the config AND from the runtime:
     # `evaluateMissingDeviceIdentity` (`message-handler-*.js`) now reads
     #
@@ -3095,22 +3095,22 @@ def check_gateway(ctx: Context) -> Finding:
     # only in `legacy-*.js`, the retired-path list, while on 2026.7.1-2 it is read by
     # `audit-*.js`, `dangerous-config-flags-current-*.js` and `gateway-chat-*.js`.
     #
-    # So the leg STAYS — a 2026.7.x fleet still has the weakened state — but on a build we
+    # So the leg STAYS - a 2026.7.x fleet still has the weakened state - but on a build we
     # can see is newer, a key left on disk after an upgrade is INERT, and reporting it as
     # an exposure would describe a state the runtime cannot be in. Same treatment as every
     # other stale key in this upgrade: the fact is reported, the verdict is not driven by
-    # it. NOT remapped to `dangerouslyDisableDeviceAuth` — that key coexisted with this one
+    # it. NOT remapped to `dangerouslyDisableDeviceAuth` - that key coexisted with this one
     # in 2026.7.1-2 (our own snapshot), so it is disqualified as a rename target.
     retired_insecure_auth = ""
     if dig(cfg, "gateway.controlUi.allowInsecureAuth"):
         if _openclaw_generation(ctx) == "modern":
             # Held back rather than appended here. B2's WARN is SCORED at CRITICAL, so a
             # note that lands in `soft_ev` on its own manufactures a scored critical
-            # warning about a key that grants nothing — costing the user grade for a dead
+            # warning about a key that grants nothing - costing the user grade for a dead
             # line. It rides along only where a real finding already exists (below).
             retired_insecure_auth = (
                 "gateway.controlUi.allowInsecureAuth is set but OpenClaw 2026.8.1 removed "
-                "it — the Control-UI now requires device identity unconditionally, so this "
+                "it \u2014 the Control-UI now requires device identity unconditionally, so this "
                 "line grants nothing. Delete it (`openclaw doctor --fix` does)."
             )
         else:
@@ -3129,12 +3129,12 @@ def check_gateway(ctx: Context) -> Finding:
         fixes.append("Use a gateway auth token of at least 24 characters")
     # B-233: trusted-proxy auth is only as strong as the identity header it trusts. On a
     # non-loopback bind, without requiredHeaders/allowUsers genuinely constraining that
-    # header, any direct network caller can self-declare identity — a spoofable full
+    # header, any direct network caller can self-declare identity - a spoofable full
     # auth bypass, not "authenticated". BUT (grounded: dist auth-B27MflKU.js
     # authorizeTrustedProxy / authorizeGatewayConnectCore, gated by
     # net-*.js isTrustedProxyAddress) OpenClaw itself rejects the connection before ever
     # reading the identity header when the caller's SOURCE IP is not in a configured
-    # gateway.trustedProxies allow-list — so a genuine (non-wildcard) trustedProxies
+    # gateway.trustedProxies allow-list - so a genuine (non-wildcard) trustedProxies
     # list is an equally valid identity constraint; only the total absence of ALL THREE
     # (requiredHeaders, allowUsers, trustedProxies) is the real spoof surface.
     if (
@@ -3148,7 +3148,7 @@ def check_gateway(ctx: Context) -> Finding:
         user_header = dig(cfg, "gateway.auth.trustedProxy.userHeader") or "x-forwarded-user"
         ev.append(
             f"gateway.auth.mode=trusted-proxy on non-loopback bind={bind} with no "
-            f"requiredHeaders/allowUsers/trustedProxies configured — the {user_header!r} "
+            f"requiredHeaders/allowUsers/trustedProxies configured \u2014 the {user_header!r} "
             "identity header is attacker-spoofable"
         )
         fixes.append(
@@ -3166,7 +3166,7 @@ def check_gateway(ctx: Context) -> Finding:
         _insecure_auth_only = ev == ["gateway.controlUi.allowInsecureAuth enabled"]
         sev = WARN if _insecure_auth_only else FAIL
         # soft_ev rides along in the detail so the report still says WHY the exposed bind
-        # was not counted, but it can never raise the status — every escalation still
+        # was not counted, but it can never raise the status - every escalation still
         # comes from `ev`.
         return _finding("B2", sev, "; ".join(ev + soft_ev), "; ".join(fixes), ev + soft_ev)
     if soft_ev:
@@ -3175,7 +3175,7 @@ def check_gateway(ctx: Context) -> Finding:
         return _finding(
             "B2",
             UNKNOWN,
-            "No config loaded — cannot assess gateway.",
+            "No config loaded \u2014 cannot assess gateway.",
             "Run on the host with ~/.openclaw present.",
             # B-362: sets not_applicable only when the config locus was read COMPLETELY
             # and cfg is still empty. Every condition this check grades (bind, auth mode,
@@ -3191,8 +3191,8 @@ def check_gateway(ctx: Context) -> Finding:
     # C-182: `if not cfg:` above only catches a WHOLE-CONFIG-empty state. A
     # present-but-malformed `gateway` value (e.g. `"gateway": null`, a list, a
     # number) makes every dig(cfg, "gateway...") lookup degrade to its default
-    # ("absent") without raising — indistinguishable from "gateway key simply
-    # not present" — and falls through to a confident PASS below. A field that
+    # ("absent") without raising - indistinguishable from "gateway key simply
+    # not present" - and falls through to a confident PASS below. A field that
     # genuinely can't be assessed must read UNKNOWN, not a fabricated PASS.
     # B-362: this malformed-value branch stays a REAL UNKNOWN (never not_applicable)
     # -- a present-but-corrupt `gateway` value is not "no such surface", it is "we
@@ -3204,10 +3204,10 @@ def check_gateway(ctx: Context) -> Finding:
         return _finding(
             "B2",
             UNKNOWN,
-            "gateway config value is present but malformed (not an object) — cannot assess.",
+            "gateway config value is present but malformed (not an object) \u2014 cannot assess.",
             "Fix `gateway` to be a config object, or remove the key.",
         )
-    # B-233: this PASS is reached only when none of the ev-conditions above fired — i.e.
+    # B-233: this PASS is reached only when none of the ev-conditions above fired - i.e.
     # either the bind is loopback, or the bind is exposed but auth genuinely covers it
     # (token/password/trusted-proxy with identity constraints). Never claim "loopback"
     # for a bind that plainly isn't.
@@ -3228,50 +3228,50 @@ def check_gateway(ctx: Context) -> Finding:
 
 
 def check_gateway_rate_limit(ctx: Context) -> Finding:
-    """B80 — gateway auth without rate limiting on a non-loopback bind.
+    """B80 - gateway auth without rate limiting on a non-loopback bind.
 
     Grounded (recon: gateway.auth.rateLimit). A token/password-authenticated gateway
     reachable beyond loopback with no rate limiting lets an attacker brute-force the
     credential.
 
-    PASS    — auth is not token/password (explicit config, AND, when config sets no
+    PASS    - auth is not token/password (explicit config, AND, when config sets no
               explicit auth.mode, config-token- AND environment-derived), OR the bind
               is loopback, OR gateway.auth.rateLimit is configured.
-    WARN    — token/password auth (explicit-config-, config-token-, or
+    WARN    - token/password auth (explicit-config-, config-token-, or
               environment-derived) AND non-loopback bind AND no gateway.auth.rateLimit.
-    UNKNOWN — config sets no explicit auth.mode, no config-supplied token authenticates
+    UNKNOWN - config sets no explicit auth.mode, no config-supplied token authenticates
               either, and no persistent artifact (systemd unit or global dotenv) was
               readable to check for an environment-supplied credential, on a
-              non-loopback bind — cannot tell whether the gateway is genuinely
+              non-loopback bind - cannot tell whether the gateway is genuinely
               unauthenticated or env-authenticated, so this must not default to a
               fabricated PASS. Also UNKNOWN, ``engine_degraded=True``
               (B-657), when a persistent artifact WAS read but the
               collector's byte cap truncated it (``limit_hits_for(ctx,
-              LIMIT_DOMAIN_ENV)``) — an env-supplied credential could sit past the cut,
+              LIMIT_DOMAIN_ENV)``) - an env-supplied credential could sit past the cut,
               so "no usable credential" is a claim about text that was never scanned,
               not a verified absence.
 
     B-310: this check used to read ONLY `gateway.auth.mode` from config, so a gateway
     authenticated by an environment-supplied credential (OPENCLAW_GATEWAY_TOKEN/
-    _PASSWORD, resolved the same way B2/B-290 grounds — auth-resolve-NyPBrh8F.js:34-42,
+    _PASSWORD, resolved the same way B2/B-290 grounds - auth-resolve-NyPBrh8F.js:34-42,
     credential read at credentials-DesN22Ui.js:30-42) silently PASSed as "does not rely
-    on a brute-forceable secret" without ever assessing rate limiting — the exact
+    on a brute-forceable secret" without ever assessing rate limiting - the exact
     config-only blindness B-290 fixed for B2.
 
     B-312 gap (round 2, C-135): B-310's fix above stopped at the ENV leg and never
     re-derived `mode` from a config-supplied `gateway.auth.token` / `gateway.token` the
-    way B2's own B-312 fix does — so a config-token-authenticated gateway (auth.mode
+    way B2's own B-312 fix does - so a config-token-authenticated gateway (auth.mode
     absent, token >=24 chars) still fell all the way through to the same "does not rely
     on a brute-forceable secret" PASS as a genuinely unauthenticated one, even though B2
     correctly WARNs that identical config as authenticated-but-disclosed. Closed by
     sharing `_gateway_config_token` with B2 (config-first, mirroring the dist's own
     precedence, auth-resolve-NyPBrh8F.js:23-24) so the two checks cannot independently
-    drift on what "authenticated by config" means — this docstring previously claimed
+    drift on what "authenticated by config" means - this docstring previously claimed
     parity with B2 while that config-token leg was still missing; it is genuine now.
 
     Same >=24-char strength bar as B2 (2a2f8af), for the identical reason:
     `hasSharedSecret` (server-runtime-config-r5ejxORO.js:66,78) accepts ANY non-empty
-    credential, so a sub-bar config OR env value is not genuine auth — it is B2's
+    credential, so a sub-bar config OR env value is not genuine auth - it is B2's
     exposed/guessable-secret FAIL, not this check's "authenticated-but-unthrottled"
     concern, and is treated the same as no credential at all here. Only the
     credential's LENGTH is read; the value never reaches evidence, detail, fix, or a
@@ -3280,7 +3280,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B80", ctx)
     if unreadable is not None:
         return unreadable
-    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # B-661: `_config_unreadable` only covers "present but unparseable" - on a host
     # with no openclaw.json at all, config_parse_error is False and ctx.config is
     # `{}`, so `dig(cfg, "gateway.bind", "")`'s `""` default lands in LOOPBACK below
     # and an unread config would be reported as a PROVEN loopback bind.
@@ -3297,7 +3297,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
     bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
     # Loopback is checked before mode/credential resolution: a loopback bind is not
     # exposed to remote brute-force regardless of auth mode, so it must never need an
-    # env-credential read to resolve — that would manufacture a spurious UNKNOWN on the
+    # env-credential read to resolve - that would manufacture a spurious UNKNOWN on the
     # common, already-safe case.
     if bind_host in LOOPBACK:
         return _finding(
@@ -3311,7 +3311,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
     cred_src = None
     if mode is None:
         # B-312 parity: config wins over environment (config-first, identical to B2)
-        # — a config-supplied token is only ever superseded by looking at the
+        # - a config-supplied token is only ever superseded by looking at the
         # environment when NO config token exists at all.
         _cfg_token, _cfg_token_strong = _gateway_config_token(cfg, mode)
         if _cfg_token is not None and _cfg_token_strong:
@@ -3327,14 +3327,14 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
                 # (ctx.dotenv_found/unit_env_found are set before the byte-cap check
                 # fires), so env_evidence_readable(ctx) is already True here and the
                 # "not readable at all" branch below can never catch this case. A
-                # credential past the cut is present-but-unread, not genuinely absent —
+                # credential past the cut is present-but-unread, not genuinely absent -
                 # same DEGRADED_CHECK_CAP consequence as the B6/B172 fix (f748869).
                 return _finding(
                     "B80",
                     UNKNOWN,
                     "gateway.auth.mode is not set in config, the bind is non-loopback, and no "
                     "usable environment-supplied gateway credential was found in the systemd "
-                    "unit(s) or global dotenv file(s) that were read — but at least one of "
+                    "unit(s) or global dotenv file(s) that were read \u2014 but at least one of "
                     "them exceeded the collector's byte cap, so a credential past the cut "
                     "would not have been seen. Cannot determine whether the auth endpoint is "
                     "brute-forceable.",
@@ -3350,7 +3350,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
                     UNKNOWN,
                     "gateway.auth.mode is not set in config, the bind is non-loopback, and no "
                     "systemd user unit or global dotenv file was readable to check for an "
-                    "environment-supplied gateway credential — cannot determine whether the "
+                    "environment-supplied gateway credential \u2014 cannot determine whether the "
                     "auth endpoint is brute-forceable.",
                     "Run the audit where it can read the OpenClaw systemd user unit and "
                     "global dotenv files, or set gateway.auth.mode explicitly.",
@@ -3361,7 +3361,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             # falls through to the ordinary "not token/password" PASS below, exactly as
             # before B-310 for a truly-unauthenticated gateway.
         # else: a config token IS present but below the 24-char bar. B2 already FAILs
-        # this as an exposed/guessable-secret gateway (config-first — the environment is
+        # this as an exposed/guessable-secret gateway (config-first - the environment is
         # never consulted, matching B2/B-312 exactly); it is not this check's
         # "authenticated-but-unthrottled" concern, so it is treated the same as no
         # credential at all here (mirrors the weak-env-credential leg above). mode stays
@@ -3397,7 +3397,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
         "B80",
         WARN,
         "Gateway uses token/password auth on a non-loopback bind but has no "
-        "gateway.auth.rateLimit — the auth endpoint can be brute-forced.",
+        "gateway.auth.rateLimit \u2014 the auth endpoint can be brute-forced.",
         "Configure gateway.auth.rateLimit (max attempts / window) to throttle credential "
         "guessing, or bind the gateway to loopback.",
         evidence=evidence,
@@ -3431,17 +3431,17 @@ def check_least_privilege(ctx: Context) -> Finding:
         # Legacy / hypothetical flat wildcard
         hard.append("tools.elevated.allowFrom = '*' (every sender can use elevated tools)")
     elif isinstance(allow, list) and "*" in allow:
-        hard.append("tools.elevated.allowFrom contains '*' (flat list form — every sender)")
+        hard.append("tools.elevated.allowFrom contains '*' (flat list form \u2014 every sender)")
     elif isinstance(allow, list) and len(allow) > 25:
         hard.append(f"tools.elevated.allowFrom has {len(allow)} entries (too broad)")
     profile = str(dig(cfg, "tools.profile", "")).lower()
     if profile and profile != "minimal":
-        # a broader profile (e.g. "coding") is a least-privilege preference, not a hole —
+        # a broader profile (e.g. "coding") is a least-privilege preference, not a hole -
         # WARN, never a hard FAIL (the native audit does not fail it either).
         soft.append(f"tools.profile='{dig(cfg, 'tools.profile')}' is broader than minimal")
     if dig(cfg, "plugins.allow") is None and _plugins(cfg):
         soft.append("no plugins.allow reachability allowlist (plugins.entries present)")
-    # plugins.tools_reachable_policy does NOT exist in OpenClaw schema — removed
+    # plugins.tools_reachable_policy does NOT exist in OpenClaw schema - removed
     fixes = []
     if hard:
         fixes.append("Restrict tools.elevated.allowFrom to specific provider/sender IDs (no '*')")
@@ -3456,7 +3456,7 @@ def check_least_privilege(ctx: Context) -> Finding:
         return _finding("B3", WARN, "; ".join(soft), "; ".join(fixes), soft)
     # B-065: hedge to UNKNOWN when the privilege surface is ENTIRELY undeclared,
     # mirroring A1's _meaningful_tool_surface thin-surface guard (B-033 gold standard).
-    # NARROW gate: only when EVERY privilege signal is absent — no elevated grant, no
+    # NARROW gate: only when EVERY privilege signal is absent - no elevated grant, no
     # tool profile, no plugins, no RECOGNIZED tool surface, and no --attest roster. A
     # declared-but-clean surface (small allowFrom, minimal profile, allow-listed plugins,
     # a recognized tools.allow entry) still PASSes. _capabilities_attested is redundant
@@ -3464,7 +3464,7 @@ def check_least_privilege(ctx: Context) -> Finding:
     #
     # C-135 (independent, post-commit, B-803 sibling gap): the original gate let
     # `_capabilities_attested(ctx)` alone clear `surface_undeclared` to False even on
-    # a config-blind run (no openclaw.json read at all) — an --attest roster then
+    # a config-blind run (no openclaw.json read at all) - an --attest roster then
     # walked this straight through to the unconditional PASS below, a confident
     # "no over-broad elevated-tool grant... in config" claim over a config that was
     # never read. Reproduced directly: config_found=False + a real --attest roster ->
@@ -3483,7 +3483,7 @@ def check_least_privilege(ctx: Context) -> Finding:
     if surface_undeclared:
         detail = (
             "Least-privilege posture cannot be determined: no OpenClaw config was found "
-            "to read at all — an attestation only speaks to the agent's own declared "
+            "to read at all \u2014 an attestation only speaks to the agent's own declared "
             "tools, not the rest of the config surface (tools.profile, plugins, "
             "elevated-tool allowlists) a config-blind run never read."
             if config_blind else
@@ -3507,7 +3507,7 @@ def check_least_privilege(ctx: Context) -> Finding:
         )
     # B-042: PASS verifies a CONFIG-level least-privilege posture only (no over-broad
     # elevated grant, no profile/plugin escalation). It must NOT claim runtime "tool
-    # reachability is constrained" — runtime-granted tools (message/exec_command/web_*)
+    # reachability is constrained" - runtime-granted tools (message/exec_command/web_*)
     # are not in openclaw.json.
     return _finding(
         "B3",
@@ -3521,7 +3521,7 @@ def check_least_privilege(ctx: Context) -> Finding:
 def check_local_first(ctx: Context) -> Finding:
     names = _model_names(ctx.config)
     if not names:
-        return _finding("B12", UNKNOWN, "No model config found.", "—")
+        return _finding("B12", UNKNOWN, "No model config found.", "\u2014")
     cloud = [n for n in names if any(c in n.lower() for c in CLOUD_PROVIDERS)]
     if cloud:
         return _finding(
@@ -3529,13 +3529,13 @@ def check_local_first(ctx: Context) -> Finding:
             WARN,
             f"Cloud model(s) in use: {', '.join(sorted(set(cloud)))}.",
             "For maximum privacy prefer a local model; if cloud is required, ensure no "
-            "sensitive data is sent to it. (Informational — low severity.)",
+            "sensitive data is sent to it. (Informational \u2014 low severity.)",
         )
     return _finding("B12", PASS, "Models are local-first.", "Keep data local where possible.")
 
 
 def check_proxy_header_forging(ctx: Context) -> Finding:
-    """C032 — advisory UNKNOWN when real-IP fallback lacks trusted proxy allow-list.
+    """C032 - advisory UNKNOWN when real-IP fallback lacks trusted proxy allow-list.
 
     If ``gateway.allowRealIpFallback`` is enabled, OpenClaw will parse forwarded
     client-address headers. Without an explicit proxy allow-list, that logic can be
@@ -3547,7 +3547,7 @@ def check_proxy_header_forging(ctx: Context) -> Finding:
     unreadable = _config_unreadable("C032", ctx)
     if unreadable is not None:
         return unreadable
-    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # B-661: `_config_unreadable` only covers "present but unparseable" - on a host
     # with no openclaw.json at all, config_parse_error is False and ctx.config is
     # `{}`, so `dig(ctx.config, "gateway.allowRealIpFallback")` would silently
     # resolve to None and fall through to the PASS about a config nobody read.
@@ -3609,7 +3609,7 @@ def check_sandbox(ctx: Context) -> Finding:
     # this function's own isinstance chain. NOT `dig(cfg, "agents.defaults.sandbox")`:
     # that is a bare NON-LEAF object read, which test_schema_grounding.py's manifest
     # guard cannot verify by construction (same reasoning `_peragent_sandbox_evidence`
-    # already documents for the identical problem) — plain dict traversal instead.
+    # already documents for the identical problem) - plain dict traversal instead.
     #
     # C-135 (independent, post-commit): reproduced a real regression here directly
     # against bf31513^ -- the pre-extraction code was `dig(cfg, "...binds")` gated on
@@ -3626,7 +3626,7 @@ def check_sandbox(ctx: Context) -> Finding:
     if binds is None:
         ev.append(
             "agents.defaults.sandbox.docker.binds is present but not a recognizable "
-            "shape (expected a bind-spec string or a list of them) — cannot rule out "
+            "shape (expected a bind-spec string or a list of them) \u2014 cannot rule out "
             "a host-path bind"
         )
     elif binds:
@@ -3634,7 +3634,7 @@ def check_sandbox(ctx: Context) -> Finding:
         # docker.sock bind hands full host control to the sandbox (container escape vector)
         if _bind_mentions_docker_sock(binds):
             ev.append(
-                "agents.defaults.sandbox.docker.binds mounts docker.sock — "
+                "agents.defaults.sandbox.docker.binds mounts docker.sock \u2014 "
                 "grants host control to the sandbox (container escape)"
             )
     # Real path: agents.defaults.sandbox.workspaceAccess ("none"/"ro"/"rw")
@@ -3643,7 +3643,7 @@ def check_sandbox(ctx: Context) -> Finding:
         ev.append(
             "agents.defaults.sandbox.workspaceAccess=rw (agent can write the mounted workspace)"
         )
-    # Per-agent sandbox overrides are explicit, unambiguous misconfig — a named agent can
+    # Per-agent sandbox overrides are explicit, unambiguous misconfig - a named agent can
     # re-expose the host even when agents.defaults.sandbox is safe (C-058). Report it as a
     # definite FAIL ahead of the defaults-only WARN/UNKNOWN/phantom branches.
     agent_ev = _peragent_sandbox_evidence(cfg)
@@ -3652,14 +3652,14 @@ def check_sandbox(ctx: Context) -> Finding:
             "B4",
             FAIL,
             "one or more named agents override agents.defaults.sandbox with unsafe "
-            "settings (see evidence) — a per-agent override can re-expose the host even "
+            "settings (see evidence) \u2014 a per-agent override can re-expose the host even "
             "when the defaults are safe.",
             # B-699: no container key is named here on purpose. The evidence identifies
             # each offending agent by id ("agent 'w': sandbox.mode=off"), which is true in
             # either roster shape, while `agents.list[]` is true in only one -- 2026.8.1
             # rejects that key, and a user on an older build has no `agents.entries`.
             # Naming one of them would point half the fleet at a key their file lacks.
-            # B-738: 'non-main' dropped from the offer — it leaves each agent's own main
+            # B-738: 'non-main' dropped from the offer - it leaves each agent's own main
             # session on the host, so it does not remove the override's danger.
             "Remove the unsafe per-agent sandbox overrides named in the evidence "
             "(set sandbox.mode to 'all', sandbox.docker.network to 'bridge', "
@@ -3668,14 +3668,14 @@ def check_sandbox(ctx: Context) -> Finding:
             ev + agent_ev,
         )
     # NOTE: the agents.defaults.sandbox.docker.dangerouslyAllow* break-glass trio is
-    # intentionally NOT checked here — check_dangerous_overrides (B48) already owns the
+    # intentionally NOT checked here - check_dangerous_overrides (B48) already owns the
     # whole "dangerously*" registry (gateway + per-agent), so detecting it here too would
     # double-report the same finding. See the docker/sandbox section of the internal
     # openclaw-schema-recon.md.
     # sandbox.seccomp_profile / sandbox.apparmor_profile do NOT exist as first-class config
     # fields; Docker backend relies on Docker's own profile mechanism
     # A present-but-phantom top-level `sandbox` block (sandbox.mode=... etc.) is NOT a real
-    # OpenClaw key — sandbox config lives under agents.defaults.sandbox. Say so explicitly so
+    # OpenClaw key - sandbox config lives under agents.defaults.sandbox. Say so explicitly so
     # a user who configured the wrong key doesn't think the tool missed it (C-057).
     phantom_sandbox = isinstance(cfg.get("sandbox"), dict)
     _move_fix = (
@@ -3724,7 +3724,7 @@ def check_sandbox(ctx: Context) -> Finding:
         return _finding(
             "B4",
             WARN,
-            "exec tooling present but agents.defaults.sandbox.mode not set — "
+            "exec tooling present but agents.defaults.sandbox.mode not set \u2014 "
             "likely host execution.",
             # B-738: see the structured remediation in catalog.py for the grounding.
             "Set agents.defaults.sandbox.mode to 'all' ('non-main' sandboxes only an "
@@ -3743,14 +3743,14 @@ def check_sandbox(ctx: Context) -> Finding:
                 _move_fix,
                 config_field_paths={"agents.defaults.sandbox.mode"},
             )
-        return _finding("B4", UNKNOWN, "No exec tools and no sandbox config — not applicable.", "—",
+        return _finding("B4", UNKNOWN, "No exec tools and no sandbox config \u2014 not applicable.", "\u2014",
                         config_field_paths={"agents.defaults.sandbox.mode"})
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
 
 
 # ---------- B391: nodeHost.workerRuns isolation disclosure ----------
 # Re-grounded directly against the installed 2026.9.5 dist (the internal recon doc's
-# descriptions map has no `nodeHost.workerRuns` entry at all — same documented gap class
+# descriptions map has no `nodeHost.workerRuns` entry at all - same documented gap class
 # as B390/attachments, CLAUDE.md §4(c)):
 #
 #   dist/schema-CwAIqZVE.mjs:892-896 (vendor descriptions, verbatim):
@@ -3774,39 +3774,39 @@ def check_sandbox(ctx: Context) -> Finding:
 # feature shipped in 2026.8.1; the installed dist here is 2026.9.5): the path, the enum,
 # and both defaults are unchanged. No FAIL-worthy shape turned up (containerImage is a
 # plain trimmed string with no host/registry validation to interrogate, and the
-# schema/defaults are identical to the originally filed gap) — this stays a "report it"
+# schema/defaults are identical to the originally filed gap) - this stays a "report it"
 # reading, not a promotion to a FAIL-capable check.
 #
 # WHY THIS IS A REPORT, NOT A JUDGEMENT (never FAILs, and does not WARN on the default):
 # isolation="none" is OpenClaw's OWN baseline for this setting, not a weakening a user
-# introduced — the security-relevant question ("is this host's agent execution actually
+# introduced - the security-relevant question ("is this host's agent execution actually
 # isolated?") is already asked by check_sandbox (B4) above, over a DIFFERENT config
 # sub-tree (agents.defaults.sandbox.*). What is missing without this check is visibility:
-# nodeHost.workerRuns governs a SEPARATE execution surface — worker sessions a paired
+# nodeHost.workerRuns governs a SEPARATE execution surface - worker sessions a paired
 # Gateway dispatches to run on THIS node, from bundles that Gateway installed, entirely
-# outside agents.defaults.sandbox — so a reader auditing "how isolated is code execution
+# outside agents.defaults.sandbox - so a reader auditing "how isolated is code execution
 # on this host" previously had no line naming it at all. The WARN branch below fires only
 # once the feature is actually opted into (`enabled: true`); it is disclosure of a real,
 # active surface, not a complaint about a default nobody touched.
 def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
-    """B391 — nodeHost.workerRuns execution-isolation disclosure, beside B4 (sandbox).
+    """B391 - nodeHost.workerRuns execution-isolation disclosure, beside B4 (sandbox).
 
-    PASS    — workerRuns is not enabled (absent, or `enabled` anything but `true` —
+    PASS    - workerRuns is not enabled (absent, or `enabled` anything but `true` -
               the vendor default), so no worker session runs on this node at all; or
               workerRuns is enabled with `isolation: "container"` (the vendor's own
               isolated option), disclosing the image in use.
-    WARN    — workerRuns is enabled and `isolation` resolves to anything other than
-              `"container"` (absent, `"none"`, or an unrecognized value — all three
+    WARN    - workerRuns is enabled and `isolation` resolves to anything other than
+              `"container"` (absent, `"none"`, or an unrecognized value - all three
               collapse to the vendor's own host-execution default): worker sessions
               dispatched by a paired Gateway then run directly on this node host, a
               distinct surface from agents.defaults.sandbox.* and not covered by it.
-              Advisory only (CheckMeta.scored=False) — never moves the grade.
-    UNKNOWN — config unreadable/unparseable (engine-side), or no config was read at
-              all (not_applicable in that second case — nothing to disclose about a
+              Advisory only (CheckMeta.scored=False) - never moves the grade.
+    UNKNOWN - config unreadable/unparseable (engine-side), or no config was read at
+              all (not_applicable in that second case - nothing to disclose about a
               host nobody looked at).
 
     Never FAILs: workerRuns is an explicit opt-in feature for hosting OTHER nodes'
-    sessions, and its own documented default is the less-isolated option — reporting
+    sessions, and its own documented default is the less-isolated option - reporting
     that as a failure would penalize the vendor's baseline, not a user's choice.
     """
     unreadable = _config_unreadable("B391", ctx)
@@ -3827,7 +3827,7 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
             "B391",
             PASS,
             "nodeHost.workerRuns.enabled is not set to true (the vendor default), so "
-            "this node does not host worker sessions dispatched by a paired Gateway — "
+            "this node does not host worker sessions dispatched by a paired Gateway \u2014 "
             "the isolation setting is moot.",
             "No action needed unless you intend this node to host sessions for other "
             "nodes; if you do enable it, review nodeHost.workerRuns.isolation first.",
@@ -3844,7 +3844,7 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
         return _finding(
             "B391",
             PASS,
-            "nodeHost.workerRuns is enabled with isolation='container' — worker "
+            "nodeHost.workerRuns is enabled with isolation='container' \u2014 worker "
             f"sessions dispatched by a paired Gateway run inside a container boundary "
             f"(image: {image}), not directly on this node host.",
             "Keep isolation set to 'container'; prefer a digest-pinned or "
@@ -3858,7 +3858,7 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
     return _finding(
         "B391",
         WARN,
-        f"nodeHost.workerRuns is enabled with isolation={resolved!r} — worker sessions "
+        f"nodeHost.workerRuns is enabled with isolation={resolved!r} \u2014 worker sessions "
         "dispatched by a paired Gateway run directly on this node host, with no "
         "process boundary. 'none' is OpenClaw's own default for this setting, not a "
         "weakening introduced by this config, but it is a distinct execution surface "
@@ -3873,7 +3873,7 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
 
 
 # ---------- B393: telemetry.enabled disclosure (F-202) ----------
-# Re-grounded directly against the installed 2026.9.5 dist — the internal recon doc's
+# Re-grounded directly against the installed 2026.9.5 dist - the internal recon doc's
 # descriptions map has no `telemetry` entry at all (same documented gap class as
 # B389/B390/B391, CLAUDE.md §4(c)):
 #
@@ -3895,12 +3895,12 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
 #   dist/telemetry-CwSEtSer.mjs:147-154 (`resolveTelemetryStatus`, the actual runtime
 #   gate) shows the full precedence: an automated environment, the update check being
 #   disabled, or DO_NOT_TRACK=1 (each checked in that order) independently force
-#   telemetry off regardless of `telemetry.enabled` — `reason` resolves to "enabled"
+#   telemetry off regardless of `telemetry.enabled` - `reason` resolves to "enabled"
 #   only once all three earlier legs are clear AND `config.telemetry?.enabled ===
 #   true`. DO_NOT_TRACK is read from `process.env` in the GATEWAY's own process
-#   (`isDoNotTrackEnabled`, :92-95) — this audit is config-only and never reads
+#   (`isDoNotTrackEnabled`, :92-95) - this audit is config-only and never reads
 #   `os.environ` for a verdict about the audited host (that would answer "what is in
-#   the auditing shell's environment", not the gateway's — the same doctrine
+#   the auditing shell's environment", not the gateway's - the same doctrine
 #   `checks/_lifecycle.py::check_update_pinning`'s own grounding note documents for
 #   `OPENCLAW_NO_AUTO_UPDATE`), so this check cannot observe that suppression and does
 #   not claim to.
@@ -3924,27 +3924,27 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
 # and C-473's shortlist verdict, re-confirmed above against the current dist):
 # telemetry is opt-in (disabled by default), unconditionally overridden off by
 # DO_NOT_TRACK, and the vendor's own description of the payload is already the benign
-# one this check quotes — feature-usage counts, never message content or secrets.
+# one this check quotes - feature-usage counts, never message content or secrets.
 # There is no weakening here for a static audit to judge; naming what leaves the
 # machine once an operator opts in is a transparency line for the reader, not a
 # security verdict. This never escalates past PASS, so it needed no C-135 pass: there
 # is no FAIL/WARN branch for one to adversarially test.
 def check_telemetry_enabled(ctx: Context) -> Finding:
-    """B393 (F-202) — telemetry.enabled: name what leaves the machine when a user
+    """B393 (F-202) - telemetry.enabled: name what leaves the machine when a user
     opts in to OpenClaw's anonymous feature-usage statistics.
 
-    PASS    — telemetry.enabled is not `True` (absent, `False`, or any other
-              non-`True` shape — the vendor default): nothing leaves the machine via
+    PASS    - telemetry.enabled is not `True` (absent, `False`, or any other
+              non-`True` shape - the vendor default): nothing leaves the machine via
               this channel. Also PASS when telemetry.enabled IS `True`, in which case
               the detail instead *names* what the payload builder actually sends
-              (which is more than the vendor's own help text says) — a
+              (which is more than the vendor's own help text says) - a
               transparency line, not a verdict.
-    UNKNOWN — config unreadable/unparseable (engine-side), or no config was read at
-              all (not_applicable in that second case — nothing to disclose about a
+    UNKNOWN - config unreadable/unparseable (engine-side), or no config was read at
+              all (not_applicable in that second case - nothing to disclose about a
               host nobody looked at).
 
     Never WARNs and never FAILs: opting in to anonymous feature statistics is not a
-    weakening a static audit can judge (Golden Rule #4) — it is disabled by default,
+    weakening a static audit can judge (Golden Rule #4) - it is disabled by default,
     always suppressed under DO_NOT_TRACK, and the vendor's own description of the
     payload is already the benign one this check quotes. This is a transparency line,
     not a security verdict, so it never escalates past PASS.
@@ -3967,7 +3967,7 @@ def check_telemetry_enabled(ctx: Context) -> Finding:
         return _finding(
             "B393",
             PASS,
-            "telemetry.enabled is not set to true (the vendor default) — no "
+            "telemetry.enabled is not set to true (the vendor default) \u2014 no "
             "anonymous feature-usage statistics leave this machine via this "
             "channel.",
             "Nothing to do.",
@@ -3976,7 +3976,7 @@ def check_telemetry_enabled(ctx: Context) -> Finding:
     return _finding(
         "B393",
         PASS,
-        "telemetry.enabled is true — anonymous feature statistics are attached to "
+        "telemetry.enabled is true \u2014 anonymous feature statistics are attached to "
         "the daily update check. As of OpenClaw 2026.9.5 that request carries: the "
         "OpenClaw version, platform and architecture, Node version and the invoking "
         "surface; the names of enabled channels and provider families and the ids "
@@ -3987,7 +3987,7 @@ def check_telemetry_enabled(ctx: Context) -> Finding:
         "part a count; the payload also names them. Always suppressed when "
         "DO_NOT_TRACK=1 is set in the gateway's own process environment, which this "
         "config-only audit cannot observe.",
-        "Nothing to do — this is disclosure, not a finding. Run 'openclaw telemetry "
+        "Nothing to do \u2014 this is disclosure, not a finding. Run 'openclaw telemetry "
         "show' to see the exact request this build would send, or 'openclaw "
         "telemetry off' to disable it.",
         config_field_paths={"telemetry.enabled"},
@@ -4010,12 +4010,12 @@ def check_secrets(ctx: Context) -> Finding:
             f"{len(secret_paths)} secret(s) in config and openclaw.json is "
             f"group/world-readable ({oct(ctx.config_mode)[-3:]})"
         )
-    # secrets hardcoded into bootstrap files (always wrong — injected into the prompt)
+    # secrets hardcoded into bootstrap files (always wrong - injected into the prompt)
     for fname, text in ctx.bootstrap.items():
         if _pattern_hits_real_secret(SECRET_PATTERNS, text):
             ev.append(f"secret-like string in {fname}")
     if ev:
-        # B-759: named against the audited home, not a hardcoded `~/.openclaw` — the
+        # B-759: named against the audited home, not a hardcoded `~/.openclaw` - the
         # config path this run actually read (`ctx.config_path`, falling back to the
         # conventional filename under `ctx.home` for the rare case it was never
         # resolved) so the copy-pasted chmod acts on the config this run diagnosed,
@@ -4030,7 +4030,7 @@ def check_secrets(ctx: Context) -> Finding:
             "config-stored tokens are not readable by others.",
             ev,
         )
-    # B-228: openclaw.json present but unparseable/unreadable — bootstrap-file secrets
+    # B-228: openclaw.json present but unparseable/unreadable - bootstrap-file secrets
     # (checked above, config-independent) still legitimately FAILed if present, but a
     # clean verdict at this point is only trustworthy if the config itself was actually
     # read. Guard the terminal PASS only (not the whole function) so the bootstrap scan
@@ -4044,7 +4044,7 @@ def check_secrets(ctx: Context) -> Finding:
     # is ALSO None, legitimately, on a plain non-OpenClaw host where there is no
     # openclaw.json to stat() at all (config_found is False there), which must keep
     # reading as the ordinary "nothing to flag" PASS below, not a fake UNKNOWN. Only
-    # matters here when there is something to protect (secret_paths) — an empty
+    # matters here when there is something to protect (secret_paths) - an empty
     # config has nothing this check would flag regardless of whether perms could be
     # verified.
     if secret_paths and ctx.config_found and _is_posix() and ctx.config_mode is None:
@@ -4053,19 +4053,19 @@ def check_secrets(ctx: Context) -> Finding:
             UNKNOWN,
             f"{len(secret_paths)} token(s) in config, but file permissions could not "
             "be verified (the file parsed but its permission bits could not be read) "
-            "— cannot confirm openclaw.json is not group/world-readable.",
+            "\u2014 cannot confirm openclaw.json is not group/world-readable.",
             "Check why the audit could not stat() openclaw.json (see the run's errors) "
             "and re-run; in the meantime, manually confirm `chmod 600 "
             "~/.openclaw/openclaw.json`.",
         )
     # B-661: the two guards above ("present but unparseable" / "parsed but
-    # unstattable") do not cover "no openclaw.json at all" — bootstrap-file secrets
+    # unstattable") do not cover "no openclaw.json at all" - bootstrap-file secrets
     # (checked unconditionally above) still legitimately FAIL either way, but the
     # PASS wording below says "No exposed plaintext secrets", which conflates
     # "checked the config and found none" with "never checked the config at all".
     # secret_paths is necessarily empty here whenever config_found is False (it is
     # derived from an empty ctx.config), so this cannot mask a real config-content
-    # finding — it only stops the terminal sentence from overclaiming.
+    # finding - it only stops the terminal sentence from overclaiming.
     if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
         return _finding(
             "B1",
@@ -4091,12 +4091,12 @@ def check_secrets(ctx: Context) -> Finding:
 
 
 def check_secrets_at_rest_home(ctx: Context) -> Finding:
-    """C015 — read-only scan for plaintext secret-shaped values in the OpenClaw home.
+    """C015 - read-only scan for plaintext secret-shaped values in the OpenClaw home.
 
     This complements B1: B1 owns openclaw.json/bootstrap semantics and permissions, while
     C015 inventories any user-owned text file under the audited home (excluding installed
     skill dirs) that appears to contain an inline secret/token value. Evidence names files
-    only — secret values are never echoed.
+    only - secret values are never echoed.
     """
     capped: list = []
     unreadable_skip_roots: list = []
@@ -4130,42 +4130,42 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             hits.append(f"{rel}: secret-like value detected")
 
     # B-244: the walk cap can still be hit on a very large home even after excluded
-    # material is kept out of the budget (see _c015_candidate_files) — never let either
+    # material is kept out of the budget (see _c015_candidate_files) - never let either
     # verdict below read as a complete scan when it wasn't.
     cap_note = (
         f" Scan hit the {_C015_MAX_SCAN_FILES}-file walk cap before the home was fully"
-        " covered — additional secrets may exist in files not yet reached."
+        " covered \u2014 additional secrets may exist in files not yet reached."
         if scan_capped
         else ""
     )
     # B-915: a subdirectory that could not be searched (permission denied) is the same
-    # shape of coverage gap as the walk cap above — content under it was never reached —
+    # shape of coverage gap as the walk cap above - content under it was never reached -
     # so it is disclosed the same way, never silently dropped or left to crash the whole
     # check. Deliberately NOT narrowed by ownership/reachability the way B87's symlink
     # gate is (`_b87_gap_is_graded`, checks/_content.py): B87 asks whether an
     # already-loaded skill's symlink can be FOLLOWED by the agent right now, so a gate
     # neither the scanning uid nor its owner can currently open genuinely cannot be
-    # exploited that specific way. C015 asks a broader question — is there a plaintext
-    # secret sitting in this home that its owner forgot to lock down — and a directory
+    # exploited that specific way. C015 asks a broader question - is there a plaintext
+    # secret sitting in this home that its owner forgot to lock down - and a directory
     # the SAME user tightened (deliberately or by accident) is exactly that shape; its
     # owner can chmod it back open at will, which is B87's own reason a same-owner gate
     # stays graded rather than exempted. A genuinely foreign-owned, unreachable directory
     # (e.g. a Docker volume mount) is rarer here, but C015 has no ownership filter
-    # anywhere else in its candidate-file logic either — a foreign-owned file sitting
-    # inside a READABLE directory is scanned exactly like any other — so carving out only
+    # anywhere else in its candidate-file logic either - a foreign-owned file sitting
+    # inside a READABLE directory is scanned exactly like any other - so carving out only
     # the unreadable subset would open a one-line bypass (`chmod 700` a directory holding
     # a secret to silence this specific check) that the rest of the check's own logic
     # does not honor. Kept uniform: always disclosed, never a silent PASS.
     gap_note = (
         f" Could not search {gap_count} subdirector{'y' if gap_count == 1 else 'ies'}"
-        " under the home (permission denied) — a secret there would not have been found."
+        " under the home (permission denied) \u2014 a secret there would not have been found."
         if gap_count
         else ""
     )
 
     if hits:
         detail = (
-            f"Plaintext secret-shaped value(s) found in {len(hits)} home file(s) — see evidence."
+            f"Plaintext secret-shaped value(s) found in {len(hits)} home file(s) \u2014 see evidence."
             f"{cap_note}{gap_note}"
         )
         # B-513: the detail states the true count while the evidence list was silently
@@ -4173,8 +4173,8 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
         # and the reader had to notice the arithmetic themselves. Every other capped
         # evidence list in the engine already discloses its overflow (`(+N more)` in
         # _egress.py's B14, B164 and the loose-permission walk); this one did not follow
-        # the convention it sits beside. Truncating is right — a home can hold hundreds of
-        # matches and the report has to stay readable — but a silent truncation makes the
+        # the convention it sits beside. Truncating is right - a home can hold hundreds of
+        # matches and the report has to stay readable - but a silent truncation makes the
         # count and the list disagree, which is the same defect class as B-518.
         shown = hits[:_C015_MAX_EVIDENCE]
         if len(hits) > _C015_MAX_EVIDENCE:
@@ -4190,7 +4190,7 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
     if unreadable_skip_roots:
         # B-913: an ancestor of one of the installed-skill roots (e.g. the workspace
         # dir, or `.agents`) is not traversable, so this scan could not even confirm
-        # whether that root exists to exclude it — a permission-denied subtree that
+        # whether that root exists to exclude it - a permission-denied subtree that
         # used to raise PermissionError uncaught. No secret-shaped value was found in
         # what WAS read, but that is not a clean bill of health over a home this scan
         # could not fully see (Golden Rule #4).
@@ -4211,17 +4211,17 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
 
     if scan_capped or gap_count:
         # GR#4/B-228 family: a coverage gap must never roll up to a confident "scanned
-        # the home, all clean" headline — UNKNOWN, not PASS, until the rest is covered.
+        # the home, all clean" headline - UNKNOWN, not PASS, until the rest is covered.
         #
         # B-915: engine_degraded stays at its False default here (not passed below). A
-        # scoped, disclosed gap in an otherwise-completed walk — hitting the file-count
-        # cap, or one subdirectory the scan could not search — is not an ENGINE-SIDE
+        # scoped, disclosed gap in an otherwise-completed walk - hitting the file-count
+        # cap, or one subdirectory the scan could not search - is not an ENGINE-SIDE
         # crash/timeout, the identical distinction this walk-cap branch already drew
         # before the directory case existed as its own channel (see the cap_note/
         # gap_note comment above): it must not cost the whole audit
         # DEGRADED_CHECK_CAP's worst-case "cannot rule out a CRITICAL" treatment
         # (catalog.py's Finding.engine_degraded contract) over one unreachable directory
-        # — which is the literal bug this fix closes (uncaught PermissionError ->
+        # - which is the literal bug this fix closes (uncaught PermissionError ->
         # run_all's generic except-Exception handler -> engine_degraded UNKNOWN -> the
         # whole audit capped at 49/F).
         reasons = []
@@ -4236,12 +4236,12 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             "C015",
             UNKNOWN,
             f"Scanned {len(candidates)} home file(s); the scan " + " and ".join(reasons)
-            + " before the home was fully covered — no plaintext secret-shaped values in"
+            + " before the home was fully covered \u2014 no plaintext secret-shaped values in"
             " what was scanned, but coverage is incomplete.",
             "Re-run against a narrower home, or manually review any credentials/, "
             "identity/, devices/, and workspace/ content not covered by this scan."
             + (
-                " A skipped subdirectory is normally owned by you — chmod it back to a"
+                " A skipped subdirectory is normally owned by you \u2014 chmod it back to a"
                 " searchable mode and re-run to cover it."
                 if gap_count
                 else ""
@@ -4257,7 +4257,7 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
 
 # ---------- C-405: secrets stored at OpenClaw-redactor-blind config paths ----------
 #
-# MEASURED FIRST, per this task's own instruction, before writing anything here — both
+# MEASURED FIRST, per this task's own instruction, before writing anything here - both
 # real consumers, not just the underlying patterns: `_secret_paths(cfg)` (B1's own
 # detector) and `_c015_has_secret(text)` (C015's own detector) were run directly against
 # five representative configs. Four missed; the positive control (an ordinary `apiKey`)
@@ -4357,21 +4357,21 @@ def _redactor_blind_secret_paths(obj, prefix: str = "", depth: int = 0) -> list:
 
 
 def check_redactor_blind_secret_paths(ctx: Context) -> Finding:
-    """B381 (C-405) — a secret-shaped value sits at a config path neither OpenClaw's
+    """B381 (C-405) - a secret-shaped value sits at a config path neither OpenClaw's
     own redactor nor this tool's own SECRET_KEY_RE-based detection recognizes (see the
     module comment above `_redactor_blind_secret_paths` for the measurement).
 
     Unlike B1, this is NOT gated on file permissions: the threat this check names is
     OpenClaw's own runtime echoing the value back through `config get` output,
-    trajectory logs, or a message channel relay — a leak that happens regardless of
+    trajectory logs, or a message channel relay - a leak that happens regardless of
     who else can read openclaw.json on disk. Never FAIL: a false positive here costs
     a WARN, not a hard-capped grade, and this is a narrow, hand-anchored key-name
     match (see `_REDACTOR_BLIND_KEY_RE`'s own comment for why it is anchored rather
     than a substring test) rather than the exhaustively-vetted `SECRET_KEY_RE`.
 
-    WARN    — a redactor-blind path holds a secret-shaped value.
-    UNKNOWN — openclaw.json present but unparseable/unreadable, or not read at all.
-    PASS    — no such path found.
+    WARN    - a redactor-blind path holds a secret-shaped value.
+    UNKNOWN - openclaw.json present but unparseable/unreadable, or not read at all.
+    PASS    - no such path found.
     """
     unreadable = _config_unreadable("B381", ctx)
     if unreadable is not None:
@@ -4404,7 +4404,7 @@ def check_redactor_blind_secret_paths(ctx: Context) -> Finding:
         f"output, trajectory logs, or a relayed message channel: {label}{extra}",
         "Move the value to `openclaw secrets configure` (a SecretRef indirection), "
         "or to a path OpenClaw's redactor does recognize (a key name containing "
-        "password/secret/token/apiKey) — never a bare Authorization/bearer/key field "
+        "password/secret/token/apiKey) \u2014 never a bare Authorization/bearer/key field "
         "or a plural token array.",
         evidence=paths,
     )
@@ -4423,10 +4423,10 @@ def check_tls(ctx: Context) -> Finding:
         ev.append(f"gateway.bind={bind} is non-loopback without TLS configured")
     if _perms_loose(ctx):
         ev.append(
-            f"openclaw.json is group/world-readable ({oct(ctx.config_mode)[-3:]}) — at-rest risk"
+            f"openclaw.json is group/world-readable ({oct(ctx.config_mode)[-3:]}) \u2014 at-rest risk"
         )
     if ev:
-        # B-759: see B1's own comment above — named against the audited home, not a
+        # B-759: see B1's own comment above - named against the audited home, not a
         # hardcoded `~/.openclaw`.
         _b11_cfg = ctx.config_path or (ctx.home / "openclaw.json")
         return _finding(
@@ -4437,7 +4437,7 @@ def check_tls(ctx: Context) -> Finding:
             f"`chmod 600 {_b11_cfg}` and `chmod 700 {ctx.home}`.",
             ev,
         )
-    # B-228: guard the terminal PASS only — _perms_loose(ctx) above is a real, config-
+    # B-228: guard the terminal PASS only - _perms_loose(ctx) above is a real, config-
     # content-independent file-permission signal (still legitimately WARNs on a broken
     # openclaw.json that is ALSO group/world-readable), so only the "transport is fine"
     # claim (which needs the actual gateway.bind/gateway.tls.enabled values) is gated.
@@ -4445,11 +4445,11 @@ def check_tls(ctx: Context) -> Finding:
     if unreadable is not None:
         return unreadable
     # config_mode stays None when openclaw.json parsed fine but the SEPARATE stat()
-    # call that reads its permission bits (collector.py) itself raised OSError —
+    # call that reads its permission bits (collector.py) itself raised OSError -
     # config_parse_error is False in that case (the content WAS read), so the guard
     # above does not catch it. _perms_loose() then folds that "never checked" state
     # into the same False as "checked and found tight" (deliberately, for the
-    # non-POSIX case — see tests/test_windows.py), which would make this a fake PASS
+    # non-POSIX case - see tests/test_windows.py), which would make this a fake PASS
     # on the one POSIX sub-case that has no such excuse. config_found is required too
     # -- config_mode is ALSO None, legitimately, on a plain non-OpenClaw host with no
     # openclaw.json to stat() at all, which must keep reading as the ordinary
@@ -4461,14 +4461,14 @@ def check_tls(ctx: Context) -> Finding:
             "B11",
             UNKNOWN,
             "Config file permissions could not be verified (the file parsed but its "
-            "permission bits could not be read) — cannot confirm openclaw.json is not "
+            "permission bits could not be read) \u2014 cannot confirm openclaw.json is not "
             "group/world-readable.",
             "Check why the audit could not stat() openclaw.json (see the run's errors) "
             "and re-run; in the meantime, manually confirm `chmod 600 "
             "~/.openclaw/openclaw.json`.",
         )
     # B-661: the two guards above only cover "openclaw.json present but unparseable"
-    # (_config_unreadable) and "parsed but unstattable" — on a host with NO
+    # (_config_unreadable) and "parsed but unstattable" - on a host with NO
     # openclaw.json at all, config_found is False, config_parse_error is False, and
     # ctx.config is `{}`. `bind`/`tls` above then silently read as "absent" and this
     # PASS would assert a proven-safe transport about a config nobody read. The
@@ -4494,29 +4494,29 @@ def check_tls(ctx: Context) -> Finding:
 
 def check_trifecta(ctx: Context) -> Finding:
     # B-306: openclaw.json present but unparseable/unreadable (config_parse_error, B-166)
-    # collapses ctx.config to {} — every dig(cfg, ...) lookup inside _trifecta_legs then
+    # collapses ctx.config to {} - every dig(cfg, ...) lookup inside _trifecta_legs then
     # defaults to "absent", so the untrusted-input and outbound-action legs (100%
     # config-derived) read as OFF even when the real config has them ON. Guarded at the
     # top, before computing legs at all: unlike B1/B11 (whose independent, non-config
     # signal is a COMPLETE, self-sufficient basis for their own FAIL/WARN), the one
-    # non-config contributor mixed into _trifecta_legs — the credential-store CONTENT read
+    # non-config contributor mixed into _trifecta_legs - the credential-store CONTENT read
     # (B-666; was `(ctx.home / "credentials").is_dir()`), feeding only the "sensitive
-    # data" leg — can never by itself clear the
+    # data" leg - can never by itself clear the
     # >=3-legs FAIL threshold or satisfy the thin-surface WARN branch below (which keys on
     # the untrusted-input/outbound legs, not sensitive data). So guarding here cannot mask
     # an independently-provable verdict; it only stops a confidently-worded WARN/PASS from
     # being computed off a config the audit never actually saw. Measured impact on a real
     # blind run: A1 read WARN instead of its true FAIL, inflating the overall grade from
-    # F/49 to C/79 — a lying two-grade improvement on the flagship CRITICAL check.
+    # F/49 to C/79 - a lying two-grade improvement on the flagship CRITICAL check.
     unreadable = _config_unreadable("A1", ctx)
     if unreadable is not None:
         return unreadable
     legs = _trifecta_legs(ctx)
     active = [k for k, v in legs.items() if v]
-    detail = f"Active legs {len(active)}/3: {', '.join(active) or 'none'}. Rule: keep ≤2 of 3."
+    detail = f"Active legs {len(active)}/3: {', '.join(active) or 'none'}. Rule: keep \u22642 of 3."
     if len(active) >= 3:
         detail += (
-            " All three legs are active — your agent takes outside input, can reach"
+            " All three legs are active \u2014 your agent takes outside input, can reach"
             " sensitive data, and can act outbound; one injected prompt is enough to"
             " exfiltrate everything."
         )
@@ -4537,17 +4537,17 @@ def check_trifecta(ctx: Context) -> Finding:
             "A1",
             FAIL,
             detail,
-            "Break the trifecta: remove one leg. Easiest wins — lock channels to "
+            "Break the trifecta: remove one leg. Easiest wins \u2014 lock channels to "
             "owner only (no untrusted input), or gate all outbound/exec actions behind "
             "human approval, or move sensitive data out of the agent's reach.",
             evidence=active,
         )
 
-    # B-803: a run that never found openclaw.json at all leaves ctx.config == {} —
+    # B-803: a run that never found openclaw.json at all leaves ctx.config == {} -
     # exactly the same shape as a genuinely empty, fully-read config (B-166's own note
     # at the top of this function). `_capabilities_attested`/`_meaningful_tool_surface`
     # below treat an attested roster as license to trust every OFF leg they gate, but an
-    # attestation only speaks to the AGENT's own declared tools — it says nothing about
+    # attestation only speaks to the AGENT's own declared tools - it says nothing about
     # channels/dmPolicy or the rest of the config surface this run never read at all. A
     # config-blind run therefore let an attested roster silence every hedge and reach a
     # confident PASS on the flagship CRITICAL check, which is strictly worse than the
@@ -4555,7 +4555,7 @@ def check_trifecta(ctx: Context) -> Finding:
     # 'Active legs 1/3' vs the correct WARN once attested tools are added to an
     # otherwise-empty home). `not ctx.config`, not just `not ctx.config_found`, so a
     # hand-built test Context that sets a real config dict without also setting
-    # config_found=True (this file's own convention — see e.g. test_checks.py's `_a1`)
+    # config_found=True (this file's own convention - see e.g. test_checks.py's `_a1`)
     # stays inert; only an ACTUALLY empty config participates.
     config_blind = not getattr(ctx, "config_found", False) and not ctx.config
 
@@ -4563,8 +4563,8 @@ def check_trifecta(ctx: Context) -> Finding:
     # exec_command, web_*, memory_*) are NOT written to openclaw.json, so an
     # input/outbound leg that looks OFF can still be live. We only trust an OFF leg
     # when the user has attested the agent's real tool inventory (--attest). An
-    # unrelated tools.allow entry must NOT silence this — a no-op name was previously
-    # enough to flip WARN→PASS without changing real exposure. A config-blind run
+    # unrelated tools.allow entry must NOT silence this - a no-op name was previously
+    # enough to flip WARN->PASS without changing real exposure. A config-blind run
     # (B-803) can never trust the attestation to stand in for the config it never saw,
     # so it forces this hedge regardless of what `_meaningful_tool_surface` says.
     runtime_unknown = [
@@ -4581,13 +4581,13 @@ def check_trifecta(ctx: Context) -> Finding:
                 " session start are not reflected in openclaw.json."
             ),
             f"Run `{command_prefix()} --ask` to generate an attestation template, then re-run"
-            " with `--attest <file>` so these legs resolve — or treat as possible 3/3.",
+            " with `--attest <file>` so these legs resolve \u2014 or treat as possible 3/3.",
             evidence=active,
         )
 
     # B-499: a config that never wrote dmPolicy is not the same as one that restricted
     # ingress, but A1 reported them identically. Mirrors the runtime_unknown guard just
-    # above — same shape, same reason: do not hand back a confident PASS for a posture the
+    # above - same shape, same reason: do not hand back a confident PASS for a posture the
     # config never actually stated. Deliberately WARN and not a leg: promoting a resolved
     # default to a full leg would move `active`, which is the one thing this change
     # forbids (measured: 0 A1 FAIL flips across 535 findings, 6 fixtures PASS->WARN).
@@ -4602,7 +4602,7 @@ def check_trifecta(ctx: Context) -> Finding:
         )
 
     # B-609: a WRITTEN dmPolicy that OpenClaw does not recognize for its channel is not
-    # the same as one that restricted ingress, either — see _substituted_dm_policy_note.
+    # the same as one that restricted ingress, either - see _substituted_dm_policy_note.
     if substituted_dm:
         return _finding(
             "A1",
@@ -4610,7 +4610,7 @@ def check_trifecta(ctx: Context) -> Finding:
             detail,
             "Fix the typo: write one of the values `DmPolicySchema` actually accepts for"
             ' that channel (open / pairing / allowlist / disabled; Feishu and Lark accept'
-            " the first, second, and third — see the note above for how `disabled` is"
+            " the first, second, and third \u2014 see the note above for how `disabled` is"
             " still honored there). An unrecognized literal is not read as a restriction.",
             evidence=active,
         )
@@ -4623,7 +4623,7 @@ def check_trifecta(ctx: Context) -> Finding:
     # B-666: the same reasoning as the two guards above, for the leg they do not cover.
     # `runtime_unknown` hedges an OFF input/outbound leg because runtime tools are not
     # written to openclaw.json; nothing hedged an OFF "sensitive data" leg, so a config
-    # that simply never named a data tool got a confidently-worded PASS — the leg read as
+    # that simply never named a data tool got a confidently-worded PASS - the leg read as
     # KNOWN-ABSENT when it was only UNDECLARED. It is not merely undeclared, either: both
     # config layers that decide whether a file-read tool can leave the workspace default
     # to the PERMISSIVE end (see clawseccheck/toolpolicy.py), so on such a config the
@@ -4631,15 +4631,15 @@ def check_trifecta(ctx: Context) -> Finding:
     #
     # Deliberately a WARN and NOT a leg, following B-499 exactly: promoting this to a leg
     # was measured across 581 local corpus homes and produced 18 new CRITICAL FAILs, six
-    # of them on `clean_*` fixtures — `active` and `evidence` stay untouched, so the leg
+    # of them on `clean_*` fixtures - `active` and `evidence` stay untouched, so the leg
     # count a reader sees is unchanged and no new FAIL can come out of this branch.
-    # (The wiring B-666 originally proposed — raise the leg from C015's at-rest scan or
-    # B41's credential inventory — was measured too and is worse: 470 of 581 homes carry
+    # (The wiring B-666 originally proposed - raise the leg from C015's at-rest scan or
+    # B41's credential inventory - was measured too and is worse: 470 of 581 homes carry
     # a secret-shaped value in openclaw.json itself, so the leg would be ON for 81% of all
     # configs and A1 would collapse into "ingress AND outbound".)
     # Gated on the ATTESTATION alone, deliberately NOT on `_meaningful_tool_surface`
     # (which silences the runtime_unknown hedge above). That helper counts a powerful
-    # `tools.profile` as a visible capability surface — and `coding` is precisely the
+    # `tools.profile` as a visible capability surface - and `coding` is precisely the
     # profile that GRANTS the unconfined `read` tool, so reusing it here would switch the
     # hedge off exactly where the exposure is most certain. Only a positive declaration
     # of the agent's real tool inventory can resolve a leg the config left undeclared.
@@ -4648,19 +4648,19 @@ def check_trifecta(ctx: Context) -> Finding:
     # data-read tool silences this hedge instead of raising the leg, because nothing
     # feeds attested tool names into `_trifecta_leg_sources`. Same root as the fact that
     # SENSITIVE_TOOL_HINTS does not know OpenClaw's real fs tool ids (`read`/`edit`/
-    # `write`/`apply_patch`) — "read" cannot simply be added to a substring hint list
+    # `write`/`apply_patch`) - "read" cannot simply be added to a substring hint list
     # without matching "thread"/"spreadsheet". Tracked separately; not widened here,
     # because raising a leg is FAIL-capable movement and this change adds no FAIL.
     # B-803: same reasoning as the config_blind guard above, for the one leg this
     # thin-surface family doesn't already cover. `config_blind` forces this hedge too
-    # (`or` below) — an attestation cannot single-handedly clear the sensitive-data leg
+    # (`or` below) - an attestation cannot single-handedly clear the sensitive-data leg
     # on a run that never read the config it would need to corroborate that with.
     if not legs["sensitive data"] and (config_blind or not _capabilities_attested(ctx)):
         reach = scopes_reaching_outside_workspace(ctx.config)
         store = _credential_store_state(getattr(ctx, "home", None))
         # B-749: the on-disk credentials/ scan above can read clean while OpenClaw's
         # machine-owned auth-profile store (config_machine_state["authProfiles.store"])
-        # holds real material — measured on the fleet machine, 2026-09-06:
+        # holds real material - measured on the fleet machine, 2026-09-06:
         # secret_files=[], incomplete=False (a confident "looked, nothing there"), while
         # the state DB held a non-trivial authProfiles.store row. Length-only (see
         # collector._collect_auth_profile_store_presence): a row longer than the
@@ -4670,7 +4670,7 @@ def check_trifecta(ctx: Context) -> Finding:
         # leg-raising signal: whether a non-empty row always means a USABLE credential
         # (vs. an expired/revoked profile) is unresolved, so asserting the leg is ON
         # would risk a new false-positive FAIL on the CRITICAL check that grade-caps
-        # the whole audit — the same care B-730 already took in the other direction.
+        # the whole audit - the same care B-730 already took in the other direction.
         auth_store_length = getattr(ctx, "auth_profile_store_length", None)
         auth_store_present = (
             getattr(ctx, "auth_profile_store_read", False)
@@ -4684,7 +4684,7 @@ def check_trifecta(ctx: Context) -> Finding:
         # empty credentials/ directory AND an empty-or-absent shared-store row can still
         # have real material sitting in an agent's own database, which the two checks
         # above are both blind to. Deliberately the SAME hedge, not a leg-raising signal
-        # — see the auth_store_present comment above; the same "not yet resolved whether
+        # - see the auth_store_present comment above; the same "not yet resolved whether
         # a non-empty row always means a usable credential" reasoning applies here too.
         agent_auth_store_length = getattr(ctx, "agent_auth_profile_store_length", None)
         agent_auth_store_present = (
@@ -4717,7 +4717,7 @@ def check_trifecta(ctx: Context) -> Finding:
                 # B-712: when one of these scopes is `sandbox.mode: "non-main"`, whether it
                 # is confined depends on which SESSION runs, which no config states. Saying
                 # "are not confined" and "can read" would then assert what we have not
-                # established — the same fabrication in the other direction as the confident
+                # established - the same fabrication in the other direction as the confident
                 # `True` this predicate used to return. The claim is weakened to match.
                 undecided = any_confinement_undecided(reach)
                 why.append(
@@ -4769,7 +4769,7 @@ def check_trifecta(ctx: Context) -> Finding:
             if config_blind:
                 why.append(
                     "no OpenClaw config was found on this host at all, so nothing about"
-                    " this leg was actually read — an attested roster speaks only to the"
+                    " this leg was actually read \u2014 an attested roster speaks only to the"
                     " agent's own tools, not to channels or the rest of the config surface"
                 )
             return _finding(
@@ -4812,12 +4812,12 @@ def check_trifecta(ctx: Context) -> Finding:
             )
 
     return _finding(
-        "A1", PASS, detail, "Keep it at ≤2 of 3 — do not add the third capability.", evidence=active
+        "A1", PASS, detail, "Keep it at \u22642 of 3 \u2014 do not add the third capability.", evidence=active
     )
 
 
 def check_trustedproxy_loopback(ctx: Context) -> Finding:
-    """B70 — trusted-proxy auth: non-loopback bind without identity constraints, or
+    """B70 - trusted-proxy auth: non-loopback bind without identity constraints, or
     allowLoopback on a non-loopback bind.
 
     Grounded (dist zod-schema-O9ml_nmo.js / types.openclaw-CXjMEWAQ.d.ts):
@@ -4825,21 +4825,21 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
     requiredHeaders,allowUsers,allowLoopback}. Trusted-proxy auth delegates
     authentication to a reverse-proxy-supplied identity header; on a non-loopback bind an
     attacker who can reach the port directly can forge that header unless
-    requiredHeaders/allowUsers genuinely constrain it (B-233) — OR (grounded: dist
+    requiredHeaders/allowUsers genuinely constrain it (B-233) - OR (grounded: dist
     auth-B27MflKU.js authorizeTrustedProxy / authorizeGatewayConnectCore, gated by
     net-*.js isTrustedProxyAddress) OpenClaw itself rejects the connection by source IP
     before ever reading the header when a genuine gateway.trustedProxies allow-list is
     configured, so that is an equally valid constraint.
 
-    UNKNOWN — trusted-proxy auth is not configured (auth.mode != 'trusted-proxy' and
+    UNKNOWN - trusted-proxy auth is not configured (auth.mode != 'trusted-proxy' and
               gateway.auth.trustedProxy.allowLoopback is not set).
-    FAIL    — auth.mode='trusted-proxy' AND the bind is non-loopback AND none of
+    FAIL    - auth.mode='trusted-proxy' AND the bind is non-loopback AND none of
               requiredHeaders, allowUsers, or a genuine gateway.trustedProxies allow-list
-              is configured — any direct caller can self-declare identity via the
+              is configured - any direct caller can self-declare identity via the
               (spoofable) trusted-proxy header.
-    WARN    — gateway.auth.trustedProxy.allowLoopback=true AND the gateway bind is
+    WARN    - gateway.auth.trustedProxy.allowLoopback=true AND the gateway bind is
               non-loopback (a same-host caller can still forge the header).
-    PASS    — loopback bind, or requiredHeaders/allowUsers/trustedProxies genuinely
+    PASS    - loopback bind, or requiredHeaders/allowUsers/trustedProxies genuinely
               constrain identity, or trusted-proxy is not configured.
     """
     cfg = ctx.config
@@ -4851,7 +4851,7 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
             "B70",
             UNKNOWN,
             "gateway.auth.mode is not 'trusted-proxy' and "
-            "gateway.auth.trustedProxy.allowLoopback is not set — trusted-proxy auth is "
+            "gateway.auth.trustedProxy.allowLoopback is not set \u2014 trusted-proxy auth is "
             "not configured.",
             "If you use a reverse proxy, configure gateway.auth.mode=trusted-proxy "
             "explicitly (with requiredHeaders/allowUsers) and bind the gateway to "
@@ -4879,7 +4879,7 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
             user_header = dig(cfg, "gateway.auth.trustedProxy.userHeader") or "x-forwarded-user"
             # B-315: was FAIL. B70 belongs to the B68-B73 block, whose catalog comment
             # documents the group as "WARN-only ... zero false-positive FAILs on real
-            # configs" — this branch was the sole violator of that documented intent
+            # configs" - this branch was the sole violator of that documented intent
             # (and this exact loopback/private-network predicate is the one CLAUDE.md
             # §6.1 records as version-dependent across Python 3.9/3.12). An unscored
             # check must not FAIL (Dave's ruling: scored=False caps at WARN); downgrading
@@ -4889,7 +4889,7 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
                 WARN,
                 f"gateway.auth.mode=trusted-proxy is bound to a non-loopback address "
                 f"(bind host={bind_host!r}) with no requiredHeaders/allowUsers/"
-                f"trustedProxies configured — the {user_header!r} identity header is "
+                f"trustedProxies configured \u2014 the {user_header!r} identity header is "
                 "attacker-spoofable by any direct caller.",
                 "Configure gateway.auth.trustedProxy.requiredHeaders and/or allowUsers, "
                 "or gateway.trustedProxies, to constrain identity, or bind the gateway "
@@ -4906,7 +4906,7 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
             "B70",
             WARN,
             "gateway.auth.trustedProxy.allowLoopback is true and the gateway is bound to a "
-            "non-loopback address — a header-spoofing attacker can forge the trusted-proxy "
+            "non-loopback address \u2014 a header-spoofing attacker can forge the trusted-proxy "
             "header.",
             "Bind the gateway to loopback (127.0.0.1) when using trustedProxy auth, or "
             "disable gateway.auth.trustedProxy.allowLoopback.",
@@ -4931,11 +4931,11 @@ def _parse_bind_port_raw(value) -> "str | None":
     validation), mirroring parse_bind_host's own handling of the bracketed-IPv6 /
     host:port / bare forms (checks/_shared.py).
 
-    Returns None when no port substring is present at all — an empty value, a bare
+    Returns None when no port substring is present at all - an empty value, a bare
     address with no port, or a bare (unbracketed) IPv6 literal where "the port" would
     be ambiguous. Splitting this out from :func:`_parse_bind_port` (B-374 follow-up,
     C-135 round 2) lets a caller distinguish "gateway.bind names no port at all" from
-    "gateway.bind names a port string that turned out to be invalid" — two different
+    "gateway.bind names a port string that turned out to be invalid" - two different
     UNKNOWN reasons check_effective_bind reports distinctly.
     """
     s = str(value or "").strip()
@@ -4962,13 +4962,13 @@ def _parse_bind_port(value) -> "int | None":
     B-374 follow-up (C-135 round 2, 2026-07-31): uses ``str.isdecimal()``, not
     ``str.isdigit()``, before calling ``int()``. A handful of Unicode characters (e.g.
     the superscript ``"²"``) satisfy ``isdigit()`` while still raising ``ValueError``
-    out of ``int()`` — the OLD code could crash on a config value shaped like
+    out of ``int()`` - the OLD code could crash on a config value shaped like
     ``"8080²"`` instead of degrading to UNKNOWN. ``isdecimal()`` only accepts
     characters ``int()`` can actually parse, so this now never raises. The 1-65535
-    range check is new too — the old code accepted any positive int without an upper
-    bound. A ``None`` return here never raises — ``check_effective_bind`` falls back
+    range check is new too - the old code accepted any positive int without an upper
+    bound. A ``None`` return here never raises - ``check_effective_bind`` falls back
     to ``gateway.port`` next (B-400: including OpenClaw's own grounded default port
-    when ``gateway.port`` is itself absent — see ``_DEFAULT_GATEWAY_PORT``), not
+    when ``gateway.port`` is itself absent - see ``_DEFAULT_GATEWAY_PORT``), not
     straight to "nothing to look up".
     """
     port_str = _parse_bind_port_raw(value)
@@ -4988,37 +4988,37 @@ def _declared_bind_class(cfg: dict) -> str:
 
     C-135 finding: a naive ``parse_bind_host(bind) in LOOPBACK`` test (what B2/B70 use
     for their own, different, purpose) is WRONG for two of the current schema's five
-    ``gateway.bind`` profiles — ``auto`` resolves to loopback on bare metal but to
+    ``gateway.bind`` profiles - ``auto`` resolves to loopback on bare metal but to
     ``0.0.0.0`` inside a container, and ``custom`` resolves through the SEPARATE
     ``gateway.customBindHost`` field, not the profile name itself. Reusing that naive
     test here would misclassify a container's ``bind=auto`` (genuinely, correctly
     ``0.0.0.0``) as "declared loopback", and the moment the effective socket confirms
     the wildcard bind, this check would FAIL a config that is working exactly as
-    designed — a textbook false FAIL this module exists to never produce.
+    designed - a textbook false FAIL this module exists to never produce.
 
-    So this reuses ``_gateway_remote_exposure_reason`` (checks/_shared.py) — the
+    So this reuses ``_gateway_remote_exposure_reason`` (checks/_shared.py) - the
     already-grounded, already-tested resolver RISK-20 relies on for the identical
-    per-profile logic (``loopback``/``local``/host:port → the shared ``LOOPBACK``
-    predicate; ``lan``/``tailnet`` → always remote; ``custom`` → discriminated by
-    ``customBindHost``; Tailscale ``serve``/``funnel`` → always remote regardless of
-    bind) — but does NOT stop at its ``Optional[str]`` return. That function
+    per-profile logic (``loopback``/``local``/host:port -> the shared ``LOOPBACK``
+    predicate; ``lan``/``tailnet`` -> always remote; ``custom`` -> discriminated by
+    ``customBindHost``; Tailscale ``serve``/``funnel`` -> always remote regardless of
+    bind) - but does NOT stop at its ``Optional[str]`` return. That function
     deliberately collapses two different truths into one ``None``: "provably
     loopback" and "genuinely unprovable from a config file alone" (``auto``; ``custom``
-    with no valid ``customBindHost``, which — per that function's own docstring — the
+    with no valid ``customBindHost``, which - per that function's own docstring - the
     product refuses to even start with). Corroboration needs the two kept apart:
     treating "unprovable" as "declared loopback" is exactly the false-FAIL risk above,
-    so an ambiguous profile is reported as its own bucket instead — an honest UNKNOWN,
+    so an ambiguous profile is reported as its own bucket instead - an honest UNKNOWN,
     never a guess in either direction.
 
     C-135 bug 2 (independent review, 2026-07-30): an ABSENT or empty ``gateway.bind``
-    is classified the same as ``auto`` — ambiguous — NOT ``loopback``. Grounded against
+    is classified the same as ``auto`` - ambiguous - NOT ``loopback``. Grounded against
     the installed dist (``net-BOKtNTf8.js:161-178``, ``defaultGatewayBindMode``): when
     ``gateway.bind`` is unset, the vendor's own effective default is ``loopback`` on
     bare metal but resolves through the SAME container-detecting path as an explicit
-    ``auto`` — ``0.0.0.0`` inside a container, "for port-forwarding compatibility", by
+    ``auto`` - ``0.0.0.0`` inside a container, "for port-forwarding compatibility", by
     design. That is exactly the ambiguity the ``auto`` branch above exists to never
     guess at, and an absent bind reaches it through an identical vendor code path, not
-    a different one — so it gets the identical verdict.
+    a different one - so it gets the identical verdict.
     """
     if _gateway_remote_exposure_reason(cfg) is not None:
         return "remote"
@@ -5076,28 +5076,28 @@ _INTERPRETER_EXE_BASENAMES = frozenset({"node", "bun", "deno"})
 
 
 def _names_openclaw_install(path: str) -> bool:
-    """True when *path* — a single argv TOKEN already filtered by the caller to look
+    """True when *path* - a single argv TOKEN already filtered by the caller to look
     like a filesystem path (contains ``/``), never arbitrary free text such as a
-    hostname or a flag value — structurally names an OpenClaw install.
+    hostname or a flag value - structurally names an OpenClaw install.
 
     Checked as PATH SEGMENTS (split on ``/``, compared whole, never a substring
     search), so a decoy directory that merely CONTAINS "openclaw" as part of a longer
-    name (``/tmp/my-openclaw-notes/script.js``) does NOT match — only an EXACT
+    name (``/tmp/my-openclaw-notes/script.js``) does NOT match - only an EXACT
     segment does. Three real shapes match, all grounded against this project's own
     installed dist:
 
-    * a segment exactly ``openclaw`` — covers both the standard npm package layout
+    * a segment exactly ``openclaw`` - covers both the standard npm package layout
       (``.../node_modules/openclaw/...``, global or local, any package manager) and a
       direct top-level install directory (``/opt/openclaw/...``);
-    * a segment exactly ``.openclaw`` — the state/install directory convention
+    * a segment exactly ``.openclaw`` - the state/install directory convention
       (``~/.openclaw/dist/cli.js``, this machine's own live shape);
-    * the final segment (basename) IS the real entry point itself — ``openclaw`` (the
+    * the final segment (basename) IS the real entry point itself - ``openclaw`` (the
       installed ``bin/openclaw`` symlink's own name, confirmed by actually invoking a
-      shebang-symlinked launcher and inspecting its resulting ``argv`` — see this
+      shebang-symlinked launcher and inspecting its resulting ``argv`` - see this
       task's C-135 notes) or ``openclaw.mjs`` (the resolved package script,
       ``~/.npm-global/lib/node_modules/openclaw/openclaw.mjs`` on this machine).
 
-    Deliberately NOT a bare substring test over the whole path or the whole cmdline —
+    Deliberately NOT a bare substring test over the whole path or the whole cmdline -
     see the block comment above :func:`_classify_listener_identity` for exactly why
     that was the bug this replaces (B-400).
     """
@@ -5177,7 +5177,7 @@ def check_effective_bind(ctx: Context) -> Finding:
     """B340 (F-156): corroborate the DECLARED ``gateway.bind`` against the ACTUAL
     listening socket, read from ``/proc/net/tcp{,6}`` (see ``sockets.py``).
 
-    Every other gateway-exposure verdict (B2, B70) is declared-state only — it reads
+    Every other gateway-exposure verdict (B2, B70) is declared-state only - it reads
     ``gateway.bind`` and reasons about that string. It never checks what the process is
     actually listening on, which is a real blind spot in both directions: a config that
     says loopback while an env override/wrapper/reverse-proxy actually exposes the port
@@ -5185,16 +5185,16 @@ def check_effective_bind(ctx: Context) -> Finding:
     even running (false FAIL elsewhere). This check adds the one runtime signal that
     closes that gap.
 
-    Route decision (recorded per the task DoD): **no subprocess** — ``sockets.py``
+    Route decision (recorded per the task DoD): **no subprocess** - ``sockets.py``
     reads ``/proc/net/tcp{,6}`` directly, matching ``hostwatch.py``'s "no subprocess, no
     network" doctrine rather than ``native.py``'s guarded-subprocess precedent. Read-only,
-    stdlib-only, and — because it parses the fixed ``local_address`` column instead of
-    regexing a whole ``ss``/``netstat`` line — structurally immune to the peer-column bug
+    stdlib-only, and - because it parses the fixed ``local_address`` column instead of
+    regexing a whole ``ss``/``netstat`` line - structurally immune to the peer-column bug
     a competitor tool shipped (see ``sockets.py``'s module docstring).
 
-    Matching a listener to the declared port is still by PORT NUMBER first — that part
+    Matching a listener to the declared port is still by PORT NUMBER first - that part
     of the original design is unchanged. C-135 bug 1 (independent review, 2026-07-30,
-    live-reproduced on the reviewer's own machine against ``fixtures/home_safe`` —
+    live-reproduced on the reviewer's own machine against ``fixtures/home_safe`` -
     Docker's userland proxy sharing port 8080 with a correctly loopback-only declared
     gateway) showed that port-number-alone matching has a real false-positive-FAIL
     mode, so this adds the ``/proc/*/fd`` PID correlation the original design had
@@ -5206,20 +5206,20 @@ def check_effective_bind(ctx: Context) -> Finding:
 
     B-374 (C-135 round 2, 2026-07-31) REPLACED the original one-sided calibration.
     The original fix could only ever DOWNGRADE FAIL to WARN, and only on POSITIVE
-    evidence the listener was something else — any unresolved identity (permission
+    evidence the listener was something else - any unresolved identity (permission
     denied, no matching inode, disagreeing names) kept the FAIL, which is itself an
     unproven guess in the FAIL direction (Golden Rule #5 forbids exactly this). Now:
     the verdict stays FAIL ONLY when at least one non-loopback listener is POSITIVELY
-    confirmed to be the gateway itself — see :func:`_classify_listener_identity`; the
-    moment NONE of them can be so confirmed — whether because they positively resolve
+    confirmed to be the gateway itself - see :func:`_classify_listener_identity`; the
+    moment NONE of them can be so confirmed - whether because they positively resolve
     to something else (Docker's userland proxy) or because identity resolution is
-    inconclusive (permission denied is the common case) — this reports UNKNOWN instead
+    inconclusive (permission denied is the common case) - this reports UNKNOWN instead
     of FAIL. This is a deliberate, accepted false-negative trade: a real lying gateway
     whose ``/proc/<pid>/fd`` this reader cannot read now also reads UNKNOWN, not FAIL.
     B2/B70 still assess the DECLARED posture regardless, so the config's own stated
-    exposure is never hidden — only THIS check's runtime corroboration backs off. Every
+    exposure is never hidden - only THIS check's runtime corroboration backs off. Every
     existing synthetic ``Context`` the test suite injects with no inode data at all
-    now resolves to UNKNOWN in this branch (not "keep FAIL" as before) — see
+    now resolves to UNKNOWN in this branch (not "keep FAIL" as before) - see
     ``tests/test_b340_effective_bind.py``.
 
     B-400 (2026-08-01, independent review) tightened WHAT counts as
@@ -5230,7 +5230,7 @@ def check_effective_bind(ctx: Context) -> Finding:
     path open, a shell script run from a directory literally named ``openclaw``) as
     the gateway itself. :func:`_classify_listener_identity` now requires the
     KERNEL-RESOLVED executable path (``/proc/<pid>/exe``, ``sockets.ProcessIdentity.
-    exe`` — unlike argv, not something a process's own arguments can spoof) to name a
+    exe`` - unlike argv, not something a process's own arguments can spoof) to name a
     real script interpreter or OpenClaw itself before cmdline is even consulted, and
     even then only a PATH-SHAPED, PATH-SEGMENT match counts, never a raw substring
     over free text. See that function's own docstring for the full four-way
@@ -5239,56 +5239,56 @@ def check_effective_bind(ctx: Context) -> Finding:
     the exact shapes this now clears that the old substring test did not.
 
     Scoring (B-387, C-135 round 2, 2026-07-31): every PASS and WARN branch below
-    passes ``scored=False`` explicitly — B340 can never EARN a scored point, only ever
+    passes ``scored=False`` explicitly - B340 can never EARN a scored point, only ever
     COST one via the single FAIL branch (which stays scored, HIGH-capped at 79). Before
     this, a declared-remote config whose effective bind also read non-loopback (the
-    "already assessed by B2/B70" PASS below) scored a full-weight PASS — so WIDENING
+    "already assessed by B2/B70" PASS below) scored a full-weight PASS - so WIDENING
     ``gateway.bind`` from loopback to remote could swap a capped FAIL (a correctly
     -declared config hitting an attribution edge case) for a full-weight PASS, i.e. a
     LESS secure declaration scoring BETTER on this one check. Making every non-FAIL
     branch unscored closes that inversion structurally: widening the declared/actual
     exposure can only ever move this check from "scores a capped FAIL" to "scores
-    nothing", never to "scores a PASS" — see ``tests/test_b340_effective_bind.py``'s
+    nothing", never to "scores a PASS" - see ``tests/test_b340_effective_bind.py``'s
     monotonicity test.
 
     Fully enumerated verdict table (``declared`` = ``_declared_bind_class``, which
-    resolves the FULL 5-profile ``gateway.bind`` enum — not a naive ``LOOPBACK``
+    resolves the FULL 5-profile ``gateway.bind`` enum - not a naive ``LOOPBACK``
     membership test, see its own docstring for why that would false-FAIL a container's
     ``bind=auto``; ``effective`` = every listener found on the declared port, ALL
-    loopback or not — a dual-stack 127.0.0.1 + [::1] pair on the same port is ONE
+    loopback or not - a dual-stack 127.0.0.1 + [::1] pair on the same port is ONE
     effective state, not two findings):
 
         declared      | effective         | verdict
         --------------+-------------------+----------------------------------------
-        loopback      | loopback          | PASS (unscored) — corroborates B2
-        loopback      | not loopback,      | FAIL (scored) — at least one non-loopback
+        loopback      | loopback          | PASS (unscored) - corroborates B2
+        loopback      | not loopback,      | FAIL (scored) - at least one non-loopback
                       | >=1 confirmed      |   listener positively confirmed as the
                       | gateway            |   gateway itself; the config lies
-        loopback      | not loopback,      | UNKNOWN — no non-loopback listener could be
+        loopback      | not loopback,      | UNKNOWN - no non-loopback listener could be
                       | none confirmed     |   positively tied to the gateway process
                       | gateway            |   (foreign process, or unresolvable)
-        remote        | loopback           | WARN (unscored) — config is dangerous but
+        remote        | loopback           | WARN (unscored) - config is dangerous but
                       |                    |   not currently exposed
-        remote        | not loopback       | PASS (unscored) — declared exposure is
+        remote        | not loopback       | PASS (unscored) - declared exposure is
                       |                    |   real; B2/B70 already assess it
-        ambiguous     | (any)              | UNKNOWN — profile (auto / custom w/o a
+        ambiguous     | (any)              | UNKNOWN - profile (auto / custom w/o a
                       |                    |   valid customBindHost) is not resolvable
                       |                    |   from the config alone; corroborating it
                       |                    |   either way would be a guess
-        (any)         | no listener found  | UNKNOWN — gateway not running, nothing measured
+        (any)         | no listener found  | UNKNOWN - gateway not running, nothing measured
                       |                    |   (checked against the resolved port, which may
-                      |                    |   be OpenClaw's own default — see "Port source")
-        (any)         | /proc unavailable  | UNKNOWN — platform not supported, or scan not run
-        (any)         | gateway.port       | UNKNOWN — gateway.bind embeds no port AND
+                      |                    |   be OpenClaw's own default - see "Port source")
+        (any)         | /proc unavailable  | UNKNOWN - platform not supported, or scan not run
+        (any)         | gateway.port       | UNKNOWN - gateway.bind embeds no port AND
                       | present, malformed |   gateway.port is present but not a valid
-                      |                    |   1-65535 port (a real config error — never
+                      |                    |   1-65535 port (a real config error - never
                       |                    |   silently defaulted, see "Port source")
-        (any)         | port out of range  | UNKNOWN — gateway.bind names an embedded port
+        (any)         | port out of range  | UNKNOWN - gateway.bind names an embedded port
                       |                    |   that is out of 1-65535 range
 
     Port source (C-135 finding, fixed before this shipped; B-400 extended
     it): this package's whole existing gateway-check family (B2, B70) reads
-    ``gateway.bind`` as a ``host:port`` string via ``parse_bind_host`` — the shape every
+    ``gateway.bind`` as a ``host:port`` string via ``parse_bind_host`` - the shape every
     fixture in this repo uses. But the CURRENT installed OpenClaw schema (grounded
     directly against the dist, since the recon doc does not cover this:
     ``zod-schema-O9ml_nmo.js``, the ``gateway: object({ port:
@@ -5296,24 +5296,24 @@ def check_effective_bind(ctx: Context) -> Finding:
     literal("remote")]).optional(), bind: union([literal("auto"), literal("lan"),
     literal("loopback"), literal("custom"), literal("tailnet")]).optional(),
     customBindHost: string().optional(), ... })`` block) makes ``gateway.bind`` a
-    5-value MODE enum with no embedded port at all — confirmed against this machine's
+    5-value MODE enum with no embedded port at all - confirmed against this machine's
     own live ``~/.openclaw/openclaw.json`` (``"bind": "loopback", "port": 18789``,
     sibling fields). Reading only an embedded port would make this check report UNKNOWN
-    on every config shaped this way — a real coverage gap on the exact real-fleet
+    on every config shaped this way - a real coverage gap on the exact real-fleet
     config available for this check's own C-135 pass, not a false FAIL, but real
     enough that it defeats the check's purpose. So the port is resolved, in order: (1)
     an embedded ``host:port`` in ``gateway.bind`` (the fixture/legacy shape); (2) the
     sibling ``gateway.port`` (grounded above; manifest entry in
     ``tests/grounded_schema_paths.txt``) when ``gateway.bind`` is a bare mode string
-    and ``gateway.port`` IS present and a valid 1-65535 int; (3) — B-400 —
+    and ``gateway.port`` IS present and a valid 1-65535 int; (3) - B-400 -
     OpenClaw's own grounded default, :data:`_DEFAULT_GATEWAY_PORT` (18789), when
     ``gateway.port`` is genuinely ABSENT (the single most common real shape, since the
     field is ``.optional()``): before this, an absent ``gateway.port`` made this check
     report UNKNOWN ("nothing to look up") even against a real, world-open listener on
-    OpenClaw's own real default port — a coverage blind spot, not a false FAIL, but one
+    OpenClaw's own real default port - a coverage blind spot, not a false FAIL, but one
     that defeated corroboration on the most common config shape. A ``gateway.port`` that
     IS present but not a valid port (a string, an out-of-range int, ...) is a genuine
-    config error and is never silently treated as "absent" — it stays its own distinct
+    config error and is never silently treated as "absent" - it stays its own distinct
     UNKNOWN (see the port-resolution block below), never masked by the default.
     """
     cfg = ctx.config
@@ -5321,7 +5321,7 @@ def check_effective_bind(ctx: Context) -> Finding:
         return _finding(
             "B340",
             UNKNOWN,
-            "No config loaded — cannot corroborate gateway.bind against the actual "
+            "No config loaded \u2014 cannot corroborate gateway.bind against the actual "
             "listening socket.",
             "Run on the host with ~/.openclaw present.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
@@ -5332,7 +5332,7 @@ def check_effective_bind(ctx: Context) -> Finding:
         return _finding(
             "B340",
             UNKNOWN,
-            "gateway config value is present but malformed (not an object) — cannot "
+            "gateway config value is present but malformed (not an object) \u2014 cannot "
             "corroborate it against the actual listening socket.",
             "Fix `gateway` to be a config object, or remove the key.",
         )
@@ -5346,7 +5346,7 @@ def check_effective_bind(ctx: Context) -> Finding:
             f"gateway.bind={bind_raw!r} is a profile whose actual bind cannot be "
             "determined from the config alone ('auto' resolves differently inside a "
             "container vs. bare metal; a 'custom' profile with no valid "
-            "gateway.customBindHost cannot even start) — nothing to corroborate.",
+            "gateway.customBindHost cannot even start) \u2014 nothing to corroborate.",
             "Set gateway.bind to an explicit profile ('loopback'/'lan'/'tailnet'), or "
             "give a 'custom' profile a valid gateway.customBindHost, so this check can "
             "state what is actually declared.",
@@ -5355,7 +5355,7 @@ def check_effective_bind(ctx: Context) -> Finding:
     # Port source, in order: an embedded host:port in gateway.bind (the shape every
     # fixture in this repo uses), falling back to the sibling gateway.port (the shape
     # the CURRENT OpenClaw schema actually uses when gateway.bind is a bare mode
-    # string — see the docstring's "Port source" note; grounded against the dist,
+    # string - see the docstring's "Port source" note; grounded against the dist,
     # manifest entry in tests/grounded_schema_paths.txt).
     bind_port_raw = _parse_bind_port_raw(bind_raw)
     port = _parse_bind_port(bind_raw)
@@ -5367,7 +5367,7 @@ def check_effective_bind(ctx: Context) -> Finding:
             "B340",
             UNKNOWN,
             f"gateway.bind={bind_raw!r} names a port ({bind_port_raw!r}) that is not a "
-            "valid TCP port (1-65535) — cannot look up which listening socket to "
+            "valid TCP port (1-65535) \u2014 cannot look up which listening socket to "
             "corroborate it against.",
             "Set gateway.bind to a valid host:port (port 1-65535), or set gateway.port "
             "to a valid port, so this check can corroborate it against the actual "
@@ -5394,7 +5394,7 @@ def check_effective_bind(ctx: Context) -> Finding:
                 return _finding(
                     "B340",
                     UNKNOWN,
-                    f"gateway.port={gw_port!r} is not a valid TCP port (1-65535) — "
+                    f"gateway.port={gw_port!r} is not a valid TCP port (1-65535) \u2014 "
                     f"cannot look up which listening socket to corroborate "
                     f"gateway.bind={bind_raw!r} against.",
                     "Set gateway.port to a valid port (1-65535) so this check can "
@@ -5409,7 +5409,7 @@ def check_effective_bind(ctx: Context) -> Finding:
             return _finding(
                 "B340",
                 UNKNOWN,
-                f"gateway.port={gw_port!r} is not a valid TCP port (1-65535) — "
+                f"gateway.port={gw_port!r} is not a valid TCP port (1-65535) \u2014 "
                 f"cannot look up which listening socket to corroborate "
                 f"gateway.bind={bind_raw!r} against.",
                 "Set gateway.port to a valid port (1-65535) so this check can "
@@ -5423,7 +5423,7 @@ def check_effective_bind(ctx: Context) -> Finding:
             "B340",
             UNKNOWN,
             "The effective-bind socket scan was not run (audit(include_sockets=True), "
-            "or the CLI's --no-sockets was passed) — cannot corroborate gateway.bind "
+            "or the CLI's --no-sockets was passed) \u2014 cannot corroborate gateway.bind "
             "against reality.",
             "Run the full CLI audit (omit --no-sockets) so this check can read "
             "/proc/net/tcp{,6} and corroborate the declared bind.",
@@ -5438,7 +5438,7 @@ def check_effective_bind(ctx: Context) -> Finding:
         )
 
     port_source = (
-        f"gateway.port unset — falling back to OpenClaw's own default port {port}"
+        f"gateway.port unset \u2014 falling back to OpenClaw's own default port {port}"
         if used_default_port
         else f"the port gateway.bind={bind_raw!r} declares"
     )
@@ -5447,7 +5447,7 @@ def check_effective_bind(ctx: Context) -> Finding:
         return _finding(
             "B340",
             UNKNOWN,
-            f"Nothing is listening on port {port} ({port_source}) — the gateway is not "
+            f"Nothing is listening on port {port} ({port_source}) \u2014 the gateway is not "
             "running, or is listening elsewhere; nothing to corroborate.",
             "Start the gateway and re-run the audit so this check can corroborate "
             "gateway.bind against the actual listening socket.",
@@ -5462,7 +5462,7 @@ def check_effective_bind(ctx: Context) -> Finding:
     ]
     if used_default_port:
         evidence.append(
-            f"gateway.port was not set in config — corroborated against OpenClaw's "
+            f"gateway.port was not set in config \u2014 corroborated against OpenClaw's "
             f"own grounded default port {_DEFAULT_GATEWAY_PORT}, not a value read "
             "from this config"
         )
@@ -5498,10 +5498,10 @@ def check_effective_bind(ctx: Context) -> Finding:
             reasons = []
             for m, ident in zip(non_loopback, identities):
                 if ident is None:
-                    reasons.append(f"{m.host}:{m.port} — process identity unresolvable")
+                    reasons.append(f"{m.host}:{m.port} \u2014 process identity unresolvable")
                 else:
                     reasons.append(
-                        f"{m.host}:{m.port} held by pid {ident.pid} ({ident.name}) — "
+                        f"{m.host}:{m.port} held by pid {ident.pid} ({ident.name}) \u2014 "
                         "not identifiable as the OpenClaw gateway"
                     )
             return _finding(
@@ -5511,7 +5511,7 @@ def check_effective_bind(ctx: Context) -> Finding:
                 f"listener was found on port {port}, but it could not be positively tied "
                 "to the OpenClaw gateway process itself: " + "; ".join(reasons) + ". This "
                 "could be gateway.bind lying (env override/launch wrapper/reverse proxy), "
-                "or an unrelated process coincidentally sharing the port number — not "
+                "or an unrelated process coincidentally sharing the port number \u2014 not "
                 "distinguishable from a config file and a /proc read alone.",
                 f"Confirm what is actually listening on port {port} (e.g. `lsof -i "
                 f":{port}` or `ss -tlnp` as root) to determine whether gateway.bind is "
@@ -5522,7 +5522,7 @@ def check_effective_bind(ctx: Context) -> Finding:
             "B340",
             FAIL,
             f"gateway.bind={bind_raw!r} declares a loopback bind, but the gateway is "
-            f"ACTUALLY listening on a non-loopback address on port {port} — the config "
+            f"ACTUALLY listening on a non-loopback address on port {port} \u2014 the config "
             "lies and the port is reachable from the network (env override, launch "
             "wrapper, or a reverse proxy re-publishing it).",
             "Find why the running gateway does not match the declared bind (an "
@@ -5538,7 +5538,7 @@ def check_effective_bind(ctx: Context) -> Finding:
         )
     if not declared_loopback and effective_loopback:
         # B-374 follow-up (item 4): when the DECLARED-remote classification actually
-        # comes from Tailscale serve/funnel (which requires a loopback gateway.bind —
+        # comes from Tailscale serve/funnel (which requires a loopback gateway.bind -
         # see _gateway_remote_exposure_reason's docstring), name that reason instead
         # of telling the owner to "set gateway.bind to loopback" when it may already
         # BE loopback and Tailscale's own relay path is what exposes it.
@@ -5546,20 +5546,20 @@ def check_effective_bind(ctx: Context) -> Finding:
         if exposure_reason is not None and exposure_reason.startswith("gateway.tailscale.mode="):
             detail = (
                 f"{exposure_reason} publishes the gateway externally regardless of "
-                f"gateway.bind={bind_raw!r} — the gateway is currently only listening "
+                f"gateway.bind={bind_raw!r} \u2014 the gateway is currently only listening "
                 f"loopback-only on port {port} on this host, but Tailscale's own "
                 "serve/funnel relay is what actually exposes it, not this machine's "
                 "socket."
             )
             fix = (
-                "Confirm the Tailscale serve/funnel exposure is intentional — it "
+                "Confirm the Tailscale serve/funnel exposure is intentional \u2014 it "
                 "publishes the gateway regardless of gateway.bind. Disable "
                 "gateway.tailscale.mode if that is not intended."
             )
         else:
             detail = (
                 f"gateway.bind={bind_raw!r} declares a non-loopback bind, but the "
-                f"gateway is currently only listening on loopback on port {port} — the "
+                f"gateway is currently only listening on loopback on port {port} \u2014 the "
                 "config is dangerous even though nothing is exposed right now."
             )
             fix = (
@@ -5590,7 +5590,7 @@ def check_effective_bind(ctx: Context) -> Finding:
         "B340",
         PASS,
         f"gateway.bind={bind_raw!r} declares a non-loopback bind and the gateway is "
-        f"ACTUALLY listening non-loopback on port {port} — the declared exposure is "
+        f"ACTUALLY listening non-loopback on port {port} \u2014 the declared exposure is "
         "real, and already assessed by B2/B70.",
         "See B2/B70 for the auth/exposure posture of this bind.",
         evidence=evidence,
@@ -5707,7 +5707,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         return _finding(
             "B384",
             UNKNOWN,
-            "No config loaded — cannot assess desktop.host's network exposure.",
+            "No config loaded \u2014 cannot assess desktop.host's network exposure.",
             "Run on the host with ~/.openclaw present.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
@@ -5716,7 +5716,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         return _finding(
             "B384",
             PASS,
-            "desktop.host is not configured — the experimental gateway-host desktop "
+            "desktop.host is not configured \u2014 the experimental gateway-host desktop "
             "source (a second, VNC/RFB network listener beside the gateway) is off by "
             "default and absent here.",
             "No action needed unless you intend to use the Desktop lab feature.",
@@ -5725,7 +5725,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         return _finding(
             "B384",
             UNKNOWN,
-            "desktop.host is present but malformed (not an object) — cannot assess its "
+            "desktop.host is present but malformed (not an object) \u2014 cannot assess its "
             "network exposure.",
             "Fix `desktop.host` to be a config object, or remove the key.",
         )
@@ -5733,7 +5733,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         return _finding(
             "B384",
             PASS,
-            "desktop.host.enabled is not true — the gateway-host VNC/RFB desktop source "
+            "desktop.host.enabled is not true \u2014 the gateway-host VNC/RFB desktop source "
             "is off.",
             "No action needed unless you intend to use the Desktop lab feature.",
         )
@@ -5753,7 +5753,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         return _finding(
             "B384",
             UNKNOWN,
-            f"desktop.host.port={port_raw!r} is not a valid TCP port (1-65535) — cannot "
+            f"desktop.host.port={port_raw!r} is not a valid TCP port (1-65535) \u2014 cannot "
             "look up which listening socket to corroborate.",
             "Set desktop.host.port to a valid port (1-65535), or remove it to use "
             f"OpenClaw's own default ({_DESKTOP_DEFAULT_VNC_PORT}).",
@@ -5765,7 +5765,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
             "B384",
             UNKNOWN,
             "The listening-socket scan was not run (audit(include_sockets=True), or the "
-            "CLI's --no-sockets was passed) — cannot corroborate desktop.host against "
+            "CLI's --no-sockets was passed) \u2014 cannot corroborate desktop.host against "
             "reality.",
             "Run the full CLI audit (omit --no-sockets) so this check can read "
             "/proc/net/tcp{,6} and corroborate desktop.host's exposure.",
@@ -5791,7 +5791,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
             "B384",
             UNKNOWN,
             f"desktop.host.enabled is true, but nothing is listening on port {port} "
-            f"({port_source}) yet — the Labs feature needs a gateway restart after "
+            f"({port_source}) yet \u2014 the Labs feature needs a gateway restart after "
             "being enabled, or the desktop has not started.",
             "Restart the gateway and re-run the audit so this check can corroborate the "
             "listener.",
@@ -5831,7 +5831,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         if _classify_desktop_listener_identity(ident) == "vnc"
     ]
     # FAIL requires BOTH: the binary is positively Xtigervnc, AND the config itself says
-    # OpenClaw is supervising it (managed=True). Binary identity alone is not enough —
+    # OpenClaw is supervising it (managed=True). Binary identity alone is not enough -
     # Xtigervnc is the stock Debian/Ubuntu tigervnc-standalone-server binary, so an
     # operator's own unmanaged VNC server matches it too (C-135, see module comment).
     if confirmed_vnc and managed:
@@ -5839,8 +5839,8 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
             "B384",
             FAIL,
             f"desktop.host.enabled is true, desktop.host.managed is true, and the "
-            f"VNC/RFB desktop listener on port {port} — confirmed as running the "
-            "Xtigervnc binary OpenClaw's managed-desktop supervisor spawns — is "
+            f"VNC/RFB desktop listener on port {port} \u2014 confirmed as running the "
+            "Xtigervnc binary OpenClaw's managed-desktop supervisor spawns \u2014 is "
             "ACTUALLY reachable on a non-loopback address. This is a second network "
             "listener beside the gateway, gated only by VNC password auth "
             "(desktop.host.passwordFile, see B385), not OpenClaw's own channel auth.",
@@ -5860,19 +5860,19 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
     for m, ident in zip(non_loopback, identities):
         classification = _classify_desktop_listener_identity(ident)
         if classification == "unresolved":
-            reasons.append(f"{m.host}:{m.port} — process identity unresolvable")
+            reasons.append(f"{m.host}:{m.port} \u2014 process identity unresolvable")
         elif classification == "vnc":
             # confirmed_vnc is non-empty here only when `managed` is not True (the
             # managed+confirmed combination returned FAIL above already).
             reasons.append(
-                f"{m.host}:{m.port} held by pid {ident.pid} (exe={ident.exe}) — runs "
+                f"{m.host}:{m.port} held by pid {ident.pid} (exe={ident.exe}) \u2014 runs "
                 "the exact binary OpenClaw's managed desktop spawns, but "
                 "desktop.host.managed is not true, so this is just as consistent with "
                 "an operator-run TigerVNC server entirely outside OpenClaw's control"
             )
         else:
             reasons.append(
-                f"{m.host}:{m.port} held by pid {ident.pid} (exe={ident.exe}) — not "
+                f"{m.host}:{m.port} held by pid {ident.pid} (exe={ident.exe}) \u2014 not "
                 "identifiable as OpenClaw's managed desktop"
             )
     return _finding(
@@ -5883,11 +5883,11 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         "own managed desktop process: " + "; ".join(reasons) + ". This could be the "
         "VNC server desktop.host relies on (managed or an existing one) actually "
         "reachable from the network rather than loopback-only, or an unrelated process "
-        "coincidentally sharing the port — not distinguishable from a config file and a "
+        "coincidentally sharing the port \u2014 not distinguishable from a config file and a "
         "/proc read alone.",
         f"Confirm what is listening on port {port} (e.g. `ss -tlnp` as root, or `lsof "
         f"-i :{port}`). If desktop.host.managed is not set, the VNC server is entirely "
-        "external to OpenClaw and nothing here enforces loopback for it — bind it to "
+        "external to OpenClaw and nothing here enforces loopback for it \u2014 bind it to "
         "127.0.0.1 explicitly.",
         evidence=evidence + reasons,
         scored=False,
@@ -5915,7 +5915,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
         return _finding(
             "B385",
             UNKNOWN,
-            "No config loaded — cannot assess desktop.host.passwordFile.",
+            "No config loaded \u2014 cannot assess desktop.host.passwordFile.",
             "Run on the host with ~/.openclaw present.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
@@ -5931,7 +5931,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
         return _finding(
             "B385",
             UNKNOWN,
-            "desktop.host is present but malformed (not an object) — cannot assess its "
+            "desktop.host is present but malformed (not an object) \u2014 cannot assess its "
             "passwordFile.",
             "Fix `desktop.host` to be a config object, or remove the key.",
         )
@@ -5940,14 +5940,14 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
         return _finding(
             "B385",
             PASS,
-            "desktop.host.passwordFile is not set — no VNC password file to assess.",
+            "desktop.host.passwordFile is not set \u2014 no VNC password file to assess.",
             "No action needed.",
         )
     if not _is_posix():
         return _finding(
             "B385",
             UNKNOWN,
-            "On Windows, file security uses NTFS ACLs, not POSIX mode bits — "
+            "On Windows, file security uses NTFS ACLs, not POSIX mode bits \u2014 "
             "desktop.host.passwordFile's at-rest permissions are UNKNOWN, never a false "
             "PASS.",
             f"Check the ACLs yourself: `icacls {raw_path}` should not grant read to "
@@ -5963,7 +5963,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
             "B385",
             UNKNOWN,
             f"desktop.host.passwordFile is set to {raw_path!r}, but no readable file "
-            "exists there — cannot assess its permissions.",
+            "exists there \u2014 cannot assess its permissions.",
             "If this install does use the Desktop lab feature, ensure the password "
             "file is readable by the audit so a future run can check its permissions.",
         )
@@ -5975,7 +5975,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
             f"desktop.host.passwordFile ({raw_path}) is {why}. This is the sole "
             "credential gating the gateway-host VNC/RFB desktop listener (TigerVNC "
             "VncAuth's DES-based obfuscation is not a real secret boundary once the "
-            "file itself can be read) — anyone who can read it can unlock remote "
+            "file itself can be read) \u2014 anyone who can read it can unlock remote "
             "control of the desktop.",
             f"Run `chmod 600 {raw_path}`. If you cannot rule out that it was already "
             "read, regenerate it (your VNC server's password tool, e.g. "
@@ -5991,35 +5991,35 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
 
 
 def check_audit_target_divergence(ctx: Context) -> Finding:
-    """B183 — the running agent may be reading a DIFFERENT config file than the one audited.
+    """B183 - the running agent may be reading a DIFFERENT config file than the one audited.
 
     B-281 (ENV-1). Every other check in this catalog describes ``ctx.config_path``. That is
     only useful if the agent is running that same file. OpenClaw's own resolver
     (``resolveConfigPath``, dist/paths-BMBAvkNf.js:136-152) consults
     ``OPENCLAW_CONFIG_PATH`` first and unconditionally, reaches a different home through
-    ``OPENCLAW_HOME`` (home-dir-CJKEsOtx.js:34-42), and follows ``OPENCLAW_STATE_DIR`` —
+    ``OPENCLAW_HOME`` (home-dir-CJKEsOtx.js:34-42), and follows ``OPENCLAW_STATE_DIR`` -
     which is exactly what ``openclaw --profile <name>`` sets. It also prefers an EXISTING
     legacy ``clawdbot.json`` over the canonical name, so the target can move with no
     environment variable set at all.
 
     Left unreported, a stale hardened ``~/.openclaw/openclaw.json`` scores A while the live
-    agent runs a wide-open profile — a lying PASS across the whole catalog at once, the same
+    agent runs a wide-open profile - a lying PASS across the whole catalog at once, the same
     family as the E-052 phantom-path findings.
 
-    WARN    — the path the product would resolve differs (by ``realpath``) from the audited
+    WARN    - the path the product would resolve differs (by ``realpath``) from the audited
               one. Both paths are named.
-    PASS    — the two resolve to the same file.
-    UNKNOWN — the audited home is not this machine's default state directory (a fixture or
+    PASS    - the two resolve to the same file.
+    UNKNOWN - the audited home is not this machine's default state directory (a fixture or
               ``--home`` scan), or the resolution could not be completed.
 
     Never FAIL: a divergence is a signal to re-point the audit, not a proven
-    misconfiguration — the other file may be perfectly hardened.
+    misconfiguration - the other file may be perfectly hardened.
 
     Three deliberate constraints, each of which would otherwise produce a spurious finding:
 
     * **``realpath`` comparison, not presence.** ``OPENCLAW_CONFIG_PATH`` explicitly set to
       the file we already audit, or reaching it through a symlink, is NOT a divergence. A
-      naive "the variable is set → warn" would fire on a correct setup.
+      naive "the variable is set -> warn" would fire on a correct setup.
     * **Gated on the default state directory** (``audits_default_state_dir``). Under
       ``--home``/fixtures the user deliberately targeted a file and a warning would be
       noise; it also keeps the auditor's own environment from steering a fixture scan.
@@ -6058,7 +6058,7 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             UNKNOWN,
             f"This scan targets {audited_rel} under an explicitly chosen home, which is "
             "not this machine's default OpenClaw state directory, so it cannot be "
-            "compared against the path the running agent would resolve — the environment "
+            "compared against the path the running agent would resolve \u2014 the environment "
             "of this process describes a different subject.",
             "Run the audit with no --home argument to have it check whether the agent's "
             "own config resolution points somewhere else.",
@@ -6087,7 +6087,7 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             WARN,
             "The audited config file is NOT the one OpenClaw would load. Every other "
             f"finding in this report describes {audited_rel} under the audited home, but "
-            f"the agent resolves a different file ({reason}) — so a clean grade here says "
+            f"the agent resolves a different file ({reason}) \u2014 so a clean grade here says "
             "nothing about the configuration the agent is actually running. Both paths "
             "are named in full in this finding's evidence and in the fix below.",
             f"Re-run the audit against the live target: {command_prefix()} --home "
@@ -6113,21 +6113,21 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
 # B-282 (ENV-6): break-glass environment toggles that relax a security control.
 #
 # Each entry is (variable, predicate, what it does) and each was grounded in the installed
-# dist individually — the three toggles use THREE DIFFERENT truthiness rules and collapsing
+# dist individually - the three toggles use THREE DIFFERENT truthiness rules and collapsing
 # them into one would misreport at least two:
 #
 #   OPENCLAW_ALLOW_INSECURE_PRIVATE_WS  strict `=== "1"` (connection-details-BBobR8Xp.js:27)
 #   OPENCLAW_LOAD_SHELL_ENV             isTruthyEnvValue {1,on,true,yes}
-#                                       (shell-env-DaE9Xx3-.js:200-202 → env-CKdem44B.js:46)
+#                                       (shell-env-DaE9Xx3-.js:200-202 -> env-CKdem44B.js:46)
 #
 # DELIBERATELY EXCLUDED, both would be false positives:
 #
-#   OPENCLAW_SHOW_SECRETS — its sense is INVERTED. status.scan-Bm3xXn8C.js:34 reads
+#   OPENCLAW_SHOW_SECRETS - its sense is INVERTED. status.scan-Bm3xXn8C.js:34 reads
 #     `showSecrets: process.env.OPENCLAW_SHOW_SECRETS?.trim() !== "0"`, so display is ON by
 #     default and the ONLY value that changes anything is "0", which HARDENS the `openclaw
 #     status` output. Flagging this variable as "set" would warn about a setting identical
 #     to the default, and warn hardest at the exact moment the user had improved matters.
-#   OPENCLAW_CLI_CONTAINER_BYPASS — not a sandbox escape but the CLI's container-DELEGATION
+#   OPENCLAW_CLI_CONTAINER_BYPASS - not a sandbox escape but the CLI's container-DELEGATION
 #     recursion guard, injected by OpenClaw itself when exec'ing into the container
 #     (startup-trace-Bc2ebu8Y.js:176-177). Its set state is the normal condition inside any
 #     containerized install, so a check on it would fire on every correct deployment.
@@ -6148,34 +6148,34 @@ _ENV6_TOGGLES = (
 
 
 def check_env_breakglass_toggles(ctx: Context) -> Finding:
-    """B192 — a break-glass environment toggle relaxes a security control.
+    """B192 - a break-glass environment toggle relaxes a security control.
 
     B-282 (ENV-6). Read from the two GLOBAL runtime dotenv files OpenClaw loads into
-    ``process.env`` (``~/.openclaw/.env`` and ``~/.config/openclaw/gateway.env`` —
+    ``process.env`` (``~/.openclaw/.env`` and ``~/.config/openclaw/gateway.env`` -
     dist/dotenv-global-mWLbBl_z.js:85-111), and from this process's own environment only
     when the audited home is this user's own.
 
-    WARN    — a toggle is observably on. Never FAIL: both are DOCUMENTED break-glass
+    WARN    - a toggle is observably on. Never FAIL: both are DOCUMENTED break-glass
               switches. ``OPENCLAW_ALLOW_INSECURE_PRIVATE_WS`` is sanctioned in OpenClaw's
               own gateway security docs for trusted private networks and its plugin docs
               instruct users to set it. A FAIL would punish following the vendor's manual.
-    PASS    — a global dotenv file exists and none of the toggles are on in it.
-    UNKNOWN — no global dotenv file exists AND the audited home is not this user's own, so
+    PASS    - a global dotenv file exists and none of the toggles are on in it.
+    UNKNOWN - no global dotenv file exists AND the audited home is not this user's own, so
               there is nothing to have read. Also UNKNOWN, ``engine_degraded=True``
               (B-657), when a global dotenv file WAS read but exceeded the collector's
-              byte cap (``ctx.dotenv_truncated``) — a toggle past the cut would silently
+              byte cap (``ctx.dotenv_truncated``) - a toggle past the cut would silently
               disable a protection with no disclosure. Not gated on the shared
               ``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``: this check's only evidence source
               (``dotenv_override``) never reads a systemd unit's environment, and that
               domain also covers unit-file truncation this check never touches.
 
     **Scope, stated exactly.** A variable exported in the shell that launched an
-    already-running agent leaves no on-disk trace and is not detectable from here — that
+    already-running agent leaves no on-disk trace and is not detectable from here - that
     is a process boundary. The two global dotenv files cover the *persistent* delivery
     paths, which are also the ones that survive a restart and therefore the ones an
     attacker or a compromised agent would use; a shell export dies with the shell. The
     residual is a false NEGATIVE, never a false positive. Accordingly this check never
-    claims "no toggle is set" — only that none was found in the persistent locations.
+    claims "no toggle is set" - only that none was found in the persistent locations.
     """
     from ..collector import dotenv_override, is_truthy_env_value  # noqa: PLC0415
 
@@ -6186,7 +6186,7 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
             continue
         on = strict(raw) if strict is not None else is_truthy_env_value(raw)
         if on:
-            hits.append(f"{name} is on ({_detail_path(source, ctx.home)}) — it {what}")
+            hits.append(f"{name} is on ({_detail_path(source, ctx.home)}) \u2014 it {what}")
 
     if hits:
         return _finding(
@@ -6198,7 +6198,7 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
             "a dotenv file persists across restarts.",
             "Remove the variable from the dotenv file once the situation that needed it "
             "is over, so the protection returns on the next agent start. If it is needed "
-            "permanently, record why — a persistent break-glass is a standing exception, "
+            "permanently, record why \u2014 a persistent break-glass is a standing exception, "
             "not a default.",
             evidence=hits,
         )
@@ -6216,7 +6216,7 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
             "that were read, but at least one of them exceeded the collector's byte cap "
             "("
             + ", ".join(_detail_path(p, ctx.home) for p in ctx.dotenv_files)
-            + ") — a toggle past the cut would not have been seen.",
+            + ") \u2014 a toggle past the cut would not have been seen.",
             "Keep OpenClaw's global dotenv files (~/.openclaw/.env, "
             "~/.config/openclaw/gateway.env) under the collector's size cap, then "
             "re-run the audit.",
@@ -6258,34 +6258,34 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
 
 
 def check_shell_env_fallback(ctx: Context) -> Finding:
-    """B324 — env.shellEnv.enabled (E-060 item 7): agent-startup login-shell import.
+    """B324 - env.shellEnv.enabled (E-060 item 7): agent-startup login-shell import.
 
     The CONFIG-KEY half of the same OR condition B192 already checks the ENV-VAR half
     of: OpenClaw enables its shell-env fallback when EITHER the
     ``OPENCLAW_LOAD_SHELL_ENV`` dotenv toggle is on (B192) OR
-    ``env.shellEnv.enabled === true`` in openclaw.json (this check) — grounded directly
+    ``env.shellEnv.enabled === true`` in openclaw.json (this check) - grounded directly
     against the dist: ``call-Bj6Erfmh.js:101`` / ``io-By0s-a_s.js:5268``:
     ``shouldEnableShellEnvFallback(env) || cfg.env?.shellEnv?.enabled === true``. When
     on, OpenClaw loads environment variables from the user's login shell at agent
-    startup, so ``~/.bashrc``/``~/.zshrc`` content becomes agent-startup input — a
+    startup, so ``~/.bashrc``/``~/.zshrc`` content becomes agent-startup input - a
     persistence foothold or a PATH-hijack planted there becomes an agent-startup
     vector, not only an interactive-shell one.
 
     WARN-only, never FAIL: OpenClaw's own field description calls this a legitimate,
     commonly-wanted feature ("Keep this enabled when you depend on profile-defined
-    secrets or PATH customizations" — schema-DRyO1XBt.js:91), mirroring B192's own
+    secrets or PATH customizations" - schema-DRyO1XBt.js:91), mirroring B192's own
     break-glass framing for the sibling toggle.
 
     Scope, stated exactly: ``shouldEnableShellEnvFallback()`` also fires from the
     ``OPENCLAW_LOAD_SHELL_ENV`` runtime environment variable (B192's surface, not
-    config) — a static config audit cannot observe that path, so this check's absence
+    config) - a static config audit cannot observe that path, so this check's absence
     of a finding here does NOT mean shell-env loading is off, only that the openclaw.json
     key itself does not request it. That residual is a false NEGATIVE (already covered
     by B192 for the env-var path), never a false positive this check would introduce.
 
-    WARN    — env.shellEnv.enabled == true.
-    PASS    — env.shellEnv.enabled is absent or false.
-    UNKNOWN — no config found at all, or present but unparseable/unreadable.
+    WARN    - env.shellEnv.enabled == true.
+    PASS    - env.shellEnv.enabled is absent or false.
+    UNKNOWN - no config found at all, or present but unparseable/unreadable.
     """
     if not ctx.config_found:
         return _finding(
@@ -6303,8 +6303,8 @@ def check_shell_env_fallback(ctx: Context) -> Finding:
         return _finding(
             "B324",
             WARN,
-            "env.shellEnv.enabled=true — OpenClaw loads environment variables from "
-            "the user's login shell (~/.bashrc, ~/.zshrc, …) at agent startup, so "
+            "env.shellEnv.enabled=true \u2014 OpenClaw loads environment variables from "
+            "the user's login shell (~/.bashrc, ~/.zshrc, \u2026) at agent startup, so "
             "shell rc file content becomes agent-startup input.",
             "Confirm this is needed (e.g. profile-defined secrets or PATH "
             "customizations the agent depends on); disable it in a locked-down "
@@ -6314,7 +6314,7 @@ def check_shell_env_fallback(ctx: Context) -> Finding:
     return _finding(
         "B324",
         PASS,
-        "env.shellEnv.enabled is absent or false — openclaw.json does not request "
+        "env.shellEnv.enabled is absent or false \u2014 openclaw.json does not request "
         "login-shell environment import at startup (the OPENCLAW_LOAD_SHELL_ENV "
         "env-var path is checked separately by B192).",
         "Keep it that way unless a specific workflow depends on profile-defined "
@@ -6343,26 +6343,26 @@ def _b323_is_literal_path_override(key: object, value: object) -> bool:
 
 
 def check_env_vars_path_override(ctx: Context) -> Finding:
-    """B323 — env.vars.PATH / env.<KEY> catchall: an explicit PATH override.
+    """B323 - env.vars.PATH / env.<KEY> catchall: an explicit PATH override.
 
     Narrowed on grounding from the epic's original framing ("report any env.vars /
     env.<KEY> catchall key OpenClaw's own blocklist doesn't already block"). Two
-    catchall shapes reach the process environment identically —
+    catchall shapes reach the process environment identically -
     ``config-env-vars-DlUfO5Q_.js:43-59`` ``collectConfigEnvVarsByTarget()`` reads
     ``env.vars.<KEY>`` (a Zod ``record(string(), string())``,
     ``zod-schema-O9ml_nmo.js:1004``) AND any other ``env.<KEY>`` sibling except
     ``shellEnv``/``vars`` (a Zod ``.catchall(string())`` on the ``env`` object itself,
-    ``zod-schema-O9ml_nmo.js:1005``) — and both funnel through the same
+    ``zod-schema-O9ml_nmo.js:1005``) - and both funnel through the same
     ``isBlockedConfigEnvVar()`` gate (``config-env-vars-DlUfO5Q_.js:36-38``), which
     unions ``isDangerousHostEnvVarName()`` + ``isDangerousHostEnvOverrideVarName()``
     (``host-env-security-CWC2ZCy4.js:5-316``, ~254 explicit keys + 7 prefixes + 1
-    regex — NODE_OPTIONS/PYTHONPATH/BASH_ENV/GIT_EXTERNAL_DIFF/RUSTC_WRAPPER/
+    regex - NODE_OPTIONS/PYTHONPATH/BASH_ENV/GIT_EXTERNAL_DIFF/RUSTC_WRAPPER/
     SSLKEYLOGFILE/EDITOR/HOME/AWS_*/GH_TOKEN/etc.). That blocklist is comprehensive
     enough that a check flagging every *other* residual key would false-WARN on the
-    feature's own legitimate purpose (arbitrary app/API-key vars) — a Golden Rule #5
+    feature's own legitimate purpose (arbitrary app/API-key vars) - a Golden Rule #5
     violation. The one concrete, groundable gap is ``PATH`` itself: it does not
     appear anywhere in ``blockedEverywhereKeys``/``blockedOverrideOnlyKeys``
-    (host-env-security-CWC2ZCy4.js:5-316) — the file's only literal ``"PATH"`` match
+    (host-env-security-CWC2ZCy4.js:5-316) - the file's only literal ``"PATH"`` match
     is inside ``sanitizeHostEnvOverridesWithDiagnostics()`` (:497), a *different*,
     host-exec-override subsystem this config path never reaches.
 
@@ -6374,18 +6374,18 @@ def check_env_vars_path_override(ctx: Context) -> Finding:
     ``io-By0s-a_s.js:5267`` ``finalizeLoadedRuntimeConfig``,
     ``call-Bj6Erfmh.js:79`` ``resolveGatewayDispatchEnvVars``) defaults to
     ``process.env``, which always carries a non-empty ``PATH`` in a realistic launch
-    — so this is closer to C5's own "declared trust expansion, real-world
+    - so this is closer to C5's own "declared trust expansion, real-world
     exploitability uncertain" WARN precedent (host-filesystem PATH/install-dir
     hijacking) than to B186's narrow-and-deterministic writable-root FAIL. A value
     containing an unresolved ``${...}`` substitution token is skipped, mirroring
-    ``containsEnvVarReference()`` (``env-substitution-CATXLg7n.js:102-112``) — the
+    ``containsEnvVarReference()`` (``env-substitution-CATXLg7n.js:102-112``) - the
     config is referencing another variable indirectly, not hardcoding a literal path.
 
-    WARN    — ``env.vars.PATH`` or the ``env.<KEY>`` catchall sets a literal
+    WARN    - ``env.vars.PATH`` or the ``env.<KEY>`` catchall sets a literal
               (non-``${...}``) non-empty string value for a key that normalizes
               (case-insensitively) to ``PATH``.
-    PASS    — no such entry.
-    UNKNOWN — no openclaw.json found, or present but unparseable/unreadable.
+    PASS    - no such entry.
+    UNKNOWN - no openclaw.json found, or present but unparseable/unreadable.
     """
     if not ctx.config_found:
         return _finding(
@@ -6630,7 +6630,7 @@ _B389_COMPUTER_PLUGIN_ID = "cua-computer"
 
 
 def _b389_sandbox_mode(cfg: dict, entry) -> str:
-    """Same per-scope resolution as ``toolpolicy._sandbox_mode`` (not imported — this
+    """Same per-scope resolution as ``toolpolicy._sandbox_mode`` (not imported - this
     check only needs the coarse ``== "all"`` reading B68 already uses, not the full
     tri-state ``_sandbox_confines``/B-712 machinery): a per-agent ``sandbox.mode``
     override, else ``agents.defaults.sandbox.mode``."""
@@ -6642,7 +6642,7 @@ def _b389_sandbox_mode(cfg: dict, entry) -> str:
 
 
 def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
-    """B389 — the Gateway's own unmanaged-desktop `computer` control
+    """B389 - the Gateway's own unmanaged-desktop `computer` control
     route, reachable via the `computer.invoke`/`computer.status` RPC methods without
     passing through `gateway.nodes.commands.deny` or any per-action confirmation.
 
@@ -6654,51 +6654,51 @@ def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
     `desktop.release` (operator.admin). `computer.invoke`/`computer.status`
     (`computer-B53mi_iF.mjs:29-61`) dispatch straight to
     `context.gatewayComputerService`, which is `createGatewayComputerService`
-    (`computer-service-B8rKHvOb.mjs`) — the Gateway process's OWN, ambient desktop
+    (`computer-service-B8rKHvOb.mjs`) - the Gateway process's OWN, ambient desktop
     session, prepared without ever checking `desktop.host.enabled` (that only gates the
     separate MANAGED-desktop branch inside `prepare()`; the plain/unmanaged path needs
     no `desktop.host` config at all, refuting the "gated on desktop.host" half of the
     original candidate wording).
 
     THE GAP. `invoke()` never imports or calls `isNodeCommandAllowed`/
-    `resolveNodeCommandAllowlist` — the predicate every OTHER command-shaped route
+    `resolveNodeCommandAllowlist` - the predicate every OTHER command-shaped route
     (paired remote nodes, `computer-transport-CwEUIeg3.mjs:189-198`; exec approvals;
     fs) consults, and the one that actually reads `gateway.nodes.commands.deny`
     (`node-command-policy-5uuS2pOn.mjs:297-298`). So a config that sets
-    `gateway.nodes.commands.deny: ["computer.act"]` — believing it has closed the
-    `computer` capability everywhere — does not touch this route at all: it is not a
+    `gateway.nodes.commands.deny: ["computer.act"]` - believing it has closed the
+    `computer` capability everywhere - does not touch this route at all: it is not a
     node-command invocation, it is the Gateway's own desktop. There is also no
     per-action confirmation gate on this path (measured: no `confirm`/`approval` symbol
-    anywhere in `computer-service-B8rKHvOb.mjs`) — the only gates are the operator RPC
+    anywhere in `computer-service-B8rKHvOb.mjs`) - the only gates are the operator RPC
     scope and `configuredProvider()` below.
 
     WHY THIS NEVER FIRES BY ACCIDENT. `configuredProvider()`
     (`computer-service-B8rKHvOb.mjs:110-115`) requires, as one conjunction: the plugin
     registry's resolved `plugin.enabled === true` AND `config.plugins?.enabled !== false`
     AND, separately, `config.plugins?.entries?.["cua-computer"]?.enabled === true` read
-    off the RAW config — an EXPLICIT entry, not merely the bundled plugin's own
+    off the RAW config - an EXPLICIT entry, not merely the bundled plugin's own
     `enabledByDefault: true` (`extensions/cua-computer/openclaw.plugin.json`) taking
     effect with no config touch at all. So despite shipping enabled-by-default, the
     Gateway-desktop route this check reports on requires the owner to have explicitly
-    written `plugins.entries.cua-computer.enabled: true` — the same "owner's explicit
+    written `plugins.entries.cua-computer.enabled: true` - the same "owner's explicit
     act, not the shipped default" shape B350 (`gateway.terminal.enabled`) already
     reports on, which is why this stays a WARN-only disclosure rather than a bare
     "plugin ships enabled" alarm.
 
     WHY IT ALSO GATES ON `toolgrant.granted('computer', scope)`. The plugin-enabled
     condition alone only proves an AUTHENTICATED OPERATOR (Control UI, mobile, any
-    other `operator.write`-scoped RPC client — a human using an admin feature by
+    other `operator.write`-scoped RPC client - a human using an admin feature by
     design) could drive the desktop; that is not itself a misconfiguration. What turns
     it into a PROMPT-INJECTABLE surface is an AGENT itself holding the `computer` tool
-    (`computer-tool-w_NM7BHT.mjs:277,295` — an agent-hosted run can call
+    (`computer-tool-w_NM7BHT.mjs:277,295` - an agent-hosted run can call
     `computer.invoke` over the SAME Gateway RPC, via `callGatewayTool`, using its own
     delegated authority). `computer` is an ordinary core tool id
     (`toolgrant._CORE_TOOL_GROUPS["group:nodes"]`/`["group:openclaw"]`) but is granted
-    by NONE of the `minimal`/`coding`/`messaging` profiles — only `profile: "full"` or
+    by NONE of the `minimal`/`coding`/`messaging` profiles - only `profile: "full"` or
     an explicit `allow`/`alsoAllow` naming it (or the group) reaches it, so
     `toolgrant.granted(cfg, "computer", scope)` is the right, already-vendor-validated
     question to ask per scope (differentially re-verified for this exact tool id against
-    the live 2026.9.5 resolver via `tests/_toolgrantoracle.py`, 2026-09-19 — its own
+    the live 2026.9.5 resolver via `tests/_toolgrantoracle.py`, 2026-09-19 - its own
     committed battery does not cover `"computer"`).
 
     WHY SANDBOX IS THE ONE CONFIG-VISIBLE MITIGATION NAMED IN THE TRIGGER, NOT ONLY IN
@@ -6706,32 +6706,32 @@ def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
     sandboxed session with `containedToolNames: ["computer"]`
     (`worker-turn-execution-CxTBWFYa.mjs:112`, `workspace-result-finalize-C4Pt3pQL.mjs:626`)
     specifically to route the agent's `computer` tool through a CONTAINED desktop rather
-    than the ambient one this check is about — so a scope proven fully sandboxed
+    than the ambient one this check is about - so a scope proven fully sandboxed
     (`agents.defaults.sandbox.mode`/per-agent `sandbox.mode` `== "all"`) is genuinely
     mitigated, not merely hoped to be. Same coarse `== "all"` reading B68's composite
     predicate already uses (not the fuller `non-main`-undecidable tri-state
-    `toolpolicy._sandbox_confines` models) — narrowing, not closing: `sandbox.mode:
+    `toolpolicy._sandbox_confines` models) - narrowing, not closing: `sandbox.mode:
     "non-main"` is left on the WARN side rather than invented as a proof either way.
 
-    PASS    — the trigger is PROVEN false: `plugins.enabled` is explicitly `false`, or
+    PASS    - the trigger is PROVEN false: `plugins.enabled` is explicitly `false`, or
               `plugins.entries.cua-computer.enabled` is absent/not `True` (the shipped
               default requires this exact opt-in), or the plugin is on but no declared
               scope is granted `computer` while unsandboxed.
-    WARN    — `plugins.entries.cua-computer.enabled` is `True`, `plugins.enabled` is
+    WARN    - `plugins.entries.cua-computer.enabled` is `True`, `plugins.enabled` is
               not `false`, and at least one scope (global or a declared agent) is
               granted `computer` and is not proven fully sandboxed. Names the scopes.
-    UNKNOWN — the config was not read/parseable, or `plugins`/`plugins.entries` is
-              present but not an object (Golden Rule #4 — every downstream dig()/`.get()`
+    UNKNOWN - the config was not read/parseable, or `plugins`/`plugins.entries` is
+              present but not an object (Golden Rule #4 - every downstream dig()/`.get()`
               would otherwise silently degrade to "absent").
 
     Never FAIL: a configured-capability disclosure requiring its own explicit opt-in
-    plus an explicit tool grant is not, on config evidence alone, a proven compromise —
+    plus an explicit tool grant is not, on config evidence alone, a proven compromise -
     a FAIL tier needs its own independent C-135 pass first, matching B350/B358/B360's
     own reasoning for the same Gateway-capability-disclosure shape.
 
     DECLARED LIMIT, in the over-reporting direction only: `resolveSandboxToolPolicyForAgent`'s
     `deny`/`allow` layers on TOP of `containedToolNames` are not modelled here (the same
-    scope this project's toolpolicy/toolgrant leaves to their own callers) — an operator
+    scope this project's toolpolicy/toolgrant leaves to their own callers) - an operator
     who additionally denies `computer` inside `tools.sandbox.tools.deny` for an
     already-non-`all`-sandboxed scope is not read as closing it. That can only cost a
     finding, never invent one.
@@ -6772,7 +6772,7 @@ def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
             PASS,
             "plugins.entries.cua-computer.enabled is not true (or plugins.enabled is "
             "false), so the Gateway's unmanaged-desktop computer.invoke/computer.status "
-            "route is not configured — it ships enabled-by-default at the plugin level, "
+            "route is not configured \u2014 it ships enabled-by-default at the plugin level, "
             "but this specific Gateway route additionally requires an explicit "
             "plugins.entries.cua-computer.enabled: true.",
             "Keep it that way unless you specifically need remote/agent desktop "
@@ -6800,7 +6800,7 @@ def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
             "plugins.entries.cua-computer.enabled is true, but no declared scope is "
             "granted the `computer` tool while unsandboxed, so no agent can reach the "
             "Gateway's unmanaged-desktop control route as a tool call. (An authenticated "
-            "Gateway operator could still call computer.invoke directly — that is the "
+            "Gateway operator could still call computer.invoke directly \u2014 that is the "
             "feature's intended admin use, not something this check flags.)",
             "If you later grant `computer` to an agent, also confirm that agent's "
             "sandbox.mode is 'all' or accept that this route bypasses "
@@ -6923,7 +6923,7 @@ def _b397_direct_reach(cfg: dict) -> "tuple[str, str]":
 
 
 def check_gateway_portal_reach(ctx: Context) -> Finding:
-    """B397 — agent-opened Gateway portals (``gateway.portals``, the `portal` tool) are
+    """B397 - agent-opened Gateway portals (``gateway.portals``, the `portal` tool) are
     gated only by a per-portal bearer token in the URL, never by ``gateway.auth``,
     trusted-proxy identity or any access layer in front of the Gateway.
 
@@ -6933,7 +6933,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
 
     THE SCHEMA. ``gateway.portals`` is ``strictObject({ ingress: strictObject({domain,
     port}).optional() }).optional()`` (``GatewayConfigSchema``,
-    ``zod-schema-B-u3AXjg.mjs:993-996``) — no ``enabled`` field, no token/secret/
+    ``zod-schema-B-u3AXjg.mjs:993-996``) - no ``enabled`` field, no token/secret/
     SecretRef/env/cookie/bind-host field. There is no "weak auth" or "literal secret"
     mode to express in config, and nothing here for ``logsafe.redact`` to mask beyond the
     domain string itself (which is not a secret, only PII-adjacent hostname text).
@@ -6967,31 +6967,31 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     precedence (``createGatewayPortalService.open``, ``server-start-BG4nMCFD.mjs:
     6196-6310``):
 
-    * T1 **ingress** — used whenever ``gateway.portals.ingress`` is set
+    * T1 **ingress** - used whenever ``gateway.portals.ingress`` is set
       (``servers = ingress ? [] : ...``, ``:6235``; ingress wins over Tailscale,
       ``:6197``). URL: ``https://<random-hex>.<domain>``, routed by Host header
       (``portalIngressHostname``, ``:6028-6031``), served by the loopback listener.
-    * T2 **tailscale** — used when there is no ingress and
+    * T2 **tailscale** - used when there is no ingress and
       ``gateway.tailscale.mode`` is ``serve``/``funnel`` (``managedTailscaleMode``,
       ``:7527``). Always claimed as Tailscale **Serve**, never Funnel
       (``claimTailscaleServePort``, ``tailscale-DHUFjoUd.mjs:309-317``) even when the
       Gateway itself runs Funnel, and fails closed if the managed route is not active.
       Tailscale serve/funnel also forces a loopback Gateway bind
       (``validateGatewayTailscaleBind``, ``validation-core-C5ZDhifM.mjs:1245-1256``).
-    * T3 **direct** — every other case. Each portal gets its own listener on every
+    * T3 **direct** - every other case. Each portal gets its own listener on every
       address the Gateway's own HTTP server binds (``params.httpBindHosts``,
       ``:7718``, from ``resolveGatewayListenHosts``, ``net-DU4aWKLv.mjs:217-228``), on a
       random port, plain HTTP unless ``gateway.tls.enabled``. **A hardened primary
       gateway on ``bind=lan`` therefore also serves portals on ``0.0.0.0`` with random
-      ports, outside gateway.auth** — a check that only fired on the ingress path
+      ports, outside gateway.auth** - a check that only fired on the ingress path
       would get this backwards, PASSing the equally-exposed direct-on-LAN shape.
 
     OPERATORS CAN ALWAYS OPEN PORTALS TOO. ``portal.open`` is an ``operator.write``
     Gateway method (``method-scopes-C7g7eSZh.mjs:2584-2602``), always created
     (``server-start-BG4nMCFD.mjs:7541-7548``); ``portal.list`` redacts the token for
     non-write/admin clients (``portals-D5UqY34x.mjs:13-16,49``). The agent-facing
-    ``gateway`` tool cannot call it — its actions are only config.get,
-    config.schema.lookup and update.run (``openclaw-tools-thu-J91q.mjs:3414-3419``) —
+    ``gateway`` tool cannot call it - its actions are only config.get,
+    config.schema.lookup and update.run (``openclaw-tools-thu-J91q.mjs:3414-3419``) -
     but an agent with unsandboxed exec may still reach it via
     ``openclaw gateway call portal.open`` (``gateway-cli-C-ulFTjb.mjs:403``), disclosed
     in the P2 fix text rather than checked here (B4/B8/B43 cover exec itself).
@@ -7008,20 +7008,20 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     portal routes reachable off-host and gated only by a bearer URL, never by
     gateway.auth.
 
-    PASS (P1)  — the resolved transport is ``direct`` and ``_b397_direct_reach``
+    PASS (P1)  - the resolved transport is ``direct`` and ``_b397_direct_reach``
                  proves the Gateway's own bind is loopback. Decided before any
                  tool-policy read.
-    PASS (P2)  — operator-only: whatever the transport, no agent scope (per
+    PASS (P2)  - operator-only: whatever the transport, no agent scope (per
                  ``_toolgrant.resolved_scopes``, skipping a scope proven fully
                  sandboxed via ``_b389_sandbox_mode(cfg, row.entry) == "all"``) is
                  granted the `portal` tool.
-    WARN       — an agent scope is granted `portal`, unsandboxed, and the transport
+    WARN       - an agent scope is granted `portal`, unsandboxed, and the transport
                  (ingress / tailscale-serve / direct) is reachable off-host or cannot be
                  proven not to be.
-    UNKNOWN    — the config was not read/parseable; ``gateway``/``gateway.portals``/
+    UNKNOWN    - the config was not read/parseable; ``gateway``/``gateway.portals``/
                  ``gateway.portals.ingress``/``gateway.tailscale`` is present but
                  malformed, or carries a field this audit does not recognise (the
-                 unknown-future-field path — 2026.9.6's `strictObject`s may grow a
+                 unknown-future-field path - 2026.9.6's `strictObject`s may grow a
                  field a newer build reads); the ingress domain/port fails OpenClaw's
                  own schema (so OpenClaw itself refuses the config as written); the
                  installed build predates 2026.9.6; the tool policy could not be
@@ -7030,19 +7030,19 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
                  behind an opaque byProvider/toolsBySender layer this audit does not
                  model.
 
-    Never FAILs: a configured-capability disclosure, not a proven compromise — see
+    Never FAILs: a configured-capability disclosure, not a proven compromise - see
     CheckMeta.scored=False and the module's own C-135 pass before any FAIL tier is
     considered (matching B350/B389's own reasoning for the identical Gateway-capability
     shape).
 
-    DECLARED LIMITS (over-report direction — can only cost a WARN a closer look would
+    DECLARED LIMITS (over-report direction - can only cost a WARN a closer look would
     clear, never hide one):
 
     1. With the ingress set, the WARN describes intended publication; if no proxy
        exists, or the proxy is private, it overstates reach.
-    2. The vendor's own cross-field refinement — a portal domain overlapping
+    2. The vendor's own cross-field refinement - a portal domain overlapping
        ``gateway.publicOrigin``/``gateway.controlUi.allowedOrigins``
-       (``zod-schema-B-u3AXjg.mjs:1295-1304``) — is not replicated; OpenClaw refuses
+       (``zod-schema-B-u3AXjg.mjs:1295-1304``) - is not replicated; OpenClaw refuses
        such a config outright.
     3. With Tailscale serve/funnel but Tailscale down, ``portal.open`` fails closed, so
        there are no portals at all.
@@ -7061,7 +7061,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     unsandboxed exec may open portals through ``openclaw gateway call portal.open``
     despite a `portal` tool deny (disclosed in the P2 fix; exec itself is covered by
     B4/B8/B43); and portal behavior on unmeasured builds is evaluated with the 9.6
-    model (with the fix qualifier) — a future build that changes behavior without a
+    model (with the fix qualifier) - a future build that changes behavior without a
     schema change needs the upgrade re-baseline.
     """
     unreadable = _config_unreadable("B397", ctx)
@@ -7085,9 +7085,9 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
         return _finding(
             "B397",
             UNKNOWN,
-            "The installed OpenClaw build predates 2026.9.6 — the release whose portal "
+            "The installed OpenClaw build predates 2026.9.6 \u2014 the release whose portal "
             "publishing this check was verified against, and the first whose config "
-            "schema has gateway.portals — so how portals are published on this build "
+            "schema has gateway.portals \u2014 so how portals are published on this build "
             "could not be determined.",
             "Upgrade to OpenClaw 2026.9.6 or later and re-run; if gateway.portals is "
             "set on this build, run `openclaw config validate`.",
@@ -7366,7 +7366,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
             "by the per-portal token in that URL (then a cookie), never by "
             "gateway.auth, trusted-proxy identity or any access layer in front of "
             "the Gateway, and the agent receives the tokenized URL when it opens "
-            f"the portal — allowing a prompt-injected agent at {scopes_text} to "
+            f"the portal \u2014 allowing a prompt-injected agent at {scopes_text} to "
             "publish any local port, and anyone who obtains the URL to reach it "
             "from wherever that proxy is reachable."
         )
@@ -7390,7 +7390,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
             "HTTPS route (Serve only, never Funnel). Entry is decided only by the "
             "per-portal token in the URL, never by gateway.auth or Tailscale "
             "identity, and the agent receives the tokenized URL when it opens the "
-            f"portal — allowing a prompt-injected agent at {scopes_text} to publish "
+            f"portal \u2014 allowing a prompt-injected agent at {scopes_text} to publish "
             "any local port to every device on your tailnet that obtains the URL."
         )
         evidence = [
@@ -7414,14 +7414,14 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
             "by the per-portal token in the URL, never by gateway.auth, "
             "trusted-proxy identity or any access layer in front of the Gateway "
             "port, and the agent receives the tokenized URL when it opens the "
-            f"portal — allowing a prompt-injected agent at {scopes_text} to publish "
+            f"portal \u2014 allowing a prompt-injected agent at {scopes_text} to publish "
             "any local port to anyone on that network who obtains the URL."
         )
         evidence = ["transport=direct", direct_label]
         evidence.append(
             "portal listeners serve HTTPS (gateway.tls.enabled)"
             if tls_on
-            else "portal listeners serve plain HTTP — the URL token crosses the "
+            else "portal listeners serve plain HTTP \u2014 the URL token crosses the "
             "network unencrypted"
         )
         evidence += scope_lines
@@ -7437,7 +7437,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
 
 
 def check_local_model_service_command(ctx: Context) -> Finding:
-    """B355 (C-408) — models.providers.<id>.localService.command auto-spawns a binary at
+    """B355 (C-408) - models.providers.<id>.localService.command auto-spawns a binary at
     provider startup, with config-chosen args/cwd/env. Grounded on the installed dist's
     zod schema (``ModelProviderLocalServiceSchema``, ``zod-schema.core-*.mjs``): the
     object is ``.strict().optional()`` with ``command: string().min(1)`` required
@@ -7462,11 +7462,11 @@ def check_local_model_service_command(ctx: Context) -> Finding:
     C-135 pass against real configs, which this stub explicitly deferred (CLAUDE.md's
     "WARN/INFO ship first" allowance for this task).
 
-    WARN — an absolute `command` (or its containing directory) is group/world-writable
+    WARN - an absolute `command` (or its containing directory) is group/world-writable
            by an account other than the owner (`_dir_replaceable_by_others`, the same
-           predicate B352/C5 use — sticky dirs and owner-singleton groups excluded).
-    PASS — a `command` is configured and safely owned, or no provider declares one.
-    UNKNOWN — the config was not read, or is present but malformed.
+           predicate B352/C5 use - sticky dirs and owner-singleton groups excluded).
+    PASS - a `command` is configured and safely owned, or no provider declares one.
+    UNKNOWN - the config was not read, or is present but malformed.
     """
     unreadable = _config_unreadable("B355", ctx)
     if unreadable is not None:
@@ -7529,7 +7529,7 @@ def check_local_model_service_command(ctx: Context) -> Finding:
             WARN,
             f"{len(writable)} model-provider local-service command(s) are a binary-"
             f"hijack surface: {'; '.join(sorted(writable)[:3])}. OpenClaw spawns this "
-            "exact path at provider startup, with config-chosen args/cwd/env — another "
+            "exact path at provider startup, with config-chosen args/cwd/env \u2014 another "
             "local account replacing it runs arbitrary code as whoever runs OpenClaw, "
             "with no approval prompt.",
             "Move the binary to a directory only your account can write (owner-only "
@@ -7553,7 +7553,7 @@ def check_local_model_service_command(ctx: Context) -> Finding:
             PASS,
             f"{relative_count} model-provider local-service command(s) are a relative "
             "path, which OpenClaw's own launcher refuses to spawn (it requires an "
-            "absolute path) — so no binary is actually auto-spawned by any of them.",
+            "absolute path) \u2014 so no binary is actually auto-spawned by any of them.",
             "Not a security exposure, but the provider's local service will not start "
             "until localService.command is changed to an absolute path.",
         )
@@ -7570,7 +7570,7 @@ def _gateway_http_reach(cfg: dict, surface: str) -> str:
     """Disclosure clause for a gateway-HTTP-surface finding: whether *surface* (a short
     noun phrase, e.g. "this endpoint", "the Control UI") is reachable beyond loopback.
 
-    Same idiom as ``check_gateway_operator_terminal`` (B350) — reuses
+    Same idiom as ``check_gateway_operator_terminal`` (B350) - reuses
     ``_gateway_remote_exposure_reason`` rather than re-deriving the classification, so
     B340/B350/B358/B360 can never disagree about what counts as "exposed".
     """
@@ -7587,7 +7587,7 @@ def _gateway_http_reach(cfg: dict, surface: str) -> str:
 
 
 def check_chat_completions_endpoint(ctx: Context) -> Finding:
-    """B358 (C-410) — gateway.http.endpoints.chatCompletions: an OpenAI-compatible
+    """B358 (C-410) - gateway.http.endpoints.chatCompletions: an OpenAI-compatible
     ``POST /v1/chat/completions`` endpoint, off by default. Grounded on the installed
     dist (openclaw@2026.9.3, ``zod-schema-CTg_faEc.mjs:928-937``):
     ``chatCompletions: strictObject({ enabled: boolean().optional(), images:
@@ -7597,38 +7597,38 @@ def check_chat_completions_endpoint(ctx: Context) -> Finding:
     ``allowUrl`` default to false (``schema-DbKC3IUo.mjs:845,847`` and
     ``DEFAULT_OPENAI_IMAGE_LIMITS`` in ``openai-http--Ewj8T0W.mjs``).
 
-    **The original stub's FAIL premise — "allowUrl=true with no urlAllowlist is SSRF
-    to cloud metadata endpoints / internal services" — is REFUTED by the runtime, not
+    **The original stub's FAIL premise - "allowUrl=true with no urlAllowlist is SSRF
+    to cloud metadata endpoints / internal services" - is REFUTED by the runtime, not
     the schema, and was caught before it was ever committed.** The image-URL fetch
-    (``extractImageContentFromSource`` → ``fetchWithGuard``, both
+    (``extractImageContentFromSource`` -> ``fetchWithGuard``, both
     ``input-files-DS7n4SJk.mjs``) always calls ``fetchWithSsrFGuard``
     (``fetch-guard-B8Mfb56t.mjs``) with ``policy: {allowPrivateNetwork: false,
-    hostnameAllowlist: limits.urlAllowlist}`` — ``allowPrivateNetwork`` is hardcoded
+    hostnameAllowlist: limits.urlAllowlist}`` - ``allowPrivateNetwork`` is hardcoded
     false regardless of config, and the guard's private-IP predicate
     (``ssrf-B1sxrDMt.mjs``) imports a dedicated ``isCloudMetadataIpAddress`` alongside
     RFC1918/loopback/link-local/CGNAT checks. The check is DNS-PINNED and re-applied
     on every redirect hop inside the same guarded-fetch loop (defeats DNS rebinding
     and redirect-based bypass), not just on the initial URL. So an absent
-    ``urlAllowlist`` does not expose the internal network or cloud metadata — that
+    ``urlAllowlist`` does not expose the internal network or cloud metadata - that
     path is unconditionally closed by the vendor. What an EMPTY/absent allowlist
     actually means (``matchesHostnameAllowlist``: an empty list matches everything) is
     narrower: the gateway will fetch an attacker-chosen *public* URL server-side, an
     open-proxy-shaped capability, not an SSRF-to-internal one. That does not clear the
-    FAIL bar (Golden Rule #5) — reporting it as SSRF to metadata/internal services
-    would have been a spurious FAIL — so this stays a disclosure at WARN.
+    FAIL bar (Golden Rule #5) - reporting it as SSRF to metadata/internal services
+    would have been a spurious FAIL - so this stays a disclosure at WARN.
 
-    PASS    — the endpoint is not enabled (the shipped default).
-    WARN    — enabled, and ``images.allowUrl`` is not true: a remote, OpenAI-shaped
+    PASS    - the endpoint is not enabled (the shipped default).
+    WARN    - enabled, and ``images.allowUrl`` is not true: a remote, OpenAI-shaped
               ingress exists (anything reaching the gateway's HTTP surface can drive
               agent turns through it, outside whatever per-channel restrictions
-              — allowed senders, DM policy — a configured channel would apply), but
+              - allowed senders, DM policy - a configured channel would apply), but
               no server-side URL fetch.
-    WARN    — enabled and ``images.allowUrl`` is true: same ingress, plus the gateway
+    WARN    - enabled and ``images.allowUrl`` is true: same ingress, plus the gateway
               will fetch an attacker-chosen URL server-side (private/internal/cloud-
               metadata targets are blocked by the runtime unconditionally). The
               wording distinguishes a non-empty ``images.urlAllowlist`` (fetch scoped
               to named public hosts) from an absent/empty one (any public host).
-    UNKNOWN — the config was not read, or ``chatCompletions``/``images`` is present
+    UNKNOWN - the config was not read, or ``chatCompletions``/``images`` is present
               but not an object.
     """
     unreadable = _config_unreadable("B358", ctx)
@@ -7718,27 +7718,27 @@ def check_chat_completions_endpoint(ctx: Context) -> Finding:
 
 
 def check_gateway_remote_ssh_host_key_policy(ctx: Context) -> Finding:
-    """B359 (C-410) — gateway.remote.sshHostKeyPolicy: how THIS machine verifies the
+    """B359 (C-410) - gateway.remote.sshHostKeyPolicy: how THIS machine verifies the
     SSH host key when it connects OUT to a remote OpenClaw gateway over an SSH tunnel
     (the remote-gateway-link feature). Grounded on the installed dist
     (openclaw@2026.9.3, ``zod-schema-CTg_faEc.mjs:473``):
     ``union([literal("strict"), literal("openssh")]).optional()``. Default "strict"
-    — corroborated by both the schema description ("'strict' requires an already
+    - corroborated by both the schema description ("'strict' requires an already
     trusted host key") and ``FIELD_PLACEHOLDERS["gateway.remote.sshHostKeyPolicy"]``
     (``schema-DbKC3IUo.mjs:2823``), which shows "strict" as the field's own example
     value.
 
-    This is a CLIENT-side setting for the machine initiating the SSH tunnel — unlike
+    This is a CLIENT-side setting for the machine initiating the SSH tunnel - unlike
     B358/B360 it says nothing about whether THIS host's own gateway is exposed, so it
     does not use ``_gateway_http_reach``.
 
-    PASS    — "strict" (the default) or absent.
-    WARN    — "openssh": host-key verification is delegated to the effective OpenSSH
+    PASS    - "strict" (the default) or absent.
+    WARN    - "openssh": host-key verification is delegated to the effective OpenSSH
               configuration (``~/.ssh/config``, ``known_hosts``,
-              ``StrictHostKeyChecking``) instead of requiring an already-trusted key —
+              ``StrictHostKeyChecking``) instead of requiring an already-trusted key -
               anything able to intercept the first connection to the remote gateway's
               address (DNS/routing spoofing) can MITM it undetected.
-    UNKNOWN — present but neither known literal (a malformed/future value this audit
+    UNKNOWN - present but neither known literal (a malformed/future value this audit
               cannot reason about), or the config was not read.
     """
     unreadable = _config_unreadable("B359", ctx)
@@ -7772,7 +7772,7 @@ def check_gateway_remote_ssh_host_key_policy(ctx: Context) -> Finding:
             "B359",
             PASS,
             "gateway.remote.sshHostKeyPolicy is 'strict' (or unset, which defaults to "
-            "'strict') — connecting to a remote gateway over SSH requires an already "
+            "'strict') \u2014 connecting to a remote gateway over SSH requires an already "
             "trusted host key.",
             "Nothing to do.",
         )
@@ -7794,7 +7794,7 @@ def check_gateway_remote_ssh_host_key_policy(ctx: Context) -> Finding:
         "B359",
         UNKNOWN,
         f"gateway.remote.sshHostKeyPolicy is {policy!r}, neither 'strict' nor "
-        "'openssh' — not a value this audit recognizes, so its effect could not be "
+        "'openssh' \u2014 not a value this audit recognizes, so its effect could not be "
         "determined.",
         "Set gateway.remote.sshHostKeyPolicy to 'strict' (recommended) or "
         "'openssh'.",
@@ -7803,7 +7803,7 @@ def check_gateway_remote_ssh_host_key_policy(ctx: Context) -> Finding:
 
 
 def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
-    """B360 (C-410) — gateway.controlUi.embedSandbox: the iframe sandbox policy for
+    """B360 (C-410) - gateway.controlUi.embedSandbox: the iframe sandbox policy for
     hosted Control UI embeds. Grounded on the installed dist (openclaw@2026.9.3,
     ``zod-schema-CTg_faEc.mjs:849-853``): ``union([literal("strict"),
     literal("scripts"), literal("trusted")]).optional()``. Default "scripts" per the
@@ -7814,13 +7814,13 @@ def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
 
     "trusted" is the one value that removes origin isolation from an embedded
     iframe, so any XSS in whatever page hosts the embed reaches the Control UI's own
-    origin — the operator's authenticated session. Same gateway-reachability
+    origin - the operator's authenticated session. Same gateway-reachability
     disclosure as B358/B350 (``_gateway_http_reach``), since an outside document can
     only reach the embed at all when the gateway itself is reachable.
 
-    PASS    — "strict", "scripts" (the default), or absent.
-    WARN    — "trusted".
-    UNKNOWN — present but none of the three known literals, or the config was not
+    PASS    - "strict", "scripts" (the default), or absent.
+    WARN    - "trusted".
+    UNKNOWN - present but none of the three known literals, or the config was not
               read.
     """
     unreadable = _config_unreadable("B360", ctx)
@@ -7854,18 +7854,18 @@ def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
         return _finding(
             "B360",
             PASS,
-            f"gateway.controlUi.embedSandbox is {state} — hosted Control UI embeds "
+            f"gateway.controlUi.embedSandbox is {state} \u2014 hosted Control UI embeds "
             "keep origin isolation from their embedding page.",
             "Nothing to do.",
         )
     if mode == "trusted":
-        reach = _gateway_http_reach(cfg, "the Control UI — and any embed of it")
+        reach = _gateway_http_reach(cfg, "the Control UI \u2014 and any embed of it")
         return _finding(
             "B360",
             WARN,
             "gateway.controlUi.embedSandbox is 'trusted': hosted Control UI embeds "
             "get allow-same-origin, so an XSS in whatever page hosts the embed "
-            "reaches the Control UI's own origin — the operator's authenticated "
+            "reaches the Control UI's own origin \u2014 the operator's authenticated "
             f"session. Right now {reach}.",
             "Set gateway.controlUi.embedSandbox to 'scripts' (the default) unless "
             "the embedding document is fully trusted and genuinely needs "
@@ -7876,7 +7876,7 @@ def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
         "B360",
         UNKNOWN,
         f"gateway.controlUi.embedSandbox is {mode!r}, not one of 'strict'/'scripts'/"
-        "'trusted' — not a value this audit recognizes, so its effect could not be "
+        "'trusted' \u2014 not a value this audit recognizes, so its effect could not be "
         "determined.",
         "Set gateway.controlUi.embedSandbox to 'strict', 'scripts' (recommended "
         "default), or 'trusted' only if genuinely needed.",
@@ -7886,11 +7886,11 @@ def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
 
 # B374 (C-526): the 9.4 "cloud ready workers" defaults, grounded verbatim
 # against the INSTALLED 2026.9.4 dist (not the recon, which omits the cloudWorkers
-# namespace entirely — see tests/grounded_schema_paths.txt / dist_verified_paths.txt).
+# namespace entirely - see tests/grounded_schema_paths.txt / dist_verified_paths.txt).
 # dist/service-DTQsk1L5.mjs's `createPreparedWorkerPool` (~:216-221):
 #   target:   profile.readyWorkers ?? DEFAULT_READY_WORKERS
 #   maxTotal: config?.preparedPool?.maxTotal ?? DEFAULT_MAX_TOTAL
-# with (same file, ~:217-218) `DEFAULT_READY_WORKERS = 1` / `DEFAULT_MAX_TOTAL = 4` — and
+# with (same file, ~:217-218) `DEFAULT_READY_WORKERS = 1` / `DEFAULT_MAX_TOTAL = 4` - and
 # the schema's own help text (dist/zod-schema.cloud-workers-CfJaNmxt.mjs) says the same
 # thing in prose ("Target ... (default: 1)" / "Gateway-wide cap ... (default: 4)").
 _B374_DEFAULT_READY_WORKERS = 1
@@ -7898,26 +7898,26 @@ _B374_DEFAULT_MAX_TOTAL = 4
 
 
 def check_cloudworkers_prepared_pool(ctx: Context) -> Finding:
-    """B374 — cloudWorkers 9.4 prepared-pool: a default-on, warm,
+    """B374 - cloudWorkers 9.4 prepared-pool: a default-on, warm,
     off-machine worker reserve.
 
     ``cloudWorkers`` provisions off-machine execution environments from a
     plugin-supplied provider (`CloudWorkerProfileShape.provider`: "Worker provider id
     registered by a plugin"). 9.4 added a PREPARED POOL on top of that: unless disabled,
     OpenClaw keeps ``readyWorkers`` machines (default 1, per eligible project/profile)
-    running and warm, up to ``preparedPool.maxTotal`` (default 4, gateway-wide) — see the
+    running and warm, up to ``preparedPool.maxTotal`` (default 4, gateway-wide) - see the
     module comment above for the exact grounding.
 
     Gated, not universal. The pool only ever targets a nonzero count once a real
     ``cloudWorkers.profiles.<id>`` entry exists (the runtime's own gate:
     ``configured: Boolean(profile && normalizeCapabilityProviderId(profile.provider)
-    === record.providerId)``) — a vanilla install with no cloud-worker plugin/profile
+    === record.providerId)``) - a vanilla install with no cloud-worker plugin/profile
     gets nothing, hence UNKNOWN below rather than a blanket WARN on every config.
 
     WARN/advisory only (a reserve existing is not itself a
     hole, so no FAIL tier and no C-135 pass; unscored, mirroring B12/check_local_first).
-    Each active reserve is a RUNNING remote machine — the 9.4 CHANGELOG's own words:
-    "Ready workers incur provider running-machine charges until deleted" — held warm
+    Each active reserve is a RUNNING remote machine - the 9.4 CHANGELOG's own words:
+    "Ready workers incur provider running-machine charges until deleted" - held warm
     with the eligible project's source already prepared on it before any session binds,
     and eligibility reaches past the operator's own repos to "public GitHub repository
     sessions" per that same changelog, so a session against a public (not necessarily
@@ -7930,7 +7930,7 @@ def check_cloudworkers_prepared_pool(ctx: Context) -> Finding:
     `dist/daemon-G2kqiA9m.mjs` in 2026.9.5) and is absent from this machine's own
     ``~/.openclaw/state/openclaw.sqlite`` (confirmed absent on 2026.9.4, and again on
     2026.9.5 on 2026-09-19, on a live gateway that dispatches, but does not itself run as, a
-    cloud worker node) — it
+    cloud worker node) - it
     materializes on the REMOTE node's own state DB, never the local gateway's. So it never lands in
     ``skillprovenance.py``'s ``WORKSPACE_DIRS`` or the derived-agent-workspace invariant
     ``tests/test_b610_derived_agent_workspaces.py`` pins, and this check has no local
@@ -7955,7 +7955,7 @@ def check_cloudworkers_prepared_pool(ctx: Context) -> Finding:
             UNKNOWN,
             "cloudWorkers.profiles is not configured, so no cloud worker provider is "
             "available and the 9.4 prepared-pool reserve cannot be active.",
-            "—",
+            "\u2014",
         )
 
     max_total_raw = dig(cfg, "cloudWorkers.preparedPool.maxTotal")
@@ -7972,7 +7972,7 @@ def check_cloudworkers_prepared_pool(ctx: Context) -> Finding:
         return _finding(
             "B374",
             PASS,
-            f"cloudWorkers.preparedPool.maxTotal is 0 — the gateway-wide prepared-worker "
+            f"cloudWorkers.preparedPool.maxTotal is 0 \u2014 the gateway-wide prepared-worker "
             f"reserve is disabled ({len(valid_profiles)} cloud worker profile(s) "
             "configured).",
             "Keep it at 0 unless a warm reserve is genuinely wanted.",
@@ -7991,10 +7991,10 @@ def check_cloudworkers_prepared_pool(ctx: Context) -> Finding:
         if rw > 0:
             active.append(pid)
             shown = str(rw) if explicit else f"unset (defaults to {rw})"
-            evidence.append(f"profile '{pid}': readyWorkers={shown} — reserve active")
+            evidence.append(f"profile '{pid}': readyWorkers={shown} \u2014 reserve active")
         else:
             disabled.append(pid)
-            evidence.append(f"profile '{pid}': readyWorkers=0 — reserve disabled")
+            evidence.append(f"profile '{pid}': readyWorkers=0 \u2014 reserve disabled")
 
     if not active:
         return _finding(
@@ -8014,7 +8014,7 @@ def check_cloudworkers_prepared_pool(ctx: Context) -> Finding:
         "RUNNING off-machine worker held warm with the eligible project's source "
         "already prepared on it before any session binds, so it keeps incurring "
         "provider running-machine charges and stays a live remote target until deleted "
-        "— and this is the DEFAULT posture (readyWorkers defaults to 1 per profile) "
+        "\u2014 and this is the DEFAULT posture (readyWorkers defaults to 1 per profile) "
         "unless explicitly disabled.",
         "Set cloudWorkers.profiles.<id>.readyWorkers: 0 on profiles that should not "
         "pre-warm a reserve, or cloudWorkers.preparedPool.maxTotal: 0 to disable the "

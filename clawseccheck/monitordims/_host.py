@@ -1,4 +1,4 @@
-"""The `host` dimension — security tools detected running on this machine.
+"""The `host` dimension - security tools detected running on this machine.
 
 Only a `present -> absent` transition alerts. A watcher whose earlier state was `unknown`
 can stop without a word, which is a real limit rather than an oversight, so the arm says
@@ -18,7 +18,7 @@ from ._shared import _DIMENSION_NAME_CAP, NOTE_UNDETERMINED  # noqa: F401
 #: ("network monitoring / IDS (Suricata, Zeek, Snort)") and covers five of the seven
 #: classes. Five names of that length do not fit a sentence. Kept in step with the source of
 #: truth by `tests/test_b678_host_class_names.py`, which requires a name for every entry in
-#: `hostwatch.CLASSES` — a replicated vocabulary with no guard is one that drifts.
+#: `hostwatch.CLASSES` - a replicated vocabulary with no guard is one that drifts.
 _HOST_CLASS_NAMES = {
     "network_ids": "network intrusion detection",
     "host_audit": "audit logging",
@@ -34,7 +34,7 @@ def _name_host_classes(classes) -> str:
     """A readable clause naming *classes*, capped, with the remainder counted.
 
     Mirrors `_shared._name_dimensions`, including the cap being STATED rather than applied
-    silently — a truncation the reader cannot see reads as "that was all of them".
+    silently - a truncation the reader cannot see reads as "that was all of them".
     """
     named = [_HOST_CLASS_NAMES.get(c, c) for c in sorted(classes)]
     shown, hidden = named[:_DIMENSION_NAME_CAP], len(named) - _DIMENSION_NAME_CAP
@@ -51,18 +51,18 @@ def _diff_host_monitors(pair, alerts, note) -> None:
 
     It was chosen because it is the cleanest, measured rather than guessed. Its entire free
     variable set inside `diff_with_notes` was `_host_pair`, `alerts`, `note` plus module
-    constants — three parameters. The blocking analysis on the task said a per-dimension cut
+    constants - three parameters. The blocking analysis on the task said a per-dimension cut
     meant threading 61 shared locals; that figure is an aggregate over the whole function
     and does not describe the arms, which read three or four names each. The 61 live in the
     blind-run preamble, which is why the preamble moves last, not first.
 
     `alerts` and `note` are passed in because they are the two accumulators every arm
     shares. `note` is still a closure over `diff_with_notes`' own state, so it is handed
-    over rather than reconstructed — reconstructing it is what an earlier verification pass
+    over rather than reconstructed - reconstructing it is what an earlier verification pass
     correctly said cannot be lifted to a `_shared` module.
 
     Returns nothing: it appends. That is deliberate and matches how the arm behaved inline,
-    so the extraction cannot change ordering — the contract for this move is an identical
+    so the extraction cannot change ordering - the contract for this move is an identical
     alert and note sequence, verified across six snapshot pairs including both directions
     and a blind run.
     """
@@ -71,17 +71,17 @@ def _diff_host_monitors(pair, alerts, note) -> None:
     ph, ch = pair
     for cls in sorted(set(ph) & set(ch)):
         if ph[cls] == "present" and ch[cls] != "present":
-            alerts.append(("HIGH", f"Host monitor '{cls}' is no longer detected — "
+            alerts.append(("HIGH", f"Host monitor '{cls}' is no longer detected \u2014 "
                            "a watcher on this machine was removed or disabled."))
     # C-418: only a present -> absent transition alerts, so a watcher whose earlier
     # state was `unknown` can stop without a word. Measured on a real machine: five of
     # seven classes are `unknown`, i.e. most of this dimension is not in fact being
     # watched for disappearance.
     #
-    # `unknown` ONLY — not "anything other than present". The first version tested
+    # `unknown` ONLY - not "anything other than present". The first version tested
     # `!= "present"`, which swept in `absent -> absent`: a confident verdict on both
     # sides, fully compared, with nothing that could have stopped. That is a false
-    # note, and a permanent one — a machine that simply has no EDR would report it on
+    # note, and a permanent one - a machine that simply has no EDR would report it on
     # every run forever, which would put the tick this change introduced permanently
     # out of reach there. A note that can never be cleared trains the reader to ignore
     # the whole block.

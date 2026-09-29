@@ -7,7 +7,7 @@ release can't ship a mismatch (the §6 lock-step, automated):
   - clawseccheck/__init__.py   __version__
   - clawseccheck/__init__.py   __released__   -> today (or --date)
   - SKILL.md                   version:
-  - CHANGELOG.md               a new top "## [X.Y.Z] — DATE" stub (prose is yours)
+  - CHANGELOG.md               a new top "## [X.Y.Z] - DATE" stub (prose is yours)
 
 Usage:
   python3 scripts/bump.py patch|minor|major     # bump from current __version__
@@ -155,8 +155,10 @@ def _sub_or_die(path: Path, pattern: str, repl: str, label: str) -> str:
 
 
 def _changelog_stub(version: str, date: str) -> str:
+    # ASCII hyphen, not an em dash: CHANGELOG.md ships in the ClawHub bundle, where one
+    # character above U+00FF makes the whole joined bundle two-byte (openclaw/clawhub#3831).
     return (
-        f"## [{version}] — {date}\n\n"
+        f"## [{version}] - {date}\n\n"
         "_TODO: one-line summary of what changed and why._\n\n"
         "### Added\n- _TODO_\n\n"
         "### Fixed\n- _TODO_\n\n"

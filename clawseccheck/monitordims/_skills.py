@@ -1,4 +1,4 @@
-"""The `skills` dimension — the installed skills and how much of them was read.
+"""The `skills` dimension - the installed skills and how much of them was read.
 
 The signature records a per-skill digest AND the truncation frontier, because "this skill
 did not change" and "we did not finish reading this skill" are different answers and only
@@ -30,9 +30,9 @@ def _skill_sig(ctx) -> dict:
 
     B-267: hashing only ``ctx.installed_skills[name]`` made the drift signal inherit the
     malware-scanner's budget. That blob is TEXT-only and capped, so the three stealthiest
-    in-place backdoors — a same-size binary swap under ``bin/``, an appended directive in a
+    in-place backdoors - a same-size binary swap under ``bin/``, an appended directive in a
     file past the per-skill budget, and an edit inside a file dropped whole for exceeding
-    the per-file cap — every one of them left the stored signature byte-identical and the
+    the per-file cap - every one of them left the stored signature byte-identical and the
     monitor silent. Measured first-hand on all three before the fix: zero alerts. This is
     the exact scenario --monitor exists for (malware landing in a skill already trusted),
     and the tool was holding the contradicting evidence: the collector already records a
@@ -40,7 +40,7 @@ def _skill_sig(ctx) -> dict:
     never read.
 
     ``scan_partial`` carries that evidence into the snapshot. It does NOT weaken the change
-    signal — ``tree`` covers the unscanned region for change-detection purposes — but it
+    signal - ``tree`` covers the unscanned region for change-detection purposes - but it
     marks a skill whose CONTENT was never fully vetted, so a "NEW"/"CHANGED" alert can say
     so rather than implying the new state was inspected and found benign.
     """
@@ -70,9 +70,9 @@ def _skill_sig(ctx) -> dict:
 
 
 # B-267: the collector's per-skill text-cap limit_hit, e.g.
-#   text scan of skill 'clawstealth' hit the 1000KB/500-file cap — …
+#   text scan of skill 'clawstealth' hit the 1000KB/500-file cap - ...
 # Parsed rather than re-derived so there is a single source of truth for "was this skill's
-# content fully scanned?" — the collector decides, monitor only reports.
+# content fully scanned?" - the collector decides, monitor only reports.
 _SCAN_TRUNCATED_RE = re.compile(r"text scan of skill '([^']+)' hit the ")
 
 
@@ -98,7 +98,7 @@ def _diff_skills_common(
 ) -> None:
     """Skills present on both sides: content, capabilities and version, each compared apart.
 
-    Separate signals on purpose — a content change with an unchanged version is a different
+    Separate signals on purpose - a content change with an unchanged version is a different
     fact from a version bump, and collapsing them would lose the more interesting one.
     """
     for name in sorted(ps.keys() & cs.keys()):
@@ -107,7 +107,7 @@ def _diff_skills_common(
         if _skill_changed(ps[name], cs[name]):
             _partial = isinstance(cs[name], dict) and cs[name].get("scan_partial")
             alerts.append(("HIGH",
-                           f"Installed skill '{name}' CHANGED since last check — re-review it."
+                           f"Installed skill '{name}' CHANGED since last check \u2014 re-review it."
                            + (" NOTE: this skill is too large to scan in full, so the "
                               "change may lie outside the region the audit inspects."
                               if _partial else "")))
@@ -118,11 +118,11 @@ def _diff_skills_common(
             # imply coverage (the same B-074 rule that turns a truncated scan into UNKNOWN
             # instead of PASS).
             alerts.append(("INFO",
-                           f"Installed skill '{name}' is too large to fingerprint in full — "
+                           f"Installed skill '{name}' is too large to fingerprint in full \u2014 "
                            "part of its directory is not covered by change detection, so "
                            "'unchanged' cannot be confirmed for that region."))
 
-        # Capability diff — only when BOTH sides carry structured caps (new-format
+        # Capability diff - only when BOTH sides carry structured caps (new-format
         # snapshots); a legacy/UNKNOWN side skips silently rather than fabricating a diff.
         if p_caps is None or c_caps is None:
             _skill_caps_unknown.add(name)
@@ -132,13 +132,13 @@ def _diff_skills_common(
             if added:
                 alerts.append(("HIGH",
                                f"Installed skill '{name}' UPDATE EXPANDED its capabilities: "
-                               f"+{', '.join(sorted(added))} — the new version can now do more "
+                               f"+{', '.join(sorted(added))} \u2014 the new version can now do more "
                                "than the version you last reviewed; re-vet it."))
             elif removed:
                 alerts.append(("INFO",
                                f"Skill '{name}' capabilities shrank: -{', '.join(sorted(removed))}."))
 
-        # Version regression — best-effort static downgrade signal only. Real TAM-09
+        # Version regression - best-effort static downgrade signal only. Real TAM-09
         # "replay an old *signed* manifest" semantics require verifying a signature
         # against a trust root, which is impossible read-only/offline; this merely
         # compares the declared frontmatter version string across snapshots.
@@ -149,7 +149,7 @@ def _diff_skills_common(
                 if _ver_tuple(c_ver) < _ver_tuple(p_ver):
                     alerts.append(("MEDIUM",
                                    f"Skill '{name}' declared version went BACKWARD: "
-                                   f"{p_ver} -> {c_ver} — a manifest replay / downgrade signal "
+                                   f"{p_ver} -> {c_ver} \u2014 a manifest replay / downgrade signal "
                                    "(TAM-09, best-effort static)."))
             except TypeError:
                 pass
@@ -164,7 +164,7 @@ def _diff_skills_added(alerts, cs, prev_sk_capped, prev_sk_partial, ps) -> None:
     for name in sorted(cs.keys() - ps.keys()):
         if name in prev_sk_capped:
             # Known to have been on disk last run, merely beyond the cap. Calling it NEW
-            # would misdate the install — the CRITICAL says "this is when malware lands",
+            # would misdate the install - the CRITICAL says "this is when malware lands",
             # and that claim must not be made about a skill that was already there.
             continue
         _partial = isinstance(cs[name], dict) and cs[name].get("scan_partial")
@@ -178,12 +178,12 @@ def _diff_skills_added(alerts, cs, prev_sk_capped, prev_sk_partial, ps) -> None:
             # strength rather than asserted or dropped.
             alerts.append(("HIGH",
                            f"Skill '{name}' is now being inspected and was not inspected "
-                           "last run — it may be newly installed, or it may have been "
+                           "last run \u2014 it may be newly installed, or it may have been "
                            "present all along outside the inspection cap (too many skills "
                            "were installed last run to tell). Vet its source." + _scan_note))
             continue
         alerts.append(("CRITICAL",
-                       f"NEW skill installed since last check: '{name}' — vet its source "
+                       f"NEW skill installed since last check: '{name}' \u2014 vet its source "
                        "before trusting it (this is when malware lands)." + _scan_note))
 
 
@@ -197,7 +197,7 @@ def _note_skills_capped(_sk_capped_n, alerts, curr_sk_capped) -> None:
         _eg = sorted(curr_sk_capped)[:3]
         alerts.append((
             "HIGH",
-            f"{_sk_capped_n} installed skill(s) were NOT collected — the inspection cap "
+            f"{_sk_capped_n} installed skill(s) were NOT collected \u2014 the inspection cap "
             "was reached, so they are neither scanned nor monitored for change"
             + (f" (e.g. {', '.join(_eg)})" if _eg else "")
             + ". Skills are collected in filename order, so which ones fall outside the "
@@ -216,7 +216,7 @@ def _diff_skills_removed(
     """A skill that is gone, once removals can be trusted at all."""
     if trust_removals:
         for name in sorted(ps.keys() - cs.keys()):
-            # B-268: still on disk this run, just cap-evicted — not a removal. When the
+            # B-268: still on disk this run, just cap-evicted - not a removal. When the
             # frontier is itself truncated we cannot tell the two apart for ANY name, so
             # every removal is suppressed: a missed removal notice (INFO) is a far smaller
             # harm than a burst of fabricated ones, and the disclosure below states that
@@ -227,7 +227,7 @@ def _diff_skills_removed(
 
 
 def _note_skills_frontier_partial(curr, curr_sk_capped, curr_sk_partial, note) -> None:
-    """The frontier is partial without a count — say so rather than inferring a number."""
+    """The frontier is partial without a count - say so rather than inferring a number."""
     if curr_sk_partial and not (curr.get("skills_capped_count") or curr_sk_capped):
         note(NOTE_INSPECTION_CAPPED,
              "Skills that disappeared were not reported: this run could not establish the "
@@ -239,7 +239,7 @@ def _note_skills_prev_capped(note, prev_sk_capped) -> None:
     # C-418: THIS run's truncation already gets a HIGH alert below (`_sk_capped_n`), so it
     # is not repeated as a note. What has no voice at all is the PREVIOUS run's truncation:
     # a skill that was over the cap last time and is inspected now is deliberately not
-    # announced as new — correctly, since calling it new would misdate the install — but
+    # announced as new - correctly, since calling it new would misdate the install - but
     # the user is then never told it appeared.
     if prev_sk_capped:
         note(NOTE_INSPECTION_CAPPED,

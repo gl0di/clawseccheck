@@ -1,13 +1,13 @@
-"""Capability menu — the guided Welcome screen as a runnable command.
+"""Capability menu - the guided Welcome screen as a runnable command.
 
 ``clawseccheck --menu`` prints the compact entry screen the skill shows in
 ``SKILL.md`` Step 1: the three modes plus a way into everything else, the rule
-that decides whether a run gets a grade at all, and two status nudges — when you
+that decides whether a run gets a grade at all, and two status nudges - when you
 last ran a check, and an offline hint if this build looks stale.
 Read-only, no network, pure stdlib (Python 3.9+).
 
 ``render_menu()`` is pure and fully injectable (version, ages, staleness) so it is
-deterministic under test; ``cli.py`` wires the real local values in. English only —
+deterministic under test; ``cli.py`` wires the real local values in. English only -
 the host agent localizes for the user's own language.
 """
 from __future__ import annotations
@@ -18,29 +18,29 @@ from . import brand
 
 # (number, emoji, title, hint). The emoji is dropped in --ascii mode.
 #
-# The three product modes, on the one axis that separates them — how often you
-# reach for each — plus a way into everything else. Item 1 -> the audit (--full
-# and its instruments), 2 -> the periodic watch (--monitor / --trend / …),
+# The three product modes, on the one axis that separates them - how often you
+# reach for each - plus a way into everything else. Item 1 -> the audit (--full
+# and its instruments), 2 -> the periodic watch (--monitor / --trend / ...),
 # 3 -> the pre-install vet (--vet family), 4 -> the full palette (--functions).
 # The hint column is deliberately the *question the mode answers*, not a list of
 # flags: a flag list is what Screen 12 is for, and it is what made this screen
 # unreadable before.
 _ITEMS = (
-    # B-469: item 1 said "config + live agent test ⚡", wrong twice over — the audit is
+    # B-469: item 1 said "config + live agent test bolt", wrong twice over - the audit is
     # entirely read-only and never touches the running agent, and the live injection test
     # is a separate, opt-in step. The live tests now live inside mode A on Screen 12,
-    # where their ⚡ tag and confirm-gate are stated next to them.
-    ("1", "🔍", "Full check", "how safe is this setup?"),
-    ("2", "👀", "Watch", "what changed since last time?"),
-    ("3", "📦", "Before you install", "is this thing safe to add?"),
-    ("4", "📋", "Everything else", "the full list of instruments"),
+    # where their bolt tag and confirm-gate are stated next to them.
+    ("1", "\U0001f50d", "Full check", "how safe is this setup?"),
+    ("2", "\U0001f440", "Watch", "what changed since last time?"),
+    ("3", "\U0001f4e6", "Before you install", "is this thing safe to add?"),
+    ("4", "\U0001f4cb", "Everything else", "the full list of instruments"),
 )
 
 # The grade rule, stated up front rather than discovered at the end of a report.
 # A check earns a letter only when all five layers ran; anything short of that
 # shows findings and names what is missing. Keeping it on this screen means the
 # user is told before they choose, not after they read a number that isn't there.
-_GRADE_RULE = "A grade only when all five layers ran — otherwise findings, and what's missing."
+_GRADE_RULE = "A grade only when all five layers ran \u2014 otherwise findings, and what's missing."
 
 # Title column width, so hints line up. Padding is by plain-title length; emoji
 # prefixes shift the emoji rows by a constant, so the columns still read.
@@ -50,14 +50,14 @@ _TITLE_COL = 22
 def _ascii(text: str) -> str:
     """Fold the few non-ASCII glyphs we use down to safe ASCII for --ascii mode."""
     return (text
-            .replace("⚡", "(live)")
+            .replace("\u26a1", "(live)")
             .replace("·", "-")
-            .replace("—", "-")
-            .replace("…", "..."))
+            .replace("\u2014", "-")
+            .replace("\u2026", "..."))
 
 
 def _last_check_line(days, ascii_only: bool) -> str:
-    label = "Last check:" if ascii_only else "🕒 Last check:"
+    label = "Last check:" if ascii_only else "\U0001f552 Last check:"
     if days is None:
         return f"{label} not checked yet"
     if days <= 0:
@@ -70,20 +70,20 @@ def _build_line(build_digest: str, ascii_only: bool) -> str:
     """B-869: a self-computed content fingerprint, distinct from the version string.
 
     ``version``/``build_age_days`` above both come from ``__version__``/``__released__``
-    — strings a human edits and can forget to bump, so a dev checkout can print the
+    - strings a human edits and can forget to bump, so a dev checkout can print the
     same version as the release it diverged from. This line is a prefix of
     ``integrity.build_fingerprint()``, computed from the files actually on disk, so a
     dev install whose content differs says so even when the version line does not.
     """
-    label = "Build:" if ascii_only else "🔧 Build:"
+    label = "Build:" if ascii_only else "\U0001f527 Build:"
     return f"{label} {build_digest}"
 
 
 def _update_line(build_age_days, stale: bool, ascii_only: bool) -> str:
-    """The 🆙 update affordance. Always shown so "update" is discoverable; louder when stale."""
-    label = "Update:" if ascii_only else "🆙"
+    """The UP update affordance. Always shown so "update" is discoverable; louder when stale."""
+    label = "Update:" if ascii_only else "\U0001f199"
     if stale and build_age_days is not None and build_age_days > 0:
-        body = 'build is {n} days old — a newer one may exist · say "update"'.format(n=build_age_days)
+        body = 'build is {n} days old \u2014 a newer one may exist · say "update"'.format(n=build_age_days)
     elif stale:
         body = 'a newer ClawSecCheck may exist · say "update"'
     else:
@@ -116,19 +116,19 @@ def compute_ages(*, released=None, last_check=None, today=None):
 
 def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
                       ascii_only: bool = False, sandboxed: bool = False) -> str:
-    """Screen 13 — first-run onboarding when there is nothing to audit.
+    """Screen 13 - first-run onboarding when there is nothing to audit.
 
     Shown instead of a wall of UNKNOWNs when the OpenClaw home is *missing*
-    (``reason="missing"``) or an *empty* directory (``reason="empty"``). Pure —
+    (``reason="missing"``) or an *empty* directory (``reason="empty"``). Pure -
     no I/O; the caller passes the (already-sanitized) home path, check count, and
     (B-776) whether this run's own process carries the sandbox signal.
 
     *sandboxed* is a SEPARATE axis from *reason*, not a third reason value: it changes
-    only the ADVICE, never the diagnosis — a sandboxed run genuinely does have "nothing
+    only the ADVICE, never the diagnosis - a sandboxed run genuinely does have "nothing
     there" at *home*, exactly like the ordinary missing/empty case, but "re-run with
     --home <path>" is not an instruction a container with no view of the host filesystem
     can act on. Distinguish it from the case this advice DOES fit: a config that simply
-    isn't at the default path but is reachable somewhere else on the same filesystem —
+    isn't at the default path but is reachable somewhere else on the same filesystem -
     that case has no sandbox signal, and keeps the unchanged --home advice below.
 
     English only; the host agent localizes. Read-only, fabricates no findings.
@@ -136,14 +136,14 @@ def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
     head = brand.header(subtitle="welcome", ascii_only=ascii_only)
 
     if reason == "empty":
-        lead = f"{home} is here, but it's empty — no OpenClaw config in it yet."
+        lead = f"{home} is here, but it's empty \u2014 no OpenClaw config in it yet."
     else:
         lead = f"I looked for an OpenClaw setup at {home}, but there's nothing there."
 
     count = str(n_checks) if n_checks else "the full set of"
-    bullet = "-" if ascii_only else "•"
+    bullet = "-" if ascii_only else "\u2022"
     if sandboxed:
-        # B-776: this chat session IS the sandbox — no `--home` on this filesystem can
+        # B-776: this chat session IS the sandbox - no `--home` on this filesystem can
         # ever reach the host's real OpenClaw setup, so the ordinary bullets below would
         # be sending the reader to fix something that cannot be fixed from here.
         lines = [
@@ -152,7 +152,7 @@ def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
             lead,
             "",
             "This chat session runs inside a sandboxed container, with no access to your "
-            "host's real OpenClaw setup — that isn't fixable by pointing --home anywhere "
+            "host's real OpenClaw setup \u2014 that isn't fixable by pointing --home anywhere "
             "else on this filesystem, because the host's config simply isn't reachable "
             "from in here.",
             "",
@@ -165,7 +165,7 @@ def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
             "",
             lead,
             "",
-            "ClawSecCheck audits an OpenClaw setup for security holes — I just need to find yours:",
+            "ClawSecCheck audits an OpenClaw setup for security holes \u2014 I just need to find yours:",
             f"  {bullet} Default location:  ~/.openclaw",
             f"  {bullet} Config elsewhere?  re-run with  --home <path>",
             f"  {bullet} No OpenClaw yet?   install it, then run me again.",
@@ -179,10 +179,10 @@ def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
 def render_menu(*, version, build_age_days=None, last_check_days=None,
                 stale: bool = False, ascii_only: bool = False,
                 build_digest: str | None = None) -> str:
-    """Render the capability menu as plain text. Pure — no I/O, no clock read.
+    """Render the capability menu as plain text. Pure - no I/O, no clock read.
 
     ``build_digest``, when given (B-869), is a short self-computed content
-    fingerprint from ``integrity.build_fingerprint()`` — optional and additive so
+    fingerprint from ``integrity.build_fingerprint()`` - optional and additive so
     every pre-existing caller/test that omits it reproduces the prior output
     unchanged; ``cli.py`` wires the real value in for the actual ``--menu`` run.
     """

@@ -1,19 +1,19 @@
 """Does the agent's file-READ tool reach outside its workspace?
 
-A faithful, stdlib-only port of one OpenClaw runtime predicate —
-``resolveEffectiveToolFsRootExpansionAllowed`` (dist ``tool-fs-policy-*.js`` — declared
+A faithful, stdlib-only port of one OpenClaw runtime predicate -
+``resolveEffectiveToolFsRootExpansionAllowed`` (dist ``tool-fs-policy-*.js`` - declared
 there, not in ``local-roots-*.js``, which only imports it; a hash-pinned
-``local-roots-CAoJyC6u.js`` cited here before both rotated AND named the wrong file) —
+``local-roots-CAoJyC6u.js`` cited here before both rotated AND named the wrong file) -
 which answers exactly one question: can this config's ``read`` tool open a file that is
 not under the agent's workspace? That is the question A1's "sensitive data" leg needs
 and could not previously ask, so it read a directory NAME instead (B-666).
 
-Two config layers decide it, and BOTH matter — reading only one is wrong by a factor of
+Two config layers decide it, and BOTH matter - reading only one is wrong by a factor of
 five on the local corpus (measured 2026-08-27: the fs layer alone says 483/581 homes are
 exposed; both layers together say 98):
 
-  1. ``tools.fs.workspaceOnly`` — confinement. The runtime normalizes it with a strict
-     ``=== true``, so the EFFECTIVE default when the field is absent is **false** — file
+  1. ``tools.fs.workspaceOnly`` - confinement. The runtime normalizes it with a strict
+     ``=== true``, so the EFFECTIVE default when the field is absent is **false** - file
      tools are NOT confined unless the user writes ``true``. Do not be misled by
      ``options.workspaceOnly !== false`` elsewhere: that reads an already-normalized strict
      boolean and never sees ``undefined``. OpenClaw's own audit agrees
@@ -26,69 +26,69 @@ exposed; both layers together say 98):
      names are content-hashed and 94% of them rotate per release.
 
      This paragraph used to cite ``createToolFsPolicy``
-     (``{ workspaceOnly: params.workspaceOnly === true }``), which **no longer exists** —
+     (``{ workspaceOnly: params.workspaceOnly === true }``), which **no longer exists** -
      2026.8.x inlined that normalization into the read site. Recorded because it is the
      instructive case: the CLAIM survived the rename unchanged and only the citation died,
      and from a dead citation alone a reader cannot tell that apart from the behaviour
      having changed. Re-verify by executing the resolver, not by grepping the old name.
-  2. the tool allow/deny policy — whether ``read`` is granted at all. An absent
+  2. the tool allow/deny policy - whether ``read`` is granted at all. An absent
      ``tools.profile`` pushes NO policy (``if (profilePolicy) policies.push(...)``), i.e.
      the permissive end again; ``minimal``/``messaging`` do not grant ``read``, ``coding``
      and ``full`` do, and ``tools.allow``/``deny``/``alsoAllow`` can override either way.
 
 So both of this predicate's defaults sit at the permissive end, which is why an unread
-layer here does not merely make the answer quieter — it inverts it (the lesson B-664's
+layer here does not merely make the answer quieter - it inverts it (the lesson B-664's
 ``_execpolicy`` dimension learned the same way).
 
-SCOPE: every scope the config declares — the global surface AND each entry of
+SCOPE: every scope the config declares - the global surface AND each entry of
 ``agents.list``, resolved the way ``resolveEffectiveToolFsRootExpansionAllowed`` resolves
 one (``agentTools?.profile ?? cfg.tools?.profile``, an agent-level ``tools.fs``, and the
 agent policy stacked on top of the global one). Global-only would have been quieter, not
 safer: measured across the 22 local corpus configs that declare agents, five disagree with
 their global answer and four of those are an AGENT that can read outside a global scope
-that cannot. ``agents.defaults.tools`` is deliberately NOT a scope — ``resolveAgentConfig``
+that cannot. ``agents.defaults.tools`` is deliberately NOT a scope - ``resolveAgentConfig``
 returns ``tools: entry.tools`` from the ``agents.list`` entry and never merges the defaults
 block, so treating it as one would invent a confinement the runtime does not apply.
 
 CHANNELS ARE NOT A SCOPE HERE, AND THAT IS NOT A DISPROOF (executed against the installed
 openclaw@2026.9.4, 2026-09-16). A raised schema-walk depth cap recovered six paths this
 module has no scope for: ``channels.<provider>.accounts.<id>.guilds.<id>.channels.<id>.
-tools.{allow,alsoAllow,deny}`` and the matching ``toolsBySender.<id>.*``. The question —
+tools.{allow,alsoAllow,deny}`` and the matching ``toolsBySender.<id>.*``. The question -
 does a per-channel/per-group ``tools``/``toolsBySender`` block reach the runtime's real
-tool-gating decision for a message — was answered BY EXECUTION, not inferred from the
+tool-gating decision for a message - was answered BY EXECUTION, not inferred from the
 schema. It does. Traced by symbol through the installed dist:
 ``resolveRequesterToolPolicies`` (``agent-tools.policy-*.mjs``) resolves ``groupPolicy``
-via ``resolveGroupToolPolicy`` — which tries a channel PLUGIN's own
+via ``resolveGroupToolPolicy`` - which tries a channel PLUGIN's own
 ``plugin.groups.resolveToolPolicy`` hook first (Discord's ``guilds.<id>.channels.<id>``
 nesting is exactly this kind of plugin-specific shape; that hook was not located and
-examined — it lives in a per-provider plugin bundle, not the core dist files this module
+examined - it lives in a per-provider plugin bundle, not the core dist files this module
 already cites) and falls back to the generic ``resolveChannelGroupToolsPolicy``
-(``channels.<channel>.groups.<id>.tools``/``.toolsBySender``, ``group-policy-*.mjs``) —
+(``channels.<channel>.groups.<id>.tools``/``.toolsBySender``, ``group-policy-*.mjs``) -
 and the resolved ``groupPolicy``, alongside a separately-resolved ``senderPolicy``
-(``resolveSenderToolPolicy``, ``sender-tool-policy-*.mjs`` — note: THIS one only ever reads
+(``resolveSenderToolPolicy``, ``sender-tool-policy-*.mjs`` - note: THIS one only ever reads
 agent-level/global ``tools.toolsBySender``, not the channel-nested one), is threaded into
 ``buildDefaultToolPolicyPipelineSteps``/``applyToolPolicyPipeline``
 (``tool-policy-pipeline-*.mjs``) as two MORE sequential AND-ed filter steps layered on top
-of every policy ``resolveConfiguredToolPolicies`` already models — confirmed by reading
+of every policy ``resolveConfiguredToolPolicies`` already models - confirmed by reading
 ``ra=[profilePolicy,providerProfilePolicy,globalPolicy,globalProviderPolicy,agentPolicy,
 agentProviderPolicy,groupPolicy,senderPolicy,...]`` feeding that pipeline in the live
 message-handling call site.
 
 So this is NOT the "add channel key names to a list" fix first suspected and rejected (see
-the task) — it is also not simply "extend the scope enumeration" the task's own DoD
+the task) - it is also not simply "extend the scope enumeration" the task's own DoD
 offered as the likely shape, because a channel is not an independent scope PARALLEL to an
 agent the way ``agents.list`` entries are: it is a NARROWING FILTER that applies only to
 messages a given agent receives THROUGH that specific channel/account/guild/sender
 combination. ``confined_scopes``/``_sandbox_confines`` answer a per-AGENT confinement
 question that has no channel-shaped analogue (a channel is not separately sandboxed), and
-attributing a channel's narrowing to the right agent scope — rather than crediting an
-agent with a channel it never actually receives traffic through — needs an agent-channel
+attributing a channel's narrowing to the right agent scope - rather than crediting an
+agent with a channel it never actually receives traffic through - needs an agent-channel
 ROUTING model this tool does not have and the schema recon does not establish. A `scopes`
 list that just appended one entry per declared channel would silently answer a DIFFERENT,
 unsound question ("does ANY channel anywhere narrow write") instead of the one this module
 actually needs ("does THIS agent's effective policy get narrowed").
 
-STILL OPEN — and the ROUTING model named above is the wrong axis (re-read and partly
+STILL OPEN - and the ROUTING model named above is the wrong axis (re-read and partly
 executed against the installed openclaw@2026.9.5, 2026-09-23). An attempt to credit a
 per-channel block to the DEFAULT agent's scope whenever no route binding is declared
 (with no matching binding ``resolveAgentRoute`` does fall back to the default agent) was
@@ -98,12 +98,12 @@ per agent:
 
 * ``resolveGroupToolPolicyOutcome`` takes group ids ONLY from the server-built session key
   (a caller-supplied group id the key does not name is dropped) and returns no policy when
-  there are none — so a DM turn gets no group policy at all (executed: an open-DM turn
+  there are none - so a DM turn gets no group policy at all (executed: an open-DM turn
   resolved to no policy beside a ``groups["*"]`` block that denied the write family), and
   a group block on one provider never reaches another provider's turn.
 * inside ``resolveScopeToolsPolicy`` a specific group's own ``tools`` (or a matching
   ``toolsBySender`` entry) REPLACES the ``groups["*"]`` answer instead of stacking on it,
-  and ``tools: {}`` still counts as an answer — ``pickSandboxToolPolicy({})`` is undefined,
+  and ``tools: {}`` still counts as an answer - ``pickSandboxToolPolicy({})`` is undefined,
   so that group gets no narrowing at all (executed). A block's presence proves nothing;
   only its resolved allow/deny, over every node and sender entry, could.
 
@@ -113,27 +113,27 @@ that removes each write tool. Even that is not shippable today, for three reason
 the way (none reachable from the schema):
 
 1. provider hooks: of the channel plugins the npm package bundles, only Telegram declares
-   a ``groups.resolveToolPolicy`` hook (``resolveTelegramGroupToolPolicy`` → the same
+   a ``groups.resolveToolPolicy`` hook (``resolveTelegramGroupToolPolicy`` -> the same
    shared ``buildChannelGroupsScopeTree``/``resolveScopeToolsPolicy`` tree), and it passes
-   no ``access.toolPolicy`` for group turns. Most others — Discord (whose
+   no ``access.toolPolicy`` for group turns. Most others - Discord (whose
    ``guilds.<id>.channels.<id>`` nesting is the shape that opened this), Slack, WhatsApp,
-   Signal and more — are excluded from the package (``"!dist/extensions/<name>/**"``), and
+   Signal and more - are excluded from the package (``"!dist/extensions/<name>/**"``), and
    a plugin's ``access.toolPolicy`` REPLACES the config group policy outright
    (``conversationPolicy ?? resolveGroupToolPolicy(...)`` in
    ``resolveRequesterToolPolicies``), so no config reading can bound those providers.
-2. ``session.groupScope: "main"`` — or a binding's ``session.groupScope: "main"`` — makes
+2. ``session.groupScope: "main"`` - or a binding's ``session.groupScope: "main"`` - makes
    ``buildAgentPeerSessionKey`` put group turns in the agent's MAIN session key, which
    names no group, so no group policy applies to any group (executed).
 3. laundering: ``sessions_send`` is not an owner-only tool and
    ``tools.sessions.visibility`` defaults to ``"all"``, so a narrowed group turn can inject
-   a turn into a session with no group policy (read, not executed — that needs a running
+   a turn into a session with no group policy (read, not executed - that needs a running
    gateway). ``sessions_spawn`` is not such a path: the tool builder hands a spawned child
    the parent's explicit denylist (group policy included) and, under a restrictive allow,
    its effective allowlist. Closing this needs a vetted list of which tools can start an
    unnarrowed turn, which no vendor port provides.
 
 Until those are resolved, the config's channel blocks stay unread here and a config whose
-group block really does remove write keeps its FAIL — the loud direction, never a missed
+group block really does remove write keeps its FAIL - the loud direction, never a missed
 one. ``tests/test_b726_channel_tools_narrowing.py`` pins the three shapes the reverted
 attempt got wrong. ``_OPAQUE_NARROWING_KEYS`` is unchanged: the gap is a missing
 per-ingress model, not a key this module visits and mishandles.
@@ -146,7 +146,7 @@ Validated by ``tests/test_f186_write_reach.py`` against a vendor-executed batter
 
 Verified against the vendor: this module's answer was compared with a real
 ``resolveEffectiveToolFsRootExpansionAllowed`` call over all 581 local corpus configs
-plus a hand-built edge table — see ``tests/test_b666_read_reach.py``.
+plus a hand-built edge table - see ``tests/test_b666_read_reach.py``.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ from .toolgrant import OPAQUE_NARROWING_KEYS as _OPAQUE_NARROWING_KEYS
 # DUPLICATED from ``checks/_shared.py``'s ``_TOOL_NAME_ALIASES``/``_canon_tool`` rather
 # than imported, because this module is a LEAF and importing from the check layer would
 # invert the dependency flow. Same arrangement, same reason, as ``skillprovenance.py``'s
-# copy of WORKSPACE_DIRS — and, like that one, it is a copy WITH A GUARD:
+# copy of WORKSPACE_DIRS - and, like that one, it is a copy WITH A GUARD:
 # ``tests/test_b666_read_reach.py`` fails the build if the two tables ever disagree.
 _TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch"}
 
@@ -183,12 +183,12 @@ _TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch"}
 # C-584: this had gone stale by one member. "ls" carries `sectionId: "fs"` in
 # CORE_TOOL_DEFINITIONS (tool-catalog-*.js) alongside read/write/edit/apply_patch, and
 # ``toolgrant.py``'s own whole-table-grounded copy already recorded "2026.9.2: group:fs
-# gained 'ls'" — but this module's independent literal was never updated to match. Verified
+# gained 'ls'" - but this module's independent literal was never updated to match. Verified
 # by EXECUTING the vendor (``tests/_toolgrantoracle.py --tables`` against openclaw@2026.9.5,
 # 2026-09-21): ``groups["group:fs"] == ["ls", "read", "write", "edit", "apply_patch"]``.
 # Confirmed inert rather than a lying-PASS: this table is consulted (`_expand`) only to
 # decide whether the fixed tool name "read" matches an expanded allow/deny list, and "read"
-# was already a member either way, so no config changed verdict — but it is corrected here
+# was already a member either way, so no config changed verdict - but it is corrected here
 # to keep this a faithful port rather than a table trusted to happen not to matter, and
 # ``test_dist_group_fs_membership_matches_core_tool_definitions`` now grounds the full set
 # so the next vendor addition is caught mechanically instead of by inspection.
@@ -203,14 +203,14 @@ _GROUP_FS_MEMBERS = ("ls", "read", "write", "edit", "apply_patch")
 _PROFILES_GRANTING_READ = frozenset({"coding", "full"})
 # ``ToolProfileSchema`` (dist zod-schema.agent-runtime-*.js). A value outside this set is
 # not a profile the runtime recognizes: ``resolveCoreToolProfilePolicy`` returns undefined
-# for it and NO policy is pushed — the permissive end, not a restriction.
+# for it and NO policy is pushed - the permissive end, not a restriction.
 _KNOWN_PROFILES = frozenset({"minimal", "coding", "messaging", "full"})
 
 
 def _normalize(name) -> str:
     """``normalizeToolName``: fold to a trimmed lowercase string, then apply aliases.
 
-    ``normalizeLowercaseStringOrEmpty`` returns "" for ANY non-string — a numeric or null
+    ``normalizeLowercaseStringOrEmpty`` returns "" for ANY non-string - a numeric or null
     entry in an allow list is dropped, not coerced to its digits.
     """
     text = name.strip().lower() if isinstance(name, str) else ""
@@ -264,8 +264,8 @@ def _allowed_by(name: str, policy) -> bool:
 def _sandbox_tool_policy(tools):
     """``pickSandboxToolPolicy``: fold allow/alsoAllow/deny into one policy, or None.
 
-    ``alsoAllow`` without ``allow`` is a WIDENING, not a restriction — the dist unions it
-    onto an implicit ``"*"`` — so a config that only sets ``alsoAllow`` still allows every
+    ``alsoAllow`` without ``allow`` is a WIDENING, not a restriction - the dist unions it
+    onto an implicit ``"*"`` - so a config that only sets ``alsoAllow`` still allows every
     tool it did not name.
     """
     if not isinstance(tools, dict):
@@ -291,12 +291,12 @@ def _profile_policy(tools, also_from=None):
     """``resolveToolProfilePolicy`` + ``mergeAlsoAllowPolicy``, reduced to allow/deny.
 
     *also_from* supplies ``alsoAllow`` when the profile came from a different scope than
-    the one holding it — the runtime reads ``agentTools?.alsoAllow ?? globalTools?.alsoAllow``
+    the one holding it - the runtime reads ``agentTools?.alsoAllow ?? globalTools?.alsoAllow``
     independently of where the profile came from.
     """
     if not isinstance(tools, dict):
         return None
-    # EXACT, case-sensitive lookup — ``CORE_TOOL_PROFILES[profile]`` is a plain object
+    # EXACT, case-sensitive lookup - ``CORE_TOOL_PROFILES[profile]`` is a plain object
     # index with no trim and no case fold, unlike the tool-NAME normalization above. So
     # "Coding" or " coding " is not a profile the runtime knows: it resolves to no policy
     # at all, i.e. the permissive end, not to the profile the user meant.
@@ -311,7 +311,7 @@ def _profile_policy(tools, also_from=None):
         allow = list(allow) + [a for a in also]
     # An empty allow list would read as "allow everything" downstream (that is what an
     # absent allowlist means), so a profile that does NOT grant read is expressed as a
-    # policy that allows something else — never as an empty one.
+    # policy that allows something else - never as an empty one.
     return {"allow": allow or ["session_status"], "deny": None}
 
 
@@ -319,7 +319,7 @@ def _has_fs_flag(tools) -> bool:
     """Whether this scope SET ``tools.fs.workspaceOnly`` at all.
 
     ``resolveToolFsConfig`` is ``agent?.tools?.fs?.workspaceOnly ?? global?.fs?.workspaceOnly``
-    — a nullish coalesce, so an agent that writes ``false`` overrides a global ``true``,
+    - a nullish coalesce, so an agent that writes ``false`` overrides a global ``true``,
     while an agent that writes nothing inherits it.
     """
     fs = tools.get("fs") if isinstance(tools, dict) else None
@@ -346,7 +346,7 @@ _DEFAULT_AGENT_ID = "main"
 def _normalize_agent_id(value) -> str:
     """``normalizeAgentId`` (dist account-selection-*.js).
 
-    An entry with no ``id`` is not skipped — the dist folds a missing id to "main", so
+    An entry with no ``id`` is not skipped - the dist folds a missing id to "main", so
     such an entry IS the main agent's config, and its tools really do apply. (The schema
     marks ``agents.list[].id`` required, so this only comes up on a config OpenClaw would
     reject; resolving it the dist's way keeps us from calling a real opt-out inert.)
@@ -375,7 +375,7 @@ def _scope_reaches_outside(global_tools, agent_tools) -> bool:
 
     Mirrors ``resolveEffectiveToolFsRootExpansionAllowed``: confinement first (the agent's
     own ``tools.fs.workspaceOnly`` if it set one, otherwise the global field), then the
-    profile — taken from the AGENT when it names one, else the global — stacked with both
+    profile - taken from the AGENT when it names one, else the global - stacked with both
     the global and the agent allow/deny policies.
 
     READ-ONLY BY CONSTRUCTION, and it must stay that way. B-670 briefly parametrised this by
@@ -408,7 +408,7 @@ def _scope_reaches_outside(global_tools, agent_tools) -> bool:
 # nothing there and this returns False anyway. Not modelled because it is unobserved: of the
 # 671 fixture homes plus the clawrange corpus, three set `workspaceOnly: true` at all and
 # none of the three declares a workspace containing its home. Recorded rather than left
-# implicit — the failure is a missed WARN, never a wrong one.
+# implicit - the failure is a missed WARN, never a wrong one.
 def read_reaches_outside_workspace(cfg: dict, agent_tools=None) -> bool:
     """True when a file-read tool is granted AND is not confined to the workspace.
 
@@ -423,12 +423,12 @@ def read_reaches_outside_workspace(cfg: dict, agent_tools=None) -> bool:
 
 
 # ---------------------------------------------------------------- sandbox containment
-# NOT part of the ported predicate — `resolveEffectiveToolFsRootExpansionAllowed` answers
+# NOT part of the ported predicate - `resolveEffectiveToolFsRootExpansionAllowed` answers
 # a POLICY question ("may this tool expand past the workspace root") and knows nothing
 # about where the process can see. A sandboxed session is a second, independent
 # confinement: `appendWorkspaceMountArgs` (dist docker-*.js) binds the workspace dirs and
-# the read-only skill overlays into the container and NOTHING ELSE — the OpenClaw home is
-# never mounted — so under `sandbox.mode: "all"` a granted `read` tool cannot open
+# the read-only skill overlays into the container and NOTHING ELSE - the OpenClaw home is
+# never mounted - so under `sandbox.mode: "all"` a granted `read` tool cannot open
 # openclaw.json or the credential store however permissive the tool policy is. Saying it
 # could would be a false alarm, so this layer subtracts those scopes.
 #
@@ -440,7 +440,7 @@ _SANDBOX_OFF = "off"
 
 # B-712: appended to a scope label whose confinement the config does not decide, so the
 # uncertainty reaches the reader instead of being flattened into a bare assertion.
-_UNDECIDED_SUFFIX = " (sandbox 'non-main' — confinement depends on which session runs)"
+_UNDECIDED_SUFFIX = " (sandbox 'non-main' \u2014 confinement depends on which session runs)"
 
 
 def any_confinement_undecided(labels) -> bool:
@@ -459,7 +459,7 @@ def _default_agent_id(cfg: dict) -> str:
     """``resolveDefaultAgentId``: the entry marked ``default``, else the first one.
 
     Needed because "non-main" is defined against THIS id, not against the literal string
-    "main" — a config whose only agent is `{"id": "bot"}` has `bot` as its main agent, so
+    "main" - a config whose only agent is `{"id": "bot"}` has `bot` as its main agent, so
     `non-main` does not sandbox it.
     """
     entries = [e for _, e in _agent_entries(cfg)]
@@ -495,7 +495,7 @@ def _sandbox_confines(cfg: dict, agent_id: str, entry) -> "bool | None":
 
     ``all`` and ``off`` are decidable from config alone. ``non-main`` falls through to a
     comparison against the RUNNING session's key, which has no representation in
-    ``openclaw.json`` — so the honest answer is that there is none.
+    ``openclaw.json`` - so the honest answer is that there is none.
 
     Two corrections to what this function used to assert, both measured by executing
     ``resolveSandboxRuntimeStatus`` for both session positions of each agent across 45
@@ -503,14 +503,14 @@ def _sandbox_confines(cfg: dict, agent_id: str, entry) -> "bool | None":
 
     * ``non-main`` is undecidable for EVERY agent, not only the non-default ones. The old
       ``agent_id != _default_agent_id(cfg)`` came from reading "non-main" as "not the main
-      AGENT", but ``resolveMainSessionKeyForSandbox`` resolves per agent — so every agent has
+      AGENT", but ``resolveMainSessionKeyForSandbox`` resolves per agent - so every agent has
       its own main session that runs unsandboxed, and its other sessions that do not.
     * An absent ``mode`` resolves to ``off``, not to "unknown". The vendor's effective mode
       for an absent key is ``off``, so ``False`` there is a real answer, not a guess.
 
     A value we do not recognise also yields ``None``. The schema restricts ``mode`` to the
     three literals (probed: ``"bogus"`` is rejected as ``invalid_union`` at both the defaults
-    and the per-entry placement), so this is unreachable from a loadable config — it is the
+    and the per-entry placement), so this is unreachable from a loadable config - it is the
     Golden-Rule-#4 default rather than a live branch.
 
     NOT modelled, and it matters for how a caller words itself: ``sandboxRequired`` is checked
@@ -655,8 +655,8 @@ def confinement_undecided_only(cfg: dict) -> bool:
 
     B-712. The distinction a verdict has to make before it words itself: a scope with the
     sandbox demonstrably off is evidence; a scope on `sandbox.mode: "non-main"` is an absence
-    of evidence. Both stop `_fs_reads_are_confined` from suppressing a leg — correctly, since
-    suppression requires proof — but only the first justifies a sentence that asserts the
+    of evidence. Both stop `_fs_reads_are_confined` from suppressing a leg - correctly, since
+    suppression requires proof - but only the first justifies a sentence that asserts the
     exposure outright. False when any scope is proven unconfined (there is real evidence, so
     no hedge is owed) and False when everything is confined (nothing to say).
     """
@@ -675,7 +675,7 @@ def confined_scopes(cfg: dict):
     CONFINEMENT half, because its caller already has independent evidence that a read
     capability was DECLARED (a tool named in the config, or an attested roster) and only
     needs to know whether a guard neutralizes it. Asking the granted-question there would
-    silently drop a declared tool whose name OpenClaw's policy stack does not recognize —
+    silently drop a declared tool whose name OpenClaw's policy stack does not recognize -
     ``fs_read``, for one, which two corpus fixtures grant and the runtime does not define.
 
     Guards are OpenClaw's own, from the predicate behind
@@ -683,8 +683,8 @@ def confined_scopes(cfg: dict):
     (per scope, nullish-coalesced onto the global field) or a session the sandbox fully
     contains, where the OpenClaw home is not mounted at all.
 
-    Returns one entry per declared scope — the main agent's surface plus each
-    ``agents.list`` entry — so a caller can require ALL of them, which is the honest
+    Returns one entry per declared scope - the main agent's surface plus each
+    ``agents.list`` entry - so a caller can require ALL of them, which is the honest
     reading: one unconfined scope leaves the capability exposed.
     """
     if not isinstance(cfg, dict) or not cfg:
@@ -695,7 +695,7 @@ def confined_scopes(cfg: dict):
         fs_scope = tools if _has_fs_flag(tools) else cfg.get("tools")
         # B-712: three-state. `workspaceOnly: true` is proof on its own, so it wins outright;
         # otherwise the answer is the sandbox's, INCLUDING its `None`. Written out rather
-        # than left as `a or b` — that expression happens to produce the same three values,
+        # than left as `a or b` - that expression happens to produce the same three values,
         # and a security predicate should not depend on a reader noticing that.
         if _workspace_only_of(fs_scope):
             out.append(True)
@@ -711,8 +711,8 @@ def scopes_reaching_outside_workspace(cfg: dict) -> list:
     agent that resolves the same way. A scope PROVEN sandboxed is subtracted (see above).
     Empty means no declared scope can read the OpenClaw home.
 
-    B-712: a scope whose confinement is UNDECIDABLE from config — `sandbox.mode: "non-main"`,
-    where the vendor's answer depends on which session is running — is NOT subtracted, and
+    B-712: a scope whose confinement is UNDECIDABLE from config - `sandbox.mode: "non-main"`,
+    where the vendor's answer depends on which session is running - is NOT subtracted, and
     says so in its own label. Subtracting it would fabricate a containment the config does
     not establish; dropping the qualifier would assert a reach we have not established
     either. The caller renders these labels into its evidence, so the uncertainty travels

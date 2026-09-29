@@ -1,8 +1,8 @@
-"""The `plugins` dimension — which plugins may load, and what switches that.
+"""The `plugins` dimension - which plugins may load, and what switches that.
 
 B-659. A plugin runs INSIDE the agent, so the allow list is a trust grant and every field
 here is read off the installed dist's own zod schema rather than a docs page. The arm
-watches the list, the enable flag, the slots, the registry entries — and `bundledDiscovery`,
+watches the list, the enable flag, the slots, the registry entries - and `bundledDiscovery`,
 which a C-135 pass found to be a silent off switch for all of the above.
 
 Signature builder and diff arm together, which is the whole point of this package: a field
@@ -17,7 +17,7 @@ from __future__ import annotations
 #
 # An adversarial pass produced six false positives from one omission: `_plugins_sig` stored
 # raw strings and the arm did a raw set difference, while OpenClaw compares ids through
-# `normalizePluginId` — trim, lowercase, then an alias table
+# `normalizePluginId` - trim, lowercase, then an alias table
 # (`dist/config-state-CtMlHVRM.js`). Every identity-preserving re-spelling therefore looked
 # like a set difference, and always on a LOOSENING arm, because a re-spelling adds the new
 # form to `allow` and removes the old form from `deny` in the same edit.
@@ -26,7 +26,7 @@ from __future__ import annotations
 # tells the user to run: the `openai-codex` -> `openai` migration rewrote the id in `allow`
 # and `deny` at once and produced two MEDIUM alerts, one of them saying a plugin that is
 # still denied had left the block list. Another announced a genuine TIGHTENING (two aliases
-# collapsed to one canonical deny entry) as a loosening — the exact inversion the direction
+# collapsed to one canonical deny entry) as a loosening - the exact inversion the direction
 # calibration exists to prevent.
 #
 # Lifted verbatim from BUILT_IN_PLUGIN_ALIAS_FALLBACKS (`config-state-CtMlHVRM.js`), read
@@ -53,7 +53,7 @@ def _plugin_id(raw: object) -> str:
 
 
 def _plugins_sig(ctx) -> dict:
-    """B-659: the plugin TRUST surface — who may load, who may not, and what switches it.
+    """B-659: the plugin TRUST surface - who may load, who may not, and what switches it.
 
     `plugins.*` reached the monitor only if some check's status happened to move, and
     measured on `fixtures/home_safe` an appended `plugins.allow` entry moved none of 188.
@@ -68,15 +68,15 @@ def _plugins_sig(ctx) -> dict:
     SWITCH for everything else in this dimension: `plugins.bundledDiscovery === "compat"`
     sets `bypassAllowlist`, which leaves `allowSet` undefined and makes every bundled plugin
     eligible (`dist/bundled-compat-yOgFRqvZ.js`). One word turns the allowlist off, and
-    `doctor --fix` writes it automatically for any restrictive allowlist — so the same run
+    `doctor --fix` writes it automatically for any restrictive allowlist - so the same run
     that produced the migration false positive also produced this false negative.
 
     `entries` records each id's `enabled` flag rather than only the id, because a plugin
-    already registered and switched off can be switched on without adding a key — invisible
+    already registered and switched off can be switched on without adding a key - invisible
     to a keys-only signature and to the new-key arm both. The rest of an entry's body IS
     provider setup's working state and stays unwatched.
 
-    `plugins.load.paths` — where plugins are loaded FROM — is deliberately out: it is its own
+    `plugins.load.paths` - where plugins are loaded FROM - is deliberately out: it is its own
     family and deserves its own adversarial pass rather than a rider on this one. An earlier
     version of this docstring also claimed to be excluding `plugins.mcp`; there is no such
     field in the installed schema, and justifying an omission with an invented field name is
@@ -102,14 +102,14 @@ def _plugins_sig(ctx) -> dict:
     if isinstance(discovery, str):
         out["bundled_discovery"] = discovery.strip().lower()
     # F-183: from OpenClaw 2026.8.1 this value LEFT openclaw.json for the machine-owned
-    # state store, and the runtime reads it there —
+    # state store, and the runtime reads it there -
     # `readBundledDiscoveryMode` -> `readConfigMachineState("plugins.bundledDiscovery")`.
     # Watching only the config key meant the arm below could never fire on a current
     # build, however loudly the value changed.
     #
     # BOTH sources are recorded, under distinct signature keys, rather than one being
     # picked by version: the arm then fires on whichever one moves, and a store that
-    # cannot be read simply leaves its key absent — the same shape as "not set", so an
+    # cannot be read simply leaves its key absent - the same shape as "not set", so an
     # unreadable store can never manufacture an alert.
     state_discovery = (getattr(ctx, "config_machine_state", None) or {}).get(
         "plugins.bundledDiscovery")
@@ -134,7 +134,7 @@ def _diff_plugins(pair, alerts, compare_config) -> None:
     """C-433: the `plugins` dimension's diff arm.
 
     Third per-dimension extraction, and the largest so far at 66 lines with only THREE
-    parameters. `_listed` looked like a blocker in the first survey — it is a closure — but
+    parameters. `_listed` looked like a blocker in the first survey - it is a closure - but
     it is defined inside this arm rather than at the function's top level, so it travels
     with the arm instead of having to be threaded in. Worth recording because the survey
     that flagged it was counting names, not asking where they were bound.
@@ -158,7 +158,7 @@ def _diff_plugins(pair, alerts, compare_config) -> None:
         alerts.append((
             "MEDIUM",
             "Plugin(s) newly allowed to load: " + ", ".join(sorted(_ca - _pa))
-            + ". A plugin runs inside your agent — vet it before trusting it."))
+            + ". A plugin runs inside your agent \u2014 vet it before trusting it."))
     _pd, _cd = _listed(_pp, "deny"), _listed(_cp, "deny")
     if _pd is not None and _cd is not None and (_pd - _cd):
         alerts.append((
@@ -177,7 +177,7 @@ def _diff_plugins(pair, alerts, compare_config) -> None:
     # watching the allowlist saw nothing because the list itself did not move.
     #
     # F-183: checked on BOTH the config key and the machine-state key, because 2026.8.1
-    # moved the value into the state store — and because it can arrive there without the
+    # moved the value into the state store - and because it can arrive there without the
     # user writing anything. `migrateLegacyConfigMachineState` synthesises
     # `["plugins.bundledDiscovery", "compat"]` on upgrade when `plugins.allow` is
     # non-empty and the config was last touched before 2026.7.2. The population that
@@ -187,7 +187,7 @@ def _diff_plugins(pair, alerts, compare_config) -> None:
             alerts.append((
                 "MEDIUM",
                 "Plugin discovery switched to compat mode, which bypasses your "
-                "plugin allow list entirely — every bundled plugin can load again, "
+                "plugin allow list entirely \u2014 every bundled plugin can load again, "
                 "whatever the list says."
                 + (" This was set in OpenClaw's own state store, not in openclaw.json, "
                    "so an upgrade can have done it without you editing anything."
@@ -215,7 +215,7 @@ def _diff_plugins(pair, alerts, compare_config) -> None:
                 + ". Configuring a provider writes one of these, so this is expected if "
                 "you just did that."))
         # A plugin already registered and switched OFF can be switched on without adding
-        # a key — invisible to the arm above and to a keys-only signature. INFO would be
+        # a key - invisible to the arm above and to a keys-only signature. INFO would be
         # wrong here: this is a plugin becoming live, not a provider being configured.
         _switched = sorted(k for k, v in _ce.items() if v and _pe.get(k) is False)
         if _switched:

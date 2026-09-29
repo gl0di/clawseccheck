@@ -6,14 +6,14 @@ notices a relevant filesystem change itself and re-runs the identical `--monitor
 automatically, instead of waiting for the next scheduled invocation.
 
 It deliberately does NOT reimplement drift detection. On a debounced change it shells out
-to ``python3 -m clawseccheck --monitor --verbose ...`` — the same invocation
+to ``python3 -m clawseccheck --monitor --verbose ...`` - the same invocation
 ``scripts/monitor_detection_gate.py`` already uses to drive this tool from outside the
-library — so the alert format, severity mapping and the tamper-evident event journal stay
+library - so the alert format, severity mapping and the tamper-evident event journal stay
 the single implementation in monitordims/. This module only decides WHEN to trigger that
 re-scan (inotify-driven, debounced) and whether the watcher process itself is still alive
 (a heartbeat file under the caller's own store directory).
 
-Mechanism choice — stdlib-only, no new runtime dependency: see
+Mechanism choice - stdlib-only, no new runtime dependency: see
 docs/design/watch-mechanism.md. Short version: a real inotify wrapper via ``ctypes``
 against libc (``inotify_init1``/``inotify_add_watch``/``read``), with a stat-based
 polling fallback for any platform or sandbox where the inotify syscalls are unavailable.
@@ -22,7 +22,7 @@ the design note records that this was verified live on Linux, not assumed.
 
 Read-only w.r.t. the audited home (Golden Rule #2): this module never writes under
 *home*. Every file it writes (the heartbeat) lives under the caller-supplied store
-directory — the same boundary ``--monitor`` already respects.
+directory - the same boundary ``--monitor`` already respects.
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ from .safeio import secure_dir, secure_write_text
 
 # --------------------------------------------------------------------------- inotify
 #
-# Flags/masks from <sys/inotify.h> (stable Linux UAPI) — ctypes cannot include a C
+# Flags/masks from <sys/inotify.h> (stable Linux UAPI) - ctypes cannot include a C
 # header, so these are restated as constants rather than reimplemented as a syscall.
 
 IN_CLOEXEC = 0o02000000
@@ -76,7 +76,7 @@ _libc = None
 
 class InotifyUnavailable(OSError):
     """The inotify syscalls cannot be used here (wrong platform, or a sandbox that
-    refuses the syscall itself) — the trigger for falling back to PollWatcher."""
+    refuses the syscall itself) - the trigger for falling back to PollWatcher."""
 
 
 def _get_libc():
@@ -142,7 +142,7 @@ def probe_inotify() -> bool:
     """True when this platform/sandbox can actually create an inotify fd right now.
 
     A cheap, side-effect-free real syscall attempt (opens and immediately closes one
-    fd) — never a platform-name guess. `sys.platform != "linux"` is the common fast
+    fd) - never a platform-name guess. `sys.platform != "linux"` is the common fast
     exit, but a restricted Linux sandbox can also refuse the syscall itself, and only
     an actual attempt can see that.
     """
@@ -160,7 +160,7 @@ def probe_inotify() -> bool:
 # ---------------------------------------------------------------- bounded dir walk
 
 #: Generous for a real OpenClaw home, but a pathological tree must not make watch
-#: setup itself unbounded — same discipline as safeio.walk_dir_safely's max_files.
+#: setup itself unbounded - same discipline as safeio.walk_dir_safely's max_files.
 DEFAULT_MAX_WATCH_DIRS = 20_000
 
 
@@ -176,7 +176,7 @@ def _bounded_watch_dirs(root: Path, max_dirs: int = DEFAULT_MAX_WATCH_DIRS
     """Every directory under *root* (root included); symlinked directories are never
     followed (no cycles, no escaping *root*).
 
-    Returns ``(dirs, capped)`` — ``capped`` is True when the tree holds more
+    Returns ``(dirs, capped)`` - ``capped`` is True when the tree holds more
     directories than *max_dirs* and the walk stopped short, so a caller can disclose a
     partial watch rather than silently watching only part of the tree.
     """
@@ -205,7 +205,7 @@ def _bounded_watch_dirs(root: Path, max_dirs: int = DEFAULT_MAX_WATCH_DIRS
 # ------------------------------------------------------------------- watcher classes
 
 class Watcher:
-    """Common interface both mechanisms implement — the loop in run_watch() never
+    """Common interface both mechanisms implement - the loop in run_watch() never
     branches on which one it got."""
 
     mode = "abstract"
@@ -221,7 +221,7 @@ class Watcher:
 class InotifyWatcher(Watcher):
     """Real, event-driven watch via ctypes + libc inotify.
 
-    Recursive by hand — Linux inotify is not natively recursive: every existing
+    Recursive by hand - Linux inotify is not natively recursive: every existing
     subdirectory gets its own watch descriptor up front (`_bounded_watch_dirs`), and a
     newly created subdirectory is watched the moment its IN_CREATE|IN_ISDIR event is
     seen, so a directory created after start-up is not a blind spot.
@@ -268,7 +268,7 @@ class InotifyWatcher(Watcher):
             for wd, mask, _cookie, name in _parse_inotify_events(buf):
                 if mask & IN_Q_OVERFLOW:
                     # The kernel dropped events we could not read fast enough. Treat
-                    # as a change unconditionally — under-reporting here would be a
+                    # as a change unconditionally - under-reporting here would be a
                     # silent gap in exactly the surface this module exists to watch.
                     self.overflowed = True
                     changed = True
@@ -298,7 +298,7 @@ class InotifyWatcher(Watcher):
 
 class PollWatcher(Watcher):
     """Fallback: bounded stat-based polling (mtime + size), for a non-Linux platform
-    or a sandbox where the inotify syscalls raise. Not a guess — `make_watcher` only
+    or a sandbox where the inotify syscalls raise. Not a guess - `make_watcher` only
     reaches this after a real `InotifyWatcher()` construction attempt failed.
     """
 
@@ -371,7 +371,7 @@ def _write_heartbeat(path: Path, **fields) -> None:
 
 def read_heartbeat(path: "str | Path") -> "dict | None":
     """Read back a heartbeat file for a liveness check. None if absent, unreadable,
-    or not valid JSON — never raises."""
+    or not valid JSON - never raises."""
     try:
         text = Path(path).expanduser().read_text(encoding="utf-8")
         data = json.loads(text)
@@ -386,7 +386,7 @@ DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_POLL_INTERVAL_S = 1.0
 DEFAULT_SELECT_TIMEOUT_S = 1.0
 DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
-#: A heartbeat older than this many multiples of its own interval reads as stale —
+#: A heartbeat older than this many multiples of its own interval reads as stale -
 #: the watcher likely hung rather than merely being between two ordinary updates.
 STALE_HEARTBEAT_MULTIPLE = 3
 
@@ -400,11 +400,11 @@ def _run_monitor_once(home: Path, state_path, events_path, history_path,
 
     The literal argv list is inlined directly into the `subprocess.run` call (rather
     than built up in a local first) so it stays statically visible to
-    `tests/test_doc_facts.py::test_the_only_program_this_package_spawns_...` — the
+    `tests/test_doc_facts.py::test_the_only_program_this_package_spawns_...` - the
     same shape `native.py`'s own spawn site already uses, and the reason that test can
     name this one's argv too instead of only knowing a second spawn site exists. This
     is the package invoking ITSELF (`-m clawseccheck`, its own installed entry point)
-    to re-run the identical local, offline `--monitor` check in a fresh process — not a
+    to re-run the identical local, offline `--monitor` check in a fresh process - not a
     third-party program and not a network call, so it does not touch either badge
     figure the tests above pin; it is still a distinct spawn site, which is exactly
     what that test exists to make visible rather than let accumulate unnoticed.
@@ -442,7 +442,7 @@ def run_watch(
     """Watch *home* and re-run `--monitor` on a debounced relevant change.
 
     Read-only w.r.t. *home*: every write goes through the three `--monitor` paths
-    (unchanged) or *heartbeat_path* — always inside the caller's own store directory
+    (unchanged) or *heartbeat_path* - always inside the caller's own store directory
     (Golden Rule #2).
 
     Returns 0 on a clean stop. This function never exits the process itself, so a
@@ -450,7 +450,7 @@ def run_watch(
     (`install_signal_handlers=True`, the default); a test instead passes a
     `threading.Event` as *stop_event* and/or a small `max_cycles`, and must pass
     `install_signal_handlers=False` when running this loop from a non-main thread
-    (Python signal handlers can only be installed on the main thread — see
+    (Python signal handlers can only be installed on the main thread - see
     tests/test_watch.py).
     """
     out = stream if stream is not None else sys.stdout
@@ -463,7 +463,7 @@ def run_watch(
 
     # Installed BEFORE the first heartbeat write, deliberately: a caller (or a test)
     # that treats "the heartbeat file exists" as "the process is ready to be signalled"
-    # must never observe a window where that is not yet true — Python's default
+    # must never observe a window where that is not yet true - Python's default
     # SIGTERM/SIGINT handling (die / raise KeyboardInterrupt) would otherwise be able
     # to win a race against this function installing its own handler.
     stop_requested = {"flag": False}
@@ -545,7 +545,7 @@ def run_watch(
 
 
 def describe_liveness(heartbeat: "dict | None") -> "tuple[str, str]":
-    """(status_word, sentence) for a heartbeat dict — the `--watch-status` surface.
+    """(status_word, sentence) for a heartbeat dict - the `--watch-status` surface.
 
     Three outcomes, not two, for the same reason `--verify-baseline` refuses to
     collapse "no baseline" into "tampered": a watcher that never ran, one that shut
@@ -553,7 +553,7 @@ def describe_liveness(heartbeat: "dict | None") -> "tuple[str, str]":
     facts calling for different reactions.
     """
     if heartbeat is None:
-        return "NOT RUNNING", "No watch heartbeat found — --watch has not run yet."
+        return "NOT RUNNING", "No watch heartbeat found \u2014 --watch has not run yet."
     status = heartbeat.get("status")
     pid = heartbeat.get("pid")
     updated_at = heartbeat.get("updated_at")
@@ -568,19 +568,19 @@ def describe_liveness(heartbeat: "dict | None") -> "tuple[str, str]":
         except ProcessLookupError:
             pid_alive = False
         except (OSError, PermissionError):
-            # Exists, owned by someone else, or platform can't tell — not evidence
+            # Exists, owned by someone else, or platform can't tell - not evidence
             # either way; treated as "cannot determine" rather than "gone".
             pid_alive = None
     if status == "stopped":
         return "STOPPED", f"The watcher (pid {pid}) shut down cleanly at {updated_at}."
     if pid_alive is False:
         return ("STOPPED", f"The watcher process (pid {pid}) is gone but never recorded a "
-                           f"clean shutdown — it may have crashed. Last update: {updated_at}.")
+                           f"clean shutdown \u2014 it may have crashed. Last update: {updated_at}.")
     age_s = None
     try:
         from datetime import datetime  # noqa: PLC0415 - only needed here
         # `_now_iso()` (monitorstore.py), the sole producer of `updated_at`, writes
-        # NAIVE local time — no "Z", no offset. `datetime.now(upd.tzinfo)` matches
+        # NAIVE local time - no "Z", no offset. `datetime.now(upd.tzinfo)` matches
         # that: `upd.tzinfo` is None for the real (naive) case, so this compares
         # naive-to-naive like the producer intends, while still doing the right thing
         # if a future producer ever switches to an aware timestamp (the "Z" -> "+00:00"
@@ -591,6 +591,6 @@ def describe_liveness(heartbeat: "dict | None") -> "tuple[str, str]":
         age_s = None
     if age_s is not None and age_s > interval * STALE_HEARTBEAT_MULTIPLE:
         return ("STALE", f"The watcher (pid {pid}) has not updated its heartbeat in "
-                         f"{int(age_s)}s (expected every {int(interval)}s) — it may have hung.")
+                         f"{int(age_s)}s (expected every {int(interval)}s) \u2014 it may have hung.")
     return "ALIVE", f"The watcher (pid {pid}) is running, mode={heartbeat.get('mode')}, " \
                    f"{heartbeat.get('cycles', 0)} re-scan(s) so far. Last update: {updated_at}."

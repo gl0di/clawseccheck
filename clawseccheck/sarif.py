@@ -1,6 +1,6 @@
 """Render ClawSecCheck findings as a SARIF 2.1.0 JSON string.
 
-LOCAL FILE ONLY — this function returns a string; it never writes or uploads anything.
+LOCAL FILE ONLY - this function returns a string; it never writes or uploads anything.
 The schema URI below is a string literal; it is never fetched.
 
 Usage::
@@ -258,7 +258,7 @@ def _build_analysis_completeness(
         "checksTotal": checks_total,
         "unknownCount": sum(1 for f in findings if f.status == UNKNOWN),
         # F-138/B1: how many of the (still-full) unknownCount above are UNKNOWN because
-        # the check's surface doesn't exist here, vs genuinely undetermined. Additive —
+        # the check's surface doesn't exist here, vs genuinely undetermined. Additive -
         # runs[0].properties.* is explicitly outside the frozen public contract (see
         # docs/OUTPUT_SCHEMA.md), so unknownCount itself stays the whole count and does
         # not shrink for whatever already consumes it.
@@ -281,17 +281,17 @@ def _build_analysis_completeness(
         # len(findings). Folded into failCount, where its weight already says it belongs.
         "failCount": sum(1 for f in findings if f.status in FAIL_WEIGHT_STATUSES),
         "suppressedCount": sum(1 for f in findings if f.suppressed),
-        # I3: per-severity counts of UNSUPPRESSED FAIL findings — the same numbers
+        # I3: per-severity counts of UNSUPPRESSED FAIL findings - the same numbers
         # `--fail-on SEVERITY` (cli.py) gates on and report.py's --json carries as
         # `fail_counts_by_severity`. Deliberately distinct from `failCount` two lines
         # above: that one is an unconditional total (suppressed FAILs included, no
-        # severity split); this one is the CI-assertable, suppression-aware figure —
+        # severity split); this one is the CI-assertable, suppression-aware figure -
         # see finding_counts_by_severity()'s docstring (report.py) for the exact
         # predicate. camelCase key to match this block's existing convention
-        # (checksRun/failCount/…); lowercase severity sub-keys to match report.py's.
+        # (checksRun/failCount/...); lowercase severity sub-keys to match report.py's.
         "failCountsBySeverity": finding_counts_by_severity(findings),
         # B-560: camelCase to match this block's convention. Always present, empty list
-        # when nothing was excluded — an absent key would make "no exclusions" and "this
+        # when nothing was excluded - an absent key would make "no exclusions" and "this
         # producer is too old to say" the same thing to a consumer.
         "selfExcludedSkills": sorted(self_excluded),
         "limitations": [
@@ -302,7 +302,7 @@ def _build_analysis_completeness(
     if block["engineDegradedCount"]:
         block["limitations"].append(
             f"{block['engineDegradedCount']} check(s) crashed or timed out this run and "
-            "produced no verdict — not the same as a surface confirmed absent; "
+            "produced no verdict \u2014 not the same as a surface confirmed absent; "
             "re-run with --debug for a traceback"
         )
     if score is None:
@@ -320,7 +320,7 @@ def _build_analysis_completeness(
     block["layersTotal"] = len(LAYER_ORDER)
     block["layersRan"] = len(LAYER_ORDER) - len(missing)
     block["missingLayers"] = missing
-    # A layer that RAN but could not exhaust its subject — a different question from a
+    # A layer that RAN but could not exhaust its subject - a different question from a
     # layer that never ran, and the reason both are published (ScoreResult's own
     # docstring makes the same distinction).
     block["notChecked"] = list(getattr(score, "not_checked", ()) or ())
@@ -335,16 +335,16 @@ def _build_analysis_completeness(
     # B-690: `configBlind` is ONE of the six signals that can cap the score, and it was the
     # only one this block published. A run capped by an open CRITICAL, a fired behavioural
     # detector, a corroborated runtime indicator or a submitted VULNERABLE live-test verdict
-    # emitted SARIF saying nothing about any of it — with `configBlind.capped: false` present
+    # emitted SARIF saying nothing about any of it - with `configBlind.capped: false` present
     # and looking like an answer. That matters more here than in a report a human reads: this
     # artifact goes to CI and code-scanning consumers that act on it unaccompanied.
     #
-    # ALWAYS present, empty list when nothing capped — the rule this block already states for
+    # ALWAYS present, empty list when nothing capped - the rule this block already states for
     # `selfExcludedSkills` (B-560): an absent key would make "nothing capped this run" and
     # "this producer is too old to say" the same thing to a consumer.
     #
     # The same `capsFired` name and shape the judge packet uses, from the same producer, not
-    # a second ladder beside it — B-689/B-692/B-693/B-694 were each one rule kept by hand in
+    # a second ladder beside it - B-689/B-692/B-693/B-694 were each one rule kept by hand in
     # two places. Lazy import for the same reason `history._sanitize_home` gives for reaching
     # into `report`: both modules are Layer 3 and the coupling is load-bearing only here.
     #
@@ -352,23 +352,23 @@ def _build_analysis_completeness(
     # signal a consumer may already read, and breaking it to tidy a duplication would trade a
     # silence for a regression. `tests/test_b690_every_cap_reaches_sarif.py` pins that the two
     # cannot disagree.
-    from .adjudication import caps_fired  # noqa: PLC0415 — see the comment above
+    from .adjudication import caps_fired  # noqa: PLC0415 - see the comment above
     block["capsFired"] = caps_fired(score)
     if block["capsFired"]:
         block["limitations"].append(
             "the score was capped: " + ", ".join(c["what"] for c in block["capsFired"])
-            + " — it reports a ceiling, not a measurement of everything below it"
+            + " \u2014 it reports a ceiling, not a measurement of everything below it"
         )
     if blind_reason:
         block["limitations"].append(
-            f"openclaw.json was {blind_reason} this run — findings describe what could "
+            f"openclaw.json was {blind_reason} this run \u2014 findings describe what could "
             "NOT be checked, not a clean configuration"
         )
     if not graded:
         block["limitations"].append(
             "no grade: " + ", ".join(
                 f"{m['layer']} ({m['status']})" for m in missing
-            ) + " — this run did not complete the five-layer check"
+            ) + " \u2014 this run did not complete the five-layer check"
         )
     return block
 
@@ -383,7 +383,7 @@ def render_sarif(
     """Return a SARIF 2.1.0 JSON string representing *findings*.
 
     Only FAIL and WARN findings that are not suppressed produce ``results``
-    entries. PASS and UNKNOWN are omitted, as are ordinary suppressed findings —
+    entries. PASS and UNKNOWN are omitted, as are ordinary suppressed findings -
     except a score-capping suppressed CRITICAL/HIGH FAIL (or sensitive check id),
     which is emitted WITH a SARIF ``suppressions`` array so it stays visible to a
     consumer (e.g. GitHub code scanning) rather than being silently hidden (B-163).
@@ -429,7 +429,7 @@ def render_sarif(
         if f.suppressed and not surfaced_suppressed:
             continue
         # B-751: SKILL_ARCHIVE_PATH_TRAVERSAL (a confirmed zip-slip) is FAIL-weight but
-        # isn't the literal "FAIL", so this bare tuple check dropped it silently — a CI
+        # isn't the literal "FAIL", so this bare tuple check dropped it silently - a CI
         # gate consuming SARIF never saw a confirmed escape.
         if f.status not in FAIL_WEIGHT_STATUSES and f.status != WARN:
             continue
@@ -446,7 +446,7 @@ def render_sarif(
         _ax = axis_for(f)
         if _ax is not None:
             result["properties"]["axis"] = _ax
-        # SARIF `fixes`: description-only (no artifactChanges — ClawSecCheck never edits
+        # SARIF `fixes`: description-only (no artifactChanges - ClawSecCheck never edits
         # files). Built from the paste-ready remediation when the check has one.
         rem = remediation_for(f.id)
         fix_texts = list(rem["commands"])
@@ -491,7 +491,7 @@ def render_sarif(
                 "tool": {
                     "driver": {
                         # Display name, single-sourced from brand.py (C-241); value is
-                        # unchanged ("ClawSecCheck") — see tests/test_sarif.py.
+                        # unchanged ("ClawSecCheck") - see tests/test_sarif.py.
                         "name": brand.WORDMARK,
                         "version": tool_version,
                         "informationUri": _INFO_URI,
@@ -595,12 +595,12 @@ def render_sarif(
                 for skill, entries in effect_profiles.items()
             }
 
-    # Risk-dossier summary (additive, non-breaking — an extension property outside the
+    # Risk-dossier summary (additive, non-breaking - an extension property outside the
     # frozen SARIF contract). Per-finding results stay finding-oriented; this carries the
     # axis roll-up + Mode C's install-recommendation verdict so a viewer can show the
     # dossier alongside the results.
     #
-    # C427: no letter grade / numeric score here — "verdict" is `profile.verdict`
+    # C427: no letter grade / numeric score here - "verdict" is `profile.verdict`
     # (dossier.verdict_for(profile.overall_status), computed once in build_profile), the
     # exact same value the text dossier / --json / --advise render, so SARIF cannot
     # disagree with them.

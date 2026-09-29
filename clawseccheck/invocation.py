@@ -1,4 +1,4 @@
-"""How to invoke this tool again — resolved from how it was actually started.
+"""How to invoke this tool again - resolved from how it was actually started.
 
 B-679. Everything the tool printed said `clawseccheck ...`, and on a ClawHub install there
 is no such command: ClawHub installs a DIRECTORY, and `audit.py` is the shim that exists for
@@ -11,7 +11,7 @@ exactly that reason. Measured on a real machine:
 agent `python3 {baseDir}/audit.py`, and the 16 emitted command strings did not know that.
 
 The sharp end is not the typo. `--cron-recipe` prints a job the agent installs VERBATIM, and
-its trigger maps any exit code outside {0, 3} to `fire: true` — deliberately, so the watch
+its trigger maps any exit code outside {0, 3} to `fire: true` - deliberately, so the watch
 fails loud rather than silent. With rc=127 that is a wake-up every five minutes, forever,
 about a probe that never ran. The fail-open design is right; it was being fed a command that
 could not exist.
@@ -20,13 +20,13 @@ could not exist.
 
 `command_prefix()` is for a human copying a line out of a report into their own shell.
 `machine_command_prefix()` is for a command this tool WRITES INTO a scheduled job, and it
-differs in two ways that both come from the same fact — a cron job inherits neither the
+differs in two ways that both come from the same fact - a cron job inherits neither the
 user's shell nor their cwd:
 
   * the interpreter is `sys.executable`, absolute, not the word `python3`. A cron job's PATH
     really is minimal; `monitordims/_install.py` already records `env -i PATH=/usr/bin:/bin`
     failing to find the openclaw the same machine resolves interactively.
-  * every path is absolutised and shell-quoted. `sys.argv[0]` is whatever the user typed —
+  * every path is absolutised and shell-quoted. `sys.argv[0]` is whatever the user typed -
     measured: `python3 script.py` gives `'script.py'`, and `python3 ./script.py` gives
     `'./script.py'`. Either would resolve against the job's cwd, not the user's.
 
@@ -39,12 +39,12 @@ user's shell nor their cwd:
 
 ## B-776: a second reader for `_display_path`, with the opposite need
 
-`display_path_for_delivery()` below exists because `_display_path`'s `~`-collapse — right
-for a human's shell — is wrong for a `MEDIA:<path>` line emitted from inside an OpenClaw
+`display_path_for_delivery()` below exists because `_display_path`'s `~`-collapse - right
+for a human's shell - is wrong for a `MEDIA:<path>` line emitted from inside an OpenClaw
 sandbox: the gateway (not the sandboxed shell) expands that `~` using the HOST's real
 home, producing a path outside the sandbox root that `assertSandboxPath` then rejects.
 The caller (`cli.py`) decides *sandboxed* from `ctx.sandboxed` (collector.py); this module
-still imports nothing from the package — it stays a leaf, the sandboxed/not choice arrives
+still imports nothing from the package - it stays a leaf, the sandboxed/not choice arrives
 as a plain bool.
 
 Read-only, stdlib only. A LEAF: imports nothing from the package.
@@ -62,7 +62,7 @@ from pathlib import Path
 _CONSOLE_NAME = "clawseccheck"
 
 #: The bundled-skill entrypoint, next to the package directory. Named here rather than
-#: guessed at each call site, and only ever used as a FALLBACK — the resolved `argv[0]` is
+#: guessed at each call site, and only ever used as a FALLBACK - the resolved `argv[0]` is
 #: better evidence than any path we reconstruct.
 _SHIM_NAME = "audit.py"
 
@@ -113,7 +113,7 @@ def _is_our_entry_script(path: str) -> bool:
         return True
     if resolved.name == _SHIM_NAME and (resolved.parent / _CONSOLE_NAME).is_dir():
         # A shim beside a `clawseccheck/` package that is not the one we were imported
-        # from — an installed skill running a checkout, say. Still ours.
+        # from - an installed skill running a checkout, say. Still ours.
         return True
     try:
         return pkg in resolved.parents
@@ -131,7 +131,7 @@ def _shim_beside_the_package() -> "str | None":
 
 
 def _resolve(path: str) -> str:
-    """Absolutise without requiring the file to exist — `resolve()` is enough, and
+    """Absolutise without requiring the file to exist - `resolve()` is enough, and
     `strict=True` would turn a moved-but-still-runnable install into an exception."""
     try:
         return str(Path(path).resolve())
@@ -168,23 +168,23 @@ def _display_path(path: str) -> str:
 
 
 def display_path_for_delivery(path: str, *, sandboxed: bool) -> str:
-    """Path rendering for a string that LEAVES the process — a ``MEDIA:<path>`` line or an
-    attach note — where the host and the sandboxed case need opposite treatment (B-776).
+    """Path rendering for a string that LEAVES the process - a ``MEDIA:<path>`` line or an
+    attach note - where the host and the sandboxed case need opposite treatment (B-776).
 
-    Host (``sandboxed=False``): byte-identical to `_display_path` — collapse to ``~/...``,
+    Host (``sandboxed=False``): byte-identical to `_display_path` - collapse to ``~/...``,
     because a human types or pastes this string, and a bare absolute path under
     ``/home/<name>`` leaks the OS username (B-381).
 
     Sandboxed: the opposite is true, for two independent reasons. First, ``~`` in a
-    ``MEDIA:`` line is expanded by the OPENCLAW GATEWAY, not by the sandboxed shell — and
+    ``MEDIA:`` line is expanded by the OPENCLAW GATEWAY, not by the sandboxed shell - and
     the gateway's own ``os.homedir()`` is the REAL HOST home, not the container's
     ``/workspace``. A sandboxed run that still collapsed to ``~/...`` would have the
     gateway re-expand it to a path OUTSIDE the sandbox root, and
-    ``assertSandboxPath`` rejects it ("Path escapes sandbox root") — confirmed in a real
+    ``assertSandboxPath`` rejects it ("Path escapes sandbox root") - confirmed in a real
     transcript as ``attachment_error code=delivery-failed``. Second, there is no username
     to leak here in the first place: a sandboxed path reads ``/workspace/...``, never
     ``/home/<real-name>/...``, so returning it absolute costs nothing B-381 cared about.
-    Never switches the HOST case to absolute — that would reopen B-381/B-757 for no
+    Never switches the HOST case to absolute - that would reopen B-381/B-757 for no
     sandboxed gain.
     """
     if sandboxed:
@@ -208,7 +208,7 @@ def command_prefix() -> str:
         return "python3 -m " + _CONSOLE_NAME
     if _is_our_entry_script(argv0):
         return "python3 " + _display_path(argv0)
-    # argv[0] told us nothing usable — an embedding host, or a frozen build. Prefer a
+    # argv[0] told us nothing usable - an embedding host, or a frozen build. Prefer a
     # console script that DEMONSTRABLY exists over one we hope is installed; only then
     # fall back to the shim, and only then to the bare name.
     if shutil.which(_CONSOLE_NAME):
@@ -225,7 +225,7 @@ def machine_command_prefix() -> str:
     Absolute interpreter, absolute script, both shell-quoted. Never the bare word
     `python3` and never a relative path: the job runs with a PATH and a cwd that are not
     the user's, and a command that cannot be found there is the defect this module exists
-    for — one that a fail-open trigger turns into a five-minutely false alarm.
+    for - one that a fail-open trigger turns into a five-minutely false alarm.
     """
     argv0 = _argv0()
     exe = shlex.quote(sys.executable or "python3")
@@ -244,7 +244,7 @@ def machine_command_prefix() -> str:
 
     # The shim BEFORE `-m`, deliberately, and this ordering is the point of the function.
     # `-m clawseccheck` resolves through `sys.path`, which for a source tree means the
-    # CURRENT DIRECTORY — so a job started from anywhere else gets ModuleNotFoundError,
+    # CURRENT DIRECTORY - so a job started from anywhere else gets ModuleNotFoundError,
     # which the fail-open trigger turns into the same five-minutely alarm rc=127 gave.
     # The shim has no such dependency.
     shim = _shim_beside_the_package()
@@ -258,5 +258,5 @@ def machine_command_prefix() -> str:
 
 
 def cmd(args: str) -> str:
-    """`command_prefix()` joined to *args* — the form nearly every call site wants."""
+    """`command_prefix()` joined to *args* - the form nearly every call site wants."""
     return command_prefix() + " " + args if args else command_prefix()

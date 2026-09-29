@@ -21,11 +21,11 @@ from .textnorm import asciify
 
 # B-873: the CLI's own `--home`/`--data-dir` defaults (cli.py's `--home` argparse default,
 # and the `~/.clawseccheck` literal `cli.py` already uses at its `--data-dir`-or-default
-# call sites, e.g. the --cron-recipe branch). Duplicated here rather than imported —
+# call sites, e.g. the --cron-recipe branch). Duplicated here rather than imported -
 # `invocation.py`/`guide.py` sit BELOW `cli.py` in the layering (see CLAUDE.md §3's
 # dependency-flow line) and must not import it. Every other module that needs one of
 # these two defaults (`__init__.py.audit`/`build_context`, `collector.collect`,
-# `history.DEFAULT_HISTORY`, …) already carries its own copy for the same reason —
+# `history.DEFAULT_HISTORY`, ...) already carries its own copy for the same reason -
 # there is no shared leaf constant to import instead.
 _DEFAULT_HOME = "~/.openclaw"
 _DEFAULT_DATA_DIR = "~/.clawseccheck"
@@ -35,10 +35,10 @@ def _quote_cli_path(value: str) -> str:
     """Shell-quote *value* for splicing into a printed command line.
 
     A bare `shlex.quote` on a `~/...` string quotes the tilde too, which turns it into a
-    literal directory named `~` instead of the shell's home-expansion — the same trap
+    literal directory named `~` instead of the shell's home-expansion - the same trap
     `invocation._display_path` documents and avoids for the same reason. Only the
     remainder after a leading `~/` (or `~` alone) needs quoting; some other absolute or
-    relative path is quoted whole. This does not resolve or expand *value* — the caller
+    relative path is quoted whole. This does not resolve or expand *value* - the caller
     already decided this is the exact string the user typed (or the tool's own default),
     and byte-for-byte fidelity is the point (B-873: --home/--data-dir on their own already
     describe a location; this only makes the composed command safe to paste as one line).
@@ -57,14 +57,14 @@ def _state_flags(home: "str | None", data_dir: "str | None", *,
 
     B-873: every "what you can do next" command used to run against the DEFAULT
     `~/.openclaw`/`~/.clawseccheck`, even when the audit that produced the finding list
-    looked at a different `--home` and/or `--data-dir` — so the printed follow-up command
+    looked at a different `--home` and/or `--data-dir` - so the printed follow-up command
     quietly re-targeted the user's setup. Appends a flag only when the caller says this
     particular command actually reads or writes state gated by it (`wants_home`/
-    `wants_data_dir` — not every emitted command does, see each call site below) AND the
+    `wants_data_dir` - not every emitted command does, see each call site below) AND the
     resolved value differs from the tool's own default, so a default-path run's emitted
     text stays byte-identical to before this fix. `home`/`data_dir` of `None` means "the
     caller did not resolve one" (every pre-existing caller of `suggest_actions`/
-    `render_json`) and is treated the same as "equals the default" — never as "differs".
+    `render_json`) and is treated the same as "equals the default" - never as "differs".
     """
     parts = []
     if wants_home and home is not None and home != _DEFAULT_HOME:
@@ -92,13 +92,13 @@ def _layer_already_ran(score: ScoreResult, layer: str) -> bool:
     built, to have completed.
 
     B-779: ``score.missing_layers`` reads identically empty both when every ledger
-    layer ran AND when no ledger was ever built at all (``ledger=None`` — the
+    layer ran AND when no ledger was ever built at all (``ledger=None`` - the
     default the overwhelming majority of call sites still use; see
     ``ScoreResult.ledger_present``'s own docstring). Reading ``missing_layers``
     alone would make every one of those non-ledger call sites agree that
     live-behaviour "ran", which would silently suppress advice to run it on a
     run that never attempted it. ``ledger_present`` is the field that tells the
-    two apart, so an absent ledger returns False here — "we don't know" must
+    two apart, so an absent ledger returns False here - "we don't know" must
     never read as "it ran".
     """
     if not getattr(score, "ledger_present", False):
@@ -113,7 +113,7 @@ def _surface_failed(findings: list[Finding], surface: str) -> bool:
     Derived from the catalog's own `surface` slug rather than from a list of check ids.
     The id-keyed rules this supplements see 7 of 188 checks, so a FAIL on any other check
     produced no next step at all, and the trigger set could not help falling further
-    behind — every new check needed a new rule to become visible here. Keying on the
+    behind - every new check needed a new rule to become visible here. Keying on the
     surface means a new skills-surface check inherits its next step for free.
 
     FAIL only, deliberately, and this is the whole calibration. Measured over 40 fixtures:
@@ -129,7 +129,7 @@ def _surface_failed(findings: list[Finding], surface: str) -> bool:
         if getattr(f, "suppressed", False):
             continue
         meta = BY_ID.get(f.id)
-        # B-751: FAIL-weight, not the literal — a confirmed zip-slip could drop the whole
+        # B-751: FAIL-weight, not the literal - a confirmed zip-slip could drop the whole
         # surface block, not just one line.
         if meta is not None and meta.surface == surface and f.status in FAIL_WEIGHT_STATUSES:
             return True
@@ -145,29 +145,29 @@ def suggest_actions(
 ) -> list[Action]:
     """Build a list of recommended next steps from the audit result.
 
-    All trigger logic is deterministic — no network, no side effects.
+    All trigger logic is deterministic - no network, no side effects.
     Returns actions sorted by (priority, id).
 
     *home*/*data_dir* (B-873): the `--home`/`--data-dir` THIS run was actually pointed
-    at, as the caller's own CLI flag strings (not `Path.expanduser()`d — printed back
+    at, as the caller's own CLI flag strings (not `Path.expanduser()`d - printed back
     verbatim, same convention `render_cron_recipe`'s `data_dir` param already uses).
     Both default to `None`, which every pre-existing caller still gets and which reads as
-    "unresolved, add nothing" — so an old caller's output is unchanged. Each `Action`
+    "unresolved, add nothing" - so an old caller's output is unchanged. Each `Action`
     below decides FOR ITSELF, via `_state_flags`'s `wants_home`/`wants_data_dir`, whether
     its own command actually reads or writes state gated by one, the other, both or
-    neither — see the comment on each.
+    neither - see the comment on each.
     """
     idx = _by_id(findings)
     actions: list[Action] = []
     # Reports-only doctrine (F-074): every suggestion below is a further CHECK
-    # (vet, monitor, live test, trend) — never remediation. `score` is read below
+    # (vet, monitor, live test, trend) - never remediation. `score` is read below
     # (the `graded`/ledger-derived branches; B-779 added the live-test gate).
 
     # vet_skills: ANY skills-surface check is FAIL or WARN.
     #
     # B-566: this used to key on B13 alone, so a run could carry a skills-surface FAIL and
     # produce no next step at all. The measured case was B181 ("installed skill files no
-    # longer match the SHA-256 digests ClawHub recorded") — a possible-compromise
+    # longer match the SHA-256 digests ClawHub recorded") - a possible-compromise
     # indicator that the command whose whole job is "what should I do now" had nothing to
     # say about. B181 and B13 share surface="skills"; there was never a reason for one to
     # reach this action and the other not.
@@ -193,7 +193,7 @@ def suggest_actions(
         actions.append(Action(
             id="vet_skills",
             title="Double-check your installed skills for malware",
-            # B-873: EXEMPT, explicitly (not silently skipped) — `<skill-folder>` is a
+            # B-873: EXEMPT, explicitly (not silently skipped) - `<skill-folder>` is a
             # placeholder for a path the user/agent supplies themselves, and vetting that
             # folder's content does not depend on which OpenClaw `--home` or ClawSecCheck
             # `--data-dir` is in effect (the coverage-ledger bookkeeping write under
@@ -228,7 +228,7 @@ def suggest_actions(
     b17_hit = b17 is not None and b17.status in (FAIL, WARN)
     b21_hit = b21 is not None and b21.status in (FAIL, WARN)
     # B-779: don't offer a live-behaviour test this run's own ledger already shows
-    # as `ran` — the graded card used to print this unconditionally, so a run that
+    # as `ran` - the graded card used to print this unconditionally, so a run that
     # had just submitted a `--judged-bundle` `liveTest` verdict (layer 5 complete,
     # `missing_layers` empty) still told the user to go run one, implying the
     # layer the grade already depends on was still missing.
@@ -253,9 +253,9 @@ def suggest_actions(
         ))
 
     # review_mcp: B15/B24 "active" means MCP surface may exist or we simply can't
-    # tell (blind pass) — silent only once not_applicable has POSITIVELY confirmed
+    # tell (blind pass) - silent only once not_applicable has POSITIVELY confirmed
     # no MCP surface. B15/B24 status is ALWAYS UNKNOWN (that never changes; status
-    # is not a proxy for "is there MCP surface" — not_applicable is orthogonal to
+    # is not a proxy for "is there MCP surface" - not_applicable is orthogonal to
     # status), so the old `status != UNKNOWN` gate never fired regardless of
     # whether MCP surface actually existed (F-139/B2 semantic-bug fix).
     b15 = idx.get("B15")
@@ -277,7 +277,7 @@ def suggest_actions(
 
     # C-428: both of these always-on actions promised a grade. On an ungraded run
     # (fewer than five layers ran) `--trend` plots nothing for it and the badge
-    # renders "no grade yet" — so the promise was one the tool could not keep.
+    # renders "no grade yet" - so the promise was one the tool could not keep.
     # Same fact, wording that matches what the user will actually get.
     graded = bool(getattr(score, "graded", True))
 
@@ -294,7 +294,7 @@ def suggest_actions(
         command=cmd("--trend" + _state_flags(
             home, data_dir, wants_home=False, wants_data_dir=True)),
         why=("See if you're getting safer or drifting." if graded else
-             "Only graded runs plot on the trend — this run is recorded, not plotted. "
+             "Only graded runs plot on the trend \u2014 this run is recorded, not plotted. "
              "Complete all five layers to put a point on the line."),
         priority=8,
     ))
@@ -302,8 +302,8 @@ def suggest_actions(
     # share_grade: ALWAYS
     actions.append(Action(
         id="share_grade",
-        title=("Share your grade (safe — findings stay private)" if graded
-               else "Share your result (safe — findings stay private)"),
+        title=("Share your grade (safe \u2014 findings stay private)" if graded
+               else "Share your result (safe \u2014 findings stay private)"),
         # B-873: needs BOTH, and more than the others above -- the `why` text right below
         # already explains that this command STARTS A FRESH AUDIT (badge export never
         # rides the run that produced `score`; see B-586/C-428 in that text). A fresh
@@ -315,14 +315,14 @@ def suggest_actions(
             home, data_dir, wants_home=True, wants_data_dir=True)),
         why=(
             # C-428 follow-up: the second sentence used to be carried over verbatim from
-            # the graded branch — "Only the grade + score is ever shared" two words after
+            # the graded branch - "Only the grade + score is ever shared" two words after
             # "this run has no grade". The privacy promise is load-bearing, so it is
             # reworded to what the badge actually contains (measured: its only text nodes
             # are "OpenClaw Security" and "no grade yet"), never dropped.
             #
             # C-428 fixed the ungraded branch's PROSE and left the graded branch's
             # COMMAND promising what it cannot deliver. A grade needs all five layers,
-            # and per B-586 an export never honours `--full` on its own — it rides the
+            # and per B-586 an export never honours `--full` on its own - it rides the
             # run that genuinely completed those layers. So the bare command below opens
             # a NEW, ungraded audit: on a run that had just earned "Grade A · 96/100" it
             # wrote aria-label="OpenClaw Security: no grade yet" (measured). Telling a
@@ -330,15 +330,15 @@ def suggest_actions(
             # it, is worse than saying nothing.
             # The wording deliberately does not quote the ungraded badge's own text
             # here: tests/test_b604_dashboard_next_actions.py discriminates the two
-            # blocks by that phrase, and it is right to — a graded block that quotes
+            # blocks by that phrase, and it is right to - a graded block that quotes
             # it reads like an ungraded one to a user skimming.
             ("Only the grade + score is shared, never your findings. As written this "
              "command starts a fresh audit that will not complete all five layers, so "
-             "its badge would not carry this grade — add `--badge grade.svg` to the "
+             "its badge would not carry this grade \u2014 add `--badge grade.svg` to the "
              "same command that produced it. " if graded else
-             "This run has no grade, so the badge reads \"no grade yet\" — that phrase "
+             "This run has no grade, so the badge reads \"no grade yet\" \u2014 that phrase "
              "is the whole of what it carries. Your findings are never in it. ")
-            + "This writes a real SVG file — attach grade.svg itself, do not redraw "
+            + "This writes a real SVG file \u2014 attach grade.svg itself, do not redraw "
               "or regenerate the badge image yourself."
         ),
         priority=9,
@@ -361,9 +361,9 @@ def render_next_actions(
     """
     if not actions:
         # C-216 (PASS-semantics doctrine): "good shape"/"stay safe" overstates what a clean
-        # result means — reframed to what's actually true (no known pattern matched).
+        # result means - reframed to what's actually true (no known pattern matched).
         return (
-            "No further action suggested — nothing here matched a known attack"
+            "No further action suggested \u2014 nothing here matched a known attack"
             " pattern. Re-run after any change to your setup.\n"
         )
 
@@ -385,7 +385,7 @@ def render_next_actions(
     return out
 
 
-# ── F-172: a native OpenClaw cron job, printed for the agent to create ────────────
+# -- F-172: a native OpenClaw cron job, printed for the agent to create ------------
 #
 # "Watch continuously and tell me when something is wrong" needs periodicity and delivery.
 # This tool supplies neither and must not: a resident daemon breaks the skill shape, and
@@ -397,11 +397,11 @@ def render_next_actions(
 # none|announce|webhook.
 #
 # WHY THERE IS NO `trigger` BLOCK, recorded so the next attempt starts from an answer:
-# `trigger.script` exists and would be the better design — it polls headlessly and wakes
+# `trigger.script` exists and would be the better design - it polls headlessly and wakes
 # the agent only when it returns {fire: true}, i.e. zero token cost while nothing is wrong.
 # Traced: the script is passed as `code` to `runCodeModeScriptHeadless`
 # (server-cron-Cwg2hJro.js:3714), which runs it in a **QuickJS/WASI sandbox**
-# (agents/code-mode.worker.js imports `quickjs-wasi`) — so it is JavaScript, not shell and
+# (agents/code-mode.worker.js imports `quickjs-wasi`) - so it is JavaScript, not shell and
 # not Python. It must return a boolean `fire`, may return `message`/`state`, and is bounded
 # to 30s wall clock, 5 tool calls and 16KB of persisted state
 # (server-cron-Cwg2hJro.js:3461-3464).
@@ -409,7 +409,7 @@ def render_next_actions(
 # What is NOT established is whether that sandbox's tool catalog can execute an external
 # binary and read its exit status. Without that a trigger cannot consult
 # `clawseccheck --exit-code`, which is the whole point of using one. A full monitor run
-# measures 7.7-7.9s on a real machine, so the 30s ceiling is not the obstacle — the exec
+# measures 7.7-7.9s on a real machine, so the 30s ceiling is not the obstacle - the exec
 # route is. Until someone grounds it, this emits the plain `every` + `agentTurn` variant,
 # which is fully grounded today.
 
@@ -422,7 +422,7 @@ _CRON_EVERY_MS = 21_600_000        # six hours
 # arm that reports a check leaving PASS emits at MEDIUM unconditionally. Measured on this
 # tree: `gateway.auth.mode` token -> none printed `1 change(s) detected` on screen and
 # exited 0, so an agent following this very recipe stayed silent about the gateway losing
-# authentication — which is the case B-273's own source comment names as its
+# authentication - which is the case B-273's own source comment names as its
 # reason for existing.
 #
 # MEDIUM, not HIGH, because HIGH excludes the entire PASS->WARN/UNKNOWN regression arm, and
@@ -431,7 +431,7 @@ _CRON_EVERY_MS = 21_600_000        # six hours
 # and paging on those is what gets a scheduled check switched off, which the epic this
 # recipe belongs to counts as 0% coverage.
 #
-# It does NOT change what a bare `--exit-code` does — that stays at HIGH, documented and
+# It does NOT change what a bare `--exit-code` does - that stays at HIGH, documented and
 # depended on. This only sets the threshold for the job we hand the agent.
 _CRON_FAIL_ON = "medium"
 
@@ -490,7 +490,7 @@ def _json_inner(value: str) -> str:
     `_json_str` returns a quoted JSON string; these recipe fields are assembled by hand and
     need the escaped body without the quotes. Not cosmetic: B-679 puts a resolved
     filesystem path in there, and on Windows that path carries backslashes, which are a
-    JSON escape character — `C:\\Users\\...` unescaped makes the emitted job unparseable.
+    JSON escape character - `C:\\Users\\...` unescaped makes the emitted job unparseable.
     """
     return json.dumps(value)[1:-1]
 
@@ -510,7 +510,7 @@ def render_cron_recipe(ascii_only: bool = False,
     """A copy-paste OpenClaw cron job that runs the drift check on a schedule.
 
     Prints only. This never writes a file, never edits openclaw.json and never invokes
-    `openclaw cron` — creating the job is the agent's or the user's act, and a security
+    `openclaw cron` - creating the job is the agent's or the user's act, and a security
     tool that installs a recurring job as a side effect of being asked how to install one
     has helped itself to a decision that was not offered.
 
@@ -524,11 +524,11 @@ def render_cron_recipe(ascii_only: bool = False,
         '    "kind": "agentTurn",\n'
         f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
         f'--data-dir {data_dir}\\nExit 0 means nothing at {_CRON_FAIL_ON} severity or above '
-        'was recorded — say nothing and stop; anything below that is advisory and is '
+        'was recorded \u2014 say nothing and stop; anything below that is advisory and is '
         f'counted by `{_json_inner(machine_command_prefix())} --brief`. Exit 3 means drift was '
         'recorded: report what '
         'changed, quoting the tool\'s own output. Exit 1 means monitoring is NOT established '
-        '(the run could not write its state) — say so, it is more urgent than drift. '
+        '(the run could not write its state) \u2014 say so, it is more urgent than drift. '
         'Exit 2 is a usage error in this job, not a finding."\n'
         '  },\n'
         '  "delivery": { "mode": "announce", "channel": "<your-channel>", "to": "<you>" },\n'
@@ -559,7 +559,7 @@ def render_cron_recipe(ascii_only: bool = False,
         f'--data-dir {data_dir}\\nThe probe that woke you already saw drift but did NOT '
         'record it, so this run is the one that reports and records it. Exit 3 means drift: '
         "report what changed, quoting the tool's own output. Exit 1 means monitoring is NOT "
-        'established — say so, it is more urgent than drift. Exit 0 here means the change '
+        'established \u2014 say so, it is more urgent than drift. Exit 0 here means the change '
         'was resolved between the probe and this run; say that plainly rather than nothing."\n'
         '  },\n'
         '  "delivery": { "mode": "announce", "channel": "<your-channel>", "to": "<you>" },\n'
@@ -570,7 +570,7 @@ def render_cron_recipe(ascii_only: bool = False,
         "Watch this setup on a schedule",
         "",
         "OpenClaw runs the schedule and delivers the message; this tool only checks. Ask",
-        "your agent to create these jobs with its own `cron` tool — nothing here is created",
+        "your agent to create these jobs with its own `cron` tool \u2014 nothing here is created",
         "for you.",
         "",
         "TWO jobs, and you want both. The first tells you quickly; the second is the one",
@@ -587,7 +587,7 @@ def render_cron_recipe(ascii_only: bool = False,
         "Why both, and this is the part worth reading:",
         "",
         "  - OpenClaw treats a trigger script that errors or times out as 'do not fire'.",
-        "    So if the probe ever fails to run, job 1 goes SILENT rather than loud — and a",
+        "    So if the probe ever fails to run, job 1 goes SILENT rather than loud \u2014 and a",
         "    security watch that goes quiet on error looks exactly like one with nothing to",
         "    report. The script itself fires on anything it cannot determine, which covers",
         "    the errors it can see; it cannot cover being killed or timing out. Job 2 is",
@@ -602,7 +602,7 @@ def render_cron_recipe(ascii_only: bool = False,
         f"  - It messages you at {_CRON_FAIL_ON} severity and above. Change --fail-on to",
         "    widen or narrow that; changes below the line are still recorded, and --brief",
         "    counts them. Nothing at all is silently discarded.",
-        f"  - It writes three local files under {data_dir} — the drift baseline, the event",
+        f"  - It writes three local files under {data_dir} \u2014 the drift baseline, the event",
         "    journal and the score history. Nothing leaves the machine.",
         "  - Replace <your-channel> and <you>. Delivery is OpenClaw's, not this tool's; set",
         '    "mode": "none" if you would rather read the result in the session.',

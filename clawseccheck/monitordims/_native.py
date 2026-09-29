@@ -1,4 +1,4 @@
-"""The `native_count` dimension — how many findings OpenClaw's OWN audit reported.
+"""The `native_count` dimension - how many findings OpenClaw's OWN audit reported.
 
 A second opinion this tool does not produce and cannot verify, so the arm compares two
 recorded counts and nothing else. A count that becomes unavailable is UNDETERMINED, never
@@ -30,7 +30,7 @@ def _diff_native_findings(
     """
     if not _both_native:
         # Absent on either side is not silence: C-418's contract is that a comparison this
-        # run did not make is counted and, under --verbose, named. Self-healing — the next
+        # run did not make is counted and, under --verbose, named. Self-healing - the next
         # run has the key on both sides.
         note(NOTE_NO_PRIOR_RECORD,
              "The built-in `openclaw security audit` issue count was not compared: one of "

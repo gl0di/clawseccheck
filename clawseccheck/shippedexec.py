@@ -437,7 +437,7 @@ class _FileFacts:
         self._legb_tampers: "bool | None" = None
         self._legb_attr_store_cache: dict = {}
 
-    # ── names ──────────────────────────────────────────────────────────────────────────
+    # -- names --------------------------------------------------------------------------
 
     def _import_table(self) -> dict:
         """alias -> dotted target, for names bound ONLY by one kind of import."""
@@ -873,7 +873,7 @@ class _FileFacts:
                     return v.value
         return None
 
-    # ── this file's own blockers ────────────────────────────────────────────────────────
+    # -- this file's own blockers --------------------------------------------------------
 
     def _blocked(self, module_names: set) -> bool:
         for n in ast.walk(self.tree):
@@ -965,7 +965,7 @@ class _FileFacts:
         bound = self._bind_open(call, d)
         return None if bound is None else self._read_mode(bound.get("mode"))
 
-    # ── path resolution ─────────────────────────────────────────────────────────────────
+    # -- path resolution -----------------------------------------------------------------
 
     def resolve(self, e: ast.AST, scope: ast.AST, depth: int = 0) -> "_Path | None":
         if depth > _MAX_DEPTH:
@@ -1040,7 +1040,7 @@ class _FileFacts:
             cur = cur.join(seg)
         return cur
 
-    # ── B-917: the shared location resolver (loader sinks / staged imports) ────────────
+    # -- B-917: the shared location resolver (loader sinks / staged imports) ------------
 
     def locate(self, e: ast.AST, scope: ast.AST, depth: int = 0) -> "Loc | None":
         """Where *e* points, anchored (FILE/CWD/ABS/TEMP/HOME/SYM) -- see `Loc`.
@@ -1258,7 +1258,7 @@ class _FileFacts:
         rel = "/".join(p.parts)
         return rel if rel in self.artifact.exec_paths or self.any_target else None
 
-    # ── the executed value ──────────────────────────────────────────────────────────────
+    # -- the executed value --------------------------------------------------------------
 
     def _open_read(self, call: ast.AST, scope: ast.AST) -> "tuple | None":
         """(kind, target) for an open-family call that reads a whole shipped file."""

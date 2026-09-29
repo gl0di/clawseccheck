@@ -6,7 +6,7 @@ the report, and the monitor snapshot.
 
 A bare entry may also be a RISK-* id (e.g. ``RISK-03``): those are matched
 directly against ``risk.RiskPath.id`` by ``risk.risk_paths(..., ignore=...)``,
-not by this module — RiskPath objects are not part of the ``findings`` list
+not by this module - RiskPath objects are not part of the ``findings`` list
 ``apply()`` filters. Suppressing a RISK-id requires listing that RISK-id
 explicitly; suppressing only the underlying check(s) does not implicitly
 suppress a chain derived from it (see B-154).
@@ -60,7 +60,7 @@ def fingerprint(finding) -> str:
 
 #: C-519: recognized structured fields in a trailing comment. Matched with word
 #: boundaries and no embedded spaces in the value (a value is one whitespace-delimited
-#: token) — good enough for an id/name/ISO-date and simple enough that the leftover
+#: token) - good enough for an id/name/ISO-date and simple enough that the leftover
 #: text after stripping them out is unambiguously "everything else", never a fragment
 #: of a field whose own value happened to contain a space.
 _STRUCTURED_FIELD_RE = re.compile(r"\b(author|date|expires)=(\S+)")
@@ -71,12 +71,12 @@ class IgnoreEntry:
     """One parsed ``.clawseccheckignore`` line.
 
     ``entry`` is the bare id/fingerprint ``apply()``/``risk.risk_paths()`` match
-    against — never the raw line, and never includes the comment. ``author``/``date``/
+    against - never the raw line, and never includes the comment. ``author``/``date``/
     ``expires`` are the structured fields when present (each ``None`` otherwise, not
     an empty string, so a caller can tell "not given" from "given as empty"). ``reason``
     is what remains of the comment after the structured fields are removed, stripped,
     or ``None`` when there was no comment at all. ``expired`` is computed once, here,
-    against ``date.today()`` at LOAD time — never re-derived downstream, so a caller
+    against ``date.today()`` at LOAD time - never re-derived downstream, so a caller
     that reads it later in a long-running process cannot see the date change under it
     mid-run.
     """
@@ -93,10 +93,10 @@ def _parse_ignore_line(raw: str) -> "IgnoreEntry | None":
     """One non-blank, non-full-line-comment line -> an ``IgnoreEntry``, or ``None``.
 
     ``None`` for a blank line, a line that is ENTIRELY a comment (starts with ``#``,
-    the pre-C-519 format for a standalone note — ``append_entries`` still writes these
+    the pre-C-519 format for a standalone note - ``append_entries`` still writes these
     ahead of a batch), or a line whose id half is empty once the comment is split off
     (a bare ``#`` with nothing before it, which the previous rule already exists to
-    handle — this only catches the case where something is CLAIMED before it but
+    handle - this only catches the case where something is CLAIMED before it but
     turns out to be blank after stripping, e.g. a line of only whitespace before ``#``).
     """
     line = raw.strip()
@@ -132,7 +132,7 @@ def _parse_ignore_line(raw: str) -> "IgnoreEntry | None":
 def load_ignore_entries(home: Path | str) -> "list[IgnoreEntry]":
     """Read ``<home>/.clawseccheckignore`` and return every entry, parsed.
 
-    Includes EXPIRED entries — this is the "everything on file" view
+    Includes EXPIRED entries - this is the "everything on file" view
     ``--show-suppressed`` needs to report them; ``load_ignore()`` below is the
     "currently active" view every suppression-consuming call site uses. Returns an
     empty list when the file is absent or unreadable, same fail-open-to-nothing shape
@@ -158,7 +158,7 @@ def load_ignore(home: Path | str) -> set[str]:
 
     Each non-blank, non-comment line is one entry (bare id or fingerprint) with any
     trailing ``#`` comment stripped. An entry whose ``expires=`` date (C-519) has
-    already passed is excluded — auto-expiry falls out of this one filter, for free,
+    already passed is excluded - auto-expiry falls out of this one filter, for free,
     for every caller: ``apply()``, ``dead_entries()``, and the bare RISK-id match in
     ``risk.risk_paths(..., ignore=...)`` all consume this same set and none of them
     needs to know expiry exists. Returns an empty set when the file is absent.
@@ -182,13 +182,13 @@ def apply(findings, ignore: set[str]) -> None:
 def dead_entries(findings, ignore: set[str]) -> set[str]:
     """B-769: fingerprint-form *ignore* entries that matched no finding this run.
 
-    Only fingerprint entries (``<id>:<8-hex>``) can go dead — a bare id always
+    Only fingerprint entries (``<id>:<8-hex>``) can go dead - a bare id always
     matches its own check's Finding object regardless of status, since every
     registered check contributes exactly one Finding per run. A fingerprint stops
     matching when either the underlying issue was genuinely repaired (the good
     case) or the check's own `detail` wording changed under a ClawSecCheck
     upgrade (measured directly: 14 checks' fingerprints moved between two real
-    releases over the same two fixture homes) — in the second case the same
+    releases over the same two fixture homes) - in the second case the same
     problem is silently un-suppressed and returns as a fresh, unexplained
     finding. Call this AFTER `apply()` has run, over the same *findings*/*ignore*
     pair, so the two can never disagree about what matched.
@@ -207,7 +207,7 @@ def append_entries(home: Path | str, entries, *, comment: str | None = None) -> 
     Entries already present (exact-string match against ``load_ignore``) are
     skipped so a repeated apply cannot grow the file with duplicates. *comment*,
     if given, is written as one ``#``-prefixed line ahead of the new entries so
-    a reader can see WHERE a suppression line came from — this does not change
+    a reader can see WHERE a suppression line came from - this does not change
     matching (``apply`` above ignores blank/comment lines) or any of the
     existing safety properties: a suppressed score-capping CRITICAL/HIGH FAIL
     or a ``SENSITIVE_SUPPRESSED_IDS`` id still surfaces regardless of how the
@@ -222,7 +222,7 @@ def append_entries(home: Path | str, entries, *, comment: str | None = None) -> 
         return 0
     lines = [f"# {comment}"] if comment else []
     lines.extend(new_entries)
-    # C-135 (2026-07-22): symlink-safe append (O_NOFOLLOW under the hood) — this is
+    # C-135 (2026-07-22): symlink-safe append (O_NOFOLLOW under the hood) - this is
     # the one write path in this module, so it gets the same protection secure_write_text
     # already gives every other local-store writer in the package.
     secure_append_text(p, "\n".join(lines) + "\n")

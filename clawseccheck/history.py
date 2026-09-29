@@ -1,7 +1,7 @@
 """Local score history for --trend: append-only JSONL, chmod 600, stdlib only.
 
 This module is the ONLY writer of history records. record() runs by default on
-every audit — cli.py appends one score line unless --no-history is passed (--trend
+every audit - cli.py appends one score line unless --no-history is passed (--trend
 and --monitor have their own record call-sites). The file stays local and
 owner-only under ~/.clawseccheck/; nothing is ever uploaded. Opt out with
 --no-history.
@@ -27,13 +27,13 @@ DEFAULT_HISTORY = "~/.clawseccheck/history.jsonl"
 
 # F-128: run-source tags. "audit" is a real invocation; "test"/"dev" (or any other
 # value an env override supplies) mark development/CI noise. The tag makes such a row
-# LEGIBLE — render_trend prints it inline as "[test]" — it does NOT hide the row. This
+# LEGIBLE - render_trend prints it inline as "[test]" - it does NOT hide the row. This
 # comment used to say the tag existed "so --trend can filter it out by default"; that
 # filter was deleted, and render_trend's own design note (below) explains at length why
 # a hidden row silently rewrote the trend. Two readings of the same field, 270 lines
 # apart, is how B-519 stayed invisible: a tag that reads like containment is not
 # containment, and the suite went on appending thousands of rows to the real store.
-# "legacy" is not assignable here — it is load()'s own label for a pre-F-128 entry that
+# "legacy" is not assignable here - it is load()'s own label for a pre-F-128 entry that
 # predates the source concept entirely (see load()).
 _SOURCE_ENV = "CLAWSECCHECK_RUN_SOURCE"
 
@@ -45,10 +45,10 @@ def _run_source(source: str | None = None) -> str:
       1. an explicit *source* argument (a caller that already knows better);
       2. the ``CLAWSECCHECK_RUN_SOURCE`` env override (CI/dev harnesses can
          tag their own runs, e.g. "dev");
-      3. ``PYTEST_CURRENT_TEST`` — pytest sets this automatically for every
+      3. ``PYTEST_CURRENT_TEST`` - pytest sets this automatically for every
          test, so the suite's own audit runs self-tag as "test" with no
          per-call-site plumbing;
-      4. otherwise "audit" — a real, non-test invocation.
+      4. otherwise "audit" - a real, non-test invocation.
     """
     if source:
         return source
@@ -65,7 +65,7 @@ def _sanitize_home(value: str | None) -> str | None:
 
     Strips terminal-control/bidi/zero-width characters and redacts any
     secret-shaped substring (same treatment every other untrusted string gets
-    before it reaches a report or a journal) — a no-op for an ordinary path
+    before it reaches a report or a journal) - a no-op for an ordinary path
     like ``~/.openclaw``. Local import: report.py sits in the same "Layer 3"
     cluster as history.py (CLAUDE.md §3), and this keeps the coupling
     load-bearing only where it is actually used.
@@ -83,13 +83,13 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
     to the history file.
 
     Returns None on success, the OSError text when the append FAILED (B-581, same
-    shape as monitor.record_events under B-278). Still never RAISES — this is called
+    shape as monitor.record_events under B-278). Still never RAISES - this is called
     on every default audit, so a planted symlink or an unwritable directory must not
-    take the run down — but the failure is no longer invisible to a caller that asks.
+    take the run down - but the failure is no longer invisible to a caller that asks.
     The default audit path (``_record_history_point``, cli.py) still discards the
     return value on purpose: it degrades quietly there, exactly as before. ``--trend``
     (cli.py) is the one caller that reports it, because ``--trend``'s whole job is to
-    record this run's point — a dropped write there is the more serious of the two
+    record this run's point - a dropped write there is the more serious of the two
     failures this task exists to surface (see the module the caller lives in).
 
     Parameters
@@ -102,26 +102,26 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
         Either a bare ISO date (``YYYY-MM-DD``) or a full ISO datetime
         (``YYYY-MM-DDTHH:MM:SS``). Defaults to ``datetime.now()``. A bare date
         still sets 'date' for back-compat display/sorting; 'ts' is then that
-        date at midnight. Mainly a testing knob — real callers leave it None
+        date at midnight. Mainly a testing knob - real callers leave it None
         and get the actual wall-clock time.
     home:
         The audited home path (e.g. ``~/.openclaw``), sanitized (see
         _sanitize_home) before being stored. None if the caller doesn't know
-        it — the field is still written, as None, so every F-128-era entry has
+        it - the field is still written, as None, so every F-128-era entry has
         a consistent shape.
     source:
         Explicit run-source override. None lets _run_source() auto-detect it
-        (see there) — "test" under pytest, "audit" otherwise, or the
+        (see there) - "test" under pytest, "audit" otherwise, or the
         ``CLAWSECCHECK_RUN_SOURCE`` env value when set.
 
     F-128: 'ts' (full ISO datetime, seconds precision) and the 'home'/'source'
     tags let a trend tell a real audit apart from a development or test run.
     All three are additive and, like every other field, inside the hashed
-    payload — chain_hash covers them the same as 'date'/'score'/'grade'. A
+    payload - chain_hash covers them the same as 'date'/'score'/'grade'. A
     pre-F-128 entry that lacks them still loads (history.load() fills the
     honest gap: ts=None, home=None, source="legacy") and still renders.
 
-    F-094: each entry carries a 'chain_hash' — sha256(prev_chain_hash +
+    F-094: each entry carries a 'chain_hash' - sha256(prev_chain_hash +
     canonical_json(entry)), the same tamper-evident scheme monitor.py's event
     journal already uses (see verify()/monitor.verify_chain). A planted or edited
     line breaks the chain from that point forward.
@@ -135,16 +135,16 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
     the constant is shared with the events journal and the coverage ledger, so a
     bump would make an older build skip every new EVENT too. The cost of leaving
     it is that an older build silently drops ungraded rows from --trend rather
-    than disclosing them — the same trade C-250's retention marker already made.
+    than disclosing them - the same trade C-250's retention marker already made.
 
-    B-108: the read-last-hash→append critical section runs under an advisory
+    B-108: the read-last-hash->append critical section runs under an advisory
     ``journal_lock`` so two concurrent audits can't both read the same prev
     chain_hash and each append, which would otherwise leave a spurious
     "chain BROKEN" that neither writer actually caused.
 
     C-164: after appending, the file is opportunistically rotated (pruned +
     re-chained) once it exceeds the retention cap, so history.jsonl never grows
-    unbounded — see monitor._rotate_journal.
+    unbounded - see monitor._rotate_journal.
     """
     if when is None:
         now = datetime.now()
@@ -156,7 +156,7 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
 
     p = Path(path).expanduser()
     # B-509: a run whose five-layer check was incomplete carries no grade, and this is
-    # the last writer that used to republish one anyway — the report withheld the letter
+    # the last writer that used to republish one anyway - the report withheld the letter
     # while the journal recorded it, so --trend read the phantom back as a real point.
     #
     # The ungraded row OMITS 'score'/'grade' rather than writing them as null, because
@@ -166,7 +166,7 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
     # the key check, flows through as score=None, and the old render_trend's `curr > prev`
     # raises TypeError. Omission degrades; null crashes.
     #
-    # A GRADED row's payload stays byte-identical to before this change — no 'graded' key
+    # A GRADED row's payload stays byte-identical to before this change - no 'graded' key
     # on the hot path. A row that has a score IS a graded row, exactly as it always was;
     # stamping "graded": true would churn every future row's shape for zero information.
     # 'graded' sits INSIDE the hashed payload, so it is tamper-evident like '_schema': it
@@ -179,9 +179,9 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
     graded = bool(getattr(score, "graded", True))
     # int()/str() are evaluated only on the graded branch: on an ungraded run score.score
     # is None, and int(None) raises a TypeError the `except OSError` below does NOT catch
-    # — an uncaught crash on every default audit, not a quiet degrade.
+    # - an uncaught crash on every default audit, not a quiet degrade.
     #
-    # The key ORDER of a graded row is preserved exactly (date, score, grade, ts, …): the
+    # The key ORDER of a graded row is preserved exactly (date, score, grade, ts, ...): the
     # chain hash is order-independent (_chain_hash canonicalizes with sort_keys=True), but
     # the line written to disk is json.dumps(row) without it, so reordering here would
     # change the on-disk bytes of every future graded row for no reason.
@@ -213,7 +213,7 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
     # (B-505), the exact figures `raw_score` is ROUNDED from. `raw_score` alone cannot show
     # a fall smaller than its own rounding (about 4 of ~407 weight units on a real
     # machine); `raw_backstop` (monitordims/_shared.py) reads these two to catch one, and
-    # is sound doing so only because the scope hash above now also pins per-check weight —
+    # is sound doing so only because the scope hash above now also pins per-check weight -
     # see that function's own docstring.
     #
     # `assessable` is not decoration: `compute([])` returns `assessable=False, raw_score=0,
@@ -279,18 +279,18 @@ def verify(path: str = DEFAULT_HISTORY,
     """Verify the hash-chain integrity of the score history file.
 
     Delegates to monitor.verify_chain (same generic entry-agnostic algorithm), and so
-    has the same THREE outcomes (B-589): (True, "OK…") for a chain that holds — including
-    a legacy file whose rows carry no 'chain_hash', whose count is disclosed —
+    has the same THREE outcomes (B-589): (True, "OK...") for a chain that holds - including
+    a legacy file whose rows carry no 'chain_hash', whose count is disclosed -
     (False, "broken at entry N") on the first tampered/reordered/deleted entry, and
-    (None, …) when there is no chain here to verify at all: absent, empty, holding no
+    (None, ...) when there is no chain here to verify at all: absent, empty, holding no
     parseable row, or unreadable.
 
     An absent history used to return (True, "OK"), so deleting the store passed the check
     that exists to catch deletion. See verify_chain's docstring for why the answer is a
-    third value and not (False, …). Test ``is True``/``is False``/``is None``; a bare
+    third value and not (False, ...). Test ``is True``/``is False``/``is None``; a bare
     ``if ok:`` reports "no chain here" as tampering.
 
-    ``cause`` is passed straight through — see verify_chain for the ``CHAIN_*`` codes.
+    ``cause`` is passed straight through - see verify_chain for the ``CHAIN_*`` codes.
     """
     return verify_chain(path, cause=cause)
 
@@ -299,12 +299,12 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
     """Read the JSONL history file and return a list of
     {date, score, grade, ts, home, source, graded} dicts.
 
-    Silently returns [] on any read problem, same as always — a caller that needs to
+    Silently returns [] on any read problem, same as always - a caller that needs to
     know WHY (B-581) wants ``load_with_problem`` instead, which this delegates to.
 
     Blank lines and malformed JSON lines are skipped gracefully. A line whose
     '_schema' (C-162) is a newer major than this build understands is skipped too
-    (no crash, no misparse) — absent/legacy or current '_schema' loads normally.
+    (no crash, no misparse) - absent/legacy or current '_schema' loads normally.
     Returns an empty list if the file does not exist.
 
     Each surviving line is classified rather than KeyError-skipped outright:
@@ -317,7 +317,7 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
         normal GRADED row: 'score'/'grade' load as written.
       - 'graded' explicitly False -> an UNGRADED row (the five-layer check did
         not complete for that run): 'score'/'grade' load as None even if a
-        (contradictory) score/grade value is present on disk — an explicit
+        (contradictory) score/grade value is present on disk - an explicit
         "graded": false wins and withholds rather than publishes.
 
     The returned 'graded' key is always a bool. 'score'/'grade' are always
@@ -326,7 +326,7 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
 
     F-128: 'ts'/'home'/'source' are additive fields a pre-F-128 entry never
     wrote. Rather than guess, a missing 'ts'/'home' loads as None and a
-    missing 'source' loads as "legacy" — distinct from "audit" on purpose,
+    missing 'source' loads as "legacy" - distinct from "audit" on purpose,
     since a legacy entry predates the real-vs-dev/test distinction entirely
     and must not silently masquerade as a verified real-audit run.
     """
@@ -335,7 +335,7 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
 
 
 def load_with_problem(path: str = DEFAULT_HISTORY) -> "tuple[HistoryRows, OSError | None]":
-    """Same rows as ``load()``, plus the ``OSError`` that made the read fail — if any.
+    """Same rows as ``load()``, plus the ``OSError`` that made the read fail - if any.
 
     B-581: ``load()`` alone cannot tell a genuine first run (no history has ever been
     written at the caller's own default path) apart from a user-NAMED path that could
@@ -349,11 +349,11 @@ def load_with_problem(path: str = DEFAULT_HISTORY) -> "tuple[HistoryRows, OSErro
     than returning False, so a pre-check made outside a try/except would crash on
     exactly the case this function exists to report instead of catching it. Attempting
     the read directly and letting ``_iter_jsonl``'s own ``p.open(...)`` raise means
-    every OSError shape — missing, a directory, unreadable — is caught by the single
+    every OSError shape - missing, a directory, unreadable - is caught by the single
     ``except OSError`` below, the same as ``_read_verdicts_payload``.
 
     Whether a caller SHOWS the returned OSError is a decision cli.py makes from
-    ``_explicit_paths`` — an absence at the default location is a genuine first run and
+    ``_explicit_paths`` - an absence at the default location is a genuine first run and
     must stay silent; this function reports what happened, not what it means.
     """
     p = Path(path).expanduser()
@@ -366,7 +366,7 @@ def load_with_problem(path: str = DEFAULT_HISTORY) -> "tuple[HistoryRows, OSErro
             if not _schema_ok(obj):
                 continue
             if "date" not in obj:
-                # B-580: still not a row — but the retention marker is the file's own
+                # B-580: still not a row - but the retention marker is the file's own
                 # record of what it no longer contains, and dropping it here is what let
                 # `--trend` claim completeness over a pruned history. Carried on the list,
                 # never in it.
@@ -415,15 +415,15 @@ def load_with_problem(path: str = DEFAULT_HISTORY) -> "tuple[HistoryRows, OSErro
 class HistoryRows(list):
     """The rows `load()` returns, carrying what the file said about what is NOT in them.
 
-    B-580. `--trend` rendered every row it was given and said so — "Every row is shown,
-    always, in the order recorded" — while the retention marker sitting on the file's first
+    B-580. `--trend` rendered every row it was given and said so - "Every row is shown,
+    always, in the order recorded" - while the retention marker sitting on the file's first
     line, announcing that 1,001 older runs had been pruned, was dropped by `load()` before
     any renderer could see it. The oldest quarter of the history was gone and the trend, a
     claim about a shape over time, started silently mid-history.
 
     Why the notice rides as an ATTRIBUTE rather than as an element: `monitor._rotate_journal`
     shapes the marker deliberately without `date`/`score`/`grade` so that `load()`'s row
-    guard skips it, and its own docstring gives the reason — "a marker meant for a human
+    guard skips it, and its own docstring gives the reason - "a marker meant for a human
     reading the events journal must not corrupt the trend". Making it a row would do exactly
     that, and would also be counted in "N of M runs". An attribute cannot be mistaken for a
     run by any consumer: `load()`'s other two callers read `rows[-1]["date"]` and pass the
@@ -439,7 +439,7 @@ class HistoryRows(list):
 
     #: Count of runs the marker says were evicted, or 0. This is the count for THAT
     #: rotation, not a cumulative total: rotation keeps `entries[-keep:]`, so a previous
-    #: marker — being the oldest line — is itself evicted by the next one. Reported as the
+    #: marker - being the oldest line - is itself evicted by the next one. Reported as the
     #: file records it rather than summed into a number no file ever stated.
     retention_pruned: int = 0
 
@@ -458,22 +458,22 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     """Return a compact human-readable trend string.
 
     Every row is COUNTED, always, in the order recorded, whether or not it is one of
-    the ones actually printed — see ``window`` below. Each GRADED line carries a
-    timestamp, GRADE, SCORE, an arrow (▲▼· or ^v=) relative to the *previous GRADED*
+    the ones actually printed - see ``window`` below. Each GRADED line carries a
+    timestamp, GRADE, SCORE, an arrow (<U+25B2 U+25BC>· or ^v=) relative to the *previous GRADED*
     row's score, and a ``[source]`` tag (plus the audited home path, when known). An
-    UNGRADED row (the five-layer check did not complete for that run — see ``graded``
+    UNGRADED row (the five-layer check did not complete for that run - see ``graded``
     below) carries no GRADE, no SCORE, and no arrow; it renders its timestamp, the
     words "no grade", and its ``[source]``/home the same way a graded row does.
 
     window:
         C-448: print only the last *window* rows (most recent), stated as a count in
-        the header so nothing is hidden SILENTLY — the same problem this fixes as
+        the header so nothing is hidden SILENTLY - the same problem this fixes as
         `render_events`' own retention-marker header. ``None`` (or a value ``>=
         len(rows)``) prints every ROW, in the same per-row format, as the pre-C-448
         behaviour; this is what the CLI's ``--all`` flag passes. The window affects
         ONLY which lines are printed: every arrow, the "N of M runs have no grade"
         ratio, and every other statistic below is still computed by walking the FULL
-        ``rows`` list in order — narrowing the denominator to the visible slice is the
+        ``rows`` list in order - narrowing the denominator to the visible slice is the
         exact defect the deleted source filter (see the design note below) already
         taught this function not to repeat, just on a different axis (recency instead
         of source/grade). A windowed row's arrow still compares against the true
@@ -499,25 +499,25 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     rows:
         List of {date, score, grade, ts, home, source, graded} dicts (as
         returned by load()), in chronological order. A plain
-        {date, score, grade} dict (no ts/home/source/graded keys) works too —
+        {date, score, grade} dict (no ts/home/source/graded keys) works too -
         it renders with a "legacy" tag and is treated as graded. A row is
         UNGRADED only when it explicitly carries ``"graded": False`` (or, as
         load() always sets it now, has ``score is None``); its own
         ``score``/``grade`` values, if any, are never rendered.
     ascii_only:
-        Use ASCII arrows (^, v, =) instead of unicode (▲, ▼, ·).
+        Use ASCII arrows (^, v, =) instead of unicode (up-triangle, down-triangle, ·).
     chain_status:
         B-582: the caller's own ``(ok, msg)`` from ``monitor.verify_chain(path)``
         (or ``history.verify``, the same call), run over the SAME file these
         ``rows`` were just loaded from. ``None`` (the default) renders no
-        provenance line at all — existing callers/tests that never pass this are
+        provenance line at all - existing callers/tests that never pass this are
         unaffected. Three states via ``monitor.chain_provenance_note``, not two
-        (B-582 — this docstring said two until 2026-09-03): a broken chain appends
+        (B-582 - this docstring said two until 2026-09-03): a broken chain appends
         one disclosure line; a chain that verifies WITH A QUALIFIER (legacy rows
         carrying no ``chain_hash``, an unknown schema, an unparseable row) appends
         a different line naming what was not chain-verified; and only a chain that
         verifies in full appends nothing. Rows always render in every state, are
-        never withheld, and none of the three is ever called tampering — see that
+        never withheld, and none of the three is ever called tampering - see that
         function's own docstring.
 
         So silence means verified IN FULL, not merely "not broken". Collapsing the
@@ -526,7 +526,7 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
 
     Design note (this replaces a default-on filter): an earlier version of
     this function hid rows whose ``source`` wasn't "audit"/"legacy" and only
-    said so when *every* row was hidden — in the ordinary mixed case a
+    said so when *every* row was hidden - in the ordinary mixed case a
     development/test/CI run vanished with no disclosure at all, and the
     arrows were silently recomputed over the remaining subset, rewriting the
     trend narrative (e.g. erasing two real "test"-tagged entries could flip
@@ -539,9 +539,9 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     "dev" run is legible as exactly that instead of being dropped or
     disguised as a real "audit".
 
-    C-426: an UNGRADED row (five-layer check incomplete — see ``ScoreResult.
+    C-426: an UNGRADED row (five-layer check incomplete - see ``ScoreResult.
     graded``) is rendered the same unconditional way, never hidden and never
-    given a flat arrow — a flat arrow is a positive claim of "same score" and
+    given a flat arrow - a flat arrow is a positive claim of "same score" and
     would misrepresent a run that has none. Its arrow is skipped entirely and
     the comparison for the *next* graded row skips over the hole (tracked via
     ``last_graded_score``, not ``rows[i - 1]``, which would otherwise compare
@@ -549,34 +549,34 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     at least one hole exists, naming the count so an ungraded run is legible
     as "incomplete", not silently absent or silently averaged over.
 
-    B-695: a GRADED row's arrow is itself a claim — that the row being compared
+    B-695: a GRADED row's arrow is itself a claim - that the row being compared
     against describes the same subject, not merely that both carry a score. It
     renders BLANK (no glyph at all, not the flat one) in two cases: the first
     graded row in the store, which has no predecessor to claim anything against;
-    and any later graded row whose predecessor fails ``_same_subject`` — B-691's
+    and any later graded row whose predecessor fails ``_same_subject`` - B-691's
     own comparability gate (different ``home``, tool build or check set, or a
     ``test``/``dev``-tagged predecessor), reused here rather than restated. A
     legacy row written before that gate existed carries no ``home``/``raw_scope``/
     ``raw_ver`` at all (``None``, not a string) and so fails the gate on presence
-    alone — counted as not comparable, never as agreement, the identical
+    alone - counted as not comparable, never as agreement, the identical
     "presence before equality" rule the pass-rate clause below already applied.
     The first-graded-row case is never counted toward the disclosure below: there
     was no comparison to withhold there, only one that never applied. A store
     holding only such rows renders every arrow blank and says so once; the
     arrows return on their own, with no rewrite of the store, as soon as two
-    comparable graded runs land back to back. No new glyph was added for this —
-    the existing arrow set (``▲▼·`` / ``^v=``) is unchanged; the fix withholds
+    comparable graded runs land back to back. No new glyph was added for this -
+    the existing arrow set (``<U+25B2 U+25BC>·`` / ``^v=``) is unchanged; the fix withholds
     the character instead of choosing a different one.
 
     B-579: a row whose ``source`` is exactly ``"view"`` is produced by the act
     of running ``--trend`` itself (see ``history.record``'s call site in
     ``cli.py``), not by a check the user asked for. It renders unconditionally,
-    same as every other row — tag included, "Tag, do not drop" — but it is
+    same as every other row - tag included, "Tag, do not drop" - but it is
     excluded from both the numerator and denominator of the "N of M runs have
     no grade" ratio, and a SECOND line names the split whenever that exclusion
     would otherwise leave the ratio's total silently short of the row count on
     screen. Before this, a single bare ``--trend`` into a fresh store read
-    "1 of 1 runs have no grade" — the tool grading the very row it had just
+    "1 of 1 runs have no grade" - the tool grading the very row it had just
     created by being run, and every subsequent look made the ratio worse.
     """
     if not rows:
@@ -585,21 +585,21 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     if ascii_only:
         arrow_up, arrow_down, arrow_flat = "^", "v", "="
     else:
-        arrow_up, arrow_down, arrow_flat = "▲", "▼", "·"
+        arrow_up, arrow_down, arrow_flat = "\u25b2", "\u25bc", "·"
 
     # Mascot header line, once (design-system Foundations); --ascii drops it and
     # folds the separator (brand.header()). This used to be two separate lines
-    # ("🦞 ClawSecCheck" then "ClawSecCheck - Score Trend"), repeating the
-    # wordmark — collapsed to the one brand header line.
+    # ("lobster ClawSecCheck" then "ClawSecCheck - Score Trend"), repeating the
+    # wordmark - collapsed to the one brand header line.
     lines = [brand.header(subtitle="Score Trend", ascii_only=ascii_only), ""]
-    # C-448: the window is a DISPLAY cut only — every statistic below still walks all
+    # C-448: the window is a DISPLAY cut only - every statistic below still walks all
     # of `rows`, never just what gets printed. Stated up front, in the same spot
     # render_events folds its own retention marker into, so a reader knows before the
     # first row how much of the store they are looking at.
     shown_from = 0 if window is None or window >= len(rows) else len(rows) - window
     if shown_from:
         lines.append(
-            f"Showing the last {len(rows) - shown_from} of {len(rows)} run(s) — "
+            f"Showing the last {len(rows) - shown_from} of {len(rows)} run(s) \u2014 "
             f"{shown_from} older run(s) not shown here. The counts and arrows below "
             "still cover the whole history; pass --all to print every row."
         )
@@ -620,8 +620,8 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     non_comparable_arrows = 0
     holes = 0
     # B-579: a "view" row is produced by the ACT of running --trend, not by a check the
-    # user asked for (see history.record's B-579 call site). It still renders — every row
-    # always does, unconditionally, tag visible — but it is excluded from BOTH sides of
+    # user asked for (see history.record's B-579 call site). It still renders - every row
+    # always does, unconditionally, tag visible - but it is excluded from BOTH sides of
     # the "N of M runs have no grade" ratio below, or the tool would grade its own look:
     # three bare --trend runs into one fresh store used to read "3 of 3 runs have no
     # grade", which is the trend viewer reporting on rows it created by being run.
@@ -653,10 +653,10 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
                 # presence only before this task, because the pass-rate clause below
                 # already re-derives scope equality itself, inside `raw_backstop` (its
                 # `RAW_DEGRADED`/`RAW_HELD` verdicts are UNREACHABLE unless the two scopes
-                # already match — see that function's own `p_scope != c_scope` guard), so
+                # already match - see that function's own `p_scope != c_scope` guard), so
                 # adding it here changes nothing that clause could observe. It DOES matter
-                # for the arrow: a check set that grew or shrank between two runs — a
-                # release landing new checks is the ordinary case, not an edge one — moves
+                # for the arrow: a check set that grew or shrank between two runs - a
+                # release landing new checks is the ordinary case, not an edge one - moves
                 # the denominator the CAPPED score is itself a percentage OF, so "same
                 # home, same build, different scope" is still not one claim the arrow can
                 # make soundly.
@@ -772,11 +772,11 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
             "above; the arrows compare each graded run to the previous GRADED run."
         )
         # B-579: the ratio above deliberately does not cover every row in the history
-        # when a "view" row is present (see the loop above) — say so explicitly, or a
+        # when a "view" row is present (see the loop above) - say so explicitly, or a
         # reader adding up the counts above gets a different total than the sentence
         # just gave them and cannot tell whether that is a filter or a miscount. Named,
         # not silent. C-448: worded as a fact about the file, not about what is on
-        # screen — "shown above" stopped being true the moment a default window could
+        # screen - "shown above" stopped being true the moment a default window could
         # hide a view row entirely.
         if view_count:
             if view_count == 1:
@@ -858,7 +858,7 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         lines.append(
             f"{pinned_falls} {_runs} in this history kept or raised {_its} score while "
             "the underlying pass-rate fell. The score is pinned at a cap by an open "
-            "FAIL, so it cannot follow that figure down — an unchanged or improved "
+            "FAIL, so it cannot follow that figure down \u2014 an unchanged or improved "
             "letter is NOT evidence that nothing got worse. Read the findings for "
             + ("that run." if pinned_falls == 1 else "those runs.")
         )
@@ -876,7 +876,7 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         _was = "was" if uncorroborated == 1 else "were"
         # ONE neutral disjunctive sentence for every reason, on purpose. An earlier draft
         # named the likely cause ("this happens when the tool is upgraded between runs")
-        # and it fired verbatim on a config that had gone dark — a cause the tool has no
+        # and it fired verbatim on a config that had gone dark - a cause the tool has no
         # evidence for. State what could not be done, never why.
         lines.append(
             f"{uncorroborated} {_runs} in this history {_was} not compared against the "
@@ -887,7 +887,7 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         )
 
     # B-580: what this trend does NOT cover. Said after the rows, because it qualifies the
-    # shape the reader has just looked at — the pruned runs are the OLDEST, i.e. the
+    # shape the reader has just looked at - the pruned runs are the OLDEST, i.e. the
     # baseline against which "improving" would be judged.
     #
     # B-847: used to read "Not every recorded run is above: {notice}", which implied the
@@ -922,7 +922,7 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     # the one table B-483 left standing -- not by hand-picking ASCII punctuation in
     # each paragraph, which is the second-copy shape this session has fixed four times
     # over (B-689/B-692/B-693/B-694). The glyph selection above stays as it is: it
-    # chooses `^ v =` rather than folding `▲ ▼ ·`, and those have no ASCII_MAP entry,
+    # chooses `^ v =` rather than folding `up-triangle down-triangle ·`, and those have no ASCII_MAP entry,
     # so a future unicode glyph added there would fold to "?" and be caught by the
     # guard rather than sail past it.
     #

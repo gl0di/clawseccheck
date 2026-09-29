@@ -19,7 +19,7 @@ _MAX_INCLUDE_DEPTH = 10
 _MAX_INCLUDE_PATH_CHARS = 4096
 # Global fan-out budget: cycle detection only blocks a file re-including an ANCESTOR, so the
 # same fragment re-read across sibling branches ({$include: ['./f','./f',...]}) could fan out
-# to fanout**depth reads and hang the audit — a hostile-config DoS. Cap total fragment reads
+# to fanout**depth reads and hang the audit - a hostile-config DoS. Cap total fragment reads
 # across the whole resolution (a real config includes only a handful of fragments). (C-135)
 _MAX_INCLUDE_FRAGMENTS = 64
 _NAN_MARKER = "__clawseccheck_json5_nan__"
@@ -298,7 +298,7 @@ def load_openclaw_config(path: Path, *, root_byte_limit: int,
                          root_digest: "list | None" = None) -> dict:
     """Load and flatten one OpenClaw config without crossing its trust boundary.
 
-    *root_digest* — C-417: pass a **fresh** list to receive the sha256 hex of the ROOT
+    *root_digest* - C-417: pass a **fresh** list to receive the sha256 hex of the ROOT
     file's bytes as this load read them. It is appended to, not assigned, so a list reused
     across two loads holds both digests and ``[0]`` is the older one; every caller here
     builds a new list per load. The list stays empty when the load raises.

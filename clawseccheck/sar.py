@@ -1,12 +1,12 @@
-"""Structured Attestation Request (SAR) builder — F-020.
+"""Structured Attestation Request (SAR) builder - F-020.
 
 A SAR is a machine-readable intent-judgement question emitted by ClawSecCheck
 for the *user's host agent* to answer.  The tool itself NEVER calls an LLM or
-the network — it only assembles structured data that the agent can respond to
+the network - it only assembles structured data that the agent can respond to
 without reading raw skill source (which would expose it to prompt-injection from
 that very source).
 
-Each SAR covers one skill that B62 flagged as having a capability–intent mismatch
+Each SAR covers one skill that B62 flagged as having a capability-intent mismatch
 and contains:
 
   {
@@ -16,7 +16,7 @@ and contains:
     "mismatches":       [        capabilities that were NOT expected for the category
       {
         "capability":  <str>,    e.g. "network"
-        "declared":    false,    always false — the capability was NOT declared
+        "declared":    false,    always false - the capability was NOT declared
         "evidence":    <str>     human-readable evidence fragment (redacted)
       }
     ],
@@ -126,11 +126,11 @@ def build_sars(ctx: object) -> list[dict]:
     Reads ctx.installed_skills, ctx.installed_skill_py, and ctx.effect_profiles.
     Re-runs the lightweight B62 classification logic (same functions, same results)
     to enumerate mismatches; does NOT re-run the full check_capability_intent_mismatch
-    to avoid importing the checks engine (circular) — this module duplicates only the
+    to avoid importing the checks engine (circular) - this module duplicates only the
     classification helpers it needs.
 
     Returns a list of SAR dicts (one per mismatch-flagged skill), sorted by skill name.
-    An empty list means no mismatches — the host agent needs no answer.
+    An empty list means no mismatches - the host agent needs no answer.
     """
     installed = getattr(ctx, "installed_skills", {})
     installed_py = getattr(ctx, "installed_skill_py", {})

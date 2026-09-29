@@ -1,4 +1,4 @@
-"""iocdb — dated, provenance-bound indicator-of-compromise dataset.
+"""iocdb - dated, provenance-bound indicator-of-compromise dataset.
 
 Layer 1 leaf module (imports nothing from the `clawseccheck` package, per CLAUDE.md
 §3) that replaces the inline ``_SOURCE_KNOWN_BAD`` dict formerly hardcoded in
@@ -9,10 +9,10 @@ known-bad-host checks alongside the existing onion/public-IP heuristics).
 
 GOLDEN RULES BIND HARD HERE (see the workspace CLAUDE.md):
 
-  #1 no network — this dataset ships in-repo as static Python data, refreshed only by
+  #1 no network - this dataset ships in-repo as static Python data, refreshed only by
      a deliberate ClawSecCheck release. Nothing in this module ever opens a socket,
      fetches a URL, or reads any "feed" setting. There is no update mechanism here.
-  #4 no fabricated IOCs — every record below was independently verified against its
+  #4 no fabricated IOCs - every record below was independently verified against its
      cited primary-source advisory before it shipped (the same §4/C-145 discipline the
      former inline dict's comments already documented). A record whose provenance
      cannot be traced to a named, checkable advisory does not ship. This module
@@ -22,16 +22,16 @@ GOLDEN RULES BIND HARD HERE (see the workspace CLAUDE.md):
 
 Each record is a ``dict`` with mandatory provenance fields: ``value``, ``type``,
 ``first_seen`` (ISO ``YYYY-MM-DD``), ``source_url``, ``source_name``, ``note``.
-``validate_dataset()`` mechanically enforces this — a record missing any of these (or
+``validate_dataset()`` mechanically enforces this - a record missing any of these (or
 carrying an unparseable/future ``first_seen``) fails ``tests/test_iocdb.py``, which IS
 Golden Rule #4's mechanical enforcement, not just documentation of intent.
 
 Freshness is mandatory, not decorative (precedent: ``ledger.freshness_notice`` /
 ``update.update_notice``). ``REVISION`` is a point-in-time snapshot date; past
-``STALE_AFTER_DAYS`` (120 — tighter than ``update.AGE_NUDGE_DAYS``'s 60-day *build*
+``STALE_AFTER_DAYS`` (120 - tighter than ``update.AGE_NUDGE_DAYS``'s 60-day *build*
 threshold is loose, but chosen so a dormant dataset is flagged well before the ~140
 days it took the piti/openclaw-security-dashboard `ioc/` feed to go silently stale
-and start reading as a lying clean — see the 2026-07-29 competitive review),
+and start reading as a lying clean - see the 2026-07-29 competitive review),
 ``freshness_notice()`` returns an explicit "IOC data is N days old" advisory instead
 of letting a stale snapshot read as a confident, silent clean. It is wired into
 ``vet_source()``'s own evidence trail (the one place `_SOURCE_KNOWN_BAD` was
@@ -82,7 +82,7 @@ def _rec(value: str, type_: str, first_seen: str, source_url: str, source_name: 
 
 
 # ---------------------------------------------------------------------------------
-# sources — known-bad identities per source ecosystem (clawhub / npm / pypi / git).
+# sources - known-bad identities per source ecosystem (clawhub / npm / pypi / git).
 # `type` doubles as the ecosystem key consumed by known_bad_sources() below.
 # Verified verbatim against unit42.paloaltonetworks.com/openclaw-ai-supply-chain-risk/
 # (Palo Alto Unit 42, "OpenClaw's Skill Marketplace and the Emerging AI Supply Chain
@@ -122,7 +122,7 @@ SOURCES: tuple = (
 )
 
 # ---------------------------------------------------------------------------------
-# publishers — known-bad publisher/author accounts. Empty in v1: the former inline
+# publishers - known-bad publisher/author accounts. Empty in v1: the former inline
 # dict's comment explicitly excluded the one candidate ("hightower6eu") as unconfirmed
 # on its primary source and vet_source has no publisher field to match it against
 # anyway (§4 wall) -- carried forward here rather than fabricated to fill the table.
@@ -130,7 +130,7 @@ SOURCES: tuple = (
 PUBLISHERS: tuple = ()
 
 # ---------------------------------------------------------------------------------
-# hosts — C2 / drop / exfil hosts and IPs. Consumed by vet_source's url/any pools
+# hosts - C2 / drop / exfil hosts and IPs. Consumed by vet_source's url/any pools
 # (backward-compatible with the former _SOURCE_KNOWN_BAD["url"] contents), by the
 # C-221 cross-artifact correlation (checks/_shared.py / _egress.py), and by the
 # install-directive / remote-dependency known-bad-host checks (checks/_content.py).

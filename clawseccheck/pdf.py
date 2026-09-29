@@ -1,29 +1,29 @@
 """Minimal, dependency-free PDF 1.4 writer, plus the audit report laid out on top of it.
 
 Why this exists: a filesystem path is worthless to a user reading their agent's report
-from a phone (e.g. over Telegram) — a mobile chat client does not render an HTML
+from a phone (e.g. over Telegram) - a mobile chat client does not render an HTML
 attachment inline, but a PDF opens in the client's own viewer. `render_html` (report.py)
 stays the rich desktop/archival format; `render_pdf` is the deliverable-into-chat one,
 built off the same complete finding set.
 
 Design constraints, all deliberate:
 
-- **stdlib-only** (Golden Rule #1) — `zlib` for the content-stream compression, nothing
+- **stdlib-only** (Golden Rule #1) - `zlib` for the content-stream compression, nothing
   else. No PDF library, no font-embedding library.
-- **Base-14 fonts only** (`/Helvetica`, `/Helvetica-Bold`) — no font file is embedded, so
+- **Base-14 fonts only** (`/Helvetica`, `/Helvetica-Bold`) - no font file is embedded, so
   every glyph drawn must be one the PDF spec guarantees every viewer already has. That
   means **ASCII-only text**: no emoji, no Unicode box-drawing, no accented Latin-1
-  characters. Anything else is replaced with ``?`` by `_ascii_safe` — a crash is never an
+  characters. Anything else is replaced with ``?`` by `_ascii_safe` - a crash is never an
   acceptable outcome for content that can come from a hostile skill's title/detail
   strings. Output has been English-only since v2.0.0 (CLAUDE.md §9), so this loses
   nothing the tool was already promising to render faithfully.
-- **Classic (non-cross-reference-stream) PDF 1.4 layout** — header, N indirect objects
+- **Classic (non-cross-reference-stream) PDF 1.4 layout** - header, N indirect objects
   each with a byte offset, a plain xref table, and a trailer. This is the simplest
   correctly-readable PDF shape and what every extraction tool (`pdftotext`, `pdfinfo`)
   expects from a "PDF 1.4" file.
-- **No active content** — no `/JavaScript`, no `/AcroForm`, no embedded files. We ship a
+- **No active content** - no `/JavaScript`, no `/AcroForm`, no embedded files. We ship a
   security tool; the report artifact itself must not be one more thing to audit.
-- **Lossless pagination** — every line of every finding is drawn somewhere; a block that
+- **Lossless pagination** - every line of every finding is drawn somewhere; a block that
   does not fit the remaining space on a page is continued on the next one rather than
   dropped (see `_PageFlow.line`). This is the direct fix for the B-444 failure class
   (a renderer silently truncating the finding list).
@@ -79,9 +79,9 @@ from .textnorm import asciify
 
 # ---------------------------------------------------------------------------
 # Standard Adobe Core-14 Helvetica AFM glyph widths, per 1000 text-space units,
-# ASCII printable range 0x20-0x7E. This is font metrics data — identical across every
+# ASCII printable range 0x20-0x7E. This is font metrics data - identical across every
 # PDF-generating tool that ships base-14 support (reportlab, fpdf2, pdfminer,
-# Ghostscript's own Helvetica.afm) — not proprietary content; it is what makes
+# Ghostscript's own Helvetica.afm) - not proprietary content; it is what makes
 # word-wrapping against an unembedded font possible at all.
 # ---------------------------------------------------------------------------
 _HELVETICA_WIDTHS: dict[int, int] = {
@@ -107,7 +107,7 @@ _DEFAULT_GLYPH_WIDTH = 556  # falls back for anything outside the table (shouldn
 # are never drawn as visible glyphs)
 # Helvetica-Bold runs ~5-8% wider per glyph than regular; rather than a second full
 # table, wrap-width math for bold text applies this safety factor so a bold line's
-# measured width is never an UNDER-estimate (which is what would cause visual overflow —
+# measured width is never an UNDER-estimate (which is what would cause visual overflow -
 # an over-estimate just wraps one word earlier than strictly necessary, which is safe).
 _BOLD_WIDTH_FACTOR = 1.08
 
@@ -120,7 +120,7 @@ _BOTTOM_Y = _MARGIN + _FOOTER_H
 
 
 def _ascii_safe(s: str) -> str:
-    """Encode *s* for the base-14 content stream. Never raises — common typographic Unicode
+    """Encode *s* for the base-14 content stream. Never raises - common typographic Unicode
     (arrows, dashes, curly quotes, middot, multiply sign) is first folded to an ASCII
     equivalent; anything still outside printable ASCII then becomes ``?``.
 
@@ -132,13 +132,13 @@ def _ascii_safe(s: str) -> str:
 
 
 def _pdf_literal(s: str) -> str:
-    """Escape a string for a PDF ``(...)`` literal (backslash and parens only — the
+    """Escape a string for a PDF ``(...)`` literal (backslash and parens only - the
     input is already ASCII-safe, so no other byte needs escaping)."""
     return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
 def _tint(hexcolor: str, frac: float) -> str:
-    """*hexcolor* mixed *frac* of the way over white — the paper equivalent of the HTML
+    """*hexcolor* mixed *frac* of the way over white - the paper equivalent of the HTML
     report's ``color-mix(in srgb, var(--sev) N%, var(--card))``, so a failed finding is
     tinted on both surfaces from the same severity colour and no new hex enters the
     palette."""
@@ -161,7 +161,7 @@ def _text_width(s: str, size: float, bold: bool = False) -> float:
 def _wrap_text(text: str, size: float, max_width: float, bold: bool = False) -> list[str]:
     """Greedy word-wrap against the Helvetica width table. A single token wider than
     `max_width` on its own (a long path/URL in finding evidence) is hard-split by
-    character rather than left to overflow the page — this only ever affects layout,
+    character rather than left to overflow the page - this only ever affects layout,
     never drops content."""
     words = text.split()
     if not words:
@@ -193,7 +193,7 @@ def _wrap_text(text: str, size: float, max_width: float, bold: bool = False) -> 
 
 
 # ---------------------------------------------------------------------------
-# Low-level PDF object writer — classic (non-xref-stream) PDF 1.4.
+# Low-level PDF object writer - classic (non-xref-stream) PDF 1.4.
 # ---------------------------------------------------------------------------
 class _PdfDoc:
     def __init__(self) -> None:
@@ -253,7 +253,7 @@ def _stream_content_object(doc: _PdfDoc, raw: bytes) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Page-flow layout — accumulates content-stream ops for the current page, starting a
+# Page-flow layout - accumulates content-stream ops for the current page, starting a
 # fresh page whenever the next line would run past the footer.
 # ---------------------------------------------------------------------------
 class _PageFlow:
@@ -263,12 +263,12 @@ class _PageFlow:
         self._font_bold = font_bold
         self._page_ops: list[str] = []
         # The brand mark, as a PDF image XObject. Created on first use and then shared by
-        # every page's /Resources — it is drawn only in the page-one header today, but a
+        # every page's /Resources - it is drawn only in the page-one header today, but a
         # per-page number would mean re-embedding the same 7 KB for each page.
         self._logo_xobj: int | None = None
         self.pages: list[int] = []  # finished Page object numbers, in order
         self.y = _TOP_Y
-        self.page_epoch = 0  # bumped on every new page — lets a caller detect a block
+        self.page_epoch = 0  # bumped on every new page - lets a caller detect a block
         # (e.g. one finding) that straddled a page break, where a start-y captured on the
         # old page and an end-y read on the new page would otherwise combine into a
         # meaningless rect height (two different pages' coordinate spaces).
@@ -321,7 +321,7 @@ class _PageFlow:
                     hexcolor: str) -> None:
         """Draw a rect UNDER content already emitted, by splicing it in at *at*.
 
-        PDF paints in stream order, so a block's background cannot simply be appended —
+        PDF paints in stream order, so a block's background cannot simply be appended -
         it would cover the text. It also cannot be drawn up front, because the block's
         height is only known once its lines have been laid out and wrapped. Recording the
         position with `mark()` and splicing here is the one way to get both. Callers must
@@ -340,7 +340,7 @@ class _PageFlow:
         content stream" -- true when written, false since `text_abs` (below) was added
         for absolute-positioned cells (header/badge/summary-table). There are TWO text
         paths into the content stream now, and both funnel through the identical
-        sanitize -> ascii-safe -> pdf-literal-escape pipeline — nothing skips it in
+        sanitize -> ascii-safe -> pdf-literal-escape pipeline - nothing skips it in
         either one (see `text_abs`'s own docstring)."""
         line_h = size * 1.35
         self.ensure_space(gap_before + line_h)
@@ -366,7 +366,7 @@ class _PageFlow:
 
     def raw(self, op: str) -> None:
         """Append a raw content-stream fragment (path/graphics ops) to the current page.
-        Used for the header band + logo mark — absolute vector drawing rather than the
+        Used for the header band + logo mark - absolute vector drawing rather than the
         line-flow text every other method funnels through. The caller owns the graphics
         state it sets (colours/line-width); `_logo_ops` wraps its own ops in q/Q so
         nothing leaks into the text that follows."""
@@ -375,7 +375,7 @@ class _PageFlow:
     def draw_logo(self, x: float, y: float, size: float) -> None:
         """Draw the brand mark in a *size*-point square whose bottom-left is (x, y).
 
-        The mark is `brand.FAVICON_DATA_URI` — the SAME raster the HTML report and the
+        The mark is `brand.FAVICON_DATA_URI` - the SAME raster the HTML report and the
         favicon use. It used to be a hand-redrawn copy of `brand.LOGO_SVG`, which brand.py
         labels PROVISIONAL, so the PDF and the HTML export of one run showed two different
         logos. Colour is the image's own; the alpha channel rides as an /SMask so the mark
@@ -397,7 +397,7 @@ class _PageFlow:
 
     def text_abs(self, x: float, y: float, text: str, size: float, *,
                  bold: bool = False, rgb: tuple = (0.0, 0.0, 0.0)) -> None:
-        """Draw one line of text at an ABSOLUTE (x, y) baseline — no wrapping, no y-advance,
+        """Draw one line of text at an ABSOLUTE (x, y) baseline - no wrapping, no y-advance,
         no page break. For the header/badge/summary-table cells, whose layout is positioned
         by hand near the top of page 1; callers pass short fixed-width label text that fits.
         Same sanitize -> ascii-safe -> pdf-literal pipeline as `line`."""
@@ -410,17 +410,17 @@ class _PageFlow:
 
 
 # ---------------------------------------------------------------------------
-# Drawing — the branded header, the severity chips and the per-subject summary table.
+# Drawing - the branded header, the severity chips and the per-subject summary table.
 # The mark itself is a raster (`_PageFlow.draw_logo`): it used to be drawn here as path
 # ops replicating brand.LOGO_SVG's geometry, which meant the same mark existed in two
-# places and only one of them was ever updated. Still no external asset — the image is
+# places and only one of them was ever updated. Still no external asset - the image is
 # inlined in brand.py, so Golden Rule #1 holds either way.
 # ---------------------------------------------------------------------------
 
 # status -> swatch colour for the subject-summary table (grade ramp; UNKNOWN neutral grey).
 # B-751: SKILL_ARCHIVE_PATH_TRAVERSAL (a confirmed zip-slip) is FAIL-weight but isn't the
 # literal "FAIL", so a plain literal dict left it in the ``.get(status, "#9f9f9f")``
-# fallback below — the same grey as UNKNOWN. Built from the shared set so every
+# fallback below - the same grey as UNKNOWN. Built from the shared set so every
 # FAIL-weight status gets FAIL's own colour, never an invented one.
 _STATUS_HEX = {status: GRADE_HEX["F"] for status in FAIL_WEIGHT_STATUSES}
 _STATUS_HEX.update({WARN: GRADE_HEX["C"], PASS: GRADE_HEX["B"], UNKNOWN: "#9f9f9f"})
@@ -431,7 +431,7 @@ def _png_rgba(data: bytes) -> tuple:
 
     Stdlib only (`zlib` plus the filter reconstruction below) because the project takes no
     runtime dependency, and PDF cannot consume a PNG directly: it wants raw samples, and
-    the alpha channel has to travel separately as an /SMask. Deliberately narrow — it
+    the alpha channel has to travel separately as an /SMask. Deliberately narrow - it
     accepts exactly the shape `brand.FAVICON_DATA_URI` is (checked, not assumed) and
     raises on anything else rather than guessing, since a silently mis-decoded logo would
     render as noise on every page-one header we ship.
@@ -495,7 +495,7 @@ def _png_rgba(data: bytes) -> tuple:
 def _draw_header(flow: "_PageFlow", version: str) -> None:
     """The BRAND_RED header band (page 1): full-bleed rectangle + white logo mark +
     wordmark + subtitle + version. Sets `flow.y` to just below the band so the body
-    starts under it. No date is stamped — render_pdf output is deterministic byte-for-byte
+    starts under it. No date is stamped - render_pdf output is deterministic byte-for-byte
     per its docstring, and a clock read would break that."""
     band_h = 74.0
     flow.rect(0.0, _PAGE_H - band_h, _PAGE_W, band_h, BRAND_RED)
@@ -512,7 +512,7 @@ def _draw_header(flow: "_PageFlow", version: str) -> None:
 
 def _draw_chips(flow: "_PageFlow", sev_counts: dict) -> None:
     """A row of filled severity chips (CRITICAL/HIGH/MEDIUM/LOW n) in the SEVERITY ramp,
-    white text — only the severities that actually occur."""
+    white text - only the severities that actually occur."""
     active = [(sev, n) for sev, n in sev_counts.items() if n]
     if not active:
         return
@@ -532,7 +532,7 @@ def _draw_chips(flow: "_PageFlow", sev_counts: dict) -> None:
 
 
 def _draw_subject_summary(flow: "_PageFlow", rows) -> None:
-    """The "Inventory by subject" table: one row per subject — status swatch, label, and a
+    """The "Inventory by subject" table: one row per subject - status swatch, label, and a
     right-aligned "count · STATUS". Rows come from report._subject_summary_rows (derived
     from build_inventory, so this cannot disagree with the JSON inventory)."""
     for label, status, count in rows:
@@ -562,7 +562,7 @@ def _draw_section_header(flow: "_PageFlow", text: str) -> None:
     # ascender before any visible gap begins. At 8.0 it cleared exactly the ascender of
     # the 11pt finding title that follows and nothing more: measured on a real report, the
     # band's bottom edge sat 0.05pt above the glyph tops, i.e. the heading and the first
-    # finding touched — on every section, on every page. 16.0 leaves ~8pt of daylight.
+    # finding touched - on every section, on every page. 16.0 leaves ~8pt of daylight.
     flow.y = y - 17.0 - 16.0
 
 
@@ -576,34 +576,34 @@ def _pipeline_block(flow: "_PageFlow", title: str, lines) -> None:
     Behavioural / Second opinion / Coverage / Worth a glance) into the PDF.
 
     *lines* comes from report.py's OWN line renderer for that block, called with
-    ``ascii_only=True`` — so the PDF and the chat card are one system rather than two
+    ``ascii_only=True`` - so the PDF and the chat card are one system rather than two
     formatters that can drift, and every glyph is already base-14-safe ([X]/[!]/[OK]/[?]
     instead of the unicode markers, which would each become '?'). Leading indentation is
     preserved as a left inset so nested roster/reason lines still read as nested; the text
     itself word-wraps rather than overflowing (nothing is ever dropped).
 
     B-866: this is the ONE place every pipeline block's text reaches the PDF page, so
-    it is where `_redact_home_paths` is applied — once, for all eight blocks — rather
+    it is where `_redact_home_paths` is applied - once, for all eight blocks - rather
     than inside each of report.py's per-block line renderers. `_worth_a_glance_lines`
     already redacts itself (it is also the `--dashboard --full` chat card's own line;
     re-running the regex on its already-'~'-folded text here is a no-op, not a double
     redaction). The other seven renderers (`_skills_inventory_lines`,
     `_plugins_inventory_lines`, `_mcp_inventory_lines`, `_risk_chain_lines`,
     `_behavioral_block_lines`, `_second_opinion_item_lines`, `_coverage_lines`) do NOT
-    redact themselves — same choice `_finding_block` above already made for a finding's
+    redact themselves - same choice `_finding_block` above already made for a finding's
     `detail`, and for the identical reason: those renderers are shared with the plain
     `--full`/`--dashboard` TEXT report (`render_report`/`render_subject_inventory`),
-    which stays unredacted by design (the owner's own machine — see
+    which stays unredacted by design (the owner's own machine - see
     `_redact_home_paths`'s own docstring). Folding inside the shared renderer would
     have redacted the terminal report too; folding here, at the PDF-only render
     boundary, does not. Confirmed live at checks/_config.py's B1/B11 fixes (an
     absolute config path in a `chmod` suggestion) and checks/_egress.py's B82
-    evidence (an absolute `.env` path) — B-866."""
+    evidence (an absolute `.env` path) - B-866."""
     if not lines:
         return
     # One renderer (_coverage_lines) already opens with its own text rule
     # ("-- Coverage of OpenClaw surfaces --") because the terminal report splices it in
-    # unlabelled. Drop that line rather than drawing the title twice — matched by content,
+    # unlabelled. Drop that line rather than drawing the title twice - matched by content,
     # not by position, so a change to its decoration cannot silently reintroduce the dupe.
     lines = list(lines)
     if lines and lines[0].strip(" -=").casefold() == title.casefold():
@@ -626,7 +626,7 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
     # labelled WARN here once the filter below let it through.
     status_word = "FAIL" if f.status in FAIL_WEIGHT_STATUSES else "WARN"
     # Keep a finding's title (and the start of its detail) from being orphaned alone at
-    # the very bottom of a page — everything past that still breaks losslessly line by
+    # the very bottom of a page - everything past that still breaks losslessly line by
     # line via `_PageFlow.line`'s own `ensure_space`.
     flow.ensure_space(3 * 12 * 1.35)
     bar_y_top = flow.y
@@ -635,7 +635,7 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
     flow.line(f"[{status_word}] {f.id}: {_sanitize(f.title)}", size=11, bold=True, gap_after=1.0)
     flow.line(f"Severity: {f.severity}", size=9, color=sev_hex, gap_after=2.0)
     if f.detail:
-        # C-456: the PDF is a share/attach surface (docs/USAGE.md — the no-PATH
+        # C-456: the PDF is a share/attach surface (docs/USAGE.md - the no-PATH
         # `--pdf` is how OpenClaw attaches a report to a chat message), the same
         # sharing risk `_redact_home_paths` already closes for the dashboard card
         # and SARIF. `_sanitize` alone only masks secret-shaped VALUES
@@ -645,7 +645,7 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
             size=9.5, color="#444444", indent=8.0,
         )
     # A block that straddled a page break has `bar_y_top` and the current `flow.y` in two
-    # different pages' coordinate spaces — combining them into one rect height would be
+    # different pages' coordinate spaces - combining them into one rect height would be
     # meaningless (and the rect would land on the wrong page entirely). Skip the purely
     # decorative accent bar in that case rather than draw a broken one; the finding's
     # text content itself is never affected either way (see `_PageFlow.line`'s own
@@ -653,7 +653,7 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
     if flow.page_epoch == start_epoch:
         # Status has to carry its own weight, not ride on a word. The accent bar takes its
         # colour from SEVERITY, so a HIGH FAIL and a HIGH WARN were the same block with a
-        # different first word — the same defect measured and fixed in the HTML report,
+        # different first word - the same defect measured and fixed in the HTML report,
         # and leaving it here would put the two artifacts of one run back out of step.
         # A failure is tinted and its rule is thicker; a warning keeps the plain page.
         is_fail = f.status in FAIL_WEIGHT_STATUSES
@@ -675,7 +675,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
                adjudication=None, coverage_page: dict | None = None) -> bytes:
     """Render the complete audit (all FAIL/WARN findings, grouped BY SUBJECT the same way
     `render_html` groups them, under a branded header band + a per-subject summary table)
-    as a paginated, base-14-only PDF. Returns bytes — this
+    as a paginated, base-14-only PDF. Returns bytes - this
     renderer has no text form, unlike every other `render_*` in the package.
 
     Byte-level guarantees a caller can rely on (pinned by `tests/test_pdf.py`): starts
@@ -694,7 +694,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     flow = _PageFlow(doc, font_helv, font_bold)
 
     # B-751: this bare tuple dropped SKILL_ARCHIVE_PATH_TRAVERSAL, so a confirmed escape
-    # was absent from the PDF entirely — the word "traversal" did not appear in the file.
+    # was absent from the PDF entirely - the word "traversal" did not appear in the file.
     issues = [f for f in findings
               if (f.status in FAIL_WEIGHT_STATUSES or f.status == WARN)
               and not getattr(f, "suppressed", False)]
@@ -708,14 +708,14 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     # ImportError at package-init time (same reasoning as report.py's lazy imports).
     from . import __version__ as _pkg_version  # noqa: PLC0415
 
-    # ── Branded header band (page 1) + grade badge ───────────────────────────────
+    # -- Branded header band (page 1) + grade badge -------------------------------
     _draw_header(flow, _pkg_version)
     badge_top = flow.y
     if score.graded:
         grade_color = grade_hex(score.grade)
         badge_s = 54.0
         flow.rect(_MARGIN, badge_top - badge_s, badge_s, badge_s, grade_color)
-        # Centre the grade LETTER inside the badge — the old layout drew it a size above the
+        # Centre the grade LETTER inside the badge - the old layout drew it a size above the
         # box (baseline maths put a white glyph on the white page: invisible). Cap height is
         # ~0.70 of the point size for Helvetica, so this centres it vertically in the square.
         g_size = 30.0
@@ -730,7 +730,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         if pct:
             flow.rect(tx, bar_y - 7.0, 210.0 * pct / 100.0, 7.0, grade_color)
         # B-763: named a threat model and a fraction with no explanation anywhere on
-        # this artifact — the one that gets attached and shared. Same short gloss as
+        # this artifact - the one that gets attached and shared. Same short gloss as
         # report.py's render_card, so the two shareable surfaces agree on the wording.
         flow.text_abs(
             tx, badge_top - 46.0,
@@ -741,7 +741,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     else:
         # C-423: `graded is False` means no consumer of this ScoreResult may ever print a
         # letter or a number for this run (see ScoreResult.graded's own docstring, Rule
-        # 1) — so the badge is replaced with the missing-layers sentence instead of a
+        # 1) - so the badge is replaced with the missing-layers sentence instead of a
         # grade square. Layer/status wording comes ONLY from layers.describe_layer, never
         # a phrase written here (the one sentence that must not vary by surface).
         n_missing = len(score.missing_layers)
@@ -756,10 +756,10 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             flow.wrapped(missing_text, size=9.5, color="#666666")
         flow.spacer(4.0)
 
-    # C-423: the honesty invariant applies even on a graded run — a layer that ran
+    # C-423: the honesty invariant applies even on a graded run - a layer that ran
     # without exhausting its subject says so regardless of whether the run earned a
     # letter. `not_checked` is already plain-English, ledger-ordered, de-duplicated
-    # prose (layers.LayerLedger.not_checked, via scoring.compute) — joined here, not
+    # prose (layers.LayerLedger.not_checked, via scoring.compute) - joined here, not
     # reworded.
     if score.not_checked:
         flow.wrapped(
@@ -770,7 +770,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     degraded_n = getattr(score, "degraded_count", 0)
     if degraded_n:
         plural = "check" if degraded_n == 1 else "checks"
-        # B-532: the count and its cause are printed on every run — a degraded check is
+        # B-532: the count and its cause are printed on every run - a degraded check is
         # a fact about coverage, not about grading, and suppressing it here would trade a
         # wrong word for a lost fact. Only the trailing clause is grade-aware, and it
         # comes from report._degraded_incomplete_clause so this renderer cannot word it
@@ -783,7 +783,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             size=9.5, color="#b94a48",
         )
     # C-423 / B-531: a cap explanation for a number that is not printed is noise, and
-    # worse than noise here — `Capped from 50` IS a score, on a run whose whole point is
+    # worse than noise here - `Capped from 50` IS a score, on a run whose whole point is
     # that no score was earned. render_report (report.py) and the HTML renderer have
     # carried this gate since C-423; the PDF was the one site that missed it, which is
     # precisely the failure mode E-077's design note rejected when it refused to let each
@@ -791,7 +791,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     #
     # B-600: skipping the NUMBER is right; skipping the FACT was the same over-correction
     # the HTML renderer made. An ungraded run left this page with no trace that anything
-    # had capped the score at all — including a submitted VULNERABLE live-test verdict,
+    # had capped the score at all - including a submitted VULNERABLE live-test verdict,
     # which C-423 calls the most serious thing this tool can report. The PDF is the copy
     # that travels furthest from whoever ran it, so it is the worst place to lose it.
     # The sentence is `report._UNGRADED_CAP_TAIL`, shared with the card and the text
@@ -806,12 +806,12 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             text = f"{reason}{also} - {_UNGRADED_CAP_TAIL}"
         flow.wrapped(text, size=9.5, color="#b94a48")
 
-    # B-761: this document's own scope, stated on its first page — the text report
+    # B-761: this document's own scope, stated on its first page - the text report
     # additionally carries the "Highest-risk paths" attack-chain synthesis, the
     # capability graph, and "What you can do next" recommendations, and this PDF used
     # to say nothing about omitting them. `risk` is the one of the three this renderer
     # CAN carry (the "--full pipeline" RISK-chains block further down, when the caller
-    # supplied it) — the capability graph and next actions are absent from every PDF
+    # supplied it) - the capability graph and next actions are absent from every PDF
     # this function produces, so the note always names those, and names the
     # attack-chain synthesis too only when this run's PDF will not otherwise show it.
     flow.wrapped(
@@ -819,13 +819,13 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         size=8.5, color="#666666",
     )
 
-    # ── Severity chips ───────────────────────────────────────────────────────────
+    # -- Severity chips -----------------------------------------------------------
     flow.spacer(6.0)
     sev_counts = {sev: sum(1 for f in issues if f.severity == sev) for sev in (CRITICAL, HIGH, MEDIUM, LOW)}
     _draw_chips(flow, sev_counts)
     # B-588: name the population the chips count. `CRITICAL 2` alone reads as two critical
     # FAILURES, and on one real run the split was 1 FAIL + 1 WARN (and 2 FAIL + 6 WARN of
-    # the eight HIGHs). This is the PDF — the copy that travels furthest from whoever ran
+    # the eight HIGHs). This is the PDF - the copy that travels furthest from whoever ran
     # it, and its first page is the part that gets read. Same sentence as the text report,
     # from the same producer (`report.issue_population_line`), never a second tally here:
     # a second derivation is how two surfaces start disagreeing about one number.
@@ -833,14 +833,14 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     if _population:
         flow.wrapped(_population, size=8.5, color="#666666")
 
-    # ── Inventory by subject (summary table) ─────────────────────────────────────
+    # -- Inventory by subject (summary table) -------------------------------------
     summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
     if summary_rows:
         flow.spacer(8.0)
         flow.line("Inventory by subject", size=12.5, bold=True, gap_after=6.0)
         _draw_subject_summary(flow, summary_rows)
 
-    # ── Findings, grouped by subject ─────────────────────────────────────────────
+    # -- Findings, grouped by subject ---------------------------------------------
     flow.spacer(10.0)
     if not issues:
         flow.line(
@@ -853,16 +853,16 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             for f in subj_issues:
                 _finding_block(flow, f)
 
-    # ── The --full pipeline (C-374) ──────────────────────────────────────────────
+    # -- The --full pipeline (C-374) ----------------------------------------------
     # Same fixed order `render_dashboard(full=True)` uses, rendered from the SAME line
-    # renderers, so the PDF can carry everything the combined chat card carries — which
+    # renderers, so the PDF can carry everything the combined chat card carries - which
     # is what lets that card collapse to an overview + this attachment instead of pasting
     # 11.5 KB into a chat message. Every block is caller-supplied: a run that skipped a
     # phase (a plain audit, --fast, or the phase's own budget) passes None and only that
     # block is omitted. Nothing here re-scans or re-judges anything.
     inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep) if ctx is not None else None
     # B-560: `self_excluded` too, not `skills` alone. A home whose ONLY skill is our own
-    # installed copy has an empty roster and something to say about it — gating on the
+    # installed copy has an empty roster and something to say about it - gating on the
     # roster dropped the block, and with it the note that a skill was skipped, on exactly
     # the run where the reader has no other way to notice. `_skills_inventory_lines` has
     # handled the empty-roster case since B-506; this caller was deciding it never got
@@ -874,7 +874,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         _pipeline_block(flow, "MCP servers", _mcp_inventory_lines(inv, ascii_only=True))
     _pipeline_block(flow, "RISK chains", _risk_chain_lines(risk or [], ascii_only=True))
     # Behavioural / Second opinion are shown whenever the phase RAN, even to report
-    # "nothing fired" (Golden Rule #4) — their own renderers already encode that.
+    # "nothing fired" (Golden Rule #4) - their own renderers already encode that.
     _pipeline_block(flow, "Behavioural", _behavioral_block_lines(behavioral, ascii_only=True))
     _pipeline_block(flow, "Second opinion (advisory)",
                     _second_opinion_lines(adjudication, ascii_only=True)
@@ -885,7 +885,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     _pipeline_block(flow, "Coverage of OpenClaw surfaces",
                     _coverage_lines(findings, ascii_only=True))
     # F-165: TARGET coverage ("were all N plugins vetted, all M trajectory files
-    # read") — a different question from the surface-coverage block just above.
+    # read") - a different question from the surface-coverage block just above.
     # Optional and additive: `coverage_page=None` (every pre-existing caller) draws
     # nothing, via `_pipeline_block`'s own empty-lines no-op.
     from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415

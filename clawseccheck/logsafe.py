@@ -4,7 +4,7 @@ Provides:
   - redact(text): mask secret-looking substrings before they reach a log
   - get_logger(...): return a stdlib Logger with redaction built in as defense-in-depth
 
-LOCAL ONLY — no network calls, no telemetry, no external dependencies.
+LOCAL ONLY - no network calls, no telemetry, no external dependencies.
 """
 from __future__ import annotations
 
@@ -34,12 +34,12 @@ _KV_RE = re.compile(
 # Kept here (not in checks.SECRET_PATTERNS) so they only widen *redaction* and do
 # not introduce new config-scan findings / false-positive FAILs.
 #
-# Deliberately NOT here: the ClawHub CLI token shape (`clh_…`). It lives in
-# checks/_shared.py's SECRET_PATTERNS instead, because that token needs BOTH surfaces —
+# Deliberately NOT here: the ClawHub CLI token shape (`clh_...`). It lives in
+# checks/_shared.py's SECRET_PATTERNS instead, because that token needs BOTH surfaces -
 # a copy of one in a config/bootstrap file is a real B1 plaintext-secret finding, not
 # only something to mask on the way to a log. redact() iterates SECRET_PATTERNS before
-# this list, so `clh_…` is still redacted here; do not "fix" the apparent omission by
-# duplicating the pattern into this list — that would only substitute it twice.
+# this list, so `clh_...` is still redacted here; do not "fix" the apparent omission by
+# duplicating the pattern into this list - that would only substitute it twice.
 _EXTRA_SECRET_PATTERNS = [
     re.compile(r"gh[opsur]_[A-Za-z0-9]{20,}"),                 # GitHub PAT / OAuth / app tokens
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),               # Slack tokens
@@ -59,8 +59,8 @@ _EXTRA_SECRET_PATTERNS = [
 # substring, false-firing a scored check on a non-secret (see
 # checks/_config.py::check_redactor_blind_secret_paths, which closes the DETECTION
 # half of this gap with its own narrowly-anchored, whole-key-segment match instead).
-# Redaction has no equivalent false-positive cost — a masked benign value is a minor
-# usability nit, never a false verdict — so widening is safe HERE. Mirrors the exact
+# Redaction has no equivalent false-positive cost - a masked benign value is a minor
+# usability nit, never a false verdict - so widening is safe HERE. Mirrors the exact
 # precedent `_EXTRA_SECRET_PATTERNS` above already set for provider-specific VALUE
 # formats: kept in this file only, not in checks.SECRET_KEY_RE, so it only widens
 # what gets masked before reaching a log, never a config-scan finding. Same
@@ -72,7 +72,7 @@ _EXTRA_SECRET_PATTERNS = [
 # (Bearer/Basic/Token, followed by whitespace) BEFORE the token, unlike `_KV_RE`'s
 # single-word value: "Authorization: Bearer <token>" is the canonical shape this
 # pattern exists for, and `_KV_RE`'s bare `[^\s'\"&;,]{4,}` stops at the first
-# whitespace — reproduced: without this, the FIRST attempt at this pattern redacted
+# whitespace - reproduced: without this, the FIRST attempt at this pattern redacted
 # only the literal word "Bearer" and left the real token that followed it in plain
 # text, a worse outcome than no redaction at all (false confidence). Caught before
 # committing by testing the exact "Authorization: Bearer <token>" shape directly,
@@ -83,7 +83,7 @@ _EXTRA_KV_RE = re.compile(
     re.I,
 )
 
-# Candidate credit-card PAN: 13–19 digits with optional single space/hyphen
+# Candidate credit-card PAN: 13-19 digits with optional single space/hyphen
 # separators, not glued to other digits.  Luhn-validated in _replace_pan so plain
 # long numbers (phone numbers, ids) are left untouched.
 _PAN_CANDIDATE_RE = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
@@ -135,7 +135,7 @@ def redact(text: str | None) -> str:
     # We must not re-redact already-redacted markers.
     result = _KV_RE.sub(_replace_kv, result)
 
-    # C-405: Authorization/bearer/bare-key key=value pairs — see _EXTRA_KV_RE's own
+    # C-405: Authorization/bearer/bare-key key=value pairs - see _EXTRA_KV_RE's own
     # comment for why this is a separate, redaction-only widening.
     result = _EXTRA_KV_RE.sub(_replace_kv, result)
 
@@ -149,7 +149,7 @@ _URL_SHAPE_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]+")
 
 
 def sanitize_url_host_only(url: str) -> str:
-    """Return *url* reduced to ``scheme://host`` only — no userinfo, port,
+    """Return *url* reduced to ``scheme://host`` only - no userinfo, port,
     path, query, or fragment.
 
     A remote MCP command/URL can embed a credential anywhere other than the
@@ -202,13 +202,13 @@ def _replace_secret_pattern(m: re.Match) -> str:  # type: ignore[type-arg]
             # trim any quotes/spaces after the separator
             rest = full[idx + 1 :].lstrip(" '\"")
             if rest == "<redacted>":
-                # Value already masked on an earlier pass — leave the whole
+                # Value already masked on an earlier pass - leave the whole
                 # match (key prefix included) untouched so redact() stays
                 # idempotent instead of collapsing to a bare "<redacted>".
                 return full
             if rest:
                 return prefix + " <redacted>"
-    # Bare token (sk-ant-..., AKIA..., AIza...) — replace entirely.
+    # Bare token (sk-ant-..., AKIA..., AIza...) - replace entirely.
     if full == "<redacted>":
         return full
     return "<redacted>"
@@ -236,7 +236,7 @@ class _RedactingFilter(logging.Filter):
                 # double-format.
                 record.msg = redact(record.getMessage())
                 record.args = None
-        except Exception:  # pragma: no cover — safety net; never raise from a filter
+        except Exception:  # pragma: no cover - safety net; never raise from a filter
             pass
         return True
 
@@ -253,7 +253,7 @@ class _SecureFileHandler(logging.Handler):
         try:
             msg = self.format(record)
             secure_append_text(self.path.expanduser(), msg + self.terminator)
-        except Exception:  # pragma: no cover — safety net; logging should never raise
+        except Exception:  # pragma: no cover - safety net; logging should never raise
             self.handleError(record)
 
 
@@ -296,12 +296,12 @@ def get_logger(
 
     # B-479: a requested log FILE is never empty. The default level is WARNING and this
     # tool warns almost never, so `--log run.log` on its own produced no file at all (the
-    # handler creates it lazily, on the first record) — the flag whose whole purpose is
+    # handler creates it lazily, on the first record) - the flag whose whole purpose is
     # "write log output to PATH" did nothing unless you also happened to pass --verbose.
     # Asking for a log file is asking for log lines.
     #
     # The LOGGER's level drops to INFO so records reach the file, and the STDERR handler
-    # keeps the level the flags actually asked for — so --log changes what is written to
+    # keeps the level the flags actually asked for - so --log changes what is written to
     # the file, never what is printed at the user. Without the per-handler level, --log
     # would silently turn on verbose console output nobody requested.
     logger.setLevel(min(level, logging.INFO) if logfile is not None else level)
@@ -316,7 +316,7 @@ def get_logger(
     stderr_handler.addFilter(filt)
     logger.addHandler(stderr_handler)
 
-    # Handler 2: file (only when explicitly requested — respects "writes nothing by default")
+    # Handler 2: file (only when explicitly requested - respects "writes nothing by default")
     if logfile is not None:
         file_handler = _SecureFileHandler(os.path.expanduser(logfile))
         file_handler.setFormatter(fmt)

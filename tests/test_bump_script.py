@@ -309,7 +309,7 @@ def test_bump_patch_updates_all_four_sources(tmp_path, monkeypatch):
     assert "version: 1.8.3" in skill.read_text()
     chg_text = chg.read_text()
     # New stub inserted ABOVE the old entry.
-    assert chg_text.index("## [1.8.3] — 2026-07-01") < chg_text.index("## [1.8.2]")
+    assert chg_text.index("## [1.8.3] - 2026-07-01") < chg_text.index("## [1.8.2]")
     assert "old entry" in chg_text  # previous content preserved
 
 

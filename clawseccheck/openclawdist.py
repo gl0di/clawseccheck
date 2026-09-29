@@ -1,13 +1,13 @@
-"""F-174 — the installed OpenClaw package, as an identity and an integrity marker.
+"""F-174 - the installed OpenClaw package, as an identity and an integrity marker.
 
 Read-only, stdlib only, no subprocess and no network. A LEAF: it imports `deptree` for the
 one thing that module already does well (locate an installed npm package root from PATH,
 name-verified against its own manifest) and nothing else from the package. It renders no
-verdict — `monitor.py` is the consumer, the same leaf->consumer split `sockets.py`->B340,
+verdict - `monitor.py` is the consumer, the same leaf->consumer split `sockets.py`->B340,
 `deptree.py`->B349 and `configjournal.py`->B77 already use.
 
 **Why this exists.** B33 ("known-vulnerable OpenClaw version gate", HIGH) and C4 read
-`meta.lastTouchedVersion` out of `openclaw.json` — a string the agent writes about itself.
+`meta.lastTouchedVersion` out of `openclaw.json` - a string the agent writes about itself.
 A swapped `npm install` of openclaw is the top of the supply chain and nothing anywhere
 compared it against the artifact actually on disk. On the maintainer's machine the two
 happen to agree (`2026.7.1-2` in both), which is the expected state and exactly why the
@@ -16,23 +16,23 @@ disagreement is worth watching for.
 **What each digest can and cannot catch**, because a field called "integrity" that covers
 less than its name suggests is the failure this project keeps removing:
 
-* `manifest_sha256` — `package.json`. Moves on a version change, a `bin`/`main`/`exports`
+* `manifest_sha256` - `package.json`. Moves on a version change, a `bin`/`main`/`exports`
   rewrite, or a dependency-range edit. Instant (116 KB on the real install).
-* `lock_sha256` — `npm-shrinkwrap.json`, else `package-lock.json`. Moves when the resolved
+* `lock_sha256` - `npm-shrinkwrap.json`, else `package-lock.json`. Moves when the resolved
   dependency SET moves, which a version bump alone need not do. Instant (133 KB).
-* `code_sha256` — the executable surface: everything under `dist/` plus the top-level entry
-  scripts. This is the one that catches a swapped build with an untouched `package.json` —
-  the actual attack — and it is the only one with a real cost. Measured on the real install,
-  newest first: **2026.9.5** — 10,039 files, 199.2 MiB (208,872,930 B), **0.64 s** over three
+* `code_sha256` - the executable surface: everything under `dist/` plus the top-level entry
+  scripts. This is the one that catches a swapped build with an untouched `package.json` -
+  the actual attack - and it is the only one with a real cost. Measured on the real install,
+  newest first: **2026.9.5** - 10,039 files, 199.2 MiB (208,872,930 B), **0.64 s** over three
   consecutive runs, with one identical digest (`4b78566e15b10135`) for the npm-installed tree
   and the extracted tarball, so the install step did not alter `dist/`, `bin/` or the entry
-  scripts; **2026.9.4** — 9,249 files, 177.3 MiB, 0.57 s (measured on the tarball);
-  **2026.9.2** — 8,858 files, 157.4 MB, 0.59-0.63 s over three consecutive
-  runs; **2026.7.1-2** — 7,716 files, 77.8 MB, 0.27-0.32 s. Against a `--monitor` run of
+  scripts; **2026.9.4** - 9,249 files, 177.3 MiB, 0.57 s (measured on the tarball);
+  **2026.9.2** - 8,858 files, 157.4 MB, 0.59-0.63 s over three consecutive
+  runs; **2026.7.1-2** - 7,716 files, 77.8 MB, 0.27-0.32 s. Against a `--monitor` run of
   roughly 7.8 s that is still affordable; a `node_modules` sweep would not be, which is why
   the tree below stops at the package root's own code. Re-measure on every OpenClaw upgrade:
   the surface doubled in bytes between those two releases, and it does NOT move in one
-  direction only — 9.1 was 162.7 MB, so 9.2 is a contraction.
+  direction only - 9.1 was 162.7 MB, so 9.2 is a contraction.
 
 **Budget is a security property.** A monitor slow enough to be annoying gets switched off,
 so the walk is bounded by file count and by bytes, and a walk that hit a bound says so
@@ -59,9 +59,9 @@ from .deptree import find_package_root
 # file / 300 MiB caps sat at 44.3% and 52.5%; at 2026.9.5 (10,039 files / 199.2 MiB) they sat
 # at 50.2% and 66.4%, and the last release step added ~22 MiB, i.e. four to five releases from
 # a `code_capped` digest. The caps were therefore raised on 2026-09-19 to 25,000 files and
-# 500 MiB, which puts 2026.9.5 at 40.2% and 39.8% of them. Still generous rather than tight —
+# 500 MiB, which puts 2026.9.5 at 40.2% and 39.8% of them. Still generous rather than tight -
 # a cap that fires in normal use produces a permanent "could not inspect it all" note, which
-# teaches the reader to ignore the line — and the walk stays bounded (~1.6 s at the byte cap).
+# teaches the reader to ignore the line - and the walk stays bounded (~1.6 s at the byte cap).
 # A capped digest fails safe (it says `code_capped`) and blind: it cannot catch the swapped
 # build it exists for. Re-measure on every upgrade and raise the cap BEFORE it bites; the
 # series does not move in one direction only (9.2 shrank), so no single release predicts it.
@@ -69,7 +69,7 @@ MAX_CODE_FILES = 25_000
 MAX_CODE_BYTES = 500 * 1024 * 1024
 
 # The executable surface, in the order it is walked. `dist/` is where the built code lives;
-# the entry scripts are what `npm` wired into PATH. `node_modules/` is deliberately absent —
+# the entry scripts are what `npm` wired into PATH. `node_modules/` is deliberately absent -
 # it is `deptree.py`'s subject, it is far larger than the budget above, and its install-time
 # execution surface is already covered by B349.
 _CODE_DIRS = ("dist", "bin")
@@ -83,7 +83,7 @@ class InstallInfo:
     """What one installed npm package looks like from outside. All fields are safe to
     persist and to render: no absolute path is carried.
 
-    `root` is deliberately NOT stored — an install path is machine-specific detail that
+    `root` is deliberately NOT stored - an install path is machine-specific detail that
     would land in a drift baseline and, through it, in the event journal and any report the
     user pastes into an issue. `root_name` (the final directory component) is enough to say
     *which* package this is.
@@ -145,13 +145,13 @@ def _code_files(root: Path) -> "list[str]":
     symlinks excluded.
 
     Sorted so the digest is stable across filesystems that return directory entries in
-    arbitrary order — an unsorted walk would produce a different value for a byte-identical
+    arbitrary order - an unsorted walk would produce a different value for a byte-identical
     install, which is the same false-drift shape the F-173 baseline reference had to remove.
 
     `os.walk` over strings rather than `Path.rglob`, and relative paths built by slicing
     rather than by `Path.relative_to`. Not premature: measured against the install of the
     day (OpenClaw 2026.7.1-2, 7,717 files / 77.8 MB) the pathlib version took 0.89 s of a
-    ~7.8 s monitor run, of which only ~0.3 s was reading bytes — the rest was `Path` object
+    ~7.8 s monitor run, of which only ~0.3 s was reading bytes - the rest was `Path` object
     churn and 7,717 `relative_to` calls. The rewrite is ~0.35 s. Those figures are kept as
     the historical comparison that decided the rewrite, NOT restated against a current
     install: the pathlib version is gone, so its half cannot be re-measured, and replacing
@@ -160,7 +160,7 @@ def _code_files(root: Path) -> "list[str]":
     enough to be annoying gets switched off.
 
     `followlinks` is left at its default False, and each entry is checked with `islink`
-    anyway — the first stops the walk wandering outside the package root through a linked
+    anyway - the first stops the walk wandering outside the package root through a linked
     directory, the second keeps a linked FILE out of the digest.
     """
     base = str(root)
@@ -192,7 +192,7 @@ def _digest_code(root: Path, *, max_files: int = MAX_CODE_FILES,
     """``(digest, files, bytes, capped)`` over the executable surface.
 
     The RELATIVE PATH is folded into the digest alongside the bytes, so moving a file
-    without changing its contents still moves the value — a rename inside `dist/` is a real
+    without changing its contents still moves the value - a rename inside `dist/` is a real
     change to what runs, and a content-only digest would call it identical.
     """
     rels = _code_files(root)
@@ -264,7 +264,7 @@ def describe_install(binary_name: str = "openclaw", *, which=None,
 
 # Version strings carrying one of these tokens are not ordered by this module. npm's own
 # pre-release convention puts them after a `-`, where a naive digit scan reads `1.0.0-rc1`
-# as (1,0,0,1) and therefore as NEWER than `1.0.0` — which would report an upgrade to a
+# as (1,0,0,1) and therefore as NEWER than `1.0.0` - which would report an upgrade to a
 # release build as a DOWNGRADE, the loudest thing this comparison can say, on the strength
 # of a parsing artefact. The real install's `2026.7.1-2` carries no such token and orders
 # fine; a build that does simply gets "changed" instead of a direction.
@@ -279,18 +279,18 @@ _ORDER_UNKNOWN = "unknown"
 def _numeric_parts(version: str) -> "tuple | None":
     """Every digit run in *version* as a tuple of ints, or None when it cannot be ordered.
 
-    None — not an empty tuple — for a version with no digits or with a pre-release token:
+    None - not an empty tuple - for a version with no digits or with a pre-release token:
     a caller that treated "unorderable" as "equal" would silently stop reporting real moves.
     """
     # Semver build metadata (everything after `+`) is explicitly NOT part of the ordering,
-    # and a digit scan that keeps it reads `1.2.3+build7` as (1,2,3,7) — strictly greater
+    # and a digit scan that keeps it reads `1.2.3+build7` as (1,2,3,7) - strictly greater
     # than `1.2.3`, so a rebuild of the identical version would report as an upgrade and,
     # in the other direction, as a rollback. Caught by its own test rather than by review.
     base = version.split("+", 1)[0]
     lowered = base.lower()
     if any(tok in lowered for tok in _PRERELEASE_TOKENS):
         return None
-    import re  # noqa: PLC0415 — deferred so importing this leaf never costs it unused
+    import re  # noqa: PLC0415 - deferred so importing this leaf never costs it unused
     parts = re.findall(r"\d+", base)
     if not parts:
         return None
@@ -298,14 +298,14 @@ def _numeric_parts(version: str) -> "tuple | None":
 
 
 def compare_versions(old: str, new: str) -> str:
-    """``"up"`` / ``"down"`` / ``"unknown"`` — never a bool.
+    """``"up"`` / ``"down"`` / ``"unknown"`` - never a bool.
 
     A downgrade is the signal that matters most and is invisible today in both the check and
     the monitor, so it is worth ordering these at all. But a WRONG direction is worse than
     none: "your agent runtime was rolled back to a known-vulnerable build" is the loudest
     sentence this dimension can produce, and it must never come from a parsing artefact.
     Anything this function cannot order confidently returns ``"unknown"``, and the caller
-    reports a bare "changed" for that — always true, and enough for the user to act on.
+    reports a bare "changed" for that - always true, and enough for the user to act on.
     """
     if not old or not new or old == new:
         return _ORDER_UNKNOWN
@@ -316,7 +316,7 @@ def compare_versions(old: str, new: str) -> str:
         return _ORDER_UP
     if b < a:
         return _ORDER_DOWN
-    # Equal numerics, different strings — e.g. `1.2.3` vs `1.2.3+build`. Real difference,
+    # Equal numerics, different strings - e.g. `1.2.3` vs `1.2.3+build`. Real difference,
     # no defensible direction.
     return _ORDER_UNKNOWN
 
@@ -327,8 +327,8 @@ def self_reported_version(config: "dict | None") -> str:
 
     Grounded against the real config, where it reads `2026.7.1-2` alongside a
     `lastTouchedAt` timestamp. It is a SELF-REPORT: it says which build last saved settings,
-    not which build is installed now. The two disagreeing is the interesting state — a
-    downgrade leaves the config stamped with the newer version — and neither one alone can
+    not which build is installed now. The two disagreeing is the interesting state - a
+    downgrade leaves the config stamped with the newer version - and neither one alone can
     show it, which is the whole reason both are recorded.
     """
     if not isinstance(config, dict):
@@ -346,22 +346,22 @@ def self_reported_version(config: "dict | None") -> str:
 # value the way the build this project last executed against did. `checks/_shared.py`'s
 # `_cross_context_default` (B363's B-833 fix) is the proof this assumption breaks in
 # practice: `tools.message.crossContext.allowAcrossProviders`'s config PATH and its
-# declared schema default/enum did not move between 2026.9.4 and 2026.9.5 — only the
-# RESOLVER LINE did (`=== true` -> `!== false`) — so nothing short of executing the
+# declared schema default/enum did not move between 2026.9.4 and 2026.9.5 - only the
+# RESOLVER LINE did (`=== true` -> `!== false`) - so nothing short of executing the
 # vendor caught it, and B363 silently PASSed the newly-dangerous default until that fix
 # landed. That fix covers the one flip that was found. It says nothing about the next
 # one, on the next release, in some other check that has no version-aware branch at all
-# — which is the audit-level gap this exists to disclose.
+# - which is the audit-level gap this exists to disclose.
 #
 # GROUNDED_MAX_VERSION is deliberately NOT "the newest release any one check's window
-# validates" — `harnessruntime.ORACLE_MAX` is that, for the one check family narrow
+# validates" - `harnessruntime.ORACLE_MAX` is that, for the one check family narrow
 # enough to have a closed, differentially-validated window, and it already degrades to
 # `unknown` on its own outside that window, so it needs no help from this constant. This
 # is the newest release ANY check in this build was actually measured against, full
-# stop — the ceiling the whole report's grounding sits below. A SHIPPED constant (Golden
+# stop - the ceiling the whole report's grounding sits below. A SHIPPED constant (Golden
 # Rule #1: no lookup, no phone-home, nothing computed from a live probe of the install),
 # bumped by hand whenever a re-grounding pass (CLAUDE.md's C-125) touches a check against
-# a newer dist — the same discipline the code-digest measurements above already keep
+# a newer dist - the same discipline the code-digest measurements above already keep
 # release over release. Bump it only when a check was actually re-grounded that far, never
 # just because a newer OpenClaw exists. Raised to 2026.9.6 for 4.3.0: the 9.6 pass
 # re-recorded the dist citation baseline and widened the harness oracle to 9.6.
@@ -370,15 +370,15 @@ GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 6)
 
 def grounding_gap(installed_version: "str | None"):
     """The installed build's numeric ``(year, month, patch)`` when it is NEWER than
-    ``GROUNDED_MAX_VERSION`` — the newest release this build's checks were grounded
-    against — else ``None``.
+    ``GROUNDED_MAX_VERSION`` - the newest release this build's checks were grounded
+    against - else ``None``.
 
     ``None`` covers "not installed" (``installed_version`` falsy or not a string), "not
     parseable as a version" and "not shaped like a calendar release" (fewer than three
-    numeric parts — ``"2026.9"``, ``"0.0.0"`` — sort of a version that no one measured
+    numeric parts - ``"2026.9"``, ``"0.0.0"`` - sort of a version that no one measured
     this constant against either) and "carries a pre-release token" (``_numeric_parts``
     already answers ``None`` for those, per its own docstring). Every one of those is "we
-    cannot place this build on the timeline", never evidence of a gap — the same asymmetry
+    cannot place this build on the timeline", never evidence of a gap - the same asymmetry
     ``_cross_context_default``/``_openclaw_generation`` already apply to their own
     thresholds, so an ambiguous version string never manufactures a warning any more than
     it manufactures a verdict.

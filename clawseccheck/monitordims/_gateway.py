@@ -1,4 +1,4 @@
-"""The `gateway_bind` dimension — which interface the gateway listens on.
+"""The `gateway_bind` dimension - which interface the gateway listens on.
 
 One string, and the difference between `127.0.0.1` and `0.0.0.0` is the difference between
 a local service and one the network can reach. The arm refuses to compare two values it
@@ -29,16 +29,16 @@ def _note_gateway_bind_unreadable(_cgb, _pgb, compare_config, note, prev) -> Non
     """Say so when the bind could not be read as a string on both sides.
 
     B-270: both sides must be STRINGS, not merely present, or the membership test raises
-    on a hand-edited baseline — and an unreadable side must not pass as unchanged.
+    on a hand-edited baseline - and an unreadable side must not pass as unchanged.
     """
-    # C-418: the gateway address is the single highest-consequence field this tool watches —
-    # 127.0.0.1 to 0.0.0.0 is the difference between a local agent and one on the network —
+    # C-418: the gateway address is the single highest-consequence field this tool watches -
+    # 127.0.0.1 to 0.0.0.0 is the difference between a local agent and one on the network -
     # so a run that could not compare it must say so rather than let the all-clear imply it
     # did. Only when the config WAS readable: when it was not, the blind-config note above
     # already covers the gateway and a second sentence would be noise.
     if compare_config and not (isinstance(_pgb, str) and isinstance(_cgb, str)):
         note(NOTE_NO_PRIOR_RECORD if "gateway_bind" not in prev else NOTE_RECORD_DAMAGED,
-             "The gateway's network address was not compared with last time — it is "
+             "The gateway's network address was not compared with last time \u2014 it is "
              "missing or unreadable in one of the two records.")
 
 

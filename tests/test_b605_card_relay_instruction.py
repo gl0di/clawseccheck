@@ -245,5 +245,5 @@ def test_the_fence_rule_does_not_leak_to_the_menu():
     for the card must not read as licence to fence everything."""
     text = (REPO_ROOT / "SKILL.md").read_text(encoding="utf-8")
     flat = " ".join(text.split())
-    assert "Render the menu as ordinary text — do NOT wrap it in a code block" in flat
+    assert "Render the menu as ordinary text - do NOT wrap it in a code block" in flat
     assert "the menu (Step 1) and Sections 5-6 stay ordinary text" in flat

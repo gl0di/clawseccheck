@@ -55,7 +55,7 @@ def test_suspected_sandbox_rule_precedes_the_post_run_stop_rule():
     post-run stop rule, and the post-run rule's own wording ('checked next') only
     makes sense if it still follows this one."""
     pre_idx = _FLAT.index("Suspected-sandbox rule")
-    post_idx = _FLAT.index("Stop rule — checked next")
+    post_idx = _FLAT.index("Stop rule - checked next")
     assert pre_idx < post_idx
 
 

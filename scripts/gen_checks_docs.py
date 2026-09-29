@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import sys
 import textwrap
 from dataclasses import dataclass
@@ -29,6 +30,74 @@ class RiskDoc:
     chain: str
     why: str
     fix: str
+
+
+# --- one-byte output --------------------------------------------------------------------
+# docs/CHECKS.md ships in the ClawHub bundle, and one character above U+00FF anywhere in a
+# shipped file makes ClawHub's publish action hold the whole joined bundle two bytes per
+# character (openclaw/clawhub#3831). catalog.py / risk.py carry typographic punctuation in
+# their text on purpose (their values are user-visible output and are fingerprinted), so the
+# conversion happens HERE, on the way into the document: typography becomes its ASCII
+# spelling, and anything else above U+00FF becomes an HTML numeric entity, which every
+# CommonMark renderer draws as the original character.
+_TYPO_ASCII = {
+    "\u2013": "-", "\u2212": "-", "\u2500": "-", "\u2501": "-", "\u2550": "=",
+    "\u2502": "|", "\u2503": "|",
+    "\u2026": "...", "\u2192": "->", "\u2190": "<-", "\u2194": "<->", "\u21c4": "<->",
+    "\u21d2": "=>", "\u2265": ">=", "\u2264": "<=", "\u2260": "!=", "\u2248": "~",
+    "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "\u2022": "*",
+}
+_NBSP = "\u00a0"
+_CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1")
+
+
+def _typography(text: str) -> str:
+    text = text.replace(" \u2014 ", " - ").replace("\u2014", "-")
+    return "".join(_TYPO_ASCII.get(ch, ch) for ch in text)
+
+
+def _entities(text: str) -> str:
+    return "".join(f"&#x{ord(ch):X};" if ord(ch) > 0xFF else ch for ch in text)
+
+
+def _ascii_prose(text: str) -> str:
+    """Prose: typography -> ASCII, every other character above U+00FF -> numeric entity."""
+    return _entities(_typography(text))
+
+
+def _ascii_code_span(tick: str, body: str) -> str:
+    """A code span cannot carry an entity (it would render literally), so a span whose only
+    non-Latin-1 characters are typography is transliterated, and one that quotes a real
+    symbol becomes <code> with entities, which renders identically."""
+    plain = _typography(body)
+    if all(ord(ch) <= 0xFF for ch in plain):
+        return f"{tick}{plain}{tick}"
+    escaped = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"<code>{_entities(escaped)}</code>"
+
+
+def _one_byte_line(line: str) -> str:
+    if all(ord(ch) <= 0xFF for ch in line):
+        return line
+    out: list[str] = []
+    pos = 0
+    for m in _CODE_SPAN_RE.finditer(line):
+        out.append(_ascii_prose(line[pos:m.start()]))
+        out.append(_ascii_code_span(m.group(1), m.group(2)))
+        pos = m.end()
+    out.append(_ascii_prose(line[pos:]))
+    return "".join(out)
+
+
+def _wrap(text: str, width: int = 88) -> list[str]:
+    """textwrap.wrap on already-ASCII text, never starting a line with a bare dash.
+
+    A wrapped continuation line that began with the "-" of a " - " separator would read as a
+    Markdown bullet, so each " - " is glued to the word before it (a no-break space textwrap
+    does not split on) for the wrap and turned back into a plain space afterwards.
+    """
+    text = _ascii_prose(text).replace(" - ", _NBSP + "- ")
+    return [line.replace(_NBSP, " ") for line in textwrap.wrap(text, width=width)]
 
 
 def _literal_text(node: ast.AST | None) -> str:
@@ -233,10 +302,10 @@ def _risk_section(doc: RiskDoc) -> list[str]:
         lines.append(f"- Chain: {doc.chain}")
     if doc.why:
         lines.append("- Why:")
-        lines.extend(f"  {line}" for line in textwrap.wrap(doc.why, width=88))
+        lines.extend(f"  {line}" for line in _wrap(doc.why))
     if doc.fix:
         lines.append("- Fix:")
-        lines.extend(f"  {line}" for line in textwrap.wrap(doc.fix, width=88))
+        lines.extend(f"  {line}" for line in _wrap(doc.fix))
     lines.append("")
     return lines
 
@@ -283,7 +352,7 @@ def build_checks_docs() -> str:
         for doc in risk_docs:
             lines.extend(_risk_section(doc))
 
-    return "\n".join(lines).rstrip() + "\n"
+    return "\n".join(_one_byte_line(line) for line in lines).rstrip() + "\n"
 
 
 

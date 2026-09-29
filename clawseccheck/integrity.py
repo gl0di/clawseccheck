@@ -27,12 +27,12 @@ _PKG_DIR = Path(__file__).resolve().parent
 
 # Regenerated local artifacts that are NOT part of the shipped engine source: lint /
 # type / test caches and VCS metadata. They are gitignored (never published), so a clean
-# install lacks them — but a dev/CI checkout (or any tree where ruff/pytest/mypy has run)
+# install lacks them - but a dev/CI checkout (or any tree where ruff/pytest/mypy has run)
 # does, and folding them into the digest makes it environment-dependent and irreproducible
 # (B-069: a `.ruff_cache/<ver>/<key>` filename varies by ruff version). Excluded here so
 # the digest covers only shipped source and matches across dev and clean installs.
 # Scoped to integrity on purpose: the untrusted-content scanners (collector vetting / C015)
-# deliberately do NOT skip these — a payload could hide in a skill's .git/ or cache dir.
+# deliberately do NOT skip these - a payload could hide in a skill's .git/ or cache dir.
 # (``__pycache__`` is already dropped upstream by ``walk_dir_safely(exclude_pycache=True)``.)
 _NON_SOURCE_DIRS = frozenset(
     {"__pycache__", ".ruff_cache", ".mypy_cache", ".pytest_cache", ".git"}
@@ -48,17 +48,17 @@ NOTE_PATH_ESCAPE = "path-escape"
 NOTE_UNREADABLE = "unreadable"
 NOTE_VANISHED = "vanished"
 # B-608: presence-only disclosure of a PEP 552 *unchecked-hash* .pyc found directly
-# inside a real (non-symlink) ``__pycache__``. Never enters `per_file`/`combined` — see
+# inside a real (non-symlink) ``__pycache__``. Never enters `per_file`/`combined` - see
 # `_pyc_header_flags` and `_scan_for_unchecked_hash_pycs` below for why this is safe to
 # report without becoming environment-dependent (B-069).
 NOTE_UNCHECKED_PYC = "unchecked-pyc"
 
 # The first 8 bytes of a PEP 552 .pyc: a 4-byte magic number (interpreter/version
-# dependent — never read here) followed by a 4-byte little-endian bit field. Bit 0 set
+# dependent - never read here) followed by a 4-byte little-endian bit field. Bit 0 set
 # means "hash-based" rather than the default "timestamp-based"; bit 1, meaningful only
 # when bit 0 is set, means "check the hash against source on import". flags == 0b01 is
 # therefore the *unchecked*-hash pyc: hash-based, but NOT checked against source before
-# Python imports it — the PEP 552 surface this note exists to disclose. Verified against
+# Python imports it - the PEP 552 surface this note exists to disclose. Verified against
 # this box's own interpreter: a default `py_compile.compile()` call and a normal
 # `import` both always write flags == 0 (timestamp-based); producing flags == 1 requires
 # passing `invalidation_mode=PycInvalidationMode.UNCHECKED_HASH` explicitly, which no
@@ -70,29 +70,29 @@ _PYC_UNCHECKED_HASH_FLAGS = 0b01
 def _pyc_header_flags(path: Path) -> int | None:
     """Return the PEP 552 flags field of a ``.pyc``, or ``None`` if it can't be read.
 
-    Reads only the first 8 bytes (magic + flags) — never the code object, and never the
-    trailing mtime/size-or-source-hash field either — so nothing content- or
+    Reads only the first 8 bytes (magic + flags) - never the code object, and never the
+    trailing mtime/size-or-source-hash field either - so nothing content- or
     interpreter-dependent from this file ever reaches a caller. A file too short to hold
     a flags field, or one that cannot be opened, is simply unclassifiable: this is a
     best-effort signal, not a pyc validator.
 
     B-608 follow-up (2026-08-25): the "cannot be opened" branch is a
     genuine UNKNOWN, not a confirmed-benign, and it is silent by a deliberate, narrower
-    argument than the "too short to hold a header" branch above — those two are NOT the
+    argument than the "too short to hold a header" branch above - those two are NOT the
     same claim. A truncated file is provably inert: Python's own loader requires the full
     header to accept a ``.pyc`` at all, so a file this short cannot be executed as an
     unchecked-hash pyc either, whoever tries to import it. An ``OSError`` here (e.g.
-    permission denied) carries no such proof — the bytes behind it are unknown, not
+    permission denied) carries no such proof - the bytes behind it are unknown, not
     absent. It stays silent anyway because ``--verify-self`` and the package's own
     ``import`` both run as the invoking OS user on this single-user local CLI: a ``.pyc``
     this call cannot open is, on that same principal, also a ``.pyc`` Python cannot open
-    to execute — unreadable-to-audit implies unreadable-to-run, not "invisible attack".
+    to execute - unreadable-to-audit implies unreadable-to-run, not "invisible attack".
     That equivalence is the actual precondition, not an oversight; it would NOT hold
     under privilege separation (an auditor running as a lower-priv user than the process
     that later imports the package), which this tool does not assume. Emitting a
     distinct disclosure for this branch would need a new note kind whose header wording
     cli.py owns (`clawseccheck/cli.py`'s verify_self block matches `NOTE_UNCHECKED_PYC`
-    to text that asserts a *confirmed* detection) — reusing that kind here would
+    to text that asserts a *confirmed* detection) - reusing that kind here would
     overclaim an unread file as a found one. See
     ``tests/test_b608_pyc_read_error_is_unknown_not_clean.py`` for the pinned behavior
     and the escalation this leaves open.
@@ -110,11 +110,11 @@ def _pyc_header_flags(path: Path) -> int | None:
 def _scan_for_unchecked_hash_pycs(cache_dir: Path, rel: str, found: dict) -> None:
     """Record PEP 552 unchecked-hash ``.pyc`` filenames found directly inside cache_dir.
 
-    Only the immediate contents of ``cache_dir`` are listed — a real ``__pycache__``
+    Only the immediate contents of ``cache_dir`` are listed - a real ``__pycache__``
     never nests subdirectories, so there is nothing to recurse into. Entries are
     followed for classification but never for listing (``is_file(follow_symlinks=False)``
     excludes a symlinked ``.pyc``, matching the walk's own no-follow rule elsewhere in
-    this module) — a symlink pointing here is a separate, already-covered surface
+    this module) - a symlink pointing here is a separate, already-covered surface
     (``NOTE_SYMLINK`` on the directory itself, or on the link if it names a file).
     """
     try:
@@ -162,14 +162,14 @@ def package_digest(
     independent of filesystem enumeration order).  This makes the digest stable
     across identical file trees on any platform.
 
-    The scan is a recursive walk that hashes *all* file types — not just
+    The scan is a recursive walk that hashes *all* file types - not just
     top-level ``*.py``.  A flat ``iterdir()`` over ``*.py`` was blind to added
     foreign files (``.so`` / ``.pth`` / data) and to nested subpackage modules,
     so a tamperer could drop a malicious file and still get an unchanged digest.
     Recursing over every file means adding *or* nesting any file changes the
     digest.  Regenerated local artifacts are excluded (``_NON_SOURCE_DIRS``):
     ``__pycache__`` (compiled ``.pyc`` vary by interpreter), plus lint/type/test
-    caches (``.ruff_cache`` / ``.mypy_cache`` / ``.pytest_cache``) and ``.git`` —
+    caches (``.ruff_cache`` / ``.mypy_cache`` / ``.pytest_cache``) and ``.git`` -
     all gitignored, regenerated, and not part of the shipped source, so including
     them would make the digest environment-dependent (B-069).
 
@@ -177,22 +177,22 @@ def package_digest(
     by *content*: nothing inside ``__pycache__`` / ``.ruff_cache`` / ``.mypy_cache`` /
     ``.pytest_cache`` / ``.git`` is hashed, so a symlink *inside* one of them is not seen
     either and does not move the digest.  (The excluded *entry itself* is covered whatever
-    it is — a directory symlink through ``_observe_dir``, a file or dangling symlink
-    through ``skips`` — so only what is nested inside a REAL one is out of reach.)  That is
+    it is - a directory symlink through ``_observe_dir``, a file or dangling symlink
+    through ``skips`` - so only what is nested inside a REAL one is out of reach.)  That is
     a real residual, not a claim of coverage:
     a PEP 552 *unchecked-hash* ``.pyc`` planted inside a genuine ``__pycache__`` is
-    imported without validating its source. Removing the exclusion is not the fix — it is
+    imported without validating its source. Removing the exclusion is not the fix - it is
     what B-069 reverted, because ``.pyc`` bytes vary by interpreter and a dev checkout
     would stop matching a clean install.
 
     **B-608: presence of an unchecked-hash ``.pyc`` is disclosed, without reading it into
     the digest.** A real ``__pycache__`` is scanned (never descended into by the digest
     walk, only peeked at) for ``.pyc`` files whose PEP 552 flags field is exactly
-    ``0b01`` — hash-based but *not* checked against source on import, i.e. code Python
+    ``0b01`` - hash-based but *not* checked against source on import, i.e. code Python
     will run without comparing it to the ``.py`` it claims to come from. Only the 4-byte
     flags field is read (never the interpreter-dependent magic number, never the code
     object), so this cannot make ``combined`` vary by interpreter or toolchain the way
-    hashing ``.pyc`` bytes did (B-069) — the finding is reported via ``notes`` as
+    hashing ``.pyc`` bytes did (B-069) - the finding is reported via ``notes`` as
     ``NOTE_UNCHECKED_PYC`` and never enters ``per_file``. An ordinary stale or
     cross-version ``.pyc`` is timestamp-based (flags ``0``) and never trips this: a
     default ``py_compile.compile()`` call and a normal ``import`` both always write
@@ -201,7 +201,7 @@ def package_digest(
     build/test/install step performs.
 
     **Symlinks are covered by name and target, never by followed content** (B-590).
-    Until then the walk dropped them silently — ``walk_dir_safely`` skips a symlink,
+    Until then the walk dropped them silently - ``walk_dir_safely`` skips a symlink,
     and with no ``skips`` list passed the drop left no trace, so ``ln -s
     /outside/evil.py clawseccheck/extra_link.py`` produced a byte-identical
     ``combined`` over a tree that had grown an importable module.  A symlinked
@@ -209,14 +209,14 @@ def package_digest(
     but never descends, so it yielded no files and no skip entry, and an entire
     importable subpackage could be attached without moving the digest.  Both now
     enter ``per_file`` keyed by their relative path, with the digest taken over
-    ``kind:target`` — the same shape git uses for a symlink blob.  So the map's
+    ``kind:target`` - the same shape git uses for a symlink blob.  So the map's
     value is "sha256 of this path's bytes" for a real file and "sha256 of what this
     link is and points at" for a link; the ``notes`` channel below is what tells
     them apart.  Following the link and hashing the target is deliberately **not**
     done: it would let a link to a legitimate outside file leave the digest
     unchanged, and it re-opens the escape-the-base-dir hole ``walk_dir_safely``
-    closes on purpose.  Verified on this project's own installs — the git index carries
-    no ``120000`` entries and ``find -type l`` over the ClawHub-installed copy is empty —
+    closes on purpose.  Verified on this project's own installs - the git index carries
+    no ``120000`` entries and ``find -type l`` over the ClawHub-installed copy is empty -
     so on a real clawseccheck tree this adds nothing to ``per_file`` and ``combined`` is
     unchanged.  Note that "no symlinks in a package directory" is NOT true of Python
     packaging in general (Debian's ``python3-babel`` and ``python3-netaddr`` both ship
@@ -225,12 +225,12 @@ def package_digest(
 
     **A path that cannot be read is an error, not a gap.**  ``read_bytes()`` used to
     be unguarded, so ``chmod 000`` on one module aborted the whole command with a
-    generic "unexpected internal error (PermissionError)" that named nothing — and an
+    generic "unexpected internal error (PermissionError)" that named nothing - and an
     unreadable *directory* was quietly worse: ``os.walk``'s ``onerror`` discarded it,
     the subtree's files simply left ``per_file``, and the digest changed with no
     statement of why.  Both are now collected.  If the caller passed ``notes`` they
     are reported through it and the caller rules on them; if it did not, they raise a
-    named ``OSError``.  Opt-in has to mean opt-in — the alternative is that the CI job
+    named ``OSError``.  Opt-in has to mean opt-in - the alternative is that the CI job
     which signs ``SHA256SUMS.txt`` silently signs a digest over a tree it failed to
     read part of (the same reasoning as ``safeio._note_unlistable``).
 
@@ -256,7 +256,7 @@ def package_digest(
         reaching one here requires a symlinked parent, which ``_observe_dir`` now prunes
         first, so it is handled rather than relied upon.
         ``NOTE_UNCHECKED_PYC`` (B-608) is a pure disclosure: unlike the other four kinds
-        it never enters ``per_file`` at all, so it cannot move ``combined`` — it names the
+        it never enters ``per_file`` at all, so it cannot move ``combined`` - it names the
         ``__pycache__`` directory and the unchecked-hash ``.pyc`` filenames found inside
         it, for a caller that wants to surface the signal without affecting
         reproducibility.
@@ -269,7 +269,7 @@ def package_digest(
         ``{relpath: sha256hex}`` mapping, keyed by POSIX relative path from the
         package root (so nested files are distinguishable), sorted by path.
 
-    Note: self-integrity computed from inside the artifact is advisory — a
+    Note: self-integrity computed from inside the artifact is advisory - a
     modified ``integrity.py`` can print anything.  An out-of-band signature is the
     real anchor; this only proves "this file set's bytes are unchanged AND nothing
     was added/nested."
@@ -285,7 +285,7 @@ def package_digest(
     unreadable: list[tuple[str, str]] = []
     # (relpath, reason) for entries that ceased to exist mid-walk. Kept apart from
     # `unreadable` on safeio's own instruction: it records ENOENT and EACCES through one
-    # channel and says the split "is the caller's to make" — EACCES means the path is
+    # channel and says the split "is the caller's to make" - EACCES means the path is
     # there and deliberately unlistable, ENOENT means it went away between the walk
     # listing it and this code reaching it. That is ordinary churn on a live machine (an
     # update or an rsync running during the scan); an adversarial pass hit a real,
@@ -297,7 +297,7 @@ def package_digest(
     # relpath of a real (non-symlink) __pycache__ dir -> sorted unchecked-hash .pyc
     # filenames found directly inside it (B-608). Deliberately separate from `uncovered`:
     # entries in `uncovered` are hashed into `per_file` (that is what moves `combined`
-    # for a symlink), and this must NOT — it is presence-only disclosure, never digested.
+    # for a symlink), and this must NOT - it is presence-only disclosure, never digested.
     unchecked_pyc: dict[str, list[str]] = {}
 
     def _observe_dir(rel_parts) -> bool:
@@ -306,14 +306,14 @@ def package_digest(
         ``prune_dir`` is the walk's only view of a *directory* entry:
         ``os.walk(followlinks=False)`` lists a symlinked directory but never descends,
         so it contributes no files, and ``walk_dir_safely``'s ``skips`` list classifies
-        only *filenames*. Returning True prunes it — a no-op for traversal, since the
+        only *filenames*. Returning True prunes it - a no-op for traversal, since the
         walk was never going to descend, and it states the intent so a future
         ``followlinks`` change cannot start following it by accident.
 
         The symlink test runs BEFORE the ``_NON_SOURCE_DIRS`` skip, and this ordering is
         the whole point: ``__pycache__`` is excluded because its *contents* vary by
         interpreter (B-069), which is a statement about bytes, not about the directory
-        entry itself. A symlinked ``__pycache__`` is an arbitrary-code-execution surface —
+        entry itself. A symlinked ``__pycache__`` is an arbitrary-code-execution surface -
         a PEP 552 *unchecked-hash* ``.pyc`` is imported without validating its source, so
         a link pointing at an attacker-controlled cache runs their code while every
         ``.py`` on disk stays untouched and the digest never moves. Naming the link costs
@@ -332,7 +332,7 @@ def package_digest(
             return True
         if rel_parts[-1] == "__pycache__":
             # B-608: a real __pycache__ is about to be pruned (its contents are never
-            # read into the digest — B-069). Before pruning, peek at just the PEP 552
+            # read into the digest - B-069). Before pruning, peek at just the PEP 552
             # flags byte of each .pyc directly inside it, so a planted unchecked-hash
             # pyc is at least disclosed even though it stays outside `combined`.
             _scan_for_unchecked_hash_pycs(d, Path(*rel_parts).as_posix(), unchecked_pyc)
@@ -373,7 +373,7 @@ def package_digest(
     #
     # No `_NON_SOURCE_DIRS` filter here, deliberately. `skips` only ever holds symlinks and
     # path escapes, and the excluded directories are pruned above, so nothing NESTED inside
-    # one can reach this loop — the only entry the name filter could ever drop is one whose
+    # one can reach this loop - the only entry the name filter could ever drop is one whose
     # own name IS `__pycache__` / `.git` / a cache dir, i.e. exactly the attack. A symlink
     # to a FILE, and a dangling symlink, are both classified by `os.walk` as filenames
     # rather than dirnames, so they arrive here instead of at `_observe_dir`; the first
@@ -406,7 +406,7 @@ def package_digest(
         more = "" if len(unreadable) <= 3 else f" (and {len(unreadable) - 3} more)"
         raise OSError(
             f"package_digest: {len(unreadable)} path(s) under {pkg_dir} could not be "
-            f"read — {named}{more}; integrity cannot be established over this tree. "
+            f"read \u2014 {named}{more}; integrity cannot be established over this tree. "
             f"Pass notes=[] to receive this as a disclosure instead of an exception."
         )
 
@@ -417,7 +417,7 @@ def package_digest(
             notes.append((NOTE_UNREADABLE, rel, reason))
         for rel, reason in sorted(vanished):
             notes.append((NOTE_VANISHED, rel, reason))
-        # B-608: disclosure only — never folded into `uncovered`/`per_file` above, so it
+        # B-608: disclosure only - never folded into `uncovered`/`per_file` above, so it
         # cannot move `combined`.
         for rel, names in sorted(unchecked_pyc.items()):
             shown = ", ".join(names[:3])
@@ -441,7 +441,7 @@ def build_fingerprint(pkg_dir: Path | None = None) -> str:
 
     B-869: ``__version__``/``__released__`` are strings a human edits by hand and can
     forget to bump, so a local dev checkout and the release it was branched from can
-    print an identical version while the files underneath differ — exactly what let a
+    print an identical version while the files underneath differ - exactly what let a
     stale dev install pass as the release in a real incident (the menu banner and the
     report header both quoted the release string back with no way to tell the two
     builds apart). This is a prefix of :func:`package_digest`'s ``combined`` SHA-256,
@@ -452,7 +452,7 @@ def build_fingerprint(pkg_dir: Path | None = None) -> str:
     call is a security comparison against a trusted release digest, with a full
     per-file breakdown and note-by-note disclosure of symlinks/unreadable/vanished
     paths. This is a cheap, always-on "did the content change" signal for a one-line
-    status surface, not a verification tool — it carries no verdict, so it passes
+    status surface, not a verification tool - it carries no verdict, so it passes
     ``notes=[]`` through and silently accepts whatever ``package_digest`` computed over
     the readable tree rather than raising or disclosing: a menu banner or report header
     is not the place to surface a fresh unreadable-file diagnosis that ``--verify-self``

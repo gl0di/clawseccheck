@@ -2,9 +2,9 @@
 
 Complements the B16 check (which asks "do you HAVE monitoring?"). This is an
 optional, opt-in way to GET some: run the deterministic audit on a schedule,
-store a compact snapshot, and alert on what CHANGED since last time — the moments
+store a compact snapshot, and alert on what CHANGED since last time - the moments
 threats actually appear (a new/modified installed skill, SOUL.md drift, any change to
-a file under <workspace>/memory/, a dropped score — capped OR uncapped — and a check
+a file under <workspace>/memory/, a dropped score - capped OR uncapped - and a check
 leaving PASS for FAIL, WARN or UNKNOWN).
 
 It is the only part of ClawSecCheck that persists state: a single JSON snapshot
@@ -22,7 +22,7 @@ from pathlib import Path
 # `monitordims/_checks.py`, and tests/monitor_public_api.txt pins that they stay.
 from .catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN  # noqa: F401
 # Re-exports whose only readers moved into monitordims/. Kept importable from here
-# because they were before the split — see tests/monitor_public_api.txt.
+# because they were before the split - see tests/monitor_public_api.txt.
 from .hostpersist import FAMILY_LABELS as _hp_FAMILY_LABELS  # noqa: F401
 from .hostpersist import FAMILY_SYSTEM_CRON as _hp_FAMILY_SYSTEM_CRON  # noqa: F401
 from .hostpersist import FAMILY_SYSTEMD as _hp_FAMILY_SYSTEMD  # noqa: F401
@@ -33,7 +33,7 @@ from .configjournal import newest_hash as _journal_newest_hash
 from .configjournal import read_writes as _journal_read
 # B-541: the key vocabulary of the provenance dimension, imported rather than restated.
 # `skillprovenance` is a documented LEAF (it imports nothing from this package), so a
-# top-level import cannot create a cycle — and a second copy of a rule is exactly what
+# top-level import cannot create a cycle - and a second copy of a rule is exactly what
 # went wrong the last three times this area was repaired.
 #
 # Kept HERE, not folded into the monitordims re-export below, for one reason: these four
@@ -282,7 +282,7 @@ def home_mismatch(prev: "dict | None", home: "Path | str") -> bool:
 # F-147 (Wave 3, rug-pull): bumped 2 -> 3 for the new OPTIONAL `mcp_detail.<server>.
 # surface_tool_sigs` key. As with the 1 -> 2 bump (see git history, v3.11.0's
 # _skill_sig str-vs-dict sniffing), this build carries no version-keyed migration
-# function — every dimension that reads a shape newer than what an old snapshot has
+# function - every dimension that reads a shape newer than what an old snapshot has
 # already degrades gracefully via a presence/type guard (`_both_dims`, and the
 # `surface_tool_sigs in ps and in cs` gate in `diff()`), so an old snapshot compared
 # against a new-format one simply skips the new comparison for one run rather than
@@ -290,7 +290,7 @@ def home_mismatch(prev: "dict | None", home: "Path | str") -> bool:
 # humans/tests, not something diff() branches on.
 #
 # F-173: bumped 6 -> 7 for the OPTIONAL `behavioral_fired` / `behavioral_undetermined` /
-# `behavioral_capped` keys. Same degradation rule as every bump before it — an older
+# `behavioral_capped` keys. Same degradation rule as every bump before it - an older
 # baseline simply lacks them and the arm stands down for one run.
 #
 # F-174: 7 -> 8 for `openclaw_install` and `skill_provenance`. The task warned against
@@ -301,14 +301,14 @@ def home_mismatch(prev: "dict | None", home: "Path | str") -> bool:
 SNAPSHOT_VERSION = 8
 
 
-# B-270 — emitted (rendered AND journaled) when a prior baseline existed but could not be
+# B-270 - emitted (rendered AND journaled) when a prior baseline existed but could not be
 # used. Kept here, next to the predicate that decides it, so the screen and the journal
 # cannot drift apart: report.py renders whatever alert list the CLI passes to the journal.
 BASELINE_CORRUPT_ALERT = (
     "HIGH",
     "The previous monitor baseline could not be read (truncated, unreadable, or not a "
     "valid snapshot). Any change made between the last good run and this one could NOT be "
-    "compared and is therefore NOT reported. Investigate why the state file was lost — a "
+    "compared and is therefore NOT reported. Investigate why the state file was lost \u2014 a "
     "baseline that disappears is itself worth explaining.",
 )
 
@@ -316,17 +316,17 @@ BASELINE_CORRUPT_ALERT = (
 _VALUE_FLAGS_BY_CMD["podman"] = set(_VALUE_FLAGS_BY_CMD["docker"])
 
 
-# B-269 — dimensions of the snapshot that are built from ``ctx.config``. When
+# B-269 - dimensions of the snapshot that are built from ``ctx.config``. When
 # openclaw.json cannot be read/parsed the collector falls back to ``ctx.config = {}`` and
 # every one of these collapses to empty, which ``diff()`` used to read as fact.
 _CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind", "plugins",
                       # B-664: read purely from the config, so a blind run must
                       # carry the last known policy forward rather than record an
-                      # empty one — an empty record would compare as "the gate is
+                      # empty one - an empty record would compare as "the gate is
                       # gone" on the next sighted run.
                       "exec_policy")
 
-# B-269 — dimensions collected from disk that an unreadable config can still SHRINK,
+# B-269 - dimensions collected from disk that an unreadable config can still SHRINK,
 # because the config declares extra roots to scan: ``agents.defaults.workspace`` /
 # ``agents.list[].workspace`` add bootstrap + memory roots, ``skills.load.extraDirs`` adds
 # skill roots. Verified first-hand: with those keys set, a chmod 000 on openclaw.json drops
@@ -337,7 +337,7 @@ _CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind", "plugins"
 # DISAPPEAR from the collected view, never appear. So on a blind run a disappearance here
 # is untrustworthy, while an addition or a content change is still real evidence.
 # Checked, not assumed: every config consumer in the collection path only ever EXTENDS the
-# set of roots to scan — _read_installed_skills appends _config_workspace_dirs,
+# set of roots to scan - _read_installed_skills appends _config_workspace_dirs,
 # _config_extra_skill_dirs and _config_plugin_load_paths to `roots`, and the bootstrap scan
 # appends _config_workspace_dirs to `_ws_dirs`. No config key narrows or filters discovery,
 # so ctx.config == {} yields a subset, never a superset.
@@ -353,34 +353,34 @@ _CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind", "plugins"
 #
 # **A subset of the roots is not automatically a subset of the RECORDS**, and an earlier
 # version of this comment claimed it was. Two workspaces can each hold a skill of the same
-# NAME, so which record wins is a merge decision, not a set operation — with last-wins,
+# NAME, so which record wins is a merge decision, not a set operation - with last-wins,
 # merely adding a workspace to openclaw.json flipped the winner and the diff read the swap
 # as "the skill was replaced with different content", a false HIGH on an ordinary config
 # edit. That framing is now historical: B-541 removed the election from the verdict path
-# entirely — `read_provenance` emits one entry per (root, skill) pair and each record is
+# entirely - `read_provenance` emits one entry per (root, skill) pair and each record is
 # compared with itself, so first-wins survives only in the legacy name-keyed fallback that a
 # single post-upgrade run takes. The PLACEMENT is unchanged and still right, but it no longer
 # rests on "the winner does not depend on the config": it rests on the plainer fact that the
 # config can only ADD workspace roots, never remove one, so a blind run sees a SUBSET of the
-# roots — which is exactly the shrinkable contract. Re-grounded because the sentence that
+# roots - which is exactly the shrinkable contract. Re-grounded because the sentence that
 # used to carry this argument described a mechanism the tree no longer has.
 #
 # `openclaw_install` is in NEITHER list, deliberately: it is resolved from PATH, so an
 # unreadable config cannot move it. Its own failure mode is different and is handled at the
-# diff instead — see the presence gate there.
+# diff instead - see the presence gate there.
 #
 # F-179: `host_persist` is in NEITHER list for a related but distinct reason. It is read from
-# the HOST — `~/.config/systemd/user`, the shell startup files, `/etc/cron.*`, `sys.path` —
+# the HOST - `~/.config/systemd/user`, the shell startup files, `/etc/cron.*`, `sys.path` -
 # so an unreadable `openclaw.json` cannot shrink it either, which rules out
 # `_CONFIG_DIMENSIONS`. It is not `_SHRINKABLE_DIMENSIONS` either, and that one is worth
 # stating because the name invites it: that list means "config can only ADD roots, so a
-# SHRINK is a real signal". On the host the asymmetry does not hold — a user deleting a
+# SHRINK is a real signal". On the host the asymmetry does not hold - a user deleting a
 # systemd unit and an attacker deleting one to cover a track are the same edit, so BOTH
 # directions are reported and neither is privileged.
 _SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory", "skill_provenance")
 
 
-# C-417 — every snapshot key THIS build reads out of a stored baseline, persisted with
+# C-417 - every snapshot key THIS build reads out of a stored baseline, persisted with
 # the snapshot itself.
 #
 # The graceful-degradation rule documented at SNAPSHOT_VERSION has a blind spot: a
@@ -388,12 +388,12 @@ _SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory", "skill_provenance")
 # (`_both_dims`, `_frontier`, a bare `.get`) turns that into a skip, and the screen is
 # byte-identical to a genuine all-clear. The user is told nothing changed about something
 # that was never examined. Persisting this manifest lets a later run say "your baseline
-# predates this" instead — the difference between "we looked and it is fine" and "we
+# predates this" instead - the difference between "we looked and it is fine" and "we
 # could not look", which is the distinction this whole epic exists to restore.
 #
 # **Membership is the whole point, and the first version of this list got it exactly
-# backwards.** It held only the thirteen always-present dimensions — the ones that never
-# suffer the blind spot — and omitted every optional key, which is the entire population
+# backwards.** It held only the thirteen always-present dimensions - the ones that never
+# suffer the blind spot - and omitted every optional key, which is the entire population
 # the field is for: `skills_frontier_partial` (its absence downgrades a CRITICAL to a
 # HIGH), `raw_score_scope` (its absence suppresses the score-drop alert outright),
 # `skills_capped` / `memory_capped` / `skills_capped_count` (truncation frontiers),
@@ -407,21 +407,21 @@ _SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory", "skill_provenance")
 #
 # **Absence does not mean the same thing for all of them, and the consumer must not assume
 # it does.** Most are written on every run, so their absence from a stored baseline can
-# only mean that baseline predates them — the "your baseline predates this" message is
+# only mean that baseline predates them - the "your baseline predates this" message is
 # sound. A named minority is written CONDITIONALLY, so absence is a real, current state
 # and that message would be a fabrication: `host` (absent = no supported host detected),
-# `config_parse_error` and `config_baseline` (both absent = this was NOT a blind run — see
+# `config_parse_error` and `config_baseline` (both absent = this was NOT a blind run - see
 # `_degrade_snapshot`, the only writer of either), the three F-170 config-journal keys, and
 # the three F-173 `behavioral_*` keys (absent = the shell did not run the behavioural layer
 # this invocation, or it raised). A consumer that treats a missing `config_parse_error` as
 # "we don't know whether that run was blind" would invert the meaning of a key that says
 # "it wasn't". The split is pinned in tests/test_c417_snapshot_enablers.py's `_CONDITIONAL`
-# — deliberately as a named list rather than a count, because the count in this comment had
+# - deliberately as a named list rather than a count, because the count in this comment had
 # already rotted once (it still said 22/19/3 after F-170 shipped three more).
 #
 # Kept honest mechanically: tests/test_c417_snapshot_enablers.py derives the keys this
 # module reads off a stored snapshot straight from the AST and asserts EXACT equality with
-# this tuple — subset in either direction is how the first version passed while being
+# this tuple - subset in either direction is how the first version passed while being
 # wrong. Sorted, so the persisted list is stable across runs.
 WATCHED_DIMENSIONS = (
     # F-173. Conditional: present only when the shell handed `snapshot()` a behavioural
@@ -455,7 +455,7 @@ WATCHED_DIMENSIONS = (
     "config_written_by",
     # B-677. CONDITIONAL: absent when the shell did not scan the credential store, which
     # is how a baseline predating this dimension is told from a store that is genuinely
-    # empty. Not a `_CONFIG_DIMENSIONS` member — the store lives at `<home>/credentials`
+    # empty. Not a `_CONFIG_DIMENSIONS` member - the store lives at `<home>/credentials`
     # and no config key can move, add or shrink it.
     "credential_store",
     # B-664. Written on every run whose config parsed; `{}` when it did not,
@@ -482,7 +482,7 @@ WATCHED_DIMENSIONS = (
     #
     # SNAPSHOT_VERSION deliberately does NOT move for this. It was bumped to 9 while this
     # landed and the full suite caught it: B-527 already settled the convention, and
-    # `test_snapshot_version_unchanged_field_is_purely_additive` states it — membership in
+    # `test_snapshot_version_unchanged_field_is_purely_additive` states it - membership in
     # WATCHED_DIMENSIONS is what tells a pre-existing baseline the key was never recorded,
     # and `diff()` never branches on the version at all. The three version literals a bump
     # forces you to edit are tripwires, not chores; needing to touch them is the signal to
@@ -496,22 +496,22 @@ WATCHED_DIMENSIONS = (
     "native_count",
     # B-676. CONDITIONAL, and the condition is load-bearing: written only on a run that
     # had a usable baseline, because a run that compared nothing would otherwise store an
-    # empty list meaning "the watch skipped nothing last time" — and the next run would
+    # empty list meaning "the watch skipped nothing last time" - and the next run would
     # then report every standing limitation as newly lost. Measured: notes go 0 -> 4
     # between the first and second run of an unchanged home, and that step is not drift.
     "not_compared",
     # F-174. Both conditional: `openclaw_install` is absent when no OpenClaw package can be
-    # located on PATH (which a cron job's minimal PATH really does produce — verified),
+    # located on PATH (which a cron job's minimal PATH really does produce - verified),
     # `skill_provenance` when no ClawHub lock file was found in any workspace.
     "openclaw_install",
     "plugins",
     "raw_score",
     # C-469: the exact numerator/denominator behind `raw_score` (`ScoreResult.earned`/
-    # `.total`, B-505) — recorded alongside the rounded percentage so the backstop above
+    # `.total`, B-505) - recorded alongside the rounded percentage so the backstop above
     # can see a regression smaller than one rounded integer (~4 weight units on a real
     # machine). Written unconditionally, same as `raw_score` itself: `getattr(score,
     # "earned"/"total", None)` on every run, `None` only for the handful of duck-typed
-    # test doubles that carry no such attribute at all (see `raw_backstop`'s C-469 note —
+    # test doubles that carry no such attribute at all (see `raw_backstop`'s C-469 note -
     # an absent figure on either side just skips the refinement, same self-healing idiom).
     "raw_score_earned",
     "raw_score_scope",
@@ -534,13 +534,13 @@ WATCHED_DIMENSIONS = (
 def _degrade_snapshot(snap: dict, prev: "dict | None") -> None:
     """B-269/FIX2 (C-135 follow-up): mark and repair a snapshot taken while openclaw.json
     was unreadable, OR simply ABSENT this run after having previously been present (see
-    ``snapshot()``'s widened blind predicate) — both leave the collector with the same
+    ``snapshot()``'s widened blind predicate) - both leave the collector with the same
     collapsed ``ctx.config = {}`` view, so both need the same repair.
 
     Writing the collapsed (empty) config view into the baseline is what made ``diff()``
     fabricate "MCP server 'X' was removed." / "Gateway bind changed: '127.0.0.1' -> ''"
     against a byte-identical config, and then fire a burst of "NEW MCP server connected"
-    CRITICALs the moment the file became readable again — all while the score *rose*,
+    CRITICALs the moment the file became readable again - all while the score *rose*,
     because the checks that would have failed had silently become UNKNOWN and UNKNOWN is
     excluded from the score denominator.
 
@@ -548,7 +548,7 @@ def _degrade_snapshot(snap: dict, prev: "dict | None") -> None:
     rather than overwritten:
 
     * ``_CONFIG_DIMENSIONS`` are taken wholesale from the previous snapshot.
-    * ``_SHRINKABLE_DIMENSIONS`` are union-merged — previous entries survive, this run's
+    * ``_SHRINKABLE_DIMENSIONS`` are union-merged - previous entries survive, this run's
       values win wherever both sides have the key.
 
     Nothing is lost, only deferred: the next run that CAN read the config compares against
@@ -556,7 +556,7 @@ def _degrade_snapshot(snap: dict, prev: "dict | None") -> None:
     then, in the right direction, instead of being drowned in fabricated ones.
 
     ``config_baseline`` records whether a baseline actually existed to carry (``carried``)
-    or the blind run had nothing to fall back on (``unknown`` — e.g. the very first monitor
+    or the blind run had nothing to fall back on (``unknown`` - e.g. the very first monitor
     run was blind, or the previous run was blind too and never had a baseline itself).
     ``diff()`` refuses to compare config dimensions against an ``unknown`` baseline rather
     than treating emptiness as fact.
@@ -589,14 +589,14 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     """Build the drift snapshot for this run.
 
     *prev* is the previously saved snapshot, used to preserve the baseline when this run
-    could not read openclaw.json (B-269 — see ``_degrade_snapshot``) and to carry forward
+    could not read openclaw.json (B-269 - see ``_degrade_snapshot``) and to carry forward
     the "was a real config ever seen" bit that decides whether a config that is simply
-    ABSENT this run counts as blind too (C-135 FIX2 — see the ``config_ever_seen`` /
+    ABSENT this run counts as blind too (C-135 FIX2 - see the ``config_ever_seen`` /
     ``config_missing_blind`` computation below). Passing None keeps the historical
     behaviour for a first run or a caller with no stored state.
 
-    *behavioral* (F-173) is the REDUCED result of ``behavioral.analyze`` — ``{"fired":
-    [...], "undetermined": [...], "capped": bool}`` — computed by the caller, never here.
+    *behavioral* (F-173) is the REDUCED result of ``behavioral.analyze`` - ``{"fired":
+    [...], "undetermined": [...], "capped": bool}`` - computed by the caller, never here.
     This module deliberately does not import ``behavioral``: the containment idiom for a
     subsystem that can raise on a schema-drifted config lives in the shell (``cli.py``
     already wraps the identical call that way for ``--full``'s cap-only signal, and
@@ -606,7 +606,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     Passing None writes no ``behavioral_*`` key at all, and that absence is load-bearing:
     it is how ``diff_with_notes`` tells "the layer did not run" from "it ran and found
     nothing". Writing an empty list for a layer that never executed would be the
-    clean-verdict-about-an-unexamined-surface shape this whole epic exists to remove — and
+    clean-verdict-about-an-unexamined-surface shape this whole epic exists to remove - and
     on the *next* run it would read as "the signal cleared", inventing a resolution.
     """
     from . import __version__  # noqa: PLC0415 (avoid import-order coupling)
@@ -629,7 +629,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         # B-765: the PRODUCER's version, not the snapshot FORMAT's (that's "version"
         # above). Written unconditionally so diff_with_notes() can tell a genuine config
         # change from the scanner's own detection changing underneath an existing check
-        # id between two ClawSecCheck builds — see the down-rank/reword this feeds in
+        # id between two ClawSecCheck builds - see the down-rank/reword this feeds in
         # monitordims/_checks.py. Deliberately does NOT bump SNAPSHOT_VERSION: membership
         # in WATCHED_DIMENSIONS is what tells an old baseline this key was never recorded
         # (see that tuple's own F-179 comment on why a version bump here would be a
@@ -639,17 +639,17 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         # uses (_now_iso), so "what happened since the last run" is answerable by
         # comparing the two directly instead of inferring it from file mtimes.
         "ts": _now_iso(),
-        # C-417: which dimensions this build can compare — see WATCHED_DIMENSIONS. A
+        # C-417: which dimensions this build can compare - see WATCHED_DIMENSIONS. A
         # list, not the tuple, because that is what survives a JSON round-trip.
         "watched": list(WATCHED_DIMENSIONS),
         "score": score.score,
         # B-273: the UNCAPPED weighted pass-rate, recorded alongside the displayed score.
         # `score` is `min(raw, FAIL_CAPS[worst_failing_severity])` (scoring.py:80-87), so on
-        # a config with an open CRITICAL FAIL it is pinned at 49 and stops moving — the
+        # a config with an open CRITICAL FAIL it is pinned at 49 and stops moving - the
         # drop backstop in diff() was comparing a constant. Storing raw_score gives that
         # backstop a signal that still responds once the cap saturates.
         "raw_score": getattr(score, "raw_score", None),
-        # C-135/FIX1: the scope raw_score was computed over — see _raw_score_scope(). Lets
+        # C-135/FIX1: the scope raw_score was computed over - see _raw_score_scope(). Lets
         # diff() refuse to trust a raw-score fall across a denominator that moved (an
         # upgrade shipping new checks), rather than comparing two incomparable numbers.
         "raw_score_scope": _raw_score_scope(findings),
@@ -658,7 +658,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         # smaller than its own rounding (~4 weight units on a real ~407-unit machine);
         # `raw_backstop` reads these to catch one, but only once the scope hash above also
         # pins per-check weight equal (see that function's and `_raw_score_scope`'s C-469
-        # notes) — comparing earned directly is unsound without that. `getattr(..., None)`,
+        # notes) - comparing earned directly is unsound without that. `getattr(..., None)`,
         # same tolerance as `raw_score` itself: a handful of duck-typed test doubles carry
         # `.score`/`.grade` only, and an absent figure here just means this run cannot
         # refine the comparison, never a fabricated zero.
@@ -666,7 +666,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         "raw_score_total": getattr(score, "total", None),
         "grade": score.grade,
         # B-511: whether this run EARNED that grade. E-077 withholds the letter unless all
-        # five layers ran, and since C-426 the default run does not — so `score`/`grade`
+        # five layers ran, and since C-426 the default run does not - so `score`/`grade`
         # above are computed values the user was never shown. They stay recorded, because
         # a later complete run needs something to compare against and writing null is
         # worse than useless: `_num()` defaults an absent score to 0, which would fabricate
@@ -679,8 +679,8 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         # "The surface is confirmed absent" (no MCP server configured yet) and "the check
         # lost its footing" are the same string in `checks`, and they call for opposite
         # treatment: the first walking to WARN is a user configuring a feature for the
-        # first time — announcing that as a regression is the false alarm this dimension
-        # is most likely to produce — while the second is a real loss of coverage.
+        # first time - announcing that as a regression is the false alarm this dimension
+        # is most likely to produce - while the second is a real loss of coverage.
         # Two sorted id lists rather than a dict per check: only a minority of ids are ever
         # in either, so this costs a fraction of what widening `checks` itself would, and
         # it leaves the `checks` shape every existing consumer reads untouched.
@@ -688,8 +688,8 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
             f.id for f in findings
             if not getattr(f, "suppressed", False) and getattr(f, "not_applicable", False)),
         # B-500: which optional subsystems actually RAN. Two runs taken under different
-        # scopes are not comparable — `--no-host` alone turns five checks from WARN to
-        # UNKNOWN on a machine where nothing changed — and without this the drift engine
+        # scopes are not comparable - `--no-host` alone turns five checks from WARN to
+        # UNKNOWN on a machine where nothing changed - and without this the drift engine
         # reads the operator's own choice as a regression.
         #
         # The EFFECTIVE flags off `ctx`, not the CLI's `cli_opt_outs` string list: the
@@ -710,7 +710,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         "memory": _snapshot_memory_files(ctx, capped=_mem_capped),
         "native_count": native_count,
         "ignore_hash": _ignore_hash(ctx.home),
-        # Agent Watch — connection / trust surface, so drift in what the agent is
+        # Agent Watch - connection / trust surface, so drift in what the agent is
         # joined to (MCP servers, channels, gateway bind) raises an alert.
         "mcp": _mcp_sig(ctx),
         # Rug-pull detection (RP1-RP3): per-server structured fields for fine-grained
@@ -719,7 +719,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         "channels": _channel_sig(ctx),
         "gateway_bind": _gateway_bind(ctx),
         # B-664: the approval gate on unattended shell execution. Resolved,
-        # not raw — see monitordims/_execpolicy.py for why the raw fields do
+        # not raw - see monitordims/_execpolicy.py for why the raw fields do
         # not compare meaningfully.
         "exec_policy": _exec_policy_sig(ctx),
         "plugins": _plugins_sig(ctx),
@@ -744,7 +744,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     # Re-grounded 2026-08-26, because the measurement this cited had drifted: `files_capped`
     # is still True but the window is 60 of 88 files, not 93, and B191 currently reads PASS
     # with `grade_cap_signal()` empty. The divergence is the hazard the filter holds off, not
-    # something happening right now — stated in the present tense it read as a live fact.
+    # something happening right now - stated in the present tense it read as a live fact.
     #
     # `undetermined` is a first-class dimension rather than an afterthought because on the
     # real machine it is the ONLY one of the three carrying live data: measured
@@ -759,7 +759,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         snap["behavioral_incomplete"] = bool(behavioral.get("incomplete"))
 
     # F-174: the two supply-chain subjects, both handed in by the caller for the same reason
-    # `behavioral` is — the shell owns discovery (one of them reads PATH) and this module
+    # `behavioral` is - the shell owns discovery (one of them reads PATH) and this module
     # stays a pure function of what it is given. Absent means "this run did not establish
     # it", never "there is none", and the diff arms are gated on presence accordingly.
     if isinstance(install, dict) and install:
@@ -767,7 +767,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     if isinstance(provenance, dict):
         snap["skill_provenance"] = provenance
     # F-179: the host's own startup/scheduling surface, handed in by the shell for the same
-    # reason as the two above — `hostpersist.scan` walks `/etc` and `sys.path`, which is
+    # reason as the two above - `hostpersist.scan` walks `/etc` and `sys.path`, which is
     # discovery, and this module stays a pure function of what it is given.
     if isinstance(host_persist, dict) and host_persist:
         snap["host_persist"] = host_persist
@@ -786,10 +786,10 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     # arbitrarily long run of blind snapshots (same "once True, stays True" pattern as
     # ``config_baseline == 'carried'``). It is what lets the widened blind predicate below
     # tell "openclaw.json used to be readable and just vanished" (a benign atomic-replace
-    # window — `jq ... > tmp && mv tmp openclaw.json` — a `mv openclaw.json
+    # window - `jq ... > tmp && mv tmp openclaw.json` - a `mv openclaw.json
     # openclaw.json.bak` mid-troubleshooting, or a home not yet mounted on a cron-driven
     # run) apart from "this home never had an openclaw.json at all" (a non-OpenClaw setup,
-    # or the very first run ever). Only the former is treated as blind — a user who
+    # or the very first run ever). Only the former is treated as blind - a user who
     # genuinely never configured OpenClaw must never get a permanent "Could not read
     # openclaw.json" alert, which is exactly the false alarm B-269 exists to prevent.
     prev_had_config = bool(isinstance(prev, dict) and prev.get("config_ever_seen"))
@@ -798,7 +798,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     parse_error = bool(getattr(ctx, "config_parse_error", False))
     # C-135 FIX2: collector.py defines config_parse_error = config_found and not parsed_ok,
     # so a config that is simply ABSENT this run (config_found False) leaves
-    # config_parse_error False too — B-269's original guard never fired for it, so
+    # config_parse_error False too - B-269's original guard never fired for it, so
     # _degrade_snapshot() never ran, trust_removals stayed True in diff(), and the same
     # collapsed ctx.config = {} view B-269 already knows is untrustworthy got written into
     # the baseline as fact: a full fabrication burst (skill/MCP/channel "removed", gateway
@@ -813,19 +813,19 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         # read the file stores no digest at all. Deliberately not carried forward from
         # `prev` the way _degrade_snapshot carries the config dimensions: a stale digest
         # sitting beside a fresh `ts` would assert we read the config at a time we did
-        # not — the same clean-verdict-about-an-unread-surface shape B-269 exists to
+        # not - the same clean-verdict-about-an-unread-surface shape B-269 exists to
         # prevent. An absent key reads as "no digest for this run"; a carried one reads
         # as a fact.
         digest = _config_file_digest(ctx)
         if digest:
             snap["config_file_sha256"] = digest
         # B-527: the resolved-config digest, store-only like config_file_sha256 was at
-        # C-417 — no diff() arm reads it yet, so it cannot alert. It closes the gap this
+        # C-417 - no diff() arm reads it yet, so it cannot alert. It closes the gap this
         # task exists for on its own (an $include fragment edit moves it even when the
         # root file's bytes do not), and a later phase can wire a comparison in once one
         # is wanted, the same staged shape C-417 used for config_file_sha256 itself.
         # B-527 follow-up: gated on a config having actually been READ, not merely on the
-        # helper returning something. `collector.Context.config` defaults to `{}` — a dict —
+        # helper returning something. `collector.Context.config` defaults to `{}` - a dict -
         # so on a home with no openclaw.json and no prior baseline this arm runs (that state
         # is not `config_missing_blind`, which needs `prev_had_config`) and stored
         # sha256("{}") beside an ABSENT config_file_sha256. A digest for a file nobody read
@@ -840,19 +840,19 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
             snap["config_resolved_sha256"] = resolved_digest
         # F-170: OpenClaw's own config-write journal, captured HERE rather than compared
         # live in diff(), for two reasons. It keeps `diff` a pure function of two stored
-        # snapshots — everything it concludes stays reproducible from the state file
+        # snapshots - everything it concludes stays reproducible from the state file
         # alone. And it lets the comparison run on HASHES instead of clocks: our `ts` is
         # local time while the journal's is UTC with a `Z`, so a string compare between
         # them is a silent timezone bug waiting for a user east of Greenwich.
-        # Scoped to the config file THIS audit read — see configjournal._same_config.
+        # Scoped to the config file THIS audit read - see configjournal._same_config.
         _journal = _journal_read(ctx.home, config_path=getattr(ctx, "config_path", None))
         if _journal.present:
             # The newest journaled write, as a cursor. `prev.head != curr.head` means the
             # journal advanced between runs, which is what makes "changed and reverted"
             # expressible at all.
             # Only a REAL hash. `newest_hash` returns "" when the window holds no usable
-            # record — an empty journal, a `copytruncate` rotation, every record filtered
-            # out as belonging to another config — and "" is still a str, so storing it
+            # record - an empty journal, a `copytruncate` rotation, every record filtered
+            # out as belonging to another config - and "" is still a str, so storing it
             # made a VANISHED cursor indistinguishable from an ADVANCED one. That fired a
             # false "changed and changed back" on a byte-identical config, which is the
             # exact thing this module's own docstring says rotation must never produce.
@@ -863,12 +863,12 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
             _by = _journal_find_by_hash(_journal.writes, digest) if digest else None
             if _by is not None:
                 # Attribution for THIS run's config bytes. Only the three fields that are
-                # safe to render — see configjournal.ConfigWrite on why the path and cwd
+                # safe to render - see configjournal.ConfigWrite on why the path and cwd
                 # are never carried at all.
                 snap["config_written_by"] = {
                     "ts": _by.ts, "pid": _by.pid, "argv0": _by.argv0,
                     # What this write STARTED from. Without it, attribution names the
-                    # newest write regardless of how many happened in between — so a hand
+                    # newest write regardless of how many happened in between - so a hand
                     # edit followed by any OpenClaw write handed the resulting CRITICAL
                     # alert OpenClaw's own provenance, exonerating whoever really did it,
                     # in a record that reaches the tamper-evident journal.
@@ -882,8 +882,8 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
 
     A thin shim over ``diff_with_notes``, kept because ``diff`` is public API (it is in the
     package ``__all__`` and fifteen test modules call it). Callers that need to know what
-    was NOT compared — the CLI does, so it can stop printing an unqualified all-clear over
-    unexamined ground — should call ``diff_with_notes`` instead.
+    was NOT compared - the CLI does, so it can stop printing an unqualified all-clear over
+    unexamined ground - should call ``diff_with_notes`` instead.
     """
     return diff_with_notes(prev, curr)[0]
 
@@ -893,18 +893,18 @@ def diff_with_notes(prev: dict | None, curr: dict
     """Return ``(alerts, notes)``.
 
     *alerts* are drift events, unchanged. *notes* are ``(category, sentence)`` pairs
-    recording every comparison this run DECLINED to make — see the NOTE_* constants. A note
+    recording every comparison this run DECLINED to make - see the NOTE_* constants. A note
     is never an alert: it does not describe a change, does not reach the tamper-evident
     event journal, and cannot move a score. It exists so that "no new threats" can stop
     meaning "no new threats in the parts we looked at, and silence about the rest".
     """
-    # B-270: a usable baseline is a NON-EMPTY DICT — the same predicate ``read_baseline``
+    # B-270: a usable baseline is a NON-EMPTY DICT - the same predicate ``read_baseline``
     # applies, restated here because ``diff`` is public API and a caller can hand it
     # anything. The old bare truthiness check let a truthy non-dict (``[1,2,3]``, ``42``,
     # ``"abc"``) straight through to ``prev.get("skills", {})``, which raised
     # AttributeError; because the crash preceded ``save_state`` the poisoned file was never
     # replaced, so the run failed identically forever (measured: rc=1 on three consecutive
-    # runs, state.json unchanged). An empty dict still returns no alerts, as before — but
+    # runs, state.json unchanged). An empty dict still returns no alerts, as before - but
     # the CLI no longer describes that as a clean comparison.
     if not isinstance(prev, dict) or not prev:
         # No note here: the CLI already tells absent from corrupt (BASELINE_ABSENT vs
@@ -918,7 +918,7 @@ def diff_with_notes(prev: dict | None, curr: dict
         notes.append((category, sentence))
 
     # C-418: several comparisons are gated on a SUB-key inside a dimension rather than on
-    # the dimension itself, so the `watched` manifest above cannot see them — it lists
+    # the dimension itself, so the `watched` manifest above cannot see them - it lists
     # top-level snapshot keys only. Each of these gates is individually correct and each
     # was individually invisible: a tool server gaining `exfil` in its observed surface,
     # a skill update expanding what it can do, a channel allowlist changing shape, all
@@ -938,24 +938,24 @@ def diff_with_notes(prev: dict | None, curr: dict
         opposite actions: a key ABSENT from the old baseline heals itself on the next run
         and needs nothing from the user, while a key present but of the wrong type means
         the state file is damaged and will stay damaged until it is deleted. Absent from
-        BOTH sides is neither — that surface was never recorded on this platform or in this
+        BOTH sides is neither - that surface was never recorded on this platform or in this
         setup, so there is no gap to disclose and no note.
         """
         pair = _both_dims(prev, curr, key)
         if pair is not None:
             return pair
         # ABSENT from both, not merely non-dict on both. The looser test swallowed
-        # prev-damaged + curr-absent — precisely the state whose note tells the user to
-        # delete the state file — and returned the bare all-clear over it.
+        # prev-damaged + curr-absent - precisely the state whose note tells the user to
+        # delete the state file - and returned the bare all-clear over it.
         if key not in prev and key not in curr:
             return None
         if key not in prev:
             note(NOTE_NO_PRIOR_RECORD,
-                 f"{human} had nothing to compare against — your saved record predates "
+                 f"{human} had nothing to compare against \u2014 your saved record predates "
                  f"this, and will cover it from the next run onwards.")
         else:
             note(NOTE_RECORD_DAMAGED,
-                 f"{human} could not be compared — the saved record for them is damaged. "
+                 f"{human} could not be compared \u2014 the saved record for them is damaged. "
                  f"Delete the monitor state file to start a fresh baseline.")
         return None
 
@@ -988,11 +988,11 @@ def diff_with_notes(prev: dict | None, curr: dict
     # B-511: a run whose grade was withheld has no verdict to compare. Printing
     # "Security score dropped: A 97 -> A 96." underneath the same run's own
     # "No grade yet - 3 of 5 layers did not run" was E-077's headline invariant
-    # contradicting itself out loud — and on the DEFAULT path, since C-426 made the bare
+    # contradicting itself out loud - and on the DEFAULT path, since C-426 made the bare
     # run ungraded. Absent on either side means a snapshot written before this flag was
     # recorded: read as UNGRADED rather than assumed graded, so a legacy baseline can
     # never republish a number its run declined to show. Costs one run's score
-    # comparison after the upgrade and then self-heals — the same trade the raw_score
+    # comparison after the upgrade and then self-heals - the same trade the raw_score
     # backstop below already makes for the same reason.
     _both_graded = bool(prev.get("graded")) and bool(curr.get("graded"))
     if not _both_graded:
@@ -1011,7 +1011,7 @@ def diff_with_notes(prev: dict | None, curr: dict
              "than gone.")
     if not compare_config:
         note(NOTE_CONFIG_BLIND,
-             "Your connections — tool servers, chat channels and the gateway address — "
+             "Your connections \u2014 tool servers, chat channels and the gateway address \u2014 "
              "were not compared with last time.")
     if prev_blind or curr_blind:
         note(NOTE_CONFIG_BLIND,
@@ -1021,14 +1021,14 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     # C-418 reading C-417's manifest: the GENERIC form of "your baseline predates this".
     #
-    # A release that adds a comparison opens a presence gate on every existing baseline —
+    # A release that adds a comparison opens a presence gate on every existing baseline -
     # the older snapshot simply lacks the key, the gate skips, and the screen is identical
     # to a genuine all-clear. Instrumenting each gate individually would mean a new note
     # site with every such release, and the one that got forgotten would be invisible again.
     # Comparing the recorded manifest against what this build reads covers that family at
     # once, including gates that do not exist yet.
     #
-    # TOP-LEVEL keys only, though — `watched` lists snapshot keys, so it is blind to a gate
+    # TOP-LEVEL keys only, though - `watched` lists snapshot keys, so it is blind to a gate
     # sitting on a sub-key INSIDE a dimension (a server's `surface_tool_sigs`, a skill's
     # `caps`). Those are instrumented individually further down. An earlier version of this
     # comment claimed the manifest subsumed them; it does not, and believing it would have
@@ -1037,7 +1037,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # Self-healing by construction: this run writes the current manifest, so the note
     # appears exactly once after an upgrade and never again.
     # C-441: both arms NAME what was skipped. The absent arm used to say only "this run
-    # cannot say which comparisons it was able to make" — on the one upgrade path this note
+    # cannot say which comparisons it was able to make" - on the one upgrade path this note
     # exists to serve, and the names were derivable the whole time. A baseline that predates
     # the manifest still carries its own keys, and a key this build watches that is not
     # among them is exactly a comparison that had nothing to compare against. So the two
@@ -1065,8 +1065,8 @@ def diff_with_notes(prev: dict | None, curr: dict
                  "run compares them.")
     elif not _from_manifest:
         # A pre-manifest baseline that nonetheless recorded everything this build watches.
-        # Still worth one line — the reader is owed the reason this run had to derive the
-        # answer — but it must not imply a coverage gap, because there is not one.
+        # Still worth one line - the reader is owed the reason this run had to derive the
+        # answer - but it must not imply a coverage gap, because there is not one.
         note(NOTE_NO_PRIOR_RECORD,
              "Your saved record predates coverage tracking, but it recorded everything "
              "this version watches, so nothing was skipped.")
@@ -1075,7 +1075,7 @@ def diff_with_notes(prev: dict | None, curr: dict
         unknown = sum(1 for s in (curr.get("checks") or {}).values() if s == UNKNOWN)
         alerts.append((
             "HIGH",
-            "Could not read openclaw.json this run — MCP, channel and gateway drift were "
+            "Could not read openclaw.json this run \u2014 MCP, channel and gateway drift were "
             f"NOT evaluated and {unknown} check(s) report UNKNOWN. This run covers less "
             "ground than the last full one, so its score/grade are not comparable: a "
             "higher number here means reduced coverage, not improved security. The last "
@@ -1084,7 +1084,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     elif prev_blind:
         alerts.append((
             "INFO",
-            "openclaw.json is readable again — full drift detection resumed; "
+            "openclaw.json is readable again \u2014 full drift detection resumed; "
             + ("MCP/channel/gateway state was compared against the last known-good "
                "baseline." if prev_config_usable else
                "no known-good config baseline existed (the previous run could not read it "
@@ -1098,7 +1098,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     def _skill_changed(p, c) -> bool:
         """B-267: did this skill change? Prefer the full-directory ``tree`` fingerprint.
 
-        The scanned-text ``hash`` is a strict subset of the tree — TEXT-only, capped — so
+        The scanned-text ``hash`` is a strict subset of the tree - TEXT-only, capped - so
         where the two disagree the tree is right and the hash is blind. Only when a side
         lacks ``tree`` (a legacy bare-hash snapshot, or one written before this fix) does
         the comparison fall back to the old hash, rather than fabricating a diff against a
@@ -1115,12 +1115,12 @@ def diff_with_notes(prev: dict | None, curr: dict
         toks = re.split(r"[.\-+]", s)
         return tuple((0, int(t)) if t.isdigit() else (1, t) for t in toks)
 
-    # B-304: `_both_dims` — not `_dim` on each side independently — because comparing a
+    # B-304: `_both_dims` - not `_dim` on each side independently - because comparing a
     # genuinely populated `cs` against a `ps` that only LOOKS empty (a corrupted/hand-
     # edited `skills` field coerced to {} by `_dim`) fabricated a CRITICAL "NEW skill
     # installed ... this is when malware lands" for every already-installed, unchanged
     # skill. Measured first-hand: a state.json holding `"skills": ["not", "a", "dict"]`
-    # (well-formed JSON, so `read_baseline` reports it BASELINE_OK, not BASELINE_CORRUPT —
+    # (well-formed JSON, so `read_baseline` reports it BASELINE_OK, not BASELINE_CORRUPT -
     # the top-level payload IS a usable dict, only this one field is not) reported every
     # real skill on disk as newly installed. `mcp`/`mcp_detail`/`channels`/`host` already
     # use this same guard for exactly this reason (their own docstring: "comparing a real
@@ -1131,8 +1131,8 @@ def diff_with_notes(prev: dict | None, curr: dict
     _skills_pair = pair_or_note("skills", "Installed skills")
     ps, cs = _skills_pair if _skills_pair is not None else ({}, {})
     # B-268: the skills truncation frontier on each side (see snapshot()). `ctx.installed_
-    # skills` is capped at _MAX_SKILLS and its fill order is filename order — attacker-
-    # controlled — so a flood of early-sorting skill dirs evicts real ones from the view.
+    # skills` is capped at _MAX_SKILLS and its fill order is filename order - attacker-
+    # controlled - so a flood of early-sorting skill dirs evicts real ones from the view.
     # Diffed as ground truth that produced a phantom "Skill 's299' was removed" while s299
     # sat on disk untouched (measured: 310 skills + one aaa*-named addition).
     prev_sk_capped = _frontier(prev, "skills_capped")
@@ -1153,7 +1153,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # B-694: through the shared predicate, not `int(...)` on the raw field. `int(True)`
     # is 1 and `int("49")` is 49, so a corrupted count became a confident "1 installed
     # skill(s) were NOT collected" on a run where nothing was capped. Same class as
-    # B-270 (`score`) and B-304 (`bootstrap`) right below — fixed case by case, and this
+    # B-270 (`score`) and B-304 (`bootstrap`) right below - fixed case by case, and this
     # was one of the two left. A non-number now falls back to the length of the capped
     # list, which is THIS run's own observation rather than the record's claim; a
     # recorded 0 falls back the same way it always did.
@@ -1161,7 +1161,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     _sk_capped_n = int(_recorded_capped) if _recorded_capped else len(curr_sk_capped)
     _note_skills_capped(_sk_capped_n, alerts, curr_sk_capped)
 
-    # B-304: same `_both_dims` reasoning as `skills` immediately above — a corrupted
+    # B-304: same `_both_dims` reasoning as `skills` immediately above - a corrupted
     # `bootstrap` field on one side must not make every file on the OTHER, real side read
     # as "New bootstrap file appeared". `_dim` on each side independently used to do
     # exactly that (measured: `"bootstrap": "a string"` on prev reported every current
@@ -1173,11 +1173,11 @@ def diff_with_notes(prev: dict | None, curr: dict
     # C-135 FIX1: ctx.bootstrap is keyed "<workspace-label>/<NAME>.md", where the label
     # depends on scan order plus a resolved-path de-dup (collector.py). The exact same
     # inode, with byte-identical content still read by the agent, can land under a
-    # DIFFERENT key after a benign refactor — e.g. deleting now-redundant symlinks so
+    # DIFFERENT key after a benign refactor - e.g. deleting now-redundant symlinks so
     # files resolve under their real mount label, or renaming the workspace dir and
     # updating the config to match. A bare key-set diff cannot tell that apart from a real
     # deletion. Pair each removed key with an added key carrying the IDENTICAL content
-    # hash and treat the pair as a MOVE — neither a removal nor a new file — before either
+    # hash and treat the pair as a MOVE - neither a removal nor a new file - before either
     # loop below runs. This cannot mask a genuine deletion: if identical content is still
     # present under another key, the agent is still reading it, so there is nothing left
     # to alert on either direction. (Measured separation: a benign rename pairs every
@@ -1195,23 +1195,23 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     _diff_score(_both_graded, _same_scope_flags, alerts, curr, curr_blind, note, prev, prev_blind)
 
-    # B-304: same `_both_dims` reasoning again — a corrupted `checks` field on prev must
+    # B-304: same `_both_dims` reasoning again - a corrupted `checks` field on prev must
     # not make every currently-FAILing check read as "Now FAILING" (a claim of a fresh
     # transition this run cannot actually see). `_dim` on each side independently used to
     # do exactly that (measured: `"checks": None` on prev reported every real FAIL,
     # including CRITICAL ones, as "Now FAILING" against a config that never changed).
     _checks_pair = pair_or_note("checks", "Individual check results")
     pc, cc = _checks_pair if _checks_pair is not None else ({}, {})
-    # B-500 — the transition matrix, and why each silent cell is silent.
+    # B-500 - the transition matrix, and why each silent cell is silent.
     #
     #   prev \ curr |  PASS  |  WARN  |  FAIL  | UNKNOWN | gone
     #   PASS        | silent | ALERT  | ALERT  | ALERT   | ALERT/note
     #   WARN        | silent | silent | ALERT  | ALERT*  | ALERT/note
     #   FAIL        | silent | silent | silent | ALERT*  | ALERT/note
     #   UNKNOWN     | silent | ALERT* | ALERT  | silent  | ALERT/note
-    #   absent      | silent | silent | ALERT  | silent  |   —
+    #   absent      | silent | silent | ALERT  | silent  |   -
     #
-    #   * gated on the reason, not the status — see `_na` below.
+    #   * gated on the reason, not the status - see `_na` below.
     #
     # Silent cells, each for a reason and not by omission: anything INTO PASS is an
     # improvement; WARN->WARN and FAIL->FAIL are the same verdict restated; UNKNOWN->UNKNOWN
@@ -1221,12 +1221,12 @@ def diff_with_notes(prev: dict | None, curr: dict
     #
     # Before this, only two of the twenty-five cells alerted. On the real machine 78 of 184
     # checks sit in WARN or UNKNOWN, so for 42% of the subject nothing short of a full FAIL
-    # was ever announced — and going grey is both cheaper for an attacker than going red and
+    # was ever announced - and going grey is both cheaper for an attacker than going red and
     # RAISES the displayed score, since UNKNOWN leaves the score's denominator entirely.
     #
     # `_na` / `_deg`: which UNKNOWNs are a confirmed-absent surface and which are a broken
     # check. The status alone cannot tell them apart, and treating them alike is the false
-    # alarm this arm is most likely to produce — a user configuring their first MCP server
+    # alarm this arm is most likely to produce - a user configuring their first MCP server
     # walks UNKNOWN->WARN benignly. An older baseline carries neither list, so the arms that
     # need them stand down for one run rather than guess.
     _p_na, _c_na = prev.get("checks_not_applicable"), curr.get("checks_not_applicable")
@@ -1235,11 +1235,11 @@ def diff_with_notes(prev: dict | None, curr: dict
     _deg_curr = set(curr.get("checks_degraded") or ())
     if pc and cc and not _reasons_known:
         note(NOTE_NO_PRIOR_RECORD,
-             "Checks that stopped being determinable were not compared — your saved record "
+             "Checks that stopped being determinable were not compared \u2014 your saved record "
              "does not say which of them were simply not applicable.")
 
     # B-500: comparisons whose OUTCOME is real but whose CAUSE we cannot evidence. They
-    # become coverage notes rather than alerts — see the arms below for why.
+    # become coverage notes rather than alerts - see the arms below for why.
     _checks_alerts_from = len(alerts)
     _went_dark: list = []
     _newly_visible: list = []
@@ -1249,11 +1249,11 @@ def diff_with_notes(prev: dict | None, curr: dict
     def _check_title(cid: str) -> str:
         return BY_ID[cid].title if cid in BY_ID else cid
 
-    # B-765: a version boundary is a THIRD state, not a bool — "we could not tell" must
+    # B-765: a version boundary is a THIRD state, not a bool - "we could not tell" must
     # never collapse into either "definitely the same build" or "definitely different
     # builds". `curr` always carries the field once this ships (snapshot() writes it
     # unconditionally); `prev` is the one that can lack it, and that absence IS the B-765
-    # repro itself — the very first run after upgrading across the release that adds this
+    # repro itself - the very first run after upgrading across the release that adds this
     # field. Gated on `_curr_producer` truthiness first so every hand-built-snapshot test
     # (which never sets this key on either side) leaves `_version_boundary` at None by
     # construction, not by coincidence.
@@ -1272,7 +1272,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # B-660: this was the one arm in diff() gated on neither the scope flags nor presence.
     #
     # `native_count` is written as `len(native.findings) if native else 0`, and `_num`
-    # defaults a missing key to 0 — so "the native audit did not run last time" and "the
+    # defaults a missing key to 0 - so "the native audit did not run last time" and "the
     # native audit found fewer problems last time" arrived here as the same input. Two
     # measured fabrications, both on a machine where nothing moved:
     #
@@ -1287,7 +1287,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # SAME way, and this needs the two runs to differ in how they were taken.
     #
     # Fixed the way its siblings already are, and deliberately not by changing `_num`'s
-    # default — other callers rely on 0 there. Presence on both sides, plus the same
+    # default - other callers rely on 0 there. Presence on both sides, plus the same
     # `_same_scope_flags` guard B-500 added to the check-transition arms after --no-host
     # produced "No longer determinable: Host firewall active" on an unchanged machine.
     # bool excluded for the same reason `_num` excludes it: True < 2 compares as 1, so a
@@ -1303,7 +1303,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     curr_ih = curr.get("ignore_hash", "")
     if prev_ih != curr_ih:
         alerts.append(("HIGH",
-                       "your .clawseccheckignore changed — a suppression was added/removed "
+                       "your .clawseccheckignore changed \u2014 a suppression was added/removed "
                        "(review to ensure a real hole is not hidden)."))
 
     # --- Agent Watch: connection / trust-surface drift (guarded so an old snapshot
@@ -1313,7 +1313,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # Marked by index so a journaled write can be attributed to exactly those and not to
     # skill, memory or host drift, which the same config edit did not cause.
     _config_alerts_from = len(alerts)
-    # Indices inside that span whose evidence is NOT the config file — see the RP6/RP7
+    # Indices inside that span whose evidence is NOT the config file - see the RP6/RP7
     # block below. Kept as an exclusion set rather than by narrowing the span, because the
     # trajectory-derived alerts are interleaved with config-derived ones inside the same
     # per-server loop.
@@ -1330,7 +1330,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     _chan_pair = pair_or_note("channels", "The ways your agent can be contacted")
     _diff_channels(_chan_pair, _chan_partial, alerts, compare_config)
 
-    # B-270: both sides must be STRINGS, not merely present — `cb in EXPOSED_BINDS` raises
+    # B-270: both sides must be STRINGS, not merely present - `cb in EXPOSED_BINDS` raises
     # TypeError on an unhashable (list/dict) value from a corrupted snapshot, and a
     # non-string bind is not a bind address we can reason about anyway.
     _pgb, _cgb = prev.get("gateway_bind"), curr.get("gateway_bind")
@@ -1347,7 +1347,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # allowed, a deny being lifted, or the global switch opening are all trust grants.
     #
     # Inside the config-alert span on purpose, so F-170's attribution stamps these the same
-    # way it stamps an MCP or gateway change — a config edit is what causes them.
+    # way it stamps an MCP or gateway change - a config edit is what causes them.
     #
     # DIRECTION IS THE WHOLE CALIBRATION. Only loosening is reported: an id ADDED to allow,
     # an id REMOVED from deny, `enabled` going false -> true. Tightening is the user doing
@@ -1356,7 +1356,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     #
     # MEDIUM is a ceiling, and it is the epic's constraint rather than timidity: this fleet
     # configures `plugins.entries` (three of them) and has no `allow`/`deny` at all, so the
-    # loosening arms have FIXTURE evidence only — and no HIGH or CRITICAL alert may ship on
+    # loosening arms have FIXTURE evidence only - and no HIGH or CRITICAL alert may ship on
     # fixture evidence alone. Raise it when a real config exercises it, not before.
     #
     # `entries` is INFO and separate: the installed dist documents that block as "updated by
@@ -1374,7 +1374,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # The machine's own startup and scheduling files. NOT gated on `compare_config`: this
     # surface is read from the host, so an unreadable `openclaw.json` says nothing about
     # it, and skipping it on a blind run would hide the one thing a blind run can still
-    # see. See `hostpersist.py` for what is readable and — more importantly — what is not.
+    # see. See `hostpersist.py` for what is readable and - more importantly - what is not.
     #
     # SEVERITY, and why it differs by family rather than being uniform. An entry APPEARING
     # is an execution entry point that did not exist at the last check, which is the shape
@@ -1383,7 +1383,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # are infrastructure that changes rarely and whose every line can start a process, so a
     # modification there is MEDIUM too; a shell startup file or a `.pth` is edited by
     # humans and by ordinary package managers (`pip install -e` writes a `.pth`, every
-    # version manager appends to `.bashrc`), so a modification there is INFO — recorded,
+    # version manager appends to `.bashrc`), so a modification there is INFO - recorded,
     # counted by `--brief`, and deliberately below the cron recipe's `--fail-on medium`
     # threshold, because a watch that pages on `pip install` gets switched off.
     #
@@ -1398,7 +1398,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # fabrication that the generic helper produced here. `host_persist` is CONDITIONAL: the
     # shell may hand `snapshot()` nothing, so "recorded last time, absent now" is a routine
     # state, not damage. `pair_or_note` classified exactly that as `record_damaged` and told
-    # the user *"the saved record for them is damaged. Delete the monitor state file"* —
+    # the user *"the saved record for them is damaged. Delete the monitor state file"* -
     # advice that destroys a working baseline over a scan that simply did not run. Measured,
     # not theorised. Same bespoke shape `openclaw_install` uses a few arms below, for the
     # same reason. The reverse direction (absent in the baseline, present now) IS worth a
@@ -1416,12 +1416,12 @@ def diff_with_notes(prev: dict | None, curr: dict
     _diff_host_monitors(_host_pair, alerts, note)
 
     # C-418: the sub-key gates, reported once per reason with a count. Ordered loudest
-    # first — a tool server's observed surface is the live rug-pull signature, a skill's
+    # first - a tool server's observed surface is the live rug-pull signature, a skill's
     # capability set is what an update quietly widens.
     if _mcp_surface_unknown:
         note(NOTE_UNDETERMINED,
              f"The tools actually offered to your model by {len(_mcp_surface_unknown)} "
-             f"server(s) were not compared — no session transcript was available for one "
+             f"server(s) were not compared \u2014 no session transcript was available for one "
              f"of the two runs, so a server that started offering new tools would not show.")
     if _mcp_tools_unknown:
         note(NOTE_NO_PRIOR_RECORD,
@@ -1429,7 +1429,7 @@ def diff_with_notes(prev: dict | None, curr: dict
              f"compared with last time.")
     if _mcp_pkg_unknown:
         note(NOTE_NO_PRIOR_RECORD,
-             f"Which package {len(_mcp_pkg_unknown)} server(s) launch was not compared — "
+             f"Which package {len(_mcp_pkg_unknown)} server(s) launch was not compared \u2014 "
              f"your saved record predates that detail, so a swap under a trusted name "
              f"would not show.")
     if _skill_caps_unknown:
@@ -1438,28 +1438,28 @@ def diff_with_notes(prev: dict | None, curr: dict
              f"with last time, so an update that widened them would not show.")
     if _skill_ver_unknown:
         note(NOTE_NO_PRIOR_RECORD,
-             f"Version numbers were not compared for {len(_skill_ver_unknown)} skill(s) — "
+             f"Version numbers were not compared for {len(_skill_ver_unknown)} skill(s) \u2014 "
              f"they do not declare one on both sides.")
     if _chan_partial:
         note(NOTE_NO_PRIOR_RECORD,
              f"Some settings of {len(_chan_partial)} contact channel(s) had nothing to "
-             f"compare against — they are recorded on only one of the two runs.")
+             f"compare against \u2014 they are recorded on only one of the two runs.")
     # B-500: a check that ran last time and not this time. The comparison loop walks the
     # CURRENT set only, so before this these ids were never visited at all.
     #
     # Two very different causes, told apart rather than merged. `run_all` isolates each
     # check and, on a crash or timeout, replaces the catalog id with an `ERR:<funcname>`
-    # key — so a check that blows up does not go UNKNOWN, it VANISHES and a stranger
+    # key - so a check that blows up does not go UNKNOWN, it VANISHES and a stranger
     # appears beside it. A CRITICAL FAIL that becomes a crash therefore disappeared in
     # complete silence. The scoring layer normally catches this via DEGRADED_CHECK_CAP,
     # but that cap is 49 and the real machine already scores 49, so on the host this was
     # measured on the cap could not move anything.
     #
-    # No `ERR:` key means the id simply no longer exists in this build — a catalog change
+    # No `ERR:` key means the id simply no longer exists in this build - a catalog change
     # across an upgrade. That is not an event and must not alert; it gets a note, and it
     # self-heals on the next run.
     _vanished = set(pc) - set(cc)
-    # An id can also vanish because a new ignore rule suppressed it — suppressed findings
+    # An id can also vanish because a new ignore rule suppressed it - suppressed findings
     # are excluded from the snapshot entirely. The ignore-hash change is already alerted
     # separately; attributing the disappearance to a crash on top of it would be a second,
     # false explanation for something the user just did deliberately.
@@ -1476,7 +1476,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     if _newly_visible:
         note(NOTE_UNDETERMINED,
              f"{len(_newly_visible)} check(s) began reporting a problem they could not "
-             f"determine last time — it may be new, or it may have been there unseen.")
+             f"determine last time \u2014 it may be new, or it may have been there unseen.")
 
     # ---- F-173: the behavioural layer ------------------------------------------------
     #
@@ -1486,8 +1486,8 @@ def diff_with_notes(prev: dict | None, curr: dict
     # ground. This arm ends the silence. It is deliberately asymmetric, and each asymmetry
     # is a separate decision:
     #
-    # 1. APPEARANCE is reported, DISAPPEARANCE never is. The evidence window rotates — 60
-    #    of 88 trajectory files on this machine as of 2026-08-26 — so a pattern leaving it
+    # 1. APPEARANCE is reported, DISAPPEARANCE never is. The evidence window rotates - 60
+    #    of 88 trajectory files on this machine as of 2026-08-26 - so a pattern leaving it
     #    is not evidence it stopped happening. "T1 cleared" would be a resolution we
     #    invented; a real one shows up as a check status change in `checks`, which is
     #    compared elsewhere.
@@ -1496,13 +1496,13 @@ def diff_with_notes(prev: dict | None, curr: dict
     #    unless `--verbose` (see report._not_compared_lines, and its measured reason), so a
     #    detector that fired would have been INVISIBLE on a default run. INFO is below the
     #    HIGH default of the C-419 exit-code threshold, so this still cannot page anyone,
-    #    and it never touches the score — the F-154 cap-only discipline is preserved
+    #    and it never touches the score - the F-154 cap-only discipline is preserved
     #    because nothing here reaches `scoring.compute`.
     #
     #    Two channels it DOES reach, named here because an earlier version of this list
     #    read as exhaustive while naming only what the alert cannot do. `record_events`
     #    applies no severity filter, so an INFO behavioural alert is appended to
-    #    `events.jsonl` — which is hash-chained, so it is permanent — and `render_brief`
+    #    `events.jsonl` - which is hash-chained, so it is permanent - and `render_brief`
     #    counts every journal entry, so it shows up in `--brief`'s "N event(s) recorded"
     #    line. Verified by running it: an INFO baseline-reference entry lands in the journal
     #    and is counted by `--brief` as "none above MEDIUM". Neither is a defect; both are
@@ -1511,7 +1511,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # 3. It stands down when either side was blind. Structural, not measured: T3's
     #    "declared" capability set is read out of the config, so a collapsed `ctx.config`
     #    could in principle widen "observed minus declared" and fabricate a firing. The
-    #    experiment was run and could NOT discriminate — with `ctx.config = {}` the real
+    #    experiment was run and could NOT discriminate - with `ctx.config = {}` the real
     #    machine returns byte-identical verdicts, because its T3 is UNKNOWN in both views.
     #    An inconclusive experiment is not a licence to drop the guard.
     _c_fired = curr.get("behavioral_fired")
@@ -1520,12 +1520,12 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     # ---- F-174: the OpenClaw installation itself --------------------------------------
     #
-    # B33 and C4 read `meta.lastTouchedVersion` — a string the agent writes about itself.
+    # B33 and C4 read `meta.lastTouchedVersion` - a string the agent writes about itself.
     # This compares the artifact on disk instead.
     #
     # **Wholesale appearance or disappearance is never an alert**, and this is not caution
     # for its own sake: the install is located from PATH, and a cron job's PATH really is
-    # minimal. Verified — `env -i PATH=/usr/bin:/bin` cannot find the openclaw the same
+    # minimal. Verified - `env -i PATH=/usr/bin:/bin` cannot find the openclaw the same
     # machine resolves interactively. So the very schedule this feature exists to serve
     # would otherwise have reported "OpenClaw was uninstalled" on its first cron run and
     # "OpenClaw appeared" the first time someone ran it by hand. It gets a note.
@@ -1539,12 +1539,12 @@ def diff_with_notes(prev: dict | None, curr: dict
     # `trust_removals` for the same B-269 reason every other collected dimension does: the
     # workspace roots are config-derived, so a blind run sees a subset.
     # NOT `pair_or_note`. That helper's absent-from-curr branch says "the saved record for
-    # them is damaged. Delete the monitor state file to start a fresh baseline." — which is
+    # them is damaged. Delete the monitor state file to start a fresh baseline." - which is
     # false here and whose remedy destroys the user's whole drift history. This key is
     # absent whenever THIS run found no install records: no lock file in any workspace
     # searched, an unreadable or oversized one, or a blind run whose only workspace came
     # from the config. The saved record is fine; the current run is the one that came up
-    # empty. An independent pass found this by reading the two branches side by side —
+    # empty. An independent pass found this by reading the two branches side by side -
     # `openclaw_install` right above got bespoke, correct absence handling and its sibling
     # was routed through a generic helper carrying the opposite meaning.
     _prov = _both_dims(prev, curr, "skill_provenance")
@@ -1554,7 +1554,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     #
     # Everything here is derived from the two STORED snapshots, so it stays reproducible
     # from the state file alone, and every comparison is over hashes rather than clocks
-    # (our `ts` is local, the journal's is UTC — a string compare between them is a
+    # (our `ts` is local, the journal's is UTC - a string compare between them is a
     # timezone bug waiting for a user east of Greenwich).
     _p_digest, _c_digest = prev.get("config_file_sha256"), curr.get("config_file_sha256")
     _p_head, _c_head = prev.get("config_journal_head"), curr.get("config_journal_head")

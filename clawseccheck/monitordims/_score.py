@@ -1,4 +1,4 @@
-"""The `score` / `grade` / `raw_score` dimensions — the audit's own verdict, over time.
+"""The `score` / `grade` / `raw_score` dimensions - the audit's own verdict, over time.
 
 A score is only comparable against a score taken over the same SCOPE, so the arm reads
 `raw_score_scope` and stands down rather than reporting a drop that is really a change in
@@ -40,7 +40,7 @@ def _diff_score(
     in what was measured.
     """
     # B-269: a partially-evaluated run is not comparable to a full one in EITHER direction
-    # — a blind run's score is inflated by UNKNOWN-exclusion, so the run after it would
+    # - a blind run's score is inflated by UNKNOWN-exclusion, so the run after it would
     # report a fabricated "score dropped" as the real checks come back. The coverage
     # alert above says so explicitly instead.
     # `_same_scope_flags`: a score taken with --no-host is not the same measurement as
@@ -58,14 +58,14 @@ def _diff_score(
         c_score = _num_or_none(curr, "score")
         if p_score is None or c_score is None:
             note(NOTE_RECORD_DAMAGED,
-                 "The security score was not compared — one of the two records does not "
+                 "The security score was not compared \u2014 one of the two records does not "
                  "hold a number there.")
         elif c_score < p_score:
             alerts.append(("HIGH", f"Security score dropped: {prev.get('grade')} {p_score} "
                                    f"-> {curr.get('grade')} {c_score}."))
         else:
             # B-273: the displayed score is capped by the most severe open FAIL
-            # (scoring.py FAIL_CAPS — CRITICAL pins it at 49), so on any config already
+            # (scoring.py FAIL_CAPS - CRITICAL pins it at 49), so on any config already
             # holding a CRITICAL FAIL it is a constant and the comparison above can never
             # fire however much worse the config gets. Measured on a copy of a real home:
             # gateway auth token->none (B32 PASS->WARN) AND a standing allow-always
@@ -82,13 +82,13 @@ def _diff_score(
             # C-135/FIX1: ALSO guarded on both sides recording the IDENTICAL raw_score_scope
             # (see _raw_score_scope). raw_score's denominator is exactly the scored/
             # non-UNKNOWN/non-suppressed check set that run, and that set grows every time a
-            # release ships new checks — so two snapshots straddling an upgrade compare
+            # release ships new checks - so two snapshots straddling an upgrade compare
             # different denominators even though nothing on disk moved. Measured on the real
             # ~/.openclaw: extending the finding list by two new WARN checks alone (no config
             # change) fell raw 83 -> 82 while the capped score stayed 49 -> 49, and this was
-            # the ONLY alert produced — a false, unactionable "review the check-level alerts"
-            # pointing at alerts that correctly do not exist. A scope mismatch — including an
-            # absent hash from a pre-this-fix snapshot — skips the comparison for one run,
+            # the ONLY alert produced - a false, unactionable "review the check-level alerts"
+            # pointing at alerts that correctly do not exist. A scope mismatch - including an
+            # absent hash from a pre-this-fix snapshot - skips the comparison for one run,
             # same self-healing idiom as the presence guard above.
             # B-694: through the shared predicate, not a re-derived `isinstance(x, int)`.
             # `isinstance(True, int)` is True, so the hand-rolled check let a corrupted
@@ -100,28 +100,28 @@ def _diff_score(
             #
             # B-691: the DECISION moved to `_shared.raw_backstop`, unchanged. `--trend`
             # makes the same temporal claim over the same two fields and had none of the
-            # rules above — it printed a flat arrow across a run that gained four HIGH
+            # rules above - it printed a flat arrow across a run that gained four HIGH
             # FAILs. Keeping the rules here and restating them there is the shape B-689,
             # B-692 and B-693 each turned out to be. The note TEXTS stay here: they address
             # a monitor user, and the trend addresses its own reader.
             # C-469: the two extra keys let `raw_backstop` compare the exact `earned`
             # figure (not just the rounded `raw_score` percentage) when both snapshots
-            # recorded it — see that function's docstring for why the weight-aware scope
+            # recorded it - see that function's docstring for why the weight-aware scope
             # hash above is what makes doing so sound.
             verdict, p_raw, c_raw = raw_backstop(
                 prev, curr, "raw_score_scope", "raw_score",
                 "raw_score_earned", "raw_score_total")
             # C-418: this backstop is the ONLY thing that catches posture worsening once an
             # open FAIL has pinned the displayed score, so a run where it cannot fire is a
-            # run with a real hole in it — and the hole was previously invisible.
+            # run with a real hole in it - and the hole was previously invisible.
             # Presence BEFORE equality: `same_scope` is also False when the key is simply
             # absent, and reporting that as "this version checks a different set of things"
-            # states a specific fact the code has no evidence for — an older baseline
+            # states a specific fact the code has no evidence for - an older baseline
             # carries no scope hash at all, which says nothing about whether the check set
             # moved.
             if verdict == RAW_NO_SCOPE:
                 note(NOTE_NO_PRIOR_RECORD,
-                     "The underlying pass-rate was not compared — your saved record does "
+                     "The underlying pass-rate was not compared \u2014 your saved record does "
                      "not say which checks its figure covered, so the two numbers cannot "
                      "be lined up.")
             elif verdict == RAW_SCOPE_MOVED:
@@ -131,7 +131,7 @@ def _diff_score(
                      "your baseline did.")
             elif verdict == RAW_NO_FIGURE:
                 note(NOTE_NO_PRIOR_RECORD,
-                     "The underlying pass-rate was not compared — your saved record does "
+                     "The underlying pass-rate was not compared \u2014 your saved record does "
                      "not carry that figure.")
             elif verdict == RAW_DEGRADED:
                 alerts.append((
@@ -146,8 +146,8 @@ def _diff_score(
 
 def _raw_score_scope(findings) -> str:
     """C-135/FIX1: a hash of exactly the check ids ``scoring.compute()`` folded into THIS
-    run's ``raw_score`` denominator — scored, not UNKNOWN/ARCHIVE, and not suppressed
-    unless it is a FAIL — PAIRED WITH each one's own weight. Mirrors ``scoring.compute()``'s
+    run's ``raw_score`` denominator - scored, not UNKNOWN/ARCHIVE, and not suppressed
+    unless it is a FAIL - PAIRED WITH each one's own weight. Mirrors ``scoring.compute()``'s
     own ``scored`` selection by hand (kept in sync deliberately rather than imported, since
     ``scoring.py`` is a sibling module this fix does not touch).
 
@@ -156,7 +156,7 @@ def _raw_score_scope(findings) -> str:
     snapshots straddling an upgrade compare different denominators even though nothing on
     disk moved. Measured first-hand on the real ``~/.openclaw``: extending the finding
     list by two new WARN checks alone (no config change) dropped raw 83 -> 82 while the
-    displayed score stayed 49 -> 49 (already pinned by an open CRITICAL FAIL) — and the
+    displayed score stayed 49 -> 49 (already pinned by an open CRITICAL FAIL) - and the
     ONLY alert the old code produced was "Security posture degraded ... Review the
     check-level alerts in this run", whose own closing sentence points at check-level
     alerts that correctly do not exist. This campaign alone moved the catalog from 143 to
@@ -164,28 +164,28 @@ def _raw_score_scope(findings) -> str:
 
     C-469: WEIGHT joined the hashed pair after an adversarial pass on that task's first
     attempt found the same class of hole one layer down. An id-only scope hash says two
-    runs scored the same CHECKS, never that they scored them the same WAY — a check whose
+    runs scored the same CHECKS, never that they scored them the same WAY - a check whose
     SEVERITY is data-dependent (e.g. B171, CRITICAL vs HIGH depending on which
     `commands.*` surface is enabled) can retune between two runs with the id set
     byte-identical. Concretely: B9 MEDIUM(3)->LOW(1) staying PASS both runs, and B12
     LOW(1)->MEDIUM(3) staying FAIL both runs, hold `total` at 3+1=4 in both runs (so a
     naive `total` equality check does not catch it either) while `earned` falls 3->1 with
-    NO check's status ever changing — a false "posture degraded" pointing at check-level
+    NO check's status ever changing - a false "posture degraded" pointing at check-level
     alerts that do not exist. Hashing `id:weight` pairs makes a lone retune move the scope
     hash itself, so it reads as RAW_SCOPE_MOVED (a denominator that moved) rather than a
-    fabricated RAW_DEGRADED — and it is what makes comparing `earned` directly sound at
+    fabricated RAW_DEGRADED - and it is what makes comparing `earned` directly sound at
     all: identical scope now PROVES identical per-check weight, so an `earned` fall behind
     it can only come from a check's own status moving. See `raw_backstop`'s earned/total
     branch (`monitordims/_shared.py`).
 
     The sibling PASS->FAIL arm below already carries the matching guard for exactly this
     reason (``pc.get(cid) == PASS``, chosen so "a check newly added by an upgrade, absent
-    from the previous snapshot, cannot fire") — that reasoning had not been carried to
+    from the previous snapshot, cannot fire") - that reasoning had not been carried to
     ``raw_score``, whose own presence guard only covered a snapshot with NO ``raw_score``
     key at all (self-healing after one run, but blind to every subsequent upgrade). This
     hash extends the same protection: ``diff()`` trusts the raw-score backstop only when
-    both snapshots recorded the IDENTICAL scope; a mismatch — including an absent hash
-    from a pre-this-fix snapshot — skips the comparison for one run rather than fabricate
+    both snapshots recorded the IDENTICAL scope; a mismatch - including an absent hash
+    from a pre-this-fix snapshot - skips the comparison for one run rather than fabricate
     a verdict against a moved denominator, the same self-healing, absent-key-is-a-no-op
     idiom every other dimension in this module already uses.
     """
@@ -199,7 +199,7 @@ def _raw_score_scope(findings) -> str:
         and (not getattr(f, "suppressed", False)
              or f.status in FAIL_WEIGHT_STATUSES)
     ]
-    # C-469: `id:weight`, not just `id` — see the docstring. `WEIGHT[f.severity]` mirrors
+    # C-469: `id:weight`, not just `id` - see the docstring. `WEIGHT[f.severity]` mirrors
     # exactly what `scoring.compute()` sums into `total` for this same finding.
     pairs = sorted(f"{f.id}:{WEIGHT[f.severity]}" for f in scored)
     return _h(",".join(pairs))

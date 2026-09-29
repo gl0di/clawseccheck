@@ -30,7 +30,7 @@ from use, and this notice records that use and the claim.
 ## What you may do without asking
 
 - **Say what your software is.** "Built on ClawSecCheck", "compatible with ClawSecCheck",
-  "a fork of ClawSecCheck" — accurate, descriptive references are fine, and are called
+  "a fork of ClawSecCheck" - accurate, descriptive references are fine, and are called
   nominative fair use.
 - **Write about it.** Articles, talks, reviews, comparisons, tutorials, criticism. Favourable
   or not; no permission is required and none is implied by a mention.

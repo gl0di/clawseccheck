@@ -4,22 +4,22 @@ history.jsonl and events.jsonl are hash-chained: an append reads the *last*
 chain_hash, then appends the new line(s) computed from it. Two processes racing
 that read-then-append window can each read the same "last" hash and both append,
 leaving the journal with two lines that both legitimately point at the same
-prev_hash — a false "chain BROKEN" from verify_chain's point of view even though
+prev_hash - a false "chain BROKEN" from verify_chain's point of view even though
 neither writer did anything wrong.
 
 ``journal_lock`` closes that race with a POSIX advisory ``flock`` (``fcntl``) on a
-dedicated *sidecar* lock file (``<target>.lock``), never the data file's own fd —
+dedicated *sidecar* lock file (``<target>.lock``), never the data file's own fd -
 append() reopens the data file's fd fresh every call (via ``os.open``) and rotation
 (C-164) replaces its inode outright, so a lock tied to the data file's fd would not
 serialize across either. A sidecar path is stable across both.
 
 Degrades to a **no-op** whenever locking cannot be trusted to help: no ``fcntl``
-(non-POSIX platforms — most notably Windows), or any failure acquiring/releasing
-the lock. It never raises and never blocks the append from happening — worst case
+(non-POSIX platforms - most notably Windows), or any failure acquiring/releasing
+the lock. It never raises and never blocks the append from happening - worst case
 without a working lock is the pre-existing (rare, already-documented) race, not a
 new failure mode. A pre-existing ``.lock`` file left over from a crashed process is
 NOT "held" from ``flock``'s point of view; a fresh process re-acquires it fine
-(that is exactly the POSIX advisory-lock contract — locks are process-lifetime, not
+(that is exactly the POSIX advisory-lock contract - locks are process-lifetime, not
 filesystem-persistent).
 
 Pure stdlib, no network.
@@ -45,7 +45,7 @@ def journal_lock(target: "str | Path"):
     """Advisory-lock the journal at *target* for the duration of the ``with`` block.
 
     Takes an exclusive ``flock`` on ``<target>.lock`` (created owner-only, 0600,
-    symlink-safe — same primitives as the rest of the local store). Never raises:
+    symlink-safe - same primitives as the rest of the local store). Never raises:
     on any failure to prepare/acquire the lock, or when ``fcntl`` is unavailable,
     this is a no-op context manager (the critical section still runs, just without
     the extra serialization). Always releases (``LOCK_UN`` + close) in ``finally``.
@@ -53,7 +53,7 @@ def journal_lock(target: "str | Path"):
     B-870: *target* is expanded (``~``/``~user``) here, once, before the sidecar
     path is built. Every other ``journal_lock`` caller already expands its own
     path before calling in (history.py, ledger.py, runstore.py, sbom_runs.py,
-    incidentstore.py, monitorstore.py — all do ``Path(path).expanduser()``
+    incidentstore.py, monitorstore.py - all do ``Path(path).expanduser()``
     first), so this is a no-op for them. The one caller that didn't,
     ``cli.py``'s ``--monitor`` path, passed the literal default string
     ``"~/.clawseccheck/state.json"`` straight through: the lock sidecar landed
@@ -61,7 +61,7 @@ def journal_lock(target: "str | Path"):
     directory instead of the real state file's directory. That both littered
     the launch directory with a bogus ``~`` tree and meant the lock was never
     actually the shared resource two concurrent ``--monitor`` runs contend
-    over — expanding here, centrally, closes both.
+    over - expanding here, centrally, closes both.
     """
     if not _HAS_FCNTL:
         yield
@@ -77,7 +77,7 @@ def journal_lock(target: "str | Path"):
         fcntl.flock(fd, fcntl.LOCK_EX)
         locked = True
     except OSError:
-        pass  # degrade to no-op — never block/crash the append
+        pass  # degrade to no-op - never block/crash the append
 
     try:
         yield

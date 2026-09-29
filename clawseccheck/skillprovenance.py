@@ -1,27 +1,27 @@
-"""F-174 (B) — where each installed skill came from, as a time series.
+"""F-174 (B) - where each installed skill came from, as a time series.
 
 Read-only, stdlib only, no network. A LEAF: it imports nothing from this package. It renders
-no verdict — `monitor.py` is the consumer, the same leaf->consumer split `sockets.py`->B340,
+no verdict - `monitor.py` is the consumer, the same leaf->consumer split `sockets.py`->B340,
 `deptree.py`->B349, `configjournal.py`->B77 and `openclawdist.py` already use.
 
 **What is on disk**, verified first-hand on the maintainer's machine rather than assumed:
 
-* `<workspace>/.clawhub/lock.json` — `{"version": 1, "skills": {"<name>": {...}}}`, 27 KB,
+* `<workspace>/.clawhub/lock.json` - `{"version": 1, "skills": {"<name>": {...}}}`, 27 KB,
   one record per installed skill carrying `version`, `installedAt` (epoch ms),
   `registry`, `artifact.{kind,sha256,integrity}`, `skillFile.{path,sha256}` and a
   `verification` block (`ok`, `decision`, plus card/artifact/provenance/security detail).
-* `<skill>/.clawhub/origin.json` — the same facts written beside the skill itself, under
+* `<skill>/.clawhub/origin.json` - the same facts written beside the skill itself, under
   slightly different names: `slug`, `installedVersion`, `installedAt`, `artifact`,
   `skillFile`. No `verification` block.
 
 B181 already reads these digests for a point-in-time verdict. What was missing is the time
 series: `installedVersion` moving, `installedAt` moving, `artifact.sha256` changing. That is
-how an update is *detected* — the tier of the pre-update story that works with no
+how an update is *detected* - the tier of the pre-update story that works with no
 cooperation from the user, because it needs nothing but the next scheduled run.
 
 **Why both files, when a second one is there at all.** `origin.json` is a real and
-documented artifact — `openclaw skills verify` reads it to check an installed version against
-the registry it came from — but the docs describe it as present only "when origin metadata
+documented artifact - `openclaw skills verify` reads it to check an installed version against
+the registry it came from - but the docs describe it as present only "when origin metadata
 exists", and it is **optional**. Measured on this machine, 2026-08-22: the workspace lock
 holds 19 skills, exactly one of them has a `skills/<name>/` directory at all, and **zero**
 `origin.json` files exist anywhere under `~/.openclaw`. So `_corroborate` returns None for
@@ -30,18 +30,18 @@ every skill here and there is no second witness to disagree with.
 An earlier version of this paragraph claimed the two files had been "measured on the real
 machine" agreeing exactly, version and both digests. That is not the state of this machine and
 the sentence is not repeated. The field stays, because when the file IS there the reasoning
-holds — the two are written by the same installer at the same moment, so one of them moving
-alone is not something an ordinary update produces — and because `corroborated` is already
-three-state, so "no second witness" and "the witnesses disagree" never collapse into one. Same reasoning as F-170's config journal — a second witness earns its keep
+holds - the two are written by the same installer at the same moment, so one of them moving
+alone is not something an ordinary update produces - and because `corroborated` is already
+three-state, so "no second witness" and "the witnesses disagree" never collapse into one. Same reasoning as F-170's config journal - a second witness earns its keep
 by agreeing until it does not. The corroboration is recorded as a flag, never as a verdict:
 this module says the two sources differ, and nothing about why.
 
 **Nothing here is a secret**, but nothing here is a path either: the skill NAME goes into
 the snapshot and the on-disk location does not, because a drift baseline reaches the event
-journal and any report a user pastes into an issue. That holds for `winner_root` too — it
+journal and any report a user pastes into an issue. That holds for `winner_root` too - it
 identifies WHICH root's record won, so a later run can tell "the same record" from "a
 different one", and it does so through `_root_identity`, which returns a literal name for the
-three `WORKSPACE_DIRS` constants and a digest for everything else — **including anything else
+three `WORKSPACE_DIRS` constants and a digest for everything else - **including anything else
 under home**. The earlier rule was "literal for anything under home, digest otherwise", on the
 reasoning that a path under home is one of OpenClaw's own fixed names. It is not: a
 config-declared `~/.openclaw/client-acme-private`, and every `workspace-<agent id>` B-610
@@ -70,7 +70,7 @@ MAX_LOCK_BYTES = 4 * 1024 * 1024
 # one subject. The rule is not a matter of taste: **it must equal the union of the fields
 # the consumer's guarded comparisons read**, or a comparison ends up gated on a flag that
 # never looked at the field it is about to render a verdict on. That is exactly how
-# `corroborated` came to be missing here — two workspaces holding byte-identical lock
+# `corroborated` came to be missing here - two workspaces holding byte-identical lock
 # records but disagreeing `origin.json` files produced `ambiguous=False`, and
 # `monitor.diff_with_notes` then raised "the two install records no longer agree" about
 # whichever record first-wins happened to pick.
@@ -91,8 +91,8 @@ CONFLICT_FIELDS = ("version", "artifact_sha256", "skill_file_sha256", "corrobora
 # overwrite a sighted one wholesale. Flat keys get the blind-run protection that already
 # exists, for free and correctly.
 #
-# `::` is safe as a separator against the real data — none of the 19 skill names in this
-# machine's lock file contains `@`, `/` or `:` — and `_is_record_key` additionally requires the
+# `::` is safe as a separator against the real data - none of the 19 skill names in this
+# machine's lock file contains `@`, `/` or `:` - and `_is_record_key` additionally requires the
 # prefix to be a `WORKSPACE_DIRS` literal or a `_root_identity` digest, so an ordinary name can
 # never be mistaken for one. A skill literally named `workspace::foo` could collide with the
 # real `foo` in `workspace`; that is absurd enough to state rather than defend against.
@@ -100,7 +100,7 @@ KEY_SEP = "::"
 # One key PER searched root, not a single `::roots` list. `monitor._degrade_snapshot` carries a
 # blind run's dimension forward with `{**prev, **curr}` over top-level keys: a dict entry is
 # unioned, a LIST VALUE under one key is replaced wholesale. With a single list, one blind run
-# erased every config-derived root from the searched set while the records it guards survived —
+# erased every config-derived root from the searched set while the records it guards survived -
 # and the guard that reports a planted record ("was this root searched last time?") silently
 # stopped firing. Measured by an independent pass: control alerts MEDIUM, after one blind run
 # it is silent. The first version of this claimed flat keys got that protection "for free and
@@ -122,7 +122,7 @@ def _is_record_key(key: str, names=None) -> bool:
     `evil`. Without it an attacker-chosen name made the tool invent a subject: an independent
     pass got `changed_skills` to return `evil`, a skill that exists nowhere, and the same
     phantom into an alert's text. An earlier comment here called the collision "absurd enough
-    to state rather than defend against" — that was the wrong call, because the failure is not
+    to state rather than defend against" - that was the wrong call, because the failure is not
     a collision between two real things, it is a fabricated one.
     """
     if not isinstance(key, str) or KEY_SEP not in key or key.startswith(ROOT_MARK):
@@ -152,17 +152,17 @@ class SkillOrigin:
     # True when more than one workspace holds an install record under this NAME and they
     # do not agree on CONFLICT_FIELDS. Which one the agent actually loads is not something
     # this tool can determine, so the consumer must not compare the chosen record's digests
-    # across runs — see the stand-down in monitor.diff_with_notes.
+    # across runs - see the stand-down in monitor.diff_with_notes.
     ambiguous: bool = False
     # How many workspace roots held a record under this name. For WORDING only: the
     # consumer says "3 records found" rather than a bare "more than one".
     n_records: int = 1
-    # WHICH root's record won, as a location-free identity (`_root_identity`) — IDENTITY,
+    # WHICH root's record won, as a location-free identity (`_root_identity`) - IDENTITY,
     # never content. This is the field that decides whether an ambiguous record may still
     # be compared across runs.
     #
     # `ambiguous` alone cannot decide it: it is a bool, and two runs both reporting True
-    # does NOT prove they are about the same winning record — one root can be added while
+    # does NOT prove they are about the same winning record - one root can be added while
     # another is removed, and first-wins would elect a different one with the flag never
     # moving.
     #
@@ -171,7 +171,7 @@ class SkillOrigin:
     # ATTACKER ADDS A FILE. Measured end-to-end through the real CLI: a skill downgraded
     # 2.0.0 -> 1.0.0 with a swapped artifact digest in the winning record, plus one decoy
     # `<workspace>/.clawhub/lock.json` that never wins, alerted before the set-keyed
-    # stand-down and went silent after it — and stayed silent on every later run, because
+    # stand-down and went silent after it - and stayed silent on every later run, because
     # by then the tampered record IS the baseline. Silence bought for one file.
     #
     # The winner's identity answers what the guard is actually asking: is the record about
@@ -211,14 +211,14 @@ class ProvenanceScan:
     skills: dict = None
     capped: bool = False
     notes: tuple = ()
-    # (skill name, root identity) -> SkillOrigin, for EVERY root that held a record — not just
+    # (skill name, root identity) -> SkillOrigin, for EVERY root that held a record - not just
     # the elected winner. This is what lets the consumer compare a record with itself.
     records: dict = None
     # Every root this run looked in, as identities, INCLUDING ones that do not exist. A root
     # that was searched and found absent is not the same fact as a root that was never
     # searched, and the consumer needs the difference: without it, a decoy planted in a
     # workspace directory that did not exist last run reads as "somewhere we had not looked"
-    # — benign — when it is exactly the thing worth reporting.
+    # - benign - when it is exactly the thing worth reporting.
     roots_searched: tuple = ()
 
     def __post_init__(self):
@@ -274,40 +274,40 @@ def _root_identity(home: Path, root: Path) -> str:
     "Location-free" is meant literally, and the first version was not. It returned the raw
     relative path for ANY root under *home*, on the reasoning that those "are OpenClaw's own
     fixed directory names, already public constants in this module, and they carry nothing
-    personal". That is true of the three `WORKSPACE_DIRS` entries and of nothing else — a
+    personal". That is true of the three `WORKSPACE_DIRS` entries and of nothing else - a
     config-declared `~/.openclaw/client-acme-private` put its user-chosen directory name into
     `winner_root`, which reaches the drift baseline, the event journal, and any report a user
     pastes into an issue. So the literal form is now allowed only for the names that really
     are public constants; everything else is digested, inside home or not.
 
-    **Resolved first.** `workspace_roots` de-duplicates on the resolved path — its comment
+    **Resolved first.** `workspace_roots` de-duplicates on the resolved path - its comment
     explains why: "a config workspace that is a symlink to a default one is the same
-    directory" — while this digested the unresolved string, so the same directory reached
+    directory" - while this digested the unresolved string, so the same directory reached
     through a symlink produced two identities. `_prov_comparable` keys its stand-down on this
     field, so that disagreement manufactured the disclosed-but-blind state out of an edit that
     changed nothing real. Reproduce it by digesting a directory and a symlink to it: before the
     fix the two strings differed, because only one of them had been through `resolve()`. The
-    specific hex is deliberately not quoted — it is a digest of an absolute path and no later
+    specific hex is deliberately not quoted - it is a digest of an absolute path and no later
     reader could re-derive it.
 
     The digest is per-machine by construction (it is taken over an absolute path) and needs to
     be nothing more: it is only ever compared against the same machine's previous run. It hides
     the name, not the directory: against a guessed candidate it is a confirmation oracle, since
-    the input space is small. That is enough for the property claimed here — the string carries
-    no location — and is not claimed to be more.
+    the input space is small. That is enough for the property claimed here - the string carries
+    no location - and is not claimed to be more.
 
     **The migration cost, stated as what it is.** Changing this changes `winner_root`, which
     `_prov_comparable` keys its stand-down on. Non-ambiguous records never reach that
     comparison and the three literals do not move, so the only affected shape is an ambiguous
     record whose winner is a config-declared root. For that shape the first run after the
-    change stands down — and a stand-down is **not a deferred alert**: the arm `continue`s past
+    change stands down - and a stand-down is **not a deferred alert**: the arm `continue`s past
     all three alert branches, and by the next run the baseline already holds the new record, so
     a content swap landing inside that window is never reported at all. `monitor.py` spells the
     same shape out for the case it was written for. The window is one run, except after a
     BLIND run, which carries the legacy value forward through `_degrade_snapshot`'s merge, so
     it lasts until the first sighted run that sees the root again.
 
-    A one-time migration — accepting a baseline's legacy literal as matching its digest — was
+    A one-time migration - accepting a baseline's legacy literal as matching its digest - was
     considered and not done here: the obvious encoding of it puts the raw name back into the
     record this change exists to keep it out of. Left as a decision rather than a silent
     trade-off.
@@ -329,17 +329,17 @@ def _root_identity(home: Path, root: Path) -> str:
 # `resolveAgentWorkspaceDir` rules. Duplicated from `collector.py` rather than imported, for
 # the same reason `WORKSPACE_DIRS` is: this module is a LEAF and importing the collector would
 # invert the layering. `tests/test_b610_derived_agent_workspaces.py` pins the two derivations equal on
-# a battery of configs, not just the constant — a duplicated *rule* rots more quietly than a
+# a battery of configs, not just the constant - a duplicated *rule* rots more quietly than a
 # duplicated list.
 DEFAULT_AGENT_ID = "main"
 
 
 # Spelled with BOTH cases instead of `re.IGNORECASE`, deliberately. JS's `/i` without
-# the `u` flag does not case-fold non-ASCII, while Python's IGNORECASE does — so
-# `re.IGNORECASE` accepted U+0130 `İ`, U+0131 `ı` and U+017F `ſ` as valid ASCII
+# the `u` flag does not case-fold non-ASCII, while Python's IGNORECASE does - so
+# `re.IGNORECASE` accepted U+0130 (I with dot above), U+0131 (dotless i) and U+017F (long s) as valid ASCII
 # letters and returned them unsanitised. Measured against the real dist function over a
 # 65,504-codepoint BMP sweep: those three were the ONLY divergences, and an id like
-# `İstanbul` is a perfectly ordinary Turkish agent name whose workspace we would then
+# `<U+0130>stanbul` is a perfectly ordinary Turkish agent name whose workspace we would then
 # have kept looking for in the wrong directory.
 _JS_TRIM_CHARS = (
     "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
@@ -370,21 +370,21 @@ def _normalize_agent_id(value) -> str:
     **There are SIX copies of this function in the dist and they do not agree.** Two
     (`monitor.account-*.js`, `telegram-ingress-spool-*.js`) are a bare
     `trim().toLowerCase() || DEFAULT_AGENT_ID`; the other four sanitise. The first version of
-    this port transcribed a bare one — found by grepping for the first definition rather than
-    by following what the caller binds — and asserted in its own docstring that the product
+    this port transcribed a bare one - found by grepping for the first definition rather than
+    by following what the caller binds - and asserted in its own docstring that the product
     "does not sanitise the value as a path segment". The opposite is true, and the function's
     own comment says so. The copy that matters is the one in the same module as
     `resolveAgentWorkspaceDir` (`config-utils-*.js`), which is the sanitising one.
 
     Getting this wrong left the hole open for ordinary ids: `Work Laptop` becomes
     `work-laptop`, so OpenClaw uses `workspace-work-laptop` while we derived
-    `workspace-work laptop` and read nothing. Measured end to end — `installed_skills == {}`
+    `workspace-work laptop` and read nothing. Measured end to end - `installed_skills == {}`
     against a control of `{'evil': ...}`. It also closed a hazard by accident: a sanitised id
     can no longer contain a path separator, so a derived root cannot escape the state dir
     through the id at all.
 
     Note `VALID_ID_RE` is tested against the TRIMMED original (case-insensitively) while the
-    value returned is the lowercased one — an id that is already valid is never sliced.
+    value returned is the lowercased one - an id that is already valid is never sliced.
     """
     # `String.trim()`, not `str.strip()`: Python strips \x1c-\x1f and \x85 which JS keeps,
     # and keeps \ufeff which JS strips. Only observable when the difference exposes an
@@ -490,13 +490,13 @@ def workspace_roots(home: Path, config: "dict | None" = None, *,
     """Every workspace directory to look in, deduplicated, existing ones only.
 
     *config* may add roots (`agents.defaults.workspace`, `agents.list[].workspace`) and can
-    only ever ADD them — the same invariant `monitor._SHRINKABLE_DIMENSIONS` documents and
+    only ever ADD them - the same invariant `monitor._SHRINKABLE_DIMENSIONS` documents and
     depends on. That is why this dimension belongs in the shrinkable group: a run that could
     not read the config sees a SUBSET, never a superset, so a disappearance on a blind run
     is untrustworthy while an addition or a content change is still real evidence.
 
     `searched` (a list) receives the identity of every root this call CONSIDERED, whether or
-    not it exists on disk — the return value carries only the ones that do. The difference is
+    not it exists on disk - the return value carries only the ones that do. The difference is
     load-bearing for B-541: a lock file appearing in a directory that did not exist last run
     must read as "a record appeared where we looked and found none", not as "somewhere new we
     had not searched before", or a decoy is bought with one `mkdir`.
@@ -515,7 +515,7 @@ def workspace_roots(home: Path, config: "dict | None" = None, *,
         # B-610: the two rules OpenClaw applies to an agent with no explicit workspace.
         extra.extend(Path(w).expanduser() for w in _derived_agent_workspaces(config))
     # A RELATIVE workspace string is resolved against *home*, never against the process's
-    # working directory — matching `collector._config_workspace_dirs` (B-161), which is the
+    # working directory - matching `collector._config_workspace_dirs` (B-161), which is the
     # established precedent for exactly this key and says so in its own docstring. The first
     # version used a bare `expanduser()`, so a relative path stayed CWD-relative and running
     # the same check from a different directory read a different workspace: an independent
@@ -564,7 +564,7 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
     capped = False
 
     searched: "list[str]" = []
-    # NOT `records` — that name is already the lock file's own skills map further down,
+    # NOT `records` - that name is already the lock file's own skills map further down,
     # and the collision silently merged the two, putting bare skill names into what is
     # supposed to be a (name, root)-keyed map.
     per_root: dict = {}
@@ -596,7 +596,7 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
                 skill_file_sha256=skill_file,
                 # Built for the rival too, not just the winner. Corroboration is one of the
                 # CONFLICT_FIELDS, so establishing it costs one bounded read per DUPLICATE
-                # record — and skipping it is what let two workspaces with identical locks
+                # record - and skipping it is what let two workspaces with identical locks
                 # and disagreeing origin.json files pass as one unambiguous subject.
                 corroborated=_corroborate(root, name, rec),
             )
@@ -609,17 +609,17 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
             if won is None:
                 skills[name] = entry
             elif won.conflict_tuple() != entry.conflict_tuple():
-                # FIRST root wins — but winning is not enough on its own, and the first
+                # FIRST root wins - but winning is not enough on its own, and the first
                 # attempt at this fix stopped there and was broken again by the next pass.
                 #
                 # The history is worth keeping because it shows the shape of the mistake.
                 # Originally this was LAST-wins, so merely adding `agents.list[].workspace`
                 # to openclaw.json changed which of two same-named records won and the diff
-                # read the swap as "the skill was replaced with different content" — a false
+                # read the swap as "the skill was replaced with different content" - a false
                 # HIGH from an ordinary config edit. First-wins with the default workspaces
                 # searched first fixed the default-vs-config case. It did NOT fix ordering
                 # among config roots (adding an agent to `agents.list` flipped the winner
-                # again), and `workspace_roots` now sorts those — but sorting only makes the
+                # again), and `workspace_roots` now sorts those - but sorting only makes the
                 # choice stable, not correct.
                 #
                 # The honest answer is that when two workspaces hold different records under
@@ -637,7 +637,7 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
         origin.n_records = len(ids)
         # The FIRST identity, because the merge above is first-wins: the root that
         # contributed `skills[name]` is the root that appended `ids[0]`. Not `sorted(ids)`
-        # and not a digest over all of them — the consumer needs to know WHICH record it is
+        # and not a digest over all of them - the consumer needs to know WHICH record it is
         # looking at, and only the winner's identity answers that.
         origin.winner_root = ids[0] if ids else ""
     if capped:
@@ -650,7 +650,7 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
 def _corroborate(root: Path, name: str, rec: dict) -> "bool | None":
     """Does the skill's own `origin.json` agree with the workspace lock file?
 
-    None when there is no `origin.json` to ask — a skill installed before that file existed,
+    None when there is no `origin.json` to ask - a skill installed before that file existed,
     or installed by hand. Reported as "no second witness", never as disagreement.
 
     Compared on the two digests and the version only. `installedAt` is deliberately left

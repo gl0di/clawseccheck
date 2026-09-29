@@ -2,7 +2,7 @@
 
 Helpers, regexes and constants reused across two or more topic modules (or by
 sibling modules via the clawseccheck.checks aggregator). Depends only on the
-layer-1 modules (catalog/collector/...) and stdlib — never on a topic module.
+layer-1 modules (catalog/collector/...) and stdlib - never on a topic module.
 Moved verbatim from the former single-file checks.py; no logic changes.
 """
 from __future__ import annotations
@@ -27,12 +27,12 @@ from ..collector import (
     limit_hits_for,
 )
 # _escape_embedded_header_lines lives in collector.py (the sole legitimate emitter of
-# the "# file: <name>" header convention) — reused here so MCP tool descriptions get
-# the identical defense (B-305/C-135 round 2, Finding 2 — see _mcp_tool_texts below).
+# the "# file: <name>" header convention) - reused here so MCP tool descriptions get
+# the identical defense (B-305/C-135 round 2, Finding 2 - see _mcp_tool_texts below).
 from ..collector import _escape_embedded_header_lines  # noqa: F401
 # Pure re-exports (B-265): these three moved DOWN into collector.py so Layer-1 skill
 # discovery can share one self-identity oracle with vet_skill. They stay importable from
-# here — `checks/_vet.py` and the aggregator both do `from ._shared import _is_own_source`
+# here - `checks/_vet.py` and the aggregator both do `from ._shared import _is_own_source`
 # (§3.1-a: no name that is importable today may stop being importable).
 from ..collector import (  # noqa: F401
     _OWN_ENGINE_MARKERS,
@@ -92,10 +92,10 @@ def _username_safe_path(path) -> str:
     so a Finding's ``detail``/``fix`` prose never carries the operator's username (B-757).
 
     The plain-prose sibling of ``invocation._display_path``, which does the identical
-    substitution but additionally shell-quotes the remainder — right for a command line,
+    substitution but additionally shell-quotes the remainder - right for a command line,
     wrong here: a quoted path mid-sentence reads as literal quote characters in a "Why:"
     line. Not reused directly for that reason, and not imported from ``invocation.py``
-    into a check module regardless — invocation.py is a leaf `command_prefix()`/CLI-facing
+    into a check module regardless - invocation.py is a leaf `command_prefix()`/CLI-facing
     module, and duplicating this narrow piece keeps the check layer independent of it.
 
     Unlike ``report._credential_surface_rel`` (the other existing precedent for this
@@ -106,24 +106,24 @@ def _username_safe_path(path) -> str:
     leaking through that specific channel).
 
     Falls back to the resolved path unchanged if ``Path.home()`` cannot be determined
-    (no HOME set, e.g. a stripped-down cron environment) — never raises.
+    (no HOME set, e.g. a stripped-down cron environment) - never raises.
 
-    Only calls ``.resolve()`` — which walks the filesystem, ``lstat``-ing each
-    ancestor to follow symlinks — when *path* actually exists. Some callers (B136)
+    Only calls ``.resolve()`` - which walks the filesystem, ``lstat``-ing each
+    ancestor to follow symlinks - when *path* actually exists. Some callers (B136)
     pass a path parsed out of a THIRD PARTY config file, describing a location that
     need not exist on the machine running this audit at all (every fixture/test path
     is a synthetic example, never present on disk). Resolving a nonexistent path is
     still well-defined on POSIX in principle (``strict=False`` just appends whatever
-    doesn't exist, unchanged) — but on macOS, an absolute path's first component can
+    doesn't exist, unchanged) - but on macOS, an absolute path's first component can
     be ``/home``, which is a live *autofs* trigger (``/etc/auto_master`` -> the
     ``auto_home`` map), not an inert missing directory the way it is on Linux.
-    Touching it via ``lstat`` — which is exactly what the ``.resolve()`` walk does —
+    Touching it via ``lstat`` - which is exactly what the ``.resolve()`` walk does -
     invokes ``automountd``, so the very same input path can render differently (or,
     in the worst case, block) depending on what that triggers, breaking the
     cross-platform finding-fingerprint manifest (C-433-style). Skipping the real
     filesystem walk for anything not already known to exist sidesteps that
-    trigger entirely while leaving the genuine local-path case — the one this
-    helper exists for — untouched.
+    trigger entirely while leaving the genuine local-path case - the one this
+    helper exists for - untouched.
     """
     try:
         p = Path(path)
@@ -149,7 +149,7 @@ def _detail_path(value, home) -> str:
     rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
 
     ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
-    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
+    ``.clawseccheckignore`` keys a per-finding suppression on that hash - so an absolute
     scan-root path baked into a detail silently orphans that suppression the moment the
     workspace or the scanned skill moves, and it leaks the reporter's directory layout
     into any report they share. The audited root is printed once in the report header
@@ -178,7 +178,7 @@ def _perms_loose(ctx: Context) -> bool:
     """True only on POSIX when the config file is group/world-readable.
 
     Windows uses NTFS ACLs, not POSIX mode bits, so st_mode is not meaningful
-    there — we never raise a false 'world-readable' finding on Windows.
+    there - we never raise a false 'world-readable' finding on Windows.
     """
     if not _is_posix() or ctx.config_mode is None:
         return False
@@ -191,13 +191,13 @@ def _group_has_other_members(gid: int, owner_uid: int) -> "bool | None":
     Read-only, stdlib-only (``grp``/``pwd``), never shells out, never touches the
     network. A file's owning group can gain a member two ways: an explicit
     ``gr_mem`` entry in ``/etc/group``, or another user whose PRIMARY group
-    (``pw_gid`` in ``/etc/passwd``) is *gid* — both are checked.
+    (``pw_gid`` in ``/etc/passwd``) is *gid* - both are checked.
 
     Returns:
-        True  — at least one other user is a member (explicit or primary-group).
-        False — the group has no members besides the file's owner (a "singleton"
-                group) — group-write is not actually exploitable by anyone else.
-        None  — membership could not be determined (non-POSIX, ``grp``/``pwd``
+        True  - at least one other user is a member (explicit or primary-group).
+        False - the group has no members besides the file's owner (a "singleton"
+                group) - group-write is not actually exploitable by anyone else.
+        None  - membership could not be determined (non-POSIX, ``grp``/``pwd``
                 unavailable, or the gid/uid is unresolvable). Callers must treat
                 this as "unknown" and NOT downgrade a finding on this basis.
     """
@@ -235,13 +235,13 @@ def _dir_replaceable_by_others(path: Path) -> "str | None":
     Mirrors C5's ``_writable_kind`` (``checks/_capability.py``) so the two agree on what
     "someone else could swap this code" means:
 
-    * a STICKY directory (``/tmp``, mode 1777) is never flagged — the sticky bit blocks
+    * a STICKY directory (``/tmp``, mode 1777) is never flagged - the sticky bit blocks
       cross-owner rename/delete, so it is not a replace vector. This is why "the target is
       under /tmp" is NOT on its own a finding: a 0700 directory inside /tmp is as private
       as one in the user's home, and treating the location as the signal would key a
       verdict on a path string rather than on an actual privilege;
     * group-write is only reported when the owning group has, or may have, a member other
-      than the owner (``_group_has_other_members``) — a user-private group is not an
+      than the owner (``_group_has_other_members``) - a user-private group is not an
       exposure, and B-127 already paid for that lesson;
     * non-POSIX hosts return None. NTFS ACLs are not POSIX mode bits, and inventing a
       verdict from ``st_mode`` on Windows would be fabrication.
@@ -275,7 +275,7 @@ def _file_readable_by_others(path: Path) -> "str | None":
 
     The read-side sibling of ``_dir_replaceable_by_others``, same rules: POSIX only, and
     group-read is only reported when the owning group has (or may have) a member other
-    than the owner, so a user-private group — the default on most Linux distributions —
+    than the owner, so a user-private group - the default on most Linux distributions -
     is not reported as an exposure. Used where a file may hold a secret; a 0644/0664 mode
     on a user-private-group box is the distro default and not, on its own, a leak.
     """
@@ -306,11 +306,11 @@ def _loopback_ip(host) -> bool:
     parse the literal, fold an IPv4-mapped IPv6 address down to its IPv4 form
     (``normalizeIpv4MappedAddress``, ip-BvvIlSgO.js:1048-1052), then ask whether the
     result is in the loopback range. So the whole of ``127.0.0.0/8`` counts, not just
-    ``127.0.0.1`` — which matters on real hosts, not just in theory: Debian/Ubuntu map
+    ``127.0.0.1`` - which matters on real hosts, not just in theory: Debian/Ubuntu map
     the machine's own hostname to ``127.0.1.1`` in ``/etc/hosts`` and systemd-resolved
     listens on ``127.0.0.53``.
 
-    PYTHON 3.9 vs 3.12 — why the unmapping is written out instead of leaning on
+    PYTHON 3.9 vs 3.12 - why the unmapping is written out instead of leaning on
     ``.is_loopback`` alone. ``IPv6Address.is_loopback`` DISAGREES across the versions
     this project supports, verified on both interpreters:
 
@@ -319,17 +319,17 @@ def _loopback_ip(host) -> bool:
                                 if ipv4_mapped is not None: return ipv4_mapped.is_loopback`)
             3.12.3  -> False   (the 3.12 property is just `return self._ip == 1`)
 
-    Folding through ``.ipv4_mapped`` FIRST — which exists and behaves identically on
-    both — makes the verdict byte-identical on 3.9 and 3.12. Relying on the bare
+    Folding through ``.ipv4_mapped`` FIRST - which exists and behaves identically on
+    both - makes the verdict byte-identical on 3.9 and 3.12. Relying on the bare
     property would have made an IPv4-mapped loopback bind read as local on the CI floor
     and as remote on a modern interpreter: the same config, two answers.
 
     Non-literals (``localhost``, a profile-enum name, "") return False here; they are
     handled by the literal members of :data:`LOOPBACK`. Non-canonical forms
     (``127.1``, ``127.0.0.01``) raise in ``ipaddress`` on both interpreters checked
-    (3.9.25 / 3.12.3) and so return False, which matches the vendor — its
+    (3.9.25 / 3.12.3) and so return False, which matches the vendor - its
     ``isLoopbackIpAddress`` also parses canonical literals only
-    (``parseCanonicalIpAddress``) — and errs toward "not proven local".
+    (``parseCanonicalIpAddress``) - and errs toward "not proven local".
 
     One bounded caveat, stated rather than silently assumed: ``ipaddress`` only began
     REJECTING leading-zero octets partway through the 3.9 series, so on a 3.9 older
@@ -357,10 +357,10 @@ class _LoopbackHostSet(frozenset):
     ``check_control_plane_mutation``, ``check_discovery_mdns_mode``,
     ``_gateway_remote_exposure_reason``/RISK-20; URL hosts in ``check_outbound_proxy``,
     ``check_provider_baseurl``, ``_mcp_url_is_local``), and every one of them asks the
-    same question in the same words — ``host in LOOPBACK``. An exact-match set answered
+    same question in the same words - ``host in LOOPBACK``. An exact-match set answered
     that question wrongly for all of ``127.0.0.0/8`` except ``127.0.0.1``, and the two
     URL call sites had each independently patched around it with a local
-    ``host.startswith("127.")``, while the gateway call sites had not — so the same
+    ``host.startswith("127.")``, while the gateway call sites had not - so the same
     address got opposite verdicts depending on which check looked at it. Fixing the
     predicate at the single point every caller already funnels through removes that
     class of drift instead of asking eleven call sites, and every future one, to
@@ -416,7 +416,7 @@ def parse_bind_host(value) -> str:
     # Bare wildcard / known special values without colons
     if s in {"::", "0.0.0.0", "*"}:
         return s
-    # host:port (IPv4 or hostname) — exactly one colon
+    # host:port (IPv4 or hostname) - exactly one colon
     if s.count(":") == 1:
         return s.split(":", 1)[0]
     # Bare IPv6 address with multiple colons (no brackets, no port).
@@ -433,15 +433,15 @@ SECRET_KEY_RE = re.compile(r"(password|secret|token|api[_-]?key|apikey|bottoken)
 
 
 # C-358: the npm dependency-tree blind spot, declared rather than left silent. _mcp.py's
-# plugin content scan already discloses its own (stronger, name-pruned) exclusion —
+# plugin content scan already discloses its own (stronger, name-pruned) exclusion -
 # "coverage: node_modules/ (third-party npm deps) excluded from the content scan"
 # (checks/_mcp.py, _PLUGIN_SKIP_DIRS). Neither the installed-skill path (B13/vet_skill)
-# nor B42 prune node_modules/ by name — a skill's dependency tree is walked as ordinary
+# nor B42 prune node_modules/ by name - a skill's dependency tree is walked as ordinary
 # skill content, capped like everything else (collector.py's _MAX_FILES_PER_SKILL /
-# _MAX_BYTES_PER_SKILL truncation already surfaces honestly as its own UNKNOWN when hit —
-# that is NOT this gap). The real gap: the tree is never analysed AS a dependency tree —
+# _MAX_BYTES_PER_SKILL truncation already surfaces honestly as its own UNKNOWN when hit -
+# that is NOT this gap). The real gap: the tree is never analysed AS a dependency tree -
 # no lockfile reconciliation, no per-package lifecycle-hook review. These two notes are
-# evidence-only (appended to Finding.evidence, never to detail) — they must never move a
+# evidence-only (appended to Finding.evidence, never to detail) - they must never move a
 # verdict, grade, or finding id.
 NPM_DEPTREE_HOOK_COVERAGE_NOTE = (
     "coverage: install-lifecycle hooks in the installed dependency tree (node_modules/) "
@@ -449,7 +449,7 @@ NPM_DEPTREE_HOOK_COVERAGE_NOTE = (
 )
 NPM_DEPTREE_SKILL_COVERAGE_NOTE = (
     "coverage: a skill's dependency tree is scanned as ordinary files, not analysed as a "
-    "dependency tree — no lockfile reconciliation, no per-package lifecycle-hook review"
+    "dependency tree \u2014 no lockfile reconciliation, no per-package lifecycle-hook review"
 )
 
 
@@ -460,7 +460,7 @@ SECRET_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_-]{30,}"),
     # C-226: the value is captured in group(1) so callers that need to distinguish a
     # pure SecretRef indirection (e.g. "${NAME}") from a real plaintext secret can
-    # inspect just the value — see _is_secret_reference below. Adding the group does
+    # inspect just the value - see _is_secret_reference below. Adding the group does
     # not change what this pattern matches (group(0)/start()/end() are unaffected),
     # so existing .sub()/.search() callers (logsafe.redact, logscan.py) are unaffected.
     re.compile(r"(?:password|secret|api[_-]?key|token)\s*[:=]\s*['\"]?([^\s'\"]{8,})", re.I),
@@ -468,19 +468,19 @@ SECRET_PATTERNS = [
     # tests/test_b01.py (SECRET_PATTERNS[0]/[2]/[4]) stay correct.
     #
     # Grounding (Golden Rule #4): the `clh_` prefix is documented by the installed ClawHub
-    # CLI itself — `clawhub login --token clh_...` in its README (clawhub@0.22.0). The CLI
+    # CLI itself - `clawhub login --token clh_...` in its README (clawhub@0.22.0). The CLI
     # performs NO client-side length/charset validation of the token: `dist/cli/authToken.js`
     # only reads `cfg?.token` and `dist/schema/schemas.js` types it as a bare `"string?"`.
-    # So the suffix matcher below is deliberately generous rather than a claimed format —
+    # So the suffix matcher below is deliberately generous rather than a claimed format -
     # over-matching only costs an extra redaction, while under-matching would let a real
     # publish-capable token through our own output.
     #
     # Why this belongs in the shared detector list and not only in logsafe's redaction-only
     # extras: a ClawHub token grants publish rights over the user's own skills, so a copy of
     # one sitting in an OpenClaw config/bootstrap file is exactly the plaintext-secret state
-    # B1 exists to flag — a detection gap, not just a redaction gap. No capturing group, so
+    # B1 exists to flag - a detection gap, not just a redaction gap. No capturing group, so
     # `_pattern_hits_real_secret` treats it like the other concrete literal formats
-    # (sk-ant-…/AKIA…/AIza…) and fires on any match; a `${VAR}` indirection cannot collide
+    # (sk-ant-.../AKIA.../AIza...) and fires on any match; a `${VAR}` indirection cannot collide
     # with a `clh_`-prefixed literal.
     re.compile(r"clh_[A-Za-z0-9_-]{8,}"),
 ]
@@ -488,7 +488,7 @@ SECRET_PATTERNS = [
 
 # C-226: OpenClaw 2026.7.1 added secret-by-reference config values
 # (SecretInput = string | SecretRef{source, provider, id}) so a value need not be a
-# plaintext secret at all — our detectors must not FAIL/WARN on the indirection
+# plaintext secret at all - our detectors must not FAIL/WARN on the indirection
 # itself. Grounded against the installed OpenClaw 2026.7.1 dist
 # (dist/types.secrets-*.d.ts + types.secrets-OocW4TQ1.js):
 #   ENV_SECRET_REF_ID_RE       = /^[A-Z][A-Z0-9_]{0,127}$/
@@ -497,7 +497,7 @@ SECRET_PATTERNS = [
 #   LEGACY_SECRETREF_ENV_MARKER_PREFIX          = "secretref-env:" (+ ID, case-sensitive)
 #   LEGACY_DOUBLE_UNDERSCORE_ENV_MARKER_PREFIX  = "__env__:" (+ ID, case-sensitive)
 # The structured `{source, provider, id}` SecretRef object form is a dict, never a
-# string, so _secret_paths (below) already skips it — it only ever flags STRING
+# string, so _secret_paths (below) already skips it - it only ever flags STRING
 # values under a secret-shaped key. No handling needed here for that shape.
 _SECRET_REF_ENV_ID = r"[A-Z][A-Z0-9_]{0,127}"
 
@@ -509,7 +509,7 @@ _SECRET_REFERENCE_RE = re.compile(
 
 def _is_secret_reference(value: str) -> bool:
     """True only when *value*, after ``.strip()``, is EXACTLY one OpenClaw SecretRef
-    indirection shorthand — never a substring or a prefix of something longer, so any
+    indirection shorthand - never a substring or a prefix of something longer, so any
     real secret material appended (or prepended) to a reference shape still counts as
     a plaintext secret (C-226 adversarial requirement: the exclusion must stay narrow).
     """
@@ -520,7 +520,7 @@ def _is_secret_reference(value: str) -> bool:
 
 # F-180/B-666: moved here VERBATIM from checks/_config.py so `_trifecta_leg_sources`
 # (this leaf) can ask whether a file carries a real secret without importing a
-# Layer-2 topic module — _config.py imports them back from here, so C015 and A1 now
+# Layer-2 topic module - _config.py imports them back from here, so C015 and A1 now
 # share ONE definition of "this text contains a plaintext secret" instead of A1
 # proxying for it with a directory name.
 # C015 mirrors logsafe's additional secret token shapes so the home-file scan catches
@@ -540,7 +540,7 @@ _C015_EXTRA_SECRET_PATTERNS = [
     # quote in between) never matches identity/device-auth.json or devices/paired.json
     # style credential objects. This mirrors that same pattern for the quoted-JSON-key
     # shape, scoped to key names that only carry live credential/grant material
-    # (password/secret/api[_-]key/*token/privateKey*) — not a general JSON-value scan.
+    # (password/secret/api[_-]key/*token/privateKey*) - not a general JSON-value scan.
     # `\w*token` (not just `token`) also covers accessToken/refreshToken-style keys
     # confirmed under identity/device-auth.json's and devices/paired.json's "tokens"
     # object.
@@ -562,7 +562,7 @@ def _pattern_hits_real_secret(patterns, text: str) -> bool:
     (sk-ant-.../AKIA.../AIza...) that can never collide with `$NAME`/`${NAME}`/
     legacy-marker syntax, so any match on those fires immediately. Patterns WITH a
     capturing group (the generic ``keyword[:=]value`` shapes) have that captured
-    value checked against ``_is_secret_reference`` before counting as a hit — via
+    value checked against ``_is_secret_reference`` before counting as a hit - via
     ``finditer`` over every match, not just the first, so a real secret elsewhere in
     the same text still fires even when an earlier match of the SAME pattern is a
     pure reference (a decoy reference in one field must never mask a real secret in
@@ -588,25 +588,25 @@ def _c015_has_secret(text: str) -> bool:
 # Extended set covers npm/pypi token files, netrc, Docker/k8s/gcloud creds, browser
 # cookies, and crypto wallet paths (Electrum / Exodus).
 # B-144: the browser-name co-occurrence for the Cookies alternative is now MANDATORY
-# (was optional) — a bare "Cookies" mention matches any ordinary discussion of HTTP
+# (was optional) - a bare "Cookies" mention matches any ordinary discussion of HTTP
 # session cookies (a networking/privacy tool's documentation is full of these), not just
 # the intended signal (a browser's on-disk Cookies credential-store FILE, e.g.
 # `~/Library/Application Support/Google/Chrome/Default/Cookies`). Confirmed empirically
 # against a real skill (clawstealth, a privacy/networking tool) whose extensive HTTP-
-# cookie discussion — with no browser name anywhere nearby — fed a false cross-skill
+# cookie discussion - with no browser name anywhere nearby - fed a false cross-skill
 # cred+exfil co-occurrence finding once its full text became scannable (B-144 follow-up).
 #
 # F-124/E-044 layer-fix: moved here VERBATIM from checks/_content.py so logscan.py (a
-# Layer-1 leaf) can reuse it without importing a Layer-2 topic module — _content.py now
+# Layer-1 leaf) can reuse it without importing a Layer-2 topic module - _content.py now
 # imports it back from here like every other cross-topic name.
 #
 # B-976: same missing exclusion B-898 (ea6db77d) fixed for skillast.py's AST-level
-# `_CRED_PATH_RE` — `.ssh/id_[a-z0-9]+` matched a PUBLIC-key filename too (id_rsa.pub,
+# `_CRED_PATH_RE` - `.ssh/id_[a-z0-9]+` matched a PUBLIC-key filename too (id_rsa.pub,
 # id_ed25519.pub, an OpenSSH cert id_rsa-cert.pub), since nothing excluded the
 # `.pub`/`-cert.pub` suffix. A public key is meant to be shared (uploaded to a git host,
 # handed to a key-provisioning flow), not a credential leak, so a skill's own prose
 # documenting exactly that flow (mentioning the pubkey filename near a network verb)
-# false-positived this SHARED regex's several consumers — up to and including a same-line
+# false-positived this SHARED regex's several consumers - up to and including a same-line
 # CRITICAL "secret/credential exfiltration" verdict in check_installed_skills (B13) when
 # the mention and the upload verb share a line, or a HIGH "split-stage" finding via
 # `_has_cross` when they sit on different lines. Same negative-lookahead discipline as
@@ -620,21 +620,21 @@ _CRED_RE = re.compile(
     r"\bCookies\b[^\n]{0,60}(?:Chrome|Firefox|Safari|Brave|Edge)|"
     r"(?:Chrome|Firefox|Safari|Brave|Edge)[^\n]{0,60}\bCookies\b|"
     r"Electrum[^\n]{0,40}wallets?|Exodus[^\n]{0,40}wallets?|"
-    # C-198: real default on-disk crypto-wallet stores — Geth/go-ethereum's keystore dir
+    # C-198: real default on-disk crypto-wallet stores - Geth/go-ethereum's keystore dir
     # and the Solana CLI's default keypair path (both well-known, documented paths, not
-    # fabricated — grounded the same way as the .aws/.kube/.config/gcloud entries above).
+    # fabricated - grounded the same way as the .aws/.kube/.config/gcloud entries above).
     r"\.ethereum/keystore|\.config/solana(?:/id\.json)?|"
-    # E-065/C-323: same widening as skillast.py's _CRED_PATH_RE/_SH_CRED_FILE_RE — a
+    # E-065/C-323: same widening as skillast.py's _CRED_PATH_RE/_SH_CRED_FILE_RE - a
     # process's own environment (procfs), the K8s service-account bearer token mount,
     # and the Docker/Swarm secrets mount, all read by the HF-incident reproduction.
     #
     # B-425: the K8s mount below is one fully-specified FILE that is always the bearer
     # token itself, so it stays a bare match. The other two additions broke the
-    # discipline every OTHER entry in this regex already follows — a specific
+    # discipline every OTHER entry in this regex already follows - a specific
     # credential-bearing FILENAME (`.ssh/id_[a-z0-9]+`, `.aws/credentials`), never a
     # bare directory or a content-agnostic diagnostic path. `/run/secrets/[^/\s"']+`
     # matched ANY file under the Docker/Swarm secret mount (a TLS CA cert, a license
-    # file — not just an actual secret), and a bare `/proc/*/environ` mention alone
+    # file - not just an actual secret), and a bare `/proc/*/environ` mention alone
     # treated "read my own environment" as inherently a credential access. Confirmed
     # false-FAIL via B63 (`_has_outbound_exfil`, checks/_content.py): a skill reading a
     # Docker-mounted TLS CA cert (`/run/secrets/registry_ca.pem`) and asking not to
@@ -643,9 +643,9 @@ _CRED_RE = re.compile(
     # narrowed `_B63_SECRET_TERM_RE`'s bare `.ssh`/`.aws` substrings to actual
     # credential-bearing filenames: `/run/secrets/` now requires the filename itself to
     # look secret-shaped (same noun set `_B63_SECRET_TERM_RE`, checks/_content.py, uses
-    # — duplicated rather than imported: this module is a Layer-1 leaf and _content.py
+    # - duplicated rather than imported: this module is a Layer-1 leaf and _content.py
     # is Layer-2), and a bare `/proc/*/environ` mention now requires one of those same
-    # nouns within 60 chars either side — mirroring skillast.py's AST-level
+    # nouns within 60 chars either side - mirroring skillast.py's AST-level
     # CRED_EXFIL_FLOW/SHELL_CRED_EXFIL, which already require an actual
     # credential-derived value reaching a sink, not just path presence. A genuine
     # `/run/secrets/db_password` or `/run/secrets/api_key` read is unaffected.
@@ -663,15 +663,15 @@ _CRED_RE = re.compile(
 )
 
 
-# Exfil transports — same set used for both same-line and cross-skill detection.
+# Exfil transports - same set used for both same-line and cross-skill detection.
 # B-144: discord.com/api/webhooks and api.telegram.org/bot are DUAL-USE notification
-# hosts (see B-122's _SKILL_NOTIFY_HOST_RE in _vet.py) — a skill's own self-notification
+# hosts (see B-122's _SKILL_NOTIFY_HOST_RE in _vet.py) - a skill's own self-notification
 # bot is their single most common legitimate use. R1/B-122 already built a dedicated,
 # taint-aware discriminator for exactly these two hosts (CRITICAL only when an unrelated
 # secret or local file-read reaches the same request; a bare mention is WARN) and folded
 # it into check_installed_skills as its own finding. But _EXFIL_RE is a SHARED pattern
 # also consumed by the same-line rule (_has_cred_exfil_outside_fence) and the cross-skill
-# co-occurrence rule (_has_cross, below) — R1 never touched those two, so a skill that
+# co-occurrence rule (_has_cross, below) - R1 never touched those two, so a skill that
 # merely mentions a credential-shaped path AND its own notify host ANYWHERE (zero taint/
 # proximity requirement for the cross-skill case) still FAILs via this second path. Since
 # the dedicated B-122 discriminator already covers the genuinely-tainted case, these two
@@ -688,7 +688,7 @@ _CRED_RE = re.compile(
 # "post" alone). Both narrowings were retracted on C-135 grounds: this pattern is
 # SHARED by 15+ consumers across _vet.py/_content.py/_config.py/_lifecycle.py/
 # logscan.py/trajaudit.py, and several of them (B13's same-line cred+exfil rule, its
-# cross-skill split-stage sibling) have NO independent floor of their own — narrowing
+# cross-skill split-stage sibling) have NO independent floor of their own - narrowing
 # the shared pattern silenced those consumers as a side effect, and each round's fix
 # for one silenced consumer revealed another. The real false positive is B63-only,
 # so round 3 restores this pattern to its original, unnarrowed form (see git history
@@ -708,7 +708,7 @@ _EXFIL_RE = re.compile(
 
 
 # C-211: the HOST-only leg of the B13 "paste / exfiltration host" crit signal, moved here
-# (verbatim) so it can be reused outside skill-content scanning too — B166 (checks/_mcp.py)
+# (verbatim) so it can be reused outside skill-content scanning too - B166 (checks/_mcp.py)
 # matches it against an MCP server's own command/args, a different data source than B13's
 # skill-content blob. Deliberately narrower than _EXFIL_RE above: no generic curl/wget/
 # base64 keywords, only known drop-point HOSTNAMES, since an MCP server's argv commonly
@@ -772,17 +772,17 @@ _KNOWN_EXFIL_HOST_RE = _build_known_exfil_host_re()
 # for why) so logscan.py (a Layer-1 leaf) can reuse it without importing trajaudit.py.
 #
 # B-157 (see trajaudit.py's skill_indicators()): this regex ALONE is permissive by
-# design — `[\w./~+-]*` is zero-or-more on both sides, so it matches a bare dictionary
+# design - `[\w./~+-]*` is zero-or-more on both sides, so it matches a bare dictionary
 # word ("secret", "password", "tokens") with no path separator at all, not just a real
 # path. trajaudit.py's own consumer filters that out by requiring a "/" in the match
 # before treating it as a real secret-path indicator. logscan.py (F-124's class 4,
-# env_compromise_ioc) does NOT apply that same filter — it only requires co-occurrence
-# with _EXFIL_RE on the same line — so a line that merely DISCUSSES a password/secret in
+# env_compromise_ioc) does NOT apply that same filter - it only requires co-occurrence
+# with _EXFIL_RE on the same line - so a line that merely DISCUSSES a password/secret in
 # prose alongside an unrelated exfil-transport word (curl/webhook/...) can still produce
 # a same-line match here. Confirmed in practice: ClawSecCheck's own report text ("...no
 # egress allowlist...outbound tools (send/webhook/exec)...System-prompt/secret leak...")
 # recorded as trajectory tool-output content is exactly this shape. Accepted as a known
-# residual for Phase 1 (advisory/scored=False, WARN-only, never FAILs) — a future
+# residual for Phase 1 (advisory/scored=False, WARN-only, never FAILs) - a future
 # precision pass on logscan.py's class 4 could adopt the same "/"-required discipline.
 _SECRET_PATH_RE = re.compile(
     r"[\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\w./~+-]*", re.I
@@ -808,12 +808,12 @@ def correlation_indicators(installed_skills):
     """Map each HIGH-SPECIFICITY IOC an installed skill NAMES -> the skill naming it (C-221).
 
     Deliberately narrower than trajaudit.skill_indicators: only tokens whose appearance in
-    the agent's OWN log corpus is strong cross-artifact evidence — credential-shaped paths
+    the agent's OWN log corpus is strong cross-artifact evidence - credential-shaped paths
     (_CRED_RE), secret-named paths WITH a '/' separator (_SECRET_PATH_RE + the B-157 filter),
-    and KNOWN drop-point hosts (_KNOWN_EXFIL_HOST_RE — B-384: this now already
+    and KNOWN drop-point hosts (_KNOWN_EXFIL_HOST_RE - B-384: this now already
     includes the bundled IOC dataset's HOST literals, spliced into its own alternation, so a
     separate iocdb-only regex is no longer iterated here too). The bare _EXFIL_RE verbs
-    (curl/wget/fetch/base64/POST) are EXCLUDED — base-rate noise in any web/exec-capable
+    (curl/wget/fetch/base64/POST) are EXCLUDED - base-rate noise in any web/exec-capable
     agent's logs. Keys are normalized (tilde-stripped, lowercased) for a case-insensitive
     substring membership test; values are the declaring skill name. Capped at
     _CORR_INDICATOR_CAP entries.
@@ -851,9 +851,9 @@ INPUT_TOOL_HINTS = (
 
 
 # B-667: the SUBSTRING hints below are a generic vocabulary ("db", "vault", "fs_read")
-# that predates any grounding against OpenClaw's own tool catalog — and it misses the
+# that predates any grounding against OpenClaw's own tool catalog - and it misses the
 # catalog entirely. The real ids a config writes into `tools.allow` are `read`, `write`,
-# `edit`, `apply_patch`, `memory_get`, `memory_search`, … (dist tool-catalog-*.js,
+# `edit`, `apply_patch`, `memory_get`, `memory_search`, ... (dist tool-catalog-*.js,
 # CORE_TOOL_DEFINITIONS), and not one of them is a substring match for any hint:
 # `"fs_read" in "read"` is False. Five corpus configs name `read` outright and A1's
 # sensitive-data leg stayed off for every one of them.
@@ -862,7 +862,7 @@ INPUT_TOOL_HINTS = (
 # substring of a joined blob, so adding "read" would convict a tool named `thread` or
 # `spreadsheet`, "write" would convict `copywriter`, "edit" would convict `credit`. This
 # is an EXACT-id set instead, compared after the same alias fold OpenClaw applies
-# (`_canon_tool` ↔ normalizeToolName), so it can only ever match a tool the user actually
+# (`_canon_tool` <-> normalizeToolName), so it can only ever match a tool the user actually
 # named.
 #
 # Membership rule, applied to each id's own dist description: a tool belongs here when it
@@ -871,10 +871,10 @@ INPUT_TOOL_HINTS = (
 #   memory_get    "Read memory files"           -> in
 #   memory_search "Semantic search" (memory)    -> in
 # Deliberately OUT, and this is not timidity:
-#   write / edit / apply_patch — mutation tools. To edit or patch, the model must already
+#   write / edit / apply_patch - mutation tools. To edit or patch, the model must already
 #     hold the content; none of them hands it back. They are a WRITE surface (a gap on the
-#     outbound leg, which cannot see them either — separate defect, not widened here).
-#   sessions_history — "Read *sanitized* session history". OpenClaw sanitizes it, so it is
+#     outbound leg, which cannot see them either - separate defect, not widened here).
+#   sessions_history - "Read *sanitized* session history". OpenClaw sanitizes it, so it is
 #     not the unqualified private-data read the other three are.
 # Measured before choosing: `read` alone turns the leg on for 5 of 581 corpus homes and
 # produces ZERO new A1 FAILs; adding the mutation tools would add one (a clawrange
@@ -889,7 +889,7 @@ SENSITIVE_TOOL_IDS = frozenset({"read", "memory_get", "memory_search"})
 # does the same. What it deliberately does NOT do is treat a `tools.profile` of "coding"
 # or "full" as a data-read grant, even though the runtime resolves both to a `read` tool.
 # That is a larger, unresolved question and the measurement says so: raising the leg from
-# the profile turns 6 more corpus homes into CRITICAL 3/3 FAILs — including the
+# the profile turns 6 more corpus homes into CRITICAL 3/3 FAILs - including the
 # maintainer's own machine, whose file tools B-666 proved cannot reach the OpenClaw home
 # because `tools.fs.workspaceOnly` is true there. Deciding it means deciding whether
 # "sensitive data" means the home's credentials or any private data the agent can read at
@@ -899,19 +899,19 @@ SENSITIVE_TOOL_IDS = frozenset({"read", "memory_get", "memory_search"})
 
 # B-674 decision: keep the bare "fs_read" / "fs_write" substring hints below rather than
 # deleting them, even though neither is in CORE_TOOL_DEFINITIONS (installed dist
-# `tool-catalog-*.js`, sectionId "fs" — the core ids are `read`/`write`/`edit`/`apply_patch`).
+# `tool-catalog-*.js`, sectionId "fs" - the core ids are `read`/`write`/`edit`/`apply_patch`).
 # `fs_write` is not absent from the dist altogether: it is named in two vendor deny lists
 # (DEFAULT_GATEWAY_HTTP_TOOL_DENY, ACP_UNSUPPORTED_INHERITED_TOOL_DENY), so whether it is
-# ever dispatchable is UNPROVEN, not disproven — B55's own notes treat it as a real id.
+# ever dispatchable is UNPROVEN, not disproven - B55's own notes treat it as a real id.
 # See SENSITIVE_TOOL_IDS / OUTBOUND_TOOL_IDS
 # below for the exact-id layer that answers "did the runtime actually grant this"). Two
 # reasons to keep the substring, not one: it still catches a REAL namespaced MCP tool such
 # as `mcp__files__fs_read`, and a bare invented id in a core `tools.allow` still shows the
-# user INTENDED a grant OpenClaw silently ignores — worth surfacing, not worth deleting.
+# user INTENDED a grant OpenClaw silently ignores - worth surfacing, not worth deleting.
 # Known consequence, not fixed here: two clawrange corpus fixtures
 # (`trifecta_live`, `multiagent_trifecta`) are built on `tools.profile: "minimal"` plus a
 # bare `fs_read`/`fs_write` core allowlist entry, and `resolveCoreToolProfilePolicy(
-# "minimal")` grants neither under the real policy resolver — both fixtures do not
+# "minimal")` grants neither under the real policy resolver - both fixtures do not
 # demonstrate what their names claim. That is clawrange's corpus, a different project;
 # filed there, not edited from here (B-674).
 SENSITIVE_TOOL_HINTS = (
@@ -941,7 +941,7 @@ OUTBOUND_TOOL_HINTS = (
 
 
 # B-674: OUTBOUND_TOOL_HINTS above is a substring match and cannot see OpenClaw's own
-# write-capable tool ids either — the same defect B-667 fixed for the inbound/sensitive
+# write-capable tool ids either - the same defect B-667 fixed for the inbound/sensitive
 # leg via SENSITIVE_TOOL_IDS. Grounded against the installed dist's `tool-catalog-*.js`
 # CORE_TOOL_DEFINITIONS: `write`/`edit`/`apply_patch` all carry `sectionId: "fs"`, and
 # none of the three matches any OUTBOUND_TOOL_HINTS entry as a substring ("write" is not
@@ -957,26 +957,26 @@ OUTBOUND_TOOL_IDS = frozenset({"write", "edit", "apply_patch"})
 
 
 # B55/B-395: the real, canonical write-capable subset of _B68_FS_TOOLS. "read" is
-# deliberately excluded — B68's tuple includes it because B68 asks a DIFFERENT question
+# deliberately excluded - B68's tuple includes it because B68 asks a DIFFERENT question
 # ("is any fs tool reachable"), but B55 asks specifically about WRITE exposure.
 #
 # F-169: moved here from checks/_capability.py when A1 (checks/_config.py) needed the same
-# question. §3.1 — a helper two topics reuse belongs in the leaf, not restated in each. A
+# question. §3.1 - a helper two topics reuse belongs in the leaf, not restated in each. A
 # second copy is exactly the drift that made B-450's consumer regexes miss every new class
 # member and left B-563's leg hints frozen at seven check ids.
 #
-# B-735: "fs_delete" and "fs_move" added. Both are real, dispatchable OpenClaw tool ids —
+# B-735: "fs_delete" and "fs_move" added. Both are real, dispatchable OpenClaw tool ids -
 # grounded against the installed 2026.9.4 dist, in TWO independent vendor lists naming the
-# fs-write family: DEFAULT_GATEWAY_HTTP_TOOL_DENY (dangerous-tools-*.mjs) —
-# ["exec","spawn","shell","fs_write","fs_delete","fs_move","apply_patch","terminal",...] —
-# and ACP_UNSUPPORTED_INHERITED_TOOL_DENY (subagent-capabilities-*.mjs) —
+# fs-write family: DEFAULT_GATEWAY_HTTP_TOOL_DENY (dangerous-tools-*.mjs) -
+# ["exec","spawn","shell","fs_write","fs_delete","fs_move","apply_patch","terminal",...] -
+# and ACP_UNSUPPORTED_INHERITED_TOOL_DENY (subagent-capabilities-*.mjs) -
 # ["apply_patch","edit","exec","fs_delete","fs_move","fs_write","process","read","shell",
 # "spawn","write"]. Both lists group fs_delete/fs_move with fs_write/write/edit/apply_patch,
 # never with the non-fs dangerous tools in the same first list (terminal, portal,
-# sessions_spawn, ...) — deliberately NOT importing those here; they are real hazards but
+# sessions_spawn, ...) - deliberately NOT importing those here; they are real hazards but
 # not filesystem-write, a different question than this set answers. Deletion/move are not
-# less dangerous than an overwrite — arguably more, since a delete is not repairable by a
-# later write — so they get the identical treatment, not a lesser one.
+# less dangerous than an overwrite - arguably more, since a delete is not repairable by a
+# later write - so they get the identical treatment, not a lesser one.
 _B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch", "fs_delete", "fs_move"})
 
 
@@ -1023,9 +1023,9 @@ def _openclaw_generation(ctx) -> str:
        Treating a stale stamp as authoritative is how you name the retired key to the very
        user this task exists for.
 
-    ⚠️ WHAT REMAINS OF THE PATH WINDOW, recorded rather than hidden. Source 1 used to
+    warning WHAT REMAINS OF THE PATH WINDOW, recorded rather than hidden. Source 1 used to
     resolve the install through ``shutil.which`` alone, and a cron job inherits neither
-    the user's PATH nor their cwd (the reason ``invocation.py`` exists) — so an
+    the user's PATH nor their cwd (the reason ``invocation.py`` exists) - so an
     interactive run could answer ``modern`` while a scheduled one answered ``unknown``,
     and B9's absent-field branch lets that alternation move a STATUS and raise a spurious
     ``--monitor`` alert. ``deptree._conventional_package_roots`` now covers the
@@ -1089,7 +1089,7 @@ def _retired_key_note(ctx, legacy: str) -> str:
     """
     generation = _openclaw_generation(ctx)
     if generation == "modern":
-        return f" On OpenClaw 2026.8.1 and later, {legacy} no longer exists — do not add it."
+        return f" On OpenClaw 2026.8.1 and later, {legacy} no longer exists \u2014 do not add it."
     if generation == "legacy":
         return ""
     return (f" Note: {legacy} exists only on OpenClaw releases before 2026.8.1; "
@@ -1435,13 +1435,13 @@ def _meta(cid: str):
 
 
 # B-228: openclaw.json present but unparseable/unreadable (ctx.config_parse_error, B-166)
-# makes the collector fall back to ctx.config = {} — a check that reads ctx.config /
+# makes the collector fall back to ctx.config = {} - a check that reads ctx.config /
 # dig(ctx.config, ...) with no other guard then sees an empty-but-VALID-looking config and
 # emits an affirmative "clean" PASS it never actually earned (GR#4: report UNKNOWN, not a
 # fake PASS/FAIL, when a check genuinely can't determine state). This is a per-check
 # OPT-IN guard, not an engine-wide blanket: only a check whose verdict is primarily
 # CONFIG-content-derived should call it. A check whose primary evidence is bootstrap/
-# skills/host/trajectory data must not call this — it would suppress a real, config-
+# skills/host/trajectory data must not call this - it would suppress a real, config-
 # independent finding that has nothing to do with openclaw.json parsing. For a check that
 # mixes config-derived evidence with an independent non-config signal (e.g. B1's bootstrap-
 # file secret scan, B11's file-permission check), call this immediately before the check's
@@ -1482,17 +1482,17 @@ def _meta(cid: str):
 
 def _sandbox_docker_binds(sandbox: dict) -> "list | None":
     """Normalize `sandbox.docker.binds` (real schema: a bind-spec string, or a list of
-    them) to a plain `list[str]`. The SINGLE reader of this field's raw shape — every
+    them) to a plain `list[str]`. The SINGLE reader of this field's raw shape - every
     check/risk-path consumer below calls this instead of its own `.get("docker")` /
     `.get("binds")` / isinstance chain, so a future consumer cannot re-diverge on the
     normalization step the way B-673 already found four independent copies of.
 
     Returns:
-      * `[]` — no `docker` key, or `docker` is a dict with no (or a falsy) `binds` key.
+      * `[]` - no `docker` key, or `docker` is a dict with no (or a falsy) `binds` key.
         The ordinary "nothing declared" case.
-      * `list[str]` — `binds` is a string (wrapped as a 1-element list) or a list
+      * `list[str]` - `binds` is a string (wrapped as a 1-element list) or a list
         (each entry coerced with `str()`, matching every caller's own prior handling).
-      * `None` — the shape is malformed/unparseable: `docker` is present but not a
+      * `None` - the shape is malformed/unparseable: `docker` is present but not a
         dict, or `binds` is present but neither a string nor a list. Distinct from
         `[]` so a caller that must fail closed on ambiguity (`_sandbox_has_writable_bind`)
         can do so, while a caller that only wants evidence text (B4) can choose its own
@@ -1602,10 +1602,10 @@ def _sandbox_browser_enabled(sandbox: dict, fallback: bool) -> bool:
 
 def _bind_mentions_docker_sock(binds: "list | None") -> bool:
     """True if any bind spec in *binds* (as returned by `_sandbox_docker_binds`)
-    references `docker.sock` — full host control / container-escape signal. The one
+    references `docker.sock` - full host control / container-escape signal. The one
     definition; every caller previously ran its own `"docker.sock" in " ".join(...)`.
     `None` (a malformed `binds` shape) is not iterable content, so this returns False
-    for it — each caller already decides separately how to treat a malformed shape via
+    for it - each caller already decides separately how to treat a malformed shape via
     `_sandbox_docker_binds`'s own return value, before ever reaching this helper."""
     if not binds:
         return False
@@ -1737,7 +1737,7 @@ def _resolve_sandbox_scope(agent_sandbox: dict, default_sandbox: dict) -> str:
     4, widened to ``network`` by B-673): under ``scope: "shared"`` (or the legacy boolean
     ``perSession: false``, at either level), OpenClaw discards this agent's OWN
     ``sandbox.docker`` object ENTIRELY (``scopedAgentDocker = scope === "shared" ? void 0
-    : agentSandbox?.docker``, symbol ``scopedAgentDocker``, dist/config-*.js:150 — symbol
+    : agentSandbox?.docker``, symbol ``scopedAgentDocker``, dist/config-*.js:150 - symbol
     re-verified present in openclaw@2026.9.1, line read on 2026.8.2) before
     ``resolveSandboxDockerConfig``
     reads either ``network`` (dist:66, falling back to the global default, not to "host")
@@ -1767,12 +1767,12 @@ def _config_unreadable(cid: str, ctx: Context) -> "Finding | None":
     non-walrus two-line form) before trusting ``ctx.config``/``dig(ctx.config, ...)`` for
     an affirmative verdict.
 
-    B-399: this is THE canonical engine-side UNKNOWN — the collector positively found
+    B-399: this is THE canonical engine-side UNKNOWN - the collector positively found
     openclaw.json and positively failed to parse/read it, which is categorically
     different from a check finding nothing to look at. Marked ``engine_degraded=True`` so
     scoring.DEGRADED_CHECK_CAP (via ``_degraded_signal``) hard-caps the grade even when a
     caller invokes ``compute()`` without ``ctx`` (so scoring.CONFIG_BLIND_CAP's own
-    ctx.config_parse_error read never fires) — every one of this helper's ~30 call sites
+    ctx.config_parse_error read never fires) - every one of this helper's ~30 call sites
     across checks/*.py gets that protection for free, with no per-check change needed.
     """
     if not ctx.config_parse_error:
@@ -1780,7 +1780,7 @@ def _config_unreadable(cid: str, ctx: Context) -> "Finding | None":
     return _finding(
         cid,
         UNKNOWN,
-        "openclaw.json present but unparseable/unreadable — cannot determine.",
+        "openclaw.json present but unparseable/unreadable \u2014 cannot determine.",
         "Fix openclaw.json so it is valid JSON and owner-readable, then re-run the audit.",
         engine_degraded=True,
     )
@@ -1789,29 +1789,29 @@ def _config_unreadable(cid: str, ctx: Context) -> "Finding | None":
 def _surface_absent(ctx: Context, *domains: str) -> bool:
     """True ONLY when the auditor read the locus COMPLETELY, where this surface would be.
 
-    Never a claim that the check applies — only that the read was complete. F-138/B1's
+    Never a claim that the check applies - only that the read was complete. F-138/B1's
     ``Finding.not_applicable`` exists precisely so a migrating check can compute this
     instead of hand-writing ``True`` in each "no X configured" branch: a shortened,
     unreadable, or absent config automatically degrades the flag back to ordinary
     UNKNOWN through ``__post_init__``, with no per-check effort.
 
-    CRITICAL — why ``config_found`` is required, not just ``not config_parse_error``:
+    CRITICAL - why ``config_found`` is required, not just ``not config_parse_error``:
     ``collector.py``'s ``ctx.config_parse_error = ctx.config_found and not parsed_ok``
     means that on a host where ``openclaw.json`` is ENTIRELY ABSENT, ``config_parse_error``
     is ``False`` and ``ctx.config`` is ``{}``. Every "no X configured" branch would fire,
     and the naive predicate ``not ctx.config_parse_error`` alone would wrongly mark ~25
-    checks "not applicable" on a plain non-OpenClaw machine — the exact lying PASS this
+    checks "not applicable" on a plain non-OpenClaw machine - the exact lying PASS this
     field exists to prevent, and it would smear ``report.py``'s honest non-OpenClaw
     wording. Requiring ``config_found`` closes that hole.
 
     ``limit_hits_for(ctx, *domains)`` deliberately INCLUDES untagged limit-hit entries
-    (Golden Rule #4 — an unknown scan-completeness signal must not resolve into a
-    convenient answer) — see its own docstring. Mirrors ``dossier.py``'s
+    (Golden Rule #4 - an unknown scan-completeness signal must not resolve into a
+    convenient answer) - see its own docstring. Mirrors ``dossier.py``'s
     ``_danger_coverage_gap``, which already does this reasoning for the Danger axis.
 
     A check whose surface lives on DISK rather than in ``openclaw.json`` (e.g. the
     installed-skill corpus) must ALSO check :func:`_skill_corpus_complete` (or the
-    equivalent per-collector completeness flag) — config-locus completeness alone does
+    equivalent per-collector completeness flag) - config-locus completeness alone does
     not prove a disk-read locus was complete.
     """
     return (
@@ -1824,7 +1824,7 @@ def _surface_absent(ctx: Context, *domains: str) -> bool:
 def _skill_corpus_complete(ctx: Context) -> bool:
     """True when the installed-skill discovery walk was NOT capped or left partial.
 
-    The disk-locus counterpart to :func:`_surface_absent`'s config-locus check — a check
+    The disk-locus counterpart to :func:`_surface_absent`'s config-locus check - a check
     concluding "no installed skill has X" needs BOTH: the frontier walk actually finished
     (not ``skills_frontier_partial``) and nothing was skipped by the hard cap
     (``skills_capped_count == 0``). Either alone still leaves skills this audit never saw.
@@ -1851,31 +1851,31 @@ def _finding(
     """*scored*: per-finding override of CheckMeta.scored, same shape as *severity*.
 
     B-315: an unscored (CheckMeta.scored=False) check must never emit a FAIL that
-    scoring.compute() can't see — but several checks (B185/B186/B193) deliberately keep
+    scoring.compute() can't see - but several checks (B185/B186/B193) deliberately keep
     their WARN/PASS branches out of scoring for reasons unrelated to FAIL (opportunistic
     evidence presence, or protecting a benign relocated/legacy setup from being docked),
     while their FAIL branch is a narrow, well-vetted, deterministic escalation that
     SHOULD hard-cap the grade. Passing scored=True on just that branch lets the
     CheckMeta stay scored=False (preserving the documented WARN/PASS non-scoring
     behavior) while the FAIL finding itself still participates. Defaults to
-    CheckMeta.scored when omitted — every existing caller is unaffected.
+    CheckMeta.scored when omitted - every existing caller is unaffected.
 
-    *not_applicable* (F-138/B1): per-branch, same shape as *scored* — see
+    *not_applicable* (F-138/B1): per-branch, same shape as *scored* - see
     Finding.not_applicable. Defaults False; every existing caller is unaffected.
 
-    *sub_signals* (F-154 round 2): per-branch, same shape — see Finding.sub_signals.
+    *sub_signals* (F-154 round 2): per-branch, same shape - see Finding.sub_signals.
     Defaults to an empty frozenset when omitted; every existing caller is unaffected.
 
     *engine_degraded* (B-399): pass True only for an UNKNOWN whose cause is ENGINE-SIDE
     (crash/timeout/scan-budget escape, or an input the check expected to read that turned
-    out unreadable/corrupt) — never for a plain "nothing to check" UNKNOWN. See
+    out unreadable/corrupt) - never for a plain "nothing to check" UNKNOWN. See
     ``Finding.engine_degraded``'s own docstring (catalog.py) for the full reasoning.
     Defaults False, so every existing caller is unaffected.
 
-    *destination_hosts* (B-556): per-finding, same shape — see Finding.destination_hosts.
+    *destination_hosts* (B-556): per-finding, same shape - see Finding.destination_hosts.
     Defaults to an empty frozenset when omitted; every existing caller is unaffected.
 
-    *config_field_paths* (F-166 track 1): per-finding, same shape — see
+    *config_field_paths* (F-166 track 1): per-finding, same shape - see
     Finding.config_field_paths. Defaults to an empty frozenset when omitted; every
     existing caller is unaffected.
     """
@@ -1905,40 +1905,40 @@ def _channels(cfg: dict) -> dict:
     return ch if isinstance(ch, dict) else {}
 
 
-# Policies that admit ANY non-owner external sender — authenticated source ≠ trusted content.
+# Policies that admit ANY non-owner external sender - authenticated source != trusted content.
 # "owner" / "owner-only" / absent / "ask" (per-message approval) are intentionally excluded.
 # _open_channels() uses only "open" for B2 ("anyone can command"); _external_input_channels()
 # uses the full set for trifecta / blast-radius / ingress-path checks (B-032 fix).
 #
 # B-283 (a): this set previously read {"open", "allowlist", "paired"}. "paired" is NOT an
-# OpenClaw policy value — grounded against the installed dist, DmPolicySchema is
+# OpenClaw policy value - grounded against the installed dist, DmPolicySchema is
 # _enum(["open","pairing","allowlist"]) (channel-PR3XHV0V.js:84-88) and every bare "paired"
 # literal in the dist is a DEVICE-pairing status or a provider-catalog order, never a
 # dm/groupPolicy value (`grep 'dmPolicy === "paired"'` returns nothing). So the only member
-# that could ever match was the one that never occurs, while "pairing" — which is the
+# that could ever match was the one that never occurs, while "pairing" - which is the
 # DEFAULT (`DmPolicySchema.optional().default("pairing")` at 6+ schema sites, plus ~15
-# runtime `?? "pairing"` fallbacks) — evaluated as NOT untrusted input. That is a lying PASS
+# runtime `?? "pairing"` fallbacks) - evaluated as NOT untrusted input. That is a lying PASS
 # on the most common real-world ingress path. Fixed: "paired" dropped as dead, "pairing"
 # added.
 #
 # GROUNDING CORRECTION (C-135 review, B-283): the justification originally written here for
 # ADDING "pairing" claimed "senders self-enrol" and "dm-policy-shared-BaGKWQzz.js never
-# returns block" — both checked against the dist and found false, so replaced with what
+# returns block" - both checked against the dist and found false, so replaced with what
 # actually holds. (1) Pairing is NOT self-enrolment: admission requires an explicit owner
 # action, `openclaw pairing approve <channel> <code>` ("Approve a pairing code and allow
-# that sender", pairing-cli-C7VdpD0e.js:123) — a sender only sends a *request*; nothing
+# that sender", pairing-cli-C7VdpD0e.js:123) - a sender only sends a *request*; nothing
 # admits it unattended. (2) The resolver DOES return block for an unapproved pairing sender:
-# message-access-DucCKzfO.js:163-164 — `if (dmPolicy === "pairing" && event.mayPair) return
+# message-access-DucCKzfO.js:163-164 - `if (dmPolicy === "pairing" && event.mayPair) return
 # block("dm_policy_pairing_required")`, then a final `return
-# block(dmPolicy === "pairing" ? "event_pairing_not_allowed" : ...)` — both via the local
+# block(dmPolicy === "pairing" ? "event_pairing_not_allowed" : ...)` - both via the local
 # `block()` at lines 138-144, whose `senderGate` carries `effect: "block-dispatch"`. The
 # justification that actually holds: a sender who HAS completed pairing resolves through
-# dm-policy-shared-BaGKWQzz.js:92 — `isSenderAllowed(effectiveAllowFrom) ? allow(...,
-# DM_POLICY_ALLOWLISTED, ...) : ...` — to the exact same decision and reasonCode
+# dm-policy-shared-BaGKWQzz.js:92 - `isSenderAllowed(effectiveAllowFrom) ? allow(...,
+# DM_POLICY_ALLOWLISTED, ...) : ...` - to the exact same decision and reasonCode
 # (`dm_policy_allowlisted`) that a `dmPolicy=="allowlist"` match produces; the modern
 # resolver in message-access-DucCKzfO.js:152-160 agrees (`pairingStore.match.matched` also
 # yields `reasonCode: "dm_policy_allowlisted"`). OpenClaw itself classifies a paired sender
-# identically to an allow-listed one, and "allowlist" was already a member of this set —
+# identically to an allow-listed one, and "allowlist" was already a member of this set -
 # that is reason enough for "pairing" to join it, independent of the retracted claims above.
 #
 # Why the GR#4 schema-grounding guard could not catch this: both layers ground dig() PATHS.
@@ -1946,7 +1946,7 @@ def _channels(cfg: dict) -> dict:
 # grounds. The same shape can hide in any value-literal comparison.
 #
 # An ABSENT dmPolicy is deliberately NOT a member here, and B-499 settled why. The product
-# default IS "pairing" — grounded against the installed dist (openclaw@2026.7.1-2): 8 schema
+# default IS "pairing" - grounded against the installed dist (openclaw@2026.7.1-2): 8 schema
 # sites bind `dmPolicy: DmPolicySchema.optional().default("pairing")`, 7 more bind a bare
 # `.optional()` whose absence is resolved by one of 48 runtime `?? "pairing"` fallbacks. So a
 # config that simply omits dmPolicy runs with the same ingress posture as one that writes
@@ -1959,7 +1959,7 @@ def _channels(cfg: dict) -> dict:
 # findings. Dave's 2026-08-21 call was therefore neither "defer" nor "make it a leg": a
 # resolved default is reported as a WARN-grade signal via _resolved_default_input_channels()
 # below, which A1 discloses without counting it among the three legs. Promoting it to a full
-# leg stays out of scope — that is what would risk the Golden Rule #5 flip, and nothing in
+# leg stays out of scope - that is what would risk the Golden Rule #5 flip, and nothing in
 # this set changes.
 _UNTRUSTED_INPUT_POLICIES = frozenset({"open", "allowlist", "pairing"})
 
@@ -1971,10 +1971,10 @@ def _norm_group_policy(channel_name, value):
     ``union([_enum(["open","allowlist","disabled"]), literal("allowall").transform(() => "open")])``
     (channel-PR3XHV0V.js:89-93), and ``normalizeFeishuGroupPolicy`` does the same
     (policy-hydoYQvK.js:55-57). So a Feishu config written as ``groupPolicy: "allowall"``
-    runs as ``"open"`` — the single most permissive setting.
+    runs as ``"open"`` - the single most permissive setting.
 
     FEISHU SCOPE ONLY (GROUNDING CORRECTION, C-135 review). This was originally channel-
-    agnostic — every ``== "open"`` / policy-set membership test in this package normalized
+    agnostic - every ``== "open"`` / policy-set membership test in this package normalized
     every channel's groupPolicy the same way. Checked against the dist, that is wrong:
     Feishu is the ONLY channel schema in the installed dist that accepts the ``"allowall"``
     literal. LINE defines its own separate ``GroupPolicySchema`` as a bare
@@ -1982,19 +1982,19 @@ def _norm_group_policy(channel_name, value):
     (reply-payload-transform-Ce9ZfUxA.js:19-23), and Telegram/Discord/Slack/Signal/Matrix/
     Nextcloud-Talk/Zalo/Zalouser all import the shared "core" ``GroupPolicySchema``, itself
     ``_enum(["open","disabled","allowlist"])`` with no ``"allowall"`` member
-    (zod-schema.core-DviqqtPj.js:424-428). Both REJECT ``"allowall"`` — a config with e.g.
+    (zod-schema.core-DviqqtPj.js:424-428). Both REJECT ``"allowall"`` - a config with e.g.
     ``channels.telegram.groupPolicy: "allowall"`` fails OpenClaw's own schema validation and
     so cannot be a config a running instance actually loaded. Normalizing it channel-
     agnostically meant this package could score a CRITICAL FAIL against a value zod would
-    refuse to load — a fabricated schema fact in its own right, not just a wrong comment.
+    refuse to load - a fabricated schema fact in its own right, not just a wrong comment.
     Callers now pass the channel key; this function transforms the literal only when
     ``channel_name == "feishu"``. Every other channel's raw ``"allowall"`` (an already-
     invalid value there) passes through unchanged, same as any other unmodeled string.
 
     dmPolicy is untouched regardless of channel: ``allowall`` is not a member of
     ``DmPolicySchema`` on any channel checked, and Feishu's own ``normalizeFeishuDmPolicy``
-    (policy-hydoYQvK.js:52-54) maps any unrecognised dmPolicy — including a stray
-    ``"allowall"`` — to ``"pairing"``, NOT to ``"open"``. Normalizing dmPolicy="allowall" to
+    (policy-hydoYQvK.js:52-54) maps any unrecognised dmPolicy - including a stray
+    ``"allowall"`` - to ``"pairing"``, NOT to ``"open"``. Normalizing dmPolicy="allowall" to
     "open" would therefore overstate the exposure of an already-invalid config.
 
     GROUNDING CORRECTION (item 4): a prior version of this docstring claimed the dmPolicy
@@ -2002,7 +2002,7 @@ def _norm_group_policy(channel_name, value):
     against this package's own code, that is wrong: dmPolicy is never normalized anywhere,
     so an unrecognised dmPolicy literal (``"allowall"`` or any other unmodeled string) is
     compared as-is against ``_UNTRUSTED_INPUT_POLICIES`` and against ``"open"``, matches
-    neither, and resolves as a silent PASS in this package's own output — indistinguishable
+    neither, and resolves as a silent PASS in this package's own output - indistinguishable
     from a genuinely-restrictive policy. That gap is real, applies to every unmodeled
     dmPolicy string (not just "allowall"), and is out of scope for this fix, which only
     corrects the groupPolicy alias.
@@ -2015,11 +2015,11 @@ def _norm_group_policy(channel_name, value):
 # left open (test_an_unmodeled_dmpolicy_is_not_reported_as_a_resolved_default).
 #
 # Grounded against the installed dist (openclaw@2026.7.1-2), reading the RUNTIME
-# normalizer functions, not just the zod validation schemas — a schema rejection does
+# normalizer functions, not just the zod validation schemas - a schema rejection does
 # NOT stop a config from running: validateConfigObjectRaw uses safeParse and RETURNS
 # {ok:false, issues} rather than throwing (io-By0s-a_s.js:3900-3903), and the snapshot
 # read path on !validated.ok still returns runtimeConfig: coerceConfig(effectiveConfigRaw)
-# — the raw, unvalidated config (io-By0s-a_s.js:5676-5695). So an unmodeled dmPolicy
+# - the raw, unvalidated config (io-By0s-a_s.js:5676-5695). So an unmodeled dmPolicy
 # literal reaches the runtime, and what happens to it there is a per-channel fact, not a
 # schema fact.
 #
@@ -2029,18 +2029,18 @@ def _norm_group_policy(channel_name, value):
 #            `policy === "open" || policy === "pairing" || policy === "allowlist" ||
 #             policy === "disabled" ? policy : "pairing"`
 #            NOTE: this whitelists "disabled" even though Feishu's own DmPolicySchema
-#            (channel-PR3XHV0V.js:84-88) does NOT include "disabled" as a schema member —
+#            (channel-PR3XHV0V.js:84-88) does NOT include "disabled" as a schema member -
 #            the runtime normalizer and the validation schema disagree with each other.
 #            So `dmPolicy: "disabled"` on Feishu is NOT the substitution case: it passes
 #            this normalizer unchanged and senderGateForDirect's own
 #            `if (dmPolicy === "disabled") return block("dm_policy_disabled")`
-#            (message-access-DucCKzfO.js:146) blocks all DMs — the user's stated intent
+#            (message-access-DucCKzfO.js:146) blocks all DMs - the user's stated intent
 #            IS what runs. Only a literal outside {open,pairing,allowlist,disabled} (a
 #            typo, or a value from a different channel's vocabulary, e.g. "owner") falls
 #            back to "pairing" for Feishu.
 #   iMessage normalizeDmPolicy         monitor-i23HdnNo.js:1216-1218
 #            `policy === "open" || policy === "allowlist" || policy === "disabled" ?
-#             policy : "pairing"` — any literal outside {open,allowlist,disabled}
+#             policy : "pairing"` - any literal outside {open,allowlist,disabled}
 #            (including a stray "pairing" typo-variant, which is harmless since it lands
 #            on "pairing" anyway) falls back to "pairing".
 #
@@ -2048,11 +2048,11 @@ def _norm_group_policy(channel_name, value):
 # "unmodeled channel -> unmodeled literal passes through unchanged" default. This was
 # checked, not assumed: the generic ingress resolver every other channel goes through
 # (resolveResolverPolicy, message-access-DucCKzfO.js:1028-1035) only substitutes
-# "pairing" via `??` when dmPolicy is ABSENT (null/undefined) — a DEFINED-but-invalid
-# string is not touched by it — and senderGateForDirect's own fallthrough for such a
+# "pairing" via `??` when dmPolicy is ABSENT (null/undefined) - a DEFINED-but-invalid
+# string is not touched by it - and senderGateForDirect's own fallthrough for such a
 # value (message-access-DucCKzfO.js:164) is NOT the "pairing" branch: it evaluates
 # `allowlistFailureReason(dm) ?? "dm_policy_not_allowlisted"`, i.e. the sender is judged
-# against the configured allowlist, same shape as dmPolicy="allowlist" — not proven more
+# against the configured allowlist, same shape as dmPolicy="allowlist" - not proven more
 # permissive than a genuine PASS reading, and in the common case (no allowFrom
 # configured) it blocks every sender outright. Claiming "pairing" there would be a
 # fabricated fact this project's Golden Rule #4 forbids; Synology Chat's
@@ -2071,12 +2071,12 @@ def _norm_dm_policy(channel_name, value):
     two channels whose runtime normalizer is dist-confirmed to fall back to "pairing" on
     any unrecognized literal. See the grounding comment above
     ``_DM_POLICY_UNMODELED_FALLBACK`` for the citations and for why every other channel
-    (including LINE and the shared "core" schema family — telegram/discord/slack/...)
+    (including LINE and the shared "core" schema family - telegram/discord/slack/...)
     is deliberately excluded rather than defaulted to the same behavior: that fallback is
     NOT what the dist does for them, and asserting otherwise would be an ungrounded claim,
     not a conservative one.
 
-    Only a non-empty string is ever transformed — a schema-drifted dmPolicy (list/dict/
+    Only a non-empty string is ever transformed - a schema-drifted dmPolicy (list/dict/
     int) is never a genuine policy member either way (B-378 idiom) and is returned
     unchanged, matching every sibling helper's degrade-don't-raise contract.
     """
@@ -2087,12 +2087,12 @@ def _norm_dm_policy(channel_name, value):
 
 
 # B-389 (C-135 review of the fix below): a channel-level credential does not stop
-# governing traffic once `accounts` is added — OpenClaw runs it as an extra IMPLICIT
+# governing traffic once `accounts` is added - OpenClaw runs it as an extra IMPLICIT
 # default account alongside the explicitly configured ones (`hasImplicitDefaultAccount`,
 # account-helpers-BAtt8fRD.js:15-19: `for (const key of
 # options?.implicitDefaultAccount?.channelKeys ?? []) if
 # (hasConfiguredAccountValue(channel?.[key])) return true`). So a still-running base
-# account's own dmPolicy/groupPolicy can't be dropped just because `accounts` exists —
+# account's own dmPolicy/groupPolicy can't be dropped just because `accounts` exists -
 # only when nothing on the base node would spawn that implicit account. Grounded per
 # channel against the installed dist (each channel registers its own trigger keys):
 #   telegram      botToken / tokenFile           account-selection-CccGNkkz.js:59-63
@@ -2103,7 +2103,7 @@ def _norm_dm_policy(channel_name, value):
 #   imessage      cliPath / dbPath                accounts-DzM4R0Z8.js:9
 #   raft          profile                         setup-DWCfQpXL.js:14-20
 # feishu and nextcloud-talk register a bespoke predicate (multiple fields ANDed
-# together) instead of a single-key-present check — handled explicitly below.
+# together) instead of a single-key-present check - handled explicitly below.
 # Every other channel in the installed dist (slack/matrix/signal/msteams/line/...)
 # registers no implicitDefaultAccount trigger at all, so this table is exhaustive for
 # the channels where the gap can occur, not an arbitrarily incomplete allowlist.
@@ -2121,18 +2121,18 @@ _IMPLICIT_DEFAULT_ACCOUNT_KEYS = {
 def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
     """True when *raw_node* (the UNMERGED base channel node) carries a credential that
     makes OpenClaw run it as an implicit default account alongside any explicitly
-    configured ``accounts`` — see the grounding above ``_IMPLICIT_DEFAULT_ACCOUNT_KEYS``.
+    configured ``accounts`` - see the grounding above ``_IMPLICIT_DEFAULT_ACCOUNT_KEYS``.
 
     Truthiness mirrors the dist's own ``hasConfiguredAccountValue`` exactly (a string
-    counts only after ``.strip()``; any other non-``None`` value counts as-is —
+    counts only after ``.strip()``; any other non-``None`` value counts as-is -
     account-helpers-BAtt8fRD.js:61-64).
 
     Deliberately config-only: the dist ALSO treats a matching env var (e.g.
     ``$TELEGRAM_BOT_TOKEN``) as triggering the same implicit account, which this cannot
-    see — clawseccheck reads only the config file, and the target OpenClaw process' real
+    see - clawseccheck reads only the config file, and the target OpenClaw process' real
     runtime environment is not reliably observable from here (e.g. a systemd service's
     environment need not match this host's shell). That env-var route stays a
-    documented, deliberate residual false negative — the same "narrows, does not close"
+    documented, deliberate residual false negative - the same "narrows, does not close"
     trade-off ``_resolved_channel_nodes``' own docstring already accepts elsewhere, not a
     new one introduced here.
     """
@@ -2154,20 +2154,20 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
 
 
 def _open_channels(cfg: dict) -> list[str]:
-    """Channels where dmPolicy/groupPolicy == 'open' (truly public — anyone can command).
+    """Channels where dmPolicy/groupPolicy == 'open' (truly public - anyone can command).
 
     Used by B2 (gateway auth check) and risk label rendering. For the broader
     'any external input arrives here' question use _external_input_channels().
     """
     out = []
     for name, c in _channels(cfg).items():
-        # B-041: a channel with enabled:false ingests nothing — skip it, matching the
+        # B-041: a channel with enabled:false ingests nothing - skip it, matching the
         # enabled-aware _active_channels/_untrusted_input_channels helpers. Without this a
         # DISABLED open channel produced §5 hard-FAIL false positives (B2/B55).
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
         # B-389: read the RESOLVED per-account node, not the raw [c] + accounts.values()
-        # idiom the old code used — see _resolved_channel_nodes' docstring for why that
+        # idiom the old code used - see _resolved_channel_nodes' docstring for why that
         # shallow walk is unsound (a vestigial base-level "open" policy still scored as
         # open even when every real running account overrides it to pairing/allowlist).
         # Mirrors the precedent _open_wildcard_group_channels already set for the
@@ -2177,7 +2177,7 @@ def _open_channels(cfg: dict) -> list[str]:
         nodes = _resolved_channel_nodes(c)
         # C-135 follow-up on the same B-389 fix: the base node can still be a LIVE
         # implicit default account (see _channel_has_implicit_default_account) even once
-        # `accounts` is configured — it joins, not replaces. Add it back only then;
+        # `accounts` is configured - it joins, not replaces. Add it back only then;
         # unconditionally adding it back would reintroduce the exact bug this fix exists
         # to close (a vestigial base policy with no live account behind it at all).
         accounts = c.get("accounts")
@@ -2186,7 +2186,7 @@ def _open_channels(cfg: dict) -> list[str]:
         for node in nodes:
             if not isinstance(node, dict):
                 continue
-            # B-391: a resolved node's own `enabled: false` (a per-account disable —
+            # B-391: a resolved node's own `enabled: false` (a per-account disable -
             # e.g. a retired account left in place with its old, wide-open policy still
             # on record) means that account ingests nothing, same reasoning as the
             # channel-level B-041 guard above. The merged node carries the account's
@@ -2204,7 +2204,7 @@ def _open_channels(cfg: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# B-297 — the wildcard-group ingress shape, as ONE definition
+# B-297 - the wildcard-group ingress shape, as ONE definition
 # ---------------------------------------------------------------------------
 # `channels.<p>.groups {"*": {...}}` is how open group access is actually written: it
 # carries NO dmPolicy/groupPolicy field at all, so every policy-value predicate in this
@@ -2216,7 +2216,7 @@ def _open_channels(cfg: dict) -> list[str]:
 # `_b140_*` privates B-266 landed) into this leaf so B140 and the ingress leg read one
 # definition of "this wildcard group is effectively unrestricted". Writing a second,
 # subtly-different notion of "wildcard means unrestricted" is the exact defect class this
-# change exists to remove — extend THESE, never fork them.
+# change exists to remove - extend THESE, never fork them.
 
 def _is_wildcard_allow_entry(entry) -> bool:
     """True when *entry* is OpenClaw's literal ``"*"`` allow-everyone sentinel.
@@ -2253,7 +2253,7 @@ def _effective_group_allow_from(wildcard_group, node):
 
     Grounded on the dist's group-allowlist resolution order (LINE monitor-*.js:
     ``firstDefined(groupConfig?.allowFrom, account.config.groupAllowFrom,
-    account.config.allowFrom?.length ? account.config.allowFrom : void 0)``) — the
+    account.config.allowFrom?.length ? account.config.allowFrom : void 0)``) - the
     FIRST configured source wins outright; the later ones are fallbacks, not a union.
 
     Order matters for correctness, not just tidiness: a per-group ``allowFrom: ["*"]``
@@ -2261,7 +2261,7 @@ def _effective_group_allow_from(wildcard_group, node):
     "any source restricts it" test would emit exactly the lying PASS this function
     exists to prevent.
 
-    *node* is a RESOLVED channel node (see ``_resolved_channel_nodes``) — i.e. the
+    *node* is a RESOLVED channel node (see ``_resolved_channel_nodes``) - i.e. the
     ``account.config`` the dist's own resolver reads, not necessarily the raw
     ``channels.<p>`` dict. Returns ``None`` when no source is configured at all.
     """
@@ -2270,7 +2270,7 @@ def _effective_group_allow_from(wildcard_group, node):
     )
     for source in (
         group_allow_from,
-        # channels.<provider>.groupAllowFrom — a channel-level array sibling of
+        # channels.<provider>.groupAllowFrom - a channel-level array sibling of
         # `groups`, present in the bundled schema for telegram/line/feishu/zalo/
         # matrix/imessage/msteams/googlechat/nextcloud. It was never read before
         # B-266, so a config scoped only via groupAllowFrom used to WARN falsely.
@@ -2285,7 +2285,7 @@ def _effective_group_allow_from(wildcard_group, node):
 def _wildcard_group_gap(node) -> str | None:
     """Reason string when *node* has an effectively-unrestricted ``groups["*"]``, else None.
 
-    Two distinct ways to be open, deliberately reported apart — before B-266 they were
+    Two distinct ways to be open, deliberately reported apart - before B-266 they were
     indistinguishable in the output, and the ``["*"]`` one printed a PASS.
     """
     if not isinstance(node, dict):
@@ -2300,9 +2300,9 @@ def _wildcard_group_gap(node) -> str | None:
     if any(_is_wildcard_allow_entry(e) for e in entries):
         # OpenClaw's isSenderIdAllowed() short-circuits `if (allow.hasWildcard)
         # return true;` BEFORE consulting senderId (allow-from-o-cfFFcK.js:43-47), so
-        # a "*" among otherwise-narrow entries still admits every sender — a non-empty
+        # a "*" among otherwise-narrow entries still admits every sender - a non-empty
         # list is not a restriction.
-        return "allowFrom contains '*' — admits every sender"
+        return "allowFrom contains '*' \u2014 admits every sender"
     return None
 
 
@@ -2317,10 +2317,10 @@ def _resolved_channel_nodes(c: dict) -> list[dict]:
         const base = {...channelConfig} minus "accounts" (and omitKeys)
         const merged = { ...base, ...accountConfig }
 
-    — a shallow spread where the account wins key-by-key and inherits the rest. So the
+    - a shallow spread where the account wins key-by-key and inherits the rest. So the
     two FALSE-POSITIVE shapes a raw per-node read would produce are both avoided here:
     a base-level ``groups {"*"}`` beside an account-level ``allowFrom``, and a base-level
-    ``allowFrom`` beside an account-level ``groups {"*"}`` — the dist merges both into one
+    ``allowFrom`` beside an account-level ``groups {"*"}`` - the dist merges both into one
     restricted account config, and so do we.
 
     NARROWS, does not close: when ``accounts`` is configured the raw channel node is not
@@ -2328,20 +2328,20 @@ def _resolved_channel_nodes(c: dict) -> list[dict]:
     synthesise an extra implicit "default" account from channel-level credentials
     (``hasImplicitDefaultAccount``, account-helpers-BAtt8fRD.js:16-22), but which keys
     trigger that is per-channel (``implicitDefaultAccount.channelKeys``) and is NOT
-    modelled here — so a wildcard group reachable only through an implicit default
+    modelled here - so a wildcard group reachable only through an implicit default
     account alongside explicit accounts is a known false NEGATIVE. That is the safe
     direction under Golden Rule #5 and is deliberate; do not "fix" it by also evaluating
     the raw base node, which reintroduces the first false positive above.
 
     B-391 (mixed-schema ``accounts``): the pre-existing B-378 guard above degrades an
     ``accounts`` that is a list/string/empty dict to "no accounts" (``[c]``), but a MIXED
-    dict — some entries genuine account dicts, one entry drifted to some other type —
+    dict - some entries genuine account dicts, one entry drifted to some other type -
     used to fall through the list comprehension's ``isinstance(acc, dict)`` filter
     silently: the well-formed entries produced a non-empty ``merged``, so the ``merged or
     [c]`` fallback never fired, and the malformed entry (and, since ``accounts`` is
     configured, the base node too) was dropped from the walk with no trace. We cannot
     tell whether that malformed entry is a live account whose (unreadable) policy might
-    be wide open, so — same zero-false-PASS reasoning as the B-378 guard — treat ANY
+    be wide open, so - same zero-false-PASS reasoning as the B-378 guard - treat ANY
     non-dict entry as schema drift for the WHOLE ``accounts`` block and fall back to
     ``[c]``, rather than silently proceeding on the well-formed subset alone.
     """
@@ -2358,24 +2358,24 @@ def _resolved_channel_nodes(c: dict) -> list[dict]:
 def _wildcard_group_is_reachable(node) -> bool:
     """False when a node's wildcard group cannot receive group messages at all.
 
-    REACHABILITY, not restriction — deliberately separate from ``_wildcard_group_gap``,
+    REACHABILITY, not restriction - deliberately separate from ``_wildcard_group_gap``,
     which answers only "is this wildcard group unrestricted by allowFrom". Two config
     shapes switch group ingress off outright, both grounded in the dist:
 
-    * ``groupPolicy: "disabled"`` — a schema-valid value (``GroupPolicySchema =
+    * ``groupPolicy: "disabled"`` - a schema-valid value (``GroupPolicySchema =
       _enum(["open","disabled","allowlist"])``, zod-schema.core-DviqqtPj.js:424-428)
       that every group-access resolver gates on FIRST and unconditionally:
       ``if (params.groupPolicy === "disabled") return { allowed: false, reason:
       "disabled" }`` (group-access-CyF0dAER.js:9/14/44/75, and
       message-handler.preflight-CmntKN5R.js:264).
-    * a wildcard entry's own ``enabled: false`` — ``isGroup && groupPolicy !==
+    * a wildcard entry's own ``enabled: false`` - ``isGroup && groupPolicy !==
       "disabled" && groupEntry?.enabled === false`` builds a route with
       ``enabled: false`` (channel2.runtime-Bb6oxd87.js:237), which
       ``evaluateGroupRouteAccessForPolicy`` rejects with ``reason: "route_disabled"``.
 
     Found by the C-135 adversarial pass on B-297, which is the only reason this exists:
-    without it, a leftover ``groups {"*": ...}`` beside ``groupPolicy: "disabled"`` — a
-    perfectly ordinary way to turn group access off without deleting the block — became
+    without it, a leftover ``groups {"*": ...}`` beside ``groupPolicy: "disabled"`` - a
+    perfectly ordinary way to turn group access off without deleting the block - became
     "untrusted ingress", flipping B41 to WARN and firing RISK-01/02/03 on a config that
     admits no group message at all. B140 tolerated that shape as an advisory false WARN
     (its documented gap #3); promoting it into the ingress leg would have made the same
@@ -2400,17 +2400,17 @@ def _open_wildcard_group_channels(cfg: dict) -> dict:
     ``groups["*"]`` entry.
 
     The ingress-leg counterpart of B140: same restriction predicate, but additionally
-    scoped to what can actually receive a message —
+    scoped to what can actually receive a message -
 
-    * ``enabled: False`` channels are skipped (B-041 — a disabled channel ingests
+    * ``enabled: False`` channels are skipped (B-041 - a disabled channel ingests
       nothing), so this composes with ``_external_input_channels`` / ``_open_channels``,
       which already skip them;
-    * a RESOLVED node's own ``enabled: false`` is also skipped — a per-account disable
+    * a RESOLVED node's own ``enabled: false`` is also skipped - a per-account disable
       (e.g. a retired account left in place with its old, wide-open wildcard-group policy
       still on record) ingests nothing, same reasoning as the channel-level guard above
       and as the identical guard `_open_channels` carries for the dmPolicy/groupPolicy
       leg. This is a caller-side scoping choice layered on top of `_resolved_channel_nodes`
-      (which does not itself drop disabled nodes), not a different restriction predicate —
+      (which does not itself drop disabled nodes), not a different restriction predicate -
       B140's own check (`check_wildcard_group_ingress`) deliberately does NOT skip
       `enabled` at all, at either the channel or node level (see its docstring), so there
       is no upstream handling to lean on here;
@@ -2429,7 +2429,7 @@ def _open_wildcard_group_channels(cfg: dict) -> dict:
         # is added, so OpenClaw synthesizes an implicit default account carrying the
         # base policy. Without this add-back, a single `accounts: {retired:
         # {enabled: false}}` entry made the whole channel's open wildcard group
-        # invisible even though the implicit default account still ingests — a false
+        # invisible even though the implicit default account still ingests - a false
         # NEGATIVE, and this helper feeds the behavioral arming and the RISK chains.
         # Same guard `_open_channels` and `_b171_open_channels` already apply.
         accounts = c.get("accounts")
@@ -2448,17 +2448,17 @@ def _open_wildcard_group_channels(cfg: dict) -> dict:
 def _external_input_channels(cfg: dict) -> list[str]:
     """Channels that admit external (non-owner) senders regardless of how restricted.
 
-    Includes open, allowlist, and pairing modes — all of which carry untrusted content
+    Includes open, allowlist, and pairing modes - all of which carry untrusted content
     that could be crafted by (or injected into) the sender. Used for the trifecta
     'untrusted input' leg and credential / ingress-path checks (B-032). ``groupPolicy``
     is normalized first so a Feishu channel's ``"allowall"`` alias counts as ``"open"``
-    (B-283; Feishu-scoped — see ``_norm_group_policy``).
+    (B-283; Feishu-scoped - see ``_norm_group_policy``).
 
     B-297: a channel is ALSO external-input when it carries an effectively-unrestricted
     ``groups {"*": ...}`` entry (``_open_wildcard_group_channels``). That shape declares
     no dmPolicy/groupPolicy at all, so the policy-value test above returned [] on the
-    commonest real open-group config and every consumer of this helper — the risk
-    engine's ingress leg included — read it as "no external ingress".
+    commonest real open-group config and every consumer of this helper - the risk
+    engine's ingress leg included - read it as "no external ingress".
     """
     open_wildcard = _open_wildcard_group_channels(cfg)
     out = []
@@ -2481,7 +2481,7 @@ def _external_input_channels(cfg: dict) -> list[str]:
             dm_policy = node.get("dmPolicy")
             group_policy = _norm_group_policy(name, node.get("groupPolicy"))
             # B-378: an unmodeled dmPolicy/groupPolicy (e.g. a list) is never a
-            # genuine policy member — only a hashable value even needs the `in` test.
+            # genuine policy member - only a hashable value even needs the `in` test.
             if (
                 (isinstance(dm_policy, Hashable) and dm_policy in _UNTRUSTED_INPUT_POLICIES)
                 or (
@@ -2498,12 +2498,12 @@ def _external_input_channels(cfg: dict) -> list[str]:
 # bot-admission overrides. Grounded programmatically, not read by eye: the installed
 # dist (openclaw@2026.9.3) ships every bundled channel plugin's config JSON Schema in
 # one runtime-parsed registry (`dist/ids-*.mjs`'s `RAW_BUNDLED_CHANNEL_CONFIG_METADATA`,
-# an array of string chunks joined then `JSON.parse`d — 27 plugins: a2a, buzz,
+# an array of string chunks joined then `JSON.parse`d - 27 plugins: a2a, buzz,
 # clickclack, discord, feishu, googlechat, imessage, irc, line, matrix, mattermost,
 # msteams, nextcloud-talk, nostr, qa-channel, raft, reef, signal, slack, sms,
 # synology-chat, telegram, tlon, twitch, whatsapp, zalo, zalouser). Walking all 27
 # schemas' `properties` recursively for requireMention/chatmode/allowBots (script, not
-# manual reading — a blob this size cannot be eyeballed reliably) found every
+# manual reading - a blob this size cannot be eyeballed reliably) found every
 # per-conversation override lives under exactly one of the five container keys below,
 # in one of three shapes:
 #   - flat: an entry under the container carries the field directly (most providers'
@@ -2515,7 +2515,7 @@ def _external_input_channels(cfg: dict) -> list[str]:
 # unfamiliar 28th provider that reuses one of these container names is covered for
 # free, and one that doesn't simply contributes no scopes beyond its own root.
 # ``chatmode`` is deliberately checked only at the root/account level, never inside a
-# nested container — grounded fact, not an oversight: of the 27 schemas, only
+# nested container - grounded fact, not an oversight: of the 27 schemas, only
 # Mattermost declares ``chatmode`` at all, and even there it never appears inside
 # ``groups.*``.
 _MENTION_GATE_CONTAINERS = ("groups", "rooms", "guilds", "channels", "direct")
@@ -2531,13 +2531,13 @@ def _mention_gate_scopes(node: dict) -> list:
     override scope nested under it, per the container vocabulary above.
 
     *node* must already be a single RESOLVED channel node (the channel root, or one
-    merged account from ``_resolved_channel_nodes``) — this only walks conversation-
+    merged account from ``_resolved_channel_nodes``) - this only walks conversation-
     scoped nesting WITHIN one already-resolved node; it does not itself merge
     accounts. ``label`` is ``""`` for *node* itself, else a dotted path like
     ``"groups.*"`` or ``"guilds.123.channels.456"`` naming the scope for evidence
     text. A container/entry that isn't the expected dict shape (schema drift, or a
     provider that simply doesn't use that container) contributes nothing for that
-    branch rather than raising — the caller decides what an absent scope means.
+    branch rather than raising - the caller decides what an absent scope means.
     """
     if not isinstance(node, dict):
         return []
@@ -2592,19 +2592,19 @@ def _secret_paths(obj, prefix="", depth=0) -> list[str]:
 
 def _agent_tools_widenings(cfg: dict) -> "tuple[list, list]":
     """Per-agent ``tools.alsoAllow`` entries and per-agent powerful ``tools.profile``
-    values, each as ``(evidence_label, value)`` pairs — the two vendor-real WIDENING
+    values, each as ``(evidence_label, value)`` pairs - the two vendor-real WIDENING
     layers ``_enabled_tools()`` / ``_enabled_tools_sources()`` / ``_tool_hint_sources()``
     union in on top of the global config (B-672).
 
     A per-agent ``tools.alsoAllow`` is not a separate AND-ed policy: the real resolver
     merges it directly into the resolved profile policy, ``??``-replacing (not adding
-    to) a global ``tools.alsoAllow`` (``resolveConfiguredToolPolicies`` — see
+    to) a global ``tools.alsoAllow`` (``resolveConfiguredToolPolicies`` - see
     ``toolgrant.py``'s module docstring for the full resolution order and dist
     citations, re-grounded against the installed 2026.9.4). A per-agent
     ``tools.profile`` is the SAME kind of ``??`` coalesce and can likewise widen past a
     weaker global profile. Neither is symmetric with a per-agent EXPLICIT
     ``tools.allow``, which is a separate, independently AND-ed layer that can only
-    NARROW — deliberately not read here (B-672's K3 negative control: reading it would
+    NARROW - deliberately not read here (B-672's K3 negative control: reading it would
     manufacture a capability the real resolver never grants). Mirrors
     ``checks/_capability.py``'s ``_agent_profile_widenings``/``_b68_fs_tools_granted``,
     which established this exact distinction for the filesystem-tool family; this is
@@ -2615,25 +2615,25 @@ def _agent_tools_widenings(cfg: dict) -> "tuple[list, list]":
     agent have this", not a per-agent one, so which agent contributed a token matters
     only for the evidence string, never for the verdict.
 
-    Also reads ``agents.defaults.tools`` — the second DECLARED per-agent surface
-    ``_b68_fs_tools_granted`` already models (its own docstring's "S3" section) — and
+    Also reads ``agents.defaults.tools`` - the second DECLARED per-agent surface
+    ``_b68_fs_tools_granted`` already models (its own docstring's "S3" section) - and
     for the identical reason: ``resolveEffectiveToolPolicy`` falls back to it as the
     resolved ``agentTools`` ONLY when the config declares NO roster key at all (dist
     lines 238-239), so it is a live, widening scope precisely when there is no roster
     entry to read instead. Gated on the roster KEY being declared, not on the roster
-    RESOLVING non-empty — an ``agents.entries: {}`` config still has a roster property,
+    RESOLVING non-empty - an ``agents.entries: {}`` config still has a roster property,
     and the real resolver ignores ``agents.defaults.tools`` there (verified by
     executing ``toolgrant.granted()``, which already carries this distinction as
     ``_has_agent_roster``).
 
-    C-135: an ``alsoAllow`` candidate is kept only when ``toolgrant.granted()`` — the
-    already battery-tested port of the full resolver, deny included — agrees it is
+    C-135: an ``alsoAllow`` candidate is kept only when ``toolgrant.granted()`` - the
+    already battery-tested port of the full resolver, deny included - agrees it is
     actually granted at that scope. A first version of this fix echoed every
     ``alsoAllow`` literal unconditionally and was caught firing on
     ``tools.alsoAllow: ["x"], tools.deny: ["x"]`` (global scope) and its per-agent/
     per-``agents.defaults`` equivalents: measured, each one flips `check_egress`/
     `check_human_approval` to a false WARN over a token the runtime denies outright.
-    The pre-existing ``tools.allow`` literal echo below is NOT filtered the same way —
+    The pre-existing ``tools.allow`` literal echo below is NOT filtered the same way -
     that coarseness (it has never deny-filtered, at any scope) predates this task and
     is out of its scope; only the NEW surface this fix adds is held to the stricter
     standard, because only new surface can create a new conviction (per this task's
@@ -2675,7 +2675,7 @@ def _agent_tools_widenings(cfg: dict) -> "tuple[list, list]":
 
 def _global_also_allow_granted(cfg: dict) -> list:
     """The GLOBAL ``tools.alsoAllow`` literals that ``toolgrant.granted()`` confirms are
-    actually granted (deny included) — the single source both ``_enabled_tools()`` and
+    actually granted (deny included) - the single source both ``_enabled_tools()`` and
     ``_tool_hint_sources()`` read, so the two can never again drift the way a first
     version of B-672 let them (see ``_agent_tools_widenings``'s C-135 note for the
     measured false-WARN this closes)."""
@@ -2707,15 +2707,15 @@ def _enabled_tools(cfg: dict) -> list[str]:
     ):
         tools.append("exec")
     # Collect any explicitly listed tool names. B-672: gateway.tools.allow is NOT a
-    # grant — the real resolver only ever uses it to remove entries from a fixed
+    # grant - the real resolver only ever uses it to remove entries from a fixed
     # HTTP-surface tool-deny list, never to add a tool to an agent's policy (see
-    # toolgrant.py's module docstring) — so it is no longer read as a tools.allow
+    # toolgrant.py's module docstring) - so it is no longer read as a tools.allow
     # fallback here; doing so invented capabilities a config never actually granted.
     # tools.alsoAllow (global, and per agent via _agent_tools_widenings) IS a real
     # grant field the previous version missed entirely. The global alsoAllow list is
     # toolgrant-verified for the same C-135 reason _agent_tools_widenings' own
     # per-agent/defaults reads are: a bare `tools.alsoAllow: ["x"], tools.deny: ["x"]`
-    # must not echo "x" as granted. tools.allow itself is NOT filtered this way —
+    # must not echo "x" as granted. tools.allow itself is NOT filtered this way -
     # that coarseness is pre-existing at every scope and out of this task's charge.
     listed: list = []
     seen: set = set()
@@ -2741,13 +2741,13 @@ def _hint(names, hints) -> bool:
 
 def _hint_matches(names, hints) -> list:
     """Like ``_hint()``, but returns the entries of *names* that matched instead of a
-    bool — B-493's attribution primitive needs to say WHICH tool name triggered a leg,
+    bool - B-493's attribution primitive needs to say WHICH tool name triggered a leg,
     not just that one did.
 
     Same substring-in-lowercased-blob semantics as ``_hint()``: each entry is checked
     independently. That is equivalent to ``_hint()``'s single ``" ".join(names)`` blob
     because a hint (none of which contain a space) can only ever match *within* one
-    joined entry, never span the join space between two — so
+    joined entry, never span the join space between two - so
     ``bool(_hint_matches(names, hints)) == _hint(names, hints)`` always holds (pinned by
     ``test_b493_trifecta_leg_sources.py``).
     """
@@ -2758,12 +2758,12 @@ def _enabled_tools_sources(cfg: dict) -> dict:
     """Field path behind each synthetic tag ``_enabled_tools()`` injects, keyed by that
     tag string ("elevated" / "exec").
 
-    Mirrors ``_enabled_tools()``'s own conditions exactly (same fields, same order) —
+    Mirrors ``_enabled_tools()``'s own conditions exactly (same fields, same order) -
     see that function. "exec" here is the BROADER signal it uses (includes
     ``agents.defaults.sandbox.mode`` != "off" and, since B-672, a per-agent
     ``tools.profile`` widening past a weaker global one), which is why B-064's own
     comment on ``_trifecta_legs`` says the outbound leg's
-    ``_hint(tools, OUTBOUND_TOOL_HINTS)`` term is "intentionally left unchanged" —
+    ``_hint(tools, OUTBOUND_TOOL_HINTS)`` term is "intentionally left unchanged" -
     narrower ``_real_exec_enabled()`` (see ``_exec_enabled_sources`` below) is what
     feeds the sensitive leg instead.
     """
@@ -2799,13 +2799,13 @@ def _tool_id_sources(cfg: dict, ids) -> list:
     """Tool grants naming one of *ids* EXACTLY, attributed to the field that granted it.
 
     The exact-match sibling of ``_tool_hint_sources`` (B-667). Each configured entry is
-    alias-folded through ``_canon_tool`` — the same fold OpenClaw's ``normalizeToolName``
-    applies before its own allow/deny matching — and then compared for equality, never
+    alias-folded through ``_canon_tool`` - the same fold OpenClaw's ``normalizeToolName``
+    applies before its own allow/deny matching - and then compared for equality, never
     containment, so a tool called ``thread`` can never satisfy an id ``read``.
 
     Reads ``tools.alsoAllow`` as well as the ``tools.allow`` / ``gateway.tools.allow``
-    pair ``_enabled_tools`` uses. ``alsoAllow`` is a real grant field — the runtime unions
-    it onto the profile's allowlist (``mergeAlsoAllowPolicy``) — and the substring-hint
+    pair ``_enabled_tools`` uses. ``alsoAllow`` is a real grant field - the runtime unions
+    it onto the profile's allowlist (``mergeAlsoAllowPolicy``) - and the substring-hint
     path above has never read it. That blindness is a separate defect affecting all three
     legs; it is not reproduced here just to stay symmetrical with it.
 
@@ -2817,7 +2817,7 @@ def _tool_id_sources(cfg: dict, ids) -> list:
     # C-135: deny wins in the runtime matcher (`makeToolPolicyMatcher` tests the deny
     # list first and returns false on a hit), so a tool named in BOTH lists is not
     # granted. Reading only the allow side would report a capability the config
-    # explicitly took away — a false positive on a CRITICAL leg.
+    # explicitly took away - a false positive on a CRITICAL leg.
     denied = {
         _canon_tool(raw)
         for raw in (dig(cfg, "tools.deny") or [])
@@ -2841,13 +2841,13 @@ def _attested_tool_id_sources(ctx, ids) -> list:
 
     ``--attest`` could previously only ever CLEAR a leg: ``_capabilities_attested`` gates
     A1's hedges, so a roster that truthfully declared a file-read tool silenced the very
-    warning it should have confirmed — a one-way ratchet where telling the truth improved
+    warning it should have confirmed - a one-way ratchet where telling the truth improved
     the verdict. An attested roster is a deliberate declaration by the operator (B-033's
     whole premise for trusting it to resolve an OFF leg), so it is trusted symmetrically
     here: it can raise this leg as well as leave it down.
 
     Names are normalized the way ``checks/_capability.py`` already normalizes an attested
-    tool — ``_canon_tool(_attest.normalize_verb(t))`` — so a namespaced
+    tool - ``_canon_tool(_attest.normalize_verb(t))`` - so a namespaced
     ``mcp__server__read`` is compared as ``read``.
     """
     out = []
@@ -2864,8 +2864,8 @@ def _tool_hint_sources(cfg: dict, hints) -> list:
 
     Mirrors ``_hint(_enabled_tools(cfg), hints)`` exactly: the same union of
     ``tools.allow`` + ``tools.alsoAllow`` (global) + per-agent ``tools.alsoAllow``
-    ``_enabled_tools()`` uses — never ``gateway.tools.allow``, which is not a grant
-    (B-672) — plus the synthetic "elevated"/"exec" tags it injects (see
+    ``_enabled_tools()`` uses - never ``gateway.tools.allow``, which is not a grant
+    (B-672) - plus the synthetic "elevated"/"exec" tags it injects (see
     ``_enabled_tools_sources``). So
     ``bool(_tool_hint_sources(cfg, hints)) == _hint(_enabled_tools(cfg), hints)`` always
     holds (pinned by ``test_b493_trifecta_leg_sources.py``).
@@ -2911,7 +2911,7 @@ def _profile_is_powerful(profile) -> bool:
 
 
 def _real_exec_enabled(cfg: dict) -> bool:
-    """A genuinely-DECLARED exec/shell capability — not a mere containment control.
+    """A genuinely-DECLARED exec/shell capability - not a mere containment control.
 
     B-064: the shared _enabled_tools() infers a synthetic "exec" from
     `agents.defaults.sandbox.mode != "off"` (correct for B4's "exec present but
@@ -2935,12 +2935,12 @@ def _real_exec_enabled(cfg: dict) -> bool:
 
 def _exec_enabled_sources(cfg: dict) -> list:
     """Every field that makes ``_real_exec_enabled()`` True, attributed instead of
-    collapsed to a bool. Same fields, same order as that function's own docstring —
+    collapsed to a bool. Same fields, same order as that function's own docstring -
     ``tools.exec.security`` / ``.host`` / ``.mode`` grounded against the installed dist's
     Zod schema (see ``_has_approval_gate``'s docstring, same three fields), then a
     powerful ``tools.profile``, then an "exec"/"shell" ``tools.allow``/
     ``gateway.tools.allow`` entry. Unlike ``_real_exec_enabled()`` (bool, first match
-    wins), this reports EVERY contributing field — a leg can be over-determined (B-493),
+    wins), this reports EVERY contributing field - a leg can be over-determined (B-493),
     so a user removing only the first-listed one may not clear it.
     ``bool(_exec_enabled_sources(cfg)) == _real_exec_enabled(cfg)`` always holds (pinned
     by ``test_b493_trifecta_leg_sources.py``).
@@ -2980,7 +2980,7 @@ def _web_fetch_enabled(cfg: dict) -> bool:
 def _web_fetch_source(cfg: dict) -> str:
     """The specific ``tools.web.*`` field that makes ``_web_fetch_enabled()`` True, else
     ``""``. Mirrors that function's own logic exactly (same ``tools.web`` dig, same
-    top-level-then-sub-key check), just naming the field instead of returning a bool —
+    top-level-then-sub-key check), just naming the field instead of returning a bool -
     ``bool(_web_fetch_source(cfg)) == _web_fetch_enabled(cfg)`` always holds (pinned by
     ``test_b493_trifecta_leg_sources.py``).
     """
@@ -3006,15 +3006,15 @@ def _active_channels(cfg: dict) -> dict:
 
 # B-619: a written ``dmPolicy`` is not always the flat key. Grounded against the
 # installed dist (openclaw@2026.7.1-2) by reading the RUNTIME resolvers that actually
-# gate message dispatch, not just the zod schema — the same three-place check (schema /
+# gate message dispatch, not just the zod schema - the same three-place check (schema /
 # normalizer / consumer gate) B-609 already required, because they can disagree (Feishu's
-# schema omits "disabled" while its normalizer honors it — see _norm_dm_policy above).
+# schema omits "disabled" while its normalizer honors it - see _norm_dm_policy above).
 #
-# Exactly 4 channels define a nested `dm` config OBJECT anywhere in the installed dist —
+# Exactly 4 channels define a nested `dm` config OBJECT anywhere in the installed dist -
 # verified exhaustively with `grep -rn '^\tdm: [A-Za-z]'` across every dist/*.js file, not
 # assumed.
 #
-# B-720 — READ THE NEXT SENTENCE BEFORE USING THIS LIST. Defining a `dm` object is NOT the
+# B-720 - READ THE NEXT SENTENCE BEFORE USING THIS LIST. Defining a `dm` object is NOT the
 # same as defining `dm.policy` inside it, and conflating the two is exactly how googlechat
 # ended up misclassified for as long as this comment has existed. Of these 4, **only matrix
 # declares `dm.policy`**. Measured against the vendor's own generated config schema, across
@@ -3028,7 +3028,7 @@ def _active_channels(cfg: dict) -> dict:
 #
 # and `dmPolicy` is the ONLY key in the entire config surface with a nested `<stem>.policy`
 # twin at all (34 flat sites, 1 nested). So the nested form is a single exception, not a
-# pattern — treat any future "this channel is nested too" claim as needing the same
+# pattern - treat any future "this channel is nested too" claim as needing the same
 # per-channel schema evidence, not an analogy to matrix.
 #
 # The 4 channels defining a `dm` object:
@@ -3039,7 +3039,7 @@ def _active_channels(cfg: dict) -> dict:
 # Every other channel (telegram/feishu/imessage/msteams/whatsapp/nostr/line/zalo/...) has
 # no `dm` object in its schema at all, so a `dm.policy`/`dm.enabled` key on one of them is
 # never read by anything and inventing a closure there would be fabricated, not
-# conservative — same reasoning _norm_dm_policy's docstring already gives for scoping.
+# conservative - same reasoning _norm_dm_policy's docstring already gives for scoping.
 #
 # Precedence differs by channel and is grounded at the REAL per-account resolver, not the
 # schema alone (dm-access-j6yOoNfd.js:81-85 `resolveChannelDmPolicy`, called with a `mode`
@@ -3050,13 +3050,13 @@ def _active_channels(cfg: dict) -> dict:
 #            dmPolicy === "disabled") ... "Discord DMs are disabled."`).
 #   slack    topOnly, by the same schema shape as discord (`dmPolicy ?? dm?.policy ??
 #            "pairing"` in the identical superRefine cross-check,
-#            bundled-channel-config-schema-CkfMA6sO.js:881) — the dedicated runtime file
+#            bundled-channel-config-schema-CkfMA6sO.js:881) - the dedicated runtime file
 #            for Slack's own DM gate was not independently located within this task's
 #            grounding budget, so slack is scoped to the VALUE check only below, matching
 #            discord's grounded order, and explicitly NOT given a dm.enabled gate (next
 #            paragraph) since that specific consumer behavior is unconfirmed for Slack.
 #   googlechat  FLAT. This entry read "nestedOnly" until B-720, on reasoning that was
-#            wrong the day it was written — not stale, wrong. It claimed
+#            wrong the day it was written - not stale, wrong. It claimed
 #            "GoogleChatAccountSchema is `.strict()` with no `dmPolicy` field whatsoever,
 #            so a flat `dmPolicy` is rejected at validation". The `.strict()` observation
 #            was REAL but attached to the wrong object, and that inverted the conclusion:
@@ -3064,7 +3064,7 @@ def _active_channels(cfg: dict) -> dict:
 #                const GoogleChatDmSchema = object({ enabled: boolean().optional() }).strict();
 #
 #            It is the NESTED schema that is strict and holds only `enabled`. So `dm.policy`
-#            is the key `.strict()` rejects — the exact opposite of the claim — and the old
+#            is the key `.strict()` rejects - the exact opposite of the claim - and the old
 #            classification made us read a path no valid config can contain, returning None
 #            for every googlechat channel however its DM policy was set.
 #
@@ -3081,29 +3081,29 @@ def _active_channels(cfg: dict) -> dict:
 #            The cited runtime line (`account.config.dm?.policy ?? "pairing"`) cannot have
 #            meant what it was read to mean either: with `dm` accepting only `enabled`, that
 #            expression is undefined on every valid config, which would make googlechat's DM
-#            policy permanently "pairing" and unconfigurable — flatly contradicted by the
+#            policy permanently "pairing" and unconfigurable - flatly contradicted by the
 #            superRefine above. Most likely a resolver misattributed from another channel.
 #            THE TELL, worth carrying forward: a grounding that concludes a security setting
 #            cannot be set at all deserves a second, independent authority before it is
 #            believed. Here that second authority was the generated config schema, and the
 #            two could only disagree because a second one existed.
 #
-#            Note the citations above still RESOLVE on 8.2 and the claim was still false —
+#            Note the citations above still RESOLVE on 8.2 and the claim was still false -
 #            `dist_citation_gate.py` and the dist-grounded tests check that a citation is
 #            alive, never that it says what we claim. Liveness guards cannot catch this.
 #   matrix   nestedOnly, no flat field exists in the schema at all (grep for "dmPolicy"
 #            over config-schema-D6CA0P8M.js returns nothing); the real per-account
 #            resolver is `resolveMatrixDmPolicy = createScopedDmSecurityResolver({
 #            resolvePolicy: (account) => account.config.dm?.policy, ...})`
-#            (channel-DVVz3Nzd.js:774-778) — a "Security" resolver, i.e. the one that
+#            (channel-DVVz3Nzd.js:774-778) - a "Security" resolver, i.e. the one that
 #            actually gates sender authorization, not a setup-wizard convenience reader.
 #
 # `dm.enabled === false` is a SEPARATE, higher-priority closure, independently grounded
 # at the dist's own generic ingress-registry helper (`channelDmPolicy`,
-# register-CvPzWKo8.js:2853-2870 — checked BEFORE the flat/nested value, returns
+# register-CvPzWKo8.js:2853-2870 - checked BEFORE the flat/nested value, returns
 # "disabled") and confirmed at two real consumer gates:
 #   googlechat  channel2.runtime-Bb6oxd87.js:325 `if (account.config.dm?.enabled ===
-#               false) { ...; return {ok:false}; }` — blocks BEFORE any policy check.
+#               false) { ...; return {ok:false}; }` - blocks BEFORE any policy check.
 #   discord     provider-DNXfDOia.js:1222,3747 `const dmEnabled = discordConfig?.dm?.
 #               enabled ?? true;` then `if (!dmEnabled || dmPolicy === "disabled") ...`.
 # Slack and Matrix are deliberately excluded from the dm.enabled set for the same reason
@@ -3121,7 +3121,7 @@ _DM_POLICY_NESTED_ONLY_CHANNELS = frozenset({"matrix"})
 # B-720, measured: NEITHER declares `dm.policy` in the current schema, so that fallback is
 # unreachable and this set is behaviourally identical to the flat-only default today. Two
 # consequences, and the second is the one worth writing down:
-#   * do NOT "simplify" the set away on that basis — it encodes the vendor's stated
+#   * do NOT "simplify" the set away on that basis - it encodes the vendor's stated
 #     precedence, and a channel that starts declaring `dm.policy` would need it;
 #   * NO TEST CAN DISTINGUISH a correct implementation of this branch from a broken one,
 #     because no input reaches it. Mutating the fallback reddens nothing. That is a known,
@@ -3133,10 +3133,10 @@ _DM_POLICY_ENABLED_GATE_CHANNELS = frozenset({"googlechat", "discord"})
 
 def _declared_dm_policy(channel_name: str, node) -> str | None:
     """The dmPolicy value *node* declares for *channel_name*, reading every form the
-    installed dist actually resolves — not just the flat ``dmPolicy`` key. See the
+    installed dist actually resolves - not just the flat ``dmPolicy`` key. See the
     grounding comment above ``_DM_POLICY_NESTED_ONLY_CHANNELS`` for the per-channel
     citations. Returns ``None`` when nothing is declared (the config is silent and
-    OpenClaw falls back to its product default, "pairing", elsewhere) — never raises on a
+    OpenClaw falls back to its product default, "pairing", elsewhere) - never raises on a
     schema-drifted value (B-378 idiom: a list/dict/int at either key is never a genuine
     policy literal either way).
     """
@@ -3157,7 +3157,7 @@ def _declared_dm_policy(channel_name: str, node) -> str | None:
     # Every other channel: flat only, matching every dedicated per-channel resolver
     # grepped for this fix (telegramCfg.dmPolicy / feishuCfg?.dmPolicy /
     # imessageCfg.dmPolicy / msteamsCfg?.dmPolicy, all `?? "pairing"`, none consult a
-    # `dm` object because their schema doesn't define one — see the module comment).
+    # `dm` object because their schema doesn't define one - see the module comment).
     return flat
 
 
@@ -3166,25 +3166,25 @@ def _untrusted_input_channels(cfg: dict) -> list[str]:
 
     Same untrusted-policy allowlist as _external_input_channels (dmPolicy/groupPolicy in
     _UNTRUSTED_INPUT_POLICIES = open/allowlist/pairing, with a Feishu channel's groupPolicy
-    normalized so its "allowall" alias counts as "open" — B-283, Feishu-scoped, see
+    normalized so its "allowall" alias counts as "open" - B-283, Feishu-scoped, see
     _norm_group_policy), but additionally excludes channels explicitly disabled
-    (`enabled: False`) — a disabled channel ingests nothing. An absent or restrictive
+    (`enabled: False`) - a disabled channel ingests nothing. An absent or restrictive
     groupPolicy (e.g. "ask" per-message approval, or "owner") is deliberately NOT treated
     as untrusted, consistent with the leg doctrine at _UNTRUSTED_INPUT_POLICIES: a
-    groups-present denylist would FAIL a safe owner-approved group bot ("ask") — a §5
-    false positive — so we key off the untrusted-policy allowlist only.
+    groups-present denylist would FAIL a safe owner-approved group bot ("ask") - a §5
+    false positive - so we key off the untrusted-policy allowlist only.
 
     B-619: ``dmPolicy`` is read via ``_declared_dm_policy`` rather than the raw flat key
-    directly, so a channel written via a nested ``dm.policy`` (matrix — the only one; see
+    directly, so a channel written via a nested ``dm.policy`` (matrix - the only one; see
     ``_declared_dm_policy``'s grounding comment, and B-720 for why this list used to name
     four) is no longer invisible to leg-counting. Before this fix a nested `dm.policy: "open"` was silently
     dropped here, which could under-count the trifecta's untrusted-input leg entirely on
-    a config where no other source supplied it — a false negative, not just a wrong WARN
+    a config where no other source supplied it - a false negative, not just a wrong WARN
     string. This is a per-node, unmerged read (same shallow walk as before this fix,
     intentionally NOT inherited from the channel to an account that omits its own): a
     node that writes nothing itself still resolves to the product default ("pairing")
     at runtime, but that resolved-default case is a WARN-only signal
-    (``_resolved_default_input_channels``), never promoted to a leg — unchanged by this
+    (``_resolved_default_input_channels``), never promoted to a leg - unchanged by this
     fix.
     """
     out = []
@@ -3201,7 +3201,7 @@ def _untrusted_input_channels(cfg: dict) -> list[str]:
             dm_policy = _declared_dm_policy(name, node)
             group_policy = _norm_group_policy(name, node.get("groupPolicy"))
             # B-378: an unmodeled dmPolicy/groupPolicy (e.g. a list) is never a
-            # genuine policy member — only a hashable value even needs the `in` test.
+            # genuine policy member - only a hashable value even needs the `in` test.
             if (
                 (isinstance(dm_policy, Hashable) and dm_policy in _UNTRUSTED_INPUT_POLICIES)
                 or (
@@ -3217,7 +3217,7 @@ def _untrusted_input_channels(cfg: dict) -> list[str]:
 def _resolved_default_input_channels(cfg: dict) -> list[str]:
     """Enabled channels whose ``dmPolicy`` is ABSENT, so OpenClaw resolves it to "pairing".
 
-    B-499. This is a WARN-grade signal, NOT a trifecta leg — see the note above
+    B-499. This is a WARN-grade signal, NOT a trifecta leg - see the note above
     ``_UNTRUSTED_INPUT_POLICIES`` for the grounding and for Dave's 2026-08-21 decision.
     A1 discloses what this returns; ``_trifecta_legs`` never reads it, so the leg count
     is untouched by construction and B46 is unaffected.
@@ -3227,7 +3227,7 @@ def _resolved_default_input_channels(cfg: dict) -> list[str]:
     * It does not resolve through ``channels.defaults``. Grounded against the installed
       dist: ``channels.defaults.contextVisibility`` is real (and is read via ``dig()``
       at ``_channels_with_context_visibility_all``), but there is no defaults-level
-      ``dmPolicy`` anywhere in it — so an absent per-channel value resolves straight to
+      ``dmPolicy`` anywhere in it - so an absent per-channel value resolves straight to
       the product default, with no intermediate layer to consult. Inventing one would be
       a fabricated schema path.
     * It does not re-report a channel ``_untrusted_input_channels`` already counts. Such
@@ -3239,7 +3239,7 @@ def _resolved_default_input_channels(cfg: dict) -> list[str]:
     ``dmPolicy`` under a channel that sets it is therefore NOT a resolved default.
 
     B-619: the presence check now goes through ``_declared_dm_policy`` (flat OR nested OR
-    ``dm.enabled``, per its grounding comment) instead of the raw flat ``dmPolicy`` key —
+    ``dm.enabled``, per its grounding comment) instead of the raw flat ``dmPolicy`` key -
     a nested-only channel (googlechat/matrix) or a hybrid one written via its nested form
     (discord/slack) used to look identical to a channel that wrote nothing at all.
 
@@ -3248,7 +3248,7 @@ def _resolved_default_input_channels(cfg: dict) -> list[str]:
     account, so a flat-key channel (e.g. telegram) whose ONLY declared policy sat on its
     one configured account was still reported, because the untouched base node's own
     absence was enough to trigger it. The base node is only evaluated on its own when it
-    is actually live — no ``accounts`` at all, or ``_channel_has_implicit_default_account``
+    is actually live - no ``accounts`` at all, or ``_channel_has_implicit_default_account``
     confirms a credential still spawns it alongside the configured ones (same doctrine
     ``_open_channels`` already applies for groups/allowFrom, B-389).
     """
@@ -3284,7 +3284,7 @@ def _resolved_default_input_channels(cfg: dict) -> list[str]:
 def _substituted_dm_policy_channels(cfg: dict) -> dict:
     """Enabled channels whose WRITTEN ``dmPolicy`` is a literal OpenClaw does not
     recognize for that channel, on a channel where the dist confirms what it actually
-    runs on instead — see ``_norm_dm_policy``'s grounding comment for the citations.
+    runs on instead - see ``_norm_dm_policy``'s grounding comment for the citations.
 
     B-609. Sibling of ``_resolved_default_input_channels`` (B-499) for the ABSENT case;
     this is the WRITTEN-but-unmodeled case, which that helper's own docstring explicitly
@@ -3296,24 +3296,24 @@ def _substituted_dm_policy_channels(cfg: dict) -> dict:
     never read it, so the leg count is untouched by construction.
 
     Only reports a channel when THREE things all hold: the written value is a non-empty
-    string (a schema-drifted list/dict never was a genuine policy choice — B-378 idiom),
+    string (a schema-drifted list/dict never was a genuine policy choice - B-378 idiom),
     ``_norm_dm_policy`` actually transforms it for that channel (i.e. the channel is one
-    of the two with a dist-confirmed fallback — every other channel returns unchanged and
+    of the two with a dist-confirmed fallback - every other channel returns unchanged and
     so never qualifies here, deliberately: see ``_norm_dm_policy``'s docstring for why
     guessing at the rest would be a fabricated fact, not a conservative one), and the
     resolved value lands in ``_UNTRUSTED_INPUT_POLICIES`` (true for every case this can
-    currently produce, since both grounded fallbacks resolve to "pairing" — checked
+    currently produce, since both grounded fallbacks resolve to "pairing" - checked
     explicitly rather than assumed, so a future third grounded channel with a different
     fallback target does not silently start reporting a restriction as an exposure).
 
     Does not re-report a channel ``_untrusted_input_channels`` already counts (same
     dedup ``_resolved_default_input_channels`` applies, same reason: that channel is
     already a full leg on its own written policy). Account nodes inherit the channel's
-    written value when they do not set their own — same account -> channel precedence
+    written value when they do not set their own - same account -> channel precedence
     as ``_resolved_default_input_channels``.
 
     Returns ``{channel_name: (written_literal, resolved_value)}`` so a caller can name
-    both — naming only the unrecognised string would leave a reader knowing we were
+    both - naming only the unrecognised string would leave a reader knowing we were
     confused without knowing what is actually running.
     """
     already = set(_untrusted_input_channels(cfg))
@@ -3413,12 +3413,12 @@ def _agent_legs(tools: list) -> dict:
     Per-agent we only have that agent's own tool names (from the attestation roster),
     so legs are derived purely from the same tool-name hints A1 uses. OpenClaw does
     expose per-agent tool config (agents.list[].tools.*), but this classifies the
-    ATTESTED roster on purpose — attestation can reflect session-granted runtime tools
+    ATTESTED roster on purpose - attestation can reflect session-granted runtime tools
     that static per-agent config fields can't (see check_agent_separation for why). The
     config-level signals A1 also consults (the credential store's CONTENT -- B-666, not
     the directory's existence -- `gateway.auth.password` -- B-876 -- and
     elevated.allowFrom) are GLOBAL, not attributable to one agent, so they are
-    intentionally not applied here — not because A1 excludes them (it now counts all of
+    intentionally not applied here - not because A1 excludes them (it now counts all of
     them; see `_trifecta_leg_sources`), but because a per-agent classification has no
     single agent to attribute a config-level signal to. report.py's capability graph
     applies these global signals to the `main` node only, for the same reason; see
@@ -3476,26 +3476,26 @@ def _unclassified_leg_verbs(tools: list) -> list:
 
 
 # B-644: tool tokens whose write capability is NOT reached by tools.exec.mode/
-# security/ask at all (see `_has_approval_gate`'s docstring — it is schema-scoped to
+# security/ask at all (see `_has_approval_gate`'s docstring - it is schema-scoped to
 # that field family alone). Matched with the same discipline risk.py's
 # `_has_exec_or_write_tools` already uses for this exact vocabulary: "fs_write" is
-# safe as an unanchored substring (multi-word, no realistic accidental collision —
+# safe as an unanchored substring (multi-word, no realistic accidental collision -
 # see that function's own B-735 note), but "write"/"edit"/"fs_delete"/"fs_move" are
 # matched by EXACT membership only (B-395/B-735 C-135 rounds: "write"/"edit" are
-# common English-word fragments — "underwriter", "credit_score" — and
+# common English-word fragments - "underwriter", "credit_score" - and
 # "fs_delete"/"fs_move" collide with "refs_delete"/"prefs_delete" as substrings).
 # Deliberately narrower than OUTBOUND_TOOL_HINTS: "send"/"webhook"/"http_post"/
 # "publish" are a different tool family (messaging/network) that this fix does not
-# touch — only the write-to-local-files family the B20/B22/RISK-07 self-modification
+# touch - only the write-to-local-files family the B20/B22/RISK-07 self-modification
 # shape actually depends on.
 #
 # B-848: "elevated" does NOT belong here and has been removed. B-644 added it on the
 # premise that `tools.elevated.allowFrom` is entirely outside tools.exec.*'s reach,
-# citing _capability.py's B-395 note — but that note answers a different question
+# citing _capability.py's B-395 note - but that note answers a different question
 # (whether `tools.elevated` is one of OpenClaw's tool-*policy-resolution* layers that
 # decide which tools an agent can reach at all; it is not). Exec *approval* is a
 # separate mechanism: the installed OpenClaw dist (2026.9.5) shows an "elevated
-# full" request's approval bypass is gated by the SAME tools.exec fields —
+# full" request's approval bypass is gated by the SAME tools.exec fields -
 # `bash-tools-BBKNLrRH.mjs:4085` (`modePolicyAllowsFullBypass = modePolicy.security
 # === "full" && modePolicy.ask === "off"`) and `:4090` (the bypass only applies when
 # `elevatedMode === "full" && modePolicyAllowsFullBypass && hostPolicyAllowsFullBypass`).
@@ -3512,16 +3512,16 @@ def _exec_gate_covers_tools(tools) -> bool:
     `tools.exec.mode/security/ask` to have any bearing on it at all.
 
     False when *tools* contains a non-exec write tool (fs_write/write/edit/
-    fs_delete/fs_move) — none of those are reached by tools.exec.* (see
+    fs_delete/fs_move) - none of those are reached by tools.exec.* (see
     `_has_approval_gate`'s own grounded field list), so an exec-scoped gate does not
     cover them regardless of its own value. True otherwise, INCLUDING when *tools*
     is empty/None: a caller that has not established a non-exec write tool is
     present gets the plain exec-only reading `_has_approval_gate(cfg)` already gave
-    before this fix — this helper only ever narrows, never widens, what counts as
+    before this fix - this helper only ever narrows, never widens, what counts as
     gated.
 
     B-848: "elevated" is deliberately NOT in `_NON_EXEC_WRITE_TOKENS` (see that
-    tuple's comment) — a bare `tools.elevated.allowFrom` grant IS reached by
+    tuple's comment) - a bare `tools.elevated.allowFrom` grant IS reached by
     tools.exec.mode/security/ask, so it must not make this return False.
     """
     if not tools:
@@ -3534,22 +3534,22 @@ def _exec_gate_covers_tools(tools) -> bool:
 def _has_approval_gate(cfg: dict, tools=None) -> bool:
     """Return True when the config has a meaningful exec approval gate.
 
-    Real fields — grounded against the installed OpenClaw dist's Zod schema
+    Real fields - grounded against the installed OpenClaw dist's Zod schema
     (`zod-schema.agent-runtime-DQfiImgc.mjs:511-538`, ToolExecBaseShape; B-848
-    re-grounded this citation — the file the docstring previously named,
+    re-grounded this citation - the file the docstring previously named,
     `zod-schema.agent-runtime-C02vY4RT.js`, does not exist in the installed
     2026.9.5 dist, though the schema fact itself still held), which corrects the
     field-list doc at docs.openclaw.ai/tools/permission-modes:
-      tools.exec.mode     — deny/allowlist/ask/auto/full
-      tools.exec.security — deny/allowlist/full   ("ask" is NOT a valid value of THIS
-                             field — it belongs to tools.exec.ask below; a Zod
+      tools.exec.mode     - deny/allowlist/ask/auto/full
+      tools.exec.security - deny/allowlist/full   ("ask" is NOT a valid value of THIS
+                             field - it belongs to tools.exec.ask below; a Zod
                              .strict() config can't even set mode together with
                              security/ask, see addExecPolicyModeConflictIssue)
-      tools.exec.ask      — off/on-miss/always
+      tools.exec.ask      - off/on-miss/always
     Non-existent: tools.confirm, tools.requireApproval, tools.elevated.requireApproval
 
     B-848: these same fields also gate `tools.elevated`'s own "full" escalation
-    bypass, not just plain exec — `bash-tools-BBKNLrRH.mjs:4085,4090` shows an
+    bypass, not just plain exec - `bash-tools-BBKNLrRH.mjs:4085,4090` shows an
     elevated "full" request skips approval only when
     `modePolicy.security === "full" && modePolicy.ask === "off"`. So a bare
     `tools.elevated.allowFrom` grant IS covered by this function's reading; see
@@ -3558,13 +3558,13 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
     security="allowlist" is a real gate even with an empty/default allowlist and even
     when tools.exec.ask is unset (default "off"): verified against the live runtime
     decision path (exec-approvals-BIKWP8_V.js requiresExecApproval/
-    hasGatewayAllowlistMiss, consumed by bash-tools-DHyGpWCr.js) — a non-matching
+    hasGatewayAllowlistMiss, consumed by bash-tools-DHyGpWCr.js) - a non-matching
     command is either routed to human approval (ask="on-miss"/"always") or denied
     outright ("exec denied: allowlist miss", ask="off"). There is no path where
     security="allowlist" alone lets an unmatched command run unattended, so a sparse
     allowlist makes this MORE restrictive, never a false gate.
 
-    B-644: this function is scoped to tools.exec.* ONLY — it has no visibility into
+    B-644: this function is scoped to tools.exec.* ONLY - it has no visibility into
     which tool would actually carry out a write. A chain that suppresses on this
     return value alone reads a config with, say, `fs_write` granted and NO exec at
     all as "gated" purely because an unrelated tools.exec.mode='ask' happens to be
@@ -3572,7 +3572,7 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
     computed to decide a write/outbound action is in play) so this can refuse to
     call the write gated when the tool doing it is not exec-family
     (`_exec_gate_covers_tools`). `tools=None` (the default) keeps the OLD exec-only
-    reading unchanged — for callers where the action being gated is already known to
+    reading unchanged - for callers where the action being gated is already known to
     be exec-only, or that have not yet been audited for this gap.
     """
     if tools is not None and not _exec_gate_covers_tools(tools):
@@ -3581,7 +3581,7 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
     security = dig(cfg, "tools.exec.security")
     ask = dig(cfg, "tools.exec.ask")
     # "auto" IS a gate (grounded 2026-06-24, docs.openclaw.ai/tools/permission-modes):
-    # "Run allowlist matches, then use auto-review" — approval misses go through the
+    # "Run allowlist matches, then use auto-review" - approval misses go through the
     # native auto-reviewer first, then fall back to the human approval route. Only "full"
     # ("Run host exec without prompts") is ungated, and it is intentionally excluded here.
     # Do not re-flag "auto" as a false-PASS (previously reported and closed not-a-bug).
@@ -3601,7 +3601,7 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
 # `_has_approval_gate` above answers the question for the GLOBAL `tools.exec` layer
 # only. OpenClaw resolves the policy a given agent actually runs under by layering
 # `agents.list[].tools.exec` (or the 2026.8.1 `agents.entries` record shape) OVER the
-# global one — `resolveNodeExecConfigPolicy` (dist `daemon-*.mjs`, grounded against the
+# global one - `resolveNodeExecConfigPolicy` (dist `daemon-*.mjs`, grounded against the
 # installed openclaw@2026.9.4): `applyExecPolicyLayer(applyExecPolicyLayer(defaults,
 # globalExec), agentExec)`. So an agent can be outside a gate the owner set globally,
 # and the check said the gate held regardless. B-663.
@@ -3620,11 +3620,11 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
 #     }
 #
 # An agent layer that sets only `security` (or only `ask`) does not merge under whatever
-# `mode` produced the base — it REPLACES security/ask wholesale and the base's `mode`
+# `mode` produced the base - it REPLACES security/ask wholesale and the base's `mode`
 # identity is discarded. A merge that instead let an inherited `mode` win over an agent's
 # own explicit `security` would reproduce this task's exact false PASS (global
 # `mode: "ask"` + agent `tools.exec.security: "full"` must resolve to ungated `full`, not
-# stay `ask`) — this is `_layer_exec_policy` below's whole reason for being a small,
+# stay `ask`) - this is `_layer_exec_policy` below's whole reason for being a small,
 # self-contained port rather than a "merge the two dicts" shortcut.
 #
 # `resolveExecPolicyForMode` (`exec-approvals-core-BZ3ECkXD.mjs`) is unchanged from the
@@ -3638,10 +3638,10 @@ _EXEC_MODE_SECURITY_ASK = {
 }
 
 # `defaultSecurity = effectiveHost === "sandbox" ? "deny" : "full"`, `ask: "off"`
-# (`exec-defaults-Bt0sKd7t.mjs`, grounded against 2026.9.4) — the non-sandboxed default,
+# (`exec-defaults-Bt0sKd7t.mjs`, grounded against 2026.9.4) - the non-sandboxed default,
 # i.e. the same scope `_has_approval_gate` above already covers. The sandbox/host layer
 # is a separate, already-modelled surface (`monitordims/_execpolicy.py`, a HIGHER layer
-# that consumes `checks/` and so cannot be imported from here — CLAUDE.md's dependency
+# that consumes `checks/` and so cannot be imported from here - CLAUDE.md's dependency
 # flow is one-directional); this per-agent gate re-derives nothing about it, matching the
 # precision `_has_approval_gate` itself already has (a raw-field read, no sandbox
 # resolution either) rather than introducing a new, asymmetric gap.
@@ -3654,7 +3654,7 @@ def _layer_exec_policy(base_security: str, base_ask: str, layer) -> "tuple[str, 
 
     Port of `applyExecPolicyLayer`, restricted to the (security, ask) outputs this
     module needs (the `mode` field is an OUTPUT label for the mode branch, never an input
-    to the security/ask branch — see the module note above). *layer* is the raw,
+    to the security/ask branch - see the module note above). *layer* is the raw,
     unresolved `tools.exec` dict for one scope (global or one agent); it is not itself
     layered before being passed in.
     """
@@ -3676,11 +3676,11 @@ def _exec_policy_is_gated(security: str, ask: str) -> bool:
 
     `resolveExecModeFromPolicy` (ported verbatim as
     `monitordims/_execpolicy.py::_resolve_mode_from_policy`) is a closed table, and the
-    ONLY combination it resolves to `full` — OpenClaw's sole ungated mode — is
+    ONLY combination it resolves to `full` - OpenClaw's sole ungated mode - is
     `security == "full" and ask != "always"`. Every other combination resolves to
     `deny`/`allowlist`/`ask`, each of which either refuses a non-matching command
     outright or routes it to a human/auto-reviewer before it runs. So "has a gate" is
-    exactly the negation of that one combination, not an independent threshold — the same
+    exactly the negation of that one combination, not an independent threshold - the same
     binary PASS/WARN granularity `_has_approval_gate` above already uses (it never
     distinguishes among deny/allowlist/ask/auto, only whether the state is `full`).
     """
@@ -3690,7 +3690,7 @@ def _exec_policy_is_gated(security: str, ask: str) -> bool:
 def _agents_without_exec_gate(cfg: dict) -> "list[str]":
     """Named agents whose EFFECTIVE `tools.exec` policy has no approval gate.
 
-    Only agents that declare their own `tools.exec` override are considered — an agent
+    Only agents that declare their own `tools.exec` override are considered - an agent
     with no override runs the global policy, which `_has_approval_gate` above already
     covers. Dedup is by normalised agent id, FIRST match wins
     (`toolgrant._normalize_agent_id`, already battery-tested against the dist): a second
@@ -3723,7 +3723,7 @@ def _agents_without_exec_gate(cfg: dict) -> "list[str]":
 
 
 def _is_public_ip(ip: str) -> bool:
-    """True for a routable IPv4 — excludes private / loopback / link-local / TEST-NET doc
+    """True for a routable IPv4 - excludes private / loopback / link-local / TEST-NET doc
     ranges so example addresses in documentation don't fire."""
     try:
         octs = [int(x) for x in ip.split(".")]
@@ -3743,7 +3743,7 @@ def _is_public_ip(ip: str) -> bool:
 
 # `_OWN_ENGINE_MARKERS` / `_is_own_source` used to be DEFINED here. B-265 relocated them
 # down into `collector.py` (Layer 1) so skill *discovery* can use the same content-verified
-# self-identity oracle that `vet_skill` uses — the Layer-1 collector may not import this
+# self-identity oracle that `vet_skill` uses - the Layer-1 collector may not import this
 # Layer-2 module, and the basename-only skip it had instead was a free rename cloak. They
 # are re-imported at the top of this file exactly as `_OWN_SKILL_NAMES`/`Context`/`dig`
 # already are, so `from ._shared import _is_own_source` keeps working unchanged.
@@ -3781,7 +3781,7 @@ _TIER_NAME = {3: "schema (wall)", 2: "filtered (sieve)", 1: "raw/unknown (passth
 
 
 # ---------------------------------------------------------------------------
-# B79 — Codex session approval-policy posture
+# B79 - Codex session approval-policy posture
 # ---------------------------------------------------------------------------
 def _safe_mtime(p: Path) -> float:
     """B-109: modification time for recency sorting; 0.0 if the file is unreadable
@@ -3804,7 +3804,7 @@ def _plugins(cfg: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# B77 — Config-write audit log review
+# B77 - Config-write audit log review
 # ---------------------------------------------------------------------------
 _JSONL_SCAN_CAP = 1_000_000  # B-104: byte budget for tailing append-only JSONL logs
 
@@ -3829,28 +3829,28 @@ def _custom(
 
     *not_applicable* (F-138/B1): see Finding.not_applicable / _finding()'s docstring.
 
-    *engine_degraded* (B-455): same contract as ``_finding()``'s own parameter — pass
+    *engine_degraded* (B-455): same contract as ``_finding()``'s own parameter - pass
     True only for an UNKNOWN whose cause is ENGINE-SIDE (an input the check expected to
     read that turned out unreadable/corrupt/unparseable), never for a plain "nothing to
     check" UNKNOWN. Defaults False, so every existing caller is unaffected. Before this,
-    ``_custom()`` had no way to set the flag at all — every dynamic-severity check
+    ``_custom()`` had no way to set the flag at all - every dynamic-severity check
     (B13's ``check_installed_skills`` chain included) was structurally incapable of
     marking its own engine-side UNKNOWN, so it silently dropped out of
     ``scoring.compute()``'s denominator instead of hard-capping the grade like
     ``_config_unreadable()``'s ``_finding()``-built UNKNOWN already does.
 
-    *sub_signals* (B-556): same contract as ``_finding()``'s own parameter — see
+    *sub_signals* (B-556): same contract as ``_finding()``'s own parameter - see
     Finding.sub_signals. ``_custom`` could not set it before, which is why the field was
     dead for every dynamic-severity check, B13 included: the judge packet's
     `safe_facts["sub_signals"]` had exactly one producer and that producer is never
     borderline, so the field shipped unreachable.
 
-    *destination_hosts* (B-556): same contract as ``_finding()``'s own parameter — see
+    *destination_hosts* (B-556): same contract as ``_finding()``'s own parameter - see
     Finding.destination_hosts. Defaults to an empty frozenset when omitted; every
     existing caller is unaffected.
 
     *config_field_paths* (F-166 track 1): same contract as ``_finding()``'s own
-    parameter — see Finding.config_field_paths. Defaults to an empty frozenset when
+    parameter - see Finding.config_field_paths. Defaults to an empty frozenset when
     omitted; every existing caller is unaffected.
     """
     m = BY_ID[cid]
@@ -3961,8 +3961,8 @@ def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]
     """Read at most the last ``cap`` bytes of a (possibly huge) append-only JSONL log.
 
     Session / config-audit logs can reach GB; a whole-file read + splitlines OOMs on
-    long-running agents (B-104). We tail the most-recent ``cap`` bytes — the entries a
-    posture check cares about — and drop a possibly-partial leading line (callers already
+    long-running agents (B-104). We tail the most-recent ``cap`` bytes - the entries a
+    posture check cares about - and drop a possibly-partial leading line (callers already
     skip unparseable lines). Returns (text, truncated).
     """
     size = path.stat().st_size
@@ -3981,12 +3981,12 @@ def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]
 # ---------- B-229: MCP-granted capability folds into the lethal-trifecta legs ----------
 # MCP is OpenClaw's primary capability-extension surface, yet the trifecta legs
 # historically derived capability only from tools.*/credentials/ and never read
-# mcp.servers — so a server granting broad filesystem/database/secret access (the
+# mcp.servers - so a server granting broad filesystem/database/secret access (the
 # "sensitive data" leg) or a remote/network endpoint (the "outbound" leg) counted for
 # nothing, and A1 under-reported the leg count. The wiring below is deliberately
 # CONSERVATIVE so a benign read-only MCP cannot manufacture a spurious 3/3 FAIL
 # (§5 zero-FP / C-135): only a KNOWN data/db/secret server package name, OR a filesystem
-# server rooted at a BROAD path, raises the sensitive leg — a narrowly project-scoped fs
+# server rooted at a BROAD path, raises the sensitive leg - a narrowly project-scoped fs
 # root does not; and a loopback MCP endpoint is NOT outbound.
 #
 # The two FP-suppression denylists below plus the command/args-only sensitive-data
@@ -3995,11 +3995,11 @@ def _read_jsonl_tail(path: Path, cap: int = _JSONL_SCAN_CAP) -> tuple[str, bool]
 
 # Capability keywords that, when they name an MCP server via the canonical
 # @scope/server-<cap> / mcp-server-<cap> / mcp-<cap> naming convention, mark a server
-# that inherently exposes sensitive data — a whole database, secret store, or cloud
+# that inherently exposes sensitive data - a whole database, secret store, or cloud
 # drive. Grounded on the @modelcontextprotocol reference servers plus common third-party
 # naming. The MCP-naming anchor is REQUIRED so a bare keyword in a path/host cannot match
 # (e.g. a "db-helper" arg with no mcp/server- prefix stays unflagged). This pattern is
-# matched ONLY against a stdio server's command/args (see _mcp_leg_contributions) —
+# matched ONLY against a stdio server's command/args (see _mcp_leg_contributions) -
 # never a remote server's url, which says nothing about local data access.
 _MCP_DATA_CAP_RE = re.compile(
     r"(?:@[\w.-]+/server-|mcp[-_]server[-_]|mcp[-_])"
@@ -4011,16 +4011,16 @@ _MCP_DATA_CAP_RE = re.compile(
 
 # FP-suppression denylist (C-135 round 2, tightened round 3): a capability keyword
 # immediately followed by one of these SHAPE-ONLY suffixes names a tool that inspects/
-# documents a data store's STRUCTURE, not one that reads its contents — e.g.
+# documents a data store's STRUCTURE, not one that reads its contents - e.g.
 # "database-diagram", "redis-docs", "server-database-schema". Matched right after
 # _MCP_DATA_CAP_RE's keyword; a bare keyword with no such suffix (a real
 # "server-postgres"/"server-vault") still flags.
 #
 # C-135 round 3 (FN-1): "viewer"/"explorer"/"dashboard"/"scanner" were REMOVED from this
-# denylist — those suffixes name a READER, not a shape-only tool (a "vault-viewer" reads
+# denylist - those suffixes name a READER, not a shape-only tool (a "vault-viewer" reads
 # the actual secrets, a "postgres-viewer"/"mongodb-explorer"/"redis-viewer" reads DB rows,
 # an "s3-explorer"/"gdrive-viewer" reads cloud objects, a "database-scanner" dumps a DB),
-# so suppressing them was a real false-negative — they must still flag as data access.
+# so suppressing them was a real false-negative - they must still flag as data access.
 _MCP_BENIGN_COMPOUND_RE = re.compile(
     r"\A[-_]?(diagram|designer|docs?|documentation|schema|erd)\b",
     re.I,
@@ -4047,23 +4047,23 @@ _MCP_BROAD_FS_ROOTS = frozenset(
 
 # FP-suppression denylist (C-135 round 2, tightened round 3, FP-A): basenames directly
 # under /home or /Users that name a conventionally-shared/scratch/dev-workspace
-# directory, NOT a private per-user home — e.g. the standard macOS /Users/Shared folder,
+# directory, NOT a private per-user home - e.g. the standard macOS /Users/Shared folder,
 # or a team's /home/data /home/projects /home/workspace convention. A single path level
 # under /home//Users is only "the whole user home" when it is a plausible username, i.e.
 # NOT one of these.
 #
 # C-135 round 3 (FN-2): {git, backup, backups, www, srv, web, repo, repos} were REMOVED
-# from this denylist — those are service-account / secret-bearing home directories, not
+# from this denylist - those are service-account / secret-bearing home directories, not
 # harmless shares: /home/git is a git service user's home (~/.ssh deploy keys + every
 # repo it serves), /home/backup(s) holds whole-system backups / DB dumps, /home/www
 # ///srv//web are webroots (configs, .env, credentials), /home/repo(s) is a repo-hosting
 # account. Rooting a filesystem MCP there is a genuine sensitive-data grant, so
-# suppressing it was a real false-negative — they go back to broad (FAIL), a true
+# suppressing it was a real false-negative - they go back to broad (FAIL), a true
 # positive.
 #
 # The remaining names ARE kept as an intentional, accepted residual (not a bug): the
 # bare word after /home/ or /Users/ (e.g. "data", "projects", "workspace") is statically
-# undecidable — it can equally be a team's shared scratch/dev folder (the common case) OR
+# undecidable - it can equally be a team's shared scratch/dev folder (the common case) OR
 # someone's actual private home directory named after its purpose. Per Golden Rule #5 a
 # false-positive FAIL is the hard blocker, so this ambiguity is deliberately tie-broken
 # toward PASS (no leg raised) rather than FAIL, accepting the narrower risk of a false
@@ -4085,12 +4085,12 @@ def _mcp_fs_root_is_broad(raw) -> bool:
 
     Broad = the whole root ('/'), an entire user home ('~'/'$HOME'/'/home/<user>'/
     '/Users/<user>'), or a system-config tree ('/etc', '/var'). A narrowly project-scoped
-    root (a single sub-dir under a home, '.', a relative path) is NOT broad — it does not,
+    root (a single sub-dir under a home, '.', a relative path) is NOT broad - it does not,
     by itself, raise the sensitive-data leg (§5 zero-FP). Flags (leading '-') are skipped.
 
     C-135 round 2 (FP-A), tightened round 3: a single level under /home or /Users is
     broad only when that basename is NOT a conventionally-shared/scratch name (see
-    _MCP_HOME_SHARED_BASENAMES) — e.g. /Users/Shared or /home/data stay non-broad, even
+    _MCP_HOME_SHARED_BASENAMES) - e.g. /Users/Shared or /home/data stay non-broad, even
     though nominally "one level under the homes parent". A service-account / secret-
     bearing home (/home/git, /home/backup, /home/www, ...) is deliberately NOT in that
     denylist (round 3, FN-2) and so still counts as broad.
@@ -4101,7 +4101,7 @@ def _mcp_fs_root_is_broad(raw) -> bool:
     low = (p.rstrip("/") or "/").lower()
     if low in _MCP_BROAD_FS_ROOTS:
         return True
-    # /home/<user> or /Users/<user> — exactly one level under the homes parent — grants
+    # /home/<user> or /Users/<user> - exactly one level under the homes parent - grants
     # the whole user home = broad; a deeper path (/home/<user>/project) is project-scoped;
     # a shared/service basename (/Users/Shared, /home/data) is not a private home either.
     segs = [s for s in low.split("/") if s]
@@ -4113,15 +4113,15 @@ def _mcp_fs_root_is_broad(raw) -> bool:
 def _mcp_sensitive_reason(local_blob: str, args: list) -> str:
     """Human-readable reason a STDIO MCP server grants the sensitive-data leg, else ''.
 
-    ``local_blob`` must be the server's command+args ONLY (see _mcp_leg_contributions) —
+    ``local_blob`` must be the server's command+args ONLY (see _mcp_leg_contributions) -
     never a remote server's url/host, which says nothing about local data access (a
     remote endpoint's own risk is the outbound leg, not this one).
 
     Two sound signals: a known data/db/secret server package name that is NOT a
-    shape-only compound (diagram/designer/docs/documentation/schema/erd — inspects the
+    shape-only compound (diagram/designer/docs/documentation/schema/erd - inspects the
     structure, doesn't read the data; _MCP_BENIGN_COMPOUND_RE), or a filesystem server
     ALSO rooted at a broad path. A reader/browser compound (viewer/explorer/dashboard/
-    scanner) is deliberately NOT in that denylist (C-135 round 3, FN-1) — it still flags.
+    scanner) is deliberately NOT in that denylist (C-135 round 3, FN-1) - it still flags.
     """
     m = _MCP_DATA_CAP_RE.search(local_blob)
     if m and not _MCP_BENIGN_COMPOUND_RE.match(local_blob[m.end():]):
@@ -4134,12 +4134,12 @@ def _mcp_sensitive_reason(local_blob: str, args: list) -> str:
 
 
 # B-247 (a B-229 residual): a server package that itself pulls untrusted EXTERNAL
-# content into the agent — fetch/web-search/browser/scraper, or a mailbox/feed/chat/
+# content into the agent - fetch/web-search/browser/scraper, or a mailbox/feed/chat/
 # issue-tracker reader. Mirrors INPUT_TOOL_HINTS, anchored to the MCP package-naming
 # convention like _MCP_DATA_CAP_RE (a bare keyword with no such prefix cannot match).
 # Narrower than INPUT_TOOL_HINTS's bare "web": "mcp-server-web3"/"mcp-server-webhook"
 # name an unrelated blockchain tool / an OUTBOUND sink, not intake, so only the
-# "web-search" compound counts. "filesystem" is excluded on purpose — that is the
+# "web-search" compound counts. "filesystem" is excluded on purpose - that is the
 # sensitive-data leg's domain (_MCP_FS_PKG_RE); folding it in here would duplicate it.
 _MCP_INTAKE_CAP_RE = re.compile(
     r"(?:@[\w.-]+/server-|mcp[-_]server[-_]|mcp[-_])"
@@ -4153,7 +4153,7 @@ def _mcp_intake_reason(blob: str) -> str:
     """Human-readable reason an MCP server grants the trifecta's untrusted-input leg,
     else ''.
 
-    Unlike ``_mcp_sensitive_reason``, ``blob`` is NOT local-only — callers pass
+    Unlike ``_mcp_sensitive_reason``, ``blob`` is NOT local-only - callers pass
     command+args+url combined (see _mcp_leg_contributions). A remote fetch/web-search/
     inbox-style endpoint pulls untrusted external content into the agent's context just
     like a local stdio one does; the "url says nothing about local access" reasoning
@@ -4174,11 +4174,11 @@ def _mcp_leg_contributions(cfg: dict) -> dict:
     Each string NAMES the server so A1 can attribute the leg to its capability source.
     Untrusted-input contributors (B-247): a fetch/web-search/browser/scraper/email/
     imap/gmail/rss/feed/slack/inbox/github-issues package, matched against command+
-    args+url combined — a remote intake endpoint is just as much an intake source as a
+    args+url combined - a remote intake endpoint is just as much an intake source as a
     local one (see _mcp_intake_reason). Sensitive-data contributors: a STDIO server
     whose command/args name a known data/db/secret package (not a benign diagram/docs/
     schema compound) or a broad-rooted fs root. A remote server's url/host is NEVER
-    used for THIS leg (C-135 round 2, FP-B) — it says nothing about local data access.
+    used for THIS leg (C-135 round 2, FP-B) - it says nothing about local data access.
     Outbound contributors: a remote/network endpoint that is NOT loopback (a localhost
     MCP keeps data on the machine and is not an exfil path).
     """
@@ -4186,11 +4186,11 @@ def _mcp_leg_contributions(cfg: dict) -> dict:
     for name, spec in _mcp_servers(cfg).items():
         if not isinstance(spec, dict):
             spec = {}
-        # B-247 FP fix: an `enabled: false` server contributes NO tools to the agent —
+        # B-247 FP fix: an `enabled: false` server contributes NO tools to the agent -
         # OpenClaw filters it out at every consumption site (server.enabled !== false in
         # bundle-mcp-config-CdwmTK7W.js / tool-policy-pipeline-C3edOW1F.js / bundle-mcp-
         # codex-DkMkPyae.js; McpServerSchema.enabled is optional boolean, zod-schema-
-        # O9ml_nmo.js). Use `is False`, not falsy/`not spec.get("enabled")` — an omitted
+        # O9ml_nmo.js). Use `is False`, not falsy/`not spec.get("enabled")` - an omitted
         # key is the permissive default. This also repairs the pre-existing (B-229)
         # sensitive-data/outbound blindness to the same field, not just the new intake
         # leg: keeping a disabled entry in config (OpenClaw's own documented
@@ -4202,13 +4202,13 @@ def _mcp_leg_contributions(cfg: dict) -> dict:
         raw_args = spec.get("args")
         args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
         # Sensitive-data signal is local-only: command+args of a stdio server. A
-        # remote server's url is deliberately excluded (FP-B) — see docstring.
+        # remote server's url is deliberately excluded (FP-B) - see docstring.
         local_blob = " ".join([cmd] + args)
         reason = _mcp_sensitive_reason(local_blob, args)
         if reason:
             contribs["sensitive data"].append(f"MCP server {name!r} {reason}")
         url = str(spec.get("url", "") or "")
-        # B-247: intake probe covers command+args+url — a remote endpoint's identity
+        # B-247: intake probe covers command+args+url - a remote endpoint's identity
         # IS meaningful here, unlike the sensitive-data probe above (see docstring).
         intake_blob = f"{local_blob} {url}" if url else local_blob
         intake_reason = _mcp_intake_reason(intake_blob)
@@ -4228,29 +4228,29 @@ def _unpolicied_open_wildcard_group_channels(cfg: dict) -> dict:
 
     Used ONLY by `_trifecta_legs` (A1's CRITICAL-scored, hard-FAIL-capable leg). B41 /
     B46's own `ext_ch` / RISK-01/02/03 keep reading the full, unguarded
-    `_open_wildcard_group_channels` via `_external_input_channels` — unaffected, since
+    `_open_wildcard_group_channels` via `_external_input_channels` - unaffected, since
     none of them can hard-FAIL on it (B140 is WARN-never-FAIL, RiskPaths never move the
     A-F score, B41/B46 are WARN-capped).
 
     Why the extra guard exists here and nowhere else: `_wildcard_group_gap` treats only
     the schema-valid `groupPolicy == "disabled"` (`GroupPolicySchema =
-    _enum(["open","disabled","allowlist"])`) as a closing signal — see its docstring.
-    An explicit-but-UNMODELED policy value (not a real schema literal — e.g. a config a
+    _enum(["open","disabled","allowlist"])`) as a closing signal - see its docstring.
+    An explicit-but-UNMODELED policy value (not a real schema literal - e.g. a config a
     live OpenClaw instance's own zod validation would reject, or simply a value this
     package hasn't been taught) is therefore read as "not disabled", i.e. open, same as
     a genuinely absent field. That reading is the right call for the WARN-only/advisory
     consumers above (better to nudge on something unparseable than stay silent), but
-    plugging it un-narrowed into A1 — a hard CRITICAL FAIL — would flip on ANY group
+    plugging it un-narrowed into A1 - a hard CRITICAL FAIL - would flip on ANY group
     config carrying some policy value the resolver doesn't happen to recognize, which is
     indistinguishable here from a deliberate, safe restriction. C-135 found this via two
     pre-existing FP-guard tests
     (`tests/test_checks.py::test_a1_approval_gated_group_bot_not_untrusted_input`,
     `::test_a1_owner_only_group_bot_not_untrusted_input`) that broke under the first,
-    unguarded attempt at this fix — both went red before this guard was added, so this
+    unguarded attempt at this fix - both went red before this guard was added, so this
     isn't a hypothetical. Scoped instead to exactly the shape B-297's own docstring
     calls "the commonest real open-group config": a channel/account node with NO
     dmPolicy/groupPolicy field at all (verified live in the referenced
-    `coding_telegram_insecure` real-fleet config — see `_trifecta_legs`).
+    `coding_telegram_insecure` real-fleet config - see `_trifecta_legs`).
     """
     out = {}
     for name, c in _channels(cfg).items():
@@ -4258,7 +4258,7 @@ def _unpolicied_open_wildcard_group_channels(cfg: dict) -> dict:
             continue
         for node in _resolved_channel_nodes(c):
             # B-438 (C-135 adversarial review): mirror the per-resolved-node
-            # `enabled: false` skip `_open_wildcard_group_channels` already carries — a
+            # `enabled: false` skip `_open_wildcard_group_channels` already carries - a
             # retired/disabled account left with its old open wildcard-group policy still
             # on record ingests nothing, same reasoning as that sibling's own guard. This
             # helper feeds A1's CRITICAL hard-FAIL leg (`_trifecta_legs`), so missing it
@@ -4278,7 +4278,7 @@ def _unpolicied_open_wildcard_group_channels(cfg: dict) -> dict:
 # incomplete. The real store holds a handful of small JSON files (OpenClaw's own
 # `resolveOAuthDir` writes `oauth.json` there, and channel pairing/allowFrom state lands
 # beside it), so a trip here means something pathological, not a big-home budget problem
-# — which is why the cap is disclosed to the caller instead of silently absorbed.
+# - which is why the cap is disclosed to the caller instead of silently absorbed.
 _CRED_STORE_MAX_FILES = 200
 _CRED_STORE_MAX_BYTES = 200_000
 # How many file names one over-determined store contributes before the rest are counted.
@@ -4286,16 +4286,16 @@ _CRED_STORE_MAX_NAMES = 3
 
 
 def _credential_store_state(home) -> dict:
-    """What OpenClaw's credential store HOLDS — not merely that the directory exists.
+    """What OpenClaw's credential store HOLDS - not merely that the directory exists.
 
     ``<home>/credentials`` is ``resolveOAuthDir`` (dist paths-*.js: ``$STATE_DIR/credentials``),
     where an OAuth grant is written as ``oauth.json``. It is ALSO where channel pairing
-    state lands, and OpenClaw creates it as soon as a channel is paired — so its mere
+    state lands, and OpenClaw creates it as soon as a channel is paired - so its mere
     presence says nothing about whether a credential is in it.
 
     B-666: A1's "sensitive data" leg used to be raised by ``(home / "credentials").is_dir()``
-    alone. Measured on the real fleet home, that directory held 94 bytes across two files —
-    a Telegram allow-list and an empty pairing-request list, neither of them a secret — and
+    alone. Measured on the real fleet home, that directory held 94 bytes across two files -
+    a Telegram allow-list and an empty pairing-request list, neither of them a secret - and
     that was the ONLY thing holding up a CRITICAL 3/3 FAIL. Moving those 94 bytes out
     flipped A1 to PASS and the grade from F/49 to C/79 while every real credential
     (the bot token, the provider profile, the gateway token) stayed exactly where it was.
@@ -4304,13 +4304,13 @@ def _credential_store_state(home) -> dict:
     serves both checks.
 
     Returns ``{"present", "secret_files", "incomplete", "reason"}``. ``secret_files`` holds
-    store-relative names only — never a value, never an absolute path (§8). ``incomplete``
+    store-relative names only - never a value, never an absolute path (§8). ``incomplete``
     is True when the walk could not finish (cap or an unlistable directory): an empty
     ``secret_files`` then means "not found in what we read", NOT "not there", and
     ``check_trifecta`` routes that to its hedge rather than to a clean leg-is-off PASS.
     """
     # B-677 added `digests` additively: a per-file content hash so the MONITOR can see a
-    # credential replaced, which no status-based check can. Measured before building it —
+    # credential replaced, which no status-based check can. Measured before building it -
     # with the sensitive-data leg already up, a second credential file and a rotated token
     # both produced ZERO alerts. Hashes only, never content (section 8), and every consumer
     # of the other keys is unaffected.
@@ -4333,7 +4333,7 @@ def _credential_store_state(home) -> dict:
     for path in files:
         try:
             if path.stat().st_size > _CRED_STORE_MAX_BYTES:
-                # Too big to read is not "clean" — the store was not fully covered.
+                # Too big to read is not "clean" - the store was not fully covered.
                 out["incomplete"] = True
                 out["reason"] = "a file in it is too large to scan"
                 continue
@@ -4364,8 +4364,8 @@ def _credential_store_state(home) -> dict:
 # ---------------------------------------------------------------------------- C-462
 # Only ONE member of SENSITIVE_TOOL_IDS is a tool `tools.fs.workspaceOnly` actually
 # governs: `read`. `memory_get`/`memory_search` are memory tools, and the substring hints
-# beside them (`fs_read`, `files`, `db`, `vault`, …) are generic names — `fs_read` is not
-# even an id OpenClaw defines — so no filesystem setting confines any of them. Applying
+# beside them (`fs_read`, `files`, `db`, `vault`, ...) are generic names - `fs_read` is not
+# even an id OpenClaw defines - so no filesystem setting confines any of them. Applying
 # the guard past `read` would suppress a leg over a control that does not reach the tool.
 _FS_GOVERNED_TOOL_IDS = frozenset({"read"})
 
@@ -4374,12 +4374,12 @@ def _fs_reads_are_confined(cfg: dict) -> bool:
     """True when EVERY declared scope is PROVEN to confine its file reads.
 
     B-712 sharpened that sentence, and the change of proposition is the point. `confined_scopes`
-    now answers True / False / None per scope, where None means `sandbox.mode: "non-main"` — a
+    now answers True / False / None per scope, where None means `sandbox.mode: "non-main"` - a
     confinement the vendor resolves against the RUNNING session's key, which no config carries.
     An undecided scope therefore does not satisfy this predicate: suppression requires proof,
     and `all()` over a list containing None would have reached the same answer by coercion
     rather than by decision. Written out so the decision is visible, because this feeds two
-    FAIL gates — A1's sensitive-data leg, and `_capability.py`, whose own comment notes that
+    FAIL gates - A1's sensitive-data leg, and `_capability.py`, whose own comment notes that
     `fs_confined` downgrades a hard FAIL to WARN.
 
     C-462: the two guards are OpenClaw's own, taken from the predicate its audit uses for
@@ -4387,8 +4387,8 @@ def _fs_reads_are_confined(cfg: dict) -> bool:
 
         fsUnguarded = fsTools.length > 0 && sandboxMode !== "all" && fsWorkspaceOnly !== true
 
-    So a granted file-read tool behind `tools.fs.workspaceOnly: true` — or inside a fully
-    sandboxed session, where the OpenClaw home is not mounted at all — is not an exposure,
+    So a granted file-read tool behind `tools.fs.workspaceOnly: true` - or inside a fully
+    sandboxed session, where the OpenClaw home is not mounted at all - is not an exposure,
     by the platform's own reckoning. Scopes are the same ones `toolpolicy` resolves (the
     global surface plus each `agents.list` entry), and the answer is the conjunction: one
     unconfined scope is enough to leave the capability exposed.
@@ -4399,10 +4399,10 @@ def _fs_reads_are_confined(cfg: dict) -> bool:
 
 def _trifecta_leg_sources(ctx: Context) -> dict:
     """The three lethal-trifecta legs, each mapped to the SPECIFIC config entries that
-    make it active (B-493) — every OR-disjunct `_trifecta_legs` (below) used to collapse
-    to a bare bool, now named. Same three keys, same insertion order (input → sensitive
-    → outbound) as `_trifecta_legs`; `_trifecta_legs(ctx) == {k: bool(v) for k, v in
-    _trifecta_leg_sources(ctx).items()}` always holds — pinned by
+    make it active (B-493) - every OR-disjunct `_trifecta_legs` (below) used to collapse
+    to a bare bool, now named. Same three keys, same insertion order (input -> sensitive
+    -> outbound) as `_trifecta_legs`; `_trifecta_legs(ctx) == {k: bool(v) for k, v in
+    _trifecta_leg_sources(ctx).items()}` always holds - pinned by
     `test_b493_trifecta_leg_sources.py`, which also checks every fixture home, so a
     future disjunct added to one function without a matching source in the other is
     caught as a leg going True with an empty `[]`, not silently.
@@ -4410,28 +4410,28 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     WHAT A LEG IS (C-462, written down because the engine used to hold two answers). A
     leg is a capability this config **declares** and does not **confine**:
 
-      * declared — a tool named in `tools.allow`/`alsoAllow`/`gateway.tools.allow` or in
+      * declared - a tool named in `tools.allow`/`alsoAllow`/`gateway.tools.allow` or in
         an attested roster, ungated exec, a sensitive MCP server, a credential sitting in
         the store. NOT a capability that exists only because OpenClaw's defaults are
         permissive: an absent `tools.profile` grants every core tool, including `read`,
         and treating that as a leg would make A1 fire CRITICAL on any config that merely
         never mentioned tools. That population is reported by `check_trifecta`'s WARN
-        hedge instead — which is also how OpenClaw's own audit rates it
+        hedge instead - which is also how OpenClaw's own audit rates it
         (`security.exposure.open_groups_with_runtime_or_fs` is `critical` only when
         RUNTIME tools are unguarded, and `warn` when the exposure is filesystem-only).
-      * confined — for a file `read`, `tools.fs.workspaceOnly: true` or a fully sandboxed
+      * confined - for a file `read`, `tools.fs.workspaceOnly: true` or a fully sandboxed
         session, the two guards that same vendor predicate uses. See
         `_fs_reads_are_confined`. Nothing else in the sensitive set is governed by a
         filesystem setting, so nothing else is filtered by it.
 
-    A leg is frequently OVER-DETERMINED — several independent suppliers each sufficient
+    A leg is frequently OVER-DETERMINED - several independent suppliers each sufficient
     alone (e.g. `web` in `tools.allow` AND an open channel both raise "untrusted
-    input") — so a value here can hold more than one entry. Naming ALL of them, not
+    input") - so a value here can hold more than one entry. Naming ALL of them, not
     just the first, is the point: a user who removes one entry from an over-determined
     leg and re-runs sees the leg still active, and needs to know that going in rather
     than discover it by trial and error.
 
-    Reuses `_trifecta_legs`'s exact predicates as the ground truth for what fires —
+    Reuses `_trifecta_legs`'s exact predicates as the ground truth for what fires -
     `_tool_hint_sources`/`_exec_enabled_sources`/`_web_fetch_source` are the attributed
     siblings of `_hint`/`_real_exec_enabled`/`_web_fetch_enabled` (see each's own
     docstring for the bool-parity invariant), so this cannot drift into naming a
@@ -4454,15 +4454,15 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     untrusted.extend(mcp_legs["untrusted input"])  # B-247: fetch/web-search/inbox/... MCP
 
     # Agent-readable private data: a data tool (db/credential/vault/fs_read/...), a
-    # plaintext credential inside the credentials/ store (B-666 — its content, not the
+    # plaintext credential inside the credentials/ store (B-666 - its content, not the
     # directory's existence), the gateway's own auth password (B-876, see below), or
     # ungated exec.
     sensitive: list = []
     sensitive.extend(_tool_hint_sources(cfg, SENSITIVE_TOOL_HINTS))
-    # B-667: the generic hints above cannot see OpenClaw's own tool ids — see
+    # B-667: the generic hints above cannot see OpenClaw's own tool ids - see
     # SENSITIVE_TOOL_IDS. Exact match, alias-folded, over the config's grants and over an
     # attested roster (which until now could only ever clear a leg, never raise one).
-    # C-462: a declared file-read tool is a leg only while it is UNCONFINED — see
+    # C-462: a declared file-read tool is a leg only while it is UNCONFINED - see
     # `_fs_reads_are_confined`. The ids that no filesystem setting governs are unaffected.
     granting_ids = SENSITIVE_TOOL_IDS
     if _fs_reads_are_confined(cfg):
@@ -4471,7 +4471,7 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
         ctx, granting_ids
     )
     # B-712: when the ONLY reason a file-read counts is that confinement could not be
-    # resolved — `sandbox.mode: "non-main"`, whose answer depends on which session runs — the
+    # resolved - `sandbox.mode: "non-main"`, whose answer depends on which session runs - the
     # source says so. Keeping the leg is right (suppression requires proof); stating it
     # without the qualifier would assert an exposure we did not establish, which is the same
     # fabrication as the confident `True` this predicate used to return, pointed the other
@@ -4488,11 +4488,11 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # setting .home, relying on _trifecta_legs' original `or`-chain never reaching this
     # term once an earlier one is already True (test_b283_shallow_reads.py's
     # TestTrifectaPayoff). This primitive evaluates every term unconditionally (it must,
-    # to list ALL suppliers of an over-determined leg — B-493), so it has to tolerate
+    # to list ALL suppliers of an over-determined leg - B-493), so it has to tolerate
     # the same test double the lazy `or` used to protect by construction. Production
     # Context.home is a required dataclass field (collector.py) and is always set.
     home = getattr(ctx, "home", None)
-    # B-666: CONTENT, not a directory name. See _credential_store_state — the store
+    # B-666: CONTENT, not a directory name. See _credential_store_state - the store
     # exists on any home that ever paired a channel, so its presence raised this
     # CRITICAL leg over 94 bytes of pairing state on the real fleet home, and moving
     # those bytes out bought a clean A1 while every actual credential stayed put.
@@ -4506,40 +4506,40 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
             "hold a plaintext credential)"
         )
     # B-876: this leg used to exclude `gateway.auth.password` on the stated
-    # ground that it is "the gateway's own auth secret, not agent-readable data" — true of
+    # ground that it is "the gateway's own auth secret, not agent-readable data" - true of
     # WHO minted it, not of whether the agent can reach it, and `risk.py::_has_sensitive_data`
     # / report.py's capability graph (`main_secrets`) both already counted it. Reproduced by
     # the B-730 review: a home with an empty credentials store, `fs.workspaceOnly=true` and
     # only this key set gave A1 PASS "Active legs 2/3" next to a RISK-02 HIGH asserting all
-    # three legs active in the SAME run — the exact contradiction B-730 fixed for the
+    # three legs active in the SAME run - the exact contradiction B-730 fixed for the
     # credential store, reached through a different term (pinned, until this task, by
     # `tests/test_b730_sensitive_data_model_agreement.py::
     # test_the_gateway_password_asymmetry_is_the_one_known_divergence`). Dave's decision
     # (2026-09-20): widen A1 to match the other two consumers, not narrow them. B1
-    # (`check_secrets`) still separately FAILs/CRITICALs on the same key — that is a
+    # (`check_secrets`) still separately FAILs/CRITICALs on the same key - that is a
     # different question (a plaintext secret sitting in the config file) from this leg's
     # question (data the agent can reach), and both answers can be true at once.
     if dig(cfg, "gateway.auth.password"):
         sensitive.append("gateway.auth.password is set")
     # B-061: ungated exec/shell can read any private file. Approval-gated exec (see
-    # _has_approval_gate) is NOT autonomous, so it must not raise this leg — matches
+    # _has_approval_gate) is NOT autonomous, so it must not raise this leg - matches
     # _trifecta_legs' exec_enabled = _real_exec_enabled(cfg) and not _has_approval_gate(cfg).
     if not _has_approval_gate(cfg):
         sensitive.extend(
-            f"{s} — ungated (tools.exec.mode/security/ask absent or not gating)"
+            f"{s} \u2014 ungated (tools.exec.mode/security/ask absent or not gating)"
             for s in _exec_enabled_sources(cfg)
         )
     sensitive.extend(mcp_legs["sensitive data"])  # B-229: fs-at-broad-root / db / secret MCP
 
     outbound: list = []
     outbound.extend(_tool_hint_sources(cfg, OUTBOUND_TOOL_HINTS))
-    # B-674: the generic hints above cannot see OpenClaw's own write-capable tool ids —
+    # B-674: the generic hints above cannot see OpenClaw's own write-capable tool ids -
     # see OUTBOUND_TOOL_IDS. Exact match, alias-folded, over the config's grants and over
     # an attested roster, mirroring B-667's SENSITIVE_TOOL_IDS treatment of the inbound
     # leg exactly (same helpers, same shape). No confinement guard, by decision: a write
     # confined to the workspace can still tamper SOUL.md / memory / skills, which is what
     # this leg exists to catch, so the outbound leg does not honour confinement (B55 does,
-    # because it asks a different question — reach outside the workspace).
+    # because it asks a different question - reach outside the workspace).
     outbound.extend(_tool_id_sources(cfg, OUTBOUND_TOOL_IDS))
     outbound.extend(_attested_tool_id_sources(ctx, OUTBOUND_TOOL_IDS))
     if dig(cfg, "tools.elevated.allowFrom"):
@@ -4556,7 +4556,7 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # dict.fromkeys de-dups while preserving order: the same source string can be
     # reached two ways for outbound ("exec" via _enabled_tools_sources' synthetic tag
     # AND the separate _profile_is_powerful() OR-term below both name tools.profile
-    # when no explicit tools.exec.* is set) — a literal duplicate would misread as two
+    # when no explicit tools.exec.* is set) - a literal duplicate would misread as two
     # independent suppliers instead of one.
     return {
         "untrusted input": list(dict.fromkeys(untrusted)),
@@ -4566,32 +4566,32 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
 
 
 def _trifecta_legs(ctx: Context) -> dict:
-    """The three lethal-trifecta legs computed from the GLOBAL config surface — a thin
+    """The three lethal-trifecta legs computed from the GLOBAL config surface - a thin
     bool wrapper over `_trifecta_leg_sources` (B-493).
 
     Shared by A1 (check_trifecta) and B46 (check_multiagent_exposure) so both read
     one definition of the legs. Keys are the human-facing labels A1 emits; insertion
-    order is preserved (input → sensitive → outbound).
+    order is preserved (input -> sensitive -> outbound).
 
     Kept as its own function rather than inlining `bool(...)` at every call site
     because two existing tests pin `_trifecta_legs(...)["leg"] is False` as a C-135
     false-positive guard (`tests/test_b297_wildcard_group_ingress_leg.py`,
-    `tests/test_b371_a1_b41_ingress_agreement.py`) — `[]` is not `False`, so returning
+    `tests/test_b371_a1_b41_ingress_agreement.py`) - `[]` is not `False`, so returning
     `_trifecta_leg_sources`'s lists directly at those call sites would break both pins.
 
     B-371 (2026-07-31): the untrusted-input leg now ALSO counts
-    `_unpolicied_open_wildcard_group_channels` — a B-297 open `groups["*"]` entry with
+    `_unpolicied_open_wildcard_group_channels` - a B-297 open `groups["*"]` entry with
     no dmPolicy/groupPolicy at all. Before this, A1 was the one CRITICAL-scored consumer
     of the dmPolicy/groupPolicy allowlist that could not see that shape at all (B41's
     `_external_input_channels` already could), even though it is the commonest real
     open-community-bot config and B140 already WARNs on it. That gap was deliberately
     left open when B-297 landed pending "its own C-135 pass" (see the now-updated
-    `tests/test_b297_wildcard_group_ingress_leg.py`) — this is that pass. Verified
+    `tests/test_b297_wildcard_group_ingress_leg.py`) - this is that pass. Verified
     against every local `fixtures/` home (549) and the full clawrange corpus (73 real
     configs, read-only): exactly one config's A1 verdict changes,
-    `coding_telegram_insecure` (PASS→FAIL) — an open Telegram group with no allowFrom
+    `coding_telegram_insecure` (PASS->FAIL) - an open Telegram group with no allowFrom
     feeding a "coding"-profile agent with ungated exec, a genuine 3/3 trifecta A1 was
-    previously blind to. Deliberately NOT the full `_external_input_channels` reading —
+    previously blind to. Deliberately NOT the full `_external_input_channels` reading -
     see `_unpolicied_open_wildcard_group_channels`'s docstring for why a narrower guard
     is used here specifically (two existing FP-guard tests, `test_checks.py`'s
     `test_a1_approval_gated_group_bot_not_untrusted_input` /
@@ -4608,7 +4608,7 @@ INJECTION_PATTERNS = [
     re.compile(
         r"do (whatever|anything) (the )?(user|sender|message|email) (says|asks|wants)", re.I
     ),
-    # NOTE: a bare "without (asking|confirmation)" pattern was removed — it is approval-bypass
+    # NOTE: a bare "without (asking|confirmation)" pattern was removed - it is approval-bypass
     # phrasing (B23's domain, which is severity-gated) and conflated protective directives
     # ("Don't run destructive commands without asking") with permissive ones, causing false
     # CRITICAL FAILs on well-configured agents. B6 flags blanket-obedience / injection only.
@@ -4616,30 +4616,30 @@ INJECTION_PATTERNS = [
 
 
 # F-127 (2026-07-18, C-135): logscan.py's class 1 (`injection_against_agent`) used
-# INJECTION_PATTERNS[0] alone and missed the single most canonical injection phrasing —
+# INJECTION_PATTERNS[0] alone and missed the single most canonical injection phrasing -
 # "ignore all previous instructions" stacks TWO modifiers ("all" + "previous") where
 # INJECTION_PATTERNS[0] allows exactly one, and "disregard"/"forget" (the next two most
-# common override verbs — "Disregard all prior instructions", "Forget everything above")
+# common override verbs - "Disregard all prior instructions", "Forget everything above")
 # aren't covered by any verb there at all. Fixed end-to-end FN on check_memory_reconsumption_
 # injection (B180): 3 of 4 textbook poisoned-memory payloads returned PASS despite an
 # unambiguous cred-read + attacker-host exfil line the scanner DID see as a second class.
 #
 # Deliberately NOT folded into INJECTION_PATTERNS itself: that list is also consumed
-# un-corroborated by check_bootstrap_injection (B6 — a bare match is a direct FAIL, no
+# un-corroborated by check_bootstrap_injection (B6 - a bare match is a direct FAIL, no
 # second-signal gate) and by the B58/C074 content-ring checks. Re-fleet testing (the §4
 # C-135 adversarial pass) showed widening INJECTION_PATTERNS in place immediately reopened
 # B6 as a FALSE FAIL on two clean fixtures whose SOUL.md legitimately QUOTES this exact
 # phrase as a worked example in a prompt-injection-defense doc (fixtures/clean_b64_defensive,
-# fixtures/clean_b64_signatures) — B6 has no quote/report-frame discriminator the way B64
+# fixtures/clean_b64_signatures) - B6 has no quote/report-frame discriminator the way B64
 # (`_b64_reported_or_quoted`) does, and retrofitting that machinery into B6 is a separate,
 # larger change than this task's confirmed defect. This pattern is used ONLY by logscan.py's
 # class 1, which feeds check_log_threat_hunt (B164) and check_memory_reconsumption_injection
-# (B180) — BOTH of which already gate on 2-class corroboration in the SAME file before ever
+# (B180) - BOTH of which already gate on 2-class corroboration in the SAME file before ever
 # surfacing anything above PASS (see `_b180_corroborated` / `_log_hunt_corroborated`), so an
 # isolated match here (the "security note quoting an attack" case) still cannot WARN on its
 # own. Reuses the SAME bounded-filler shape checks/_content.py's `_B74_TURN_DIRECTIVE_RE`
 # already uses for this identical "override imperative" concept (0-3 filler words between
-# verb and target noun; bounded quantifier, no catastrophic-backtracking risk) — not a new
+# verb and target noun; bounded quantifier, no catastrophic-backtracking risk) - not a new
 # heuristic, just the missing verb/modifier-count coverage, narrowly scoped to the two
 # checks whose own corroboration gate already absorbs the quote-vs-live-directive ambiguity.
 LOG_SCAN_INJECTION_PATTERNS = INJECTION_PATTERNS + [
@@ -4676,7 +4676,7 @@ _FM_BLOCK_HEADERED_RE = re.compile(
 
 
 # General per-file section splitter for the "# file: <name>\n" header _read_skill_text
-# injects ahead of every concatenated file's content (moved here from _content.py, B-193 —
+# injects ahead of every concatenated file's content (moved here from _content.py, B-193 -
 # reused by _vet.py too). `name` keeps only the basename (directory stripped by
 # _read_skill_text), so this identifies WHICH FILE a blob position came from, not its path.
 _MANIFEST_HEADER_RE = re.compile(
@@ -4688,7 +4688,7 @@ _MANIFEST_HEADER_RE = re.compile(
 # A sentence terminator (with trailing space/EOL) or a blank-line paragraph break.
 # Used to decide grammatical CONNECTION: a negation/prohibition only governs a trigger
 # if no sentence/paragraph boundary separates them (moved here from _content.py,
-# B-194 — reused by _vet.py too).
+# B-194 - reused by _vet.py too).
 _SENTENCE_BREAK_RE = re.compile(r"[.!?][\"')\]]?(?:\s|$)|\n[^\S\n]*\n")
 
 
@@ -4714,12 +4714,12 @@ def _skill_frontmatter_block(blob: str) -> str | None:
 
 # B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY + V_MISLEADING_DESCRIPTION): the
 # "declared vs actual" discriminator recommended by B-342's own diagnosis, B-340, and
-# C-310's SC-005-shape-1 item. This is the DISCLOSURE side only — it says nothing about
+# C-310's SC-005-shape-1 item. This is the DISCLOSURE side only - it says nothing about
 # whether the CODE actually collects/transmits data (that is
 # skillast.py's EXCESSIVE_TELEMETRY_FLOW); the two are combined by the caller
 # (checks/_vet.py) into a single "undisclosed" finding.
 #
-# Deliberately broad wording, not a narrow "telemetry" literal — a legitimate skill that
+# Deliberately broad wording, not a narrow "telemetry" literal - a legitimate skill that
 # discloses this in its own words ("we back up your files", "usage stats are sent to
 # improve this skill", "collects anonymized analytics") must not still be flagged for using
 # different words than a scanner author guessed.
@@ -4735,7 +4735,7 @@ def _skill_frontmatter_block(blob: str) -> str | None:
 # _skill_declares_config_target's identical precedent) fixes that: the frontmatter
 # `name`/`description` is the short, curated text a user actually reads before
 # installing/triggering a skill, not free-form body prose an injected instruction can
-# plant a keyword into. This is a narrowing for soundness, not a completeness claim —
+# plant a keyword into. This is a narrowing for soundness, not a completeness claim -
 # a skill that only discloses telemetry in its body (not frontmatter) will still be
 # flagged; that is the safer failure direction for a security check.
 #
@@ -4763,11 +4763,11 @@ _TELEMETRY_DISCLOSURE_RE = re.compile(
 
 
 def _skill_declares_telemetry_disclosure(blob: str) -> bool:
-    """True when the skill's OWN SKILL.md FRONTMATTER (name/description/metadata —
+    """True when the skill's OWN SKILL.md FRONTMATTER (name/description/metadata -
     _skill_frontmatter_block, same scope _skill_declares_config_target uses) discloses
-    that it collects/sends usage, diagnostic, or file/data information — the
+    that it collects/sends usage, diagnostic, or file/data information - the
     "declared" half of the declared-vs-actual discriminator. Deliberately does NOT
-    search the whole blob/body prose — see the C-135 note above the regex for the real
+    search the whole blob/body prose - see the C-135 note above the regex for the real
     false-negative that scoping choice fixes (an injected body instruction can plant a
     disclosure-shaped word that was never the skill's own stated purpose)."""
     fm = _skill_frontmatter_block(blob)
@@ -4776,30 +4776,30 @@ def _skill_declares_telemetry_disclosure(blob: str) -> bool:
     return bool(_TELEMETRY_DISCLOSURE_RE.search(fm))
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # B-288: the root-`hooks` SESSION-KEY / AGENT-ROUTING policy family.
 #
 # B179 inventories the hooks ENABLE toggles (hooks.enabled, hooks.internal.*) and
-# stopped there. The security-critical siblings under the SAME root `hooks` object —
+# stopped there. The security-critical siblings under the SAME root `hooks` object -
 # who may choose a session key, which prefixes are acceptable, and which agent ids a
-# hook request may route to — were read by nothing in the package (grep: 0 hits for
+# hook request may route to - were read by nothing in the package (grep: 0 hits for
 # all four before this change), so a setup that had opened hook ingress to arbitrary
 # session keys looked identical to one that had scoped it.
 #
 # Grounded against the installed dist (openclaw 2026.7.1), not the recon doc:
-#   zod-schema-O9ml_nmo.js:1294-1306 — root `hooks` is `.strict()` and declares
+#   zod-schema-O9ml_nmo.js:1294-1306 - root `hooks` is `.strict()` and declares
 #     defaultSessionKey / allowRequestSessionKey / allowedSessionKeyPrefixes /
 #     allowedAgentIds (all optional).
-#   audit.nondeep.runtime-C3y1Q5Fi.js:631-703 — collectHooksHardeningFindings, the
+#   audit.nondeep.runtime-C3y1Q5Fi.js:631-703 - collectHooksHardeningFindings, the
 #     product's own audit of exactly this family. Every predicate below is a
 #     transcription of the one used there, which is what makes agreement with the
 #     vendor's verdict structural rather than a coincidence of tuning.
-#   hooks-Bjrm8pWp.js:343-362, 493-527 — the ENFORCEMENT side: the same fields become
+#   hooks-Bjrm8pWp.js:343-362, 493-527 - the ENFORCEMENT side: the same fields become
 #     `sessionPolicy` / `agentPolicy` and actually gate a request-supplied sessionKey.
 #
 # NOT covered here, deliberately: `plugins.entries.*.hooks.allowPromptInjection` and
 # `.allowConversationAccess` (zod-schema-O9ml_nmo.js:789-795). Those are PLUGIN-ENTRY
-# scoped, not root-`hooks` fields — root `hooks` being `.strict()`, a config setting
+# scoped, not root-`hooks` fields - root `hooks` being `.strict()`, a config setting
 # them at the root would be rejected by schema validation outright. They are a real and
 # separately-uncovered surface, and they belong to a different task with the correct
 # path; nothing below should be read as covering them.
@@ -4807,7 +4807,7 @@ def _skill_declares_telemetry_disclosure(blob: str) -> bool:
 def _hooks_allowed_session_key_prefixes(cfg: dict) -> list[str]:
     """The configured non-blank hook session-key prefixes (empty list when unset).
 
-    Mirrors audit.nondeep.runtime-C3y1Q5Fi.js:672 — a non-array is an empty policy,
+    Mirrors audit.nondeep.runtime-C3y1Q5Fi.js:672 - a non-array is an empty policy,
     and blank entries are trimmed away rather than counted as a restriction.
     """
     raw = dig(cfg, "hooks.allowedSessionKeyPrefixes")
@@ -4821,8 +4821,8 @@ def _hooks_agent_ids_unrestricted(cfg: dict) -> bool:
 
     Transcribes resolveAllowedAgentIds (hooks-policy-Tc4l1nSI.js:4-18), whose contract
     is "returns undefined when all agents are allowed": a non-array is unrestricted, and
-    so is any list containing a literal ``*``. An explicit list — INCLUDING the empty
-    list, which denies hook agent routing outright — is restricted.
+    so is any list containing a literal ``*``. An explicit list - INCLUDING the empty
+    list, which denies hook agent routing outright - is restricted.
 
     Note this is true in the DEFAULT state (the field simply unset), which is exactly
     why it is reported as inventory evidence and only escalates inside RISK-20, under
@@ -4855,7 +4855,7 @@ def _hooks_session_key_exposures(cfg: dict) -> list[tuple[str, str]]:
     if not (isinstance(default_key, str) and default_key.strip()):
         out.append((
             "default_session_key_unset",
-            "hooks.defaultSessionKey — not configured, so hook agent runs without an "
+            "hooks.defaultSessionKey \u2014 not configured, so hook agent runs without an "
             "explicit sessionKey land in generated per-request keys rather than one "
             "known, reviewable session",
         ))
@@ -4863,7 +4863,7 @@ def _hooks_session_key_exposures(cfg: dict) -> list[tuple[str, str]]:
     if _hooks_agent_ids_unrestricted(cfg):
         out.append((
             "allowed_agent_ids_unrestricted",
-            "hooks.allowedAgentIds — unset or contains '*', so an authenticated hook "
+            "hooks.allowedAgentIds \u2014 unset or contains '*', so an authenticated hook "
             "caller may route to ANY configured agent id, including the default agent "
             "when agentId is omitted",
         ))
@@ -4871,13 +4871,13 @@ def _hooks_session_key_exposures(cfg: dict) -> list[tuple[str, str]]:
     if dig(cfg, "hooks.allowRequestSessionKey") is True:
         out.append((
             "request_session_key_enabled",
-            "hooks.allowRequestSessionKey — enabled, so /hooks/agent callers choose "
+            "hooks.allowRequestSessionKey \u2014 enabled, so /hooks/agent callers choose "
             "their own session key; hook token holders are effectively full-trust",
         ))
         if not _hooks_allowed_session_key_prefixes(cfg):
             out.append((
                 "request_session_key_prefixes_missing",
-                "hooks.allowedSessionKeyPrefixes — unset or empty while "
+                "hooks.allowedSessionKeyPrefixes \u2014 unset or empty while "
                 "allowRequestSessionKey is on, so request payloads can target "
                 "arbitrary session-key shapes (cross-session write)",
             ))
@@ -4887,19 +4887,19 @@ def _hooks_session_key_exposures(cfg: dict) -> list[tuple[str, str]]:
 def _node_commands(cfg: dict, kind: str) -> "tuple[object, str]":
     """The gateway node command allow/deny list, from EITHER config shape.
 
-    ``kind`` is ``"allow"`` or ``"deny"``. Returns ``(value, path)`` — the value exactly
+    ``kind`` is ``"allow"`` or ``"deny"``. Returns ``(value, path)`` - the value exactly
     as found (callers type-check it themselves, as they did when they read ``dig()``
     directly) and the config path to name in evidence.
 
     B-698. OpenClaw 2026.8.1 moved ``gateway.nodes.allowCommands`` / ``denyCommands``
     into a new strict object ``gateway.nodes.commands.{allow,deny}``. We read only the
     old spelling, so on a 2026.8.1 config B48 saw nothing and then returned "No dangerous
-    break-glass override flags enabled." — a clean verdict about a grant it never read.
+    break-glass override flags enabled." - a clean verdict about a grant it never read.
     Measured, not inferred: the same ``["system.run"]`` grant gave WARN in the old shape
     and PASS in the new one.
 
-    Both shapes are read, permanently. OpenClaw's migration is DEFERRED — it runs inside
-    ``openclaw doctor --fix`` — so an un-migrated config still carries ``allowCommands``
+    Both shapes are read, permanently. OpenClaw's migration is DEFERRED - it runs inside
+    ``openclaw doctor --fix`` - so an un-migrated config still carries ``allowCommands``
     on disk, and a user on an older OpenClaw is not migrating at all. Switching outright
     would trade the fake PASS for a silent UNKNOWN on every un-migrated config. Same rule
     and same shape as ``_mcp_servers`` above, which merges ``mcp.servers`` with the legacy
@@ -4911,7 +4911,7 @@ def _node_commands(cfg: dict, kind: str) -> "tuple[object, str]":
         if (Object.hasOwn(nodes, "allowCommands")) {
             if (commands.allow === void 0) commands.allow = nodes.allowCommands;
 
-    so the NEW key wins whenever it is PRESENT — including an explicit ``null``, which
+    so the NEW key wins whenever it is PRESENT - including an explicit ``null``, which
     ``=== void 0`` does not treat as absent. Do not "improve" that into "new key if
     truthy": a config carrying both would then be read one way by us and the other way by
     OpenClaw, which is the disagreement this accessor exists to prevent.
@@ -4924,13 +4924,13 @@ def _node_commands(cfg: dict, kind: str) -> "tuple[object, str]":
     is discharged rather than merely restated.
 
     Note the ORDER this requires: the presence test stays outside ``dig``, because the
-    precedence above turns on ``kind in commands`` — present-but-null must win. ``dig``
+    precedence above turns on ``kind in commands`` - present-but-null must win. ``dig``
     cannot express that distinction (it returns None for absent and for explicit null
     alike), so it supplies the VALUE and the ``in`` test supplies the DECISION. Reading
     the value through ``dig`` was verified equivalent to ``commands[kind]`` inside this
     branch over every value shape including explicit null and falsy scalars.
     """
-    # The CONTAINER is read with plain dict access, not `dig` — same as `_mcp_servers`
+    # The CONTAINER is read with plain dict access, not `dig` - same as `_mcp_servers`
     # reading `cfg.get("mcp")`. A `dig("gateway.nodes")` would add a manifest entry whose
     # only purpose is to reach a child, and the manifest's job is to vouch for the leaf
     # paths a check actually reasons about.
@@ -4959,7 +4959,7 @@ def _node_commands(cfg: dict, kind: str) -> "tuple[object, str]":
 def _node_allow_skills(cfg: dict) -> "tuple[object, str]":
     """Whether paired gateway nodes may publish skills, from EITHER config shape.
 
-    Returns ``(value, path)`` — the value exactly as found (the caller type-checks it
+    Returns ``(value, path)`` - the value exactly as found (the caller type-checks it
     itself, as callers did when reading ``dig()`` directly) and the config path to name
     in evidence.
 
@@ -4975,7 +4975,7 @@ def _node_allow_skills(cfg: dict) -> "tuple[object, str]":
     ``legacy-*.mjs``'s own migration (``if (nodes.allowSkills === void 0) nodes
     .allowSkills = skills.enabled``) confirms both the rename and its precedence.
 
-    Both shapes are read, permanently — same rule as ``_node_commands``: the vendor's
+    Both shapes are read, permanently - same rule as ``_node_commands``: the vendor's
     own migration is DEFERRED (``openclaw doctor --fix``), so an un-migrated config
     still carries the legacy nested key, and an operator on an older OpenClaw is not
     migrating at all.
@@ -4986,7 +4986,7 @@ def _node_allow_skills(cfg: dict) -> "tuple[object, str]":
         if (skills && Object.hasOwn(skills, "enabled")) {
             if (nodes.allowSkills === void 0) nodes.allowSkills = skills.enabled;
 
-    so the NEW key wins whenever it is PRESENT — including an explicit ``null``, which
+    so the NEW key wins whenever it is PRESENT - including an explicit ``null``, which
     ``=== void 0`` does not treat as absent. Same "present, not truthy" precedence as
     ``_node_commands``, so a config carrying both during a mid-migration window is read
     the same way OpenClaw itself reads it, not "new key if truthy".
@@ -4994,7 +4994,7 @@ def _node_allow_skills(cfg: dict) -> "tuple[object, str]":
     BOTH spellings are read through ``dig`` so both keep an entry in
     ``tests/grounded_schema_paths.txt``. The legacy path does not resolve against the
     installed dist (``t.safeParse`` on a config carrying it fails with
-    ``unrecognized_keys@gateway.nodes keys=["skills"]`` — the object no longer declares
+    ``unrecognized_keys@gateway.nodes keys=["skills"]`` - the object no longer declares
     a ``skills`` key at all, not merely a changed leaf under one), so it is registered in
     ``tests/test_schema_grounding.py``'s ``_NOT_IN_CURRENT_SCHEMA`` with that measured
     disproof, the same way ``gateway.nodes.allowCommands``/``denyCommands`` are.
@@ -5016,15 +5016,15 @@ _CANONICAL_IPV4_RE = re.compile(r"\A(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\Z
 def _canonical_ipv4(value) -> str | None:
     """The value as a canonical dotted-decimal IPv4 string, else None.
 
-    Mirrors the dist's ``isCanonicalDottedDecimalIPv4`` (ip-BvvIlSgO.js:1083-1089) —
-    four decimal octets, each 0-255, no leading zeros — which is exactly the predicate
+    Mirrors the dist's ``isCanonicalDottedDecimalIPv4`` (ip-BvvIlSgO.js:1083-1089) -
+    four decimal octets, each 0-255, no leading zeros - which is exactly the predicate
     ``gateway.bind=custom`` validation applies to ``gateway.customBindHost``
     (server-runtime-config-r5ejxORO.js:42).
 
     Written out rather than delegated to ``ipaddress`` on purpose: that module's
     tolerance for leading-zero octets changed *inside* the 3.9 series, and a security
     predicate must not silently mean different things on two supported interpreters
-    (CLAUDE.md §6.1 — 3.9 can change a verdict, not just crash).
+    (CLAUDE.md §6.1 - 3.9 can change a verdict, not just crash).
     """
     s = str(value or "").strip()
     m = _CANONICAL_IPV4_RE.match(s)
@@ -5041,8 +5041,8 @@ def _canonical_ipv4(value) -> str | None:
 def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
     """Label for a gateway PROVEN reachable beyond loopback, else None.
 
-    Ground truth here is the vendor's RESOLVER — ``resolveGatewayBindHost``
-    (net-BOKtNTf8.js:135-160), the function that actually decides the socket — and NOT
+    Ground truth here is the vendor's RESOLVER - ``resolveGatewayBindHost``
+    (net-BOKtNTf8.js:135-160), the function that actually decides the socket - and NOT
     the vendor's audit helper ``isGatewayRemotelyExposed``
     (audit.nondeep.runtime-C3y1Q5Fi.js:279-283), which collapses every profile that is
     not the literal ``"loopback"`` into "remote". Being faithful to the vendor's AUDIT
@@ -5051,27 +5051,27 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
 
     Per-profile, quoting the resolver:
 
-    * ``loopback`` → ``127.0.0.1`` (net:137-140). Local. Also the effective default
+    * ``loopback`` -> ``127.0.0.1`` (net:137-140). Local. Also the effective default
       when ``gateway.bind`` is absent on a non-container host
       (``defaultGatewayBindMode``, net:174-178).
-    * ``lan`` → ``return "0.0.0.0"``, unconditional (net:147). Remote.
-    * ``tailnet`` → the primary tailnet IPv4 when Tailscale is up, loopback only when
+    * ``lan`` -> ``return "0.0.0.0"``, unconditional (net:147). Remote.
+    * ``tailnet`` -> the primary tailnet IPv4 when Tailscale is up, loopback only when
       it is down (net:141-146). Reported remote: binding a tailnet address IS reachable
       off-host, and whether Tailscale is up is not a fact a config file carries.
-    * ``custom`` → ``gateway.customBindHost``, when that is a valid IPv4 the host can
+    * ``custom`` -> ``gateway.customBindHost``, when that is a valid IPv4 the host can
       bind (net:148-153). The DISCRIMINATOR is therefore that field, not the profile
-      name — a ``customBindHost`` of ``127.0.0.1`` is a loopback bind. The vendor says
+      name - a ``customBindHost`` of ``127.0.0.1`` is a loopback bind. The vendor says
       so itself: ``validateGatewayTailscaleBind`` accepts ``bind=custom`` with a
       loopback ``customBindHost`` as satisfying "must resolve to loopback"
       (io-By0s-a_s.js:3876). Loopback is the whole ``127.0.0.0/8`` range there
-      (``isLoopbackIpAddress`` → ``range() === "loopback"``, ip-BvvIlSgO.js:1104-1108),
+      (``isLoopbackIpAddress`` -> ``range() === "loopback"``, ip-BvvIlSgO.js:1104-1108),
       so ``127.0.0.53`` counts too.
-    * ``auto`` → ``0.0.0.0`` inside a container, ``127.0.0.1`` otherwise
-      (net:154-158, documented at net:130). Not knowable from a config file → None.
+    * ``auto`` -> ``0.0.0.0`` inside a container, ``127.0.0.1`` otherwise
+      (net:154-158, documented at net:130). Not knowable from a config file -> None.
 
     WHY ``auto`` RETURNS None RATHER THAN A REMOTE LABEL. ``auto`` is not an exotic
-    setting — it is the third option ``openclaw configure`` offers, labelled
-    "Auto (Loopback → LAN)" (configure.commands-DNA_7NSl.js:487-490) — and on a
+    setting - it is the third option ``openclaw configure`` offers, labelled
+    "Auto (Loopback -> LAN)" (configure.commands-DNA_7NSl.js:487-490) - and on a
     bare-metal or VM host it resolves to loopback. Asserting "reachable beyond
     loopback" there is a confident wrong answer. The tempting fix, detecting
     containerhood from the auditing process, is one the vendor explicitly warns
@@ -5081,18 +5081,18 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
     (net-BOKtNTf8.js:167-170). A static config reader is precisely such a host-side
     diagnostic, so it stays static and claims no proof.
 
-    HONEST LABELLING — the residual false negative this knowingly accepts. On a
+    HONEST LABELLING - the residual false negative this knowingly accepts. On a
     CONTAINER host ``bind=auto`` genuinely is ``0.0.0.0``, and this helper will not say
     so, so RISK-20 will not chain there. That is a deliberate trade of one unprovable
     escalation for a class of confident false positives, and it does not hide the
     underlying posture: the hook-policy evidence stays visible unconditionally as B179
     inventory either way. The same reasoning covers ``custom`` with an absent or
-    non-IPv4 ``customBindHost`` — as written that config is refused at startup outright
+    non-IPv4 ``customBindHost`` - as written that config is refused at startup outright
     (server-runtime-config-r5ejxORO.js:40-42), so there is nothing serving to escalate,
     while a ``--host`` CLI override could still make it serve somewhere this reader
     cannot see. No proof either way, so no claim either way.
 
-    Universality (CLAUDE.md §2.6 — never hardcode one shape where the schema allows
+    Universality (CLAUDE.md §2.6 - never hardcode one shape where the schema allows
     variants): ``gateway.bind`` is the profile ENUM in the current schema
     (zod-schema-O9ml_nmo.js:1341-1347), but configs in the wild still carry the older
     host:port form (``fixtures/home_safe`` does). Every value that is not one of the
@@ -5102,7 +5102,7 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
     still correctly read as local instead of being mistaken for a remote profile name.
     That fall-through is the DOMINANT shape in practice (259 of ~300 ``bind`` values in
     ``fixtures/`` use host:port), and it applies the same whole-``127.0.0.0/8`` loopback
-    test as the ``custom`` branch — see :class:`_LoopbackHostSet`. It has to: a user who
+    test as the ``custom`` branch - see :class:`_LoopbackHostSet`. It has to: a user who
     binds the gateway to their own hostname on any Debian-family distro gets
     ``127.0.1.1`` from ``/etc/hosts``, which is a loopback bind and must not be reported
     as reachable off-host.
@@ -5115,7 +5115,7 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
         # _canonical_ipv4 keeps the vendor's gate (io-By0s-a_s.js:3876 accepts the bind
         # only when customBindHost is a canonical dotted IPv4); LOOPBACK then applies the
         # SAME loopback predicate the host:port branch below uses. One predicate, both
-        # branches — reading two different loopback tests in one function is how the
+        # branches - reading two different loopback tests in one function is how the
         # 127.0.0.0/8 gap survived here in the first place.
         host = _canonical_ipv4(dig(cfg, "gateway.customBindHost"))
         if host is not None and host not in LOOPBACK:
@@ -5128,7 +5128,7 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
         if bind_host not in LOOPBACK:
             return f"gateway.bind={bind_host}"
 
-    # Tailscale serve/funnel publishes the gateway regardless of how it binds — indeed
+    # Tailscale serve/funnel publishes the gateway regardless of how it binds - indeed
     # the product REQUIRES a loopback bind in that mode (io-By0s-a_s.js:3870-3880), so
     # this leg must be reachable even when the bind itself read as local or unproven.
     mode = dig(cfg, "gateway.tailscale.mode")
@@ -5238,12 +5238,12 @@ def _canon_tool(token) -> str:
 
 
 # =============================================================================
-# B-879 (round 4 design): prose binding — does a token GOVERN an
+# B-879 (round 4 design): prose binding - does a token GOVERN an
 # EXEC verb, or merely sit NEAR it? `_authkey_persistence_hits` (checks/_vet.py)
 # used bare proximity (`_is_code_example`'s fence/negation-marker path) to decide
 # whether a fenced authorized_keys write is a documented example, which a
 # positive instruction wrapped around a negation word ("Don't forget to run
-# this...", "You cannot proceed without running this...") bypasses outright —
+# this...", "You cannot proceed without running this...") bypasses outright -
 # the negator is present, but it does not GOVERN the EXEC verb.
 #
 # Rounds 1-3 tried to resolve, from local punctuation alone, whether a negator
@@ -5257,7 +5257,7 @@ def _canon_tool(token) -> str:
 # The round-4 fix is a third value: when a negator is immediately followed by
 # a comma/dash/paren, its clause is UNRESOLVED ("clouded") rather than guessed
 # bound or unbound. A clouded EXEC verb is neither a confirmed prohibition nor
-# a confirmed order — callers route it to the WARN band that already exists for
+# a confirmed order - callers route it to the WARN band that already exists for
 # soft/ambiguous signal, never to a PASS/FAIL guess.
 # =============================================================================
 
@@ -5281,25 +5281,25 @@ class ProseBinding(_NamedTuple):
 
 _PB_TOK_RE = re.compile(
     r"\$\{?\w+\}?|\{\{[^}]*\}\}|<[A-Za-z_][\w-]*>|`[^`\n]*`|https?://\S+|"
-    r"[A-Za-z][A-Za-z'’]*(?:\.[a-z]{2,}(?:/\S*)?)?|—|–|--|[,;:()]|\S"
+    r"[A-Za-z][A-Za-z'" "\u2019" r"]*(?:\.[a-z]{2,}(?:/\S*)?)?|" "\u2014" r"|" "\u2013" r"|--|[,;:()]|\S"
 )
 _PB_EMPH_RE = re.compile(r"\*\*|__|(?<!\w)[*_](?=\w)|(?<=\w)[*_](?!\w)")
 
-_PB_DELIM = {",", ";", ":", "(", ")", "—", "–", "--"}
+_PB_DELIM = {",", ";", ":", "(", ")", "\u2014", "\u2013", "--"}
 
 # B-879 round 5: a bare ASCII "-" is a mid-word compound hyphen far more often
 # than stand-alone punctuation ("cross-session"), and the word-token pattern in
 # `_PB_TOK_RE` does not itself include "-", so the tokenizer would otherwise
 # split a compound word into three tokens (word, "-", word) with nothing at the
 # token level to tell that "-" apart from a real delimiter. `_pb_tokens`
-# recognises exactly this shape — a hyphen glued to an alphabetic character on
-# both sides, with no surrounding whitespace — and emits the `_PB_GLUED`
+# recognises exactly this shape - a hyphen glued to an alphabetic character on
+# both sides, with no surrounding whitespace - and emits the `_PB_GLUED`
 # sentinel instead of a literal "-", so `_neg_scan`'s class rule (below) never
 # mistakes an ordinary compound word for an unresolved-negation delimiter.
 _PB_GLUED = "\x00-"
-_PB_HYPHENS = {"-", "‐", "‑"}
+_PB_HYPHENS = {"-", "\u2010", "\u2011"}
 
-# The closed EXEC vocabulary — "run it"/"paste it"/"type it"/"source it" — the
+# The closed EXEC vocabulary - "run it"/"paste it"/"type it"/"source it" - the
 # family of "apply this SKILL.md block to your machine" verbs. Base forms only
 # for `_directive` (do/does/did and every -ing/-s/-ed form are excluded there);
 # the wider form set here is used to find the verb AT ALL, for negation and
@@ -5337,7 +5337,7 @@ _PB_INV_SUBJ = {"you", "anyone", "anybody", "one", "we", "they", "users", "the",
 _PB_ADV_WORDS = {"ever", "even", "again", "really", "seriously", "once", "at", "all"}
 
 # B-879 round 6 (see `_neg_scan_ex`'s docstring): a closed, single-word
-# preposition list — empirically confirmed (a "Never PREP X, run the
+# preposition list - empirically confirmed (a "Never PREP X, run the
 # following:" probe for each) to make the negator's clause walk stop at a
 # fronted PP's head instead of its real object. Deliberately excludes "at":
 # "at" is already in `_PB_ADV_WORDS` above (for "not at all") and is skipped
@@ -5350,12 +5350,12 @@ _PB_ADV_WORDS = {"ever", "even", "again", "really", "seriously", "once", "at", "
 # run the following:" shape against six more ordinary single-word
 # prepositions and found the IDENTICAL fronted-PP-stop bug on every one:
 # "by", "for", "from", "over", "through", "within". This is not meant to be
-# an exhaustive part-of-speech classifier — English has more single-word
+# an exhaustive part-of-speech classifier - English has more single-word
 # prepositions than this set will ever enumerate, and a future probe will
 # likely find more (the same "any enumeration is missing a member" lesson
 # round 5's class rule drew for punctuation applies here too, just not
 # solved the same way, because "is this word a preposition" has no
-# alphanumeric-content class rule to fall back on) — it is simply the
+# alphanumeric-content class rule to fall back on) - it is simply the
 # complete list of single-word prepositions actually probed and confirmed to
 # reproduce this exact mechanism so far.
 _PB_FRONTED_PREP = {
@@ -5368,14 +5368,14 @@ _PB_OPENERS = {
     "second", "third", "immediately", "always",
 }
 # B-879 round 7: the subset of `_PB_OPENERS` that is a genuine COORDINATING
-# CONJUNCTION — a word that can introduce a grammatically independent second
+# CONJUNCTION - a word that can introduce a grammatically independent second
 # clause with its own subject and modal, as opposed to a plain sequencing
 # adverb ("then"/"now"/"immediately"/...) that merely orders steps WITHIN the
-# same clause a negator already governs. See `_sentence_directed`'s (d″) for
+# same clause a negator already governs. See `_sentence_directed`'s (d'') for
 # why this distinction is load-bearing: a bare comma-splice aside ("Never,
 # under any circumstances, run...") must stay unresolved, but "..., so you
 # must run..." is a real, separate directive clause. "but" is deliberately
-# NOT in `_PB_OPENERS` itself (a pre-existing, out-of-scope gap — see
+# NOT in `_PB_OPENERS` itself (a pre-existing, out-of-scope gap - see
 # `_pb_directive_mood`) but IS a coordinating conjunction for this narrower
 # purpose.
 _PB_COORD = {"and", "so", "but"}
@@ -5398,19 +5398,19 @@ _PB_BLOCK_NOUN = {
 }
 _PB_STOP = {
     "not", "never", "but", "unless", "except", "instead", "than", "other",
-    "besides", "apart", ";", ".", "!", "?", ",", "—", "–", "--", "(", ")",
+    "besides", "apart", ";", ".", "!", "?", ",", "\u2014", "\u2013", "--", "(", ")",
 }
 _PB_TAIL_OK = {
     "below", "above", "here", "command", "commands", "snippet", "snippets", "block",
     "blocks", "line", "lines", "code", "example", "examples", "one", "ones",
-    "script", "payload", "ever", "again", "yourself", ":", ".", "!", ",", "—",
-    "--", "–",
+    "script", "payload", "ever", "again", "yourself", ":", ".", "!", ",", "\u2014",
+    "--", "\u2013",
 }
 _PB_FWD_DEIXIS = frozenset({"this", "these", "following", "below"})
 _PB_BACK_DEIXIS = frozenset({"above", "this", "that", "these", "it"})
 _PB_MARKER_RE = re.compile(
     r"\bexamples?\b|\bfor\s+instance\b|\bsample\b|\bfor\s+example\b|e\.g\.|"
-    r"(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|[✅❌]",
+    r"(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|[" "\u2705\u274c" r"]",
     re.I | re.M,
 )
 _PB_STRUCT_LINE_RE = re.compile(
@@ -5418,7 +5418,7 @@ _PB_STRUCT_LINE_RE = re.compile(
 )
 
 # B-879 round 4 §4.f: "e.g."/"i.e."/"etc."/"vs."/"cf." followed by a lowercase
-# word is not a sentence or clause boundary for this primitive — a preceding
+# word is not a sentence or clause boundary for this primitive - a preceding
 # aside like "(e.g. in staging)" must not split the intro into two sentences
 # (or, at the token level, end a negator's clause early) just because it
 # contains an abbreviation's period. "e.g. Run" with a capital next word still
@@ -5426,7 +5426,7 @@ _PB_STRUCT_LINE_RE = re.compile(
 #
 # B-879 round 5: the whole pattern is compiled with re.I so the abbreviation
 # itself matches any case ("E.g."/"E.G."), but that also made the lookahead's
-# `[a-z]` match an upper-case follower too — "e.g. Run the following" was
+# `[a-z]` match an upper-case follower too - "e.g. Run the following" was
 # silently protected as if "Run" were lowercase, which is exactly backwards
 # (a capital follower IS a genuine new sentence). `(?-i:[a-z])` turns
 # case-insensitivity back OFF for just that one group, so the lookahead is
@@ -5448,13 +5448,13 @@ def _pb_tokens(s: str) -> list[str]:
 
     Two round-5 refinements over the plain `_PB_TOK_RE.finditer` walk:
 
-    * GLUED compounds — a "-" token sandwiched between two other tokens with
+    * GLUED compounds - a "-" token sandwiched between two other tokens with
       no whitespace on either side, both of them alphabetic at the join, is a
       mid-word hyphen ("cross-session"), never stand-alone punctuation. It is
       emitted as the `_PB_GLUED` sentinel instead of a bare "-" so `_neg_scan`
       (which treats any non-content token as a class-rule cloud opener) does
       not misread an ordinary compound word as a negator's delimiter.
-    * Trailing-apostrophe split (decision (a′)/A2) — the word-token pattern's
+    * Trailing-apostrophe split (decision (a')/A2) - the word-token pattern's
       character class includes the apostrophe so a WORD-INTERNAL one
       ("don't") stays glued on, but that means a CLOSING quote mark glued
       onto a word's end ("Never'") is swallowed into the word too, and a
@@ -5477,7 +5477,7 @@ def _pb_tokens(s: str) -> list[str]:
         ):
             out.append(_PB_GLUED)
             continue
-        t = raw.lower().replace("’", "'")
+        t = raw.lower().replace("\u2019", "'")
         if len(t) > 1 and t[0].isalpha() and t[-1] == "'":
             out.append(t.rstrip("'"))
             out.append("'")
@@ -5503,7 +5503,7 @@ def _pb_is_word(t: str) -> bool:
 def _pb_is_adverb(t: str) -> bool:
     """B-879 round 4 §4.a fix: an EXEC verb is never an adverb, no matter how it
     ends. Several EXEC verbs end in a letter sequence that also matches the
-    generic '-ly, len>3' adverb shape — most notably "apply"/"supply"/"reply",
+    generic '-ly, len>3' adverb shape - most notably "apply"/"supply"/"reply",
     which all end in "...ply" (which ends in "ly"). Before this guard, a
     negator's clause-scan treated "apply" as a skippable adverb and walked
     straight past it, losing the negation event on "Never, under any
@@ -5542,7 +5542,7 @@ def _reaches_block(
     within 7 words, with the walk STOPPING at any clause delimiter and at
     not/never/but/unless/except/instead/than/other/besides/apart (this is what
     closes "run anything OTHER THAN the following" and "If not already done, run
-    the following" — a verb that ends its sentence ("run:") also reaches."""
+    the following" - a verb that ends its sentence ("run:") also reaches."""
     dx = deixis | ({"it", "that"} if introducer else set())
     steps = 0
     j = i + 1
@@ -5586,9 +5586,9 @@ def _pb_has_content(t: str) -> bool:
     """Does *t* contain at least one alphanumeric character? The round-5 class
     rule (see `_neg_scan_ex`) tests this instead of enumerating a punctuation
     set: any token that FAILS it is, by construction, punctuation of some
-    kind — a comma, a dash, a bracket, an ellipsis, an emoji, a full stop, a
+    kind - a comma, a dash, a bracket, an ellipsis, an emoji, a full stop, a
     box-drawing character, any of the several thousand Unicode punctuation
-    code points nobody sat down and enumerated — and a token this shape can
+    code points nobody sat down and enumerated - and a token this shape can
     always open a negator's clause the same way a comma can."""
     return any(c.isalnum() for c in t)
 
@@ -5597,21 +5597,21 @@ def _neg_scan_ex(
     tokens: list[str], carry: bool | None = None
 ) -> tuple[list[tuple[int, int]], dict[int, int], bool | None]:
     """B-879 round 5: resolve each negator in *tokens* to either a GOVERNED
-    event, or an UNRESOLVED ("clouded") span, never a guess — and, new in round
+    event, or an UNRESOLVED ("clouded") span, never a guess - and, new in round
     5, do it with a CLASS rule instead of an enumerated delimiter set.
 
     Rounds 1-3 tried to resolve, from local punctuation alone, whether a
     negator separated from its verb by a comma/dash/paren aside still governs
     it, and guessed either way was unsound (see the module design comment).
-    Round 4's fix was a third value — UNRESOLVED — but it opened the cloud only
+    Round 4's fix was a third value - UNRESOLVED - but it opened the cloud only
     on an enumerated set of delimiters (comma/dash/open-paren). Any enumerated
     set is exactly the kind of thing this bug keeps recurring on: a sweep of
     3,666 Unicode punctuation characters glued directly after "Never" found a
-    false FAIL on all but 5 of them — round 4's own set. The round-5 rule
+    false FAIL on all but 5 of them - round 4's own set. The round-5 rule
     replaces the enumeration with its own justification: a negator's clause
     walk (see below) is looking for either a skippable filler word or the verb
-    it governs; the FIRST token that is neither — i.e. the first token with NO
-    alphanumeric content at all (`_pb_has_content`) — is definitionally
+    it governs; the FIRST token that is neither - i.e. the first token with NO
+    alphanumeric content at all (`_pb_has_content`) - is definitionally
     punctuation of some kind, and punctuation right after a negator is an
     aside-or-splice shape no token-level scanner can resolve, whatever
     character it happens to be spelled with. `Never, X, run...` is a real
@@ -5620,24 +5620,24 @@ def _neg_scan_ex(
     apart, and a class rule at least never depends on which punctuation
     character X started with, which point-of-Unicode enumeration always did.
 
-    A compound word's mid-word hyphen is not this kind of punctuation — see
+    A compound word's mid-word hyphen is not this kind of punctuation - see
     `_pb_tokens`'s `_PB_GLUED` sentinel, which the walk below special-cases so
     an ordinary word like "cross-session" is never mistaken for a delimiter.
 
     Sentence-spanning (round 5, Dave's R3 decision, 2026-09-24): the cloud
     spans the rest of the LOGICAL sentence, not just the rest of the clause up
-    to the next terminator — a splice's own aside can itself contain a clause
+    to the next terminator - a splice's own aside can itself contain a clause
     terminator ("Never, as Mr. Smith explained: run the following.") without
     closing the cloud early. *carry* threads an already-open cloud (and the
     directive-mood of the negator that opened it) in from a PREVIOUS sentence
-    that never resolved before its own sentence boundary — see `_carries` and
+    that never resolved before its own sentence boundary - see `_carries` and
     `_soft_break`, which decide whether that boundary was a genuine full stop
     or an artifact (an abbreviation `_pb_sentences` did not protect) worth
     carrying a cloud across. Returns ``(events, clouded, carry_out)``:
 
-      * ``events``: ``(negator_index, governed_index)`` pairs — the negator
+      * ``events``: ``(negator_index, governed_index)`` pairs - the negator
         binds directly to its governed word, unambiguously.
-      * ``clouded``: ``{token_index: owning_negator_index}`` — every token from
+      * ``clouded``: ``{token_index: owning_negator_index}`` - every token from
         the first non-content token after a negator (or, for a cloud carried
         in from a previous sentence, every token in *this* sentence) to the
         end of the sentence. The owner is the opening negator's index, or -1
@@ -5650,10 +5650,10 @@ def _neg_scan_ex(
     point", ...) with subject-aux inversion ("...should you/anyone run...").
 
     After the negator: skip adverbs (ever/even/once/-ly..., but never an EXEC
-    verb — `_pb_is_adverb`), try/attempt to, "to be" and "to <EXEC>".
+    verb - `_pb_is_adverb`), try/attempt to, "to be" and "to <EXEC>".
 
     Negative PPs: a comma right after the PP is skipped ONLY as part of a full
-    subject-aux inversion (comma, AUX, INV_SUBJ) — "Under no circumstances,
+    subject-aux inversion (comma, AUX, INV_SUBJ) - "Under no circumstances,
     should you run..." A bare comma with no following inversion is UNRESOLVED,
     same as any other negator ("By no means, run the following.").
 
@@ -5665,12 +5665,12 @@ def _neg_scan_ex(
     always the negator's true object. "Never under any circumstances, run..."
     (no comma after "Never"), "Not even in a sandbox, run...", "Never as
     root, run..." each stop at a PREPOSITION ("under"/"in"/"as") that heads a
-    whole fronted PP the comma closes — the negation's real scope is that
+    whole fronted PP the comma closes - the negation's real scope is that
     whole phrase, not just its first word, so recording a GOVERNED event on
     the preposition let the verb after the phrase's comma escape negation
     entirely. `_PB_FRONTED_PREP` (below) is a small, closed, empirically
     -confirmed set of single-word prepositions this happens with, gated on
-    `_pb_negator_mood` exactly like the class rule's own carry-mood — the
+    `_pb_negator_mood` exactly like the class rule's own carry-mood - the
     misreading only matters when the negator is itself addressed to the
     reader as an imperative ("If not in a container, run..." keeps its real
     directive reading, since "if" makes the negator's own mood non-directive).
@@ -5742,7 +5742,7 @@ def _neg_scan_ex(
         while j is not None and j < n:
             tj = tokens[j]
             if tj == _PB_GLUED:
-                # An intra-word hyphen is not a delimiter (see `_pb_tokens`) —
+                # An intra-word hyphen is not a delimiter (see `_pb_tokens`) -
                 # stop the skip-walk here and let the negator govern it, the
                 # same neutral (non-EXEC, non-eventful) outcome round 4 gave a
                 # bare "-" that happened to land in this position.
@@ -5770,7 +5770,7 @@ def _neg_scan_ex(
                 j = None
                 continue
             if tj in _PB_FRONTED_PREP and _pb_negator_mood(tokens, i):
-                # Round 6: *tj* is not the negator's object — it is the head
+                # Round 6: *tj* is not the negator's object - it is the head
                 # of a FRONTED PREPOSITIONAL PHRASE the negation scopes over
                 # as a whole (see the docstring above and `_PB_FRONTED_PREP`'s
                 # own comment). Cloud the rest of the sentence exactly like
@@ -5794,8 +5794,8 @@ def _neg_scan_ex(
 
 
 def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]:
-    """Single-sentence convenience wrapper over `_neg_scan_ex` — no carry in,
-    carry discarded — kept for callers (and tests) that only ever look at one
+    """Single-sentence convenience wrapper over `_neg_scan_ex` - no carry in,
+    carry discarded - kept for callers (and tests) that only ever look at one
     sentence in isolation."""
     events, clouded, _carry_out = _neg_scan_ex(tokens)
     return events, clouded
@@ -5803,18 +5803,18 @@ def _neg_scan(tokens: list[str]) -> tuple[list[tuple[int, int]], dict[int, int]]
 
 def _neg_events(tokens: list[str]) -> list[tuple[int, int]]:
     """Thin wrapper over `_neg_scan` kept for the aggregator export contract
-    (§3.1-a: a name importable today stays importable) — returns only the
+    (§3.1-a: a name importable today stays importable) - returns only the
     unambiguously GOVERNED events, discarding cloud information."""
     return _neg_scan(tokens)[0]
 
 
 def _pb_chunk_raw_pre(ts: list[str], i: int) -> tuple[list[str], int]:
     """The word-only span from the start of *ts[i]*'s clause up to (not
-    including) *ts[i]*, with NOTHING stripped — the raw material
+    including) *ts[i]*, with NOTHING stripped - the raw material
     `_pb_chunk_pre` immediately throws away by stripping leading openers and a
     "Step N" prefix. B-879 round 7's cloud-recovery mechanism
-    (`_sentence_directed`'s (d″)) needs to see whether that raw span itself
-    OPENS with a genuine opener/coordinator BEFORE any stripping happens —
+    (`_sentence_directed`'s (d'')) needs to see whether that raw span itself
+    OPENS with a genuine opener/coordinator BEFORE any stripping happens -
     `_pb_chunk_pre` alone cannot answer that, since by the time it returns,
     the very evidence of what the chunk started with is already gone."""
     s = 0
@@ -5827,10 +5827,10 @@ def _pb_chunk_raw_pre(ts: list[str], i: int) -> tuple[list[str], int]:
 
 def _pb_strip_chunk_openers(pre: list[str]) -> list[str]:
     """Strip leading OPENERS (then/now/next/.../please/and/so/...), any
-    "-ly" adverb, and a leading "Step N" off the front of *pre* — the
-    stripping half of `_pb_chunk_pre`, factored out so B-879 round 7's (d″)
+    "-ly" adverb, and a leading "Step N" off the front of *pre* - the
+    stripping half of `_pb_chunk_pre`, factored out so B-879 round 7's (d'')
     can apply the SAME stripping after first removing a coordinator
-    (`_PB_COORD`) that is not itself in `_PB_OPENERS` ("but" — see
+    (`_PB_COORD`) that is not itself in `_PB_OPENERS` ("but" - see
     `_PB_COORD`'s own comment)."""
     while pre and (pre[0] in _PB_OPENERS or (pre[0].endswith("ly") and len(pre[0]) > 3)):
         pre = pre[1:]
@@ -5868,7 +5868,7 @@ def _pb_directive_mood(ts: list[str], i: int) -> bool:
 
 
 def _pb_negator_mood(ts: list[str], n: int) -> bool:
-    """B-879 round 4 §4.d: is the NEGATOR at ts[n] itself in directive mood —
+    """B-879 round 4 §4.d: is the NEGATOR at ts[n] itself in directive mood -
     "after stripping do-support, the chunk-pre is empty, or it is an addressee
     plus modal filler"? Same test as `_pb_directive_mood`, but a leading
     periphrastic "do"/"does"/"did" is stripped from the chunk-pre first: "Do
@@ -5889,22 +5889,22 @@ def _pb_negator_mood(ts: list[str], n: int) -> bool:
 
 def _directive(tokens: list[str], i: int, deixis: frozenset, introducer: bool) -> bool:
     """Is tokens[i] a DIRECTIVE EXEC verb that reaches the block? Base-form EXEC
-    only (`_PB_EXEC_BASE_RE`) — do/does/did and every -ing/-s/-ed form are
+    only (`_PB_EXEC_BASE_RE`) - do/does/did and every -ing/-s/-ed form are
     EXCLUDED here (they are still recognised by the wider `_PB_EXEC_RE` for
     negation/description purposes).
 
     Frames, all closed classes:
-      (a) chunk-initial after an opener — `_pb_directive_mood`
-      (b) addressee + modal filler — `_pb_directive_mood`
-      (c) matrix verb (make sure to/be sure to/...) — `_pb_directive_mood`
+      (a) chunk-initial after an opener - `_pb_directive_mood`
+      (b) addressee + modal filler - `_pb_directive_mood`
+      (c) matrix verb (make sure to/be sure to/...) - `_pb_directive_mood`
       (d) a negator governing an INVERTING verb (forget/hesitate/fail/skip/
-          omit/neglect/miss/ignore) followed by "to <EXEC>" or a block object —
+          omit/neglect/miss/ignore) followed by "to <EXEC>" or a block object -
           handled in `_sentence_directed`, not here (it needs the negation
           scan, and round 4 gates it on the negator's own mood).
       (e) "without <EXEC-ing>" inside a sentence whose negation event governs a
           NON-exec word (necessity: "cannot proceed WITHOUT RUNNING this").
       (f) "by <EXEC-ing>" in a chunk containing you/your, not starting with a
-          subject word — the addressed means-clause "register your key BY
+          subject word - the addressed means-clause "register your key BY
           COPYING it below".
     """
     t = tokens[i]
@@ -5933,25 +5933,25 @@ def _sentence_directed(
 ) -> bool:
     """Is there a live, free-standing directive EXEC verb in *sent*? Round 4
     additions over the base frames: (d) is gated on the NEGATOR's own mood
-    (`_pb_directive_mood`) — "Attackers never fail to run the following:" has a
+    (`_pb_directive_mood`) - "Attackers never fail to run the following:" has a
     third-person subject before "never", so it no longer counts as an order;
-    and (d′) recovers an inverting verb found INSIDE a cloud when it opens its
+    and (d') recovers an inverting verb found INSIDE a cloud when it opens its
     own chunk and the cloud's own negator is in directive mood ("Never, under
     any circumstances, forget to run the following:"). Round 5 adds *carry*
     (see `_neg_scan_ex`/`_carries`): a cloud still open from a previous
-    sentence, threaded in so (d′) can judge an inverting verb sitting in it.
-    Round 7 adds (d″), below: the same "opens its own chunk" recovery
-    principle as (d′), generalized from INVERTING verbs to ordinary EXEC
+    sentence, threaded in so (d') can judge an inverting verb sitting in it.
+    Round 7 adds (d''), below: the same "opens its own chunk" recovery
+    principle as (d'), generalized from INVERTING verbs to ordinary EXEC
     verbs, for a token whose OWN local grammar proves it belongs to a
     different clause/sentence than the one an unrelated cloud nominally still
-    covers — see (d″)'s own comment for the two different bars (coordinator +
+    covers - see (d'')'s own comment for the two different bars (coordinator +
     subject/modal for a same-sentence cloud; a marked, already-established
     directive frame for a cross-sentence carry)."""
     ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
     evs, clouded, _carry_out = _neg_scan_ex(ts, carry)
     governed = {g for _n, g in evs}
     cloud_idx = set(clouded)
-    # (d) negator + inverting verb — only when the negator itself is addressed
+    # (d) negator + inverting verb - only when the negator itself is addressed
     # to the reader (round 4 §4.d).
     for _n, g in evs:
         if ts[g] in _PB_INVERT and _pb_negator_mood(ts, _n):
@@ -5964,7 +5964,7 @@ def _sentence_directed(
                 return True
             if _reaches_block(ts, g, deixis, introducer) is not None:
                 return True
-    # (d′) round 4 §4.e, recommended and included in the measured candidate: an
+    # (d') round 4 §4.e, recommended and included in the measured candidate: an
     # inverting verb INSIDE a cloud still directs when it opens its own chunk
     # (nothing but the cloud's own delimiter precedes it) and the cloud's
     # negator is itself in directive mood. A cloud CARRIED IN from a previous
@@ -5991,10 +5991,10 @@ def _sentence_directed(
             mood = neg_idx is not None and _pb_negator_mood(ts, neg_idx)
         if mood:
             return True
-    # (d″) round 7: generalize (d′)'s "opens its own chunk" recovery from
+    # (d'') round 7: generalize (d')'s "opens its own chunk" recovery from
     # INVERTING verbs to ordinary EXEC verbs. An earlier, unrelated negator's
     # cloud being nominally still "open" over a token does not mean that
-    # token is really part of the SAME clause the negator governs — a token
+    # token is really part of the SAME clause the negator governs - a token
     # that independently proves it belongs to a different, grammatically
     # independent clause (or a different SENTENCE) must not be suppressed
     # just because the cloud's technical span happens to still cover it. The
@@ -6003,27 +6003,27 @@ def _sentence_directed(
     #
     #   * Same-sentence cloud (`neg_idx >= 0`, opened by a comma/dash/etc.
     #     INSIDE this sentence): only a genuine COORDINATING CONJUNCTION
-    #     (`_PB_COORD` — "and"/"so"/"but", never a plain sequencing adverb
+    #     (`_PB_COORD` - "and"/"so"/"but", never a plain sequencing adverb
     #     like "then"/"now") can introduce an independent second clause, and
     #     even then only when what follows it is a real subject+modal
     #     ("so you must run...") or a matrix frame ("so make sure to
     #     run..."). A bare "so run"/"and run" with nothing else stays
-    #     suppressed — that shape is indistinguishable at the token level
+    #     suppressed - that shape is indistinguishable at the token level
     #     from an ordinary same-clause comma splice ("Never, under any
     #     circumstances, run..."), which is exactly the false-FAIL shape
     #     this whole design exists to avoid, so it is deliberately NOT
     #     recovered just because a coordinator happens to be present.
     #   * Carried-in cloud (`neg_idx == -1`, threaded in from a PREVIOUS
     #     sentence via `_carries`/`_soft_break`): this sentence already sits
-    #     on the far side of a genuine `_pb_sentences` PERIOD split — the
+    #     on the far side of a genuine `_pb_sentences` PERIOD split - the
     #     only reason it is still "clouded" at all is `_soft_break`'s casing
     #     heuristic (the next sentence merely starts lowercase, which could
     #     mean the period was not a real full stop, or could just as easily
     #     mean an author wrote a fresh, informally-cased new instruction). A
     #     period is a much stronger independence signal than a mid-sentence
     #     comma, so the bar is the ordinary, already-established directive
-    #     test (`_pb_directive_mood`, frames (a)/(b)/(c) — which already
-    #     accepts a bare chunk-initial imperative) — BUT gated on the raw
+    #     test (`_pb_directive_mood`, frames (a)/(b)/(c) - which already
+    #     accepts a bare chunk-initial imperative) - BUT gated on the raw
     #     chunk finding a genuine `_PB_OPENERS` marker first, so a bare,
     #     filler-less continuation ("Never, ever. run the following:", the
     #     C01-C06 accepted-cost group) stays exactly as unresolved as it
@@ -6047,7 +6047,7 @@ def _sentence_directed(
         else:
             if raw_pre[0] not in _PB_COORD:
                 continue
-            # Strip the coordinator itself by hand first — plain
+            # Strip the coordinator itself by hand first - plain
             # `_pb_chunk_pre` would not do it for us here, because "but" is
             # deliberately NOT a member of `_PB_OPENERS` (its own stripping
             # loop would leave it in place, and the addressee check below
@@ -6085,7 +6085,7 @@ def _forbids(sentence: str, deixis: frozenset) -> str | None:
     negation event whose governed word is EXEC and reaches the block, the
     passive form ("the above must never be run"), or "what not to do".
 
-    Round 4 §4.b: unchanged from the base design — this only ever sees bound
+    Round 4 §4.b: unchanged from the base design - this only ever sees bound
     `_neg_scan` EVENTS, never cloud information, so a clouded verb can never
     read as a prohibition (no false PASS)."""
     ts = _pb_tokens(_PB_EMPH_RE.sub("", sentence))
@@ -6116,7 +6116,7 @@ def _forbids(sentence: str, deixis: frozenset) -> str | None:
 
 def _pb_described(sent: str, deixis: frozenset) -> bool:
     """A non-base EXEC verb (using/running/executed/...) with a non-addressee
-    subject 1-4 words long, whose object REACHES the block — third-person
+    subject 1-4 words long, whose object REACHES the block - third-person
     DESCRIPTION, not a directive to the reader: "Attackers persist by appending
     a line like this"."""
     ts = _pb_tokens(_PB_EMPH_RE.sub("", sent))
@@ -6139,7 +6139,7 @@ def _pb_unreadable(text: str) -> bool:
 
 def _block_para_before(blob: str, start: int, cap: int = 400) -> str:
     """The paragraph before *start*, stripped of layout (frontmatter, heading
-    lines, fence/`<pre>` marker lines, blockquote `>` prefixes) — those are not
+    lines, fence/`<pre>` marker lines, blockquote `>` prefixes) - those are not
     prose."""
     seg = blob[max(0, start - cap) : start]
     seg = _PB_STRUCT_LINE_RE.sub("", seg)
@@ -6171,8 +6171,8 @@ def _pb_has_clouded_exec_reaching(
 ) -> bool:
     """B-879 round 4 §4.c: is there a CLOUDED EXEC verb in *sent* that reaches
     the block? Used to compute `ProseBinding.unresolved` over every intro
-    sentence and the first trailer sentence — not just the one `directed`/
-    `forbids` inspect — so a splice earlier in the intro plus a clean
+    sentence and the first trailer sentence - not just the one `directed`/
+    `forbids` inspect - so a splice earlier in the intro plus a clean
     prohibition as the last sentence ("Never, ever skip this, run the following
     to register your key. Never run the following:") is still unresolved
     rather than a confirmed FORBIDDEN prohibition. Round 5 adds *carry*: a
@@ -6186,11 +6186,11 @@ def _pb_has_clouded_exec_reaching(
 
 
 # B-879 round 5: abbreviations `_pb_sentences` does not already protect (that
-# list, `_PB_ABBREV_RE`, only covers e.g./i.e./etc./vs./cf. — the ones that
+# list, `_PB_ABBREV_RE`, only covers e.g./i.e./etc./vs./cf. - the ones that
 # would otherwise strand a lowercase continuation mid-sentence). This wider
 # list feeds `_soft_break`'s fallback, which decides whether a period
 # `_pb_sentences` DID split on was a genuine sentence end or an abbreviation
-# nobody protected — the same "closed enumeration will always be missing a
+# nobody protected - the same "closed enumeration will always be missing a
 # member" problem `_neg_scan_ex`'s class rule solves for punctuation, mirrored
 # here with a shape-based fallback (`_soft_break`'s last clause) for whatever
 # this list itself still misses.
@@ -6207,7 +6207,7 @@ _PB_SOFT_ABBREV = {
 def _soft_break(prev: str, rest: str) -> bool:
     """Should an already-open negation cloud carry FROM *prev* (the sentence
     `_pb_sentences` just ended) INTO *rest* (everything after it)? A carry-only
-    decision — this never merges two sentences back into one, it only decides
+    decision - this never merges two sentences back into one, it only decides
     whether the CLOUD survives the boundary between them.
 
     Two paths to "yes":
@@ -6215,16 +6215,16 @@ def _soft_break(prev: str, rest: str) -> bool:
     1. *rest* starts with a lowercase letter or digit. `_pb_sentences` splits
        on any ``. `` regardless of what follows (only the small, explicitly
        protected abbreviation list is exempted beforehand), so a genuine new
-       sentence almost always starts capitalized — if it does not, the period
+       sentence almost always starts capitalized - if it does not, the period
        that ended *prev* was not really a full stop.
     2. *prev* ends in a single, un-doubled period, and the word immediately
-       before it looks like an abbreviation `_pb_sentences` did not protect —
+       before it looks like an abbreviation `_pb_sentences` did not protect -
        a single letter (an initial), an internal period ("U.S"), a member of
        `_PB_SOFT_ABBREV`, or (the class-rule fallback, for whatever that list
        itself still misses) a short, non-uppercase, vowel-less token, the same
        shape common abbreviations like "Blvd"/"Mfg" take. Guarded off when the
        very next word is a base-form EXEC verb ("e.g. Run the following:" is a
-       real new sentence, capital or not — this only matters for the small
+       real new sentence, capital or not - this only matters for the small
        sliver `_pb_protect_abbrev` did not already catch)."""
     m = re.search(r"[A-Za-z0-9]", rest)
     if m and m.group(0).islower():
@@ -6266,7 +6266,7 @@ def _carries(sents: list[str]) -> list[bool | None]:
 
 def _prose_binding(blob: str, start: int, end: int, *, heading_matches=None) -> ProseBinding:
     """Classify the prose around one block (SKILL.md fence/line/span) spanning
-    [start, end) in *blob*. CLASSIFICATION ONLY — see the module-level design
+    [start, end) in *blob*. CLASSIFICATION ONLY - see the module-level design
     comment. *heading_matches* is accepted for call-site symmetry with the
     heading-aware helpers callers combine this with; the primitive itself does
     not need it.
@@ -6279,7 +6279,7 @@ def _prose_binding(blob: str, start: int, end: int, *, heading_matches=None) -> 
     first_t = tsents[0] if tsents else ""
     # B-879 round 5: an unresolved cloud can span more than one `_pb_sentences`
     # split (a splice's own aside may itself contain what looks like a clause
-    # terminator) — `carry_in[k]` is the cloud state, if any, still open when
+    # terminator) - `carry_in[k]` is the cloud state, if any, still open when
     # intro sentence k starts. The trailer's first sentence never inherits a
     # carry: it sits on the OTHER side of the code block itself, a real
     # boundary no aside crosses.

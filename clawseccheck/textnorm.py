@@ -7,7 +7,7 @@ Provides two public functions:
 Stdlib-only (unicodedata, re). Leaf module: no imports from other
 clawseccheck modules (avoids the circular-import risk).
 
-CRITICAL: never folds Hebrew U+0590–05FF — those code points are explicitly
+CRITICAL: never folds Hebrew U+0590-05FF - those code points are explicitly
 excluded from _CONFUSABLES so RTL / Hebrew bootstrap files are never corrupted.
 """
 from __future__ import annotations
@@ -197,11 +197,11 @@ _NAKED_BIDI_OVERRIDE_RE = re.compile("[\u202d\u202e]")
 
 
 def has_naked_bidi_override(text: str) -> bool:
-    """True when *text* contains a bidi OVERRIDE control (U+202D/U+202E) — a
+    """True when *text* contains a bidi OVERRIDE control (U+202D/U+202E) - a
     Trojan-Source-shaped concealment channel, categorically, independent of whether a
     keyword pattern also matches the (still-reversed) normalized text; that match is
     exactly what the attack defeats. See `_NAKED_BIDI_OVERRIDE_RE` above for why this is
-    override-only and not gated on RTL-script presence — unlike the weaker ordering
+    override-only and not gated on RTL-script presence - unlike the weaker ordering
     signal, a genuine override is flagged whether or not the surrounding text is RTL.
     """
     return _NAKED_BIDI_OVERRIDE_RE.search(text) is not None
@@ -237,70 +237,70 @@ _INVISIBLE_TOKEN_RE = re.compile(
 
 # ---------------------------------------------------------------------------
 # Curated confusable map: Cyrillic/Greek lookalikes -> ASCII equivalents.
-# MUST NOT include any code point in U+0590–05FF (Hebrew block).
+# MUST NOT include any code point in U+0590-05FF (Hebrew block).
 #
-# Groundings:
-#   Cyrillic small а U+0430, е U+0435, о U+043E, р U+0440, с U+0441,
-#   х U+0445, ѕ U+0455, і U+0456 (Ukrainian/Belarusian і)
-#   Greek letters: ο (omicron) U+03BF, α U+03B1
+# Groundings (non-ASCII examples in comments are written as U+XXXX or romanized):
+#   Cyrillic small U+0430, U+0435, U+043E, U+0440, U+0441,
+#   U+0445, U+0455, U+0456 (Ukrainian/Belarusian i)
+#   Greek letters: omicron U+03BF, alpha U+03B1
 #
 # B-887: capitals ADDED for every lowercase entry above whose case-fold is itself
-# a Latin lookalike. NOT added: lowercase у→y -- not needed here, and it would
-# re-fold every Russian evidence snippet containing у (fixtures / users'
+# a Latin lookalike. NOT added: lowercase <U+0443>->y -- not needed here, and it would
+# re-fold every Russian evidence snippet containing <U+0443> (fixtures / users'
 # .clawseccheckignore), an unannounced change out of scope for this fix (4.3.1).
 # See I1 below for why the table must stay closed under case, and `fold_pattern`
 # further down for capital-only lookalikes (lowercase not itself a confusable,
-# e.g. Cyrillic К/к) -- those need PATTERN-side closure, not a table entry here
+# e.g. Cyrillic <U+041A>/<U+043A>) -- those need PATTERN-side closure, not a table entry here
 # (a table entry would re-fold real lowercase Cyrillic/Greek prose the same way
-# lowercase у→y would; see `_ML_OVERRIDE_TABLE_NORM` in checks/_content.py).
+# lowercase <U+0443>->y would; see `_ML_OVERRIDE_TABLE_NORM` in checks/_content.py).
 # ---------------------------------------------------------------------------
 _CONFUSABLES: dict[int, str] = {
     # Cyrillic confusables
-    0x0430: "a",   # Cyrillic small а → ASCII a
-    0x0435: "e",   # Cyrillic small е → ASCII e  (THE injection evasion char)
-    0x043E: "o",   # Cyrillic small о → ASCII o
-    0x0440: "p",   # Cyrillic small р → ASCII p
-    0x0441: "c",   # Cyrillic small с → ASCII c
-    0x0445: "x",   # Cyrillic small х → ASCII x
-    0x0455: "s",   # Cyrillic small ѕ → ASCII s
-    0x0456: "i",   # Cyrillic/Ukrainian і → ASCII i
-    # Cyrillic capitals (B-887) -- Ѕ/І are the upper-case of a lowercase entry
-    # already above; the rest (А/В/Е/К/М/Н/О/Р/С/Т/У/Х/Ј) have no lowercase table
+    0x0430: "a",   # Cyrillic small <U+0430> -> ASCII a
+    0x0435: "e",   # Cyrillic small <U+0435> -> ASCII e  (THE injection evasion char)
+    0x043E: "o",   # Cyrillic small <U+043E> -> ASCII o
+    0x0440: "p",   # Cyrillic small <U+0440> -> ASCII p
+    0x0441: "c",   # Cyrillic small <U+0441> -> ASCII c
+    0x0445: "x",   # Cyrillic small <U+0445> -> ASCII x
+    0x0455: "s",   # Cyrillic small <U+0455> -> ASCII s
+    0x0456: "i",   # Cyrillic/Ukrainian <U+0456> -> ASCII i
+    # Cyrillic capitals (B-887) -- <U+0405>/<U+0406> are the upper-case of a lowercase entry
+    # already above; the rest (<U+0410>/<U+0412>/<U+0415>/<U+041A>/<U+041C>/<U+041D>/<U+041E>/<U+0420>/<U+0421>/<U+0422>/<U+0423>/<U+0425>/<U+0408>) have no lowercase table
     # entry of their own -- see _PATTERN_CASE_CLOSURE below for how patterns still
-    # match THEIR lowercase lookalikes (в/к/м/н/т/у/ј) under case.
-    0x0410: "A",   # Cyrillic capital А → ASCII A
-    0x0412: "B",   # Cyrillic capital В → ASCII B
-    0x0415: "E",   # Cyrillic capital Е → ASCII E
-    0x041A: "K",   # Cyrillic capital К → ASCII K
-    0x041C: "M",   # Cyrillic capital М → ASCII M
-    0x041D: "H",   # Cyrillic capital Н → ASCII H
-    0x041E: "O",   # Cyrillic capital О → ASCII O
-    0x0420: "P",   # Cyrillic capital Р → ASCII P
-    0x0421: "C",   # Cyrillic capital С → ASCII C
-    0x0422: "T",   # Cyrillic capital Т → ASCII T
-    0x0423: "Y",   # Cyrillic capital У → ASCII Y
-    0x0425: "X",   # Cyrillic capital Х → ASCII X
-    0x0405: "S",   # Cyrillic capital Ѕ → ASCII S
-    0x0406: "I",   # Cyrillic capital І (Ukrainian/Belarusian) → ASCII I
-    0x0408: "J",   # Cyrillic capital Ј (Je, Serbian/Macedonian) → ASCII J
+    # match THEIR lowercase lookalikes (<U+0432>/<U+043A>/<U+043C>/<U+043D>/<U+0442>/<U+0443>/<U+0458>) under case.
+    0x0410: "A",   # Cyrillic capital <U+0410> -> ASCII A
+    0x0412: "B",   # Cyrillic capital <U+0412> -> ASCII B
+    0x0415: "E",   # Cyrillic capital <U+0415> -> ASCII E
+    0x041A: "K",   # Cyrillic capital <U+041A> -> ASCII K
+    0x041C: "M",   # Cyrillic capital <U+041C> -> ASCII M
+    0x041D: "H",   # Cyrillic capital <U+041D> -> ASCII H
+    0x041E: "O",   # Cyrillic capital <U+041E> -> ASCII O
+    0x0420: "P",   # Cyrillic capital <U+0420> -> ASCII P
+    0x0421: "C",   # Cyrillic capital <U+0421> -> ASCII C
+    0x0422: "T",   # Cyrillic capital <U+0422> -> ASCII T
+    0x0423: "Y",   # Cyrillic capital <U+0423> -> ASCII Y
+    0x0425: "X",   # Cyrillic capital <U+0425> -> ASCII X
+    0x0405: "S",   # Cyrillic capital <U+0405> -> ASCII S
+    0x0406: "I",   # Cyrillic capital <U+0406> (Ukrainian/Belarusian) -> ASCII I
+    0x0408: "J",   # Cyrillic capital <U+0408> (Je, Serbian/Macedonian) -> ASCII J
     # Greek confusables
-    0x03B1: "a",   # Greek small α → ASCII a
-    0x03BF: "o",   # Greek small ο (omicron) → ASCII o
+    0x03B1: "a",   # Greek small <U+03B1> -> ASCII a
+    0x03BF: "o",   # Greek small <U+03BF> (omicron) -> ASCII o
     # Greek capitals (B-887)
-    0x0391: "A",   # Greek capital Α (Alpha) → ASCII A
-    0x0392: "B",   # Greek capital Β (Beta) → ASCII B
-    0x0395: "E",   # Greek capital Ε (Epsilon) → ASCII E
-    0x0396: "Z",   # Greek capital Ζ (Zeta) → ASCII Z
-    0x0397: "H",   # Greek capital Η (Eta) → ASCII H
-    0x0399: "I",   # Greek capital Ι (Iota) → ASCII I
-    0x039A: "K",   # Greek capital Κ (Kappa) → ASCII K
-    0x039C: "M",   # Greek capital Μ (Mu) → ASCII M
-    0x039D: "N",   # Greek capital Ν (Nu) → ASCII N
-    0x039F: "O",   # Greek capital Ο (Omicron) → ASCII O
-    0x03A1: "P",   # Greek capital Ρ (Rho) → ASCII P
-    0x03A4: "T",   # Greek capital Τ (Tau) → ASCII T
-    0x03A5: "Y",   # Greek capital Υ (Upsilon) → ASCII Y
-    0x03A7: "X",   # Greek capital Χ (Chi) → ASCII X
+    0x0391: "A",   # Greek capital <U+0391> (Alpha) -> ASCII A
+    0x0392: "B",   # Greek capital <U+0392> (Beta) -> ASCII B
+    0x0395: "E",   # Greek capital <U+0395> (Epsilon) -> ASCII E
+    0x0396: "Z",   # Greek capital <U+0396> (Zeta) -> ASCII Z
+    0x0397: "H",   # Greek capital <U+0397> (Eta) -> ASCII H
+    0x0399: "I",   # Greek capital <U+0399> (Iota) -> ASCII I
+    0x039A: "K",   # Greek capital <U+039A> (Kappa) -> ASCII K
+    0x039C: "M",   # Greek capital <U+039C> (Mu) -> ASCII M
+    0x039D: "N",   # Greek capital <U+039D> (Nu) -> ASCII N
+    0x039F: "O",   # Greek capital <U+039F> (Omicron) -> ASCII O
+    0x03A1: "P",   # Greek capital <U+03A1> (Rho) -> ASCII P
+    0x03A4: "T",   # Greek capital <U+03A4> (Tau) -> ASCII T
+    0x03A5: "Y",   # Greek capital <U+03A5> (Upsilon) -> ASCII Y
+    0x03A7: "X",   # Greek capital <U+03A7> (Chi) -> ASCII X
 }
 
 # ---------------------------------------------------------------------------
@@ -311,7 +311,7 @@ _CONFUSABLES: dict[int, str] = {
 # vice versa. This is exactly the invariant B-887's three prior rounds each
 # broke (capitals on one script only, or via a second, independently-
 # normalised haystack). Capital-only entries with no lowercase counterpart
-# (e.g. Cyrillic К) can't be checked here -- see _PATTERN_CASE_CLOSURE below.
+# (e.g. Cyrillic <U+041A>) can't be checked here -- see _PATTERN_CASE_CLOSURE below.
 # ---------------------------------------------------------------------------
 for _cp, _latin in _CONFUSABLES.items():
     _ch = chr(_cp)
@@ -340,12 +340,12 @@ del _cp, _latin, _ch
 # the table (adding one here would re-fold genuine lowercase prose -- see
 # above), record that capital's OWN lowercase glyph -> its ASCII fold target.
 # `fold_pattern` uses this to widen a literal Cyrillic/Greek letter already
-# sitting in a PATTERN's own Russian/Greek alternative (e.g. "тайно"'s literal
-# т) so it also matches whatever that letter folds to when text capitalizes it
-# (a sentence-initial "Тайно" folds its capital Т straight to ASCII "T", which
-# the pattern's un-folded lowercase т cannot re.I-match on its own). E.g. only
-# capital К is a table key, lowercase к is not, so this yields {"к": "k"}:
-# wherever pattern source has literal Cyrillic "к", also match ASCII "k"/"K".
+# sitting in a PATTERN's own Russian/Greek alternative (e.g. "tayno"'s literal
+# <U+0442>) so it also matches whatever that letter folds to when text capitalizes it
+# (a sentence-initial "Tayno" folds its capital <U+0422> straight to ASCII "T", which
+# the pattern's un-folded lowercase <U+0442> cannot re.I-match on its own). E.g. only
+# capital <U+041A> is a table key, lowercase <U+043A> is not, so this yields {"<U+043A>": "k"}:
+# wherever pattern source has literal Cyrillic "<U+043A>", also match ASCII "k"/"K".
 # ---------------------------------------------------------------------------
 _PATTERN_CASE_CLOSURE: dict[str, str] = {
     chr(_cp).lower(): _latin.lower()
@@ -359,21 +359,21 @@ _PATTERN_CASE_CLOSURE: dict[str, str] = {
 _CONFUSABLES_TABLE = str.maketrans(_CONFUSABLES)
 
 # ---------------------------------------------------------------------------
-# Hebrew block guard (U+0590–U+05FF).  No code point in this range appears
-# in _CONFUSABLES — this assertion catches a future edit that accidentally
+# Hebrew block guard (U+0590-U+05FF).  No code point in this range appears
+# in _CONFUSABLES - this assertion catches a future edit that accidentally
 # adds one.
 # ---------------------------------------------------------------------------
 assert all(0x0590 > cp or cp > 0x05FF for cp in _CONFUSABLES), (
-    "textnorm._CONFUSABLES must never include Hebrew block U+0590–05FF"
+    "textnorm._CONFUSABLES must never include Hebrew block U+0590\u201305FF"
 )
 
 
 # ---------------------------------------------------------------------------
-# Unicode Tag block (U+E0000–U+E007F) de-obfuscation (B-232).
+# Unicode Tag block (U+E0000-U+E007F) de-obfuscation (B-232).
 #
 # The Tag block is a set of "ASCII mirror" code points, invisible in virtually
-# every font/renderer (no glyph is defined for them anywhere). U+E0020–U+E007E
-# ("TAG SPACE" .. "TAG TILDE") each mirror ASCII 0x20–0x7E at a fixed offset
+# every font/renderer (no glyph is defined for them anywhere). U+E0020-U+E007E
+# ("TAG SPACE" .. "TAG TILDE") each mirror ASCII 0x20-0x7E at a fixed offset
 # (-0xE0000), so a complete ASCII message can be smuggled as an entirely
 # invisible run of Tag characters ("ASCII smuggling" / invisible-Unicode prompt
 # injection). Unicode's own NFKC compatibility decomposition does NOT map the
@@ -442,7 +442,7 @@ _NORM_TABLE = str.maketrans({**_TAG_TABLE, **_CONFUSABLES})
 # above. No code point in this range may ever be a translate key, or RTL /
 # Hebrew bootstrap files would be silently corrupted.
 assert all(0x0590 > cp or cp > 0x05FF for cp in _NORM_TABLE), (
-    "textnorm._NORM_TABLE must never include Hebrew block U+0590–05FF"
+    "textnorm._NORM_TABLE must never include Hebrew block U+0590\u201305FF"
 )
 
 _TAG_RUN_RE = re.compile("[\U000e0000-\U000e007f]+")
@@ -477,25 +477,25 @@ def _has_suspicious_tag_run(text: str) -> bool:
 #
 # unicodedata (stdlib) does not expose the Unicode "Extended_Pictographic"
 # property, so this is a small, explicit range list covering the blocks that
-# matter for detecting legitimate emoji ZWJ sequences (e.g. 🧑‍⚖️, family
-# emoji, profession emoji). Not a complete emoji-property implementation —
+# matter for detecting legitimate emoji ZWJ sequences (e.g. <U+1F9D1 U+200D U+2696 U+FE0F>, family
+# emoji, profession emoji). Not a complete emoji-property implementation -
 # just enough to distinguish "ZWJ between two emoji" (benign) from "ZWJ
 # splicing ASCII/other text" (obfuscation).
 #
 # Ranges (grounded in the Unicode emoji blocks):
-#   U+1F300–1F5FF : Miscellaneous Symbols and Pictographs
-#   U+1F600–1F64F : Emoticons
-#   U+1F680–1F6FF : Transport and Map Symbols
-#   U+1F700–1FAFF : Symbols/Pictographs Extended-A, Supplemental Symbols, etc.
-#   U+2600–27BF   : Miscellaneous Symbols + Dingbats (☀ ✂ etc.)
-#   U+2B00–2BFF   : Miscellaneous Symbols and Arrows (⭐ etc.)
-#   U+1F000–1F0FF : Mahjong/Domino/Playing Cards (rare, but pictographic)
-#   U+2190–21FF   : Arrows block (a few are used as emoji, e.g. ↔️ ↩️)
-#   U+1F1E6–1F1FF : Regional indicator symbols (flag emoji pairs)
-#   U+1F3FB–1F3FF : Emoji skin-tone modifiers (Fitzpatrick modifiers)
+#   U+1F300-1F5FF : Miscellaneous Symbols and Pictographs
+#   U+1F600-1F64F : Emoticons
+#   U+1F680-1F6FF : Transport and Map Symbols
+#   U+1F700-1FAFF : Symbols/Pictographs Extended-A, Supplemental Symbols, etc.
+#   U+2600-27BF   : Miscellaneous Symbols + Dingbats (sun scissors etc.)
+#   U+2B00-2BFF   : Miscellaneous Symbols and Arrows (star etc.)
+#   U+1F000-1F0FF : Mahjong/Domino/Playing Cards (rare, but pictographic)
+#   U+2190-21FF   : Arrows block (a few are used as emoji, e.g. <U+2194 U+FE0F> <U+21A9 U+FE0F>)
+#   U+1F1E6-1F1FF : Regional indicator symbols (flag emoji pairs)
+#   U+1F3FB-1F3FF : Emoji skin-tone modifiers (Fitzpatrick modifiers)
 #   U+FE0F        : Variation Selector-16 (emoji presentation selector)
-#   U+20E3        : Combining enclosing keycap (keycap emoji, e.g. 1️⃣)
-#   U+1F9B0–1F9B3 : Emoji hair-style components (red hair, curly hair, ...)
+#   U+20E3        : Combining enclosing keycap (keycap emoji, e.g. 1+keycap)
+#   U+1F9B0-1F9B3 : Emoji hair-style components (red hair, curly hair, ...)
 # ---------------------------------------------------------------------------
 _EMOJI_RANGES: tuple[tuple[int, int], ...] = (
     (0x1F300, 0x1F5FF),
@@ -516,15 +516,15 @@ _EMOJI_RANGES: tuple[tuple[int, int], ...] = (
 
 def _is_emoji_codepoint(cp: int) -> bool:
     """True when *cp* (an integer code point) falls in one of the emoji /
-    pictographic blocks in *_EMOJI_RANGES* — including emoji modifiers
+    pictographic blocks in *_EMOJI_RANGES* - including emoji modifiers
     (skin tones, variation selector, keycap) that flank a ZWJ in real
-    emoji ZWJ sequences (e.g. the skin-toned 🧑🏽‍⚖️).
+    emoji ZWJ sequences (e.g. the skin-toned <U+1F9D1 U+1F3FD U+200D U+2696 U+FE0F>).
     """
     return any(lo <= cp <= hi for lo, hi in _EMOJI_RANGES)
 
 
 # Codepoints that are "emoji-adjacent" modifiers rather than emoji themselves
-# — when scanning outward from a ZWJ, skip over these before checking
+# - when scanning outward from a ZWJ, skip over these before checking
 # whether the next real character is an emoji.
 _EMOJI_MODIFIERS = frozenset({0xFE0F, *range(0x1F3FB, 0x1F400)})
 
@@ -537,7 +537,7 @@ def _is_zwj_between_emoji(chars: list[str], idx: int) -> bool:
 
     Skips over emoji modifiers (variation selector, skin-tone modifiers)
     immediately adjacent to the ZWJ before checking the flanking character,
-    so ``🧑🏽‍⚖️`` (person + skin-tone + ZWJ + scales + VS-16) is recognised.
+    so ``<U+1F9D1 U+1F3FD U+200D U+2696 U+FE0F>`` (person + skin-tone + ZWJ + scales + VS-16) is recognised.
     """
     # Walk left, skipping modifiers, to find the nearest substantive char.
     left = idx - 1
@@ -549,14 +549,14 @@ def _is_zwj_between_emoji(chars: list[str], idx: int) -> bool:
         right += 1
 
     if left < 0 or right >= len(chars):
-        return False  # ZWJ at start/end of string — never exempt
+        return False  # ZWJ at start/end of string - never exempt
 
     return _is_emoji_codepoint(ord(chars[left])) and _is_emoji_codepoint(
         ord(chars[right])
     )
 
 
-# The Mongolian Unicode block (U+1800-U+18AF) — the letters/digits/punctuation
+# The Mongolian Unicode block (U+1800-U+18AF) - the letters/digits/punctuation
 # a flanking character must fall inside, PLUS a general-category allowlist so
 # a flanking character must be a genuinely spacing/visible glyph. Built as an
 # allowlist rather than "anything in range" or "anything not U+180E", because
@@ -570,7 +570,7 @@ _MONGOLIAN_VISIBLE_CATEGORIES = frozenset({
     "Lo",  # letters (the bulk of the block)
     "Lm",  # modifier letter (U+1843 MONGOLIAN LETTER TODO LONG VOWEL SIGN)
     "Nd",  # digits (U+1810-1819)
-    "Po",  # punctuation (birga, comma, colon, ellipsis, …)
+    "Po",  # punctuation (birga, comma, colon, ellipsis, ...)
     "Pd",  # dash punctuation (U+1806 MONGOLIAN TODO SOFT HYPHEN)
 })
 
@@ -584,7 +584,7 @@ def _is_mongolian_flanked_180e(chars: list[str], idx: int) -> bool:
     unrelated content (B-647).
 
     A flanking character must be in the Mongolian block AND carry one of the
-    "visible glyph" general categories above (`unicodedata.category`) — TWO
+    "visible glyph" general categories above (`unicodedata.category`) - TWO
     independent adversarial findings against earlier drafts of this
     function, both closed by tightening what counts as a flanking character
     rather than by special-casing one more code point (a lesson repeated
@@ -620,7 +620,7 @@ def _is_mongolian_flanked_180e(chars: list[str], idx: int) -> bool:
     uses).
     """
     if idx <= 0 or idx >= len(chars) - 1:
-        return False  # at a string boundary — never exempt
+        return False  # at a string boundary - never exempt
 
     def _is_visible_mongolian(ch: str) -> bool:
         cp = ord(ch)
@@ -691,10 +691,10 @@ def _normalize_uncached(text: str) -> str:
 
     Steps (in order):
       1. Strip invisible / bidi-control characters
-         (U+200B–200D, U+FEFF, U+202A–202E, U+2060, U+2066–2069, U+00AD).
+         (U+200B-200D, U+FEFF, U+202A-202E, U+2060, U+2066-2069, U+00AD).
       2. NFKC normalization (collapses fullwidth, ligatures, etc.).
-      3. Unicode Tag-block (U+E0000–E007F) fold/strip AND confusable folding
-         (Cyrillic/Greek lookalikes → ASCII), applied together in a single
+      3. Unicode Tag-block (U+E0000-E007F) fold/strip AND confusable folding
+         (Cyrillic/Greek lookalikes -> ASCII), applied together in a single
          `.translate(_NORM_TABLE)` pass (see *_NORM_TABLE* for why merging the
          two translate tables into one is safe). Printable Tag chars decode
          to their ASCII mirror (revealing an ASCII-smuggled payload);
@@ -703,7 +703,7 @@ def _normalize_uncached(text: str) -> str:
          (B-232).
 
     Read-only and lossy by design: the original *text* is never mutated.
-    Hebrew characters (U+0590–05FF) are explicitly excluded from confusable
+    Hebrew characters (U+0590-05FF) are explicitly excluded from confusable
     folding (see the assert next to *_NORM_TABLE*).
     """
     stripped = _INVISIBLE_RE.sub("", text)
@@ -759,7 +759,7 @@ def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> b
 
       - U+200D (ZWJ) is suspicious UNLESS it sits between two emoji code
         points (see *_is_zwj_between_emoji*), in which case it is a normal
-        emoji ZWJ sequence (e.g. 🧑‍⚖️) and must not be flagged.
+        emoji ZWJ sequence (e.g. <U+1F9D1 U+200D U+2696 U+FE0F>) and must not be flagged.
       - U+180E (MONGOLIAN VOWEL SEPARATOR) is suspicious UNLESS it sits
         directly between two Mongolian-block characters (see
         *_is_mongolian_flanked_180e*), in which case it is doing its one
@@ -769,7 +769,7 @@ def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> b
         shipped without it, false-WARNing on a real Mongolian-language skill.
 
     Iterates over Python ``str`` code points directly (each element of a
-    Python 3 ``str`` is already a full code point, astral chars included —
+    Python 3 ``str`` is already a full code point, astral chars included -
     no UTF-16 surrogate handling needed).
     """
     match = zero_width_re.search(text)
@@ -783,9 +783,9 @@ def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> b
             continue
         cp = ord(ch)
         if cp == 0x200D and _is_zwj_between_emoji(chars, idx):
-            continue  # legitimate emoji ZWJ sequence — not suspicious
+            continue  # legitimate emoji ZWJ sequence - not suspicious
         if cp == 0x180E and _is_mongolian_flanked_180e(chars, idx):
-            continue  # literal Mongolian text run — not suspicious
+            continue  # literal Mongolian text run - not suspicious
         return True
     return False
 
@@ -794,14 +794,14 @@ _VS_SUPPLEMENT_RE = re.compile("[" + _VS_SUPPLEMENT_CLASS_SRC + "]")
 
 # B-646: grounded against a direct probe of the same 338,751-file real skill
 # corpus the class above cites. An UNGATED signal over this class touches a
-# small number of files (a handful of stray, single-digit occurrences —
+# small number of files (a handful of stray, single-digit occurrences -
 # scraped web content, a minifier artifact, decode noise off a mislabeled
 # binary file), none anywhere near the density a real encoded payload needs;
 # the corpus's one genuine positive (a published skill encoding Cashu tokens
 # through the Supplement range) carries 384 code points behind one emoji.
 # 32 sits comfortably above every measured noise sample (max 20) and matches
 # the threshold C038's OWN "run of >= 4 or a total of >= 32" invisible-count
-# gate already uses elsewhere in this codebase (checks/_mcp.py) — not a fresh
+# gate already uses elsewhere in this codebase (checks/_mcp.py) - not a fresh
 # number, a second application of one this project already trusted.
 _VS_SUPPLEMENT_SIGNAL_MIN_COUNT = 32
 
@@ -859,17 +859,17 @@ def _has_dense_vs_supplement_channel(text: str, *, excuse_ivs: bool = True) -> b
     (B-646).
 
     Deliberately COUNT-gated rather than unconditional like the Tier 1 zero-
-    width class: this class's two most common members in real text —
+    width class: this class's two most common members in real text -
     U+3164/U+FFA0 (Hangul fillers) and, had they been included, U+FE0E/
     U+FE0F (the ordinary emoji-presentation selectors, kept OUT of this class
-    entirely) — have honest, common uses, so a bare-presence signal here
+    entirely) - have honest, common uses, so a bare-presence signal here
     would WARN on ordinary Korean or emoji-heavy content. A real encoded
     payload needs many symbols (roughly 8 bits/code point across this class),
     so requiring a real count catches the channel while a stray one or two
-    stays quiet — the same reasoning the pre-existing C038 invisible-count
+    stays quiet - the same reasoning the pre-existing C038 invisible-count
     gate already applies one check up the stack, generalised to this
     specific class rather than reused directly (C038's own counter combines
-    a DIFFERENT class — see its own module comment for why the two must not
+    a DIFFERENT class - see its own module comment for why the two must not
     be merged).
 
     ONE per-character exemption, added by B-859 and applied only when
@@ -953,15 +953,15 @@ def obfuscation_signals(text: str, *, excuse_ivs: bool = True) -> list[str]:
     function's docstring for the residual the default exemption leaves open).
 
     Signal categories (all checked independently):
-      - "zero-width / invisible characters found" — invisible chars stripped
-      - "bidi-override / embedding controls found" — bidi controls stripped
-      - "Unicode Tag-block characters found" — Tag-block (U+E0000-E007F) run present,
+      - "zero-width / invisible characters found" - invisible chars stripped
+      - "bidi-override / embedding controls found" - bidi controls stripped
+      - "Unicode Tag-block characters found" - Tag-block (U+E0000-E007F) run present,
         not explained away as a legitimate flag-subdivision emoji sequence (B-232)
-      - "dense variation-selector / invisible-alphabet channel found" — enough
+      - "dense variation-selector / invisible-alphabet channel found" - enough
         Variation-Selectors-Supplement-class characters (U+FE00-FE0D minus
         FE0E/FE0F, U+E0100-E01EF, U+3164, U+FFA0) to look like a deliberate
         encoded channel rather than an incidental occurrence (B-646)
-      - "confusable characters folded to ASCII" — confusable map applied
+      - "confusable characters folded to ASCII" - confusable map applied
     """
     signals: list[str] = []
 
@@ -1096,18 +1096,18 @@ _ASCII_LATIN = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 def confusable_in_ascii_context(text: str) -> bool:
     """True when a confusable char (Cyrillic/Greek lookalike that folds to ASCII) sits in
-    the SAME word-token as plain ASCII-Latin letters — i.e. a homoglyph swapped into an
-    otherwise-Latin word (e.g. ``іgnore``, ``оriginally``).
+    the SAME word-token as plain ASCII-Latin letters - i.e. a homoglyph swapped into an
+    otherwise-Latin word (e.g. ``<U+0456>gnore``, ``<U+043E>riginally``).
 
-    Whole-script non-Latin runs (legitimate i18n like ``Привет`` or ``Ελληνικά``) contain
-    no ASCII-Latin letters within the token, so they are NOT flagged — this is what keeps
+    Whole-script non-Latin runs (legitimate i18n like ``Privet`` or ``<U+0395 U+03BB U+03BB U+03B7 U+03BD U+03B9 U+03BA U+03AC>``) contain
+    no ASCII-Latin letters within the token, so they are NOT flagged - this is what keeps
     B58 from false-firing on multilingual prose while still catching homoglyph substitution
     inside Latin-context text. Read-only, stdlib-only.
     """
     stripped = _INVISIBLE_TOKEN_RE.sub("", text)
     for token in re.findall(r"\w+", stripped, re.UNICODE):
         if not any(ch in _ASCII_LATIN for ch in token):
-            continue  # whole non-Latin (or all-digit) token — benign i18n, not a mix
+            continue  # whole non-Latin (or all-digit) token - benign i18n, not a mix
         if any(ord(ch) in _CONFUSABLES for ch in token):
             return True
     return False
@@ -1156,12 +1156,12 @@ def _nfkc_ascii_fold_changed(text: str) -> bool:
 #
 # The counterpart to the input-side normalization above: this folds the unicode
 # THIS TOOL EMITS down for a console that cannot render it. Deliberately a
-# separate table from `_CONFUSABLES` — that one exists to defeat an attacker's
+# separate table from `_CONFUSABLES` - that one exists to defeat an attacker's
 # homoglyph obfuscation on untrusted input, this one exists so a legacy terminal
 # still reads our own prose.
 #
 # B-483: it lives here, in the leaf, because there were SIX ascii-folding sites
-# in the package and only two of them applied a mapping table at all — the other
+# in the package and only two of them applied a mapping table at all - the other
 # four did a bare `.encode("ascii", "replace")`, so every em dash, ellipsis and
 # arrow in `--self-test`, `--dryrun`, `--multiturn`, `--next` and the PDF came
 # out as a literal `?`. Measured: 60 lines of `--self-test --ascii` output,
@@ -1171,19 +1171,19 @@ def _nfkc_ascii_fold_changed(text: str) -> bool:
 ASCII_MAP = str.maketrans({
     # dashes / spacing punctuation (escapes, not literals: a non-breaking and a thin
     # space are indistinguishable in source and one shadows the other silently)
-    "—": "-", "–": "-", "‑": "-", "‒": "-", "―": "-",
+    "\u2014": "-", "\u2013": "-", "\u2011": "-", "\u2012": "-", "\u2015": "-",
     "\u00a0": " ", "\u2009": " ", "\u202f": " ",
     # separators used as list/field dividers in our own output
-    "·": "-", "•": "*", "‣": "*", "▪": "*",
+    "·": "-", "\u2022": "*", "\u2023": "*", "\u25aa": "*",
     # quotes
-    "’": "'", "‘": "'", "‚": "'", "“": '"', "”": '"', "„": '"',
+    "\u2019": "'", "\u2018": "'", "\u201a": "'", "\u201c": '"', "\u201d": '"', "\u201e": '"',
     # math / comparison
-    "×": "x", "÷": "/", "≤": "<=", "≥": ">=", "≈": "~", "≠": "!=", "±": "+/-",
-    "\u2212": "-",  # MINUS SIGN — pdf.py's one entry this table lacked
+    "×": "x", "÷": "/", "\u2264": "<=", "\u2265": ">=", "\u2248": "~", "\u2260": "!=", "±": "+/-",
+    "\u2212": "-",  # MINUS SIGN - pdf.py's one entry this table lacked
     # arrows
-    "→": "->", "←": "<-", "↔": "<->", "⇒": "=>",
+    "\u2192": "->", "\u2190": "<-", "\u2194": "<->", "\u21d2": "=>",
     # misc prose
-    "…": "...", "§": "S", "©": "(c)", "®": "(r)", "™": "(tm)", "°": " deg",
+    "\u2026": "...", "§": "S", "©": "(c)", "®": "(r)", "\u2122": "(tm)", "°": " deg",
     "½": "1/2", "¼": "1/4", "¾": "3/4",
 })
 
@@ -1191,7 +1191,7 @@ ASCII_MAP = str.maketrans({
 def asciify(text: str) -> str:
     """Fold the unicode we emit down to pure ASCII for legacy consoles.
 
-    Anything with no sensible ASCII spelling still becomes `?` — that is the
+    Anything with no sensible ASCII spelling still becomes `?` - that is the
     honest outcome for a glyph the console cannot show, and callers that own a
     real ASCII alternative (icon tables, box-drawing rules) are expected to
     substitute it BEFORE calling this, exactly as they already do. This is the
@@ -1207,7 +1207,7 @@ def fold_pattern(src: str) -> str:
     already makes a pattern letter x match a text confusable whenever x or
     upper(x) is a `_CONFUSABLES` key (I1 keeps those case-equivalent). It
     cannot cover a CAPITAL-ONLY lookalike (lowercase not itself a key, e.g.
-    Cyrillic К) without folding genuine lowercase prose too -- so that half is
+    Cyrillic <U+041A>) without folding genuine lowercase prose too -- so that half is
     closed on the PATTERN instead, via `_PATTERN_CASE_CLOSURE`: each closure
     letter `x` in *src* becomes the class `[x<alt>]`, which re.I then also
     matches as `X`/`<ALT>`. One haystack (`norm`), one offset space, no
@@ -1216,7 +1216,7 @@ def fold_pattern(src: str) -> str:
     A backslash escape passes through untouched. Outside a class, `x` becomes
     `[x<alt>]`. Inside an existing class, `x` stays put and `<alt>` is appended
     just before the closing `]` (never spliced in mid-class, which could turn
-    `[а-я]` into a bogus range) -- so `[а-я]` survives as `[а-яy]`. A leading
+    `[<U+0430>-<U+044F>]` into a bogus range) -- so `[<U+0430>-<U+044F>]` survives as `[<U+0430>-<U+044F>y]`. A leading
     `^` or `]` right after `[` is copied through before closure scanning, so
     `[^...]` / `[]...]` keep their special first member.
 

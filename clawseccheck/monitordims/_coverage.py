@@ -1,4 +1,4 @@
-"""The `not_compared` dimension — what the watch could not compare, watched for GROWTH.
+"""The `not_compared` dimension - what the watch could not compare, watched for GROWTH.
 
 B-676. `--monitor`'s incompleteness disclosure never reached the one consumer the feature
 exists for. Three decisions, each right on its own:
@@ -31,27 +31,27 @@ conditions this tool cannot remove: the per-user crontab spool is mode 1730 and 
 subprocess (`hostpersist.py`), five of seven host-monitor classes resolve `unknown`
 (`_host.py`), and the behavioural window rotates. So "tell the agent when the run was not
 fully compared" and "exit non-zero when it was not" both reduce to "do this every single
-time" — an alarm that always fires is one nobody reads.
+time" - an alarm that always fires is one nobody reads.
 
 ## What carries information instead: the DELTA
 
 The note set is stable. That is the measured property this dimension is built on: on an
 unchanged machine the same comparisons are skipped for the same reasons, run after run, so
-a comparison the watch made last time and cannot make now is a real event — the watch got
+a comparison the watch made last time and cannot make now is a real event - the watch got
 quieter, which is exactly the condition under which a real change passes unseen.
 
 That is a drift signal, so it belongs where every other drift signal is: in `alerts`. The
-exit-code contract does not move at all — a coverage regression simply becomes an alert,
+exit-code contract does not move at all - a coverage regression simply becomes an alert,
 and `--fail-on medium` picks it up like any other.
 
 ## What is deliberately NOT reported
 
-  * **A coverage IMPROVEMENT** — an entry that disappeared. The watch seeing more is not an
+  * **A coverage IMPROVEMENT** - an entry that disappeared. The watch seeing more is not an
     event to page anyone about, and reporting it would double the noise for nothing.
   * **The first comparison after this key appears.** `not_compared` is written only on a
     run with a usable baseline, so a first run stores nothing rather than storing `[]`.
     An empty list would mean "last time the watch compared everything", which is false, and
-    the next run would report all four standing limitations as newly lost — measured as
+    the next run would report all four standing limitations as newly lost - measured as
     exactly the 0 -> 4 step between run 1 and run 2 above.
   * **Anything at all on the run after an upgrade.** A build that adds a note kind changes
     the note set without anything on the machine moving. `watched` already records the
@@ -91,7 +91,7 @@ _COVERAGE_ALREADY_ANNOUNCED = frozenset({NOTE_CONFIG_BLIND})
 _COVERAGE_DIGITS_RE = re.compile(r"\d+")
 
 #: A bound on the stored list. Notes are 4-6 on the two real populations measured, so this
-#: is a backstop against a pathological run rather than a budget — and it is DISCLOSED
+#: is a backstop against a pathological run rather than a budget - and it is DISCLOSED
 #: when it bites, because a silently truncated record would make the entries past the cap
 #: read as "newly lost" on the next run.
 _COVERAGE_MAX_ENTRIES = 60
@@ -148,7 +148,7 @@ def _diff_coverage(prev, curr, notes, alerts, note) -> None:
     recorded = prev.get("not_compared")
     if not isinstance(recorded, list):
         # No prior record: a baseline predating this key, or one written by a run that had
-        # no usable baseline of its own and therefore compared nothing. Silent by design —
+        # no usable baseline of its own and therefore compared nothing. Silent by design -
         # see the module docstring's second exclusion.
         return
     if prev.get("watched") != curr.get("watched"):
@@ -169,7 +169,7 @@ def _diff_coverage(prev, curr, notes, alerts, note) -> None:
             "MEDIUM",
             "This check could not make a comparison it made at the last check: "
             f"{live.get(key, '(reason not recorded)')} Nothing on your machine has "
-            "necessarily changed — but the watch is looking at less than it was, so a "
+            "necessarily changed \u2014 but the watch is looking at less than it was, so a "
             "real change could now pass unseen."))
     if len(lost) > _COVERAGE_NAME_CAP:
         alerts.append((

@@ -77,7 +77,7 @@ Advisory checks are recorded for coverage but are not scored.
 - OWASP: LLM06 Excessive Agency
 - What it checks: Execution sandbox
 - Remediation:
-  - config: `agents.defaults.sandbox.mode` = `"all"` - run exec tools in a sandbox — 'all' sandboxes every session; 'non-main' leaves the agent's own main session on the host
+  - config: `agents.defaults.sandbox.mode` = `"all"` - run exec tools in a sandbox - 'all' sandboxes every session; 'non-main' leaves the agent's own main session on the host
 
 ## Advisory checks
 
@@ -111,7 +111,7 @@ Advisory checks are recorded for coverage but are not scored.
 
 - Severity: HIGH
 - Block: hardening
-- Framework: Untrusted↔Trusted separation
+- Framework: Untrusted<->Trusted separation
 - Scored: yes
 - Confidence: MEDIUM
 - OWASP: LLM01 Prompt Injection
@@ -447,9 +447,9 @@ Advisory checks are recorded for coverage but are not scored.
 - OWASP: LLM01 Prompt Injection
 - What it checks: Sender identity strength (name-matching / mutable-ID bypass)
 - Remediation:
-  - config: `channels.<provider>.dangerouslyAllowNameMatching` - remove this flag — a mutable display-name allowlist is trivially bypassed
+  - config: `channels.<provider>.dangerouslyAllowNameMatching` - remove this flag - a mutable display-name allowlist is trivially bypassed
 
-### B31 - Effective-tools bypass (illusory deny — write blocked but apply_patch/exec still write)
+### B31 - Effective-tools bypass (illusory deny - write blocked but apply_patch/exec still write)
 
 - Severity: MEDIUM
 - Block: hardening
@@ -457,7 +457,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: yes
 - Confidence: HIGH
 - OWASP: LLM06 Excessive Agency
-- What it checks: Effective-tools bypass (illusory deny — write blocked but apply_patch/exec still write)
+- What it checks: Effective-tools bypass (illusory deny - write blocked but apply_patch/exec still write)
 - Remediation:
   - none
 
@@ -509,7 +509,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `browser.evaluateEnabled` = `false` - disable the browser's arbitrary-JS evaluate sink unless a workflow genuinely requires it
 
-### B330 - browser CDP control port — unauthenticated, and how far it reaches
+### B330 - browser CDP control port - unauthenticated, and how far it reaches
 
 - Severity: HIGH
 - Block: hardening
@@ -517,7 +517,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: yes
 - Confidence: HIGH
 - OWASP: none
-- What it checks: browser CDP control port — unauthenticated, and how far it reaches
+- What it checks: browser CDP control port - unauthenticated, and how far it reaches
 - Remediation:
   - config: `browser.extraArgs` - remove --remote-allow-origins; keep browser.cdpUrl and every profile cdpUrl on loopback
 
@@ -601,7 +601,7 @@ Advisory checks are recorded for coverage but are not scored.
 
 - Severity: HIGH
 - Block: hardening
-- Framework: Untrusted↔Trusted separation
+- Framework: Untrusted<->Trusted separation
 - Scored: yes
 - Confidence: HIGH
 - OWASP: none
@@ -799,7 +799,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B44 - Attestation ⇄ config mismatch (undisclosed capability)
+### B44 - Attestation <-> config mismatch (undisclosed capability)
 
 - Severity: MEDIUM
 - Block: advisory
@@ -807,7 +807,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: ATTESTED
 - OWASP: LLM06 Excessive Agency
-- What it checks: Attestation ⇄ config mismatch (undisclosed capability)
+- What it checks: Attestation <-> config mismatch (undisclosed capability)
 - Remediation:
   - none
 
@@ -1023,7 +1023,7 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Advisory checks
 
-### B62 - Capability–intent mismatch (declared purpose vs actual behaviour)
+### B62 - Capability-intent mismatch (declared purpose vs actual behaviour)
 
 - Severity: MEDIUM
 - Block: advisory
@@ -1031,7 +1031,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: MEDIUM
 - OWASP: LLM06 Excessive Agency
-- What it checks: Capability–intent mismatch (declared purpose vs actual behaviour)
+- What it checks: Capability-intent mismatch (declared purpose vs actual behaviour)
 - Remediation:
   - none
 
@@ -1421,7 +1421,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B75 - MCP tool-inheritance bypass — per-agent filter circumvented (attested)
+### B75 - MCP tool-inheritance bypass - per-agent filter circumvented (attested)
 
 - Severity: MEDIUM
 - Block: hardening
@@ -1429,7 +1429,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: ATTESTED
 - OWASP: none
-- What it checks: MCP tool-inheritance bypass — per-agent filter circumvented (attested)
+- What it checks: MCP tool-inheritance bypass - per-agent filter circumvented (attested)
 - Remediation:
   - none
 
@@ -1545,7 +1545,7 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Hardening checks
 
-### B85 - Incident readiness — tool-use trail present and tamper-resistant
+### B85 - Incident readiness - tool-use trail present and tamper-resistant
 
 - Severity: MEDIUM
 - Block: hardening
@@ -1553,7 +1553,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: none
-- What it checks: Incident readiness — tool-use trail present and tamper-resistant
+- What it checks: Incident readiness - tool-use trail present and tamper-resistant
 - Remediation:
   - none
 
@@ -2187,7 +2187,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B380 - hooks.mappings[].transform.module — config-loaded code run on messages
+### B380 - hooks.mappings[].transform.module - config-loaded code run on messages
 
 - Severity: LOW
 - Block: advisory
@@ -2195,7 +2195,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: none
-- What it checks: hooks.mappings[].transform.module — config-loaded code run on messages
+- What it checks: hooks.mappings[].transform.module - config-loaded code run on messages
 - Remediation:
   - none
 
@@ -2353,7 +2353,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B324 - env.shellEnv.enabled — agent-startup login-shell environment import
+### B324 - env.shellEnv.enabled - agent-startup login-shell environment import
 
 - Severity: MEDIUM
 - Block: hardening
@@ -2361,7 +2361,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: none
-- What it checks: env.shellEnv.enabled — agent-startup login-shell environment import
+- What it checks: env.shellEnv.enabled - agent-startup login-shell environment import
 - Remediation:
   - none
 
@@ -2403,7 +2403,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### T2 - Outcome anomaly (fail→fail→success series on a sensitive verb)
+### T2 - Outcome anomaly (fail->fail->success series on a sensitive verb)
 
 - Severity: MEDIUM
 - Block: advisory
@@ -2411,7 +2411,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: MEDIUM
 - OWASP: none
-- What it checks: Outcome anomaly (fail→fail→success series on a sensitive verb)
+- What it checks: Outcome anomaly (fail->fail->success series on a sensitive verb)
 - Remediation:
   - none
 
@@ -2427,7 +2427,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B191 - OpenClaw's runtime audit_events trail — coverage, policy-blocked tools, and evasive tool names
+### B191 - OpenClaw's runtime audit_events trail - coverage, policy-blocked tools, and evasive tool names
 
 - Severity: MEDIUM
 - Block: advisory
@@ -2435,7 +2435,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: none
-- What it checks: OpenClaw's runtime audit_events trail — coverage, policy-blocked tools, and evasive tool names
+- What it checks: OpenClaw's runtime audit_events trail - coverage, policy-blocked tools, and evasive tool names
 - Remediation:
   - none
 
@@ -2879,7 +2879,7 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Advisory checks
 
-### B393 - telemetry.enabled — name what leaves the machine when a user opts in
+### B393 - telemetry.enabled - name what leaves the machine when a user opts in
 
 - Severity: LOW
 - Block: advisory
@@ -2887,7 +2887,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: none
-- What it checks: telemetry.enabled — name what leaves the machine when a user opts in
+- What it checks: telemetry.enabled - name what leaves the machine when a user opts in
 - Remediation:
   - none
 
@@ -2943,17 +2943,17 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Why:
   The channel '{channel_label}' {open_reason}. The agent also has {tool_label} enabled.
   Any anonymous actor can craft a message that causes the agent to execute code or mutate
-  files on the host — no additional privilege escalation required.
+  files on the host - no additional privilege escalation required.
 - Fix:
   Lock every channel's dmPolicy and groupPolicy to 'allowlist' so only known, trusted
   senders can reach the agent. If open channels are required, remove or gate
   exec/write/elevated tools behind human approval (tools.exec.mode='ask' puts a command to
   you when it is not on the allow list; tools.exec.ask='always' puts every one to you).
 
-### RISK-02 - Lethal Trifecta: untrusted input → sensitive data → outbound
+### RISK-02 - Lethal Trifecta: untrusted input -> sensitive data -> outbound
 
 - Severity: HIGH
-- Pattern: HIGH: dirty input + sensitive data + outbound/exec — the explicit Trifecta path.
+- Pattern: HIGH: dirty input + sensitive data + outbound/exec - the explicit Trifecta path.
 - Chain: input_label -> sensitive_label -> outbound_label
 - Why:
   All three legs of the Lethal Trifecta are active simultaneously: the agent ingests
@@ -2996,7 +2996,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Fix:
   Disable dangerouslyAllowNameMatching in all channel configurations and require
   cryptographic identity verification (e.g. token-based auth). Restrict elevated tool
-  allowFrom to explicit, verified sender IDs — never '*' or name-matched identities.
+  allowFrom to explicit, verified sender IDs - never '*' or name-matched identities.
 
 ### RISK-05 - Browser SSRF to private network + secrets reachable
 
@@ -3026,21 +3026,21 @@ These paths are computed from multiple checks. They fire only when every leg is 
   agent configuration, installing skills, or reading all secrets.
 - Fix:
   Restrict control-plane access to loopback or a trusted VPN interface only. Lock all
-  external channels to an allowlist. Enable strong auth (token ≥ 24 chars) on the control-
-  plane endpoint and never expose it on a public or open interface.
+  external channels to an allowlist. Enable strong auth (token >= 24 chars) on the
+  control-plane endpoint and never expose it on a public or open interface.
 
 ### RISK-07 - Self-modification: writable identity/bootstrap + exec without approval
 
 - Severity: HIGH
 - Pattern: HIGH: writable bootstrap (or already-poisoned bootstrap) + exec/fs_write
-- Chain: exec / fs_write tool (no approval gate) -> writable bootstrap/identity files -> agent identity rewritten → persistent compromise
+- Chain: exec / fs_write tool (no approval gate) -> writable bootstrap/identity files -> agent identity rewritten -> persistent compromise
 - Why:
   Bootstrap or identity files (SOUL.md / AGENTS.md / TOOLS.md) are group- or world-
   writable (B20 or B22 fails), OR a content-ring scanner already found an
-  override/jailbreak directive actually written into them (B6 or B161 fails — the normal-
+  override/jailbreak directive actually written into them (B6 or B161 fails - the normal-
   permission file poisoned through the agent's own fs_write). Either way, the agent also
   has exec or fs_write tools enabled without a human approval gate, so it can rewrite its
-  own instructions, identity, or installed skills — a single successful prompt-injection
+  own instructions, identity, or installed skills - a single successful prompt-injection
   makes the compromise persistent across restarts.
 - Fix:
   Run 'chmod 700 workspace/ && chmod 600 workspace/SOUL.md workspace/AGENTS.md
@@ -3069,24 +3069,24 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Pattern: CRITICAL: a malicious installed skill (B13 FAIL) + outbound egress = active exfiltration.
 - Chain: malicious installed skill (B13) -> runs with full agent permissions -> outbound egress (channels / external skills) -> credential & data exfiltration
 - Why:
-  ClawSecCheck flagged an installed skill as malicious (B13 — the ClawHavoc class). Skills
+  ClawSecCheck flagged an installed skill as malicious (B13 - the ClawHavoc class). Skills
   run with the agent's FULL permissions, and this agent has an outbound egress surface
   (messaging channels and/or external-service skills). The malicious skill can read your
-  secrets and conversation data and send them out — this is an active exfiltration path,
+  secrets and conversation data and send them out - this is an active exfiltration path,
   not theoretical.
 - Fix:
   Uninstall the flagged skill(s) NOW (see the B13 finding for the name), and ROTATE every
-  secret it could have reached — channel tokens, cloud keys, password managers. Only
+  secret it could have reached - channel tokens, cloud keys, password managers. Only
   reinstall skills whose source you have read.
 
-### RISK-10 - Powerful agent on an unmonitored host — a breach would be invisible
+### RISK-10 - Powerful agent on an unmonitored host - a breach would be invisible
 
 - Severity: MEDIUM
 - Pattern: MEDIUM: a high-privilege agent on a host with no CONFIRMED detection monitoring.
 - Chain: untrusted input reaches the agent -> agent can execute / write on the host -> no host detection (IDS / audit / file-integrity / EDR) -> a compromise would leave no trace
 - Why:
   This agent can act on the host (exec / write / elevated tools) and is reachable by
-  untrusted input, yet ClawSecCheck found no evidence of any host detection monitoring —
+  untrusted input, yet ClawSecCheck found no evidence of any host detection monitoring -
   no confirmed network IDS, audit logging, file-integrity monitor, or endpoint/EDR sensor
   (some of these may simply be unreadable by a non-root scan). If the agent were
   compromised via a prompt injection, the resulting activity would very likely go unseen.
@@ -3107,7 +3107,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
   can drive a sensitive-data agent and an outbound agent across delegation edges that are
   not structural walls (raw passthrough / text filter / undeclared return). A single
   prompt-injection at the entry agent can orchestrate the others to exfiltrate secrets or
-  take action — the trifecta reassembles across the graph (a confused-deputy chain).
+  take action - the trifecta reassembles across the graph (a confused-deputy chain).
 - Fix:
   Break one edge: make the callee return a typed/structured value (a wall) so injected
   instructions and raw data cannot flow back, OR remove the delegation reach so '{entry}'
@@ -3117,12 +3117,12 @@ These paths are computed from multiple checks. They fire only when every leg is 
 
 - Severity: HIGH
 - Pattern: HIGH: broad filesystem-write capability (B55) + untrusted ingress = tamper/persistence.
-- Chain: ingress_label -> broad fs-write tool (unscoped, no approval gate) -> files overwritten → tamper / persistence implant
+- Chain: ingress_label -> broad fs-write tool (unscoped, no approval gate) -> files overwritten -> tamper / persistence implant
 - Why:
   The agent is granted a filesystem-write tool (fs_write / apply_patch) that B55 found
   broadly reachable or ungated, AND untrusted content can reach the agent (an open channel
   or an input tool). A single prompt-injection in that untrusted input can drive arbitrary
-  file writes — overwriting bootstrap or skill files to implant persistent instructions,
+  file writes - overwriting bootstrap or skill files to implant persistent instructions,
   or tampering with data the agent later trusts.
 - Fix:
   tools.exec.mode='ask', tools.elevated.allowFrom, and locking ingress channels to
@@ -3143,7 +3143,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
   B59 shows that a remote markdown/image URL can carry data out of the agent context. If
   bootstrap or memory files are writable (B20 or B22 fails), OR a content-ring scanner
   already found a planted directive in them (B6 or B161 fails), the same attacker can
-  write — or already has written — a payload or instruction back into files the agent
+  write - or already has written - a payload or instruction back into files the agent
   reloads later. The result is a persistence-plus-exfil chain: steal data now, leave
   behind code or instructions that survive restart.
 - Fix:
@@ -3161,7 +3161,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
   invoke elevated tools, and a heartbeat (agents.defaults.heartbeat or a per-agent
   heartbeat) makes the agent act on its own schedule. Together, a single prompt-injection
   from an untrusted sender can trigger elevated actions that the heartbeat keeps re-
-  running unattended — a self-escalating autonomous privilege loop with no human in the
+  running unattended - a self-escalating autonomous privilege loop with no human in the
   path.
 - Fix:
   Replace the '*' in tools.elevated.allowFrom with an explicit per-provider sender
@@ -3177,8 +3177,8 @@ These paths are computed from multiple checks. They fire only when every leg is 
   A channel exposes full untrusted context to the agent
   (channels.<p>.contextVisibility='all', B26), and the browser is allowed to reach
   private/internal addresses (browser.ssrfPolicy.dangerouslyAllowPrivateNetwork, B38). A
-  prompt-injection in an untrusted message can make the agent fetch an internal URL —
-  cloud metadata or a credential store — and the response surfaces in tool output.
+  prompt-injection in an untrusted message can make the agent fetch an internal URL -
+  cloud metadata or a credential store - and the response surfaces in tool output.
   OpenClaw has no built-in egress allowlist, so the attacker-fetch leg is structurally
   unconstrained.
 - Fix:
@@ -3197,7 +3197,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
   host filesystem broadly (docker.sock or a root-level source), so an exec-capable agent
   can read arbitrary host files. The gateway credential is stored in plaintext at
   gateway.auth.password in openclaw.json, so the agent can read it and authenticate to the
-  control plane as admin — a sandbox weakness escalates to full control-plane takeover.
+  control plane as admin - a sandbox weakness escalates to full control-plane takeover.
 - Fix:
   Set agents.defaults.sandbox.workspaceAccess to 'ro' or 'none', remove docker.sock and
   root-level host binds from agents.defaults.sandbox.docker.binds, and stop storing
@@ -3222,12 +3222,12 @@ These paths are computed from multiple checks. They fire only when every leg is 
 
 - Severity: HIGH
 - Pattern: HIGH (RISK-18): contextVisibility=all + cron + heartbeat = persistent foothold.
-- Chain: channel '{ch_label}' contextVisibility='all' → prompt injection via untrusted input -> injected instruction schedules a cron task (persistent scheduler surface) -> heartbeat re-executes cron task autonomously with no human review -> persistent autonomous foothold
+- Chain: channel '{ch_label}' contextVisibility='all' -> prompt injection via untrusted input -> injected instruction schedules a cron task (persistent scheduler surface) -> heartbeat re-executes cron task autonomously with no human review -> persistent autonomous foothold
 - Why:
   A channel exposes full untrusted context to the agent
   (channels.<p>.contextVisibility='all'), a cron scheduler surface is active, and the
   agent runs autonomously on a heartbeat (agents.defaults.heartbeat). A prompt-injection
-  in untrusted input can plant a cron task that the heartbeat re-executes indefinitely —
+  in untrusted input can plant a cron task that the heartbeat re-executes indefinitely -
   no human approval is required after the initial injection. The result is a persistent
   autonomous foothold that survives restarts and continues running without further
   attacker interaction.
@@ -3241,18 +3241,18 @@ These paths are computed from multiple checks. They fire only when every leg is 
 ### RISK-19 - Audit/security-themed skill co-installed with a high-capability skill
 
 - Severity: MEDIUM
-- Pattern: MEDIUM (RISK-19, C-197): Skill Composition Risk — Trust Transfer.
+- Pattern: MEDIUM (RISK-19, C-197): Skill Composition Risk - Trust Transfer.
 - Chain: {audit_name} (audit/security/verification-themed output) -> agent reads its output as an implicit approval signal -> {blast_name} (exec / network / write capability)
 - Why:
   '{audit_name}' presents itself as an audit/security/verification tool, and
   '{blast_name}' is a separate installed skill with exec, network, or write capability.
   Per the Skill Composition Risk literature (arXiv 2606.15242), a prompt injection can
-  borrow the audit-themed skill's implied authority — its benign-sounding summary ('looks
-  clean', 'verified') — to green-light '{blast_name}'s risky action, even though neither
+  borrow the audit-themed skill's implied authority - its benign-sounding summary ('looks
+  clean', 'verified') - to green-light '{blast_name}'s risky action, even though neither
   skill is individually malicious and no single skill holds both roles.
 - Fix:
   Never let '{audit_name}'s output serve as an approval gate for '{blast_name}' or any
-  other high-capability skill's action — route genuinely risky actions
+  other high-capability skill's action - route genuinely risky actions
   (exec/network/write) through a human-approval step that reads the actual action, not a
   different skill's summary of it.
 
@@ -3260,13 +3260,13 @@ These paths are computed from multiple checks. They fire only when every leg is 
 
 - Severity: HIGH
 - Pattern: HIGH (RISK-20, B-288): remotely-reachable hook ingress with an unconstrained
-- Chain: gateway reachable beyond loopback ({exposure}) -> hooks.enabled — inbound /hooks/agent endpoint serving -> detail
+- Chain: gateway reachable beyond loopback ({exposure}) -> hooks.enabled - inbound /hooks/agent endpoint serving -> detail
 - Why:
   The gateway is reachable beyond loopback ({exposure}) and the inbound hook endpoint is
   enabled, while its session/agent policy is unconstrained: {detail}. A caller holding the
-  hook token can therefore write into session keys it was never meant to touch — placing
+  hook token can therefore write into session keys it was never meant to touch - placing
   content into another session's history, where the agent reads it as trusted prior
-  context — and/or route its request to any configured agent, including the default one.
+  context - and/or route its request to any configured agent, including the default one.
   OpenClaw's own audit rates each of these critical under exactly this remote-exposure
   condition; ClawSecCheck reports it one notch lower because the endpoint still requires
   hooks.token, so this is blast-radius amplification for a token holder rather than an
@@ -3275,7 +3275,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Fix:
   Constrain the hook policy rather than the network path, since the point of hooks is to
   be reachable. Set hooks.allowedSessionKeyPrefixes to a narrow prefix (for example
-  ["hook:"]) so request-supplied keys cannot escape their own namespace — or set
+  ["hook:"]) so request-supplied keys cannot escape their own namespace - or set
   hooks.allowRequestSessionKey=false and let hooks.defaultSessionKey decide the session.
   Set hooks.allowedAgentIds to an explicit allowlist of the agents hooks may drive (or []
   to deny hook agent routing entirely). If the gateway does not need to be remotely
@@ -3290,8 +3290,8 @@ These paths are computed from multiple checks. They fire only when every leg is 
   The channel '{channel_name}' admits group messages from senders who are not the owner
   ({reason}), and the trajectory log records a session opened from a group or channel
   surface on '{channel_name}' in which the agent actually invoked {shown}. Both halves of
-  this exposure were already visible in isolation — the posture as a config finding, the
-  tool use as a log observation — but nothing related them, so a setup where an untrusted
+  this exposure were already visible in isolation - the posture as a config finding, the
+  tool use as a log observation - but nothing related them, so a setup where an untrusted
   surface has demonstrably reached a high-blast primitive looked the same as one where it
   never had. It is not proof that a group sender caused those specific calls: that needs
   the call arguments, which this tool never reads.
@@ -3299,8 +3299,8 @@ These paths are computed from multiple checks. They fire only when every leg is 
   Decide whether group senders on '{channel_name}' are meant to reach
   exec/destructive/mailbox-config tools at all. If not, restrict the channel (set
   groupPolicy to 'allowlist' and list the permitted senders in groupAllowFrom, or scope
-  the groups entry so it is not '*'). If open group access is intentional — a community
-  bot, say — put the high-blast tools behind a human approval step (tools.exec.mode='ask')
+  the groups entry so it is not '*'). If open group access is intentional - a community
+  bot, say - put the high-blast tools behind a human approval step (tools.exec.mode='ask')
   so an untrusted message cannot reach them unattended.
 
 ### RISK-22 - MCP server's own tool set spans a toxic flow (input -> sensitive -> egress)
@@ -3312,7 +3312,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
   The MCP server '{server}' declares tools spanning all three roles of a confused-deputy
   chain in its own tool set: an untrusted-input tool ('{input_tool}'), a sensitive-read
   tool ('{sensitive_tool}'), and an egress tool ('{egress_tool}'). None of these tools is
-  individually dangerous, and no exploit is proven here — this is a PRECONDITION, not an
+  individually dangerous, and no exploit is proven here - this is a PRECONDITION, not an
   incident. But because all three are co-resident on one server, content read by the input
   tool could steer the model into misusing the other two for exfiltration, without leaving
   this server's own tool boundary.
@@ -3322,22 +3322,22 @@ These paths are computed from multiple checks. They fire only when every leg is 
   or gate the sensitive-read/egress tools behind human approval (tools.exec.mode='ask') so
   an injected instruction from the input tool cannot reach them unattended.
 
-### RISK-23 - Multiple independent persistence anchors — eviction-resistant foothold
+### RISK-23 - Multiple independent persistence anchors - eviction-resistant foothold
 
 - Severity: HIGH
 - Pattern: HIGH (RISK-23, E-065): 2+ independent persistence anchors of DIFFERENT
 - Chain: *fired -> removing any single anchor does not evict the foothold
 - Why:
   This install has ... independent persistence mechanisms flagged at once, from different
-  mechanism classes: .... Most of these checks are WARN-only disclosure — a developer
+  mechanism classes: .... Most of these checks are WARN-only disclosure - a developer
   might legitimately have any one of them for a real reason. What makes this combination
   worth escalating is that at least one of them (...) shows an actual suspicious signal
   beyond "the mechanism exists, unreviewed", co-located with other independent re-
-  establishment mechanisms — the shape that makes removing any single anchor insufficient
+  establishment mechanisms - the shape that makes removing any single anchor insufficient
   to evict a real foothold. This is not proof of compromise; it warrants prioritized
   review of every flagged anchor, starting with the one that shows the actual signal.
 - Fix:
-  Investigate every flagged anchor, starting with ... — then review the rest: the
+  Investigate every flagged anchor, starting with ... - then review the rest: the
   .pth/sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill hooks, and any
   tunnel/mesh-VPN binaries this install surfaced. Removing a single anchor without
   addressing the others leaves a working foothold in place.
@@ -3349,11 +3349,11 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Chain: untrusted input reaches the agent -> agent can execute / write on the host -> ... enrolled and active on the host (its own outbound transport) -> default-deny OUTPUT policy confirmed, but cannot see destinations carried inside the tunnel's own already-permitted connection -> destination-based egress filtering is defeated for traffic riding the tunnel
 - Why:
   ClawSecCheck confirmed a default-deny outbound firewall policy on this host, and ... is
-  enrolled and active — its own outbound control connection is itself a locally-generated
+  enrolled and active - its own outbound control connection is itself a locally-generated
   packet the OUTPUT chain does evaluate, but once that one connection is up, destination-
   based egress filtering cannot see the individual destinations carried inside it. This
   agent can act on the host (exec/write) and is reachable by untrusted input, so a prompt-
-  injection compromise could invoke that transport directly — the audit's own 'egress is
+  injection compromise could invoke that transport directly - the audit's own 'egress is
   hardened' verdict does not extend to traffic riding inside it.
 - Fix:
   Do not rely on host firewall policy alone to contain this agent. Either remove the
@@ -3369,8 +3369,8 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Chain: marketplaces.feeds (or .sources) names a non-canonical registry -> security.installPolicy is disabled, or its exec hook is escaped -> skill/plugin installs from that source run unmonitored and unreviewed
 - Why:
   This install names a marketplace feed/source other than the public https://clawhub.ai,
-  and at the same time security.installPolicy — the operator-owned gate meant to review
-  every skill/plugin install and update — is not enabled, or is enabled with its own exec
+  and at the same time security.installPolicy - the operator-owned gate meant to review
+  every skill/plugin install and update - is not enabled, or is enabled with its own exec
   hook's path-safety checks bypassed (exec.allowInsecurePath) or forwarding a secret-
   shaped env var name. Neither posture alone is unusual: a private feed can be a
   legitimate self-hosted mirror, and a disabled install-policy gate is a common untouched
@@ -3379,7 +3379,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Fix:
   Either confirm the marketplaces.feeds/.sources entry is your own trusted mirror and
   enable security.installPolicy with a real exec review command (no unconstrained
-  allowInsecurePath — scope it with exec.trustedDirs if you need it), or restore the
+  allowInsecurePath - scope it with exec.trustedDirs if you need it), or restore the
   canonical https://clawhub.ai feed if the non-default entry was not an intentional,
   disclosed deployment.
 

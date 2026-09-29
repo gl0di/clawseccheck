@@ -1,8 +1,8 @@
-"""The `openclaw_install` dimension — the installed OpenClaw package as an identity marker.
+"""The `openclaw_install` dimension - the installed OpenClaw package as an identity marker.
 
 F-174. `openclawdist.py` is the reader; this is the comparison. Three digests move
-independently — the manifest, the lock file, and the content digest over the executable
-surface — and only the last one catches a swapped build under an untouched manifest, which
+independently - the manifest, the lock file, and the content digest over the executable
+surface - and only the last one catches a swapped build under an untouched manifest, which
 is the actual npm supply-chain attack.
 """
 
@@ -31,7 +31,7 @@ def _diff_openclaw_install(_c_inst, _p_inst, alerts, curr, note, prev) -> None:
     else:
         _p_ver, _c_ver = _p_inst.get("version", ""), _c_inst.get("version", "")
         if _p_ver and _c_ver and _p_ver != _c_ver:
-            # Direction only when it is defensible — see openclawdist.compare_versions for
+            # Direction only when it is defensible - see openclawdist.compare_versions for
             # why a wrong "rolled back" is worse than a bare "changed".
             if _version_order(_p_ver, _c_ver) == "down":
                 alerts.append((
@@ -53,7 +53,7 @@ def _diff_openclaw_install(_c_inst, _p_inst, alerts, curr, note, prev) -> None:
             # branch above not having fired. The `elif` alone was reached when one side's
             # version was never recorded at all (a manifest with no `version` string), and
             # the sentence then asserted the version "stayed at" a value the other side did
-            # not have — claiming a same-version swap out of a missing field.
+            # not have - claiming a same-version swap out of a missing field.
             alerts.append((
                 "HIGH",
                 f"Your OpenClaw program files changed while the version number stayed at "
@@ -67,7 +67,7 @@ def _diff_openclaw_install(_c_inst, _p_inst, alerts, curr, note, prev) -> None:
                 and _p_inst["lock_sha256"] != _c_inst["lock_sha256"]):
             # Every clause of the sentence has to be EVIDENCED, not merely un-contradicted.
             # Tightening the swapped-build branch above pushed three cases down into this
-            # one — a missing version on either side, and a capped code digest — and this
+            # one - a missing version on either side, and a capped code digest - and this
             # line then asserted the version AND the program files were unchanged when one
             # was unrecorded and the other demonstrably differed. An `elif` chain makes
             # "the branch above did not fire" look like evidence; it never is.

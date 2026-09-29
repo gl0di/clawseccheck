@@ -1,6 +1,6 @@
 """AI-BOM export (`--sbom`): a local, deterministic bill-of-materials JSON.
 
-Standalone export format — NOT a human report. Summarizes the installed-skill /
+Standalone export format - NOT a human report. Summarizes the installed-skill /
 MCP-server / installed-plugin inventory an `audit()` pass already collected, in a
 stable machine-readable shape so it can be diffed, archived, or fed to other local
 tooling. Local file / stdout only; never uploaded anywhere.
@@ -8,13 +8,13 @@ tooling. Local file / stdout only; never uploaded anywhere.
 Hashing and field extraction deliberately REUSE monitor.py's existing helpers
 (`_h`, `_SKILL_VERSION_RE`) and monitor.py's `_mcp_detail_sig` so the BOM's hashes
 line up with monitor.py's own drift-detection snapshots (same hash scheme, same
-inputs) — this module does not invent a second hashing convention.
+inputs) - this module does not invent a second hashing convention.
 
-Redaction discipline (ZKDS): the BOM NEVER contains secret/credential VALUES — only
+Redaction discipline (ZKDS): the BOM NEVER contains secret/credential VALUES - only
 key names, hashes and structural metadata. MCP env vars reuse `_mcp_detail_sig`'s
 existing `key:*` marking for secret-shaped key names; values are never read here.
 Every filesystem path this module emits (plugin `manifest_path`/`root_dir`/
-`entry_point`) is routed through `report._redact_home_paths` first — an install path
+`entry_point`) is routed through `report._redact_home_paths` first - an install path
 carries the operator's OS username, and a BOM is exactly the artifact people paste
 into a ticket (CLAUDE.md §8; the same fix already applies to sarif.py's
 `_sarif_text` for the same class of leak).
@@ -31,44 +31,44 @@ from .monitor import _SKILL_VERSION_RE, _h, _mcp_detail_sig
 from .report import _redact_home_paths
 
 # B-568: bumped 2 -> 3. Two independent additions, both breaking a prior implicit
-# promise: (1) a `plugins` array now exists (it was entirely absent — an AI-BOM that
+# promise: (1) a `plugins` array now exists (it was entirely absent - an AI-BOM that
 # silently omits a whole component class is worse than no BOM, since completeness is
 # its entire claim); (2) `complete` now ALSO requires the installed-plugin index to
 # have been read cleanly, where it previously said nothing about plugins at all. A
 # consumer pinned to version 2's `complete` == "no skill was withheld" would misread
-# version 3's `complete` == "no skill was withheld AND the plugin inventory is known" —
+# version 3's `complete` == "no skill was withheld AND the plugin inventory is known" -
 # same shape as B-521's version 1 -> 2 bump one field over.
 SBOM_VERSION = 3
 
 
 def _skill_supplier(name: str, ctx) -> "str | None":
-    """Which plugin supplies skill *name*, or ``None``/``"unknown"`` — never a guess.
+    """Which plugin supplies skill *name*, or ``None``/``"unknown"`` - never a guess.
 
     Three distinct claims, deliberately spelled three different ways:
 
-    * ``None`` — *not applicable*. ``ctx.installed_skill_bundled`` (collector.py,
+    * ``None`` - *not applicable*. ``ctx.installed_skill_bundled`` (collector.py,
       B-507) is a DEFINITIVE set: it is built from WHICH root a skill was discovered
       under, not inferred, so "not bundled" is always a known fact, not an absence of
       one. A directly user-installed skill has no plugin-supplier concept to report.
-    * ``"unknown"`` — the skill IS bundled with a plugin (definitively, per the same
+    * ``"unknown"`` - the skill IS bundled with a plugin (definitively, per the same
       set) but WHICH plugin cannot be determined from the data this module reads: the
       persisted ``installed_plugin_index`` carries no reverse "these are my skills"
       list (its records are pluginId/origin/enabled/manifestPath/rootDir/source/
-      contracts only — collector.py's ``_collect_plugin_trust`` docstring), so
+      contracts only - collector.py's ``_collect_plugin_trust`` docstring), so
       attribution is derived by directory containment instead, and containment can
       fail to resolve to exactly one plugin (index unreadable, zero matches, or an
-      ambiguous >1 matches). This is the ONLY honest spelling for "known-unknown" —
+      ambiguous >1 matches). This is the ONLY honest spelling for "known-unknown" -
       an empty string reads as "the supplier field is blank", not "we don't know".
-    * ``"<plugin_id>"`` — exactly one installed-plugin record's ``root_dir`` contains
+    * ``"<plugin_id>"`` - exactly one installed-plugin record's ``root_dir`` contains
       the skill's own resolved directory (``ctx.installed_skill_dirs``). Never derived
-      from the skill's or plugin's NAME — a name-based match would be exactly the
+      from the skill's or plugin's NAME - a name-based match would be exactly the
       "plausible-looking guess" this field must not emit.
 
     No filesystem access here (``build_sbom`` is pure/deterministic, no I/O): both
     ``ctx.installed_skill_dirs`` values and ``ctx.plugin_index_records[*]["root_dir"]``
     are already-resolved absolute paths by the time the collector writes them, so a
     plain ``Path.relative_to`` containment check (no ``.resolve()`` call) is sufficient
-    — confirmed against a real installed-plugin index, not assumed.
+    - confirmed against a real installed-plugin index, not assumed.
     """
     bundled = getattr(ctx, "installed_skill_bundled", None) or set()
     if name not in bundled:
@@ -114,7 +114,7 @@ def _skill_entry(name: str, blob: str, supplier: "str | None") -> dict:
 def _mcp_entry(name: str, detail: dict) -> dict:
     env_keys = detail.get("env_keys") or []
     # "pinned" here means the command's first arg carries a version pin (e.g. an
-    # npx `pkg@1.2.3` spec) — a coarse, best-effort supply-chain signal derived
+    # npx `pkg@1.2.3` spec) - a coarse, best-effort supply-chain signal derived
     # from the same args0 field monitor.py already extracts; never fabricated.
     args0 = str(detail.get("args0") or "")
     pinned = "@" in args0.rsplit("/", 1)[-1][1:] if args0 else False
@@ -136,23 +136,23 @@ def _plugin_entry(rec: dict) -> dict:
     """One ``installed_plugin_index.plugins_json`` record, reshaped for the BOM.
 
     ``origin`` is OpenClaw's own provenance tag ("bundled" | "global" | "config" | ...)
-    — grounded straight from the persisted index; collector.py's own docstring on this
+    - grounded straight from the persisted index; collector.py's own docstring on this
     field is explicit that it is "provenance, NOT a trust verdict", so this module
     passes it through verbatim rather than interpreting it as one.
 
     There is no plugin VERSION or PUBLISHER field anywhere in what the collector reads
     (``buildInstalledPluginIndexRecords`` persists pluginId/origin/enabled/
-    manifestPath/rootDir/source/contributions.contracts only — collector.py
-    ``_collect_plugin_trust`` docstring) — this entry does not fabricate either. A
+    manifestPath/rootDir/source/contributions.contracts only - collector.py
+    ``_collect_plugin_trust`` docstring) - this entry does not fabricate either. A
     consumer wanting a plugin version/publisher needs a new collector.py reader (out of
     this file's ownership); until then this is the honest ceiling of what is knowable.
 
-    ``manifest_path``/``root_dir``/``entry_point`` (the record's own ``source`` field —
+    ``manifest_path``/``root_dir``/``entry_point`` (the record's own ``source`` field -
     named ``entry_point`` here to avoid colliding with a skill's ``supplier``, a
     different concept) are filesystem paths straight from the state DB and routinely
     carry the operator's OS username; each is redacted via ``_redact_path`` before
     leaving this module. ``hash`` is computed over the RAW (unredacted) record, matching
-    ``_mcp_entry``'s existing convention — the hash never leaves the process as text, so
+    ``_mcp_entry``'s existing convention - the hash never leaves the process as text, so
     hashing the unredacted bytes costs nothing and keeps drift-detection precise.
     """
     return {
@@ -188,7 +188,7 @@ def build_sbom(ctx) -> dict:
         for name, detail in sorted(mcp_detail.items())
     ]
 
-    # B-463: an empty BOM is two very different facts — "this setup has no components" and
+    # B-463: an empty BOM is two very different facts - "this setup has no components" and
     # "we never found the setup". They used to serialise BYTE-IDENTICALLY, so a typo'd
     # --home in a diff/archive pipeline read as "every component was uninstalled". The
     # audit already knows the difference (`config_found`); record it rather than asserting
@@ -210,12 +210,12 @@ def build_sbom(ctx) -> dict:
     # WHICH component is missing rather than only that one is.
     self_excluded = sorted(getattr(ctx, "self_excluded_skills", None) or [])
 
-    # B-568: `complete` used to say nothing about the plugin category at all — it was
+    # B-568: `complete` used to say nothing about the plugin category at all - it was
     # reachable (a pristine home) even though the shape has no plugins array. A plugin
     # component list is "complete" only when the persisted index was actually read
     # (`plugin_index_found`), parsed without error (`not plugin_index_parse_error`), and
     # not truncated by the plugin-domain cap (`not limit_hits_for(ctx, LIMIT_DOMAIN_PLUGIN)`
-    # — an untagged/global limit hit is included conservatively, same as every other
+    # - an untagged/global limit hit is included conservatively, same as every other
     # `limit_hits_for` caller). `plugins_scanned` ships alongside `complete`, same
     # precedent as `self_excluded_skills`: a consumer needs to tell WHY `complete` is
     # false, not only that it is.
@@ -252,14 +252,14 @@ def render_sbom(ctx) -> str:
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
 
 
-# C-521: CycloneDX / SPDX export — a PRESENTATION-time transform of the exact same
+# C-521: CycloneDX / SPDX export - a PRESENTATION-time transform of the exact same
 # build_sbom(ctx) inventory above, never a second scan. Both interoperability formats
 # want a full-length content hash; monitor.py's _h() (native format's own hash) is
 # DELIBERATELY truncated to 16 hex chars for its own compact-signature use, and a
 # 16-char value would not itself validate as a real SHA-256 digest under either
 # format's schema. _full_hash below reuses the exact same input-construction each
-# native entry builder already uses (the same bytes _h() hashes) — just without the
-# truncation — so this is still "reuse the digest machinery", not a second convention.
+# native entry builder already uses (the same bytes _h() hashes) - just without the
+# truncation - so this is still "reuse the digest machinery", not a second convention.
 
 
 def _full_hash(text: str) -> str:
@@ -271,7 +271,7 @@ def _full_hash(text: str) -> str:
 def _full_hashes_by_component(ctx) -> dict:
     """``(kind, name) -> full sha256 hex`` for every skill/mcp/plugin component, hashing
     the identical input text ``build_sbom``'s own ``_skill_entry``/``_mcp_entry``/
-    ``_plugin_entry`` already hash (truncated) — reads ``ctx`` again, but ``ctx`` is
+    ``_plugin_entry`` already hash (truncated) - reads ``ctx`` again, but ``ctx`` is
     already fully collected in memory by the time any BOM renderer runs, so this is
     cheap dict iteration, not a second scan."""
     out = {}
@@ -289,14 +289,14 @@ def render_sbom_cyclonedx(ctx) -> str:
     """The same inventory as ``render_sbom``, as minimal-but-valid CycloneDX 1.5 JSON.
 
     License is never asserted: nothing this module reads carries license data for a
-    locally-installed skill/MCP-server/plugin (Golden Rule #4 — report UNKNOWN, never
+    locally-installed skill/MCP-server/plugin (Golden Rule #4 - report UNKNOWN, never
     guess), and CycloneDX's ``licenses`` key is optional, so it is omitted rather than
     populated with a fabricated value. ``purl`` (package-URL) is omitted for the same
-    reason — these components mostly have no package-registry identity to assert.
+    reason - these components mostly have no package-registry identity to assert.
     ``version`` is omitted (not "UNKNOWN") when unknown, since CycloneDX only accepts a
     real version string there; an absent key is the format's own honest "not stated".
 
-    No ``metadata.timestamp`` — that field is optional in the CycloneDX spec, and
+    No ``metadata.timestamp`` - that field is optional in the CycloneDX spec, and
     omitting it keeps this renderer's output exactly as deterministic (same Context,
     same bytes) as the native format's own documented promise.
     """
@@ -354,7 +354,7 @@ def render_sbom_spdx(ctx) -> str:
     """The same inventory as ``render_sbom``, as minimal-but-valid SPDX 2.3 JSON.
 
     Uses SPDX's own standard ``"NOASSERTION"`` wherever a value is not knowable
-    (version, license, download location) — the format's OWN spelling for exactly
+    (version, license, download location) - the format's OWN spelling for exactly
     Golden Rule #4's "report UNKNOWN, never guess", so no invented convention is
     needed here the way CycloneDX's key-omission approach required one above.
 
@@ -379,13 +379,13 @@ def render_sbom_spdx(ctx) -> str:
         # SPDXID must be alnum/dot/hyphen only; a skill/plugin/server name can carry
         # other characters, so sanitize rather than emit a structurally invalid id.
         spdx_id = "".join(ch if ch.isalnum() or ch in ".-" else "-" for ch in spdx_id)
-        # C-135: sanitizing can make two DIFFERENT names collide onto the SAME id —
+        # C-135: sanitizing can make two DIFFERENT names collide onto the SAME id -
         # "a/b" and "a b" both fold to "a-b", since both "/" and " " map to the same
         # replacement character. SPDX requires SPDXID to be unique per document,
         # and a silent collision would make a strict consumer only see one of the
         # two components (or reject the document outright). Appending a hash-derived
         # suffix UNCONDITIONALLY (not just when a collision is detected) keeps each
-        # component's id stable across runs regardless of what else is present —
+        # component's id stable across runs regardless of what else is present -
         # detect-and-suffix-on-repeat would make an id's shape depend on iteration
         # order and on which OTHER components happened to be installed that run.
         spdx_id = f"{spdx_id}-{hashes.get((kind, entry['name']), '')[:8]}"

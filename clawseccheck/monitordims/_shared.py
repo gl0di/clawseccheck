@@ -1,12 +1,12 @@
-"""C-433 — the vocabulary every dimension module reuses.
+"""C-433 - the vocabulary every dimension module reuses.
 
 The LEAF of the `monitordims` package: it imports nothing from `clawseccheck`, so a
 dimension module can import it without any question of ordering. Same arrangement as
-`monitorstore.py`, and for the same reason — the supporting names move DOWN so the new
+`monitorstore.py`, and for the same reason - the supporting names move DOWN so the new
 modules are true leaves and `monitor` imports one way.
 
 Only names with more than one consumer live here. A helper or constant used by exactly
-one dimension belongs in that dimension's own module, next to the arm that reads it —
+one dimension belongs in that dimension's own module, next to the arm that reads it -
 the `checks/_shared.py` rule, applied to this package.
 """
 
@@ -22,14 +22,14 @@ def _h(text: str) -> str:
 #
 # The note that reports a baseline predating a comparison used to say only "this run cannot
 # say which comparisons it was able to make", which tells the reader nothing they can act on
-# and — on the very upgrade path it exists for — was the least informative sentence the
+# and - on the very upgrade path it exists for - was the least informative sentence the
 # monitor emitted. The names are derivable; only the vocabulary was missing.
 #
 # Deliberately partial. Roughly half of WATCHED_DIMENSIONS is internal bookkeeping
 # (`graded`, `raw_score_scope`, `config_baseline`, the `*_capped` frontiers) whose names
 # would be jargon in a user-facing sentence, so those are COUNTED rather than named. A key
 # absent from this map is not an error: it falls into the count. That is why the renderer
-# below reports both halves instead of a single number — dropping the unnamed ones would
+# below reports both halves instead of a single number - dropping the unnamed ones would
 # understate what was skipped, and naming them would bury the ones that matter.
 _DIMENSION_LABELS = {
     "behavioral_fired": "how your agent has been behaving",
@@ -60,7 +60,7 @@ _DIMENSION_LABELS = {
 
 # How many names to spell out before falling back to a count. Six fits a readable sentence;
 # the rest are still counted, and the cap is stated in the output rather than applied
-# silently — a truncation the reader cannot see reads as "that was all of them".
+# silently - a truncation the reader cannot see reads as "that was all of them".
 _DIMENSION_NAME_CAP = 6
 
 
@@ -83,24 +83,24 @@ def _name_dimensions(keys: "list[str]") -> str:
     return clause
 
 
-# C-418 — the four reasons a comparison is DECLINED, as opposed to made and found equal.
+# C-418 - the four reasons a comparison is DECLINED, as opposed to made and found equal.
 #
 # `diff()` is full of deliberate silences: a blind config makes every disappearance
 # untrustworthy, a truncated collection cannot tell "gone" from "never looked at", an older
 # baseline simply lacks the key a newer comparison needs. Each is individually correct, and
 # each used to fall through invisibly into an unconditional "No new threats since last
-# check" — a sentence about the whole setup, printed over the parts of it that were never
+# check" - a sentence about the whole setup, printed over the parts of it that were never
 # examined.
 #
 # Four categories rather than forty individual reasons, because the render collapses to a
 # count by default: an eight-line "not compared" list on a healthy run reads as a
 # malfunction, and teaching users to ignore the monitor is a worse outcome than the silence
 # this replaces. They are ordered by how much they should worry the reader.
-NOTE_CONFIG_BLIND = "config_blind"          # openclaw.json unreadable — the loudest
+NOTE_CONFIG_BLIND = "config_blind"          # openclaw.json unreadable - the loudest
 NOTE_RECORD_DAMAGED = "record_damaged"      # the saved baseline is corrupt in part
 NOTE_INSPECTION_CAPPED = "inspection_capped"  # too much on disk to inspect it all
 NOTE_UNDETERMINED = "undetermined"          # a real record on both sides, but it says "unknown"
-NOTE_NO_PRIOR_RECORD = "no_prior_record"    # nothing to compare against yet — the quietest
+NOTE_NO_PRIOR_RECORD = "no_prior_record"    # nothing to compare against yet - the quietest
 
 
 NOTE_CATEGORY_ORDER = (
@@ -113,13 +113,13 @@ NOTE_CATEGORY_ORDER = (
 
 
 def _dim(snap: dict, key: str) -> dict:
-    """B-270: a snapshot dimension as a dict — ``{}`` when absent OR the wrong type.
+    """B-270: a snapshot dimension as a dict - ``{}`` when absent OR the wrong type.
 
     ``read_baseline`` guarantees the snapshot itself is a non-empty dict, but says nothing
     about what is *inside* it: a hand-edited or partially-corrupted state file can hold
     ``{"skills": [1,2]}``, and every dimension loop below assumes ``.keys()``. Coercing to
     ``{}`` makes such a dimension a no-op for one run instead of an AttributeError that
-    takes the whole monitor run down — the same self-healing, absent-key-is-a-no-op idiom
+    takes the whole monitor run down - the same self-healing, absent-key-is-a-no-op idiom
     the B-267 ``tree`` fallback and the RP2 ``args_pkg`` gate already use.
     """
     val = snap.get(key)
@@ -147,7 +147,7 @@ def _frontier(snap: dict, key: str) -> set:
     Same reasoning as ``_dim``: the frontier keys are consumed with ``set(... or ())``,
     which raises TypeError on an int and silently yields dict KEYS on a dict. An
     unusable frontier must degrade to "nothing known to be capped", which is the same
-    value a pre-frontier snapshot supplies — already a handled, self-healing case.
+    value a pre-frontier snapshot supplies - already a handled, self-healing case.
     """
     val = snap.get(key)
     if isinstance(val, (list, tuple, set, frozenset)):
@@ -162,12 +162,12 @@ def _num_or_none(snap: dict, key: str) -> "int | float | None":
     the two callers need different things from that case. `_num`'s `default=0` is right
     where a missing figure should compare as zero; it is wrong where the comparison must be
     SKIPPED, since defaulting an absent baseline to 0 reads the ARRIVAL of a figure as a
-    rise. `raw_score`'s backstop needs the second — see `monitordims/_score.py`.
+    rise. `raw_score`'s backstop needs the second - see `monitordims/_score.py`.
 
     That backstop used to re-derive the predicate rather than call one, and dropped the bool
     clause doing it: `isinstance(True, int)` is True and `True < 74` is `1 < 74`, so a
     `state.json` corrupted to `"raw_score": true` fired a HIGH reading "the underlying
-    pass-rate fell 74 -> True" — a confident measurement of a degradation that did not
+    pass-rate fell 74 -> True" - a confident measurement of a degradation that did not
     happen, from a file that carries no chain and no signature. One predicate, two answers,
     so a third copy has nowhere to drift from.
     """
@@ -189,7 +189,7 @@ def _num(snap: dict, key: str, default: int = 0) -> "int | float":
 
 
 # B-691: the ONE decision about whether an uncapped pass-rate fell between two records, and
-# — when it did not — why the two figures could not be lined up.
+# - when it did not - why the two figures could not be lined up.
 #
 # It lives here, in the leaf, because two subsystems make the same temporal claim over the
 # same pair of fields and only one of them had learned the rules. `monitordims/_score.py`
@@ -206,7 +206,7 @@ def _num(snap: dict, key: str, default: int = 0) -> "int | float":
 #                   "this version checks a different set of things" would state a fact the
 #                   code has no evidence for (C-418's presence-before-equality rule).
 #   RAW_SCOPE_MOVED both say, and they disagree. The denominator is the scored, non-UNKNOWN,
-#                   non-suppressed check set of that run, and it grows with every release —
+#                   non-suppressed check set of that run, and it grows with every release -
 #                   measured on a real home, two new WARN checks alone fell raw 83 -> 82
 #                   with nothing on disk changed.
 #   RAW_NO_FIGURE   same scope, but one side holds no usable number. Absent is not zero:
@@ -225,7 +225,7 @@ def _num(snap: dict, key: str, default: int = 0) -> "int | float":
 #
 # C-469 closed that resolution floor rather than just documenting it, by comparing the
 # exact `earned` figure (not the rounded `raw_score` percentage) when both records hold
-# it — see `raw_backstop`'s own docstring for the mechanism, and `_raw_score_scope` in
+# it - see `raw_backstop`'s own docstring for the mechanism, and `_raw_score_scope` in
 # `monitordims/_score.py` for the scope-hash change that is what makes it sound.
 RAW_DEGRADED = "raw_degraded"
 RAW_HELD = "raw_held"
@@ -236,10 +236,10 @@ RAW_NO_FIGURE = "raw_no_figure"
 
 def raw_backstop(prev: dict, curr: dict, scope_key: str, score_key: str,
                  earned_key: str, total_key: str) -> "tuple[str, object, object]":
-    """``(verdict, prev_raw, curr_raw)`` — see the RAW_* constants above.
+    """``(verdict, prev_raw, curr_raw)`` - see the RAW_* constants above.
 
     The key names are REQUIRED POSITIONAL arguments, with no defaults, for two reasons. The
-    two stores spell them differently and neither spelling is worth migrating — the
+    two stores spell them differently and neither spelling is worth migrating - the
     monitor's snapshot has said `raw_score_scope`/`raw_score_earned`/`raw_score_total` since
     C-135/C-469, and `history.jsonl` is an append-only hash-chained file whose existing rows
     cannot be rewritten (it spells the same triple `raw_scope`/`raw_earned`/`raw_total`).
@@ -250,14 +250,14 @@ def raw_backstop(prev: dict, curr: dict, scope_key: str, score_key: str,
     visible to the guard and to the next reader at the same time.
 
     C-469: `prev`/`curr` under `earned_key`/`total_key` refine, never override, the rounded
-    `score_key` comparison — `p_raw`/`c_raw` in the return are ALWAYS the `score_key`
+    `score_key` comparison - `p_raw`/`c_raw` in the return are ALWAYS the `score_key`
     figures (what callers already render), and the two extra keys can only turn a rounded
     RAW_HELD into a RAW_DEGRADED, never the reverse. That asymmetry is deliberate: the
     rounded comparison is never wrong when it already says DEGRADED (a percentage that fell
     reflects a real earned fall), it can only fail to notice one that rounded away.
 
     The refinement fires only when ALL of these hold, and skips (falls back to the rounded
-    comparison) otherwise — the same self-healing, absent-is-a-no-op idiom as the scope
+    comparison) otherwise - the same self-healing, absent-is-a-no-op idiom as the scope
     check above, never a fabricated figure:
 
     * both records carry a real number under `earned_key` and under `total_key`
@@ -265,14 +265,14 @@ def raw_backstop(prev: dict, curr: dict, scope_key: str, score_key: str,
     * the two `total_key` figures are EXACTLY equal. This is a second, cheap witness of what
       the scope-hash equality above already implies (see `_raw_score_scope`'s C-469 update:
       the hash is now over `id:weight` pairs, so identical scope PROVES identical per-check
-      weight and therefore identical `total`) — kept as a belt-and-suspenders check rather
+      weight and therefore identical `total`) - kept as a belt-and-suspenders check rather
       than trusted on faith, since it costs one float comparison and the alternative is
       trusting a 16-hex-char hash never collided;
     * `total_key`'s figure is `> 0` (an empty denominator has no ratio to compare).
 
     Given all three, `earned_key` falling IS a genuine posture regression: pinned equal
     weights per check means a fallen numerator can only come from a check's own status
-    moving (PASS->WARN, WARN->FAIL, PASS->FAIL), never from a re-tuned severity — which is
+    moving (PASS->WARN, WARN->FAIL, PASS->FAIL), never from a re-tuned severity - which is
     exactly the class of false positive an independent adversarial pass found in this
     task's first attempt, when the scope hash was still id-only and `earned` was compared
     with only `total` equality (not also weight-per-check equality) as its guard. See the
@@ -280,26 +280,26 @@ def raw_backstop(prev: dict, curr: dict, scope_key: str, score_key: str,
     version.
 
     C-135 (independent, post-commit): this refinement's own "additive, never the reverse"
-    guarantee is LOCAL — it holds only once the scope check above has already agreed the
+    guarantee is LOCAL - it holds only once the scope check above has already agreed the
     two runs are comparable. It is NOT a soundness claim about the function as a whole. The
     id:weight scope hash (this function's own precondition) can itself now return
     RAW_SCOPE_MOVED for a run where a real regression also happened to occur, whenever an
-    unrelated check's weight was ALSO retuned in the same window — e.g. check A goes
+    unrelated check's weight was ALSO retuned in the same window - e.g. check A goes
     MEDIUM->LOW (unrelated, stays PASS) while check B genuinely regresses PASS->FAIL (weight
     unchanged): raw_score itself falls (100 -> 50 in a constructed two-check repro), but
     because A's weight changed, the scope hash differs and this function returns
-    RAW_SCOPE_MOVED before ever comparing `score_key` — the real fall is never reported, not
+    RAW_SCOPE_MOVED before ever comparing `score_key` - the real fall is never reported, not
     merely reported at reduced confidence. This is not new: RAW_SCOPE_MOVED already meant
     "an unrelated denominator change means the comparison cannot be trusted" for every
-    check-SET change before C-469 (see the RAW_* docstring above — "it grows with every
+    check-SET change before C-469 (see the RAW_* docstring above - "it grows with every
     release, ... two new WARN checks alone fell raw 83 -> 82 with nothing on disk changed").
     C-469 only widened which changes count as "the denominator moved" to include a
-    per-check WEIGHT change, not only its ID set — and reopening that comparison instead
+    per-check WEIGHT change, not only its ID set - and reopening that comparison instead
     would reopen the exact false-DEGRADED bug C-469 exists to close, since a raw_score fall
     that partly (or wholly) traces to a legitimate retune cannot be told apart from one that
     doesn't without re-deriving which portion of the delta each cause explains. Accepted as
     the same fail-toward-silence tradeoff this whole function already makes elsewhere, not
-    a defect — recorded here so it is not mistaken for a soundness gap in THIS refinement
+    a defect - recorded here so it is not mistaken for a soundness gap in THIS refinement
     specifically.
     """
     p_scope, c_scope = prev.get(scope_key), curr.get(scope_key)

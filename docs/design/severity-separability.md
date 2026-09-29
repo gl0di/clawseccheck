@@ -23,7 +23,7 @@ metric (positive = non-normal; FPR over the 1,643 `normal` cases):
 
 Two readings, both unflattering:
 
-- **At matched precision (~0.92)** the peer recalls 0.6732 against our 0.3776 — 1.78x
+- **At matched precision (~0.92)** the peer recalls 0.6732 against our 0.3776 - 1.78x
   more of the real malware at the same false-alarm cost.
 - **At matched recall (~0.790)** the peer's LOW+ point has precision 0.8606 / FPR 0.3019
   against our 0.8381 / 0.3603. Its curve is outside ours at *both* ends.
@@ -47,19 +47,19 @@ Derived from those measured counts:
   P 3,065/3,206 = 0.956 at R 0.7906. No rule of this shape can beat that.
 - **The bar to match the peer.** To reach R 0.6732 (2,610 TP) while holding P >= 0.9278,
   a rule must promote 1,146 of the 1,601 gold-positive WARNs (71.6%) while promoting at
-  most 62 of the 451 normal WARNs (13.7%) — a promoted subset that is **~94.9%
+  most 62 of the 451 normal WARNs (13.7%) - a promoted subset that is **~94.9%
   gold-positive**, against a base rate of 78.0%.
 
-## 2. Q1 — where the recall lives: the partition
+## 2. Q1 - where the recall lives: the partition
 
 This is the load-bearing measurement. Of the malicious cases we catch only at WARN, how
 many carried a signal that *was* FAIL-capable and got downgraded, versus never had one?
 
 `check_installed_skills` collects evidence into named buckets, and each bucket is either
 
-- **Class D (downgraded)** — the signal is appended to the FAIL-capable `crit`/`high`
+- **Class D (downgraded)** - the signal is appended to the FAIL-capable `crit`/`high`
   lists everywhere *except* when a specific down-rank predicate fires (Section 3.2), or
-- **Class N (never FAIL-capable)** — no path to `crit`/`high` exists; the source says so
+- **Class N (never FAIL-capable)** - no path to `crit`/`high` exists; the source says so
   ("WARN-first", "never an automatic FAIL", "never FAIL on their own").
 
 Because the verdict chain is first-match-wins, counting only the *winning* bucket would
@@ -84,13 +84,13 @@ FAIL-capable signal at all. The nine down-rank predicates are not where the reca
 
 The second row is the one worth pausing on: **the downgrade gates fire on benign skills
 (5.32%) at roughly twice the rate they fire on malicious ones (2.68%)**. They are doing
-their job. Relaxing them would cost more precision than it buys recall — confirmed
+their job. Relaxing them would cost more precision than it buys recall - confirmed
 directly as option O2 in Section 5.
 
 So the recall is not being downgraded. It is sitting in signals that the engine was
 never willing to fail on, in a structure that cannot combine them.
 
-## 3. Q2 — the gates that produce a WARN instead of a FAIL
+## 3. Q2 - the gates that produce a WARN instead of a FAIL
 
 Line references are to the working tree at version 3.54.0.
 
@@ -98,7 +98,7 @@ Line references are to the working tree at version 3.54.0.
 
 `vet_skill` (`clawseccheck/checks/_vet.py:2668`) returns a **single** `Finding`.
 `check_installed_skills` (`clawseccheck/checks/_vet.py:1808`) reaches its verdict through
-a flat ordered if-chain of `return` statements — the first non-empty bucket wins, every
+a flat ordered if-chain of `return` statements - the first non-empty bucket wins, every
 other bucket is discarded:
 
 | rank | line | bucket | verdict |
@@ -128,9 +128,9 @@ skill tripping one weak bucket and a skill tripping five different ones return t
 identical WARN, at the identical severity, carrying only the winning bucket's evidence.
 
 The ring merge has the same property. `_VET_MERGE_RANK` (`_vet.py:2638`) picks the single
-highest-ranked finding across `{B13} ∪ ring` (45 ring checks and growing, `_vet.py:3222`), so N ring
+highest-ranked finding across <code>{B13} &#x222A; ring</code> (45 ring checks and growing, `_vet.py:3222`), so N ring
 WARNs plus a B13 WARN still yield one WARN. Measured: of the 2,052 WARN cases, **975 have
-a ring check rather than B13 as the primary verdict** — the ring is not a side channel,
+a ring check rather than B13 as the primary verdict** - the ring is not a side channel,
 it decides nearly half the WARN verdicts, and its corroboration is discarded too.
 
 ### 3.2 The explicit down-rank predicates (Class D)
@@ -159,26 +159,26 @@ recurring instinct to reopen them.
 
 ### 3.3 The WARN-by-construction ceilings (Class N)
 
-These have no path to FAIL at any evidence strength — each a documented calibration
+These have no path to FAIL at any evidence strength - each a documented calibration
 decision: `warns_env_exfil` (`_vet.py:2325`), `warns_host_exfil` (`_vet.py:2345`),
 `warns_curl_dropper` (`_vet.py:2368`), `warns_timebomb` (`_vet.py:2387`),
 `warns_shell_injection` (`_vet.py:2406`), `warns_insecure_tempfile` (`_vet.py:2426`),
 `warns_js` (`_vet.py:2448`), `warns_local_exfil` (`_vet.py:2518`).
 
 Note the shape of that list. `warns_env_exfil` co-occurring with `warns_timebomb` is
-"a secret reaches the network, behind a date gate" — a sleeper exfiltrator — and today
+"a secret reaches the network, behind a date gate" - a sleeper exfiltrator - and today
 that returns the same single WARN as an unpinned dependency. The information is present;
 the architecture has nowhere to put it.
 
-## 4. Q3 — does the confidence field already carry the answer?
+## 4. Q3 - does the confidence field already carry the answer?
 
 **No. It is a per-check constant, and where it appears to separate, per-check identity
 does the same job three times better.**
 
 ### 4.1 It is a constant by construction
 
-`_custom` (`clawseccheck/checks/_shared.py:797`) — the constructor used by *every*
-`check_installed_skills` return path — sets `confidence=m.confidence`, the static
+`_custom` (`clawseccheck/checks/_shared.py:797`) - the constructor used by *every*
+`check_installed_skills` return path - sets `confidence=m.confidence`, the static
 `CheckMeta` value, with no per-finding override. B13 declares `confidence="MEDIUM"`
 (`clawseccheck/catalog.py:233`). So every B13 finding, from any of the 19 buckets,
 carries `MEDIUM`. `pass_confidence` is documented as meaningful only for PASS
@@ -186,7 +186,7 @@ carries `MEDIUM`. `pass_confidence` is documented as meaningful only for PASS
 
 ### 4.2 Measured over 2,052 WARN cases
 
-`pass_confidence` was `None` on **2,052 of 2,052** — it carries nothing on this path,
+`pass_confidence` was `None` on **2,052 of 2,052** - it carries nothing on this path,
 exactly as the source predicts.
 
 | stratum | n | gold-positive |
@@ -197,10 +197,10 @@ exactly as the source predicts.
 | ring confidence HIGH | 126 | 96.8% |
 | ring confidence LOW | 8 | 100.0% |
 
-There *is* a separation — 77.3% vs 85.5% on the primary, 87.4% vs 96.8% on the ring. But
+There *is* a separation - 77.3% vs 85.5% on the primary, 87.4% vs 96.8% on the ring. But
 it is not evidence strength. Confidence is a per-check constant, so "HIGH-confidence
 WARN" is a synonym for "one of the few HIGH-confidence checks fired". Compare what the
-check identity itself yields (Section 5.2): B98 99.7%, B13 68.2% — a 31.5-point spread
+check identity itself yields (Section 5.2): B98 99.7%, B13 68.2% - a 31.5-point spread
 against confidence's 8.2. **Confidence is a lossy proxy for check identity, and a
 promotion rule keyed on it would be a worse-specified version of a rule keyed on the
 check.** Promotion-by-confidence is off the table, and no work should be spent adding
@@ -208,7 +208,7 @@ per-finding confidence plumbing to make it available.
 
 This is the null result the analysis was asked to report if it found one.
 
-## 5. Q4 — candidate options, with measured cost
+## 5. Q4 - candidate options, with measured cost
 
 ### 5.1 What does discriminate: corroboration count
 
@@ -255,26 +255,26 @@ rule applied to the WARN set. Baseline FAIL set = 1,605 (1,464 TP, 141 FP).
 | **O5** promote B98-primary | 1,978 | 0.9282 | 0.4736 | 0.6272 | 0.0864 |
 | **O5** promote the shell-injection bucket | 1,726 | 0.9171 | 0.4083 | 0.5651 | 0.0870 |
 | **O6** O3(>= 3 checks) **or** B98-primary | 2,246 | **0.9305** | **0.5391** | 0.6827 | 0.0949 |
-| *(reference)* static peer HIGH+ | — | 0.9278 | 0.6732 | 0.7803 | 0.1236 |
+| *(reference)* static peer HIGH+ | - | 0.9278 | 0.6732 | 0.7803 | 0.1236 |
 
 Readings:
 
 - **O2 is refuted.** Relaxing the down-rank gates trades 0.011 precision and +0.015 FPR
-  for 0.011 recall. It is the intuitive fix and it is the wrong one — as Section 2
+  for 0.011 recall. It is the intuitive fix and it is the wrong one - as Section 2
   predicted.
-- **O3 at >= 3 checks strictly improves precision** (0.9121 → 0.9172) *while* raising
-  recall (0.3776 → 0.4431). Cost is +0.0085 FPR, i.e. 141 → 155 benign FAILs on this
+- **O3 at >= 3 checks strictly improves precision** (0.9121 -> 0.9172) *while* raising
+  recall (0.3776 -> 0.4431). Cost is +0.0085 FPR, i.e. 141 -> 155 benign FAILs on this
   corpus.
 - **O6 exceeds the peer's precision (0.9305 vs 0.9278) at a lower FPR (0.0949 vs 0.1236)**
   and narrows the recall gap from 1.78x to 1.25x. It does not close it. Per the
   honest-labelling rule: this narrows the gap, it does not eliminate it.
 
-### 5.4 The benchmark-fitting hazard in O5/O6 — read before adopting
+### 5.4 The benchmark-fitting hazard in O5/O6 - read before adopting
 
 O5's numbers are the best in the table and its risk is the highest. B98 is "invokes a
 code-execution primitive but declares no allowed-tools/tools manifest". This corpus
 defines `normal` as *no attack **and** no vulnerability*, which makes "no manifest"
-almost definitionally non-normal here — hence 99.7%. On a real fleet, a large fraction
+almost definitionally non-normal here - hence 99.7%. On a real fleet, a large fraction
 of perfectly benign skills ship no manifest and call `subprocess`. **Promoting B98 to
 FAIL is a plausible mass-false-FAIL on real skills and would breach the zero-false-FAIL
 rule.** The same caution applies to the shell-injection bucket row (100% positive on this
@@ -282,10 +282,10 @@ corpus because insecure coding *is* the label).
 
 O3 does not have this problem: it promotes no individual signal, only the agreement of
 three independent checks. It is an evidence-combination rule, not a threshold tweak, and
-is far less likely to be corpus-specific — but it still needs an independent adversarial
+is far less likely to be corpus-specific - but it still needs an independent adversarial
 pass against real skills before it ships.
 
-## 6. Q5 — the do-nothing option
+## 6. Q5 - the do-nothing option
 
 Stated at full strength, not as a foil.
 
@@ -296,7 +296,7 @@ Stated at full strength, not as a foil.
    promise, and spends it on a corpus whose `normal` is stricter than a real fleet.
 2. **The benchmark is not the user.** The board's metric merges malicious and suspicious
    into one positive class, rewarding exactly the behaviour our ladder exists to avoid:
-   calling a maybe a definitely. Our WARN is not a miss on the product surface — the user
+   calling a maybe a definitely. Our WARN is not a miss on the product surface - the user
    sees it, and the borderline-adjudication path exists to route those cases to a judge
    rather than to a louder regex.
 3. **The gap at matched recall is small.** At R ~0.790 we are 0.022 precision behind.
@@ -306,7 +306,7 @@ Stated at full strength, not as a foil.
 
 **Against:** the structural finding in Section 3.1 is not a threshold choice, it is an
 architectural inability. Section 5.1 measures the cost precisely: the corroboration count
-separates 70.5% → 100% monotonically, and the engine discards it. "Five independent
+separates 70.5% -> 100% monotonically, and the engine discards it. "Five independent
 checks agree" and "one weak check fired" are different evidentiary situations and the
 engine cannot represent the difference. That is a defect on its own terms, and it would
 remain one if this benchmark did not exist.
@@ -318,14 +318,14 @@ underneath it is lossy. That distinction is the recommendation.
 
 > **Status update (2026-07-22, post-authoring).** Item 2's `>= 3 distinct corroborating
 > checks` FAIL rule was implemented (C-257) and then **reverted two days later in
-> v3.55.0** after an independent C-135 adversarial pass — the precondition this section
-> itself calls for — found three structurally distinct real false positives
+> v3.55.0** after an independent C-135 adversarial pass - the precondition this section
+> itself calls for - found three structurally distinct real false positives
 > (advisory-check tallying, prose-family co-firing, a single technique re-escalating),
 > "signaling an unsound design rather than one narrow edge case" (CHANGELOG.md v3.55.0).
 > The rule is not present in current source: `check_installed_skills` is still a pure
 > first-match-wins chain, and `Finding.corroborating_buckets` is explicitly retention-only
 > bookkeeping that never itself changes a verdict. Item 5's B98/O6 promotion study was
-> also carried out (C-260, same wave-7 batch) and **concluded REFUTED** — no
+> also carried out (C-260, same wave-7 batch) and **concluded REFUTED** - no
 > B98-promotion-to-FAIL logic exists in current source. The rest of this section (items
 > 1/3/4, and the O3 architecture item 1 depends on) is unaffected and still holds.
 
@@ -343,8 +343,8 @@ Concretely, in priority order:
 2. **Set the FAIL bar at >= 3 distinct corroborating checks**, in addition to the existing
    `crit`/`high` paths.
 
-   **Measured cost: precision 0.9121 → 0.9172 (improves), recall 0.3776 → 0.4431,
-   FPR 0.0858 → 0.0943 — i.e. 141 → 155 benign FAILs on this corpus, +14.** F1 0.5341 →
+   **Measured cost: precision 0.9121 -> 0.9172 (improves), recall 0.3776 -> 0.4431,
+   FPR 0.0858 -> 0.0943 - i.e. 141 -> 155 benign FAILs on this corpus, +14.** F1 0.5341 ->
    0.5976.
 
 3. **Do not touch the nine down-rank predicates.** Measured as net-correct (Section 2);
@@ -358,7 +358,7 @@ Concretely, in priority order:
 **Honest labelling.** O3 narrows the precision-matched recall gap from 0.3776-vs-0.6732
 (1.78x) to 0.4431-vs-0.6732 (1.52x). It does not close it, and this document does not
 claim a path that does. Roughly half the remaining gap sits in Class N single-signal
-cases where one weak detector fired alone — closing those is new detection work, not
+cases where one weak detector fired alone - closing those is new detection work, not
 calibration, and is out of scope here.
 
 ## 8. Measurement provenance
@@ -368,7 +368,7 @@ calibration, and is out of scope here.
   reproduce the published summary exactly, including our confusion matrix (normal
   1051/451/141, suspicious 494/371/149, malicious 318/1230/1315) and the 141 benign
   FAILs. The peer's CRITICAL+ and LOW+ rows are new here, derived from the `max_severity`
-  field its harness already records — no re-run.
+  field its harness already records - no re-run.
 - WARN population counts (2,052 = 1,230 + 371 + 451) are counted from the same artifacts.
 - Section 3 line references and Section 4.1 were read from the working tree at version
   3.54.0.
@@ -379,7 +379,7 @@ calibration, and is out of scope here.
   census on the context object before the verdict chain; no verdict logic is touched and
   the production tree is unmodified.
 - **Drift control:** all 2,052 cases that were WARN at v3.53.0 were still WARN on the
-  v3.54.0 snapshot — zero drift — so the Section 5.3 option rows can be composed against
+  v3.54.0 snapshot - zero drift - so the Section 5.3 option rows can be composed against
   the v3.53.0 baseline FAIL set without a full re-run.
 
 ## 9. Limits of this analysis
@@ -388,7 +388,7 @@ calibration, and is out of scope here.
   the v3.53.0 FAIL set. The PASS and FAIL populations were not themselves re-run at
   v3.54.0; the zero-drift result above is evidence for, but not proof of, their stability.
 - Everything here is measured on one corpus whose `normal` label is stricter than a real
-  fleet. Section 5.4 shows this is not a formality — it is why the best-scoring option is
+  fleet. Section 5.4 shows this is not a formality - it is why the best-scoring option is
   the one to be most suspicious of.
 - No real-fleet verification was performed under this analysis. Any option adopted from
   Section 5.3 must clear the zero-false-FAIL bar against real configs before it ships;

