@@ -1,20 +1,20 @@
 """Two-pass confidence-based finding deduplication for ClawSecCheck.
 
-Pass 1 — same-"file" dedup: collapses findings with the same check id, file/path
+Pass 1 - same-"file" dedup: collapses findings with the same check id, file/path
 context, and matched-text snippet, keeping the highest-confidence instance.
 
-Pass 2 — cross-file dedup: collapses findings with the same check id and matched
+Pass 2 - cross-file dedup: collapses findings with the same check id and matched
 text regardless of file, again keeping the highest-confidence instance. Only runs
 for findings that carry a non-empty matched_text (or detail) snippet so that distinct
 findings that happen to share only a check id are never merged.
 
-Both passes operate purely on Finding metadata — no I/O, no network, stdlib only.
+Both passes operate purely on Finding metadata - no I/O, no network, stdlib only.
 """
 from __future__ import annotations
 
 from typing import List
 
-# Confidence tier → numeric score used when comparing two findings that share a
+# Confidence tier -> numeric score used when comparing two findings that share a
 # dedup key. Higher score = stronger evidence = kept.
 _CONF_MAP = {
     "high": 1.0,
@@ -66,7 +66,7 @@ def _check_id(f: object) -> str:
 
 def _path(f: object) -> str:
     """Return the file/path for same-file grouping.  ClawSecCheck Finding has
-    no path field — returns ``""`` so all findings for a given check are
+    no path field - returns ``""`` so all findings for a given check are
     treated as co-located."""
     return getattr(f, "path", None) or getattr(f, "file", None) or ""
 
@@ -90,8 +90,8 @@ def deduplicate_findings(findings: List) -> List:
         findings: list of Finding (or duck-type equivalent) objects.
 
     Returns:
-        A new list with duplicates removed, sorted FAIL → WARN → PASS → UNKNOWN,
-        then by severity (CRITICAL → HIGH → MEDIUM → LOW).
+        A new list with duplicates removed, sorted FAIL -> WARN -> PASS -> UNKNOWN,
+        then by severity (CRITICAL -> HIGH -> MEDIUM -> LOW).
     """
     # ------------------------------------------------------------------ #
     # Pass 1: same-file dedup                                              #
@@ -123,7 +123,7 @@ def deduplicate_findings(findings: List) -> List:
     for f in pass1_order:
         mt = _matched_text_key(f)
         if not mt:
-            # No content fingerprint — cannot safely cross-file dedup.
+            # No content fingerprint - cannot safely cross-file dedup.
             pass2.append(f)
             continue
         key = (_check_id(f), mt)

@@ -49,7 +49,7 @@ from ..invocation import command_prefix
 
 
 # Keywords that map a free-text self-reported host monitor to a host-watch class.
-# Used only to UPGRADE a gap (absent / unknown / not-scanned) to an attested PASS —
+# Used only to UPGRADE a gap (absent / unknown / not-scanned) to an attested PASS -
 # never to downgrade a static detection and never to create a FAIL.
 _HOST_ATTEST_HINTS = {
     "network_ids": (
@@ -107,8 +107,8 @@ _HOST_CLASS_LABEL = {
 }
 
 # The four *detection/visibility* classes (mirrors hostwatch.VISIBILITY_CLASSES).
-# A read-only, often non-root scan cannot PROVE one of these is absent — a miss
-# is honest UNKNOWN (hostwatch._detection_cls, B-172) — but an UNKNOWN on one of
+# A read-only, often non-root scan cannot PROVE one of these is absent - a miss
+# is honest UNKNOWN (hostwatch._detection_cls, B-172) - but an UNKNOWN on one of
 # these still means "presence not confirmed," so a high-privilege agent still
 # deserves a (lower-confidence) heads-up rather than a silent plain UNKNOWN.
 # FIREWALL is prevention, not detection, and keeps the plain UNKNOWN branch.
@@ -152,7 +152,7 @@ def _attested_host_monitors(ctx: Context, cls: str) -> list[str]:
 def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
     label = _HOST_CLASS_LABEL[cls]
     host = getattr(ctx, "host", None)
-    # Attestation fills the gap the read-only scan can't see — but only when the
+    # Attestation fills the gap the read-only scan can't see - but only when the
     # static scan did NOT already confirm this class present (that HIGH evidence wins).
     static_present = bool(
         host
@@ -166,7 +166,7 @@ def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
             PASS,
             f"{label} not confirmed by the read-only scan, but the agent attests it "
             f"runs on this host: {', '.join(attested)} (self-reported).",
-            "Self-reported — confirm it is actually active and its rules are current.",
+            "Self-reported \u2014 confirm it is actually active and its rules are current.",
             evidence=attested,
             confidence=ATTESTED,
         )
@@ -204,7 +204,7 @@ def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
                 f"Could not confirm read-only whether {label} is present on this "
                 "host, and this agent is high-privilege (it can act on the host "
                 "and is reachable by untrusted input). A read-only scan cannot "
-                "prove a monitor's absence — but if there genuinely is none, a "
+                "prove a monitor's absence \u2014 but if there genuinely is none, a "
                 "compromise here could go unseen.",
                 f"Confirm manually whether {label} is active on the agent's "
                 "machine, or self-report it via `--attest` (host_monitors) so "
@@ -217,7 +217,7 @@ def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
             f"Verify manually whether {label} is active on the agent's machine.",
         )
 
-    # status == "absent" — gate on agent blast-radius so we never cry wolf
+    # status == "absent" - gate on agent blast-radius so we never cry wolf
     if _agent_is_powerful(ctx):
         return _finding(
             cid,
@@ -258,11 +258,11 @@ def check_audit_log(ctx: Context) -> Finding:
     #      existing records stay readable until they expire."
     #   types.openclaw-CXjMEWAQ.d.ts:1658  audit?: AuditConfig
     #
-    # So `audit.enabled: false` silently stops the agent-activity ledger — an
+    # So `audit.enabled: false` silently stops the agent-activity ledger - an
     # anti-forensics switch this check was declining to look at.
     #
     # B-700: "`logging.audit` IS a phantom" was the other half of that note, and it has
-    # since gone stale — OpenClaw 2026.8.1 MOVED the block there. `audit` is rejected at
+    # since gone stale - OpenClaw 2026.8.1 MOVED the block there. `audit` is rejected at
     # the root and `logging.audit.enabled` is the real key, so reading only the old path
     # made this check answer PASS "Nothing here turns it off" on a config that had
     # explicitly turned it off. Measured, on the whole check set:
@@ -281,25 +281,25 @@ def check_audit_log(ctx: Context) -> Finding:
     # i.e. `logging.audit.enabled` wins where it is present and the legacy block only
     # fills a key the canonical one does not have.
     #
-    # ABSENT is the DOCUMENTED DEFAULT (true), i.e. the safe state — warning on it would
+    # ABSENT is the DOCUMENTED DEFAULT (true), i.e. the safe state - warning on it would
     # be a false positive on every stock config. The default lives in the .d.ts, not in
     # the zod schema, which is why a first pass at this fix grounded on zod alone and
     # wrongly reported the default as unreadable.
     #
     # B-524: but "absent" has two causes, and answering the default for both is a lying
     # PASS. Every verdict below is read out of ctx.config alone, and on a config the
-    # collector found and failed to parse that dict is {} — so the default branch would
+    # collector found and failed to parse that dict is {} - so the default branch would
     # tell the user "Nothing here turns it off" about a file nothing read. This check is
     # purely config-content-derived (no bootstrap/host/trajectory signal of its own), so
     # the guard belongs at the top: there is no independent evidence below that deserves
     # a chance to fire first.
     if (unreadable := _config_unreadable("B10", ctx)) is not None:
         return unreadable
-    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # B-661: `_config_unreadable` only covers "present but unparseable" - on a host
     # with no openclaw.json at all, config_parse_error is False and ctx.config is
     # `{}`. The B-524 comment above says the guard "belongs at the top" precisely to
     # stop the audit_enabled-is-None branch below from reporting the documented
-    # default about a file nothing read — but it only ever checked parse errors, so
+    # default about a file nothing read - but it only ever checked parse errors, so
     # the not-found case still fell all the way through to that same PASS.
     if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
         return _finding(
@@ -311,7 +311,7 @@ def check_audit_log(ctx: Context) -> Finding:
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     cfg = ctx.config
-    # B-700: canonical first, legacy as the fallback — see the migration quoted above.
+    # B-700: canonical first, legacy as the fallback - see the migration quoted above.
     # The container is read with plain dict access, exactly as `_shared._node_commands`
     # does, so no manifest entry is created for a path that only reaches a child.
     logging_node = cfg.get("logging") if isinstance(cfg, dict) else None
@@ -324,13 +324,13 @@ def check_audit_log(ctx: Context) -> Finding:
         audit_key = ("audit.enabled" if audit_enabled is not None
                      else _key_advice(ctx, "audit.enabled", "logging.audit.enabled"))
     redact = dig(cfg, "logging.redactSensitive")
-    # C-471: B-700 fixed only this check's audit half (audit_key, above) — the
+    # C-471: B-700 fixed only this check's audit half (audit_key, above) - the
     # redaction half kept naming logging.redactSensitive with no generation awareness,
     # so a 2026.8.1 build got a byte-identical WARN/fix to a 2026.7.x one about a key
     # that OpenClaw REMOVED outright. Grounded against the installed dist (2026.8.2):
     # `legacy-B-ouzcdF.js` lists `["logging", "redactSensitive"]` in the retired-path
     # table, and `redact-C9Jj-ryD.js` hard-codes `DEFAULT_REDACT_MODE = "tools"` as a
-    # constant no config path feeds — the same runtime fact B9 (checks/_egress.py)
+    # constant no config path feeds - the same runtime fact B9 (checks/_egress.py)
     # already reads. `_shared.py`'s own B-700 note measured B9's fix string
     # (`logging.redactSensitive: "tools"`) as `REJECTED unrecognized_keys@logging` on a
     # modern build, and this check's fix string was the same one.
@@ -351,7 +351,7 @@ def check_audit_log(ctx: Context) -> Finding:
         return _finding(
             "B10",
             WARN,
-            f"{audit_key} is false — the metadata audit ledger is switched OFF, so agent "
+            f"{audit_key} is false \u2014 the metadata audit ledger is switched OFF, so agent "
             "runs and tool actions stop being recorded to the shared state database. "
             "Existing records stay readable until they expire; nothing new is written, so "
             f"an incident from here on leaves no ledger to reconstruct.{redact_note}",
@@ -362,7 +362,7 @@ def check_audit_log(ctx: Context) -> Finding:
         generation = _openclaw_generation(ctx)
         if generation == "modern":
             fix = (
-                "Delete logging.redactSensitive — OpenClaw 2026.8.1 and later ignores "
+                "Delete logging.redactSensitive \u2014 OpenClaw 2026.8.1 and later ignores "
                 "it and redaction is unconditional there. Run `openclaw security "
                 "audit` periodically."
             )
@@ -373,7 +373,7 @@ def check_audit_log(ctx: Context) -> Finding:
             )
         else:
             fix = (
-                'On OpenClaw 2026.8.1 and later, delete logging.redactSensitive — it '
+                'On OpenClaw 2026.8.1 and later, delete logging.redactSensitive \u2014 it '
                 'no longer exists there and redaction is unconditional; on releases '
                 'before that, set it to "tools" instead. Either way, run `openclaw '
                 "security audit` periodically."
@@ -381,7 +381,7 @@ def check_audit_log(ctx: Context) -> Finding:
         return _finding(
             "B10",
             WARN,
-            'logging.redactSensitive is "off" — logs may expose secrets/PII '
+            'logging.redactSensitive is "off" \u2014 logs may expose secrets/PII '
             f"(Israel Amendment 13). The audit toggle is a separate setting, "
             f"{audit_key}.{stale}",
             fix,
@@ -390,7 +390,7 @@ def check_audit_log(ctx: Context) -> Finding:
         return _finding(
             "B10",
             PASS,
-            f"{audit_key} is true — the metadata audit ledger is switched on. This is "
+            f"{audit_key} is true \u2014 the metadata audit ledger is switched on. This is "
             "the config toggle only; that records are actually being written, retained "
             "and reachable by you is not observable from config.",
             "Confirm the ledger is really being produced and is retained somewhere you "
@@ -400,7 +400,7 @@ def check_audit_log(ctx: Context) -> Finding:
         return _finding(
             "B10",
             PASS,
-            f"{audit_key} is not set, and its documented default is true — the metadata "
+            f"{audit_key} is not set, and its documented default is true \u2014 the metadata "
             "audit ledger records agent runs and tool actions unless something turns it "
             "off. Nothing here turns it off.",
             "Nothing to change. If you want the setting to be explicit rather than "
@@ -410,7 +410,7 @@ def check_audit_log(ctx: Context) -> Finding:
     return _finding(
         "B10",
         UNKNOWN,
-        f"{audit_key} is set to {audit_enabled!r}, which is not a boolean — OpenClaw's "
+        f"{audit_key} is set to {audit_enabled!r}, which is not a boolean \u2014 OpenClaw's "
         "schema expects true or false, so what the runtime does with this value cannot "
         "be read from the config.",
         f"Set {audit_key} to a real boolean (true), or remove it to inherit the "
@@ -446,7 +446,7 @@ def _attested_monitors_any(ctx: Context) -> list:
     """Every self-reported host monitor, regardless of class.
 
     `_attested_host_monitors` filters by class for B50-B54. B16 asks the broader
-    question — is anything watching at all — so it takes the list unfiltered rather
+    question - is anything watching at all - so it takes the list unfiltered rather
     than borrowing another check's hint list.
     """
     att = getattr(ctx, "attestation", None) or {}
@@ -459,25 +459,25 @@ def _attested_monitors_any(ctx: Context) -> list:
 def check_monitoring(ctx: Context) -> Finding:
     """Does the user actually have threat monitoring / detection in place?"""
     cfg = ctx.config
-    # B-501: a NAME used to be the whole gate — anything matching a hint returned PASS
+    # B-501: a NAME used to be the whole gate - anything matching a hint returned PASS
     # "Threat monitoring present". The name is attacker-controlled, and the corpus already
     # held the exploit: fixtures/bad_ownname_clawseccheck_squat is a hostile skill calling
     # itself `clawseccheck` and shipping vendor/sitecustomize.py, and B16 credited it as
     # the user's threat monitoring. Only two fixtures in the whole corpus reached PASS,
-    # and that squat was one of them — the check's entire positive evidence was a string
+    # and that squat was one of them - the check's entire positive evidence was a string
     # an attacker picks.
     #
-    # A name is now a candidate. The PASS that remains is the attested one — B16's own fix
+    # A name is now a candidate. The PASS that remains is the attested one - B16's own fix
     # text has pointed users at `--attest host_monitors` since it was written, and nothing
     # ever read it.
     #
     # Deliberately NOT added: corroborating a candidate against an OpenClaw cron entry.
-    # Measured before designing — ctx.cron_jobs is empty on the real fleet box
+    # Measured before designing - ctx.cron_jobs is empty on the real fleet box
     # (cron_store_empty) and no fixture populates it, so it would be machinery that
     # credits nobody while costing false negatives for externally-scheduled monitors.
     #
     # monitoring, security.monitoring, alerts, security.alerts do NOT exist in the
-    # OpenClaw config schema — removed earlier to eliminate dead-code false-signal arms.
+    # OpenClaw config schema - removed earlier to eliminate dead-code false-signal arms.
     candidates = [
         f"'{name}'"
         for name in list(ctx.installed_skills) + list(_plugins(cfg))
@@ -490,7 +490,7 @@ def check_monitoring(ctx: Context) -> Finding:
             PASS,
             "Threat monitoring is not confirmable from this config, but the agent "
             f"attests it runs: {', '.join(attested[:5])} (self-reported).",
-            "Self-reported — confirm it is actually running and that its alerts reach you.",
+            "Self-reported \u2014 confirm it is actually running and that its alerts reach you.",
             evidence=list(attested[:5]),
             confidence=ATTESTED,
         )
@@ -499,7 +499,7 @@ def check_monitoring(ctx: Context) -> Finding:
             "B16",
             WARN,
             f"Possible monitoring skill/plugin by name only: {', '.join(candidates[:5])}. "
-            "A name is not evidence — nothing here shows it watches anything, and the "
+            "A name is not evidence \u2014 nothing here shows it watches anything, and the "
             "name is chosen by whoever installed it. Treat monitoring as unconfirmed.",
             "Confirm it really is a monitor and that its alerts reach you. If it is, "
             "self-report it via `--attest` (host_monitors) so this check can credit it; "
@@ -509,8 +509,8 @@ def check_monitoring(ctx: Context) -> Finding:
         "B16",
         WARN,
         "No threat-monitoring or detection plugin/skill is configured in this OpenClaw "
-        "config. Monitors set up OUTSIDE it — a separate security agent or workspace, "
-        "host-level IDS/EDR — are not visible to this config-only scan, so this is "
+        "config. Monitors set up OUTSIDE it \u2014 a separate security agent or workspace, "
+        "host-level IDS/EDR \u2014 are not visible to this config-only scan, so this is "
         "'not detected here', not proof you're unwatched; confirm before relying on it.",
         "If you have no detection, add a monitoring skill (e.g. ClawSec or "
         "openclaw-security-monitor), wire audit logging to an alert channel, or schedule "
@@ -540,15 +540,15 @@ def check_host_firewall(ctx: Context) -> Finding:
     return _host_finding("B54", "firewall", ctx)
 
 
-# B101 (F-084): outbound (egress) filtering posture — is the default OUTPUT policy
+# B101 (F-084): outbound (egress) filtering posture - is the default OUTPUT policy
 # deny or allow? Distinct from B54 (which only asks "is a firewall present"): a
 # firewall can be installed and active with a wide-open default-allow egress
 # policy, which is exactly the gap this check targets. Does NOT reuse
-# _host_finding — that helper's "found = PASS regardless of active state" shape
+# _host_finding - that helper's "found = PASS regardless of active state" shape
 # fits "is a monitor tool present," not "is the resolved policy itself good or
 # bad" (a confirmed default-allow must read as a gap, not a PASS).
 def check_host_egress_posture(ctx: Context) -> Finding:
-    """B101 — outbound (egress) filtering posture (F-084)."""
+    """B101 - outbound (egress) filtering posture (F-084)."""
     host = getattr(ctx, "host", None)
     if not host or not host.get("supported"):
         return _finding(
@@ -572,7 +572,7 @@ def check_host_egress_posture(ctx: Context) -> Finding:
             "deny or allow on this host.",
             "Verify manually whether outbound traffic defaults to deny (nftables/"
             "iptables OUTPUT policy, ufw DEFAULT_OUTPUT_POLICY in /etc/default/ufw) "
-            "— an unreadable policy is the expected result on most systems.",
+            "\u2014 an unreadable policy is the expected result on most systems.",
             evidence=evidence,
         )
 
@@ -599,7 +599,7 @@ def check_host_egress_posture(ctx: Context) -> Finding:
             "destinations the agent actually needs.",
             evidence=evidence,
         )
-    # B-529: same shape as B50-B54's terminal branch above — active is False is
+    # B-529: same shape as B50-B54's terminal branch above - active is False is
     # real, config-independent host-scan evidence, but "low-privilege" is read out
     # of ctx.config via _agent_is_powerful, which is False on an unreadable
     # openclaw.json (ctx.config == {}) purely because nothing could be read. Guard
@@ -697,7 +697,7 @@ def _check_incident_readiness_sqlite(ctx: Context, corr) -> Finding:
             "B85",
             WARN,
             "The agent's trajectory record exists (SQLite trajectory database(s)) but is "
-            "group/world-writable — a local user (or the agent itself) could rewrite or "
+            "group/world-writable \u2014 a local user (or the agent itself) could rewrite or "
             "delete the tool-use trail, destroying the evidence needed to reconstruct an "
             f"incident: {joined}{extra} {container_note}",
             "Tighten permissions so only the owner can write the record: `chmod 600` the "
@@ -712,11 +712,11 @@ def _check_incident_readiness_sqlite(ctx: Context, corr) -> Finding:
         return _custom(
             "B85", LOW, WARN,
             "The agent's trajectory record exists (SQLite trajectory database(s)) but is "
-            "group-writable — tighten to 0600/0700; no other group members currently: "
+            "group-writable \u2014 tighten to 0600/0700; no other group members currently: "
             f"{joined}{extra} {container_note}",
             "Tighten permissions so only the owner can write the record: `chmod 600` the "
             "openclaw-agent.sqlite file(s) and `chmod 700` their agent/ directory (defense "
-            "in depth — group membership can change later).",
+            "in depth \u2014 group membership can change later).",
             tamper_singleton,
         )
 
@@ -726,7 +726,7 @@ def _check_incident_readiness_sqlite(ctx: Context, corr) -> Finding:
         "An attributable trajectory record of the agent's tool use is present "
         f"({corr.sqlite_rows} SQLite trajectory row(s) across {corr.sqlite_sessions} "
         f"session(s) in {corr.sqlite_dbs_read} agent database(s) checked) and neither the "
-        "database file(s) nor their agent/ directory are group/world-writable — an "
+        "database file(s) nor their agent/ directory are group/world-writable \u2014 an "
         f"incident could be reconstructed from a tamper-resistant trail. {container_note}",
         "Keep trajectory tracing on and its SQLite database file(s) owner-only so the "
         "incident trail stays trustworthy.",
@@ -739,35 +739,35 @@ def _check_incident_readiness_sqlite(ctx: Context, corr) -> Finding:
 
 
 def check_incident_readiness(ctx: Context) -> Finding:
-    """B85 — incident readiness: is the agent's tool-use trail present AND tamper-resistant?
+    """B85 - incident readiness: is the agent's tool-use trail present AND tamper-resistant?
 
     After a compromise you need to reconstruct what the agent actually did. OpenClaw's
     per-session trajectory sidecar (recon §9.1) is the on-disk, attributable record of tool
-    calls — the closest thing to an audit log OpenClaw has, and unlike ``logging.file`` /
+    calls - the closest thing to an audit log OpenClaw has, and unlike ``logging.file`` /
     ``cacheTrace`` it is a documented, greppable tool-call surface. This check answers two
-    filesystem questions and NEVER reads call contents (§8 — no ``data.arguments`` etc.):
+    filesystem questions and NEVER reads call contents (§8 - no ``data.arguments`` etc.):
 
-      1. present — does any trajectory sidecar exist (is tool use recorded at all)?
-      2. tamper  — are those files, or their ``sessions/`` directory, group/world-writable,
+      1. present - does any trajectory sidecar exist (is tool use recorded at all)?
+      2. tamper  - are those files, or their ``sessions/`` directory, group/world-writable,
                    so a local user (or the agent itself) could rewrite/delete the record?
 
-    HIGH confidence — these are filesystem facts, not a self-report. Advisory (scored=False)
+    HIGH confidence - these are filesystem facts, not a self-report. Advisory (scored=False)
     so it never moves the static grade.
 
-    PASS    — a trajectory record is present AND no file/dir is group/world-writable.
-    WARN    — a trajectory record is present BUT a file or its ``sessions/`` dir is
-              group/world-writable — the incident trail is tamperable.
-    UNKNOWN — non-POSIX (NTFS ACLs unreadable), or no sidecar found (disabled via
+    PASS    - a trajectory record is present AND no file/dir is group/world-writable.
+    WARN    - a trajectory record is present BUT a file or its ``sessions/`` dir is
+              group/world-writable - the incident trail is tamperable.
+    UNKNOWN - non-POSIX (NTFS ACLs unreadable), or no sidecar found (disabled via
               ``OPENCLAW_TRAJECTORY=0``, relocated to ``OPENCLAW_TRAJECTORY_DIR``, or the
               agent simply has not run yet). Never a false PASS/FAIL.
 
-    Only ``stat()`` is called — no trajectory file contents are read.
+    Only ``stat()`` is called - no trajectory file contents are read.
     """
     if not _shared._is_posix():
         return _finding(
             "B85",
             UNKNOWN,
-            "On Windows, file security uses NTFS ACLs, not POSIX mode bits — ClawSecCheck "
+            "On Windows, file security uses NTFS ACLs, not POSIX mode bits \u2014 ClawSecCheck "
             "can't read those read-only, so the trajectory record's tamper-resistance is "
             "UNKNOWN, never a false PASS.",
             "Check the ACLs yourself: the trajectory sidecar files under "
@@ -850,7 +850,7 @@ def check_incident_readiness(ctx: Context) -> Finding:
         return _finding(
             "B85",
             WARN,
-            "The agent's trajectory record exists but is group/world-writable — a local "
+            "The agent's trajectory record exists but is group/world-writable \u2014 a local "
             "user (or the agent itself) could rewrite or delete the tool-use trail, "
             f"destroying the evidence needed to reconstruct an incident: {joined}{extra}",
             "Tighten permissions so only the owner can write the record: `chmod 600` the "
@@ -864,11 +864,11 @@ def check_incident_readiness(ctx: Context) -> Finding:
         extra = f" (+{len(tamper_singleton) - 8} more)" if len(tamper_singleton) > 8 else ""
         return _custom(
             "B85", LOW, WARN,
-            "The agent's trajectory record exists but is group-writable — tighten to "
+            "The agent's trajectory record exists but is group-writable \u2014 tighten to "
             f"0600/0700; no other group members currently: {joined}{extra}",
             "Tighten permissions so only the owner can write the record: `chmod 600` the "
             "*.trajectory.jsonl files and `chmod 700` their sessions/ directory (defense "
-            "in depth — group membership can change later).",
+            "in depth \u2014 group membership can change later).",
             tamper_singleton,
         )
 
@@ -877,7 +877,7 @@ def check_incident_readiness(ctx: Context) -> Finding:
         PASS,
         f"An attributable trajectory record of the agent's tool use is present "
         f"({len(files)} session file(s) checked) and neither the files nor their "
-        "sessions/ directory are group/world-writable — an incident could be "
+        "sessions/ directory are group/world-writable \u2014 an incident could be "
         "reconstructed from a tamper-resistant trail.",
         "Keep trajectory tracing on and its files owner-only so the incident trail stays "
         "trustworthy.",
@@ -888,7 +888,7 @@ def check_incident_readiness(ctx: Context) -> Finding:
 
 # ---------- B150: systemd user-unit Restart=always persistence (informational) ----------
 # Real observed shape: ~/.config/systemd/user/openclaw-gateway.service carries
-# `Restart=always` + `WantedBy=default.target` — a durable autonomy substrate (the
+# `Restart=always` + `WantedBy=default.target` - a durable autonomy substrate (the
 # gateway restarts itself indefinitely and starts automatically at login/boot). No
 # existing check reads systemd unit files; hostwatch.py only detects system-wide
 # *monitor* enable-symlinks (/etc/systemd/system/*.wants/), not user units or their
@@ -921,18 +921,18 @@ def _systemd_unit_is_openclaw_related(unit_name: str, exec_start: str) -> bool:
 
 
 def check_systemd_persistence(ctx: Context) -> Finding:
-    """B150 — OpenClaw-related systemd user-unit Restart=always persistence.
+    """B150 - OpenClaw-related systemd user-unit Restart=always persistence.
 
     Reads ~/.config/systemd/user/*.service (a sibling of ~/.openclaw, resolved via
     ctx.home.parent) for units whose name or ExecStart= line mentions "openclaw". If
-    found with Restart=always, this is reported as an informational/LOW advisory —
+    found with Restart=always, this is reported as an informational/LOW advisory -
     legitimate infrastructure that also happens to be a durable autonomy/persistence
     mechanism worth disclosing, never proof of compromise.
 
-    PASS    — OpenClaw-related unit(s) found, none set Restart=always (or an
+    PASS    - OpenClaw-related unit(s) found, none set Restart=always (or an
               equivalent persistent-restart directive).
-    WARN    — an OpenClaw-related unit sets Restart=always (advisory, LOW, never FAIL).
-    UNKNOWN — no ~/.config/systemd/user/ directory (systemd not in use, non-Linux, or
+    WARN    - an OpenClaw-related unit sets Restart=always (advisory, LOW, never FAIL).
+    UNKNOWN - no ~/.config/systemd/user/ directory (systemd not in use, non-Linux, or
               simply absent), or no OpenClaw-related unit file found there.
     """
     user_units_dir = ctx.home.parent / ".config" / "systemd" / "user"
@@ -940,7 +940,7 @@ def check_systemd_persistence(ctx: Context) -> Finding:
         return _finding(
             "B150",
             UNKNOWN,
-            "No ~/.config/systemd/user/ directory found — systemd user units are not in "
+            "No ~/.config/systemd/user/ directory found \u2014 systemd user units are not in "
             "use on this host (or this is not Linux), so unit-based persistence could "
             "not be assessed.",
             "No action needed unless a systemd user unit is added later.",
@@ -985,7 +985,7 @@ def check_systemd_persistence(ctx: Context) -> Finding:
             "B150",
             UNKNOWN,
             "No OpenClaw-related systemd user unit found under "
-            f"{user_units_dir} — unit-based persistence not applicable.",
+            f"{user_units_dir} \u2014 unit-based persistence not applicable.",
             "No action needed unless an OpenClaw systemd user unit is added later.",
         )
 
@@ -995,7 +995,7 @@ def check_systemd_persistence(ctx: Context) -> Finding:
             "B150",
             WARN,
             "An OpenClaw-related systemd user unit restarts itself indefinitely "
-            f"(a durable autonomy substrate): {detail}. This is disclosure only — "
+            f"(a durable autonomy substrate): {detail}. This is disclosure only \u2014 "
             "Restart=always is common, legitimate infrastructure for a long-running "
             "gateway service, not proof of compromise.",
             "Confirm this restart policy is intentional. If the service should not "
@@ -1018,7 +1018,7 @@ def _host_entry_abs_path(entry_path: str, home: Path) -> Path:
     """Reconstruct the absolute path a `hostpersist.HostEntry.path` string came from.
 
     `hostpersist.scan()` deliberately renders home-rooted entries as `~/...` (never a
-    raw absolute path with the account name — see its own module docstring) and
+    raw absolute path with the account name - see its own module docstring) and
     everything else (the /etc families) as-is. This is the one place that string gets
     turned back into a real Path so this check can open the file; the reconstructed
     absolute path itself is never put into a Finding's detail/evidence, only the
@@ -1032,7 +1032,7 @@ def _host_entry_abs_path(entry_path: str, home: Path) -> Path:
 def _bounded_read_text(path: Path) -> "str | None":
     """Best-effort bounded read of *path* as text, or None on any read failure.
 
-    None means "could not check this entry's content" — the caller must not treat
+    None means "could not check this entry's content" - the caller must not treat
     that as "no match", only as reduced confidence (the entry's own file NAME is
     still checked either way). Bounded to `hostpersist.MAX_FILE_BYTES` so this never
     reads more of a host file than `hostpersist.scan()` itself was willing to digest.
@@ -1053,21 +1053,21 @@ def _bounded_read_text(path: Path) -> "str | None":
 # ---------- cron config (crontab / systemd timers) ------------------------------------------
 #
 # C048 (checks/_lifecycle.py) covers exactly one surface: OpenClaw's OWN `cron` config
-# block. Its own docstring has said so since B-496 (commit 373c910) — it does not read,
+# block. Its own docstring has said so since B-496 (commit 373c910) - it does not read,
 # and never claimed to read, the HOST's own scheduler. An agent that can write to the
 # filesystem can install a systemd user timer or drop a file under a world-readable
 # /etc/cron.* directory, and neither was visible anywhere in this audit before this
-# check. `--monitor` (F-179, hostpersist.py) already watches this surface for DRIFT —
+# check. `--monitor` (F-179, hostpersist.py) already watches this surface for DRIFT -
 # a change between two runs. This check gives the surface a one-shot VERDICT too, for
 # every invocation that never runs --monitor at all (the default `clawseccheck` audit).
 #
-# hostpersist.py is METADATA-ONLY by design (digest, never content — ZKDS): the right
+# hostpersist.py is METADATA-ONLY by design (digest, never content - ZKDS): the right
 # leaf for --monitor's "did this change" question, and the wrong shape alone for this
 # check's "does this reference OpenClaw" question. So this check re-opens the exact
 # same, already-enumerated, already-bounded set of paths hostpersist.scan() found and
 # reads their content narrowly (bounded to hostpersist.MAX_FILE_BYTES, same as the leaf
 # itself), searching only for the single case-insensitive "openclaw" marker B150
-# already uses (collector.systemd_unit_is_openclaw_related — the one definition, not a
+# already uses (collector.systemd_unit_is_openclaw_related - the one definition, not a
 # second copy). The raw content itself never reaches a Finding: only "a match was
 # found at <redacted path>".
 CHECKS_HOST_ENTRY_FAMILIES = (
@@ -1077,41 +1077,41 @@ CHECKS_HOST_ENTRY_FAMILIES = (
 
 
 def check_host_scheduled_persistence(ctx: Context) -> Finding:
-    """B379 (F-178) — host-level scheduled persistence (systemd user TIMER / system
+    """B379 (F-178) - host-level scheduled persistence (systemd user TIMER / system
     cron) that names OpenClaw, outside openclaw.json's own `cron` block (C048).
 
     Deliberately narrow, three ways:
 
     1. Systemd user **service** units are B150's territory (Restart=always
-       persistence) — reusing them here would double-report the same unit under two
+       persistence) - reusing them here would double-report the same unit under two
        ids. Only `.timer` entries count here: the actual periodic-scheduling
        primitive, and the one systemd shape B150 does not look at.
     2. Shell startup files (`hostpersist.FAMILY_SHELL_RC`) are excluded. Per
        hostpersist.py's own module docstring they are in scope for B324
-       (env.shellEnv.enabled) only — and ~/.bashrc existing at all is close to
+       (env.shellEnv.enabled) only - and ~/.bashrc existing at all is close to
        universal, so counting it here would be a guaranteed false-positive flood on
        every real machine (Golden Rule #5).
     3. The identifying signal is a plain, bounded, case-insensitive "openclaw" match
-       on an entry's own name or content — never bare existence. Measured on a real
+       on an entry's own name or content - never bare existence. Measured on a real
        dev box: /etc/cron.* alone carries dozens of ordinary distro-packaged entries
        (anacron, logrotate, sysstat, apport, dpkg, man-db, google-chrome...); an
        existence-only WARN would have fired on every single one of them.
 
-    WARN    — a systemd-user `.timer` or a world-readable system-cron entry names
-              OpenClaw. Disclosure only, like B150/B193 — a legitimate scheduled
+    WARN    - a systemd-user `.timer` or a world-readable system-cron entry names
+              OpenClaw. Disclosure only, like B150/B193 - a legitimate scheduled
               housekeeping task reads identically to a planted one from a static
               scan; both are worth a human look, so this never FAILs.
-    UNKNOWN (host scanning disabled) — `ctx.include_host` is False (`audit()`'s
-              default, matching every other real-host-reading check in this module —
+    UNKNOWN (host scanning disabled) - `ctx.include_host` is False (`audit()`'s
+              default, matching every other real-host-reading check in this module -
               `--no-host` on the CLI). `_ETC_CRON_LOCATIONS` is a hardcoded absolute
-              path list (`/etc/crontab`, `/etc/cron.d`, …), read unconditionally by
-              `hostpersist.scan()` regardless of which `home` is passed — unlike the
+              path list (`/etc/crontab`, `/etc/cron.d`, ...), read unconditionally by
+              `hostpersist.scan()` regardless of which `home` is passed - unlike the
               systemd-user leg, it is NOT scoped to the audited home at all, so
               without this gate every hermetic (default, test-suite) audit call would
               read the REAL machine's `/etc/cron.*` inventory, which differs by
               distro and by platform (a bare macOS host has none of these paths at
-              all) and made this check's own finding text — and so its
-              `baseline.fingerprint()` — a function of whatever real host happened to
+              all) and made this check's own finding text - and so its
+              `baseline.fingerprint()` - a function of whatever real host happened to
               run the audit, not of the fixture/config under test (found via a
               macOS-only CI failure, 2026-09-17: a fixture unrelated to this check
               picked up a different B379 fingerprint purely from running on a
@@ -1119,29 +1119,29 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
 
     C-135 (independent, post-commit): systemd's own idiom keeps the schedule in the
     `.timer` unit and the payload (`ExecStart=`) in a SEPARATELY-named `.service` unit
-    that shares its basename and is triggered implicitly — a `.timer` file is typically
+    that shares its basename and is triggered implicitly - a `.timer` file is typically
     just `[Timer]\\nOnCalendar=...` with no command in it at all. Checking only the
     `.timer` file's own name+content (as this check originally did) missed that: a
     generically-named timer+service pair (`backup-sync.timer` / `backup-sync.service`,
     the latter's `ExecStart=` invoking openclaw) evaded BOTH this check (wrong file) and
     B150 (a timer-triggered service is normally `Type=oneshot`, not `Restart=always`).
     Fixed by additionally checking each `.timer` entry's PAIRED `.service` file (same
-    basename, already present in `scan.entries` — `hostpersist.scan()` walks the whole
+    basename, already present in `scan.entries` - `hostpersist.scan()` walks the whole
     systemd-user directory regardless of extension, this check just used to discard
-    everything but `.timer`) — never a new file read, only a second look at content this
+    everything but `.timer`) - never a new file read, only a second look at content this
     check already had in hand.
-    UNKNOWN — no OpenClaw-named entry found, and hostpersist.scan() could not read
-              something in this surface — overwhelmingly the account's own crontab
+    UNKNOWN - no OpenClaw-named entry found, and hostpersist.scan() could not read
+              something in this surface - overwhelmingly the account's own crontab
               spool, which is mode 1730 root:crontab and unreadable by its own owner
               without a subprocess this read-only tool will not run (hostpersist.py's
               own module docstring). This is the closest static analogue to the
               published attack this check exists for, and the one part of the
-              surface that can never clear to PASS on a normal Linux box — an honest
+              surface that can never clear to PASS on a normal Linux box - an honest
               gap, not a silent one.
-    UNKNOWN (not_applicable) — no host scheduling surface was present to look at at
-              all (no systemd-user dir, no /etc/cron.* paths, no crontab spool) —
+    UNKNOWN (not_applicable) - no host scheduling surface was present to look at at
+              all (no systemd-user dir, no /etc/cron.* paths, no crontab spool) -
               non-Linux, a minimal container, or systemd simply not in use.
-    PASS    — every location hostpersist.scan() looked at was actually read (nothing
+    PASS    - every location hostpersist.scan() looked at was actually read (nothing
               in `scan.unreadable`) and none of it names OpenClaw.
     """
     if not getattr(ctx, "include_host", False):
@@ -1154,18 +1154,18 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
             "Re-run without --no-host to check for an OpenClaw-named systemd timer "
             "or system-cron entry.",
         )
-    home = ctx.home.parent  # the ACCOUNT home, never ctx.home (~/.openclaw) — see
+    home = ctx.home.parent  # the ACCOUNT home, never ctx.home (~/.openclaw) - see
     # hostpersist.py's own module docstring: passing ctx.home there once silently
     # returned 23 entries instead of 36, every home-rooted family missing, no error.
     scan = _hostpersist.scan(home=home)
 
     # C-135 (independent, two rounds): a lookup of every systemd-user entry BY
     # BASENAME, built once, so a `.timer` entry can find its paired `.service` unit
-    # without a second filesystem walk — `scan.entries` already has it, this check
+    # without a second filesystem walk - `scan.entries` already has it, this check
     # used to just throw it away below. Keyed by basename, not by full relative path:
     # a first attempt keyed by path (`entry.path[:-len(".timer")] + ".service"`) missed
     # a `.timer` unit that exists ONLY inside `timers.target.wants/` with no top-level
-    # counterpart — systemd loads a unit dropped there directly, not only a symlink to
+    # counterpart - systemd loads a unit dropped there directly, not only a symlink to
     # one, and `hostpersist.scan()` enumerates it under that subdirectory's own path
     # (`~/.config/systemd/user/timers.target.wants/x.timer`), never suffix-matching a
     # sibling `.service` that (normally) sits at the top level
@@ -1173,7 +1173,7 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
     # regardless of which of the two directories either file happens to live in.
     # Grouped as a list (not overwritten) because BOTH a top-level unit file and its
     # `.wants/` enable-symlink legitimately share one basename and both get their own
-    # entry — collapsing to one would silently drop a second same-named file whose
+    # entry - collapsing to one would silently drop a second same-named file whose
     # content actually differs (a real if unusual host-tampering shape).
     systemd_by_basename: dict[str, list] = {}
     for entry in scan.entries:
@@ -1209,7 +1209,7 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
             WARN,
             "Host-level scheduled persistence names OpenClaw, outside openclaw.json's "
             "own cron block (already covered by C048): " + "; ".join(hits[:8]) + ". "
-            "Disclosure only — a legitimate scheduled task reads the same as a planted "
+            "Disclosure only \u2014 a legitimate scheduled task reads the same as a planted "
             "one from a static scan.",
             "Confirm each entry above is intentional. If it should not exist, remove it "
             "(`systemctl --user disable --now <name>.timer`, or edit the /etc/cron.* "
@@ -1223,11 +1223,11 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
             "B379",
             UNKNOWN,
             "No OpenClaw-related systemd timer or system-cron entry was found, but "
-            f"{len(scan.unreadable)} host scheduling location(s) could not be read — "
+            f"{len(scan.unreadable)} host scheduling location(s) could not be read \u2014 "
             "typically the account's own crontab spool, which needs root or a "
             "subprocess this read-only tool will not run. This is not the same as "
             "confirming nothing is scheduled.",
-            "Run `crontab -l` yourself to check your personal crontab — this tool "
+            "Run `crontab -l` yourself to check your personal crontab \u2014 this tool "
             "cannot read it.",
             evidence=list(scan.unreadable),
         )
@@ -1237,9 +1237,9 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
             "B379",
             UNKNOWN,
             "No host-level scheduling surface (systemd user units, system cron, or a "
-            "crontab spool) was found on this host — host-level scheduled persistence "
+            "crontab spool) was found on this host \u2014 host-level scheduled persistence "
             "does not apply.",
-            "—",
+            "\u2014",
             not_applicable=True,
         )
 
@@ -1255,7 +1255,7 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
 
 # ---------- B186 (B-289, ENV-3): relocated bundled skills/hooks code-load roots ----------
 # OpenClaw resolves its BUNDLED skills and hooks directories through two environment
-# variables that it honours UNCONDITIONALLY — no existence check, no trust check, ahead of
+# variables that it honours UNCONDITIONALLY - no existence check, no trust check, ahead of
 # every legitimate resolution path:
 #
 #   OPENCLAW_BUNDLED_SKILLS_DIR  bundled-dir-BQFrcRIS.js:22-24  resolveBundledSkillsDir
@@ -1269,7 +1269,7 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
 # The WORKSPACE .env is NOT a channel: BLOCKED_WORKSPACE_DOTENV_KEYS lists both variables
 # (:125-127) and BLOCKED_WORKSPACE_DOTENV_PREFIXES contains "OPENCLAW_" (:183).
 #
-# HONEST SCOPE — three deliberate narrowings, each with its reason:
+# HONEST SCOPE - three deliberate narrowings, each with its reason:
 #
 # 1. OPENCLAW_BUNDLED_PLUGINS_DIR is NOT covered and must never be added. OpenClaw
 #    hardened exactly that one: bundled-dir-DKbeVv7V.js:124-134 gates the override through
@@ -1283,8 +1283,8 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
 #    Round 1 made every "found nothing" outcome UNKNOWN, on the reasoning that a variable
 #    exported into an interactive shell just before launching the agent leaves no artifact
 #    on disk, so "we found no override in the files we can read" is not "no override is
-#    set". That reasoning is still correct — it is WHY this can never reach
-#    pass_confidence="verified" — but applying it uniformly made an unconditional UNKNOWN
+#    set". That reasoning is still correct - it is WHY this can never reach
+#    pass_confidence="verified" - but applying it uniformly made an unconditional UNKNOWN
 #    the permanent state of every clean host, including ones where a systemd unit or global
 #    dotenv genuinely WAS read and genuinely carries no override. An UNKNOWN that can never
 #    clear regardless of what the audit reads stops functioning as a signal. Two considered
@@ -1294,29 +1294,29 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
 #          reaches build_judge_packet() today with zero code change (adjudication.py's
 #          source (a)), so this would additionally require inventing a NEW "suppress from
 #          the main report but still adjudicate" mechanism with no precedent anywhere else
-#          in report.py/dossier.py/sarif.py — a bigger, riskier change than the defect
+#          in report.py/dossier.py/sarif.py - a bigger, riskier change than the defect
 #          warrants, for a check that is already scored=False and therefore already outside
 #          the grade either way.
 #      (b) PICKED: when at least one persistent artifact was actually read
 #          (env_evidence_readable(ctx)) and it carries no override, return PASS with
-#          pass_confidence="no_signal" — the same idiom B191 (this file) and B168
+#          pass_confidence="no_signal" - the same idiom B191 (this file) and B168
 #          (checks/_lifecycle.py) already use for "we looked, found nothing, but our view is
 #          known-incomplete." It differs from THEIR "no_signal" only in WHY the view is
 #          incomplete: theirs is a sampling/retention cap that a fuller read could someday
 #          clear to "verified"; B186's gap is the ambient-shell channel, which no persistent
-#          read can EVER clear — so this finding can reach PASS but can never reach
+#          read can EVER clear - so this finding can reach PASS but can never reach
 #          pass_confidence="verified". That distinction is stated in the finding text itself
 #          so it is never mistaken for a fully-verified clean bill of health.
 #    When NOTHING persistent was even present to read (no unit, no dotenv), there is no
-#    evidence to build even a capped PASS on — that state stays UNKNOWN, matching how B191
+#    evidence to build even a capped PASS on - that state stays UNKNOWN, matching how B191
 #    keeps "no audit_events table at all" as UNKNOWN rather than PASS.
 #
 # 3. The task this check came from proposed two extra rules that were tried and RETRACTED:
 #    (a) "downgrade to informational when the override resolves INSIDE the openclaw package
-#    root" — the package root is not knowable hermetically for a --home/fixture scan, and
+#    root" - the package root is not knowable hermetically for a --home/fixture scan, and
 #    the only hermetic proxy (a `node_modules/openclaw` path segment) is a string the
 #    attacker picks, so it would have been a downgrade keyed on attacker-controlled input;
-#    (b) "escalate when the target is /tmp-rooted" — a 0700 directory inside /tmp is as
+#    (b) "escalate when the target is /tmp-rooted" - a 0700 directory inside /tmp is as
 #    private as one in the user's home, so the location is not the privilege. What replaced
 #    both is the thing that is actually checkable: whether another local account can
 #    replace the code (_dir_replaceable_by_others, sticky-aware, POSIX-only).
@@ -1326,23 +1326,23 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
 # rather than a second one. A relocated HOOKS root holds hook modules, not SKILL.md
 # directories; it is disclosed here only.
 def check_bundled_root_override(ctx: Context) -> Finding:
-    """B186 (B-289) — bundled skills/hooks code-load root relocated by an env override.
+    """B186 (B-289) - bundled skills/hooks code-load root relocated by an env override.
 
-    FAIL    — an override is observed AND its target directory is group/world-writable
+    FAIL    - an override is observed AND its target directory is group/world-writable
               (non-sticky): another local account can replace the code the agent loads.
-    WARN    — an override is observed. The agent loads and executes code from a root
+    WARN    - an override is observed. The agent loads and executes code from a root
               outside its install tree; legitimate for a source-checkout developer, which
               is why this is disclosure rather than an accusation.
-    PASS    — no override found, AND at least one persistent artifact (an OpenClaw-related
+    PASS    - no override found, AND at least one persistent artifact (an OpenClaw-related
               systemd unit or a global runtime dotenv file) was actually read to reach that
               conclusion. Always carries ``pass_confidence="no_signal"`` (see C-262 in the
-              comment above this function) — never "verified": the ambient-shell delivery
+              comment above this function) - never "verified": the ambient-shell delivery
               channel leaves nothing on disk for ANY read to see, no matter how complete.
-    UNKNOWN — no persistent artifact was even present to read (no systemd unit, no global
+    UNKNOWN - no persistent artifact was even present to read (no systemd unit, no global
               dotenv). There is no evidence to build a PASS on at all. Also UNKNOWN,
               ``engine_degraded=True`` (B-657), when a persistent artifact WAS
               present and read but the collector's byte cap truncated it
-              (``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``) — the override this check exists
+              (``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``) - the override this check exists
               to catch could sit past the cut, and "no override" is then a claim about text
               that was never scanned, not a verified absence. Same shape as B6/B172
               (f748869): checked before the no_signal PASS below, which is only reachable
@@ -1356,7 +1356,7 @@ def check_bundled_root_override(ctx: Context) -> Finding:
                 UNKNOWN,
                 "No OPENCLAW_BUNDLED_SKILLS_DIR / OPENCLAW_BUNDLED_HOOKS_DIR relocation was "
                 "found in the systemd user unit(s) and global dotenv file(s) that WERE read, "
-                "but at least one of them exceeded the collector's byte cap — content past "
+                "but at least one of them exceeded the collector's byte cap \u2014 content past "
                 "the cap was never scanned, so a clean bill of health cannot be given: an "
                 "override sitting in the truncated portion would relocate the code-load root "
                 "an agent executes skills/hooks from and this check would never see it.",
@@ -1364,7 +1364,7 @@ def check_bundled_root_override(ctx: Context) -> Finding:
                 "(~/.openclaw/.env, ~/.config/openclaw/gateway.env) under the collector's "
                 "size cap, then re-run the audit.",
                 # C-135: present-but-unread content (a real file the collector's own cap cut
-                # short), not genuinely absent — catalog.py's Finding.engine_degraded doc
+                # short), not genuinely absent - catalog.py's Finding.engine_degraded doc
                 # names this exact contrast and this exact consequence (the
                 # DEGRADED_CHECK_CAP "cannot rule out a CRITICAL" treatment). Matches the
                 # B6/B172 ordering (f748869): checked ahead of the no_signal PASS below.
@@ -1382,7 +1382,7 @@ def check_bundled_root_override(ctx: Context) -> Finding:
                 "agent, which leaves no artifact on disk for any local, read-only audit to "
                 "see, however complete its read of persistent files is.",
                 "No action needed if you never set these variables. If the agent is "
-                "launched from a wrapper script or shell profile, check there too — "
+                "launched from a wrapper script or shell profile, check there too \u2014 "
                 "OpenClaw honours both unconditionally and will load skills/hooks from "
                 "wherever they point, and that channel is invisible to this check.",
                 pass_confidence="no_signal",
@@ -1392,27 +1392,27 @@ def check_bundled_root_override(ctx: Context) -> Finding:
             "B186",
             UNKNOWN,
             "No OPENCLAW_BUNDLED_SKILLS_DIR / OPENCLAW_BUNDLED_HOOKS_DIR relocation was "
-            f"found ({where}) — but nothing persistent was present to read, so there is no "
+            f"found ({where}) \u2014 but nothing persistent was present to read, so there is no "
             "evidence to build even a reduced-confidence PASS on. Either variable can also "
             "be exported into the shell that launches the agent, which leaves no artifact "
             "on disk for a local audit to read.",
             "If you never set these variables, nothing is needed. If the agent is launched "
-            "from a wrapper script or shell profile, check there too — OpenClaw honours "
+            "from a wrapper script or shell profile, check there too \u2014 OpenClaw honours "
             "both unconditionally and will load skills/hooks from wherever they point.",
         )
 
     evidence: list[str] = []
     replaceable: list[str] = []
     for var, kind, value, source in overrides:
-        # B-311: report the LITERAL override value — do not expanduser() it. systemd's
+        # B-311: report the LITERAL override value - do not expanduser() it. systemd's
         # Environment=/EnvironmentFile= parsing is not a shell (no `~` expansion), and the
         # dist reads the value verbatim: resolveBundledSkillsDir / resolveBundledHooksDir
         # both do `process.env.X?.trim(); if (override) return override;`
-        # (bundled-dir-BQFrcRIS.js:22-24, workspace-zj1TEEka.js:54-56) — no expansion, no
+        # (bundled-dir-BQFrcRIS.js:22-24, workspace-zj1TEEka.js:54-56) - no expansion, no
         # existence check. A `~`-prefixed override is therefore resolved by OpenClaw
         # relative to whatever the launching process's cwd happens to be, never to $HOME.
         # Expanding it here would report a directory OpenClaw does not actually load from
-        # — wrong on a disclosure-only check whose entire value is telling the truth about
+        # - wrong on a disclosure-only check whose entire value is telling the truth about
         # where the code-load root points. The scan below still runs against the literal
         # value; the only thing this changes is what gets PRINTED.
         resolved = Path(value)
@@ -1420,7 +1420,7 @@ def check_bundled_root_override(ctx: Context) -> Finding:
         # B-349: `resolved` is the LITERAL override value and stays verbatim (it is what
         # the owner has to go unset, and it varies only when the audited subject does).
         # `source` is the artifact this scan happened to read it out of, so it carries the
-        # scan root — which `baseline.fingerprint()` would then hash into this finding's
+        # scan root - which `baseline.fingerprint()` would then hash into this finding's
         # identity, orphaning a user's suppression the moment the home moved.
         evidence.append(
             f"{var}={resolved} ({kind} root, {state}) via "
@@ -1431,11 +1431,11 @@ def check_bundled_root_override(ctx: Context) -> Finding:
             replaceable.append(f"{var} target {resolved} is {why}")
 
     if replaceable:
-        # B-315: CheckMeta stays scored=False (catalog.py's own precedent — the WARN
+        # B-315: CheckMeta stays scored=False (catalog.py's own precedent - the WARN
         # branch is a source-checkout developer's deliberate relocation, and scoring it
         # would dock a setup that is working as its owner intended). But this FAIL
         # branch (target dir writable by other local accounts) is the one real,
-        # deterministic escalation — narrowly scoped on purpose (see
+        # deterministic escalation - narrowly scoped on purpose (see
         # tests/test_b186_bundled_root_override.py's explicit discussion of the
         # alternative "/tmp-rooted" escalation it deliberately did NOT implement). Dave's
         # ruling requires an unscored check to never FAIL, and this narrow, well-reasoned
@@ -1450,7 +1450,7 @@ def check_bundled_root_override(ctx: Context) -> Finding:
             "resolution path.",
             "Move the relocated root to a directory only you can write (0755 or tighter, "
             "not group- or world-writable), or unset the variable so OpenClaw resolves its "
-            "own bundled directory. Then review what is currently in that directory — it "
+            "own bundled directory. Then review what is currently in that directory \u2014 it "
             "has been an executable-code root for the agent.",
             evidence=evidence + replaceable,
             confidence="HIGH",
@@ -1462,8 +1462,8 @@ def check_bundled_root_override(ctx: Context) -> Finding:
         WARN,
         "A bundled code-load root is relocated by an environment override, so the agent "
         "loads skills/hooks from outside its own install tree: " + "; ".join(evidence) + ". "
-        "This is disclosure, not proof of compromise — a source-checkout developer sets "
-        "these deliberately — but it is a code-execution root, and OpenClaw honours it "
+        "This is disclosure, not proof of compromise \u2014 a source-checkout developer sets "
+        "these deliberately \u2014 but it is a code-execution root, and OpenClaw honours it "
         "with no existence or trust check.",
         "Confirm you set this deliberately and that you control and have reviewed the "
         "target directory. If you did not set it, unset it and inspect the directory it "
@@ -1475,23 +1475,23 @@ def check_bundled_root_override(ctx: Context) -> Finding:
 
 # ---------- B193 (B-290, ENV-4): gateway secret embedded in a systemd unit ----------
 # OpenClaw's OWN service audit flags this: auditGatewayToken
-# (service-audit-bKq3tdW1.js:185-192) raises `gatewayTokenEmbedded` — "Gateway service
-# embeds OPENCLAW_GATEWAY_TOKEN and should be reinstalled." — with the remedy
+# (service-audit-bKq3tdW1.js:185-192) raises `gatewayTokenEmbedded` - "Gateway service
+# embeds OPENCLAW_GATEWAY_TOKEN and should be reinstalled." - with the remedy
 # "Run `openclaw gateway install --force` to remove embedded service token."
 #
 # Two things make an inlined credential worse than the same credential in a dedicated
 # environment file: a unit file is a configuration artifact people copy, diff, back up and
 # paste into bug reports, and it is world-readable by default on most distributions (the
-# real unit on a stock install is 0664). The dist draws exactly this distinction itself —
+# real unit on a stock install is 0664). The dist draws exactly this distinction itself -
 # readEmbeddedGatewayToken returns early when the value's source is EnvironmentFile-only
 # (`isEnvironmentFileOnlySource`, service-audit-bKq3tdW1.js:247, systemd-B4Oq2owH.js:29-30)
-# — which is why this check reads ctx.unit_env_inline and not ctx.unit_env_values.
+# - which is why this check reads ctx.unit_env_inline and not ctx.unit_env_values.
 #
 # CALIBRATION. OpenClaw rates its own finding level "recommended", so a blanket FAIL would
 # be harsher than the vendor's own audit and would fire on every host that merely followed
 # an older install path. The status therefore keys on a CHECKABLE privilege rather than on
 # taste: FAIL only when the unit file is genuinely readable by another local account
-# (_file_readable_by_others, which — per B-127 — does not count a user-private group as an
+# (_file_readable_by_others, which - per B-127 - does not count a user-private group as an
 # exposure), WARN otherwise. That mirrors B182's "token store readable by others" shape.
 #
 # The secret's VALUE is never read into a message, evidence entry or log; only the fact
@@ -1500,15 +1500,15 @@ _EMBEDDED_GATEWAY_SECRET_KEYS = ("OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PAS
 
 
 def check_unit_embedded_gateway_secret(ctx: Context) -> Finding:
-    """B193 (B-290) — a gateway credential written inline into a systemd user unit.
+    """B193 (B-290) - a gateway credential written inline into a systemd user unit.
 
-    FAIL    — the credential is inlined AND the unit file is readable by other local
+    FAIL    - the credential is inlined AND the unit file is readable by other local
               accounts, so the gateway secret is exposed to every one of them.
-    WARN    — the credential is inlined in a unit only its owner can read. Still worth
+    WARN    - the credential is inlined in a unit only its owner can read. Still worth
               removing: OpenClaw's own service audit asks for a reinstall, and an embedded
               token silently drifts out of step with gateway.auth.token.
-    PASS    — an OpenClaw unit was read and inlines no gateway credential.
-    UNKNOWN — no OpenClaw systemd user unit was readable (not Linux, no service installed,
+    PASS    - an OpenClaw unit was read and inlines no gateway credential.
+    UNKNOWN - no OpenClaw systemd user unit was readable (not Linux, no service installed,
               or the unit could not be opened).
     """
     if not ctx.unit_env_found:
@@ -1548,12 +1548,12 @@ def check_unit_embedded_gateway_secret(ctx: Context) -> Finding:
             "The OpenClaw systemd user unit(s) read do not inline a gateway token or "
             "password; any credential they use comes from the config or a separate "
             "environment file.",
-            "Keep gateway credentials out of the unit file — `openclaw gateway install` "
+            "Keep gateway credentials out of the unit file \u2014 `openclaw gateway install` "
             "writes them where they belong.",
         )
 
     if exposed:
-        # B-315: CheckMeta stays scored=False (catalog.py's own precedent — OpenClaw
+        # B-315: CheckMeta stays scored=False (catalog.py's own precedent - OpenClaw
         # rates its own finding "recommended", and an owner-only inlined credential
         # ["private"] is hygiene, not an active exposure, so WARN/PASS must stay out of
         # scoring). But this FAIL branch (unit file readable by another local account)
@@ -1583,7 +1583,7 @@ def check_unit_embedded_gateway_secret(ctx: Context) -> Finding:
         "A gateway credential is written in plaintext into a systemd unit file: "
         + "; ".join(private)
         + ". Only your account can read the file today, so this is hygiene rather than "
-        "an active exposure — but unit files get copied, diffed and pasted into bug "
+        "an active exposure \u2014 but unit files get copied, diffed and pasted into bug "
         "reports, and an embedded token drifts out of step with gateway.auth.token.",
         "Run `openclaw gateway install --force` to remove the embedded service token "
         "(OpenClaw's own service audit recommends this), or move the value into an "
@@ -1596,13 +1596,13 @@ def check_unit_embedded_gateway_secret(ctx: Context) -> Finding:
 # ---------------------------------------------------------------------------------------
 # F-134 (DISK-1, B191): OpenClaw's OWN runtime audit trail (``audit_events`` in the shared
 # state SQLite database). ``collector._collect_audit_events`` reads it into
-# ``ctx.audit_events`` (+ coverage counters) — see that collector's docstring for the full
+# ``ctx.audit_events`` (+ coverage counters) - see that collector's docstring for the full
 # grounding and the GR#5 hard blocker this check is scoped around.
 #
 # OPT-IN, --behavioral ONLY (matching the T1/T2/T3 precedent in behavioral.py): this
 # function is never added to CHECKS and never runs as part of a default audit()/A-F grade.
 # It is invoked exclusively from ``behavioral.analyze()`` (see ``BEHAVIORAL_CHECK_IDS`` in
-# behavioral.py), which also supplies ``divergent_sessions`` — see the parameter docstring
+# behavioral.py), which also supplies ``divergent_sessions`` - see the parameter docstring
 # below for why that argument lives there and not here.
 # ---------------------------------------------------------------------------------------
 
@@ -1614,11 +1614,11 @@ def _fmt_epoch_ms(ms: int) -> str:
 def _b191_audit_enabled(cfg) -> "bool | None":
     """Resolve the audit kill switch the same way B10 (check_audit_log) does:
     canonical ``logging.audit.enabled`` wins when present, else the legacy
-    ``audit.enabled`` falls back (B-700 migration precedence — ``logging`` is
+    ``audit.enabled`` falls back (B-700 migration precedence - ``logging`` is
     ``.strict()`` on OpenClaw 2026.8.1+, so an un-migrated config still carries
     only the legacy key while a migrated one carries only the canonical one).
     Returns ``None`` when neither key is set, config is unread, or the value found
-    is not the container shape expected — callers must treat ``None`` as "cannot
+    is not the container shape expected - callers must treat ``None`` as "cannot
     say", never as "enabled". Read-only; never used to change a verdict, only to
     attribute one (C-431).
     """
@@ -1637,37 +1637,37 @@ def check_audit_trail_signals(
     divergent_sessions: frozenset = frozenset(),
     trajectory_compared: bool = False,
 ) -> Finding:
-    """B191 (F-134, DISK-1) — OpenClaw's OWN runtime audit trail: coverage, plus two
+    """B191 (F-134, DISK-1) - OpenClaw's OWN runtime audit trail: coverage, plus two
     narrow, near-zero-FP runtime signals nothing else in ClawSecCheck sees.
 
     THREE THINGS, ONE FINDING:
 
-    1. COVERAGE / OBSERVABILITY — is ``audit_events`` present, readable, and how far back
+    1. COVERAGE / OBSERVABILITY - is ``audit_events`` present, readable, and how far back
        does it reach? This alone answers a question no other check does: whether
        OpenClaw's own durable, metadata-only tool-execution record exists, and how much
        history it holds (bounded by its own documented 30-day / 100,000-row retention,
-       pruned on every insert — see the collector's docstring).
-    2. DIVERGENCE — the ``--behavioral`` corroboration source. ``divergent_sessions`` /
+       pruned on every insert - see the collector's docstring).
+    2. DIVERGENCE - the ``--behavioral`` corroboration source. ``divergent_sessions`` /
        ``trajectory_compared`` are supplied by ``behavioral.analyze()``, which already
        reads the trajectory sidecar for T1/T2/T3 and can therefore compare, at zero extra
        file I/O, the session ids ``audit_events`` has seen against the ones the
-       trajectory source actually recorded (both expose a plain ``session_id`` — see
+       trajectory source actually recorded (both expose a plain ``session_id`` - see
        ``behavioral._audit_event_sessions``/``audit_trail_divergence`` for why that field,
        and not ``session_key``, is the join key). A non-empty result means
-       ``audit_events`` retains a session the trajectory source does not — the trajectory
+       ``audit_events`` retains a session the trajectory source does not - the trajectory
        sidecar may be disabled (``OPENCLAW_TRAJECTORY=0``), relocated, or have rotated
        that session out past its own 60-file cap, while this INDEPENDENT, differently
        -bounded store still has it. This function never reads the trajectory sidecar
        itself; it only reports what its caller already computed.
     3. TWO NARROW SIGNALS:
-       - ``status=='blocked'`` and ``error_code=='tool_blocked'`` — the policy engine
+       - ``status=='blocked'`` and ``error_code=='tool_blocked'`` - the policy engine
          actually DENIED a tool at runtime (``projectToolExecutionEventToAudit``,
          server-runtime-subscriptions-OlWMLbPY.js:~299-327). No other check or mode sees
-         this anywhere — it is a runtime enforcement event, not a config posture.
-       - ``tool_name=='unknown'`` — the literal sentinel OpenClaw's own ``auditToolName``
+         this anywhere - it is a runtime enforcement event, not a config posture.
+       - ``tool_name=='unknown'`` - the literal sentinel OpenClaw's own ``auditToolName``
          writes when a tool-call name fails its OWN syntax check
          (``isAllowedToolCallName``, tool-call-shared-BoRDqDVC.js:23-29: not a string,
-         over 64 chars, or outside ``^[A-Za-z0-9_:.-]+$``) — i.e. a tool call reached
+         over 64 chars, or outside ``^[A-Za-z0-9_:.-]+$``) - i.e. a tool call reached
          execution with a name so malformed OpenClaw's own audit layer could not record
          it. A well-formed ``mcp__server__tool`` name is stored verbatim (with a null
          allowlist that function is a pure syntax check, not a lookup); only a genuinely
@@ -1675,50 +1675,50 @@ def check_audit_trail_signals(
          box this was grounded against.
 
     HARD GR#5 BLOCKER (see the collector's docstring in full): ``audit_events`` stores
-    ``tool_name`` alone — no argv, no command, no path, no host. This function therefore
+    ``tool_name`` alone - no argv, no command, no path, no host. This function therefore
     NEVER builds a volumetric or tool-name-presence rule; the two signals above are the
     only ``tool_name``-adjacent conditions it evaluates, and both are near-zero-FP by
     construction (a benign config never legitimately has a blocked tool call or a
     malformed tool name reach execution).
 
-    WARN    — any of: a blocked-tool row, an evasive/malformed tool name, or a
-              caller-supplied session divergence. Always advisory (``scored=False``) —
+    WARN    - any of: a blocked-tool row, an evasive/malformed tool name, or a
+              caller-supplied session divergence. Always advisory (``scored=False``) -
               each of the three has a legitimate benign story this check cannot rule out
               (a deliberately tightened policy; a third-party MCP tool name that still
               slipped past an older OpenClaw's syntax gate; trajectory tracing turned off
               on purpose). ``Finding.sub_signals`` names which fired (F-154 round 2) so
               a cap-only consumer can react to the two strong ones, never bare divergence.
-    PASS    — ``audit_events`` present, readable, non-empty, and none of the three
+    PASS    - ``audit_events`` present, readable, non-empty, and none of the three
               signals fired in the sampled window. ``pass_confidence`` is ``"verified"``
               when the sample covered the whole table, or ``"no_signal"`` when
-              ``ctx.audit_events_truncated`` is True (see C-135 round-2 note below) — the
+              ``ctx.audit_events_truncated`` is True (see C-135 round-2 note below) - the
               same ``"verified"``/``"no_signal"`` split B168 already uses
               (``checks/_lifecycle.py``).
-    UNKNOWN — no state DB, no ``audit_events`` table, the table present but unreadable, or
+    UNKNOWN - no state DB, no ``audit_events`` table, the table present but unreadable, or
               present but currently empty (pruning can empty it, so "no rows" is not
-              evidence nothing ran — same reasoning as B189's ``cron_run_logs``). C-431:
+              evidence nothing ran - same reasoning as B189's ``cron_run_logs``). C-431:
               when the table is present-but-empty AND config says recording is switched
-              off (``audit.enabled``/``logging.audit.enabled`` since 2026.8.1 — see B10)
+              off (``audit.enabled``/``logging.audit.enabled`` since 2026.8.1 - see B10)
               is explicitly ``False``, the detail NAMES that cause instead of the
-              generic pruning sentence — still UNKNOWN, attribution only, never a
+              generic pruning sentence - still UNKNOWN, attribution only, never a
               verdict change. The generic wording is unchanged (byte-for-byte) when the
               switch is not explicitly off, since ``ctx.config`` may itself be unread.
 
-    C-135 ROUND-2 FIX (F-134/B191, DISK-1) — ABSENCE-IMPLIES-CLEAN ASYMMETRY. The row
+    C-135 ROUND-2 FIX (F-134/B191, DISK-1) - ABSENCE-IMPLIES-CLEAN ASYMMETRY. The row
     SAMPLE (``ctx.audit_events``) is capped at ``_MAX_AUDIT_EVENTS``, most-recent-first
     (see the collector's docstring). When ``ctx.audit_events_truncated`` is True, a
     genuine blocked-tool-call or evasive-name row older than the cap is invisible to the
-    ``hits`` scan below — it was evicted before this function ever saw it — yet the PASS
+    ``hits`` scan below - it was evicted before this function ever saw it - yet the PASS
     used to carry undiminished ``confidence="HIGH"`` regardless of how much of the table
     was actually sampled. Reproduced: one genuine ``blocked``/``tool_blocked`` row followed
     by 1200 ordinary rows -> PASS/HIGH/no caveat, the blocked row silently evicted from the
     window. Fixed the same way B168 handles ``cron_store_shadowed``
     (``checks/_lifecycle.py``): only the "nothing found" verdict degrades
-    (``pass_confidence="no_signal"``) when the scanned set is known-incomplete — a hit that
+    (``pass_confidence="no_signal"``) when the scanned set is known-incomplete - a hit that
     DID fire within the sampled window (the ``hits`` branch above) is unaffected by
     truncation and keeps its full-confidence WARN, since that finding is real regardless of
     what else may sit outside the window. This does not close DISK-1's "prove nothing
-    outside the cap happened" gap — it correctly reports that the gap exists rather than
+    outside the cap happened" gap - it correctly reports that the gap exists rather than
     reporting a clean bill of health the sample never actually earned.
     """
     if not ctx.audit_events_found:
@@ -1726,7 +1726,7 @@ def check_audit_trail_signals(
             "B191",
             UNKNOWN,
             "No audit_events table found (the state SQLite database, or its audit_events "
-            "table, is absent) — OpenClaw's own runtime audit trail could not be read.",
+            "table, is absent) \u2014 OpenClaw's own runtime audit trail could not be read.",
             "No action needed if this OpenClaw install predates the audit_events table. "
             "Keep ~/.openclaw/state/openclaw.sqlite owner-readable so a future audit can "
             "read this trail.",
@@ -1741,7 +1741,7 @@ def check_audit_trail_signals(
         )
     if ctx.audit_events_total_rows == 0:
         # C-431: an empty ledger next to an explicit kill switch is a materially
-        # different fact from an empty ledger on a fresh install — name the cause
+        # different fact from an empty ledger on a fresh install - name the cause
         # when config actually says so, rather than the same generic pruning
         # sentence for both. `_b191_audit_enabled` mirrors B10's own canonical-
         # then-legacy resolution (B-700) exactly, read-only, no verdict change: an
@@ -1753,7 +1753,7 @@ def check_audit_trail_signals(
                 UNKNOWN,
                 "The audit_events table is present but currently empty, and "
                 "audit.enabled (logging.audit.enabled since OpenClaw 2026.8.1) is set "
-                "to false — the ledger is empty because recording is switched off, "
+                "to false \u2014 the ledger is empty because recording is switched off, "
                 "not merely because nothing has happened yet. See B10.",
                 "If a runtime audit trail is wanted, set logging.audit.enabled (or "
                 "audit.enabled before OpenClaw 2026.8.1) to true, then re-run once "
@@ -1764,7 +1764,7 @@ def check_audit_trail_signals(
             UNKNOWN,
             "The audit_events table is present but currently empty. This table is pruned "
             "on every insert (a documented 30-day / 100,000-row retention), so an empty "
-            "table is not evidence that no tool ever ran — it may simply have nothing "
+            "table is not evidence that no tool ever ran \u2014 it may simply have nothing "
             "left in the retention window.",
             "No action needed. Re-run once the agent has been active, if a runtime audit "
             "signal is wanted.",
@@ -1793,7 +1793,7 @@ def check_audit_trail_signals(
     if evasive:
         hits.append(
             f"{len(evasive)} tool call(s) reached execution with a tool name OpenClaw's "
-            "own audit layer could not record (tool_name='unknown' — malformed or "
+            "own audit layer could not record (tool_name='unknown' \u2014 malformed or "
             "over-length)"
         )
         evidence += [
@@ -1838,12 +1838,12 @@ def check_audit_trail_signals(
     # C-135 round 2 (F-134/B191): "none of the three signals fired" is a claim about the
     # SAMPLED window, and ctx.audit_events_truncated means that window is not the whole
     # table (see the docstring above). Only the ABSENCE-implies-clean verdict weakens here
-    # — a hit found INSIDE the window (the `hits` branch above) already returned and is
+    # - a hit found INSIDE the window (the `hits` branch above) already returned and is
     # untouched by this.
     if ctx.audit_events_truncated:
         caveat = (
             f" The signal-detection sample was capped at the {len(ctx.audit_events)} most "
-            f"recent of {ctx.audit_events_total_rows} total row(s) — a genuine blocked-"
+            f"recent of {ctx.audit_events_total_rows} total row(s) \u2014 a genuine blocked-"
             "tool-call or evasive tool name older than that cap would NOT have been seen "
             "by this scan."
         )

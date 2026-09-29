@@ -1,4 +1,4 @@
-"""The `host_persist` dimension — the HOST's own persistence surface.
+"""The `host_persist` dimension - the HOST's own persistence surface.
 
 F-179. `hostpersist.py` is the reader; this is the comparison. The family labels and the
 INFRASTRUCTURE classification are sourced from the leaf's own tables rather than retyped:
@@ -20,7 +20,7 @@ from ._shared import (  # noqa: F401
 
 # F-179: the human-facing family names, and which families count as INFRASTRUCTURE for
 # severity purposes. Sourced from `hostpersist.FAMILY_LABELS` rather than retyped, so a
-# family renamed in the leaf cannot silently stop matching here — B-483 found seven copies
+# family renamed in the leaf cannot silently stop matching here - B-483 found seven copies
 # of one table in this tree and three of them had drifted.
 _HOST_PERSIST_LABELS = dict(_hp_FAMILY_LABELS)
 
@@ -52,7 +52,7 @@ def _diff_host_persist(_hp_pair, alerts, curr, note, prev) -> None:
         elif "host_persist" not in prev and "host_persist" in curr:
             note(NOTE_NO_PRIOR_RECORD,
                  "This machine's own startup and scheduling files had nothing to compare "
-                 "against — your saved record predates this check. It will cover them from "
+                 "against \u2014 your saved record predates this check. It will cover them from "
                  "the next run onwards.")
         elif "host_persist" in prev or "host_persist" in curr:
             note(NOTE_RECORD_DAMAGED,

@@ -807,7 +807,7 @@ def _sqlite_dbs(
 
 
 def sqlite_db_paths(home) -> "list[Path]":
-    """Public wrapper for :func:`_sqlite_dbs` — the per-agent trajectory database PATHS
+    """Public wrapper for :func:`_sqlite_dbs` - the per-agent trajectory database PATHS
     only, never opened here. Exists for callers that need to ``stat()`` these files
     (tamper/permission checks) without reading a single row: B85 (``checks/_host.py``)
     is the first consumer, extending its existing JSONL sidecar tamper sweep to the
@@ -847,13 +847,13 @@ def sqlite_db_paths_capped(home) -> bool:
 
 def sqlite_session_ids(home) -> "frozenset[str]":
     """The set of ``session_id`` values present in every readable per-agent trajectory
-    database under *home*. Reuses :func:`_read_sqlite_db` verbatim — no new SQL, no
-    ``event_json`` read (see the module docstring's §8 paragraph) — so this carries
+    database under *home*. Reuses :func:`_read_sqlite_db` verbatim - no new SQL, no
+    ``event_json`` read (see the module docstring's §8 paragraph) - so this carries
     exactly the same guarantee ``corroborate()`` already has: it can only ever learn
     that a session id EXISTS, never what it did.
 
     Exists for callers that need session-level PRESENCE, not the full reconciliation
-    ``corroborate()`` returns — B189's cron-erasure pivot (``checks/_lifecycle.py``) is
+    ``corroborate()`` returns - B189's cron-erasure pivot (``checks/_lifecycle.py``) is
     the first consumer: it already cross-references orphaned run-log session ids against
     on-disk evidence so its advisory can point at a transcript the user can actually
     still read, and today that cross-reference only checks JSONL sidecars. Bounded the
@@ -1090,8 +1090,8 @@ def corroborate(home) -> TrajectoryCorroboration:
     # restore a JSONL sidecar from the archive while the matching SQLite rows are still
     # present, and a caller who read `sqlite_rows` on its own (independent of `status`)
     # must not see the SAME event counted as evidence twice. `sqlite_rows`/
-    # `sqlite_sessions` below are always the DEDUPED figures — rows not already visible
-    # via a live sidecar — so they stay meaningful regardless of what `status` says.
+    # `sqlite_sessions` below are always the DEDUPED figures - rows not already visible
+    # via a live sidecar - so they stay meaningful regardless of what `status` says.
     # When jsonl_count == 0 (the common post-migration case) there is nothing to
     # subtract and this reduces to the raw SQLite figures.
     jsonl_pairs = _jsonl_session_seq_pairs(jsonl_files_list) if jsonl_count else set()

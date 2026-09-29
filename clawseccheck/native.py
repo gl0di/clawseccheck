@@ -1,7 +1,7 @@
 """Optionally run OpenClaw's own `openclaw security audit` and fold its findings in.
 
 This is the ONLY external command ClawSecCheck ever runs: a single, fixed,
-read-only invocation of the user's own `openclaw` CLI —
+read-only invocation of the user's own `openclaw` CLI -
 
     openclaw security audit --json
 
@@ -24,25 +24,25 @@ from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, Finding
 
 def _untrusted_exec_reason(exe: str) -> "tuple[bool, str] | None":
     """Return ``(must_skip, reason)`` if *exe* (or its directory) could not be trusted
-    enough to exec, or ``None`` if it was CHECKED and found clean — i.e. writable by
+    enough to exec, or ``None`` if it was CHECKED and found clean - i.e. writable by
     group/other on POSIX, which means a local user could have swapped the binary we are
     about to run.
 
     The audit flags group/world-writable install dirs in others, so it must not blindly
     exec from such a path itself (B-014). Two DIFFERENT reasons a caller might see no
-    green light here (B-774 — both used to collapse into plain `None`, reading exactly
+    green light here (B-774 - both used to collapse into plain `None`, reading exactly
     like a verified-clean path):
 
-    * ``must_skip=True`` — POSIX and the mode bits prove it writable (never exec), OR the
-      stat itself raised ``OSError`` — an unreadable path is not a trusted one, so this
+    * ``must_skip=True`` - POSIX and the mode bits prove it writable (never exec), OR the
+      stat itself raised ``OSError`` - an unreadable path is not a trusted one, so this
       fails CLOSED the same as a confirmed-unsafe verdict (Option 1: "cheap, strictly
-      safer, and cannot affect a healthy machine — a stat of a binary `shutil.which` just
+      safer, and cannot affect a healthy machine - a stat of a binary `shutil.which` just
       resolved does not normally fail").
-    * ``must_skip=False`` — non-POSIX, where ``os.stat().st_mode``'s group/other bits
-      carry no meaning at all (Windows uses NTFS ACLs — the same "can't read those
+    * ``must_skip=False`` - non-POSIX, where ``os.stat().st_mode``'s group/other bits
+      carry no meaning at all (Windows uses NTFS ACLs - the same "can't read those
       read-only" limitation `checks/_host.py`'s B85 already discloses rather than
       silently reading as clean). The check genuinely does not apply here, not merely
-      "failed to run" — so the caller may still exec, but must disclose that this trust
+      "failed to run" - so the caller may still exec, but must disclose that this trust
       check specifically could not be made, never render it as an absence of concern.
     """
     if os.name != "posix":
@@ -118,7 +118,7 @@ def _parse(out: str):
     try:
         return json.loads(out)
     except json.JSONDecodeError:
-        # some CLIs emit log lines before the JSON body — try the last {...}/[...]
+        # some CLIs emit log lines before the JSON body - try the last {...}/[...]
         for opener, closer in (("{", "}"), ("[", "]")):
             i, j = out.find(opener), out.rfind(closer)
             if 0 <= i < j:
@@ -136,7 +136,7 @@ def run_native_audit(openclaw_bin: str = "openclaw", timeout: int = 60,
     exe = shutil.which(openclaw_bin)
     if not exe:
         return NativeResult("not_found", note=(
-            "openclaw CLI not on PATH — run this inside OpenClaw to also include "
+            "openclaw CLI not on PATH \u2014 run this inside OpenClaw to also include "
             "its built-in `openclaw security audit`."))
     trust = _untrusted_exec_reason(exe)
     trust_caveat = ""
@@ -148,7 +148,7 @@ def run_native_audit(openclaw_bin: str = "openclaw", timeout: int = 60,
                 "Restore owner-only perms on the binary/dir, or run from a trusted PATH, "
                 "to include the built-in audit."))
         # B-774: the install-path trust check does not apply on this platform (see
-        # _untrusted_exec_reason) — proceed, but carry an honest disclosure into
+        # _untrusted_exec_reason) - proceed, but carry an honest disclosure into
         # whatever this call returns below, so "unverifiable" never reads the same
         # as "checked, clean" the way a bare `None` note used to.
         trust_caveat = f" (install-path trust check not performed: {reason})"

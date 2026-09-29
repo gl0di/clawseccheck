@@ -1,8 +1,8 @@
-"""clawseccheck.brand — the single source of brand truth.
+"""clawseccheck.brand - the single source of brand truth.
 
 Layer 1 leaf module (see the repo-root CLAUDE.md §3 dependency flow): stdlib only,
 imports **nothing** from the rest of ``clawseccheck``. Every renderer imports FROM
-this module; it never imports them — that keeps the dependency graph acyclic.
+this module; it never imports them - that keeps the dependency graph acyclic.
 
 ## Three reach tiers, kept as three separate kinds of export
 
@@ -10,19 +10,19 @@ A live Telegram + web-chat test proved that not everything a renderer *emits*
 actually *reaches* the user the same way, so this module deliberately keeps three
 tiers apart instead of exposing one flat "brand" blob:
 
-1. **Seen everywhere** — :data:`MASCOT`, :data:`WORDMARK`, :func:`header`,
+1. **Seen everywhere** - :data:`MASCOT`, :data:`WORDMARK`, :func:`header`,
    :func:`frame`. Plain text; it survives every channel OpenClaw relays a skill's
    output over (a real terminal, web ControlUI, Telegram, Discord, ...).
-2. **Terminal-only** — :data:`GRADE_ANSI` and each :class:`SeverityStyle`'s
+2. **Terminal-only** - :data:`GRADE_ANSI` and each :class:`SeverityStyle`'s
    ``ansi`` field: ``ansi.py`` colour-palette *names* (not escape codes). Colour
    never reaches a chat channel (no ANSI there); only an interactive terminal
    renders it, and only when ``ansi.should_color()`` says so.
-3. **HTML / badge-only** — :data:`GRADE_HEX`, :data:`BRAND_RED`, each
+3. **HTML / badge-only** - :data:`GRADE_HEX`, :data:`BRAND_RED`, each
    ``SeverityStyle``'s ``hex`` field, and :data:`LOGO_SVG`. A graphical logo mark
    is physically impossible to deliver in a chat message; it can only appear in
    the self-contained ``--html`` export or the shareable ``--badge`` SVG file.
 
-Nothing in this module does I/O, reads the clock, or reads the environment — every
+Nothing in this module does I/O, reads the clock, or reads the environment - every
 export is a pure constant or a pure string-building function, so it is trivially
 testable and safe to import from anywhere (including a check or a test) without
 side effects.
@@ -31,14 +31,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# ── Tier 1: seen everywhere (text, every channel) ────────────────────────────
+# -- Tier 1: seen everywhere (text, every channel) ----------------------------
 
-MASCOT = "🦞"
+MASCOT = "\U0001f99e"
 """The brand mascot emoji ("the Claw"). Header line only, once per screen; dropped
-entirely under ``--ascii`` (never folded to an ASCII substitute — there isn't one)."""
+entirely under ``--ascii`` (never folded to an ASCII substitute \u2014 there isn't one)."""
 
 WORDMARK = "ClawSecCheck"
-"""The product name exactly as it must render everywhere — never abbreviated,
+"""The product name exactly as it must render everywhere \u2014 never abbreviated,
 re-cased, or translated (output is English-only; see CLAUDE.md §9)."""
 
 SEPARATOR = " · "
@@ -52,11 +52,11 @@ FRAME_WIDTH = 30
 
 
 def header(subtitle: str = "", *, ascii_only: bool = False) -> str:
-    """The one brand header line: ``"🦞 ClawSecCheck · {subtitle}"``.
+    """The one brand header line: ``"lobster ClawSecCheck · {subtitle}"``.
 
     An empty *subtitle* renders just the (optionally mascot-prefixed) wordmark,
     with no trailing separator. ``ascii_only`` drops the mascot and folds the
-    separator to ``" - "`` — the same convention every current renderer hand-rolls
+    separator to ``" - "`` - the same convention every current renderer hand-rolls
     (``menu.render_menu``, ``menu.render_onboarding``, ``palette.render_palette``).
     Pure text; identical output every call for the same arguments.
     """
@@ -75,23 +75,23 @@ def frame(label: str, *, width: int = FRAME_WIDTH) -> list[str]:
     render at variable width, so it visibly breaks. With nothing to misalign on
     the right, this frame holds together in a monospace surface (terminal,
     ControlUI code-block) *and* degrades to three harmless plain lines in a
-    proportional one (Telegram) — the single box-art exception to the plain-text
+    proportional one (Telegram) - the single box-art exception to the plain-text
     baseline every other screen uses.
 
     Returns the three lines as a list (top rule, label line, bottom rule) so a
     caller can ``lines.extend(frame(...))`` or join them directly. *label* should
-    already carry any trailing count text (e.g. ``"🌐 Exposure & Network — 1
-    issue(s)"``) — this function only draws the frame around it.
+    already carry any trailing count text (e.g. ``"globe Exposure & Network - 1
+    issue(s)"``) - this function only draws the frame around it.
     """
-    rule = "─" * width
-    return [f"┌{rule}", f"│ {label}", f"└{rule}"]
+    rule = "\u2500" * width
+    return [f"\u250c{rule}", f"\u2502 {label}", f"\u2514{rule}"]
 
 
-# ── Tier 2 + 3: colour palette ────────────────────────────────────────────────
+# -- Tier 2 + 3: colour palette ------------------------------------------------
 #
 # Grade -> colour is kept as two *separate*, distinctly-named dicts on purpose.
-# report.py used to define a single `_GRADE_COLOR` name twice — once with ANSI
-# palette names, once (later in the file) with hex codes — so the second
+# report.py used to define a single `_GRADE_COLOR` name twice - once with ANSI
+# palette names, once (later in the file) with hex codes - so the second
 # definition silently shadowed the first and the terminal grade letter/score-bar
 # fill rendered with no colour at all. Two names that can never collide fixes
 # that class of bug structurally instead of relying on file-order discipline.
@@ -103,7 +103,7 @@ GRADE_HEX: dict[str, str] = {
     "D": "#fe7d37",
     "F": "#e05d44",
 }
-"""Grade letter -> hex colour. **HTML / badge-only** (Tier 3) — the SVG badge and
+"""Grade letter -> hex colour. **HTML / badge-only** (Tier 3) \u2014 the SVG badge and
 the ``--html`` export are the only surfaces that are static files rather than
 channel-relayed text, so they are the only place a grade colour can appear."""
 
@@ -115,12 +115,12 @@ GRADE_ANSI: dict[str, str] = {
     "F": "red",
 }
 """Grade letter -> ``ansi.py`` palette colour *name* (not an escape code).
-**Terminal-only** (Tier 2) — pass straight to ``ansi.paint(text,
+**Terminal-only** (Tier 2) \u2014 pass straight to ``ansi.paint(text,
 grade_ansi(grade), enabled=color)``; ``color`` must already be gated by
 ``ansi.should_color()``."""
 
 BRAND_RED = "#e34234"
-"""The one brand accent colour, independent of any grade/severity ramp — used by
+"""The one brand accent colour, independent of any grade/severity ramp \u2014 used by
 the logo mark and HTML accent highlights. **HTML / badge-only** (Tier 3)."""
 
 _DEFAULT_HEX = "#9f9f9f"
@@ -144,9 +144,9 @@ def grade_ansi(grade: str) -> str:
 class SeverityStyle:
     """One severity level's presentation, one field per reach tier."""
 
-    glyph: str  # Tier 1 — seen everywhere: the severity dot (chat + terminal + HTML)
-    ansi: str   # Tier 2 — terminal-only: an ansi.py palette colour name
-    hex: str    # Tier 3 — HTML/badge-only: a hex colour
+    glyph: str  # Tier 1 - seen everywhere: the severity dot (chat + terminal + HTML)
+    ansi: str   # Tier 2 - terminal-only: an ansi.py palette colour name
+    hex: str    # Tier 3 - HTML/badge-only: a hex colour
 
 
 # Derived FROM the same grade ramp GRADE_ANSI/GRADE_HEX use (CRITICAL/HIGH share
@@ -154,20 +154,20 @@ class SeverityStyle:
 # hand-kept colour set that could drift from it. The glyphs match
 # design-system.md's Layer 0 glyph legend and report.py's existing severity dots.
 SEVERITY: dict[str, SeverityStyle] = {
-    "CRITICAL": SeverityStyle("🔴", GRADE_ANSI["F"], GRADE_HEX["F"]),
-    "HIGH": SeverityStyle("🟠", GRADE_ANSI["D"], GRADE_HEX["D"]),
-    "MEDIUM": SeverityStyle("🟡", GRADE_ANSI["C"], GRADE_HEX["C"]),
-    "LOW": SeverityStyle("⚪", GRADE_ANSI["B"], GRADE_HEX["B"]),
+    "CRITICAL": SeverityStyle("\U0001f534", GRADE_ANSI["F"], GRADE_HEX["F"]),
+    "HIGH": SeverityStyle("\U0001f7e0", GRADE_ANSI["D"], GRADE_HEX["D"]),
+    "MEDIUM": SeverityStyle("\U0001f7e1", GRADE_ANSI["C"], GRADE_HEX["C"]),
+    "LOW": SeverityStyle("\u26aa", GRADE_ANSI["B"], GRADE_HEX["B"]),
 }
 """Severity name -> :class:`SeverityStyle`. The severity **glyph** (Tier 1) is what
 actually reaches a chat channel; ``ansi``/``hex`` are additive, higher-reach-tier
 enhancements a terminal or the HTML export may layer on top."""
 
 
-# ── Tier 3: the graphical mark (HTML / badge-only) ───────────────────────────
+# -- Tier 3: the graphical mark (HTML / badge-only) ---------------------------
 #
 # PROVISIONAL placeholder mark: a minimal, self-contained abstract "claw pincer"
-# glyph in BRAND_RED — no external assets/fonts/references (matches the --html
+# glyph in BRAND_RED - no external assets/fonts/references (matches the --html
 # export's existing "single self-contained file" rule), so it is safe to inline
 # wherever a real graphical logo is wanted today. The *final* mark art is an
 # explicit follow-up (a sibling brand-epic task) that only needs to replace this
@@ -185,17 +185,17 @@ LOGO_SVG = (
     "</svg>"
 )
 """A minimal, self-contained SVG mark (no external assets/fonts/network refs) for
-the ``--html`` export and the ``--badge`` SVG. **HTML / badge-only** (Tier 3) — a
+the ``--html`` export and the ``--badge`` SVG. **HTML / badge-only** (Tier 3) \u2014 a
 graphical logo cannot be delivered through any chat channel. See the PROVISIONAL
 note above: the mark art itself is a placeholder pending the final design."""
 
 # A 64x64 raster PNG of the real mascot mark (shield + claws + check), base64-inlined
-# so the browser-tab icon stays self-contained — no external file reference, no
+# so the browser-tab icon stays self-contained - no external file reference, no
 # network fetch. Source art lives at docs/assets/logo.png (cropped/resized from
 # there); regenerate this constant if that source ever changes. Deliberately NOT a
 # replacement for LOGO_SVG above: LOGO_SVG's value is being a tiny set of vector
 # paths that render.py re-nests inside the 14px shields.io badge icon (see
-# report.py's `_LOGO_INNER`) — a raster blob would be pointless at that size and
+# report.py's `_LOGO_INNER`) - a raster blob would be pointless at that size and
 # would bloat every `--badge` SVG. This constant is favicon-only.
 FAVICON_DATA_URI = (
     "data:image/png;base64,"
@@ -340,14 +340,14 @@ FAVICON_DATA_URI = (
     "TkSuQmCC"
 )
 """64x64 favicon PNG for the ``--html`` export's ``<head>``, base64-inlined. **HTML
-/ badge-only** (Tier 3) — same reach constraint as :data:`LOGO_SVG`, but this one is
+/ badge-only** (Tier 3) \u2014 same reach constraint as :data:`LOGO_SVG`, but this one is
 the real mascot art, not the vector placeholder; see :func:`clawseccheck.report.
 render_html`."""
 
 
 #: The mark the HTML report shows in its header.
 #:
-#: Deliberately the SAME bytes as ``FAVICON_DATA_URI`` — the real mascot art — and NOT
+#: Deliberately the SAME bytes as ``FAVICON_DATA_URI`` - the real mascot art - and NOT
 #: ``LOGO_SVG``. ``LOGO_SVG`` is labelled PROVISIONAL above: an abstract circle-and-arcs
 #: placeholder, which is the right trade for the badge (a 14px shields.io row, where a
 #: raster would blur and vector geometry is re-implemented in `pdf.py`) and the wrong one

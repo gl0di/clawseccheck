@@ -6,11 +6,11 @@
 |---------|-----------|
 | Latest release | Fully supported |
 | Previous minor release | Critical security fixes only |
-| Older releases | Unsupported — please update (`openclaw skills update clawseccheck`) |
+| Older releases | Unsupported - please update (`openclaw skills update clawseccheck`) |
 
 ## Reporting a vulnerability
 
-Please **do not** open a public GitHub issue for security vulnerabilities — use one of
+Please **do not** open a public GitHub issue for security vulnerabilities - use one of
 the private channels below so the issue can be assessed and patched before public
 disclosure.
 
@@ -44,10 +44,10 @@ security-tool config paths and binaries on `PATH`, the text of a few known firew
 files, the names of proxy-shaped env vars, and on Windows read-only
 `HKEY_LOCAL_MACHINE` registry queries), a socket scan (`--no-sockets`: `/proc/net/tcp{,6}`
 and a read-only `/proc/*/fd` walk), and an npm dependency-tree walk (`--no-deptree`:
-`node_modules` under the installed OpenClaw package, outside the OpenClaw home —
+`node_modules` under the installed OpenClaw package, outside the OpenClaw home -
 manifests and install-time targets only, nothing executed). `SKILL.md` and
 [`SECURITY_MODEL.md`](SECURITY_MODEL.md) list the full surface. It writes only its own
-state under `~/.clawseccheck/` — by default a one-line run-history entry (opt out with
+state under `~/.clawseccheck/` - by default a one-line run-history entry (opt out with
 `--no-history`), which records the score only when the run earned a grade and otherwise
 just notes that it did not, and other files only when you ask (`--save`, `--badge`, `--html`,
 `--sarif`, `--pdf`, `--monitor`, `--log`). The one named exception, opt-in and
@@ -63,7 +63,7 @@ In-scope issues include:
 
 - Logic bugs that produce false PASS results for genuinely unsafe configs.
 - Output channels that could be exploited for prompt injection (the text report,
-  `--json`, `--sarif`, `--html`, `--pdf`) — anywhere untrusted config or skill content
+  `--json`, `--sarif`, `--html`, `--pdf`) - anywhere untrusted config or skill content
   reaches a reader without being sanitized as quoted evidence.
 - Any code path that reads, writes, or executes more than the documented scope.
 - Dependency or supply-chain issues in the publish workflow.
@@ -82,5 +82,5 @@ days for confirmed issues. Complex issues may take longer; we will communicate d
 
 The full maintainer release checklist (tests, doc alignment, dependency review,
 signed release assets) lives in [`docs/RELEASING.md`](docs/RELEASING.md). It
-exists to prevent release drift — code, docs, and operational security guidance
+exists to prevent release drift - code, docs, and operational security guidance
 must always describe the same shipped behavior.

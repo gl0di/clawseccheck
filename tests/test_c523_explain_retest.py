@@ -180,6 +180,17 @@ def test_a_backtick_wrapped_tag_leaves_no_stray_backticks():
     assert "[CHECK" not in note
 
 
+def test_one_byte_doc_markup_is_decoded_back_to_the_real_characters():
+    """docs/THREAT_COVERAGE.md ships one-byte for ClawHub (symbols as HTML entities,
+    symbol-bearing spans as <code>), but --explain prints to a terminal: the note must
+    carry the character, never the markup."""
+    assert "⇏" in _threat_coverage_note("B31")
+    assert "`іgnore`" in _threat_coverage_note("B349")
+    leaked = {fid: note for fid in CATALOG_BY_ID
+              if (note := _threat_coverage_note(fid)) and ("&#" in note or "<code>" in note)}
+    assert not leaked, leaked
+
+
 def test_a_terse_row_falls_back_to_its_category():
     """B10's Notes cell is JUST the tag ('| ... | B10 | `[CHECK: B10]` |') — stripping
     the tag alone would leave an empty string, which used to read as 'not covered'."""

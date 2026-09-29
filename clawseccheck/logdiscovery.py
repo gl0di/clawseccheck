@@ -1,32 +1,32 @@
 """Read-only enumeration of the agent's own log/transcript sinks (E-044 Phase 1 substrate).
 
-"All logs" here means the corpus the OpenClaw agent itself PRODUCES — not the host's OS
+"All logs" here means the corpus the OpenClaw agent itself PRODUCES - not the host's OS
 logs (journald / bash_history are out of scope; see the workspace design doc §1.1, which
 grounds that boundary against the real dist). The sinks this module knows about:
 
-  - ``logging.file``                    — config-declared primary JSONL log
-  - ``diagnostics.cacheTrace.filePath`` — config-declared cache-trace transcript JSONL
+  - ``logging.file``                    - config-declared primary JSONL log
+  - ``diagnostics.cacheTrace.filePath`` - config-declared cache-trace transcript JSONL
                                            (NOT ``logging.cacheTrace.*``, which does not
-                                           exist in the dist — see B82 in checks/_egress.py),
+                                           exist in the dist - see B82 in checks/_egress.py),
                                            PLUS its conventional default
                                            ``logs/cache-trace.jsonl`` when ``filePath`` is
-                                           unset — which is the common shape, since
+                                           unset - which is the common shape, since
                                            ``filePath`` is optional and tracing is switched
                                            on with ``enabled`` alone
-  - trajectory sidecars                 — ``agents/*/sessions/*.trajectory.jsonl``
+  - trajectory sidecars                 - ``agents/*/sessions/*.trajectory.jsonl``
                                            (on by default; reuses ``trajectory.find_trajectory_files``)
-  - session transcripts                 — ``agents/*/sessions/*.jsonl`` (NOT the trajectory
+  - session transcripts                 - ``agents/*/sessions/*.jsonl`` (NOT the trajectory
                                            sidecar files, which are already covered above)
-  - config-audit log                    — ``logs/config-audit.jsonl`` (B77 already reads it)
-  - generic rotated/ad-hoc logs         — ``logs/*.log``
-  - memory files                        — ``<workspace>/memory/**`` (same convention
+  - config-audit log                    - ``logs/config-audit.jsonl`` (B77 already reads it)
+  - generic rotated/ad-hoc logs         - ``logs/*.log``
+  - memory files                        - ``<workspace>/memory/**`` (same convention
                                            ``check_data_atrest`` (B19, checks/_egress.py) knows)
-  - install backups                     — ``<home>/.openclaw-install-backups/**`` (same
+  - install backups                     - ``<home>/.openclaw-install-backups/**`` (same
                                            convention B19 knows)
 
 Layer 1 leaf: depends only on ``collector`` (Context/dig/WORKSPACE_DIRS), ``trajectory``
-(``find_trajectory_files`` — reused, not re-implemented), ``safeio`` (symlink-safe
-traversal), and stdlib. Never imports ``checks/`` (Layer 2) or any Layer-3 module —
+(``find_trajectory_files`` - reused, not re-implemented), ``safeio`` (symlink-safe
+traversal), and stdlib. Never imports ``checks/`` (Layer 2) or any Layer-3 module -
 ``logscan.py``, the sibling leaf that reads these sinks, has the same constraint, and this
 module's job is scoped even narrower: it never opens a file, it only enumerates paths.
 
@@ -47,7 +47,7 @@ from .collector import Context, WORKSPACE_DIRS, _safe_is_dir, _safe_is_symlink, 
 from .safeio import walk_dir_safely
 from .trajectory import find_trajectory_files
 
-# Overall cap across every source combined (DoS guard — mirrors the 200-file caps used
+# Overall cap across every source combined (DoS guard - mirrors the 200-file caps used
 # elsewhere in the codebase, e.g. checks/_egress.py's _collect_atrest_transcripts).
 _MAX_SINKS = 200
 # Per-source sub-cap so one pathologically large source can't starve the others out of
@@ -55,26 +55,26 @@ _MAX_SINKS = 200
 _MAX_PER_SOURCE = 200
 
 # Same conventional backup directory name check_data_atrest (B19, checks/_egress.py)
-# already reads — the path CONVENTION is reused here (Layer 1 can't import a Layer-2
+# already reads - the path CONVENTION is reused here (Layer 1 can't import a Layer-2
 # check function), not the code.
 _BACKUP_DIRNAME = ".openclaw-install-backups"
 
 
 @dataclass(frozen=True)
 class LogSink:
-    """One discovered log/transcript file — a path, never file content."""
+    """One discovered log/transcript file - a path, never file content."""
 
     path: Path
     kind: str  # trajectory|config_log|cache_trace|transcript|config_audit|memory|backup
     source: str  # config|convention|env
     # B-484: cheap stat() metadata, so a consumer that cannot afford to read every sink
-    # can choose WHICH ones to read from (size, mtime) alone — deterministically, before
+    # can choose WHICH ones to read from (size, mtime) alone - deterministically, before
     # opening anything. Measured on a real 132-sink corpus: stat()ing all of them costs
     # 0.27 ms, 0.006% of B164's 4.5s budget, because discovery already stat()s every
     # candidate in `_is_regular_readable_file` and the inodes are page-cache hot.
     #
     # DEFAULTED, and deliberately so: every existing 3-argument LogSink(...) construction
-    # — including the ones in tests/test_b314_check_perf.py — keeps working and reads
+    # - including the ones in tests/test_b314_check_perf.py - keeps working and reads
     # size 0 / mtime 0.0. `_plan_log_hunt_sinks` treats size 0 as "unknown, admit it and
     # let the clock govern", so a hand-built sink is never planned out.
     #
@@ -100,8 +100,8 @@ def _config_path_sink(ctx: Context, dotted_path: str, kind: str) -> "LogSink | N
     file.
 
     Deliberately path-based, not gated on ``diagnostics.cacheTrace.enabled``: a trace file
-    written during an earlier debugging session still exists — and still holds transcript
-    content worth scanning — after tracing is switched back off.
+    written during an earlier debugging session still exists - and still holds transcript
+    content worth scanning - after tracing is switched back off.
     """
     value = dig(ctx.config, dotted_path)
     if not isinstance(value, str) or not value.strip():
@@ -118,10 +118,10 @@ def _config_path_sink(ctx: Context, dotted_path: str, kind: str) -> "LogSink | N
 
 
 def _transcript_sinks(home: Path, budget: int) -> list[LogSink]:
-    """``agents/*/sessions/*.jsonl`` — session transcripts, NOT trajectory sidecars.
+    """``agents/*/sessions/*.jsonl`` - session transcripts, NOT trajectory sidecars.
 
     A trajectory sidecar file also matches ``*.jsonl`` under the same directory (it is
-    named ``<session>.trajectory.jsonl``), so it is explicitly excluded here — it is
+    named ``<session>.trajectory.jsonl``), so it is explicitly excluded here - it is
     already discovered as its own dedicated ``trajectory``-kind sink.
     """
     out: list[LogSink] = []
@@ -154,12 +154,12 @@ def _transcript_sinks(home: Path, budget: int) -> list[LogSink]:
 
 
 def _default_cache_trace_sink(home: Path) -> "LogSink | None":
-    """``logs/cache-trace.jsonl`` — where cache tracing writes when ``filePath`` is unset.
+    """``logs/cache-trace.jsonl`` - where cache tracing writes when ``filePath`` is unset.
 
     ``resolveCacheTraceConfig`` (``dist/selection-JInn13lc.js:1052``) resolves the
     destination as ``config?.filePath?.trim() || env.OPENCLAW_CACHE_TRACE_FILE?.trim()``
     and otherwise falls back to ``path.join(resolveStateDir(env), "logs",
-    "cache-trace.jsonl")`` — and ``resolveStateDir`` defaults to the same state root this
+    "cache-trace.jsonl")`` - and ``resolveStateDir`` defaults to the same state root this
     module is handed as ``home`` (``dist/config-utils-Cn9AD66v.js:65-77``). Since
     ``filePath`` is optional and ``enabled`` alone switches tracing on, the default path
     is the COMMON shape; keying discovery on ``filePath`` alone found the sink only for
@@ -177,7 +177,7 @@ def _default_cache_trace_sink(home: Path) -> "LogSink | None":
 
 
 def _config_audit_sink(home: Path) -> "LogSink | None":
-    """``logs/config-audit.jsonl`` — the same file B77 (check_config_audit_log) reads."""
+    """``logs/config-audit.jsonl`` - the same file B77 (check_config_audit_log) reads."""
     p = home / "logs" / "config-audit.jsonl"
     if not _is_regular_readable_file(p):
         return None
@@ -185,9 +185,9 @@ def _config_audit_sink(home: Path) -> "LogSink | None":
 
 
 def _generic_log_sinks(home: Path, budget: int) -> list[LogSink]:
-    """Bare ``<home>/logs/*.log`` files (excluding config-audit.jsonl — its own kind).
+    """Bare ``<home>/logs/*.log`` files (excluding config-audit.jsonl - its own kind).
 
-    Bucketed as ``config_log`` — the same kind as the config-declared ``logging.file`` —
+    Bucketed as ``config_log`` - the same kind as the config-declared ``logging.file`` -
     since the LogSink taxonomy has no more specific kind for a bare rotated/ad-hoc log
     file sitting under the conventional ``logs/`` directory.
     """
@@ -211,11 +211,11 @@ def _generic_log_sinks(home: Path, budget: int) -> list[LogSink]:
 def _memory_sinks(
     home: Path, budget: int, ctx: Context | None = None, unreadable: list | None = None,
 ) -> list[LogSink]:
-    """Workspace memory-dir files — the same ``<workspace>/memory`` convention
+    """Workspace memory-dir files - the same ``<workspace>/memory`` convention
     ``check_data_atrest`` (B19, checks/_egress.py) already knows. Symlink-safe, capped.
 
     B-913: a workspace dir made non-traversable (`chmod 000`) raises `PermissionError`
-    on the bare `mem_dir.is_dir()` this used to call directly — needs +x on `mem_dir`'s
+    on the bare `mem_dir.is_dir()` this used to call directly - needs +x on `mem_dir`'s
     PARENT (the workspace dir), which a hostile/misconfigured permission on the
     workspace removes. Routed through `_safe_is_dir`/`_safe_is_symlink` so that
     degrades to a disclosed miss instead of an uncaught crash; *unreadable*, when
@@ -241,7 +241,7 @@ def _memory_sinks(
 
 
 def _backup_sinks(home: Path, budget: int) -> list[LogSink]:
-    """``<home>/.openclaw-install-backups/**`` — the same convention B19 already knows.
+    """``<home>/.openclaw-install-backups/**`` - the same convention B19 already knows.
     Symlink-safe, capped."""
     backup_dir = home / _BACKUP_DIRNAME
     if not backup_dir.is_dir() or backup_dir.is_symlink():
@@ -253,13 +253,13 @@ def _backup_sinks(home: Path, budget: int) -> list[LogSink]:
 
 
 def discover_log_sinks(ctx: Context, unreadable: list | None = None) -> list[LogSink]:
-    """Enumerate the agent's own log/transcript sinks — paths only, nothing is read.
+    """Enumerate the agent's own log/transcript sinks - paths only, nothing is read.
 
     Bounded to ``_MAX_SINKS`` total; deduplicated by resolved path so the same file is
     never counted twice across sources. Returns ``[]`` when ``ctx.home`` is not usable.
 
     *unreadable*, when given (B-913), collects the path(s) of any source directory
-    this discovery could not even stat (e.g. a `chmod 000` workspace dir) — additive,
+    this discovery could not even stat (e.g. a `chmod 000` workspace dir) - additive,
     optional, so every existing caller/test passing only *ctx* is unaffected.
     """
     home = getattr(ctx, "home", None)
@@ -281,7 +281,7 @@ def discover_log_sinks(ctx: Context, unreadable: list | None = None) -> list[Log
                 continue
             seen.add(key)
             # B-484: stamp size/mtime here, once per admitted sink, so downstream
-            # planning needs no second walk. A stat() failure is not an error — the
+            # planning needs no second walk. A stat() failure is not an error - the
             # sink stays in the list with the 0/0.0 defaults and is treated as
             # unknown-cost by any planner.
             try:
@@ -294,7 +294,7 @@ def discover_log_sinks(ctx: Context, unreadable: list | None = None) -> list[Log
     # NOTE (B-484): this function deliberately does NOT sort. `check_memory_injection`
     # (B180, checks/_lifecycle.py) consumes the same list filtered to kind="memory" and
     # renders `list(corroborated.items())[:5]` straight into its Finding.detail, which
-    # baseline.fingerprint() hashes — so reordering here would move B180's fingerprint
+    # baseline.fingerprint() hashes - so reordering here would move B180's fingerprint
     # and orphan users' .clawseccheckignore entries, for no benefit to B180 (it has no
     # cumulative budget and reads every memory sink anyway). Ordering is the consumer's
     # job: see `_plan_log_hunt_sinks` in checks/_egress.py.
@@ -306,11 +306,11 @@ def discover_log_sinks(ctx: Context, unreadable: list | None = None) -> list[Log
     cache_trace = _config_path_sink(ctx, "diagnostics.cacheTrace.filePath", "cache_trace")
     if cache_trace is not None:
         _add_many([cache_trace])
-    # `filePath` is optional — `enabled` alone starts tracing — so also probe the
+    # `filePath` is optional - `enabled` alone starts tracing - so also probe the
     # conventional default. Deduplication by resolved path means a config that DOES set
     # `filePath` to this same location still yields one sink, not two.
     #
-    # C-471: on OpenClaw 2026.8.1 that read above is always empty — `filePath` was removed
+    # C-471: on OpenClaw 2026.8.1 that read above is always empty - `filePath` was removed
     # and `diagnostics.cacheTrace` holds only `enabled`, so the schema has ZERO `filePath`
     # leaves anywhere. The read stays for a 2026.7.x fleet, which still sets it; the
     # default probe below is what finds the sink on a current build, which is why this

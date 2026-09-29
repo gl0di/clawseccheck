@@ -22,6 +22,7 @@ Offline, writes nothing outside ``tmp_path``, stdlib only.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -212,11 +213,25 @@ def test_the_marker_set_covers_every_glyph_the_renderer_uses():
     severity the gate cannot see: the first version omitted ⛔ and ⚠️ — CRITICAL and HIGH —
     and read its two loudest alerts only through the exit code.
     """
-    src = (REPO_ROOT / "clawseccheck" / "report.py").read_text(encoding="utf-8")
-    maps = re.findall(
-        r'\{"CRITICAL": "([^"]+)", "HIGH": "([^"]+)", "MEDIUM": "([^"]+)", '
-        r'"LOW": "([^"]+)", "INFO": "([^"]+)"\}', src)
+    # Read the DECODED string values off the syntax tree, not the source text. The shipped
+    # bundle is held to one-byte characters (every glyph in report.py is written as a \u
+    # escape), so a regex over the raw source would see `⛔` where the renderer emits the
+    # real character, and the gate's marker set would never match it.
+    tree = ast.parse((REPO_ROOT / "clawseccheck" / "report.py").read_text(encoding="utf-8"))
+    keys = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
+    maps = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict) or len(node.keys) != len(keys):
+            continue
+        if not all(isinstance(k, ast.Constant) and k.value == want
+                   for k, want in zip(node.keys, keys)):
+            continue
+        if all(isinstance(v, ast.Constant) and isinstance(v.value, str) and v.value
+               for v in node.values):
+            maps.append(tuple(v.value for v in node.values))
     assert maps, "the severity->glyph map in report.py has moved; re-anchor this guard"
+    # Both the emoji map and the --ascii map are found, exactly as the old regex found both.
+    assert len(maps) >= 2, f"expected the emoji and the ascii severity maps, found {maps!r}"
     for row in maps:
         for glyph in row:
             assert glyph in gate._ALERT_MARKS, (

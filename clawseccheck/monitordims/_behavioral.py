@@ -1,4 +1,4 @@
-"""The `behavioral_*` dimensions — what the agent actually DID, between two runs.
+"""The `behavioral_*` dimensions - what the agent actually DID, between two runs.
 
 F-173. `behavioral.py` produces the detector results; this compares two runs of them. The
 keys are CONDITIONAL: their absence means the behavioural layer did not run this invocation,
@@ -31,13 +31,13 @@ def _diff_behavioral(
 
     Takes nine parameters because that is what the statement measurably read, not because
     it is entangled: it writes nothing any later arm reads. The whole `if` travelled with
-    its condition — rebuilding a compound guard as one clause is how the previous batch
+    its condition - rebuilding a compound guard as one clause is how the previous batch
     re-created a B-269 fabrication, so the condition is moved rather than re-derived.
     """
     if not isinstance(_c_fired, list):
         note(NOTE_UNDETERMINED,
              "What your agent actually did was not examined this run, so nothing in this "
-             "report covers its behaviour — only how it is set up.")
+             "report covers its behaviour \u2014 only how it is set up.")
     else:
         if curr.get("behavioral_capped"):
             note(NOTE_INSPECTION_CAPPED,
@@ -45,9 +45,9 @@ def _diff_behavioral(
                  "only the most recent part of it was examined for behaviour patterns.")
         _b_unknown = curr.get("behavioral_undetermined")
         if isinstance(_b_unknown, list) and _b_unknown:
-            # Neither the count's catalog TITLE nor the phrase "the activity log" — both
+            # Neither the count's catalog TITLE nor the phrase "the activity log" - both
             # were in the first version and both were wrong here. The titles are written
-            # for the check catalog ("OpenClaw's runtime audit_events trail — coverage,
+            # for the check catalog ("OpenClaw's runtime audit_events trail - coverage,
             # policy-blocked tools, and evasive tool names") and read as jargon in a
             # sentence aimed at someone who just wants to know if their agent is fine. And
             # "from the activity log" presupposes there is one: measured on a fresh home
@@ -56,7 +56,7 @@ def _diff_behavioral(
             # was read did not settle it".
             note(NOTE_UNDETERMINED,
                  f"{len(_b_unknown)} thing(s) about how your agent has been behaving could "
-                 f"not be determined — there may be too little recorded activity to judge "
+                 f"not be determined \u2014 there may be too little recorded activity to judge "
                  f"yet. Run --behavioral to see which.")
         if isinstance(_p_fired, list):
             if prev_blind or curr_blind:
@@ -76,7 +76,7 @@ def _diff_behavioral(
                     # mean nothing more than the window sliding over older events, and
                     # paging on window movement is a false alarm. But when NEITHER run hit
                     # the cap, both replays were complete, that ambiguity does not exist,
-                    # and "newly fired" means newly DONE — the agent did something it had
+                    # and "newly fired" means newly DONE - the agent did something it had
                     # not done before. At INFO that sat below the shipped cron recipe's
                     # `--fail-on medium`, so the one signal in this whole watch about what
                     # the agent actually DID, rather than how it is configured, could never
@@ -85,7 +85,7 @@ def _diff_behavioral(
                     # `is False`, not falsy: an ABSENT flag (an older baseline, or a run
                     # that did not record one) must read as capped. Absence is not evidence
                     # that the replay was complete, and the failure it would cause is the
-                    # loud kind — paging on a window slide.
+                    # loud kind - paging on a window slide.
                     #
                     # MEDIUM is the ceiling for the reason the `plugins` arm states: no
                     # HIGH or CRITICAL ships on fixture evidence alone.
@@ -95,8 +95,8 @@ def _diff_behavioral(
                     # is capped. That was an overstatement and it is corrected here rather
                     # than quietly dropped: `files_capped` is a property of how much
                     # recorded activity a home holds, not of the fleet. Measured through the
-                    # real audit path — `~/.openclaw` True, `fixtures/home_safe` False,
-                    # `fixtures/traj_outcome_anomaly` False with T2 fired — so the branch IS
+                    # real audit path - `~/.openclaw` True, `fixtures/home_safe` False,
+                    # `fixtures/traj_outcome_anomaly` False with T2 fired - so the branch IS
                     # reachable end to end, and
                     # `tests/test_f182_behaviour_newly_done.py::test_the_paging_branch_is_
                     # reachable_through_the_real_cli` exercises it through `main()`.

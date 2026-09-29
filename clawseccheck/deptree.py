@@ -1,10 +1,10 @@
-"""deptree — bounded, read-only enumeration of an installed npm dependency tree.
+"""deptree - bounded, read-only enumeration of an installed npm dependency tree.
 
 Layer 1 leaf module (imports only stdlib + ``safeio``, per CLAUDE.md §3): it walks a
 ``node_modules`` directory, parses each package's own manifest, and reports the two ways
-a package there can run code at install time — the install-lifecycle hooks it declares,
-and the command-expansions in its ``binding.gyp`` build config — together with the
-in-package file each would actually run. It renders no verdict —
+a package there can run code at install time - the install-lifecycle hooks it declares,
+and the command-expansions in its ``binding.gyp`` build config - together with the
+in-package file each would actually run. It renders no verdict -
 ``checks/_lifecycle.py``'s B349 is the consumer, exactly as ``sockets.py`` is the
 read-only source B340 reasons over.
 
@@ -12,7 +12,7 @@ WHY THIS EXISTS (F-167). Every content scanner in this package deliberately step
 a dependency tree: the plugin walk prunes ``node_modules`` by name, and a skill's tree is
 walked as ordinary content under a file cap that a real tree blows past. So the one
 directory a compromised transitive dependency actually lives in is the one nothing
-reasons about. B42 already recognises a ``preinstall``/``postinstall`` hook — it just
+reasons about. B42 already recognises a ``preinstall``/``postinstall`` hook - it just
 never looks here.
 
 WHAT IT DOES NOT DO, and why the boundary is permanent:
@@ -21,12 +21,12 @@ WHAT IT DOES NOT DO, and why the boundary is permanent:
     version is known-bad, and no future revision of it may. Every signal is derived from
     bytes already on disk.
   * **No root manifest.** Only packages *inside* ``node_modules`` are enumerated. A
-    package's own top-level hooks are its vendor's installer — measured on a clean box
+    package's own top-level hooks are its vendor's installer - measured on a clean box
     (2026-08-04) OpenClaw's own root manifest declares two, and flagging a vendor's own
     installer would be a false positive on every single install.
   * **No verdict on the hook alone.** Measured on the same box: of 380 packages in
     OpenClaw's tree, 3 declare an install-lifecycle hook and all 3 are benign (re-measured
-    2026-09-19 on the installed 2026.9.5: 398 packages, 4 hooks plus 1 build directive —
+    2026-09-19 on the installed 2026.9.5: 398 packages, 4 hooks plus 1 build directive -
     `@google/genai` preinstall `echo`, `koffi` install `cnoke.cjs`, `protobufjs` postinstall,
     `tree-sitter-bash` install `node-gyp-build` with an inline gyp expansion; targets readable
     for two of those five sites). A rule
@@ -35,30 +35,30 @@ WHAT IT DOES NOT DO, and why the boundary is permanent:
     half of a conjunction; the consumer supplies the other half.
 
 TARGET RESOLUTION IS THE FALSE-POSITIVE-CRITICAL PART. Of those same 3 real hooks, only
-ONE runs a file that lives in its own package (``protobufjs`` → ``scripts/postinstall``).
-The other two — ``node-gyp-build`` (a bin contributed by a *dependency*) and
-``echo 'preinstall: no-op'`` (a shell builtin) — have no in-package target at all.
+ONE runs a file that lives in its own package (``protobufjs`` -> ``scripts/postinstall``).
+The other two - ``node-gyp-build`` (a bin contributed by a *dependency*) and
+``echo 'preinstall: no-op'`` (a shell builtin) - have no in-package target at all.
 "No resolvable target" is therefore the COMMON case, not the exceptional one, and it
 must produce *no finding* rather than noise: a hook this module cannot resolve is a hook
 whose bytes we never read, and a checker must not claim anything about bytes it never
-read. Resolution is deliberately narrow — only an explicit ``node <file>`` invocation
+read. Resolution is deliberately narrow - only an explicit ``node <file>`` invocation
 resolves, and only to a real regular file inside that package's own directory.
 
 WHY ``binding.gyp`` IS ENUMERATED TOO (B-447). Reading only ``scripts`` was a false
 negative, not a scoping choice. The node-gyp supply-chain worm executes with **no
 lifecycle script at all**: its tarballs declare no ``preinstall``/``install``/
 ``postinstall``/``prepare``, and execution comes instead from GYP's own command-expansion
-syntax inside the build config — ``"sources": ["<!(node index.js && echo stub.c)"]`` runs
+syntax inside the build config - ``"sources": ["<!(node index.js && echo stub.c)"]`` runs
 while node-gyp is merely *configuring*, long before any compiler starts. npm invokes
 node-gyp on its own for any package shipping a ``binding.gyp`` with no prebuilt binary,
 so the file's mere presence is the trigger. A scanner that enumerates lifecycle scripts
 is exactly the script-focused monitoring that shape was built to walk past.
 
 Two boundaries keep that from becoming a false-positive engine. **Only the package
-root's ``binding.gyp``** is read — that is where npm's automatic ``node-gyp configure``
+root's ``binding.gyp``** is read - that is where npm's automatic ``node-gyp configure``
 looks; a nested one is not auto-invoked, and reporting it would manufacture a finding the
 installer never triggers. And **the same narrow resolver** decides what has bytes to
-read, so the overwhelmingly common honest idiom (``<!(node -e "require('nan')")`` — an
+read, so the overwhelmingly common honest idiom (``<!(node -e "require('nan')")`` - an
 inline expression, no file) resolves to nothing and is never assessed, exactly as
 ``node-gyp-build`` is not. What is NOT followed, and is stated rather than implied: GYP's
 own ``includes`` directive can pull in a ``.gypi`` carrying further expansions. Following
@@ -78,14 +78,14 @@ from .safeio import walk_dir_safely
 # Bounds. OpenClaw's real tree measured 380 packages and ClawHub's 39 (2026-08-04; 398 for
 # OpenClaw on 2026.9.5, 2026-09-19), so
 # these leave generous headroom while still refusing to walk an unbounded tree. A cap
-# that is HIT is disclosed (`truncated`), never silently absorbed — see GR#4.
+# that is HIT is disclosed (`truncated`), never silently absorbed - see GR#4.
 MAX_PACKAGES = 2000
 MAX_MANIFEST_BYTES = 512_000
 MAX_TARGET_BYTES = 2_000_000
 
 # A build config is a small hand-written file; real ones measured on this box are under
 # 4 KB. The per-file expansion cap stops a hostile config from turning one package into
-# an unbounded amount of work — a config that hits it has already earned attention.
+# an unbounded amount of work - a config that hits it has already earned attention.
 MAX_GYP_BYTES = 256_000
 MAX_GYP_EXPANSIONS = 40
 
@@ -125,7 +125,7 @@ _NODE_BINS = frozenset({"node", "nodejs"})
 class LifecycleHook:
     """One declared install-lifecycle hook, and the in-package files it would run.
 
-    `targets` is empty whenever the command is not a resolvable `node <file>` form —
+    `targets` is empty whenever the command is not a resolvable `node <file>` form -
     which is the common case on real trees. An empty `targets` means "we did not read
     any bytes for this hook", never "the hook is fine".
     """
@@ -144,7 +144,7 @@ class BuildDirective:
     Same contract as `LifecycleHook`: an empty `targets` means the expansion runs
     something whose bytes we never read (an inline `node -e` expression, a `python`
     probe, a `pkg-config` call), never that it is fine. Unlike a lifecycle hook this
-    needs no `phase` — npm triggers it on the file's existence alone.
+    needs no `phase` - npm triggers it on the file's existence alone.
     """
 
     package: str
@@ -158,7 +158,7 @@ class DepTreeScan:
     """Result of one bounded dependency-tree walk.
 
     `truncated` is True when the package cap was reached before the tree was fully
-    walked — the caller MUST degrade its verdict rather than report a clean tree.
+    walked - the caller MUST degrade its verdict rather than report a clean tree.
     """
 
     root: Path | None = None
@@ -189,14 +189,14 @@ def find_package_root(binary_name: str, *, which=None,
                       candidate_roots=None) -> "Path | None":
     """Locate an installed npm package's root directory from its executable on PATH.
 
-    Nothing in this package could previously do this — ``checks/_config.py``'s
+    Nothing in this package could previously do this - ``checks/_config.py``'s
     ``_names_openclaw_install()`` only RECOGNISES a path handed to it from elsewhere
     (a kernel-resolved ``/proc/<pid>/exe``); it cannot find one. B349 needs the root
     itself, because the measurement that motivated it found every real dependency tree
     on a live box under the npm global root, and none under any skill or plugin
     directory. A check scoped away from that root would scan nothing and report clean.
 
-    Resolution is PATH-based and subprocess-free — ``shutil.which`` by default, with
+    Resolution is PATH-based and subprocess-free - ``shutil.which`` by default, with
     the same injectable-resolver contract ``hostwatch.detect(which=...)`` already uses
     so tests never touch the real PATH.
 
@@ -205,7 +205,7 @@ def find_package_root(binary_name: str, *, which=None,
     would happily attribute a neighbouring or parent package. So the manifest's own
     ``name`` must EQUAL *binary_name* before the directory is accepted. Without that,
     a shadowed or renamed binary earlier on PATH would silently redirect the whole scan
-    to an unrelated tree — and the check would report on it as though it were OpenClaw's.
+    to an unrelated tree - and the check would report on it as though it were OpenClaw's.
     Returns None when nothing on PATH resolves to a package that names itself correctly;
     the caller must treat that as UNKNOWN, never as a clean tree.
     """
@@ -354,8 +354,8 @@ def resolve_hook_targets(command: str, pkg_dir: Path) -> tuple:
     """Files inside *pkg_dir* that *command* would run via an explicit `node <file>`.
 
     Narrow on purpose (see the module docstring). A token is a candidate only when the
-    PREVIOUS meaningful token is a node interpreter, so `node-gyp-build` — whose own
-    basename is not `node` — never resolves, and `echo 'preinstall: no-op'` never does
+    PREVIOUS meaningful token is a node interpreter, so `node-gyp-build` - whose own
+    basename is not `node` - never resolves, and `echo 'preinstall: no-op'` never does
     either. Shell operators (`&&`, `;`, `|`) simply end one command and begin another,
     so a chained `node a.js && node b.js` yields both without this having to understand
     shell grammar.
@@ -366,7 +366,7 @@ def resolve_hook_targets(command: str, pkg_dir: Path) -> tuple:
     """
     try:
         tokens = shlex.split(command, posix=True)
-    except ValueError:  # unbalanced quotes — not something to guess at
+    except ValueError:  # unbalanced quotes - not something to guess at
         return ()
     out: list = []
     expect_script = False
@@ -411,7 +411,7 @@ def extract_gyp_commands(
 ) -> tuple:
     """Every `<!(...)` / `<!@(...)` command-expansion body in a GYP file, in order.
 
-    GYP is not JSON — it permits comments, single quotes and trailing commas — so this
+    GYP is not JSON - it permits comments, single quotes and trailing commas - so this
     deliberately does NOT parse the file. It only locates the expansion syntax, because
     that is the only part whose meaning we need and the only part a parser could get
     wrong in a way that loses a real one.
@@ -419,7 +419,7 @@ def extract_gyp_commands(
     Paren matching is balanced-depth rather than a lazy regex: real commands nest parens
     (`<!(node -p "require('x').include")`), and stopping at the first `)` would truncate
     the command into something we never actually saw. An expansion whose parens never
-    balance yields nothing and scanning resumes after it — we cannot say where such a
+    balance yields nothing and scanning resumes after it - we cannot say where such a
     command ends, and a guess would be a fabricated finding (GR#4).
 
     Each scan is bounded to `MAX_GYP_COMMAND_BYTES` ahead and the number of markers tried
@@ -428,8 +428,8 @@ def extract_gyp_commands(
 
     A BOUND THAT IS HIT IS DISCLOSED, NEVER ABSORBED. Every bound here is also an evasion
     if it fails silently: the package author writes the `binding.gyp`, so padding it with
-    2,000 decoy `<!` markers ahead of the real expansion — or spacing one command past the
-    scan window — would evict the real command from a budget and leave a clean PASS behind.
+    2,000 decoy `<!` markers ahead of the real expansion - or spacing one command past the
+    scan window - would evict the real command from a budget and leave a clean PASS behind.
     So *capped* (a list, the same out-parameter idiom `safeio.walk_dir_safely` uses) gets a
     reason appended, and B349 turns that into UNKNOWN naming the package rather than a
     verdict over bytes it never read. An expansion whose parens simply never balance is NOT
@@ -440,17 +440,17 @@ def extract_gyp_commands(
     markers = 0
     while i < n:
         if len(out) >= max_expansions:
-            _note_cap(capped, "expansion cap reached — the rest of the build config was not examined")
+            _note_cap(capped, "expansion cap reached \u2014 the rest of the build config was not examined")
             break
         if markers >= MAX_GYP_MARKERS:
-            _note_cap(capped, "command-marker budget exhausted — the rest of the build config was not examined")
+            _note_cap(capped, "command-marker budget exhausted \u2014 the rest of the build config was not examined")
             break
         start = text.find("<!", i)
         if start < 0:
             break
         markers += 1
         cur = start + 2
-        if cur < n and text[cur] == "@":  # `<!@(...)` — expands to a list, runs the same
+        if cur < n and text[cur] == "@":  # `<!@(...)` - expands to a list, runs the same
             cur += 1
         if cur >= n or text[cur] != "(":
             i = start + 2
@@ -488,7 +488,7 @@ def _is_commented_out(text: str, marker: int) -> bool:
 
     GYP takes `#` to end-of-line as a comment, and every real build config measured on
     this box uses them. Without this, a commented-out expansion was lifted out as a live
-    command and its target read and judged — a verdict about a file the installer would
+    command and its target read and judged - a verdict about a file the installer would
     never run (found by the B-447 C-135 pass, reproduced end-to-end as a wrong UNKNOWN on
     an honest package).
 
@@ -520,7 +520,7 @@ def _gyp_directives(pkg_dir: Path, name: str, relpath: str) -> tuple:
     """Command-expansions in *pkg_dir*'s root `binding.gyp`, and any reason we fell short.
 
     Returns `(directives, capped_notes)`. Reached for EVERY package, including one
-    declaring no `scripts` at all — which is precisely the shape of the worm this exists
+    declaring no `scripts` at all - which is precisely the shape of the worm this exists
     for (B-447).
 
     Every early return here is a place a hostile package could hide behind, so each one
@@ -612,7 +612,7 @@ def scan_dep_tree(nm_root, *, max_packages: int = MAX_PACKAGES) -> DepTreeScan:
         result.packages += 1
         try:
             relpath = str(pkg_dir.relative_to(root))
-        except ValueError:  # pragma: no cover — walk_dir_safely confines to root
+        except ValueError:  # pragma: no cover - walk_dir_safely confines to root
             relpath = pkg_dir.name
         name = data.get("name")
         if not isinstance(name, str) or not name:

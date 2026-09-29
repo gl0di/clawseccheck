@@ -1,4 +1,4 @@
-"""Coverage ledger — tracks when opt-in test capabilities were last run.
+"""Coverage ledger - tracks when opt-in test capabilities were last run.
 
 Records last-run dates for opt-in capabilities to a small JSON map at
 ``~/.clawseccheck/coverage.json`` and emits an advisory nudge when a
@@ -25,7 +25,7 @@ from pathlib import Path
 
 DEFAULT_COVERAGE = "~/.clawseccheck/coverage.json"
 
-# Capability → stale threshold in days (hard-coded per spec).
+# Capability -> stale threshold in days (hard-coded per spec).
 THRESHOLDS: dict[str, int] = {
     "self_test": 30,
     "vet_mcp": 14,
@@ -39,7 +39,7 @@ def _ledger_path(home: str | None = None, path: str | None = None) -> Path:
     ----------
     path:
         The ledger file itself. Wins over *home*. This is how the CLI keeps the
-        ledger inside whatever local store the rest of the run is using — see
+        ledger inside whatever local store the rest of the run is using - see
         B-599 below.
     home:
         When given, treated as the user's HOME directory; the ledger lives at
@@ -47,7 +47,7 @@ def _ledger_path(home: str | None = None, path: str | None = None) -> Path:
         ``~/.clawseccheck/coverage.json`` (expanduser) is used.
 
     B-599: ``home`` was documented "for testing" and no production path passed
-    anything, so this always resolved to the REAL ``~/.clawseccheck`` — including
+    anything, so this always resolved to the REAL ``~/.clawseccheck`` - including
     under ``--data-dir``, whose own help text promises a scratch run "cannot
     half-redirect and write into your real history". Three of the store's four
     files moved with that flag and this one did not, so scratch, CI and test runs
@@ -67,14 +67,14 @@ def load_ledger(home: str | None = None, *, path: str | None = None) -> dict[str
     """Load the coverage ledger from disk.
 
     Returns a ``{capability: last_run_iso_date}`` dict.
-    Returns an empty dict if the file is missing, unreadable, or malformed —
+    Returns an empty dict if the file is missing, unreadable, or malformed -
     callers must handle the "never-run" case explicitly.
 
     Parameters
     ----------
     home:
         Override the ledger's parent HOME dir (for testing).
-        ``None`` → real ``~/.clawseccheck/`` via expanduser.
+        ``None`` -> real ``~/.clawseccheck/`` via expanduser.
     path:
         The ledger file itself; wins over *home*. The CLI passes the store dir it
         is already using for history/state/events, so every local-state file of a
@@ -87,10 +87,10 @@ def load_ledger(home: str | None = None, *, path: str | None = None) -> dict[str
         return {}
     if not isinstance(data, dict):
         return {}
-    # Accept only string → string entries; discard anything malformed. "_schema"
-    # (C-162) is a reserved bookkeeping key, not a capability — never surfaced to
+    # Accept only string -> string entries; discard anything malformed. "_schema"
+    # (C-162) is a reserved bookkeeping key, not a capability - never surfaced to
     # callers (freshness_notice iterates THRESHOLDS, so it would be ignored anyway,
-    # but filtering here keeps the returned map a clean capability→date view).
+    # but filtering here keeps the returned map a clean capability->date view).
     return {k: v for k, v in data.items()
             if isinstance(k, str) and isinstance(v, str) and k != "_schema"}
 
@@ -111,10 +111,10 @@ def record_run(capability: str, *, home: str | None = None,
         ``freshness_notice``.
     home:
         Override the ledger's parent HOME dir (for testing).
-        ``None`` → real ``~/.clawseccheck/`` via expanduser.
+        ``None`` -> real ``~/.clawseccheck/`` via expanduser.
     today:
         Override the recorded date (for testing).
-        ``None`` → ``date.today()``.
+        ``None`` -> ``date.today()``.
     path:
         The ledger file itself; wins over *home*. See :func:`_ledger_path` for why
         production callers must pass this rather than relying on the default.
@@ -130,7 +130,7 @@ def record_run(capability: str, *, home: str | None = None,
         # C-174: the read-modify-write cycle below was unlocked, so two real
         # concurrent processes (e.g. --self-test and --vet-mcp run back to
         # back) could each read the same stale ledger and overwrite each
-        # other's key on write — a silent lost update. journal_lock (same
+        # other's key on write - a silent lost update. journal_lock (same
         # primitive history.py/monitor.py already use) serializes it.
         with journal_lock(p):
             # Read from the SAME file this is about to write. Passing `home` alone
@@ -155,16 +155,16 @@ def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
 
     This function is ADVISORY ONLY.  It never alters score, grade, or findings.
     It reads only the provided *ledger* dict and the local clock (injectable via
-    *today*) — it makes no network calls and writes nothing.
+    *today*) - it makes no network calls and writes nothing.
 
     Parameters
     ----------
     ledger:
         The map returned by ``load_ledger()``.
     today:
-        Override the current date (for testing).  ``None`` → ``date.today()``.
+        Override the current date (for testing).  ``None`` -> ``date.today()``.
     skip:
-        Capability keys to omit from the advisory — used when the caller is
+        Capability keys to omit from the advisory - used when the caller is
         refreshing those capabilities in the same run (e.g. ``--full``), so a
         stale/never nudge for them would be self-contradictory.
     """
@@ -201,7 +201,7 @@ def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
         if cap in skip:
             # Caller is refreshing this capability in the same run (e.g. --full
             # runs the self-test + vet-mcp sections), so a staleness nudge for it
-            # would contradict itself — suppress it.
+            # would contradict itself - suppress it.
             continue
         threshold = THRESHOLDS[cap]
         last = ledger.get(cap)
@@ -214,7 +214,7 @@ def freshness_notice(ledger: dict[str, str], *, today: date | None = None,
             try:
                 last_date = date.fromisoformat(str(last).strip()[:10])
             except (ValueError, TypeError):
-                # Corrupted/blank ledger entry → fail SAFE: treat it as never-run
+                # Corrupted/blank ledger entry -> fail SAFE: treat it as never-run
                 # so the advisory still nudges, rather than silently swallowing it
                 # (fails-open is exactly what this tool warns others about).
                 if cap in _NEVER_MSGS:

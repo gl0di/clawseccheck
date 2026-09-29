@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ClawSecCheck — bundled-skill entrypoint: `python3 {baseDir}/audit.py [...]`.
+"""ClawSecCheck - bundled-skill entrypoint: `python3 {baseDir}/audit.py [...]`.
 
 This is a thin shim so the OpenClaw skill can run ClawSecCheck without installing it.
 The real CLI lives in `clawseccheck/cli.py` (also exposed as the `clawseccheck` command

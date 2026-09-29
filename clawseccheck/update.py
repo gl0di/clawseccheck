@@ -1,16 +1,16 @@
-"""Offline update advisory — tells the user their ClawSecCheck may be stale, WITHOUT a network call.
+"""Offline update advisory - tells the user their ClawSecCheck may be stale, WITHOUT a network call.
 
 Golden rule #1 of this project is local-only / zero-network / no phone-home. Knowing whether a
 *newer* version exists is server-side state, so the tool itself must never fetch it. Instead:
 
   1. A trusted distribution layer (the user's ClawHub client / auto-updater / their agent) MAY
-     drop a small LOCAL hint file at ~/.clawseccheck/latest.json. We only *read* it — no network.
+     drop a small LOCAL hint file at ~/.clawseccheck/latest.json. We only *read* it - no network.
   2. Failing that, we fall back to a purely offline staleness nudge based on the baked-in build
      date (`__released__`) versus the local clock.
 
 The hint file is UNTRUSTED input (it could be planted): we accept only a strict semver from its
 `version` field and reconstruct it from parsed integers, so a hostile hint can at most misstate a
-number — never inject text, a URL, or an action. This module never imports anything that does I/O
+number - never inject text, a URL, or an action. This module never imports anything that does I/O
 beyond reading that one local file, and never opens a socket.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ DEFAULT_LATEST = "~/.clawseccheck/latest.json"
 AGE_NUDGE_DAYS = 60
 
 # Strict leading semver. We use match (not fullmatch) but ALWAYS reconstruct the version from the
-# captured integers, so whatever trails the number is discarded — the echoed string is clean.
+# captured integers, so whatever trails the number is discarded - the echoed string is clean.
 _SEMVER_RE = re.compile(r"^\s*(\d{1,6})\.(\d{1,6})\.(\d{1,6})")
 
 
@@ -55,7 +55,7 @@ def read_latest_hint(path: str = DEFAULT_LATEST) -> str | None:
     """Read the LOCAL update-hint file (no network). Return a sanitized version string or None.
 
     Tolerates a missing / unreadable / malformed file and a non-dict / non-semver `version`
-    by returning None — the advisory simply stays silent rather than erroring.
+    by returning None - the advisory simply stays silent rather than erroring.
     """
     try:
         data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
@@ -83,7 +83,7 @@ def update_notice(current: str, *, released: str | None = None,
     if latest and cur and _ver_tuple(latest) > cur:
         return [
             f"A newer ClawSecCheck is available: v{latest} (you have v{current}).",
-            "Security checks go stale — update via your ClawHub client.",
+            "Security checks go stale \u2014 update via your ClawHub client.",
             "(offline notice: read from a local hint file; ClawSecCheck made no network call)",
         ]
 
@@ -96,7 +96,7 @@ def update_notice(current: str, *, released: str | None = None,
         if age >= AGE_NUDGE_DAYS:
             return [
                 f"This ClawSecCheck build is {age} days old (v{current}, released {rel.isoformat()}).",
-                "Security tooling should be kept current — check your ClawHub client for a newer version.",
+                "Security tooling should be kept current \u2014 check your ClawHub client for a newer version.",
                 "(offline notice: based only on the build date; ClawSecCheck made no network call)",
             ]
     return []

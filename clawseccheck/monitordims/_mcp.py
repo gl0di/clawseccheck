@@ -1,10 +1,10 @@
-"""The `mcp` and `mcp_detail` dimensions — connected tool servers and what they launch.
+"""The `mcp` and `mcp_detail` dimensions - connected tool servers and what they launch.
 
 Two keys, one subject, so one module: `mcp` is the roster and `mcp_detail` is what each
 entry actually runs and asks for. Splitting them would put the roster's signature builder
 and the detail's diff arm in different files while a single config edit moves both.
 
-Everything recorded here passes through the redaction helpers first — a server command line
+Everything recorded here passes through the redaction helpers first - a server command line
 can carry a token, and this dimension is persisted to disk.
 """
 
@@ -31,7 +31,7 @@ def _mcp_sig(ctx) -> dict:
 # C-135/FIX3: known value-taking flags for the runner commands realistically seen in an
 # MCP server spec's `command`, keyed by the command's basename. A value-taking flag's
 # VALUE is never the package/image identity, so it must be skipped along with the flag
-# itself rather than mistaken for the first "non-flag" token. Curated, not exhaustive —
+# itself rather than mistaken for the first "non-flag" token. Curated, not exhaustive -
 # see the NARROWS note on ``_extract_args_pkg`` for what this deliberately does not cover.
 _VALUE_FLAGS_BY_CMD: "dict[str, set[str]]" = {
     "node": {"--max-old-space-size", "--stack-size", "-r", "--require",
@@ -45,7 +45,7 @@ _VALUE_FLAGS_BY_CMD: "dict[str, set[str]]" = {
 }
 
 
-# C-135/FIX3: a leading SUBCOMMAND names the action ("run", "exec"), not the image — the
+# C-135/FIX3: a leading SUBCOMMAND names the action ("run", "exec"), not the image - the
 # measured defect: `docker run -i --rm mcp/server` mis-selected "run" itself. Checked only
 # at args[0] ("leading"), matching the canonical `<cmd> <subcommand> ...` shape.
 _RUNNER_LEAD_SUBCOMMANDS_BY_CMD: "dict[str, set[str]]" = {
@@ -56,7 +56,7 @@ _RUNNER_LEAD_SUBCOMMANDS_BY_CMD: "dict[str, set[str]]" = {
 
 
 # C-135/FIX3: `uvx --from <pkg> <tool>` names the package via --from's VALUE, not
-# positionally — the value itself is the identity to select (unlike the SKIP_FLAG_AND_
+# positionally - the value itself is the identity to select (unlike the SKIP_FLAG_AND_
 # VALUE flags above, where the value is never the identity). Checked only at args[0].
 _RUNNER_LEAD_VALUE_MARKERS_BY_CMD: "dict[str, set[str]]" = {
     "uvx": {"--from"},
@@ -64,30 +64,30 @@ _RUNNER_LEAD_VALUE_MARKERS_BY_CMD: "dict[str, set[str]]" = {
 
 
 def _extract_args_pkg(command: str, args) -> str:
-    """C-135/FIX3: the first argument that identifies WHAT actually runs — the
-    package/image/script — rather than the naive "first non-flag argument", which
+    """C-135/FIX3: the first argument that identifies WHAT actually runs - the
+    package/image/script - rather than the naive "first non-flag argument", which
     mis-selects in two real shapes:
 
     1. **A value-taking flag.** ``node --max-old-space-size 4096 server.js`` mis-selected
-       "4096" (the flag's value) instead of "server.js" — measured first-hand.
+       "4096" (the flag's value) instead of "server.js" - measured first-hand.
     2. **A subcommand-style runner.** ``docker run -i --rm mcp/server`` mis-selected "run"
-       itself (the action, not the image) — also measured first-hand.
+       itself (the action, not the image) - also measured first-hand.
 
     Fixed via ``_VALUE_FLAGS_BY_CMD`` (skip a known flag AND its value, keep scanning) and
     ``_RUNNER_LEAD_SUBCOMMANDS_BY_CMD``/``_RUNNER_LEAD_VALUE_MARKERS_BY_CMD`` (skip a
-    leading subcommand/marker token, select what comes right after) — both keyed by the
+    leading subcommand/marker token, select what comes right after) - both keyed by the
     command's basename so a flag meaning in one tool (docker's ``-p``) is never applied to
     an unrelated tool.
 
     NARROWS, does not close: the flag tables are curated from well-known public CLI
     surfaces (Node, uv/uvx, Docker/Podman), not exhaustive. An MCP server invoked through
-    an unlisted value-taking flag — most plausibly an uncommon docker flag this table
+    an unlisted value-taking flag - most plausibly an uncommon docker flag this table
     omits, e.g. ``docker run --add-host=x:y --cap-add SYS_PTRACE myimage`` if ``--cap-add``
-    were absent from the table — still mis-selects that flag's value instead of the image.
+    were absent from the table - still mis-selects that flag's value instead of the image.
     Docker/Podman in particular have a large flag surface this table cannot claim to cover
     completely; the curated set closes the common, unflagged-image shape this was measured
     against, and closes what it can WITHOUT guessing at flags this project has not verified
-    take a value. A leading marker/subcommand is only recognised at args[0] — a runner
+    take a value. A leading marker/subcommand is only recognised at args[0] - a runner
     invoked through a wrapper that prepends its own flags before ``run``/``--from`` is not
     handled and falls back to the general scan.
     """
@@ -139,10 +139,10 @@ def _mcp_observed_surfaces(ctx) -> dict:
     """F-147 (Wave 3, rug-pull): name -> mcpsurface.ToolSurface, from POST-HOC
     trajectory evidence only (``mcpsurface.from_trajectory`` / B185's own source).
 
-    This is an OPTIONAL, best-effort source — a host with no trajectory sidecar (or
+    This is an OPTIONAL, best-effort source - a host with no trajectory sidecar (or
     none carrying a ``context.compiled`` record) yields ``{}`` here, same as B185's own
     "no evidence" case. Absence must never itself be treated as a signal by any caller:
-    see ``_mcp_detail_sig``'s ``surface_tool_sigs`` — a server present in
+    see ``_mcp_detail_sig``'s ``surface_tool_sigs`` - a server present in
     ``_mcp_servers`` but ABSENT from this dict simply gets no ``surface_tool_sigs`` key
     at all, which is exactly the same "key absent = no-op for one run" idiom the
     ``args_pkg`` (B-279) and channel-dimension (B-274) guards already use.
@@ -162,18 +162,18 @@ def _mcp_detail_sig(ctx) -> dict:
     """name -> structured per-server snapshot for rug-pull (RP1-RP3) detection.
 
     Captures real MCP spec fields (command, args[0], transport, url, env key names,
-    oauth.scope) — confirmed real fields per recon docs §1/§4.  Env VALUES are never
+    oauth.scope) - confirmed real fields per recon docs §1/§4.  Env VALUES are never
     stored; only the key names are recorded (SECRET_KEY_RE keys get a ``*``-marker so
     their presence is visible but no value leaks).
 
     F-147 (Wave 3, rug-pull): also folds in, per server, an OPTIONAL
-    ``surface_tool_sigs`` — ``{tool_name: hash(description + params)}`` observed via
+    ``surface_tool_sigs`` - ``{tool_name: hash(description + params)}`` observed via
     trajectory sidecars (``_mcp_observed_surfaces``, post-hoc). This is a SEPARATE
     dimension from ``tool_sigs`` above: ``tool_sigs`` hashes what the *config itself*
     declares under ``mcp.servers.<name>.tools`` (rare in real configs); the trajectory
     source is what the host has ACTUALLY observed being sent to the model, which
     exists independently of whether the config embeds a tools list at all. It is
-    entirely optional — a server with no trajectory evidence for it simply gets no
+    entirely optional - a server with no trajectory evidence for it simply gets no
     ``surface_tool_sigs`` key, never a synthesized "missing" marker (see
     ``diff()``'s RP6/RP7 block, which requires the key on BOTH sides before comparing).
     """
@@ -185,7 +185,7 @@ def _mcp_detail_sig(ctx) -> dict:
             continue
         args = spec.get("args") or []
         args0 = str(args[0]) if isinstance(args, list) and args else ""
-        # B-279: the first NON-FLAG argument — the package/script identity. `args0` is
+        # B-279: the first NON-FLAG argument - the package/script identity. `args0` is
         # positional, and the canonical MCP stdio shape is `npx -y <pkg>`, so for the
         # majority of real servers args0 is the literal constant "-y" and RP2's comparison
         # of it is structurally dead: swapping `notes-mcp` for `notes-mcp-pro` under the
@@ -198,11 +198,11 @@ def _mcp_detail_sig(ctx) -> dict:
         # Added as a NEW key rather than by redefining what args0 extracts. Reinterpreting
         # args0 in place would make every existing snapshot's stored "-y" disagree with the
         # newly-computed "<pkg>" for an entirely UNCHANGED config, firing a spurious
-        # rug-pull HIGH on the first post-upgrade run for the majority server shape — and
+        # rug-pull HIGH on the first post-upgrade run for the majority server shape - and
         # `sbom.py`'s independent `detail.get("args0")` reader would silently change
         # meaning too.
         #
-        # C-135/FIX3: extraction itself moved to _extract_args_pkg() — the naive "first
+        # C-135/FIX3: extraction itself moved to _extract_args_pkg() - the naive "first
         # non-flag argument" mis-selected a value-taking flag's value (e.g. node's
         # `--max-old-space-size 4096`) and a runner subcommand (e.g. `docker run`) itself.
         # See that function's docstring for what is fixed and what NARROWS rather than
@@ -233,8 +233,8 @@ def _mcp_detail_sig(ctx) -> dict:
                     if tool_name:
                         tool_sigs[tool_name] = ""
         # B-105: at-rest redaction. command/args0 can embed a credential inside a URL
-        # arg (npx --registry https://TOKEN@reg/ …); url can be https://user:token@host or
-        # carry ?api_key=…. Sanitize BEFORE the value enters the snapshot, so state.json
+        # arg (npx --registry https://TOKEN@reg/ ...); url can be https://user:token@host or
+        # carry ?api_key=.... Sanitize BEFORE the value enters the snapshot, so state.json
         # never holds the secret and every drift alert built from these fields (RP2/RP3)
         # inherits the redaction. Host-level drift (the security signal) is preserved;
         # only the secret-bearing parts collapse.
@@ -248,7 +248,7 @@ def _mcp_detail_sig(ctx) -> dict:
             "oauth_scope": oauth_scope,
             "tool_sigs": dict(sorted(tool_sigs.items())),
         }
-        # F-147 (Wave 3): OPTIONAL — only set when trajectory evidence exists for this
+        # F-147 (Wave 3): OPTIONAL - only set when trajectory evidence exists for this
         # server. Never set an empty dict / sentinel here: the key's mere PRESENCE is
         # what diff() gates its RP6/RP7 comparison on, so a synthesized empty value
         # would make "no evidence" indistinguishable from "observed zero tools".
@@ -277,11 +277,11 @@ def _diff_mcp_servers(_mcp_pair, alerts, compare_config) -> None:
     if compare_config and _mcp_pair is not None:
         pm, cm = _mcp_pair
         for name in sorted(cm.keys() - pm.keys()):
-            alerts.append(("CRITICAL", f"NEW MCP server connected since last check: '{name}' — "
+            alerts.append(("CRITICAL", f"NEW MCP server connected since last check: '{name}' \u2014 "
                            "vet it before trusting (new tool/data trust surface)."))
         for name in sorted(pm.keys() & cm.keys()):
             if pm[name] != cm[name]:
-                alerts.append(("HIGH", f"MCP server '{name}' configuration CHANGED — "
+                alerts.append(("HIGH", f"MCP server '{name}' configuration CHANGED \u2014 "
                                "re-review its transport, secret passthrough and scope."))
         for name in sorted(pm.keys() - cm.keys()):
             alerts.append(("INFO", f"MCP server '{name}' was removed."))
@@ -296,7 +296,7 @@ def _diff_mcp_detail(
         alerts,
         compare_config,
 ) -> None:
-    """C-433: the `mcp_detail` dimension's diff arm — what each tool server launches and asks for.
+    """C-433: the `mcp_detail` dimension's diff arm - what each tool server launches and asks for.
 
     Seven parameters for 156 lines: nearly everything it touches is its own. The three
     `_mcp_*_unknown` sets are the caller's, mutated in place, so the notes they drive keep
@@ -309,8 +309,8 @@ def _diff_mcp_detail(
             if not isinstance(ps, dict) or not isinstance(cs, dict):
                 continue
 
-            # RP1 — scope/privilege expansion (HIGH): oauth.scope gained a new token or
-            # was broadened (e.g. read → read+write, or any → */all/admin).
+            # RP1 - scope/privilege expansion (HIGH): oauth.scope gained a new token or
+            # was broadened (e.g. read -> read+write, or any -> */all/admin).
             p_scope = ps.get("oauth_scope", "")
             c_scope = cs.get("oauth_scope", "")
             if p_scope != c_scope and c_scope:
@@ -325,10 +325,10 @@ def _diff_mcp_detail(
                     alerts.append((sev,
                                    f"MCP server '{name}' rug-pull RP1: oauth.scope expanded "
                                    f"'{p_scope}' -> '{c_scope}' (gained: {' '.join(sorted(gained))}) "
-                                   "— server gained privilege post-approval, re-vet it."))
+                                   "\u2014 server gained privilege post-approval, re-vet it."))
 
-            # RP2 — command/transport change (HIGH): the executable, first arg, or
-            # transport changed — a different thing now runs under the same trusted name.
+            # RP2 - command/transport change (HIGH): the executable, first arg, or
+            # transport changed - a different thing now runs under the same trusted name.
             # C-178: command/args0 may hold a pre-cde6798 build's raw (unredacted)
             # value in ps; re-apply redact_urls_in_text (idempotent on an already-
             # redacted value) before comparing, same normalization as RP3's url.
@@ -341,7 +341,7 @@ def _diff_mcp_detail(
             # B-279: the package identity leg, gated on the key existing on BOTH sides.
             # An old snapshot has no `args_pkg` at all, so it simply skips this one
             # comparison for one run instead of diffing a present value against a missing
-            # one — the same absent-key-is-a-no-op idiom as the enclosing `"mcp_detail" in
+            # one - the same absent-key-is-a-no-op idiom as the enclosing `"mcp_detail" in
             # prev and ... in curr` guard, and the reason this is a new key rather than a
             # redefinition of args0. Self-healing: the next snapshot carries it.
             p_pkg = redact_urls_in_text(ps.get("args_pkg", ""))
@@ -370,10 +370,10 @@ def _diff_mcp_detail(
                 alerts.append(("HIGH",
                                f"MCP server '{name}' rug-pull RP2: "
                                + ", ".join(parts)
-                               + " — a different binary/package/transport now runs under "
+                               + " \u2014 a different binary/package/transport now runs under "
                                "this trusted name, re-vet it."))
 
-            # RP3 — endpoint/default repoint (HIGH): url or env values that look like
+            # RP3 - endpoint/default repoint (HIGH): url or env values that look like
             # endpoints changed.  We snapshot env KEY names only, so this detects an env
             # var disappearing or appearing; the url field is snapshotted directly.
             #
@@ -392,9 +392,9 @@ def _diff_mcp_detail(
                 alerts.append(("HIGH",
                                f"MCP server '{name}' rug-pull RP3: url repointed "
                                f"'{p_url}' -> '{c_url}' "
-                               "— trusted endpoint changed, verify the destination."))
+                               "\u2014 trusted endpoint changed, verify the destination."))
 
-            # RP4/RP5 — tool surface drift (HIGH): new tool appeared or a declared tool's
+            # RP4/RP5 - tool surface drift (HIGH): new tool appeared or a declared tool's
             # description changed under the same trusted server name.
             p_tools = ps.get("tool_sigs") or {}
             c_tools = cs.get("tool_sigs") or {}
@@ -404,29 +404,29 @@ def _diff_mcp_detail(
                 for tool in sorted(set(c_tools) - set(p_tools)):
                     alerts.append(("HIGH",
                                    f"MCP server '{name}' rug-pull RP4: new tool '{tool}' "
-                                   "appeared in the manifest — re-vet the tool surface."))
+                                   "appeared in the manifest \u2014 re-vet the tool surface."))
                 for tool in sorted(set(p_tools) & set(c_tools)):
                     if p_tools[tool] != c_tools[tool]:
                         alerts.append(("HIGH",
                                        f"MCP server '{name}' rug-pull RP5: tool description "
-                                       f"changed for '{tool}' — re-review the server's "
+                                       f"changed for '{tool}' \u2014 re-review the server's "
                                        "declared affordances."))
 
-            # RP6/RP7 — F-147 (Wave 3): OBSERVED tool-surface drift, from trajectory
+            # RP6/RP7 - F-147 (Wave 3): OBSERVED tool-surface drift, from trajectory
             # evidence (mcpsurface.from_trajectory), DISTINCT from RP4/RP5 above (which
-            # read the config's own embedded `tools` spec — rarely present in real
+            # read the config's own embedded `tools` spec - rarely present in real
             # configs). This is the actual rug-pull signature the task exists to close:
             # a server can keep a byte-identical launch spec (command/args/transport/
             # url/env-keys all unchanged, so RP1-RP3 stay silent) while the tool
             # descriptions it hands the model post-approval silently change.
             #
-            # Gated on the `surface_tool_sigs` key existing on BOTH sides — same
+            # Gated on the `surface_tool_sigs` key existing on BOTH sides - same
             # absent-key-is-a-no-op idiom as `args_pkg` (B-279) and every other
             # optional-dimension guard in this module. This is not just upgrade
             # safety: it is the acceptance criterion. A server for which the key is
             # missing on EITHER side had no trajectory evidence available at that
             # snapshot, so "the source only just became visible" must never be reread
-            # as "the surface changed" — comparing a real dict against a coerced {}
+            # as "the surface changed" - comparing a real dict against a coerced {}
             # would report every tool as newly appeared the moment trajectory data
             # first showed up, which is exactly the false alarm this task forbids.
             p_surf = ps.get("surface_tool_sigs")
@@ -434,7 +434,7 @@ def _diff_mcp_detail(
             if not (isinstance(p_surf, dict) and isinstance(c_surf, dict)):
                 _mcp_surface_unknown.add(name)
             # F-170: these three loops read the tool surface OBSERVED IN TRAJECTORY
-            # SIDECARS, not in the config file — so a config write did not cause them and
+            # SIDECARS, not in the config file - so a config write did not cause them and
             # must not be stamped with its provenance. They sit inside the config-derived
             # index span, so their indices are excluded explicitly.
             _traj_from = len(alerts)
@@ -443,13 +443,13 @@ def _diff_mcp_detail(
                     alerts.append(("HIGH",
                                    f"MCP server '{name}' rug-pull RP6: a new tool "
                                    f"'{tool}' was observed in the tool surface actually "
-                                   "sent to the model (source: trajectory) — re-vet it."))
+                                   "sent to the model (source: trajectory) \u2014 re-vet it."))
                 for tool in sorted(set(p_surf) & set(c_surf)):
                     if p_surf[tool] != c_surf[tool]:
                         alerts.append(("HIGH",
                                        f"MCP server '{name}' rug-pull RP7: the tool "
                                        f"surface actually sent to the model for '{tool}' "
-                                       "changed (source: trajectory) — the server's "
+                                       "changed (source: trajectory) \u2014 the server's "
                                        "declared description/parameters changed after "
                                        "approval while its launch spec stayed identical; "
                                        "re-review it."))

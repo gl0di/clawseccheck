@@ -7,11 +7,11 @@ This checklist is for maintainers cutting a release. Users never need it.
 - `python3 -m ruff check .`
 - `python3 -m pytest`
 - Run the most relevant test subset for the touched area if the full suite is
-  too large for your CI window — but a release tag requires the full suite green.
+  too large for your CI window - but a release tag requires the full suite green.
 - **Run the suite on the supported Python floor too, not only your own interpreter.**
   This is not a formality: a stdlib predicate whose semantics moved between versions
   can change a *verdict* rather than crash. One such change once made two checks
-  accept a world-open proxy — the exact lying PASS they exist to prevent.
+  accept a world-open proxy - the exact lying PASS they exist to prevent.
 
 ### The gates that are not in the test suite
 
@@ -21,7 +21,7 @@ suite structurally cannot ask, and a release runs all of them:
 | gate | the question only it asks |
 | --- | --- |
 | `scripts/fleet_fp_gate.py compare` | does this build raise a FAIL on real configs that the last one did not? A new FAIL id/target is a hard blocker until diagnosed. |
-| `scripts/monitor_detection_gate.py` | does the watch actually *say so* when something dangerous changes? The FP gate only proves it stays quiet — which a broken detector also does. ~20 minutes. |
+| `scripts/monitor_detection_gate.py` | does the watch actually *say so* when something dangerous changes? The FP gate only proves it stays quiet - which a broken detector also does. ~20 minutes. |
 | `scripts/dist_citation_gate.py` | do the citations in our source still resolve against the installed OpenClaw? |
 | `scripts/state_db_drift_gate.py` | do the queries we issue still match the state DB the runtime ships? Run it after starting the new build, since the DB migrates on first start. |
 
@@ -40,11 +40,11 @@ Update all of the following files (in order), so shipped docs never lag the code
 - `SKILL.md`
 - `docs/` (regenerate `docs/CHECKS.md` when checks changed)
 
-## 3) Dependabot — review open PRs
+## 3) Dependabot - review open PRs
 
-- `gh pr list --author app/dependabot` — **review** all open Dependabot PRs
+- `gh pr list --author app/dependabot` - **review** all open Dependabot PRs
   before tagging. Merge the safe ones; a major-version Action bump may
-  deliberately wait — read its release notes first. The point is that no update
+  deliberately wait - read its release notes first. The point is that no update
   ships un-triaged, not that every update ships immediately.
 
 ## 4) Version bump (lock-step)
@@ -52,11 +52,11 @@ Update all of the following files (in order), so shipped docs never lag the code
 The version lives in four places and must move together; CI fails the build if
 they ever disagree:
 
-1. `clawseccheck/__init__.py` — `__version__`
-2. `clawseccheck/__init__.py` — `__released__` (the release date)
+1. `clawseccheck/__init__.py` - `__version__`
+2. `clawseccheck/__init__.py` - `__released__` (the release date)
 3. `SKILL.md` frontmatter `version:` (ClawHub reads this; the publish workflow
    fails if the git tag doesn't equal it)
-4. `CHANGELOG.md` — a new top entry
+4. `CHANGELOG.md` - a new top entry
 
 `python3 scripts/bump.py patch|minor|major` writes all four; fill the
 CHANGELOG prose by hand.
@@ -65,7 +65,7 @@ CHANGELOG prose by hand.
 
 - Re-read the release notes and verify that check IDs, remediation text, and
   examples match the implemented code/tests.
-- Verify zero false-positive FAILs against real configs — a release must not
+- Verify zero false-positive FAILs against real configs - a release must not
   cry wolf.
 
 ## 6) Tag and publish
@@ -75,14 +75,14 @@ bundle, and only then generates `SHA256SUMS.txt` (the engine package plus every
 staged file beside it), signs it with keyless cosign, and verifies the bundle
 with the documented user command. After publishing to ClawHub it creates the
 GitHub Release with both assets and fails the run unless both are attached.
-Publishing is deliberately tag-gated — there is no auto-release.
+Publishing is deliberately tag-gated - there is no auto-release.
 
 ### If "Create GitHub Release" hard-exits on a half-created release
 
 The step retries `gh release create`/`gh release upload` up to 3 times, but a
 release left with exactly **one** of the two expected assets
-(`SHA256SUMS.txt`, `SHA256SUMS.txt.bundle`) — e.g. a partial upload from an
-earlier, interrupted run — is treated as a mismatch it will not silently
+(`SHA256SUMS.txt`, `SHA256SUMS.txt.bundle`) - e.g. a partial upload from an
+earlier, interrupted run - is treated as a mismatch it will not silently
 "complete": it exits immediately with
 `::error::Release vX.Y.Z has only one of the two signed assets; a human must
 resolve the mismatch.` A release left with **zero** of the two, or a `gh`
@@ -92,21 +92,21 @@ Either way this needs a human, not a re-run of CI alone:
 
 1. Check what is actually attached:
    `gh release view vX.Y.Z --json assets --jq '.assets[].name'`.
-2. Fix the mismatch by hand — either attach the missing asset(s)
+2. Fix the mismatch by hand - either attach the missing asset(s)
    (`gh release upload vX.Y.Z SHA256SUMS.txt SHA256SUMS.txt.bundle`, run
    locally from the tagged tree so the files match the digest cosign signed),
    or, if the release is otherwise unusable, delete it entirely
    (`gh release delete vX.Y.Z`). Never force-replace assets on an existing
-   release with mismatched bytes — a `DUPLICATE` verdict must not let a later
+   release with mismatched bytes - a `DUPLICATE` verdict must not let a later
    run's upload overwrite a prior, honestly-signed one.
 3. **Only if ClawHub does not yet have this version**, re-run the workflow
    (`workflow_dispatch`, or push the tag again) so it verifies (or recreates)
-   the release cleanly — this also re-checks `isDraft` and publishes a
+   the release cleanly - this also re-checks `isDraft` and publishes a
    lingering draft automatically. Confirm afterwards with
    `gh release view vX.Y.Z --json isDraft,assets`.
 
    **A bare re-run does NOT recover this once ClawHub has already accepted
-   the version** (`curl .../versions/vX.Y.Z` answers 200) — "Preflight —
+   the version** (`curl .../versions/vX.Y.Z` answers 200) - "Preflight -
    confirm the CURRENT version is not already published" hard-fails the run
    before it ever reaches staging or signing again, on every attempt.
    `clawhub publish`'s own duplicate rejection is never even reached, so
@@ -119,8 +119,8 @@ Either way this needs a human, not a re-run of CI alone:
 
 ### No GitHub Release, but ClawHub already has it
 
-This is the state left behind when the ClawHub publish — this job's own, or
-an earlier run's — succeeded and something after it did not: "Create GitHub
+This is the state left behind when the ClawHub publish - this job's own, or
+an earlier run's - succeeded and something after it did not: "Create GitHub
 Release" itself, or the whole job (a cancelled run, a runner failure). A
 re-run cannot recover it (see the caveat at the end of the previous section):
 the "not already published" preflight refuses every subsequent attempt for
@@ -131,18 +131,18 @@ run either.
 The signed `SHA256SUMS.txt` and `SHA256SUMS.txt.bundle` are not lost,
 though. Every run uploads them as a workflow artifact
 (`signed-release-assets-X.Y.Z`, 90-day retention) immediately after they are
-verified — before the ClawHub publish that a later step's failure could
+verified - before the ClawHub publish that a later step's failure could
 follow. Recover by hand from the run that actually published this version:
 
 1. Open that run in the Actions tab and download the
    `signed-release-assets-X.Y.Z` artifact from its Summary page.
 2. Attach it to a new (or existing) GitHub Release for the tag:
    `gh release create vX.Y.Z SHA256SUMS.txt SHA256SUMS.txt.bundle` (or
-   `gh release upload` if the release already exists as a draft or partial —
+   `gh release upload` if the release already exists as a draft or partial -
    see the previous section's step 2 for the mismatched-bytes rule).
 3. Confirm: `gh release view vX.Y.Z --json isDraft,assets` shows both assets
    and `isDraft: false`, and the documented `cosign verify-blob --bundle`
-   command (README, "🔒 Safe to run") passes against the downloaded files.
+   command (README, "&#x1F512; Safe to run") passes against the downloaded files.
 
 If the artifact has already expired with no GitHub Release ever created, the
 signed bytes cannot be reproduced outside the workflow: a valid signature can
@@ -169,6 +169,6 @@ False positives, false negatives, and bugs.
 Required OpenClaw/Python versions; breaking changes if any.
 
 ## Verification
-The release assets include SHA256SUMS.txt and its cosign bundle — see the
-README "🔒 Safe to run" section for the exact verify command.
+The release assets include SHA256SUMS.txt and its cosign bundle - see the
+README "Safe to run" section for the exact verify command.
 ```

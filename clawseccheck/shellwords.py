@@ -163,7 +163,7 @@ def _word_scan_state(text: str, start: int):
 
 def _sh_loop_word_end(text: str, start: int) -> int:
     """End offset of the shell word starting at *start* (an assignment's
-    value): quotes, `$(…)`, `${…}` and backticks nest; unquoted whitespace or
+    value): quotes, `$(...)`, `${...}` and backticks nest; unquoted whitespace or
     a separator ends it. Never crosses a newline, so a call is always bounded
     by its own line.
 

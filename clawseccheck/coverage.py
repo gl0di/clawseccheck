@@ -1,4 +1,4 @@
-"""Coverage engine for the Dashboard: surface → 7-family roll-up + coverage map.
+"""Coverage engine for the Dashboard: surface -> 7-family roll-up + coverage map.
 
 Pure stdlib, Python 3.9+, deterministic, read-only.
 
@@ -14,10 +14,10 @@ from .catalog import (
     SURFACES, Finding,
 )
 
-# ── Derived surface / family constants ───────────────────────────────────────
+# -- Derived surface / family constants ---------------------------------------
 
 # The 14 bucket surfaces in canonical order (the "trifecta" cross-cutting chip
-# is deliberately excluded — it is a headline chip, not a coverage bucket).
+# is deliberately excluded - it is a headline chip, not a coverage bucket).
 _BUCKET_SURFACES: tuple[str, ...] = tuple(s for s in SURFACES if s != "trifecta")
 
 # Family order: first-encounter traversal of _BUCKET_SURFACES via FAMILY_OF.
@@ -33,7 +33,7 @@ _FAMILY_SURFACES: dict[str, tuple[str, ...]] = {
     for fam in _FAMILY_ORDER
 }
 
-# ── Static known gaps — grounded against openclaw-schema-recon.md ─────────────
+# -- Static known gaps - grounded against openclaw-schema-recon.md -------------
 # not_checkable: no OpenClaw config control exists that we could audit; these are
 # permanently out of static-analysis scope.  Do NOT add entries without a grounding
 # reference in that recon doc.
@@ -46,9 +46,9 @@ _NOT_CHECKABLE: list[str] = [
 # roadmap: real OpenClaw surfaces ClawSecCheck does not yet cover (buildable but not built).
 _ROADMAP: list[str] = []
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
-#: B-755: derived, not spelled — a FAIL-weight status other than the literal "FAIL" left a
+#: B-755: derived, not spelled - a FAIL-weight status other than the literal "FAIL" left a
 #: surface reading "partial" (never assessed) when it had in fact been assessed and convicted.
 _CHECKED_STATUSES: frozenset[str] = frozenset({"PASS", "WARN"}) | FAIL_WEIGHT_STATUSES
 
@@ -84,18 +84,18 @@ def _worst(counts: dict[str, int]) -> str:
     return "unknown"
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# -- Public API ----------------------------------------------------------------
 
 def coverage(findings: list[Finding]) -> dict:
     """Compute the coverage map over the 14 OpenClaw bucket surfaces.
 
     Findings whose `id` is not in BY_ID (e.g. MCP-VET diagnostic findings)
-    and findings from the "trifecta" surface are silently ignored — they carry
+    and findings from the "trifecta" surface are silently ignored - they carry
     no bucket-surface assignment.
 
     Surface states:
-        "checked" — ≥1 finding for this surface returned PASS / FAIL / WARN.
-        "partial" — all findings returned UNKNOWN (needs --attest / --host /
+        "checked" - >=1 finding for this surface returned PASS / FAIL / WARN.
+        "partial" - all findings returned UNKNOWN (needs --attest / --host /
                     config present to resolve), or no findings produced at all.
 
     Args:
@@ -121,7 +121,7 @@ def coverage(findings: list[Finding]) -> dict:
                 "roadmap": [str, ...],        # extensible; empty now
             },
             "summary": {
-                "checked": N,        # surfaces with ≥1 non-UNKNOWN finding
+                "checked": N,        # surfaces with >=1 non-UNKNOWN finding
                 "partial": M,        # surfaces where all findings are UNKNOWN
                 "not_checkable": K,  # len(_NOT_CHECKABLE)
                 "roadmap": J,        # len(_ROADMAP)
@@ -137,7 +137,7 @@ def coverage(findings: list[Finding]) -> dict:
             continue
         surface_findings[meta.surface].append(f)
 
-    # ── Per-surface state + counts ─────────────────────────────────────────
+    # -- Per-surface state + counts -----------------------------------------
     surfaces: dict[str, dict] = {}
     checked = 0
     partial = 0
@@ -151,7 +151,7 @@ def coverage(findings: list[Finding]) -> dict:
         else:
             partial += 1
 
-    # ── 7-family roll-up ───────────────────────────────────────────────────
+    # -- 7-family roll-up ---------------------------------------------------
     families: dict[str, dict] = {}
     for fam in _FAMILY_ORDER:  # deterministic: canonical derived tuple order
         member_surfaces = _FAMILY_SURFACES[fam]
@@ -181,7 +181,7 @@ def coverage(findings: list[Finding]) -> dict:
     }
 
 
-# ── F-165: per-subject (F-163 8-subject taxonomy) scanned-vs-total ────────────
+# -- F-165: per-subject (F-163 8-subject taxonomy) scanned-vs-total ------------
 # Distinct question from `coverage()` above: that answers "what did the 14 SURFACES
 # find" (checked/partial/not_checkable by SECURITY FAMILY); this answers "was every
 # CHECK this subject owns actually reached", at the coarser 8-SUBJECT (owner-facing)
@@ -189,14 +189,14 @@ def coverage(findings: list[Finding]) -> dict:
 # Every subject that owns at least one CATALOG check, derived from `SUBJECT_OF` rather
 # than listed by hand. B-565: it *was* a hand-written tuple excluding skills/mcp/plugins,
 # on the reasoning that those three get a PER-INSTANCE count instead. The per-instance
-# count is real and still rendered — but "counted per instance" never implied "every check
+# count is real and still rendered - but "counted per instance" never implied "every check
 # about it resolved", and the hand-written tuple made the two mutually exclusive: 68 of 188
 # catalog checks (skills 55 + mcp 13) were in neither the numerator nor the denominator of
 # the page whose whole job is to say what did and did not get checked. Deriving the set
 # means a subject added to `SUBJECT_OF` tomorrow is counted the day it is added.
 _CHECK_OWNING_SUBJECTS: tuple[str, ...] = tuple(dict.fromkeys(SUBJECT_OF.values()))
 # The subjects whose TOP-LEVEL page row is check granularity. The rest (skills/mcp/plugins)
-# lead with their per-instance count and carry check granularity in a `checks` sub-entry —
+# lead with their per-instance count and carry check granularity in a `checks` sub-entry -
 # see `build_coverage_page`. `plugins` owns no catalog check at all, so it has no sub-entry.
 _BUCKET_SUBJECTS: tuple[str, ...] = tuple(
     s for s in _CHECK_OWNING_SUBJECTS if s not in ("skills", "mcp", "plugins")
@@ -219,13 +219,13 @@ def subject_coverage(findings: list[Finding], *,
     "scanned" = this subject has >=1 check that returned a conclusive PASS/FAIL/WARN
     (the same `_CHECKED_STATUSES` `coverage()` above uses); "total" = every CATALOG
     check id routed to this subject via `SUBJECT_OF`. `not_scanned` names the check
-    ids that stayed UNKNOWN (or never fired at all this run) — never merely counted.
-    `not_scanned_reasons` (C-566) names WHY, per id — see `_not_scanned_reason`.
+    ids that stayed UNKNOWN (or never fired at all this run) - never merely counted.
+    `not_scanned_reasons` (C-566) names WHY, per id - see `_not_scanned_reason`.
 
     Args:
         findings: list of Finding objects from a scan run (e.g. checks.run_all).
         subjects: which subjects to report. Defaults to EVERY subject that owns a
-            catalog check (`_CHECK_OWNING_SUBJECTS`) — including skills/mcp, whose
+            catalog check (`_CHECK_OWNING_SUBJECTS`) - including skills/mcp, whose
             checks this function silently dropped before B-565. `build_coverage_page`
             passes the default and then decides where each subject's numbers are
             rendered; the parameter exists so a caller can narrow, never so this
@@ -265,7 +265,7 @@ def subject_coverage(findings: list[Finding], *,
 
 def _shorten(text: str, limit: int = 60) -> str:
     """One clause, ASCII-safe (no glyph the ``ascii_only`` renderers would need to
-    degrade — see `coverage_page_lines`'s own note on why it stays plain ASCII)."""
+    degrade - see `coverage_page_lines`'s own note on why it stays plain ASCII)."""
     text = " ".join(text.split())  # collapse embedded newlines/whitespace runs
     if len(text) <= limit:
         return text
@@ -273,46 +273,46 @@ def _shorten(text: str, limit: int = 60) -> str:
 
 
 def _not_scanned_reason(finding: "Finding | None") -> str:
-    """Why a check id is missing from this run's numerator — grounded in what the
+    """Why a check id is missing from this run's numerator - grounded in what the
     engine actually recorded, never invented (Golden Rule #4's spirit applied to
     this page, not just to CVE/schema claims).
 
     A Finding that reached UNKNOWN this run already carries its own reason in
     `detail` (docs/CHECK_AUTHORING.md: "UNKNOWN details name why state is
-    undetermined") — reused here, shortened to one clause. `detail` is sanitized
+    undetermined") - reused here, shortened to one clause. `detail` is sanitized
     first: some producers build it from trajectory-sourced, attacker-influenced
     text (see behavioral.py's own `_sanitize` note on T1/T2/T3/B191), and this is
     the one path that text takes into the coverage page.
 
-    A check with NO Finding at all this run (never invoked — e.g. an off-`CHECKS`
+    A check with NO Finding at all this run (never invoked - e.g. an off-`CHECKS`
     behavioral detector, B-558, that stayed inconclusive) has no producer-supplied
     reason to draw on; this says exactly that rather than guessing at one.
     """
     if finding is None:
         return "not evaluated this run"
-    from .report import _sanitize  # noqa: PLC0415 — see build_coverage_page's own
+    from .report import _sanitize  # noqa: PLC0415 - see build_coverage_page's own
                                     # note on why this stays a deferred import.
     return _shorten(_sanitize(finding.detail))
 
 
 def _sweep_coverage(sweep, *, skip_reason: str | None = None) -> dict:
     """(total, scanned, not_scanned) for a skill/plugin sweep, in the shape
-    `build_coverage_page` wants — or the honest "never swept this run" entry when
+    `build_coverage_page` wants - or the honest "never swept this run" entry when
     `sweep` is None (a plain audit without ``--full``, or ``--fast``).
 
     ``sweep`` is any duck-typed sweep exposing ``.no_roots``/``.no_targets``/
-    ``.counts()``/``.not_scanned()`` (``cli.SkillSweep`` or the plugin sweep — see
+    ``.counts()``/``.not_scanned()`` (``cli.SkillSweep`` or the plugin sweep - see
     ``pipeline.resolve_plugin_sweep``'s docstring for why neither is imported here by
     type). "total" counts every target the sweep accounted for, INCLUDING ones it
-    never finished (SKIPPED/TRUNCATED) — the same "no silent gaps" counting
+    never finished (SKIPPED/TRUNCATED) - the same "no silent gaps" counting
     ``SkillSweep`` itself already uses (``counts()['total'] + counts()['skipped']``,
     since ``counts()['total']`` there already excludes SKIPPED rows). "scanned"
-    excludes SKIPPED, TRUNCATED, and (B-888) UNKNOWN — a skill whose
-    own scan raised mid-analysis — since ``sweep.not_scanned()`` now names all
+    excludes SKIPPED, TRUNCATED, and (B-888) UNKNOWN - a skill whose
+    own scan raised mid-analysis - since ``sweep.not_scanned()`` now names all
     three: a partially scanned OR crashed target is not claimed fully covered."""
     if sweep is None:
         # B-473: the note must name the reason THIS run skipped the sweep. "needs --full"
-        # was printed verbatim on `--full --fast` runs — telling the operator to pass the
+        # was printed verbatim on `--full --fast` runs - telling the operator to pass the
         # flag they had just passed, when --fast was what dropped the phase. The caller
         # knows which it was; this function does not, so it is told rather than guessing.
         return {"total": None, "scanned": None, "not_scanned": [],
@@ -331,57 +331,57 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
                         sweep_skip_reason: str | None = None) -> dict:
     """The full 8-subject (F-163 taxonomy) "was everything looked at" page: answers a
     different question than the Inventory-by-subject block (`report.build_inventory`,
-    "what did we FIND") — this states scanned-vs-total, with every skip named, never
+    "what did we FIND") - this states scanned-vs-total, with every skip named, never
     merely counted (the epic's own "no silent gaps" requirement, E-069).
 
     `openclaw`/`host`/`agents`/`channels`/`logs` come from `subject_coverage` above
     (CHECK-granularity bucket coverage); `skills`/`plugins` come from the duck-typed
     sweep objects (either may be None when this run never swept that subject); `mcp`
-    is always fully scanned (MCP vetting is not sweep-budgeted) — 0 of 0 reads as
+    is always fully scanned (MCP vetting is not sweep-budgeted) - 0 of 0 reads as
     "none configured".
 
     `extra_findings` (B-558) is how verdicts reached OUTSIDE `CHECKS` reach the bucket
-    counts — today P8's T1/T2/T3/B191, which are catalogued (so they are in `logs`'
+    counts - today P8's T1/T2/T3/B191, which are catalogued (so they are in `logs`'
     denominator) but never registered as checks. Omit it and the page reports exactly
     what the audit's own findings support, which is right for any run that did not run
     those phases.
 
     V1 scope note (F-165, re-confirmed C-566 2026-09-21): file/byte-level detail for
     `logs` ("N of M trajectory files, X of Y MB scanned") is still NOT in this page.
-    The FILE-count half of that premise has moved since F-165 shipped — `behavioral.
+    The FILE-count half of that premise has moved since F-165 shipped - `behavioral.
     analyze()`'s and `trajaudit.analyze()`'s own result dicts already carry structured
     `files_total`/`files_scanned` (see behavioral.py's `files_capped` handling, around
-    line 1384) — but
+    line 1384) - but
     nothing threads either into `build_coverage_page` today: `logs`' denominator here
     is still the 7 CATALOG check ids `_CHECK_OWNING_SUBJECTS` routes to it, not a file
     count, and none of this function's callers (`pipeline.run_pipeline`, cli.py's
     `--dashboard --full` path) passes one in. The BYTE half of the premise still fully
     holds: no producer anywhere counts bytes read, only files. Wiring the file count in
-    is a real design decision, not a one-line fix — which call site builds it, whether
+    is a real design decision, not a one-line fix - which call site builds it, whether
     it replaces or supplements the check-granularity row, and whether behavioral's and
-    trajaudit's two independent `analyze()` passes should be reconciled first — and
+    trajaudit's two independent `analyze()` passes should be reconciled first - and
     rushing a partial version risks exactly the half-wired-renderer defect this page
     was rejected for three times already (see this function's own docstring). C-566
     leaves it deferred rather than repeat that; no follow-up ticket has been filed yet
-    (flagged since the 2026-08-04 review comment) — filing one is still owed.
+    (flagged since the 2026-08-04 review comment) - filing one is still owed.
 
     Consumed by ``--full`` (text, via ``pipeline.render_sections``), ``--full --json``
-    (``coveragePage``), and — since the renderer-wiring gap three separate reviews
-    rejected this task for — ``report.render_dashboard``/``report.render_html``/
+    (``coveragePage``), and - since the renderer-wiring gap three separate reviews
+    rejected this task for - ``report.render_dashboard``/``report.render_html``/
     ``pdf.render_pdf`` too, each behind an optional ``coverage_page`` parameter a
     caller must build and pass explicitly (this function does not run itself; the
     ``--dashboard --full`` CLI path builds its own page the same way ``run_pipeline``
     does, since that one code path hand-rolls its phases rather than calling
-    ``run_pipeline`` — see cli.py's own comment on ``_dashboard_phases`` for why).
+    ``run_pipeline`` - see cli.py's own comment on ``_dashboard_phases`` for why).
     """
     if ctx is None:
         return {}
-    from .report import _mcp_inventory  # noqa: PLC0415 — deferred: report.py locally
+    from .report import _mcp_inventory  # noqa: PLC0415 - deferred: report.py locally
     # imports `coverage.coverage` the same way (see this file's own `coverage()`
     # docstring precedent); keeping both directions deferred avoids the two modules
     # ever needing a load-order guarantee neither currently promises.
 
-    # B-558: `extra_findings` carries verdicts reached OUTSIDE `CHECKS` this run — today
+    # B-558: `extra_findings` carries verdicts reached OUTSIDE `CHECKS` this run - today
     # P8's T1/T2/T3/B191. They are in CATALOG, so `subject_coverage` already counts them
     # in `logs`' denominator; without this merge they could never reach its numerator, and
     # a `--full` run printed their verdicts and then listed them as "not scanned" twenty
@@ -390,13 +390,13 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     # cap-only signal, computed elsewhere, and that stays their only path to the verdict).
     #
     # Merged FIRST so a real check always wins a collision. `subject_coverage` keeps the
-    # LAST finding per id (`{f.id: f for f in findings}`), so this order — not the one an
-    # earlier revision of this comment claimed — is what stops an off-check producer
+    # LAST finding per id (`{f.id: f for f in findings}`), so this order - not the one an
+    # earlier revision of this comment claimed - is what stops an off-check producer
     # overriding a registered check's verdict. Nothing collides today, since no member of
     # `BEHAVIORAL_CHECK_IDS` is in `CHECKS`; the ordering is here because this parameter is
     # generic over any future phase, and a collision would otherwise be silent.
     #
-    # Status semantics are `_CHECKED_STATUSES`, unchanged — an UNKNOWN detector stays in
+    # Status semantics are `_CHECKED_STATUSES`, unchanged - an UNKNOWN detector stays in
     # `not_scanned` exactly as an UNKNOWN check does. What is NOT delegated to that rule is
     # whether these verdicts are admissible at all: a behavioural PASS can be vacuous in a
     # way no check's can (see `behavioral.analysis_is_conclusive`), so the producer decides
@@ -413,11 +413,11 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
 
     # B-565: the three instance-counted subjects ALSO own catalog checks, and their
     # per-instance row cannot speak for those. `mcp` was the sharp end: its row is
-    # `scanned = total` by construction — no finding is consulted, so it could never
+    # `scanned = total` by construction - no finding is consulted, so it could never
     # report a gap for any config. Measured on a config with three MCP servers, it
     # printed "3 of 3 scanned" while 9 of 13 MCP checks were UNKNOWN, four of them HIGH
     # (B331 tool-description injection, B185 poisoned tool description, B177, B332).
-    # "MCP vetting is not sweep-budgeted" — the old rationale — is true and does not
+    # "MCP vetting is not sweep-budgeted" - the old rationale - is true and does not
     # imply every MCP check resolved; enumerating every server is not checking it.
     # The instance count stays the headline (it answers "did we look at each one"),
     # and `checks` carries the separate question underneath, never merged into it.
@@ -429,16 +429,16 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
 
 def coverage_page_lines(page: dict, *, ascii_only: bool = False,
                         show_reasons: bool = True) -> list[str]:
-    """Text rendering of `build_coverage_page`'s output — one function, reused by the
+    """Text rendering of `build_coverage_page`'s output - one function, reused by the
     ``--full`` narrative section (`pipeline.render_sections`), `report.render_dashboard`,
     `report.render_html` and `pdf.render_pdf` (each behind its own optional
-    ``coverage_page`` parameter — see that function's own docstring for the renderer
+    ``coverage_page`` parameter - see that function's own docstring for the renderer
     wiring). ``ascii_only`` is accepted for signature parity with every other renderer
     in this codebase; the output here is already plain ASCII (no glyphs to degrade).
 
     ``show_reasons`` (C-566): the per-id ``not_scanned_reasons`` (see
     `subject_coverage`) are rendered by default. `report.render_dashboard` passes
-    `show_reasons=not compact` — `--dashboard --full --compact` targets a fixed,
+    `show_reasons=not compact` - `--dashboard --full --compact` targets a fixed,
     small character budget (`_COMPACT_CHAR_BUDGET`, a Telegram-paste size) that the
     reduction ladder already fights for on the findings themselves; reasons are
     genuinely useful detail, not noise, but exactly the kind `--compact`'s own
@@ -467,7 +467,7 @@ def coverage_page_lines(page: dict, *, ascii_only: bool = False,
         # is what hid the gap: a reader answering "what did not get checked?" read
         # "Skills: 2 of 2 scanned" as full coverage of the 55 skill checks, 13 of which
         # were UNKNOWN in that very run. It is appended even when the sweep did not run,
-        # because the checks still did — dropping it there would re-hide the gap on exactly
+        # because the checks still did - dropping it there would re-hide the gap on exactly
         # the `--fast`/plain-audit runs that have no sweep to speak for them.
         checks = entry.get("checks")
         if checks:
@@ -490,12 +490,12 @@ def _not_scanned_lines(not_scanned: list, label: str, *,
     Shared so the instance tally and the check tally (B-565) name their skips the same
     way and neither can quietly start merely counting them.
 
-    ``reasons`` (C-566), when given, names WHY each shown id is absent — ``id
+    ``reasons`` (C-566), when given, names WHY each shown id is absent - ``id
     (reason)`` instead of a bare id. Only the CHECK-granularity lists carry one
     (`subject_coverage`'s own `not_scanned_reasons`, see `_not_scanned_reason`);
     the instance lists (skills/plugins target names, from the duck-typed sweep's
-    own `not_scanned()`) do not, because that surface is deliberately narrow —
-    see `_sweep_coverage`'s docstring — and reaching into a sweep's per-target
+    own `not_scanned()`) do not, because that surface is deliberately narrow -
+    see `_sweep_coverage`'s docstring - and reaching into a sweep's per-target
     row status for a reason is left as a follow-up rather than widening that
     contract here."""
     if not not_scanned:

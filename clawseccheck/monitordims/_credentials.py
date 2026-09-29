@@ -1,4 +1,4 @@
-"""The `credential_store` dimension — what OpenClaw's own credential store holds.
+"""The `credential_store` dimension - what OpenClaw's own credential store holds.
 
 B-677. `<home>/credentials` is `resolveOAuthDir` ($STATE_DIR/credentials), where OAuth
 grants and channel pairing state land. B-666 taught A1 to read it for a plaintext
@@ -15,7 +15,7 @@ Three transitions, driven through the real CLI on a copy of `fixtures/home_safe`
 
 Only the first is covered, and only coincidentally: A1 moved because that file completed a
 2/3 config, which is a property of the config rather than of the credential. The other two
-are the security-relevant ones — a planted credential, and a rotated or swapped token — and
+are the security-relevant ones - a planted credential, and a rotated or swapped token - and
 nothing in the tree reported them.
 
 ## The one overlapping case, accepted rather than suppressed
@@ -24,7 +24,7 @@ On the FIRST credential a machine ever stores, A1 may also move, and then the ru
 both lines. That is accepted, and the reasoning is recorded because this repo treats
 reporting one edit twice as a defect in its own right (`_execpolicy`'s `and not widened`):
 
-  * it happens at most once per machine — every later credential finds the leg already up;
+  * it happens at most once per machine - every later credential finds the leg already up;
   * the two sentences are about different subjects. A1 says "your agent is now lethally
     capable"; this says "a credential appeared, here is the file". Neither implies the other;
   * suppressing it would silence the ONLY line that names the file, on the single run where
@@ -53,7 +53,7 @@ def _credentials_sig(state) -> dict:
     """The stored form of `checks/_shared._credential_store_state`.
 
     `{}` when the caller did not scan, which is how a baseline written by a build without
-    this dimension is told from a store that is genuinely empty — the same conditional-key
+    this dimension is told from a store that is genuinely empty - the same conditional-key
     contract `openclaw_install` and `host_persist` use.
     """
     if not isinstance(state, dict) or not state.get("present"):
@@ -93,7 +93,7 @@ def _diff_credentials(pair, alerts, note) -> None:
         return
 
     # A truncated walk cannot tell "removed" from "never read", so removals stand down
-    # wholesale — the `_skills.py` frontier rule, for the same reason: a burst of
+    # wholesale - the `_skills.py` frontier rule, for the same reason: a burst of
     # fabricated removal notices is a worse harm than one missed INFO.
     incomplete = bool(prev_rec.get("incomplete")) or bool(curr_rec.get("incomplete"))
     if incomplete:
@@ -113,7 +113,7 @@ def _diff_credentials(pair, alerts, note) -> None:
         alerts.append((
             "MEDIUM",
             f"{len(added_secret)} new file(s) holding a plaintext credential appeared in "
-            f"your credential store: {_credential_names(added_secret)}. Confirm you added them — a "
+            f"your credential store: {_credential_names(added_secret)}. Confirm you added them \u2014 a "
             "credential planted here is one your agent will use."))
     if added_plain:
         # No secret in it, so this is pairing/allow-list state rather than a credential.
@@ -127,15 +127,15 @@ def _diff_credentials(pair, alerts, note) -> None:
     # preference. The first version raised MEDIUM on "a stored credential was replaced",
     # reasoning that a token changing without the user rotating it is what a takeover looks
     # like. Then the claim underneath it was grounded against the installed dist, which is
-    # where it died: OpenClaw refreshes OAuth grants and writes them back —
+    # where it died: OpenClaw refreshes OAuth grants and writes them back -
     # `refreshOAuth` (25 sites), `writeOAuth` (14), `refreshAccessToken` (46), `expiresAt`
     # (976). So `credentials/oauth.json` moves on a schedule on any machine using OAuth,
     # and the alert would have fired on every refresh: an alarm that fires routinely is the
     # exact failure B-676 was opened to fix, one dimension over.
     #
     # A digest cannot tell a refresh from a swap. What COULD is a digest over the
-    # identity-bearing subset of the grant — the account and scope, which a refresh
-    # preserves and a swap does not — and that needs the grant's real field paths grounded
+    # identity-bearing subset of the grant - the account and scope, which a refresh
+    # preserves and a swap does not - and that needs the grant's real field paths grounded
     # against the dist rather than guessed (section 2.4). Worth its own task; not worth
     # guessing here.
     #

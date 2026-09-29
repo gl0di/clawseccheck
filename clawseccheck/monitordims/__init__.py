@@ -1,10 +1,10 @@
-"""C-433 — one module per watched dimension: its snapshot builder AND its diff arm.
+"""C-433 - one module per watched dimension: its snapshot builder AND its diff arm.
 
 `monitor.py` grew to 4,916 lines and its size exemption had been restated three times.
 Three earlier attempts to split it were rejected for the same reason, and the reason was
 right: `snapshot()` builds a dimension and `diff()` compares it, so a split BY FUNCTION
 separates the two halves that must always change together. The split that works is the
-one this package makes — **per dimension**, each module owning both halves.
+one this package makes - **per dimension**, each module owning both halves.
 
 Layering, top to bottom, mirroring `checks/`:
 
@@ -12,11 +12,11 @@ Layering, top to bottom, mirroring `checks/`:
     _<dimension>.py     one dimension's signature builder, its helpers, and its diff arm
     __init__.py         this aggregator
 
-`monitor.py` imports from here one way — the same arrangement as `monitorstore.py`, and
+`monitor.py` imports from here one way - the same arrangement as `monitorstore.py`, and
 the reason the supporting names moved DOWN rather than being imported back up: an arm
 importing `monitor` while `monitor` imports the arm is a cycle.
 
-**No `__all__` on this package or on any submodule** — the `checks/` package's §3.1-a rule,
+**No `__all__` on this package or on any submodule** - the `checks/` package's §3.1-a rule,
 here for the same reason: tests import private helpers and regex constants by name, and a
 narrow `__all__` would hide every one of them. Every submodule name is re-exported below,
 underscore-prefixed privates included.

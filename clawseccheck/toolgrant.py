@@ -1,8 +1,8 @@
-"""``granted(cfg, tool, scope) -> bool`` — is TOOL granted to SCOPE by OpenClaw's own
+"""``granted(cfg, tool, scope) -> bool`` - is TOOL granted to SCOPE by OpenClaw's own
 runtime tool-policy resolver?
 
 A full, faithful port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies``
-(the ``agent-tools.policy-*`` and ``tool-policy-match-*`` dist bundles — content-hashed names
+(the ``agent-tools.policy-*`` and ``tool-policy-match-*`` dist bundles - content-hashed names
 that rotate every release, so they are cited by symbol; ``tests/_toolgrantoracle.py`` locates
 them by declaration; grounded on the installed **openclaw@2026.9.5**, 2026-09-19), not the
 narrower FS-only model ``checks/_capability.py``'s ``_tool_policy_view`` +
@@ -10,20 +10,20 @@ narrower FS-only model ``checks/_capability.py``'s ``_tool_policy_view`` +
 specific checks and deliberately approximates two things this module does not:
 
 * it SUPPRESSES the global ``tools.allow``/``alsoAllow`` layer whenever ``tools.profile``
-  is set (``_tool_policy_view``'s own docstring, part (a)) — sound for that narrower
+  is set (``_tool_policy_view``'s own docstring, part (a)) - sound for that narrower
   question, but the real resolver never does this: ``pickSandboxToolPolicy(cfg.tools)`` is
   pushed onto the AND-ed ``policies[]`` list UNCONDITIONALLY, alongside the profile policy,
   whether or not a profile is set (line 103-104 below). This module does not suppress it.
 * it reads a per-agent ``tools.profile`` widening as a bolt-on correction
   (``_agent_profile_widenings``) rather than as part of one resolution order. Here it falls
-  out of the real order directly: ``profile = agentTools?.profile ?? cfg.tools?.profile`` —
+  out of the real order directly: ``profile = agentTools?.profile ?? cfg.tools?.profile`` -
   an agent's own profile REPLACES the global one (``??`` coalesce), while everything else
   (the raw global ``tools.allow``/``deny`` policy AND the raw agent ``tools.allow``/``deny``
-  policy) is a SEPARATE, independently AND-ed layer that can only narrow. That asymmetry —
-  one layer that coalesces, everything else that intersects — is the whole defect this
+  policy) is a SEPARATE, independently AND-ed layer that can only narrow. That asymmetry -
+  one layer that coalesces, everything else that intersects - is the whole defect this
   module exists to close: a global ``tools.profile: "minimal"`` plus a per-agent
   ``tools.alsoAllow: ["write"]`` genuinely widens that agent's write grant, and neither
-  ``B55`` nor ``B68`` could see it (measured — see ``tests/test_toolscope_per_scope_grants.py``).
+  ``B55`` nor ``B68`` could see it (measured - see ``tests/test_toolscope_per_scope_grants.py``).
 
 RESOLUTION ORDER (``resolveConfiguredToolPolicies``, reproduced here for the citation)::
 
@@ -31,31 +31,31 @@ RESOLUTION ORDER (``resolveConfiguredToolPolicies``, reproduced here for the cit
     profileAlsoAllow = agentTools?.alsoAllow ?? cfg.tools?.alsoAllow   # independent coalesce
     profilePolicy = mergeAlsoAllowPolicy(resolveToolProfilePolicy(profile), profileAlsoAllow)
     policies = [profilePolicy, pickSandboxToolPolicy(cfg.tools), pickSandboxToolPolicy(agentTools)]
-    # (extraPolicies / sandboxMode=="all" push two more layers this module does not model —
+    # (extraPolicies / sandboxMode=="all" push two more layers this module does not model -
     #  see "NOT MODELLED" below)
     granted = policies.every(p => isToolAllowedByPolicyName(tool, p))   # deny wins, then allow
 
 ``agentTools`` itself is resolved the way ``resolveEffectiveToolPolicy`` resolves it (its
 ``agentTools`` derivation, three lines): the matching roster entry's own ``tools`` block
 (``collector.agent_roster``, which already reads both the 2026.8.1 ``agents.entries`` record
-and legacy ``agents.list`` — B-699), falling back to ``agents.defaults.tools`` **only when
-the config declares no roster at all** (``hasAgentRosterProperty`` — checked by whether
+and legacy ``agents.list`` - B-699), falling back to ``agents.defaults.tools`` **only when
+the config declares no roster at all** (``hasAgentRosterProperty`` - checked by whether
 ``agents.entries``/``agents.list`` is a KEY the config owns, not by whether the roster is
 non-empty). Verified by executing the real function, not by reading it: two things this port
-might otherwise have gotten wrong from reading alone —
+might otherwise have gotten wrong from reading alone -
 
 * the fallback applies to the SCOPE param equally whether it names the default agent
   ("main") or any other id, and equally to the ``GLOBAL_SCOPE`` query (no explicit agent at
-  all) — it is gated on "does a roster exist", not on which id was asked. ``agents.defaults.
+  all) - it is gated on "does a roster exist", not on which id was asked. ``agents.defaults.
   tools`` is a real, live scope precisely when there is no roster to read instead (the S1
-  battery's ``toolscope_case8`` — 2026.9.1 says ``write=True`` there; ``toolpolicy.py:47-49``'s
+  battery's ``toolscope_case8`` - 2026.9.1 says ``write=True`` there; ``toolpolicy.py:47-49``'s
   own comment calling this "deliberately NOT a scope" is right for the READ-CONFINEMENT
-  predicate it guards but wrong as a general claim — do not port that comment here);
-* the moment a roster IS declared (even an empty one), that fallback stops firing entirely —
+  predicate it guards but wrong as a general claim - do not port that comment here);
+* the moment a roster IS declared (even an empty one), that fallback stops firing entirely -
   ``agents.defaults.tools`` is then dead weight (``toolscope_case9``).
 
 GROUNDED TABLES. ``CORE_TOOL_PROFILES`` / ``CORE_TOOL_GROUPS`` below are not hand-transcribed
-off ``CORE_TOOL_DEFINITIONS`` (the ``tool-catalog`` bundle) — they are the two tables that
+off ``CORE_TOOL_DEFINITIONS`` (the ``tool-catalog`` bundle) - they are the two tables that
 module ITSELF builds (the ``CORE_TOOL_PROFILES`` object literal; ``CORE_TOOL_GROUPS`` via
 ``buildCoreToolGroupMap()``, spread into ``TOOL_GROUPS`` by ``tool-policy-shared``), dumped by
 executing them against the installed dist so a mis-transcription of ~55 tool ids across 12
@@ -68,23 +68,23 @@ tables were wrong about ``gateway``, ``plugins``, ``ls``, ``openclaw`` and ``pdf
 (``tests/test_toolgrant_dist_grounding.py``). It now compares every profile, every group and
 the alias map with a fresh execution of the vendor, and sweeps ``granted()`` against the vendor
 over every tool name the catalog mentions. Re-ground history: 2026.9.2 (2026-09-06) identical
-to the 2026.9.1 literals; 2026.9.5 (2026-09-19) moved three profiles and four groups — see the
-comments on the two tables — and changed NO verdict for the six-tool family
+to the 2026.9.1 literals; 2026.9.5 (2026-09-19) moved three profiles and four groups - see the
+comments on the two tables - and changed NO verdict for the six-tool family
 ``{read, write, edit, apply_patch, exec, automations}`` (0 of 3,354 previously pinned cells;
 0 of 4,266 across the regenerated corpus and synthetic configs). That is why the drift was
 invisible: ``checks/_capability.py`` (B55/B68) asks only about the four fs tools. The other
 caller, the ``alsoAllow`` candidate filter in ``checks/_shared.py``, asks about whatever
-names a user wrote, so it alone can see the moved tables — for ``gateway``, ``plugins``,
+names a user wrote, so it alone can see the moved tables - for ``gateway``, ``plugins``,
 ``ls``, ``openclaw`` and ``pdf`` reached through a group-level allow/deny. None of the 8
 ``alsoAllow`` entries in the fixture corpus changes its answer.
 
-ALIAS TABLE — THREE ENTRIES, GROUNDED, NOT TWO. ``checks/_shared.py``'s ``_TOOL_NAME_ALIASES``
+ALIAS TABLE - THREE ENTRIES, GROUNDED, NOT TWO. ``checks/_shared.py``'s ``_TOOL_NAME_ALIASES``
 and ``toolpolicy.py``'s copy of the same table both carry only ``{"bash": "exec",
 "apply-patch": "apply_patch"}``. The real ``TOOL_NAME_ALIASES`` (the ``tool-policy-shared``
-bundle) has a third: ``"cron": "automations"`` — a "permanently accepted alias ... same
+bundle) has a third: ``"cron": "automations"`` - a "permanently accepted alias ... same
 contract as bash -> exec" per the dist's own comment (``automations-tool-name-*``). Neither
 existing copy is wrong for what it covers (bash/apply-patch), but a guard comparing them to
-EACH OTHER (a peer) would stay green while both are missing the same third entry — the
+EACH OTHER (a peer) would stay green while both are missing the same third entry - the
 "anchor a guard on the producer" lesson. This module's own three-entry table is grounded
 against the dist directly in ``tests/test_toolgrant_dist_grounding.py``, not against either
 sibling copy.
@@ -92,7 +92,7 @@ sibling copy.
 ``write`` IMPLIES ``apply_patch`` (the ``tool-policy-match`` bundle,
 ``createToolPolicyMatcher``'s ``writeAllowsApplyPatch`` parameter, default ``true``): a
 policy whose allow list names ``write`` but not ``apply_patch`` still lets ``apply_patch``
-through THAT policy. It is evaluated per policy, inside the AND — a policy that denies
+through THAT policy. It is evaluated per policy, inside the AND - a policy that denies
 ``apply_patch`` explicitly, or restricts allow to something that names neither, still blocks
 it. ``checks/_capability.py``'s ``_tool_policy_view`` docstring marks this "NOT modelled,
 deliberately"; this module models it because it is a real, unconditional part of the
@@ -103,12 +103,12 @@ narrowing this module's own consumer question would need a vetted model of its o
 same "don't invent a positive" discipline ``toolpolicy.py``'s ``unconfined_write_scopes``
 docstring explains):
 
-* ``sandboxMode`` / ``resolveSandboxToolPolicyForAgent`` — the sandbox-containment layer the
+* ``sandboxMode`` / ``resolveSandboxToolPolicyForAgent`` - the sandbox-containment layer the
   real resolver only pushes when a caller passes ``sandboxMode === "all"``. This module never
   passes it (equivalent to always calling with ``sandboxMode`` absent), so it answers the
   DECLARED policy question, the same split ``toolpolicy.py`` already keeps between "is a tool
   granted" and "is the session sandbox-contained" (its own ``_sandbox_confines``).
-* ``extraPolicies`` — per-provider (``byProvider``) and per-channel/group
+* ``extraPolicies`` - per-provider (``byProvider``) and per-channel/group
   (``toolsBySender`` / plugin group policy) layers a caller can inject; none of this module's
   two inputs (global ``cfg.tools``, one resolved ``agentTools``) supply them, so they are
   simply absent from the AND, never approximated.
@@ -116,19 +116,19 @@ docstring explains):
   ``SHIPPED_PLUGIN_POLICY_FAMILY_CORE_TOOLS`` / ``SHIPPED_CORE_POLICY_RENAMES``): ``canvas`` ->
   ``[canvas, show_widget]`` and ``update_plan`` -> ``progress_card``. They run in the tool-
   CONSTRUCTION pipeline, after the resolver this module ports, so ``isToolAllowedByPolicies``
-  never sees them — measured by execution on 2026.9.5: ``allow: ["canvas"]`` does not grant
+  never sees them - measured by execution on 2026.9.5: ``allow: ["canvas"]`` does not grant
   ``show_widget`` at this layer (``tests/test_toolgrant_dist_grounding.py``). No check asks
   about either target by name (only the ``alsoAllow`` filter could, with a user-written
   entry); a consumer that starts to would need this modelled and its own differential (the
-  three-entry alias map above is unaffected — that is a different table).
+  three-entry alias map above is unaffected - that is a different table).
 * glob patterns other than a bare ``*`` interior wildcard are handled (``_matches`` below is
   the same compiled-regex approach ``toolpolicy.py::_matches`` already carries, grounded
-  against ``glob-pattern-DFVWJ-hh.mjs`` — openclaw@2026.9.3) — this is modelled, not
+  against ``glob-pattern-DFVWJ-hh.mjs`` - openclaw@2026.9.3) - this is modelled, not
   skipped; listed here only to say explicitly that it is NOT one of the omissions.
 
 An unreadable/empty config is not evidence of a grant: ``granted()`` returns ``False`` for
 ``cfg`` that is not a non-empty ``dict``, a DELIBERATE divergence from the vendor (which
-answers ``True`` for ``{}`` — nothing said restricts nothing) for the same reason
+answers ``True`` for ``{}`` - nothing said restricts nothing) for the same reason
 ``toolpolicy.read_reaches_outside_workspace`` makes the identical choice (see its own
 docstring / ``tests/test_b666_read_reach.py::test_a_blind_config_is_not_evidence_of_exposure``):
 a config this tool never actually parsed must not read as "everything is granted". The S1
@@ -136,11 +136,11 @@ battery only exercises non-empty fixture configs, so this divergence sits outsid
 by construction, not as an exception carved out of a disagreement.
 
 Verified against the vendor: ``tests/test_toolgrant_battery.py`` replays assertions captured
-by EXECUTING ``resolveConfiguredToolPolicies``/``isToolAllowedByPolicies`` — the six-tool
+by EXECUTING ``resolveConfiguredToolPolicies``/``isToolAllowedByPolicies`` - the six-tool
 family one case per ``(fixture, scope, tool)`` over every plain-JSON, non-empty
 ``fixtures/*/openclaw.json`` (3,648 cases, including the nine ``fixtures/toolscope_case*`` edge
 fixtures), and ``gateway``/``plugins``/``ls``/``openclaw``/``pdf`` plus 96 synthetic configs
-(every group, profile, alias spelling and roster shape) in aggregate — pinned offline as data
+(every group, profile, alias spelling and roster shape) in aggregate - pinned offline as data
 (``tests/data/toolgrant_battery.json``) so the suite needs neither node nor the installed dist
 to run. ``tests/_toolgrantoracle.py`` is the committed generator (``--write`` / ``--check``).
 """
@@ -152,21 +152,21 @@ import re
 from .collector import agent_roster, dig
 
 class _GlobalScope:
-    """The type of ``GLOBAL_SCOPE`` — a private sentinel, not a string, so the global scope
+    """The type of ``GLOBAL_SCOPE`` - a private sentinel, not a string, so the global scope
     is UNSPELLABLE by any config value or copy-pasted literal (C-561).
 
     Before this, ``GLOBAL_SCOPE`` was the plain string ``"global"``, which is also a legal
     agent id: ``granted(cfg, tool, "global")`` for a roster row spelled ``global`` collided
     with the global-scope query itself (F-186), and a caller holding that roster id had to
     remember a keyword (``agent=True``) to disambiguate. A caller who forgot it got the
-    WRONG scope silently — no exception, no log line, just a resolved policy for the wrong
+    WRONG scope silently - no exception, no log line, just a resolved policy for the wrong
     entity, with nothing short of a differential battery able to catch it.
 
     A ``_GlobalScope`` instance has no ``__eq__`` of its own, so equality falls back to
-    identity — it is never equal to any string a config or a caller could produce.
+    identity - it is never equal to any string a config or a caller could produce.
     Disambiguation is therefore structural, not a caller-supplied flag: ``scope is
-    GLOBAL_SCOPE`` means "the global scope"; any other value — including the string
-    ``"global"`` — means "look this id up in the agent roster", which is the CORRECT
+    GLOBAL_SCOPE`` means "the global scope"; any other value - including the string
+    ``"global"`` - means "look this id up in the agent roster", which is the CORRECT
     reading for an agent actually named ``global`` (the vendor gives that id no special
     meaning; it resolves exactly like one named ``w``). The ``agent: bool`` keyword
     ``granted()`` used to carry is gone: there is no longer a flag to forget.
@@ -188,16 +188,16 @@ class _GlobalScope:
 GLOBAL_SCOPE = _GlobalScope()
 
 # TOOL_NAME_ALIASES (the tool-policy-shared bundle; a Map since 2026.9.2, its three pairs
-# unchanged through openclaw@2026.9.6 — compared whole against the EXECUTED Map on 2026-09-25).
-# Three entries — see the module docstring's "ALIAS TABLE" section for why this is not a copy
+# unchanged through openclaw@2026.9.6 - compared whole against the EXECUTED Map on 2026-09-25).
+# Three entries - see the module docstring's "ALIAS TABLE" section for why this is not a copy
 # of checks/_shared.py's/toolpolicy.py's two-entry tables. Grounded directly against the dist
 # in tests/test_toolgrant_dist_grounding.py, never against either sibling copy.
 _TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch", "cron": "automations"}
 
-# CORE_TOOL_GROUPS — the object the vendor's ``expandToolGroups`` actually consults
+# CORE_TOOL_GROUPS - the object the vendor's ``expandToolGroups`` actually consults
 # (``TOOL_GROUPS = { ...CORE_TOOL_GROUPS }`` in tool-policy-shared, built by
 # ``buildCoreToolGroupMap()`` in tool-catalog): "group:openclaw" plus one "group:<section>"
-# per CORE_TOOL_SECTION_ORDER entry. Dumped by EXECUTING the installed dist, not transcribed —
+# per CORE_TOOL_SECTION_ORDER entry. Dumped by EXECUTING the installed dist, not transcribed -
 # grounded against openclaw@2026.9.6 on 2026-09-25 (tests/_toolgrantoracle.py --tables), and
 # compared WHOLE against a fresh execution by tests/test_toolgrant_dist_grounding.py. Versus
 # 2026.9.2: group:fs gained "ls"; group:automation gained "plugins" and "openclaw";
@@ -242,7 +242,7 @@ _CORE_TOOL_GROUPS = {
     ],
 }
 
-# CORE_TOOL_PROFILES — the literal object in tool-catalog, read through
+# CORE_TOOL_PROFILES - the literal object in tool-catalog, read through
 # ``resolveCoreToolProfilePolicy(profile)`` for each key (an exact, case-sensitive object
 # index). "full" is allow-all; the other three are the exact tool-id lists the runtime grants.
 # Grounded against openclaw@2026.9.6 on 2026-09-25 by execution, and compared WHOLE against a
@@ -275,14 +275,14 @@ _CORE_TOOL_PROFILES = {
 }
 
 _DEFAULT_AGENT_ID = "main"
-# normalizeAgentId (dist agent-id-GA8mwdTG.mjs, openclaw@2026.9.3 — the bundle graph
+# normalizeAgentId (dist agent-id-GA8mwdTG.mjs, openclaw@2026.9.3 - the bundle graph
 # reshuffled around it, but the function body is byte-identical to the old
 # agent-id-CeT3w4ap.js). Two-branch, unlike toolpolicy.py's own
 # single-branch approximation: an id that ALREADY matches VALID_ID_RE is returned merely
 # lowercased (a trailing/leading dash survives, e.g. "a-" -> "a-"); only an id that fails
 # the pattern goes through the invalid-char-fold + dash-strip + 64-char-truncate slow path.
 # Differentially verified over an edge table (including "a-", "-a", "_x", "---", a 70-char
-# id) in tests/test_toolgrant_dist_grounding.py — the two branches disagree on "a-" alone.
+# id) in tests/test_toolgrant_dist_grounding.py - the two branches disagree on "a-" alone.
 _VALID_AGENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.IGNORECASE)
 _INVALID_AGENT_ID_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
 _AGENT_ID_MAX_LEN = 64
@@ -387,7 +387,7 @@ def _explicit_also_allow(tools):
 
 def _profile_policy(profile):
     """resolveToolProfilePolicy -> resolveCoreToolProfilePolicy: an EXACT, case-sensitive
-    key lookup — "Coding"/" coding " match nothing, same as tools.profile everywhere else."""
+    key lookup - "Coding"/" coding " match nothing, same as tools.profile everywhere else."""
     if not isinstance(profile, str) or not profile:
         return None
     resolved = _CORE_TOOL_PROFILES.get(profile)
@@ -429,7 +429,7 @@ def _agent_tools(cfg: dict, scope):
     for ANY scope including GLOBAL_SCOPE -- agents.defaults.tools.
 
     ``scope`` is either the ``GLOBAL_SCOPE`` sentinel (``scope is GLOBAL_SCOPE``) or a
-    declared agent id — any other value, including the string ``"global"``, a legal id the
+    declared agent id - any other value, including the string ``"global"``, a legal id the
     vendor treats like any other. The identity check is what makes the scope unspellable:
     no string a config can hold is ever ``is`` the sentinel object, so this branch can no
     longer be told the wrong answer by a caller forgetting a flag (there is none to forget)."""
@@ -479,7 +479,7 @@ def _unresolved_profile(cfg: dict, scope=GLOBAL_SCOPE) -> bool:
 
 def _policies(cfg: dict, scope=GLOBAL_SCOPE) -> list:
     """The exact ``[profilePolicy, globalPolicy, agentPolicy]`` list
-    ``resolveConfiguredToolPolicies`` builds and ANDs together — split out of ``granted()``
+    ``resolveConfiguredToolPolicies`` builds and ANDs together - split out of ``granted()``
     (B-737) so ``policy_layers()`` can ask which of these three layers actually constrains
     anything, without a second, driftable copy of the resolution order. ``granted()``'s
     answers are unchanged: it is now ``all(_policy_allows(name, p) for p in _policies(...))``,
@@ -512,13 +512,13 @@ def _policies(cfg: dict, scope=GLOBAL_SCOPE) -> list:
 def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE) -> bool:
     """Is ``tool`` granted at ``scope`` (``GLOBAL_SCOPE``, or a declared agent id) by ``cfg``?
 
-    The port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` — see the
+    The port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` - see the
     module docstring for the resolution order, the grounded tables, and what is
     deliberately not modelled (sandboxMode, extraPolicies).
 
     ``scope`` disambiguates by TYPE, not by a caller-supplied flag (C-561):
     pass the ``GLOBAL_SCOPE`` sentinel for the global scope, or any string (a roster id)
-    otherwise — including the string ``"global"``, which the vendor treats as an ordinary
+    otherwise - including the string ``"global"``, which the vendor treats as an ordinary
     agent id, never the global scope (executed: an agent with that id resolves exactly like
     one named ``w``). See ``GLOBAL_SCOPE``'s own docstring (the ``_GlobalScope`` class) for
     why this replaced an earlier ``agent: bool`` keyword a caller could forget to pass.

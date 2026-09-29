@@ -6,24 +6,24 @@ table. That is the whole subject of `--monitor` today, and it is structurally bl
 the mechanism that matters most in the published attack chain.
 
 `docs/research/fourth-leg-persistence-2026-08-06.md` §2 tabulates every write path to an
-identity file. Row 3 is a **host scheduled task** — Zenity Labs' demonstrated OpenClaw
-chain, a job rewriting `SOUL.md` every two minutes from an attacker endpoint — and the
+identity file. Row 3 is a **host scheduled task** - Zenity Labs' demonstrated OpenClaw
+chain, a job rewriting `SOUL.md` every two minutes from an attacker endpoint - and the
 column "what stops it" reads, in full: *nothing in openclaw.json*. A config-only watch
 cannot see that job, cannot see the shell profile that launched it, and cannot see the
 systemd unit that keeps it alive. This module supplies that surface so
 `monitor.snapshot()` can record it and `diff_with_notes()` can say it moved.
 
 Doctrine (matches `hostwatch.py` and `sockets.py`): **no subprocess, no network.** We
-read well-known paths directly. That constraint is not decoration here — it decides what
+read well-known paths directly. That constraint is not decoration here - it decides what
 this module can and cannot see, and §"What is unreadable" below is the honest half of
 this file.
 
-RENDERS NO VERDICT. Like `sockets.py` → B340 and `deptree.py` → B349, this is a leaf: it
+RENDERS NO VERDICT. Like `sockets.py` -> B340 and `deptree.py` -> B349, this is a leaf: it
 enumerates and digests, and the consumer decides what any of it means. It imports nothing
 from the package.
 
 **Metadata only, never content (ZKDS).** These files carry credentials in the real world
-— B193 exists precisely because a gateway token can sit in a systemd unit, and a shell
+- B193 exists precisely because a gateway token can sit in a systemd unit, and a shell
 profile is where people put `export API_KEY=`. Only a SHA-256 of the bytes ever leaves
 this module. A digest cannot be un-hashed into the secret it covers, and it is exactly
 enough to answer the one question the watch asks: *did this change?*
@@ -31,12 +31,12 @@ enough to answer the one question the watch asks: *did this change?*
 **No absolute paths carrying $HOME.** Home-rooted entries are recorded home-relative, for
 the reason `openclawdist.py` records: a drift baseline reaches the event journal and any
 report a user pastes into an issue, and an absolute path there names the user.
-System-wide paths under `/etc` are recorded as-is — they identify nobody.
+System-wide paths under `/etc` are recorded as-is - they identify nobody.
 
 ## What is unreadable, and why that is a finding rather than an omission
 
-The **user's own crontab** — `/var/spool/cron/crontabs/<user>` on Debian-family systems,
-`/var/spool/cron/<user>` elsewhere — is the closest thing on disk to Zenity's mechanism,
+The **user's own crontab** - `/var/spool/cron/crontabs/<user>` on Debian-family systems,
+`/var/spool/cron/<user>` elsewhere - is the closest thing on disk to Zenity's mechanism,
 and on a normal machine it is **not readable by the user who owns it**. Measured on the
 real box: `Permission denied` on the containing directory. The spool is mode 1730
 root:crontab and `crontab -l` reads it through a setgid helper. Reading it therefore
@@ -57,8 +57,8 @@ shell startup files.
 
 ## What was removed after an adversarial pass, and why (C-135)
 
-A fourth family — Python auto-execution hooks, the `.pth` files and `sitecustomize.py` that
-B99 and B335 check — was implemented, tested green, and then **removed**, because the
+A fourth family - Python auto-execution hooks, the `.pth` files and `sitecustomize.py` that
+B99 and B335 check - was implemented, tested green, and then **removed**, because the
 adversarial pass showed it measured the OBSERVER rather than the SUBJECT.
 
 Those files were located by walking the running interpreter's `sys.path`. That is a
@@ -69,19 +69,19 @@ containing a single ordinary `pip install -e` artefact produced
     system -> venv   MEDIUM  "Startup/scheduling file(s) appeared ... __editable__.myproj-0.1.0.pth"
     venv -> system   INFO    "Startup/scheduling file(s) were removed ... __editable__.myproj-0.1.0.pth"
 
-on a host where nothing whatsoever had changed — and the MEDIUM arm is above the shipped
+on a host where nothing whatsoever had changed - and the MEDIUM arm is above the shipped
 cron recipe's threshold, so it would have woken the user, in alternation, forever.
 
 **A drift dimension must be a function of its subject.** The three families that remain are
-all rooted in the machine — the account's home and `/etc` — and cannot move because of how
+all rooted in the machine - the account's home and `/etc` - and cannot move because of how
 the tool was started.
 
 This is a narrowing, not a silencing, and the distinction is load-bearing: `.pth` and
 `sitecustomize` coverage does not disappear, it stays where it was before this module
 existed. B99 and B335 still examine them on every audit, and `checks` is itself a watched
 dimension, so a malicious hook appearing still reaches the watch through a check's status
-moving. What is given up is digest-level drift on that one family — the state of affairs
-before F-179 — in exchange for not paging on `pip install -e`.
+moving. What is given up is digest-level drift on that one family - the state of affairs
+before F-179 - in exchange for not paging on `pip install -e`.
 
 ## Why shell startup files are in scope for an OpenClaw audit
 
@@ -122,7 +122,7 @@ SYSTEM_CRON_PATHS = (
     "/etc/cron.monthly",
 )
 
-# Per-user crontab spools. Never read (see the module docstring) — probed only so their
+# Per-user crontab spools. Never read (see the module docstring) - probed only so their
 # existence can be disclosed as UNDETERMINED rather than pass as absent.
 USER_CRON_SPOOLS = (
     "/var/spool/cron/crontabs",
@@ -134,7 +134,7 @@ FAMILY_SHELL_RC = "shell_rc"
 FAMILY_SYSTEM_CRON = "system_cron"
 FAMILY_PYTHON_AUTOEXEC = "python_autoexec"
 
-# `FAMILY_PYTHON_AUTOEXEC` is deliberately ABSENT from FAMILIES — see the C-135 note in
+# `FAMILY_PYTHON_AUTOEXEC` is deliberately ABSENT from FAMILIES - see the C-135 note in
 # the module docstring. The constant is kept so the removal reads as a decision rather than
 # an oversight, and so a future reader who re-adds it finds the reason first.
 FAMILIES = (FAMILY_SYSTEMD, FAMILY_SHELL_RC, FAMILY_SYSTEM_CRON)
@@ -161,7 +161,7 @@ class HostEntry:
 class HostPersistScan:
     entries: "tuple[HostEntry, ...]" = ()
     #: Paths that EXIST but this process could not read. Never empty on a normal Linux
-    #: box — the user crontab spool lands here by design.
+    #: box - the user crontab spool lands here by design.
     unreadable: "tuple[str, ...]" = ()
     #: True when MAX_ENTRIES was hit, so the consumer can disclose a partial view rather
     #: than present it as whole.
@@ -173,7 +173,7 @@ def _digest(path: Path) -> "str | None":
     """SHA-256 of a file's bytes, or None if it cannot be read.
 
     Returns None rather than "" for an unreadable file so the caller can tell "read it,
-    it was empty" (a real digest) from "could not read it" — a distinction the whole
+    it was empty" (a real digest) from "could not read it" - a distinction the whole
     unreadable/undetermined path depends on.
     """
     try:
@@ -307,7 +307,7 @@ def scan(home: "str | Path | None" = None,
         break  # the first spool that exists is this platform's; the rest are other distros'
 
     # Python auto-execution hooks (`.pth`, `sitecustomize.py`) are NOT scanned, and there is
-    # deliberately no parameter left behind to re-enable them — see the C-135 note in the
+    # deliberately no parameter left behind to re-enable them - see the C-135 note in the
     # module docstring. `test_a_pth_file_is_not_a_watched_family` pins the absence.
 
     return HostPersistScan(
@@ -321,7 +321,7 @@ def scan(home: "str | Path | None" = None,
 def to_snapshot(result: HostPersistScan) -> dict:
     """Reduce a scan to the JSON-safe shape `monitor.snapshot()` stores.
 
-    Sorted so two runs over an unchanged host produce byte-identical output — the drift
+    Sorted so two runs over an unchanged host produce byte-identical output - the drift
     engine compares these directly, and an unstable key order would fabricate a change on
     every run.
     """

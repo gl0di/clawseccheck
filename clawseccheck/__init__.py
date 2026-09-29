@@ -1,8 +1,8 @@
-"""ClawSecCheck — OpenClaw security self-audit engine (read-only, stdlib-only).
+"""ClawSecCheck - OpenClaw security self-audit engine (read-only, stdlib-only).
 
 The local checks are offline and never shell out. Optionally (`include_native`)
 ClawSecCheck also runs the user's own `openclaw security audit` and surfaces those
-findings too — the single, fixed, read-only external command it can run.
+findings too - the single, fixed, read-only external command it can run.
 """
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ def _deptree_scan(root=None):
     """Walk the OpenClaw install's dependency tree once for B349 (F-167).
 
     A single module-level seam on purpose, mirroring `_host_detect` above: the suite's
-    autouse conftest stub patches THIS name, so no test — including the CLI end-to-end
-    ones — reaches the real machine's global npm install. Returns None when no install
+    autouse conftest stub patches THIS name, so no test - including the CLI end-to-end
+    ones - reaches the real machine's global npm install. Returns None when no install
     root can be located, which B349 reports as UNKNOWN rather than a clean tree.
     """
     from . import deptree as _deptree
@@ -63,7 +63,7 @@ def _installed_dist_version(binary_name="openclaw"):
     hermetic caller simply leaves `include_dist` off so it is never called. None when
     the package could not be located on PATH; `check_version` (C4) treats that exactly
     like the hermetic default (see `Context.installed_dist_version`'s own comment) rather
-    than as a separate UNKNOWN — it already has a presence-only fallback verdict.
+    than as a separate UNKNOWN - it already has a presence-only fallback verdict.
     """
     from . import deptree as _deptree
     from . import openclawdist as _openclawdist
@@ -74,9 +74,9 @@ def _installed_dist_version(binary_name="openclaw"):
     return _openclawdist._read_version(root) or None
 
 
-__version__ = "4.3.0"
+__version__ = "4.3.1"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-09-26"
+__released__ = "2026-09-29"
 
 
 def build_context(home: Path | str = "~/.openclaw",
@@ -90,19 +90,19 @@ def build_context(home: Path | str = "~/.openclaw",
 
     Extracted so a caller that wants to run ONE check (`--explain`/`--retest`) can build
     the exact same Context a full audit would, without paying for `run_all()`'s loop over
-    every OTHER check. Context-building itself has no such shortcut — collect() reads the
+    every OTHER check. Context-building itself has no such shortcut - collect() reads the
     config, all bootstrap files and all installed skills regardless of which checks will
     run, and the include_* scans below are each a single whole-host pass, not something
-    scoped per check — so this saves the OTHER checks' CPU time, not the I/O, and callers
+    scoped per check - so this saves the OTHER checks' CPU time, not the I/O, and callers
     should not expect it to be cheap.
 
     Deliberately excludes `include_native`/`native_bin`/`native_timeout`: `audit()` below
     populates `ctx.native` only AFTER `run_all()` returns, so no `check_*` function ever
-    reads it — it exists purely for the report renderer to show native findings
+    reads it - it exists purely for the report renderer to show native findings
     alongside this engine's own. A single-check caller has no use for it either, and
     skipping it also skips its subprocess call.
 
-    Same parameters as `audit()`, same meaning — see its docstring for the reasoning
+    Same parameters as `audit()`, same meaning - see its docstring for the reasoning
     behind each `include_*` default.
     """
     ctx = collect(home)
@@ -140,9 +140,9 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     `include_native=False` and `include_host=False` keep the engine fully offline
     (default, hermetic for tests). The CLI passes both as True so end users also get
     OpenClaw's built-in `openclaw security audit` findings and the host-monitor
-    posture (B50–B54) in the same report.
+    posture (B50-B54) in the same report.
 
-    Host detection is populated BEFORE run_all so the B50–B54 checks can read it.
+    Host detection is populated BEFORE run_all so the B50-B54 checks can read it.
     When off, ctx.host stays None and those checks report UNKNOWN (no score impact).
 
     `include_sockets` (default False, same hermetic-by-default reasoning as
@@ -156,7 +156,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 
     `include_deptree` (default False, same hermetic-by-default reasoning) walks the
     installed OpenClaw npm dependency tree once (`deptree.scan_dep_tree`) so B349 can
-    look for an install-time target carrying a code-execution signal — reached from
+    look for an install-time target carrying a code-execution signal - reached from
     either a lifecycle hook (F-167) or a `binding.gyp` command-expansion, which needs
     no lifecycle script at all (B-447). The CLI passes True. `openclaw_pkg_root` overrides where that tree is
     found; None discovers it from PATH. B349 itself never touches the filesystem --
@@ -181,8 +181,8 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     budgets `run_all` enforces. False reproduces `scanbudget.DEFAULT_LIMITS`
     exactly, so the default path is byte-identical to before this parameter existed.
 
-    I-025/B-309: the returned ScoreResult may be capped — never given an ordinary
-    scored point — by a corroborated runtime signal (a trajaudit-style skill/bootstrap
+    I-025/B-309: the returned ScoreResult may be capped - never given an ordinary
+    scored point - by a corroborated runtime signal (a trajaudit-style skill/bootstrap
     indicator match; see scoring._runtime_cap_signal). Every runtime-consuming check
     (B83, B84, B85, B164, B180, T1/T2/T3) stays unable to move the grade any other way.
 
@@ -206,7 +206,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     ctx.dead_ignore_entries = _baseline.dead_entries(findings, ignore)
     # I-025/B-309: pass ctx so scoring.compute can also see a trajaudit-style indicator
     # match (needs ctx.installed_skills/bootstrap/home) alongside the B164 exfil_evidence
-    # signal it already reads off `findings` alone — see scoring.py's cap-only runtime
+    # signal it already reads off `findings` alone - see scoring.py's cap-only runtime
     # path. Both stay cap-only; neither becomes an ordinary scored point.
     score = compute(findings, ctx)
     if include_native:

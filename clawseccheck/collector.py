@@ -1,12 +1,12 @@
 """Read-only collection of OpenClaw config, bootstrap files, and related host artifacts.
 
 This module never writes, never makes a network call, and imports nothing beyond the
-stdlib — but "reads only config and bootstrap files" undersells its real scope, which
+stdlib - but "reads only config and bootstrap files" undersells its real scope, which
 every check needs to draw on. The ``LIMIT_DOMAIN_*`` constants below name every domain
 it reads from: ``~/.openclaw/openclaw.json``, workspace bootstrap markdown, installed
 skill/plugin text, the cron job store, exec-approvals state, the OpenClaw dotenv files
 and systemd ``EnvironmentFile=`` lines, subagent-run and audit-event trails. Each read
-is bounded (size caps, no execution of anything read) — see the individual
+is bounded (size caps, no execution of anything read) - see the individual
 ``_collect_*`` functions and ``SECURITY_MODEL.md`` for the full, itemized capability
 surface. No network. No writes. Pure stdlib.
 """
@@ -63,19 +63,19 @@ from . import trajectorystore as _trajectorystore
 # B6/B7/B9 cover that gap.
 #
 # B-365: BOOT.md is the ONE bootstrap file with an automatic EXECUTION trigger, not
-# merely an injection surface — the bundled `boot-md` hook (`gateway:startup` event)
+# merely an injection surface - the bundled `boot-md` hook (`gateway:startup` event)
 # runs it once per agent workspace on every gateway restart, no user turn involved
 # (grounded against the installed dist's own docs, `~/.npm-global/lib/node_modules/
 # openclaw/`: docs/concepts/agent-workspace.md:85, docs/automation/hooks.md:229,280,
 # docs/cli/hooks.md:31,101, docs/reference/templates/BOOT.md). Before this fix it was
 # absent here, so an attacker who could write one file into the workspace got a
 # directive-injection surface the whole content ring (B6/B7/B9 and friends, which all
-# iterate ctx.bootstrap) never saw at all. Adding it here is enough — those checks
+# iterate ctx.bootstrap) never saw at all. Adding it here is enough - those checks
 # already scan every ctx.bootstrap entry by name, so BOOT.md is now covered by the
 # SAME generic detection as SOUL.md/AGENTS.md/TOOLS.md, with no new check id needed.
 # (The `boot-md` hook itself ships DISABLED by default and must be explicitly enabled
 # via `openclaw hooks enable boot-md`, i.e. `hooks.internal.entries.boot-md.enabled` /
-# `hooks.internal.enabled` in openclaw.json — reading that toggle to gate severity is
+# `hooks.internal.enabled` in openclaw.json - reading that toggle to gate severity is
 # left for a follow-up task, not this fix.)
 BOOTSTRAP_FILES = [
     "SOUL.md", "AGENTS.md", "TOOLS.md", "MEMORY.md", "IDENTITY.md",
@@ -91,24 +91,24 @@ WORKSPACE_DIRS = ["workspace-home", "workspace-work", "workspace"]
 # not the recon doc:
 #   paths-BMBAvkNf.js:18-21   CONFIG_FILENAME / LEGACY_CONFIG_FILENAMES /
 #                             LEGACY_STATE_DIRNAMES / NEW_STATE_DIRNAME
-#   paths-BMBAvkNf.js:112-116 resolveCanonicalConfigPath  — OPENCLAW_CONFIG_PATH first
-#   paths-BMBAvkNf.js:136-152 resolveConfigPath           — the 4-branch ladder
+#   paths-BMBAvkNf.js:112-116 resolveCanonicalConfigPath  - OPENCLAW_CONFIG_PATH first
+#   paths-BMBAvkNf.js:136-152 resolveConfigPath           - the 4-branch ladder
 #   paths-BMBAvkNf.js:175-190 resolveDefaultConfigCandidates
-#   paths-BMBAvkNf.js:44-62   resolveStateDir             — OPENCLAW_STATE_DIR, then
+#   paths-BMBAvkNf.js:44-62   resolveStateDir             - OPENCLAW_STATE_DIR, then
 #                             ~/.openclaw, then an EXISTING ~/.clawdbot, else ~/.openclaw
-#   home-dir-CJKEsOtx.js:34-58 resolveRawHomeDir/resolveRequiredHomeDir — OPENCLAW_HOME
+#   home-dir-CJKEsOtx.js:34-58 resolveRawHomeDir/resolveRequiredHomeDir - OPENCLAW_HOME
 #                             beats HOME/USERPROFILE; "", "undefined" and "null" are
 #                             rejected as unset (normalize$1, :13-17)
 OPENCLAW_CONFIG_FILENAME = "openclaw.json"
 # Historical name from the clawdbot era. `resolveConfigPath` prefers an EXISTING legacy
 # file over the canonical one, so a migrated user can have OpenClaw reading a file this
-# tool would never have opened — with no environment variable set at all.
+# tool would never have opened - with no environment variable set at all.
 OPENCLAW_LEGACY_CONFIG_FILENAMES = ("clawdbot.json",)
 OPENCLAW_NEW_STATE_DIRNAME = ".openclaw"
 OPENCLAW_LEGACY_STATE_DIRNAMES = (".clawdbot",)
 
 # The three variables that can point OpenClaw at a different config file than the one we
-# audit. Read-only, by NAME only — values are paths, never secrets, but they are still
+# audit. Read-only, by NAME only - values are paths, never secrets, but they are still
 # routed through the report's normal path handling and never logged raw.
 OPENCLAW_PATH_ENV_VARS = ("OPENCLAW_CONFIG_PATH", "OPENCLAW_HOME", "OPENCLAW_STATE_DIR")
 
@@ -117,7 +117,7 @@ SKILL_DIRS = ["skills", "workspace/skills", "workspace-home/skills",
               "workspace-work/skills", ".agents/skills"]
 # B-265: the ONLY own-skill directory name we still recognise. "clawshield" was a dead
 # legacy namespace (renamed away in v0.16.0) that protected nothing and handed an attacker
-# a free cloak. Note this set is never a self-exclusion decision on its own — it only
+# a free cloak. Note this set is never a self-exclusion decision on its own - it only
 # selects which *shape* of `_is_own_source` layout check applies; the engine markers below
 # are what actually grant the exclusion.
 _OWN_SKILL_NAMES = {"clawseccheck"}
@@ -126,17 +126,17 @@ _OWN_SKILL_NAMES = {"clawseccheck"}
 # contains. Used to recognise our own source so neither --vet nor the installed-skill audit
 # flags the scanner's embedded attack signatures + red-team payloads as malware.
 # B-846 ROUND 5: `_is_own_source` matches these as AST STRUCTURE (a real FunctionDef
-# name / Assign target), not as literal text — see its docstring. `_OWN_ENGINE_MARKERS`
+# name / Assign target), not as literal text - see its docstring. `_OWN_ENGINE_MARKERS`
 # itself is still plain text: it remains correct as a human-readable label (also used
 # by tests to build FORGED comment/string/f-string spoofs, where the point is that the
 # text is NOT real code) and `_marker_identifier()` strips it down to the bare
 # identifier for the raw-text short-circuit.
 _OWN_ENGINE_MARKERS = ("def check_installed_skills", "def vet_skill", "_SKILL_CRIT")
 # Real, syntactically-complete statements shaped like the genuine engine's own
-# definitions, one per `_OWN_ENGINE_MARKERS` entry (same order, same identifiers) —
+# definitions, one per `_OWN_ENGINE_MARKERS` entry (same order, same identifiers) -
 # for tests to build a "genuine own source" fixture that a real AST FunctionDef/Assign
 # search actually recognises, instead of the bare marker TEXT above (which has no
-# `():`/`=` and is not valid Python on its own — it was only ever a stand-in for the
+# `():`/`=` and is not valid Python on its own - it was only ever a stand-in for the
 # pre-round-5 substring match, and would silently fail to parse if used here).
 _OWN_ENGINE_MARKER_STATEMENTS = (
     "def check_installed_skills(ctx):\n    pass\n",
@@ -151,7 +151,7 @@ _MAX_SKILLS = 300
 # above _MAX_SKILLS so any plausible real fleet keeps an EXACT frontier.
 _MAX_SKILL_FRONTIER_NAMES = 5_000
 # B-144 follow-up: raised 60_000 -> 200_000 -> 1_000_000, all three caps kept in lock-
-# step. _MAX_FILE_BYTES must move WITH _MAX_BYTES_PER_SKILL, not independently — a
+# step. _MAX_FILE_BYTES must move WITH _MAX_BYTES_PER_SKILL, not independently - a
 # single file over _MAX_FILE_BYTES is dropped whole by collect_skill_files before the
 # per-skill budget logic ever sees it, so raising only the per-skill cap has no effect
 # on a skill with one large file. Regex/entropy scanning 1MB is still low-single-digit
@@ -170,12 +170,12 @@ _ARCHIVE_MAX_TOTAL_BYTES = 20_000_000
 _ARCHIVE_MAX_EXPANSION_RATIO = 100
 
 # B-153: openclaw.json is user/agent-authored structured config (MCP server lists,
-# capability grants, agent definitions, …) rather than a skill payload, so it gets its
-# OWN — slightly larger — cap instead of reusing _MAX_FILE_BYTES verbatim: a real config
+# capability grants, agent definitions, ...) rather than a skill payload, so it gets its
+# OWN - slightly larger - cap instead of reusing _MAX_FILE_BYTES verbatim: a real config
 # with many servers/agents can legitimately run a few hundred KB larger than a single
 # skill file, and the read happens exactly ONCE per audit (unlike per-skill-file reads),
 # so a larger single cap doesn't reopen the memory-scaling hole B-153 closes. Still
-# bounded — a 500MB config caps at 5MB read, not unbounded RSS growth.
+# bounded - a 500MB config caps at 5MB read, not unbounded RSS growth.
 _MAX_CONFIG_BYTES = 5_000_000
 
 # B-846: `_is_own_source` parses candidate engine sources with `ast.parse`, which costs
@@ -195,7 +195,7 @@ _MAX_OWN_SOURCE_BYTES = 2_000_000
 
 # B-231 sub-item 1: the cron job store (~/.openclaw/cron/jobs.json, or the SQLite-backed
 # cron_jobs table when the legacy JSON file is absent) is read-only, symlink-safe, and
-# capped the same way as the config/bootstrap reads above — a huge/padded store must not
+# capped the same way as the config/bootstrap reads above - a huge/padded store must not
 # load whole into memory or feed an unbounded number of jobs into the content-ring scan.
 _MAX_CRON_BYTES = _MAX_CONFIG_BYTES
 _MAX_CRON_JOBS = 200
@@ -226,7 +226,7 @@ _MAX_SKILL_UPLOADS = 500
 
 # B-240 (B177): the persisted installed_plugin_index.install_records_json column (OpenClaw's
 # own ClawHub trust verdict per plugin) is read-only and size/entry-capped the same way as
-# the cron/exec-approvals stores above — a huge/padded blob must not load whole into memory
+# the cron/exec-approvals stores above - a huge/padded blob must not load whole into memory
 # or feed an unbounded number of records into the finding text.
 _MAX_PLUGIN_TRUST_BYTES = _MAX_CONFIG_BYTES
 _MAX_PLUGIN_TRUST_RECORDS = 500
@@ -244,11 +244,11 @@ _MAX_PLUGIN_INDEX_RECORDS = 500
 # B-296 (DISK-5 increment 1): the subagent-spawn registry (``subagent_runs`` in the same
 # shared state SQLite DB) is read-only and row-capped the same way as the stores above. This
 # is a DISCLOSURE surface (prove N spawns ran despite config silence), not a forensic dump,
-# so the cap stays modest — enough to name a handful of examples without holding an unbounded
+# so the cap stays modest - enough to name a handful of examples without holding an unbounded
 # number of ``task``/``outcome_json`` blobs in memory.
 _MAX_SUBAGENT_RUNS = 50
 # A subagent's own delegated task text is free-form and may be long (or, worst case, carry
-# arbitrary/sensitive content it was asked to act on) — cap it defensively at read time. The
+# arbitrary/sensitive content it was asked to act on) - cap it defensively at read time. The
 # disclosure check (checks/_agents.py) never echoes this field into evidence text anyway
 # (see its docstring), but the collector caps it independently so nothing downstream can
 # accidentally hold or print an unbounded blob.
@@ -263,16 +263,16 @@ _MAX_SUBAGENT_TASK_CHARS = 500
 _SUBAGENT_OUTCOME_STATUSES = frozenset({"ok", "error", "timeout", "unknown"})
 
 # F-134 (DISK-1, B191): OpenClaw's OWN runtime audit trail (``audit_events`` in the shared
-# state SQLite DB) is bounded on the WRITE side by the shipped runtime itself — pruned to a
+# state SQLite DB) is bounded on the WRITE side by the shipped runtime itself - pruned to a
 # 30-day / 100,000-row retention window on every insert (audit-event-store-D1P32Q4Y.js:6-7,
-# 52-57: AUDIT_EVENT_RETENTION_MS / AUDIT_EVENT_MAX_ROWS) — but this collector still bounds
+# 52-57: AUDIT_EVENT_RETENTION_MS / AUDIT_EVENT_MAX_ROWS) - but this collector still bounds
 # its OWN read the same way every other sqlite reader in this module does, so a long-lived,
 # very active box can't feed an unbounded row set into a check. The real box this was
 # grounded against holds 502 rows total, comfortably under this cap.
 _MAX_AUDIT_EVENTS = 1000
 
 # B-111: an archive member name is attacker-controlled and NOT OS-length-limited (unlike a
-# real filesystem path) — a crafted zip/tar entry can carry a multi-KB name. It flows
+# real filesystem path) - a crafted zip/tar entry can carry a multi-KB name. It flows
 # uncapped into ctx.limit_hits / ctx.path_traversal_violations / ctx.file_manifest keys,
 # which are joined straight into report evidence text (see B13 in the checks engine). Cap it at the
 # point of entry so every downstream consumer inherits the bound.
@@ -285,7 +285,7 @@ def _note_skill_gap(ctx, skill_dir: Path, entry: str) -> None:
     B-551: `unreadable_files` entries are paths relative to their own skill directory, so
     `lib/payload.sh` alone cannot say whose it is. `report._skill_inventory` builds a FRESH
     per-skill Context and copies only the four content maps, so the gap recorded on the main
-    ctx was structurally invisible to it — and the row for the skill whose payload directory
+    ctx was structurally invisible to it - and the row for the skill whose payload directory
     had just been reported unreadable came out `NO KNOWN ISSUE / PASS`, in the same report
     that said B13 could not read it. Found by the independent adversarial pass; the row was
     *created* by making that skill collectable at all, so the false-clean claim moved out of
@@ -303,7 +303,7 @@ def _note_skill_gap(ctx, skill_dir: Path, entry: str) -> None:
 def _note_skill_traversal(ctx, skill_dir: Path, entry: str) -> None:
     """Attribute an archive path-traversal violation to the skill it belongs to.
 
-    B-751, and the same shape as :func:`_note_skill_gap` directly above — which is the point.
+    B-751, and the same shape as :func:`_note_skill_gap` directly above - which is the point.
     B-551 found that `report._skill_inventory` builds a FRESH per-skill Context copying only
     the content maps, so a signal recorded on the main ctx is structurally invisible to it. It
     fixed that for coverage gaps and nobody carried it to this signal, so the inventory row for
@@ -314,7 +314,7 @@ def _note_skill_traversal(ctx, skill_dir: Path, entry: str) -> None:
     `_note_skill_gap` above keys its own map. That difference is the finding: colliding
     basenames are de-duplicated into `skills/<name>` / `<name>#2` before they reach
     `installed_skills`, so a name-keyed map joins to the wrong entry on any home carrying the
-    same skill name under two load roots — and this map drives a CONVICTION, so a slipped
+    same skill name under two load roots - and this map drives a CONVICTION, so a slipped
     join convicts an innocent skill rather than misplacing a note. `_note_skill_gap` has the
     same latent slip with a milder payload; filed separately rather than changed here.
     """
@@ -329,7 +329,7 @@ def _exists_but_not_regular(path: Path) -> bool:
 
     Deliberately `lstat`, never `open`: a FIFO blocks forever on read with no writer, so the
     one thing this must not do is try to read the thing it is reporting. A vanished entry
-    (the walk listed it, it is gone now) answers False — same errno discipline as the
+    (the walk listed it, it is gone now) answers False - same errno discipline as the
     unreadable-directory branch: "gone" is not "hidden".
     """
     try:
@@ -391,7 +391,7 @@ class LimitHit(str):
 
     Deliberately a ``str`` subclass, not a dataclass: the bucket has many consumers
     (report/SARIF/dossier/monitor and several tests) that treat it as ``list[str]``, and
-    all of them must keep working unchanged. ``.domain`` is purely additive — a consumer
+    all of them must keep working unchanged. ``.domain`` is purely additive - a consumer
     that does not care never sees it, and one that does reads it via ``limit_hits_for``.
 
     (No ``__slots__``: CPython forbids a non-empty ``__slots__`` on a ``str`` subclass.)
@@ -423,23 +423,23 @@ def _note_unreadable_manifest(ctx, owner: str) -> None:
     walked: the detail-bearing `unreadable_files` entry, the per-skill coverage gap, the
     file manifest, the absent-vs-unreadable bridge B13's `unreadable`/absent-manifest
     branches read (`unreadable_manifests`), and the domain-scoped limit hit. Extracted
-    into one place so a second call site — `_iter_skill_dirs_guarded`, which sees this
-    fact at DISCOVERY time, before a directory is ever added to `ctx.installed_skills` —
+    into one place so a second call site - `_iter_skill_dirs_guarded`, which sees this
+    fact at DISCOVERY time, before a directory is ever added to `ctx.installed_skills` -
     cannot describe the same fact a different way. That drift is exactly how B-549
     attempt 3 went wrong one layer up (a `limit_hits`-only note landed on the generic
     truncation branch instead of the correct `unreadable` one).
 
     *rel* is always `f"{owner}/SKILL.md"`, never a bare "SKILL.md": at discovery time
     `owner` never enters `ctx.installed_skills` (the directory is neither yielded nor
-    truncated — see `iter_discovered_skill_dirs`'s docstring), so an unprefixed name
+    truncated - see `iter_discovered_skill_dirs`'s docstring), so an unprefixed name
     would point at nothing a reader could act on. `owner` is always a bare directory
-    NAME, never a path (collector.py's own `Disclosure.subject` precedent) — these
+    NAME, never a path (collector.py's own `Disclosure.subject` precedent) - these
     records reach SARIF and a report a user pastes into an issue.
     """
     if ctx is None:
         return
     rel = f"{owner}/SKILL.md"
-    detail = f"{rel} (not a regular file — nothing to read at rest)"
+    detail = f"{rel} (not a regular file \u2014 nothing to read at rest)"
     ctx.unreadable_files.append(detail)
     ctx.skill_coverage_gaps.setdefault(owner, []).append(detail)
     ctx.file_manifest.setdefault(rel, "not-a-regular-file")
@@ -451,7 +451,7 @@ def _note_unreadable_manifest(ctx, owner: str) -> None:
 
 
 def limit_hits_for(ctx, *domains: str) -> list[str]:
-    """The limit hits that truncated one of *domains* — i.e. "was MY scan truncated?".
+    """The limit hits that truncated one of *domains* - i.e. "was MY scan truncated?".
 
     UNTAGGED entries are INCLUDED, deliberately. A plain ``str`` in the bucket carries no
     evidence about which scan it belongs to, and Golden Rule #4 says an unknown must not be
@@ -479,7 +479,7 @@ class Disclosure:
     one (see ``LimitHit``) and it was a notepad until ``dossier.py`` read its truthiness
     into a verdict leg; a plain string can be ``"; ".join``-ed into a finding detail or
     truth-tested into a gate by any future edit, and ``_MODE_C_VERDICT`` turns any status
-    it acquires into an install gate — the exact defect B-526 was filed to fix. A record
+    it acquires into an install gate - the exact defect B-526 was filed to fix. A record
     that is not a string cannot be spliced into prose by accident, and
     ``tests/test_b617_disclosure_channel.py`` fails the build if anything outside the
     renderers reads ``ctx.disclosures`` at all.
@@ -487,7 +487,7 @@ class Disclosure:
     ``subject`` is a NAME, never a path. ``collector`` knows the absolute path and must
     not hand it on: an absolute path carries the username, the mount points and the
     directory layout, and these records reach SARIF and a report a user pastes into an
-    issue. This follows ``report._credential_surface_rel``'s precedent — say WHAT was
+    issue. This follows ``report._credential_surface_rel``'s precedent - say WHAT was
     found, never WHERE on disk.
     """
 
@@ -515,8 +515,8 @@ class _ScopedLimitSink:
     ``skilldiscovery`` is a LEAF (it imports nothing from the package, by §3's dependency
     flow) so it cannot call ``note_limit`` itself. Rather than push the tag into the leaf
     or leave its one writer untagged, the collector hands it a pre-scoped sink. Only the
-    operations that module and ``_config_workspace_dirs`` actually use are implemented —
-    ``append`` and the ``in``/iterate/len trio — so a wrong assumption fails loudly instead
+    operations that module and ``_config_workspace_dirs`` actually use are implemented -
+    ``append`` and the ``in``/iterate/len trio - so a wrong assumption fails loudly instead
     of silently writing an untagged entry.
     """
 
@@ -541,13 +541,13 @@ class _ScopedLimitSink:
 
 # B-303: a non-traversable directory (most commonly the whole audited home, e.g. an
 # operator's ``chmod 000 ~/.openclaw``) makes ANY bare ``is_dir()``/``is_file()``/
-# ``is_symlink()`` on an entry beneath it raise an uncaught ``PermissionError`` — stat()
+# ``is_symlink()`` on an entry beneath it raise an uncaught ``PermissionError`` - stat()
 # needs execute/search permission on every ancestor directory, not just on the target
 # itself. Several pre-checks in this module ran that stat before any try/except existed
 # to catch it, so the ONE bad directory took the WHOLE audit down with a traceback
 # instead of producing a report. These three helpers are the single place that absorbs
 # that class of failure: a permission problem is reported exactly like "this path does
-# not exist", which is not a new behaviour invented for this bug — every caller below
+# not exist", which is not a new behaviour invented for this bug - every caller below
 # already treats "not found" as the trigger for its own honest UNKNOWN (Golden Rule #4;
 # e.g. ``ctx.cron_found`` / ``ctx.installed_skills`` / ``ctx.bootstrap`` staying empty is
 # documented, in each collector, to degrade its consuming check to UNKNOWN rather than a
@@ -559,7 +559,7 @@ def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None,
     """``Path.is_dir()`` that answers False instead of raising on a permission error.
 
     B-404: when *domain* is given (alongside *ctx*), a genuine OSError also
-    becomes a domain-tagged ``limit_hits`` entry, not just a ``ctx.errors`` note — so a
+    becomes a domain-tagged ``limit_hits`` entry, not just a ``ctx.errors`` note - so a
     consumer asking "was MY scan complete?" (``limit_hits_for``) can see a root that could
     be confirmed to exist but could not be stat'd (e.g. a permission-denied skill root),
     distinct from a root that simply is not there (which stays silent, exactly as before).
@@ -574,13 +574,13 @@ def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None,
             if domain is not None:
                 note_limit(
                     ctx.limit_hits, domain,
-                    f"could not check {what or p} ({exc.__class__.__name__}) — not scanned",
+                    f"could not check {what or p} ({exc.__class__.__name__}) \u2014 not scanned",
                 )
         return False
 
 
 def _safe_is_file(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
-    """``Path.is_file()`` sibling of ``_safe_is_dir`` — see its docstring (B-303)."""
+    """``Path.is_file()`` sibling of ``_safe_is_dir`` - see its docstring (B-303)."""
     try:
         return p.is_file()
     except OSError as exc:
@@ -590,7 +590,7 @@ def _safe_is_file(p: Path, ctx: Context | None = None, what: str | None = None) 
 
 
 def _safe_is_symlink(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
-    """``Path.is_symlink()`` sibling of ``_safe_is_dir`` — see its docstring (B-303)."""
+    """``Path.is_symlink()`` sibling of ``_safe_is_dir`` - see its docstring (B-303)."""
     try:
         return p.is_symlink()
     except OSError as exc:
@@ -600,14 +600,14 @@ def _safe_is_symlink(p: Path, ctx: Context | None = None, what: str | None = Non
 
 
 # F-087: padding-anomaly evasion signal. When a file is sliced by the text-scan cap,
-# the discarded tail is sampled (bounded — never re-reads gigabytes) and measured for
+# the discarded tail is sampled (bounded - never re-reads gigabytes) and measured for
 # Shannon entropy. Low-entropy filler (a repeated byte, long whitespace/newline runs, a
 # giant comment block) is the shape of deliberate cap-evasion padding (standard §2.5,
 # "omnicogg"); a real high-entropy binary asset stays the honest UNKNOWN it is today.
 _ENTROPY_SAMPLE_BYTES = 65_536      # sample at most 64 KiB of the cut tail
 _ENTROPY_MIN_SAMPLE = 2_048         # below this, entropy is too noisy to judge
 # bits/byte. Empirically calibrated (not guessed): a repeated short benign English
-# line measures ~3.84, varied prose ~4.3, base64-of-random ~6.0 — but a single
+# line measures ~3.84, varied prose ~4.3, base64-of-random ~6.0 - but a single
 # repeated byte measures 0.0 and a whitespace run ~1.0. 3.0 cleanly separates
 # genuinely degenerate/uniform filler (the "omnicogg" padding shape) from any text
 # with ordinary character variety, even repetitive documentation. Err toward
@@ -617,7 +617,7 @@ _PADDING_ENTROPY_THRESHOLD = 3.0
 def _shannon_entropy_bits(s: str) -> float:
     """Shannon entropy (bits per byte) over the UTF-8 byte histogram of *s*.
 
-    Stdlib-only, single pass, bounded by the caller's sample slice — never call this
+    Stdlib-only, single pass, bounded by the caller's sample slice - never call this
     on more than a small bounded sample of a large tail.
     """
     data = s.encode("utf-8", "replace")
@@ -655,13 +655,13 @@ class Context:
     config_found: bool = False                       # openclaw.json present (vs non-OpenClaw setup)
     # B-776: True when THIS PROCESS's own environment (not the audited --home target)
     # shows the OpenClaw sandbox-sync marker AND no config was found this run. Set by
-    # `_sandbox_signal()`, called from `collect()` right after `config_found` above —
+    # `_sandbox_signal()`, called from `collect()` right after `config_found` above -
     # never derived from the audited home's own contents, since the whole point is that a
     # sandboxed run's --home target (default or explicit) resolves nowhere real. See that
     # function's docstring for the two conditions and why both are required.
     sandboxed: bool = False
     config_parse_error: bool = False                 # openclaw.json present but unparseable (B-166)
-    # B-306 safe-symlink split: WHY config_parse_error is (or was) considered — the raw
+    # B-306 safe-symlink split: WHY config_parse_error is (or was) considered - the raw
     # loader message for a genuine-blind config, or a note that a dotfiles-style symlink
     # was safely followed. Distinguishes the two states config_parse_error conflates so a
     # readable-but-relocated config is never mistaken for a dark one. None when the config
@@ -672,19 +672,19 @@ class Context:
     # user (a benign stow/chezmoi/yadm/bare-git dotfiles layout). The collector follows it
     # and audits the real bytes; this flag exempts the run from CONFIG_BLIND_CAP and drives
     # the report's "symlinks outside ~/.openclaw" note. NEVER set for corrupt/unreadable
-    # bytes — those stay genuine-blind (config_parse_error True, cap intact).
+    # bytes - those stay genuine-blind (config_parse_error True, cap intact).
     config_symlink_escapes_home: bool = False
     # B-281 (ENV-1): the config file this audit ACTUALLY read (or, when absent, the
     # canonical path it looked for). Every verdict in the report describes this file and
     # only this file, so it is reported verbatim rather than left implicit behind a bare
-    # `config_found` bool. May be a legacy `clawdbot.json` — see resolve_config_in_home.
+    # `config_found` bool. May be a legacy `clawdbot.json` - see resolve_config_in_home.
     config_path: "Path | None" = None
     # C-417: sha256 hex of the config file's bytes AS THIS AUDIT READ THEM, captured by
     # the loader on its own read rather than by a second one later. --monitor persists it
     # in the drift baseline, so it must describe the same bytes every other field in that
     # snapshot describes; a re-read at snapshot time would silently pair one file's digest
     # with another file's parsed values whenever anything wrote in between. None when the
-    # config was absent or did not load. Covers the ROOT file only — see
+    # config was absent or did not load. Covers the ROOT file only - see
     # configloader.load_openclaw_config's `root_digest`.
     config_sha256: "str | None" = None
     # B-282 (ENV-2/ENV-6): keys parsed from the two GLOBAL runtime dotenv files, with
@@ -699,17 +699,17 @@ class Context:
     # cap, so a key past the cut is present-but-unread, not absent. Distinct from
     # LIMIT_DOMAIN_ENV's shared `limit_hits_for()` signal, which also fires on a
     # truncated systemd unit that `dotenv_override()`'s callers never read at all
-    # (dotenv_override touches only dotenv_values/os.environ, never unit_env_values) —
+    # (dotenv_override touches only dotenv_values/os.environ, never unit_env_values) -
     # a consumer of dotenv_override needs THIS flag, not the domain-wide one, the same
     # split `audit_events_truncated` already uses for its own narrower callers.
     dotenv_truncated: bool = False
     # B-289/B-290 (ENV-3/ENV-4): the environment the OpenClaw *service* actually runs
-    # with, read off disk from OpenClaw-related systemd user units — `Environment=` lines
+    # with, read off disk from OpenClaw-related systemd user units - `Environment=` lines
     # plus any file named by `EnvironmentFile=`. This is the artifact that matters: the
     # gateway runs under systemd with its OWN environment, so the auditing process's
     # os.environ describes a different process entirely (see env_evidence).
     # `unit_env_inline` maps each key that came from an INLINE `Environment=` line to the
-    # unit file that inlined it — OpenClaw's own service audit treats an inline value
+    # unit file that inlined it - OpenClaw's own service audit treats an inline value
     # differently from an EnvironmentFile-sourced one (service-audit-bKq3tdW1.js:247).
     # It deliberately stores the unit path rather than the value: a caller that needs to
     # reason about an inlined secret must never be handed a second copy of it (§8).
@@ -723,14 +723,14 @@ class Context:
     host: object = None                             # hostwatch.detect() result; set by audit(include_host=True)
     include_host: bool = False                      # host-filesystem scanning enabled (audit(include_host=True) / not --no-host)
     # F-156: sockets.scan_listening_sockets() result; set by audit(include_sockets=True).
-    # None (the hermetic default) means the runtime socket scan was not run at all —
+    # None (the hermetic default) means the runtime socket scan was not run at all -
     # check_effective_bind reports UNKNOWN, exactly like ctx.host is None for B50-B54.
     sockets: object = None
     include_sockets: bool = False  # /proc/net/tcp{,6} listening-socket scan enabled
     # F-164: --exhaustive widens the DoS/ReDoS-guard ceilings scanbudget.limits_for()
     # hands back (traj/log scan caps, per-check/audit wall-clock budgets) instead of
-    # today's defaults. No behavior of its own here — same pattern as include_sockets
-    # above — just a flag other code (scanbudget.limits_for, run_all callers) can read.
+    # today's defaults. No behavior of its own here - same pattern as include_sockets
+    # above - just a flag other code (scanbudget.limits_for, run_all callers) can read.
     exhaustive: bool = False
     # C-135 bug 1: the proc_root audit() was called with (default "/proc"), carried on ctx
     # so check_effective_bind's best-effort PID correlation (sockets.identify_listener_process)
@@ -765,7 +765,7 @@ class Context:
     # B-231 sub-item 1: normalized cron jobs (from ~/.openclaw/cron/jobs.json, or the
     # SQLite-backed cron_jobs table when the JSON file is absent). Each entry is a plain
     # dict: id, name, enabled, delete_after_run, trigger_script, payload_kind,
-    # payload_message — the same shape regardless of which backing store it came from,
+    # payload_message - the same shape regardless of which backing store it came from,
     # and (B-709) regardless of which of the two observed cron_jobs COLUMN shapes the
     # SQLite table itself has (see _collect_cron's docstring). B-819:
     # payload_message_dormant is a SEPARATE, scan-only field -- non-None only from the
@@ -784,12 +784,12 @@ class Context:
     # B-294 follow-up: the job-definition set that was read is INCOMPLETE, so "this job id
     # has no definition" cannot be concluded from it. Two distinct causes, both silent
     # before these flags existed:
-    #   cron_jobs_truncated  — the read hit the _MAX_CRON_JOBS row cap, so definitions past
+    #   cron_jobs_truncated  - the read hit the _MAX_CRON_JOBS row cap, so definitions past
     #                          the cap were never seen. The SQLite branch has no ORDER BY,
     #                          so which jobs get dropped is storage order, not recency,
-    #                          while the run-log read takes the MOST RECENT rows — the two
+    #                          while the run-log read takes the MOST RECENT rows - the two
     #                          sets are sampled on different axes and cannot be differenced.
-    #   cron_store_shadowed  — a legacy ~/.openclaw/cron/jobs.json exists and was used as
+    #   cron_store_shadowed  - a legacy ~/.openclaw/cron/jobs.json exists and was used as
     #                          the definition source, but the SQLite cron_jobs table also
     #                          holds rows. In the shipped dist that file is only a store-key
     #                          identity (loadCronJobsStoreWithConfigJobs ->
@@ -862,14 +862,14 @@ class Context:
     # _collect_cron_run_logs's docstring, and note it selects on the OBSERVED TABLES, not
     # on an OpenClaw version: the state DB's migration ladder does not map onto the product
     # version, which is why neither this comment nor the code names one), which deliberately
-    # OUTLIVES the job definition —
+    # OUTLIVES the job definition -
     # one-shot (`kind:"at"`) jobs default to deleteAfterRun TRUE, the legacy table has no
     # foreign key to cron_jobs, and the only cron_jobs delete in the dist (replaceCronRows)
     # never touches it. Each entry is a plain dict: job_id, status, session_id, session_key,
     # run_id, run_at_ms, ts -- the SAME keys regardless of which backing table it came from
     # (session_id is always None on the task_runs path; it has no successor column there).
     # NOTE: the run record carries no copy of the job's original payload.message, so this is
-    # a PIVOT (what ran, when, under which session) — never the erased job's content.
+    # a PIVOT (what ran, when, under which session) - never the erased job's content.
     cron_run_logs: list = field(default_factory=list)
     cron_run_logs_found: bool = False        # the cron_run_logs table was present and read
     cron_run_logs_parse_error: bool = False  # table present but could not be read
@@ -927,7 +927,7 @@ class Context:
     # state_key = 'plugins.installedIndex' (index.installRecords, keyed by pluginId), which
     # _collect_plugin_trust prefers when present and usable. See that function's docstring
     # for the dual-shape selection rule. Each entry: {plugin_id, disposition, scan_status,
-    # moderation_state, reasons (list[str]), pending, stale} — disposition is one of
+    # moderation_state, reasons (list[str]), pending, stale} - disposition is one of
     # "clean" | "review-recommended" | "review-required" | "blocked" | None (no verdict
     # persisted for that install yet). Same dict shape regardless of which sink it came from.
     plugin_trust_records: list = field(default_factory=list)
@@ -958,7 +958,7 @@ class Context:
     # spawn_mode/task are permanently None -- that schema does not carry them at all (see
     # _collect_subagent_runs's docstring). A one-time LIMIT_DOMAIN_AGENTS disclosure names
     # this per collection run; a consumer must not read the None as "no workspace recorded".
-    # DISCLOSURE ONLY — see checks/_agents.py::_disk_subagent_disclosure for the consumer;
+    # DISCLOSURE ONLY - see checks/_agents.py::_disk_subagent_disclosure for the consumer;
     # there is deliberately no FAIL-capable predicate anywhere over this data (CLAUDE.md GR#5,
     # the task's own out-of-tree-workspace_dir / model-fallback traps).
     subagent_runs: list = field(default_factory=list)
@@ -985,7 +985,7 @@ class Context:
     # the shared state SQLite DB), most-recent first. Each entry is a plain dict: kind,
     # action, status, error_code, actor_type, actor_id, agent_id, session_key, session_id,
     # run_id, tool_call_id, tool_name, occurred_at. GR#5: the table stores ONLY those
-    # columns — no argv, no command string, no file path, no target host — so this is a
+    # columns - no argv, no command string, no file path, no target host - so this is a
     # metadata-only observability source, never content evidence. See checks/_host.py::
     # check_audit_trail_signals (B191) for the consumer.
     audit_events: list = field(default_factory=list)
@@ -993,7 +993,7 @@ class Context:
     audit_events_parse_error: bool = False  # present but could not be read
     audit_events_truncated: bool = False     # the row-sample read hit the _MAX_AUDIT_EVENTS cap
     # Coverage stats over the FULL table (COUNT(*)/MIN/MAX(occurred_at)), independent of the
-    # row-sample cap above — "how far back does this reach" must not be limited by how many
+    # row-sample cap above - "how far back does this reach" must not be limited by how many
     # rows the signal-detection sample happened to keep.
     audit_events_total_rows: int = 0
     audit_events_oldest_ms: int | None = None
@@ -1004,7 +1004,7 @@ class Context:
     installed_skill_js: dict = field(default_factory=dict)  # skill name -> [(relpath, source)] for .js/.ts
     # B-612: skill name -> [(relpath, language, source)] for files only a SKILL.md names
     # with an interpreter (`read_skill_declared`). FINDINGS ONLY: read by B13's danger pass
-    # and nothing else — never folded into the three lists above, which coverage reads.
+    # and nothing else - never folded into the three lists above, which coverage reads.
     installed_skill_declared: dict = field(default_factory=dict)
     # skill name -> that skill's own resolved directory (the dir containing its SKILL.md).
     # F-131: lets a per-skill Context be scoped to JUST that skill (mirrors vet_skill's
@@ -1013,9 +1013,9 @@ class Context:
     # skill's evidence onto this one.
     installed_skill_dirs: dict = field(default_factory=dict)
     # B-404: every skill-load root _read_installed_skills actually confirmed
-    # exists and walked — the hardcoded SKILL_DIRS entries, any config-declared workspace/
+    # exists and walked - the hardcoded SKILL_DIRS entries, any config-declared workspace/
     # extraDirs/plugins.load.paths root, the personal ~/.agents/skills tier, a bundled-root
-    # env override, and plugin-skills — resolved-path deduped in the same order the walk
+    # env override, and plugin-skills - resolved-path deduped in the same order the walk
     # used. This is the single source of truth for "was there anywhere to look"; cli.py's
     # sweep_installed_skills reads it instead of re-deriving its own, narrower root list
     # (the bug this field exists to close: a second, flat iterdir()-only guess over just
@@ -1067,64 +1067,64 @@ class Context:
     #: its own map and was how this started. That is wrong here and its own C-135 caught
     #: it: `installed_skills` de-duplicates colliding basenames into `skills/archive-demo`,
     #: `...#2` and so on (see the key computation below), so on a home with the same skill
-    #: name under two load roots the name-keyed map lined up with the WRONG entry —
+    #: name under two load roots the name-keyed map lined up with the WRONG entry -
     #: measured, it convicted a skill shipping nothing but a SKILL.md as DANGEROUS while
     #: the one that really shipped the zip-slip rendered the old temp-file WARN. A path is
     #: unique by construction, so the join cannot slip.
     skill_traversal_violations: dict[str, list[str]] = field(default_factory=dict)
     file_manifest: dict[str, str] = field(default_factory=dict)  # file relpath -> status
     # B-616: relpaths whose text came from one of the decode ladder's ASSUMED rungs
-    # (`latin-1`, or — B-537 — a guessed legacy multi-byte codec such as `shift_jis`;
+    # (`latin-1`, or - B-537 - a guessed legacy multi-byte codec such as `shift_jis`;
     # see `_decode_ladder`) rather than a self-identifying encoding (utf-8, BOM/shape-
     # confirmed utf-16). `file_manifest`'s "(<codec>-assumed)" qualifier records the same
     # fact per file but had exactly one reader (sarif.py); this is the ctx-level signal
     # dossier.py reads to keep a prose-dependent axis from reading PASS over text nobody
-    # actually understood. Never the `(lossy)` (None-encoding) rung — that one keeps a
+    # actually understood. Never the `(lossy)` (None-encoding) rung - that one keeps a
     # UTF-8 reading and pays only per bad character, which is a different, much weaker
     # claim.
     assumed_encoding_files: list[str] = field(default_factory=list)
     symlink_skips: list[str] = field(default_factory=list)        # F-061: skipped symlinks / path-escapes
     # B-458: files that are PRESENT in the skill but could not be opened (permissions,
     # a dangling target, an I/O error). Distinct from every cap channel: nothing was
-    # truncated and no limit was reached — the file was simply never read, so its
+    # truncated and no limit was reached - the file was simply never read, so its
     # content is unknown rather than partially known. Kept separate from limit_hits'
     # generic "truncated / split oversized files" remediation, which would be false
     # advice here (mirrors how padding_anomalies earns its own narrower channel).
     unreadable_files: list[str] = field(default_factory=list)
     # B-551: the same facts, attributed to the skill they belong to. `unreadable_files`
     # entries are paths relative to their own skill directory, so `lib/payload.sh` alone
-    # cannot say whose it is — which is why `report._skill_inventory`, building a fresh
+    # cannot say whose it is - which is why `report._skill_inventory`, building a fresh
     # per-skill Context, could not carry the coverage gap and stamped `NO KNOWN ISSUE` on
     # the very skill whose payload directory the same report said it never read. Keyed by
     # skill name so a per-skill consumer can take exactly its own.
     skill_coverage_gaps: dict = field(default_factory=dict)
     # B-461: skill names whose SKILL.md itself could not be read. Without this, B88 sees an
     # empty text blob and reports the manifest as ABSENT ("no SKILL.md frontmatter block
-    # found — this skill will not appear to the agent"), which is a false statement about a
+    # found - this skill will not appear to the agent"), which is a false statement about a
     # file that is present and well-formed and merely unopenable.
     unreadable_manifests: set = field(default_factory=set)
     filename_obfuscations: list[str] = field(default_factory=list)  # F-061: homoglyph/RTL/zero-width filenames
-    # F-087: skill names whose text-scan was truncated by a LOW-ENTROPY cut tail — the
+    # F-087: skill names whose text-scan was truncated by a LOW-ENTROPY cut tail - the
     # shape of deliberate cap-evasion padding, distinct from limit_hits (which fires on
-    # ANY cap — archive/py/text — including a genuine high-entropy oversized asset).
+    # ANY cap - archive/py/text - including a genuine high-entropy oversized asset).
     padding_anomalies: list[str] = field(default_factory=list)
 
     # B-268: the _MAX_SKILLS truncation frontier. `installed_skills` is a capped VIEW of
     # the filesystem, and a consumer that diffs it against a previous view (monitor.py) or
     # prints its length as an inventory total (report.py) was reading that view as ground
     # truth. These three fields make the partiality explicit and machine-readable:
-    #   skills_capped_names — directory names DISCOVERED but not read because the cap was
+    #   skills_capped_names - directory names DISCOVERED but not read because the cap was
     #     already full. Bounded by _MAX_SKILL_FRONTIER_NAMES so a 100k-skill flood cannot
     #     turn the frontier itself into an unbounded allocation.
-    #   skills_capped_count — the true number skipped, exact even when the name list above
+    #   skills_capped_count - the true number skipped, exact even when the name list above
     #     was itself truncated.
-    #   skills_frontier_partial — True when skills_capped_names is incomplete, i.e. a
+    #   skills_frontier_partial - True when skills_capped_names is incomplete, i.e. a
     #     consumer may NOT use "absent from the name list" to conclude "absent from disk".
     skills_capped_names: list[str] = field(default_factory=list)
     skills_capped_count: int = 0
     skills_frontier_partial: bool = False
 
-    # C-289 (A1): per-scan memo for `trajaudit.analyze(ctx)` — five call sites
+    # C-289 (A1): per-scan memo for `trajaudit.analyze(ctx)` - five call sites
     # (`scoring.compute` x3 via `project`, `audit()` itself, both reading through
     # `grade_cap_signal`) do the exact same trajectory-sidecar I/O against the exact
     # same, unmutated `ctx` within one audit run. Deliberately last: has a default, so
@@ -1136,7 +1136,7 @@ class Context:
     # via `getattr(ctx, "_trajaudit_cache", None)` and skips caching entirely when it is
     # absent, so a duck-typed stub `ctx` in a test keeps working unchanged. A fresh
     # `Context` (e.g. report.py's per-skill blast-radius re-scan) always gets a fresh,
-    # empty dict — nothing here can leak a cached result across two different `Context`
+    # empty dict - nothing here can leak a cached result across two different `Context`
     # objects.
     _trajaudit_cache: dict = field(default_factory=dict, repr=False, compare=False)
 
@@ -1162,7 +1162,7 @@ def _read_with_limit(file_obj: io.BufferedIOBase, byte_limit: int) -> tuple[byte
 
 def _pyc_fmt(data: bytes) -> str | None:
     r"""Name a would-be-binary file 'pyc' when it carries the CPython bytecode magic
-    (``<version-low-byte>\r\r\n`` — bytes 1..3 are ``\x0d\x0d\x0a`` for every 3.x release,
+    (``<version-low-byte>\r\r\n`` - bytes 1..3 are ``\x0d\x0d\x0a`` for every 3.x release,
     since the 16-bit magic's high byte is 0x0d). F-116: consulted ONLY on the binary return
     paths, so a benign text file that merely starts with ``#\r\r\n`` (which stays high-
     printable-ratio TEXT) is never misnamed pyc."""
@@ -1171,7 +1171,7 @@ def _pyc_fmt(data: bytes) -> str | None:
 
 # How many leading bytes classify_bytes samples when deciding text vs binary. Named
 # because B-533 turns on the fact that this is a fixed offset with no regard for
-# character boundaries — see the decode comment there.
+# character boundaries - see the decode comment there.
 _TEXT_SAMPLE_BYTES = 4096
 
 
@@ -1179,7 +1179,7 @@ def _looks_like_utf16(chunk: bytes) -> bool:
     """Do these bytes plausibly *are* UTF-16, rather than merely decode as it?
 
     B-533: a UTF-16 decode raises only on an unpaired surrogate, so almost any byte
-    string "decodes" — which made a non-raising decode worthless as evidence and let
+    string "decodes" - which made a non-raising decode worthless as evidence and let
     mojibake win over a correct UTF-8 reading. Two positive signals instead: a byte-order
     mark, or the interleaved-NUL shape ASCII-range text has in UTF-16 (every other byte
     zero). Text outside the ASCII range without a BOM is not claimed here; it decodes as
@@ -1217,7 +1217,7 @@ _PRINTABLE_RATIO_THRESHOLD = 0.85
 
 def _printable_ratio(decoded: str) -> float:
     """Share of `decoded` that is not a Unicode control/format/surrogate/private/
-    unassigned character (categories Cc, Cf, Cs, Co, Cn) — the same gate
+    unassigned character (categories Cc, Cf, Cs, Co, Cn) - the same gate
     `classify_bytes` applies to its whole-sample decode, factored out so
     `_try_structured_multibyte` (B-537) can apply it per-candidate before a rung is
     trusted. An empty string has nothing to be binary about, so it scores 1.0."""
@@ -1236,19 +1236,19 @@ def _printable_ratio(decoded: str) -> float:
 # B-537: shift-jis/cp932 Japanese (and, incidentally, other CJK legacy multi-byte
 # codepages) reintroduced the exact defect B-533 fixed for UTF-8 CJK. Root cause: shift-jis
 # lead bytes occupy 0x81-0x9F, which is precisely latin-1's C1 control block (Unicode
-# category Cc) — decoding a shift-jis document as latin-1 (the single-byte rung below)
+# category Cc) - decoding a shift-jis document as latin-1 (the single-byte rung below)
 # therefore scores roughly half its characters Cc, well under `_PRINTABLE_RATIO_THRESHOLD`,
 # and the file classifies BINARY and drops out of content scanning entirely. Every other
 # legacy CJK encoding this ladder already read correctly (big5, gb2312, euc_kr,
 # iso2022_jp) escapes only because ITS lead bytes happen to sit above 0xA0 and so score
-# high under latin-1 by the same accident the UTF-16 fallback relied on before B-533 — not
+# high under latin-1 by the same accident the UTF-16 fallback relied on before B-533 - not
 # because the ladder recognised the encoding.
 #
 # These are the codecs Python's stdlib ships incremental decoders for that can plausibly
 # carry a legacy CJK document; tried in this order because shift_jis/cp932 are the
 # regression this bug is about and a wrong-but-structurally-valid match earlier in the
 # list (e.g. cp932 reading euc_jp bytes as half-width-katakana mojibake) still lands on
-# TEXT, which is the only thing `classify_bytes` needs from this rung — the specific
+# TEXT, which is the only thing `classify_bytes` needs from this rung - the specific
 # label is best-effort disclosure, not a claim of correctness (same status as the
 # existing `latin-1` rung's guess).
 _LEGACY_MULTIBYTE_CODECS = ("shift_jis", "cp932", "euc_jp", "big5", "gb18030", "euc_kr")
@@ -1273,13 +1273,13 @@ def _try_structured_multibyte(data: bytes) -> "tuple[str, str] | None":
     both bars.
 
     Unlike the latin-1 rung below (which never raises and so is not itself evidence of
-    anything), a structured multi-byte codec's byte-sequence rules CAN reject — lead and
-    trail bytes must pair up correctly — so "it decoded" is real, if imperfect, positive
+    anything), a structured multi-byte codec's byte-sequence rules CAN reject - lead and
+    trail bytes must pair up correctly - so "it decoded" is real, if imperfect, positive
     evidence the bytes are that encoding's shape. That is why this rung is tried BEFORE
     latin-1: latin-1 would otherwise always accept first and this rung would never run.
 
     Only called from the NUL-free branch of `_decode_ladder`, on data already found not
-    to be predominantly UTF-8 — i.e. exactly the population that would otherwise fall to
+    to be predominantly UTF-8 - i.e. exactly the population that would otherwise fall to
     the unconditional latin-1 guess.
     """
     if len(data) < _MULTIBYTE_MIN_SAMPLE_BYTES:
@@ -1298,7 +1298,7 @@ def _is_predominantly_utf8(data: bytes) -> bool:
     """Is this a UTF-8 document with a few bad bytes, or is it a legacy single-byte file?
 
     Asked only once whole-file UTF-8 has already failed and the UTF-16 rungs have been
-    ruled out — i.e. exactly when the ladder is about to assume a codepage.
+    ruled out - i.e. exactly when the ladder is about to assume a codepage.
 
     B-538 (repair): the latin-1 rung is all-or-nothing, so before this gate ONE invalid
     byte anywhere in a NUL-free file demoted the WHOLE file to a latin-1 re-read. That
@@ -1316,7 +1316,7 @@ def _is_predominantly_utf8(data: bytes) -> bool:
         at all. Judging the whole file by a byte outside that sample lets the classifier
         and the readers disagree about what the file is, which is the B-538 defect.
     (b) **The damage is not at scale.** The sample is a fixed prefix, so a byte planted
-        at offset 200 defeats (a) as easily as one appended at the end — (a) alone would
+        at offset 200 defeats (a) as easily as one appended at the end - (a) alone would
         have moved the attack, not stopped it. So also ask what share of the non-ASCII
         bytes UTF-8 actually fails on. In a legacy codepage essentially every non-ASCII
         byte is invalid UTF-8 (ratio 1.0); in a UTF-8 document they overwhelmingly form
@@ -1350,7 +1350,7 @@ def _is_predominantly_utf8(data: bytes) -> bool:
     non_ascii = len(data.translate(None, bytes(range(128))))
     if not non_ascii:
         return False
-    damaged = data.decode("utf-8", errors="replace").count("�")
+    damaged = data.decode("utf-8", errors="replace").count("\ufffd")
     return damaged / non_ascii < _LEGACY_DAMAGE_RATIO
 
 
@@ -1433,7 +1433,7 @@ def _merge_bridged_invalid_runs(runs: "list[tuple[int, int]]") -> "list[tuple[in
 # B-546 (round 2): an ABSOLUTE size floor on the merged span -- the first cut of this
 # fix -- broke a genuinely short legacy file. Measured on the real regression
 # (`test_every_reader_gets_the_decoded_text_not_just_the_ring`, a 53-byte cp1251
-# comment: `# Настройка плагина: описание параметров.\n` + one ASCII code line): after
+# comment: `# <Cyrillic: Nastroyka plagina: opisanie parametrov.>\n` + one ASCII code line): after
 # `_merge_bridged_invalid_runs` correctly reassembles its four word-runs into ONE
 # 38-byte span (bridging was never the problem -- `_REGION_BRIDGE_BYTES=64` already
 # spans every gap in it), 38 bytes still cannot clear a 256-byte floor, because the
@@ -1467,7 +1467,7 @@ def _region_reads_as_legacy(data: bytes, start: int, end: int) -> bool:
     non_ascii = len(window.translate(None, bytes(range(128))))
     if not non_ascii:
         return False
-    damaged = window.decode("utf-8", errors="replace").count("�")
+    damaged = window.decode("utf-8", errors="replace").count("\ufffd")
     return damaged / non_ascii >= _LEGACY_DAMAGE_RATIO
 
 
@@ -1536,11 +1536,11 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
     """Decode bytes the way the scanner must read them: (text, encoding-used).
 
     Both are None when no rung fits. The encoding name is returned because the rungs are
-    not equally trustworthy — see the latin-1 branch — and the manifest claim in
+    not equally trustworthy - see the latin-1 branch - and the manifest claim in
     `collect_skill_files` has to say which one carried the file.
 
-    The single decode ladder — UTF-8, then BOM/shape-confirmed UTF-16, then a legacy
-    single-byte reading *only for files that really are single-byte* — shared by the
+    The single decode ladder - UTF-8, then BOM/shape-confirmed UTF-16, then a legacy
+    single-byte reading *only for files that really are single-byte* - shared by the
     classifier and by every reader that feeds the content ring. That last rung is gated,
     per contiguous region (B-546), by `_decode_ladder_regions`: a region that is still
     predominantly UTF-8 stays UTF-8 and pays per character, which it reports by
@@ -1552,13 +1552,13 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
     ``.decode("utf-8", errors="replace")``, so a file the classifier had correctly read
     as cp1251 or UTF-16 reached the ring as mojibake while `file_manifest` recorded it
     ``scanned-text``. Measured on a 12.5 KB cp1251 SKILL.md: 9,801 U+FFFD in the text the
-    ring received, and B58 (Unicode obfuscation — a check that can only fire on the
+    ring received, and B58 (Unicode obfuscation - a check that can only fire on the
     non-ASCII bytes themselves) downgraded WARN -> PASS against its byte-identical UTF-8
     twin. A BOM'd UTF-16 file was worse than partial: even the ASCII payload was
     destroyed, and B156/B160/B64/B58 all vanished from a skill reported as scanned.
 
     An incremental decoder is used so an incomplete trailing sequence is buffered rather
-    than raised on — `classify_bytes` passes a sample cut at a fixed offset (B-533), and
+    than raised on - `classify_bytes` passes a sample cut at a fixed offset (B-533), and
     a reader can be handed bytes truncated at a cap. Only a genuinely invalid byte
     reaches the fallbacks.
     """
@@ -1568,13 +1568,13 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
         pass
 
     # A real invalid sequence, not a truncated tail. Only now consider UTF-16, and only
-    # when the bytes actually look like UTF-16 — accepting any non-raising UTF-16 decode
+    # when the bytes actually look like UTF-16 - accepting any non-raising UTF-16 decode
     # is what let arbitrary bytes through as text-shaped garbage in the first place.
     # Nearly every byte pair is valid UTF-16, so "it did not raise" carries almost no
     # evidence; a BOM or the interleaved-NUL shape of ASCII-range text does.
     if _looks_like_utf16(data):
         # B-538: when there IS a BOM it names the byte order, so honour it instead of
-        # trying LE first — a big-endian body decoded as little-endian does not raise, it
+        # trying LE first - a big-endian body decoded as little-endian does not raise, it
         # silently yields byte-swapped CJK. Harmless while only the printable ratio read
         # the result; not harmless now that the ring reads it.
         if data[:2] == b"\xff\xfe":
@@ -1594,7 +1594,7 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
     elif b"\x00" not in data:
         # B-538 (repair): guard the rung before explaining it. Because the rung is
         # all-or-nothing, taking it costs EVERY non-ASCII character in the file, not just
-        # the byte that failed — which made one attacker-planted byte a silencer for every
+        # the byte that failed - which made one attacker-planted byte a silencer for every
         # non-ASCII-keyed check. A file that is still predominantly UTF-8 therefore keeps a
         # UTF-8 reading and pays per character, disclosed as `(lossy)` by the None
         # encoding; the legacy rungs below are for files -- or, since B-546, REGIONS of a
@@ -1608,7 +1608,7 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
         # before, just scoped to a region rather than the whole file), so padding placed
         # away from the real payload can no longer vote on how the payload's own region
         # is read. See its docstring for the two rungs, the merge/floor mechanics, and
-        # why `b"\xee"` (cp1251 `о`, latin-1 `î`, nothing in the bytes says which) is
+        # why `b"\xee"` (cp1251 `<U+043E>`, latin-1 `î`, nothing in the bytes says which) is
         # still an assumption the caller must disclose, never a claimed read.
         return _decode_ladder_regions(data)
 
@@ -1649,7 +1649,7 @@ def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
         if not fmt:
             fmt = "Mach-O (FAT MSB)"
     elif data.startswith(b"\x00asm"):
-        fmt = "wasm"  # F-116: WebAssembly module — unambiguous magic, a loose .wasm is a stowaway
+        fmt = "wasm"  # F-116: WebAssembly module - unambiguous magic, a loose .wasm is a stowaway
     elif data.startswith(b"PK\x03\x04"):
         fmt = "ZIP"
     elif data.startswith(b"PK\x05\x06"):
@@ -1690,19 +1690,19 @@ def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
     #   2-byte scripts (Cyrillic, Greek, Hebrew)    mojibake ratio 1.000 -> TEXT, by luck
     #   Arabic                                       utf-16le fails, utf-16be carries it
     #
-    # So CJK was reliably broken and the rest merely got away with it — the same wrong
+    # So CJK was reliably broken and the rest merely got away with it - the same wrong
     # cut, a different roll. Do not read the 2-byte rows as "those were fine".
     #
-    # The cost was never the "Binary files found" WARN itself — and as of B-615 it is
+    # The cost was never the "Binary files found" WARN itself - and as of B-615 it is
     # not cosmetic either: it drives checks/_vet.py's CAUTION verdict and exit code for
     # any binary `classify_bytes` did NOT recognise as inert media (see ctx.binary_files
     # at the decompress call site; recognised PNG/JPEG/GIF are disclosed instead and
     # don't reach it). The real, separate cost stands regardless: a BINARY verdict drops
     # the file from content scanning, so a CJK skill's prose went unscanned past this
-    # sample size — injection and exfiltration instructions in it were invisible.
+    # sample size - injection and exfiltration instructions in it were invisible.
     #
     # B-538: the ladder itself now lives in `decode_scanned_text` so the readers that
-    # feed the content ring use the SAME one — this function's verdict and their reading
+    # feed the content ring use the SAME one - this function's verdict and their reading
     # of the file must come from one decision, or the manifest claims a coverage the ring
     # never got. Only the sample size is this function's business.
     decoded = decode_scanned_text(data[:_TEXT_SAMPLE_BYTES])
@@ -1827,7 +1827,7 @@ def decompress_and_classify(
 
                 for member_name in namelist:
                     # B-111: member_name is attacker-controlled and NOT length-limited like a
-                    # real filesystem path — use a capped display name for evidence/manifest
+                    # real filesystem path - use a capped display name for evidence/manifest
                     # text; the real (uncapped) member_name still drives zf.getinfo/zf.open.
                     member_disp = _cap_name(member_name)
                     if not is_safe_tar_member(skill_dir, member_name):
@@ -1922,7 +1922,7 @@ def decompress_and_classify(
                     
                 for member in members:
                     # B-111: member.name is attacker-controlled and NOT length-limited like a
-                    # real filesystem path — use a capped display name for evidence/manifest
+                    # real filesystem path - use a capped display name for evidence/manifest
                     # text; the real (uncapped) member.name still drives tf.extractfile.
                     member_disp = _cap_name(member.name)
                     if not is_safe_tar_member(skill_dir, member.name):
@@ -1936,7 +1936,7 @@ def decompress_and_classify(
                         if ctx is not None and (member.issym() or member.islnk()):
                             # F-061-style disclosure: a symlink/hardlink member inside an
                             # archive is dropped just like a symlink hit by walk_dir_safely
-                            # on a real directory — record it the same way so --vet on an
+                            # on a real directory - record it the same way so --vet on an
                             # archive surfaces "N symlink member(s) not followed" too.
                             tgt = member.linkname or "?"
                             reason = f"symlink -> {tgt}"
@@ -2166,18 +2166,18 @@ def decompress_and_classify(
     return results
 
 
-# B-615: formats `classify_bytes` positively RECOGNISES as ordinary, inert media — a
+# B-615: formats `classify_bytes` positively RECOGNISES as ordinary, inert media - a
 # logo, a screenshot, a rendered doc. Bundling one is normal skill authoring, not a
 # stowaway (F-054 already owns native executables/pyc/wasm, a separate branch below)
 # and not an opaque blob (an unrecognised binary still lands in `ctx.binary_files` and
-# still WARNs — that signal is real and stays). Deliberately narrow: archive formats
+# still WARNs - that signal is real and stays). Deliberately narrow: archive formats
 # (ZIP/tar/gzip/bz2/xz) are excluded even though `classify_bytes` recognises them too,
 # because an archive that reached here failed or was capped during decompression, so it
 # is genuinely unresolved content, not inert media.
 #
 # PDF is deliberately NOT in this set despite being one of `classify_bytes`'s
 # recognised formats. A PNG/JPEG/GIF magic-byte match means the whole file IS a raster
-# image — the format has no capability for active content. A PDF magic-byte match
+# image - the format has no capability for active content. A PDF magic-byte match
 # means only that the file STARTS with a valid header; the format itself can carry
 # `/JavaScript`, `/OpenAction`, `/Launch` actions and embedded files, none of which the
 # 8-byte `%PDF-` signature says anything about. "Recognised" would silently become
@@ -2364,7 +2364,7 @@ def _media_is_well_terminated(fmt: str, data: bytes) -> bool:
 def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:
     """Collect (and archive-decompress/classify) the files that make up one skill.
 
-    B-152: *skill_dir* may also be a single **file** — e.g. a bare skill archive
+    B-152: *skill_dir* may also be a single **file** - e.g. a bare skill archive
     (.zip/.tar.gz/.tgz/.tar.bz2/.tar.xz) passed directly to --vet/--vet-skill instead
     of an installed skill directory. In that case the file itself is the sole entry
     walked below, so it goes through the exact same archive-decompression / size-cap /
@@ -2381,23 +2381,23 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
     # is one FLAT list shared across every skill a sweep scans (collector.py's
     # `_read_installed_skills` calls this function once per skill against the same
     # `ctx`), and each entry used to be only the file's path RELATIVE TO ITS OWN skill
-    # dir — indistinguishable from another skill's `lib/x.node` bearing the same
+    # dir - indistinguishable from another skill's `lib/x.node` bearing the same
     # relative path.
     #
     # Deliberately `skill_dir.name` in BOTH branches (not `_note_skill_gap`'s
     # directory-only `skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name`
     # convention): `skill_dir` here is also, per B-152, sometimes a bare skill ARCHIVE
     # FILE passed straight to --vet-skill, and `.name` on a file path is already that
-    # file's own basename (e.g. "malicious-skill.zip") — no ".parent" needed, and taking
+    # file's own basename (e.g. "malicious-skill.zip") - no ".parent" needed, and taking
     # it would instead name the archive's CONTAINING FOLDER (e.g. "downloads"), which is
     # not a skill at all and disagrees with the identity `_vet_resolved_skill` gives the
     # very same target (`p.name`, checks/_vet.py). Verified: the parent-dir form printed
-    # "downloads: malicious-skill.zip::helper.bin (ELF)" for exactly that target — wrong
+    # "downloads: malicious-skill.zip::helper.bin (ELF)" for exactly that target - wrong
     # AND redundant, since `sub_relpath` already spells out the archive as
     # "malicious-skill.zip::helper.bin" in this path. Using `skill_dir.name` instead
     # fixes "wrong" (it now names the archive itself, matching `_vet_resolved_skill`);
     # it stays cosmetically redundant in that one single-archive-target shape
-    # ("malicious-skill.zip: malicious-skill.zip::helper.bin (ELF)") — accepted rather
+    # ("malicious-skill.zip: malicious-skill.zip::helper.bin (ELF)") - accepted rather
     # than special-cased, since the ONLY place that redundancy can occur is a single-
     # target vet call with exactly one candidate owner, where there is nothing to
     # actually misattribute to.
@@ -2440,7 +2440,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             # B-458 built for an unreadable file, because it is the same fact one level up:
             # the content is present and unknown, not absent. Keeping it in `symlink_skips`
             # instead would have described it as "symlink / path-escape not followed" (false)
-            # and, worse, as a WARN — while an unreadable *file* correctly forces the Danger
+            # and, worse, as a WARN - while an unreadable *file* correctly forces the Danger
             # axis to UNKNOWN. A directory hides strictly more than a file, so it cannot
             # carry the weaker verdict.
             #
@@ -2457,7 +2457,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 except (ValueError, OSError):
                     rel = dpath
                 if err == errno.ENOENT:
-                    # The directory did not become unreadable — it stopped existing between
+                    # The directory did not become unreadable - it stopped existing between
                     # `os.walk` listing it and descending into it. Recorded, but never as a
                     # coverage gap: "present and unreadable" and "gone" are different facts,
                     # and only the first one hides anything.
@@ -2468,32 +2468,32 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     # removed mid-scan (a ClawHub update under --vet-all, a `git checkout` in a
                     # skill repo, a pytest/npm temp dir being cleaned). That is a false FAIL on
                     # the documented `--vet ... || fail` install gate, i.e. a Golden Rule #5
-                    # blocker, and the sentence was false twice over — nothing "could not be
+                    # blocker, and the sentence was false twice over - nothing "could not be
                     # READ", and the remediation asserted a hidden subtree where there was none.
                     #
                     # Not a silencer (the FP fix that opens a false negative): to make ENOENT
                     # fire, a directory has to exist at listing time and be gone at descent
                     # time. `rmdir` needs it empty, so every file under it was already
-                    # unlinked — the bytes are off disk at the moment the scanner looks, and a
+                    # unlinked - the bytes are off disk at the moment the scanner looks, and a
                     # static reader cannot be blinded to content that no longer exists.
                     # Restoring it afterwards needs a process running during the scan. That
                     # precondition is absent by construction for `--vet`/`--advise` (an inert,
                     # not-yet-installed tree cannot race itself) but NOT for the audit path or
                     # `--vet-all` over installed skills on a live machine, where an attacker's
-                    # agent may be running — so the claim is "no worse than before" there, not
+                    # agent may be running - so the claim is "no worse than before" there, not
                     # "impossible": pre-fix, ENOENT was recorded nowhere at all. The independent
                     # C-135 pass tried dangling/looping symlinks, a directory replaced by a file
-                    # (ENOTDIR), and PATH_MAX nesting (ENAMETOOLONG) — every one lands on the
+                    # (ENOTDIR), and PATH_MAX nesting (ENAMETOOLONG) - every one lands on the
                     # disclosing side above. `file_manifest` keeps the observation (it reaches
                     # SARIF's inventory and drives no verdict anywhere), so the fact is not
                     # lost, only demoted out of the grade.
                     ctx.file_manifest.setdefault(rel + "/", "vanished-during-scan")
                     continue
-                # Every other errno stays on the disclosing side — EACCES/EPERM is the defect
+                # Every other errno stays on the disclosing side - EACCES/EPERM is the defect
                 # itself, and EIO/ELOOP/ENAMETOOLONG are genuine "present but unread" too.
                 # Fail-closed by default: a new errno nobody anticipated discloses rather than
                 # hides, which is the direction B-458 already chose one level down.
-                # B-551: the same channel now carries two shapes — a directory the walk could
+                # B-551: the same channel now carries two shapes - a directory the walk could
                 # not list, and an entry inside a listed directory that could not even be
                 # classified (no `x` on the parent). Label by what can actually be verified
                 # rather than by which branch recorded it: claiming "directory not entered"
@@ -2511,11 +2511,11 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 ctx.file_manifest.setdefault(rel + suffix, "unreadable")
                 if is_dir and rel in (".", ""):
                     # The skill ROOT is what could not be listed, so whether SKILL.md exists is
-                    # unknown — and B88 defaults to "absent". Without this bridge the dossier
+                    # unknown - and B88 defaults to "absent". Without this bridge the dossier
                     # contradicted itself in adjacent rows: Danger said "an unreadable path is
                     # not an absent one" while Build quality said "no SKILL.md frontmatter block
                     # found ... this skill will not appear to the agent", and that WARN owns the
-                    # top `Fix (top):` line — so the user was told to repair frontmatter that was
+                    # top `Fix (top):` line - so the user was told to repair frontmatter that was
                     # perfectly valid and merely behind a closed door. B-461 built exactly this
                     # bridge for the unreadable *file* case; the directory case has to cross it
                     # too or the two paths disagree about the same fact.
@@ -2549,12 +2549,12 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         """B-458: record a file that is PRESENT but could not be read.
 
         Golden Rule #4 in its sharpest form. These three read sites used to be bare
-        ``except OSError: continue`` — the file vanished from the scan with no
+        ``except OSError: continue`` - the file vanished from the scan with no
         bookkeeping at all, so B13 went on to assert "no malware signature or known-bad
         indicator" about content it had never seen. Measured: ``chmod 000`` on a
         credential-exfiltration script inside a skill flipped that skill from
         ``Grade F (DANGEROUS)``/exit 1 to ``Grade A (NO KNOWN ISSUE)``/exit 0, and
-        ``--advise`` from DO-NOT-INSTALL to INSTALL — i.e. making a payload unreadable
+        ``--advise`` from DO-NOT-INSTALL to INSTALL - i.e. making a payload unreadable
         was a way to buy a clean bill of health, and `--vet ... || fail` (documented in
         docs/USAGE.md as an install gate) went green on a skill nothing had opened.
 
@@ -2580,18 +2580,18 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
     for f in files:
         if not f.is_file():
             # B-549: the walk yields everything os.walk did not classify as a directory, so a
-            # FIFO, a socket or a device node lands here — and this `continue` dropped it with
+            # FIFO, a socket or a device node lands here - and this `continue` dropped it with
             # no bookkeeping. Measured through `--vet-skill` on a skill whose `run.sh` was a
             # FIFO: INSTALL / "no least-privilege, pinning, or authoring-hygiene issue found" /
             # exit 0, i.e. a positive clean over a file the scanner structurally cannot read.
             # The agent will still execute it and take its bytes from whoever writes the pipe.
             #
             # Only `lstat` is consulted (via is_file()); a FIFO is never opened, because
-            # reading one blocks forever with no writer — which is also why "scan it anyway"
+            # reading one blocks forever with no writer - which is also why "scan it anyway"
             # is not an option and disclosure is the only honest answer.
             #
             # False-positive surface measured before landing: 0 non-regular files (symlinks
-            # excluded, they have their own channel) across 9,480 real ones — ~/.openclaw
+            # excluded, they have their own channel) across 9,480 real ones - ~/.openclaw
             # 8,222, ~/.claude/skills 30, fixtures/ 1,228.
             if ctx is not None and _exists_but_not_regular(f):
                 if f.name.lower() == "skill.md":
@@ -2600,7 +2600,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     # pass with a FIFO named SKILL.md: Danger correctly reported an unread
                     # path while Build quality announced "no SKILL.md frontmatter block
                     # found ... this skill will not appear to the agent" one row down, and
-                    # that WARN owns the top `Fix (top):` line — so the user was told to add
+                    # that WARN owns the top `Fix (top):` line - so the user was told to add
                     # a `description:` field to a named pipe.
                     #
                     # B-654: routed through the shared helper so this call site and
@@ -2610,10 +2610,10 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 else:
                     rel = _rel(f)
                     ctx.unreadable_files.append(
-                        f"{rel} (not a regular file — nothing to read at rest)"
+                        f"{rel} (not a regular file \u2014 nothing to read at rest)"
                     )
                     _note_skill_gap(
-                        ctx, skill_dir, f"{rel} (not a regular file — nothing to read at rest)"
+                        ctx, skill_dir, f"{rel} (not a regular file \u2014 nothing to read at rest)"
                     )
                     ctx.file_manifest.setdefault(rel, "not-a-regular-file")
                     note_limit(
@@ -2696,13 +2696,13 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     ctx.excluded_binary_files_count += 1
                     # B-615: a RECOGNISED, WELL-TERMINATED inert media file (PNG/JPEG/
                     # GIF, magic bytes at the start AND the format's own terminator
-                    # reached with nothing trailing it — see _media_is_well_terminated)
-                    # does not join `ctx.binary_files` — that list drives the
+                    # reached with nothing trailing it - see _media_is_well_terminated)
+                    # does not join `ctx.binary_files` - that list drives the
                     # "unexpected binary" WARN in checks/_vet.py, and a bundled logo or
                     # screenshot is ordinary skill content, not a suspicious one. It
                     # still wasn't content-scanned (excluded_binary_files_count above
                     # already says so honestly), so the fact is disclosed on the B-617
-                    # channel instead — never read by a check, never gates a verdict.
+                    # channel instead - never read by a check, never gates a verdict.
                     # A magic-byte match alone is NOT enough: round 2 of this bug was a
                     # live PNG-plus-appended-payload polyglot that the magic-only check
                     # let through as INSTALL. An unrecognised, malformed, or trailing-
@@ -2719,10 +2719,10 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     else:
                         ctx.binary_files.append(sub_relpath)
                     # F-054: a native executable (ELF/PE/Mach-O/JVM class) bundled inside a
-                    # skill is a stowaway — skills are text/config; a compiled binary the
+                    # skill is a stowaway - skills are text/config; a compiled binary the
                     # prose doesn't need has no business here. Recorded for a WARN.
                     #
-                    # B-857: prefixed with `_stowaway_owner` — see that variable's own
+                    # B-857: prefixed with `_stowaway_owner` - see that variable's own
                     # comment above. Before this, a two-skill home (one with a benign
                     # `process.dlopen()` WARN, a separate one merely bundling `tool.node`)
                     # rendered "both: process.dlopen() ..." beside "coverage: native
@@ -2735,7 +2735,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             
             # B-538: decode ONCE, here, and carry the text forward. The manifest entry
             # below is a claim about what the readers will actually receive, so it has to
-            # be derived from the decode they get — not from the classifier's verdict on
+            # be derived from the decode they get - not from the classifier's verdict on
             # a 4096-byte sample, which is how a UTF-16 file whose every reader saw
             # nothing but mojibake was still recorded `scanned-text`.
             sub_text, sub_enc = _decode_ladder(sub_bytes) if sub_class == "TEXT" else (None, None)
@@ -2747,7 +2747,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 sub_text = sub_bytes.decode("utf-8", errors="replace")
 
             # How much the manifest is entitled to claim for this file. `scanned-text`
-            # is reserved for a determined encoding — anything else says so, because a
+            # is reserved for a determined encoding - anything else says so, because a
             # PASS from the content ring is only as good as the characters it was given.
             qualifier = ""
             if sub_class == "TEXT":
@@ -2761,7 +2761,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     # "assumed") or silently borrowing latin-1's label for a different
                     # codec (which would misname the assumption actually made).
                     qualifier = f"({sub_enc}-assumed)"
-                    # B-616: ctx-level twin of the manifest qualifier above — the manifest
+                    # B-616: ctx-level twin of the manifest qualifier above - the manifest
                     # string had exactly one reader (sarif.py); this is what lets
                     # dossier.py keep a prose-dependent axis from reading PASS over text
                     # this run never actually understood.
@@ -2803,7 +2803,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
 # B-086: extensions/names scanned before the size/file cap can be hit. SKILL.md is
 # always the highest-signal file; executable/script extensions are the next most
 # likely place a real payload lives. Everything else keeps its original (alphabetical)
-# relative order — the sort is stable, so ties are unaffected.
+# relative order - the sort is stable, so ties are unaffected.
 _HIGH_PRIORITY_SCAN_EXTS = (".sh", ".bash", ".py", ".mjs", ".js", ".ps1")
 
 
@@ -2827,37 +2827,37 @@ def _skill_scan_priority(item: dict) -> tuple[int, str]:
 # up to the next header from the natural-language-directive ring (an unfenced
 # `.py`/`.sh` file is source code, never a live instruction). The bug: this
 # function concatenates each file's RAW, attacker-controlled bytes verbatim, with
-# no escaping of a "# file:"-shaped line the file's own content already contains —
+# no escaping of a "# file:"-shaped line the file's own content already contains -
 # so a single-file skill can write its own "# file: notes.py" line inside e.g. its
 # SKILL.md body and, once concatenated, that forged line is byte-for-byte
 # indistinguishable from a header THIS function actually inserted. From blob text
 # alone there is no lexical property that tells the two apart (a keyword/regex
 # patch at the consuming end would be the exact whack-a-mole this project's
-# CLAUDE.md warns against — and provably unsound here, since real and forged
+# CLAUDE.md warns against - and provably unsound here, since real and forged
 # headers are identical strings). The only sound fix is structural: make the
 # header un-forgeable by construction. Since THIS function is the sole place that
 # ever legitimately writes a "# file: <name>" line, escaping every confusable line
-# already present in a file's OWN text — before concatenation — guarantees every
+# already present in a file's OWN text - before concatenation - guarantees every
 # such line surviving in the assembled blob is one this function itself inserted.
 #
 # ROUND 2 (the C-135 reviewer broke round 1): round 1 matched the literal ASCII
 # prefix "# file:" against the RAW, pre-normalization line. But every consuming
 # check runs `normalize_for_scan()` on the assembled blob BEFORE `_MANIFEST_
-# HEADER_RE.finditer()` — and `normalize_for_scan` strips invisible/bidi
+# HEADER_RE.finditer()` - and `normalize_for_scan` strips invisible/bidi
 # characters (and folds Tag-block "ASCII smuggling" runs, and confusable
 # homoglyphs) as its very first steps. So a line that does NOT literally start
 # with "# file:" in raw form (e.g. a zero-width space, or an entirely
 # Tag-block-encoded "# file: evil.py" run that is *invisible* until decoded) can
 # still normalize to a real header at scan time, reopening the exact bypass the
 # round-1 fix targeted. The fix is again structural, not a wider keyword list:
-# escape a RAW line whenever its *normalized* form — the exact text the
-# consuming regex actually matches against — starts with the header prefix,
+# escape a RAW line whenever its *normalized* form - the exact text the
+# consuming regex actually matches against - starts with the header prefix,
 # regardless of which raw characters (literal, invisible, or Tag-encoded)
 # produce that normalized shape. Escaping still only ever prepends one literal
 # backslash to the RAW line (leaving every original character, visible or
 # invisible, in place) so: (a) the line stays fully scannable by every content
-# check, and (b) B58's own `obfuscation_signals()` — which reads the RAW text
-# for zero-width/bidi/Tag-run evidence — is completely unaffected; only the
+# check, and (b) B58's own `obfuscation_signals()` - which reads the RAW text
+# for zero-width/bidi/Tag-run evidence - is completely unaffected; only the
 # header-matching prefix is defeated, nothing is stripped or hidden from any
 # other detector.
 _MANIFEST_HEADER_PREFIX = "# file:"
@@ -2867,23 +2867,23 @@ def _escape_embedded_header_lines(text: str) -> str:
     """Neutralize any line in *text* that would be shaped like the '# file:
     <name>' section header `_read_skill_text` injects ONCE IT IS NORMALIZED
     the same way every consuming check normalizes the assembled blob before
-    matching `_MANIFEST_HEADER_RE` against it (B-305/C-135 — see the comment
+    matching `_MANIFEST_HEADER_RE` against it (B-305/C-135 - see the comment
     above for why raw-text-only matching is unsound).
 
-    Decides per RAW line using `normalize_for_scan(line)` — the identical
+    Decides per RAW line using `normalize_for_scan(line)` - the identical
     de-obfuscation pass (invisible/bidi strip, Tag-block fold, confusable fold)
-    every consuming check already applies — so a line can never look
+    every consuming check already applies - so a line can never look
     header-shaped at scan time without also looking header-shaped here. When a
     line's normalized form starts with the header prefix, a literal backslash
-    is prepended to the RAW line (its original characters — including any
-    invisible/confusable/Tag-block ones — are left completely untouched), which
+    is prepended to the RAW line (its original characters - including any
+    invisible/confusable/Tag-block ones - are left completely untouched), which
     survives normalization (backslash passes through every step unchanged) and
     moves the *normalized* line's first character off '#', so
     `_MANIFEST_HEADER_RE` can no longer match there.
 
     `normalize_for_scan` only ever substitutes or deletes individual code
-    points — it never inserts, deletes, or reorders the U+000A line-terminator
-    itself — so a raw line and its normalized counterpart are always at the
+    points - it never inserts, deletes, or reorders the U+000A line-terminator
+    itself - so a raw line and its normalized counterpart are always at the
     same line index; if that invariant is ever violated (e.g. a future
     textnorm.py change), this degrades to a plain literal-prefix check on the
     raw line rather than risk misaligned per-line indexing.
@@ -2928,15 +2928,15 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
     """Concatenate the text/code files of one installed skill (capped, read-only).
 
     B-086: files are scanned in RISK-PRIORITY order, not the raw alphabetical walk
-    order — SKILL.md first, then executable/script extensions, then everything
+    order - SKILL.md first, then executable/script extensions, then everything
     else (stable within each tier). A padded low-risk decoy file (e.g. `AAA_ref.md`)
     can no longer push a genuinely higher-signal file out of the scan budget just
     by sorting first alphabetically. Does not mutate collect_skill_files's own
-    (cached) ordering — only this local copy.
+    (cached) ordering - only this local copy.
 
     B-305/C-135: every file's own text is escaped (`_escape_embedded_header_lines`)
     before the real header is prepended, so a file cannot forge a "# file: <name>"
-    boundary of its own — see that function's docstring.
+    boundary of its own - see that function's docstring.
     """
     collected = sorted(collect_skill_files(skill_dir, ctx), key=_skill_scan_priority)
     parts = []
@@ -2954,8 +2954,8 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
         text = _collected_text(item)
         budget = _MAX_BYTES_PER_SKILL - total
         if len(text) > budget:
-            truncated = True  # this file was sliced — its tail is unscanned
-            # F-087: sample the CUT tail (bounded — never re-reads the whole file) and
+            truncated = True  # this file was sliced - its tail is unscanned
+            # F-087: sample the CUT tail (bounded - never re-reads the whole file) and
             # measure its entropy. Low-entropy filler is the shape of deliberate
             # cap-evasion padding; a real high-entropy asset leaves no anomaly signal.
             tail_sample = text[budget : budget + _ENTROPY_SAMPLE_BYTES]
@@ -2977,19 +2977,19 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"text scan of skill '{skill_dir.name}' hit the "
-            f"{_MAX_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
+            f"{_MAX_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap \u2014 "
             "content beyond the cap was NOT scanned",
         )
 
     return "\n".join(parts)
 
 
-# B-267: budgets for skill_tree_signature() — the CHANGE-DETECTION walk, deliberately
+# B-267: budgets for skill_tree_signature() - the CHANGE-DETECTION walk, deliberately
 # separate from and far wider than the malware-SCAN budgets above. The scan caps exist to
 # bound regex/AST/entropy work on attacker-supplied content; fingerprinting costs one
 # streamed sha256 per file, so it can cover ground the scanner never will. Measured on the
 # real ~/.openclaw: the largest installed skill is 2,190 files / 7.5MB and fingerprints in
-# ~0.65s — comfortably inside both budgets, and paid only on a --monitor run (snapshot() is
+# ~0.65s - comfortably inside both budgets, and paid only on a --monitor run (snapshot() is
 # the sole caller), never on a plain audit.
 _SIG_MAX_FILES = 20_000
 _SIG_MAX_TOTAL_BYTES = 200_000_000
@@ -3001,19 +3001,19 @@ def skill_tree_signature(skill_dir: Path) -> dict:
 
     Returns ``{"digest": str, "files": int, "bytes": int, "complete": bool}``.
 
-    B-267: ``_read_skill_text`` builds the blob the audit SCANS — TEXT-classified files
+    B-267: ``_read_skill_text`` builds the blob the audit SCANS - TEXT-classified files
     only, truncated at ``_MAX_BYTES_PER_SKILL``, with any single file over
     ``_MAX_FILE_BYTES`` dropped whole before the budget logic ever sees it. Hashing that
     blob (which is what monitor's ``_skill_sig`` used to do, alone) answers "did the part
     we scanned change?", and monitor was reporting the answer as "did the skill change?".
     Those differ precisely where it matters: swapping ``bin/helper`` (non-TEXT), appending
     a directive to a file past the per-skill budget, or editing inside an oversized
-    ``REFERENCE.md`` all leave the scanned blob byte-identical. Verified first-hand — all
+    ``REFERENCE.md`` all leave the scanned blob byte-identical. Verified first-hand - all
     three produced ZERO monitor alerts before this function existed.
 
     Change detection does not need the scan budget, so this walk does not inherit it. Each
     file contributes ``relpath\\0size\\0sha256(content)`` to a canonical, sorted fold, so
-    the digest moves on any content edit, size change, addition, removal or rename —
+    the digest moves on any content edit, size change, addition, removal or rename -
     including in regions no scanner will ever read.
 
     ``complete`` is False when the walk itself hit ``_SIG_MAX_FILES`` /
@@ -3022,12 +3022,12 @@ def skill_tree_signature(skill_dir: Path) -> dict:
     incomplete case as unknown rather than as evidence of stability (same discipline B-074
     applies to a truncated scan).
 
-    NARROWS, does not close — two blind spots remain, both inherited deliberately:
+    NARROWS, does not close - two blind spots remain, both inherited deliberately:
 
     * ``__pycache__`` and VCS metadata (``.git``/``.hg``/``.svn``) are excluded, matching
       ``collect_skill_files``'s existing B-125 boundary. They are already outside the
       audited surface, and including them would fire a "skill CHANGED" alert on every
-      ``git status`` or interpreter run — a false positive on ordinary use. A payload
+      ``git status`` or interpreter run - a false positive on ordinary use. A payload
       parked *only* inside ``.git/`` is therefore still invisible here, exactly as it is
       to every other part of the audit.
     * Symlinks are skipped (``walk_dir_safely``), so re-pointing a symlink inside a skill
@@ -3098,7 +3098,7 @@ def skill_tree_signature(skill_dir: Path) -> dict:
 def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str | None:
     """F-116: concatenate the source of a Jupyter notebook's `code` cells so the AST/taint
     engine (which otherwise sees only .py/.sh/.js) can analyze them. Returns joined Python
-    source, or None when the notebook JSON can't be parsed — in which case a limit_hit is
+    source, or None when the notebook JSON can't be parsed - in which case a limit_hit is
     recorded so the AST layer degrades to UNKNOWN (AST_UNANALYZABLE), never a false PASS."""
     try:
         nb = json.loads(text)
@@ -3109,7 +3109,7 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
         if ctx is not None:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_SKILL,
-                f"notebook in skill '{skill_name}' could not be parsed — its code cells "
+                f"notebook in skill '{skill_name}' could not be parsed \u2014 its code cells "
                 "were NOT analyzed (AST_UNANALYZABLE)",
             )
         return None
@@ -3125,13 +3125,13 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
     return "\n".join(parts)
 
 
-# ── B-548: which analyzer owns a file ────────────────────────────────────────
+# -- B-548: which analyzer owns a file ----------------------------------------
 # The three readers below used to answer this from the file NAME alone, so an
-# executable script with no extension — `urlgo`, `install`, `scripts/post_install`
-# — landed in no bucket at all. That is not silence: every downstream coverage
+# executable script with no extension - `urlgo`, `install`, `scripts/post_install`
+# - landed in no bucket at all. That is not silence: every downstream coverage
 # predicate short-circuits on an empty bucket and dossier.py then prints the
 # POSITIVE claim "no executable code to analyze". Our own bad fixture shows the
-# contradiction it produces — `fixtures/bad_b335_no_extension_installer` prints a
+# contradiction it produces - `fixtures/bad_b335_no_extension_installer` prints a
 # WARN saying its `install` file writes auto-execution persistence, and one line
 # below, that there was no executable code to analyse.
 #
@@ -3147,7 +3147,7 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
 #
 # Read that second row as "this machine has no subject", NOT as a fleet result:
 # the installed-skills directory here holds two entries, so the corpus is really
-# `fixtures/`. The exec bit is rejected on a stronger argument than the count —
+# `fixtures/`. The exec bit is rejected on a stronger argument than the count -
 # it does not survive a git checkout or a tarball, so a payload loses it in
 # transit and a benign file gains one by accident.
 #
@@ -3157,7 +3157,7 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
 # `#!/bin/bash`), which the _NON_CODE_SUFFIXES gate below excludes before the
 # shebang is read. Neither was a regression. When the skill's own SKILL.md runs such
 # a file with a named interpreter (`python3 bin/lint`, `bash scripts/setup.json`),
-# B-612's `read_skill_declared` below now hands it to B13's danger pass — for
+# B-612's `read_skill_declared` below now hands it to B13's danger pass - for
 # FINDINGS ONLY, never into these three readers' lists, which is what keeps it from
 # touching coverage (see that block for why the distinction is the whole design). A
 # file nothing declares at all stays unread, and
@@ -3167,13 +3167,13 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
 # `note_limit` for a shebang naming an interpreter we do not parse (perl, ruby).
 # Three independent defects, any one fatal: (a) LIMIT_DOMAIN_SKILL's only
 # renderer is the size/file-cap verdict, so a two-line Ruby CSV formatter printed
-# "Content beyond the size/file cap was not scanned ... split oversized files" —
+# "Content beyond the size/file cap was not scanned ... split oversized files" -
 # a fabricated cause, and it moved a benign skill from `1 safe`/rc 0 to
 # `1 partially scanned`/rc 1 (Golden Rule #5); (b) the same text was printed for
 # a `.md` excluded by suffix, calling python3 "an interpreter this scanner does
 # not analyze"; (c) it never reached the screen at all when a real FAIL outranked
 # it. The scanner did not read ruby before this change either, so coverage never
-# moved — only the claim did. `ctx.limit_hits` carries verdict weight
+# moved - only the claim did. `ctx.limit_hits` carries verdict weight
 # (dossier._danger_coverage_gap leg 2); it is not a notepad. If this disclosure
 # is wanted, it needs its own non-verdict channel, the precedent being
 # NPM_DEPTREE_SKILL_COVERAGE_NOTE (C-358: evidence only, never detail).
@@ -3183,13 +3183,13 @@ _JS_SUFFIXES = (".js", ".ts", ".mjs", ".cjs")
 
 # Interpreter stems, after the basename is lowercased and a trailing version
 # ("3", "3.11", "20") is stripped. Deliberately strict: an interpreter we do not
-# model is NOT guessed into a bucket — a `#!/usr/bin/env ruby` file handed to
+# model is NOT guessed into a bucket - a `#!/usr/bin/env ruby` file handed to
 # analyze_shell would produce findings about a language nobody parsed. It is
 # disclosed instead (see read_skill_python).
 # Suffixes that name DATA or PROSE. A file with one of these never reaches the
 # shebang route, however its first bytes read. Two reasons, and the second is the
 # load-bearing one: a `README.md` opening with `#!` is a Markdown heading, not a
-# script — `#` starts a comment or a heading in a dozen formats — and the prose
+# script - `#` starts a comment or a heading in a dozen formats - and the prose
 # surface is already scanned by the content ring, so routing it to the AST layer
 # would double-count it under a language nobody wrote it in. Measured count of
 # such files across fixtures + the real fleet: zero. The rule is here because a
@@ -3214,7 +3214,7 @@ def _shebang_language(text: str) -> str | None:
     NOT distinguish them. An earlier revision did, to disclose the second as a coverage
     gap; that arm was retracted (see the block comment above) because the scanner never
     read those languages either way, so the disclosure moved the claim without moving
-    the coverage — and it moved a benign skill's exit code with it.
+    the coverage - and it moved a benign skill's exit code with it.
     """
     if not text.startswith("#!"):
         return None
@@ -3266,7 +3266,7 @@ def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple
     """Collect the Python source files of one skill for read-only AST analysis.
 
     Returns a list of (relative-path, source) pairs. F-116: Jupyter `.ipynb` notebooks are
-    included — their code cells are routed to the SAME engine as `.py`.
+    included - their code cells are routed to the SAME engine as `.py`.
     """
     collected = collect_skill_files(skill_dir, ctx)
     out: list[tuple[str, str]] = []
@@ -3301,7 +3301,7 @@ def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"Python scan of skill '{skill_dir.name}' hit the "
-            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
+            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap \u2014 "
             ".py content beyond the cap was NOT analyzed",
         )
 
@@ -3336,7 +3336,7 @@ def read_skill_shell(skill_dir: Path, ctx: Context | None = None) -> list[tuple[
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"shell scan of skill '{skill_dir.name}' hit the "
-            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
+            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap \u2014 "
             "shell content beyond the cap was NOT scanned",
         )
 
@@ -3371,14 +3371,14 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"js scan of skill '{skill_dir.name}' hit the "
-            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
+            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap \u2014 "
             "js content beyond the cap was NOT scanned",
         )
 
     return out
 
 
-# ── B-612: a file whose language only the skill's SKILL.md declares ──────────
+# -- B-612: a file whose language only the skill's SKILL.md declares ----------
 # `bin/lint` with no extension and no `#!`, which SKILL.md tells the agent to run as
 # `python3 bin/lint`, is claimed by none of the three readers above. Measured before
 # this: the same credential-exfil bytes read CAUTION as `bin/lint.py`, CAUTION with a
@@ -3387,17 +3387,17 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
 # THE CONTRACT, and the only reason this route is allowed to exist: a prose-declared
 # file is analysed for FINDINGS ONLY, never for COVERAGE. It is returned here, in its
 # own list, and deliberately NOT added to `installed_skill_py/_shell/_js`. Those three
-# lists are what every coverage predicate reads — `dossier._skill_capabilities`
+# lists are what every coverage predicate reads - `dossier._skill_capabilities`
 # (`has_code` / capability families), `_skill_has_unread_language_code`, the effect
-# simulator behind `ctx.effect_profiles`, and every content-ring check's code pass —
+# simulator behind `ctx.effect_profiles`, and every content-ring check's code pass -
 # so none of them sees a declared file AS CODE (its text still reaches the prose scan,
 # exactly as before), and nothing a declared file contains can move a Persistence /
 # Connections axis from UNKNOWN to PASS. Two consumers, both one-directional: B13's
 # per-file danger pass (`checks/_vet.py::check_installed_skills`), which can only ADD a
 # FAIL/WARN finding, and `dossier._pool_has_declared_code`, which can only WITHDRAW an
 # axis PASS the scan cannot back. A declared Python file that fails to parse is not a
-# parse error there — that carries verdict weight (`engine_degraded`, B-485) and the
-# baseline never read the file — it is disclosed as evidence and nothing else.
+# parse error there - that carries verdict weight (`engine_degraded`, B-485) and the
+# baseline never read the file - it is disclosed as evidence and nothing else.
 #
 # Why that contract and not the one B-612 was filed with. Routing on the declared
 # interpreter was built and retracted after seven C-135 rounds (2026-08-23), on one
@@ -3411,9 +3411,9 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
 # skill pays only what it would pay for naming that file `.py`.
 #
 # What the prose must say, stated as tokens rather than grammar: an interpreter token
-# (`python3`, `/usr/bin/python3`, `pypy3`, `bash`, `sh`, `node`, `deno run`, …) handed
-# a path — as its script argument after its own flags, on stdin (`< path`), or from a
-# `cat path |` — that names a file THIS collection already holds as text. Nothing is
+# (`python3`, `/usr/bin/python3`, `pypy3`, `bash`, `sh`, `node`, `deno run`, ...) handed
+# a path - as its script argument after its own flags, on stdin (`< path`), or from a
+# `cat path |` - that names a file THIS collection already holds as text. Nothing is
 # ever opened from a prose path: it is looked up in the collected set, so
 # `python3 ../../etc/x` and `/etc/x` cannot reach a read. `-m` / `-c` / `-e` mean the
 # program is a module or a string, and route nothing.
@@ -3422,17 +3422,17 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
 # fixtures, the author's ~/.openclaw, OpenClaw's bundled skills, SkillTrustBench, peer
 # corpora): 14,906 prose invocations resolve to a bundled file, a reader above already
 # claims every one of them by extension (8 under a different interpreter than the prose
-# names — never re-routed), and ZERO route here (the `*_b612_*` fixture
+# names - never re-routed), and ZERO route here (the `*_b612_*` fixture
 # pair added with this route is the only exception). So on every measured target this
 # list is empty and nothing moves; it exists for the shape the corpus does not contain
 # and an attacker can write in one line.
 #
 # A data suffix (`_NON_CODE_SUFFIXES`) is the second shape B-612 filed: `bash
 # scripts/setup.json` over a file carrying `#!/bin/bash`. It is routed only when the
-# file's OWN `#!` names the same language as the prose — two independent statements
-# agreeing — so `the node package.json` routes nothing, and B-548's `README.md`-
+# file's OWN `#!` names the same language as the prose - two independent statements
+# agreeing - so `the node package.json` routes nothing, and B-548's `README.md`-
 # opening-with-`#!` argument does not arise (that heading names no interpreter).
-# A word, a `<placeholder>/…` path (kept whole, see below), or one of the shell
+# A word, a `<placeholder>/...` path (kept whole, see below), or one of the shell
 # operators the extractor has to see: `|`, `||`, `&&`, `;` end a command, `<` feeds stdin.
 # Backticks, quotes, brackets, parens and commas are pure separators.
 _DECLARED_TOKEN_RE = re.compile(
@@ -3447,9 +3447,9 @@ _DECLARED_FAMILY_LANG = {"py": "py", "sh": "sh", "node": "js", "deno": "js"}
 # Per interpreter family, because the same letter means different things: `-O` is an
 # optimisation switch to python3 and takes an argument in bash; `-c` is a program string
 # to python3 and a config FILE to deno.
-#   no_file — the program is an argument string or a module, so there is no file to route
-#   stdin   — the program is read from stdin; later words are its arguments
-#   arg     — the flag consumes the next word, which is therefore not the script
+#   no_file - the program is an argument string or a module, so there is no file to route
+#   stdin   - the program is read from stdin; later words are its arguments
+#   arg     - the flag consumes the next word, which is therefore not the script
 _DECLARED_FLAGS = {
     "py": {
         "no_file": frozenset({"-c", "-m"}),
@@ -3561,7 +3561,7 @@ def _declared_invocations(manifest: str) -> list[tuple[str, str]]:
 def _declared_relpath(token: str, base: str, known) -> str | None:
     """The collected relpath *token* names relative to the manifest's dir, or None.
 
-    Lookup only — the result must already be a key of *known*. Absolute paths, `~`,
+    Lookup only - the result must already be a key of *known*. Absolute paths, `~`,
     and any `..` / `.` / empty component are refused before the lookup.
     """
     m = _DECLARED_PLACEHOLDER_RE.match(token)
@@ -3592,11 +3592,11 @@ def read_skill_declared(
     Capped like `read_skill_python`, and recorded the same way when the cap cuts a
     declared file off (B-074): a silent cap would let named decoys ahead of the payload
     buy back the INSTALL this route exists to remove. Measured, that is defence in depth
-    at today's constants — padding big enough to reach this cap also overflows the text
+    at today's constants - padding big enough to reach this cap also overflows the text
     blob's own 1 MB cap (`_MAX_BYTES_PER_SKILL`), and the 500-file walk leaves at most
     499 declared candidates, so an existing limit hit already fires; this one keeps the
     route honest on its own terms if those constants ever move apart. A limit hit can
-    only move the verdict toward UNKNOWN — the direction the contract allows — and it is
+    only move the verdict toward UNKNOWN - the direction the contract allows - and it is
     what the same bytes named `.py` would have produced.
     """
     collected = collect_skill_files(skill_dir, ctx)
@@ -3619,7 +3619,7 @@ def read_skill_declared(
     for target, lang in wanted:
         text = _collected_text(known[target])
         if _file_language(target, text) is not None:
-            continue  # a reader above already owns it — never analyse a file twice
+            continue  # a reader above already owns it - never analyse a file twice
         if target.lower().endswith(_NON_CODE_SUFFIXES) and _shebang_language(text) != lang:
             continue
         if total >= _MAX_PY_BYTES_PER_SKILL or len(out) >= _MAX_FILES_PER_SKILL:
@@ -3631,24 +3631,24 @@ def read_skill_declared(
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"declared-script scan of skill '{skill_dir.name}' hit the "
-            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap — "
+            f"{_MAX_PY_BYTES_PER_SKILL // 1000}KB/{_MAX_FILES_PER_SKILL}-file cap \u2014 "
             "files its SKILL.md runs beyond the cap were NOT analyzed",
         )
     return out
 
 
-# OpenClaw's own default when an agent id is absent or blank — `DEFAULT_AGENT_ID = "main"`
+# OpenClaw's own default when an agent id is absent or blank - `DEFAULT_AGENT_ID = "main"`
 # in `dist/monitor.account-*.js`. Ours must agree or the "is this the default agent?" test
 # below picks a different branch than the product does.
 DEFAULT_AGENT_ID = "main"
 
 
 # Spelled with BOTH cases instead of `re.IGNORECASE`, deliberately. JS's `/i` without
-# the `u` flag does not case-fold non-ASCII, while Python's IGNORECASE does — so
-# `re.IGNORECASE` accepted U+0130 `İ`, U+0131 `ı` and U+017F `ſ` as valid ASCII
+# the `u` flag does not case-fold non-ASCII, while Python's IGNORECASE does - so
+# `re.IGNORECASE` accepted U+0130 (I with dot above), U+0131 (dotless i) and U+017F (long s) as valid ASCII
 # letters and returned them unsanitised. Measured against the real dist function over a
 # 65,504-codepoint BMP sweep: those three were the ONLY divergences, and an id like
-# `İstanbul` is a perfectly ordinary Turkish agent name whose workspace we would then
+# `<U+0130>stanbul` is a perfectly ordinary Turkish agent name whose workspace we would then
 # have kept looking for in the wrong directory.
 _JS_TRIM_CHARS = (
     "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
@@ -3679,21 +3679,21 @@ def _normalize_agent_id(value) -> str:
     **There are SIX copies of this function in the dist and they do not agree.** Two
     (`monitor.account-*.js`, `telegram-ingress-spool-*.js`) are a bare
     `trim().toLowerCase() || DEFAULT_AGENT_ID`; the other four sanitise. The first version of
-    this port transcribed a bare one — found by grepping for the first definition rather than
-    by following what the caller binds — and asserted in its own docstring that the product
+    this port transcribed a bare one - found by grepping for the first definition rather than
+    by following what the caller binds - and asserted in its own docstring that the product
     "does not sanitise the value as a path segment". The opposite is true, and the function's
     own comment says so. The copy that matters is the one in the same module as
     `resolveAgentWorkspaceDir` (`config-utils-*.js`), which is the sanitising one.
 
     Getting this wrong left the hole open for ordinary ids: `Work Laptop` becomes
     `work-laptop`, so OpenClaw uses `workspace-work-laptop` while we derived
-    `workspace-work laptop` and read nothing. Measured end to end — `installed_skills == {}`
+    `workspace-work laptop` and read nothing. Measured end to end - `installed_skills == {}`
     against a control of `{'evil': ...}`. It also closed a hazard by accident: a sanitised id
     can no longer contain a path separator, so a derived root cannot escape the state dir
     through the id at all.
 
     Note `VALID_ID_RE` is tested against the TRIMMED original (case-insensitively) while the
-    value returned is the lowercased one — an id that is already valid is never sliced.
+    value returned is the lowercased one - an id that is already valid is never sliced.
     """
     # `String.trim()`, not `str.strip()`: Python strips \x1c-\x1f and \x85 which JS keeps,
     # and keeps \ufeff which JS strips. Only observable when the difference exposes an
@@ -3876,8 +3876,8 @@ def _derived_agent_workspaces(cfg: dict) -> "list[str]":
     3. otherwise, if `agents.defaults.workspace` is set, ``join(that, id)``;
     4. otherwise ``join(stateDir, "workspace-" + id)``.
 
-    Rules 3 and 4 were never constructed, so every NON-default agent's entire workspace —
-    its `skills/`, its bootstrap files, its memory — was invisible to the audit whenever the
+    Rules 3 and 4 were never constructed, so every NON-default agent's entire workspace -
+    its `skills/`, its bootstrap files, its memory - was invisible to the audit whenever the
     user had not hand-written a `workspace` path for it. Measured end to end: the same
     malicious SKILL.md produced B13 under `workspace` and nothing at all under
     `workspace-personal` with a matching two-agent config.
@@ -3887,7 +3887,7 @@ def _derived_agent_workspaces(cfg: dict) -> "list[str]":
 
     Only entries carrying a **string** `id` get a derived path, matching
     `listAgentWorkspaceDirs`, which skips the rest. An entry's explicit `workspace` is still
-    collected by the caller whether or not it has an id — narrowing that would scan less than
+    collected by the caller whether or not it has an id - narrowing that would scan less than
     before, and no fix for a blind spot may open a new one.
 
     NOT implemented, and disclosed rather than left implicit: `resolveDefaultAgentWorkspaceDir`
@@ -3912,10 +3912,10 @@ def _derived_agent_workspaces(cfg: dict) -> "list[str]":
             continue
         own = entry.get("workspace")
         if isinstance(own, str) and own.strip():
-            continue  # rule 1 — the caller already collects it
+            continue  # rule 1 - the caller already collects it
         agent_id = _normalize_agent_id(entry.get("id"))
         if agent_id == default_id:
-            continue  # rule 2 — `fallback`, or the plain `workspace` in WORKSPACE_DIRS
+            continue  # rule 2 - `fallback`, or the plain `workspace` in WORKSPACE_DIRS
         out.append(str(Path(fallback) / agent_id) if fallback else f"workspace-{agent_id}")
     return out
 
@@ -3926,8 +3926,8 @@ def _config_workspace_dirs(
 ) -> list[Path]:
     """Absolute workspace dir(s) declared in openclaw.json (B-161).
 
-    OpenClaw's ``agents.defaults.workspace`` — and any per-agent
-    ``agents.list[].workspace`` override — can point the agent's workspace outside the
+    OpenClaw's ``agents.defaults.workspace`` - and any per-agent
+    ``agents.list[].workspace`` override - can point the agent's workspace outside the
     hardcoded WORKSPACE_DIRS names. Bootstrap files and a ``skills/`` dir living there
     would otherwise be invisible, so a malicious SOUL.md / skill in a custom workspace
     scored clean. Returns de-duplicated absolute, RESOLVED dirs (relative paths resolved
@@ -3937,7 +3937,7 @@ def _config_workspace_dirs(
 
     B-169: real OpenClaw does not confine ``workspace`` under the user's home
     (``resolveUserPath`` has no home-check), so a workspace that resolves OUTSIDE *home*
-    is legitimate and MUST still be scanned — rejecting it would be a false-positive
+    is legitimate and MUST still be scanned - rejecting it would be a false-positive
     FAIL/skip (Golden Rule #5). Instead, when *limit_hits* is given and a workspace
     resolves outside *home*, one de-duplicated disclosure line is appended so the report
     stays transparent about the scan's actual scope.
@@ -3970,8 +3970,8 @@ def _config_workspace_dirs(
         try:
             resolved = p.resolve()
         except (OSError, ValueError, RuntimeError):
-            # An unusable workspace path — embedded null byte (ValueError), symlink loop /
-            # over-deep (RuntimeError), or an OS error — must be skipped, never crash the
+            # An unusable workspace path - embedded null byte (ValueError), symlink loop /
+            # over-deep (RuntimeError), or an OS error - must be skipped, never crash the
             # audit. Dropping it here also stops a later is_dir() from raising on it (C-135).
             continue
         if resolved in seen:
@@ -3986,7 +3986,7 @@ def _config_workspace_dirs(
                 if limit_hits is not None:
                     msg = (
                         f"custom workspace '{resolved.name}' resolves outside the audited "
-                        f"--home ({resolved}) — bootstrap/skills read from there are outside "
+                        f"--home ({resolved}) \u2014 bootstrap/skills read from there are outside "
                         "the scoped audit"
                     )
                     if msg not in limit_hits:
@@ -3996,9 +3996,9 @@ def _config_workspace_dirs(
                         )
                 # B-617: DUAL-WRITE, and the two sinks say deliberately different things.
                 # The limit_hits entry above is left byte-identical because three
-                # consumers already depend on its exact text and truthiness — B13's
+                # consumers already depend on its exact text and truthiness - B13's
                 # UNKNOWN (checks/_vet.py), dossier leg 2, and cli.sweep_installed_skills
-                # — so changing it would move verdicts. It also interpolates the ABSOLUTE
+                # - so changing it would move verdicts. It also interpolates the ABSOLUTE
                 # path, which is why it must never be rendered into human text (sarif.py
                 # copies limit_hits verbatim and already carries `/home/<user>/...`).
                 # The disclosure below is the renderable half: a bare name, no path.
@@ -4014,12 +4014,12 @@ def _config_workspace_dirs(
 
 
 # B-846 ROUND 5: `_OWN_ENGINE_MARKERS` used to be matched as TEXT (first a bare
-# substring, then a substring of a hand-blanked/tokenize-blanked reconstruction — see
+# substring, then a substring of a hand-blanked/tokenize-blanked reconstruction - see
 # the ROUND 1-4 history in `_is_own_source`'s docstring). Every one of those rounds
 # was eventually broken by a lexer/grammar quirk version-specific to either CPython
 # 3.9 or 3.12 (PEP 701 changed f-string tokenizing in 3.12; a pre-PEP-701 lexer has no
-# notion of `{}` nesting at all, so a source that is not even valid Python — e.g.
-# `f"{"def vet_skill"}"`, a same-quote nested f-string — can still lex on 3.9 into
+# notion of `{}` nesting at all, so a source that is not even valid Python - e.g.
+# `f"{"def vet_skill"}"`, a same-quote nested f-string - can still lex on 3.9 into
 # real, un-blanked `NAME` tokens spelling out a marker). Reconstructing "real code
 # text" from a lexer that does not validate grammar and then substring-matching it is
 # unfixable in kind: the next lexer/grammar-vs-lexer mismatch fails somewhere else.
@@ -4027,7 +4027,7 @@ def _config_workspace_dirs(
 # `_marker_identifier` extracts the bare Python identifier each marker names, e.g.
 # "def vet_skill" -> "vet_skill", "_SKILL_CRIT" -> "_SKILL_CRIT" (no space, so the
 # whole string). Used only for the raw-text short-circuit below the matching function
-# — this remains sound because it does not care about a marker's surrounding
+# - this remains sound because it does not care about a marker's surrounding
 # whitespace at all, only whether the identifier's exact spelling occurs somewhere in
 # the file (a real `ast.FunctionDef`/`Name` node can only ever be spelled exactly as
 # it appears in the source: the parser reads the identifier's characters directly, no
@@ -4038,14 +4038,14 @@ def _marker_identifier(marker: str) -> str:
 
 def _own_engine_symbols_in_ast(tree: ast.AST) -> set:
     """Return the subset of `_OWN_ENGINE_MARKERS` structurally present as real AST
-    nodes in `tree` — never a substring/text match, so no lexer or grammar quirk
+    nodes in `tree` - never a substring/text match, so no lexer or grammar quirk
     (comment, string, f-string, PEP-701 nesting edge case, ...) can forge a hit:
     forging one means literally writing the function/assignment, which is the
     documented, accepted residual (see `_is_own_source`'s class docstring) and no
     cheaper than it already was.
 
     Same idiom as `clawseccheck/skillast.py` (read-only `ast.parse()` analysis of
-    scanned skill code, never eval/exec) — this function never executes `tree` either,
+    scanned skill code, never eval/exec) - this function never executes `tree` either,
     it only walks the node graph `ast.parse` already built.
     """
     found = set()
@@ -4071,7 +4071,7 @@ def _is_own_source(p: Path) -> bool:
     red-team payloads as *data*, so a naive malware scan of its own source self-flags.
 
     Recognition is by structure (package layout) AND real AST STRUCTURE of the
-    engine's distinctive symbols (`_own_engine_symbols_in_ast`, above) — never by name
+    engine's distinctive symbols (`_own_engine_symbols_in_ast`, above) - never by name
     and never by TEXT: `_SKILL_CRIT` must be the target of a genuine
     `Assign`/`AnnAssign`, and `check_installed_skills`/`vet_skill` must each be a real
     `FunctionDef`/`AsyncFunctionDef` name. `ast.parse` is the same read-only-AST idiom
@@ -4082,7 +4082,7 @@ def _is_own_source(p: Path) -> bool:
     dodge or forge detection.
 
     B-265: this is the single self-identity oracle for BOTH surfaces (`--vet`'s
-    `_vet_resolved_skill` short-circuit, and skill discovery's self-exclusion below) —
+    `_vet_resolved_skill` short-circuit, and skill discovery's self-exclusion below) -
     both must agree, or `mv evil-skill clawshield` (or any other rename) could erase a
     skill from `ctx.installed_skills`/`--monitor` while `--vet` on the same bytes still
     convicted it. `checks/_shared.py` re-imports this function so `vet_skill` and the
@@ -4090,39 +4090,39 @@ def _is_own_source(p: Path) -> bool:
 
     ACCEPTED RESIDUAL (B-846, not solvable by parsing, deliberately out of scope): a
     forger who writes three real, trivial `def`/assignment statements (a `def
-    vet_skill(): pass` stub, say) instead of any lexical trick still passes — forging
+    vet_skill(): pass` stub, say) instead of any lexical trick still passes - forging
     a `FunctionDef`/`Assign` node means literally writing the function/assignment,
     which is no cheaper than the genuine engine's own definitions. Closing this needs
     a signed/attested identity, not a content heuristic. Separately, `check_installed_
     skills` is only one of the surfaces that sees a skill at all. Pinned by
     `tests/test_b846_self_source_axis_and_marker_forgery.py`.
 
-    RETRACTED APPROACHES (B-846 — do not reintroduce; each was tried and defeated by a
+    RETRACTED APPROACHES (B-846 - do not reintroduce; each was tried and defeated by a
     C-135 reviewer, reproduced end-to-end against the real DO-NOT-INSTALL fixture
     `fixtures/bad_b335_runtime_persist_install/skills/envtools`, flipping its verdict
     to INSTALL / Danger PASS every time):
     - Bare substring match on `_OWN_ENGINE_MARKERS` text: a single `#`-commented line
-      of marker text granted identity for free — no real code needed at all.
+      of marker text granted identity for free - no real code needed at all.
     - Stripping only comment-ONLY lines before the substring match: missed inline/
       trailing comments, comments after `;`, and markers inside strings/docstrings.
     - Tokenizing (stdlib `tokenize`) and blanking COMMENT/STRING[/FSTRING_MIDDLE on
       3.12+] tokens before the substring match: still fundamentally text-based, so it
-      inherited every lexer-vs-grammar mismatch — PEP 701 changed f-string tokenizing
+      inherited every lexer-vs-grammar mismatch - PEP 701 changed f-string tokenizing
       on 3.12 (a marker sailed through unblanked there before that was patched), and
       separately a pre-PEP-701 lexer's total lack of `{}`-nesting awareness lets a
       source that is NOT even valid Python (a same-quote nested f-string,
       `f"{"def vet_skill"}"`) still LEX cleanly into real, un-blanked `NAME` tokens on
       3.9-3.11, with no exception raised to trip any fail-closed path. A pure lexer
       has no grammar validation, so reconstructing "real code text" from one and
-      substring-matching it is unfixable in kind — only AST structure is sound, since
+      substring-matching it is unfixable in kind - only AST structure is sound, since
       forging a node requires the source to actually PARSE as that node.
 
     C-135 residual, accepted deliberately: an own install that ships the DOCS but not the
-    engine (a hand-made partial copy — `SKILL.md` + `README.md` + `docs/` under a
+    engine (a hand-made partial copy - `SKILL.md` + `README.md` + `docs/` under a
     `clawseccheck/` dir with no `clawseccheck/checks/`) is no longer excluded, so the
     audit scans our own prose, which necessarily quotes attack payloads, and self-flags.
     Not a shipped shape: both documented installs put the engine on disk (ClawHub installs
-    the whole tree — pyproject `packages` includes `clawseccheck.checks` — and the pipx
+    the whole tree - pyproject `packages` includes `clawseccheck.checks` - and the pipx
     route creates no skill dir at all), and a docs-only copy has no working console script.
     Verified against the real `~/.openclaw` install, which recognises correctly. Left
     unmitigated on purpose: every candidate fix keys on copyable doc content, which is
@@ -4135,7 +4135,7 @@ def _is_own_source(p: Path) -> bool:
     # Read every engine source so the markers are found regardless of which topic module
     # the I-022 split scattered them into.
     # B-303: every is_dir()/is_file()/glob() below goes through the _safe_* helpers (or a
-    # try/except) — a non-traversable *p* (e.g. an ancestor chmod 000) must answer "not
+    # try/except) - a non-traversable *p* (e.g. an ancestor chmod 000) must answer "not
     # our own source", never crash the whole audit with an uncaught PermissionError.
     if _safe_is_dir(p / "clawseccheck" / "checks"):  # repo root / install dir (package)
         try:
@@ -4162,23 +4162,23 @@ def _is_own_source(p: Path) -> bool:
         except OSError:
             return False
     # B-846: see the class docstring. A marker is matched by AST STRUCTURE
-    # (`_own_engine_symbols_in_ast`) — a real `FunctionDef`/`Assign` node — never by
+    # (`_own_engine_symbols_in_ast`) - a real `FunctionDef`/`Assign` node - never by
     # substring text, so no lexer/grammar mismatch (comment, string, f-string, or a
     # source that lexes differently from how it parses) can forge one.
     #
     # PERFORMANCE: `ast.parse` is real parsing, not a cheap scan, and the real engine
     # is ~3.4M characters across 11 files. The short-circuit below skips parsing a file
     # outright when none of the still-missing markers' bare IDENTIFIERS appear
-    # anywhere in that file's raw text — sound, not a heuristic: an `ast.FunctionDef`
+    # anywhere in that file's raw text - sound, not a heuristic: an `ast.FunctionDef`
     # or `ast.Name` node's identifier is always spelled EXACTLY as it appears in the
     # source (the parser reads the characters directly; no lexer/grammar trick renames
     # one), so "identifier absent from raw text" soundly implies "no such node exists
     # in this file", in the safe direction only (a file can be skipped, never wrongly
     # excluded from parsing). The loop also stops entirely once every marker has been
-    # confirmed present in some file's AST — later files (sorted, so this is
+    # confirmed present in some file's AST - later files (sorted, so this is
     # deterministic) are never even considered. Measured on the real `checks/`
     # package (11 files): 5 get parsed (`__init__.py`, `_content.py`, `_mcp.py`,
-    # `_shared.py`, `_vet.py` — every file whose text mentions `vet_skill`/
+    # `_shared.py`, `_vet.py` - every file whose text mentions `vet_skill`/
     # `check_installed_skills` at all, including plain imports/re-exports that never
     # define them), the other 6 are skipped on the raw-text check alone. `heads`
     # above is still read in full regardless (reading is cheap and preserves the
@@ -4186,11 +4186,11 @@ def _is_own_source(p: Path) -> bool:
     # `ast.parse` costs more than tokenizing (parsing does strictly more work than
     # lexing): ~0.39s/call on
     # python3.12.3 and ~0.26s/call on python3.9.25 against the real repo root (a
-    # directory that genuinely impersonates our layout) — against ~0.02ms/call on
+    # directory that genuinely impersonates our layout) - against ~0.02ms/call on
     # BOTH versions for an ordinary candidate skill directory with no
-    # `clawseccheck`-shaped layout at all. The short-circuit's actual job — keeping
+    # `clawseccheck`-shaped layout at all. The short-circuit's actual job - keeping
     # the expensive path off the vast majority of directories discovery ever looks
-    # at — still holds; only a directory already claiming to BE our package pays the
+    # at - still holds; only a directory already claiming to BE our package pays the
     # parse cost, exactly as before this round.
     remaining = set(_OWN_ENGINE_MARKERS)
     for text in heads:
@@ -4203,7 +4203,7 @@ def _is_own_source(p: Path) -> bool:
         except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
             # Fails CLOSED, not open: a file that does not PARSE (whether genuinely
             # malformed, or a lexer-confusing construct like a same-quote nested
-            # f-string that only pre-PEP-701 tokenizers mis-lex — see ROUND 5)
+            # f-string that only pre-PEP-701 tokenizers mis-lex - see ROUND 5)
             # contributes NO markers, rather than falling back to any weaker text
             # match. Our own engine sources always parse cleanly (they compile).
             continue
@@ -4217,20 +4217,20 @@ def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
     B-289: skill roots used to be either inside the audited home or named by the config,
     so an unreadable entry was a remote possibility. OPENCLAW_BUNDLED_SKILLS_DIR makes the
     root an ARBITRARY absolute path chosen by whoever set the variable, and a directory
-    containing an entry this process cannot stat is then reachable — the discovery walk
+    containing an entry this process cannot stat is then reachable - the discovery walk
     raises ``PermissionError`` and takes the WHOLE audit down with it.
 
     Found by the adversarial pass, not by a fixture: pointing the override at ``/tmp`` is
     enough on a stock Ubuntu box, because ``/tmp/snap-private-tmp`` is root-only. That
     turns "an attacker who can write the systemd unit" into "an attacker who can stop the
-    audit from producing any report at all" — a denial-of-audit for the price of one line.
+    audit from producing any report at all" - a denial-of-audit for the price of one line.
 
     A partial walk is recorded as a limit hit, never swallowed: consumers of
     ``ctx.installed_skills`` treat a limit hit as "this view is incomplete" and report
     UNKNOWN rather than a clean PASS over a scan that never finished.
 
     B-654: also collects, without changing the population or the walk at all, every
-    directory whose own SKILL.md exists but is not a regular file — the fall-through
+    directory whose own SKILL.md exists but is not a regular file - the fall-through
     ``iter_discovered_skill_dirs`` already takes without yielding or truncating. Those
     names get the same five writes ``collect_skill_files`` performs for the identical
     fact once a directory HAS been yielded, via the shared ``_note_unreadable_manifest``,
@@ -4255,7 +4255,7 @@ def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_SKILL,
                 f"skill discovery under '{base}' stopped early ({exc.__class__.__name__}) "
-                "— skills beyond that point were NOT scanned",
+                "\u2014 skills beyond that point were NOT scanned",
             )
             break
         yield item
@@ -4265,8 +4265,8 @@ def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
 
 def _read_installed_skills(home: Path, ctx: Context) -> None:
     seen: set[str] = set()
-    # (base_dir, allow_symlink_entries). The hardcoded roots refuse symlinked skill dirs —
-    # a planted symlink is a tamper signal — but plugin-skills entries are *deliberately*
+    # (base_dir, allow_symlink_entries). The hardcoded roots refuse symlinked skill dirs -
+    # a planted symlink is a tamper signal - but plugin-skills entries are *deliberately*
     # symlinks into a plugin's bundled skills/ dir, so those get dereferenced (B-161).
     roots: list[tuple[Path, bool]] = [(home / rel, False) for rel in SKILL_DIRS]
     # OpenClaw also loads personal cross-agent skills from ~/.agents/skills. Only add
@@ -4345,7 +4345,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                                     disclosures=ctx.disclosures):
         roots.append((cw / "skills", False))
     roots.extend((path, False) for path in _config_extra_skill_dirs(home, ctx.config))
-    # F-119: plugins.load.paths (a real dist key) — a path-loaded plugin bundles skills under
+    # F-119: plugins.load.paths (a real dist key) - a path-loaded plugin bundles skills under
     # <plugin>/skills/ that enter the auto-load surface; discover them so they're scanned like
     # any other installed skill instead of being silently invisible.
     roots.extend((pp / "skills", False) for pp in _config_plugin_load_paths(home, ctx.config))
@@ -4353,13 +4353,13 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     # resolveBundledSkillsDir (bundled-dir-BQFrcRIS.js:22-24) honours it unconditionally.
     # The relocated directory is a real auto-load root, so its skills go through the SAME
     # content scanners as every other tier rather than a second engine. Only a relocation
-    # evidenced by a persistent artifact is followed — the auditing shell's environment is
+    # evidenced by a persistent artifact is followed - the auditing shell's environment is
     # not the agent's (see persistent_env_evidence). Note this ADDS a load root: the
     # default bundled-dist tier is still not scanned (SKILL_TIER_ORDER omits it), so this
     # is an unenumerated-root fix, not a stale-snapshot one.
     for _var, _kind, _value, _src in bundled_root_overrides(ctx):
         if _kind != "skills":
-            continue  # a hooks root holds hook modules, not SKILL.md dirs — B186 discloses it
+            continue  # a hooks root holds hook modules, not SKILL.md dirs - B186 discloses it
         try:
             _override = Path(_value).expanduser()
         except (OSError, ValueError, RuntimeError):
@@ -4373,12 +4373,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     seen_roots: set[Path] = set()
     for base, allow_symlink in roots:
         # B-303: a load root that exists but is not traversable (most commonly the whole
-        # home, e.g. chmod 000) must be skipped like a root that does not exist at all —
+        # home, e.g. chmod 000) must be skipped like a root that does not exist at all -
         # ctx.installed_skills then simply stays emptier, which check_installed_skills
         # (B13) already degrades to UNKNOWN for, never a crash or a fake clean PASS.
         # B-404: unlike a root that genuinely does not exist, a root that
         # exists but could not be stat'd (permission denied) is a REAL enumeration
-        # failure — domain=LIMIT_DOMAIN_SKILL records it so a consumer asking "was this
+        # failure - domain=LIMIT_DOMAIN_SKILL records it so a consumer asking "was this
         # scan complete" (limit_hits_for) can see it, instead of it reading identically
         # to "nothing configured here".
         if not _safe_is_dir(base, ctx, what=f"skill root '{base}'", domain=LIMIT_DOMAIN_SKILL):
@@ -4391,11 +4391,11 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             continue
         seen_roots.add(base_key)
         # B-404: the single source of truth for "which roots did the real
-        # discovery engine confirm and walk" — see the field's docstring on Context.
+        # discovery engine confirm and walk" - see the field's docstring on Context.
         ctx.installed_skill_roots.append(base)
         for sd, target in _iter_skill_dirs_guarded(base, allow_symlink, ctx):
             if len(ctx.installed_skills) >= _MAX_SKILLS:
-                # B-268: this used to `return` — the collection stopped dead, leaving
+                # B-268: this used to `return` - the collection stopped dead, leaving
                 # ctx.installed_skills a silently truncated view with no trace that more
                 # existed. Two consumers then read that view as filesystem ground truth:
                 # monitor's skill diff reported every uncollected name as "was removed"
@@ -4406,7 +4406,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 # of the scanned set entirely, and nothing recorded a limit hit, so B13
                 # still reported a clean verdict over a scan that never saw it.
                 #
-                # Keep walking so the frontier is EXACT — the skipped dirs are only
+                # Keep walking so the frontier is EXACT - the skipped dirs are only
                 # enumerated (a bounded directory listing, already capped by
                 # skilldiscovery's _MAX_DIRS), never read, so the cap still does its job
                 # of bounding content work.
@@ -4417,7 +4417,7 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                     ctx.skills_frontier_partial = True
                 continue
             # B-265: self-exclusion is CONTENT-verified, never basename-verified. Test the
-            # resolved `target` (the real bytes), not `sd` — a symlinked plugin-skills entry
+            # resolved `target` (the real bytes), not `sd` - a symlinked plugin-skills entry
             # must be judged by what it points at. A malicious skill renamed to an own-skill
             # name now enters the inventory and is audited like any other.
             if _is_own_source(target):
@@ -4468,20 +4468,20 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     # B-268: record the cap hit, mirroring what skilldiscovery.py already does for its
     # sibling _MAX_DIRS cap. This is what makes check_installed_skills (B13) degrade to
     # UNKNOWN instead of reporting a clean PASS over a scan that never reached the skills
-    # beyond the cap — the existing B-074 discipline, which this cap alone was bypassing.
+    # beyond the cap - the existing B-074 discipline, which this cap alone was bypassing.
     if ctx.skills_capped_count:
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_SKILL,
-            f"installed-skill collection hit the {_MAX_SKILLS}-skill cap — "
+            f"installed-skill collection hit the {_MAX_SKILLS}-skill cap \u2014 "
             f"{ctx.skills_capped_count} further skill director"
             f"{'y was' if ctx.skills_capped_count == 1 else 'ies were'} NOT read",
         )
 
 
 # Skill-load tiers in PRECEDENCE order, HIGHEST-WINS first. Grounded against the dist loader
-# (openclaw dist workspace-*.js — every discovered skill is merged into one global Map keyed by
-# declared `name:`, so the LAST-merged root silently overwrites — "shadows" — any same-named
-# skill from an earlier root, with NO warning). Precedence highest→lowest: workspace >
+# (openclaw dist workspace-*.js - every discovered skill is merged into one global Map keyed by
+# declared `name:`, so the LAST-merged root silently overwrites - "shadows" - any same-named
+# skill from an earlier root, with NO warning). Precedence highest->lowest: workspace >
 # project-agent > personal-agent > managed (~/.openclaw/skills) > bundled(dist) > extraDirs /
 # plugins.load.paths. The audit sees the home-rooted tiers below; the bundled-dist tier lives
 # outside the home and is not scanned.
@@ -4492,11 +4492,11 @@ def skill_load_roots(
     home: Path, cfg: dict | None = None, *, user_home: Path | None = None
 ) -> list[tuple[Path, str]]:
     """Return ``(root_dir, tier)`` for every skill-load root the audit can see, in PRECEDENCE
-    order — highest-precedence (the tier that WINS a name collision) FIRST. Resolved-path
+    order - highest-precedence (the tier that WINS a name collision) FIRST. Resolved-path
     de-duped so one physical dir is never listed twice (the highest-precedence alias wins).
     Read-only; never raises. Used by B104 to flag cross-tier NAME shadowing (a planted
     higher-precedence copy silently overriding a trusted skill). ``user_home`` adds the
-    personal ``~/.agents/skills`` tier — pass it only when auditing a real ``~/.openclaw``
+    personal ``~/.agents/skills`` tier - pass it only when auditing a real ``~/.openclaw``
     profile, so fixture/custom --home scans stay hermetic (mirrors ``_read_installed_skills``)."""
     cfg = cfg if isinstance(cfg, dict) else {}
     ordered: list[tuple[Path, str]] = []
@@ -4517,7 +4517,7 @@ def skill_load_roots(
     for pp in _config_plugin_load_paths(home, cfg):
         ordered.append((pp / "skills", "extra/plugin"))
     ordered.append((home / "plugin-skills", "extra/plugin"))
-    # Resolved-path de-dup — keep the first (highest-precedence) occurrence of each dir.
+    # Resolved-path de-dup - keep the first (highest-precedence) occurrence of each dir.
     out: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     for path, tier in ordered:
@@ -4698,14 +4698,14 @@ def _collect_cron(home: Path, ctx: Context) -> None:
     genuinely corrupt store is -- ``cron_found=True`` + ``cron_parse_error=True`` -- rather
     than inventing a third flag a consumer would also have to learn.
 
-    Both branches resolve candidate files through ``safeio.walk_dir_safely`` — symlinks
+    Both branches resolve candidate files through ``safeio.walk_dir_safely`` - symlinks
     and path-escapes are skipped, matching every other collector read.
 
     B-294: a store that is present but holds ZERO jobs now sets ``ctx.cron_store_empty``.
     That case used to be indistinguishable from a clean populated store, so B168 answered
     PASS/``pass_confidence="verified"`` having scanned nothing. The execution trail is read
     separately by ``_collect_cron_run_logs`` (called first, so it runs for the legacy-JSON
-    branch too — the run logs live in SQLite regardless of which store holds the jobs).
+    branch too - the run logs live in SQLite regardless of which store holds the jobs).
     """
     _collect_cron_run_logs(home, ctx)
     cron_dir = home / "cron"
@@ -4722,7 +4722,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_CRON,
                     f"cron store '{jobs_json}' exceeded the "
-                    f"{_MAX_CRON_BYTES // 1_000_000}MB cap — content beyond the cap "
+                    f"{_MAX_CRON_BYTES // 1_000_000}MB cap \u2014 content beyond the cap "
                     "was NOT scanned",
                 )
             store = json.loads(raw.decode("utf-8", errors="replace"))
@@ -4772,7 +4772,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 ctx.cron_jobs_truncated = True
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_CRON,
-                    f"cron store '{jobs_json}' has {len(jobs)} jobs — only the first "
+                    f"cron store '{jobs_json}' has {len(jobs)} jobs \u2014 only the first "
                     f"{_MAX_CRON_JOBS} were scanned",
                 )
             ctx.cron_store_empty = not ctx.cron_jobs  # B-294: read, but nothing to scan
@@ -4892,12 +4892,12 @@ def _collect_cron(home: Path, ctx: Context) -> None:
             # _collect_cron_run_logs takes the MOST RECENT runs. Differencing two sets
             # sampled on different axes invents "orphans". Mirrors the run-log reader's own
             # probe below, and the JSON branch's limit_hits, which this branch
-            # previously lacked entirely — making the truncation invisible.
+            # previously lacked entirely - making the truncation invisible.
             ctx.cron_jobs_truncated = True
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_CRON,
                 f"cron_jobs table in '{db_path}' returned the {_MAX_CRON_JOBS}-row cap "
-                "— further job definitions were NOT read",
+                "\u2014 further job definitions were NOT read",
             )
 
         if modern:
@@ -4930,7 +4930,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                         note_limit(
                             ctx.limit_hits, LIMIT_DOMAIN_CRON,
                             f"cron job '{job_id}' in '{db_path}' has unparseable "
-                            "job_json — its payload/trigger content was NOT scanned",
+                            "job_json \u2014 its payload/trigger content was NOT scanned",
                         )
                 # Named-key extraction only (§8) -- job_json is never stored or emitted
                 # whole; only the three grounded keys below are pulled out of it.
@@ -4998,13 +4998,13 @@ def _cron_store_key_candidates(jobs_json: Path) -> list:
     """Return the ``cron_jobs.store_key`` spellings that denote the audited store file.
 
     The runtime's partition key is ``cronStoreKey(storePath) { return path.resolve(storePath); }``
-    (key-BBZ40bDq.mjs:5-7, grounded against openclaw@2026.9.3) — an identity resolve, so the
+    (key-BBZ40bDq.mjs:5-7, grounded against openclaw@2026.9.3) - an identity resolve, so the
     key is just the absolute store path.
 
     Two spellings are returned because Node's ``path.resolve`` is **purely lexical**
     (normalize + absolutize, no filesystem access) while Python's ``Path.resolve`` also
     follows symlinks. They diverge whenever the OpenClaw home is reached through a
-    symlinked parent — a dotfiles checkout or a mounted volume. Binding only the
+    symlinked parent - a dotfiles checkout or a mounted volume. Binding only the
     symlink-resolved spelling would therefore miss the runtime's actual key on exactly
     those installs and silently stop detecting shadowing, so both are matched.
     ``os.path.abspath`` is the faithful Node analogue; ``Path.resolve`` is the fallback
@@ -5031,7 +5031,7 @@ def _flag_cron_store_config_mismatch(ctx: Context, jobs_json: Path) -> None:
     exists and never once looks at ``cron.store`` (``string().optional()``,
     zod-schema-O9ml_nmo.js:1221; description schema-DRyO1XBt.js:986). A host with an
     explicit ``cron.store`` pointing elsewhere, plus a stale default ``jobs.json`` left over
-    from before that setting was added, gets scanned on the WRONG file entirely — with the
+    from before that setting was added, gets scanned on the WRONG file entirely - with the
     scoped shadow check now correctly reporting "no rows shadowed" for the default path,
     because the runtime's actual jobs live under a store_key this function never queried.
     The result was a "verified" PASS over a job payload never read.
@@ -5043,7 +5043,7 @@ def _flag_cron_store_config_mismatch(ctx: Context, jobs_json: Path) -> None:
     """
     # F-183: `cron.store` left openclaw.json for the machine-owned state store
     # (`config_machine_state`), so reading only the config silently stopped this check firing on
-    # a current build — the shadow it exists to catch would go unreported. The state value
+    # a current build - the shadow it exists to catch would go unreported. The state value
     # wins where present; the config key remains authoritative on builds that still have
     # one, and on any machine whose state store could not be read.
     configured = (ctx.config_machine_state or {}).get("cron.store")
@@ -5059,7 +5059,7 @@ def _flag_cron_store_config_mismatch(ctx: Context, jobs_json: Path) -> None:
     note_limit(
         ctx.limit_hits, LIMIT_DOMAIN_CRON,
         f"cron.store is configured to '{configured}', but the store actually scanned was "
-        f"'{jobs_json}' — the configured store was NOT read",
+        f"'{jobs_json}' \u2014 the configured store was NOT read",
     )
 
 
@@ -5069,7 +5069,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
 
     ``_collect_cron`` prefers the JSON store and returns before it ever opens SQLite, which
     is correct for a genuinely legacy install but wrong for an upgraded one. In the shipped
-    dist the job rows live in SQLite — ``loadCronJobsStoreWithConfigJobs`` resolves the
+    dist the job rows live in SQLite - ``loadCronJobsStoreWithConfigJobs`` resolves the
     store path only to derive a key (``cronStoreKey(path.resolve(storePath))``,
     store-ScQ9SjOe.js:710) and then reads ``loadCronRows`` from the database; writes go
     through ``replaceCronRows`` (store-ScQ9SjOe.js:647). Grepped the dist's cron modules
@@ -5078,23 +5078,23 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     migration therefore keeps a file that the runtime no longer reads, and differencing run
     logs against it makes live jobs look erased.
 
-    COUNT ONLY — no job content is read here, so this cannot contradict or silently replace
+    COUNT ONLY - no job content is read here, so this cannot contradict or silently replace
     what B168 scanned out of the JSON file. Read-only, symlink-safe, never raises: any
     sqlite3 error (including a state DB predating the table) simply leaves the flag False.
 
     W-DB2 round-4: the count is SCOPED TO THE AUDITED PARTITION. ``cron_jobs`` is
     partitioned by ``store_key`` (``store_key TEXT NOT NULL``,
-    openclaw-state-db-DzSsA9Ji.js:1421-1422) and the runtime reads exactly one partition —
+    openclaw-state-db-DzSsA9Ji.js:1421-1422) and the runtime reads exactly one partition -
     ``loadCronRows`` filters ``WHERE store_key = ?`` (store-ScQ9SjOe.js:643-645). An
     unscoped ``COUNT(*)`` was therefore blind to WHICH store the rows belonged to. A config
-    that sets an explicit ``cron.store`` (a documented key — schema-DRyO1XBt.js:986) parks
+    that sets an explicit ``cron.store`` (a documented key - schema-DRyO1XBt.js:986) parks
     its rows under a different key, and those rows are NOT what this jobs.json resolves to:
     for the audited path ``loadCronJobsStoreWithConfigJobs`` loads zero rows and returns an
     empty store (store-ScQ9SjOe.js:709-723). Counting them declared a shadow that does not
     exist and emitted a limit_hit asserting rows "were NOT read" that the runtime would
     never have read for this store either.
 
-    UNATTRIBUTABLE ROWS ARE COUNTED, deliberately — the conservative direction. A row whose
+    UNATTRIBUTABLE ROWS ARE COUNTED, deliberately - the conservative direction. A row whose
     ``store_key`` is NULL/blank, or a table whose schema predates the column entirely,
     cannot be assigned to a partition; since it still MIGHT be the row the runtime loads,
     dropping it would trade a false positive for a false negative (a real shadow going
@@ -5147,7 +5147,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     ``ctx.cron_run_logs``.
 
     Grounded against the installed dist (openclaw-state-db-DzSsA9Ji.js:
-    ``CREATE TABLE IF NOT EXISTS cron_run_logs`` — columns store_key, job_id, seq, ts,
+    ``CREATE TABLE IF NOT EXISTS cron_run_logs`` - columns store_key, job_id, seq, ts,
     status, error, summary, diagnostics_summary, delivery_status, delivery_error,
     delivered, session_id, session_key, run_id, run_at_ms, duration_ms, next_run_at_ms,
     model, provider, total_tokens, entry_json, created_at; PK (store_key, job_id, seq)).
@@ -5159,14 +5159,14 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     to ``deleteAfterRun`` TRUE (jobs-qB_gTO89.js:834, normalize-BMkddmz2.js:409), the runner
     deletes the row after a SUCCESSFUL run (server-cron-Cwg2hJro.js:1340), ``deleteAfterRun``
     is exposed to the AGENT ITSELF as a schedulable option (cron-tool-C9qaFGtt.js:495), and
-    the legacy table has NO foreign key to ``cron_jobs`` — the only cron_jobs delete in the
+    the legacy table has NO foreign key to ``cron_jobs`` - the only cron_jobs delete in the
     dist (``replaceCronRows``, store-ScQ9SjOe.js:648) never touches it. So a job that was
     added, ran, and self-erased leaves no definition for B168 to scan, but its run trail
     survives here.
 
     B-709: where the state DB carries a completed migration record whose id is literally
-    ``state:cron-run-logs-to-task-runs:v1`` — the vendor naming its own destination, not an
-    inference — ``cron_run_logs`` DOES NOT EXIST AT ALL and cron executions instead live as
+    ``state:cron-run-logs-to-task-runs:v1`` - the vendor naming its own destination, not an
+    inference - ``cron_run_logs`` DOES NOT EXIST AT ALL and cron executions instead live as
     rows in the generic ``task_runs`` table
     (``runtime = 'cron'``, also ``task_kind = 'automation_run'``). Verified empirically: a
     live ``task_runs`` row's ``source_id`` equals the ``job_id`` of a live ``cron_jobs`` row
@@ -5186,7 +5186,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     ===============  =========================================
 
     ``session_id`` has no analogue in ``task_runs`` and is deliberately left ``None`` on
-    the modern path rather than backfilled from a different column — inventing a value
+    the modern path rather than backfilled from a different column - inventing a value
     there would misattribute a run to a session it was never recorded under.
 
     Same dual-shape discipline as ``_collect_cron``'s ``cron_jobs`` reader: the two SQLite
@@ -5194,23 +5194,23 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     absent, no exception raised either way), not by trying one SELECT and catching
     ``sqlite3.OperationalError``, which cannot distinguish "the other schema" from "a
     genuine read failure". When BOTH tables exist (a mid-migration DB), the LEGACY table
-    wins — it is the one this reader was originally grounded against, and preferring it
+    wins - it is the one this reader was originally grounded against, and preferring it
     keeps behaviour stable on such a machine.
 
-    DELIBERATELY NOT read on the legacy path: ``entry_json`` — it is
+    DELIBERATELY NOT read on the legacy path: ``entry_json`` - it is
     ``JSON.stringify(entry)`` of the RUN RECORD (jobId/status/summary/session/model/timing
-    — run-log-DIhrTrSU.js:97 ``bindCronRunLogRow``), NOT a copy of the job's original
+    - run-log-DIhrTrSU.js:97 ``bindCronRunLogRow``), NOT a copy of the job's original
     ``payload.message``. Content-scanning it for the erased directive would be unreliable,
     so this collector takes only the structural/pivot columns: which job ran, when, and
-    under which session. ``task_runs`` is never ``SELECT *``'d either — the same state DB
+    under which session. ``task_runs`` is never ``SELECT *``'d either - the same state DB
     holds live OAuth tokens (§8).
 
     Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
     ``_collect_plugin_trust`` uses on this exact database. Neither table present leaves
-    ``cron_run_logs_found`` False — UNKNOWN downstream, never a fake PASS (Golden Rule #4).
+    ``cron_run_logs_found`` False - UNKNOWN downstream, never a fake PASS (Golden Rule #4).
 
     C-488: ``ctx.cron_run_logs_table`` records WHICH of the two shapes was actually read
-    (``"cron_run_logs"`` | ``"task_runs"`` | ``None``) — previously only decided in the
+    (``"cron_run_logs"`` | ``"task_runs"`` | ``None``) - previously only decided in the
     local ``modern`` variable and then discarded, forcing every consumer (B189) to name
     BOTH tables in its UNKNOWN wording even though at most one is ever the relevant fact
     on a given machine. ``ctx.cron_run_logs_both_tables_present`` separately preserves the
@@ -5318,7 +5318,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_CRON,
             f"cron run-log table in '{db_path}' returned the {_MAX_CRON_RUN_LOGS}-row cap "
-            "— older run history was NOT read",
+            "\u2014 older run history was NOT read",
         )
 
 
@@ -5642,12 +5642,12 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
 _MAX_PAIRED_DEVICE_JSON_BYTES = 256 * 1024
 _MAX_PAIRED_DEVICES = 500
 
-# B396: the row-within-cap predicate and the SELECT gained three more columns —
-# role/roles_json/node_surface_json — the ones a paired NODE's admission (as opposed to
+# B396: the row-within-cap predicate and the SELECT gained three more columns -
+# role/roles_json/node_surface_json - the ones a paired NODE's admission (as opposed to
 # a paired OPERATOR's authority, which is all B176 itself ever needed) turns on. Bounded
 # the exact same way as the original three: at the SQL level, per column, so a hostile
 # oversized value on any of the six never reaches this process (see this table's own
-# module docstring below for the full C-135 round 1 grounding — only a hostile row's
+# module docstring below for the full C-135 round 1 grounding - only a hostile row's
 # behaviour changes; a real device's role/roles/nodeSurface is a few bytes at most).
 _PAIRED_DEVICE_ROW_WITHIN_CAP = (
     "(scopes_json IS NULL OR length(CAST(scopes_json AS BLOB)) <= ?) "
@@ -6281,13 +6281,13 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
     ``state/debug-proxy/capture.sqlite`` path ``@deprecated Capture storage now lives in the
     shared state database``, confirming these rows land in the shared DB.
 
-    COUNTS ONLY — deliberately. ``headers_json`` carries bearer tokens and ``data_text``
+    COUNTS ONLY - deliberately. ``headers_json`` carries bearer tokens and ``data_text``
     carries request bodies, so §8 makes reading them a disclosure hazard, and flagging the
     hosts a developer legitimately captured (provider APIs, ClawHub) would be a false
     "exfil" signal. This collector therefore reads ``COUNT(*)`` and nothing else: no host,
     no header, no body, no blob ever leaves the database. That is enough to answer the
-    question the check asks — "was your agent's traffic recorded to disk in plaintext, and
-    how much" — without reading a single captured byte.
+    question the check asks - "was your agent's traffic recorded to disk in plaintext, and
+    how much" - without reading a single captured byte.
 
     Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
     ``_collect_plugin_trust`` and ``_collect_cron_run_logs`` use on this exact database.
@@ -6468,7 +6468,7 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
     try:
         skip = target.is_symlink() or not target.is_file()
     except OSError as exc:
-        # B-303: same class of exposure as _safe_is_dir/_safe_is_file — a non-traversable
+        # B-303: same class of exposure as _safe_is_dir/_safe_is_file - a non-traversable
         # ancestor (typically the whole home) must degrade this to "not found" (->
         # ctx.exec_approvals_found stays False -> UNKNOWN downstream), never crash.
         ctx.errors.append(f"could not check '{target}': {exc}")
@@ -6482,7 +6482,7 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
                 f"exec-approvals store '{target}' exceeded the "
-                f"{_MAX_EXEC_APPROVALS_BYTES // 1_000_000}MB cap — content beyond the "
+                f"{_MAX_EXEC_APPROVALS_BYTES // 1_000_000}MB cap \u2014 content beyond the "
                 "cap was NOT scanned",
             )
         store = json.loads(raw.decode("utf-8", errors="replace"))
@@ -6505,7 +6505,7 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         if len(agents) > _MAX_EXEC_APPROVALS_AGENTS:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
-                f"exec-approvals store '{target}' has {len(agents)} agent(s) — only the "
+                f"exec-approvals store '{target}' has {len(agents)} agent(s) \u2014 only the "
                 f"first {_MAX_EXEC_APPROVALS_AGENTS} were scanned for standing grants",
             )
         for agent_id, agent in list(agents.items())[:_MAX_EXEC_APPROVALS_AGENTS]:
@@ -6517,10 +6517,10 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
             # the installed dist (exec-approvals-allowlist*.js's buildArgPatternFromArgv/
             # buildScriptArgPatternFromArgv): both return `undefined` on every non-Windows
             # platform BY DESIGN, so a POSIX "always allow" click persists an entry with no
-            # `argPattern` key at all — and the matcher (exec-command-resolution*.js) reads
+            # `argPattern` key at all - and the matcher (exec-command-resolution*.js) reads
             # a missing `argPattern` as a wildcard over argv. That is a materially different
             # standing grant from one WITH an `argPattern` (Windows, or a future OpenClaw
-            # release) — "any arguments to this binary, forever" vs "this exact argv only" —
+            # release) - "any arguments to this binary, forever" vs "this exact argv only" -
             # and the old single tally could not tell a reader which they were looking at.
             # A present-but-falsy `argPattern` (`""`/`null`) is treated the same as absent:
             # the matcher's own check is `if (!entry.argPattern)`, so JS falsy is the real
@@ -6557,7 +6557,7 @@ def _plugin_trust_record_from(plugin_id, rec: dict) -> dict:
 
     Shared by BOTH sinks (legacy ``installed_plugin_index.install_records_json`` and the
     OC-82 ``config_machine_state['plugins.installedIndex']`` successor, fallback leg
-    included) so the output shape cannot drift between them — see
+    included) so the output shape cannot drift between them - see
     ``_collect_plugin_trust``'s docstring for the selection rule.
     """
     disposition = rec.get("clawhubTrustDisposition")
@@ -6615,7 +6615,7 @@ def _plugin_index_object_is_valid(index_obj: object) -> bool:
     """OC-82/C-135: does ``index_obj`` (the ``value_json -> index`` sub-object of
     ``config_machine_state['plugins.installedIndex']``) pass the SAME acceptance test
     the runtime's OWN parser applies before it trusts a row
-    (``installed-plugin-index-store-*.js:75-93`` — symbol
+    (``installed-plugin-index-store-*.js:75-93`` - symbol
     ``extractPluginInstallRecordsFromInstalledPluginIndex``, re-verified present in
     openclaw@2026.9.1; line numbers read on 2026.8.2, filename globbed because it
     rehashes every release)?
@@ -6625,11 +6625,11 @@ def _plugin_index_object_is_valid(index_obj: object) -> bool:
     a non-empty ``compatRegistryVersion``, ``migrationVersion === 1``, a non-empty
     ``policyHash``, a numeric ``generatedAtMs``, a valid ``plugins`` array, and (when
     present) a valid ``installRecords`` map. ANY failure there returns null and the
-    runtime discards the WHOLE row — so a row failing this must not be trusted by this
+    runtime discards the WHOLE row - so a row failing this must not be trusted by this
     tool either; checking ``revision`` alone let a row the runtime itself would reject
     be treated here as authoritative (the concrete case: ``installRecords`` naming a
-    plugin absent from ``plugins`` is a MODELLED, tolerated runtime state — see
-    ``installed-plugin-index-store-*.js:131-136`` — not evidence this row is
+    plugin absent from ``plugins`` is a MODELLED, tolerated runtime state - see
+    ``installed-plugin-index-store-*.js:131-136`` - not evidence this row is
     bad; it is the "index" object's OWN internal field validity that must be checked).
 
     Measured on a real machine (2026.8.2): all nine ``index`` fields present with the
@@ -6667,7 +6667,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     """B-240 (B177) + B-292 (RT-2) + OC-82: read-only collection of the persisted
     installed-plugin index into TWO independent ``ctx`` fields:
     ``ctx.plugin_trust_records`` (OpenClaw's own ClawHub trust verdict) and
-    ``ctx.plugin_index_records`` (the full per-plugin index record — origin/enabled/
+    ``ctx.plugin_index_records`` (the full per-plugin index record - origin/enabled/
     contracts).
 
     TWO backing shapes exist, probed in this order over the SAME read-only connection:
@@ -6686,10 +6686,10 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
        dict keyed by pluginId (2 entries observed); ``index.plugins`` is a list (61
        entries observed); ``index.diagnostics`` is a list.
     B/C. (legacy) ``installed_plugin_index.install_records_json`` /
-       ``.plugins_json`` where ``index_key = 'installed-plugin-index'`` — the original
+       ``.plugins_json`` where ``index_key = 'installed-plugin-index'`` - the original
        table, unchanged from before OC-82. See the historical grounding kept below.
 
-    SELECTION RULE — a predicate over the OBSERVED ROW, never ``PRAGMA user_version`` or
+    SELECTION RULE - a predicate over the OBSERVED ROW, never ``PRAGMA user_version`` or
     an OpenClaw version string (the state DB's own migration ladder does not map onto
     OpenClaw releases 1:1):
 
@@ -6697,7 +6697,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
       ``index`` object that passes ``_plugin_index_object_is_valid`` -> A is the source
       for BOTH ``plugin_trust_records`` and ``plugin_index_records``; B/C are never
       consulted (their ``SELECT``s stay in this source file only as the OTHER-generation
-      branch a mid-migration/pre-OC-82 database satisfies — see
+      branch a mid-migration/pre-OC-82 database satisfies - see
       ``scripts/state_db_drift_gate.py``). The numeric-``revision`` requirement mirrors
       the runtime's OWN rejection of a row it did not write
       (``installed-plugin-index-store-*.js:118``); the ``index``-object check
@@ -6705,7 +6705,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
       which additionally requires ``version === 1``,
       ``hostContractVersion``, ``compatRegistryVersion``, ``migrationVersion === 1``,
       ``policyHash``, ``generatedAtMs``, a valid ``plugins`` array, and a fully-valid
-      ``installRecords`` map — ANY failure there returns null and the runtime discards
+      ``installRecords`` map - ANY failure there returns null and the runtime discards
       the WHOLE row. A row the runtime itself would discard must not be one this tool
       trusts either (C-135: checking ``revision`` alone let a downgraded/foreign-
       generation row be trusted here and ignored by the runtime).
@@ -6732,7 +6732,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
       than a dict, or ``revision`` is missing/non-numeric, or ``index`` fails the
       validity check above -> ``plugin_trust_found = plugin_trust_parse_error = True``
       (and likewise the index pair). Present-and-unreadable is reported as such, NEVER
-      silently treated as absent-and-therefore-falling-back to the legacy columns — a
+      silently treated as absent-and-therefore-falling-back to the legacy columns - a
       hand-downgraded DB can carry both shapes, and a broken modern row must not be
       masked by a legacy read that happens to succeed.
     * A over the byte cap -> disclosed and marked unreadable WITHOUT attempting a
@@ -6779,51 +6779,51 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     resolveOpenClawStateSqlitePath -> <stateDir>/state/openclaw.sqlite). The table's
     ``CREATE TABLE`` statement (openclaw-state-db-DzSsA9Ji.js:995-1008) declares BOTH
     ``install_records_json`` and ``plugins_json`` ``TEXT NOT NULL`` in the one statement
-    that defines this table — there is no schema version where the table exists but
+    that defines this table - there is no schema version where the table exists but
     either column is absent or NULL.
 
     ``install_records_json`` (B177) is a JSON object keyed by pluginId
     (installed-plugin-index-store-CWgFGnm0.js: readPersistedInstalledPluginIndexFromSqlite);
     each install record MAY carry ``clawhubTrustDisposition`` ("clean" |
-    "review-recommended" | "review-required" | "blocked" — types.openclaw-CXjMEWAQ.d.ts:
+    "review-recommended" | "review-required" | "blocked" - types.openclaw-CXjMEWAQ.d.ts:
     1308), ``clawhubTrustScanStatus``, ``clawhubTrustModerationState``,
     ``clawhubTrustReasons`` (string[]), ``clawhubTrustPending``, ``clawhubTrustStale``
-    (installed-plugin-index-records-C_n191FN.js: CLAWHUB_TRUST_INSTALL_RECORD_FIELDS) —
+    (installed-plugin-index-records-C_n191FN.js: CLAWHUB_TRUST_INSTALL_RECORD_FIELDS) -
     OpenClaw's own ClawHub malware-scan/moderation verdict for that install, computed at
     install/refresh time (clawhub-install-trust-DdnykQnp.js).
 
-    ``plugins_json`` (B-292 / RT-2) is a JSON ARRAY — one full index record per installed
+    ``plugins_json`` (B-292 / RT-2) is a JSON ARRAY - one full index record per installed
     plugin, built by ``buildInstalledPluginIndexRecords``/``buildContributionInfo``
     (installed-plugin-index-N4jxqS0-.js:1241-1256, :1330-1390): each record carries
-    ``pluginId``, ``origin`` ("bundled" | "global" | ... — provenance, NOT a trust verdict),
+    ``pluginId``, ``origin`` ("bundled" | "global" | ... - provenance, NOT a trust verdict),
     ``enabled``, ``manifestPath``, ``manifestHash``, ``rootDir``, ``source``, and
-    ``contributions.contracts`` — a dict of OpenClaw plugin-contract name (e.g.
+    ``contributions.contracts`` - a dict of OpenClaw plugin-contract name (e.g.
     ``agentToolResultMiddleware``) -> ``normalizeSortedUniqueStringEntries(values)`` (a
     sorted, deduplicated array of plain strings; :1241). This is an INVENTORY OF NAMES that
     the plugin registered, never a behavior spec, and two narrower readings of it are
     explicitly refuted by the same normalization: ``contributions.providers`` carries no
     ``baseURL`` field at all (channels/providers/modelCatalogProviders are all normalized to
-    bare string ids — B178 already covers the real provider-baseURL surface, which lives in
+    bare string ids - B178 already covers the real provider-baseURL surface, which lives in
     config, not here), and ``commandAliases`` is normalized to
-    ``alias.name`` ONLY (:1254) — the mapping TARGET is stripped before persistence, so this
+    ``alias.name`` ONLY (:1254) - the mapping TARGET is stripped before persistence, so this
     column can show that an alias name exists and never what it invokes. See
     ``checks/_mcp.py::check_plugin_tool_result_middleware`` for the consuming check and the
     mass-false-positive trap (67 of 69 plugins on a stock install are ``origin: "bundled"``).
 
     The same state database also has ``auth_profile_stores``/``auth_profile_state`` tables
     (columns: store_key, store_json/state_json, updated_at) that plausibly hold live MCP
-    OAuth credentials — this collector deliberately reads ONLY installed_plugin_index and
+    OAuth credentials - this collector deliberately reads ONLY installed_plugin_index and
     config_machine_state's allowlisted ``plugins.installedIndex`` key, never those tables;
     openclaw.sqlite itself should stay 0600 regardless.
 
     B-293 corrected a factually WRONG claim that stood here: this comment used to assert
     that "B11 already covers general config/state-file permissions". It does not. B11 reads
-    only ``ctx.config_mode``, which collector sets from ``cfg_path.stat()`` — openclaw.json's
+    only ``ctx.config_mode``, which collector sets from ``cfg_path.stat()`` - openclaw.json's
     mode ALONE. Nothing stat'ed the state database until B188
     (``checks/_egress.py::check_state_db_atrest``), which is now the check that covers this
     file's at-rest permissions.
 
-    Opened READ-ONLY via the ``file:...?mode=ro`` URI plus ``PRAGMA query_only = 1`` — this
+    Opened READ-ONLY via the ``file:...?mode=ro`` URI plus ``PRAGMA query_only = 1`` - this
     collector never writes to the shared state database. Reuses the exact
     ``walk_dir_safely(state_dir)`` + filename-match pattern ``_collect_cron`` already uses
     for the same file (symlink-safe, path-escape-safe).
@@ -6841,17 +6841,17 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     ``immutable=1`` rejection, demonstrated.
 
     ``ctx.plugin_trust_found`` / ``ctx.plugin_index_found`` stay False when the state DB,
-    the table, or the index row is absent — a consuming check reports UNKNOWN, never a fake
+    the table, or the index row is absent - a consuming check reports UNKNOWN, never a fake
     PASS (Golden Rule #4). ``ctx.plugin_trust_parse_error`` / ``ctx.plugin_index_parse_error``
     are set when the DB/table/row exist but that column could not be read or parsed (locked
-    DB, corrupt file, malformed JSON) — also surfaced as UNKNOWN downstream, never a crash.
+    DB, corrupt file, malformed JSON) - also surfaced as UNKNOWN downstream, never a crash.
     On the legacy path each column's found/parse-error pair is independent: a corrupt
     ``plugins_json`` cell, OR the ``plugins_json`` column being entirely absent from the
     table (an unexpected schema shape, not one any known OpenClaw version ships, but not
     ruled out for a hand-modified or pre-existing older table), does not blind the
     ``install_records_json`` (B177) reader, and vice versa. This is enforced by issuing the
     two columns' ``SELECT``s separately (each in its own ``try``/``except sqlite3.Error``)
-    rather than one combined query — a combined query previously meant one column's "no
+    rather than one combined query - a combined query previously meant one column's "no
     such column" error failed the query as a whole and incorrectly flipped BOTH
     ``*_found`` flags (B-292/RT-2 round 2). On the modern (shape A) path the two columns
     necessarily share one fate, since both are extracted from the same JSON blob.
@@ -7086,7 +7086,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                 "config_machine_state['plugins.installedIndex'] in "
-                f"'{db_path}' exceeded the {_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — "
+                f"'{db_path}' exceeded the {_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap \u2014 "
                 "content was NOT scanned (no partial parse was attempted)",
             )
             ctx.plugin_trust_found = True
@@ -7180,7 +7180,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                         "config_machine_state['plugins.installedIndex'] in "
-                        f"'{db_path}' has {len(installs)} install record(s) — only the "
+                        f"'{db_path}' has {len(installs)} install record(s) \u2014 only the "
                         f"first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
                     )
 
@@ -7193,7 +7193,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                         "config_machine_state['plugins.installedIndex'] in "
-                        f"'{db_path}' has {len(plugins_list)} plugin record(s) — only "
+                        f"'{db_path}' has {len(plugins_list)} plugin record(s) \u2014 only "
                         f"the first {_MAX_PLUGIN_INDEX_RECORDS} were scanned",
                     )
 
@@ -7207,7 +7207,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                         ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                         "config_machine_state['plugins.installedIndex'] in "
                         f"'{db_path}' lists {len(plugins_list)} plugin(s) but carries "
-                        f"install records for only {len(installs)} — the ClawHub "
+                        f"install records for only {len(installs)} \u2014 the ClawHub "
                         "trust verdict is only defined over those; the rest have no "
                         "verdict on record",
                     )
@@ -7226,7 +7226,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                 f"installed_plugin_index.install_records_json in '{db_path}' exceeded the "
-                f"{_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — content beyond the cap was "
+                f"{_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap \u2014 content beyond the cap was "
                 "NOT scanned",
             )
             raw = raw[:_MAX_PLUGIN_TRUST_BYTES]
@@ -7253,7 +7253,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                     f"installed_plugin_index in '{db_path}' has {len(installs)} install "
-                    f"record(s) — only the first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
+                    f"record(s) \u2014 only the first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
                 )
 
     # ---- plugins_json (B-292 / RT-2: full per-plugin index record) ----
@@ -7263,7 +7263,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                 f"installed_plugin_index.plugins_json in '{db_path}' exceeded the "
-                f"{_MAX_PLUGIN_INDEX_BYTES // 1_000_000}MB cap — content beyond the cap "
+                f"{_MAX_PLUGIN_INDEX_BYTES // 1_000_000}MB cap \u2014 content beyond the cap "
                 "was NOT scanned",
             )
             raw2 = raw2[:_MAX_PLUGIN_INDEX_BYTES]
@@ -7290,7 +7290,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                     f"installed_plugin_index.plugins_json in '{db_path}' has "
-                    f"{len(plugins)} plugin record(s) — only the first "
+                    f"{len(plugins)} plugin record(s) \u2014 only the first "
                     f"{_MAX_PLUGIN_INDEX_RECORDS} were scanned",
                 )
 
@@ -7299,10 +7299,10 @@ def _parse_subagent_outcome(raw) -> "tuple[dict | None, bool]":
     """Best-effort parse of one ``subagent_runs.outcome_json`` cell.
 
     Returns ``(outcome, ok)``. ``ok`` is False ONLY when *raw* is a non-empty string that
-    failed to parse as JSON — a genuinely unexpected cell shape. A NULL/blank cell (the run
+    failed to parse as JSON - a genuinely unexpected cell shape. A NULL/blank cell (the run
     has not ended yet, or no outcome was ever recorded) is ``(None, True)``: that is normal,
     not corruption, and must not be confused with a parse failure by the caller (which
-    invalidates the whole row's disclosure — see ``_collect_subagent_runs``). A value that
+    invalidates the whole row's disclosure - see ``_collect_subagent_runs``). A value that
     parses but is not a JSON object (bare ``null``/number/string) is also ``(None, True)``:
     syntactically valid, just no outcome fields to surface.
     """
@@ -7323,18 +7323,18 @@ def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
     """B-709: parse one MODERN ``subagent_runs.payload_json`` cell (the consolidated blob
     that replaced the ``model``/``run_timeout_seconds``/``outcome_json``/``ended_reason``
     columns when the ``payload_json`` column is present) into a plain dict, for named-key
-    extraction only (§8 — the blob carries far more than the handful of keys this collector
+    extraction only (§8 - the blob carries far more than the handful of keys this collector
     takes, and the same state DB holds live OAuth tokens under
     ``authProfiles.store``/``auth.sharedStore``, so it is never stored or emitted whole).
 
     Returns ``(fields, ok)``, mirroring ``_parse_subagent_outcome``'s contract but over the
     WHOLE row rather than one sub-field: ``ok`` is False ONLY when *raw* is a non-empty
-    string that fails to parse as JSON, or is some other non-string, non-``None`` shape —
+    string that fails to parse as JSON, or is some other non-string, non-``None`` shape -
     the row is then genuinely unreadable and the caller drops it whole, the same
     whole-row-drop the legacy path already applies to an unparseable ``outcome_json``. A
     ``None``/blank cell, or one that parses to the empty object (the column's own SQL
     default, ``payload_json TEXT NOT NULL DEFAULT '{}'``, i.e. a freshly-registered run with
-    nothing recorded yet) is ``({}, True)`` — that is the NORMAL still-running shape, not
+    nothing recorded yet) is ``({}, True)`` - that is the NORMAL still-running shape, not
     corruption. A syntactically valid but non-object payload (bare null/number/string) is
     also ``({}, True)``: nothing to extract, but not an error either.
     """
@@ -7370,7 +7370,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     ``ctx.subagent_runs``.
 
     Grounded against the installed dist (``subagent-registry-state-CP7kKu69.js``,
-    ``openclaw-state-db-DzSsA9Ji.js`` — verbatim ``CREATE TABLE IF NOT EXISTS subagent_runs``,
+    ``openclaw-state-db-DzSsA9Ji.js`` - verbatim ``CREATE TABLE IF NOT EXISTS subagent_runs``,
     PK ``run_id``): columns ``run_id, child_session_key, controller_session_key,
     requester_session_key, requester_display_key, requester_origin_json, task, task_name,
     cleanup, label, model, agent_dir, workspace_dir, run_timeout_seconds, spawn_mode,
@@ -7378,41 +7378,41 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     cleanup_handled, ..., ended_reason, ...``. See ``docs/research/openclaw-schema-recon.md``
     §28 for the full insert/retention grounding; the two facts that shape this collector:
 
-    INSERT SEMANTICS (population was UNPROVEN at filing time — GR#4 required grounding
+    INSERT SEMANTICS (population was UNPROVEN at filing time - GR#4 required grounding
     before shipping): a row is written SYNCHRONOUSLY at spawn time, before the subagent does
     any work. ``subagent-registry-DexSZ4w1.js`` (the register path): ``params.runs.set(runId,
     entry)`` followed immediately by ``params.persistOrThrow()`` (-> ``saveSubagentRegistryToSqlite``
     -> an upsert into ``subagent_runs`` keyed on ``run_id``), with the newly-set entry rolled
-    back on a persist failure. So a row proves a spawn was REGISTERED — not necessarily that
+    back on a persist failure. So a row proves a spawn was REGISTERED - not necessarily that
     it ran to completion; ``outcome_json`` is what distinguishes the two (absent/null while
     the run is still in flight).
 
-    RETENTION IS SHORT — do not imply durable forensic history. The same module's periodic
+    RETENTION IS SHORT - do not imply durable forensic history. The same module's periodic
     sweep deletes a completed run's row via the whole-snapshot
     ``deleteFrom("subagent_runs").where("run_id","not in", runIds)`` replace once
-    ``archiveAtMs`` (``now + agents.defaults.subagents.archiveAfterMinutes`` — default 60
+    ``archiveAtMs`` (``now + agents.defaults.subagents.archiveAfterMinutes`` - default 60
     MINUTES after the run was SPAWNED/REGISTERED (``resolveArchiveAfterMs``), NEVER
-    recomputed at completion — a long-running run's window can already be nearly spent
+    recomputed at completion - a long-running run's window can already be nearly spent
     by the time it ends) has passed, or ~5 minutes after
     cleanup completes for session-mode runs with no ``archiveAtMs`` at all
     (``SESSION_RUN_TTL_MS = 5 * 60_000``). The one documented exception: a run registered
     with ``cleanup:"keep"`` (non-session spawn mode) gets NO ``archiveAtMs`` and the sweep
-    skips it outright — kept until something else (e.g. the owning session's own lifecycle)
+    skips it outright - kept until something else (e.g. the owning session's own lifecycle)
     removes it. So: a populated table proves RECENT (or explicitly kept) activity, never a
     complete history of every subagent ever spawned.
 
     WAL LAG: opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same
     pattern every other reader of this database uses. A reader connection sees the last
     COMMITTED snapshot, including anything already committed into the WAL file (SQLite
-    readers do not require a checkpoint) — so this never needs special WAL handling, but a
+    readers do not require a checkpoint) - so this never needs special WAL handling, but a
     row committed a moment after this connection opened is legitimately invisible. That is
     read-consistency, not absence: the caller (``checks/_agents.py``) must never treat
     ``rows == 0`` as proof no subagent has ever run, only as "none observed in this snapshot".
 
     ``ctx.subagent_runs_found`` stays False when the state DB or the table itself is absent
-    (a fresh/pre-subagent install) — the consuming check reports UNKNOWN, never a fake PASS
+    (a fresh/pre-subagent install) - the consuming check reports UNKNOWN, never a fake PASS
     (Golden Rule #4). ``ctx.subagent_runs_parse_error`` is set only when NOT ONE row could be
-    reliably parsed (every ``outcome_json`` cell present failed to decode as JSON) — a row
+    reliably parsed (every ``outcome_json`` cell present failed to decode as JSON) - a row
     whose outcome merely parses to "no outcome yet" is not an error and is kept; a run mixed
     with some good and some bad rows keeps the good ones (matches the tolerant per-record
     style ``_collect_plugin_trust`` already uses, rather than letting one corrupt cell blind
@@ -7421,13 +7421,13 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     B-709: on the MODERN shape (``payload_json`` column present, no ``model`` column), the
     real ``subagent_runs`` columns are ONLY
     ``run_id, child_session_key, controller_session_key, requester_session_key, created_at,
-    payload_json`` — the old SELECT above threw ``sqlite3.OperationalError: no such column:
+    payload_json`` - the old SELECT above threw ``sqlite3.OperationalError: no such column:
     model`` on every run, so ``ctx.errors`` carried that line and B18 reported UNKNOWN even
     on a machine that had really spawned subagents. Grounded against the vendor's OWN
     canonical read of this table (``dist/subagent-registry.store.sqlite-B_lUfEus.js:341-351``,
-    grounded against openclaw@2026.8.2 — that bundle name is historical and no longer in the
+    grounded against openclaw@2026.8.2 - that bundle name is historical and no longer in the
     installed dist; the shape this keys on is the column, not the version), which aliases the
-    JSON payload straight back to the retired column names — as authoritative a mapping as
+    JSON payload straight back to the retired column names - as authoritative a mapping as
     exists:
 
     ===================  =========================================
@@ -7437,35 +7437,35 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     run_timeout_seconds    $.runTimeoutSeconds
     ended_reason           $.endedReason
     outcome_json           $.execution.outcome.status (a STATUS STRING, one of
-                            "ok"|"error"|"timeout"|"unknown" — :362 — not a blob)
+                            "ok"|"error"|"timeout"|"unknown" - :362 - not a blob)
     child_session_key,     real columns, unchanged (:337, :340)
     created_at
     ===================  =========================================
 
     ``agent_dir``, ``workspace_dir``, ``spawn_mode`` and ``task`` appear NOWHERE in that
-    canonical read — they are GONE, not moved (``task`` is literally the pre-v13 schema
-    marker in the migration gate, ``dist/openclaw-state-db-*.js:1900`` — the
+    canonical read - they are GONE, not moved (``task`` is literally the pre-v13 schema
+    marker in the migration gate, ``dist/openclaw-state-db-*.js:1900`` - the
     ``workspace_attestations`` marker re-verified present in openclaw@2026.9.1, line
     read on 2026.8.2). They are set
     ``None`` on the modern path, and a consumer must not read that ``None`` as "no
-    workspace" — a ONE-TIME (per collection run, not per row) disclosure is emitted via
+    workspace" - a ONE-TIME (per collection run, not per row) disclosure is emitted via
     ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_AGENTS, ...)`` naming exactly which fields are
     unavailable on this schema, so ``limit_hits_for(ctx, LIMIT_DOMAIN_AGENTS)`` lets a
     consumer tell "no workspace was ever recorded" apart from "this schema cannot say".
 
     Which shape a given install has is decided by PROBING ``PRAGMA table_info(subagent_runs)``
-    once and branching on COLUMN PRESENCE — never by trying one SELECT and catching
+    once and branching on COLUMN PRESENCE - never by trying one SELECT and catching
     ``sqlite3.OperationalError``, which cannot distinguish "this is the other schema" from "a
     genuine read failure" (same reasoning as ``_collect_cron``'s ``cron_jobs`` dual-shape
     reader). ``model`` present -> LEGACY (checked first: the one real fixture this repo has
     seen that names both ``model`` and ``payload_json`` on the same table is the ORIGINAL
-    B-296 grounding, predating this migration, and legacy must keep winning on it — same
+    B-296 grounding, predating this migration, and legacy must keep winning on it - same
     "legacy wins when both tables/shapes exist" precedent ``_collect_cron_run_logs`` uses).
     ``payload_json`` present (and no ``model``) -> MODERN. Neither -> the same honest
     found=True/``subagent_runs_parse_error``=True verdict a genuinely unreadable store
     already gets, with the columns actually seen recorded (never a guessed mapping).
 
-    Named-key extraction only on the modern path (§8) — ``payload_json`` itself is never
+    Named-key extraction only on the modern path (§8) - ``payload_json`` itself is never
     stored or emitted whole, only the four keys above are pulled out of it.
     """
     state_dir = home / "state"
@@ -7553,7 +7553,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
             ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
             f"subagent_runs in '{db_path}' uses the consolidated payload schema: "
             "agent_dir, workspace_dir, spawn_mode and task are not present on this "
-            "state schema — NOT read",
+            "state schema \u2014 NOT read",
         )
 
     good: list[dict] = []
@@ -7624,7 +7624,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
             f"subagent_runs table in '{db_path}' returned the {_MAX_SUBAGENT_RUNS}-row cap "
-            "— older spawns were NOT read",
+            "\u2014 older spawns were NOT read",
         )
 
 
@@ -7641,27 +7641,27 @@ def _collect_audit_events(home: Path, ctx: Context) -> None:
     (``server-runtime-subscriptions-OlWMLbPY.js``). ``grep -rn "audit_events"`` across this
     package was zero hits before this collector.
 
-    GR#5 HARD BLOCKER — read this before adding a new consumer of ``ctx.audit_events``.
+    GR#5 HARD BLOCKER - read this before adding a new consumer of ``ctx.audit_events``.
     The table stores ``tool_name`` alone: there is no argv, no command string, no file
     path, no target host anywhere in the schema (verified column-by-column above). A
     benign ``bash`` build step and exfiltration-staging ``bash`` are the SAME row shape.
     Nothing downstream may build a volumetric or tool-name-presence rule ("bash ran N
-    times") from this data — that would false-FAIL essentially every real config,
+    times") from this data - that would false-FAIL essentially every real config,
     including a benign one (measured on the real box: 344 of 502 rows are plain ``bash``).
     This collector only ever feeds the two narrow, near-zero-FP signals ``status=='blocked'``
     /``error_code=='tool_blocked'`` and ``tool_name=='unknown'``, plus a session-id
-    corroboration join — see ``checks/_host.py::check_audit_trail_signals``.
+    corroboration join - see ``checks/_host.py::check_audit_trail_signals``.
 
     RETENTION IS DOCUMENTED, not "uncapped": ``AUDIT_EVENT_RETENTION_MS`` (30 days) and
     ``AUDIT_EVENT_MAX_ROWS`` (100,000) are pruned on every insert
-    (``audit-event-store-D1P32Q4Y.js:6-7,52-57``) — an explicit, knowable bound, unlike the
+    (``audit-event-store-D1P32Q4Y.js:6-7,52-57``) - an explicit, knowable bound, unlike the
     trajectory sidecar's *silent* ``_MAX_FILES`` (60) file-count drop (``trajectory.py``).
     That asymmetry is the whole point of reading this table at all: it can outlive a
     disabled or rotated-out trajectory source for the SAME sessions (F-134's corroboration
-    use — see ``behavioral.py``).
+    use - see ``behavioral.py``).
 
     ``ctx.audit_events_total_rows``/``_oldest_ms``/``_newest_ms`` are read over the FULL
-    table (cheap aggregate query, index-backed — ``idx_audit_events_time``) independent of
+    table (cheap aggregate query, index-backed - ``idx_audit_events_time``) independent of
     the row-sample cap below, so "how far back does this reach" is never limited by how
     many rows the signal-detection sample kept. The row SAMPLE (``ctx.audit_events``,
     capped at ``_MAX_AUDIT_EVENTS``, most-recent-first) is what the two narrow signals and
@@ -7669,7 +7669,7 @@ def _collect_audit_events(home: Path, ctx: Context) -> None:
 
     Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
     every other reader of this database uses. Absent DB or absent table leaves
-    ``audit_events_found`` False — UNKNOWN downstream, never a fake PASS (Golden Rule #4).
+    ``audit_events_found`` False - UNKNOWN downstream, never a fake PASS (Golden Rule #4).
     An empty table (pruned down to nothing, or a fresh install) is NOT the same as absent:
     it is recorded distinctly via ``audit_events_total_rows == 0`` so a consumer can tell
     "never read" apart from "read, and currently empty".
@@ -7740,7 +7740,7 @@ def _collect_audit_events(home: Path, ctx: Context) -> None:
         ctx.audit_events_truncated = True
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_AUDIT,
-            f"audit_events table in '{db_path}' returned the {_MAX_AUDIT_EVENTS}-row cap — "
+            f"audit_events table in '{db_path}' returned the {_MAX_AUDIT_EVENTS}-row cap \u2014 "
             "older audit rows were NOT read (the coverage stats above are exact; the row "
             "sample used for signal detection is not)",
         )
@@ -7752,7 +7752,7 @@ def _env_str(env: "dict[str, str]", name: str) -> "str | None":
     Mirrors ``normalize$1`` (home-dir-CJKEsOtx.js:13-17): empty/whitespace-only and the
     literal strings ``"undefined"`` / ``"null"`` are unset. The path vars additionally go
     through ``?.trim()`` at every dist call site, so trimming here is not an extra
-    liberty — it is what the product does.
+    liberty - it is what the product does.
     """
     raw = env.get(name)
     if not isinstance(raw, str):
@@ -7764,10 +7764,10 @@ def _env_str(env: "dict[str, str]", name: str) -> "str | None":
 
 
 def _expand_user_path(raw: str, home_dir: Path) -> Path:
-    """Mirror ``resolveUserPath`` → ``resolveHomeRelativePath`` (paths-BMBAvkNf.js:68-73).
+    """Mirror ``resolveUserPath`` -> ``resolveHomeRelativePath`` (paths-BMBAvkNf.js:68-73).
 
     A leading ``~`` expands against the EFFECTIVE home (which OPENCLAW_HOME may itself
-    have moved), not against the OS home — which is why *home_dir* is passed in rather
+    have moved), not against the OS home - which is why *home_dir* is passed in rather
     than calling ``Path.expanduser()``. Relative paths are resolved against the process
     cwd exactly as ``path.resolve`` does.
     """
@@ -7777,7 +7777,7 @@ def _expand_user_path(raw: str, home_dir: Path) -> Path:
 
 
 def openclaw_effective_home(env: "dict[str, str] | None" = None) -> Path:
-    """The home directory OpenClaw would resolve — ``resolveRequiredHomeDir``.
+    """The home directory OpenClaw would resolve - ``resolveRequiredHomeDir``.
 
     Order (home-dir-CJKEsOtx.js:31-58): ``OPENCLAW_HOME`` (with a leading ``~`` expanded
     against the OS home), then ``HOME``, then ``USERPROFILE``, then ``os.homedir()``.
@@ -7799,7 +7799,7 @@ def openclaw_state_dir(env: "dict[str, str] | None" = None,
 
     ``OPENCLAW_STATE_DIR`` wins; otherwise ``~/.openclaw`` when it exists, else an
     EXISTING legacy ``~/.clawdbot``, else ``~/.openclaw``. The existence probes are the
-    product's own (``fs.existsSync``), so mirroring them is required for fidelity — they
+    product's own (``fs.existsSync``), so mirroring them is required for fidelity - they
     are read-only stats on the auditing user's own home.
     """
     env = os.environ if env is None else env
@@ -7855,7 +7855,7 @@ def resolve_product_config_path(env: "dict[str, str] | None" = None) -> "tuple[P
     to (:118-133, :175-190). Returns ``(path, reason)`` where *reason* names the branch
     that decided, for evidence. ``(None, reason)`` when it cannot be determined.
 
-    This function READS the process environment. It never changes what is audited — the
+    This function READS the process environment. It never changes what is audited - the
     caller compares it against the audited path and reports a divergence. Silently
     retargeting the scan on an environment variable would mean the printed grade
     described a subject the user never named, which is a worse failure than the one this
@@ -7891,7 +7891,7 @@ def resolve_product_config_path(env: "dict[str, str] | None" = None) -> "tuple[P
         return state_dir / OPENCLAW_CONFIG_FILENAME, "OPENCLAW_STATE_DIR is set"
 
     # stateDir == defaultStateDir here (we resolved both the same way), so the dist falls
-    # through to resolveConfigPathCandidate → resolveDefaultConfigCandidates.
+    # through to resolveConfigPathCandidate -> resolveDefaultConfigCandidates.
     for base in (home_dir / OPENCLAW_NEW_STATE_DIRNAME,) + tuple(
         home_dir / d for d in OPENCLAW_LEGACY_STATE_DIRNAMES
     ):
@@ -7909,13 +7909,13 @@ def audits_default_state_dir(home: Path, env: "dict[str, str] | None" = None) ->
     """True when *home* is the state dir a bare, env-free ``openclaw`` would use.
 
     This is the hermeticity gate for B183. It is an audited-home-IDENTITY test, not argv
-    sniffing — the same doctrine as ``_b182_audits_this_users_own_home`` — so it behaves
+    sniffing - the same doctrine as ``_b182_audits_this_users_own_home`` - so it behaves
     identically whether the user typed ``--home ~/.openclaw`` or typed nothing.
 
     It is deliberately STRICTER than B182's predicate: it requires the exact default
     directory rather than any ``~/.openclaw*`` sibling. Auditing ``~/.openclaw-work`` is
     an explicit act of targeting one profile, and a divergence warning there would be
-    telling the user something they already know — the spurious-finding case the task
+    telling the user something they already know - the spurious-finding case the task
     brief calls out. Under a fixture scan this is False, so B183 reports UNKNOWN and can
     never manufacture an environment-driven finding (Golden Rule #5).
 
@@ -7929,7 +7929,7 @@ def audits_default_state_dir(home: Path, env: "dict[str, str] | None" = None) ->
     the canonical one for this OS user", which the OS home answers on its own.
 
     The CANONICAL ``~/.openclaw`` also opens the gate, even when it does not exist. It is
-    the CLI's ``--home`` default, so landing there is not an act of targeting anything —
+    the CLI's ``--home`` default, so landing there is not an act of targeting anything -
     typing nothing produces it. Requiring an exact match against the resolved state dir
     instead would go silent on the env-free migration case: a user with only
     ``~/.clawdbot`` gets a bare run pointed at a non-existent ``~/.openclaw`` while the
@@ -7971,23 +7971,23 @@ def audits_this_users_own_home(home: Path) -> bool:
 #: directory, never into a real user's `~/.openclaw/workspace` or any other non-sandboxed
 #: skill root. Measured on a real host: 17 copies, every one under
 #: `~/.openclaw/sandboxes/*/skills/`, none under the real workspace. This is a filesystem
-#: artifact the sandboxing machinery itself writes — readable from INSIDE the sandbox even
+#: artifact the sandboxing machinery itself writes - readable from INSIDE the sandbox even
 #: though the real `~/.openclaw` is not, which is exactly the asymmetry this signal needs.
 _SANDBOX_SYNC_MARKER = ".openclaw-sync.json"
 
 
 def sandbox_sync_marker_present() -> bool:
     """B-776: True when the sandbox-sync marker sits beside THIS PROCESS's own HOME or
-    cwd — never the audited ``--home`` target.
+    cwd - never the audited ``--home`` target.
 
     Under ``sandbox_exec`` ``$HOME`` == ``/workspace`` == the process cwd, a fact
     independent of whatever ``--home``/the default ``~/.openclaw`` resolved to (which is
-    why a genuinely-blind-but-fixable run — wrong ``--home``, config just not at the
-    default path — must never trip this: it is not read at all). Both HOME and cwd are
+    why a genuinely-blind-but-fixable run - wrong ``--home``, config just not at the
+    default path - must never trip this: it is not read at all). Both HOME and cwd are
     checked because the two coincide in the sandbox but are not guaranteed to in every
     embedding this tool runs under.
 
-    Deliberately weak alone — see ``_sandbox_signal`` below, the only caller, which
+    Deliberately weak alone - see ``_sandbox_signal`` below, the only caller, which
     ANDs this with "no config resolvable this run" before it means anything.
     ``OPENCLAW_CLI=1`` and ``/.dockerenv`` are NOT used here: both fire for ordinary host
     `exec`/cron too (measured), so neither is evidence of a *sandboxed* session on its own.
@@ -8011,7 +8011,7 @@ def sandbox_sync_marker_present() -> bool:
 
 
 def _sandbox_signal(config_found: bool) -> bool:
-    """B-776: the compound gate for ``ctx.sandboxed`` — the sync marker ALONE is not
+    """B-776: the compound gate for ``ctx.sandboxed`` - the sync marker ALONE is not
     enough, since a legitimately Docker-hosted gateway with its own real config must stay
     quiet. Combined with "no config resolvable this run" (*config_found*, from the SAME
     `collect()` call), a host that genuinely has a config at the audited path never trips
@@ -8022,11 +8022,11 @@ def _sandbox_signal(config_found: bool) -> bool:
 
 # ---------------------------------------------------------------------------
 # DATA-HANDLING INVARIANT (applies to this block and the EnvironmentFile= reader below):
-# every value parsed here is read only to be TESTED — truthy/falsy, string length,
-# hostname equality — never to be displayed. No consumer places a raw value into a
+# every value parsed here is read only to be TESTED - truthy/falsy, string length,
+# hostname equality - never to be displayed. No consumer places a raw value into a
 # Finding.detail/evidence/fix, none of it is ever logged (this module has no
 # logger/print call anywhere), and none of it is written to ~/.clawseccheck/ or any
-# other on-disk store — it lives only in this Context for the one CLI process's
+# other on-disk store - it lives only in this Context for the one CLI process's
 # lifetime. Pinned by a regression test: tests/test_b290_env_supplied_gateway_auth.py.
 #
 # B-282 (ENV-2/ENV-6): the two GLOBAL runtime dotenv files.
@@ -8036,12 +8036,12 @@ def _sandbox_signal(config_found: bool) -> bool:
 # process.env:
 #     <configDir>/.env                   (configDir defaults to ~/.openclaw)
 #     ~/.config/openclaw/gateway.env     (skipped when OPENCLAW_STATE_DIR moves the
-#                                         state env away from its default — :90/:98)
+#                                         state env away from its default - :90/:98)
 #
 # The WORKSPACE .env is NOT one of them and must never be read as one. loadDotEnv
 # (dotenv-eb21SB3p.js:218-223) passes the workspace file through an entryFilter of
 # `!shouldBlockWorkspaceDotEnvKey`, and BLOCKED_WORKSPACE_DOTENV_PREFIXES
-# (:177-185) contains the literal "OPENCLAW_" — so EVERY OPENCLAW_* key in a workspace
+# (:177-185) contains the literal "OPENCLAW_" - so EVERY OPENCLAW_* key in a workspace
 # .env is dropped before it can reach process.env. OPENCLAW_CACHE_TRACE is additionally
 # in BLOCKED_WORKSPACE_DOTENV_KEYS (:128). The global loader, by contrast, is called with
 # NO entryFilter (:222), so every OPENCLAW_* key in the two files above is admitted.
@@ -8052,12 +8052,12 @@ _MAX_DOTENV_BYTES = 256_000
 _MAX_DOTENV_ENTRIES = 500
 
 # parseBooleanValue's token sets, verbatim (boolean-CrriykWV.js:3-16). Anything outside
-# BOTH sets is ambiguous and returns None, which lets the config value stand — the same
+# BOTH sets is ambiguous and returns None, which lets the config value stand - the same
 # `?? config?.enabled` fall-through the dist performs. No heuristic guessing.
 _DOTENV_TRUTHY = frozenset({"true", "1", "yes", "on"})
 _DOTENV_FALSY = frozenset({"false", "0", "no", "off"})
 
-# env-CKdem44B.js:46-55 isTruthyEnvValue — a DIFFERENT predicate from parseBooleanValue:
+# env-CKdem44B.js:46-55 isTruthyEnvValue - a DIFFERENT predicate from parseBooleanValue:
 # binary rather than tri-state (no falsy set; anything unrecognised is simply false).
 # OPENCLAW_LOAD_SHELL_ENV uses this one (shell-env-DaE9Xx3-.js:200-202). Collapsing the
 # two would misreport both.
@@ -8065,7 +8065,7 @@ _ENV_TRUTHY_BINARY = frozenset({"1", "on", "true", "yes"})
 
 
 def parse_boolean_value(raw: "str | None") -> "bool | None":
-    """Mirror ``parseBooleanValue`` (boolean-CrriykWV.js:22-30) — tri-state.
+    """Mirror ``parseBooleanValue`` (boolean-CrriykWV.js:22-30) - tri-state.
 
     None means "ambiguous or unset", i.e. the config value survives.
     """
@@ -8080,7 +8080,7 @@ def parse_boolean_value(raw: "str | None") -> "bool | None":
 
 
 def is_truthy_env_value(raw: "str | None") -> bool:
-    """Mirror ``isTruthyEnvValue`` (env-CKdem44B.js:46-55) — binary, no falsy set."""
+    """Mirror ``isTruthyEnvValue`` (env-CKdem44B.js:46-55) - binary, no falsy set."""
     if not isinstance(raw, str):
         return False
     return raw.strip().lower() in _ENV_TRUTHY_BINARY
@@ -8091,8 +8091,8 @@ def _parse_dotenv(text: str) -> "dict[str, str]":
 
     OpenClaw uses the npm ``dotenv`` package (dotenv-global-mWLbBl_z.js:8,22), whose full
     grammar includes multi-line quoted values and escape handling. This mirrors the
-    unambiguous majority case — ``KEY=value``, optional ``export`` prefix, ``#`` comments,
-    matched single/double quotes on one line — and simply DOES NOT REPORT anything it
+    unambiguous majority case - ``KEY=value``, optional ``export`` prefix, ``#`` comments,
+    matched single/double quotes on one line - and simply DOES NOT REPORT anything it
     cannot parse. Under-reading a key yields an UNKNOWN or a silent PASS (a false
     negative); mis-parsing one would yield a false WARN. Only the former is acceptable.
 
@@ -8133,13 +8133,13 @@ def global_dotenv_paths(home: Path, env: "dict[str, str] | None" = None) -> "lis
     """The two global runtime dotenv files, expressed relative to the AUDITED home.
 
     ``home/.env`` is the ``<configDir>/.env`` slot and ``home.parent/.config/openclaw/
-    gateway.env`` is the gateway slot — ``home.parent`` is ``~`` for a real OpenClaw home,
+    gateway.env`` is the gateway slot - ``home.parent`` is ``~`` for a real OpenClaw home,
     the same idiom B150/B182 use to reach ``~/.config``. Deriving both from *home* rather
     than from ``os.environ`` keeps fixture and ``--home`` scans hermetic: the auditor's own
     environment can never steer which files a scan reads.
 
-    The gateway file is skipped exactly when the dist skips it — an explicitly non-default
-    ``OPENCLAW_STATE_DIR`` (dotenv-global-mWLbBl_z.js:90,98) — and only when the audited
+    The gateway file is skipped exactly when the dist skips it - an explicitly non-default
+    ``OPENCLAW_STATE_DIR`` (dotenv-global-mWLbBl_z.js:90,98) - and only when the audited
     home is this user's own, since otherwise the process env says nothing about it.
     """
     env = os.environ if env is None else env
@@ -8191,7 +8191,7 @@ def _collect_global_dotenv(home: Path, ctx: Context) -> None:
             ctx.dotenv_truncated = True
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_ENV,
-                f"dotenv file '{path}' exceeded the {_MAX_DOTENV_BYTES // 1000}KB cap — "
+                f"dotenv file '{path}' exceeded the {_MAX_DOTENV_BYTES // 1000}KB cap \u2014 "
                 "content beyond the cap was NOT scanned",
             )
         for key, value in _parse_dotenv(raw.decode("utf-8", errors="replace")).items():
@@ -8205,7 +8205,7 @@ def dotenv_override(ctx: Context, key: str) -> "tuple[str | None, str | None]":
     """The observed value of *key* and where it came from, or ``(None, None)``.
 
     The hermetic on-disk files are authoritative. The live process environment is only
-    consulted when the audited home is this user's own (``audits_this_users_own_home``) —
+    consulted when the audited home is this user's own (``audits_this_users_own_home``) -
     under a fixture or ``--home`` scan the auditor's environment describes a different
     subject entirely, and letting it steer a verdict would be exactly the
     environment-driven false positive Golden Rule #5 forbids.
@@ -8225,7 +8225,7 @@ def dotenv_override(ctx: Context, key: str) -> "tuple[str | None, str | None]":
 #
 # Why this exists at all: OpenClaw's gateway runs as a systemd user service, so the
 # environment that decides its behaviour is the unit's, not the auditing shell's. Reading
-# `os.environ` and calling it "the agent's environment" would be a category error — the
+# `os.environ` and calling it "the agent's environment" would be a category error - the
 # variable an attacker plants in the unit is invisible there, and a variable the operator
 # happens to have exported in their own shell is not the service's. Every verdict that
 # moves on env evidence therefore keys on a PERSISTENT, on-disk artifact only
@@ -8235,21 +8235,21 @@ def dotenv_override(ctx: Context, key: str) -> "tuple[str | None, str | None]":
 #   systemd-B4Oq2owH.js:276-287   readSystemdServiceRuntime's own unit walk: trim each
 #                                 line, skip blanks and '#', then `Environment=` ->
 #                                 parseSystemdEnvAssignment, `EnvironmentFile=` -> spec list
-#   systemd-unit-DVDnVbxX.js:70-99  parseSystemdEnvAssignment — strip one matched wrapping
+#   systemd-unit-DVDnVbxX.js:70-99  parseSystemdEnvAssignment - strip one matched wrapping
 #                                 quote pair with backslash escapes, split at the FIRST
 #                                 '=' (index must be > 0)
-#   systemd-unit-DVDnVbxX.js:101-110 parseSystemdEnvAssignments — splitArgsPreservingQuotes
+#   systemd-unit-DVDnVbxX.js:101-110 parseSystemdEnvAssignments - splitArgsPreservingQuotes
 #                                 with escapeMode "backslash", quoteChars ' and ",
 #                                 quoteStart "item-start" (a quote only opens a run at the
 #                                 start of an item), then one assignment per token
-#   systemd-B4Oq2owH.js:400-402   expandSystemdSpecifier — ONLY "%h" is expanded
-#   systemd-B4Oq2owH.js:403-405   parseEnvironmentFileSpecs — same quote-preserving split
-#   systemd-B4Oq2owH.js:430-447   resolveSystemdEnvironmentFiles — optional leading '-',
+#   systemd-B4Oq2owH.js:400-402   expandSystemdSpecifier - ONLY "%h" is expanded
+#   systemd-B4Oq2owH.js:403-405   parseEnvironmentFileSpecs - same quote-preserving split
+#   systemd-B4Oq2owH.js:430-447   resolveSystemdEnvironmentFiles - optional leading '-',
 #                                 relative specs resolved against the unit's directory,
 #                                 unreadable files skipped silently
-#   systemd-B4Oq2owH.js:406-418   parseEnvironmentFileLine — '#'/';' comments, split at the
+#   systemd-B4Oq2owH.js:406-418   parseEnvironmentFileLine - '#'/';' comments, split at the
 #                                 first '=', strip one matched wrapping quote pair
-#   systemd-B4Oq2owH.js:294-297   merge order: {...inline, ...fromFiles} — an
+#   systemd-B4Oq2owH.js:294-297   merge order: {...inline, ...fromFiles} - an
 #                                 EnvironmentFile value OVERRIDES the inline one
 #
 # Anything this parser cannot reproduce with confidence is simply not reported. Under-
@@ -8324,7 +8324,7 @@ def parse_systemd_env_assignments(raw: str) -> "list[tuple[str, str]]":
     """Parse the right-hand side of one ``Environment=`` line into (key, value) pairs.
 
     systemd allows several space-separated assignments on one line, each optionally
-    quoted as a whole (``Environment="A=b c" D=e``) — the real unit on a stock install
+    quoted as a whole (``Environment="A=b c" D=e``) - the real unit on a stock install
     uses exactly that shape. Mirrors parseSystemdEnvAssignments
     (systemd-unit-DVDnVbxX.js:101-110); tokens without a '=' past position 0 are dropped,
     as the dist drops them.
@@ -8366,8 +8366,8 @@ def _parse_environment_file(text: str) -> "list[tuple[str, str]]":
 def systemd_user_unit_dir(home: Path) -> Path:
     """``~/.config/systemd/user`` expressed relative to the AUDITED home.
 
-    ``home.parent`` is ``~`` for a real OpenClaw profile directory — the same idiom B150
-    and B182 already use to reach ``~/.config`` — so a fixture or ``--home`` scan reads
+    ``home.parent`` is ``~`` for a real OpenClaw profile directory - the same idiom B150
+    and B182 already use to reach ``~/.config`` - so a fixture or ``--home`` scan reads
     the fixture's own units and never this machine's.
     """
     return home.parent / ".config" / "systemd" / "user"
@@ -8388,7 +8388,7 @@ def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context)
     Mirrors resolveSystemdEnvironmentFiles (systemd-B4Oq2owH.js:430-447): an optional
     leading '-' (ignore-if-missing) is stripped, ``%h`` expands to the user's home, a
     relative path resolves against the unit's own directory, and an unreadable file is
-    skipped silently. Any OTHER ``%`` specifier is left unexpanded and the spec dropped —
+    skipped silently. Any OTHER ``%`` specifier is left unexpanded and the spec dropped -
     guessing at it would read the wrong file.
     """
     pathname = spec[1:].strip() if spec.startswith("-") else spec
@@ -8411,7 +8411,7 @@ def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context)
     if truncated:
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_ENV,
-            f"EnvironmentFile '{candidate}' exceeded the {_MAX_UNIT_BYTES // 1000}KB cap — "
+            f"EnvironmentFile '{candidate}' exceeded the {_MAX_UNIT_BYTES // 1000}KB cap \u2014 "
             "content beyond the cap was NOT scanned",
         )
     for key, value in _parse_environment_file(raw.decode("utf-8", errors="replace")):
@@ -8419,7 +8419,7 @@ def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context)
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_ENV,
                 f"more than {_MAX_UNIT_ENV_ENTRIES} systemd-unit environment entries were "
-                "found — entries past the cap were NOT recorded",
+                "found \u2014 entries past the cap were NOT recorded",
             )
             break
         # File values override inline ones, matching the dist's merge order
@@ -8432,7 +8432,7 @@ def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context)
 def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
     """Read the environment of OpenClaw-related systemd user units (B-289/B-290).
 
-    Silent on any host without ``~/.config/systemd/user`` — macOS, Windows, a container,
+    Silent on any host without ``~/.config/systemd/user`` - macOS, Windows, a container,
     or simply a user who never installed the service. ``ctx.unit_env_unreadable`` records
     the distinct "a unit is there but we could not read it" state so a consuming check can
     say UNKNOWN instead of inventing a clean PASS.
@@ -8442,7 +8442,7 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
         units_dir_is_dir = units_dir.is_dir()
     except OSError as exc:
         # B-303: an ancestor (e.g. a non-traversable home) can make even this existence
-        # check raise. Distinct from "not installed" — record it the same way an
+        # check raise. Distinct from "not installed" - record it the same way an
         # unreadable directory listing already is below, so a consuming check says
         # UNKNOWN instead of the false "not installed" a silent return would imply.
         ctx.errors.append(f"could not check {units_dir}: {exc}")
@@ -8466,7 +8466,7 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
         # read at all, so a consumer needs to know this claim is over an incomplete set.
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_ENV,
-            f"more than {_MAX_UNIT_FILES} systemd user unit files exist in {units_dir} — "
+            f"more than {_MAX_UNIT_FILES} systemd user unit files exist in {units_dir} \u2014 "
             "only the first "
             f"{_MAX_UNIT_FILES} (sorted by name) were read",
         )
@@ -8510,7 +8510,7 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_ENV,
                 f"systemd unit '{unit_path.name}' exceeded the "
-                f"{_MAX_UNIT_BYTES // 1000}KB cap — content beyond the cap was NOT scanned",
+                f"{_MAX_UNIT_BYTES // 1000}KB cap \u2014 content beyond the cap was NOT scanned",
             )
 
         ctx.unit_env_found = True
@@ -8522,7 +8522,7 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_ENV,
                         f"more than {_MAX_UNIT_ENV_ENTRIES} systemd-unit environment "
-                        "entries were found — entries past the cap were NOT recorded",
+                        "entries were found \u2014 entries past the cap were NOT recorded",
                     )
                 break
             for key, value in parse_systemd_env_assignments(raw_line):
@@ -8537,7 +8537,7 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
                         note_limit(
                             ctx.limit_hits, LIMIT_DOMAIN_ENV,
                             f"more than {_MAX_ENV_FILES} EnvironmentFile= specs were found "
-                            "across OpenClaw-related units — files past the cap were NOT "
+                            "across OpenClaw-related units \u2014 files past the cap were NOT "
                             "read",
                         )
                     break
@@ -8555,15 +8555,15 @@ def persistent_env_evidence(ctx: Context, key: str) -> "tuple[str | None, str | 
 
     Consults, in the order the product resolves them for a service-run agent:
 
-    1. the systemd unit's ``Environment=`` / ``EnvironmentFile=`` — already in
+    1. the systemd unit's ``Environment=`` / ``EnvironmentFile=`` - already in
        ``process.env`` when the agent starts, which is exactly why the global dotenv
        loader then skips the key (``preExistingKeys.has(key)``,
        dotenv-global-mWLbBl_z.js:44-46 / :66);
     2. the two global runtime dotenv files.
 
     It deliberately does NOT fall back to ``os.environ``. This function backs verdict-
-    moving decisions — softening B2's exposed-gateway FAIL, and B186's override
-    disclosure — and the auditing shell's environment is not the service's. Letting an
+    moving decisions - softening B2's exposed-gateway FAIL, and B186's override
+    disclosure - and the auditing shell's environment is not the service's. Letting an
     exported variable in the operator's terminal clear a CRITICAL finding about a
     separate long-running process would be keying a verdict on something outside the
     audited subject entirely. Where no persistent artifact carries the key, the honest
@@ -8592,10 +8592,10 @@ def env_evidence_readable(ctx: Context) -> bool:
 
 
 # The two bundled-root relocation variables OpenClaw honours UNCONDITIONALLY (B-289).
-#   bundled-dir-BQFrcRIS.js:22-24  resolveBundledSkillsDir — `const override =
+#   bundled-dir-BQFrcRIS.js:22-24  resolveBundledSkillsDir - `const override =
 #       process.env.OPENCLAW_BUNDLED_SKILLS_DIR?.trim(); if (override) return override;`
 #       returns BEFORE every legitimate resolution path, with no existence or trust check.
-#   workspace-zj1TEEka.js:54-56    resolveBundledHooksDir — identical shape.
+#   workspace-zj1TEEka.js:54-56    resolveBundledHooksDir - identical shape.
 #
 # OPENCLAW_BUNDLED_PLUGINS_DIR is deliberately ABSENT from this tuple and must never be
 # added: bundled-dir-DKbeVv7V.js:124-134 resolves the override and then gates it through
@@ -8614,7 +8614,7 @@ OPENCLAW_BUNDLED_ROOT_ENV_VARS = (
 def bundled_root_overrides(ctx: Context) -> "list[tuple[str, str, str, str]]":
     """Observed bundled-root relocations, as (var, kind, value, source).
 
-    Persistent artifacts only — see ``persistent_env_evidence``.
+    Persistent artifacts only - see ``persistent_env_evidence``.
     """
     out: "list[tuple[str, str, str, str]]" = []
     for var, kind in OPENCLAW_BUNDLED_ROOT_ENV_VARS:
@@ -8623,14 +8623,14 @@ def bundled_root_overrides(ctx: Context) -> "list[tuple[str, str, str, str]]":
             continue
         value = value.strip()
         if not value:
-            continue  # `?.trim()` falsy — the dist falls through to normal resolution
+            continue  # `?.trim()` falsy - the dist falls through to normal resolution
         out.append((var, kind, value, source or "an environment file"))
     return out
 
 
 # B-306 safe-symlink split: the exact substring the config loader emits when it declines
 # to FOLLOW a top-level openclaw.json symlink whose resolved target leaves the config dir
-# (configloader.load_openclaw_config). Used only to ROUTE to the structural gate below —
+# (configloader.load_openclaw_config). Used only to ROUTE to the structural gate below -
 # never as the decision itself, so wording is not load-bearing and this can't regress into
 # the keyword-widening pattern the project avoids.
 _CONFIG_SYMLINK_ESCAPE_MARKER = "symlink escapes its config directory"
@@ -8695,7 +8695,7 @@ def _recover_escaped_config_symlink(
     except (OSError, _ConfigLoadError, RecursionError):
         return None
     # C-417: the recovered symlink target IS the file this audit read, so its bytes are
-    # what the digest must describe — not the link.
+    # what the digest must describe - not the link.
     ctx.config_sha256 = _digest[0] if _digest else None
     try:
         mode = target.stat().st_mode & 0o777
@@ -8718,11 +8718,11 @@ def _bootstrap_identity(f: Path) -> object:
     correct there.
 
     De-duplicating those probes on ``Path.resolve()`` is not. ``resolve()`` is
-    ``posixpath.realpath`` — pure string manipulation over the path components; it
+    ``posixpath.realpath`` - pure string manipulation over the path components; it
     resolves symlinks and ``..``, but it never asks the filesystem for a name's on-disk
     casing. On a case-INsensitive filesystem (macOS/APFS by default, Windows) both
     probes open the *same* inode while producing two resolved strings that differ only
-    in case, so the de-dup misses and the file's content is read — and reported — twice
+    in case, so the de-dup misses and the file's content is read - and reported - twice
     under two ``ctx.bootstrap`` keys. Findings that join their evidence over
     ``ctx.bootstrap`` then render the same file twice, and ``bootstrap_blob`` doubles.
 
@@ -8756,7 +8756,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     cfg_path, cfg_found = resolve_config_in_home(home)
     ctx.config_path = cfg_path
     ctx.config_found = cfg_found
-    # B-776: computed right here, before anything below can raise — a sandboxed run must
+    # B-776: computed right here, before anything below can raise - a sandboxed run must
     # still get an honest `ctx.sandboxed` even if the rest of collection degrades.
     ctx.sandboxed = _sandbox_signal(cfg_found)
     parsed_ok = False
@@ -8769,7 +8769,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             message = str(exc)
             # B-306 safe-symlink recovery: a dotfiles-style openclaw.json symlink whose
             # target leaves the config dir is NOT a dark config when that target is a
-            # readable regular file the user owns — follow it and audit the real bytes
+            # readable regular file the user owns - follow it and audit the real bytes
             # instead of hard-capping to F. Returns None for genuinely corrupt/unreadable
             # bytes, which fall through to the unchanged genuine-blind path below.
             recovered = _recover_escaped_config_symlink(ctx, cfg_path, message)
@@ -8807,8 +8807,8 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     # included so bootstrap files that live outside the three named workspace
     # dirs are not invisible (§6: never hardcode one layout).
     # Filesystem identity is tracked (see _bootstrap_identity) so a symlink from a
-    # workspace dir back to a root file — or the same inode reached under two case
-    # spellings on a case-insensitive filesystem — is not read twice.
+    # workspace dir back to a root file - or the same inode reached under two case
+    # spellings on a case-insensitive filesystem - is not read twice.
     _seen_bootstrap: set[object] = set()
     _ws_dirs: list[tuple[str, Path]] = [("", home)]
     _ws_dirs += [(ws, home / ws) for ws in WORKSPACE_DIRS]
@@ -8824,7 +8824,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
         # `chmod 000 ~/.openclaw`) used to raise an uncaught PermissionError right here
         # (or, for home itself, one line down on the first bootstrap filename) and take
         # the WHOLE audit down. A directory this process cannot even stat is reported the
-        # same way a directory that does not exist already is — skipped, with a
+        # same way a directory that does not exist already is - skipped, with a
         # bootstrap-domain limit hit recording WHY, so check_installed_skills'/the
         # bootstrap checks' existing "ctx.bootstrap empty -> UNKNOWN" fallback fires
         # honestly instead of the process crashing.
@@ -8833,7 +8833,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
         except OSError as exc:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
-                f"could not check workspace dir '{wdir}' ({exc.__class__.__name__}) — "
+                f"could not check workspace dir '{wdir}' ({exc.__class__.__name__}) \u2014 "
                 "bootstrap files there were NOT scanned",
             )
             ctx.errors.append(f"could not check {wdir}: {exc}")
@@ -8847,7 +8847,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             except OSError as exc:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
-                    f"could not check '{f}' ({exc.__class__.__name__}) — this bootstrap "
+                    f"could not check '{f}' ({exc.__class__.__name__}) \u2014 this bootstrap "
                     "file was NOT scanned",
                 )
                 ctx.errors.append(f"could not check {f}: {exc}")
@@ -8860,7 +8860,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
             _seen_bootstrap.add(ident)
             key = name if _ws == "" else f"{_ws}/{name}"
             try:
-                # B-103: cap the read like the skill path — a huge/padded bootstrap
+                # B-103: cap the read like the skill path - a huge/padded bootstrap
                 # file must not load whole into memory (memory DoS) or turn the B58
                 # quadratic regex unbounded. _read_with_limit streams up to the cap
                 # (never over-allocates); a slice records a limit_hit so checks over
@@ -8869,8 +8869,8 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                     raw, truncated = _read_with_limit(fp, _MAX_FILE_BYTES)
                 # B-305/C-135 (round 2, Finding 2): unlike ctx.installed_skills,
                 # NO "# file: <name>" section header is ever legitimately inserted
-                # into bootstrap text — `bootstrap_blob` just joins raw file
-                # contents with "\n" — so a header-shaped line found here can only
+                # into bootstrap text - `bootstrap_blob` just joins raw file
+                # contents with "\n" - so a header-shaped line found here can only
                 # ever be attacker-forged. Escaping is therefore always safe
                 # (never neutralizes a genuine header, because there is none), and
                 # closes the same `_pos_in_source_code_section` bypass for this
@@ -8882,7 +8882,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
                         f"bootstrap file '{key}' exceeded the "
-                        f"{_MAX_FILE_BYTES // 1000}KB cap — content beyond the cap "
+                        f"{_MAX_FILE_BYTES // 1000}KB cap \u2014 content beyond the cap "
                         "was NOT scanned",
                     )
             except OSError as exc:

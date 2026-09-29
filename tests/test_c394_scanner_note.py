@@ -18,7 +18,7 @@ from clawseccheck import iocdb
 
 _ROOT = Path(__file__).resolve().parent.parent
 _README = (_ROOT / "README.md").read_text(encoding="utf-8")
-_HEADING = "## 🚩 Why security scanners flag this repo"
+_HEADING = "## &#x1F6A9; Why security scanners flag this repo"
 
 
 def _section() -> str:

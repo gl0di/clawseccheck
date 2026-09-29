@@ -1,6 +1,6 @@
 """C-520: a persistent, mutable Incident record with an open-to-closed lifecycle.
 
-Local, opt-in, append-only JSONL, chmod 600 — same idiom as runstore.py (C-524) and
+Local, opt-in, append-only JSONL, chmod 600 - same idiom as runstore.py (C-524) and
 sbom_runs.py (C-521), reusing monitorstore.py's generic hash-chain primitives
 (_chain_hash/_rotate_journal/_iter_jsonl/_last_chain_hash/_schema_ok) rather than
 reinventing them.
@@ -282,7 +282,7 @@ def mark_incident(
 def render_incident_json(record: dict, *, version: str) -> str:
     """The standalone --incident-open/--incident-mark/--incident-show --json artifact.
     Routed through adjudication._emit_json (sanitize-on-emit over the whole tree), same
-    as runstore.render_diff_json/sbom_runs.render_sbom_diff_json — the shared boundary
+    as runstore.render_diff_json/sbom_runs.render_sbom_diff_json - the shared boundary
     every machine-readable artifact this tool emits goes through."""
     from .adjudication import _emit_json  # noqa: PLC0415
 

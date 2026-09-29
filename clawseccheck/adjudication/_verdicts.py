@@ -1,7 +1,7 @@
 """Verdict consumer: turns a host agent's answers to the judge packet back into
 action.
 
-Split out of the single `adjudication.py` by C-455 — that file's
+Split out of the single `adjudication.py` by C-455 - that file's
 `tests/test_module_layout.py` line-budget exemption had been restated three
 times since 2026-08-24 (~1,247 -> ~1,570 -> ~1,920 -> ~2,433 lines) with the
 split filed but not done each time, and the file grew again to 2,478 lines
@@ -11,7 +11,7 @@ downstream of a submitted verdict:
 
   - F-115 (``--judged``): `_parse_verdicts` reads a host agent's bounded,
     defensively-parsed ``{"verdict": ..., "reason": ...}`` answers (untrusted
-    input — CLAUDE.md §2); `render_judged_json` folds them onto a
+    input - CLAUDE.md §2); `render_judged_json` folds them onto a
     `report.render_json` tree as an advisory "second opinion" that never
     changes a Finding's own status or score.
   - C-253 (``--propose-ignore``): a SAFE verdict on a borderline item becomes
@@ -20,11 +20,11 @@ downstream of a submitted verdict:
     (B-406), highest wins.
   - C-254 (``--vet-judge-packet`` / ``--vet-judged``): the same verdict cycle
     for one `--vet` target, including SUSPICIOUS/DANGEROUS escalation
-    (`_ESCALATION_TARGET`) of the vetted skill's own findings — `_escalated_status`
+    (`_ESCALATION_TARGET`) of the vetted skill's own findings - `_escalated_status`
     never returns a status ranked below the finding's current one, for any
     verdict including a malformed one: this is untrusted third-party content,
     not the user's own config, so a verdict may only ever raise it.
-  - C-255: pre-install prose attestation — the three fixed ``ATTEST-PROSE-*``
+  - C-255: pre-install prose attestation - the three fixed ``ATTEST-PROSE-*``
     ids and the new, capped-at-WARN Findings a submitted verdict on them can
     add (never remove or soften one).
 
@@ -32,7 +32,7 @@ Depends on `_builder` for packet-construction primitives shared across the
 ``--judged`` and ``--vet-judged`` paths (`build_judge_packet`,
 `_item_from_finding`, `_target_from_evidence`, `_gate_target`,
 `_is_borderline`, `_attach_corroboration`, `_with_documented_shape`,
-`_with_check_title`, `_VERDICT_SCHEMA`, `_emit_json`) — one-directional;
+`_with_check_title`, `_VERDICT_SCHEMA`, `_emit_json`) - one-directional;
 `_builder` imports nothing from here (checked mechanically before the split:
 every top-level name each half defines was cross-referenced against the
 other half's source).
@@ -91,13 +91,13 @@ _PRIORITY_BY_VERDICT = {
 # re-describing it in a second place that could itself drift.
 _VERDICT_CONTRACT_HINT = (
     'each entry needs "finding_id" (string), "target" (string) and "verdict" '
-    "(one of " + " / ".join(_VERDICT_VALUES) + ") — exactly the packet item's own "
+    "(one of " + " / ".join(_VERDICT_VALUES) + ") \u2014 exactly the packet item's own "
     '"verdict_schema" field'
 )
 
 
 def _note(message: str) -> None:
-    """Emit a user-visible ``note:`` line — the same channel and prefix cli.py already
+    """Emit a user-visible ``note:`` line - the same channel and prefix cli.py already
     uses for flag-coherence notes.
 
     Always stderr, never stdout: every consumer of this module renders a JSON
@@ -112,7 +112,7 @@ def _payload_carries_content(raw) -> bool:
     """True when a verdicts payload actually contained something.
 
     An empty/whitespace-only string is the "nothing was submitted" case (cli.py also
-    passes ``""`` when the path could not be read), which must stay silent — the
+    passes ``""`` when the path could not be read), which must stay silent - the
     diagnostic below exists to separate "0 of N applied" from "no verdicts
     submitted", so firing it on a genuinely empty payload would defeat its purpose.
     """
@@ -125,16 +125,16 @@ def _note_nothing_applied(raw, reason: str, *, hint: str = _VERDICT_CONTRACT_HIN
     """B-330: loudly report a NON-EMPTY verdicts payload that yielded zero usable
     entries.
 
-    The defensive parse below never raises, which is right for untrusted input — but
+    The defensive parse below never raises, which is right for untrusted input - but
     silently returning ``{}`` made a wholly-rejected file indistinguishable from "no
     verdicts submitted": every item still rendered "not yet reviewed by a judge" and
     nothing anywhere said 0 of N had been applied. That is exactly how the packet's
     own contract could contradict its parser for a whole release without anyone
-    noticing. Reporting is all this does — the parse result is unchanged.
+    noticing. Reporting is all this does - the parse result is unchanged.
     """
     if not _payload_carries_content(raw):
         return
-    _note(f"verdicts payload produced no usable entries — {reason}. Nothing was applied; {hint}.")
+    _note(f"verdicts payload produced no usable entries \u2014 {reason}. Nothing was applied; {hint}.")
 
 
 def _parse_verdicts(raw: str) -> dict:
@@ -182,7 +182,7 @@ def _parse_verdicts(raw: str) -> dict:
     entries = data.get("verdicts")
     if not isinstance(entries, list):
         # B-597: this used to say "no top-level 'verdicts' array". Which level is "top"
-        # depends on the caller — for `--judged` the payload IS the file, but for
+        # depends on the caller - for `--judged` the payload IS the file, but for
         # `--judged-bundle` it is the `judged` object inside it. A host agent read the
         # sentence the first way, moved its array to the file's top level, and had all 25
         # verdicts silently discarded (pipeline.split_judged_bundle now catches that
@@ -246,7 +246,7 @@ def _annotate(engine_disposition: str, entry: dict | None) -> str:
     hit, total = _vote_tally(verdict, entry.get("votes"))
     judges_desc = f"judges: {hit}/{total} {verdict}" if total else f"judge: {verdict}"
     priority = _PRIORITY_BY_VERDICT.get(verdict, "worth a closer look")
-    return f"engine: {engine_disposition} · {judges_desc} → {priority}"
+    return f"engine: {engine_disposition} · {judges_desc} \u2192 {priority}"
 
 
 def _second_opinion(ctx, findings, verdicts_map: dict) -> list[dict]:
@@ -572,7 +572,7 @@ def build_vet_judge_packet(engine_output, target: str) -> list[dict]:
     items = [_item_from_finding(f) for f in pool if _is_borderline(f)]
     items.extend(_vet_attest_packet_items(_gate_target(_vet_target_name(target))))
     # B-445/C-378: the vet packet is a SECOND assembly point, and it was not getting
-    # either normalisation — so a vet item shipped without `safe_facts` and without
+    # either normalisation - so a vet item shipped without `safe_facts` and without
     # `check_title` while the audit packet had both. Exactly the one-producer-of-N gap
     # B-571 was filed for, reintroduced by adding a second builder rather than a
     # second producer. Found by a C-378 test asserting a rendered vet item, not by

@@ -3,7 +3,7 @@
 A grade is a claim about the *subject* (an agent setup), and the subject is only as
 well understood as the layers that actually ran against it. This module is the single
 place that names those layers, the statuses a layer can be in, and the ledger type that
-refuses to let one go unaccounted for. Pure stdlib, no deps — a leaf: it imports nothing
+refuses to let one go unaccounted for. Pure stdlib, no deps - a leaf: it imports nothing
 from ``clawseccheck`` itself, so every other module can depend on it without risking a
 cycle (CLAUDE.md §3 dependency flow).
 
@@ -29,26 +29,26 @@ that stays correct until someone assumes one implies the other.
   *"did this monitor run make every comparison this build knows how to make?"* Its subject
   is the RUN, its unit is a comparison against the previous snapshot, and it gates nothing.
 
-The monitor deliberately does not import this module. It reads the ledger's *output* — the
-``score``/``grade``/``graded`` keys, through its ``_score`` dimension — and computes its own
+The monitor deliberately does not import this module. It reads the ledger's *output* - the
+``score``/``grade``/``graded`` keys, through its ``_score`` dimension - and computes its own
 completeness separately, because "which sources of evidence ran" is not "which comparisons
 were possible against a stored baseline".
 
 The trap that makes this worth stating: **``fully_compared`` is false on every ``--monitor``
-run of a healthy machine.** Measured over five consecutive runs on two populations — a bare
+run of a healthy machine.** Measured over five consecutive runs on two populations - a bare
 monitor run earns no grade, so the score comparison always emits a note, and several other
 standing limitations are permanent (the crontab spool needs elevated rights, most
 host-monitor classes cannot be confirmed, the trajectory window rotates). A reader who takes
 it for this ledger's completeness will read a healthy machine as a broken one. B-676 exists
-because of that, and the actionable monitor signal is the ``not_compared`` DELTA — a
-comparison that was possible last run and is not now — never the flag's absolute value.
+because of that, and the actionable monitor signal is the ``not_compared`` DELTA - a
+comparison that was possible last run and is not now - never the flag's absolute value.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
 
-# ── layer identity ───────────────────────────────────────────────────────────
+# -- layer identity -----------------------------------------------------------
 
 LAYER_STATIC = "static"
 LAYER_INSTALLED_SWEEP = "installed_sweep"
@@ -65,7 +65,7 @@ LAYER_ORDER = (
     LAYER_LIVE_BEHAVIOUR,
 )
 
-# ── layer status ─────────────────────────────────────────────────────────────
+# -- layer status -------------------------------------------------------------
 
 STATUS_RAN = "ran"
 STATUS_SKIPPED = "skipped"  # the operator narrowed the run (e.g. --fast)
@@ -81,7 +81,7 @@ STATUS_UNAVAILABLE = "unavailable"  # no live agent / nothing to ask, by constru
 STATUS_NOT_SUBMITTED = "not_submitted"
 STATUS_ERROR = "error"  # the layer tried and blew up
 # Kept only so pipeline.py keeps its existing vocabulary (it already used this exact
-# string for a phase that never got its turn before the deadline) — it is a valid
+# string for a phase that never got its turn before the deadline) - it is a valid
 # layer status too, not a leftover to delete.
 STATUS_NOT_REACHED = "not_reached"
 
@@ -90,10 +90,10 @@ LAYER_STATUSES = frozenset({
     STATUS_NOT_SUBMITTED, STATUS_ERROR, STATUS_NOT_REACHED,
 })
 
-#: Every status except STATUS_RAN — a layer in one of these cannot vouch for its subject.
+#: Every status except STATUS_RAN - a layer in one of these cannot vouch for its subject.
 INCOMPLETE_LAYER_STATUSES = frozenset(LAYER_STATUSES - {STATUS_RAN})
 
-# ── how a layer is named to a reader ──────────────────────────────────────────
+# -- how a layer is named to a reader ------------------------------------------
 #
 # ONE table, here in the leaf, for the same reason `textnorm.ASCII_MAP` is one table:
 # the moment a second renderer writes its own wording, the terminal report, the JSON,
@@ -126,7 +126,7 @@ STATUS_PHRASE = {
 }
 
 
-# ── layer coverage — did the layer exhaust its subject? ────────────────────────
+# -- layer coverage - did the layer exhaust its subject? ------------------------
 #
 # A THIRD axis, independent of `status`. `status` answers "did this layer run at
 # all"; `coverage` answers "when it ran, did it look at everything it could have".
@@ -137,7 +137,7 @@ STATUS_PHRASE = {
 # this question before this field existed, so nothing may retroactively claim
 # COMPLETE on its behalf.
 
-COVERAGE_UNKNOWN = "unknown"    # default — we did not ask
+COVERAGE_UNKNOWN = "unknown"    # default - we did not ask
 COVERAGE_COMPLETE = "complete"  # the layer exhausted its subject, and that was observed
 COVERAGE_PARTIAL = "partial"    # the layer left something unread, and it is named
 
@@ -189,7 +189,7 @@ class LayerState:
 
 @dataclass(frozen=True)
 class LayerLedger:
-    """One :class:`LayerState` per layer in :data:`LAYER_ORDER` — no more, no fewer.
+    """One :class:`LayerState` per layer in :data:`LAYER_ORDER` - no more, no fewer.
 
     A ledger that silently omits a layer would let ``complete`` lie about a subject
     it never actually looked at, which is exactly the failure mode this module exists
@@ -207,7 +207,7 @@ class LayerLedger:
         missing = [layer for layer in LAYER_ORDER if layer not in given]
         if missing:
             raise ValueError(
-                f"LayerLedger is missing layer(s): {missing} — all five of {LAYER_ORDER} "
+                f"LayerLedger is missing layer(s): {missing} \u2014 all five of {LAYER_ORDER} "
                 "must be present"
             )
         # Frozen + hashable-friendly: normalise into a MappingProxyType so the dataclass
@@ -219,12 +219,12 @@ class LayerLedger:
         return self.states[layer].status
 
     def coverage(self, layer: str) -> str:
-        """B-558: one layer's coverage — see :data:`LAYER_COVERAGES`.
+        """B-558: one layer's coverage - see :data:`LAYER_COVERAGES`.
 
         The sibling of :meth:`status`, and a DIFFERENT question: ``status`` says
         whether the layer ran, ``coverage`` says whether a layer that ran exhausted
         its subject. A reader that collapses the two loses the state this field was
-        built to preserve — "we did not ask" is not "we asked and found nothing left".
+        built to preserve - "we did not ask" is not "we asked and found nothing left".
         """
         return self.states[layer].coverage
 

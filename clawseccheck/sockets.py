@@ -1,22 +1,22 @@
 """Read-only enumeration of the host's actual listening TCP sockets.
 
 Every gateway-exposure verdict elsewhere in this package (B2, B70, ...) is
-**declared-state only** — it reads ``gateway.bind`` out of the config and reasons
+**declared-state only** - it reads ``gateway.bind`` out of the config and reasons
 about that string. It never checks what the process is *actually* listening on. This
 module supplies the one runtime signal that closes that gap: it enumerates real
 ``LISTEN``-state TCP sockets so a check can corroborate (or contradict) the declared
 bind (F-156).
 
 Doctrine (matches ``hostwatch.py``'s "no subprocess, no network"): on Linux this reads
-``/proc/net/tcp`` and ``/proc/net/tcp6`` directly for the base listening-socket scan —
+``/proc/net/tcp`` and ``/proc/net/tcp6`` directly for the base listening-socket scan -
 plain text, world-readable, no privileges required to read a bind address. Socket-to-PID
 correlation (:func:`identify_listener_process`, see the C-135 addendum below) additionally
-reads ``/proc/*/fd`` and each matched PID's ``comm``/``cmdline`` — still no subprocess, no
+reads ``/proc/*/fd`` and each matched PID's ``comm``/``cmdline`` - still no subprocess, no
 network, no privilege escalation, just a second read-only ``/proc`` walk; a
 ``PermissionError`` on another UID's fd table is expected and silently skipped, never an
 error. No subprocess is ever run. Where ``/proc``
 is unavailable (macOS, Windows, a container without it mounted, or simply missing) this
-degrades to an honest "unavailable" result — never a guess (B-172 doctrine). A later
+degrades to an honest "unavailable" result - never a guess (B-172 doctrine). A later
 revision MAY add a subprocess-based fallback (e.g. parsing ``lsof -F`` machine-readable
 output under ``native.py``'s ``_untrusted_exec_reason`` guard); this module does not,
 so the "no subprocess" property holds for every caller today.
@@ -24,17 +24,17 @@ so the "no subprocess" property holds for every caller today.
 **The one bug this module is designed to structurally rule out**: a competitor tool
 (piti/openclaw-security-dashboard, reviewed 2026-07-29) ran ``ss -tlnp | grep :$PORT``
 and regexed the WHOLE output line for ``0.0.0.0``/``*``. ``ss -tlnp``'s line shape is
-``LISTEN 0 511  127.0.0.1:18789  0.0.0.0:*  users:(...)`` — the trailing ``0.0.0.0:*`` is
+``LISTEN 0 511  127.0.0.1:18789  0.0.0.0:*  users:(...)`` - the trailing ``0.0.0.0:*`` is
 the **peer** address:port column (sockets in LISTEN state have no specific peer), not the
 bind. Their regex matched that peer wildcard on every Linux host and reported a loopback
-listener as "bound to 0.0.0.0" — a spurious CRITICAL on a correctly-hardened box. This
+listener as "bound to 0.0.0.0" - a spurious CRITICAL on a correctly-hardened box. This
 module never reads a peer column at all: it parses ``/proc/net/tcp{,6}``'s fixed
 ``local_address`` field by position, and returns only that. See
 ``tests/test_sockets.py``'s regression test naming this exact bug.
 
-**C-135 bug-1 addendum (independent review, 2026-07-30 — live-reproduced on this very
+**C-135 bug-1 addendum (independent review, 2026-07-30 - live-reproduced on this very
 machine)**: matching a listener to ``gateway.bind`` by PORT NUMBER ALONE has its own
-false-positive-FAIL mode — an entirely unrelated process can happen to bind the exact
+false-positive-FAIL mode - an entirely unrelated process can happen to bind the exact
 same port number on a different interface (reproduced live: Docker's userland proxy
 bound to ``0.0.0.0:8080`` for a published container port, sharing that number with
 ``fixtures/home_safe``'s correctly-configured loopback-only ``gateway.bind``).
@@ -44,18 +44,18 @@ process-identity correlation for exactly that case: it reads the LISTEN socket's
 ``/proc/*/fd/*`` for the ``socket:[inode]`` symlink that names which PID holds it, then
 reads that PID's ``comm``/``cmdline``. A ``PermissionError`` reading another UID's
 ``/proc/<pid>/fd`` is the normal, expected case (most processes are not readable by an
-unprivileged caller) and is silently skipped, never surfaced as an error — this stays
+unprivileged caller) and is silently skipped, never surfaced as an error - this stays
 just as read-only and privilege-free as the rest of the module. This module still
 names no verdict: it returns a process identity or ``None``, never "the gateway" or
-"not the gateway" — that judgement belongs to the check that knows what "the gateway"
+"not the gateway" - that judgement belongs to the check that knows what "the gateway"
 means (``checks/_config.py``'s ``check_effective_bind``).
 
 **B-374 follow-up (C-135 round 2, 2026-07-31)**: the ORIGINAL C-135 bug-1 fix above
-only ever DOWNGRADED a FAIL, and only on positive evidence of a non-gateway process —
+only ever DOWNGRADED a FAIL, and only on positive evidence of a non-gateway process -
 any unresolved identity (permission denied, no matching inode, disagreeing names) kept
 the FAIL, which is itself a false-positive-FAIL mode (an unproven guess in the FAIL
 direction). ``check_effective_bind`` no longer treats "unattributable" as "keep
-FAIL" — see its own docstring. Two additions here support that: ``ProcessIdentity``
+FAIL" - see its own docstring. Two additions here support that: ``ProcessIdentity``
 now also carries ``cmdline`` (``comm`` alone is just ``"node"`` for every Node.js
 process, which cannot positively identify OpenClaw's own gateway process among them;
 the invoking script's path usually can), and :func:`build_inode_index` lets a caller
@@ -64,15 +64,15 @@ socket (``identify_listener_process``'s optional *index* parameter).
 
 **B-400 (2026-08-01)**: ``cmdline`` turned out to still be matched by
 ``checks/_config.py``'s ``_classify_listener_identity`` as a bare substring search for
-``"openclaw"`` over the WHOLE joined command line — which credits any decoy that merely
+``"openclaw"`` over the WHOLE joined command line - which credits any decoy that merely
 *mentions* the word anywhere in its argv (``ssh -L 8080:localhost:8080
 user@my-openclaw-server``, a text editor with the repo path open, a shell script run
 from a directory literally named ``openclaw``) as the gateway itself. ``ProcessIdentity``
-now also carries ``exe`` (:func:`_process_exe`) — the target of ``/proc/<pid>/exe``, a
+now also carries ``exe`` (:func:`_process_exe`) - the target of ``/proc/<pid>/exe``, a
 symlink the KERNEL resolves at exec time from the inode that was actually run, which
 argv text cannot spoof (unlike every field read so far). For an INTERPRETED process
 (node/bun/deno) this names the INTERPRETER, never the invoked script, so it cannot
-positively confirm OpenClaw by itself — but it CAN immediately clear anything whose
+positively confirm OpenClaw by itself - but it CAN immediately clear anything whose
 executable is something else entirely (``ssh``, a text editor, ``bash``), which is
 exactly the false-positive-FAIL shape above. See ``checks/_config.py``'s
 ``_classify_listener_identity`` for how ``exe`` and ``cmdline`` are combined.
@@ -157,7 +157,7 @@ class SocketScanResult:
     """Outcome of one enumeration attempt.
 
     ``available=False`` means the scan produced no usable signal at all (neither proc
-    table could be read) — a caller must treat every port as genuinely unmeasured, not
+    table could be read) - a caller must treat every port as genuinely unmeasured, not
     "nothing is listening". ``available=True`` with an empty ``listeners`` tuple is a
     real, positive fact: at least one table was read successfully and it listed no
     LISTEN-state sockets.
@@ -175,11 +175,11 @@ def _decode_hex_addr(hexstr: str) -> bytes:
     architecture this package supports that word must be byte-swapped to recover the
     address in normal (network) byte order. IPv4 addresses are one word (8 hex chars =
     4 bytes); IPv6 addresses are four words (32 hex chars = 16 bytes), each swapped
-    independently and concatenated in word order — this is what makes
+    independently and concatenated in word order - this is what makes
     ``0100007F`` decode to ``127.0.0.1`` and an all-zero word stay all zero regardless
     of byte order (so ``::`` and ``0.0.0.0`` decode correctly without special-casing).
 
-    Raises ``ValueError`` on malformed input (wrong length, non-hex characters) —
+    Raises ``ValueError`` on malformed input (wrong length, non-hex characters) -
     callers must catch this per line, so one corrupt row never aborts the whole scan.
     """
     if len(hexstr) % 8 != 0 or not hexstr:
@@ -216,10 +216,10 @@ def classify_host(host: str) -> str:
 def _parse_table(text: str, family: str) -> list[ListenSocket]:
     """Parse one /proc/net/tcp{,6}-shaped table body.
 
-    Malformed rows (too few fields, non-hex address, unparseable port) are skipped —
-    never raised — so one corrupt line degrades that one row, not the whole scan. The
+    Malformed rows (too few fields, non-hex address, unparseable port) are skipped -
+    never raised - so one corrupt line degrades that one row, not the whole scan. The
     header line and any non-LISTEN-state row are silently skipped too; only the
-    `local_address` field is ever read (never `rem_address`) — see the module
+    `local_address` field is ever read (never `rem_address`) - see the module
     docstring for exactly why that distinction matters.
     """
     out: list[ListenSocket] = []
@@ -263,7 +263,7 @@ def scan_listening_sockets(proc_root: "str | Path" = "/proc") -> SocketScanResul
 
     Read-only, stdlib-only, no subprocess, no network. Each table is read
     independently: a kernel/container with IPv6 disabled has no ``tcp6`` file at all,
-    which is not evidence about IPv4 (or vice versa) — only when BOTH tables are
+    which is not evidence about IPv4 (or vice versa) - only when BOTH tables are
     unreadable does the whole scan report ``available=False``.
     """
     root = Path(proc_root)

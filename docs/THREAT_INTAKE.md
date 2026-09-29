@@ -1,7 +1,7 @@
-# Threat intake — how a new threat becomes a check
+# Threat intake - how a new threat becomes a check
 
 The maintainer-side protocol for the step that happens **before** any of the other docs
-apply: something new appeared in the world, and it has to end up somewhere in this repo —
+apply: something new appeared in the world, and it has to end up somewhere in this repo -
 or be recorded as deliberately not covered.
 
 [CHECK_AUTHORING.md](CHECK_AUTHORING.md) tells you how to write a check once you know you
@@ -13,7 +13,7 @@ It is process only. Nothing here changes a check, a verdict, or a finding id.
 
 ## The constraint that shapes everything
 
-Golden Rule #1 — the engine never opens a socket — is not a limitation to work around
+Golden Rule #1 - the engine never opens a socket - is not a limitation to work around
 here. It is the thing that determines the entire shape of intake, in two ways.
 
 **Intake is a maintainer-side, release-time activity.** There is no feed, no update
@@ -22,7 +22,7 @@ ships. So intake latency *is* release latency, and no amount of process changes 
 
 **Therefore detection cannot depend on knowing names.** The bundled indicator dataset
 (`clawseccheck/iocdb.py`, see [IOC_DATA.md](IOC_DATA.md)) is deliberately small, and its
-exclusion policy keeps it that way. It is a **corroborating** layer — it raises confidence
+exclusion policy keeps it that way. It is a **corroborating** layer - it raises confidence
 in a verdict some other signal already reached, and it turns a pre-download `--vet-source`
 gate into an exact match. It is not, and cannot be, the thing that finds new attacks. An
 offline list of names will always be behind a live registry.
@@ -38,7 +38,7 @@ for one that is.
 
 ## The channel that is not release-bound: the user's own agent
 
-The engine never opens a socket. **The agent running it does** — [SKILL.md](../SKILL.md)
+The engine never opens a socket. **The agent running it does** - [SKILL.md](../SKILL.md)
 states the boundary in those terms: the tool reaches the network only through your own host
 agent. This is not a loophole in Golden Rule #1, it is the topology the project chose
 deliberately, and it is already shipped three times over: `--vet` / `--vet-source` guide the
@@ -52,27 +52,27 @@ release.** It is the only part of the picture that is not release-bound.
 
 | Use of the agent | When | Sound? |
 | --- | --- | --- |
-| The maintainer's agent runs the watchlist sweep | build time | Yes, unreservedly — this is not the engine at all |
-| The host agent enriches a finding the engine already surfaced | run time | Yes, but under its **own** narrower authority — see [design/agent-knowledge-enrichment.md](design/agent-knowledge-enrichment.md) |
-| The host agent reports a miss back to us | after a run | Yes — it is a watchlist source in its own right |
+| The maintainer's agent runs the watchlist sweep | build time | Yes, unreservedly - this is not the engine at all |
+| The host agent enriches a finding the engine already surfaced | run time | Yes, but under its **own** narrower authority - see [design/agent-knowledge-enrichment.md](design/agent-knowledge-enrichment.md) |
+| The host agent reports a miss back to us | after a run | Yes - it is a watchlist source in its own right |
 | The host agent supplies indicators the engine then trusts | run time | **No** |
 
 **Why the maintainer's agent is the easy win.** Reading advisories is already what a
 maintainer does; an agent just does it on a cadence a human does not keep. Nothing about it
-touches the shipped tool — it produces triage input, which then goes through the same five
+touches the shipped tool - it produces triage input, which then goes through the same five
 buckets as any other signal. If any part of this document ever becomes automated, this is
 the part.
 
 **Why the last row is a hard no**, for two independent reasons, either of which is
 sufficient. Provenance: every shipped record is verified against a named, checkable primary
-source before it lands, and an agent-supplied indicator has no such chain — the agent may
+source before it lands, and an agent-supplied indicator has no such chain - the agent may
 have read it off a page an attacker controls. Determinism: a score that depends on what a
 model happened to know that afternoon is not reproducible, and therefore not auditable.
 
 **The template for any agent-supplied fact already exists.** `clawseccheck/update.py` reads
 a local hint file that "the user's ClawHub client / auto-updater / their agent" may drop,
 and treats it as **untrusted**: it accepts one narrowly-typed value and reconstructs it from
-parsed integers, so a hostile hint can at most misstate a number — never inject text, a URL,
+parsed integers, so a hostile hint can at most misstate a number - never inject text, a URL,
 or an action. Any future agent-to-engine channel copies that shape or it does not ship.
 
 The same discipline governs the judge band, scoped by content **provenance** rather than one
@@ -81,15 +81,15 @@ reviewing an untrusted `--vet` target may only *escalate*. A successful injectio
 either path can only move the verdict in the direction that costs the attacker nothing.
 
 **The honest limit.** The agent reasons over what the engine surfaced; it does not scan. It
-cannot find what the engine never looked at, so this channel sharpens and enriches — it does
+cannot find what the engine never looked at, so this channel sharpens and enriches - it does
 not substitute for a form rule. **A blind spot stays blind until bucket 2 or bucket 3
 handles it**, no matter how capable the agent is.
 
-## Watchlist — where signals come from
+## Watchlist - where signals come from
 
 These are the source classes that have actually produced records or grounded prose in
 this repo, not an aspirational list. Each row names what that class typically yields, in
-the vocabulary of the triage buckets below, and — where one exists — the **entry point**
+the vocabulary of the triage buckets below, and - where one exists - the **entry point**
 to start from, so a sweep does not re-derive its own sources every time.
 
 | Source class | Entry point | Typically yields |
@@ -99,7 +99,7 @@ to start from, so a sweep does not re-derive its own sources every time.
 | Vendor threat research on agent/skill supply chain | <https://unit42.paloaltonetworks.com/> · <https://www.koi.ai/> · ESET, Proofpoint, Island, CSA Labs | indicators **and** attack forms |
 | Academic pre-prints | <http://export.arxiv.org/rss/cs.CR> | attack forms, typically ahead of vendor blogs |
 | National / sector advisories | <https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json> (KEV), published CVE records | attack forms, occasionally a version-gated fact; KEV separates *published* from *exploited in the wild* |
-| The ClawHub registry | <https://clawhub.ai/> — trust dispositions, removed listings | indicators |
+| The ClawHub registry | <https://clawhub.ai/> - trust dispositions, removed listings | indicators |
 | Threat-model frameworks | <https://genai.owasp.org/> · OWASP Agentic · MITRE ATLAS | coverage gaps, never a specific indicator |
 | Peer scanners and public benchmarks | competitive review, corpus evaluation | blind spots and false negatives |
 | Our own runs, and reports from a user's host agent | real-fleet audits, GitHub issues, an agent that judged a finding worse than the engine did | false positives, false negatives, blind spots |
@@ -116,8 +116,8 @@ record here has to have; GHSA/OSV/npm beat the blog *and* are primary. When spee
 reach for the structured feed, not the faster write-up.
 
 **Aggregators and news sites are excluded, and the reason is structural, not editorial.**
-`tests/test_iocdb.py` requires every shipped record to carry a complete provenance trail —
-`value` / `type` / `first_seen` / `source_url` / `source_name` — and Golden Rule #4 requires
+`tests/test_iocdb.py` requires every shipped record to carry a complete provenance trail -
+`value` / `type` / `first_seen` / `source_url` / `source_name` - and Golden Rule #4 requires
 that source to be a checkable **primary**. A record sourced from an aggregator cannot pass
 that gate: the maintainer has to walk back to the primary report to satisfy it, so the
 aggregator bought nothing but a chance to inherit its errors. Two named candidates were
@@ -127,14 +127,14 @@ wording; the other is a single-byline aggregator that accepts press releases and
 contributor registration. Neither does original research. The cited set is short and
 entirely primary, and that is the intended shape.
 
-Two further rows deserve a note. **Framework updates never yield an indicator** — they yield a
+Two further rows deserve a note. **Framework updates never yield an indicator** - they yield a
 category, which then needs a real-world form before it can become a check; adding a check
 because a framework named a category, with no observed instance, is how a scanner ends up
 with impressive coverage claims and no efficacy. And **peer scanners are a source, not a
-scoreboard** — the useful output of reading one is "here is a surface we do not look at",
+scoreboard** - the useful output of reading one is "here is a surface we do not look at",
 not a metric to chase. A corpus number is not a reason to ship a rule.
 
-## Cadence — what is promised
+## Cadence - what is promised
 
 Promising a polling schedule that nobody keeps is worse than promising nothing, so this
 section is deliberately short on promises and specific about triggers.
@@ -160,19 +160,19 @@ whole reason for the step: a fact confirmed on a beta build is not a fact about 
 and stating it without the channel is how the internal schema recon came to carry a
 `CONFIRMED` entry for an env var that does not exist on `latest`.
 
-**Per named incident.** When a specific, verifiable event surfaces — a campaign, an
-advisory, a registry takedown, an OpenClaw release — it is triaged into the buckets below
+**Per named incident.** When a specific, verifiable event surfaces - a campaign, an
+advisory, a registry takedown, an OpenClaw release - it is triaged into the buckets below
 and recorded, *even when the outcome is "we are not going to do anything about this."* The
 recording is the point. An untriaged incident and a triaged one that produced no code look
 identical in the repo unless the second one is written down.
 
 **No fixed sweep schedule is claimed.** If one is ever adopted it belongs here, in this
-section, with a date — not as an implication elsewhere. The likeliest way that changes is a
+section, with a date - not as an implication elsewhere. The likeliest way that changes is a
 maintainer-side agent sweep over the watchlist above, which is build-time work and touches
 nothing in the shipped tool; until such a sweep is actually running, this section keeps
 saying no rather than describing an intention.
 
-## Triage — five buckets
+## Triage - five buckets
 
 Every signal lands in exactly one of these. The bucket determines what changes and which
 gate must pass; picking the wrong bucket is the common failure, so the distinguishing
@@ -193,7 +193,7 @@ source.
 
 - **Changes:** a record in `clawseccheck/iocdb.py`, `iocdb.REVISION` bumped to the
   verification date, and [IOC_DATA.md](IOC_DATA.md) if the policy or table shape moved.
-- **Gate:** `tests/test_iocdb.py` — provenance is mechanically enforced; a record missing
+- **Gate:** `tests/test_iocdb.py` - provenance is mechanically enforced; a record missing
   `value`, `type`, `first_seen`, `source_url` or `source_name`, or carrying an unparseable
   or future date, fails the suite.
 - **Do not** add an indicator the primary source itself did not confirm, a generic slug, or
@@ -202,7 +202,7 @@ source.
 
 ### 2. New attack form
 
-The shape can be described without any of the names — which is what makes it survive the
+The shape can be described without any of the names - which is what makes it survive the
 next variant.
 
 - **Changes:** the full new-check path. [CHECK_AUTHORING.md](CHECK_AUTHORING.md) owns the
@@ -219,7 +219,7 @@ next variant.
 
 ### 3. New blind spot
 
-We are not wrong about this surface — we never looked at it. This bucket exists because the
+We are not wrong about this surface - we never looked at it. This bucket exists because the
 alternative is silence, and silence reads to a user as a clean result.
 
 - **Changes:** a coverage note on every path that reports about the affected surface, and a
@@ -245,7 +245,7 @@ threat landscape changed, but our grounding did.
 
 ### 5. Known, not scheduled
 
-Real, understood, and deliberately not being built right now — usually because it is a
+Real, understood, and deliberately not being built right now - usually because it is a
 larger design question than it first appears.
 
 - **Changes:** nothing in the tree. It is recorded as an idea in its own right.
@@ -256,16 +256,16 @@ larger design question than it first appears.
 ## When is a signal "handled"
 
 [THREAT_COVERAGE.md](THREAT_COVERAGE.md)'s closure invariant already answers this, and
-intake inherits it verbatim: **"closed" does not mean "zero misses" — it means zero
+intake inherits it verbatim: **"closed" does not mean "zero misses" - it means zero
 *silent* gaps.** A threat category is handled when it carries exactly one machine-checked
 tag: a real check id, an attestation-only tag, a judge-band tag, or a declared ceiling.
 
 `tests/test_threat_coverage_ledger.py` enforces that mechanically. What it cannot enforce
-is whether the chosen tag is the *right* one — that is a human call, made during triage.
+is whether the chosen tag is the *right* one - that is a human call, made during triage.
 This means the only real failure mode of this whole process is an incident that produced no
 tag at all: not a wrong bucket, not a deferred build, but an event nobody wrote down.
 
-## Recorded incident — extended-stable diffed, 2026-08-06, CLEAN
+## Recorded incident - extended-stable diffed, 2026-08-06, CLEAN
 
 This document requires an incident be recorded even when the outcome is "nothing changes".
 This is that record, and it is the first exercise of the dist-tag step above.
@@ -274,29 +274,29 @@ This is that record, and it is the first exercise of the dist-tag step above.
 the `latest` our grounding is built on. It was unpacked and compared against the installed
 `2026.7.1-2`:
 
-- `sanitizeMcpMetadataText` — **byte-identical**: the same two regex phrase families and the
+- `sanitizeMcpMetadataText` - **byte-identical**: the same two regex phrase families and the
   same no-op `system prompt` replacement. B331's verdict logic holds on both channels.
-- `BUNDLE_MCP_METADATA_TEXT_LIMIT` — **1200 in both**. B331's truncation boundary holds.
-- Annotation hints (`readOnlyHint` and siblings) — absent from the registration context in
+- `BUNDLE_MCP_METADATA_TEXT_LIMIT` - **1200 in both**. B331's truncation boundary holds.
+- Annotation hints (`readOnlyHint` and siblings) - absent from the registration context in
   2026.7.1-2 and the then-`latest` extended-stable dist (grounded 2026-07-25); **2026.8.1
-  falsified this** — the registration entry in `dist/agents/agent-bundle-mcp-runtime.js` now
+  falsified this** - the registration entry in `dist/agents/agent-bundle-mcp-runtime.js` now
   stores `annotations`, so B333 is version-split (see `_mcp.py:2858`), not a standing claim.
-- `tests/grounded_schema_paths.txt` — **135 of 135** paths present in the extended-stable
-  dist. (A first pass flagged two; that was a scripting artifact — `relative:` is a manifest
+- `tests/grounded_schema_paths.txt` - **135 of 135** paths present in the extended-stable
+  dist. (A first pass flagged two; that was a scripting artifact - `relative:` is a manifest
   namespace prefix, not part of the path. Both tokens are present.)
 
-**Bucket 4 (schema drift), triaged CLEAN — no tree change.** The channel exists and does not
+**Bucket 4 (schema drift), triaged CLEAN - no tree change.** The channel exists and does not
 diverge on anything we ground against. Recorded rather than discarded, because an untriaged
 channel and a triaged one that produced no code look identical in the repo unless the second
 is written down.
 
-## Worked example — the npm dependency tree, 2026-08-04
+## Worked example - the npm dependency tree, 2026-08-04
 
 A supply-chain campaign resurfaced against a package ecosystem: several widely-depended
 packages were republished within a single morning, each shipping an install-time lifecycle
 hook whose target was an obfuscated file, with the package manifest's file list rewritten so
 the payload travelled in the published archive. No affected agent skill or plugin contained
-that hook in its own source — it arrived transitively.
+that hook in its own source - it arrived transitively.
 
 Package names are deliberately omitted here. A shipped document is the wrong place for live
 indicators: they belong in the dataset where provenance is enforced and freshness is
@@ -304,21 +304,21 @@ tracked, and prose naming them ages badly and invites host scanners to flag our 
 
 Triage produced three different outcomes, which is the point of the example:
 
-- **Bucket 3 — blind spot.** Installed dependency trees are skipped by every scanner in
+- **Bucket 3 - blind spot.** Installed dependency trees are skipped by every scanner in
   this repo, by design. One path already admitted this in a coverage note; the others said
   nothing, so a reader reasonably concluded the tree had been examined. Fix: emit the note
   everywhere, change no verdict.
-- **Bucket 2 — attack form.** "Lifecycle hook **and** the hook's target trips the
+- **Bucket 2 - attack form.** "Lifecycle hook **and** the hook's target trips the
   obfuscation detector." Measured before proposing: on the clean machine, install-lifecycle
-  hooks were present but every target was a plain readable script — so the naive rule
+  hooks were present but every target was a plain readable script - so the naive rule
   ("any lifecycle hook") would have produced false-positive FAILs on a clean box, and the
   conjunction produced none. That measurement is what made this a form rule rather than a
   guess.
-- **Bucket 5 — known, not scheduled.** Nothing in this repo parses a package lockfile, so
+- **Bucket 5 - known, not scheduled.** Nothing in this repo parses a package lockfile, so
   the installed tree is never reconciled against what was pinned. That is the artifact that
   would have made the republication visible locally, offline. It was recorded separately
   rather than left as a paragraph inside the other two, because it is a larger design
-  question — three lockfile formats, one of them YAML, in a project with no runtime
+  question - three lockfile formats, one of them YAML, in a project with no runtime
   dependencies.
 
 The triage also surfaced something about the dataset itself. As of that date,
@@ -331,7 +331,7 @@ triage step that looks at the dataset rather than only at the incident.
 
 - **Not a feed.** No part of this becomes a runtime fetch, an update endpoint, or a
   reputation lookup. That boundary is permanent, not a phase.
-- **Not a promise of speed — for the engine.** The *engine's* intake latency is release
+- **Not a promise of speed - for the engine.** The *engine's* intake latency is release
   latency, and its protection against something published today comes from form rules
   already shipped. A *session's* protection is not bounded the same way: the host agent
   brings knowledge newer than our last release, within the authority limits above. Do not

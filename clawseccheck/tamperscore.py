@@ -1,6 +1,6 @@
 """Tamper Score sub-grade: a presentation-layer-only view of tamper-defense posture.
 
-This is NOT a second scoring engine — it never touches ``scoring.compute()`` or the
+This is NOT a second scoring engine - it never touches ``scoring.compute()`` or the
 main A-F grade. It re-slices a subset of already-computed findings (the checks that
 speak to "can someone tamper with this agent's config/memory/identity, and would you
 notice") into a second, smaller weighted pass-rate, purely for a supplementary
@@ -11,13 +11,13 @@ Ingredients (severity per catalog.py, as of this writing):
   - B22  (HIGH)    Self-modification risk (identity/skill files writable + tools enabled)
   - B42  (MEDIUM)  Skill/plugin install-time policy (postinstall hooks, writable dirs)
   - B78  (HIGH)    Config-health integrity alert (observed suspicious signature)
-  - B85  (MEDIUM)  Incident readiness — tool-use trail present and tamper-resistant
+  - B85  (MEDIUM)  Incident readiness - tool-use trail present and tamper-resistant
   - B86  (MEDIUM)  Import-path hijack surface (sys.path from writable/relative location)
   - C5   (LOW)     Native binary PATH safety
-  - monitor_state_present (synthetic, HIGH) — is `--monitor` baseline tracking in use at all
+  - monitor_state_present (synthetic, HIGH) - is `--monitor` baseline tracking in use at all
 
 A check ID absent from this run's findings (e.g. suppressed away entirely, or a future
-catalog change) is EXCLUDED from the denominator — never scored as a fabricated PASS.
+catalog change) is EXCLUDED from the denominator - never scored as a fabricated PASS.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ _MONITOR_LABEL = "monitor-state"
 
 # Per-ingredient hard caps this sub-grade imposes on itself, most-severe first.
 # Mirrors the style of dossier.py's _WARN_CAP / _NON_DANGER_FAIL_CAP and scoring.py's
-# FAIL_CAPS — a real tamper-relevant FAIL (or missing baseline) always costs a grade.
+# FAIL_CAPS - a real tamper-relevant FAIL (or missing baseline) always costs a grade.
 _B22_FAIL_CAP = 49
 _B78_FAIL_CAP = 49
 _NO_MONITOR_CAP = 79
@@ -51,13 +51,13 @@ def tamper_subgrade(findings: list, monitor_state_present: bool) -> ScoreResult:
         findings: the full findings list for this run (only B20/B22/B42/B78/B85/B86/C5
             are consulted; everything else is ignored).
         monitor_state_present: whether a ``--monitor`` baseline snapshot exists for
-            this run — treated as a synthetic HIGH-severity ingredient.
+            this run - treated as a synthetic HIGH-severity ingredient.
 
     Returns:
         A ``ScoreResult``. When ``findings`` contributes none of the seven
-        check-derived ingredients (e.g. an empty list — the run genuinely has no
+        check-derived ingredients (e.g. an empty list - the run genuinely has no
         tamper-relevant findings to look at), returns the same "not assessable" shape
-        ``scoring.compute()`` uses: ``score=0, grade="N/A", assessable=False`` — even
+        ``scoring.compute()`` uses: ``score=0, grade="N/A", assessable=False`` - even
         though ``monitor_state_present`` is always a real bool, a sub-grade built on a
         single synthetic ingredient with zero real findings behind it would read as a
         fabricated verdict, so it is deliberately withheld rather than shown as a real
@@ -74,7 +74,7 @@ def tamper_subgrade(findings: list, monitor_state_present: bool) -> ScoreResult:
         ingredients.append((check_id, f.severity, f.status))
 
     if not ingredients:
-        # None of the seven check-derived ingredients are present this run — the
+        # None of the seven check-derived ingredients are present this run - the
         # synthetic monitor-state signal alone is not enough to call this "assessed".
         return ScoreResult(0, "N/A", False, 0, 0, 0, assessable=False)
 

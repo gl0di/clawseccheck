@@ -1,31 +1,31 @@
-"""Screen 12 — the full capability palette ("everything it can do"), by mode.
+"""Screen 12 - the full capability palette ("everything it can do"), by mode.
 
 Reached from Welcome (Screen 1, :mod:`menu`) by saying "menu" / "functions", or
 from the CLI with ``--functions``. Where Welcome shows only the three modes, this
 lists **every** capability grounded to its real CLI flag, so a normal user never
 has to know a flag in advance.
 
-Organised by the product's one primary axis — **frequency**, i.e. how often you
-reach for it — not by the flat list of instruments it used to be:
+Organised by the product's one primary axis - **frequency**, i.e. how often you
+reach for it - not by the flat list of instruments it used to be:
 
     A · Full check       how safe is this setup?          run once, deliberately
     B · Watch            what changed since last time?    run repeatedly
     C · Before install   is this thing safe to add?       run on the event
 
 Everything else is an instrument *inside* one of those, or works with any of them.
-**No flag was removed** — the flags remain the CI/power surface and keep working;
+**No flag was removed** - the flags remain the CI/power surface and keep working;
 what is organised here is what a human reads.
 
 Two registries, both single-source-of-truth:
 
-* :data:`_PALETTE` — the rendered rows, each grounded to its flag.
-* :data:`_UNLISTED_FLAG_MODES` — every remaining CLI flag and the mode it belongs
+* :data:`_PALETTE` - the rendered rows, each grounded to its flag.
+* :data:`_UNLISTED_FLAG_MODES` - every remaining CLI flag and the mode it belongs
   to, so ``FLAG_MODES`` covers the parser **totally**. ``tests/test_palette.py``
   derives the flag list from ``cli.py``'s own ``add_argument`` calls and fails if
   any flag is unassigned or claimed twice, so a new flag cannot be silently
   orphaned from the presentation.
 
-Read-only, pure stdlib (Python 3.9+), English only — the host agent localizes.
+Read-only, pure stdlib (Python 3.9+), English only - the host agent localizes.
 """
 from __future__ import annotations
 
@@ -34,12 +34,12 @@ from dataclasses import dataclass, field
 from . import brand
 
 # Kind tags. The tool only ever EMITS live-test material; running it against the
-# agent is the live part and is always confirm-gated — so "live" is disclosed here.
+# agent is the live part and is always confirm-gated - so "live" is disclosed here.
 READONLY = "readonly"
 LIVE = "live"
 DESTRUCTIVE = "destructive"
 
-# ── The three modes ──────────────────────────────────────────────────────────
+# -- The three modes ----------------------------------------------------------
 # One axis, frequency. A flag belongs to exactly one of these (CROSS = it works
 # with any of them), which is what makes the completeness guard meaningful.
 MODE_A = "full-check"
@@ -54,18 +54,18 @@ MODE_ORDER: tuple[str, ...] = (MODE_A, MODE_B, MODE_C, CROSS)
 # there is never a number, mode C says a verdict is not a letter.
 MODE_HEADING: dict[str, tuple[str, str, str]] = {
     MODE_A: ("A · Full check", "how safe is this setup?",
-             "findings — and a grade only when all five layers ran"),
+             "findings \u2014 and a grade only when all five layers ran"),
     MODE_B: ("B · Watch", "what changed since last time?",
              "events, never a number"),
     MODE_C: ("C · Before you install", "is this thing safe to add?",
-             "INSTALL / CAUTION / DO-NOT-INSTALL — not a letter grade"),
+             "INSTALL / CAUTION / DO-NOT-INSTALL \u2014 not a letter grade"),
     CROSS: ("Works with any mode", "", ""),
 }
 
 
 @dataclass(frozen=True)
 class PaletteEntry:
-    title: str            # what you say — the speakable name ("Vet anything <target>")
+    title: str            # what you say - the speakable name ("Vet anything <target>")
     flag: str | None      # the real cli.py flag this maps to (None = default audit path)
     blurb: str            # one-line description; "{n}" is filled with the check count
     also: tuple[str, ...] = ()   # folded secondary flags (e.g. --badge also covers --card)
@@ -74,18 +74,18 @@ class PaletteEntry:
 @dataclass(frozen=True)
 class PaletteCategory:
     title: str
-    kind: str                       # READONLY / LIVE / DESTRUCTIVE — drives the header tag
+    kind: str                       # READONLY / LIVE / DESTRUCTIVE - drives the header tag
     mode: str                       # MODE_A / MODE_B / MODE_C / CROSS
     entries: tuple[PaletteEntry, ...] = field(default_factory=tuple)
 
 
-# ── Grounded registry ────────────────────────────────────────────────────────
+# -- Grounded registry --------------------------------------------------------
 #
 # Blurbs are deliberately bounded (see _MAX_BLURB_COL): this screen is an index,
 # not documentation. Anything that needs a paragraph lives in docs/USAGE.md.
 
 _PALETTE: tuple[PaletteCategory, ...] = (
-    # ── A · Full check ───────────────────────────────────────────────────────
+    # -- A · Full check -------------------------------------------------------
     PaletteCategory("Scan", READONLY, MODE_A, (
         PaletteEntry("Quick scan", None,
                      "{n} checks over config, files and permissions"),
@@ -94,7 +94,7 @@ _PALETTE: tuple[PaletteCategory, ...] = (
         # B-518 follow-up: --fast is a MODIFIER of --full, not a third scan depth.
         # `cli.py` says so itself at runtime ("note: --fast has no effect without
         # --full"), and a measured bare `--fast` returns a byte-identical verdict set to
-        # the default — same 184 findings, same statuses, same missing layers. Listing it
+        # the default - same 184 findings, same statuses, same missing layers. Listing it
         # between "Quick scan" and "Full check" read as a rung on a depth ladder; it sits
         # under --full now, and the blurb names the requirement instead of promising speed.
         PaletteEntry("Fast pass", "--fast",
@@ -112,7 +112,7 @@ _PALETTE: tuple[PaletteCategory, ...] = (
         PaletteEntry("Show suppressed", "--show-suppressed",
                      "findings you've muted, by id"),
         PaletteEntry("Explain a finding <id>", "--explain",
-                     "one finding's full detail — why, evidence, fix"),
+                     "one finding's full detail \u2014 why, evidence, fix"),
         PaletteEntry("Retest a finding <id>", "--retest",
                      "re-run just that one check, skip the rest"),
         PaletteEntry("Behavioral audit", "--behavioral",
@@ -150,22 +150,22 @@ _PALETTE: tuple[PaletteCategory, ...] = (
     )),
     PaletteCategory("Report & export", READONLY, MODE_A, (
         PaletteEntry("Badge", "--badge",
-                     "shareable badge — SVG or text", ("--card",)),
+                     "shareable badge \u2014 SVG or text", ("--card",)),
         PaletteEntry("HTML report", "--html",
                      "a standalone HTML report"),
         PaletteEntry("SARIF", "--sarif",
                      "findings as SARIF 2.1.0 (CI / code scanning)"),
         PaletteEntry("PDF report", "--pdf",
-                     "the audit as a paginated PDF — attach, don't paste"),
+                     "the audit as a paginated PDF \u2014 attach, don't paste"),
         PaletteEntry("Save to a file", "--save",
                      "also write the report to a path you give"),
     )),
-    # ── B · Watch ────────────────────────────────────────────────────────────
+    # -- B · Watch ------------------------------------------------------------
     PaletteCategory("Watch", READONLY, MODE_B, (
         PaletteEntry("What changed", "--monitor",
                      "diff against your last scan"),
         PaletteEntry("Watch continuously", "--watch",
-                     "long-running — re-scans itself on a relevant change"),
+                     "long-running \u2014 re-scans itself on a relevant change"),
         PaletteEntry("Watch heartbeat", "--watch-status",
                      "ALIVE / STALE / STOPPED / NOT RUNNING"),
         PaletteEntry("Is the watch alive", "--brief",
@@ -185,7 +185,7 @@ _PALETTE: tuple[PaletteCategory, ...] = (
         PaletteEntry("Verify baseline <reference>", "--verify-baseline",
                      "the drift baseline still matches a value you kept"),
     )),
-    # ── C · Before you install ───────────────────────────────────────────────
+    # -- C · Before you install -----------------------------------------------
     PaletteCategory("Vet before you trust", READONLY, MODE_C, (
         PaletteEntry("Vet anything <target>", "--vet",
                      "malware / supply-chain check, type autodetected"),
@@ -204,14 +204,14 @@ _PALETTE: tuple[PaletteCategory, ...] = (
         PaletteEntry("Install advice <path>", "--advise",
                      "INSTALL / CAUTION / DO-NOT-INSTALL, with reasons"),
     )),
-    # ── Works with any mode ──────────────────────────────────────────────────
+    # -- Works with any mode --------------------------------------------------
     PaletteCategory("Integrity", READONLY, CROSS, (
         PaletteEntry("Verify self", "--verify-self",
-                     "SHA-256 of the engine source — a tamper check"),
+                     "SHA-256 of the engine source \u2014 a tamper check"),
     )),
     PaletteCategory("Maintenance", DESTRUCTIVE, CROSS, (
         PaletteEntry("Purge local data", "--purge",
-                     "delete ClawSecCheck's own store — confirms first",
+                     "delete ClawSecCheck's own store \u2014 confirms first",
                      ("--yes",)),
     )),
 )
@@ -224,19 +224,19 @@ _MODIFIERS: tuple[tuple[str, str | None, str], ...] = (
     ('update', None, "ask your agent to check ClawHub for a newer version (agent-driven)"),
 )
 
-# Power / CI flags deliberately NOT expanded into a row — pointed at `help` so the
+# Power / CI flags deliberately NOT expanded into a row - pointed at `help` so the
 # palette stays readable. Listed in the footer line. Every one of them is still
 # assigned a mode below, so the completeness guard sees it.
 _POWER_FLAGS = "--json, --fail-on, --exit-code, --home, --seed, --no-host"
 
 # cli._PRIMARY_MODES flags that legitimately have no palette row:
-#   --menu / --functions  → the container screens themselves (Welcome / this palette)
-#   --dashboard / --dashboard-findings → internal agent-only render hooks (SKILL.md
+#   --menu / --functions  -> the container screens themselves (Welcome / this palette)
+#   --dashboard / --dashboard-findings -> internal agent-only render hooks (SKILL.md
 #                            Step 3), not user-speakable capabilities.
-#   --judged → an internal continuation flag: it consumes a judge panel's verdicts
+#   --judged -> an internal continuation flag: it consumes a judge panel's verdicts
 #              JSON (produced by the SKILL.md "Judge-panel fan-out" flow, itself
 #              triggered from --judge-packet), not something a user says on its own.
-#   --apply-ignore-proposals → same shape as --judged: an internal continuation flag
+#   --apply-ignore-proposals -> same shape as --judged: an internal continuation flag
 #              consuming a --propose-ignore output, not something a user reaches for
 #              without having run --propose-ignore first.
 EXEMPT_FROM_PALETTE: frozenset[str] = frozenset(
@@ -244,11 +244,11 @@ EXEMPT_FROM_PALETTE: frozenset[str] = frozenset(
      "--apply-ignore-proposals"})
 
 # Every CLI flag that has no palette row of its own, and the mode it belongs to.
-# Together with the rows above this makes FLAG_MODES total over cli.py's parser —
+# Together with the rows above this makes FLAG_MODES total over cli.py's parser -
 # the guard that stops a flag being added without anyone deciding where a human
 # would look for it. A comment is required wherever the placement isn't obvious.
 _UNLISTED_FLAG_MODES: dict[str, str] = {
-    # ── A · Full check: instruments that modify or continue a check ──────────
+    # -- A · Full check: instruments that modify or continue a check ----------
     "--attest": MODE_A,          # feeds layer 4, the agent's self-report
     "--judged": MODE_A,          # continuation of --judge-packet
     "--judged-bundle": MODE_A,   # the same verdicts, as a bundle file
@@ -259,7 +259,7 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--exhaustive": MODE_A,      # raises this check's scan caps
     "--format": MODE_A,          # only with --sbom: native/cyclonedx/spdx
     "--save-sbom-run": MODE_A,   # opt-in per-run SBOM snapshot; feeds --sbom-diff
-    # ── B · Watch: where the periodic state lives ────────────────────────────
+    # -- B · Watch: where the periodic state lives ----------------------------
     "--state": MODE_B,           # snapshot file for --monitor
     "--events": MODE_B,          # the Agent Watch event journal
     "--history": MODE_B,         # the score-history file --trend reads
@@ -268,12 +268,12 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--watch-debounce": MODE_B,  # modifier of --watch, same reach
     "--save-run": MODE_B,        # opt-in per-run snapshot; feeds --diff
     "--all": MODE_B,             # un-windows --trend/--watch-log's default display cap
-    # ── C · Before you install: vet-only modifiers ───────────────────────────
+    # -- C · Before you install: vet-only modifiers ---------------------------
     "--recursive": MODE_C,       # alias of --vet-all
     "--vet-judge-packet": MODE_C,
     "--vet-judged": MODE_C,
     "--emit-manifest": MODE_C,   # proposed permission manifest for a vetted skill
-    # ── Works with any mode ──────────────────────────────────────────────────
+    # -- Works with any mode --------------------------------------------------
     "--home": CROSS,
     "--json": CROSS,
     "--exit-code": CROSS,
@@ -347,16 +347,16 @@ def duplicated_flag_assignments() -> set[str]:
     return rows & set(_UNLISTED_FLAG_MODES)
 
 
-# ── Rendering ─────────────────────────────────────────────────────────────────
+# -- Rendering -----------------------------------------------------------------
 
 def _ascii(text: str) -> str:
     """Fold the few non-ASCII glyphs we emit down to safe ASCII for --ascii mode."""
     return (text
             .replace(f"{brand.MASCOT} ", "").replace(brand.MASCOT, "")
-            .replace("✅ ", "").replace("✅", "")
-            .replace("⚠ ", "").replace("⚠", "")
-            .replace("⚡", "(live)")
-            .replace("·", "-").replace("—", "-").replace("…", "..."))
+            .replace("\u2705 ", "").replace("\u2705", "")
+            .replace("\u26a0 ", "").replace("\u26a0", "")
+            .replace("\u26a1", "(live)")
+            .replace("·", "-").replace("\u2014", "-").replace("\u2026", "..."))
 
 
 def _flag_col(entry: PaletteEntry) -> str:
@@ -369,18 +369,18 @@ def _flag_col(entry: PaletteEntry) -> str:
 
 def _header_tag(kind: str, ascii_only: bool) -> str:
     if kind == LIVE:
-        tag = "⚡ exercises your running agent — I confirm first"
+        tag = "\u26a1 exercises your running agent \u2014 I confirm first"
     elif kind == DESTRUCTIVE:
-        tag = "⚠ deletes local files — I confirm first"
+        tag = "\u26a0 deletes local files \u2014 I confirm first"
     else:
-        tag = "✅ read-only"
+        tag = "\u2705 read-only"
     return _ascii(tag) if ascii_only else tag
 
 
 # B-471: the blurb column used to be padded to the longest blurb in the WHOLE
 # palette, so a single 200-character entry stretched every row to 273 characters.
-# In a wrapping chat client — and SKILL.md tells the host agent to present this
-# output — that shreds the layout for all 60 rows to align one. Two changes fix
+# In a wrapping chat client - and SKILL.md tells the host agent to present this
+# output - that shreds the layout for all 60 rows to align one. Two changes fix
 # it for good: the speakable-prompt column was folded into the title (they said
 # the same thing twice), and blurbs are now written to fit. The cap below bounds
 # the padding; `tests/test_palette.py` bounds the rendered row itself, so a future
@@ -389,7 +389,7 @@ _MAX_BLURB_COL = 54
 
 
 def render_palette(*, n_checks: int | None = None, ascii_only: bool = False) -> str:
-    """Render the full capability palette as plain text. Pure — no I/O, no clock read.
+    """Render the full capability palette as plain text. Pure - no I/O, no clock read.
 
     ``n_checks`` fills the "{n} checks" phrase (falls back to "all" when unknown).
     """
@@ -412,7 +412,7 @@ def render_palette(*, n_checks: int | None = None, ascii_only: bool = False) -> 
         # A mode with exactly one category would otherwise print its own name
         # twice; give the kind tag to the mode line instead.
         solo = len(cats) == 1
-        title_line = f"{heading} — {question}" if question else heading
+        title_line = f"{heading} \u2014 {question}" if question else heading
         if solo:
             title_line = f"{title_line}  {_header_tag(cats[0].kind, ascii_only)}"
         lines.append(title_line)
@@ -437,8 +437,8 @@ def render_palette(*, n_checks: int | None = None, ascii_only: bool = False) -> 
         lines.append(f"  {q:<{mod_pw}}  {blurb}{tail}")
 
     lines.append("")
-    lines.append("Say the name on the left, or pass the flag — nothing here was removed.")
-    lines.append(f'Power / CI flags ({_POWER_FLAGS}…): say "help".')
+    lines.append("Say the name on the left, or pass the flag \u2014 nothing here was removed.")
+    lines.append(f'Power / CI flags ({_POWER_FLAGS}\u2026): say "help".')
 
     out = "\n".join(lines)
     return _ascii(out) if ascii_only else out

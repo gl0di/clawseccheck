@@ -1,21 +1,21 @@
 """Risk engine: combinational chain detection (the Lethal Trifecta, generalised).
 
-Detects dangerous CAPABILITY CHAINS — not isolated property checks. A chain
+Detects dangerous CAPABILITY CHAINS - not isolated property checks. A chain
 fires only on POSITIVE evidence for every link; UNKNOWN inputs yield no chain
 (zero false-positives by design).
 
 Chains are ADVISORY: they are derived from the audit, never part of it. No chain
-carries a CheckMeta, and none can move the A–F grade — cli.py computes the score
+carries a CheckMeta, and none can move the A-F grade - cli.py computes the score
 before calling ``risk_paths``, and scoring.py does not import this module.
 
 Almost every rule is a pure function of config + findings. Two exceptions read `ctx`
 directly rather than just `findings`: RISK-21 (F-135), which additionally reads the
-trajectory sidecars under ``ctx.home`` — metadata only (tool verb names and
-session-key ORIGIN KINDS; never call arguments, never the peer id) — so that "a
+trajectory sidecars under ``ctx.home`` - metadata only (tool verb names and
+session-key ORIGIN KINDS; never call arguments, never the peer id) - so that "a
 channel is open to non-owner senders" and "a high-blast verb provably ran from such a
 session" can finally be related; and RISK-23's B97 signal predicate
 (``_b97_anchor_signal``, B-433), which re-reads ``ctx.installed_skill_js``
-for a narrow shell-exec pattern B97's own regexes don't cover — see its docstring.
+for a narrow shell-exec pattern B97's own regexes don't cover - see its docstring.
 
 English-only. Read-only. Pure stdlib.
 """
@@ -57,13 +57,13 @@ from .checks import (
 from .collector import Context, agent_roster, dig
 from .scanbudget import limits_for
 # B-483: `_asciify` was a SECOND, narrower copy of report.py's table (no ·, ×,
-# ≤, ≥, ≈, •) — the drift a duplicated table always produces. Both surfaces now
+# <=, >=, ~, *) - the drift a duplicated table always produces. Both surfaces now
 # fold through the one table in the textnorm leaf.
 from .textnorm import asciify as _asciify
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Data model
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 @dataclass
 class RiskPath:
@@ -73,15 +73,15 @@ class RiskPath:
     chain: list[str]  # ordered steps, rendered as A -> B -> C
     why: str          # plain-language explanation
     fix: str          # remediation guidance
-    # B-154: mirrors Finding.suppressed — set when this RISK-id is listed in
+    # B-154: mirrors Finding.suppressed - set when this RISK-id is listed in
     # .clawseccheckignore. Kept in the returned list (same pattern as findings)
     # so --show-suppressed can surface it; report/json renderers must filter it out.
     suppressed: bool = False
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2}
 
@@ -102,7 +102,7 @@ def _finding_status(findings: list[Finding], check_id: str) -> str | None:
 
 def _finding_by_id(findings: list[Finding], check_id: str) -> Finding | None:
     """Return the Finding by id, or None if absent (last entry wins, same override
-    semantics as `_finding_status` — see its docstring)."""
+    semantics as `_finding_status` - see its docstring)."""
     result = None
     for f in findings:
         if f.id == check_id:
@@ -119,7 +119,7 @@ def _has_exec_or_write_tools(tools: list[str]) -> bool:
     unanchored substrings against the whole joined blob of granted tool names
     (checks/_shared.py's `_hint`/`h in blob`) -- safe for "fs_write"/"write_file"
     (multi-word, not realistic accidental substrings) but NOT for bare "write"/"edit":
-    both are common English word fragments ("edit" ⊂ "credit_score", "write" ⊂
+    both are common English word fragments ("edit" subset-of "credit_score", "write" subset-of
     "underwriter"/"copywriter"), so folding them into the substring tuple produced a
     CRITICAL RISK-01 false alarm ("untrusted sender can reach host execution") on a
     config granting nothing more than a finance-lookup tool. "write"/"edit" are the
@@ -217,7 +217,7 @@ def _open_channel_entries(cfg: dict) -> list[tuple[str, str, bool, str]]:
 
     B-567 round 2: a caller that needs to know WHICH predicate fired for a specific
     channel must not recover the channel name by parsing it back out of the rendered
-    label (``label.split(" (", 1)[0]``) — ``channelId`` is a plain ``ZodString`` in the
+    label (``label.split(" (", 1)[0]``) - ``channelId`` is a plain ``ZodString`` in the
     installed dist with no charset/format constraint found
     (dist/bundled-channel-config-schema-BYKT0d_t.d.ts:987), and plugin-registered
     channels are a real, schema-supported shape (dist/channel-entry-contract-
@@ -257,7 +257,7 @@ def _open_channel_entries(cfg: dict) -> list[tuple[str, str, bool, str]]:
             entries.append((name, f"{name} (open group{suffix})", True, reason))
             continue
         # B-378: a schema-drifted "accounts" (a list/string instead of a dict) must
-        # degrade to "no accounts", never raise — this is called directly from
+        # degrade to "no accounts", never raise - this is called directly from
         # risk_paths() in cli.py's _main, OUTSIDE checks.run_all's per-check crash
         # isolation, so an unguarded .values() here aborted the whole --full run.
         accounts = c.get("accounts")
@@ -271,14 +271,14 @@ def _open_channel_entries(cfg: dict) -> list[tuple[str, str, bool, str]]:
                 parts.append("open DM")
                 reason_bits.append("dmPolicy is 'open'")
             # B-283 (a), GROUNDING CORRECTION (C-135 review): Feishu's GroupPolicySchema
-            # maps the "allowall" alias onto "open" (channel-PR3XHV0V.js:89-93) — canonical
+            # maps the "allowall" alias onto "open" (channel-PR3XHV0V.js:89-93) - canonical
             # helper is _norm_group_policy in checks/_shared.py; inlined here to keep
             # risk.py free of a non-aggregator import (see CLAUDE.md §3.1-a). Feishu-scoped
             # ONLY: every other channel schema checked in the dist (LINE
             # reply-payload-transform-Ce9ZfUxA.js:19-23; the "core" schema shared by
             # Telegram/Discord/Slack/Signal/Matrix/Nextcloud-Talk/Zalo,
             # zod-schema.core-DviqqtPj.js:424-428) rejects "allowall" outright, so it
-            # cannot appear on those channels in a config that actually loaded — treating
+            # cannot appear on those channels in a config that actually loaded - treating
             # it as "open" there would label a schema-impossible value as an open group.
             # The if/elif (not a shared `or`) keeps the two RAW values distinguishable
             # for reason_bits below, while `parts`/the rendered label stay identical
@@ -301,17 +301,17 @@ def _open_channel_labels(cfg: dict) -> list[str]:
 
     B-297: also labels the ``channels.<p>.groups {"*": ...}`` shape. That shape declares
     NO dmPolicy/groupPolicy field, so the policy-value tests below returned [] on the
-    commonest real open-group config — and because RISK-01 gates on this helper alone
+    commonest real open-group config - and because RISK-01 gates on this helper alone
     (``if not open_ch: return None``), "Untrusted sender can reach host execution" could
     not fire on it at all, statically, no matter what the other legs said. The predicate
-    is ``_open_wildcard_group_channels`` in checks/_shared.py, the SAME one B140 uses —
+    is ``_open_wildcard_group_channels`` in checks/_shared.py, the SAME one B140 uses -
     imported through the checks aggregator per CLAUDE.md §3.1-a, deliberately NOT
     re-implemented here (a second, drifting copy of "wildcard means unrestricted" is the
     defect class this change removes).
 
-    ADVISORY, not scored. Every RiskPath is outside the A–F score by construction:
+    ADVISORY, not scored. Every RiskPath is outside the A-F score by construction:
     cli.py computes ``score = audit(...)`` before ``risk_paths(...)`` is called, and
-    scoring.py does not import this module — so a chain that newly fires here cannot
+    scoring.py does not import this module - so a chain that newly fires here cannot
     create a FAIL or move the grade. That is what keeps B140's WARN-never-FAIL contract
     intact (a community bot may intentionally accept any group) while still letting the
     chain be reported.
@@ -320,7 +320,7 @@ def _open_channel_labels(cfg: dict) -> list[str]:
     label, NOT treated as closing the path: it changes what triggers the bot, not who is
     allowed to trigger it.
 
-    Thin wrapper over ``_open_channel_entries`` (B-567 round 2) — kept for the existing
+    Thin wrapper over ``_open_channel_entries`` (B-567 round 2) - kept for the existing
     callers/tests that only need the rendered label, never the raw name.
     """
     return [label for _, label, _, _ in _open_channel_entries(cfg)]
@@ -330,17 +330,17 @@ def _channels_with_visibility_all(cfg: dict) -> list[str]:
     """Channel names where effective contextVisibility is 'all' (untrusted input exposed).
 
     Mirrors B26's effective-visibility logic: per-ACCOUNT value first, then the per-channel
-    value, then channels.defaults.contextVisibility, then the OpenClaw default of 'all' —
+    value, then channels.defaults.contextVisibility, then the OpenClaw default of 'all' -
     the precedence the dist resolver documents and implements
     (context-visibility-BVlvSMUZ.js:8-13). Returns [] when no channels are configured
     (zero-FP on empty/absent channels key).
 
     B-283 (c): the accounts descent was missing here AND in B26. Because RISK-15 keys off
     B26's status and RISK-18 calls this helper directly, fixing only one site would have
-    left one of the two chains blind — they had to move together. The canonical
+    left one of the two chains blind - they had to move together. The canonical
     implementation is _channels_with_context_visibility_all in checks/_shared.py; this is a
     deliberate mirror (risk.py imports only via the checks aggregator, CLAUDE.md §3.1-a),
-    so the two must be kept in step — tests/test_b283_shallow_reads.py pins them equal.
+    so the two must be kept in step - tests/test_b283_shallow_reads.py pins them equal.
     """
     channels = cfg.get("channels")
     if not isinstance(channels, dict):
@@ -357,7 +357,7 @@ def _channels_with_visibility_all(cfg: dict) -> list[str]:
             continue
         channel_value = c.get("contextVisibility")
         accounts = c.get("accounts")
-        # isinstance guard rather than `or {}` — a non-dict `accounts` is truthy and would
+        # isinstance guard rather than `or {}` - a non-dict `accounts` is truthy and would
         # raise on .values(); mirrors _channels_with_context_visibility_all in
         # checks/_shared.py.
         for node in [c] + (list(accounts.values()) if isinstance(accounts, dict) else []):
@@ -399,7 +399,7 @@ def _host_reaching_bind(cfg: dict) -> str | None:
 
     Matches docker.sock (full host control) or a root-level host source
     (/, /home, /root, /etc, /var, /usr). Narrow data binds (e.g. /data:/data) do
-    NOT match — keeps the RISK-16 chain zero-FP.
+    NOT match - keeps the RISK-16 chain zero-FP.
     """
     binds = dig(cfg, "agents.defaults.sandbox.docker.binds")
     if isinstance(binds, str):
@@ -421,7 +421,7 @@ def _has_untrusted_ingress(tools: list[str], cfg: dict) -> bool:
     """True when there is at least one vector for untrusted content to reach the agent.
 
     Uses _external_input_channels (open + allowlist + pairing, with a Feishu channel's
-    groupPolicy "allowall" alias normalized to "open" — B-283, Feishu-scoped) rather than
+    groupPolicy "allowall" alias normalized to "open" - B-283, Feishu-scoped) rather than
     _open_channels (open only) so that restricted-but-external channels are correctly
     counted as ingress.
     """
@@ -858,13 +858,13 @@ def _session_cross_user(findings: list[Finding], cfg: dict) -> bool:
 def _host_blind(ctx: Context) -> bool:
     """True only when host detection RAN, the platform is supported, and
     no visibility monitor is PRESENT across all four families (network IDS /
-    audit / FIM / EDR) — every one is either definitively ABSENT or an honest
+    audit / FIM / EDR) - every one is either definitively ABSENT or an honest
     UNKNOWN (B-172: a read-only, often non-root scan cannot PROVE one of these
-    is absent, so a miss is UNKNOWN rather than a confident 'absent' — but it
+    is absent, so a miss is UNKNOWN rather than a confident 'absent' - but it
     still means no monitor was CONFIRMED present).
 
     Any 'present' monitor yields no chain. A class status of ``None`` (the class
-    key itself missing from the result) still yields no chain — that is a shape
+    key itself missing from the result) still yields no chain - that is a shape
     the real detector never produces, so it is treated as inconclusive, not
     blind. Firewall is excluded: it's prevention, not detection of a compromise.
     """
@@ -895,15 +895,15 @@ def _has_multi_user_channel(cfg: dict) -> bool:
     return False
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Rule implementations
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | None:
     """CRITICAL: public/group sender + exec/write/elevated tool.
 
     An untrusted actor (anonymous DM or open group) can reach host execution
-    or mutate state directly — no intermediary step required.
+    or mutate state directly - no intermediary step required.
     """
     open_entries = _open_channel_entries(cfg)
     if not open_entries:
@@ -941,7 +941,7 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
             f"The channel '{channel_label}' {open_reason}. The agent also has "
             f"{tool_label} enabled. Any anonymous actor can craft a message "
             "that causes the agent to execute code or mutate files on the host "
-            "— no additional privilege escalation required."
+            "\u2014 no additional privilege escalation required."
         ),
         fix=(
             "Lock every channel's dmPolicy and groupPolicy to 'allowlist' so only "
@@ -954,7 +954,7 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
 
 
 def _rule_lethal_trifecta(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | None:
-    """HIGH: dirty input + sensitive data + outbound/exec — the explicit Trifecta path."""
+    """HIGH: dirty input + sensitive data + outbound/exec - the explicit Trifecta path."""
     has_input = _has_untrusted_ingress(tools, cfg)
     has_sensitive = _has_sensitive_data(tools, ctx)
     has_outbound = _has_outbound(tools, cfg)
@@ -967,7 +967,7 @@ def _rule_lethal_trifecta(ctx: Context, tools: list[str], cfg: dict) -> RiskPath
     return RiskPath(
         id="RISK-02",
         severity=HIGH,
-        title="Lethal Trifecta: untrusted input → sensitive data → outbound",
+        title="Lethal Trifecta: untrusted input \u2192 sensitive data \u2192 outbound",
         chain=[input_label, sensitive_label, outbound_label],
         why=(
             "All three legs of the Lethal Trifecta are active simultaneously: "
@@ -1010,7 +1010,7 @@ def _rule_sandbox_off_untrusted_exec(ctx: Context, tools: list[str], cfg: dict) 
         ),
         fix=(
             # B-738: this used to offer 'non-main' as an equal alternative. It clears
-            # this very chain while leaving it live — see _sandbox_off's docstring above,
+            # this very chain while leaving it live - see _sandbox_off's docstring above,
             # which already required exactly 'all' and cited the dist for why.
             "Enable the sandbox: set agents.defaults.sandbox.mode to 'all', and configure "
             "agents.defaults.sandbox.docker (network='bridge', no broad host binds). "
@@ -1045,7 +1045,7 @@ def _rule_mutable_identity_elevated(ctx: Context, findings: list[Finding],
             "Disable dangerouslyAllowNameMatching in all channel configurations "
             "and require cryptographic identity verification (e.g. token-based "
             "auth). Restrict elevated tool allowFrom to explicit, verified sender "
-            "IDs — never '*' or name-matched identities."
+            "IDs \u2014 never '*' or name-matched identities."
         ),
     )
 
@@ -1104,7 +1104,7 @@ def _rule_control_plane_exposed(ctx: Context, findings: list[Finding],
         fix=(
             "Restrict control-plane access to loopback or a trusted VPN "
             "interface only. Lock all external channels to an allowlist. "
-            "Enable strong auth (token ≥ 24 chars) on the control-plane endpoint "
+            "Enable strong auth (token \u2265 24 chars) on the control-plane endpoint "
             "and never expose it on a public or open interface."
         ),
     )
@@ -1143,15 +1143,15 @@ def _rule_self_modification(ctx: Context, findings: list[Finding],
         severity=HIGH,
         title="Self-modification: writable identity/bootstrap + exec without approval",
         chain=["exec / fs_write tool (no approval gate)", "writable bootstrap/identity files",
-               "agent identity rewritten → persistent compromise"],
+               "agent identity rewritten \u2192 persistent compromise"],
         why=(
             "Bootstrap or identity files (SOUL.md / AGENTS.md / TOOLS.md) are "
             "group- or world-writable (B20 or B22 fails), OR a content-ring scanner "
             "already found an override/jailbreak directive actually written into them "
-            "(B6 or B161 fails — the normal-permission file poisoned through the "
+            "(B6 or B161 fails \u2014 the normal-permission file poisoned through the "
             "agent's own fs_write). Either way, the agent also has exec or fs_write "
             "tools enabled without a human approval gate, so it can rewrite its own "
-            "instructions, identity, or installed skills — a single successful "
+            "instructions, identity, or installed skills \u2014 a single successful "
             "prompt-injection makes the compromise persistent across restarts."
         ),
         fix=(
@@ -1199,7 +1199,7 @@ def _rule_malicious_skill_exfil(ctx: Context, findings: list[Finding],
     malicious skill has a live path to read secrets/data and send them out.
     """
     # B-751: was `!= FAIL`, so a CONFIRMED zip-slip (B13 status
-    # SKILL_ARCHIVE_PATH_TRAVERSAL) silently disabled this whole CRITICAL chain —
+    # SKILL_ARCHIVE_PATH_TRAVERSAL) silently disabled this whole CRITICAL chain -
     # measured: risk_paths() returned [] on a traversal home and ['RISK-09'] on the
     # same findings with the status swapped to FAIL.
     if _finding_status(findings, "B13") not in FAIL_WEIGHT_STATUSES:
@@ -1222,15 +1222,15 @@ def _rule_malicious_skill_exfil(ctx: Context, findings: list[Finding],
             "credential & data exfiltration",
         ],
         why=(
-            "ClawSecCheck flagged an installed skill as malicious (B13 — the ClawHavoc "
+            "ClawSecCheck flagged an installed skill as malicious (B13 \u2014 the ClawHavoc "
             "class). Skills run with the agent's FULL permissions, and this agent has "
             "an outbound egress surface (messaging channels and/or external-service "
             "skills). The malicious skill can read your secrets and conversation data "
-            "and send them out — this is an active exfiltration path, not theoretical."
+            "and send them out \u2014 this is an active exfiltration path, not theoretical."
         ),
         fix=(
             "Uninstall the flagged skill(s) NOW (see the B13 finding for the name), and "
-            "ROTATE every secret it could have reached — channel tokens, cloud keys, "
+            "ROTATE every secret it could have reached \u2014 channel tokens, cloud keys, "
             "password managers. Only reinstall skills whose source you have read."
         ),
     )
@@ -1239,9 +1239,9 @@ def _rule_malicious_skill_exfil(ctx: Context, findings: list[Finding],
 def _rule_host_blind(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | None:
     """MEDIUM: a high-privilege agent on a host with no CONFIRMED detection monitoring.
 
-    Not an exploit chain like the others — a visibility gap: if this agent is
+    Not an exploit chain like the others - a visibility gap: if this agent is
     compromised, nothing on the host (IDS / audit / FIM / EDR) would notice.
-    Fires when no visibility class is confirmed present — each is either
+    Fires when no visibility class is confirmed present - each is either
     definitively absent or an honest unknown (B-172: a read-only miss is not
     proof of absence, but it is also not evidence of presence).
     """
@@ -1252,7 +1252,7 @@ def _rule_host_blind(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | No
     return RiskPath(
         id="RISK-10",
         severity=MEDIUM,
-        title="Powerful agent on an unmonitored host — a breach would be invisible",
+        title="Powerful agent on an unmonitored host \u2014 a breach would be invisible",
         chain=[
             "untrusted input reaches the agent",
             "agent can execute / write on the host",
@@ -1262,7 +1262,7 @@ def _rule_host_blind(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | No
         why=(
             "This agent can act on the host (exec / write / elevated tools) and is "
             "reachable by untrusted input, yet ClawSecCheck found no evidence of any "
-            "host detection monitoring — no confirmed network IDS, audit logging, "
+            "host detection monitoring \u2014 no confirmed network IDS, audit logging, "
             "file-integrity monitor, or endpoint/EDR sensor (some of these may simply "
             "be unreadable by a non-root scan). If the agent were compromised via a "
             "prompt injection, the resulting activity would very likely go unseen."
@@ -1277,15 +1277,15 @@ def _rule_host_blind(ctx: Context, tools: list[str], cfg: dict) -> RiskPath | No
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Public API
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 def _rule_delegation_reassembly(ctx: Context, findings: list[Finding]) -> RiskPath | None:
     """HIGH: the trifecta reassembles ACROSS agents via the attested delegation graph.
 
     Fires only when an untrusted-input agent can transitively reach both a sensitive-data
-    and an outbound agent through an edge that is NOT a structural wall (schema return) —
+    and an outbound agent through an edge that is NOT a structural wall (schema return) -
     the same condition as B47's WARN. A fully-walled reach yields no chain (the wall
     blocks it), and no attestation yields no chain (zero false-positives by design).
     """
@@ -1305,7 +1305,7 @@ def _rule_delegation_reassembly(ctx: Context, findings: list[Finding]) -> RiskPa
             f"agent '{entry}' can drive a sensitive-data agent and an outbound agent "
             "across delegation edges that are not structural walls (raw passthrough / "
             "text filter / undeclared return). A single prompt-injection at the entry "
-            "agent can orchestrate the others to exfiltrate secrets or take action — the "
+            "agent can orchestrate the others to exfiltrate secrets or take action \u2014 the "
             "trifecta reassembles across the graph (a confused-deputy chain)."
         ),
         fix=(
@@ -1359,12 +1359,12 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
         severity=HIGH,
         title="Untrusted input + broad filesystem-write = tamper / persistence",
         chain=[ingress_label, "broad fs-write tool (unscoped, no approval gate)",
-               "files overwritten → tamper / persistence implant"],
+               "files overwritten \u2192 tamper / persistence implant"],
         why=(
             "The agent is granted a filesystem-write tool (fs_write / apply_patch) that "
             "B55 found broadly reachable or ungated, AND untrusted content can reach the "
             "agent (an open channel or an input tool). A single prompt-injection in that "
-            "untrusted input can drive arbitrary file writes — overwriting bootstrap or "
+            "untrusted input can drive arbitrary file writes \u2014 overwriting bootstrap or "
             "skill files to implant persistent instructions, or tampering with data the "
             "agent later trusts."
         ),
@@ -1388,7 +1388,7 @@ def _rule_markdown_image_persistence(ctx: Context, findings: list[Finding]) -> R
 
     B59 already shows that remote markdown/HTML image URLs can leak data out of the
     agent context. If bootstrap or memory files are writable (B20 or B22 fail), OR a
-    content-ring scanner already found a directive planted in them (B6 or B161 FAIL —
+    content-ring scanner already found a directive planted in them (B6 or B161 FAIL -
     B-494; see `_bootstrap_content_poisoned`'s docstring for scope), the same attacker
     can write (or already has written) a payload or instruction back into files the
     agent reloads later. That turns a one-shot exfil channel into a
@@ -1412,7 +1412,7 @@ def _rule_markdown_image_persistence(ctx: Context, findings: list[Finding]) -> R
             "B59 shows that a remote markdown/image URL can carry data out of the agent "
             "context. If bootstrap or memory files are writable (B20 or B22 fails), OR a "
             "content-ring scanner already found a planted directive in them (B6 or B161 "
-            "fails), the same attacker can write — or already has written — a payload or "
+            "fails), the same attacker can write \u2014 or already has written \u2014 a payload or "
             "instruction back into files the agent reloads later. The result is a "
             "persistence-plus-exfil chain: steal data now, leave behind code or "
             "instructions that survive restart."
@@ -1471,10 +1471,10 @@ def _rule_self_escalating_autonomy(ctx: Context, findings: list[Finding],
 
     A provider whose tools.elevated.allowFrom is '*' lets ANY sender invoke elevated
     tools (B3 flags this alone); a configured heartbeat makes the agent act unattended
-    (B17 flags this alone). Neither existing check — nor any RISK rule — captures the
+    (B17 flags this alone). Neither existing check - nor any RISK rule - captures the
     conjunction: one injected instruction from an untrusted sender drives elevated
     actions that the heartbeat keeps re-running with no human in the loop (ATLAS
-    AML.T0053). Fires only when BOTH legs are explicitly present → zero-FP.
+    AML.T0053). Fires only when BOTH legs are explicitly present -> zero-FP.
     """
     providers = _wildcard_elevated_providers(cfg)
     if not providers:
@@ -1495,7 +1495,7 @@ def _rule_self_escalating_autonomy(ctx: Context, findings: list[Finding],
             "channel can invoke elevated tools, and a heartbeat (agents.defaults.heartbeat "
             "or a per-agent heartbeat) makes the agent act on its own schedule. Together, a "
             "single prompt-injection from an untrusted sender can trigger elevated actions "
-            "that the heartbeat keeps re-running unattended — a self-escalating autonomous "
+            "that the heartbeat keeps re-running unattended \u2014 a self-escalating autonomous "
             "privilege loop with no human in the path."
         ),
         fix=(
@@ -1512,7 +1512,7 @@ def _rule_sandbox_cred_controlplane(ctx: Context, findings: list[Finding],
     """HIGH (RISK-16): rw workspace + host-reaching bind + plaintext gateway password.
 
     sandbox-escape -> credential-read -> control-plane takeover. B4 flags the rw
-    workspace and the host bind; B1 flags the plaintext password — but no RISK rule
+    workspace and the host bind; B1 flags the plaintext password - but no RISK rule
     unifies the three-leg path. Fires only when all three are explicitly present, so
     FP is no higher than the individual B4/B1 findings.
     """
@@ -1537,7 +1537,7 @@ def _rule_sandbox_cred_controlplane(ctx: Context, findings: list[Finding],
             "reaches the host filesystem broadly (docker.sock or a root-level source), so an "
             "exec-capable agent can read arbitrary host files. The gateway credential is "
             "stored in plaintext at gateway.auth.password in openclaw.json, so the agent can "
-            "read it and authenticate to the control plane as admin — a sandbox weakness "
+            "read it and authenticate to the control plane as admin \u2014 a sandbox weakness "
             "escalates to full control-plane takeover."
         ),
         fix=(
@@ -1555,12 +1555,12 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
     """HIGH (RISK-15): untrusted-context ingress + browser SSRF to private network.
 
     Distinct from RISK-05, which keys on SECRETS being reachable: this keys on an
-    untrusted-context channel (B26 FAIL/WARN — channels.<p>.contextVisibility='all') feeding a
+    untrusted-context channel (B26 FAIL/WARN - channels.<p>.contextVisibility='all') feeding a
     browser allowed onto the private network (B38). An injection in untrusted message
     content drives the browser to an internal metadata/credential endpoint and the response
     surfaces in tool output. RISK-05 and RISK-15 cover different entries (stored-cred reach
-    vs injection-driven SSRF) and only co-fire when a config has both — each still names a
-    distinct path. Fires only when both legs are positive → zero-FP.
+    vs injection-driven SSRF) and only co-fire when a config has both - each still names a
+    distinct path. Fires only when both legs are positive -> zero-FP.
     """
     if _finding_status(findings, "B26") not in (FAIL, WARN):
         return None
@@ -1591,7 +1591,7 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
             "(channels.<p>.contextVisibility='all', B26), and the browser is allowed to reach "
             "private/internal addresses (browser.ssrfPolicy.dangerouslyAllowPrivateNetwork, "
             "B38). A prompt-injection in an untrusted message can make the agent fetch an "
-            "internal URL — cloud metadata or a credential store — and the response surfaces "
+            "internal URL \u2014 cloud metadata or a credential store \u2014 and the response surfaces "
             "in tool output. OpenClaw has no built-in egress allowlist, so the attacker-fetch "
             "leg is structurally unconstrained."
         ),
@@ -1633,8 +1633,8 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
                 # them" while the flag stays on.
                 ". If dangerouslyAllowPrivateNetwork must stay on, also add "
                 "browser.ssrfPolicy.blockedHostnames (OpenClaw 2026.9.1 and later) naming "
-                "at least the cloud-metadata addresses — 169.254.169.254, "
-                "metadata.google.internal, 100.100.100.200 — which OpenClaw still checks "
+                "at least the cloud-metadata addresses \u2014 169.254.169.254, "
+                "metadata.google.internal, 100.100.100.200 \u2014 which OpenClaw still checks "
                 "by name before DNS even with the flag enabled. That only blocks a "
                 "request that names one of those hosts/IPs directly, not an "
                 "attacker-chosen hostname that resolves to one of them, so it narrows "
@@ -1652,7 +1652,7 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
 
     Indirect prompt injection via a contextVisibility='all' channel plants a cron task
     that re-runs under heartbeat autonomy, creating a persistent autonomous foothold.
-    Fires only when ALL THREE legs are explicitly confirmed → zero-FP.
+    Fires only when ALL THREE legs are explicitly confirmed -> zero-FP.
 
     Attack path (ATLAS AML.T0054 / OWASP Agentic A05):
       1. Untrusted input reaches the agent via a channel with contextVisibility='all'.
@@ -1672,7 +1672,7 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
         severity=HIGH,
         title="Untrusted context + cron + heartbeat = persistent autonomous foothold",
         chain=[
-            f"channel '{ch_label}' contextVisibility='all' → prompt injection via untrusted input",
+            f"channel '{ch_label}' contextVisibility='all' \u2192 prompt injection via untrusted input",
             "injected instruction schedules a cron task (persistent scheduler surface)",
             "heartbeat re-executes cron task autonomously with no human review",
             "persistent autonomous foothold",
@@ -1682,7 +1682,7 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
             "(channels.<p>.contextVisibility='all'), a cron scheduler surface is active, "
             "and the agent runs autonomously on a heartbeat "
             "(agents.defaults.heartbeat). A prompt-injection in untrusted input can "
-            "plant a cron task that the heartbeat re-executes indefinitely — no human "
+            "plant a cron task that the heartbeat re-executes indefinitely \u2014 no human "
             "approval is required after the initial injection. The result is a persistent "
             "autonomous foothold that survives restarts and continues running without "
             "further attacker interaction."
@@ -1698,12 +1698,12 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
     )
 
 
-# C-197: Skill Composition Risk (SCR) — "Benign in Isolation, Harmful in Composition"
+# C-197: Skill Composition Risk (SCR) - "Benign in Isolation, Harmful in Composition"
 # (arXiv 2606.15242) names three mechanisms; Capability Flow is already covered at the
 # agent/cred level by RISK-11's cross-agent reassembly. Architect-ratified design
 # (2026-07-13): pursue Trust Transfer as a static RISK-* chain, the same way RISK-11
 # reassembles trust across agents. Authorization Confusion (advisory context
-# reinterpreted as formal approval) stays a documented, unimplemented residual — it is
+# reinterpreted as formal approval) stays a documented, unimplemented residual - it is
 # a RUNTIME reading of prose, not a structural property two co-installed skills expose
 # statically (the same "thin static surface" honestly flagged when this task was filed).
 _AUDIT_THEMED_RE = re.compile(
@@ -1715,16 +1715,16 @@ _SCR_HIGH_BLAST_FAMILIES = frozenset({"exec", "network", "write"})
 
 
 def _rule_skill_composition_trust_transfer(ctx: Context) -> RiskPath | None:
-    """MEDIUM (RISK-19, C-197): Skill Composition Risk — Trust Transfer.
+    """MEDIUM (RISK-19, C-197): Skill Composition Risk - Trust Transfer.
 
     An audit/security/verification-themed installed skill is co-present with a
     SEPARATE installed skill that has exec, network, or write capability (per
     ctx.effect_profiles / _b62_actual_families, the same substrate B62 already
-    uses). Neither skill is individually malicious — the risk is compositional: an
+    uses). Neither skill is individually malicious - the risk is compositional: an
     agent can misread the audit-themed skill's benign-sounding output ("looks
     clean", "verified", "no issues found") as authorization to proceed with the
     OTHER skill's risky action. Fires only when BOTH a themed skill and a
-    DIFFERENT high-capability skill are positively identified — zero-FP by design
+    DIFFERENT high-capability skill are positively identified - zero-FP by design
     (a single skill matching both conditions is not a composition).
     """
     skills = getattr(ctx, "installed_skills", None)
@@ -1756,30 +1756,30 @@ def _rule_skill_composition_trust_transfer(ctx: Context) -> RiskPath | None:
             f"'{audit_name}' presents itself as an audit/security/verification tool, and "
             f"'{blast_name}' is a separate installed skill with exec, network, or write "
             "capability. Per the Skill Composition Risk literature (arXiv 2606.15242), a "
-            "prompt injection can borrow the audit-themed skill's implied authority — its "
-            f"benign-sounding summary ('looks clean', 'verified') — to green-light "
+            "prompt injection can borrow the audit-themed skill's implied authority \u2014 its "
+            f"benign-sounding summary ('looks clean', 'verified') \u2014 to green-light "
             f"'{blast_name}'s risky action, even though neither skill is individually "
             "malicious and no single skill holds both roles."
         ),
         fix=(
             f"Never let '{audit_name}'s output serve as an approval gate for "
-            f"'{blast_name}' or any other high-capability skill's action — route genuinely "
+            f"'{blast_name}' or any other high-capability skill's action \u2014 route genuinely "
             "risky actions (exec/network/write) through a human-approval step that reads "
             "the actual action, not a different skill's summary of it."
         ),
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# B-288 / RISK-20 — hook session-key + agent-routing policy under REMOTE exposure
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# B-288 / RISK-20 - hook session-key + agent-routing policy under REMOTE exposure
+# ------------------------------------------------------------------------------
 # The two exposure kinds that are worth ESCALATING rather than merely inventorying,
 # mapped to the plain-language chain step each contributes. Both are drawn from
 # `_hooks_session_key_exposures` (checks/_shared.py), which transcribes the product's
 # own collectHooksHardeningFindings.
 #
 # The product re-rates THREE checkIds from "warn" to "critical" when
-# `isGatewayRemotelyExposed(cfg)` holds — `hooks.allowed_agent_ids_unrestricted`
+# `isGatewayRemotelyExposed(cfg)` holds - `hooks.allowed_agent_ids_unrestricted`
 # (audit.nondeep.runtime-C3y1Q5Fi.js:682), `hooks.request_session_key_enabled` (:689)
 # and `hooks.request_session_key_prefixes_missing` (:696), each written
 # `severity: remoteExposure ? "critical" : "warn"`. These arms are a deliberate SUBSET
@@ -1788,7 +1788,7 @@ def _rule_skill_composition_trust_transfer(ctx: Context) -> RiskPath | None:
 # which findings deserve a chain is ours.
 #
 # So `request_session_key_enabled` is dropped even though the product does escalate it:
-# on its own it is the OWNER'S DECISION to accept caller-chosen keys — dangerous only
+# on its own it is the OWNER'S DECISION to accept caller-chosen keys - dangerous only
 # when unconstrained, which is precisely what `request_session_key_prefixes_missing`
 # already reports, and `_hooks_session_key_exposures` only ever emits the latter
 # alongside the former. Keeping both would double-count one posture in one chain.
@@ -1812,13 +1812,13 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
 
     Fires only on positive evidence for every link:
 
-    1. ``hooks.enabled`` is exactly ``True`` — the inbound webhook endpoint is actually
+    1. ``hooks.enabled`` is exactly ``True`` - the inbound webhook endpoint is actually
        serving. (Enforced inside ``_hooks_session_key_exposures``, which returns ``[]``
        otherwise, mirroring the product's own early return.)
-    2. at least one of ``_R20_ARMS`` holds — the session-key or agent-routing policy is
+    2. at least one of ``_R20_ARMS`` holds - the session-key or agent-routing policy is
        unconstrained;
     3. the gateway is PROVABLY reachable beyond loopback
-       (``_gateway_remote_exposure_reason``) — proven from the config alone, not
+       (``_gateway_remote_exposure_reason``) - proven from the config alone, not
        assumed from a profile name. ``gateway.bind=auto`` resolves to ``0.0.0.0`` only
        inside a container and to loopback otherwise, and ``gateway.bind=custom``
        resolves to whatever ``gateway.customBindHost`` says; neither is remote by
@@ -1827,24 +1827,24 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
 
     WHY A CHAIN AND NOT A STANDALONE FAIL. Leg 2 is true in the DEFAULT state:
     ``allowedAgentIds`` unset means "any agent", so a standalone FAIL on it would fire on
-    every hooks-enabled config with no owner misconfiguration whatever — a textbook
+    every hooks-enabled config with no owner misconfiguration whatever - a textbook
     Golden-Rule-#5 false positive. It is the JOIN with remote reachability that the
     product itself treats as critical, and that join is this module's job. The static
     halves stay visible unconditionally as B179 evidence.
 
-    SEVERITY — HIGH, deliberately one notch below the vendor's "critical", and this is
+    SEVERITY - HIGH, deliberately one notch below the vendor's "critical", and this is
     the one place we knowingly diverge. `hooks.enabled` cannot be served without a token:
     hooks-Bjrm8pWp.js:333-334 throws ``"hooks.enabled requires hooks.token"`` outright. So
-    what this chain describes is BLAST-RADIUS AMPLIFICATION FOR A HOOK-TOKEN HOLDER — a
+    what this chain describes is BLAST-RADIUS AMPLIFICATION FOR A HOOK-TOKEN HOLDER - a
     principal who can already reach the endpoint gains cross-session write and arbitrary
-    agent routing — not an unauthenticated takeover. Reserving CRITICAL for chains that
+    agent routing - not an unauthenticated takeover. Reserving CRITICAL for chains that
     need no credential keeps the tier meaningful. The token's own strength is B1/B179
     territory and is not re-litigated here.
 
     KNOWN NARROW RESIDUAL (C-135, and deliberately not "fixed"). Leg 1 uses the product
     audit's own gate, ``hooks.enabled === true`` (audit.nondeep.runtime-C3y1Q5Fi.js:633).
-    The dist also has a STRICTER "hooks are actually live" predicate — ``enabled === true
-    && Boolean(normalizeOptionalString(cfg.hooks.token))`` (audit-UjVvFwCi.js:389) —
+    The dist also has a STRICTER "hooks are actually live" predicate - ``enabled === true
+    && Boolean(normalizeOptionalString(cfg.hooks.token))`` (audit-UjVvFwCi.js:389) -
     because hook resolution throws ``"hooks.enabled requires hooks.token"`` outright when
     the token is missing (hooks-Bjrm8pWp.js:332-334). So a config with ``hooks.enabled:
     true`` and NO ``hooks.token`` fires this chain while serving nothing. That is not a
@@ -1854,12 +1854,12 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
     token moved somewhere this reader cannot see. Pinned by
     tests/test_b288_hooks_session_key.py::test_known_residual_enabled_without_token.
 
-    HONEST LABELLING — what this does NOT claim. It does not claim the endpoint has been
+    HONEST LABELLING - what this does NOT claim. It does not claim the endpoint has been
     reached, nor that any cross-session write has occurred: every leg is config posture,
     and this module reads no hook request log (OpenClaw keeps none we could ground
     against). Read it as "the ingredients for cross-session takeover are all present and
     remotely reachable", not as evidence of compromise. Silence is likewise not an
-    all-clear for hook exposure generally — it means these three specific legs did not
+    all-clear for hook exposure generally - it means these three specific legs did not
     all hold. It also covers the ROOT ``hooks`` object only; the plugin-scoped
     ``plugins.entries.*.hooks.*`` capability grants are a different surface at a
     different path and are not read by this rule or by anything else in the package yet.
@@ -1873,7 +1873,7 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
         return None
 
     # Deterministic order: _R20_ARMS is a literal dict, so iteration follows source
-    # order, not config key order — the report must not depend on how the user's JSON
+    # order, not config key order - the report must not depend on how the user's JSON
     # happened to be written.
     detail = "; ".join(arms)
     return RiskPath(
@@ -1882,15 +1882,15 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
         title="Remotely reachable hook ingress with an unconstrained session-key policy",
         chain=[
             f"gateway reachable beyond loopback ({exposure})",
-            "hooks.enabled — inbound /hooks/agent endpoint serving",
+            "hooks.enabled \u2014 inbound /hooks/agent endpoint serving",
             detail,
         ],
         why=(
             f"The gateway is reachable beyond loopback ({exposure}) and the inbound hook "
             f"endpoint is enabled, while its session/agent policy is unconstrained: "
             f"{detail}. A caller holding the hook token can therefore write into session "
-            "keys it was never meant to touch — placing content into another session's "
-            "history, where the agent reads it as trusted prior context — and/or route "
+            "keys it was never meant to touch \u2014 placing content into another session's "
+            "history, where the agent reads it as trusted prior context \u2014 and/or route "
             "its request to any configured agent, including the default one. OpenClaw's "
             "own audit rates each of these critical under exactly this remote-exposure "
             "condition; ClawSecCheck reports it one notch lower because the endpoint "
@@ -1902,7 +1902,7 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
             "Constrain the hook policy rather than the network path, since the point of "
             "hooks is to be reachable. Set hooks.allowedSessionKeyPrefixes to a narrow "
             "prefix (for example [\"hook:\"]) so request-supplied keys cannot escape "
-            "their own namespace — or set hooks.allowRequestSessionKey=false and let "
+            "their own namespace \u2014 or set hooks.allowRequestSessionKey=false and let "
             "hooks.defaultSessionKey decide the session. Set hooks.allowedAgentIds to an "
             "explicit allowlist of the agents hooks may drive (or [] to deny hook agent "
             "routing entirely). If the gateway does not need to be remotely reachable, "
@@ -1911,9 +1911,9 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# F-135 / RISK-21 — the first chain that joins CONFIG POSTURE with the LOG
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# F-135 / RISK-21 - the first chain that joins CONFIG POSTURE with the LOG
+# ------------------------------------------------------------------------------
 # Until now this engine took only static findings, and the log-observed half of the
 # tool (behavioral.py / trajectory.py) was a terminal `--behavioral` branch that never
 # reached the audit. So "a channel admits non-owner senders" and "a high-blast verb
@@ -1923,31 +1923,31 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
 # verb is proven somewhere in the log" fires on the maintainer's own machine: measured
 # there, an open wildcard-group telegram channel sits beside 867 proven `bash` calls,
 # and every one of those calls came from `telegram:direct` (the owner's own DM),
-# `dashboard` (his own web UI) or an unrecognised `other` key — ZERO group/channel
+# `dashboard` (his own web UI) or an unrecognised `other` key - ZERO group/channel
 # origins across 73 sidecars. The join therefore runs per SESSION ORIGIN
 # (`trajectory.read_proven_tools_by_origin`), and it stays silent on that host, which is
 # the single most important property of this rule.
 #
-# ADVISORY, and structurally so. RiskPaths are outside the A–F score by construction:
+# ADVISORY, and structurally so. RiskPaths are outside the A-F score by construction:
 # cli.py computes `score = audit(...)` BEFORE calling `risk_paths(...)`, and scoring.py
-# does not import this module (it lazily imports `trajaudit` instead — see
+# does not import this module (it lazily imports `trajaudit` instead - see
 # scoring._runtime_cap_signal). That matters more here than for the static chains,
 # because of the owner's I-025 ruling (implemented in B-309): only an ARGUMENTS-
-# corroborated runtime signal may ever affect the grade, and only as a cap —
+# corroborated runtime signal may ever affect the grade, and only as a cap -
 # exhaustively, a trajaudit-style indicator match, nothing else. This rule is
-# metadata-only — it reads a verb NAME and a session-key ORIGIN KIND, never a call's
-# arguments — so it is NOT the eligible signal and must not move the grade, and it
+# metadata-only - it reads a verb NAME and a session-key ORIGIN KIND, never a call's
+# arguments - so it is NOT the eligible signal and must not move the grade, and it
 # cannot. `tests/test_risk21_*.py` pins that; `tests/test_i025_runtime_cap.py` pins
 # the eligible-signal enumeration this rule is deliberately absent from.
 #
 # §8: the only strings that can escape are the bounded origin kind, the channel id and
 # the tool verb names. The `sessionKey`'s peer-id segment is real PII (a live host's key
 # reads `agent:main:telegram:direct:<telegram user id>`) and is never read into the
-# bucket key — see `trajectory.parse_session_origin`.
+# bucket key - see `trajectory.parse_session_origin`.
 
 # EGRESS is deliberately EXCLUDED from the blast classes below, though
 # `attest.HIGH_BLAST_CLASSES` includes it. A channel-connected agent answers a group
-# message by SENDING — an agent holding an MCP `slack_send_message` / `sessions_send`
+# message by SENDING - an agent holding an MCP `slack_send_message` / `sessions_send`
 # tool produces an EGRESS-classified call in essentially every group session it ever
 # serves. Arming on that would make this chain fire on every group-enabled bot that has
 # ever replied, i.e. on ordinary traffic, which is noise rather than signal. The three
@@ -1955,7 +1955,7 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
 # already subsumes egress in practice (attest.py's own taxonomy note: arbitrary command
 # execution subsumes curl, rm and config mutation).
 #
-# HONEST LABELLING — this NARROWS the gap, it does not close it. Excluding EGRESS means
+# HONEST LABELLING - this NARROWS the gap, it does not close it. Excluding EGRESS means
 # a group-origin exfil performed purely through a dedicated send verb is a known false
 # NEGATIVE here; the static posture for it is what A1/RISK-02 already report, and the
 # runtime sequence is what T1 reports under `--behavioral`.
@@ -1967,13 +1967,13 @@ def _open_group_channels(cfg: dict) -> dict:
 
     Two arms, and deliberately no third notion of "open":
 
-    * the wildcard-group shape, via ``_open_wildcard_group_channels`` — the SAME
+    * the wildcard-group shape, via ``_open_wildcard_group_channels`` - the SAME
       predicate B140 and the B-297 ingress leg use, imported through the checks
       aggregator (CLAUDE.md §3.1-a). It is already allowFrom-aware, already skips
       ``enabled: false`` channels and ``channels.defaults``, and already drops nodes
       whose group ingress is switched off outright.
     * an explicit ``groupPolicy: "open"`` (plus Feishu's ``"allowall"`` alias, which
-      only Feishu's schema accepts — see ``_norm_group_policy``, mirrored inline here
+      only Feishu's schema accepts - see ``_norm_group_policy``, mirrored inline here
       exactly as ``_open_channel_labels`` above mirrors it).
 
     The second arm needs NO allowFrom test, and that is a dist fact rather than a
@@ -1983,7 +1983,7 @@ def _open_group_channels(cfg: dict) -> dict:
     ``resolveChannelMessageIngress``), so a ``groupAllowFrom`` beside an open
     groupPolicy does not restrict anything. (The ``@deprecated`` SDK helper
     ``resolveSenderScopedGroupPolicy``, group-access-CyF0dAER.js:8-10, DOES downgrade
-    open->allowlist when ``groupAllowFrom`` is non-empty — reading that one instead
+    open->allowlist when ``groupAllowFrom`` is non-empty - reading that one instead
     would have produced a silent false negative on every open group with a leftover
     allowlist.)
 
@@ -1997,7 +1997,7 @@ def _open_group_channels(cfg: dict) -> dict:
     ``"allowlist"`` (bundled-channel-config-schema-CkfMA6sO.js:250 and siblings) while
     the runtime resolver defaults a CONFIGURED provider to ``"open"``
     (``resolveOpenProviderRuntimeGroupPolicy``, runtime-group-policy-BEjP88cf.js:29-37).
-    Arming on absence would therefore chain on a shape we cannot prove is open — a false
+    Arming on absence would therefore chain on a shape we cannot prove is open - a false
     positive. Not arming is a false negative, which is the safe direction here.
     """
     out = dict(_open_wildcard_group_channels(cfg))
@@ -2014,7 +2014,7 @@ def _open_group_channels(cfg: dict) -> dict:
                 continue
             policy = node.get("groupPolicy")
             if policy == "open" or (name == "feishu" and policy == "allowall"):
-                out[name] = 'groupPolicy is "open" — any group member may command the agent'
+                out[name] = 'groupPolicy is "open" \u2014 any group member may command the agent'
                 break
     return out
 
@@ -2026,13 +2026,13 @@ def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
 
     1. a channel's GROUP ingress admits non-owner senders (``_open_group_channels``);
     2. the trajectory log contains a ``tool.call`` whose session was opened from a
-       GROUP or CHANNEL surface on THAT SAME channel (``EXTERNAL_ORIGIN_KINDS`` — the
+       GROUP or CHANNEL surface on THAT SAME channel (``EXTERNAL_ORIGIN_KINDS`` - the
        same bucket OpenClaw's own ``sessionKey.includes(":group:") ||
        includes(":channel:")`` discriminator uses, status-message-CQq9FqoB.js:445);
     3. that verb classifies EXEC / DESTRUCTIVE / MAILBOX_CONFIG (see
        ``_R21_BLAST_CLASSES`` on why EGRESS is excluded).
 
-    HONEST LABELLING — what this does NOT claim. It does not prove a group sender
+    HONEST LABELLING - what this does NOT claim. It does not prove a group sender
     CAUSED a particular tool call. The evidence is that the session carrying the call
     was opened from a multi-party surface and that surface is open to non-owner
     senders; the causal step between a specific message and a specific call needs the
@@ -2040,11 +2040,11 @@ def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
     "this exposure is not hypothetical here", not as an attribution.
 
     No trajectory (absent, or ``OPENCLAW_TRAJECTORY`` off) means the runtime leg is
-    UNPROVEN, not proven-absent — and this rule then stays silent rather than inventing
+    UNPROVEN, not proven-absent - and this rule then stays silent rather than inventing
     a chain, per this module's contract. The same holds when the scan's own bounds bite:
     ``read_proven_tools_by_origin`` caps at 60 sidecars / 8 MB each, so on a busy host a
     group-origin blast call sitting only in a dropped older session is a miss. Silence is
-    therefore never an all-clear for this exposure — it means "not proven here". The
+    therefore never an all-clear for this exposure - it means "not proven here". The
     STATIC half of it is what RISK-01 and A1 report unconditionally, and neither depends
     on the log.
     """
@@ -2084,7 +2084,7 @@ def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
     # not a property of the config and must never decide what the report says.
     channel_name = sorted(hits)[0]
     verbs = sorted(hits[channel_name])
-    shown = ", ".join(verbs[:5]) + (", …" if len(verbs) > 5 else "")
+    shown = ", ".join(verbs[:5]) + (", \u2026" if len(verbs) > 5 else "")
     reason = open_groups[channel_name]
     return RiskPath(
         id="RISK-21",
@@ -2100,8 +2100,8 @@ def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
             f"not the owner ({reason}), and the trajectory log records a session opened "
             f"from a group or channel surface on '{channel_name}' in which the agent "
             f"actually invoked {shown}. Both halves of this exposure were already "
-            "visible in isolation — the posture as a config finding, the tool use as a "
-            "log observation — but nothing related them, so a setup where an untrusted "
+            "visible in isolation \u2014 the posture as a config finding, the tool use as a "
+            "log observation \u2014 but nothing related them, so a setup where an untrusted "
             "surface has demonstrably reached a high-blast primitive looked the same as "
             "one where it never had. It is not proof that a group sender caused those "
             "specific calls: that needs the call arguments, which this tool never reads."
@@ -2111,61 +2111,61 @@ def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
             "exec/destructive/mailbox-config tools at all. If not, restrict the channel "
             "(set groupPolicy to 'allowlist' and list the permitted senders in "
             "groupAllowFrom, or scope the groups entry so it is not '*'). If open group "
-            "access is intentional — a community bot, say — put the high-blast tools "
+            "access is intentional \u2014 a community bot, say \u2014 put the high-blast tools "
             "behind a human approval step (tools.exec.mode='ask') so an untrusted "
             "message cannot reach them unattended."
         ),
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# F-146 / W2.4 / RISK-22 — toxic flow within a SINGLE MCP server's own tool set
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# F-146 / W2.4 / RISK-22 - toxic flow within a SINGLE MCP server's own tool set
+# ------------------------------------------------------------------------------
 # mcptrustchecker's MTC-FLOW-* class: a server can expose all three legs of a
-# confused-deputy chain among its OWN declared tools — an untrusted-input tool, a
-# sensitive-read tool, and an egress tool — with every individual tool innocuous in
+# confused-deputy chain among its OWN declared tools - an untrusted-input tool, a
+# sensitive-read tool, and an egress tool - with every individual tool innocuous in
 # isolation. Untrusted content pulled in by the input tool can steer the model into
 # misusing the other two for exfiltration, without any single tool doing anything
 # wrong on its own. RISK-02 (Lethal Trifecta) already covers this shape at the
 # WHOLE-AGENT level (any tool anywhere in tools.*); this chain narrows the same three
 # roles to CO-RESIDENCE ON ONE SERVER, which RISK-02 cannot see (an agent could hold
 # all three legs spread across three separate, individually-narrow servers with none
-# of them co-resident — RISK-02 still fires there, correctly, but for a different
+# of them co-resident - RISK-02 still fires there, correctly, but for a different
 # reason: whole-agent capability, not one server's own design).
 #
-# CLASSIFICATION: verb-class corroborators, not a new keyword enum (CLAUDE.md rule —
+# CLASSIFICATION: verb-class corroborators, not a new keyword enum (CLAUDE.md rule -
 # see reference_widening_detection_c135_segment_classifier). Reuses the SAME three
 # hint tuples RISK-02's own _has_untrusted_ingress / _has_sensitive_data /
-# _has_outbound already key tool-name classification on — INPUT_TOOL_HINTS /
+# _has_outbound already key tool-name classification on - INPUT_TOOL_HINTS /
 # SENSITIVE_TOOL_HINTS / OUTBOUND_TOOL_HINTS (checks/_shared.py, imported through the
-# checks aggregator per CLAUDE.md §3.1-a) — via the SAME _hint() substring matcher,
+# checks aggregator per CLAUDE.md §3.1-a) - via the SAME _hint() substring matcher,
 # applied per-tool to name+title+description instead of to the agent's whole
 # enabled-tools list. No new lexicon; prior art reused, per-tool instead of per-agent.
 #
 # SOURCE: config-embedded mcp.servers.<name>.tools (the SAME parser vet_mcp's
 # ring-merge path and checks/_shared._mcp_tool_texts already read from) via
-# mcpsurface.from_tool_defs(name, spec["tools"]) — the SAME call
+# mcpsurface.from_tool_defs(name, spec["tools"]) - the SAME call
 # _merge_mcp_surface_ring (checks/_mcp.py) makes. This is the only tool-surface
 # source reachable from the main audit's ctx today: from_trajectory/from_probe_json
 # have no wiring into risk_paths yet. A config-embedded tools list is always
 # completeness="full" (from_tool_defs's default), because it always carries
-# name+description, never bare names — a "names-only" surface can therefore only
+# name+description, never bare names - a "names-only" surface can therefore only
 # ever reach this rule through a future wiring (probe-json), not through today's
-# config path — but the completeness guard below is enforced anyway, defensively, so
+# config path - but the completeness guard below is enforced anyway, defensively, so
 # that wiring lands safe on day one without a second change here.
 #
 # COMPLETENESS CONTRACT: fires ONLY on completeness == "full". At "names-only" there
-# is no description text to classify roles from with any confidence — a tool named
+# is no description text to classify roles from with any confidence - a tool named
 # "fetch" could be a web-fetch (untrusted-input) or an internal cache fetch (nothing)
 # and the bare name alone cannot tell them apart. _mcp_toxic_flow_candidates keeps
-# that case a NAMED "undetermined" status, never silently folded into "clean" — see
+# that case a NAMED "undetermined" status, never silently folded into "clean" - see
 # its own docstring for why silence there would conflate "we didn't check" with
 # "checked, and it's clean" (this rule's explicit brief).
 #
-# HONEST LABELLING: a chain here is a PRECONDITION, not an incident — three roles
+# HONEST LABELLING: a chain here is a PRECONDITION, not an incident - three roles
 # co-resident on one server is what makes a prompt-injection in the untrusted-input
 # leg ABLE to reach the other two, not proof that it has. Phrased as "can", never
-# "is exfiltrating" — the `why` text below says exactly that.
+# "is exfiltrating" - the `why` text below says exactly that.
 _MCP_TOXIC_FLOW_ROLES = (
     ("untrusted-input", INPUT_TOOL_HINTS),
     ("sensitive-read", SENSITIVE_TOOL_HINTS),
@@ -2178,7 +2178,7 @@ def _mcp_tool_surfaces(cfg: dict) -> list:
 
     Reads mcp.servers.<name>.tools via _mcp_servers (checks/_shared.py, the SAME
     provider-shape reader vet_mcp and _mcp_tool_texts already use) and
-    mcpsurface.from_tool_defs (the SAME call vet_mcp's ring-merge path makes —
+    mcpsurface.from_tool_defs (the SAME call vet_mcp's ring-merge path makes -
     _merge_mcp_surface_ring in checks/_mcp.py). A server with no tools list, or an
     unparseable one, contributes no surface (from_tool_defs already returns None for
     that; mirrored here rather than re-validated).
@@ -2197,7 +2197,7 @@ def _mcp_tool_roles(tool) -> set:
     """Classify one ToolDef's role(s) from name+title+description.
 
     Substring-matches the SAME hint tuples RISK-02 keys the whole-agent trifecta on,
-    via the SAME _hint() helper — see the section docstring above. A tool can hold
+    via the SAME _hint() helper - see the section docstring above. A tool can hold
     more than one role (e.g. a combined "fetch and forward" tool is both
     untrusted-input and egress); that is not a bug, it just means that single tool
     alone could satisfy two of the three legs.
@@ -2223,12 +2223,12 @@ def _mcp_toxic_flow_candidates(cfg: dict) -> list:
       {"server": name, "status": "clean"}
           -- completeness is "full" but fewer than three roles are present.
 
-    "undetermined" is a NAMED status, not an absence — silently treating "we could
+    "undetermined" is a NAMED status, not an absence - silently treating "we could
     not classify this surface" the same as "we classified it and found nothing"
     would conflate "we didn't check" with "checked, and it's clean", which the
     rule's design brief explicitly forbids. _rule_mcp_toxic_flow below only ever
     turns a "toxic" entry into a RiskPath; "undetermined" and "clean" both yield no
-    chain, but for different, distinguishable reasons — exactly why this is a
+    chain, but for different, distinguishable reasons - exactly why this is a
     separate, independently testable function rather than inlined into the rule.
     """
     out = []
@@ -2238,7 +2238,7 @@ def _mcp_toxic_flow_candidates(cfg: dict) -> list:
                 "server": surface.server,
                 "status": "undetermined",
                 "reason": (
-                    f"tool surface completeness is '{surface.completeness}' — tool "
+                    f"tool surface completeness is '{surface.completeness}' \u2014 tool "
                     "roles cannot be classified from names alone"
                 ),
             })
@@ -2256,14 +2256,14 @@ def _mcp_toxic_flow_candidates(cfg: dict) -> list:
 
 def _rule_mcp_toxic_flow(ctx: Context, cfg: dict) -> RiskPath | None:
     """MEDIUM (RISK-22, F-146/W2.4): a single MCP server's own tool set holds all
-    three roles of a confused-deputy chain — untrusted-input, sensitive-read, and
-    egress — co-resident on that ONE server.
+    three roles of a confused-deputy chain - untrusted-input, sensitive-read, and
+    egress - co-resident on that ONE server.
 
     See the section docstring above for the classification approach, the source
     (config-embedded mcp.servers.<name>.tools only, always completeness="full"
     today), and the completeness contract (silent on anything below "full").
 
-    Fires only when _mcp_toxic_flow_candidates names a server "toxic" — i.e. all
+    Fires only when _mcp_toxic_flow_candidates names a server "toxic" - i.e. all
     three roles are positively identified among that server's OWN declared tools.
     Deterministic pick when more than one server qualifies: sorted by server name,
     not dict iteration order (which follows the config author's key order, not a
@@ -2291,7 +2291,7 @@ def _rule_mcp_toxic_flow(ctx: Context, cfg: dict) -> RiskPath | None:
             "confused-deputy chain in its own tool set: an untrusted-input tool "
             f"('{input_tool}'), a sensitive-read tool ('{sensitive_tool}'), and an "
             f"egress tool ('{egress_tool}'). None of these tools is individually "
-            "dangerous, and no exploit is proven here — this is a PRECONDITION, not "
+            "dangerous, and no exploit is proven here \u2014 this is a PRECONDITION, not "
             "an incident. But because all three are co-resident on one server, "
             "content read by the input tool could steer the model into misusing the "
             "other two for exfiltration, without leaving this server's own tool "
@@ -2307,25 +2307,25 @@ def _rule_mcp_toxic_flow(ctx: Context, cfg: dict) -> RiskPath | None:
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # E-065 (HF incident closing): eviction-resistant foothold + tunnel-defeated egress
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 # RISK-23: each label maps to the check id(s) that detect ONE independent persistence
 # MECHANISM, plus a SIGNAL predicate (B-433) deciding whether a WARN from
 # that class carries an actual suspicious signal, or merely "the mechanism exists,
 # unreviewed". B99 and B335 both detect Python-interpreter auto-execution (.pth /
-# sitecustomize / usercustomize / PYTHONSTARTUP) — the same underlying mechanism family
-# — so they count as a single class, not two, to avoid inflating the anchor count from
+# sitecustomize / usercustomize / PYTHONSTARTUP) - the same underlying mechanism family
+# - so they count as a single class, not two, to avoid inflating the anchor count from
 # one real mechanism. C048 (cron) and B189 (cron run-log orphan) were deliberately
-# EXCLUDED: C048 fires UNKNOWN (never WARN) whenever `cron` is configured at all —
-# indistinguishable at the status level from "config unreadable" — and B189's own
+# EXCLUDED: C048 fires UNKNOWN (never WARN) whenever `cron` is configured at all -
+# indistinguishable at the status level from "config unreadable" - and B189's own
 # docstring states self-erasure is the PRODUCT DEFAULT for one-shot cron jobs, so
 # neither has a clean WARN-only "anchor present" signal the way B99/B335/B150/B97/B338
-# do. An "authorized_keys" sub-signal inside B13's malware verdict was also excluded —
+# do. An "authorized_keys" sub-signal inside B13's malware verdict was also excluded -
 # it has no distinct Finding id of its own to key on (B13's id is a single aggregate
 # verdict across ~20 evidence buckets), and fabricating a detail-text match here would
-# be the first Finding.detail parse in this module — a new, fragile pattern with no
+# be the first Finding.detail parse in this module - a new, fragile pattern with no
 # existing precedent to follow (B97's signal predicate below is now the first, and it
 # is limited to that one, deliberately-marked WARN sub-case).
 #
@@ -2334,28 +2334,28 @@ def _rule_mcp_toxic_flow(ctx: Context, cfg: dict) -> RiskPath | None:
 # two of the four classes' WARN status is not a per-instance signal at all:
 #   - B150 (systemd Restart=always) has exactly ONE WARN shape, and its own text says so
 #     verbatim ("Restart=always is common, legitimate infrastructure ... not proof of
-#     compromise"). It fires for ANY OpenClaw-managed gateway unit — the RECOMMENDED
-#     deployment — with no sub-case to discriminate ordinary use from a suspicious one.
+#     compromise"). It fires for ANY OpenClaw-managed gateway unit - the RECOMMENDED
+#     deployment - with no sub-case to discriminate ordinary use from a suspicious one.
 #   - B338 (tunnel/mesh-VPN launch) fires identically whether the launch primitive sits
 #     in obfuscated code or is spelled out in the skill's own SKILL.md "Usage" section
 #     (confirmed FP repro: `tailscale up --ssh ...` documented in a skill's own docs).
 #     Its module comment concedes "a large share of legitimate developer skills run
-#     tailscale or cloudflared for perfectly ordinary ... workflows" — there is no
+#     tailscale or cloudflared for perfectly ordinary ... workflows" - there is no
 #     documented/undisclosed split in its Finding text to key on.
 # Both still count toward the "2+ classes" co-occurrence below (removing either from the
 # chain narrative would hide a real, if weak, disclosure), but neither can ever supply
 # the signal this rule now requires before escalating to a "layered foothold" verdict.
 # B99/B335's WARN already requires literal auto-execution CONTENT (an executable .pth
 # import line, a shipped sitecustomize/usercustomize file, or a runtime-installed
-# PYTHONSTARTUP hook) — there is no "mechanism present but unreviewed" sub-case, so any
+# PYTHONSTARTUP hook) - there is no "mechanism present but unreviewed" sub-case, so any
 # WARN there already is signal. B97 DOES have such a sub-case inside a single Finding
 # (see `_b97_anchor_signal`): its own text distinguishes a hook that reaches a network
 # sink / reads process.env / mutates the turn ("fires every turn AND <signal>") from one
-# that does none of those ("no sink/mutation seen — this is a normal tool-registration
-# mechanism, but review it") — only the former counts as signal here.
+# that does none of those ("no sink/mutation seen - this is a normal tool-registration
+# mechanism, but review it") - only the former counts as signal here.
 def _anchor_signal_always(ctx: Context, findings: list[Finding], ids: tuple[str, ...]) -> bool:
     """Signal predicate for a class whose WARN branch already requires positive
-    evidence of the mechanism itself (not just "exists, unreviewed") — B99/B335: any
+    evidence of the mechanism itself (not just "exists, unreviewed") - B99/B335: any
     WARN there means an actual auto-execution artifact was found."""
     return any(_finding_status(findings, cid) == WARN for cid in ids)
 
@@ -2363,7 +2363,7 @@ def _anchor_signal_always(ctx: Context, findings: list[Finding], ids: tuple[str,
 def _anchor_signal_never(ctx: Context, findings: list[Finding], ids: tuple[str, ...]) -> bool:
     """Signal predicate for a class whose WARN branch is a single, undifferentiated
     disclosure with no sub-case distinguishing ordinary use from a suspicious one
-    (B150, B338 — see the B-433 comment above). A WARN here still counts
+    (B150, B338 - see the B-433 comment above). A WARN here still counts
     toward the "2+ classes" co-occurrence but never supplies the required signal."""
     return False
 
@@ -2400,19 +2400,19 @@ def _b97_anchor_signal(ctx: Context, findings: list[Finding], ids: tuple[str, ..
     """B97's WARN status covers two sub-cases inside ONE Finding (checks/_content.py's
     check_event_hook_interceptor): a per-turn hook that reaches a network sink, reads
     process.env, or mutates the turn/tool-call ("fires every turn AND <signal>"), and
-    one that does none of those ("... no sink/mutation seen — this is a normal
+    one that does none of those ("... no sink/mutation seen - this is a normal
     tool-registration mechanism, but review it"). Only the first is a real signal per
     B97's OWN text; a minified/unreadable hook entry (UNKNOWN-shaped text folded into
     a WARN detail when at least one other file in the same skill DID warn) matches
-    neither marker and is treated as no-signal too — an unreadable file proves nothing
+    neither marker and is treated as no-signal too - an unreadable file proves nothing
     either way.
 
     Reads `.evidence` (the untruncated per-file list) rather than `.detail` (sliced to
-    the first 4 entries — B-097) so a signal on file 5+ is never missed; falls back to
+    the first 4 entries - B-097) so a signal on file 5+ is never missed; falls back to
     `.detail` for a synthetic/test Finding built with no evidence list.
 
     Also independently re-scans `ctx.installed_skill_js` (already available here, the
-    same source B97 itself reads) for `_HOOK_SHELL_EXEC_RE` — see the comment above it
+    same source B97 itself reads) for `_HOOK_SHELL_EXEC_RE` - see the comment above it
     for why this exists and why it's scoped this narrowly.
     """
     f = _finding_by_id(findings, "B97")
@@ -2452,20 +2452,20 @@ def _rule_persistence_anchor_multiplicity(ctx: Context, findings: list[Finding])
     Motivated by the HuggingFace July-2026 agent-intrusion incident
     (huggingface.co/blog/agent-intrusion-technical-timeline): 11 self-respawning
     privileged pods and 181 re-enrollments meant removing any single foothold achieved
-    nothing — the attacker had layered multiple independent mechanisms, each capable of
+    nothing - the attacker had layered multiple independent mechanisms, each capable of
     re-establishing the others. This chain generalizes that lesson to what a static
     audit of an ordinary OpenClaw install can actually see: each already-existing
     persistence check (B99/B335/B150/B97/B338) fires independently and WARN-only, so no
-    single one of them is unusual or FAIL-worthy on its own — a developer might
+    single one of them is unusual or FAIL-worthy on its own - a developer might
     legitimately have ONE of these for a real reason.
 
     B-433: plain co-occurrence of 2+ WARN classes is NOT zero-FP, because
     B150 and B338's WARN status never distinguishes ordinary use from a suspicious one
-    (see the comment above `_PERSISTENCE_ANCHOR_CLASSES`) — B150 fires for any
+    (see the comment above `_PERSISTENCE_ANCHOR_CLASSES`) - B150 fires for any
     OpenClaw-managed gateway unit (the RECOMMENDED deployment) and B338 fires the same
     whether the launch primitive is disclosed in the skill's own docs or hidden. Firing
     now additionally requires at least one of the co-occurring classes to be genuinely
-    signal-bearing per its class's predicate — two "common, unreviewed" anchors alone
+    signal-bearing per its class's predicate - two "common, unreviewed" anchors alone
     (e.g. a systemd-managed gateway plus a documented `tailscale up` skill) no longer
     read as a deliberately layered foothold, but a real escalated signal (e.g. B97's
     hook actually reaching a network sink) co-located with any other independent
@@ -2483,24 +2483,24 @@ def _rule_persistence_anchor_multiplicity(ctx: Context, findings: list[Finding])
     return RiskPath(
         id="RISK-23",
         severity=HIGH,
-        title="Multiple independent persistence anchors — eviction-resistant foothold",
+        title="Multiple independent persistence anchors \u2014 eviction-resistant foothold",
         chain=[*fired, "removing any single anchor does not evict the foothold"],
         why=(
             "This install has " + str(len(fired)) + " independent persistence "
             "mechanisms flagged at once, from different mechanism classes: "
-            + "; ".join(fired) + ". Most of these checks are WARN-only disclosure — "
+            + "; ".join(fired) + ". Most of these checks are WARN-only disclosure \u2014 "
             "a developer might legitimately have any one of them for a real reason. "
             "What makes this combination worth escalating is that at least one of "
             "them (" + "; ".join(signal_bearing) + ") shows an actual suspicious "
             "signal beyond \"the mechanism exists, unreviewed\", co-located with "
-            "other independent re-establishment mechanisms — the shape that makes "
+            "other independent re-establishment mechanisms \u2014 the shape that makes "
             "removing any single anchor insufficient to evict a real foothold. This "
             "is not proof of compromise; it warrants prioritized review of every "
             "flagged anchor, starting with the one that shows the actual signal."
         ),
         fix=(
             "Investigate every flagged anchor, starting with " + "; ".join(signal_bearing)
-            + " — then review the rest: the .pth/sitecustomize/PYTHONSTARTUP files, "
+            + " \u2014 then review the rest: the .pth/sitecustomize/PYTHONSTARTUP files, "
             "systemd units, per-turn skill hooks, and any tunnel/mesh-VPN binaries "
             "this install surfaced. Removing a single anchor without addressing the "
             "others leaves a working foothold in place."
@@ -2521,32 +2521,32 @@ def _rule_tunnel_bypasses_egress_policy(ctx: Context, tools: list[str],
                                         cfg: dict) -> RiskPath | None:
     """MEDIUM (RISK-24, E-065): a confirmed default-deny egress policy cannot see
     destinations reached through an ENROLLED tunnel/mesh-VPN transport the agent
-    could invoke — "the audit told the user egress was fine, and traffic riding the
+    could invoke - "the audit told the user egress was fine, and traffic riding the
     tunnel is invisible to it."
 
-    A default-deny OUTPUT firewall policy (hostwatch EGRESS_POSTURE, active=True —
+    A default-deny OUTPUT firewall policy (hostwatch EGRESS_POSTURE, active=True -
     the same signal B101 grades PASS on) is destination-based: it evaluates each new
     outbound connection's destination against its ruleset. A tunnel/mesh-VPN
     client's own control connection (a Tailscale mesh peer connection, an
     ngrok/cloudflared reverse tunnel) IS itself a locally-generated outbound packet
-    and DOES traverse that OUTPUT chain like any other — if the tunnel works at all
+    and DOES traverse that OUTPUT chain like any other - if the tunnel works at all
     under a real default-deny policy, the operator made a deliberate, disclosed
     allowance for it. What the OUTPUT policy genuinely cannot see is the traffic
     carried *inside* that already-permitted connection: once the tunnel is up,
     destination-based filtering has nothing left to evaluate per inner destination.
 
     `present` on hostwatch.TUNNEL_TRANSPORT alone is deliberately never a finding (a
-    large share of developers legitimately run tailscale), and — B-434 (C-135
-    adversarial review) — neither is a bare `shutil.which()` PATH hit on its own: an
+    large share of developers legitimately run tailscale), and - B-434 (C-135
+    adversarial review) - neither is a bare `shutil.which()` PATH hit on its own: an
     installed-but-never-enrolled binary is indistinguishable from a live tunnel at
     that level (the exact repro: an unused `ngrok` binary downloaded once and never
-    run). This chain now also requires hostwatch's `active is True` corroboration —
+    run). This chain now also requires hostwatch's `active is True` corroboration -
     a persisted tailscaled.state for Tailscale, or a systemd-enabled
     cloudflared.service for cloudflared (see hostwatch.py; NOT a systemd-enabled
-    tailscaled.service — a second adversarial pass, B-434 follow-up, found that
+    tailscaled.service - a second adversarial pass, B-434 follow-up, found that
     signal fires from a bare `apt install tailscale` with no authentication at all,
     since Debian/Ubuntu's official .deb postinst enables and starts that unit
-    unconditionally) — that the transport is actually enrolled, not merely
+    unconditionally) - that the transport is actually enrolled, not merely
     installed. Even then it fires ONLY on the full combination: the transport is
     enrolled, egress policy was graded hardened, AND the agent both can act
     destructively (exec/write) and is reachable by untrusted input, so a compromise
@@ -2575,13 +2575,13 @@ def _rule_tunnel_bypasses_egress_policy(ctx: Context, tools: list[str],
         ],
         why=(
             "ClawSecCheck confirmed a default-deny outbound firewall policy on this "
-            f"host, and {', '.join(transport)} is enrolled and active — its own "
+            f"host, and {', '.join(transport)} is enrolled and active \u2014 its own "
             "outbound control connection is itself a locally-generated packet the "
             "OUTPUT chain does evaluate, but once that one connection is up, "
             "destination-based egress filtering cannot see the individual "
             "destinations carried inside it. This agent can act on the host "
             "(exec/write) and is reachable by untrusted input, so a prompt-injection "
-            "compromise could invoke that transport directly — the audit's own "
+            "compromise could invoke that transport directly \u2014 the audit's own "
             "'egress is hardened' verdict does not extend to traffic riding inside it."
         ),
         fix=(
@@ -2595,17 +2595,17 @@ def _rule_tunnel_bypasses_egress_policy(ctx: Context, tools: list[str],
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# I-030 / RISK-25 — non-canonical marketplace feed + disabled install-policy gate
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# I-030 / RISK-25 - non-canonical marketplace feed + disabled install-policy gate
+# ------------------------------------------------------------------------------
 # Two already-shipped checks each read one half of the same supply-chain story and had
 # never been joined (grep of risk.py for "marketplaces"/"installPolicy" was 0 hits
 # before this rule). B325 reports when marketplaces.feeds.<name>.url (plus the
 # supplementary marketplaces.sources allowlist) names a registry other than the public
-# clawhub.ai — WARN-only, "where the next install COULD come from"; never FAIL, because
+# clawhub.ai - WARN-only, "where the next install COULD come from"; never FAIL, because
 # a self-hosted/enterprise mirror is a legitimate, disclosed deployment reusing
-# OpenClaw's own documented extension point. B174 reports when security.installPolicy —
-# the operator-owned gate meant to review every skill/plugin install and update — is
+# OpenClaw's own documented extension point. B174 reports when security.installPolicy -
+# the operator-owned gate meant to review every skill/plugin install and update - is
 # not enabled at all (WARN), or is enabled with its own exec-hook path-safety checks
 # bypassed via allowInsecurePath (FAIL when unconstrained by trustedDirs, WARN when
 # scoped, or WARN for a secret-shaped passEnv name).
@@ -2618,27 +2618,27 @@ def _rule_tunnel_bypasses_egress_policy(ctx: Context, tools: list[str],
 # actually gets pulled from it.
 #
 # Pure correlation of two already-emitted verdicts, by design: this rule reads no
-# config itself, only `_finding_status(findings, "B325"/"B174")` — it cannot introduce a
+# config itself, only `_finding_status(findings, "B325"/"B174")` - it cannot introduce a
 # new false FAIL that neither underlying check would already have raised on its own.
 def _rule_marketplace_unreviewed_install(ctx: Context,
                                          findings: list[Finding]) -> RiskPath | None:
     """MEDIUM (RISK-25, I-030): a non-canonical marketplace feed joined with a disabled
-    or escaped install-policy review gate — an unmonitored, unreviewed supply-chain
+    or escaped install-policy review gate - an unmonitored, unreviewed supply-chain
     install path.
 
     Fires only when BOTH already-shipped findings hold:
 
-    1. B325 == WARN — at least one marketplaces.feeds.<name>.url (or the accompanying
+    1. B325 == WARN - at least one marketplaces.feeds.<name>.url (or the accompanying
        marketplaces.sources allowlist) points at a registry other than the public
        https://clawhub.ai;
-    2. B174 in (WARN, FAIL) — security.installPolicy is not enabled, or its exec hook's
+    2. B174 in (WARN, FAIL) - security.installPolicy is not enabled, or its exec hook's
        own allowInsecurePath/passEnv escape flags leave the review gate degraded.
 
     Neither alone is a chain: a private feed with a healthy install-policy gate is a
     reviewed custom source (B174 stays PASS, no chain); a disabled install-policy gate
     against the canonical clawhub.ai feed relies on ClawHub's own vetting (B325 stays
-    PASS, no chain either). It is the JOIN — a non-default source AND nothing reviewing
-    what it delivers — that turns two individually-plausible postures into an actual
+    PASS, no chain either). It is the JOIN - a non-default source AND nothing reviewing
+    what it delivers - that turns two individually-plausible postures into an actual
     unmonitored install path.
     """
     if _finding_status(findings, "B325") != WARN:
@@ -2656,9 +2656,9 @@ def _rule_marketplace_unreviewed_install(ctx: Context,
         ],
         why=(
             "This install names a marketplace feed/source other than the public "
-            "https://clawhub.ai, and at the same time security.installPolicy — the "
+            "https://clawhub.ai, and at the same time security.installPolicy \u2014 the "
             "operator-owned gate meant to review every skill/plugin install and update "
-            "— is not enabled, or is enabled with its own exec hook's path-safety "
+            "\u2014 is not enabled, or is enabled with its own exec hook's path-safety "
             "checks bypassed (exec.allowInsecurePath) or forwarding a secret-shaped "
             "env var name. Neither posture alone is unusual: a private feed can be a "
             "legitimate self-hosted mirror, and a disabled install-policy gate is a "
@@ -2668,45 +2668,45 @@ def _rule_marketplace_unreviewed_install(ctx: Context,
         fix=(
             "Either confirm the marketplaces.feeds/.sources entry is your own trusted "
             "mirror and enable security.installPolicy with a real exec review command "
-            "(no unconstrained allowInsecurePath — scope it with exec.trustedDirs if "
+            "(no unconstrained allowInsecurePath \u2014 scope it with exec.trustedDirs if "
             "you need it), or restore the canonical https://clawhub.ai feed if the "
             "non-default entry was not an intentional, disclosed deployment."
         ),
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# I-031 / RISK-26 — Skill Workshop autonomous authoring + untrusted ingress
-# ──────────────────────────────────────────────────────────────────────────────
-# B175 already reports the FULL unattended Skill Workshop pipeline — autonomous
+# ------------------------------------------------------------------------------
+# I-031 / RISK-26 - Skill Workshop autonomous authoring + untrusted ingress
+# ------------------------------------------------------------------------------
+# B175 already reports the FULL unattended Skill Workshop pipeline - autonomous
 # authoring (skills.workshop.autonomous.enabled) plus no-review install
-# (approvalPolicy="auto") — as FAIL only once the skill_workshop tool is also confirmed
+# (approvalPolicy="auto") - as FAIL only once the skill_workshop tool is also confirmed
 # reachable (not sandboxed / denied / profile-restricted). That FAIL is a standalone
 # posture finding: it says the agent COULD author and install new executable skill code
 # from a single conversation turn with zero human review, but it says nothing about
 # whether anyone untrusted can start that conversation turn. B26 / B171 / B179 each
 # independently report one shape of "an inbound message from someone other than the
-# owner reaches this agent" — untrusted quoted/history context reaching the model (B26,
+# owner reaches this agent" - untrusted quoted/history context reaching the model (B26,
 # channels.<p>.contextVisibility), a privileged in-chat command surface reachable with
 # an under-scoped owner/allow-from gate (B171, which itself FAILs outright on an open
 # dmPolicy/groupPolicy with no gate), or an inbound webhook hooks endpoint / internal
 # hook module loading enabled (B179, hooks.enabled / hooks.internal). grep of risk.py
-# for "workshop" was 0 hits before this rule — none of these were ever joined.
+# for "workshop" was 0 hits before this rule - none of these were ever joined.
 #
 # The join: B175's FAIL state means a single inbound message, once it reaches the
 # agent, needs no further review step to become persistent code on disk. Whether such a
 # message can arrive from someone other than the owner is exactly what B26/B171/B179
-# already answer. Fires HIGH only when B175 == FAIL (deliberately not its WARN states —
+# already answer. Fires HIGH only when B175 == FAIL (deliberately not its WARN states -
 # see the rule's own docstring) AND at least one ingress arm below is positive.
 #
 # Pure correlation of already-emitted verdicts: no config is read directly here, only
-# `_finding_status`/`.evidence` on B175/B26/B171/B179 — this cannot introduce a new
+# `_finding_status`/`.evidence` on B175/B26/B171/B179 - this cannot introduce a new
 # false FAIL beyond what those four checks already raised independently.
 #
 # B-435 correction: being a pure correlation of already-emitted statuses does NOT by
 # itself mean every WARN/FAIL status on B171/B179 means what this chain's ingress
 # language claims. B179's single WARN status folds together the real inbound webhook
-# toggle (hooks.enabled) with hooks.internal.* LOCAL startup module loading — B179's
+# toggle (hooks.enabled) with hooks.internal.* LOCAL startup module loading - B179's
 # own fix text calls that "a visibility inventory, not a misconfiguration finding", not
 # an ingress surface. B171's WARN status likewise folds together "no owner/allow-from
 # gate configured at all" with "a real, scoped ownerAllowFrom/allowFrom is set but
@@ -2763,31 +2763,31 @@ def _r26_b179_ingress_arm(findings: list[Finding]) -> bool:
 def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
                                               findings: list[Finding]) -> RiskPath | None:
     """HIGH (RISK-26, I-031): Skill Workshop's unattended author+install pipeline,
-    reachable from at least one untrusted-ingress surface — one inbound message can
+    reachable from at least one untrusted-ingress surface - one inbound message can
     become persistent executable code on disk.
 
     Fires only when:
 
-    1. B175 == FAIL — Skill Workshop can autonomously author new executable skill code
+    1. B175 == FAIL - Skill Workshop can autonomously author new executable skill code
        from conversation signals AND install it with no human review step, AND the
        skill_workshop tool is confirmed reachable (not sandboxed/denied/profile-
        restricted). Deliberately NOT B175's WARN states: one WARN branch means the full
        pipeline is configured but the tool is currently unreachable (dormant, not live
-       — chaining on it here would claim a message can reach a tool the config itself
+       - chaining on it here would claim a message can reach a tool the config itself
        blocks); the other WARN branch means only a PARTIAL gap (e.g. just
        allowSymlinkTargetWrites, with autonomous authoring off and approvalPolicy
-       "pending") — a real widening, but not the "no review at all" shape this chain
+       "pending") - a real widening, but not the "no review at all" shape this chain
        describes. Only FAIL proves every ingredient the title claims. (B-783: that
-       example is now version-dependent — OpenClaw 2026.9.3 removed the key from its
+       example is now version-dependent - OpenClaw 2026.9.3 removed the key from its
        schema, so the identical config reads B175 == PASS there, with a disclosure that
        the stale line grants nothing; it is a live partial gap only on 2026.9.2 and
        earlier, or where the installed version could not be determined.)
-    2. at least one of B26 / B171 / B179 holds — a live ingress path for a message from
+    2. at least one of B26 / B171 / B179 holds - a live ingress path for a message from
        someone other than the owner (see `_R26_INGRESS_ARMS`). B26 accepts its plain
        WARN|FAIL status; B171/B179 are narrowed to their genuinely ingress-shaped
-       sub-signal (see `_r26_b171_ingress_arm`/`_r26_b179_ingress_arm` — B-435).
+       sub-signal (see `_r26_b171_ingress_arm`/`_r26_b179_ingress_arm` - B-435).
 
-    HONEST LABELLING. This does not claim the pipeline has actually been triggered —
+    HONEST LABELLING. This does not claim the pipeline has actually been triggered -
     every leg is config/posture, read from findings already emitted elsewhere. Silence
     is not an all-clear for Skill Workshop generally; it means these specific legs did
     not both hold.
@@ -2841,18 +2841,18 @@ def risk_paths(ctx: Context, findings: list[Finding],
     """Compute dangerous capability chains from config + existing findings.
 
     Returns [] when no chains are detected. Each rule fires only on POSITIVE
-    evidence for every link — no chain is invented from absent data.
+    evidence for every link - no chain is invented from absent data.
     Deduplicated by id; sorted by severity (CRITICAL first).
 
     F-135: RISK-21 additionally reads the trajectory sidecars under ``ctx.home``
-    (metadata only — verb names and session-key ORIGIN KINDS, never call arguments or
+    (metadata only - verb names and session-key ORIGIN KINDS, never call arguments or
     the peer id), so this function now performs bounded read-only file I/O. The bounds
     are ``trajectory``'s own (60 files / 8 MB per file); measured at ~0.1 s on a host
     with 73 sidecars. Every other rule remains a pure function of config + findings.
 
     `ignore` is the parsed `.clawseccheckignore` entry set (see baseline.py). A
     RiskPath whose id (e.g. "RISK-03") appears in `ignore` is marked
-    `suppressed = True` but still RETURNED — same pattern as
+    `suppressed = True` but still RETURNED - same pattern as
     `baseline.apply()` on regular findings, so `--show-suppressed` can list it.
     Callers that render the report/JSON must filter `not p.suppressed`
     themselves (B-154: suppression here requires the RISK-id to be listed
@@ -2989,9 +2989,9 @@ def risk_paths(ctx: Context, findings: list[Finding],
     return unique
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Renderer
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 
 def render_risk_paths(paths: list[RiskPath], ascii_only: bool = False) -> str:
@@ -3004,7 +3004,7 @@ def render_risk_paths(paths: list[RiskPath], ascii_only: bool = False) -> str:
         msg = "No dangerous capability chains detected.\n"
         return _asciify(msg) if ascii_only else msg
 
-    arrow = " -> " if ascii_only else " → "  # ->  or  →
+    arrow = " -> " if ascii_only else " \u2192 "  # ->  or  ->
     # Imported lazily because report imports this renderer lazily too. Risk labels are
     # derived from untrusted channel/provider names and need the same output boundary as
     # ordinary findings.
@@ -3014,7 +3014,7 @@ def render_risk_paths(paths: list[RiskPath], ascii_only: bool = False) -> str:
 
     for p in paths:
         sev_tag = f"[{_sanitize(p.severity)}]"
-        # Include the id (RISK-NN) in the human output too — it was only in --json before,
+        # Include the id (RISK-NN) in the human output too - it was only in --json before,
         # so a finding referenced by id could not be cross-referenced in the text report.
         lines.append(f"{sev_tag} {_sanitize(p.id)}: {_sanitize(p.title)}")
         lines.append(f"  Chain : {arrow.join(_sanitize(step) for step in p.chain)}")

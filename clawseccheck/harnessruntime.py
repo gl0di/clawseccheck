@@ -157,8 +157,8 @@ YES, NO, UNKNOWN = "yes", "no", "unknown"
 
 #: ``String.prototype.trim`` whitespace, which is NOT Python's ``str.strip`` set (Python
 #: also strips U+001C..U+001F and U+0085, and does not strip U+FEFF).
-_JS_WS = "\t\n\v\f\r            " \
-         "      　﻿"
+_JS_WS = "\t\n\v\f\r  \u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008" \
+         "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 
 _DEFAULT_RUNTIMES = (None, "auto", "default")
 

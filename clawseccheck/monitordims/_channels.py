@@ -1,4 +1,4 @@
-"""The `channels` dimension — the ways your agent can be contacted.
+"""The `channels` dimension - the ways your agent can be contacted.
 
 An inbound channel is an untrusted-input surface, so the signature records not just which
 channels exist but the reachability of each: who is allowed in, whether a group policy is
@@ -26,16 +26,16 @@ _CHANNEL_SCOPE_KEYS = ("accounts", "groups", "topics", "direct", "dms",
 # authToken :781, signingSecret :793/:873, webhookSecret :272, password :1090/:1107,
 # appPassword :1365. `tokenFile` (:244) is a PATH, not a secret, but a swap of it
 # redirects the credential just as a botToken swap does, so it is tracked the same way.
-# Only a DIGEST of the value ever enters the snapshot — never the value itself.
+# Only a DIGEST of the value ever enters the snapshot - never the value itself.
 _CHANNEL_SECRET_KEYS = ("token", "botToken", "appToken", "userToken", "authToken",
                         "signingSecret", "webhookSecret", "password", "appPassword",
                         "tokenFile")
 
 
-# B-274: sender-allowlist fields. `allowFrom` (:162/:177/:193/:247/:405/…) and
+# B-274: sender-allowlist fields. `allowFrom` (:162/:177/:193/:247/:405/...) and
 # `groupAllowFrom` (:249) are both real, array-typed schema fields in the installed dist's
-# channel schema (bundled-channel-config-schema-CkfMA6sO.js). `allowedSenders` is NOT — it
-# has ZERO occurrences anywhere in the dist — and a bare `auth` is not a channel-config
+# channel schema (bundled-channel-config-schema-CkfMA6sO.js). `allowedSenders` is NOT - it
+# has ZERO occurrences anywhere in the dist - and a bare `auth` is not a channel-config
 # field either: it is a property of NONE of the 25 channel schemas (checked per-schema,
 # see below). Both are therefore excluded from these GROUNDED keys, on the same reasoning
 # B-283 used to scope `allowall` to Feishu.
@@ -43,7 +43,7 @@ _CHANNEL_SECRET_KEYS = ("token", "botToken", "appToken", "userToken", "authToken
 # STATE THE `auth` HALF PER-SCHEMA, NEVER AS A COUNT OF DIST-WIDE GREP HITS. An earlier
 # revision claimed "the only dist hits are an HTTP-route registration option,
 # channel-Dxc6BJwP.js:1029, and description prose"; every part of that was false. A bare
-# `auth` key is common in the dist — hundreds of occurrences — and `channel-*.js` alone
+# `auth` key is common in the dist - hundreds of occurrences - and `channel-*.js` alone
 # holds four, none of them description prose: channel-BppRB2We.js:551 and
 # channel-PR3XHV0V.js:2169 are entries in channel ADAPTER tables (alongside `resolver`/
 # `message`/`status`), channel-B1AbNBrp.js:100 is a nostr received-message counter, and
@@ -51,7 +51,7 @@ _CHANNEL_SECRET_KEYS = ("token", "botToken", "appToken", "userToken", "authToken
 # OpenClaw config key, just not a channel one: plugin-sdk/config-schema.d.ts:214 declares
 # it (`auth.profiles`/`order`/`cooldowns`) as a top-level property of `OpenClawSchema`
 # (:7). None of that bears on the question here, which is only ever "is it a property of a
-# CHANNEL schema" — and there the answer is measured, not inferred: the channels type
+# CHANNEL schema" - and there the answer is measured, not inferred: the channels type
 # (types.channels-DFK41guV.d.ts) and bundled-channel-config-schema-CkfMA6sO.js each carry
 # ZERO bare `auth` properties. The `allowedSenders` half above is exact as written; the
 # defect was the unchecked quantifier on the `auth` half, not the method.
@@ -66,31 +66,31 @@ _CHANNEL_SECRET_KEYS = ("token", "botToken", "appToken", "userToken", "authToken
 #     unrecognised channel id is an issue too (:4285-4295); only a clean result is written
 #     back (:4317). Any issue makes config validation return `ok: false` (:4351-4356).
 #   * **23 of the 25 reject unknown keys.** 22 carry `additionalProperties: false`
-#     outright; `twitch` is strict too, via an `anyOf` of two branches that each set it —
+#     outright; `twitch` is strict too, via an `anyOf` of two branches that each set it -
 #     so a scan of top-level `additionalProperties` alone mislabels it as permissive.
 #     Exactly **two** are permissive: `synology-chat` (`.passthrough()`,
-#     channel-Dxc6BJwP.js:269-272, registered :1169) and `qqbot` — both surface as
+#     channel-Dxc6BJwP.js:269-272, registered :1169) and `qqbot` - both surface as
 #     `additionalProperties: {}`.
 #   * `auth` and `allowedSenders` are properties of NO channel schema. Checked directly:
 #     feishu, line, zalo, matrix, irc and tlon all REJECT them; only synology-chat and
 #     qqbot accept.
 #
 # So the ORIGINAL "OpenClaw would reject this" was broadly right, and the correction that
-# replaced it — "only EIGHT channels ship a bundled schema, the other seven pass through
-# unvalidated" — was wrong. Its root cause is worth recording so a fourth revision does not
+# replaced it - "only EIGHT channels ship a bundled schema, the other seven pass through
+# unvalidated" - was wrong. Its root cause is worth recording so a fourth revision does not
 # repeat it: `bundled-channel-config-schema-CkfMA6sO.js:1689` really does export exactly
 # eight schemas (MSTeams, Telegram, IMessage, GoogleChat, Signal, Discord, Slack,
 # WhatsApp), and that export list was mistaken for the whole registry. It is one bundle
 # file among several; the other 17 channels' schemas live elsewhere (synology-chat's in
 # channel-Dxc6BJwP.js) and are collected into the metadata above. The top-level
 # `ChannelsSchema` IS `.passthrough()` (zod-schema.channels-config-ORTHga0n.js:68-76), but
-# that only means the zod layer defers — the per-channel pass at :4297 is what judges keys.
+# that only means the zod layer defers - the per-channel pass at :4297 is what judges keys.
 #
 # NONE OF THIS IS LOAD-BEARING. The `core` term below keeps `auth`/`allowedSenders` for a
 # reason that does not reference the schema at all: clawseccheck hashes the config file AS
 # WRITTEN, and `core`'s correctness condition is equality with the value HEAD stored, not
-# groundedness. A config file may hold keys OpenClaw would refuse — a typo, a stale key
-# from an older version, a half-finished hand edit — and this is a static file scanner, not
+# groundedness. A config file may hold keys OpenClaw would refuse - a typo, a stale key
+# from an older version, a half-finished hand edit - and this is a static file scanner, not
 # the OpenClaw loader, so it must reproduce the old hash on whatever bytes are on disk.
 # Dropping the terms from a formula advertised as frozen is what made an untouched config
 # alert on the upgrade run; that is true whether or not the config would ever load.
@@ -102,7 +102,7 @@ def _channel_scope_nodes(c: dict, depth: int = 3) -> "list[tuple[str, dict]]":
 
     Bounded rather than an unbounded rglob-style walk: a bound is what keeps a
     hand-written or hostile config from turning a signature computation into unbounded
-    work. The bound is 3 because 3 is what the dist's own schema actually needs — it was 2,
+    work. The bound is 3 because 3 is what the dist's own schema actually needs - it was 2,
     which silently truncated every per-account scope (`accounts` is the FIRST level, not a
     free one). In bundled-channel-config-schema-CkfMA6sO.js the deepest chains are:
 
@@ -114,22 +114,22 @@ def _channel_scope_nodes(c: dict, depth: int = 3) -> "list[tuple[str, dict]]":
     `TelegramTopicSchema` :155 carries `requireMention` :156, `groupPolicy` :159 and
     `allowFrom` :162. At depth 2 a scope change inside a per-account group/topic was
     invisible to the drift signature. No bundled chain goes deeper: walking every
-    `record(string(), …)` container edge in that file from each exported *ConfigSchema*
+    `record(string(), ...)` container edge in that file from each exported *ConfigSchema*
     gives a maximum of 3, and the leaf schemas hold no further containers. (Not every chain
-    is `accounts`-rooted — MSTeams has no `accounts` and runs `teams` :1402 -> `channels`
+    is `accounts`-rooted - MSTeams has no `accounts` and runs `teams` :1402 -> `channels`
     :1329, depth 2.)
 
     HONEST LIMIT: that enumeration bounds the channels with a BUNDLED schema. Two of the 25
-    registered channels are permissive (`synology-chat`, `qqbot` — see
+    registered channels are permissive (`synology-chat`, `qqbot` - see
     `_CHANNEL_ALLOWLIST_KEYS`), and a plugin channel can register a schema of its own, so
-    something could in principle nest deeper and would still be truncated here — which is
+    something could in principle nest deeper and would still be truncated here - which is
     the other half of why the bound stays rather than becoming an unbounded walk.
 
     NOT EXERCISED BY ANY CONFIG IN THIS REPO. Raising the bound 2 -> 3 changes **zero** of
     the 371 fixture configs and zero of the 8 real configs: measured over every channel node
     in the corpus, the depth histogram is {0: 154, 1: 23, 2: 2} and nothing reaches 3 (the
     real config is telegram at depth 1). So the fixture sweeps and the real-config runs
-    establish that this change is INERT on real configs — they do NOT establish that it is
+    establish that this change is INERT on real configs - they do NOT establish that it is
     correct at depth 3, because they never reach it. Only the hand-built configs in
     `tests/test_b274_channel_signature.py` exercise the third level. Do not cite a corpus
     sweep as evidence for depth-3 behaviour.
@@ -172,12 +172,12 @@ def _channel_sig(ctx) -> dict:
     they are kept HERE and excluded from every new key. An earlier revision dropped them
     because neither is a real channel-config field; that reasoning is irrelevant, not
     merely wrong. ``core`` must reproduce the hash HEAD stored for the bytes on disk, and
-    this is a static file scanner — whether OpenClaw would load such a config decides
+    this is a static file scanner - whether OpenClaw would load such a config decides
     nothing (``_CHANNEL_ALLOWLIST_KEYS`` records what the dist actually does, and why that
     question is not load-bearing). Dropping the terms turned ``core`` into a silent
     behaviour change that alerted on an untouched config.
 
-    Freezing costs nothing in sensitivity relative to HEAD — it restores HEAD exactly. It
+    Freezing costs nothing in sensitivity relative to HEAD - it restores HEAD exactly. It
     declines to make ``core`` *more* sensitive, which is what "frozen" means; the grounded
     coverage lives in ``allow``/``secrets``/``gating`` below, and those cost the documented
     one run of silence on the upgrade itself (see ``diff()``).
@@ -187,22 +187,22 @@ def _channel_sig(ctx) -> dict:
     ``open``    B-283: openness with Feishu's ``groupPolicy: "allowall"`` alias normalized
                 to the ``"open"`` it actually resolves to, via the shared
                 ``_norm_group_policy``. Scoped to Feishu because Feishu is the only channel
-                schema in the dist that accepts the literal at all — do not read this as
+                schema in the dist that accepts the literal at all - do not read this as
                 "allowall is a general alias", it is not, and pinning that false fact on
                 telegram was a mistake caught in B-283's own C-135 pass.
     ``ctxvis``  B-283: effective ``contextVisibility`` per the dist's documented
                 account -> channel -> defaults -> "all" precedence
                 (context-visibility-BVlvSMUZ.js:8-13). Previously absent at every scope,
-                so a flip to ``"all"`` — the setting that exposes untrusted message content
-                to the agent — was invisible to ``--monitor`` as well as to B26.
+                so a flip to ``"all"`` - the setting that exposes untrusted message content
+                to the agent - was invisible to ``--monitor`` as well as to B26.
     ``allow``   B-274: allowlist MEMBERSHIP, not presence. The old ``has_auth`` was a
                 ``bool(...)`` over field presence, so ``allowFrom: ["owner"]`` ->
                 ``["owner", "attacker"]``, and even ``-> ["*"]``, hashed identically.
                 Wildcard-ness is recorded explicitly because ``[]`` and ``["*"]`` were
                 treated as OPPOSITES (``[]`` alerted, ``["*"]`` was silent) despite
                 ``allowWhenEmpty`` making them semantically the same.
-    ``secrets`` B-274: a digest per credential field. A swapped ``botToken`` — the whole
-                channel taken over — was silent, because the package read ``token`` and
+    ``secrets`` B-274: a digest per credential field. A swapped ``botToken`` - the whole
+                channel taken over - was silent, because the package read ``token`` and
                 Telegram's field is ``botToken``.
     ``gating``  B-274: ``requireMention`` at the channel node and at every per-scope entry.
                 Turning it off in ``groups["*"]`` lets any group message address the agent
@@ -213,7 +213,7 @@ def _channel_sig(ctx) -> dict:
     NARROWS, does not close: this is a drift signature, not a policy verdict. It reports
     that an allowlist/credential/mention-gate MOVED; it does not judge whether the new
     value is safe. A config that was already wide open on day one still produces no alert,
-    because nothing changed — that is the checks layer's job, not the monitor's.
+    because nothing changed - that is the checks layer's job, not the monitor's.
     """
     from ..checks import _norm_group_policy  # noqa: PLC0415
 
@@ -229,7 +229,7 @@ def _channel_sig(ctx) -> dict:
             # C-135/FIX4: shorthand form (e.g. "telegram": true) enables/disables the
             # channel without a per-channel policy object to inspect. Record it as
             # PRESENT with an unknown-but-tracked shape rather than skipping it
-            # outright — the old `continue` here made the channel invisible to drift
+            # outright - the old `continue` here made the channel invisible to drift
             # detection, so switching between shorthand and an explicit {} object (or
             # vice versa) made a still-live channel read as "no longer configured" in
             # diff()'s removal branch. Keying on repr(c) still detects a genuine
@@ -248,7 +248,7 @@ def _channel_sig(ctx) -> dict:
         # `_CHANNEL_ALLOWLIST_KEYS`); they stay ONLY so this hash reproduces the stored
         # pre-upgrade value bit-for-bit. Removing them made an untouched config carrying
         # such a key alert on the first post-upgrade run. Do not "clean up" this list: its
-        # correctness condition is equality with the old value, not groundedness — and not
+        # correctness condition is equality with the old value, not groundedness - and not
         # whether OpenClaw would load the file either, since this reads bytes on disk, not
         # a loaded config. New signal goes in a new sub-key, where the grounded field set
         # applies.
@@ -312,7 +312,7 @@ def _channel_sig(ctx) -> dict:
                     # REDUNDANT AND DELIBERATELY KEPT. Two facts, both measured, so nobody
                     # re-derives them:
                     #
-                    # (1) It cannot change an outcome — but it DOES change the hash, and
+                    # (1) It cannot change an outcome - but it DOES change the hash, and
                     #     the invariant is the VERDICT, not the digest. `allow_unmentioned`
                     #     is a pure function of `mentions`, which is already in the same
                     #     hash: it is true exactly when some non-empty path recorded False.
@@ -320,7 +320,7 @@ def _channel_sig(ctx) -> dict:
                     #     zero where the same tuple yielded a different flag. Because the
                     #     flag is DETERMINED by `mentions`, two configs agree on the
                     #     prefixed hash exactly when they agree on the unprefixed one, so
-                    #     `diff()` — which only ever tests two hashes for equality —
+                    #     `diff()` - which only ever tests two hashes for equality -
                     #     reaches the same verdict either way. It does NOT follow that the
                     #     digest is unchanged: dropping the `unmentioned=` prefix rehashes
                     #     every channel, e.g. telegram with
@@ -331,7 +331,7 @@ def _channel_sig(ctx) -> dict:
                     #     zero mismatches).
                     # (2) It is NOT the dist's predicate, though an earlier comment here
                     #     said it was. The dist's `allowUnmentionedGroups`
-                    #     (channel-DP5CkqKN.js:1131) is telegram-only and one level deep —
+                    #     (channel-DP5CkqKN.js:1131) is telegram-only and one level deep -
                     #     `channels.telegram[.accounts[X]].groups`, `*` or a named group.
                     #     This flag fires for ANY scope (topics, dms, direct) on ANY
                     #     channel, i.e. a strict superset.
@@ -355,8 +355,8 @@ def _channel_entry(value) -> dict:
     Pre-B-274 snapshots stored ONE hash string per channel; that value was the historical
     ``dm=/grp=/auth=`` formula, which ``_channel_sig`` still emits verbatim under ``core``,
     so a legacy string is faithfully readable as ``{"core": <string>}``. Anything else
-    (a corrupted or hand-edited dimension) degrades to ``{}`` — no shared keys, hence no
-    comparison and no alert — the same self-healing direction as ``_dim``/``_both_dims``.
+    (a corrupted or hand-edited dimension) degrades to ``{}`` - no shared keys, hence no
+    comparison and no alert - the same self-healing direction as ``_dim``/``_both_dims``.
     """
     if isinstance(value, str):
         return {"core": value}
@@ -382,12 +382,12 @@ def _diff_channels(pair, partial, alerts, compare_config) -> None:
         return
     pch, cch = pair
     for name in sorted(cch.keys() - pch.keys()):
-        alerts.append(("HIGH", f"NEW channel '{name}' appeared since last check — "
+        alerts.append(("HIGH", f"NEW channel '{name}' appeared since last check \u2014 "
                        "confirm its auth / allowlist before it can reach the agent."))
     for name in sorted(pch.keys() & cch.keys()):
         # B-274: compare only the sub-signatures present on BOTH sides. A key this
         # release added has no predecessor in an older snapshot, and comparing it
-        # against nothing would report drift on a config nobody touched — every
+        # against nothing would report drift on a config nobody touched - every
         # user, every channel, on the first post-upgrade run. Gating on
         # `shared` costs exactly one run of sensitivity for a newly added key and
         # buys silence on the upgrade itself. `_channel_entry` normalizes the
@@ -397,12 +397,12 @@ def _diff_channels(pair, partial, alerts, compare_config) -> None:
         if pe.keys() ^ ce.keys():
             partial.add(name)
         if any(pe[k] != ce[k] for k in shared):
-            alerts.append(("MEDIUM", f"Channel '{name}' openness/auth changed — review it."))
+            alerts.append(("MEDIUM", f"Channel '{name}' openness/auth changed \u2014 review it."))
     # B-275: the channels dimension had no removal branch either. INFO, not HIGH:
     # de-configuring a channel SHRINKS the agent's reachable surface, and users retire
-    # channels routinely — worth recording in the journal, not worth alarming over.
+    # channels routinely - worth recording in the journal, not worth alarming over.
     # (Unreachable on a blind run: this whole block is behind compare_config, so a
     # collapsed config can never present itself as a channel deletion.)
     for name in sorted(pch.keys() - cch.keys()):
-        alerts.append(("INFO", f"Channel '{name}' is no longer configured — the agent "
+        alerts.append(("INFO", f"Channel '{name}' is no longer configured \u2014 the agent "
                        "can no longer be reached over it."))

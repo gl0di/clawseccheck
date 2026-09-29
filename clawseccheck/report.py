@@ -1,6 +1,6 @@
 """Render plain-language report + shareable card.
 
-The shareable card NEVER lists findings — only grade + score + trifecta ratio
+The shareable card NEVER lists findings - only grade + score + trifecta ratio
 (tiered disclosure: sharing your card must not publish your vulns to attackers).
 
 Every renderer supports `ascii_only=True` for terminals that can't encode the
@@ -235,7 +235,7 @@ def _evidence_bullets(
     **What counts as hidden is the CAP, and only the cap.** An entry dropped by
     `already_shown` is not hidden: that filter exists because many checks build `detail`
     by joining their own evidence (the B-078 note at the call site), so the reader has
-    already read those words on the "why" line — counting them would promise information
+    already read those words on the "why" line - counting them would promise information
     the reader could go looking for and not find. An entry whose sanitized form is empty
     carried nothing renderable, so it is not promised either. This is deliberately
     narrower than the "count what was printed" first sketch of the fix: that number would
@@ -287,7 +287,7 @@ def _sanitize_tree(value):
 
 # A finding suppressed via .clawseccheckignore is normally dropped from the score, the
 # badge and SARIF. But a suppressed CRITICAL/HIGH FAIL (which caps the score) or a
-# sensitive check id must stay VISIBLE on every surface — one ignore line could otherwise
+# sensitive check id must stay VISIBLE on every surface - one ignore line could otherwise
 # flip an F into an A silently. This predicate is the single source of that rule, shared by
 # the human report, the SVG badge and the SARIF renderer (B-163).
 SENSITIVE_SUPPRESSED_IDS = frozenset({"B1", "B2", "B13", "B20"})
@@ -295,14 +295,14 @@ SENSITIVE_SUPPRESSED_IDS = frozenset({"B1", "B2", "B13", "B20"})
 
 # B-557: what ClawSecCheck's own installed copy IS and IS NOT excluded from.
 #
-# The old wording — "excluded from its own audit" — was unqualified, and a single `--full`
+# The old wording - "excluded from its own audit" - was unqualified, and a single `--full`
 # report both printed it and FAILED B181 against `clawseccheck` by name, listing the files
 # that no longer matched the recorded install hashes. The exclusion is real but narrow: the
 # collector's content-verified identity oracle (`collector._is_own_source`) drops our copy
 # from skill DISCOVERY and so from `check_installed_skills`' content ring. Every check that
 # enumerates skills from somewhere else still sees it.
 #
-# The set behind the second clause is measured, not assumed — four lock states over a home
+# The set behind the second clause is measured, not assumed - four lock states over a home
 # carrying a genuine own install, listing every check whose finding names it:
 #
 #     lock state                          names our own copy
@@ -338,12 +338,12 @@ def self_excluded_line(names) -> str:
     (indent, icon, HTML tags); this owns the sentence.
 
     SANITIZES. Skill names are directory names, so an attacker picks them, and the
-    identity oracle recognises our own copy by package LAYOUT rather than by name — a
+    identity oracle recognises our own copy by package LAYOUT rather than by name - a
     hostile name is self-excluded like any other and lands in this sentence. The C-135
     pass on this change proved that concrete: `render_html` escaped with `html.escape`
     alone, which neutralises `&<>"'` and nothing else, so ESC/BEL, U+200B and U+202E
     reached the page. U+202E in particular reverses the rendered order of the disclosure
-    itself — display-spoofing the very note this exists to add. Doing it here rather than
+    itself - display-spoofing the very note this exists to add. Doing it here rather than
     at each site is the point of having one composer: a surface cannot forget.
 
     Returns "" for an empty roster, so a caller can emit it unconditionally without
@@ -365,13 +365,13 @@ def surfaced_despite_suppression(f: Finding) -> bool:
     )
 
 
-# I3: per-severity FAIL counts a CI consumer can assert on without a grade — the
+# I3: per-severity FAIL counts a CI consumer can assert on without a grade - the
 # numbers `--fail-on SEVERITY` (cli.py) gates against. "Unsuppressed" is the IDENTICAL
 # predicate cli.py's --exit-code / --fail-on already use, via surfaced_despite_suppression
-# above — a suppressed finding counts only when it must still be surfaced (a score-capping
+# above - a suppressed finding counts only when it must still be surfaced (a score-capping
 # CRITICAL/HIGH FAIL, or a SENSITIVE_SUPPRESSED_IDS check). One function, shared by
-# render_json below and sarif.py's run-level properties, so the two machine surfaces —
-# and a human re-deriving the same tally from the printed findings list — can never disagree.
+# render_json below and sarif.py's run-level properties, so the two machine surfaces -
+# and a human re-deriving the same tally from the printed findings list - can never disagree.
 # Lowercase keys match this codebase's existing status/severity JSON casing convention
 # (see coverage.py's `{"pass": N, "warn": N, "fail": N, "unknown": N}`). All four keys are
 # always present, zero-filled, so a consumer never has to guess a missing key means zero.
@@ -393,21 +393,21 @@ def undetermined_summary(findings: list[Finding]) -> dict:
     """How much of the scored catalog reached no verdict, split by WHY.
 
     C-429. `scoring.compute` drops UNKNOWN from the denominator, so an undetermined check
-    neither earns nor costs a point — on a real config that was 31 of 101 scored checks,
+    neither earns nor costs a point - on a real config that was 31 of 101 scored checks,
     19 of them HIGH. The filed proposal was to cap the grade on that density. Measured
     first, and it is the wrong instrument:
 
     * a real run has no grade to cap. Through the CLI, the default run reports "no grade
-      yet — 3 of 5 layers did not run" and `--full` still misses 2 of 5, so E-077 already
+      yet - 3 of 5 layers did not run" and `--full` still misses 2 of 5, so E-077 already
       withholds the letter, which says more than any cap would;
-    * 12 of those 31 are `not_applicable` — a surface positively confirmed ABSENT, not one
+    * 12 of those 31 are `not_applicable` - a surface positively confirmed ABSENT, not one
       we failed to see. Capping on the raw count would charge a user for not enabling a
       feature;
     * none were `engine_degraded`; that case already has `DEGRADED_CHECK_CAP`.
 
     So this reports rather than penalises, and reports the distinction the cap would have
-    needed: `no_signal` is the honest "blind" population — undetermined, not confirmed
-    absent, not a broken check — and it is the only one worth gating on.
+    needed: `no_signal` is the honest "blind" population - undetermined, not confirmed
+    absent, not a broken check - and it is the only one worth gating on.
     """
     scored = [f for f in findings if getattr(f, "scored", True)]
     unknown = [f for f in scored if f.status == UNKNOWN]
@@ -434,10 +434,10 @@ def undetermined_summary(findings: list[Finding]) -> dict:
 def _runtime_cap_phrase(reason: str | None) -> str:
     """Plain-English rendering of scoring's stable ``runtime_cap_reason`` label.
 
-    ``_runtime_cap_signal`` (scoring.py) returns a stable, testable label — the
+    ``_runtime_cap_signal`` (scoring.py) returns a stable, testable label - the
     trajaudit-indicator match is the only remaining cap source (a same-line
     exfil_evidence cap was tried and RETRACTED, C-135 8th round, Dave's 2026-07-22
-    ruling — see logscan.py's retraction note) — and its docstring is explicit that
+    ruling - see logscan.py's retraction note) - and its docstring is explicit that
     the label is never rendered as-is: report.py owns the owner-facing sentence.
     Dumping the raw label would leak an internal check id into owner prose, which
     `test_brand_consistency` forbids. An unrecognized label degrades to a neutral
@@ -453,7 +453,7 @@ def _live_injection_cap_phrase(reason: str | None) -> str:
     """Plain-English rendering of scoring's stable ``live_injection_cap_reason`` label.
 
     `reason` is a bounded, allow-listed ``"tool:id[; tool:id ...]"`` string (see
-    `pipeline.live_test_cap_signal`) — already safe to embed directly (no free text ever
+    `pipeline.live_test_cap_signal`) - already safe to embed directly (no free text ever
     reaches it), but this still routes through the same "report.py owns the sentence,
     the scoring layer only names a stable label" discipline as `_runtime_cap_phrase`.
     """
@@ -466,7 +466,7 @@ def _behavioral_cap_phrase(reason: str | None) -> str:
     """Plain-English rendering of scoring's stable ``behavioral_cap_reason`` label.
 
     `reason` is one of `scoring._BEHAVIORAL_LABELS`'s values (e.g. "T1 behavioral
-    trifecta"), joined with "; " when more than one detector fired — already safe to
+    trifecta"), joined with "; " when more than one detector fired - already safe to
     embed directly (bounded, never free text), but this still routes through the same
     "report.py owns the sentence, the scoring layer only names a stable label"
     discipline as `_runtime_cap_phrase`/`_live_injection_cap_phrase`.
@@ -476,20 +476,20 @@ def _behavioral_cap_phrase(reason: str | None) -> str:
     return f"a behavioral detector fired ({reason})"
 
 
-# ── Cap-reason cascade (B-380) ──────────────────────────────────────────
+# -- Cap-reason cascade (B-380) ------------------------------------------
 #
-# Six independent cap-only signals can each tighten a score below its raw value —
+# Six independent cap-only signals can each tighten a score below its raw value -
 # severity FAILs, a blind/unreadable config, a degraded (crashed/timed-out) check, a
 # corroborated runtime signal, a submitted VULNERABLE live-injection-test verdict, and
 # a fired behavioral detector. `compute()` (scoring.py) documents every one of the
 # `*_capped` fields as True ONLY when that specific signal actually bound (tightened
-# the score further than whatever had already applied) — `cap_severity` has the
+# the score further than whatever had already applied) - `cap_severity` has the
 # identical property by construction (only set when its own cap loop actually reduced
-# the score) — so more than one of these six can be True on the SAME ScoreResult.
+# the score) - so more than one of these six can be True on the SAME ScoreResult.
 #
 # `render_report` and `render_html` used to each hand-roll their own five-branch
 # "elif" ladder plus a private "_extra = []; if X: _extra.append(...)" block per
-# branch — ten near-identical copies of the same six-signal enumeration, hand-edited
+# branch - ten near-identical copies of the same six-signal enumeration, hand-edited
 # separately every time a new signal type was added. That duplication is what let two
 # real defects ship green: `render_html`'s runtime branch tested `score.capped or
 # _rt_capped` (true for ANY cap, not just a runtime one, so a behavioral-only cap fell
@@ -501,7 +501,7 @@ def _behavioral_cap_phrase(reason: str | None) -> str:
 # `_cap_cascade()` is the ONE place that decides which signal leads (the primary
 # reason) and which other active signals are named as "also" mentions. A new signal
 # type is added to the table exactly once and both renderers pick it up automatically
-# — the defect class above becomes structurally impossible to reintroduce.
+# - the defect class above becomes structurally impossible to reintroduce.
 _CAP_LIVE = "live"
 _CAP_CONFIG_BLIND = "config_blind"
 _CAP_DEGRADED = "degraded"
@@ -512,13 +512,13 @@ _CAP_BEHAVIORAL = "behavioral"
 # Display-priority order (highest first): also the order in which `_cap_cascade` picks
 # the PRIMARY reason, and the order "also" mentions are listed in. This mirrors the
 # existing, deliberate priority render_report already used (live > config-blind >
-# degraded > severity > runtime > behavioral) — a direct, positive proof of a
+# degraded > severity > runtime > behavioral) - a direct, positive proof of a
 # successful attack outranks "cannot rule out a CRITICAL condition", which outranks an
 # actual open FAIL, which outranks a corroborated-but-indirect runtime signal, which
 # outranks the weakest/most-heuristic behavioral layer.
 #
 # Each entry's `phrase(score)` returns the unescaped English "also ..." wording for
-# that signal — never called unless the signal is active (`_cap_signal_active` below).
+# that signal - never called unless the signal is active (`_cap_signal_active` below).
 # Deliberately free of "(capped from N - ...)" framing and of HTML escaping: both
 # renderers reuse the identical English, and `render_html` applies `esc()` itself so
 # nothing here duplicates that decision.
@@ -538,7 +538,7 @@ _CAP_SIGNAL_TABLE = (
 def _cap_signal_active(score: ScoreResult) -> dict:
     """Which of the six cap-only signals actually bound the score on *score*.
 
-    `getattr(score, name, default)` throughout — never direct attribute access —
+    `getattr(score, name, default)` throughout - never direct attribute access -
     because some tests build minimal duck-typed ScoreResult stand-ins that predate the
     newer fields; this is the same tolerance every call site already established
     individually (see the B-306/F-154/F-155 comments this replaces).
@@ -557,12 +557,12 @@ def _cap_cascade(score: ScoreResult) -> tuple[str | None, list[str]]:
     """Decide the primary cap-reason signal and the co-occurring "also" phrases.
 
     Returns ``(primary, extra_phrases)``: *primary* is one of the six ``_CAP_*``
-    names — the highest-priority ACTIVE signal, per `_CAP_SIGNAL_TABLE`'s order — or
+    names - the highest-priority ACTIVE signal, per `_CAP_SIGNAL_TABLE`'s order - or
     ``None`` when nothing capped the score at all. *extra_phrases* is every OTHER
     active signal's "also ..." wording, already in priority order and ready to
     ``", ".join(...)``.
 
-    This is the ONE place that makes the primary/co-occurring decision — both
+    This is the ONE place that makes the primary/co-occurring decision - both
     `render_report` and `render_html` call it instead of maintaining their own copy of
     the same six-signal priority ladder (B-380).
     """
@@ -580,7 +580,7 @@ def _cap_cascade(score: ScoreResult) -> tuple[str | None, list[str]]:
 
 
 def _cap_also_clause(extras: list[str]) -> str:
-    """``"; also X, Y"`` (or ``""``) — the join both renderers used to hand-roll."""
+    """``"; also X, Y"`` (or ``""``) - the join both renderers used to hand-roll."""
     return f"; also {', '.join(extras)}" if extras else ""
 
 
@@ -601,33 +601,33 @@ _UNGRADED_CAP_TAIL = "it would have capped the grade, but this run has no grade 
 
 # CLAWSECCHECK headline-id-leak: `_urgent_headline`'s all-clear sentence, named so
 # `render_dashboard` can tell "a real FAIL/WARN backed this headline" apart from
-# "nothing was open" without re-running `_urgent_headline`'s own FAIL/WARN waterfall —
+# "nothing was open" without re-running `_urgent_headline`'s own FAIL/WARN waterfall -
 # see render_dashboard's `_id_hint_line` use for why that distinction matters.
 _NOTHING_URGENT_SENTENCE = "Nothing urgent found in what was checked."
 _UNGRADED_CAP_TAIL_SENTENCE = _UNGRADED_CAP_TAIL[0].upper() + _UNGRADED_CAP_TAIL[1:]
 
 # B-761: the text report renders the "Highest-risk paths" attack-chain synthesis, the
-# capability graph, and the "What you can do next" recommendations — `render_html`
+# capability graph, and the "What you can do next" recommendations - `render_html`
 # and `pdf.render_pdf` do not, and used to say nothing about the gap. Both exports
 # stayed "findings-only view, honestly disclosed" (option 2 of the task's two
 # acceptable outcomes) rather than growing renderers for a graph and a chain synthesis
-# in HTML/PDF markup, so this one sentence is the single source of that disclosure —
+# in HTML/PDF markup, so this one sentence is the single source of that disclosure -
 # shared verbatim so it cannot drift into two different claims about what a shared
 # report contains, the same discipline `_UNGRADED_CAP_TAIL` above already follows.
 _EXPORT_FINDINGS_ONLY_NOTE = (
     'This is a findings-only view. It does not include the "Highest-risk paths" '
     'attack-chain synthesis, the capability graph, or the "What you can do next" '
-    "recommendations — see the full text report (the default output, or --save) for those."
+    "recommendations \u2014 see the full text report (the default output, or --save) for those."
 )
 
 # B-761 follow-up: the richer `--dashboard --full --pdf` document DOES carry a "RISK
-# chains" section (render_pdf's own `risk` parameter, wired at that call site) —
+# chains" section (render_pdf's own `risk` parameter, wired at that call site) -
 # printing the 3-item note above on THAT document would itself be the false claim
 # this task exists to stop. This is the 2-item remainder for exactly that path: what
 # is still missing when the attack-chain synthesis is not.
 _EXPORT_RISK_INCLUDED_NOTE = (
     'This PDF does not include the capability graph or the "What you can do next" '
-    "recommendations — see the full text report (the default output, or --save) for those."
+    "recommendations \u2014 see the full text report (the default output, or --save) for those."
 )
 
 
@@ -636,17 +636,17 @@ def _cap_primary_reason_text(primary: str, score: ScoreResult, *,
     """The middle clause of "(capped from N - <this>...)" for whichever signal
     `_cap_cascade` chose as primary.
 
-    Unescaped English — `render_html` applies `esc()` around the result;
+    Unescaped English - `render_html` applies `esc()` around the result;
     `render_report` uses it as-is. `audited_path` is only ever meaningful for the
     config-blind "absent" case (`render_report` passes the resolved would-be config
     path when it has one; `render_html`'s signature has no ctx/path available, so it
-    always passes ``None`` and the HTML text stays path-free — matching the pre-
+    always passes ``None`` and the HTML text stays path-free - matching the pre-
     existing per-renderer wording exactly).
     """
     if primary == _CAP_LIVE:
         return _live_injection_cap_phrase(getattr(score, "live_injection_cap_reason", None))
     if primary == _CAP_CONFIG_BLIND:
-        # B-363: word the two config-blind states distinctly — "absent" (nothing to
+        # B-363: word the two config-blind states distinctly - "absent" (nothing to
         # read at all) is strictly less information than "unreadable" (present but
         # broken), so it must never read as if a file was found and opened.
         if getattr(score, "config_blind_reason", None) == "absent":
@@ -676,65 +676,65 @@ def _cap_primary_reason_text(primary: str, score: ScoreResult, *,
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
 # Within a family: FAIL/WARN (the actionable items) before PASS/UNKNOWN (context).
 # B-751: the traversal status sits with FAIL here, not below PASS. It was absent, and
-# `_worst_of_statuses` drops anything absent — so a rolled-up home whose ONLY bad status
+# `_worst_of_statuses` drops anything absent - so a rolled-up home whose ONLY bad status
 # was a confirmed zip-slip returned "PASS" (measured). Same table is the sort key at
 # :3237/:3435/:3666/:3787/:4816, where a missing key scored 9 and sorted it under PASS.
 _STATUS_ORDER = {FAIL: 0, "SKILL_ARCHIVE_PATH_TRAVERSAL": 0, WARN: 1, UNKNOWN: 2, PASS: 3}
-#: B-755: 'flagged, or never assessed' — the population an inventory row calls out. Built
+#: B-755: 'flagged, or never assessed' - the population an inventory row calls out. Built
 #: from the shared set so a new FAIL-weight status joins it without an edit here.
 _FLAGGED_OR_UNSEEN = ACTIONABLE_STATUSES | {UNKNOWN}
 
-_ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔", "SKILL_ARCHIVE_PATH_TRAVERSAL": "⛔"}
+_ICON = {FAIL: "\u26d4", WARN: "\u26a0\ufe0f", PASS: "\u2705", UNKNOWN: "\u2754", "SKILL_ARCHIVE_PATH_TRAVERSAL": "\u26d4"}
 _ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]", "SKILL_ARCHIVE_PATH_TRAVERSAL": "[X]"}
 
 # Severity dot for FAIL/WARN finding lines (Component-2 mock, B-077): the glyph carries
-# SEVERITY, not status — FAIL-before-WARN ordering plus the breakdown counts already carry
-# status. PASS/UNKNOWN roster lines keep the ✅/❔ status icons above. --ascii folds the
+# SEVERITY, not status - FAIL-before-WARN ordering plus the breakdown counts already carry
+# status. PASS/UNKNOWN roster lines keep the ok/? status icons above. --ascii folds the
 # dot+word to a single [SEVERITY] bracket (pure ASCII, no info loss).
-_SEV_GLYPH = {CRITICAL: "🔴", HIGH: "🟠", MEDIUM: "🟡", LOW: "⚪"}
+_SEV_GLYPH = {CRITICAL: "\U0001f534", HIGH: "\U0001f7e0", MEDIUM: "\U0001f7e1", LOW: "\u26aa"}
 _SEV_COLOR = {CRITICAL: "red", HIGH: "red", MEDIUM: "yellow", LOW: "grey"}
 
-# Subject → emoji for the chat Dashboard paste ONLY (SKILL.md Step-3 table). The CLI
+# Subject -> emoji for the chat Dashboard paste ONLY (SKILL.md Step-3 table). The CLI
 # report / HTML / PDF subject headers deliberately stay emoji-less (design-system.md
 # Layer-2 decision); only the chat card carries the emoji.
 _SUBJECT_EMOJI = {
-    "openclaw": "⚙️", "host": "🖥️", "agents": "🤖", "skills": "🧩",
-    "mcp": "🔌", "plugins": "📦", "channels": "📡", "logs": "📝",
+    "openclaw": "\u2699\ufe0f", "host": "\U0001f5a5\ufe0f", "agents": "\U0001f916", "skills": "\U0001f9e9",
+    "mcp": "\U0001f50c", "plugins": "\U0001f4e6", "channels": "\U0001f4e1", "logs": "\U0001f4dd",
 }
 
 
 def _sev_token(severity: str, *, ascii_only: bool = False, color: bool = False) -> str:
-    """`🔴 CRITICAL` severity marker for an issue line; `[CRITICAL]` under --ascii.
+    """`red-circle CRITICAL` severity marker for an issue line; `[CRITICAL]` under --ascii.
 
-    Colour (opt-in) paints the severity word only — the emoji dot is already coloured —
+    Colour (opt-in) paints the severity word only - the emoji dot is already coloured -
     and stays purely additive (strip_ansi(colored) == plain).
     """
     word = paint(severity, _SEV_COLOR.get(severity, "grey"), "bold",
                  enabled=True) if color else severity
     if ascii_only:
         return f"[{word}]"
-    return f"{_SEV_GLYPH.get(severity, '⚪')} {word}"
+    return f"{_SEV_GLYPH.get(severity, chr(0x26aa))} {word}"
 
-# ── ANSI colour palette (opt-in; see ansi.py) ────────────────────────────────
-# Grade → colour for the header grade letter + score-bar fill now comes from
-# brand.GRADE_ANSI, called directly at each site — this module used to define its own
+# -- ANSI colour palette (opt-in; see ansi.py) --------------------------------
+# Grade -> colour for the header grade letter + score-bar fill now comes from
+# brand.GRADE_ANSI, called directly at each site - this module used to define its own
 # ANSI-name dict here, but a SECOND, later `_GRADE_COLOR = {...}` (hex, for the HTML
-# badge — still present further down) silently shadowed it at the module level, so
+# badge - still present further down) silently shadowed it at the module level, so
 # the grade lookup always resolved the hex dict and the terminal grade letter/score-
 # bar fill rendered bold with no actual colour. Two distinctly-named dicts
 # (brand.GRADE_ANSI vs. brand.GRADE_HEX) makes that class of bug structurally
 # impossible instead of relying on file-order discipline.
-# Status → colour for finding icons / coverage states.
-#: B-755: the FAIL-weight entry was present and GREY — the colour this table reserves for
+# Status -> colour for finding icons / coverage states.
+#: B-755: the FAIL-weight entry was present and GREY - the colour this table reserves for
 #: "could not be assessed". Present-but-wrong is the failure mode a presence check cannot
 #: see, so the FAIL-weight rows are now DERIVED from the shared set rather than typed.
 _STATUS_COLOR = {
     **fail_weight_rows("red"), WARN: "yellow", PASS: "green", UNKNOWN: "grey",
 }
 
-# ── Assurance honesty (R11) ───────────────────────────────────────────────────
+# -- Assurance honesty (R11) ---------------------------------------------------
 # Two human-report-only signals over assessment_coverage() (scoring.py). Neither
-# ever touches score/grade/findings or the machine outputs (JSON/card/SVG/SARIF) —
+# ever touches score/grade/findings or the machine outputs (JSON/card/SVG/SARIF) -
 # both are advisory text only. Thresholds grounded against the real-fixture band
 # (assessable 0.39-0.52; see fixtures/clean_b13_doc_example ~0.39, home_safe ~0.52).
 LOW_COVERAGE_FRAC = 0.35  # below this fraction assessable -> loud caution line (C-166)
@@ -742,17 +742,17 @@ DRIFT_UNKNOWN_FRAC = 0.85  # at/above this fraction UNKNOWN -> hedged staleness 
 DRIFT_MIN_SCORED = 20  # minimum scored_total before the staleness nudge is even considered
 
 
-# ── C-423: rendering a run that carries no grade ─────────────────────────────
+# -- C-423: rendering a run that carries no grade -----------------------------
 # `score.graded is False` means no renderer may print a letter or a number for this
 # run (layers.py / scoring.ScoreResult docstrings). These three helpers are the ONLY
 # place that builds the replacement text, so every surface below stays byte-identical
 # to every other one instead of six near-copies drifting apart.
 
 def _missing_layers_sentence(score: ScoreResult) -> str:
-    """``"No grade yet — N of 5 layers did not run: <layer> (<why>), ..."`` — see
+    """``"No grade yet - N of 5 layers did not run: <layer> (<why>), ..."`` - see
     `layers.describe_layer` for the exact per-layer wording.
 
-    Layer/status wording comes from `layers.describe_layer` ONLY — this function
+    Layer/status wording comes from `layers.describe_layer` ONLY - this function
     counts and joins, it never phrases a layer or a status itself (a second, competing
     wording table anywhere in this module is exactly what this docstring stays vague
     about, on purpose).
@@ -760,47 +760,47 @@ def _missing_layers_sentence(score: ScoreResult) -> str:
     missing = getattr(score, "missing_layers", ())
     described = ", ".join(describe_layer(layer, status) for layer, status in missing)
     return (
-        f"No grade yet — {len(missing)} of {len(LAYER_ORDER)} layers did not run: "
+        f"No grade yet \u2014 {len(missing)} of {len(LAYER_ORDER)} layers did not run: "
         f"{described}."
     )
 
 
 def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
-    """``"Most urgent: CRITICAL — Lethal trifecta reachable"``, or the all-clear
+    """``"Most urgent: CRITICAL - Lethal trifecta reachable"``, or the all-clear
     variant when there is no unsuppressed FAIL.
 
     An ungraded run has still told the reader the most important thing it knows, so
-    this leads every ungraded surface — it must read as a result, never as an error.
+    this leads every ungraded surface - it must read as a result, never as an error.
     Selection mirrors `render_report`'s own `issues` sort (severity first), narrowed to
     FAIL only (a WARN is not "urgent" in the sense this headline means), with the
-    finding id used ONLY as the tie-break for determinism — never printed. This
+    finding id used ONLY as the tie-break for determinism - never printed. This
     headline states the risk, not which check number found it (design-system.md
     Layer 0: "never internal codes"); on `render_report` the id remains one scroll
     away regardless of grading, in the by-subject inventory index
     (`render_subject_inventory`, the one surface deliberately allowed to carry ids,
-    gated on `ctx` being available rather than on `score.graded`) — see this
+    gated on `ctx` being available rather than on `score.graded`) - see this
     function's call sites for the two callers where that is not true.
 
     CLAWSECCHECK headline-id-leak: `render_html` never carried a check id anywhere
-    (graded or ungraded — unaffected, pre-existing). `render_dashboard` is the real
+    (graded or ungraded - unaffected, pre-existing). `render_dashboard` is the real
     gap this headline being id-free opens: its own Skills/MCP detail blocks only ever
     carry an id when `ctx` is available AND the relevant roster is non-empty (B-506
     kept the card off `by_id` otherwise, a budget-bound call this fix does not
     reopen), so a plain `--dashboard` reader holding only this headline had no path
     to a check id at all. `render_dashboard` compensates with its own follow-up
-    line (`_NOTHING_URGENT_SENTENCE` marks the one case — genuinely nothing open —
+    line (`_NOTHING_URGENT_SENTENCE` marks the one case - genuinely nothing open -
     where that line is skipped) pointing at the full report for the id, rather than
     printing one here.
 
-    B-758 item #1: a RISK-* dangerous-capability CHAIN carries its own severity —
-    a property of the combination, not summed from its legs — and this report renders
+    B-758 item #1: a RISK-* dangerous-capability CHAIN carries its own severity -
+    a property of the combination, not summed from its legs - and this report renders
     a separate "Highest-risk paths"/"RISK Chains" section for those (`render_risk_paths`
     / `_risk_chain_lines`, fed from the same `risk` list). Before this fix this headline
     never looked at that list, so a reader could see "Most urgent: HIGH" here and a
     CRITICAL chain two sections later, with neither block acknowledging the other.
     `risk` is optional and compared on equal footing with findings by severity, with a
-    finding winning an exact-severity tie (so a caller that passes no `risk` — e.g.
-    `render_html`, which does not render a risk-chain section — reproduces the prior
+    finding winning an exact-severity tie (so a caller that passes no `risk` - e.g.
+    `render_html`, which does not render a risk-chain section - reproduces the prior
     behavior byte-for-byte). A chosen chain is always worded "dangerous capability
     chain" so the one-line headline never pretends to be the chain's own multi-step
     explanation and instead points at the fuller section for it.
@@ -825,14 +825,14 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
 
     kind, top = _pick(fail_candidates, live_risk)
     if kind == "risk":
-        return (f"Most urgent: {top.severity} — dangerous capability chain: "
+        return (f"Most urgent: {top.severity} \u2014 dangerous capability chain: "
                 f"{_sanitize(top.title)}")
     if kind == "finding":
-        return f"Most urgent: {top.severity} — {_sanitize(top.title)}"
+        return f"Most urgent: {top.severity} \u2014 {_sanitize(top.title)}"
 
     # C-426: the all-clear must not out-run the evidence. This headline leads every
     # ungraded surface, including the card, whose own "Most urgent" section lists
-    # WARN findings by severity — so on a config-blind run "Nothing urgent found"
+    # WARN findings by severity - so on a config-blind run "Nothing urgent found"
     # printed directly above a listed CRITICAL WARN, one contradicting the other.
     # Before C-426 the contradiction could not appear: the grade occupied this slot
     # and the headline was never rendered.
@@ -845,28 +845,28 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     warns = [f for f in live if f.status == WARN]
     kind, top = _pick(warns, live_risk)
     if kind == "risk":
-        return (f"Nothing failed outright — most serious open item: {top.severity} — "
+        return (f"Nothing failed outright \u2014 most serious open item: {top.severity} \u2014 "
                 f"dangerous capability chain: {_sanitize(top.title)}")
     if kind == "finding":
         if top.id == "A1":
             # B-877: A1's catalog severity is CRITICAL regardless of which of its four
             # WARN hedges fired (thin-surface / resolved-default / substituted-dm /
-            # sensitive-data undetermined — checks/_config.py::check_trifecta), so
-            # printing "{severity} — {title}" verbatim here read as an ACTIVE CRITICAL
+            # sensitive-data undetermined - checks/_config.py::check_trifecta), so
+            # printing "{severity} - {title}" verbatim here read as an ACTIVE CRITICAL
             # Lethal Trifecta directly above the finding's own "Active legs 0/3: none"
-            # row — the opposite of what a WARN (vs. FAIL) means. A1 WARN never states a
+            # row - the opposite of what a WARN (vs. FAIL) means. A1 WARN never states a
             # confirmed leg count (the same reading `_trifecta_ratio` already gives it:
-            # "?/3", never a number, on anything but PASS/FAIL) — it means the legs
+            # "?/3", never a number, on anything but PASS/FAIL) - it means the legs
             # could not be fully determined this run. Reworded for this id only; A1's
             # status/severity/score and the B-803/C-426 pins are untouched (Dave,
             # 2026-09-20). A real 3-leg FAIL is a different status and never reaches this
-            # branch, so its unqualified "Most urgent: CRITICAL — …" wording is unaffected.
+            # branch, so its unqualified "Most urgent: CRITICAL - ..." wording is unaffected.
             return (
-                "Nothing failed outright — most serious open item: could not determine "
+                "Nothing failed outright \u2014 most serious open item: could not determine "
                 f"whether the {_sanitize(top.title)} is active this run "
-                f"(catalog severity {top.severity} if it is — see the full report for why)"
+                f"(catalog severity {top.severity} if it is \u2014 see the full report for why)"
             )
-        return (f"Nothing failed outright — most serious open item: {top.severity} — "
+        return (f"Nothing failed outright \u2014 most serious open item: {top.severity} \u2014 "
                 f"{_sanitize(top.title)}")
     return _NOTHING_URGENT_SENTENCE
 
@@ -875,7 +875,7 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
     """``"Not fully covered: 79 of 132 log sinks not read; 3 plugin manifests
     unscanned."``, or ``""`` when `score.not_checked` is empty.
 
-    Appears next to the grade on BOTH graded and ungraded runs — the honesty
+    Appears next to the grade on BOTH graded and ungraded runs - the honesty
     invariant that a layer which ran without exhausting its subject must say so even
     when the run still earns a letter.
     """
@@ -885,18 +885,18 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
     return "Not fully covered: " + "; ".join(not_checked)
 
 
-# ── B-776: sandboxed + config-blind ──────────────────────────────────────────
+# -- B-776: sandboxed + config-blind ------------------------------------------
 # A chat/dashboard session driven from INSIDE an OpenClaw sandbox has no access to the
-# host's real ~/.openclaw at all — `$HOME` under `sandbox_exec` IS the sandbox workspace,
-# so a bare run finds no config there, the same shape as B-306's "absent" case — but the
+# host's real ~/.openclaw at all - `$HOME` under `sandbox_exec` IS the sandbox workspace,
+# so a bare run finds no config there, the same shape as B-306's "absent" case - but the
 # remedy is different. "Point --home at the directory that holds your config" is not an
 # instruction a container with no view of the host filesystem can act on; it needs to say
 # plainly that this session is sandboxed instead. One sentence, reused by both the
 # terminal report and the card, same discipline the B-600 follow-up established for the
-# cap phrases above — so the two surfaces cannot drift into disagreeing about why.
+# cap phrases above - so the two surfaces cannot drift into disagreeing about why.
 _SANDBOX_BLIND_SENTENCE = (
     "this chat session runs inside a sandboxed container, with no access to your host's "
-    "real OpenClaw setup — no config exists to find from here, and pointing --home "
+    "real OpenClaw setup \u2014 no config exists to find from here, and pointing --home "
     "elsewhere on this filesystem will not change that. Run this from your agent's main "
     "session (not a sandboxed one) or a host terminal to audit your real config."
 )
@@ -907,8 +907,8 @@ def _sandbox_config_blind(ctx, score) -> bool:
     misdirected/missing ``--home``.
 
     Requires BOTH ``ctx.sandboxed`` (collector.py's own-process signal, itself already
-    gated on "no config resolvable this run" — see ``collector._sandbox_signal``) and the
-    "absent" reason — a present-but-corrupt config found INSIDE a container is a fixable
+    gated on "no config resolvable this run" - see ``collector._sandbox_signal``) and the
+    "absent" reason - a present-but-corrupt config found INSIDE a container is a fixable
     file, not a sandbox-visibility problem, and keeps the ordinary B-306 "unreadable"
     wording.
     """
@@ -918,7 +918,7 @@ def _sandbox_config_blind(ctx, score) -> bool:
     )
 
 
-# ── B-520: the scope note describes THIS run, not a static assumption ────────
+# -- B-520: the scope note describes THIS run, not a static assumption --------
 # The paragraph under the score used to assert, unconditionally, three things the run
 # "does not" do. On the maintainer's own `--full` run all three were false: the live
 # self-test harnesses, the MCP vet, the skill/plugin sweeps and the behavioural replay
@@ -930,24 +930,24 @@ def _sandbox_config_blind(ctx, score) -> bool:
 # happened, so this reads it rather than re-deriving coverage from flags, from `ctx`,
 # or from what some later phase is about to print.
 #
-# B-537 rewrote the second half of that fix. Its first half — an absence must be PROVEN
-# before it is asserted — was right and survives. Its second half inverted the same
+# B-537 rewrote the second half of that fix. Its first half - an absence must be PROVEN
+# before it is asserted - was right and survives. Its second half inverted the same
 # error: it read "this layer is not listed as missing" as proof of coverage and printed
-# `· covered by this run — a deep vet of the skills … on disk.` seven lines under its own
-# `Not fully covered: third-party-skill-0 … -5`. The ledger cannot support that claim, in
+# `· covered by this run - a deep vet of the skills ... on disk.` seven lines under its own
+# `Not fully covered: third-party-skill-0 ... -5`. The ledger cannot support that claim, in
 # three independent ways:
 #
 #   1. A COMPLETE ledger is indistinguishable from NO ledger. C-422 pins that
 #      `compute(findings, ledger=<complete>)` returns a `ScoreResult` EQUAL to
-#      `compute(findings)`, so on the flagship case — every layer `ran`, Grade A — the
+#      `compute(findings)`, so on the flagship case - every layer `ran`, Grade A - the
 #      old `have_ledger = bool(missing_layers)` read False and all three clauses printed
-#      "not covered by the static audit … run it", naming the modes that had just run.
+#      "not covered by the static audit ... run it", naming the modes that had just run.
 #   2. `status == "ran"` is not "covered its subject". `pipeline.to_ledger` sets
 #      `installed_sweep=ran` from the two sweep phases' STATUS and never their
 #      `PhaseResult.complete`, so a sweep that hit its cap on six skills is `ran`.
 #   3. Even the partial-coverage evidence that DOES exist is not attributable.
-#      `ScoreResult.not_checked` is `LayerLedger.not_checked` — the flat, de-duplicated
-#      UNION across all five layers — so this renderer cannot tell whose surface was
+#      `ScoreResult.not_checked` is `LayerLedger.not_checked` - the flat, de-duplicated
+#      UNION across all five layers - so this renderer cannot tell whose surface was
 #      left unread.
 #
 # Fixing 2 or 3 properly means changing `pipeline.py` / `scoring.py` (a per-layer
@@ -955,63 +955,63 @@ def _sandbox_config_blind(ctx, score) -> bool:
 # only sound move is the conservative half: state the reached/not-reached facts that
 # ARE evidenced and assert coverage nowhere. Three forms, one per evidence state:
 #
-#   proven not-ran  →  `· not covered — {subject}: {describe_layer}. {advice}.`
-#   proven ran      →  `· ran, coverage not accounted for — {subject}: {ran_note}. {ran_advice}.`
-#   nothing known   →  `· not covered by the static audit — {subject}. {advice}.`
+#   proven not-ran  ->  `· not covered - {subject}: {describe_layer}. {advice}.`
+#   proven ran      ->  `· ran, coverage not accounted for - {subject}: {ran_note}. {ran_advice}.`
+#   nothing known   ->  `· not covered by the static audit - {subject}. {advice}.`
 #
 # `{advice}` is unconditional on the "not covered" / "no ledger" branches, and a test
 # sweeps every ledger shape to keep it that way there. That is this change's answer to
 # "what does it swallow" on those two branches: nothing. It can only ever add a
-# redundant "run it", never withhold one — which matters because both release FP gates
+# redundant "run it", never withhold one - which matters because both release FP gates
 # are structurally blind to a lost signal (`fleet_fp_gate.py` compares FAIL sets on an
 # unchanged config; `monitor_fp_gate.py` diffs two snapshots of an unchanged home).
 #
 # B-547: the RAN branch drops the mode name in exactly ONE clause, and it is a narrower
-# carve-out than "any layer whose `ran` is derived from the advised mode itself" —
+# carve-out than "any layer whose `ran` is derived from the advised mode itself" -
 # that broader rule was tried and retracted, because it is unsound for one of the two
 # candidate layers. Both LAYER_INSTALLED_SWEEP and LAYER_LIVE_BEHAVIOUR derive `ran`
 # from the advised mode having been invoked (sweep RAN iff both sweep phases RAN,
 # pipeline.py:~1368; live RAN iff a structurally-valid `--judged-bundle` entry arrived,
 # pipeline.py:~1401), but only LIVE_BEHAVIOUR's `ran` is the COMPLETE signal this
 # renderer will ever have for it: `pipeline.to_ledger` never attaches `not_reached` to
-# that layer at all (`LayerState(status=live_status)`, no other kwarg — structurally,
+# that layer at all (`LayerState(status=live_status)`, no other kwarg - structurally,
 # not just in today's fixtures). LAYER_INSTALLED_SWEEP is different: its `ran` genuinely
 # can coexist with real, per-item incompleteness (`sweep_not_reached`, the union of both
-# phases' `not_scanned`), and `ScoreResult.not_checked` — the only coverage signal this
-# module receives — is a FLAT, DE-DUPLICATED UNION across all five layers (see the
+# phases' `not_scanned`), and `ScoreResult.not_checked` - the only coverage signal this
+# module receives - is a FLAT, DE-DUPLICATED UNION across all five layers (see the
 # "three independent ways" note above), never attributable back to one layer. So a
 # sweep that ran with SIX skills silently unscanned is bit-for-bit identical, at this
-# renderer's inputs, to a sweep that ran and scanned everything — proven by
+# renderer's inputs, to a sweep that ran and scanned everything - proven by
 # `tests/test_b520_scope_note_ledger.py::test_a_truncated_but_warn_sweep_is_not_vouched_for_either`,
 # which pins that a sweep can be genuinely incomplete while carrying NO disclosure to
 # tell the two cases apart. Suppressing the mode name there would be over-suppression:
 # it would silently drop the one piece of actionable advice a user with a truncated
 # sweep still needs, and no test or FP gate in the tree can see that loss (same
 # structural blindness noted above). Closing that gap soundly needs a per-layer
-# completeness signal plumbed through `pipeline.py`/`scoring.py` — out of scope here
-# (those files are not owned by this change) — so LAYER_INSTALLED_SWEEP's `ran_advice`
+# completeness signal plumbed through `pipeline.py`/`scoring.py` - out of scope here
+# (those files are not owned by this change) - so LAYER_INSTALLED_SWEEP's `ran_advice`
 # stays byte-identical to `advice`, same as LAYER_LOGS_TRAJECTORIES and for a related
 # reason: `ran` not proving "covered" is the whole point of this branch's wording
 # ("coverage not accounted for"), and only LIVE_BEHAVIOUR's architecture rules that
 # residual out entirely.
 #
 # Each entry is `(layer, subject, advice, ran_note, ran_advice)`:
-#   * `subject` — what the reader loses when this layer does not run, in their words.
-#   * `advice` — what actually makes it count. Unconditional on "not covered"/"no
+#   * `subject` - what the reader loses when this layer does not run, in their words.
+#   * `advice` - what actually makes it count. Unconditional on "not covered"/"no
 #     ledger"; see `ran_advice` for the one clause where it is not repeated verbatim.
-#   * `ran_note` — what `status == "ran"` actually proves for THIS layer, and no more.
+#   * `ran_note` - what `status == "ran"` actually proves for THIS layer, and no more.
 #     The log/trajectory entry is the strongest case for why this must be per-layer and
 #     must not say "covered": pipeline.py marks that layer as having run on EVERY audit
 #     (B164 scans log sinks in the base run), so `ran` there does not even mean the
-#     replay modes were invoked, let alone that they exhausted the sinks — B164's own
+#     replay modes were invoked, let alone that they exhausted the sinks - B164's own
 #     disclosure is "N log/transcript sink(s) not scanned".
-#   * `ran_advice` — used ONLY in the `ran` branch. Never empty: a layer that ran still
+#   * `ran_advice` - used ONLY in the `ran` branch. Never empty: a layer that ran still
 #     owes the reader something. Byte-identical to `advice` for LAYER_INSTALLED_SWEEP
 #     and LAYER_LOGS_TRAJECTORIES (see above); only LAYER_LIVE_BEHAVIOUR's drops the
 #     mode name, because only that layer's `ran` can never coexist with a hidden gap.
 #
 #     B-558: which is also why that entry may not assert the NEGATIVE. It used to read
-#     "...; the replay analyses did not", and on a `--full` run that is simply false —
+#     "...; the replay analyses did not", and on a `--full` run that is simply false -
 #     the same report prints T1/T2/T3/B191 verdicts a few hundred lines below. `ran` no
 #     more proves the replay was skipped than it proves it happened; the note states the
 #     one thing this layer's status does prove and stops. The reader loses nothing
@@ -1023,27 +1023,27 @@ def _sandbox_config_blind(ctx, score) -> bool:
 # installed-surface clause fires and its advice names `--vet-mcp` alongside `--full`.
 # The claim it makes (the on-disk sweep did not happen) is true; only the flag list is
 # broader than that run needed. The vet is not a pipeline phase and so has no ledger
-# layer of its own — inferring one from `--fast` inside a renderer is precisely the
+# layer of its own - inferring one from `--fast` inside a renderer is precisely the
 # re-derivation that produced this bug.
 #
 # B-558 (Dave's call, 2026-09-03) adds a FOURTH evidence state on top of the three
 # above: a layer that ran AND is known to have exhausted its subject. Until
 # `LayerState.coverage` existed there was no way to tell that from "ran, and nobody
-# asked", so this renderer had to treat every `ran` as the weaker of the two — which
+# asked", so this renderer had to treat every `ran` as the weaker of the two - which
 # is why a `--full` run printed "Run `--behavioral` ..." six hundred lines above the
 # BEHAVIOURAL REPLAY section that had already run. The clause now READS that signal
 # instead of assuming its weakest value:
 #
-#   ran + COVERAGE_COMPLETE  →  `· ran and covered — {subject}: {covered_note}.
+#   ran + COVERAGE_COMPLETE  ->  `· ran and covered - {subject}: {covered_note}.
 #                                {covered_advice}.`
-#   ran + COVERAGE_PARTIAL   →  `· ran, partly covered — {subject}: {ran_note}.
+#   ran + COVERAGE_PARTIAL   ->  `· ran, partly covered - {subject}: {ran_note}.
 #                                {ran_advice}.`
-#   ran + COVERAGE_UNKNOWN   →  today's text, byte for byte.
+#   ran + COVERAGE_UNKNOWN   ->  today's text, byte for byte.
 #
 # The PARTIAL form is not cosmetic and does not collapse into UNKNOWN: it is the only
 # place in this renderer where a coverage hole is ATTRIBUTED to the layer that owns it.
 # `ScoreResult.not_checked` prints the hole's own words a few lines up, but as a flat
-# union across all five layers (see the "three independent ways" note above) — the
+# union across all five layers (see the "three independent ways" note above) - the
 # reader could not tell which surface it belonged to.
 #
 # What the COMPLETE form may NOT do is drop the whole advice clause. Only one layer can
@@ -1059,7 +1059,7 @@ def _sandbox_config_blind(ctx, score) -> bool:
 # A clause with `covered_note=None` cannot render the COMPLETE form at all. Should a
 # future producer start emitting COVERAGE_COMPLETE for such a layer, the renderer falls
 # back to the UNKNOWN wording rather than raising or inventing a sentence: it then
-# UNDER-claims — the safe direction — and `tests/test_b558_scope_note_coverage.py` pins
+# UNDER-claims - the safe direction - and `tests/test_b558_scope_note_coverage.py` pins
 # that, so the failure is a missing sentence someone must write, never a false one.
 @dataclass(frozen=True)
 class _ScopeClause:
@@ -1068,19 +1068,19 @@ class _ScopeClause:
     #: What the reader loses when this layer does not run, in their words.
     subject: str
     #: What actually makes it count. Unconditional on the "not covered" / "no ledger"
-    #: branches — it can only ever add a redundant "run it", never withhold one.
+    #: branches - it can only ever add a redundant "run it", never withhold one.
     advice: str
     #: What ``status == "ran"`` proves for THIS layer, and no more.
     ran_note: str
     #: Used only on the `ran` branches. Never empty: a layer that ran still owes the
     #: reader something. Byte-identical to `advice` for every layer except
-    #: LAYER_LIVE_BEHAVIOUR — see the retraction recorded on the sweep entry below.
+    #: LAYER_LIVE_BEHAVIOUR - see the retraction recorded on the sweep entry below.
     ran_advice: str
     #: B-558: what a PROVEN-complete coverage signal lets this layer claim. ``None``
     #: for a layer that cannot reach COVERAGE_COMPLETE today; see above for what the
     #: renderer does if one ever does.
     covered_note: str | None = None
-    #: B-558: the advice that survives a proven-complete layer — never empty, and never
+    #: B-558: the advice that survives a proven-complete layer - never empty, and never
     #: the whole of `advice` unless every mode it names was genuinely exercised.
     covered_advice: str | None = None
 
@@ -1090,9 +1090,9 @@ _SCOPE_CLAUSES = (
      LAYER_LIVE_BEHAVIOUR,
      "live prompt-injection resistance",
      "Run `--canary` / `--redteam` / `--dryrun`, then submit the agent's own verdict"
-     " back with `--judged-bundle` — that submission is what makes this layer count",
+     " back with `--judged-bundle` \u2014 that submission is what makes this layer count",
      "a live-behaviour result was submitted with this run",
-     # B-547: this `ran` status IS that submission having arrived — naming the same
+     # B-547: this `ran` status IS that submission having arrived - naming the same
      # commands again tells the operator to redo what this run just did. What `ran`
      # does not prove is that every scenario TYPE was covered, only that one entry
      # was.
@@ -1105,7 +1105,7 @@ _SCOPE_CLAUSES = (
      "a deep vet of the skills, plugins and MCP servers sitting on disk",
      "Run `--full` (or `--vet-all` / `--vet-mcp` for one surface at a time)",
      "the on-disk sweep phases ran",
-     # B-547: byte-identical to `advice`, deliberately — the retracted half of the
+     # B-547: byte-identical to `advice`, deliberately - the retracted half of the
      # first attempt at this fix. This `ran` status IS the sweep phases having run,
      # same as LAYER_LIVE_BEHAVIOUR, but unlike that layer this one's `ran` can
      # coexist with a REAL, undisclosed gap: a phase can finish `ran` while
@@ -1116,7 +1116,7 @@ _SCOPE_CLAUSES = (
      # `tests/test_b520_scope_note_ledger.py::test_a_ran_sweep_that_skipped_skills_does_not_vouch_for_them`
      # and `::test_a_truncated_but_warn_sweep_is_not_vouched_for_either` both build a
      # `ran` sweep that genuinely still needs `--vet-mcp` re-run, one with the gap
-     # disclosed and one without any disclosure at all — the second is exactly the
+     # disclosed and one without any disclosure at all - the second is exactly the
      # case this renderer cannot tell apart from a truly complete sweep.
      "Run `--full` (or `--vet-all` / `--vet-mcp` for one surface at a time)",
     ),
@@ -1129,7 +1129,7 @@ _SCOPE_CLAUSES = (
      "this audit's own log/transcript scan ran",
      # B-547: byte-identical to `advice`, deliberately. `ran` here starts True on
      # EVERY base audit (B164 scans log sinks unconditionally) and proves nothing
-     # about whether `--behavioral`/`--analyze-trajectory` ran — suppressing this
+     # about whether `--behavioral`/`--analyze-trajectory` ran - suppressing this
      # would recreate the exact false-negative trap B-520/B-537's own tests pin
      # (`test_the_replay_modes_survive_the_layer_being_marked_as_having_run`).
      "Run `--behavioral` (proven-by-log verb-sequence trifecta / outcome anomaly /"
@@ -1141,7 +1141,7 @@ _SCOPE_CLAUSES = (
      covered_note=(
          "the replay analyses ran, and this run read every log sink it found"
      ),
-     # The `--behavioral` half is dropped — this run just did it. The
+     # The `--behavioral` half is dropped - this run just did it. The
      # `--analyze-trajectory` half stays, because that mode is a separate CLI branch
      # `--full` never invokes, so no coverage signal in this ledger speaks for it.
      covered_advice=(
@@ -1160,10 +1160,10 @@ def _log_hunt_found_no_sink(findings: list[Finding]) -> bool:
     mean different things: ``if not sinks:`` (no logging.file/cacheTrace/trajectory
     sidecar/session transcript/config-audit log/memory file/install backup found
     anywhere) versus ``if not any_scanned:`` (sinks were found but none were readable or
-    non-empty). Only the first is "there was nothing to scan" — the second still has
+    non-empty). Only the first is "there was nothing to scan" - the second still has
     sinks on disk the operator could fix permissions on, and telling them "nothing to
     scan" there would be false and would bury the more actionable defect (permissions).
-    So this matches on the no-sinks branch's own detail text, not on UNKNOWN alone — a
+    So this matches on the no-sinks branch's own detail text, not on UNKNOWN alone - a
     crashed check (``ERR:check_log_threat_hunt``) or a PASS/WARN B164 is neither case.
     """
     for f in findings:
@@ -1176,11 +1176,11 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
     """The scope note under the score, branched on the run's own layer ledger (B-520).
 
     Returns ``(lines, live_tested)``. ``live_tested`` is True only on POSITIVE ledger
-    evidence that the live-behaviour layer ran; the "Static audit —" paragraph below
+    evidence that the live-behaviour layer ran; the "Static audit -" paragraph below
     uses it so its closing "use the live tests above" cannot dangle on a run whose live
     tests are already done and printed. Note what that flag is and is not: a PRESENCE
     claim ("a live-behaviour result is on this page"), which ``ran`` does prove, never a
-    coverage claim — see :data:`_SCOPE_CLAUSES` for why the clauses themselves may not
+    coverage claim - see :data:`_SCOPE_CLAUSES` for why the clauses themselves may not
     make the latter.
 
     Ledger presence is read from BOTH ledger-derived fields, ``missing_layers`` and
@@ -1188,8 +1188,8 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
     a non-empty value of either PROVES a ledger reached this render, but two empty ones
     prove nothing, because a COMPLETE ledger and no ledger at all produce the same
     ``ScoreResult`` (C-422). Reading only ``missing_layers`` is what made the flagship
-    complete-ledger run — five layers ``ran``, Grade A — print "not covered by the
-    static audit … run it" for all three subjects. Widening the read fixes the real
+    complete-ledger run - five layers ``ran``, Grade A - print "not covered by the
+    static audit ... run it" for all three subjects. Widening the read fixes the real
     product case (``pipeline.to_ledger`` always attaches an attestation-freshness
     ``not_reached`` entry when the self-report layer ran, so a genuinely complete ledger
     carries a non-empty ``not_checked``) without ever inferring a ledger that is not
@@ -1203,7 +1203,7 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
     there. See :func:`_log_hunt_found_no_sink`.
     """
     lines = [
-        # C-423: found by reading a real ungraded run, not by a test — the tests assert
+        # C-423: found by reading a real ungraded run, not by a test - the tests assert
         # that no letter appears, which they cannot do for the coherence of the
         # paragraph under it. "This score" on a run that has no score is the same lie in
         # smaller type.
@@ -1220,7 +1220,7 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
     have_ledger = bool(getattr(score, "ledger_present", False))
     # B-558: per-layer coverage, the only ledger-derived field that is ATTRIBUTABLE to
     # one layer. `getattr` with an empty default for the same reason every ledger read
-    # above uses one — a hand-built `ScoreResult` from before this field existed must
+    # above uses one - a hand-built `ScoreResult` from before this field existed must
     # render exactly as it did, and an absent entry falls through to today's wording.
     coverage_of = dict(getattr(score, "layer_coverage", ()) or ())
     clauses: list[str] = []
@@ -1231,38 +1231,38 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
         status = missing.get(layer)
         if status is not None:
             # Proven absence. Layer/status wording comes from `layers.describe_layer`
-            # ONLY — this module never phrases a layer or a status itself
+            # ONLY - this module never phrases a layer or a status itself
             # (tests/test_c423_* fails the build on a competing table).
-            clauses.append(f" · not covered — {subject}: {describe_layer(layer, status)}."
+            clauses.append(f" · not covered \u2014 {subject}: {describe_layer(layer, status)}."
                            f" {advice}.")
         elif have_ledger and layer == LAYER_LOGS_TRAJECTORIES and _log_hunt_found_no_sink(findings):
             # B-715: the layer genuinely `ran` (B164 always runs in the base audit) and
             # what it found is that there is no log/transcript sink on this machine at
-            # all — a complete, actionable answer, not an accounting gap. Saying "ran,
+            # all - a complete, actionable answer, not an accounting gap. Saying "ran,
             # coverage not accounted for" here implied something existed that this run
             # did not fully account for, which is false; say plainly that there was
             # nothing to scan instead. This does NOT claim the agent is safe, and does
-            # NOT claim the layer failed — and the advice clause is unconditional, same
+            # NOT claim the layer failed - and the advice clause is unconditional, same
             # as every other branch, so the reader still learns how to get a corpus next
             # time (turn logging/the trajectory sidecar on).
-            clauses.append(f" · ran, nothing to scan — {subject}: no log or transcript"
+            clauses.append(f" · ran, nothing to scan \u2014 {subject}: no log or transcript"
                            f" sink exists on this machine. {advice}.")
         elif have_ledger and coverage == COVERAGE_COMPLETE and clause.covered_note:
             # B-558: proven the layer ran AND that it exhausted its subject. This is
             # the one branch allowed to stop advising a mode, and only the part of the
-            # advice this run's own evidence covers — see `_SCOPE_CLAUSES` above.
-            clauses.append(f" · ran and covered — {subject}: {clause.covered_note}."
+            # advice this run's own evidence covers - see `_SCOPE_CLAUSES` above.
+            clauses.append(f" · ran and covered \u2014 {subject}: {clause.covered_note}."
                            f" {clause.covered_advice}.")
         elif have_ledger and coverage == COVERAGE_PARTIAL:
             # B-558: proven the layer ran and proven it left something unread. The
             # hole's own words are printed by `_not_fully_covered_line` above, but as a
             # union across all five layers; this is where it gets attributed to the one
-            # that owns it. The advice is the full `ran_advice` — a partly-covered layer
+            # that owns it. The advice is the full `ran_advice` - a partly-covered layer
             # is exactly the case where re-running the mode is worth the reader's time.
-            clauses.append(f" · ran, partly covered — {subject}: {ran_note}."
+            clauses.append(f" · ran, partly covered \u2014 {subject}: {ran_note}."
                            f" {ran_advice}.")
         elif have_ledger:
-            # Proven the layer ran, and NOT proven that it covered its subject — the
+            # Proven the layer ran, and NOT proven that it covered its subject - the
             # ledger records a status, not a completeness. Saying "covered by this run"
             # here vouched for skills the sweep never opened.
             #
@@ -1273,21 +1273,21 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
             #
             # B-547: `ran_advice`, not `advice`. For LAYER_LIVE_BEHAVIOUR alone,
             # `advice` names the very mode whose invocation this `ran` status already
-            # reflects — telling the operator to go run it is telling them to redo
+            # reflects - telling the operator to go run it is telling them to redo
             # what this same invocation just did. LAYER_INSTALLED_SWEEP and
             # LAYER_LOGS_TRAJECTORIES both keep `advice` unconditional on `ran` too, by
-            # giving each a byte-identical `ran_advice` — see `_SCOPE_CLAUSES` above
+            # giving each a byte-identical `ran_advice` - see `_SCOPE_CLAUSES` above
             # for why the sweep layer is NOT included in the carve-out (its `ran` can
             # hide a real, undisclosed gap that this renderer cannot see; suppressing
             # there was tried and proven unsound by two tests in this file).
-            clauses.append(f" · ran, coverage not accounted for — {subject}: {ran_note}."
+            clauses.append(f" · ran, coverage not accounted for \u2014 {subject}: {ran_note}."
                            f" {ran_advice}.")
         else:
             # No ledger reached this render, so the only honest scope is the audit's
             # own: a purely static audit does not cover these by itself. Nothing is
-            # claimed about what the wider RUN may have done — that is precisely what
+            # claimed about what the wider RUN may have done - that is precisely what
             # cannot be known here.
-            clauses.append(f" · not covered by the static audit — {subject}. {advice}.")
+            clauses.append(f" · not covered by the static audit \u2014 {subject}. {advice}.")
     # "What this run reached", not "Coverage of the layers": the heading may not promise
     # an accounting the three lines under it deliberately refuse to give.
     lines.append("What this run reached beyond the static audit"
@@ -1301,15 +1301,15 @@ def _degraded_incomplete_clause(score: ScoreResult) -> str:
 
     The disclosure itself ("N checks could not reach a reliable verdict this run
     (crashed, timed out, or hit unreadable/corrupted input)") is true regardless of
-    whether the run earned a letter, and prints byte-identical in both branches — the
+    whether the run earned a letter, and prints byte-identical in both branches - the
     fact is never withheld to tidy up an ungraded screen. Only this clause moves,
-    because ``— this grade is incomplete.`` names a grade the ungraded run never
+    because ``- this grade is incomplete.`` names a grade the ungraded run never
     printed, leaving the reader to hunt for a letter that is not on the page.
 
     The replacement deliberately says *coverage*, not grade, and deliberately does NOT
     say "that is part of why this run has no grade": degraded checks do not cause
     ungraded status (missing layers do, `layers.LayerLedger.complete`), so that phrasing
-    would be a fabricated causal claim. It is also kept short — an ungraded run already
+    would be a fabricated causal claim. It is also kept short - an ungraded run already
     prints `_not_fully_covered_line` above it, and a third restatement of "coverage was
     incomplete" is noise.
 
@@ -1331,7 +1331,7 @@ _NOTE_HEADINGS = {
     "config_blind": "Because your settings file could not be read this run:",
     "record_damaged": "Because part of the saved record is damaged:",
     "inspection_capped": "Because there was more installed than can be inspected:",
-    # A full record exists on both sides and it says "unknown" — a different fact from
+    # A full record exists on both sides and it says "unknown" - a different fact from
     # having no record, and filing it under "nothing to compare against yet" told the user
     # their baseline was too old when it was complete.
     "undetermined": "Because the state of something could not be determined:",
@@ -1348,20 +1348,20 @@ def _not_compared_lines(notes, verbose: bool, ascii_only: bool) -> list:
     nothing wrong reads as a malfunction. Teaching a user to ignore the monitor would cost
     more than the silence this replaces.
 
-    Returns [] when nothing was skipped — a run that compared everything says nothing
+    Returns [] when nothing was skipped - a run that compared everything says nothing
     here, so the block's presence is itself information.
     """
     if not notes:
         return []
-    marker = "[i]" if ascii_only else "ℹ️"
+    marker = "[i]" if ascii_only else "\u2139\ufe0f"
     n = len(notes)
     subject = "1 thing" if n == 1 else f"{n} things"
     if not verbose:
-        return ["", f"{marker} {subject} could not be compared this run — "
+        return ["", f"{marker} {subject} could not be compared this run \u2014 "
                     f"re-run with --verbose to see what."]
     out = ["", f"{marker} {subject} could not be compared this run:"]
     from .monitor import NOTE_CATEGORY_ORDER  # noqa: PLC0415 (renderer -> engine, one way)
-    bullet = "-" if ascii_only else "•"
+    bullet = "-" if ascii_only else "\u2022"
     for category in NOTE_CATEGORY_ORDER:
         in_cat = [msg for cat, msg in notes if cat == category]
         if not in_cat:
@@ -1382,14 +1382,14 @@ def _fmt_weight(n: float) -> str:
     """Render a `ScoreResult.earned`/`.total` weight figure without a spurious `.0`.
 
     Both fields are sums of `WEIGHT` (all ints) with PASS/WARN credit added at full/half
-    value (B-505), so they land on a whole or half number — show `357` but `357.5`, never
+    value (B-505), so they land on a whole or half number - show `357` but `357.5`, never
     `357.0`.
     """
     return str(int(n)) if float(n).is_integer() else f"{n:.1f}"
 
 
 def _score_bar(score: int, grade: str, *, ascii_only: bool = False, color: bool = False) -> str:
-    """Render a 16-cell score bar. Unicode ``█░`` by default; ``[####----]`` under --ascii.
+    """Render a 16-cell score bar. Unicode ``<U+2588 U+2591>`` by default; ``[####----]`` under --ascii.
 
     The fill is proportional to score/100 (rounded, clamped to 0..16). When colour is on
     the filled run takes the grade colour and the empty run is dimmed; brackets stay plain.
@@ -1400,7 +1400,7 @@ def _score_bar(score: int, grade: str, *, ascii_only: bool = False, color: bool 
     if ascii_only:
         fill_s, empty_s, lb, rb = "#" * filled, "-" * empty, "[", "]"
     else:
-        fill_s, empty_s, lb, rb = "█" * filled, "░" * empty, "", ""
+        fill_s, empty_s, lb, rb = "\u2588" * filled, "\u2591" * empty, "", ""
     if color:
         fill_s = paint(fill_s, grade_ansi(grade), enabled=True)
         empty_s = paint(empty_s, "grey", enabled=True)
@@ -1408,7 +1408,7 @@ def _score_bar(score: int, grade: str, *, ascii_only: bool = False, color: bool 
 
 
 # Coverage-map state glyphs (unicode / ascii) + colour, keyed to coverage.py states.
-_COV_GLYPH = {"checked": "✅", "partial": "◑", "roadmap": "○", "not_checkable": "⊘"}
+_COV_GLYPH = {"checked": "\u2705", "partial": "\u25d1", "roadmap": "\u25cb", "not_checkable": "\u2298"}
 _COV_GLYPH_ASCII = {"checked": "[OK]", "partial": "[~]", "roadmap": "[ ]", "not_checkable": "[x]"}
 _COV_COLOR = {"checked": "green", "partial": "yellow", "roadmap": "grey", "not_checkable": "grey"}
 
@@ -1417,7 +1417,7 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
                     color: bool = False) -> list[str]:
     """Render the OpenClaw-surface coverage map for the terminal report.
 
-    Grounded strictly in ``coverage.coverage()`` output — the 13 config surfaces split into
+    Grounded strictly in ``coverage.coverage()`` output - the 13 config surfaces split into
     ``checked``/``partial``, plus the static, recon-grounded ``not_checkable`` names and any
     ``roadmap`` gaps. Nothing is invented: only states the engine actually produced appear.
     """
@@ -1426,7 +1426,7 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
     cov = _coverage(findings)
     summary = cov["summary"]
     glyph = _COV_GLYPH_ASCII if ascii_only else _COV_GLYPH
-    dot, rule = ("|", "--") if ascii_only else ("·", "—")
+    dot, rule = ("|", "--") if ascii_only else ("·", "\u2014")
 
     def _g(state: str) -> str:
         g = glyph[state]
@@ -1440,12 +1440,12 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
         f"(of {total} config surfaces)"
     )
     # B-504: the line above counts SURFACES, and a surface counts as "checked" once ONE
-    # of its checks returns a verdict — so on the maintainer's own config it printed
+    # of its checks returns a verdict - so on the maintainer's own config it printed
     # "partial/unknown 0" while 25 of 100 scored checks, 18 of them HIGH, had reached no
     # verdict at all. That is not a rounding difference: `scoring.compute` drops UNKNOWN
     # from the denominator, so an undetermined HIGH check is indistinguishable from a
     # PASS in the final number. The count that decides the grade is the one the reader
-    # needs, and it is stated on EVERY run — the pre-existing loud caution below only
+    # needs, and it is stated on EVERY run - the pre-existing loud caution below only
     # fires under 35%, which is precisely how a quarter of the catalog stayed invisible.
     _scored = [f for f in findings if getattr(f, "scored", True)]
     _undetermined = [f for f in _scored if f.status == UNKNOWN]
@@ -1489,17 +1489,17 @@ _asciify = asciify
 
 
 # B-756: the field set the per-finding digest covers, named as a constant rather than
-# left implicit in a dict literal so a test can pin it — a silent rename/drop is what
+# left implicit in a dict literal so a test can pin it - a silent rename/drop is what
 # hid the original defect. The version this replaced read `check_id`/`rule_id`/
 # `verdict`/`path`/`file`/`line`: NONE of those ever existed on `Finding`
 # (catalog.Finding's real fields are id/title/severity/status/detail/fix/framework/...),
 # so every one of those `getattr(f, name, default)` reads silently fell back to its
-# default — the receipt was effectively `sha256(severity + detail[:200])` per finding.
+# default - the receipt was effectively `sha256(severity + detail[:200])` per finding.
 # Measured: flipping every finding's status to PASS, or renaming every check id,
 # produced a byte-identical receipt. `id` binds the receipt to WHICH check; `status` to
-# its verdict (the entire point of tamper evidence — a receipt that cannot move when a
+# its verdict (the entire point of tamper evidence - a receipt that cannot move when a
 # FAIL becomes a PASS attests to nothing); `title`/`fix`/`detail` to the text a reader
-# actually sees. `path`/`line`/`verdict` are dropped rather than kept as dead reads —
+# actually sees. `path`/`line`/`verdict` are dropped rather than kept as dead reads -
 # `Finding` carries none of them, and a `getattr` default is exactly what let a dead
 # field hide here before.
 _SCAN_RECEIPT_FIELDS = ("id", "status", "severity", "title", "fix", "detail")
@@ -1509,18 +1509,18 @@ _SCAN_RECEIPT_TRUNCATE = 200
 def compute_scan_receipt(findings) -> str:
     """Compute a deterministic Merkle-style root hash over all findings.
 
-    Each finding is hashed individually over `_SCAN_RECEIPT_FIELDS` — every one a
+    Each finding is hashed individually over `_SCAN_RECEIPT_FIELDS` - every one a
     guaranteed-present `Finding` attribute, read with no `getattr` default (a missing
     attribute raises, caught by this function's own try/except below, rather than
     silently hashing an empty string the way the B-756 bug did). Hashes are sorted
-    then combined. Returns a 64-char hex string. Empty/None findings → sha256 of empty
+    then combined. Returns a 64-char hex string. Empty/None findings -> sha256 of empty
     bytes. Pure stdlib, local-only. Never raises.
 
     `status` is hashed through `catalog.display_status`, NOT the raw field (B-756
     follow-up, tests/test_b755_status_substitution_oracle.py): every FAIL-weight
-    status (`FAIL_WEIGHT_STATUSES` — today `FAIL` and `SKILL_ARCHIVE_PATH_TRAVERSAL`)
+    status (`FAIL_WEIGHT_STATUSES` - today `FAIL` and `SKILL_ARCHIVE_PATH_TRAVERSAL`)
     must produce the SAME receipt, because B-755's oracle requires every consumer to
-    treat them identically — a receipt that moved between two literal spellings of the
+    treat them identically - a receipt that moved between two literal spellings of the
     same verdict would itself be exactly the "discriminates between FAIL-weight
     statuses" defect that oracle exists to catch. Canonicalising still moves the
     receipt on any REAL verdict change (FAIL/SKILL_ARCHIVE_PATH_TRAVERSAL -> PASS,
@@ -1545,10 +1545,10 @@ def compute_scan_receipt(findings) -> str:
 
 
 def issue_population_line(issues: list[Finding]) -> str:
-    """What a severity tally counts: `"3 FAIL, 36 WARN — incl. 2 CRITICAL, 8 HIGH, …"`.
+    """What a severity tally counts: `"3 FAIL, 36 WARN - incl. 2 CRITICAL, 8 HIGH, ..."`.
 
     B-588: the PDF's and the HTML's page-one severity blocks rendered the severity half
-    alone — `CRITICAL 2 / HIGH 8 / MEDIUM 16 / LOW 13` — with nothing saying what those
+    alone - `CRITICAL 2 / HIGH 8 / MEDIUM 16 / LOW 13` - with nothing saying what those
     numbers count. A reader takes `CRITICAL 2` for two critical FAILURES. Measured on one
     real run, the `--json` split was `fail_counts_by_severity = {"critical": 1, "high":
     2}`: of the two CRITICALs one is a FAIL and the other a WARN, and of the eight HIGHs
@@ -1560,7 +1560,7 @@ def issue_population_line(issues: list[Finding]) -> str:
     when there is nothing to describe.
 
     A severity tally over FAIL+WARN is the right population to show, not FAILs only: a
-    CRITICAL WARN is exactly the finding page one most needs to carry — "we could not
+    CRITICAL WARN is exactly the finding page one most needs to carry - "we could not
     prove it, and if it is real it is the worst kind". The fix is to state the
     population, never to narrow it.
     """
@@ -1572,32 +1572,32 @@ def issue_population_line(issues: list[Finding]) -> str:
     for f in issues:
         counts[f.severity] = counts.get(f.severity, 0) + 1
     parts = [f"{counts[sev]} {sev}" for sev in (CRITICAL, HIGH, MEDIUM, LOW) if sev in counts]
-    return f"{n_fail} FAIL, {n_warn} WARN — incl. {', '.join(parts)}"
+    return f"{n_fail} FAIL, {n_warn} WARN \u2014 incl. {', '.join(parts)}"
 
 
 def _trifecta_ratio(findings: list[Finding]) -> str:
-    """The Lethal Trifecta sub-score, `"<n>/3"` — or `"?/3"` when it is not a count.
+    """The Lethal Trifecta sub-score, `"<n>/3"` - or `"?/3"` when it is not a count.
 
     B-587: `len(f.evidence)` is the number of legs PROVEN ACTIVE, which is a determined
     count only when A1 determined every leg. It has two states where it is a floor
     instead, and both used to render as a confident number:
 
-    * A1 `WARN` — the B-033 thin-surface guard. Runtime tools granted at session start
+    * A1 `WARN` - the B-033 thin-surface guard. Runtime tools granted at session start
       (`message`, `exec_command`, `web_*`) are never written to `openclaw.json`, so a leg
       that looks OFF can be live. A1's own detail says *"Cannot determine from config:
       untrusted input, outbound actions"* and its fix line ends *"or treat as possible
-      3/3"* — while this function said `0/3`, the best possible result.
+      3/3"* - while this function said `0/3`, the best possible result.
     * A blind config (absent or unparseable), which is the same state arrived at with
       even less evidence.
 
     Measured on shipped fixtures: `--home fixtures/bad_b103_ftp --card` printed
     `Lethal Trifecta: 0/3` on a perfectly READABLE config whose A1 could not determine
-    two of the three legs. So this is not a blind-config bug — the blind config is one
+    two of the three legs. So this is not a blind-config bug - the blind config is one
     instance of A1 not having determined the legs, which is what the ratio must key on.
 
-    The predicate is A1's STATUS, never its prose: `PASS` (every leg determined, ≤2
+    The predicate is A1's STATUS, never its prose: `PASS` (every leg determined, <=2
     active) and `FAIL` (three active, by construction) are the two states where the count
-    is a determination. Anything else is `"?/3"` — the same token this already returned
+    is a determination. Anything else is `"?/3"` - the same token this already returned
     when A1 did not run at all, so no consumer meets a new shape.
     """
     for f in findings:
@@ -1722,8 +1722,8 @@ def _capability_graph(ctx) -> dict:
     # `workspaceAccess` set still inherits `mode` from the default). Reading defaults-only
     # flips `can_write_memory` both ways versus a per-agent override on the entry that
     # resolves to the "main" agent id: over-reports write when that agent narrows to
-    # "none"/"ro" under a permissive default, and — the more dangerous direction, since
-    # this graph is what a reader uses to reason about reachability — under-reports when
+    # "none"/"ro" under a permissive default, and - the more dangerous direction, since
+    # this graph is what a reader uses to reason about reachability - under-reports when
     # the agent widens to "rw" under a restrictive or absent default.
     #
     # Agent-id resolution uses B351's ported, dist-verified normaliser via
@@ -1848,7 +1848,7 @@ def _capability_graph_lines(ctx) -> list[str]:
         return []
     lines = ["Capability graph", "Static config + attestation summary:"]
     for node in graph["nodes"]:
-        # label (MCP server / subagent name) and tool names are untrusted config data —
+        # label (MCP server / subagent name) and tool names are untrusted config data -
         # strip terminal-control sequences so they can't spoof/erase the terminal (B-164).
         label = _sanitize(str(node["label"]))
         tools = _sanitize(", ".join(node["tools"])) if node["tools"] else "none"
@@ -1874,11 +1874,11 @@ def _credential_surface_rel(path: Path, home_path: Path | None) -> str:
     """Render `path` as evidence text for the credential-surface map without ever
     disclosing an absolute filesystem path (username, mount points, directory
     layout). ClawHub security-audit finding (2026-07-27, v3.58.0, Intent-Code
-    Divergence): the previous inline closure fell back to `str(path)` — the
-    absolute path — whenever `relative_to()` failed. No call site in
+    Divergence): the previous inline closure fell back to `str(path)` - the
+    absolute path - whenever `relative_to()` failed. No call site in
     `_credential_surface_map` actually triggered that fallback (every candidate is
     built as `home_path / suffix`), but that was an invariant of the callers, not
-    one this helper enforced — a future credential-surface source could pass an
+    one this helper enforced - a future credential-surface source could pass an
     out-of-home path and leak silently. Falling back to `path.name` still tells
     the reader WHAT was found, never WHERE on disk."""
     if home_path is not None:
@@ -1893,10 +1893,10 @@ def _credential_surface_map(ctx) -> list[dict]:
     """Path-existence inventory of credential stores reachable from the agent home.
 
     Checks ONLY whether well-known credential-store paths exist on the filesystem
-    (Path.exists / Path.is_file / Path.is_dir) — never opens, reads, hashes, or
+    (Path.exists / Path.is_file / Path.is_dir) - never opens, reads, hashes, or
     transmits any file contents. Reports relative paths as evidence; no absolute
     paths leave this function. This is a supply-chain reachability check so the
-    audit can warn when a powerful agent runs next to accessible secrets — it is
+    audit can warn when a powerful agent runs next to accessible secrets - it is
     NOT a credential reader.
     """
     from .checks import SECRET_KEY_RE, _mcp_servers  # noqa: PLC0415
@@ -1919,7 +1919,7 @@ def _credential_surface_map(ctx) -> list[dict]:
 
     entries: list[dict] = []
 
-    # This read `os.environ` — the environment of the process RUNNING the audit, not
+    # This read `os.environ` - the environment of the process RUNNING the audit, not
     # anything belonging to the audited home. Two harms, and the first is the worse one.
     #
     # Correctness: a clean fixture home with no credentials anywhere reported
@@ -1934,11 +1934,11 @@ def _credential_surface_map(ctx) -> list[dict]:
     # variable before the run and finding it in the output.
     #
     # `collector.persistent_env_evidence` already refuses `os.environ` for exactly this
-    # reason and says so at length; this now reads the same persistent artifacts it does —
+    # reason and says so at length; this now reads the same persistent artifacts it does -
     # the systemd unit's Environment=/EnvironmentFile= and the global dotenv files, both of
     # which belong to the service being audited.
     # Every read of ctx in this function is a `getattr`, because it is called with partial
-    # and stub contexts — the blast-radius tests build a `_Ctx` carrying only `config`.
+    # and stub contexts - the blast-radius tests build a `_Ctx` carrying only `config`.
     # `collector.env_evidence_readable` reads its two fields directly, which is right for a
     # real Context and an AttributeError here, so the same two fields are read the way the
     # rest of this function reads everything. That helper stays the authority for real
@@ -1955,7 +1955,7 @@ def _credential_surface_map(ctx) -> list[dict]:
         env_evidence.append(_summarize(env_keys, "env secret-like keys in a persistent artifact"))
     elif not _env_artifact_readable:
         # "Nothing set" and "could not look" are different answers, and only the first
-        # justifies a quiet no. `reachable` stays keyed on the KEYS, never on this note —
+        # justifies a quiet no. `reachable` stays keyed on the KEYS, never on this note -
         # letting an inability to look raise the flag would re-manufacture the same
         # fabrication in a new shape.
         env_evidence.append("no env-bearing artifact could be read (systemd unit / dotenv)")
@@ -1987,7 +1987,7 @@ def _credential_surface_map(ctx) -> list[dict]:
             candidates.append(home_path / ws / ".env")
             candidates.append(home_path / ws / ".envrc")
         for cand in candidates:
-            if cand.is_file():  # path-existence check only — never reads contents
+            if cand.is_file():  # path-existence check only - never reads contents
                 dotenv_hits.append(_rel(cand))
     entries.append({"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_hits})
 
@@ -1999,7 +1999,7 @@ def _credential_surface_map(ctx) -> list[dict]:
             ".gnupg",
         ):
             p = home_path / rel
-            if p.exists():  # path-existence check only — never reads contents
+            if p.exists():  # path-existence check only - never reads contents
                 keychain_hits.append(_rel(p))
     entries.append({"class": "keychain", "reachable": bool(keychain_hits), "evidence": keychain_hits})
 
@@ -2024,7 +2024,7 @@ def _credential_surface_map(ctx) -> list[dict]:
     ssh_hits: list[str] = []
     if home_path is not None and home_path.exists():
         ssh_dir = home_path / ".ssh"
-        if ssh_dir.is_dir():  # path-existence check only — never reads key contents
+        if ssh_dir.is_dir():  # path-existence check only - never reads key contents
             ssh_hits.append(_rel(ssh_dir))
             for name in ("id_rsa", "id_ed25519", "config", "known_hosts"):
                 p = ssh_dir / name
@@ -2055,7 +2055,7 @@ def _log_threat_report_lines(findings: list[Finding]) -> list[str]:
     """B164 (F-124/E-044) quiet-hint surfacing.
 
     A WARN B164 finding already gets its full detail + up to 12 redacted-evidence
-    bullets via the generic FAIL/WARN render path above — nothing extra needed there.
+    bullets via the generic FAIL/WARN render path above - nothing extra needed there.
     But a PASS finding renders through ``_render_finding_compact`` (title only, no
     detail), so the base-rate-discipline "N low-confidence signal(s) suppressed" hint
     baked into B164's PASS detail text would otherwise never reach the human report.
@@ -2073,7 +2073,7 @@ def _credential_surface_lines(ctx) -> list[str]:
     map_ = _credential_surface_map(ctx)
     lines = ["Credential surface map (path-existence inventory)", "Static config + file-system inventory:"]
     for item in map_:
-        # evidence carries untrusted MCP server names / config-derived strings — strip
+        # evidence carries untrusted MCP server names / config-derived strings - strip
         # terminal-control sequences before they reach the terminal (B-164).
         evidence = _sanitize("; ".join(item["evidence"])) if item["evidence"] else "none"
         lines.append(f"- {item['class']}: reachable={_bool_word(item['reachable'])}; {evidence}")
@@ -2084,10 +2084,10 @@ def compute_blast_radius(cfg: dict, finding_cid: str) -> dict:  # noqa: ARG001
     """Estimate attacker gain if this FAIL finding is exploited.
 
     Returns a dict with four fields:
-      open_channels  – count of messaging channels with dmPolicy or groupPolicy='open'
-      has_exec       – True if tools.exec.mode is configured
-      has_write      – True if fs_write or apply_patch appears in tools.allow
-      secret_paths   – count of dotted config paths that hold a secret-bearing value
+      open_channels  - count of messaging channels with dmPolicy or groupPolicy='open'
+      has_exec       - True if tools.exec.mode is configured
+      has_write      - True if fs_write or apply_patch appears in tools.allow
+      secret_paths   - count of dotted config paths that hold a secret-bearing value
 
     ``finding_cid`` is accepted for future per-check weighting; unused today.
     """
@@ -2112,7 +2112,7 @@ def compute_blast_radius(cfg: dict, finding_cid: str) -> dict:  # noqa: ARG001
 def _subject_of(f) -> str | None:
     """Map a finding to one of the 8 Inventory-by-subject buckets (F-131 §4.2) via its
     catalog surface. A1 (Lethal Trifecta) needs no special case: its surface is
-    "trifecta", already present in SUBJECT_OF (routed to "agents" — an agent-behavior
+    "trifecta", already present in SUBJECT_OF (routed to "agents" - an agent-behavior
     signal). Findings with an id outside CATALOG (native-audit passthrough, test doubles)
     return None -> the trailing "Other" bucket in _group_issues_by_subject, so nothing is
     ever silently dropped (C-372 promoted subjects to the single report/HTML/PDF/dashboard
@@ -2132,7 +2132,7 @@ def _group_issues_by_subject(issues):
     stays focused (the per-subject summary above still names all of them). This is the
     single grouping the terminal, HTML, PDF and chat-dashboard renderers all consume, so
     they cannot drift (F-131 subject taxonomy, promoted from summary-only to every detail
-    view — C-372, retiring the old 7-family grouping)."""
+    view - C-372, retiring the old 7-family grouping)."""
     grouped: dict = {}
     for f in issues:
         grouped.setdefault(_subject_of(f), []).append(f)
@@ -2151,27 +2151,27 @@ def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int 
     """The one phrase every subject rollup uses for "how did this subject do".
 
     Golden Rule #4: a subject whose checks could not reach a verdict is NOT clear. Saying
-    "clear" next to an UNKNOWN marker reads as an assessed all-good — the exact fake-PASS
-    this project refuses to emit — and B-472 found the terminal inventory block and the
+    "clear" next to an UNKNOWN marker reads as an assessed all-good - the exact fake-PASS
+    this project refuses to emit - and B-472 found the terminal inventory block and the
     by-subject detail header doing precisely that while the card summary (the first caller
-    of this rule) already got it right: `Logs & trajectories — [?] clear` printed directly
+    of this rule) already got it right: `Logs & trajectories - [?] clear` printed directly
     above `3 not assessed (config can't tell)` for the same three findings.
 
     Shared rather than repeated so the three surfaces cannot drift again. `n_unassessed`
-    counts genuine UNKNOWNs only — a `not_applicable` finding IS an assessment (the
+    counts genuine UNKNOWNs only - a `not_applicable` finding IS an assessment (the
     surface was positively confirmed absent), so it must not turn a clean subject into an
     unassessed one.
 
-    B-791: `n_not_applicable` catches the case `n_unassessed` alone cannot — a subject
+    B-791: `n_not_applicable` catches the case `n_unassessed` alone cannot - a subject
     whose ONLY UNKNOWN members are `not_applicable`. `_worst_status` still rolls the
     bucket's MARKER to UNKNOWN for such a subject (F-140's rule: not_applicable must
     never read as PASS), so with `n_not_applicable` unset this function had no way to
-    tell that apart from a genuinely clean subject and returned "clear" — an UNKNOWN
+    tell that apart from a genuinely clean subject and returned "clear" - an UNKNOWN
     marker paired with the word "clear", the exact contradiction this function exists to
     prevent, just reached through the one path B-472's original fix didn't cover
-    ("Channels (none configured) — ❔ clear"). "not applicable" is neither "clear" (which
+    ("Channels (none configured) - ? clear"). "not applicable" is neither "clear" (which
     implies a positive check ran and found nothing) nor "not assessed" (which implies a
-    gap this tool could close) — a subject with a genuine coverage gap alongside any
+    gap this tool could close) - a subject with a genuine coverage gap alongside any
     not_applicable members still reads "not assessed", since that is the stronger claim."""
     if n_issues:
         return f"{n_issues} issue(s)"
@@ -2183,27 +2183,27 @@ def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int 
 
 
 def _skills_roster_text(inv: dict, ctx) -> str:
-    """How a skill ROSTER's population is described — the one phrase, in one place.
+    """How a skill ROSTER's population is described - the one phrase, in one place.
 
     B-594: B-507 taught `_skills_inventory_lines` (the detail block) that a skill reached
     through the plugin-skills root is *bundled with a plugin* rather than something the
     user installed, and that ClawSecCheck's own content-verified copy is *excluded* rather
     than absent. It did not teach `_subject_summary_rows`, which is the single source of
-    the HTML table, the PDF summary table AND the chat card — so on a real machine the
-    card's header read `Skills — 0 flagged · 2 installed` eight lines above a body reading
+    the HTML table, the PDF summary table AND the chat card - so on a real machine the
+    card's header read `Skills - 0 flagged · 2 installed` eight lines above a body reading
     `Skills (2 bundled with a plugin · 1 self-excluded)`, and the header was the wrong one:
     the two it called "installed" ship inside OpenClaw's own npm package, while the single
     skill the user actually installed was the one being left out of the count.
 
     Note this is the SECOND time a fix to the skills wording landed in one of these two
-    functions and not the other — `_subject_summary_rows`' own comment block records B-506
+    functions and not the other - `_subject_summary_rows`' own comment block records B-506
     having done it first, in the opposite direction. So the lesson is structural, not a
     slip: describing a roster has two callers, and the way to keep them honest is to give
     them nothing to describe it with except this function.
 
     The self-excluded suffix is appended on the empty-roster branch too. A machine whose
     ONLY skill is ClawSecCheck itself has an empty roster, and "none installed" there is
-    exactly the sentence B-507 was filed against — true of the list, false about the user.
+    exactly the sentence B-507 was filed against - true of the list, false about the user.
     """
     skills = inv["skills"]
     n_skills = len(skills)
@@ -2226,7 +2226,7 @@ def _skills_roster_text(inv: dict, ctx) -> str:
         text = ("could not be fully inspected (a skill root or directory was not "
                  "readable)" if limit_hits_for(ctx, LIMIT_DOMAIN_SKILL) else "none installed")
     elif n_skipped:
-        text = f"{n_skills} inspected, {n_skipped} NOT inspected — inspection cap reached"
+        text = f"{n_skills} inspected, {n_skipped} NOT inspected \u2014 inspection cap reached"
     elif n_bundled and n_bundled < n_skills:
         # B-507: mixed roster -- state both counts so neither figure reads as the whole
         # story (a plain total would imply the user chose all of them; a plain "bundled"
@@ -2245,8 +2245,8 @@ def _skills_roster_text(inv: dict, ctx) -> str:
 
 
 def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
-    """Uniform per-subject summary rows — one `(label, status, count_text)` tuple per
-    catalog.SUBJECT_ORDER entry — for the HTML and PDF report headers. Derived entirely
+    """Uniform per-subject summary rows - one `(label, status, count_text)` tuple per
+    catalog.SUBJECT_ORDER entry - for the HTML and PDF report headers. Derived entirely
     from `build_inventory()`, so this summary can never disagree with the JSON `inventory`
     payload or the terminal "Inventory by subject" block (`render_subject_inventory`).
     Returns [] when `ctx` is unavailable (same skip-don't-guess stance those surfaces
@@ -2271,20 +2271,20 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
                  f"{_issues_count('agents')} · {n_ag} agent{'' if n_ag == 1 else 's'}"))
 
     # B-506, second half: these two rows read the per-ITEM roster and nothing else, which
-    # is the identical defect the terminal "Inventory by subject" block was fixed for —
+    # is the identical defect the terminal "Inventory by subject" block was fixed for -
     # `skills`/`mcp` are lists of installed items, so a finding filed against the SUBJECT
     # had nowhere to land and an empty roster rendered as an assessed all-clear. The
     # terminal block was corrected; this function was not, and it is the single source of
     # the HTML table, the PDF summary table AND the chat card, so all three still printed
-    # `Skills — PASS — none installed` over a body reading `Skills — 2 issue(s)` with a
+    # `Skills - PASS - none installed` over a body reading `Skills - 2 issue(s)` with a
     # FAIL in it. The subject bucket (`skills_subject`/`mcp_subject`, the sibling keys
     # B-506 added to `build_inventory`) is what the body counts, so it is what these rows
-    # count too — one source of truth, per the contract the docs already state.
+    # count too - one source of truth, per the contract the docs already state.
     #
     # Roster and subject stay NAMED SEPARATELY rather than summed ("none installed ·
     # 2 issue(s)"): "two of your installed skills look wrong" and "the skill subsystem is
     # misconfigured" are different facts, and merging them would trade one lie for
-    # another — the same reasoning `_roster_and_subject_count_text` records for the
+    # another - the same reasoning `_roster_and_subject_count_text` records for the
     # terminal block. `_subject_count_text` supplies the subject half, so an UNKNOWN-only
     # subject reads "not assessed" here exactly as it does there, never "clear".
     skills = inv["skills"]
@@ -2296,11 +2296,11 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     sk_status = _worst_of_statuses(
         [s.get("status") for s in sk_flagged] + [sk_subject.get("status", PASS)])
     # B-594: the roster's population is described by `_skills_roster_text`, never spelled
-    # out here — this row used to hand-roll "N installed" and so kept saying it after
+    # out here - this row used to hand-roll "N installed" and so kept saying it after
     # B-507 had corrected the detail block.
     _sk_roster = _skills_roster_text(inv, ctx)
     # B-758 item #2: the two FAIL-driving numbers (per-item flagged, subject issues)
-    # used to be split apart by the roster DESCRIPTION sitting between them — "0
+    # used to be split apart by the roster DESCRIPTION sitting between them - "0
     # flagged · 2 bundled with a plugin · 1 self-excluded · 5 issue(s)   FAIL" reads as
     # a contradiction because a skimming reader hits "0 flagged" and the FAIL dot
     # before ever reaching the "5 issue(s)" that actually explains it. The terminal
@@ -2328,7 +2328,7 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     mcp_bad = [m for m in mcp if m.get("verdict") != "ok"]
     mcp_status = _worst_of_statuses(
         [m.get("verdict") for m in mcp_bad] + [mcp_subject.get("status", PASS)])
-    # B-758 item #2: same adjacency fix as the skills row above — flagged/issue counts
+    # B-758 item #2: same adjacency fix as the skills row above - flagged/issue counts
     # stay together, the roster size trails.
     if mcp:
         mcp_count = f"{len(mcp_bad)} flagged"
@@ -2343,14 +2343,14 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
 
     plug = inv["plugins"]
     if not plug.get("scanned"):
-        # Distinguish "no sweep ran" from "a sweep ran and found no plugin index" —
+        # Distinguish "no sweep ran" from "a sweep ran and found no plugin index" -
         # telling a user who just ran --full to "run --full" is a lie about what happened.
-        note = "not scanned — run --full" if plugin_sweep is None else "no plugin index found"
+        note = "not scanned \u2014 run --full" if plugin_sweep is None else "no plugin index found"
         rows.append((SUBJECT_LABEL["plugins"], UNKNOWN, note))
     else:
         prows = plug.get("rows") or []
         # Fold TRUNCATED/SKIPPED into UNKNOWN for the rollup, as _plugins_inventory_lines
-        # does — _worst_of_statuses only recognizes FAIL/WARN/UNKNOWN/PASS (_STATUS_ORDER).
+        # does - _worst_of_statuses only recognizes FAIL/WARN/UNKNOWN/PASS (_STATUS_ORDER).
         pstat = [r["status"] if r["status"] in _STATUS_ORDER else UNKNOWN for r in prows]
         p_flagged = sum(1 for s in pstat if s in (FAIL, WARN, UNKNOWN))
         p_status = _worst_of_statuses(pstat) if prows else PASS
@@ -2367,7 +2367,7 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
 
 
 def _render_finding_compact(lines, icon, f):
-    """One-line roster entry for PASS/UNKNOWN — full detail would bury the FAILs/WARNs."""
+    """One-line roster entry for PASS/UNKNOWN - full detail would bury the FAILs/WARNs."""
     lines.append(f"  {icon[f.status]} [{f.severity}] {_sanitize(f.title)}")
 
 
@@ -2416,7 +2416,7 @@ def _hard_truncate_compact(out: str, budget: int = _COMPACT_CHAR_BUDGET) -> str:
 
     This runs AFTER _finalize_compact_dashboard's own _asciify step (it is the final
     fallback in that function, not wrapped by it -- see _finalize_compact_dashboard),
-    so the marker itself must always be pure ASCII: a raw "…" here would silently
+    so the marker itself must always be pure ASCII: a raw "..." here would silently
     break the documented ascii_only contract in exactly this extreme-fallback case.
     """
     if len(out) <= budget:
@@ -2441,7 +2441,7 @@ def _compact_detail(text: str, limit: int) -> str:
     cut = text[:limit].rsplit(" ", 1)[0].rstrip()
     if not cut:
         cut = text[:limit].rstrip()
-    return f"{cut}…"
+    return f"{cut}\u2026"
 
 
 def _render_finding(lines, f, cfg: dict | None = None, *,
@@ -2451,17 +2451,17 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in ACTIONABLE_STATUSES else ""
     pc = getattr(f, "pass_confidence", None)
     pass_tag = f"  ({pc.replace('_', ' ')})" if f.status == PASS and pc else ""
-    # B-877: A1 WARN (any of its four hedges — checks/_config.py::check_trifecta) means
+    # B-877: A1 WARN (any of its four hedges - checks/_config.py::check_trifecta) means
     # the trifecta legs could not be fully determined this run, never a confirmed active
-    # trifecta at A1's catalog CRITICAL severity — the same reading `_urgent_headline`
+    # trifecta at A1's catalog CRITICAL severity - the same reading `_urgent_headline`
     # gives it above and `_trifecta_ratio` already gives it ("?/3", not a count). Without
-    # this tag the severity dot below (still CRITICAL — untouched, Dave 2026-09-20) sat
+    # this tag the severity dot below (still CRITICAL - untouched, Dave 2026-09-20) sat
     # next to a bare title with no hint this is a hedge, directly above the finding's own
     # "Active legs 0/3: none" line, which reads as "0 active" rather than "undetermined".
     # Scoped to A1/WARN only: a real 3-leg FAIL is a different status and keeps its
     # unqualified strong wording (the metamorphic case this fix must not touch).
     undetermined_tag = (
-        "  (legs undetermined this run — not a confirmed active trifecta)"
+        "  (legs undetermined this run \u2014 not a confirmed active trifecta)"
         if f.id == "A1" and f.status == WARN else ""
     )
     # Issue lines lead with the severity dot (B-077 / Component-2 mock); PASS/UNKNOWN
@@ -2471,14 +2471,14 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     why_text = _sanitize(f.detail) if f.detail else ""
     if f.id == "A1" and f.status == WARN and why_text:
         # Same B-877 reasoning as the tag above, applied to the row's own "why" line:
-        # `f.detail` (unchanged — checks/_config.py owns it, and baseline.fingerprint()
+        # `f.detail` (unchanged - checks/_config.py owns it, and baseline.fingerprint()
         # hashes it, so it must not move) leads with "Active legs N/3: <list or 'none'>",
         # worded for the PASS/FAIL cases where that count is a determination. On a WARN
         # it is a floor, not a count, so this display-only clause is prepended in front
-        # of it — never written back into `f.detail` itself.
+        # of it - never written back into `f.detail` itself.
         why_text = (
             "The trifecta legs could not be fully determined this run, not a confirmed "
-            "active trifecta — " + why_text
+            "active trifecta \u2014 " + why_text
         )
     # B-405: when the per-item --compact trim below still isn't enough to fit the
     # documented 4096-char budget on a large real config, render_dashboard retries
@@ -2491,15 +2491,15 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
         shown_why = _compact_detail(why_text, _COMPACT_WHY_LIMIT) if compact else why_text
         lines.append(f"    why: {shown_why}")
     # Surface the concrete evidence (e.g. the exact verbs B43/B44 flagged) when a
-    # FAIL/WARN carries it — naming the specific item is the value of the finding.
+    # FAIL/WARN carries it - naming the specific item is the value of the finding.
     # B-078: many checks build `detail` by joining their evidence, so a bullet that is
-    # already quoted verbatim inside the why line is pure duplication — skip it. Bullets
+    # already quoted verbatim inside the why line is pure duplication - skip it. Bullets
     # survive only when they ADD something the why line doesn't literally contain.
     # B-381: --compact drops evidence bullets entirely -- the same "headline only"
     # trim already applied to Plugins/MCP/RISK-chain detail under --compact.
     if f.evidence and f.status in ACTIONABLE_STATUSES and not compact:
         # Evidence is emitted verbatim (already bidi-stripped by _sanitize). B-629: the
-        # cap is announced now — this site used to end the list silently, so a finding
+        # cap is announced now - this site used to end the list silently, so a finding
         # with 40 entries could render three bullets and look complete.
         lines.extend(
             _evidence_bullets(
@@ -2525,13 +2525,13 @@ def render_explain(f, *, coverage_note: "str | None" = None,
     Not a call to `_render_finding`: that renderer is tuned for a findings LIST (why-
     line truncation, evidence caps meant to keep a 190-check report readable, no
     remediation text) and is used unmodified everywhere else. A single, deliberately
-    requested finding gets the opposite trade — full detail, no truncation, and the
+    requested finding gets the opposite trade - full detail, no truncation, and the
     one thing `_render_finding` never shows: `f.fix` (remediation), which today only
     reaches a reader through `--json`/`guide.py`'s next-actions summary.
 
     *coverage_note*, when given, is docs/THREAT_COVERAGE.md's own "Notes" text for
     this finding's `[CHECK: ...]` ledger entry (see cli.py's `_threat_coverage_note`)
-    — appended as its own paragraph, never blended into `f.detail`.
+    - appended as its own paragraph, never blended into `f.detail`.
     """
     lines = [f"{f.id}  {_sev_token(f.severity, ascii_only=ascii_only)}  {_sanitize(f.title)}",
              f"  status: {f.status}"]
@@ -2554,14 +2554,14 @@ def render_explain(f, *, coverage_note: "str | None" = None,
     return "\n".join(lines)
 
 
-# ── Inventory by subject (F-131 Phase 1) ────────────────────────────────────────────
+# -- Inventory by subject (F-131 Phase 1) --------------------------------------------
 # Owner-facing regrouping of the SAME findings by the entities an owner actually owns
 # (System / Agents / Skills / MCP / Channels) instead of the 7 analyst-facing families
 # rendered below. Purely additive + scoring-neutral (design doc §4.7): never reads
 # anything the main audit didn't already collect, never emits a new FAIL, never touches
 # score/grade/`scored` findings. Skills and MCP get a per-instance verdict by reusing the
 # shipped vet_skill/vet_mcp scoring paths (no second engine); System/Agents/Channels stay
-# bucket-level in Phase 1 (no `subject` field on Finding yet — that is Phase 2, design §6).
+# bucket-level in Phase 1 (no `subject` field on Finding yet - that is Phase 2, design §6).
 #
 # Design-vs-implementation note: the design doc's §4.6 JSON sketch shows "channels" as a
 # list of PER-CHANNEL {name, status, findings} entries, but §4.4 is explicit that Channels
@@ -2668,12 +2668,12 @@ def _skill_inventory(ctx) -> list[dict]:
         skill_ctx.installed_skill_shell = {name: sh_map.get(name, [])}
         skill_ctx.installed_skill_js = {name: js_map.get(name, [])}
         # B-612: without this the row reads a declared-file finding the full audit's own
-        # B13 already reported — the same bytes, two answers on one screen.
+        # B13 already reported - the same bytes, two answers on one screen.
         skill_ctx.installed_skill_declared = {name: declared_map.get(name, [])}
         # B-751: carry this skill's archive-traversal violations across the same bridge
         # B-551 built for coverage gaps. Without it the cascade in check_installed_skills
         # cannot see the escape and falls through to the next arm, so the row for a skill
-        # shipping a CONFIRMED zip-slip read "SUSPICIOUS - Insecure temp-file handling" —
+        # shipping a CONFIRMED zip-slip read "SUSPICIOUS - Insecure temp-file handling" -
         # B-746's original symptom, still live on the default report path.
         skill_ctx.path_traversal_violations = list(
             getattr(ctx, "skill_traversal_violations", {}).get(str(dir_map.get(name, "")), [])
@@ -2681,7 +2681,7 @@ def _skill_inventory(ctx) -> list[dict]:
         # B-551: carry THIS skill's coverage gaps into its own Context. Without them the
         # fresh Context looks like a complete scan, and `check_installed_skills` duly
         # returned `NO KNOWN ISSUE / PASS` for the skill whose payload directory the same
-        # report had just declared unreadable — an affirmative false claim in the block a
+        # report had just declared unreadable - an affirmative false claim in the block a
         # reader scans first, contradicting B13 a few lines away. Attributed by skill name
         # at collection time (`collector._note_skill_gap`), because the paths themselves are
         # skill-relative and cannot say whose they are.
@@ -2689,7 +2689,7 @@ def _skill_inventory(ctx) -> list[dict]:
         if gaps:
             skill_ctx.unreadable_files = list(gaps)
             # The unreadable branch sits INSIDE B13's `if skill_limit_hits:` block, so the
-            # list alone is inert — carrying it without the domain entry looked like a fix
+            # list alone is inert - carrying it without the domain entry looked like a fix
             # and changed nothing, which is exactly the kind of half-wiring this whole task
             # keeps turning up. Both, or neither.
             for gap in gaps:
@@ -2699,10 +2699,10 @@ def _skill_inventory(ctx) -> list[dict]:
         # Sharing one try meant a deadline firing inside the ring abandoned the block and
         # discarded the verdict `base` had ALREADY produced: measured on a real hostile
         # skill, a genuine DANGEROUS verdict was replaced by "per-skill scan budget
-        # exhausted". Reachability was ordinary — any skill vendoring a dependency pushes
+        # exhausted". Reachability was ordinary - any skill vendoring a dependency pushes
         # base+ring past 15 s. Now a truncated ring costs the ring's OWN coverage and
         # never the base verdict. It does still lose ring findings produced before the
-        # deadline fired — the exception unwinds the list the ring was building — so the
+        # deadline fired - the exception unwinds the list the ring was building - so the
         # claim is "the base verdict survives", not "nothing is lost". The two deadlines
         # run in sequence, never nested, and the second gets only what the first left, so
         # the per-skill ceiling stays ~15 s total rather than 15 s each (exactly, where
@@ -2717,7 +2717,7 @@ def _skill_inventory(ctx) -> list[dict]:
                 "reasons": ["per-skill scan budget exhausted"],
             })
             continue
-        except Exception:  # noqa: BLE001 — a presentation-only block must never break the audit
+        except Exception:  # noqa: BLE001 - a presentation-only block must never break the audit
             out.append({
                 "name": name, "verdict": _VET_VERDICT[UNKNOWN], "status": UNKNOWN,
                 "reasons": ["could not be assessed"],
@@ -2740,12 +2740,12 @@ def _skill_inventory(ctx) -> list[dict]:
                     ring = _run_content_ring(skill_ctx)
             except ScanBudgetExceeded:
                 # Deliberately NOT re-raised: this frame owns the deadline, and the honest
-                # answer is "keep the base verdict, disclose what we missed" — not "throw
+                # answer is "keep the base verdict, disclose what we missed" - not "throw
                 # the base verdict away too".
                 ring_gap = ("content-ring coverage is incomplete: the per-skill scan "
                             "budget was exhausted before every content-security check "
                             "had run")
-            except Exception:  # noqa: BLE001 — the ring must never break the audit
+            except Exception:  # noqa: BLE001 - the ring must never break the audit
                 ring_gap = ("content-ring coverage is incomplete: a content-security "
                             "check failed before the ring completed")
         pool = [base, *ring]
@@ -2758,13 +2758,13 @@ def _skill_inventory(ctx) -> list[dict]:
             if d and d not in reasons:
                 reasons.append(d)
         shown_reasons = reasons[:3]
-        # C-307: the coverage-gap reason is STICKY — a ring that produced 3+ real
+        # C-307: the coverage-gap reason is STICKY - a ring that produced 3+ real
         # findings before being cut short would otherwise push it out of the [:3]
         # window purely by pool order, silently hiding "this scan was incomplete"
         # from the row even though the row still carries an incomplete verdict.
         # Two distinct sources land a VET-COVERAGE finding in `pool`: this frame's
         # own `ring_gap` (appended just above) AND one `_run_content_ring` already
-        # folded into `ring` on its OWN internal truncation (checks/_vet.py) —
+        # folded into `ring` on its OWN internal truncation (checks/_vet.py) -
         # either way, its reason must survive the [:3] window.
         for fx in pool:
             if fx.id != "VET-COVERAGE" or not fx.detail:
@@ -2799,7 +2799,7 @@ def _mcp_inventory(ctx) -> list[dict]:
     for name, spec in servers.items():
         try:
             dangerous, suspicious = _vet_mcp_server(name, spec if isinstance(spec, dict) else {})
-        except Exception:  # noqa: BLE001 — presentation-only block must never break the audit
+        except Exception:  # noqa: BLE001 - presentation-only block must never break the audit
             out.append({"name": name, "verdict": UNKNOWN, "reasons": ["could not be assessed"]})
             continue
         if dangerous:
@@ -2856,8 +2856,8 @@ def _channels_roster(ctx) -> list[str]:
 
 
 def _empty_inventory() -> dict:
-    """A fresh, all-clear inventory shape — every nested list/dict is newly allocated
-    per call (no shared mutable state across callers) — for when `ctx` is unavailable."""
+    """A fresh, all-clear inventory shape - every nested list/dict is newly allocated
+    per call (no shared mutable state across callers) - for when `ctx` is unavailable."""
     return {
         "openclaw": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0},
         "host": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0},
@@ -2874,16 +2874,16 @@ def _empty_inventory() -> dict:
 
 
 def _plugin_inventory(plugin_sweep) -> dict:
-    """The `"plugins"` inventory bucket (F-163) — the additive-JSON counterpart to
+    """The `"plugins"` inventory bucket (F-163) - the additive-JSON counterpart to
     `_plugins_inventory_lines` (the text/dashboard renderer), built from the SAME
     duck-typed `PluginSweep`-shaped object (`.no_roots`/`.no_targets`/`.rows`), never
     imported here (same report<->pipeline import-cycle precedent that function's own
     docstring sets out).
 
-    `plugin_sweep` is only ever populated by a `--full` run (the plugin sweep phase) —
+    `plugin_sweep` is only ever populated by a `--full` run (the plugin sweep phase) -
     a plain audit() never scans plugins at all, so "not scanned" is the honest default,
     not an empty/clear verdict. Present-but-empty (`"scanned": True, "rows": []`) is
-    reserved for a real sweep that found zero installed plugins — distinct from
+    reserved for a real sweep that found zero installed plugins - distinct from
     "scanned": False (never swept this run), matching the same "MCP servers (none
     configured)" vs. "not applicable" distinction `_mcp_inventory` already draws.
     """
@@ -2903,7 +2903,7 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
     """Build the additive `"inventory"` JSON payload (design §4.6, extended by F-163).
     Presentation-only: reads only what the main audit already collected on `ctx` (plus
     the optional `--full`-only `plugin_sweep`), and re-groups the SAME `findings` list
-    the family view (above) renders — never alters score/grade, never emits a new
+    the family view (above) renders - never alters score/grade, never emits a new
     Finding. Every SURFACES slug routes to exactly one of the 8 subjects (SUBJECT_OF
     coherence, mirrored by tests/test_subject_inventory.py)."""
     if ctx is None:
@@ -2923,7 +2923,7 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
         # rolls UNKNOWN up over PASS, so it cannot tell one unreachable check among ten
         # clean ones from a subject nothing could read; and it also folds in
         # `not_applicable` members (a surface positively confirmed absent), which ARE
-        # assessed. Additive key — every existing consumer of `status`/`findings` is
+        # assessed. Additive key - every existing consumer of `status`/`findings` is
         # unchanged.
         return {
             "status": _worst_status(members),
@@ -2935,7 +2935,7 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
             # whose only UNKNOWN members are not_applicable had `status=UNKNOWN` alongside
             # `unassessed=0` and an empty `findings` list -- `_subject_count_text` could
             # not tell that apart from a genuinely clean subject and printed "clear" next
-            # to the UNKNOWN marker ("Channels (none configured) -- ❔ clear"). Counted
+            # to the UNKNOWN marker ("Channels (none configured) -- ? clear"). Counted
             # separately so the text layer can say "not applicable" instead, without
             # touching `status` (F-140: not_applicable must never read as PASS/"clear").
             "not_applicable_count": sum(1 for f in members
@@ -2959,11 +2959,11 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
         "host": host,
         "agents": agents,
         "skills": _skill_inventory(ctx),
-        # B-506: `skills`/`mcp` are per-ITEM rosters — a list of installed skills, a list
-        # of configured servers — so a finding filed against the SUBJECT rather than
+        # B-506: `skills`/`mcp` are per-ITEM rosters - a list of installed skills, a list
+        # of configured servers - so a finding filed against the SUBJECT rather than
         # against one item had nowhere to land, and the renderer read "no flagged items"
-        # as "clear". On the maintainer's own config that printed `Skills — clear` above
-        # `Skills — 3 issue(s)`, one of them HIGH, in the same report. The five subjects
+        # as "clear". On the maintainer's own config that printed `Skills - clear` above
+        # `Skills - 3 issue(s)`, one of them HIGH, in the same report. The five subjects
         # that go through `_bucket()` never had the defect; these two bypassed it.
         # Additive sibling keys, not a shape change: `skills`/`mcp` stay lists, so every
         # existing consumer (the dashboard card, --json, the schema) is untouched.
@@ -2989,7 +2989,7 @@ def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only
     marker = icon.get(status, icon.get(UNKNOWN, "?"))
     count_text = _subject_count_text(len(fids), int(bucket.get("unassessed") or 0),
                                      int(bucket.get("not_applicable_count") or 0))
-    out = [f" {label} — {marker} {count_text}"]
+    out = [f" {label} \u2014 {marker} {count_text}"]
     for fid in fids:
         f = by_id.get(fid)
         if f is None:
@@ -3001,8 +3001,8 @@ def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only
 def _roster_and_subject_count_text(n_flagged: int, n_subject: int) -> str:
     """B-506: one status phrase covering a per-item roster AND its subject findings.
 
-    They are genuinely different populations — "two of your installed skills look
-    wrong" is not the same fact as "the skill subsystem is misconfigured" — so they
+    They are genuinely different populations - "two of your installed skills look
+    wrong" is not the same fact as "the skill subsystem is misconfigured" - so they
     are named separately rather than summed into one misleading total. "clear" is
     reachable only when both are empty, which is the whole point.
     """
@@ -3043,13 +3043,13 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     # this block also prints a per-roster note about the uninspected tail, which the
     # one-line roster phrase has no room for.
     n_skipped = int(getattr(ctx, "skills_capped_count", 0) or 0)
-    note_icon = "[i]" if ascii_only else "ℹ️ "
+    note_icon = "[i]" if ascii_only else "\u2139\ufe0f "
     if n_skills == 0:
-        # B-506: an empty roster is not the same as a clean subject — findings can be
+        # B-506: an empty roster is not the same as a clean subject - findings can be
         # filed against the skill subsystem with nothing installed at all.
         subj0 = inv.get("skills_subject") or {}
         fids0 = list(subj0.get("findings") or [])
-        # B-767: same ambiguity, same fix, as `_skills_roster_text` above — an unreadable
+        # B-767: same ambiguity, same fix, as `_skills_roster_text` above - an unreadable
         # root/entry must not render identically to a confirmed-empty roster.
         from .collector import LIMIT_DOMAIN_SKILL, limit_hits_for  # noqa: PLC0415
 
@@ -3057,7 +3057,7 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
                          else "none installed")
         label = f" {SUBJECT_LABEL['skills']} ({_roster_note})"
         if fids0:
-            label += f" — {icon.get(subj0.get('status'), '?')} {len(fids0)} issue(s)"
+            label += f" \u2014 {icon.get(subj0.get('status'), '?')} {len(fids0)} issue(s)"
         lines = [label]
         lines.extend(_subject_finding_lines(fids0, by_id, icon))
         if self_excluded:
@@ -3069,10 +3069,10 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     # version of the same sentence and fell behind. Both read it from one place now.
     installed_text = _skills_roster_text(inv, ctx)
     # B-751: this bare tuple was missed by the first pass and it is the one that matters
-    # most — a row whose status is FAIL-weight but not the literal "FAIL" fell out of
+    # most - a row whose status is FAIL-weight but not the literal "FAIL" fell out of
     # `flagged`, so it landed in the `clean` roster below and the detail loop never printed
     # it. Measured on a home whose ONLY installed skill is a confirmed zip-slip, the block
-    # printed "Skills (1 installed) — 1 issue(s)" and then "1 clean: archive-demo",
+    # printed "Skills (1 installed) - 1 issue(s)" and then "1 clean: archive-demo",
     # contradicting itself in consecutive lines.
     flagged = [s for s in skills
                if s.get("status") in ACTIONABLE_STATUSES or s.get("status") == UNKNOWN]
@@ -3087,7 +3087,7 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
         _worst_of_statuses([s["status"] for s in flagged]
                            + ([subj.get("status")] if subj_fids else [])), "?")
     count_text = _roster_and_subject_count_text(len(flagged), len(subj_fids))
-    lines = [f" {SUBJECT_LABEL['skills']} ({installed_text}) — {sk_marker} {count_text}"]
+    lines = [f" {SUBJECT_LABEL['skills']} ({installed_text}) \u2014 {sk_marker} {count_text}"]
     lines.extend(_subject_finding_lines(subj_fids, by_id, icon))
     if n_skipped:
         lines.append(
@@ -3099,11 +3099,11 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     # Skill names are untrusted (directory names) -- _sanitize() every one before it
     # reaches a line, same as finding title/detail elsewhere in this file (B164: no raw
     # ANSI/control chars may reach the terminal).
-    # C-373: the clean roster is the one UNBOUNDED part of this block — it names every
+    # C-373: the clean roster is the one UNBOUNDED part of this block - it names every
     # clean skill, so a home with hundreds of them produces thousands of characters on
     # its own. The chat card (which must fit ~4096 chars in total) passes a
-    # `clean_roster_limit` so the names still appear — B-356 added them deliberately, and
-    # a home with a handful of skills should still see them — but a 300-skill home cannot
+    # `clean_roster_limit` so the names still appear - B-356 added them deliberately, and
+    # a home with a handful of skills should still see them - but a 300-skill home cannot
     # blow the budget with a name list. The count stays exact either way, and the overflow
     # is disclosed, never silently cut. `None` (the full report, `--dashboard --full`)
     # lists them all, exactly as before.
@@ -3133,13 +3133,13 @@ def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool =
     # B-506: "none configured" described the ROSTER and was read as a verdict. The real
     # config has no `mcp.servers` block at all and still carried two MCP findings (shell
     # hooks in a plugin's doc-cache, an orphaned plugin cache), so the inventory said
-    # "none configured" directly above "MCP servers — 2 issue(s)".
+    # "none configured" directly above "MCP servers - 2 issue(s)".
     subj = inv.get("mcp_subject") or {}
     subj_fids = list(subj.get("findings") or [])
     if n_mcp == 0:
         label = f" {SUBJECT_LABEL['mcp']} (none configured)"
         if subj_fids:
-            label += f" — {icon.get(subj.get('status'), '?')} {len(subj_fids)} issue(s)"
+            label += f" \u2014 {icon.get(subj.get('status'), '?')} {len(subj_fids)} issue(s)"
         lines = [label]
         if compact:
             return lines
@@ -3150,7 +3150,7 @@ def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool =
         _worst_of_statuses([m["verdict"] for m in mcp_bad]
                            + ([subj.get("status")] if subj_fids else [])), "?")
     count_text = _roster_and_subject_count_text(len(mcp_bad), len(subj_fids))
-    lines = [f" {SUBJECT_LABEL['mcp']} ({n_mcp}) — {mcp_marker} {count_text}"]
+    lines = [f" {SUBJECT_LABEL['mcp']} ({n_mcp}) \u2014 {mcp_marker} {count_text}"]
     if compact:
         return lines
     lines.extend(_subject_finding_lines(subj_fids, by_id, icon))
@@ -3169,16 +3169,16 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
     OpenClaw core / Host machine / Agents / Skills / MCP / Plugins / Channels / Logs &
     trajectories, each with a rolled-up status; Skills, MCP and Plugins additionally get
     a per-instance verdict (design §4.4/§4.5). Purely additive/presentation: `--ascii`
-    degrades cleanly (no unicode/color), and this returns "" when `ctx` is unavailable —
+    degrades cleanly (no unicode/color), and this returns "" when `ctx` is unavailable -
     same "skip, don't guess" precedent `render_report` already uses for the capability-
     graph / credential-surface sections below. `plugin_sweep` is `--full`-only (same
-    duck-typed object `render_dashboard` already accepts) — omitted on a plain audit,
+    duck-typed object `render_dashboard` already accepts) - omitted on a plain audit,
     where the Plugins bucket honestly reports "not scanned" rather than a fake clear."""
     if ctx is None:
         return ""
     inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
     by_id = {f.id: f for f in findings}
-    rule_char = "=" if ascii_only else "═"
+    rule_char = "=" if ascii_only else "\u2550"
     lines: list[str] = ["== INVENTORY BY SUBJECT " + rule_char * 44]
 
     lines.extend(_inventory_bucket_lines(SUBJECT_LABEL["openclaw"], inv["openclaw"], by_id,
@@ -3199,7 +3199,7 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
 
     # B-506: `by_id` is threaded so subject-level findings render by id and title here,
     # the same way every other subject's do. The chat card deliberately does NOT get it:
-    # its own Findings section already names them, and the card is budget-bound — but it
+    # its own Findings section already names them, and the card is budget-bound - but it
     # still gets the corrected marker and count, which is what the invariant is about.
     lines.extend(_skills_inventory_lines(inv, ctx, ascii_only=ascii_only, by_id=by_id))
 
@@ -3209,15 +3209,15 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
         lines.extend(_plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only))
     elif plugins_deferred:
         # B-473: on a plain `--full` text run the plugin sweep is pipeline phase P7, which
-        # runs AFTER this body is assembled (deliberately — the report-body byte order is
+        # runs AFTER this body is assembled (deliberately - the report-body byte order is
         # the prefix `--full --quiet` is compared against), so this renderer genuinely has
         # no sweep object to show. Printing "run --full to include" there told the reader
         # to run the very flag they had just run, about a sweep whose results were printed
         # a few hundred lines further down the same output.
-        lines.append(f" {SUBJECT_LABEL['plugins']} (swept later in this run — "
+        lines.append(f" {SUBJECT_LABEL['plugins']} (swept later in this run \u2014 "
                      "see the PLUGIN SWEEP section below)")
     else:
-        lines.append(f" {SUBJECT_LABEL['plugins']} (not scanned — run --full to include)")
+        lines.append(f" {SUBJECT_LABEL['plugins']} (not scanned \u2014 run --full to include)")
 
     ch = inv["channels"]
     croster = ch.get("roster") or []
@@ -3249,7 +3249,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
                   build_digest: str | None = None) -> str:
     findings = deduplicate_findings(findings)
     icon = _color_icons(_ICON_ASCII if ascii_only else _ICON, color)
-    ok = "[OK]" if ascii_only else "✅"
+    ok = "[OK]" if ascii_only else "\u2705"
     # Supply cfg to _render_finding only in verbose mode so blast-radius lines appear.
     _blast_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if (verbose and ctx is not None) else None
     suppressed_count = sum(1 for f in findings if getattr(f, "suppressed", False))
@@ -3258,49 +3258,49 @@ def render_report(findings: list[Finding], score: ScoreResult,
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status not in FAIL_WEIGHT_STATUSES))
     # Assurance honesty (R11): single source-of-truth coverage tally, computed once and
     # reused by both the C-166 low-coverage line (below) and the C-165 staleness nudge
-    # (advisory band, further down) — never a second independent tally.
+    # (advisory band, further down) - never a second independent tally.
     cov = assessment_coverage(findings)
     # Mascot + wordmark: header line only, once (design-system Foundations);
     # --ascii drops the mascot and folds the separator (brand.header()).
     head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
     lines = [head]
     # B-869: an optional self-computed content fingerprint (integrity.build_fingerprint(),
-    # wired in by cli.py), distinct from __version__/__released__ — strings a human edits
+    # wired in by cli.py), distinct from __version__/__released__ - strings a human edits
     # by hand and can forget to bump, so a dev checkout can print the exact release
     # version while its files differ. Omitted by every pre-existing caller/test, which
     # reproduces the prior header unchanged.
     if build_digest:
         lines.append(f"Build: {build_digest}")
     lines.append("=" * 44)
-    # C-571: run-level grounding disclosure, ahead of everything else — this is a fact
+    # C-571: run-level grounding disclosure, ahead of everything else - this is a fact
     # about the BUILD, not about this run's findings, so it belongs above the per-run
     # disclosures that follow. `openclawdist.grounding_gap` answers None on anything it
     # cannot place past GROUNDED_MAX_VERSION (unknown install, unparseable/pre-release
     # string, a version too short to be a calendar release), so this never fires on
-    # "we don't know" — only on a build genuinely newer than any check here was measured
-    # against. Presentation-only: never touches score/grade/cap (¶2.4/Golden Rule #5 —
+    # "we don't know" - only on a build genuinely newer than any check here was measured
+    # against. Presentation-only: never touches score/grade/cap (¶2.4/Golden Rule #5 -
     # this is honesty about a gap, not a manufactured FAIL), and it does not name which
-    # checks are affected because that set is not sound to enumerate — see B363's B-833
+    # checks are affected because that set is not sound to enumerate - see B363's B-833
     # fix for the one flip that WAS found, entirely inside the check, with no schema-path
     # diff to hang a static list on.
     _gap = _openclawdist.grounding_gap(
         getattr(ctx, "installed_dist_version", None) if ctx is not None else None
     )
     if _gap is not None:
-        gap_icon = "[!]" if ascii_only else "⚠️ "
+        gap_icon = "[!]" if ascii_only else "\u26a0\ufe0f "
         _grounded_str = ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION)
         _running_str = ".".join(str(p) for p in _gap)
         lines.append(
             f"{gap_icon}This build's checks were last grounded against OpenClaw up to "
             f"{_grounded_str}; you are running {_running_str}. Some checks assume "
-            "behavior measured on the older build and may be mis-grounded on this one — "
+            "behavior measured on the older build and may be mis-grounded on this one \u2014 "
             "a real gap can still read as a clean PASS. Not a finding; the score below "
             "is unchanged."
         )
     # B-313/B-399: disclosed ABOVE the grade, unconditionally whenever any check degraded
-    # this run (crashed, timed out, or — B-399 — ran to completion but could not reach a
+    # this run (crashed, timed out, or - B-399 - ran to completion but could not reach a
     # verdict for an engine-side reason, e.g. an input it expected to read that turned out
-    # unreadable/corrupt) — regardless of whether DEGRADED_CHECK_CAP ended up strictly
+    # unreadable/corrupt) - regardless of whether DEGRADED_CHECK_CAP ended up strictly
     # "binding" (a tighter cap, e.g. a genuine CRITICAL FAIL, may already apply). The
     # reader still needs to know coverage was incomplete even when the number on screen
     # would have been just as bad anyway; getattr/default tolerates the older duck-typed
@@ -3308,9 +3308,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # config_blind_capped/runtime_capped below).
     _degraded_n = getattr(score, "degraded_count", 0)
     if _degraded_n:
-        warn_icon = "[!]" if ascii_only else "⚠️ "
+        warn_icon = "[!]" if ascii_only else "\u26a0\ufe0f "
         _plural = "check" if _degraded_n == 1 else "checks"
-        # B-624: the old sentence ended "…or review the affected finding(s) below for an
+        # B-624: the old sentence ended "...or review the affected finding(s) below for an
         # unreadable-input detail." Nothing below was marked, and nothing could be: every
         # degraded finding is UNKNOWN, and the default render does not print UNKNOWN
         # findings at all. Measured on a config-blind run: 33 degraded checks, and
@@ -3318,7 +3318,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # for something this view never shows.
         #
         # So the banner names them instead of pointing at them. Capped and disclosed, the
-        # same discipline as every other truncated list here — a silent cut would recreate
+        # same discipline as every other truncated list here - a silent cut would recreate
         # the defect one level down.
         _degraded_ids = sorted(
             f.id for f in findings if getattr(f, "engine_degraded", False)
@@ -3332,12 +3332,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
             _which += " (all carry `engine_degraded` in --json)."
         lines.append(
             f"{warn_icon}{_degraded_n} {_plural} could not reach a reliable verdict this"
-            " run (crashed, timed out, or hit unreadable/corrupted input) — "
+            " run (crashed, timed out, or hit unreadable/corrupted input) \u2014 "
             + _degraded_incomplete_clause(score)
             + " Re-run with --debug for a crash/timeout traceback."
             + _which
         )
-    # C-423: `score.graded is False` means no letter/number for this run, anywhere —
+    # C-423: `score.graded is False` means no letter/number for this run, anywhere -
     # the "Most urgent" finding leads (a result, never an error), followed by which
     # layers never ran. No score bar, no /100, no letter, in either branch below.
     if getattr(score, "graded", True):
@@ -3347,42 +3347,42 @@ def render_report(findings: list[Finding], score: ScoreResult,
     else:
         lines.append(_urgent_headline(findings, risk=risk))
         lines.append(_missing_layers_sentence(score))
-    # C-423: the mandatory "not fully covered" line — appears on GRADED runs too,
+    # C-423: the mandatory "not fully covered" line - appears on GRADED runs too,
     # whenever a layer that DID run still didn't exhaust its subject.
     _covered_line = _not_fully_covered_line(score)
     if _covered_line:
         lines.append(_covered_line)
     # B-306 (C-135 follow-up #3, 2026-07-21): gate on the GRANULAR cap signals, not
-    # `score.capped` alone. `score.capped` means "score != raw_score" — deliberately FALSE
+    # `score.capped` alone. `score.capped` means "score != raw_score" - deliberately FALSE
     # in scoring.py's `total == 0` branch (raw_score and score are both hardcoded 0 there;
     # there is no positive raw value for the cap to have reduced FROM), yet
     # `config_blind_capped`/`runtime_capped`/`degraded_capped` (B-313) can still be True in
     # that exact branch (see scoring.ScoreResult field docs and docs/OUTPUT_SCHEMA.md's
     # documented "can be true alongside capped: false" carve-out for JSON consumers).
     # Relying on `score.capped` alone silently dropped this whole explanation in precisely
-    # the scenario B-306 exists to make loud — this is a rendering-gate fix, not a
+    # the scenario B-306 exists to make loud - this is a rendering-gate fix, not a
     # scoring.py semantics change, so the JSON contract/docs above stay exactly as
     # documented.
     # B-281 (ENV-1)/B-363: computed here (ahead of both the cap-reason text below and the
     # "Audited config:" line further down) so both agree on whether a config was ever
     # actually read this run. `_audited_path` is the resolved-or-canonical path either
-    # way (see resolve_config_in_home) — `_cfg_found` is what distinguishes "we read
+    # way (see resolve_config_in_home) - `_cfg_found` is what distinguishes "we read
     # this file" from "we looked for this file and it wasn't there".
     _audited_path = getattr(ctx, "config_path", None) if ctx is not None else None
     _cfg_found = getattr(ctx, "config_found", True) if ctx is not None else True
     # B-380: the five-branch "elif" ladder + ten near-identical
     # "_extra = []; if X: _extra.append(...)" blocks that used to live here (one per
-    # branch, hand-edited separately every time a signal type was added) are gone —
+    # branch, hand-edited separately every time a signal type was added) are gone -
     # `_cap_cascade` is the single, shared decision both render_report and render_html
     # defer to now. It reads exactly the same six signals the old gate condition named
     # (`score.capped` covers the ordinary severity-cap path; the granular flags cover
     # every cap-only signal, including the `total == 0` branch where `capped` stays
-    # False by design — see the B-306 comment this replaces), so `_primary is not
+    # False by design - see the B-306 comment this replaces), so `_primary is not
     # None` is the correct, single-source-of-truth gate. B-399: `_CAP_DEGRADED`'s own
     # text (`_cap_primary_reason_text`) already covers an engine-side-degraded UNKNOWN
     # generically ("could not reach a reliable verdict") alongside crashed/timed-out --
     # no renderer-side change needed for the new cause, only scoring.py's cap trigger.
-    # C-423: a cap explanation for a number that is not printed is noise — skip it
+    # C-423: a cap explanation for a number that is not printed is noise - skip it
     # entirely on an ungraded run.
     _primary, _extras = _cap_cascade(score)
     if getattr(score, "graded", True) and _primary is not None:
@@ -3397,7 +3397,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # everywhere but here.
         #
         # This line is now the ONE place the text states a cap, and it is the only one that
-        # can: `_cap_cascade` carries RANK — which signal led and which merely also fired —
+        # can: `_cap_cascade` carries RANK - which signal led and which merely also fired -
         # and the per-signal paragraphs below cannot, because each fires on its own raw flag
         # with no knowledge of the others. On `severity + runtime` the text used to print the
         # SECONDARY signal and omit the primary. Those paragraphs consequently no longer
@@ -3409,7 +3409,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # exactly once for every combination with a cap, and not at all for the one without.
         lines.append(
             f"{_cap_primary_reason_text(_primary, score, audited_path=_audited_path)}"
-            f"{_cap_also_clause(_extras)} — {_UNGRADED_CAP_TAIL}"
+            f"{_cap_also_clause(_extras)} \u2014 {_UNGRADED_CAP_TAIL}"
         )
 
     # B-281 (ENV-1): name the file this grade actually describes. OpenClaw resolves its
@@ -3418,7 +3418,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # audited file is a RESOLVED path, not a foregone conclusion. Printing it is what lets
     # a reader notice that a grade describes a stale, dormant config; B183 does the
     # comparison, but this line stands on its own and costs nothing when they agree.
-    # B-363: only when a config was actually FOUND and read — `_audited_path` is set to
+    # B-363: only when a config was actually FOUND and read - `_audited_path` is set to
     # the canonical would-be path even when nothing was there (resolve_config_in_home),
     # so printing it unconditionally used to claim a file was audited when the collector
     # never opened anything at all. `_cfg_found`/`_audited_path` were both computed above,
@@ -3430,53 +3430,53 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(f"Audited config: {_username_safe_path(_audited_path)}")
 
     # B-306 safe-symlink split: openclaw.json is a symlink whose target leaves ~/.openclaw,
-    # and that target is a readable regular file the user owns — a benign dotfiles layout
+    # and that target is a readable regular file the user owns - a benign dotfiles layout
     # (stow/chezmoi/yadm/bare-git). The collector followed it and audited the real bytes, so
     # the grade above is a real verdict, NOT a config-blind F cap. Surface it as an INFO
     # note (never a FAIL) so the reader knows the audited file physically lives outside the
     # config dir. Presentation-only: never touches score/grade.
     if getattr(ctx, "config_symlink_escapes_home", False):
-        note_icon = "[i]" if ascii_only else "ℹ️ "
+        note_icon = "[i]" if ascii_only else "\u2139\ufe0f "
         lines.append(
             f"{note_icon} Your openclaw.json symlinks outside ~/.openclaw; its target is a"
             " readable regular file you own, so it was followed and audited normally"
             " (not treated as an unreadable config)."
         )
 
-    # C-166: loud caution line when only a small slice of the catalog could be assessed —
+    # C-166: loud caution line when only a small slice of the catalog could be assessed -
     # a high grade over a thin slice can otherwise read as a full clean bill of health.
     # Human-report-only; never alters score/grade. Gated on score.assessable so the N/A
     # path (nothing scorable at all) isn't double-warned.
     if score.assessable and cov["scored_total"] > 0 and cov["assessable_frac"] < LOW_COVERAGE_FRAC:
-        warn_icon = "[!]" if ascii_only else "⚠️ "
+        warn_icon = "[!]" if ascii_only else "\u26a0\ufe0f "
         pct = round(cov["assessable_frac"] * 100)
         lines.append(
             f"{warn_icon} Low coverage: only {pct}% of scored checks could be evaluated"
             f" ({cov['assessable']}/{cov['scored_total']})."
-            + (" Treat this grade with caution — it reflects a small slice of your setup."
+            + (" Treat this grade with caution \u2014 it reflects a small slice of your setup."
                if getattr(score, "graded", True)
                else " These findings reflect a small slice of your setup.")
         )
 
-    # Tamper Score sub-grade — human-report-only addition (like update_notice below).
+    # Tamper Score sub-grade - human-report-only addition (like update_notice below).
     # Presentation-layer only: never alters score/grade above; None (default) renders
     # nothing so the main Score/Grade line stays byte-identical to before this existed.
     if tamper is not None:
         if getattr(score, "graded", True):
             lines.append(
-                f"Tamper posture: {tamper.grade} ({tamper.score}/100 — tamper-defense"
+                f"Tamper posture: {tamper.grade} ({tamper.score}/100 \u2014 tamper-defense"
                 " sub-grade over B20/B22/B42/B78/B85/B86/C5 + monitor state)"
             )
         else:
             # C-423/C-425: found by reading a real `--full` run. This line printed
-            # "Tamper posture: D (50/100 …)" directly under "No grade yet", which is a
+            # "Tamper posture: D (50/100 ...)" directly under "No grade yet", which is a
             # second letter-and-number scale in the position a reader takes for the
-            # verdict — the exact confusion withholding the grade exists to prevent.
+            # verdict - the exact confusion withholding the grade exists to prevent.
             # The measurement is real and worth keeping, so it stays; the LETTER goes,
             # and the line says outright that it is not this run's verdict.
             lines.append(
                 f"Tamper posture: {tamper.score}/100 over"
-                " B20/B22/B42/B78/B85/B86/C5 + monitor state — a sub-score of one"
+                " B20/B22/B42/B78/B85/B86/C5 + monitor state \u2014 a sub-score of one"
                 " defence, not this run's verdict (this run has none)."
             )
 
@@ -3494,25 +3494,25 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # raw value here is internally consistent instead of self-contradicting (B-013).
     #
     # B-505: the score is SEVERITY-weighted (`WEIGHT`, catalog.py), not a flat
-    # pass-rate — "weighted pass-rate ... N pass, N warn (half weight), N fail" let a
+    # pass-rate - "weighted pass-rate ... N pass, N warn (half weight), N fail" let a
     # reader recompute `(pass + warn*0.5) / n_scored * 100`, which does NOT reproduce
     # `raw_score` (severity weighting was silently doing the rest of the work). Name
     # the real formula and print the actual numerator/total (`score.earned`/
     # `score.total`, scoring.py) so `round(earned / total * 100) == raw_score` holds
-    # for real — the whole point of a "why" line.
-    # C-423: skip entirely when ungraded — a "why N/100" explanation for a number
+    # for real - the whole point of a "why" line.
+    # C-423: skip entirely when ungraded - a "why N/100" explanation for a number
     # this run is not allowed to print is noise, not honesty.
     if getattr(score, "graded", True):
         lines.append(
             f"Why {score.raw_score}/100: severity-weighted pass rate over {n_scored} scored"
             f" checks (CRITICAL×{WEIGHT[CRITICAL]}, HIGH×{WEIGHT[HIGH]},"
             f" MEDIUM×{WEIGHT[MEDIUM]}, LOW×{WEIGHT[LOW]}; PASS full credit, WARN"
-            f" half, FAIL none) — {_fmt_weight(score.earned)} of {_fmt_weight(score.total)}"
+            f" half, FAIL none) \u2014 {_fmt_weight(score.earned)} of {_fmt_weight(score.total)}"
             f" weight points, from {n_pass} pass, {n_warn} warn, {n_fail} fail."
             " UNKNOWN/advisory checks are excluded."
         )
     # B-464: because UNKNOWNs are excluded, switching a subsystem OFF removes its checks
-    # from the denominator — and if any of them were WARNing, the score goes UP (measured:
+    # from the denominator - and if any of them were WARNing, the score goes UP (measured:
     # 97 -> 98 with --no-host). Nothing in the number itself reveals that, so a
     # deliberately-narrowed run was indistinguishable from a better-configured one. Name
     # the opt-outs so the figure is not read as comparable to a full audit.
@@ -3523,20 +3523,20 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if _opted_out:
         lines.append(
             "Note: " + " and ".join(_opted_out) + " removed whole check groups from that "
-            "denominator, so this score is NOT comparable to a full audit — opting a "
+            "denominator, so this score is NOT comparable to a full audit \u2014 opting a "
             "subsystem out can raise the number without changing your setup."
         )
-    # B-518: count `issues` — the exact list the body renders — NOT `scored_findings`.
+    # B-518: count `issues` - the exact list the body renders - NOT `scored_findings`.
     # Measured on the real config: the tally said "2 FAIL, 21 WARN" five lines above a
     # body reading "38 issue(s)", because 15 displayed WARNs are advisory (`scored=False`)
     # and dropped out here. `scored=False` means "does not move the score", never "is not
-    # an issue" — the dropped set included C015 (secrets at rest), B14 (egress surface),
+    # an issue" - the dropped set included C015 (secrets at rest), B14 (egress surface),
     # B164 (threats in agent logs) and B68 (fs confinement).
     #
     # The counting is old and was defensible while the "Why N/100" line sat right under it
     # naming the narrower denominator ("UNKNOWN/advisory checks are excluded"). That line
     # is C-423-gated on `graded`, so on an ungraded run it is not emitted and the tally was
-    # left unqualified — the nearest "scored" was 369 lines below. Same family as B-506.
+    # left unqualified - the nearest "scored" was 369 lines below. Same family as B-506.
     #
     # The "Why" line above deliberately keeps `n_pass`/`n_warn`/`n_fail`: its arithmetic
     # has to reconcile with `raw_score`, and it discloses its own denominator in its text.
@@ -3545,57 +3545,57 @@ def render_report(findings: list[Finding], score: ScoreResult,
     _population = issue_population_line(issues)
     if _population:
         lines.append(f"({_population})")
-    # B-520: what this run did and did not cover, read off its own layer ledger — see
+    # B-520: what this run did and did not cover, read off its own layer ledger - see
     # `_scope_note_lines`. This sentence used to be static, and on a `--full` run it told
     # the reader to run five modes whose output was already printed below it.
     _scope_lines, _live_tested = _scope_note_lines(score, findings)
     lines.extend(_scope_lines)
     # Capability-vs-behavior honesty (F-038): a static audit bounds what the agent CAN do,
     # not what it DOES at runtime. OpenClaw core ships no runtime egress/taint gate, so a
-    # clean Lethal Trifecta here is not a runtime guarantee — a high grade means "not
+    # clean Lethal Trifecta here is not a runtime guarantee - a high grade means "not
     # statically lethal-capable", never "protected against the trifecta at runtime".
-    # C-428: this paragraph used to say "a high grade means …" unconditionally, on a run
+    # C-428: this paragraph used to say "a high grade means ..." unconditionally, on a run
     # that may have no grade at all. Tests assert the absence of a letter; they cannot
     # assert the surrounding prose stayed coherent, which is exactly how this survived
-    # the increment that removed the number — so name the run's own artifact instead.
+    # the increment that removed the number - so name the run's own artifact instead.
     _clean_subject = ("a high grade" if getattr(score, "graded", True)
                       else "a clean static result")
     # B-520: the closing pointer is a sibling of the scope note above and had the same
-    # defect in miniature — "use the live tests above" is advice on a run that has not
+    # defect in miniature - "use the live tests above" is advice on a run that has not
     # run them, and a dangling back-reference on one that has (the paragraph above no
     # longer names those flags once the ledger says the layer ran). Same evidence, same
     # branch: positive `STATUS_RAN` only, never an absence.
     _live_tail = ("The live-behaviour result above is what speaks to that."
                   if _live_tested else "Use the live tests above to probe actual resistance.")
     lines.append(
-        "Static audit — this bounds what your agent CAN do, not how it BEHAVES under a"
+        "Static audit \u2014 this bounds what your agent CAN do, not how it BEHAVES under a"
         " live attack. OpenClaw core has no runtime egress/taint gate, so even a clean"
         f" Lethal Trifecta here can still be chained by prompt-injection at runtime: {_clean_subject}"
         " means \"not statically lethal-capable\", not \"runtime-proof\". " + _live_tail
     )
-    # I-025/B-309: an exception to "this grade never reflects runtime behaviour" above —
+    # I-025/B-309: an exception to "this grade never reflects runtime behaviour" above -
     # a trajaudit-style skill/bootstrap indicator match (--analyze-trajectory) MAY CAP
-    # this grade — never raise it, never earn/cost an ordinary scored point. B83, B84,
+    # this grade - never raise it, never earn/cost an ordinary scored point. B83, B84,
     # B85, B180, and every B164 corroboration (including exfil_evidence, same-line or
-    # cross-line) still cannot move this grade at all, in either direction — see
+    # cross-line) still cannot move this grade at all, in either direction - see
     # tests/test_i025_runtime_cap.py for the pinned enumeration. (B164's exfil_evidence
     # class was briefly cap-eligible under Dave's original 2026-07-20 ruling; retracted
     # after four C-135 rounds proved no sound host/verb gate exists for this tool's own
-    # audience — see logscan.py's retraction note.) F-154: T1/T2/T3/B191 are NO LONGER
-    # in the "cannot move it at all" set — see the behavioral exception further below —
+    # audience - see logscan.py's retraction note.) F-154: T1/T2/T3/B191 are NO LONGER
+    # in the "cannot move it at all" set - see the behavioral exception further below -
     # so this paragraph's own claim is narrowed to name only what it still covers.
     # C-423: this whole paragraph explains how a grade can be capped. On an ungraded run
-    # there is no grade to cap, so it is skipped rather than reworded — the same
+    # there is no grade to cap, so it is skipped rather than reworded - the same
     # treatment the cap sentence and the "Why N/100" line already get above.
     if getattr(score, "graded", True):
         lines.append(
             "Runtime exception (RUNTIME-CAP): a trajectory-indicator match MAY CAP this grade"
-            " (never raise it) — every other capability-vs-runtime corroboration still"
+            " (never raise it) \u2014 every other capability-vs-runtime corroboration still"
             " cannot move the grade at all; the behavioral verb-sequence/audit-trail layer"
             " below has a separate exception of its own."
         )
     # C-423: REWORDED on an ungraded run, never suppressed. Suppressing this would
-    # swallow a real runtime observation to satisfy a presentation rule — backwards for
+    # swallow a real runtime observation to satisfy a presentation rule - backwards for
     # a security tool. Only the "your grade was capped" framing is wrong when there is
     # no grade, and "that exception" needs a self-contained replacement because the
     # paragraph it referred to is skipped above.
@@ -3609,23 +3609,23 @@ def render_report(findings: list[Finding], score: ScoreResult,
             lines.append(
                 # B-600 follow-up: the tail sentence deliberately does NOT live here.
                 # The cascade line above already states the cap ONCE, with rank (which
-                # signal led, which merely also fired) — the same sentence and the same
+                # signal led, which merely also fired) - the same sentence and the same
                 # ordering the card, the HTML and the PDF print. This paragraph keeps its
                 # own framing and its reason phrase; a private copy of the shared sentence
                 # is what made 56 of the 64 signal combinations say it two to four times.
-                "Runtime signal (RUNTIME-CAP): a trajectory-indicator match fired — "
+                "Runtime signal (RUNTIME-CAP): a trajectory-indicator match fired \u2014 "
                 f"{_runtime_cap_phrase(score.runtime_cap_reason)}."
             )
-    # F-155: a SECOND exception to "this grade never reflects runtime behaviour" — a
+    # F-155: a SECOND exception to "this grade never reflects runtime behaviour" - a
     # submitted VULNERABLE verdict from a live injection-test harness (canary/dryrun/
     # redteam/multiturn) MAY CAP this grade, never raise it, and only when actually
     # submitted (self-attestation guard: RESISTANT or no submission at all has ZERO
-    # effect — see scoring.LIVE_INJECTION_CAP). Distinct from the I-025 exception above:
+    # effect - see scoring.LIVE_INJECTION_CAP). Distinct from the I-025 exception above:
     # that one is the engine corroborating its OWN trajectory sidecar; this one is the
     # agent under test self-reporting the outcome of an ACTIVE probe it just ran.
     #
     # Deliberately gated on `live_injection_capped` (unlike the I-025 paragraph above,
-    # which is unconditional) — this task's own test plan requires a run with nothing
+    # which is unconditional) - this task's own test plan requires a run with nothing
     # submitted to render byte-identically to before this feature existed, so no new line
     # may appear here unless a VULNERABLE verdict actually capped this run.
     if getattr(score, "live_injection_capped", False):
@@ -3633,53 +3633,53 @@ def render_report(findings: list[Finding], score: ScoreResult,
         if getattr(score, "graded", True):
             lines.append(
                 "Live-test exception (LIVE-TEST-CAP): this run's grade WAS capped by a submitted "
-                f"VULNERABLE verdict — {_live_phrase}."
+                f"VULNERABLE verdict \u2014 {_live_phrase}."
                 " RESISTANT or no submission would have changed nothing."
             )
         else:
             # C-423: a submitted VULNERABLE verdict is the single most serious thing this
             # report can carry. It is stated whether or not a grade was issued.
             lines.append(
-                "Live-test result (LIVE-TEST-CAP): a submitted VULNERABLE verdict — "
+                "Live-test result (LIVE-TEST-CAP): a submitted VULNERABLE verdict \u2014 "
                 # B-600 follow-up: the tail sentence deliberately does NOT live here.
                 # The cascade line above already states the cap ONCE, with rank (which
-                # signal led, which merely also fired) — the same sentence and the same
+                # signal led, which merely also fired) - the same sentence and the same
                 # ordering the card, the HTML and the PDF print. This paragraph keeps its
                 # own framing and its reason phrase; a private copy of the shared sentence
                 # is what made 56 of the 64 signal combinations say it two to four times.
                 f"{_live_phrase}."
             )
-    # F-154: a THIRD exception to "this grade never reflects runtime behaviour" — a
+    # F-154: a THIRD exception to "this grade never reflects runtime behaviour" - a
     # fired T1/T2/T3/B191 behavioral detector (--behavioral or --full) MAY CAP this
     # grade, never raise it, never earn/cost an ordinary scored point. Distinct from
     # both exceptions above: this is proven-by-LOG observation over the trajectory
-    # sidecar's own verb sequence/outcome/drift/audit-trail — not a corroborated
+    # sidecar's own verb sequence/outcome/drift/audit-trail - not a corroborated
     # indicator match (I-025) and not a self-reported ACTIVE-probe verdict (F-155).
     #
     # Deliberately gated on `behavioral_capped` (same discipline as the F-155 paragraph
-    # above, unlike the I-025 one) — a run that never executed --behavioral/--full sees
+    # above, unlike the I-025 one) - a run that never executed --behavioral/--full sees
     # no new line here, byte-identical to before this task existed.
     if getattr(score, "behavioral_capped", False):
         _beh_phrase = _behavioral_cap_phrase(score.behavioral_cap_reason)
         if getattr(score, "graded", True):
             lines.append(
                 "Behavioral exception (BEHAVIORAL-CAP): this run's grade WAS capped by a fired "
-                f"behavioral detector — {_beh_phrase}."
+                f"behavioral detector \u2014 {_beh_phrase}."
                 " A clean --behavioral/--full replay would have changed nothing."
             )
         else:
             lines.append(
-                "Behavioral result (BEHAVIORAL-CAP): a behavioral detector fired — "
+                "Behavioral result (BEHAVIORAL-CAP): a behavioral detector fired \u2014 "
                 # B-600 follow-up: the tail sentence deliberately does NOT live here.
                 # The cascade line above already states the cap ONCE, with rank (which
-                # signal led, which merely also fired) — the same sentence and the same
+                # signal led, which merely also fired) - the same sentence and the same
                 # ordering the card, the HTML and the PDF print. This paragraph keeps its
                 # own framing and its reason phrase; a private copy of the shared sentence
                 # is what made 56 of the 64 signal combinations say it two to four times.
                 f"{_beh_phrase}."
             )
     # B-306 (C-135 follow-up): openclaw.json itself went dark this run (present but
-    # unparseable, or unreadable) — every config-derived check (A1/B41/B1/B11/...)
+    # unparseable, or unreadable) - every config-derived check (A1/B41/B1/B11/...)
     # correctly degraded to UNKNOWN rather than a fabricated verdict, but that alone lets
     # the grade RISE (fewer FAILs to cap it) even though the audit saw strictly less, not
     # more. This line only ever appears alongside the cap already applied above.
@@ -3705,7 +3705,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
             )
     elif _sandbox_config_blind(ctx, score):
         # B-776: this GRADED branch (unlike the ungraded one above) never distinguished
-        # "absent" from "unreadable" — both said "could not be read/parsed", which is
+        # "absent" from "unreadable" - both said "could not be read/parsed", which is
         # simply untrue when nothing was ever found. The sandboxed case needs its own
         # wording regardless, so it is checked first rather than folded into that gap.
         lines.append(f"Config visibility (CONFIG-SANDBOX): {_SANDBOX_BLIND_SENTENCE}")
@@ -3727,14 +3727,14 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # categories that eval identified (privilege-escalation, data-exfiltration, social-
     # engineering prose) have since had dedicated detectors added (B159/B160/B163) but the
     # fix has not yet been re-measured against the same benchmark.
-    # C-428: "/high-grade" is dropped on an ungraded run — there is no grade to qualify.
+    # C-428: "/high-grade" is dropped on an ungraded run - there is no grade to qualify.
     _pass_subject = ("A clean/high-grade result" if getattr(score, "graded", True)
                      else "A clean result")
     lines.append(
-        f"{_pass_subject} means \"no known attack pattern matched\" — not \"this"
+        f"{_pass_subject} means \"no known attack pattern matched\" \u2014 not \"this"
         " setup is safe.\" External benchmarks (SkillTrustBench, OASB) found detection"
         " precision very high (few false alarms) but malicious-sample recall measured"
-        " between 0.09 and 0.41 depending on benchmark/artifact type — most misses were"
+        " between 0.09 and 0.41 depending on benchmark/artifact type \u2014 most misses were"
         " attacks described in prose rather than shipped as code. A clean result means the"
         " scanner didn't recognize a pattern it already knows, not that nothing is wrong."
     )
@@ -3746,34 +3746,34 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if not openclaw_detected:
         # B-755: this counted a CONFIRMED archive escape as "not determined". The status was
         # added here deliberately and put on the wrong side of the only distinction that
-        # matters — a conviction is the opposite of an undetermined check.
+        # matters - a conviction is the opposite of an undetermined check.
         n_unknown = sum(1 for f in findings if f.status == UNKNOWN)
-        warn_icon = "[!]" if ascii_only else "⚠️"
+        warn_icon = "[!]" if ascii_only else "\u26a0\ufe0f"
         lines.append("")
         lines.append(
-            f"{warn_icon} No openclaw.json found — this looks like a non-standard or"
+            f"{warn_icon} No openclaw.json found \u2014 this looks like a non-standard or"
             " custom setup. ClawSecCheck is calibrated for OpenClaw, the only"
             " fully-supported target right now, so checks that need the standard"
             " config could not be assessed."
         )
         if n_unknown:
             # B-532: "your score"/"the grade" name two things an ungraded run never
-            # printed — the same defect class as the degraded-checks clause above, and
+            # printed - the same defect class as the degraded-checks clause above, and
             # reworded the same way (C-166's line at the top of this function is the
-            # existing precedent for the ternary). The reassurance itself — UNKNOWN is
-            # never held against the reader — is what matters and survives in both
+            # existing precedent for the ternary). The reassurance itself - UNKNOWN is
+            # never held against the reader - is what matters and survives in both
             # branches; only the noun it hangs off moves.
             lines.append(
                 f"{n_unknown} check(s) were not assessed (UNKNOWN) and are NOT"
-                + (f" counted against your score — the grade reflects only the"
+                + (f" counted against your score \u2014 the grade reflects only the"
                    f" {n_scored} assessable check(s)."
                    if getattr(score, "graded", True)
-                   else f" counted against you — these findings reflect only the"
+                   else f" counted against you \u2014 these findings reflect only the"
                         f" {n_scored} assessable check(s).")
             )
     lines.append("")
     # F-131 Phase 1: "Inventory by subject" sits directly ABOVE the 7-family view (design
-    # §3, locked decision 1) — NOT above the whole report. It closes with "(details by
+    # §3, locked decision 1) - NOT above the whole report. It closes with "(details by
     # security family below)", which only reads correctly when the family view is what
     # follows it; prepending the block to the entire report pushed the header and the
     # grade underneath ~40 lines of findings, which is the one thing that decision
@@ -3791,18 +3791,18 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(f"No known attack pattern matched. Keep it that way. {ok}")
     else:
         if issues:
-            lines.append(f"{len(issues)} issue(s), grouped by subject — most urgent first within each:")
+            lines.append(f"{len(issues)} issue(s), grouped by subject \u2014 most urgent first within each:")
         else:
             lines.append(f"No known attack pattern matched. Keep it that way. {ok}")
         lines.append("")
         # Group EVERY finding (not just FAIL/WARN) by its Inventory subject (OpenClaw core /
         # Host / Agents / Skills / MCP / Channels / Logs) so the report reads as coverage-
-        # by-subject — matching the "Inventory by subject" block directly above — rather
+        # by-subject - matching the "Inventory by subject" block directly above - rather
         # than a flat severity dump. A1 (Lethal Trifecta) routes to Agents via its
         # "trifecta" surface (SUBJECT_OF), so it shows up as one Agents finding among others
         # instead of a standalone headline (F-044). Findings with an id outside CATALOG fall
         # into a trailing "Other" bucket (nothing silently dropped). PASS/UNKNOWN are
-        # collapsed to a one-line roster per subject — still listed, just not walled in green.
+        # collapsed to a one-line roster per subject - still listed, just not walled in green.
         grouped: dict[str | None, list[Finding]] = {}
         for f in unsuppressed_all:
             grouped.setdefault(_subject_of(f), []).append(f)
@@ -3828,12 +3828,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
                     if f.status == UNKNOWN and getattr(f, "not_applicable", False)),
             )
             if ascii_only:
-                lines.append(f"[{label_disp}] — {count_text}")
+                lines.append(f"[{label_disp}] \u2014 {count_text}")
             else:
-                _rule = "─" * 30
-                lines.append(f"┌{_rule}")
-                lines.append(f"│ {label_disp} — {count_text}")
-                lines.append(f"└{_rule}")
+                _rule = "\u2500" * 30
+                lines.append(f"\u250c{_rule}")
+                lines.append(f"\u2502 {label_disp} \u2014 {count_text}")
+                lines.append(f"\u2514{_rule}")
             n_unknown = 0
             n_na = 0
             for f in members:
@@ -3843,11 +3843,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 elif f.status == PASS:
                     _render_finding_compact(lines, icon, f)
                 else:
-                    # UNKNOWN: tallied, not enumerated one-by-one — a wall of near-identical
+                    # UNKNOWN: tallied, not enumerated one-by-one - a wall of near-identical
                     # "not assessed" lines adds noise, not information; the honest count is
                     # what matters (nothing hidden, just not spelled out per check).
                     # F-139/B2: split off not_applicable (surface positively confirmed
-                    # absent, e.g. no MCP servers) — the --ask/--attest advice below is
+                    # absent, e.g. no MCP servers) - the --ask/--attest advice below is
                     # meaningless for those, so they get their own line with no advice.
                     if getattr(f, "not_applicable", False):
                         n_na += 1
@@ -3855,14 +3855,14 @@ def render_report(findings: list[Finding], score: ScoreResult,
                         n_unknown += 1
             if n_unknown:
                 unk_icon = icon.get(UNKNOWN, "?")
-                lines.append(f"  {unk_icon} {n_unknown} not assessed (config can't tell) —"
+                lines.append(f"  {unk_icon} {n_unknown} not assessed (config can't tell) \u2014"
                              " resolve via `--ask` then `--attest`")
             if n_na:
                 na_icon = _AXIS_ICON_ASCII["N/A"] if ascii_only else _AXIS_ICON_UNI["N/A"]
                 lines.append(f"  {na_icon} {n_na} not applicable (no such surface in your config)")
             lines.append("")
 
-    # Coverage map — "check OpenClaw the platform" framing: how many config surfaces this
+    # Coverage map - "check OpenClaw the platform" framing: how many config surfaces this
     # run actually assessed, honestly split checked / partial / not-checkable (F-031 data,
     # C-102 terminal render). Read-only derivation over the findings; never alters the score.
     if findings:
@@ -3892,15 +3892,15 @@ def render_report(findings: list[Finding], score: ScoreResult,
 
     if suppressed_count:
         lines.append(f"({suppressed_count} finding(s) suppressed via .clawseccheckignore)")
-        # Surface suppressed findings that either cap the score (a FAILed CRITICAL→49 / HIGH→79)
+        # Surface suppressed findings that either cap the score (a FAILed CRITICAL->49 / HIGH->79)
         # or hit a sensitive check (B1/B2/B13/B20). Hiding these silently could turn an F into an
         # A via one .clawseccheckignore line, so they stay visible no matter what the ignore says.
-        # Same rule the badge and SARIF now use (surfaced_despite_suppression) — one source (B-163).
+        # Same rule the badge and SARIF now use (surfaced_despite_suppression) - one source (B-163).
         for f in findings:
             if surfaced_despite_suppression(f):
                 lines.append(
                     f"WARNING: a {f.severity} finding ({f.id}) is suppressed via"
-                    " .clawseccheckignore — it still counts against your real security;"
+                    " .clawseccheckignore \u2014 it still counts against your real security;"
                     " review your ignore list."
                 )
 
@@ -3917,7 +3917,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(
             f"({len(_dead)} .clawseccheckignore entr{'y' if len(_dead) == 1 else 'ies'} "
             "no longer match any finding: " + ", ".join(_dead_shown) + _dead_extra
-            + " — either the issue was fixed, or the check's wording changed and the same"
+            + " \u2014 either the issue was fixed, or the check's wording changed and the same"
             " problem is back under a new fingerprint. Run --show-suppressed to confirm"
             " which, or remove the stale entry.)"
         )
@@ -3933,7 +3933,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
                     _render_finding(lines, f, cfg=_blast_cfg,
                                     ascii_only=ascii_only, color=color)
             else:
-                lines.append("Clean — openclaw security audit found nothing.")
+                lines.append("Clean \u2014 openclaw security audit found nothing.")
         else:
             lines.append(f"(not included: {native.note})")
         lines.append("")
@@ -3947,34 +3947,34 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # Offline staleness advisory (computed by the CLI; never a network call). Untrusted hint
     # text is already sanitized to a clean semver in update.py, but pass through _sanitize too.
     if update_notice:
-        bullet = "*" if ascii_only else "⏳"
+        bullet = "*" if ascii_only else "\u23f3"
         lines.append("")
         for i, ln in enumerate(update_notice):
             prefix = f"{bullet} " if i == 0 else "   "
             lines.append(f"{prefix}{_sanitize(ln)}")
 
-    # Coverage freshness advisory — human report only, advisory only. Each element is one
+    # Coverage freshness advisory - human report only, advisory only. Each element is one
     # complete capability notice; rendered with its own bullet so both can appear together.
     # Never alters score, grade, or findings (purely additive output).
     if freshness_notice:
-        bullet = "*" if ascii_only else "⏳"
+        bullet = "*" if ascii_only else "\u23f3"
         lines.append("")
         for ln in freshness_notice:
             lines.append(f"{bullet} {_sanitize(ln)}")
 
-    # C-165: hedged staleness nudge — an overwhelming UNKNOWN share on a detected OpenClaw
+    # C-165: hedged staleness nudge - an overwhelming UNKNOWN share on a detected OpenClaw
     # setup is ambiguous (could be a genuinely minimal install, or ClawSecCheck's checks may
     # be stale against a newer OpenClaw schema) so the wording MUST keep both readings open;
     # never assert drift as fact. Human-report-only, advisory only; makes no network call.
     if (openclaw_detected and cov["scored_total"] >= DRIFT_MIN_SCORED
             and cov["unknown_frac"] >= DRIFT_UNKNOWN_FRAC):
-        bullet = "*" if ascii_only else "⏳"
+        bullet = "*" if ascii_only else "\u23f3"
         lines.append("")
         lines.append(
             f"{bullet} Most checks came back not-assessable"
             f" ({cov['unknown']}/{cov['scored_total']}) on a detected OpenClaw setup."
             " Either this is a minimal setup, or ClawSecCheck may be stale against a newer"
-            " OpenClaw config schema — worth a second look either way."
+            " OpenClaw config schema \u2014 worth a second look either way."
             " (offline notice; no network call)"
         )
 
@@ -3998,12 +3998,12 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
     of re-composing it (models drop the open 3-sided frame otherwise):
       - non-suppressed FAIL/WARN findings only (PASS/UNKNOWN live in Sections 4 & 6);
       - MEDIUM/ATTESTED-confidence findings excluded (they surface in Section 4);
-      - families with no qualifying finding are omitted (no empty "— clear" headers);
+      - families with no qualifying finding are omitted (no empty "- clear" headers);
       - each family under the same open 3-sided frame render_report uses.
 
     `compact=True` (B-381) is render_dashboard's --dashboard --full --compact mode:
     this block is the one section that SCALES with FAIL/WARN count (a bad config has
-    many), so it is the real driver of the Telegram ~4096-char budget being missed —
+    many), so it is the real driver of the Telegram ~4096-char budget being missed -
     every other combined-pipeline section is already bounded/short. `compact` threads
     into `_render_finding`, which trims each finding's "why" text and drops its
     evidence bullets; the family frames, titles and severity tokens are unchanged
@@ -4025,7 +4025,7 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
         and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
     ]
     if not qualifying:
-        ok = "[OK]" if ascii_only else "✅"
+        ok = "[OK]" if ascii_only else "\u2705"
         out = f"No high-confidence issues to fix. {ok}\n"
         return _asciify(out) if ascii_only else out
 
@@ -4034,7 +4034,7 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
         members.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
         count_text = f"{len(members)} issue(s)"
         if ascii_only:
-            lines.append(f"[{label}] — {count_text}")
+            lines.append(f"[{label}] \u2014 {count_text}")
         else:
             # Chat paste carries the subject emoji (SKILL.md Step-3 table, B-077);
             # the CLI report / HTML / PDF subject headers stay emoji-less by design.
@@ -4043,10 +4043,10 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
             # B-381: --compact narrows the frame's own border rule (still an open
             # 3-sided box -- same shape, fewer dashes) -- one of several small per-
             # family savings that add up across a bad config's many families/findings.
-            _rule = "─" * (10 if compact else 30)
-            lines.append(f"┌{_rule}")
-            lines.append(f"│ {head} — {count_text}")
-            lines.append(f"└{_rule}")
+            _rule = "\u2500" * (10 if compact else 30)
+            lines.append(f"\u250c{_rule}")
+            lines.append(f"\u2502 {head} \u2014 {count_text}")
+            lines.append(f"\u2514{_rule}")
         for f in members:
             _render_finding(lines, f, cfg=None, ascii_only=ascii_only, compact=compact,
                             why_drop_severities=why_drop_severities)
@@ -4057,30 +4057,30 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
 
 
 def _plugins_inventory_lines(sweep, *, ascii_only: bool = False, compact: bool = False) -> list[str]:
-    """Per-plugin verdict lines for the combined pipeline Dashboard (F-153) — the
+    """Per-plugin verdict lines for the combined pipeline Dashboard (F-153) - the
     Plugins counterpart to _skills_inventory_lines/_mcp_inventory_lines. `sweep` is
     duck-typed on checks._mcp.PluginSweep's published surface (.no_roots/.no_targets/
-    .counts()/.rows/.findings) and is never imported here — mirrors the precedent
+    .counts()/.rows/.findings) and is never imported here - mirrors the precedent
     pipeline.record_skill_sweep's own docstring already sets out for exactly this
     Layer-2/Layer-3 hand-off (and, in this direction, avoids the report<->pipeline
     import cycle: pipeline.py already imports report._sanitize/_sanitize_tree).
 
     Returns [] when there is genuinely nothing to sweep (no installed-plugin index
-    found, or an index naming zero plugins) — the caller omits the whole "Plugins"
+    found, or an index naming zero plugins) - the caller omits the whole "Plugins"
     block then, same as "Skills" already does when inv["skills"] is empty.
     `compact=True` (--compact) collapses this to the headline count line plus the
-    not-scanned disclosure (when there is one) — the per-plugin roster/reason lines
+    not-scanned disclosure (when there is one) - the per-plugin roster/reason lines
     are what gets dropped, not the disclosure (B-381).
 
     B-381 (Golden Rule #4): SKIPPED/TRUNCATED rows are folded into "flagged" for the
     headline marker/count, the same precedent `_skills_inventory_lines` already sets
     for its own UNKNOWN rows. `_worst_of_statuses` only recognizes FAIL/WARN/UNKNOWN/
-    PASS (`_STATUS_ORDER`) — "SKIPPED"/"TRUNCATED" aren't in that table, so they used
+    PASS (`_STATUS_ORDER`) - "SKIPPED"/"TRUNCATED" aren't in that table, so they used
     to be silently ignored by the rollup, and a sweep where EVERY row was
     SKIPPED/TRUNCATED (no FAIL/WARN at all) rolled up to a bare PASS and rendered a
-    green "clear" headline for a sweep that scanned nothing — the exact opposite of
+    green "clear" headline for a sweep that scanned nothing - the exact opposite of
     the truth. Also: the headline count is `len(sweep.rows)`, not `counts()['total']`
-    — `counts()` defines `scanned = rows where status != 'SKIPPED'` and `total =
+    - `counts()` defines `scanned = rows where status != 'SKIPPED'` and `total =
     len(scanned)`, so a sweep with any SKIPPED row under-reported the installed count
     (the same defect B-268 already fixed once for `_skills_inventory_lines`).
     """
@@ -4098,11 +4098,11 @@ def _plugins_inventory_lines(sweep, *, ascii_only: bool = False, compact: bool =
     worst_statuses = [s for _n, s in fail_warn] + ([UNKNOWN] * len(not_scanned))
     marker = icon.get(_worst_of_statuses(worst_statuses), "?")
     count_text = f"{flagged_n} flagged" if flagged_n else "clear"
-    lines = [f" Plugins ({len(sweep.rows)} installed) — {marker} {count_text}"]
+    lines = [f" Plugins ({len(sweep.rows)} installed) \u2014 {marker} {count_text}"]
     if not_scanned:
         lines.append(
             f"   {icon.get(UNKNOWN, '?')} {len(not_scanned)} plugin(s) not (fully) "
-            "scanned — their verdict is unknown, not clean"
+            "scanned \u2014 their verdict is unknown, not clean"
         )
     if compact:
         return lines
@@ -4120,7 +4120,7 @@ def _plugins_inventory_lines(sweep, *, ascii_only: bool = False, compact: bool =
 def _risk_chain_lines(paths, *, ascii_only: bool = False, compact: bool = False,
                       limit: int = 8) -> list[str]:
     """Highest-risk capability-chain lines for the combined pipeline Dashboard
-    (F-153). `paths` is the same list[RiskPath] risk.risk_paths() already produces —
+    (F-153). `paths` is the same list[RiskPath] risk.risk_paths() already produces -
     duck-typed on .id/.severity/.title/.chain/.why only, so risk.py need not be
     imported here (report.py already renders RISK-chain text for --risk-paths via
     risk.render_risk_paths, which this deliberately does NOT call: that renderer's
@@ -4129,13 +4129,13 @@ def _risk_chain_lines(paths, *, ascii_only: bool = False, compact: bool = False,
     common case, Section 2's own findings already speak to it, and repeating it
     here on every single run would just be more channel-limit noise).
 
-    Returns [] when `paths` is empty — the block is omitted entirely, matching the
+    Returns [] when `paths` is empty - the block is omitted entirely, matching the
     other "nothing to show" blocks. `compact=True` (the --compact Telegram-safe
     layout) drops the chain/why detail lines, keeping one line per chain.
     """
     if not paths:
         return []
-    arrow = " -> " if ascii_only else " → "
+    arrow = " -> " if ascii_only else " \u2192 "
     shown = paths[:limit]
     lines: list[str] = []
     for p in shown:
@@ -4144,7 +4144,7 @@ def _risk_chain_lines(paths, *, ascii_only: bool = False, compact: bool = False,
             lines.append(f"   chain: {arrow.join(_sanitize(step) for step in p.chain)}")
             lines.append(f"   why: {_sanitize(p.why)}")
     if len(paths) > limit:
-        lines.append(f"  (+{len(paths) - limit} more — see --risk-paths)")
+        lines.append(f"  (+{len(paths) - limit} more \u2014 see --risk-paths)")
     return lines
 
 
@@ -4152,17 +4152,17 @@ def _behavioral_block_lines(phase, *, ascii_only: bool = False) -> list[str]:
     """One-paragraph behavioural-replay summary for the combined pipeline Dashboard
     (F-153). `phase` is duck-typed on pipeline.PhaseResult's published surface
     (.ran/.detail/.lines) and is never imported here (pipeline.py already imports
-    report.py the other way — report.py importing pipeline.py back would be the
+    report.py the other way - report.py importing pipeline.py back would be the
     exact cycle pipeline.py's own module docstring says P6 must not reintroduce).
 
-    Always rendered when `phase` is supplied — never silently omitted, even when
+    Always rendered when `phase` is supplied - never silently omitted, even when
     nothing fired. Golden Rule #4: "not run" / "nothing found" are real answers a
     security tool must say out loud, never leave the reader to read a missing
     section as a clean pass.
     """
     if phase is None:
         return []
-    marker = "*" if ascii_only else "•"
+    marker = "*" if ascii_only else "\u2022"
     lines = [f"{marker} {_sanitize(phase.detail)}"]
     if phase.ran and any("INCIDENT SIGNAL" in ln for ln in phase.lines):
         lines.append(f"{marker} Full detail: --behavioral / --analyze-trajectory.")
@@ -4175,7 +4175,7 @@ def _second_opinion_lines(phase, *, ascii_only: bool = False) -> list[str]:
     _behavioral_block_lines; always rendered when `phase` is supplied."""
     if phase is None:
         return []
-    marker = "*" if ascii_only else "•"
+    marker = "*" if ascii_only else "\u2022"
     return [f"{marker} {_sanitize(phase.detail)}"]
 
 
@@ -4187,10 +4187,10 @@ def _second_opinion_item_lines(phase, *, limit: int = 60) -> list[str]:
     over dozens of items produced `86 of 86 borderline item(s) judged` and nothing else,
     in the card AND in the PDF, while SKILL.md promised "real per-item verdicts rather
     than a bare pending count" and "per-item annotations". The rows exist all along on
-    the phase (`data["secondOpinion"]`, one dict per item) — nothing consumed them.
+    the phase (`data["secondOpinion"]`, one dict per item) - nothing consumed them.
 
     The PDF is the right home: it is the attachment, so it has the room the card does not.
-    Bounded, with the drop disclosed (Golden Rule #4 — no silent caps).
+    Bounded, with the drop disclosed (Golden Rule #4 - no silent caps).
     """
     data = getattr(phase, "data", None) or {}
     rows = [r for r in (data.get("secondOpinion") or []) if r.get("judge_verdict")]
@@ -4215,7 +4215,7 @@ def _second_opinion_item_lines(phase, *, limit: int = 60) -> list[str]:
 
 
 def _glance_qualifying_findings(findings: list[Finding]) -> list[Finding]:
-    """The non-suppressed, MEDIUM/ATTESTED-confidence FAIL/WARN findings —
+    """The non-suppressed, MEDIUM/ATTESTED-confidence FAIL/WARN findings -
     render_dashboard_findings's own HIGH-confidence filter excludes exactly this set
     from Section 2 (B-444's `_worth_a_glance_lines` renders it instead, `full=True`
     only). Factored out so `_worth_a_glance_lines` and render_dashboard's own
@@ -4233,7 +4233,7 @@ def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
                           limit: int = 12, compact: bool = False,
                           why_drop_severities: frozenset = frozenset()) -> list[str]:
     """MEDIUM/ATTESTED-confidence findings for the combined pipeline Dashboard
-    (F-153) — the exact complement of render_dashboard_findings's own filter (which
+    (F-153) - the exact complement of render_dashboard_findings's own filter (which
     excludes these from Section 2), so nothing is shown twice and nothing is
     dropped. Reuses _render_finding, the SAME per-finding renderer Section 2 uses,
     so the two blocks stay one system rather than two hand-written formatters that
@@ -4241,22 +4241,22 @@ def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
 
     B-381 (PII / CLAUDE.md §8): render_dashboard_findings's HIGH-confidence filter has
     always kept MEDIUM/ATTESTED findings off the --dashboard card; this block is the
-    deliberate exception (F-153's "nothing dropped" design) and needs its own guard —
+    deliberate exception (F-153's "nothing dropped" design) and needs its own guard -
     a MEDIUM-confidence "Native binary PATH safety" finding's `detail` embeds an
     absolute path under the operator's home directory (username included), and this
     card is explicitly designed to be pasted into chat (Telegram et al). Every line is
     passed through `_redact_home_paths` before it is returned; keeping these findings
-    (redacted) rather than dropping them entirely was the deliberate call here — this
+    (redacted) rather than dropping them entirely was the deliberate call here - this
     section exists specifically so a lower-confidence signal is never silently
     invisible, and that "worth a glance" is genuinely useful (e.g. an over-permissive
     npm-global install dir) even once the path is collapsed to '~'.
 
     `compact=True` (B-381) also lowers the effective `limit` (the caller passes a
     smaller value) and threads `compact` into `_render_finding`, same trims Section 2
-    applies under --compact — this block is unbounded by FAIL/WARN family structure,
+    applies under --compact - this block is unbounded by FAIL/WARN family structure,
     so a bad config with many MEDIUM/ATTESTED findings could otherwise blow the
     Telegram ~4096-char budget on its own. `why_drop_severities` (B-405) threads the
-    same final-budget-enforcement drop set Section 2 gets — see
+    same final-budget-enforcement drop set Section 2 gets - see
     `render_dashboard_findings`'s docstring.
     """
     qualifying = _glance_qualifying_findings(findings)
@@ -4280,26 +4280,26 @@ def _finalize_compact_dashboard(assemble, *, compact: bool, ascii_only: bool,
 
     *reserve* is how many characters the CALLER will append to this card after the
     budget has been enforced. It exists because enforcing here and appending there is
-    not enforcement at all: measured on a real config, the card came back at 4,066 —
-    inside the 4,096 budget — and cli.py's fixed 55-character next-actions pointer took
+    not enforcement at all: measured on a real config, the card came back at 4,066 -
+    inside the 4,096 budget - and cli.py's fixed 55-character next-actions pointer took
     the emitted result to 4,121. B-604 already collapsed that block to a one-liner for
     this reason and its own docstring names the principle it still missed: "a budget
     that depends on the config is not a budget". Subtracting the caller's known,
-    fixed addition makes the ladder do the reduction — severity-ordered, LOW detail
-    first, CRITICAL never — instead of the tail being cut blind or the cap being
+    fixed addition makes the ladder do the reduction - severity-ordered, LOW detail
+    first, CRITICAL never - instead of the tail being cut blind or the cap being
     exceeded.
 
     `assemble(why_drop_severities)` builds the full (non-asciified) card for a given
     drop set; this wrapper renders it, applies `_asciify` when requested (the length
     check below runs on the ACTUAL final string the caller emits, not a pre-ascii
-    proxy for it — `_asciify` can change length, e.g. "…" -> "..."), and — only when
-    `compact=True` — retries with a progressively more aggressive drop set from
+    proxy for it - `_asciify` can change length, e.g. "..." -> "..."), and - only when
+    `compact=True` - retries with a progressively more aggressive drop set from
     `_COMPACT_WHY_DROP_LEVELS` until the result fits `_COMPACT_CHAR_BUDGET`. If the
     most aggressive level still doesn't fit, `_hard_truncate_compact` is the
     deterministic last resort that guarantees the return value is never over budget.
 
     `compact=False` (every pre-existing caller) calls `assemble()` exactly once and
-    returns it untouched — byte-identical to the pre-B-405 behaviour.
+    returns it untouched - byte-identical to the pre-B-405 behaviour.
     """
     def _final(why_drop_severities: frozenset = frozenset()) -> str:
         out = assemble(why_drop_severities)
@@ -4316,11 +4316,11 @@ def _finalize_compact_dashboard(assemble, *, compact: bool, ascii_only: bool,
     return _hard_truncate_compact(result, budget)
 
 
-# ── C-373: the default chat card is an OVERVIEW, not the full findings dump ──────────
+# -- C-373: the default chat card is an OVERVIEW, not the full findings dump ----------
 #
 # Measured on dev@2a78be6: plain `--dashboard` rendered 7225 chars on fixtures/home_vuln
 # and 3946 on the CLEAN fixtures/home_safe, against the ~4096 chars a Telegram message
-# holds — and the B-381/B-405 budget machinery was unreachable there (`--compact` is a
+# holds - and the B-381/B-405 budget machinery was unreachable there (`--compact` is a
 # no-op without `--full`, so the one output SKILL.md tells the host agent to paste had no
 # size control at all). The card now leads with the per-subject overview, names only the
 # most urgent findings, and routes full detail to the attachable PDF report.
@@ -4343,11 +4343,11 @@ def _card_trim_title(title: str, limit: int = _CARD_TITLE_LIMIT) -> str:
     if len(t) <= limit:
         return t
     cut = t[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
-    return (cut or t[:limit]) + "…"
+    return (cut or t[:limit]) + "\u2026"
 
 
 def _card_summary_lines(findings, ctx, *, plugin_sweep=None, ascii_only: bool = False) -> list[str]:
-    """Per-subject overview lines for the chat card — built from the SAME
+    """Per-subject overview lines for the chat card - built from the SAME
     `_subject_summary_rows` the HTML and PDF summary tables use, so all three surfaces
     (and the JSON `inventory`) can never disagree. Returns [] when `ctx` is unavailable,
     the same skip-don't-guess stance `render_subject_inventory` already takes."""
@@ -4362,20 +4362,20 @@ def _card_summary_lines(findings, ctx, *, plugin_sweep=None, ascii_only: bool = 
     for label, status, count_text in rows:
         marker = icon.get(status, icon.get(UNKNOWN, "?"))
         emoji = "" if ascii_only else f"{_SUBJECT_EMOJI.get(key_of.get(label), '')} "
-        out.append(f" {emoji}{label} — {marker} {count_text}")
+        out.append(f" {emoji}{label} \u2014 {marker} {count_text}")
     return out
 
 
 def _card_top_urgent_lines(findings, *, limit: int = _CARD_TOP_URGENT,
                            ascii_only: bool = False) -> tuple[list[str], int]:
     """The most urgent findings as ONE line each (severity token + trimmed title, no
-    `why:` and no evidence bullets — that is what the PDF is for).
+    `why:` and no evidence bullets - that is what the PDF is for).
 
     Draws from the same qualifying set `render_dashboard_findings` renders
     (non-suppressed FAIL/WARN, excluding MEDIUM/ATTESTED confidence) and sorts it the
     same way, so the card's "most urgent" and the full block agree on what is worst.
     Returns `(lines, n_named)`; the caller reconciles `n_named` against the header's own
-    issue count and DISCLOSES the difference (Golden Rule #4 — a card that quietly names
+    issue count and DISCLOSES the difference (Golden Rule #4 - a card that quietly names
     5 of 26 findings would read as a complete list)."""
     qualifying = [
         f for f in findings
@@ -4400,7 +4400,7 @@ def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool =
     B-468: this text is PASTED VERBATIM into a chat by the host agent, so it may contain
     only what a human reader should see. It used to carry the absolute report path and the
     line "Attach that PDF file itself into the chat; do not paste its path or re-render its
-    contents" — an instruction aimed at the agent, sitting inside the very block the agent
+    contents" - an instruction aimed at the agent, sitting inside the very block the agent
     is ordered to reproduce word for word. That is a contradiction the model has to resolve
     on its own, and the observed resolution was the one this project least wants: a real
     session where the agent handed the user a link, twice, before ever attaching the file.
@@ -4408,19 +4408,19 @@ def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool =
     the card states only that the report is attached."""
     lines: list[str] = []
     # Under --full the PDF additionally carries the pipeline blocks (Skills/Plugins/MCP/
-    # RISK chains/Behavioural/Second opinion/Coverage/Worth a glance) — say so, so the
+    # RISK chains/Behavioural/Second opinion/Coverage/Worth a glance) - say so, so the
     # reader knows the attachment is the whole run, not just a findings list.
     full_pipeline = (", plus the skills/plugins/MCP, RISK-chain, behavioural,"
                      " second-opinion and coverage blocks") if full else ""
     if n_more > 0:
         word = "finding" if n_more == 1 else "findings"
-        lines.append(f"(+{n_more} more {word} not named above — the full list is in the report.)")
+        lines.append(f"(+{n_more} more {word} not named above \u2014 the full list is in the report.)")
     if pdf_path:
-        lines.append(f"Full detail — every finding, with its why and evidence{full_pipeline}"
-                     " — is in the attached PDF report.")
+        lines.append(f"Full detail \u2014 every finding, with its why and evidence{full_pipeline}"
+                     " \u2014 is in the attached PDF report.")
     else:
         lines.append("For the full detail, re-run with `--pdf <path>` (an attachable report)"
-                     " — or `--save <path>` / `--html <path>`.")
+                     " \u2014 or `--save <path>` / `--html <path>`.")
     return lines
 
 
@@ -4428,7 +4428,7 @@ def _finalize_card(assemble_with_limit, *, ascii_only: bool) -> str:
     """Hard budget guarantee for the default chat card (C-373).
 
     Unlike `_finalize_compact_dashboard` (whose ladder drops `why:` lines, which this
-    card does not have), the card reduces by naming FEWER findings — the per-subject
+    card does not have), the card reduces by naming FEWER findings - the per-subject
     overview and the detail pointer are never what gets dropped, since a card without
     them is a grade and nothing else. `_hard_truncate_compact` remains the deterministic
     last resort, so the return value is never over budget on any input."""
@@ -4446,46 +4446,46 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
                      risk=None, plugin_sweep=None, behavioral=None,
                      adjudication=None, compact: bool = False, pdf_path=None,
                      compact_reserve: int = 0, coverage_page: dict | None = None) -> str:
-    """Deterministic chat Dashboard card — Sections 1-2 of SKILL.md Step 3, pasted verbatim,
+    """Deterministic chat Dashboard card - Sections 1-2 of SKILL.md Step 3, pasted verbatim,
     plus an optional Section 3 (B-356) with per-skill vet verdicts, plus (F-153) the rest
     of --full's pipeline when `full=True`.
 
-    Live testing (F-070) showed the host LLM silently drops the 🦞 header and the family
+    Live testing (F-070) showed the host LLM silently drops the lobster header and the family
     frame when asked to *compose* them, so the whole card is code-rendered (B-077): grade
     card + score-bar + issue count, then the framed findings block. Reports-only (F-074):
-    the card names what is wrong and why — it carries no remediation and no fix offers.
+    the card names what is wrong and why - it carries no remediation and no fix offers.
     The host agent pastes this output and only writes its own prose *around* it.
 
     B-356: `--full`'s per-skill sweep (v3.57.0) never reached this card, so a user going
-    through the normal guided flow never saw it. `ctx` is optional and additive — passing
+    through the normal guided flow never saw it. `ctx` is optional and additive - passing
     None (every pre-existing caller) reproduces the exact prior Sections 1-2 output,
     byte-identical. When `ctx` carries installed skills, a compact "Skills" section is
     appended below Findings, reusing the SAME per-skill verdict lines
     (`_skills_inventory_lines`) the full report's "Inventory by subject" block already
-    shows — one source of truth, not a second formatter to drift out of sync.
+    shows - one source of truth, not a second formatter to drift out of sync.
 
     F-153: `full=False` (every pre-existing caller, and every `--dashboard` invocation
     that doesn't also pass `--full`) reproduces Sections 1-2 plus the optional Skills
     block, nothing else. (B-444 superseded the "byte-identical" claim this docstring
     used to make here in two deliberate ways: the header now always routes through
-    `brand.header()` — bug B, the wordmark was missing — and Section 2 appends a
-    "(+N more — run --full for the rest)" disclosure line whenever `n_issues` counts
+    `brand.header()` - bug B, the wordmark was missing - and Section 2 appends a
+    "(+N more - run --full for the rest)" disclosure line whenever `n_issues` counts
     MEDIUM/ATTESTED-confidence FAIL/WARN findings that `render_dashboard_findings`
-    excludes and `full=False` never reaches `_worth_a_glance_lines` to show instead —
+    excludes and `full=False` never reaches `_worth_a_glance_lines` to show instead -
     bug A, the header count and the render used to silently disagree.) Dave settled
     2026-07-30
     that `--dashboard` must fully render everything `--full` does rather than the
     additive-append shape `--full` itself grew first (F-150/F-151/F-152); this is that
     render, reached only via `--dashboard --full`. The fixed order is: Skills (vet) ·
     Plugins (vet) · MCP · RISK chains · Behavioural · "Second opinion (advisory)" ·
-    Coverage · "Worth a glance" — each block independently omitted when there is
+    Coverage · "Worth a glance" - each block independently omitted when there is
     genuinely nothing to show for it (Plugins/MCP/RISK chains), except Behavioural and
-    Second opinion, which — per Golden Rule #4 — are shown whenever a phase result was
+    Second opinion, which - per Golden Rule #4 - are shown whenever a phase result was
     supplied, even to report "nothing fired". `risk`/`plugin_sweep`/`behavioral`/
     `adjudication` are each independently optional: a caller that skipped a phase
     (`--fast`, or the phase's own budget) passes None for it and only that ONE block
     drops, mirroring the pre-existing `ctx=None` contract for Skills. This function
-    never triggers any of that computation itself — cli.py computes each phase once,
+    never triggers any of that computation itself - cli.py computes each phase once,
     the same functions `--full` already uses, and hands the results in; nothing here
     re-scans anything, so calling this with `full=True` costs only string formatting
     over data the caller already has.
@@ -4497,18 +4497,18 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     Skills, Behavioural, Second opinion and Coverage are already short (a handful of
     lines) and unaffected.
 
-    B-381: Section 2 (Findings) is NOT one of the short/unaffected sections above — it
+    B-381: Section 2 (Findings) is NOT one of the short/unaffected sections above - it
     scales with FAIL/WARN count, exactly what a bad config has many of, and measured
     out as the actual driver of --compact missing its own ~4096-char budget (5058/7551
     chars measured for a clean/bad home before this fix, against a documented ~4096
     target Telegram itself enforces). `compact=True` now also threads into
     `render_dashboard_findings` (trims each finding's "why" text and drops evidence
     bullets, narrows the family frame's border rule) and into `_worth_a_glance_lines`
-    (lower `limit`, same per-finding trim) — see `_COMPACT_WHY_LIMIT`'s own comment for
+    (lower `limit`, same per-finding trim) - see `_COMPACT_WHY_LIMIT`'s own comment for
     the tuned value and the fixtures it was measured against.
 
     B-405: the per-item trims above were tuned against two fixtures and are NOT a hard
-    guarantee — a real config with more FAIL/WARN findings than either fixture still
+    guarantee - a real config with more FAIL/WARN findings than either fixture still
     busted the ~4096 budget (5641 chars measured against a real fleet config). When
     `compact=True`, this function now enforces `_COMPACT_CHAR_BUDGET` on the actual
     final rendered string (post-`_asciify`) as a hard cap: if the first render is over
@@ -4525,8 +4525,8 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         1 for f in findings
         if f.status in ACTIONABLE_STATUSES and not getattr(f, "suppressed", False)
     )
-    # Both separators used to be different characters (an em-dash for the "Audit —
-    # Grade"/"— Findings —" spots, a middle-dot for the "Grade F · 49/100" spot) — a
+    # Both separators used to be different characters (an em-dash for the "Audit -
+    # Grade"/"- Findings -" spots, a middle-dot for the "Grade F · 49/100" spot) - a
     # visible drift within the same string. One brand separator everywhere now.
     sep = brand.ASCII_SEPARATOR.strip() if ascii_only else brand.SEPARATOR.strip()
     issues_word = "issue" if n_issues == 1 else "issues"
@@ -4539,7 +4539,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # the wordmark still lands on the ascii path (mascot alone used to become empty
     # there with nothing to replace it).
     head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
-    # C-423: no letter, no /100, nowhere, when this run carries no grade — the
+    # C-423: no letter, no /100, nowhere, when this run carries no grade - the
     # "Most urgent" finding leads, followed by which layers never ran.
     if getattr(score, "graded", True):
         grade_lines = [
@@ -4557,33 +4557,33 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             # CLAWSECCHECK headline-id-leak: this headline states the risk, never the
             # check id (design-system.md Layer 0), and this card's own Skills/MCP
             # detail blocks only ever carry an id when `ctx` is available AND that
-            # roster is non-empty (B-506) — so a plain `--dashboard` reader holding
+            # roster is non-empty (B-506) - so a plain `--dashboard` reader holding
             # only this card, on a run whose findings never touch an installed skill
             # or configured MCP server, had no path to a check id at all. One line,
-            # no id, pointing at where the id reliably lives instead — the full text
+            # no id, pointing at where the id reliably lives instead - the full text
             # report, which carries it one scroll below its own headline regardless
             # of grading (`_urgent_headline`'s docstring).
             grade_lines.append(
                 "For that finding's check id (needed for `--explain <id>`), see the "
-                "full report — plain `clawseccheck` or `--save <path>` / `--html <path>`."
+                "full report \u2014 plain `clawseccheck` or `--save <path>` / `--html <path>`."
             )
     _covered_line = _not_fully_covered_line(score)
     if _covered_line:
         grade_lines.append(_covered_line)
     # B-767: render_report/render_html/pdf.render_pdf all disclose a degraded check
     # (crashed, timed out, or hit unreadable/corrupted input) unconditionally, above the
-    # grade — this renderer never did, even though it is the ONE artifact SKILL.md tells
+    # grade - this renderer never did, even though it is the ONE artifact SKILL.md tells
     # the agent to paste into chat. Compact, one line, matching this renderer's format;
     # same source (`score.degraded_count`) and clause (`_degraded_incomplete_clause`) as
     # the other three so the fact cannot read differently depending on which output a
     # reader happens to be looking at.
     _degraded_n = getattr(score, "degraded_count", 0)
     if _degraded_n:
-        _degraded_mark = "[!]" if ascii_only else "⚠️ "
+        _degraded_mark = "[!]" if ascii_only else "\u26a0\ufe0f "
         _plural = "check" if _degraded_n == 1 else "checks"
         grade_lines.append(
             f"{_degraded_mark}{_degraded_n} {_plural} could not reach a reliable verdict "
-            f"this run (crashed, timed out, or hit unreadable/corrupted input) — "
+            f"this run (crashed, timed out, or hit unreadable/corrupted input) \u2014 "
             + _degraded_incomplete_clause(score)
             + " Re-run with --debug for a crash/timeout traceback."
         )
@@ -4593,30 +4593,30 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # (a failing verdict on a setup the tool never located), and a submitted liveTest
     # VULNERABLE self-report took home_safe from `Grade A · 97/100` to `Grade F · 49/100`
     # over the same 11 findings with no explanation anywhere in the card. The terminal
-    # report has disclosed both all along, through this exact shared cascade — the card
+    # report has disclosed both all along, through this exact shared cascade - the card
     # simply never called it. Golden Rule #4.
-    _mark = "!" if ascii_only else "⚠️"
+    _mark = "!" if ascii_only else "\u26a0\ufe0f"
     _cap_primary, _cap_extras = _cap_cascade(score)
     if getattr(score, "graded", True) and _cap_primary is not None:
         grade_lines.append(
-            f"{_mark} capped from {score.raw_score}/100 — "
+            f"{_mark} capped from {score.raw_score}/100 \u2014 "
             f"{_cap_primary_reason_text(_cap_primary, score)}{_cap_also_clause(_cap_extras)}"
         )
     elif _cap_primary is not None:
         # C-423: the card is the one artifact SKILL.md tells the agent to paste into
         # chat, so a cap it cannot name is a cap the reader never learns about. Without
         # this branch an ungraded --dashboard --full run disclosed NOTHING about a
-        # submitted VULNERABLE live-test verdict — the most serious thing this tool can
-        # report — purely because there was no number to say it had been capped from.
+        # submitted VULNERABLE live-test verdict - the most serious thing this tool can
+        # report - purely because there was no number to say it had been capped from.
         # Golden Rule #4. (This comment used to say render_report already carried the
         # same fix. It did not: the text report reached the tail only through its
         # signal-specific sites, and its generic cap path stayed silent until B-600.)
         grade_lines.append(
             f"{_mark} {_cap_primary_reason_text(_cap_primary, score)}"
-            f"{_cap_also_clause(_cap_extras)} — {_UNGRADED_CAP_TAIL}"
+            f"{_cap_also_clause(_cap_extras)} \u2014 {_UNGRADED_CAP_TAIL}"
         )
     if getattr(score, "config_blind_capped", False):
-        # C-426: "This grade reflects…" is incoherent on a run that has no grade — and
+        # C-426: "This grade reflects..." is incoherent on a run that has no grade - and
         # after C-426 the config-blind case is USUALLY ungraded, because a bare run is.
         # The fact this line carries (what you are looking at is the shape of the gap,
         # not a judgement of your setup) is exactly as true either way, so the sentence
@@ -4624,7 +4624,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # there is no grade to explain it away.
         _subject = "This grade" if getattr(score, "graded", True) else "This result"
         if _sandbox_config_blind(ctx, score):
-            # B-776: the card is what a --dashboard chat session pastes verbatim — the
+            # B-776: the card is what a --dashboard chat session pastes verbatim - the
             # one surface most likely to actually reach a sandboxed user, so the plain
             # sandboxed statement belongs here as much as in the terminal report above.
             grade_lines.append(f"   {_subject} reflects what could NOT be checked: "
@@ -4632,7 +4632,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         else:
             grade_lines.append(
                 f"   {_subject} reflects what could NOT be checked, not a verdict on your "
-                "setup — point --home at the directory that holds your OpenClaw config."
+                "setup \u2014 point --home at the directory that holds your OpenClaw config."
             )
     # `--full` keeps its existing header (grade card + the "· Findings ·" section label
     # immediately below); the C-373 default card opens with the grade lines only and
@@ -4649,7 +4649,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         if inv["skills"]:
             skill_lines = _skills_inventory_lines(inv, ctx, ascii_only=ascii_only)
             skills_block = "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
-            # C-373: the card caps the clean roster (the one unbounded part — see
+            # C-373: the card caps the clean roster (the one unbounded part - see
             # _skills_inventory_lines); flagged skills are always named in full, since
             # those are the ones the reader has to act on.
             card_skill_lines = _skills_inventory_lines(
@@ -4660,11 +4660,11 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # C-374: `--dashboard --full --pdf <path>` ALSO renders the overview card. Under
     # `--full` the PDF now carries the whole pipeline (Skills/Plugins/MCP/RISK/
     # Behavioural/Second opinion/Coverage/Worth a glance), so collapsing the card no
-    # longer hides anything — it moves it into the attachment. Without `--pdf`, `--full`
+    # longer hides anything - it moves it into the attachment. Without `--pdf`, `--full`
     # still renders every block inline: nothing becomes unreachable just because the
     # user didn't ask for a file.
     if not full or pdf_path:
-        # C-373: the default card is an OVERVIEW — grade, the per-subject inventory, and
+        # C-373: the default card is an OVERVIEW - grade, the per-subject inventory, and
         # only the most urgent findings by name; the full findings list (with why and
         # evidence) lives in the PDF report this run may have written. The old shape
         # pasted the entire grouped findings block and measured 7225 chars against
@@ -4676,11 +4676,11 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # non-suppressed FAIL/WARN, while the named lines come from the HIGH-confidence
         # subset. The pointer block reconciles the two out loud ("+N more not named
         # above") instead of letting the header count and the rendered list silently
-        # disagree — and every one of those N IS in the PDF, which renders all
+        # disagree - and every one of those N IS in the PDF, which renders all
         # FAIL/WARN regardless of confidence.
         summary_lines = _card_summary_lines(findings, ctx, plugin_sweep=plugin_sweep,
                                             ascii_only=ascii_only)
-        ok = "[OK]" if ascii_only else "✅"
+        ok = "[OK]" if ascii_only else "\u2705"
 
         def _assemble_card(limit: int) -> str:
             top_lines, n_named = _card_top_urgent_lines(
@@ -4747,15 +4747,15 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         tail_block += "\n" + "\n".join(coverage_lines) + "\n"
 
     # F-165: the per-subject "was everything looked at" page (coverage.build_coverage_page)
-    # — a different question from `_coverage_lines` just above (config-SURFACE coverage,
-    # "which checks ran") — this is TARGET coverage ("were all N plugins vetted, all M
+    # - a different question from `_coverage_lines` just above (config-SURFACE coverage,
+    # "which checks ran") - this is TARGET coverage ("were all N plugins vetted, all M
     # trajectory files read"). `coverage_page` is optional and additive: every pre-existing
     # caller passes nothing and reproduces the exact prior card, byte-identical.
     if coverage_page:
         from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
         # C-566: reasons are dropped under --compact, same "budget beats extra detail"
         # rule --compact already applies everywhere else on this card (see
-        # `coverage_page_lines`'s own `show_reasons` note) — a fixed small budget and
+        # `coverage_page_lines`'s own `show_reasons` note) - a fixed small budget and
         # per-id reason text otherwise compound into `_hard_truncate_compact` cutting
         # this card's tail blind, up to and including the "Full pipeline detail"
         # pointer below.
@@ -4765,7 +4765,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             tail_block += ("\n" + f"{sep} Coverage page {sep}" + "\n"
                           + "\n".join(cov_page_lines) + "\n")
 
-    glance_marker = "" if ascii_only else "👀 "
+    glance_marker = "" if ascii_only else "\U0001f440 "
     footer_block = "\nFull pipeline detail: --save <path> or --html <path>.\n" if compact else ""
 
     def _assemble(why_drop_severities: frozenset = frozenset()) -> str:
@@ -4785,7 +4785,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             out += ("\n" + f"{sep} {glance_marker}Worth a glance {sep}" + "\n"
                    + "\n".join(glance_lines) + "\n")
 
-        # C-373: `--dashboard --full --pdf <path>` wrote an attachable report this run —
+        # C-373: `--dashboard --full --pdf <path>` wrote an attachable report this run -
         # say so here rather than letting cli.py print a note the host agent would paste
         # along with the card. n_more is 0: the full card already renders every finding,
         # so this is purely "the attachment exists", not a truncation disclosure.
@@ -4800,33 +4800,33 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
 
 
 def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False) -> str:
-    """Shareable badge — grade + score + trifecta ONLY. No findings, ever."""
+    """Shareable badge - grade + score + trifecta ONLY. No findings, ever."""
     # C-423: no letter, no /100 when this run carries no grade. This card never names
-    # findings (tiered disclosure — see the docstring above), so the replacement stays
+    # findings (tiered disclosure - see the docstring above), so the replacement stays
     # a bare layer count rather than the "Most urgent" headline other surfaces show.
     if getattr(score, "graded", True):
         l1 = f"  OpenClaw Security: {score.grade:<2} ({score.score:>3}/100)"
     else:
         # C-428: this read "(3/5 layers)", which a reader takes as "3 of 5 ran" when it
-        # counted the ones that did NOT — the ratio meant the opposite of how it scans.
+        # counted the ones that did NOT - the ratio meant the opposite of how it scans.
         # State the positive fact instead; it is the same number said unambiguously.
         _total = len(LAYER_ORDER)
         _ran = _total - len(getattr(score, "missing_layers", ()))
         l1 = f"  OpenClaw Security: no grade yet ({_ran}/{_total} layers ran)"
     _tri = _trifecta_ratio(findings)
     # B-587: the card is a five-line artifact designed to be PASTED somewhere else, so a
-    # footnote on another surface does not travel with it — the line itself has to carry
+    # footnote on another surface does not travel with it - the line itself has to carry
     # why the number is not a number. Kept short enough that the box never widens past
     # the ungraded `l1` above it (C-428's box-art lesson).
     # `(unverified)`, not `(legs unverified)`: the longer wording pushed this line to 40
     # columns and grew the graded card's box past the 39 C-428 fixed it at, which is an
-    # invariant a test pins deliberately — a word is not worth breaking byte-identity for.
+    # invariant a test pins deliberately - a word is not worth breaking byte-identity for.
     l2 = f"  Lethal Trifecta: {_tri}" + (" (unverified)" if _tri == "?/3" else "")
     # B-763: "Lethal Trifecta: 2/3" named a threat model and a fraction with no
-    # explanation anywhere on this artifact — the one a user posts publicly. A reader
+    # explanation anywhere on this artifact - the one a user posts publicly. A reader
     # who does not already know the term learns only a number out of 3. One short row
     # naming the three legs (kept under the established 39-column floor below, so it
-    # never grows the box on its own) — see catalog.py's own A1 title for the same three
+    # never grows the box on its own) - see catalog.py's own A1 title for the same three
     # legs named in full ("untrusted input", "sensitive data", "outbound").
     l2_gloss = "  (untrusted input, data, egress)"
     l3 = "  audited by ClawSecCheck" + ("" if ascii_only else f" {brand.MASCOT}")
@@ -4840,11 +4840,11 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     # `None` on an uncapped run (the overwhelmingly common case), so a graded card with
     # nothing capping it renders byte-identically to before this change.
     _cap_primary, _cap_extras = _cap_cascade(score)
-    _mark = "!" if ascii_only else "⚠️"
+    _mark = "!" if ascii_only else "\u26a0\ufe0f"
     cap_line = None
     if getattr(score, "graded", True) and _cap_primary is not None:
         cap_line = (
-            f"  {_mark} capped from {score.raw_score}/100 — "
+            f"  {_mark} capped from {score.raw_score}/100 \u2014 "
             f"{_cap_primary_reason_text(_cap_primary, score)}{_cap_also_clause(_cap_extras)}"
         )
     elif _cap_primary is not None:
@@ -4853,11 +4853,11 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
         # the fact without presupposing one.
         cap_line = (
             f"  {_mark} {_cap_primary_reason_text(_cap_primary, score)}"
-            f"{_cap_also_clause(_cap_extras)} — {_UNGRADED_CAP_TAIL}"
+            f"{_cap_also_clause(_cap_extras)} \u2014 {_UNGRADED_CAP_TAIL}"
         )
     lines = [l1, l2, l2_gloss] + ([cap_line] if cap_line else [])
     # C-428: the width was a hardcoded 39, sized for "A ( 95/100)". The ungraded line is
-    # longer than that, and `:<39` pads but never truncates — so the box art broke open
+    # longer than that, and `:<39` pads but never truncates - so the box art broke open
     # on exactly the runs the ungraded work introduced. Grow to fit; never shrink below
     # the established 39 so a graded, uncapped card renders byte-identically to before.
     width = max([39] + [len(ln) + 1 for ln in lines])  # widest line keeps one column of margin
@@ -4868,11 +4868,11 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
         top = bot = "+" + "-" * width + "+"
         body = "\n".join(f"|{ln:<{width}}|" for ln in (*lines, l3))
         return _asciify(f"{top}\n{body}\n{bot}")
-    top = "┌" + "─" * width + "┐"
-    bot = "└" + "─" * width + "┘"
+    top = "\u250c" + "\u2500" * width + "\u2510"
+    bot = "\u2514" + "\u2500" * width + "\u2518"
     # the mascot emoji is double-width in many terminals; pad l3 one less
     body = "\n".join(
-        [f"│{ln:<{width}}│" for ln in lines] + [f"│{l3:<{width - 1}}│"]
+        [f"\u2502{ln:<{width}}\u2502" for ln in lines] + [f"\u2502{l3:<{width - 1}}\u2502"]
     )
     return f"{header}{top}\n{body}\n{bot}"
 
@@ -4883,7 +4883,7 @@ def _header_rule_width(header_line: str, ascii_only: bool) -> int:
     column in most terminals even though it is a single Python character.
 
     A hardcoded rule width (the previous approach) under-runs once the header
-    carries the mascot — this derives it from the actual line instead, so it
+    carries the mascot - this derives it from the actual line instead, so it
     stays correct if the subtitle text ever changes too.
     """
     width = len(header_line)
@@ -4898,33 +4898,33 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
                    notes=None, verbose: bool = False, baseline_ref: str = "") -> str:
     """Render the --monitor body.
 
-    *baseline* — this was a genuine first run (no prior state file at all).
+    *baseline* - this was a genuine first run (no prior state file at all).
 
-    *persisted* — B-271: the new baseline was actually written to disk. When it was NOT,
+    *persisted* - B-271: the new baseline was actually written to disk. When it was NOT,
     every affirmation this function makes is false, so both of them are withheld: "Baseline
-    saved." is a direct lie, and "No new threats since last check ✅" reads as an all-clear
+    saved." is a direct lie, and "No new threats since last check ok" reads as an all-clear
     for ongoing monitoring that is not in fact running. Alerts computed this run ARE still
     real (the comparison happened against a real baseline) and are still shown; the CLI
     prints the failure verdict on stderr and exits non-zero.
 
-    *baseline_corrupt* — B-270: a prior baseline existed but could not be used. This is
+    *baseline_corrupt* - B-270: a prior baseline existed but could not be used. This is
     NOT a first run (saying "Baseline saved." there is what made a destroyed baseline look
     like a healthy new one) and NOT a clean comparison. The CLI supplies the explanatory
     alert itself, so that one string reaches the screen and the journal identically; all
-    this flag adds is the closing note that a replacement baseline now exists — which is
+    this flag adds is the closing note that a replacement baseline now exists - which is
     printed only when it actually got written.
 
-    *live_test_skipped* — B-379: the F-155 seed gate deliberately excluded this run from
+    *live_test_skipped* - B-379: the F-155 seed gate deliberately excluded this run from
     the journal/baseline (an unseeded/unreproducible VULNERABLE verdict), NOT a write
-    failure — `persisted` is False here too (nothing WAS written), but the CLI does not
+    failure - `persisted` is False here too (nothing WAS written), but the CLI does not
     treat this as an error (no stderr, exit 0), so this function must not read `persisted=
     False` alone as "the write failed" the way it otherwise would. When True, an explicit
     "not persisted because..." line replaces the generic silence `persisted=False` would
     otherwise produce, so the reader is told WHY rather than left to infer a crash.
 
-    *baseline_ref* — F-173: the reference value of the baseline this run just wrote — a
+    *baseline_ref* - F-173: the reference value of the baseline this run just wrote - a
     fingerprint of what it records, with the run clock excluded so an untouched setup keeps
-    the same value — or "" when nothing was written or it could not be read back. Printed
+    the same value - or "" when nothing was written or it could not be read back. Printed
     so a user running the check interactively can copy it somewhere this machine cannot
     reach. `~/.clawseccheck/` is already 0700, so a signature stored beside the baseline
     would only defend against an attacker the filesystem has already excluded, while a value
@@ -4932,11 +4932,11 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
 
     **Where it does NOT arrive by itself**, corrected after an independent pass caught the
     claim: the F-172 cron recipe tells the agent to say nothing on exit 0, so a scheduled
-    run delivers this line only on the runs where the value already MOVED — precisely the
+    run delivers this line only on the runs where the value already MOVED - precisely the
     runs where keeping it is worth least. Getting it off the machine is the user's action,
     not the schedule's, and every surface that describes it now says so.
 
-    Deliberately never worded as a guarantee — SECURITY_MODEL.md's paragraph on the baseline
+    Deliberately never worded as a guarantee - SECURITY_MODEL.md's paragraph on the baseline
     carrying no chain and no signature remains true and stays. The value also moves when the
     RUN SHAPE changes: `--no-host` / `--no-sockets` record less, so the same untouched
     machine fingerprints differently. That is why the line names that condition too, and why
@@ -4951,12 +4951,12 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     # in the report.
     mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "LOW": "[-]", "INFO": "[i]"} \
         if ascii_only \
-        else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "LOW": "⚪", "INFO": "ℹ️"}
+        else {"CRITICAL": "\u26d4", "HIGH": "\u26a0\ufe0f", "MEDIUM": "\U0001f536", "LOW": "\u26aa", "INFO": "\u2139\ufe0f"}
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-    ok = "[OK]" if ascii_only else "✅"
+    ok = "[OK]" if ascii_only else "\u2705"
     head = brand.header(subtitle="Threat Monitor", ascii_only=ascii_only)
     lines = [head, "=" * _header_rule_width(head, ascii_only)]
-    # C-423: no letter, no /100 when this run carries no grade — `alerts` carry no
+    # C-423: no letter, no /100 when this run carries no grade - `alerts` carry no
     # Finding objects, so there is no "Most urgent" finding to name here; the missing-
     # layers sentence already opens with "No grade yet".
     if getattr(score, "graded", True):
@@ -4977,10 +4977,10 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         if alerts:
             lines += _alert_lines()
         if live_test_skipped:
-            # B-379: distinguish "deliberately not persisted" from "write failed" —
+            # B-379: distinguish "deliberately not persisted" from "write failed" -
             # the CLI does not treat this as an error, and neither should this text.
             lines += ["", "Not persisted: this run's grade was capped by an unseeded "
-                          "(unreproducible) live injection-test verdict — recording it "
+                          "(unreproducible) live injection-test verdict \u2014 recording it "
                           "would manufacture drift where none exists. Re-run without a "
                           "seed-less verdict, or with a seeded one, to resume monitoring."]
     elif baseline:
@@ -4991,9 +4991,9 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         else:
             # C-418: the all-clear is scoped to what was actually compared. It used to be
             # printed unconditionally over a snapshot that watches a couple of dozen things
-            # out of a far larger subject, and every skipped comparison — a blind config, a
-            # truncated collection, a baseline predating the check — fell through into it
-            # silently. The ✅ is reserved for a run that genuinely compared everything it
+            # out of a far larger subject, and every skipped comparison - a blind config, a
+            # truncated collection, a baseline predating the check - fell through into it
+            # silently. The ok is reserved for a run that genuinely compared everything it
             # knows how to compare; anything less says so in the same breath.
             if notes:
                 lines += ["", "No new threats among what was compared."]
@@ -5002,7 +5002,7 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         if baseline_corrupt:
             lines += ["", "A replacement baseline has been saved from this run; future "
                           "runs will alert on what changes since now."]
-    # C-418: appended on EVERY branch that made a comparison AND made a claim about it —
+    # C-418: appended on EVERY branch that made a comparison AND made a claim about it -
     # a run that found three real changes and skipped four comparisons is still a partial
     # view, and the alerts it did produce must not read as the complete answer.
     #
@@ -5010,14 +5010,14 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     # at all and already say so in words, so a count would be a second, vaguer voice for a
     # state that is already named precisely. The unpersisted branch is subtler: it
     # deliberately makes NO affirmation about this run, so a qualifier there would scope a
-    # claim that was never made — the reader is handed a caveat with nothing to attach it to.
+    # claim that was never made - the reader is handed a caveat with nothing to attach it to.
     if not baseline and not baseline_corrupt and persisted:
         lines += _not_compared_lines(notes, verbose, ascii_only)
     # F-173: printed on every run that actually advanced the baseline, including the very
-    # first — a first run is exactly when a user has nothing to compare against later, so
+    # first - a first run is exactly when a user has nothing to compare against later, so
     # it is the run whose reference value is worth most.
     if baseline_ref:
-        # noqa: PLC0415 (renderer -> engine, one way) — same local import the notes block
+        # noqa: PLC0415 (renderer -> engine, one way) - same local import the notes block
         # above uses, and for the same reason: the width is the engine's decision, not a
         # second copy of 16 living in the renderer.
         from .monitor import BASELINE_DIGEST_CHARS  # noqa: PLC0415
@@ -5046,36 +5046,36 @@ def render_events(events, ascii_only: bool = False, *,
 
     C-250: the header used to print "{len(events)} recorded change event(s)" with no
     hint that ``monitor._rotate_journal`` may have already evicted up to 1002 older
-    entries — an authoritative-sounding total that silently started mid-history. When
-    the oldest entry is a retention marker (``retention_pruned`` key — always the
-    OLDEST surviving entry, since rotation prepends it fresh each time it triggers —
+    entries - an authoritative-sounding total that silently started mid-history. When
+    the oldest entry is a retention marker (``retention_pruned`` key - always the
+    OLDEST surviving entry, since rotation prepends it fresh each time it triggers -
     see ``_rotate_journal``), it is pulled out of the generic per-line loop and folded
     into the header itself instead of rendered as one more anonymous [i] line a reader
     can scroll past without registering what it means.
 
-    B-583: an empty ``events`` list is ambiguous on its own — it is what a journal that
+    B-583: an empty ``events`` list is ambiguous on its own - it is what a journal that
     was NEVER WRITTEN looks like (monitoring has never run) and also what a journal
     with a genuinely clean history looks like, and those are opposite facts. Two
     optional, caller-supplied signals resolve it without this function doing any I/O
     itself (it stays a pure renderer):
 
-    * ``journal_exists=False`` — the caller has confirmed there is no journal store at
+    * ``journal_exists=False`` - the caller has confirmed there is no journal store at
       all (e.g. the file does not exist). Rendered as "monitoring has not run", with
       no "since" and no date, because none is honest to give.
-    * ``since=<iso timestamp>`` — the caller has an honest "as of" date for a clean
+    * ``since=<iso timestamp>`` - the caller has an honest "as of" date for a clean
       history (SKILL.md's documented "nothing has changed since <date>"). This must
       come from a real record of when monitoring last ran (the monitor state's own
-      timestamp, or the freshness ledger) — **never** the journal file's mtime, which
+      timestamp, or the freshness ledger) - **never** the journal file's mtime, which
       rotation, a permission fix, or a backup restore can all move without a single
       event being recorded, producing a fabricated "since <date>" (C-135).
 
     Neither signal supplied (the default) preserves the original, deliberately vaguer
-    "No recorded change events yet." — the safe fallback for callers that have not
+    "No recorded change events yet." - the safe fallback for callers that have not
     been updated to supply either fact yet, rather than guessing.
 
     window:
         C-448: print only the last *window* SURVIVING events (after the retention
-        marker, if any, is already pulled out) — same "cut what is printed, never
+        marker, if any, is already pulled out) - same "cut what is printed, never
         what is counted" shape as ``history.render_trend``'s own ``window``. ``None``
         (or a value ``>= len(body)``) prints every surviving event, reproducing the
         pre-C-448 behaviour exactly; the CLI's ``--all`` flag passes this. Two
@@ -5084,17 +5084,17 @@ def render_events(events, ascii_only: bool = False, *,
         by rotation, never loaded at all) and this window (events that WERE loaded
         but are not among the most recent *window* of them).
     """
-    # Same severity vocabulary as render_monitor — a journal entry written at LOW must not
+    # Same severity vocabulary as render_monitor - a journal entry written at LOW must not
     # lose its glyph on the way into the permanent record.
     mark = {"CRITICAL": "[X]", "HIGH": "[!]", "MEDIUM": "[~]", "LOW": "[-]", "INFO": "[i]"} \
         if ascii_only \
-        else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "LOW": "⚪", "INFO": "ℹ️"}
+        else {"CRITICAL": "\u26d4", "HIGH": "\u26a0\ufe0f", "MEDIUM": "\U0001f536", "LOW": "\u26aa", "INFO": "\u2139\ufe0f"}
     if not events:
         header = "Agent Watch journal\n" + "=" * 30 + "\n\n"
         if since is not None:
             body = f"Nothing has changed since {since}.\n"
         elif journal_exists is False:
-            body = ("No event journal exists — monitoring has not run yet, so there "
+            body = ("No event journal exists \u2014 monitoring has not run yet, so there "
                      "is nothing that could have changed.\n")
         else:
             body = "No recorded change events yet.\n"
@@ -5107,7 +5107,7 @@ def render_events(events, ascii_only: bool = False, *,
         pruned_note = events[0]
         body = events[1:]
 
-    # C-448: cut what is PRINTED only — `body` (the full surviving list) is what the
+    # C-448: cut what is PRINTED only - `body` (the full surviving list) is what the
     # "showing N event(s)" count above was always computed from, and stays the
     # denominator; `visible` is just the tail of it that actually reaches `lines`.
     shown_from = 0 if window is None or window >= len(body) else len(body) - window
@@ -5115,7 +5115,7 @@ def render_events(events, ascii_only: bool = False, *,
     if shown_from:
         header = (
             f"showing the last {len(visible)} of {len(body)} event(s) (most recent "
-            f"last) — {shown_from} older event(s) not shown here, pass --all to see "
+            f"last) \u2014 {shown_from} older event(s) not shown here, pass --all to see "
             "them"
         )
     else:
@@ -5130,7 +5130,7 @@ def render_events(events, ascii_only: bool = False, *,
         # switching to "; " broke that promise for exactly the real-machine case (a
         # rotated journal) that promise exists to cover. Only the windowed sentence is
         # new text with no pre-C-448 form to match, so only it gets the new separator.
-        sep = "; " if shown_from else " — "
+        sep = "; " if shown_from else " \u2014 "
         header += f"{sep}{_sanitize(str(pruned_note.get('message', '')))}"
     lines = ["Agent Watch journal", "=" * 30, header + ":", ""]
     for e in visible:
@@ -5143,7 +5143,7 @@ def render_events(events, ascii_only: bool = False, *,
 
 
 # The badge's mascot mark: a scaled-down nested-<svg> instance of brand.LOGO_SVG's own
-# vector paths — NOT the 🦞 mascot glyph. An emoji would break the badge's ASCII-safety
+# vector paths - NOT the lobster mascot glyph. An emoji would break the badge's ASCII-safety
 # guarantee (test_features.py's `svg.encode("ascii")`), since shields.io-style badges
 # are meant to be embeddable byte-for-byte in Markdown/HTML without an encoding
 # declaration. Deriving the icon from LOGO_SVG's own markup (rather than hand-drawing a
@@ -5152,16 +5152,16 @@ def render_events(events, ascii_only: bool = False, *,
 _LOGO_TAG_RE = re.compile(r"^<svg[^>]*>(.*)</svg>$", re.DOTALL)
 _LOGO_MATCH = _LOGO_TAG_RE.match(LOGO_SVG.strip())
 _LOGO_INNER = _LOGO_MATCH.group(1) if _LOGO_MATCH else ""  # "" degrades to no icon, never a crash
-_LOGO_SIZE = 14  # px — fits the badge's 20px height with a few px of margin
+_LOGO_SIZE = 14  # px - fits the badge's 20px height with a few px of margin
 
 
 def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
-    """A shields.io-style SVG badge (grade + score, plus a suppressed-critical marker —
-    never finding details). Carries a small mark derived from brand.LOGO_SVG — Tier 3
+    """A shields.io-style SVG badge (grade + score, plus a suppressed-critical marker -
+    never finding details). Carries a small mark derived from brand.LOGO_SVG - Tier 3
     (HTML/badge-only) per brand.py's reach split: a graphical mark cannot reach a chat
     channel, only this static file."""
     label = "OpenClaw Security"
-    # C-423: no letter, no /100 when this run carries no grade — a bare, neutral
+    # C-423: no letter, no /100 when this run carries no grade - a bare, neutral
     # "no grade yet" label instead. `grade_hex("")` already falls back to the same
     # neutral grey `grade_hex` uses for any unrecognized letter, so the badge's
     # colour can't be reverse-engineered from `score.grade` on an ungraded run.
@@ -5170,7 +5170,7 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     else:
         value = "no grade yet"
     # B-163: if a score-capping CRITICAL/HIGH FAIL (or sensitive id) was hidden via
-    # .clawseccheckignore, the badge must not read as a clean grade — mark it so a shared
+    # .clawseccheckignore, the badge must not read as a clean grade - mark it so a shared
     # badge can't misrepresent the real posture. Count only (never finding details).
     n_hidden = sum(1 for f in findings if surfaced_despite_suppression(f))
     if n_hidden:
@@ -5212,9 +5212,9 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
 # Rule #4 forbids.
 _VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "NO KNOWN ISSUE", UNKNOWN: "UNKNOWN",
                 "SKILL_ARCHIVE_PATH_TRAVERSAL": "DANGEROUS (archive escapes its directory)"}
-# B-751: `_VET_STATUS_RANK` was DELETED here, not re-ranked. It had zero consumers —
+# B-751: `_VET_STATUS_RANK` was DELETED here, not re-ranked. It had zero consumers -
 # grep found only its own definition, two comments in checks/_vet.py citing it as
-# authority, and two tests — while ranking a confirmed zip-slip at UNKNOWN level. A dead
+# authority, and two tests - while ranking a confirmed zip-slip at UNKNOWN level. A dead
 # constant with a wrong value that other code quotes is worse than no constant: it is
 # where the "the third table governs rendering and scoring" claim came from, and that
 # claim was false in both halves. Rendering is _ICON/_VET_VERDICT; scoring is
@@ -5248,7 +5248,7 @@ def _finding_to_dict(f: Finding) -> dict:
             "evidence": [_sanitize(e) for e in (f.evidence or [])],
             "surface": _meta.surface if _meta is not None else "",
             # B-624: without this a consumer sees two aggregate numbers it cannot
-            # reconcile or attribute — `degraded_count` counts EVERY degraded finding,
+            # reconcile or attribute - `degraded_count` counts EVERY degraded finding,
             # `undetermined.engine_degraded` only the scored subset (33 vs 16 on a
             # config-blind run). Neither could name a single member. This is the flag the
             # engine already sets; publishing it is what turns a count into a list.
@@ -5257,7 +5257,7 @@ def _finding_to_dict(f: Finding) -> dict:
 
 
 # Per-axis status icons for the risk dossier (5 states incl. N/A).
-_AXIS_ICON_UNI = {"FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔", "N/A": "➖"}
+_AXIS_ICON_UNI = {"FAIL": "\u26d4", "WARN": "\u26a0\ufe0f", "PASS": "\u2705", "UNKNOWN": "\u2754", "N/A": "\u2796"}
 _AXIS_ICON_ASCII = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]", "N/A": "[-]"}
 _TOP_FIX_ORDER = {"FAIL": 0, "WARN": 1, "UNKNOWN": 2, "PASS": 3, "N/A": 4}
 
@@ -5347,10 +5347,10 @@ def render_vet_all_json(sweep, *, version: str) -> str:
 
 
 # B-526: the third channel. A disclosure has to be VISIBLE to a human and must NOT move a
-# verdict — and before this the tree had neither combination. A finding or a coverage-gap
+# verdict - and before this the tree had neither combination. A finding or a coverage-gap
 # is visible and gates (an independent C-135 measured the cost of routing disclosures
 # there: two benign skills blocked at the install gate, one of them the official `mise`
-# installer). An evidence note does not gate and was not rendered anywhere a human looks —
+# installer). An evidence note does not gate and was not rendered anywhere a human looks -
 # C-358's own dependency-tree note had been shipping invisible since it was added, which
 # is the second instance of B-553.
 #
@@ -5362,11 +5362,11 @@ def render_vet_all_json(sweep, *, version: str) -> str:
 #
 # One heading per kind, NOT one fixed string, and that is the whole reason this is a map.
 # The obvious shortcut is to reuse "Not assessed" for everything, and for this first kind it
-# would be a LIE: the out-of-home workspace WAS read — its skills are in `ctx.installed_skills`
+# would be a LIE: the out-of-home workspace WAS read - its skills are in `ctx.installed_skills`
 # and a malicious one produces a B13 FAIL naming it. The fact to disclose is that the run
 # reached FURTHER than the user scoped, not that it reached less. B-616 and B-553 will add
 # kinds that genuinely are "we did not look"; they get their own heading rather than bending
-# this one, because a disclosure that misstates its own direction is worse than silence — a
+# this one, because a disclosure that misstates its own direction is worse than silence - a
 # reader concludes those files went unexamined.
 _DISCLOSURE_HEADINGS = {
     "workspace_outside_home": "Read outside the audited scope",
@@ -5394,7 +5394,7 @@ def _disclosure_lines(ctx) -> "list[str]":
     """Render `ctx.disclosures` for the AUDIT path, grouped by kind.
 
     Reads the channel and nothing else. It must never consult a status, a score or an exit
-    code, and nothing here may write back — `tests/test_b617_disclosure_channel.py` fails the
+    code, and nothing here may write back - `tests/test_b617_disclosure_channel.py` fails the
     build if `.disclosures` is read anywhere outside this module and `sarif.py`, because
     `ctx.limit_hits` was a notepad too until `dossier.py` read its truthiness into a verdict
     leg, and `_MODE_C_VERDICT` turns any status a channel acquires into an install gate.
@@ -5416,7 +5416,7 @@ def _disclosure_lines(ctx) -> "list[str]":
 
 _COVERAGE_EVIDENCE_PREFIX = "coverage: "
 
-# STANDING limits — true of every target, every run. They are deliberately NOT printed
+# STANDING limits - true of every target, every run. They are deliberately NOT printed
 # here: a line that appears on all output is read as furniture within a week, and it would
 # bury the situational notes this block exists to surface. They remain in --json (nothing
 # is hidden) and belong in the docs, not in a per-target "what was skipped" list.
@@ -5458,7 +5458,7 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
     it *stores* / whom it *connects with*. N/A axes are shown (dimmed by icon) with their
     reason, so the reader sees exactly what could not be assessed and why.
 
-    C427: no "Grade: A-F" here — `profile.verdict` (INSTALL/CAUTION/DO-NOT-INSTALL) is the
+    C427: no "Grade: A-F" here - `profile.verdict` (INSTALL/CAUTION/DO-NOT-INSTALL) is the
     ONLY headline. A letter here collided with Mode A's own system-audit grade (two
     different A's on two different scales about two different things); this is Mode C
     ("before you install"), which never claims "all five layers ran".
@@ -5468,7 +5468,7 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
     header_icon = icons.get(profile.overall_status, icons["UNKNOWN"])
     name = _sanitize(Path(profile.target).name or profile.target)
     lines = [
-        f"{header_icon}  RISK DOSSIER — {profile.target_type} '{name}'"
+        f"{header_icon}  RISK DOSSIER \u2014 {profile.target_type} '{name}'"
         f"    {verdict}",
         "",
     ]
@@ -5488,20 +5488,20 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
         lines.append(f"  (unmapped: {', '.join(profile.unmapped)})")
     out = "\n".join(lines)
     # C-179: unlike every other renderer here, this one had no final ASCII safety
-    # net — the hardcoded em-dash in the header (line above) leaked through even
+    # net - the hardcoded em-dash in the header (line above) leaked through even
     # with --ascii set.
     return _asciify(out) if ascii_only else out
 
 
-# ---- F-067: --advise — the same VetProfile the risk dossier already computes, reframed
+# ---- F-067: --advise - the same VetProfile the risk dossier already computes, reframed
 # as an install decision rather than a risk breakdown. DANGEROUS/SUSPICIOUS/SAFE/UNKNOWN
-# relabel to INSTALL/CAUTION/DO-NOT-INSTALL; UNKNOWN maps to CAUTION (not INSTALL) — an
+# relabel to INSTALL/CAUTION/DO-NOT-INSTALL; UNKNOWN maps to CAUTION (not INSTALL) - an
 # inconclusive assessment is never presented as a green light. "Reasons" reuse each
 # finding's own detail text verbatim, which already carries F-055's source->sink trace for
-# taint findings — no separate trace plumbing needed. Read-only: this only prints; the
+# taint findings - no separate trace plumbing needed. Read-only: this only prints; the
 # agent/user decides whether to actually remove the quarantine dir.
 _ADVISE_VERDICT = {FAIL: "DO-NOT-INSTALL", WARN: "CAUTION", PASS: "INSTALL", UNKNOWN: "CAUTION"}
-_ADVISE_ICON_UNI = {"DO-NOT-INSTALL": "⛔", "CAUTION": "⚠️", "INSTALL": "✅"}
+_ADVISE_ICON_UNI = {"DO-NOT-INSTALL": "\u26d4", "CAUTION": "\u26a0\ufe0f", "INSTALL": "\u2705"}
 _ADVISE_ICON_ASCII = {"DO-NOT-INSTALL": "[X]", "CAUTION": "[!]", "INSTALL": "[OK]"}
 # F-112: a plain-language restatement of the same verdict for readers who don't parse
 # DO-NOT-INSTALL/CAUTION/INSTALL as jargon. "{d}" is the em-dash/hyphen, chosen per
@@ -5517,7 +5517,7 @@ def _restatements_of_other_findings(pool) -> set:
     """`id()` of every finding whose `detail` verbatim contains another pool member's.
 
     B-631. On a plugin, `PLUGIN-VET`'s FAIL detail is built as
-    ``f"dangerous bundled content in {summary}: {worst.detail}"`` — it quotes, word for
+    ``f"dangerous bundled content in {summary}: {worst.detail}"`` - it quotes, word for
     word, a sub-finding that is standing right beside it in the same pool. In a five-line
     window titled "what drove it" that costs a slot to say the same thing twice: measured
     on a plugin with one dominant skill, distinct bundled skills named in the window
@@ -5539,7 +5539,7 @@ def _restatements_of_other_findings(pool) -> set:
 
     So the rule is the relationship the duplication actually consists of, which needs no
     registry and no new field: quoting another member of the same pool in full. The
-    minimum length keeps two findings that merely share a phrase from matching — verified
+    minimum length keeps two findings that merely share a phrase from matching - verified
     against a pair differing only in "readable"/"writable", and against `MCP-VET` and
     `B339` standing beside unrelated findings.
 
@@ -5567,7 +5567,7 @@ def _advise_danger_gap_reason(profile) -> str:
 
     ``_advise_reasons`` collects FAIL/WARN findings only, so a target whose single signal
     is an UNKNOWN coverage gap produced an empty reason list and fell through to the
-    generic "not enough signal" line — on the one surface whose entire job is the install
+    generic "not enough signal" line - on the one surface whose entire job is the install
     decision, and while the exit code was 1. Returns "" when the axis is absent, not
     UNKNOWN, or carries no reason, so the caller's existing fallback still applies.
     """
@@ -5633,7 +5633,7 @@ def _advise_reasons(profile, limit: int = 5) -> "tuple[list[str], int]":
             f.id,
         ),
     )
-    # B-755: `display_status` rather than the raw field — every other surface labels this
+    # B-755: `display_status` rather than the raw field - every other surface labels this
     # finding FAIL, and the enum tells the reader nothing the detail beside it does not.
     shown = [f"{f.id} ({display_status(f.status)}): {_sanitize(f.detail)}"
              for f in worst_first[:limit]]
@@ -5643,13 +5643,13 @@ def _advise_reasons(profile, limit: int = 5) -> "tuple[list[str], int]":
 # B-487, second round: `shlex.quote` is necessary but NOT sufficient here, because these
 # commands are consumed LINE BY LINE (a printed block a host agent copies, per
 # docs/FLOW_CHOICES.md). A target carrying a newline is quoted correctly as ONE shell
-# argument, yet the quoted token spans two rendered LINES — so the plan's line structure
+# argument, yet the quoted token spans two rendered LINES - so the plan's line structure
 # becomes attacker-controlled. In the `#`-commented ecosystem branches that is a real
 # shell-level escape, not a cosmetic one: `#` comments to end of LINE only, so the tail of
 # a newline-bearing target lands on an UNcommented line and reaches command position.
 # Found by this change's own test matrix, not by the original report.
 #
-# No legitimate target — package name, URL, git ref, or slug — contains a control
+# No legitimate target - package name, URL, git ref, or slug - contains a control
 # character, so refusing is free of false positives and is itself the honest answer:
 # fabricating a command for such a target is exactly the "no fabricated facts" failure the
 # project forbids. Refuse the command block and say why.
@@ -5659,7 +5659,7 @@ _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 def _breaks_the_line_it_is_printed_on(text: str) -> bool:
     """True when *text* cannot be rendered inside a copy-and-run block on one line.
 
-    B-577: B-487 established the hazard — a shell-quoted token carrying a newline is ONE
+    B-577: B-487 established the hazard - a shell-quoted token carrying a newline is ONE
     correct shell argument but TWO rendered lines, and in the `#`-commented branch the
     second line carries no `#`, so its text sits in command position. B-487 refused via
     `_CONTROL_CHAR_RE`, reasoning that no legitimate target holds a control character.
@@ -5667,7 +5667,7 @@ def _breaks_the_line_it_is_printed_on(text: str) -> bool:
     That class is ASCII-only, and three characters outside it are line boundaries to the
     consumers this output is written for: U+0085 NEL, U+2028 LINE SEPARATOR, U+2029
     PARAGRAPH SEPARATOR. All three are split by `str.splitlines()`, which is how an agent
-    or a tool reads a printed block line by line — and `docs/FLOW_CHOICES.md` tells the
+    or a tool reads a printed block line by line - and `docs/FLOW_CHOICES.md` tells the
     agent to do exactly that. Measured before this change: all seven ASCII separators were
     refused, while each of those three rendered a full plan with three command-position
     lines, and `--advise` printed `rm -rf <payload>` on a line of its own.
@@ -5703,7 +5703,7 @@ def _refuse_command_plan(target: str) -> str:
         "It contains a control character (a newline, carriage return, or similar). No real",
         "package name, URL, git ref, or skill slug does. Because these commands are meant to",
         "be copied and run line by line, a target that spans lines would let the target's own",
-        "text land on a line of its own — which is how injected text reaches command position.",
+        "text land on a line of its own \u2014 which is how injected text reaches command position.",
         "",
         "Treat this as a strong signal about the target itself: something produced an",
         "identifier that cannot be one. Check where it came from before going further.",
@@ -5714,12 +5714,12 @@ def _shq(value) -> str:
     """Shell-quote *value* for safe interpolation into a printed command line.
 
     B-487: every renderer in this module that stitches a caller-supplied string (a
-    --vet-plan target, an --advise target/profile.target, …) into a shell command line
+    --vet-plan target, an --advise target/profile.target, ...) into a shell command line
     MUST route it through this helper rather than interpolating it raw. `docs/
     FLOW_CHOICES.md` tells the host agent to actually run these printed commands, so an
     unquoted field is a command-injection sink, not just a display glitch. `shlex.quote`
     is a no-op on already-safe strings (letters/digits/`-_./=:@`), so ordinary targets
-    render byte-identically to before this fix — only strings carrying shell
+    render byte-identically to before this fix - only strings carrying shell
     metacharacters change output at all.
     """
     return shlex.quote(str(value))
@@ -5728,7 +5728,7 @@ def _shq(value) -> str:
 def _looks_like_quarantine(target: str) -> bool:
     """True if *target* sits under the system temp dir (a --vet-plan quarantine copy),
     False otherwise. --advise can be pointed at ANY path, including a real installed
-    skill — never suggest an unconditional `rm -rf` outside temp, or a user could paste
+    skill - never suggest an unconditional `rm -rf` outside temp, or a user could paste
     it against their live install."""
     try:
         resolved = Path(target).expanduser().resolve()
@@ -5741,19 +5741,19 @@ def _looks_like_quarantine(target: str) -> bool:
 def render_advise(profile, ascii_only: bool = False) -> str:
     """Human-readable install recommendation: INSTALL / CAUTION / DO-NOT-INSTALL.
 
-    Built from the exact same VetProfile as render_vet_dossier — a different framing
+    Built from the exact same VetProfile as render_vet_dossier - a different framing
     of the same signals, not a second analysis pass.
     """
     icons = _ADVISE_ICON_ASCII if ascii_only else _ADVISE_ICON_UNI
     verdict = _ADVISE_VERDICT.get(profile.overall_status, "CAUTION")
     name = _sanitize(Path(profile.target).name or profile.target)
-    lines = [f"{icons[verdict]}  {verdict} — {profile.target_type} '{name}'", ""]
+    lines = [f"{icons[verdict]}  {verdict} \u2014 {profile.target_type} '{name}'", ""]
 
-    dash = "-" if ascii_only else "—"
+    dash = "-" if ascii_only else "\u2014"
     plain = _ADVISE_PLAIN_WORDS.get(verdict, _ADVISE_PLAIN_WORDS["CAUTION"]).format(d=dash)
     # B-621: the INSTALL wording is a clearance, and a clearance must not be issued over a
-    # region nobody read. The verdict itself does NOT move — an unassessed region is not
-    # evidence of harm, and inventing one would be the opposite error — but the sentence a
+    # region nobody read. The verdict itself does NOT move - an unassessed region is not
+    # evidence of harm, and inventing one would be the opposite error - but the sentence a
     # reader acts on has to stop implying the scan was complete. Same discipline the UNKNOWN
     # convention states for verdicts, applied to the sentence.
     coverage_notes = _situational_coverage_notes(profile)
@@ -5776,23 +5776,23 @@ def render_advise(profile, ascii_only: bool = False) -> str:
         lines.append("")
     elif verdict == "CAUTION":
         # B-553: the generic UNKNOWN sentence used to fire even when the real cause was
-        # already known — coverage_notes (computed above) names exactly what could not be
+        # already known - coverage_notes (computed above) names exactly what could not be
         # assessed, and that fact is rendered 12 lines below in the "Not assessed" block.
         # Name it here too instead of leaving the reader with "not enough signal" alone.
         if coverage_notes:
-            lines.append("Reasons: part of this target could not be assessed — see "
+            lines.append("Reasons: part of this target could not be assessed \u2014 see "
                           "\"Not assessed\" below; review manually before trusting this "
                           "source.")
         elif _advise_danger_gap_reason(profile):
             # B-741: the same principle one producer further out. A coverage gap that
-            # rides on the danger axis rather than on `coverage_notes` — the held-back
-            # loose-manifest scope, or a ring budget escape — left this surface saying
+            # rides on the danger axis rather than on `coverage_notes` - the held-back
+            # loose-manifest scope, or a ring budget escape - left this surface saying
             # "not enough signal" while the dossier printed the actual reason and the
             # exit code went to 1. --advise is the surface whose entire job is the
             # install decision (B-621); a reader told only "inconclusive" cannot act.
             lines.append(f"Reasons: {_advise_danger_gap_reason(profile)}")
         else:
-            lines.append("Reasons: assessment is inconclusive (UNKNOWN) — not enough signal "
+            lines.append("Reasons: assessment is inconclusive (UNKNOWN) \u2014 not enough signal "
                           "to say INSTALL; review manually before trusting this source.")
         lines.append("")
     else:
@@ -5822,28 +5822,28 @@ def render_advise(profile, ascii_only: bool = False) -> str:
         # newline spans two rendered lines, so the path's own text would land on a line of
         # its own inside a copy-and-run block. Name the path escaped and emit no command.
         lines.append(f"  This path would break the line it is printed on: {str(profile.target)!r}")
-        lines.append("  No cleanup command is printed for it — a `rm -rf` spanning two lines")
+        lines.append("  No cleanup command is printed for it \u2014 a `rm -rf` spanning two lines")
         lines.append("  is not safe to copy. Remove it by hand if it is a quarantine copy.")
     elif _looks_like_quarantine(profile.target):
-        lines.append(f"  rm -rf {_shq(profile.target)}    # remove the quarantine copy — do this either way")
+        lines.append(f"  rm -rf {_shq(profile.target)}    # remove the quarantine copy \u2014 do this either way")
     else:
-        lines.append(f"  '{profile.target}' is not under the system temp dir — this does not")
+        lines.append(f"  '{profile.target}' is not under the system temp dir \u2014 this does not")
         lines.append("  look like a --vet-plan quarantine copy. If it IS one, remove it with:")
         lines.append(f"    rm -rf {_shq(profile.target)}")
-        lines.append("  If this is your real installed skill, do NOT delete it — act on the")
+        lines.append("  If this is your real installed skill, do NOT delete it \u2014 act on the")
         lines.append("  verdict above instead (e.g. uninstall through your normal flow).")
     lines.append("  (run --json for the full finding list + axis breakdown)")
     out = "\n".join(lines)
     # B-483: this renderer read `ascii_only` for its icon table and its `dash` variable and
     # then emitted hardcoded em dashes anyway (the verdict headline, the CAUTION fallback),
-    # plus whatever unicode a finding's own text carries — so `--advise --ascii` was the one
+    # plus whatever unicode a finding's own text carries - so `--advise --ascii` was the one
     # mode that still printed raw unicode. Same closing guard every other renderer here ends
     # with, so nothing depends on remembering to use `dash`.
     return asciify(out) if ascii_only else out
 
 
 def render_advise_json(profile, *, version: str) -> str:
-    """Machine-readable install recommendation — same envelope as render_vet_json plus
+    """Machine-readable install recommendation - same envelope as render_vet_json plus
     the advise-specific verdict, reasons, and cleanup command.
 
     C427: `render_vet_json`'s own "verdict" key already carries
@@ -5861,13 +5861,13 @@ def render_advise_json(profile, *, version: str) -> str:
     if _breaks_the_line_it_is_printed_on(str(profile.target)):
         # B-487: no command for a path that would break the line it is printed on.
         payload["cleanup"] = (
-            f"# path would break the line it is printed on ({str(profile.target)!r}) — no cleanup "
+            f"# path would break the line it is printed on ({str(profile.target)!r}) \u2014 no cleanup "
             "command is emitted; remove it by hand if it is a quarantine copy"
         )
     else:
         payload["cleanup"] = (
             f"rm -rf {_shq(profile.target)}" if is_quarantine else
-            f"# '{profile.target}' is not under the system temp dir — only run "
+            f"# '{profile.target}' is not under the system temp dir \u2014 only run "
             f"'rm -rf {_shq(profile.target)}' if you're sure this is a --vet-plan quarantine "
             "copy, not your real installed skill"
         )
@@ -5875,16 +5875,16 @@ def render_advise_json(profile, *, version: str) -> str:
     return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 
 
-# ---- F-065: --vet-plan — the zero-network default path. This tool never fetches
+# ---- F-065: --vet-plan - the zero-network default path. This tool never fetches
 # anything (§2); it only PRINTS the commands a human or host agent would run to fetch a
-# source into an isolated quarantine dir, vet it, and clean up — mirroring --fix's
+# source into an isolated quarantine dir, vet it, and clean up - mirroring --fix's
 # "prints, never executes" doctrine. Ecosystem detection reuses F-073's own parser
 # (_parse_source_target) so the fetch verb matches exactly what --vet-source already
 # identified. Only real, standard package-manager verbs are suggested (git/npm/pip);
 # for "clawhub" and unresolved bare names there is no single verified CLI flag to name,
 # so the plan gives generic guidance rather than fabricating one.
 #
-# F-112: pure output-readability change — same commands, same ecosystem detection, no
+# F-112: pure output-readability change - same commands, same ecosystem detection, no
 # new verdict/scoring logic. The plain-language preamble (4 numbered steps + a consent
 # line) comes first for a reader who doesn't parse shell; the exact commands follow
 # underneath, reordered so --vet-source (the pre-download reputation gate) is step 1.
@@ -5899,14 +5899,14 @@ def render_vet_plan(target: str) -> str:
     ver_suffix = f"@{version}" if version else ""
 
     if eco == "npm":
-        # `name + ver_suffix` (e.g. "left-pad@1.0.0") is ONE npm package-spec argument —
+        # `name + ver_suffix` (e.g. "left-pad@1.0.0") is ONE npm package-spec argument -
         # quote it as a single unit so quoting can't split it into two shell words.
         fetch = f"npm pack {_shq(name + ver_suffix)} --pack-destination \"$QUARANTINE\""
     elif eco == "pypi":
         fetch = (f"pip download --no-deps -d \"$QUARANTINE\" "
                   f"{_shq(name + ('==' + version if version else ''))}")
     elif eco == "git":
-        # info only keeps host + the repo-name tail, not the full owner/repo path — pull
+        # info only keeps host + the repo-name tail, not the full owner/repo path - pull
         # host/path back out of the raw "git:<host>/<path>[@ref]" target instead of
         # reconstructing it from parsed fields (which would drop the owner segment).
         path = target[len("git:"):]
@@ -5920,7 +5920,7 @@ def render_vet_plan(target: str) -> str:
                   "but redirect the output into \"$QUARANTINE\" instead of the live skills dir")
     else:  # "url" or an unresolved bare "registry" name
         fetch = (f"curl -fsSL {_shq(target)} -o \"$QUARANTINE/download\"" if eco == "url" else
-                  f"# '{name}' has no resolvable ecosystem — fetch via your package manager's "
+                  f"# '{name}' has no resolvable ecosystem \u2014 fetch via your package manager's "
                   "normal lookup, into \"$QUARANTINE\"")
     # the concrete-command ecosystems get a shared "this line varies" annotation; the
     # clawhub/unresolved branches above are already a full "#"-commented explanation, so
@@ -5929,17 +5929,17 @@ def render_vet_plan(target: str) -> str:
         "npm", "pypi", "git", "url") else ""
 
     return "\n".join([
-        f"Before you install \"{name}\", here's what I'll do — nothing lands on your setup",
+        f"Before you install \"{name}\", here's what I'll do \u2014 nothing lands on your setup",
         "until it passes:",
         "",
-        "  1. Check the source's reputation first — no download at all.",
+        "  1. Check the source's reputation first \u2014 no download at all.",
         "  2. Fetch it into a throwaway folder your agent can't auto-load.",
         "  3. Scan that copy and give you a plain verdict: install / be careful / don't install.",
         "  4. Delete the throwaway copy no matter what.",
         "",
         "Say \"yes\" and I'll run all of this for you.",
         "",
-        "Commands (for the agent — clawseccheck never touches the network itself):",
+        "Commands (for the agent \u2014 clawseccheck never touches the network itself):",
         "",
         f"  {command_prefix()} --vet-source {_shq(target)}   # 1: reputation, zero network",
         "  QUARANTINE=$(mktemp -d)   # 2: throwaway, outside auto-load",
@@ -5949,11 +5949,11 @@ def render_vet_plan(target: str) -> str:
     ])
 
 
-# ---- B98 / F-083: --emit-manifest — a proposed permission manifest, hand-built YAML-shaped
+# ---- B98 / F-083: --emit-manifest - a proposed permission manifest, hand-built YAML-shaped
 # text (stdlib only, no PyYAML: this project has zero runtime deps). Never silently renders
-# an all-false/empty manifest for an unprofilable skill — that would read as "safe" when the
+# an all-false/empty manifest for an unprofilable skill - that would read as "safe" when the
 # truth is "unknown". Every capability field is either a real true/false derived from static
-# effect analysis, or an explicit `unknown` — the honesty rule the whole renderer exists for.
+# effect analysis, or an explicit `unknown` - the honesty rule the whole renderer exists for.
 _MANIFEST_FAMILY_ALIASES = {
     "eval": "exec",  # skillast folds eval into exec for capability purposes (cf. B62)
 }
@@ -5979,26 +5979,26 @@ def _manifest_effect_union(ctx, skill_name: str) -> tuple[set, set, set, int]:
 
 def render_permission_manifest(ctx, target: str) -> str:
     """A proposed permission manifest (YAML-shaped, hand-built text) derived from static
-    effect analysis of a single vetted skill — printed by `--vet <skill> --emit-manifest`.
+    effect analysis of a single vetted skill - printed by `--vet <skill> --emit-manifest`.
 
     `target` is the path/name passed to `--vet`; the skill-name key vet_skill() uses in
     ctx.effect_profiles / ctx.installed_skills is that path's basename (`Path(target).name`
-    — mirrors vet_skill()'s own `name = p.name` / `p.parent.name` derivation), so that key
+    - mirrors vet_skill()'s own `name = p.name` / `p.parent.name` derivation), so that key
     is looked up here rather than the raw path string.
 
     Never emits a silently-safe manifest: if the skill could not be statically profiled
     (`ctx` is None, or the skill has no Python at all), every capability field is the
     explicit string `unknown` (never `false`), plus `unprofilable: true`.
 
-    B-592: the capability fields are `skillast.capability_families` — does this code
-    touch the capability AT ALL — and no longer the effect simulator's *taint*
+    B-592: the capability fields are `skillast.capability_families` - does this code
+    touch the capability AT ALL - and no longer the effect simulator's *taint*
     reachability. A permission manifest answers "what does this skill need permission to
     do", and a constant-URL fetch needs network permission exactly as much as a tainted
     one does; keying the fields on taint made the document propose DENYING network to a
     skill whose only statement was `urlopen("https://collector.example.net/ping")`, and
     made `secrets.reads_credentials` structurally unreachable (the simulator registers
     `read`/`write`/`network`/`eval` and never a `cred` effect at all, so that field could
-    only ever print `false`). The taint view is not lost — it is exactly what the
+    only ever print `false`). The taint view is not lost - it is exactly what the
     `analysis:` block's `unshielded_effects` / `guarded_effects` carry, which is where a
     reader should look for "and is any of it driven by untrusted input".
 
@@ -6011,12 +6011,12 @@ def render_permission_manifest(ctx, target: str) -> str:
     name = _sanitize(skill_key)
     header = [
         f"# proposed-permission-manifest for: {name}",
-        "# derived from static analysis (ClawSecCheck) — NOT a guarantee of completeness",
+        "# derived from static analysis (ClawSecCheck) \u2014 NOT a guarantee of completeness",
         "# fields marked 'unknown' mean the script was opaque/unparseable, not that the "
         "capability is absent",
         "# a yes/no value answers: does the code TOUCH this capability at all "
         "(presence)?",
-        "# Whether untrusted input reaches it is a different question — see "
+        "# Whether untrusted input reaches it is a different question \u2014 see "
         "analysis.unshielded_effects.",
         "version: 1",
         f"skill: {name}",
@@ -6058,7 +6058,7 @@ def render_permission_manifest(ctx, target: str) -> str:
             "filesystem:",
             "  read: unknown",
             "  write: unknown",
-            "  deny: []               # always empty in v1 — we propose grants, not denies "
+            "  deny: []               # always empty in v1 \u2014 we propose grants, not denies "
             "(documented)",
             "network:",
             "  allowlist: []           # host/path extraction not available from static "
@@ -6088,7 +6088,7 @@ def render_permission_manifest(ctx, target: str) -> str:
             "filesystem:",
             "  read: unknown",
             "  write: unknown",
-            "  deny: []               # always empty in v1 — we propose grants, not denies "
+            "  deny: []               # always empty in v1 \u2014 we propose grants, not denies "
             "(documented)",
             "network:",
             "  allowlist: []           # host/path extraction not available from static "
@@ -6113,7 +6113,7 @@ def render_permission_manifest(ctx, target: str) -> str:
     reachable, unshielded, guarded, n_entry = _manifest_effect_union(ctx, skill_key)
 
     def _b(fam: str) -> str:
-        # Presence, not taint reachability (B-592) — see the docstring. `reachable` is
+        # Presence, not taint reachability (B-592) - see the docstring. `reachable` is
         # still read, for the `analysis:` block below: the two answer different questions
         # and the document now shows both instead of publishing one under the other's
         # name.
@@ -6124,7 +6124,7 @@ def render_permission_manifest(ctx, target: str) -> str:
         "filesystem:",
         f"  read: {_b('read')}",
         f"  write: {_b('write')}",
-        "  deny: []               # always empty in v1 — we propose grants, not denies "
+        "  deny: []               # always empty in v1 \u2014 we propose grants, not denies "
         "(documented)",
         "network:",
         "  allowlist: []           # host/path extraction not available from static "
@@ -6154,7 +6154,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
                 version: str | None = None,
                 home: "str | None" = None, data_dir: "str | None" = None) -> str:
     # B-873: forwarded verbatim to suggest_actions, same optional/None-default shape as
-    # `version` above — a caller that omits them (the public library shape; every
+    # `version` above - a caller that omits them (the public library shape; every
     # pre-existing call, incl. adjudication.render_judged_json's internal one) gets
     # exactly the pre-B-873 "next_actions" commands, unchanged.
     actions = suggest_actions(findings, score, home=home, data_dir=data_dir)
@@ -6179,7 +6179,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     if version is None:
         from . import __version__ as version  # noqa: PLC0415
     # C-423: `graded is False` means no consumer may read a real letter/number for
-    # this run — "score"/"grade"/"raw_score" go to `None` (the keys stay present, so
+    # this run - "score"/"grade"/"raw_score" go to `None` (the keys stay present, so
     # `payload["score"]` reads `None` rather than raising `KeyError`). getattr/default
     # tolerates older duck-typed ScoreResult stand-ins, same as `earned`/`total` below.
     _graded = getattr(score, "graded", True)
@@ -6189,7 +6189,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         "grade": score.grade if _graded else None,
         "capped": score.capped,
         "raw_score": score.raw_score if _graded else None,
-        # B-505: the severity-weighted numerator/denominator behind `raw_score` —
+        # B-505: the severity-weighted numerator/denominator behind `raw_score` -
         # `raw_score == round(earned / total * 100)` whenever `total > 0`. Lets a JSON
         # consumer reproduce the score the same way the human report's "Why N/100" line
         # now does, instead of having to trust the number. getattr/default tolerates
@@ -6197,13 +6197,13 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         "earned": getattr(score, "earned", 0.0),
         "total": getattr(score, "total", 0.0),
         "cap_severity": score.cap_severity,
-        # C-423: always present, even when graded — `not_checked`/`missing_layers`
+        # C-423: always present, even when graded - `not_checked`/`missing_layers`
         # answer two different questions (see ScoreResult's own docstring): a layer
         # that ran but didn't exhaust its subject, vs. a layer that never ran at all.
         "graded": _graded,
         "not_checked": list(getattr(score, "not_checked", ())),
         # B-617: inert facts about how far THIS run reached. ALWAYS PRESENT, empty when
-        # there is nothing to say — B-560's lesson, that an absent key cannot be told
+        # there is nothing to say - B-560's lesson, that an absent key cannot be told
         # apart from "nothing to report" by a consumer. Deliberately its own key rather
         # than folded into `not_checked`: that field means "a layer ran and did not
         # exhaust its subject", and the first kind here says the opposite (the run read
@@ -6217,45 +6217,45 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
             {"layer": layer, "status": status}
             for layer, status in getattr(score, "missing_layers", ())
         ],
-        # I3: per-severity unsuppressed-FAIL counts — the same numbers `--fail-on
+        # I3: per-severity unsuppressed-FAIL counts - the same numbers `--fail-on
         # SEVERITY` (cli.py) gates on, so a CI consumer can assert on findings without
         # a grade. See finding_counts_by_severity()'s docstring for the exact predicate.
         "fail_counts_by_severity": finding_counts_by_severity(findings),
         # C-429: the undetermined population, split by why. Reported, never used to
-        # penalise — see undetermined_summary() for the measurement that ruled a grade
+        # penalise - see undetermined_summary() for the measurement that ruled a grade
         # cap out. `no_signal` is the number a CI consumer should gate on; the other
         # buckets are checks that looked and found nothing, or that already cap the
         # grade through DEGRADED_CHECK_CAP.
         "undetermined": undetermined_summary(findings),
         # I-025/B-309: whether a corroborated runtime signal (never a config-static
-        # finding) drove this cap, and which — see scoring.RUNTIME_SIGNAL_CAP.
+        # finding) drove this cap, and which - see scoring.RUNTIME_SIGNAL_CAP.
         "runtime_capped": score.runtime_capped,
         "runtime_cap_reason": score.runtime_cap_reason,
         # B-306 (C-135 follow-up): true when openclaw.json was unreadable/unparseable
-        # this run and that alone hard-capped the grade — see scoring.CONFIG_BLIND_CAP.
+        # this run and that alone hard-capped the grade - see scoring.CONFIG_BLIND_CAP.
         # B-363: also true when openclaw.json was simply ABSENT (no target found at
-        # all) — `config_blind_reason` ("unreadable" | "absent" | null) distinguishes
+        # all) - `config_blind_reason` ("unreadable" | "absent" | null) distinguishes
         # the two states without a JSON consumer having to re-derive it from config_found.
         "config_blind_capped": score.config_blind_capped,
         "config_blind_reason": getattr(score, "config_blind_reason", None),
         # B-313/B-399: true when a check that could not reach a reliable verdict this run
-        # (crashed, timed out, or hit an engine-side-degraded UNKNOWN — Finding.id
+        # (crashed, timed out, or hit an engine-side-degraded UNKNOWN - Finding.id
         # prefixed "ERR:", or any UNKNOWN finding with engine_degraded=True) alone
-        # hard-capped the grade — see scoring.DEGRADED_CHECK_CAP. `degraded_count` is
+        # hard-capped the grade - see scoring.DEGRADED_CHECK_CAP. `degraded_count` is
         # unconditional (checks did/didn't reach a verdict this many times) even when this
         # bool is False because a tighter cap won.
         "degraded_capped": getattr(score, "degraded_capped", False),
         "degraded_count": getattr(score, "degraded_count", 0),
         # F-155: true when a submitted VULNERABLE live injection-test verdict (canary/
         # dryrun/redteam/multiturn, via --judged-bundle's "liveTest" bucket) alone
-        # hard-capped the grade — see scoring.LIVE_INJECTION_CAP. RESISTANT or no
+        # hard-capped the grade - see scoring.LIVE_INJECTION_CAP. RESISTANT or no
         # submission at all always leaves this False (self-attestation guard).
         "live_injection_capped": getattr(score, "live_injection_capped", False),
         "live_injection_cap_reason": getattr(score, "live_injection_cap_reason", None),
         # F-154: true when a fired T1/T2/T3/B191 behavioral detector (--behavioral or
-        # --full, which already runs the analysis) alone hard-capped the grade — see
+        # --full, which already runs the analysis) alone hard-capped the grade - see
         # scoring.BEHAVIORAL_SIGNAL_CAP. Always False when the analysis never ran this
-        # invocation (the default — a plain audit never sets it).
+        # invocation (the default - a plain audit never sets it).
         "behavioral_capped": getattr(score, "behavioral_capped", False),
         "behavioral_cap_reason": getattr(score, "behavioral_cap_reason", None),
         "assessable": bool(score.assessable),
@@ -6283,7 +6283,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
             for p in risk
         ]
     payload["capability_graph"] = _capability_graph(ctx) if ctx is not None else {"nodes": [], "edges": []}
-    # F-020: Structured Attestation Requests — always present in --json output.
+    # F-020: Structured Attestation Requests - always present in --json output.
     # Empty list when no B62 mismatches; one entry per mismatch-flagged skill.
     # Machine-readable only.
     payload["secret_reachability"] = _credential_surface_map(ctx) if ctx is not None else []
@@ -6292,17 +6292,17 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         payload["intentAttestationRequests"] = build_sars(ctx)
     else:
         payload["intentAttestationRequests"] = []
-    # F-031: surface/coverage/projection — Dashboard data (additive, back-compat).
+    # F-031: surface/coverage/projection - Dashboard data (additive, back-compat).
     from .coverage import coverage as _coverage  # noqa: PLC0415
     from .scoring import project as _project  # noqa: PLC0415
     payload["coverage"] = _coverage(findings)
     # B-379: thread the SAME cap inputs `score` (above) was computed with, so
     # projection.current can never disagree with the top-level score/grade for a
-    # capped run — see this function's `behavioral_fired_ids`/`live_test_*` params.
+    # capped run - see this function's `behavioral_fired_ids`/`live_test_*` params.
     # C-423: the ledger is threaded on exactly the same terms -- otherwise this block
     # republishes the score the payload above deliberately set to null.
     # B-512: `ledger=` alone made the guarantee above conditional on the caller
-    # threading it. `render_json(findings, score)` — the public library shape — does not,
+    # threading it. `render_json(findings, score)` - the public library shape - does not,
     # so the projection re-computed itself as graded and republished the number the
     # payload had just nulled. The score being rendered is the authority on whether this
     # run has one; say so directly rather than hoping the ledger arrived by another route.
@@ -6313,12 +6313,12 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         known_ungraded=not getattr(score, "graded", True),
     )
     # B-166: config read/parse state is machine-visible. A broken openclaw.json must not
-    # read as a silent all-clear — config_parse_error is a clean gating boolean and errors
+    # read as a silent all-clear - config_parse_error is a clean gating boolean and errors
     # carries the human-readable parse message(s) that were previously only in the text run.
     payload["config_found"] = bool(getattr(ctx, "config_found", False)) if ctx is not None else False
     # B-776: machine-visible so a JSON consumer (or a host agent deciding whether to
     # retry with a different --home) can tell "sandboxed, --home cannot help" apart from
-    # an ordinary missing/misdirected config — see collector.Context.sandboxed.
+    # an ordinary missing/misdirected config - see collector.Context.sandboxed.
     payload["sandboxed"] = bool(getattr(ctx, "sandboxed", False)) if ctx is not None else False
     # B-281 (ENV-1): WHICH file was audited, not merely whether one was found. Every
     # verdict in this payload describes exactly this path; a bare `config_found: true`
@@ -6349,11 +6349,11 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     payload["dead_ignore_entries"] = (
         sorted(getattr(ctx, "dead_ignore_entries", None) or []) if ctx is not None else []
     )
-    # F-131 Phase 1: "Inventory by subject" — additive top-level key (design §4.6).
+    # F-131 Phase 1: "Inventory by subject" - additive top-level key (design §4.6).
     # Presentation-only: never alters score/grade/findings above; empty/UNKNOWN-shaped
     # when ctx is unavailable (build_inventory's own ctx-is-None fallback).
     payload["inventory"] = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
-    # F-149 JSON gap: present ONLY under --full (the caller passes None otherwise) —
+    # F-149 JSON gap: present ONLY under --full (the caller passes None otherwise) -
     # matches the printed SKILL SWEEP section, which likewise only exists under
     # --full. Visibility only, same as the printed section: never folded into
     # score/grade/findings above.
@@ -6369,7 +6369,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
 
     Includes the brand mark + wordmark, a grade badge (colored via
     brand.GRADE_HEX), score, Lethal Trifecta ratio, and FAIL/WARN findings list
-    (colored via brand.SEVERITY). Owner view — shows findings with a note that
+    (colored via brand.SEVERITY). Owner view - shows findings with a note that
     this is private and must not be shared publicly.
 
     All finding text is HTML-escaped.
@@ -6378,7 +6378,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
               if f.status in ACTIONABLE_STATUSES and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status not in FAIL_WEIGHT_STATUSES))
 
-    # C-423: no letter when this run carries no grade — `grade_hex("")` already falls
+    # C-423: no letter when this run carries no grade - `grade_hex("")` already falls
     # back to the same neutral grey `grade_hex` uses for any unrecognized letter.
     badge_color = grade_hex(score.grade) if getattr(score, "graded", True) else grade_hex("")
     trifecta = _trifecta_ratio(findings)
@@ -6388,17 +6388,17 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     label_why = "Why:"
     # Brand mark + wordmark, split-coloured ("Claw" in BRAND_RED, the rest in the
     # page's --ink token) so the graphical mark and the product name travel
-    # together in this HTML-only surface (Tier 3 — see brand.py's module docstring).
+    # together in this HTML-only surface (Tier 3 - see brand.py's module docstring).
     # The logo is aria-hidden: the adjacent wordmark text is the real accessible
     # name, so a screen reader reads "ClawSecCheck Security Audit Report" once,
     # not twice.
     _claw, _rest = WORDMARK[:4], WORDMARK[4:]
     # F-130 put LOGO_SVG here; C-508 swaps it for the REAL mark. LOGO_SVG labels itself
-    # PROVISIONAL in brand.py — a circle and two arcs — and at 1.6rem it read as a generic
+    # PROVISIONAL in brand.py - a circle and two arcs - and at 1.6rem it read as a generic
     # glyph rather than as this product. The mascot art already ships inlined as a data URI
     # for the browser tab, so this costs no new asset and keeps the page self-contained.
     # LOGO_SVG stays where a vector belongs: the 14px badge. (It was also the PDF's
-    # mark when this was written — the PDF has since moved to the same raster, so
+    # mark when this was written - the PDF has since moved to the same raster, so
     # the badge is now the ONLY surface still showing the provisional geometry.)
     h1_html = (
         f'<span class="logo-mark" aria-hidden="true">'
@@ -6407,7 +6407,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         f'{html.escape(_rest)}</span> Security Audit Report'
     )
     title_text = "ClawSecCheck Security Audit Report"
-    private_title = "⚠ Private Report"
+    private_title = "\u26a0 Private Report"
     private_body = (
         "This report contains detailed security findings and must"
         " <strong>NOT</strong> be shared publicly."
@@ -6423,7 +6423,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     def _finding_card(f: Finding) -> str:
         sev_style = SEVERITY.get(f.severity)
         color = sev_style.hex if sev_style else "#999"
-        icon_char = "✕" if f.status in FAIL_WEIGHT_STATUSES else "⚠"
+        icon_char = "\u2715" if f.status in FAIL_WEIGHT_STATUSES else "\u26a0"
         card_cls = "finding is-fail" if f.status in FAIL_WEIGHT_STATUSES else "finding"
         f_title = esc(_sanitize(f.title))
         # B-825: `detail_plain` (unredacted) stays the `already_shown` comparison key below
@@ -6446,8 +6446,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
 
         # B-622: this renderer contained ZERO references to `.evidence`, so no finding's
         # evidence reached the page through the evidence channel at all. Measured on a
-        # deliberately-bad config: of 24 entries, 12 appeared anyway — every one of them
-        # only because its check had inlined the same words into `detail` — and 12 never
+        # deliberately-bad config: of 24 entries, 12 appeared anyway - every one of them
+        # only because its check had inlined the same words into `detail` - and 12 never
         # appeared, including the evidence behind a FAIL. That is worse than a clean
         # absence: the page looks like it carries evidence, and which half a reader gets
         # depends on how each check happened to build its `detail`.
@@ -6455,7 +6455,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         # Same gate as the text report (FAIL/WARN only) and the SAME cap decision, taken
         # by the shared helper rather than re-decided here. `indent`/`bullet` are emptied
         # because the markup supplies the bullet; the value of the call is the SELECTION
-        # and the "(+N more)" disclosure, which must not exist in two places — B-629 is
+        # and the "(+N more)" disclosure, which must not exist in two places - B-629 is
         # the record of what three independent copies of that decision cost.
         ev_rows = [
             line.lstrip()
@@ -6471,7 +6471,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
                    + "</ul>")
 
         # B-622: the same condition the text report applies (`report.py`'s _render_finding)
-        # — a hedged FAIL and a certain one rendered identically here, with nothing on the
+        # - a hedged FAIL and a certain one rendered identically here, with nothing on the
         # page to tell them apart.
         conf = getattr(f, "confidence", "HIGH")
         conf_html = (f'<span class="conf-pill">confidence: {esc(str(conf).lower())}</span>'
@@ -6495,7 +6495,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         no_issues_text = esc(
             "No known attack pattern matched across the audited surfaces. Keep it that way."
         )
-        findings_html = f'<div class="all-clear">✓ {no_issues_text}</div>'
+        findings_html = f'<div class="all-clear">\u2713 {no_issues_text}</div>'
         nav_html = ""
     else:
         nav_items = []
@@ -6531,14 +6531,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     # F-131 subject taxonomy, promoted into the HTML export: a compact "Inventory by
     # subject" table above the findings, derived from the SAME build_inventory() the JSON
     # payload and the terminal "Inventory by subject" block use (single source of truth).
-    # "" when ctx is unavailable (a bare render_html(findings, score) call) — degrades to
+    # "" when ctx is unavailable (a bare render_html(findings, score) call) - degrades to
     # no table, never a fabricated one.
     summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
     if summary_rows:
         _st_color = {FAIL: "#d9534f", WARN: "#d9a406", PASS: "#1a7f37", UNKNOWN: "#8a8f98"}
         # B-755: both halves of this cell read the RAW status. The colour lookup missed and
         # fell back to the grey reserved for "not assessed", and the cell itself printed the
-        # enum — so a confirmed archive escape rendered as a grey `SKILL_ARCHIVE_PATH_TRAVERSAL`
+        # enum - so a confirmed archive escape rendered as a grey `SKILL_ARCHIVE_PATH_TRAVERSAL`
         # in the one surface most likely to be read by someone who did not run the scan.
         _inv_rows = "".join(
             f'<tr><td class="subj-name">{esc(label)}</td>'
@@ -6548,7 +6548,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             f'{esc(display_status(status))}</td></tr>'
             for label, status, count_text in summary_rows)
         # B-560: the roster this table summarises has a member the content ring never
-        # scanned, and HTML was the one human-facing surface that did not say so — the
+        # scanned, and HTML was the one human-facing surface that did not say so - the
         # text report, the PDF and the JSON inventory all did. It is the surface most
         # likely to be read by someone who did not run the scan, which is exactly who
         # cannot otherwise know a skill was skipped. Same sentence as everywhere else
@@ -6566,14 +6566,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         subject_inventory_html = ""
 
     # F-165: the per-subject "was everything looked at" page (coverage.
-    # build_coverage_page) — TARGET coverage ("were all N plugins vetted, all M
+    # build_coverage_page) - TARGET coverage ("were all N plugins vetted, all M
     # trajectory files read"), a different question from the "Inventory by subject"
     # table above (what did we FIND) and from the config-surface coverage the text
     # report's own "Coverage of OpenClaw surfaces" block answers (which checks ran).
     # `coverage_page` is optional and additive: every pre-existing caller passes
     # nothing and reproduces the exact prior page, byte-identical. `<pre>` because
     # `coverage_page_lines` already formats nested "not scanned" sub-items via leading
-    # spaces — a list would have to re-derive that structure to preserve it.
+    # spaces - a list would have to re-derive that structure to preserve it.
     if coverage_page:
         from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
         _cov_lines = _coverage_page_lines(coverage_page, ascii_only=False)
@@ -6587,46 +6587,46 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         coverage_page_html = ""
 
     # B-306 (C-135 follow-up #3, 2026-07-21): gate on the granular cap signals, not
-    # `score.capped` alone — see the matching comment in render_report for why
+    # `score.capped` alone - see the matching comment in render_report for why
     # `score.capped` can be False here while `config_blind_capped`/`runtime_capped` are
     # True (scoring.py's `total == 0` branch). Rendering-gate fix only; scoring.py's
     # documented JSON contract is unchanged. `getattr(..., default)` (not direct attribute
     # access) on the three fields this task newly reads unconditionally: some tests build
     # a minimal duck-typed ScoreResult stand-in that predates these fields, and the OLD
-    # code never touched them because `score.capped and ...` short-circuited past them —
+    # code never touched them because `score.capped and ...` short-circuited past them -
     # preserve that tolerance instead of demanding every caller supply every field.
     # B-313/B-399: same "unconditional, above the grade" disclosure as render_report's
-    # text banner — a degraded check count is shown whenever it's nonzero, independent of
+    # text banner - a degraded check count is shown whenever it's nonzero, independent of
     # whether it ended up strictly binding the cap.
     _degraded_n = getattr(score, "degraded_count", 0)
     degraded_html = ""
     if _degraded_n:
         _plural = "check" if _degraded_n == 1 else "checks"
         degraded_html = (
-            f'<p class="degraded"><strong>⚠️ Incomplete:</strong> {_degraded_n} {_plural}'
+            f'<p class="degraded"><strong>\u26a0\ufe0f Incomplete:</strong> {_degraded_n} {_plural}'
             ' could not reach a reliable verdict this run (crashed, timed out, or hit'
-            ' unreadable/corrupted input) — ' + _degraded_incomplete_clause(score)
+            ' unreadable/corrupted input) \u2014 ' + _degraded_incomplete_clause(score)
             + '</p>'
         )
     # B-380: same shared `_cap_cascade` decision render_report now uses
-    # (see the comment there) — this renderer used to keep its OWN five-branch "elif"
+    # (see the comment there) - this renderer used to keep its OWN five-branch "elif"
     # ladder, which is exactly how it drifted out of sync with render_report: its
     # runtime branch tested `score.capped or _rt_capped` (true for ANY cap, so a
-    # behavioral-only cap fell through to it and fabricated a runtime-signal claim —
+    # behavioral-only cap fell through to it and fabricated a runtime-signal claim -
     # B-380 item 1), and its severity branch never named a co-occurring
     # runtime cap (item 2). Both are structurally impossible now: the primary/extras
     # decision lives in exactly one place. B-399's engine-side-degraded UNKNOWN cause
     # needs no change here either, for the same reason noted in render_report.
-    # C-423: a cap explanation for a number that is not printed is noise — skip the
+    # C-423: a cap explanation for a number that is not printed is noise - skip the
     # "capped from N" BANNER on an ungraded run, same as render_report's text banner.
     #
     # B-600: skipping the banner is right; skipping the FACT was not. That comment's
     # "same as render_report" was true of the banner and missed what render_report does
-    # immediately below it — its F-155 and F-154 ungraded paragraphs, which state the cap
+    # immediately below it - its F-155 and F-154 ungraded paragraphs, which state the cap
     # without a number. render_dashboard's card does the same. This renderer had neither,
     # so it emitted the `.capped` CSS rule and never the element: 42 KB of report with no
     # mention that anything had capped the score. C-423's own reasoning applies here word
-    # for word — an ungraded run disclosed NOTHING about a submitted VULNERABLE live-test
+    # for word - an ungraded run disclosed NOTHING about a submitted VULNERABLE live-test
     # verdict, the most serious thing this tool can report, purely because there was no
     # number to say it had been capped from. And the HTML is the archivable, shareable
     # copy, so it is the one most likely to be read long after the run.
@@ -6642,15 +6642,15 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
                        f'from {score.raw_score} ({_reason_html}{_also_html})</p>')
     else:
-        # Same sentence the card and the text report use — `_UNGRADED_CAP_TAIL` exists so
+        # Same sentence the card and the text report use - `_UNGRADED_CAP_TAIL` exists so
         # a fourth wording cannot appear (B-593).
         _reason_html = esc(_cap_primary_reason_text(_primary, score))
         _also_html = _cap_also_clause([esc(p) for p in _extras])
-        capped_html = (f'<p class="capped">{_reason_html}{_also_html} — '
+        capped_html = (f'<p class="capped">{_reason_html}{_also_html} \u2014 '
                        f'{esc(_UNGRADED_CAP_TAIL)}</p>')
     capped_html = degraded_html + capped_html
 
-    # C-423: mandatory "not fully covered" line — appears on GRADED runs too,
+    # C-423: mandatory "not fully covered" line - appears on GRADED runs too,
     # whenever a layer that DID run still didn't exhaust its subject.
     _covered_line = _not_fully_covered_line(score)
     not_checked_html = (
@@ -6658,13 +6658,13 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     )
 
     # B-512: `pct` is interpolated into the stylesheet below, and the stylesheet is
-    # emitted on BOTH branches — so computing it unconditionally baked the withheld
+    # emitted on BOTH branches - so computing it unconditionally baked the withheld
     # number into the page as `width: 97%`. The bar element is not rendered on an
     # ungraded run, but the CSS rule is, and anyone reading the source or opening
     # devtools recovers the exact score the report withheld. Withholding has to cover
     # what the page *contains*, not only what it displays.
     pct = max(0, min(100, int(score.score))) if getattr(score, "graded", True) else 0
-    # C-423: no letter, no /100, no score bar when this run carries no grade — the
+    # C-423: no letter, no /100, no score bar when this run carries no grade - the
     # "Most urgent" finding and which layers never ran replace them.
     if getattr(score, "graded", True):
         grade_badge_html = (
@@ -6679,12 +6679,12 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             '<i></i></div></div>'
         )
     else:
-        # C-508: this was `<div class="grade-badge">?</div>` — the same 84x84 box a real
+        # C-508: this was `<div class="grade-badge">?</div>` - the same 84x84 box a real
         # letter gets, filled with a question mark and the neutral grey `grade_hex("")`
         # returns. It was the largest element on the page and it read as a broken image,
         # while withholding the grade is 4.0.0's headline behaviour and entirely deliberate.
         # The meter says what actually happened instead: how many of the five layers ran.
-        # `class="grade-badge"` is deliberately NOT reused — tests/test_c423_ungraded_render
+        # `class="grade-badge"` is deliberately NOT reused - tests/test_c423_ungraded_render
         # allows this branch to omit it, and reusing the graded box is what made the absence
         # look like a failure to produce one.
         _ran = len(LAYER_ORDER) - len(getattr(score, "missing_layers", ()) or ())
@@ -6792,11 +6792,11 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
            hard way. Never quote report output in one: a comment reproducing the ungraded
            wording put that wording inside a GRADED report, and the guard that every
            artifact of one run agrees about the grade caught it. And never cite a tracker
-           id here — it is noise in the reader's report, and the shipped-file guard does
+           id here \u2014 it is noise in the reader's report, and the shipped-file guard does
            not reject the bare form, because in SOURCE the bare form is normal.
            Describe the output; do not copy it, and leave the bookkeeping in git.
 
-           The header centres the IDENTITY — mark, wordmark, grade or layer meter, chips.
+           The header centres the IDENTITY \u2014 mark, wordmark, grade or layer meter, chips.
            Everything that is a SENTENCE is left-aligned inside one centred measure shared
            with the score bar, so the header reads as a single column. The ungraded branch
            prints two paragraphs three or four lines long, and centred body text gives the
@@ -6854,7 +6854,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
            link. The bar wraps, so its height depends on width and on how many subjects
            the run produced. Measured at the taxonomy's worst case of nine chips: two
            rows (93px, inside the 96px offset) down to a 680px container, three rows
-           (132px) below it, 172px at phone width — where pinning would also hold a fifth
+           (132px) below it, 172px at phone width \u2014 where pinning would also hold a fifth
            of the viewport for good. Hence 720px of viewport, the narrowest that keeps
            the worst case fitting; below it the bar scrolls away with the page. */
         @media (min-width: 720px) {{
@@ -6866,7 +6866,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             .family {{ scroll-margin-top: 6rem; }}
         }}
         /* A subject heading has to outrank the card titles under it, and at 1.02rem
-           against their bold 1rem it did not — the list read as one undivided run of
+           against their bold 1rem it did not \u2014 the list read as one undivided run of
            cards with an occasional slightly-bolder line in it. */
         .family-head {{
             display: flex; align-items: center; gap: 0.6rem;
@@ -6881,7 +6881,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         }}
         /* Tint means FAILED, not "severe". Every card used to be washed with its own
            severity colour, which sounds like hierarchy and measures as none: at matched
-           severity a FAIL and a WARN differed by 4-6 of 255 in each channel — invisible,
+           severity a FAIL and a WARN differed by 4-6 of 255 in each channel \u2014 invisible,
            so the only thing separating them was a glyph. Severity is already carried
            twice, by the pill and by the rule colour; status was carried nowhere. So the
            tint now says status: failures are raised and tinted, warnings sit recessed on
@@ -6894,7 +6894,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         }}
         /* `flex: 1 1 auto` gives the title no basis, so as soon as it cannot fit beside
            the glyph and the pill the whole title jumps to the next flex line and the
-           status glyph is left sitting alone on a row of its own — which is how it
+           status glyph is left sitting alone on a row of its own \u2014 which is how it
            rendered at narrow widths. A basis lets it share the row and wrap inside its
            own column instead; `baseline` then puts glyph, first title line and pills on
            one line rather than centring the glyph against a two-line title. */
@@ -6946,7 +6946,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         /* Print. This report is shown to people, so paper is a real surface, and two
            things break on it by default. First, `prefers-color-scheme` still reports the
            reader's system setting when printing, so a dark-mode machine prints light ink
-           on the white paper the printer supplies — unreadable. The light values are
+           on the white paper the printer supplies \u2014 unreadable. The light values are
            restored here rather than in `:root` because this block has to win against the
            dark one above it, which it does by coming later at equal specificity.
            Second, browsers drop backgrounds unless asked: without `print-color-adjust`
@@ -6959,7 +6959,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
                 --warn-bg: #fff8e1; --warn-line: #f0c040; --warn-ink: #7a5c00;
                 --shadow: none;
             }}
-            /* `--bg` stays faintly grey so a warning card is still a card on paper —
+            /* `--bg` stays faintly grey so a warning card is still a card on paper \u2014
                flattening it to white would leave it a 1px outline on the white page and
                undo the FAIL/WARN separation above. The sheet itself is forced white
                here instead, since `body` is what the paper shows through. */
@@ -7012,17 +7012,17 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     return html_body
 
 
-# ── F-171: the session-start brief ────────────────────────────────────────────────
+# -- F-171: the session-start brief ------------------------------------------------
 #
 # Two problems, one mode.
 #
 # The cheapest attack on a scheduled monitor is to stop it running: the attacker never
-# touches the baseline or the journal, they remove the schedule — and nothing anywhere
+# touches the baseline or the journal, they remove the schedule - and nothing anywhere
 # says so. And an alert is written to the journal once, so if nobody was looking at that
 # moment the signal effectively never existed.
 #
 # `--brief` answers "is this thing still watching, and did it say anything while I was
-# away". It reads three files and WRITES NOTHING — no audit, no snapshot, no journal
+# away". It reads three files and WRITES NOTHING - no audit, no snapshot, no journal
 # append. That is not an optimisation, it is the whole design constraint: because it
 # writes nothing, SKILL.md can have the agent run it at session start without a consent
 # prompt, which is what makes session-start comparison possible at all.
@@ -7035,7 +7035,7 @@ _BRIEF_STALE_DAYS = 3.0
 _BRIEF_DEAD_DAYS = 14.0
 
 # Which history rows count as evidence that a real check ran. Measured on the same file:
-# 4,414 of 4,576 rows carry `source: "test"` — the pollution incident that motivated
+# 4,414 of 4,576 rows carry `source: "test"` - the pollution incident that motivated
 # `--data-dir`. Counting those would report a fixture run as a live one, which is the
 # reassuring lie this mode exists to remove.
 _BRIEF_REAL_SOURCES = ("audit",)
@@ -7065,14 +7065,14 @@ def render_brief(state: "dict | None", events: "list | None",
                  ascii_only: bool = False) -> str:
     """Zero to five lines: is the watch alive, and what did it say while you were away.
 
-    Empty ("") means healthy and quiet — a fresh baseline, nothing notable in the
-    journal, no history concern — and is itself the report (Option A): nothing earns a
+    Empty ("") means healthy and quiet - a fresh baseline, nothing notable in the
+    journal, no history concern - and is itself the report (Option A): nothing earns a
     line unless it is informative.
 
     Pure: every input is passed in, nothing is read or written here. *state* is the parsed
     drift baseline (or None when there is none), *events* the journal entries, *history*
     the score-history rows. *state_mtime_iso* is a fallback for a baseline written before
-    timestamping existed — labelled as a file time rather than passed off as a run time.
+    timestamping existed - labelled as a file time rather than passed off as a run time.
     """
     from datetime import datetime  # noqa: PLC0415
     now = now or datetime.now()
@@ -7094,9 +7094,9 @@ def render_brief(state: "dict | None", events: "list | None",
             # presenting it as anything more would be inventing precision.
             if age is not None:
                 lines.append(
-                    f"Last drift baseline was written {_brief_age_words(age)} (file time — "
+                    f"Last drift baseline was written {_brief_age_words(age)} (file time \u2014 "
                     "this baseline predates run timestamps, so the exact run is unknown).")
-        # Option A (Dave): a fresh, healthy check earns no line here — restating "Last
+        # Option A (Dave): a fresh, healthy check earns no line here - restating "Last
         # drift check: Xh ago" carried zero signal and every session paid its cost. `age`
         # is already set above; the staleness ladder right below still fires unchanged.
         if age is None:
@@ -7104,7 +7104,7 @@ def render_brief(state: "dict | None", events: "list | None",
                          "ago it was taken cannot be determined.")
         elif age >= _BRIEF_DEAD_DAYS:
             lines.append(
-                f"Monitoring is effectively not running — nothing has checked this setup "
+                f"Monitoring is effectively not running \u2014 nothing has checked this setup "
                 f"for {int(age)} days. Stopping the schedule is the cheapest way to "
                 "silence a monitor, and it leaves no trace in the files it watches.")
         elif age >= _BRIEF_STALE_DAYS:
@@ -7135,12 +7135,12 @@ def render_brief(state: "dict | None", events: "list | None",
     real = [r for r in (history or ())
             if isinstance(r, dict) and r.get("source") in _BRIEF_REAL_SOURCES]
     if history and not real:
-        lines.append("The score history holds no rows from a real check — only test runs. "
+        lines.append("The score history holds no rows from a real check \u2014 only test runs. "
                      "Nothing here reflects this machine.")
 
     # No catch-all "nothing to report yet" line here on purpose: `lines` can now be
     # genuinely empty (a healthy, recently-checked baseline, no events, no history
-    # concern) and that IS the report — a manufactured line would contradict Option A's
+    # concern) and that IS the report - a manufactured line would contradict Option A's
     # "stay silent when healthy". `state is None` never reaches here empty: section 1
     # above always appends "Nothing is watching..." unconditionally in that case.
     out = "\n".join(lines).rstrip() + "\n" if lines else ""
