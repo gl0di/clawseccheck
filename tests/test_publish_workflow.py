@@ -167,6 +167,15 @@ def _steps() -> list[list]:
     return steps
 
 
+# The real Publish step runs the CLI under a pseudo-TTY: `script -qefc '<command>' /dev/null`
+# (util-linux script). The command is single-quoted, so [^']* captures it whole; the flags
+# group is the option cluster (`qefc`), whose `e` is load-bearing (see
+# test_real_publish_runs_under_a_pty_and_keeps_the_cli_exit_code).
+_PTY_WRAP_RE = re.compile(
+    r"\bscript\s+-(?P<flags>[A-Za-z]+)\s+'(?P<inner>[^']*)'\s+/dev/null\b"
+)
+
+
 def _publish_invocations() -> list[dict]:
     """Every step that actually RUNS `clawhub publish`, attributed to its own step.
 
@@ -175,10 +184,14 @@ def _publish_invocations() -> list[dict]:
     located "the publish command" by first-match over a flat line scan inspected the
     PREFLIGHT and left the real Publish step completely unguarded — its path and --name
     could both be broken with the suite still green. Each dict carries:
-        name     the step's display name
-        line     0-based lineno of the line where `clawhub publish` appears
-        args     everything after `clawhub publish` (the path + flags), whitespace-normalised
-        dry_run  whether this invocation passes --dry-run
+        name       the step's display name
+        line       0-based lineno of the line where `clawhub publish` appears
+        args       everything after `clawhub publish` (the path + flags), whitespace-normalised.
+                   When the command is wrapped in the `script -qefc '...' /dev/null` pty
+                   wrapper, this is the WRAPPED command's args, so every flag/--name/--dry-run
+                   check below reads the same thing whether or not the wrapper is there.
+        dry_run    whether this invocation passes --dry-run
+        pty_flags  the wrapper's option cluster (e.g. "qefc"), or None when not wrapped
     """
     invocations: list[dict] = []
     for step in _steps():
@@ -189,13 +202,18 @@ def _publish_invocations() -> list[dict]:
         line = next(
             (lineno for lineno, text in step if "clawhub publish" in text), step[0][0]
         )
-        args = " ".join(body.split("clawhub publish", 1)[1].split())
+        wrap = _PTY_WRAP_RE.search(body)
+        if wrap is not None and "clawhub publish" not in wrap.group("inner"):
+            wrap = None  # a wrapper around something else is not a publish wrapper
+        command = wrap.group("inner") if wrap is not None else body
+        args = " ".join(command.split("clawhub publish", 1)[1].split())
         invocations.append(
             {
                 "name": name_match.group(1).strip() if name_match else "<unnamed step>",
                 "line": line,
                 "args": args,
                 "dry_run": "--dry-run" in args,
+                "pty_flags": wrap.group("flags") if wrap is not None else None,
             }
         )
     return invocations
@@ -2831,3 +2849,261 @@ def test_early_exit_reader_regex_flags_the_original_b905_sites() -> None:
         assert _EARLY_EXIT_READER_RE.search(snippet), (
             f"guard regex no longer flags the original B-905 line {lineno}: {snippet!r}"
         )
+
+
+# ---------------------------------------------------------------------------------
+# openclaw/clawhub#3831: the real publish runs under a pseudo-TTY, and the job's
+# timeout has to cover the (now longer) serial worst case.
+# ---------------------------------------------------------------------------------
+
+
+def _folded_run(step_name: str) -> str:
+    """The `run: >` folded scalar of *step_name*, folded the way YAML folds it.
+
+    A folded block scalar joins consecutive lines at one indentation with a single space,
+    which is the ONLY shape the publish steps use. Blank lines and more-indented lines fold
+    differently, so they are refused rather than mis-modelled: if a future edit introduces
+    one, this extractor has to be taught the rule before it can vouch for the command.
+    """
+    lines = _lines()
+    start = next(
+        (i for i, ln in enumerate(lines) if ln.strip() == f"- name: {step_name}"), None
+    )
+    assert start is not None, f"No '- name: {step_name}' step found in the workflow."
+    run_i = None
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip().startswith("- name:"):
+            break
+        if lines[i].strip() == "run: >":
+            run_i = i
+            break
+    assert run_i is not None, f"Step {step_name!r} has no 'run: >' folded block."
+    indent = len(lines[run_i]) - len(lines[run_i].lstrip())
+    body = []
+    for ln in lines[run_i + 1:]:
+        if not ln.strip():
+            break  # end of the scalar (a blank line before the next step)
+        if (len(ln) - len(ln.lstrip())) <= indent:
+            break
+        body.append(ln)
+    assert body, f"Step {step_name!r}: empty 'run: >' block."
+    inner_indents = {len(ln) - len(ln.lstrip()) for ln in body}
+    assert len(inner_indents) == 1, (
+        f"Step {step_name!r}: the folded block has more than one indentation level "
+        f"({sorted(inner_indents)}), so the simple space-join fold used here is wrong."
+    )
+    return " ".join(ln.strip() for ln in body)
+
+
+_FAKE_VERSION = "9.9.9"
+_FAKE_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _expand_expressions(command: str) -> str:
+    """Substitute the two `${{ }}` expressions the publish commands use, and no others."""
+    out = (
+        command.replace("${{ steps.ver.outputs.version }}", _FAKE_VERSION)
+        .replace("${{ github.sha }}", _FAKE_SHA)
+    )
+    assert "${{" not in out, (
+        f"A new ${{{{ }}}} expression appeared in a publish command: {out!r}. Teach "
+        "_expand_expressions() its value so the stub run below stays faithful."
+    )
+    return out
+
+
+def _script_is_util_linux() -> bool:
+    exe = shutil.which("script")
+    if exe is None:
+        return False
+    try:
+        proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "util-linux" in (proc.stdout + proc.stderr)
+
+
+def _pty_works() -> bool:
+    """Can `script` allocate a pseudo-terminal HERE? (Some sandboxes have no /dev/ptmx.)"""
+    try:
+        proc = subprocess.run(
+            ["script", "-qec", "true", "/dev/null"],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+_needs_pty_script = pytest.mark.skipif(
+    shutil.which("bash") is None or not _script_is_util_linux() or not _pty_works(),
+    reason="needs bash and a util-linux `script` that can allocate a pty "
+           "(the workflow only runs on ubuntu-latest)",
+)
+
+
+def _run_under_stub_cli(command: str, tmp_path: Path, exit_code: int):
+    """Run *command* (a workflow `run:` line) in bash with a stub `clawhub` first on PATH.
+
+    The stub records its argv, one NUL-terminated element per argument, and exits with
+    *exit_code*. Nothing here can reach the real CLI, the network or the registry, and
+    everything it writes lands in *tmp_path*. stdin is /dev/null, as on a runner step.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    argv_file = tmp_path / "argv.bin"
+    stub = bindir / "clawhub"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\0\' "$@" > "$STUB_ARGV_FILE"\n'
+        'exit "$STUB_EXIT"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{bindir}{os.pathsep}{env.get('PATH', '')}",
+        STUB_ARGV_FILE=str(argv_file),
+        STUB_EXIT=str(exit_code),
+    )
+    argv_file.unlink(missing_ok=True)
+    proc = subprocess.run(
+        ["bash", "-e", "-c", command],
+        cwd=str(tmp_path), env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=60,
+    )
+    argv = None
+    if argv_file.exists():
+        raw = argv_file.read_bytes()
+        argv = [a.decode("utf-8") for a in raw.split(b"\0")[:-1]]
+    return proc, argv
+
+
+def test_real_publish_runs_under_a_pty_and_keeps_the_cli_exit_code() -> None:
+    """The real publish runs as `script -qefc '<command>' /dev/null`; the dry-run does not.
+
+    openclaw/clawhub#3831: the CLI's spinner (which prints per-file upload progress) is
+    enabled only when stdin AND stdout are terminals, so on the runner's pipes a failed
+    upload logged nothing but a generic "Server Error". A pseudo-TTY makes it print how
+    far it got.
+
+    The `e` in the option cluster is the load-bearing part, so it is pinned by name:
+    without it `script` exits 0 whatever the child did, the Publish step's outcome
+    becomes `success` for a failed upload, and "Decide release action" would create a
+    GitHub Release for a version ClawHub never received. `c` must be last in the cluster
+    because it takes the next argument as the command.
+    """
+    real = _real_publish_invocation()
+    flags = real["pty_flags"]
+    assert flags is not None, (
+        "The real Publish step must run the CLI as `script -qefc '<command>' /dev/null` "
+        f"(a pseudo-TTY, so the CLI logs per-file progress). Its arguments were: {real['args']!r}"
+    )
+    assert "e" in flags, (
+        f"`script -{flags}` lacks -e, so it would exit 0 whatever `clawhub publish` did. A "
+        "failed upload would then read as a success and Decide would publish a GitHub "
+        "Release for a version ClawHub never got. Keep -e (returns the child's exit code)."
+    )
+    assert flags.endswith("c"), (
+        f"`script -{flags}`: -c takes the next argument as the command, so it must be the "
+        "last option in the cluster."
+    )
+    dry = [inv for inv in _publish_invocations() if inv["dry_run"]]
+    assert len(dry) == 1 and dry[0]["pty_flags"] is None, (
+        "The --dry-run preflight is deliberately left as a bare `clawhub publish`; only the "
+        "real upload runs under the pty."
+    )
+
+
+@_needs_pty_script
+@pytest.mark.parametrize("exit_code", [0, 1, 7])
+def test_publish_step_command_reaches_the_cli_intact_and_returns_its_exit_code(
+    tmp_path, exit_code
+) -> None:
+    """Run the workflow's OWN publish line against a stub CLI, through the pty wrapper.
+
+    Three things at once, none of which a text pin can prove: (1) the CLI receives exactly
+    the argument vector the dry-run preflight would give it (plus --dry-run), so the
+    wrapper's extra quoting layer changed nothing, and --name arrives as ONE argument,
+    byte-identical to SKILL.md's display name; (2) it really runs (no quoting error, no
+    pty failure); (3) the CLI's own exit code comes back out, so continue-on-error and
+    "Decide release action" see the real outcome. Mutating the workflow to drop `-e` fails
+    the exit-code half of this test; unbalancing the quotes fails the argv half.
+    """
+    invocations = _publish_invocations()
+    real = next(inv for inv in invocations if not inv["dry_run"])
+    dry = next(inv for inv in invocations if inv["dry_run"])
+
+    dry_dir = tmp_path / "dry"
+    dry_dir.mkdir()
+    dry_proc, dry_argv = _run_under_stub_cli(
+        _expand_expressions(_folded_run(dry["name"])), dry_dir, exit_code=0
+    )
+    assert dry_proc.returncode == 0, (dry_proc.stdout, dry_proc.stderr)
+    assert dry_argv and dry_argv[-1] == "--dry-run", dry_argv
+
+    proc, argv = _run_under_stub_cli(
+        _expand_expressions(_folded_run(real["name"])), tmp_path, exit_code=exit_code
+    )
+    assert argv is not None, (
+        "The stub CLI was never invoked by the publish line, so it does not run as written.\n"
+        f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+    assert proc.returncode == exit_code, (
+        f"The publish line returned {proc.returncode} but the CLI exited {exit_code}: the "
+        "pty wrapper is swallowing (or inventing) the CLI's exit code, which would make "
+        f"a failed upload look like a success.\nstdout: {proc.stdout!r}"
+    )
+    assert argv == dry_argv[:-1], (
+        "Through `script -c`, the CLI got a different argument vector than the dry-run "
+        "preflight (which the suite requires to use the identical flags).\n"
+        f"  real   : {argv!r}\n  dry-run: {dry_argv[:-1]!r}"
+    )
+    display_name = _skill_display_name_en()
+    assert argv.count(display_name) == 1 and argv[argv.index("--name") + 1] == display_name, (
+        "--name must reach the CLI as one argument, byte-identical to SKILL.md's "
+        f"metadata.display_name.en ({display_name!r}); got {argv!r}"
+    )
+    assert argv[0] == "publish" and _FAKE_VERSION in argv, argv
+
+
+def test_publish_job_timeout_covers_the_serial_worst_case() -> None:
+    """`timeout-minutes` must exceed the sum of the job's own bounded waits.
+
+    The old 90 was already below smoke + publish + confirm + surfaced-check (~93), so a
+    release whose confirm poll ran to its limit could hit the job limit before "Decide
+    release action" reached a verdict. The three poll loops are read out of the workflow
+    (each iteration sleeps 60 s); the smoke-gate and publish figures are the measured
+    ones cited in the workflow's own comment. The upper bound keeps the point of the
+    limit: a genuine hang is still cut off well short of GitHub's 360-minute default.
+    """
+    text = "\n".join(t for _, t in _code_lines())
+    match = re.search(r"^    timeout-minutes:\s*(\d+)\s*$", text, re.M)
+    assert match, "The publish job declares no integer timeout-minutes."
+    timeout = int(match.group(1))
+
+    steps = _steps()
+    names = [_step_name(s) for s in steps]
+
+    def poll_minutes(name_prefix: str) -> int:
+        idx = [i for i, n in enumerate(names) if n.startswith(name_prefix)]
+        assert len(idx) == 1, f"expected exactly one step named {name_prefix!r}*, got {idx}"
+        body = "\n".join(t for _, t in steps[idx[0]])
+        loops = re.findall(r"seq 1 (\d+)", body)
+        assert len(loops) == 1, f"{name_prefix!r}: expected one poll loop, found {loops}"
+        assert "sleep 60" in body, f"{name_prefix!r}: poll no longer sleeps 60 s per attempt"
+        return int(loops[0])
+
+    polls = {
+        "Gate": poll_minutes("Gate"),
+        "Confirm publication surfaced": poll_minutes("Confirm publication surfaced"),
+        "Check whether this version surfaced": poll_minutes("Check whether this version surfaced"),
+    }
+    smoke_minutes, publish_minutes = 32, 11
+    budget = sum(polls.values()) + smoke_minutes + publish_minutes
+    assert budget <= timeout < 360, (
+        f"timeout-minutes is {timeout}, but the serial worst case is {budget} min "
+        f"(polls {polls}, smoke ~{smoke_minutes}, publish up to ~{publish_minutes}) before "
+        "the small steps. Raise it with the poll, keep it under 360, and update the "
+        "budget comment above `timeout-minutes` in the workflow."
+    )

@@ -28,14 +28,23 @@ jobs:
     runs-on: ubuntu-latest
     # A8: without this the job's default is 360 minutes while it holds CLAWHUB_TOKEN +
     # contents:write + id-token:write — and the Publish step has already demonstrated a
-    # real ~10.5-minute hang (see that step's own comment, 2026-08-06 incident). 90
-    # minutes covers the normal worst case — smoke-gate test suite, both preflight
-    # curl checks with their retries, the actual publish, "Confirm publication
-    # surfaced"'s own up to 40-minute poll (C-368) plus the pre-existing warn-only
-    # surfaced-check's up to 10-minute poll (both can run back-to-back on a
-    # CLI-reported failure) — with headroom for a slow runner, while still catching a
-    # genuine hang well short of the 360-minute default.
-    timeout-minutes: 90
+    # real ~10.5-minute hang (see that step's own comment, 2026-08-06 incident). 150
+    # minutes covers the serial worst case with headroom for a slow runner, while still
+    # catching a genuine hang well short of the 360-minute default. The budget, in the
+    # order the steps run (tests/test_publish_workflow.py pins the sum against the poll
+    # loops actually written below, so a longer poll cannot outgrow this silently):
+    #   * the main-and-green-CI Gate step polls up to 30 x 60 s = 30 min (spent only
+    #     while CI for the tagged SHA is still running; a full CI run measured 23m36s)
+    #   * smoke gate (full pytest, ruff, compileall)                    ~32 min
+    #   * Publish, up to                                                ~11 min
+    #   * "Confirm publication surfaced" poll, 40 x 60 s (C-368)         40 min
+    #   * warn-only surfaced-check poll, 10 x 60 s                       10 min
+    #   = ~123 min, before npm ci, the preflight curl checks with their retries, the
+    #   dry-run, signing and the GitHub Release. The previous 90 was already below the
+    #   smoke + publish + confirm + surfaced-check sum alone (~93 min): a release whose
+    #   confirm poll ran to its limit would have hit the job limit before "Decide
+    #   release action" could reach a verdict.
+    timeout-minutes: 150
     # contents:write is needed to create the GitHub Release (the repo default token is
     # read-only). id-token:write is needed for cosign's keyless/OIDC signing below (it
     # exchanges the job's short-lived GitHub Actions OIDC token for a Fulcio cert — no
@@ -517,7 +526,7 @@ jobs:
               echo ""
               echo "---"
               echo ""
-              echo "_Older entries omitted from the published package to keep it small — full history:_"
+              echo "_Older entries omitted from the published package to keep it small - full history:_"
               echo "_<https://github.com/gl0di/clawseccheck/blob/main/CHANGELOG.md>_"
             } >> /tmp/changelog-trimmed.md
             mv /tmp/changelog-trimmed.md dist/clawseccheck/CHANGELOG.md
@@ -577,6 +586,77 @@ jobs:
             exit 1
           fi
           echo "Staged bundle size OK: ${STAGED_BYTES} bytes (guard limit ${MAX_STAGED_BYTES}, $((STAGED_BYTES * 100 / MAX_STAGED_BYTES))% used)."
+
+      - name: Guard — fail fast if any staged file has a character above U+00FF
+        # openclaw/clawhub#3831: ClawHub's skill-publish action decodes every uploaded
+        # file and joins ALL of their text, twice, inside a 64 MiB Convex isolate. V8
+        # keeps a string at one byte per character only while every character is at most
+        # U+00FF (Latin-1); a SINGLE character above that anywhere in any file makes the
+        # whole joined string two bytes per character, and the join is done twice. Before
+        # the v4.3.1 sweep ~26k such characters (em dashes, box-drawing, Cyrillic,
+        # arrows, emoji) sat in 134 of v4.3.0's 139 staged files (10.4M characters), so
+        # nearly all of its text was two-byte. Latin-1 characters (section sign, middle
+        # dot, e-acute, ...) are fine.
+        #
+        # This scans the STAGED tree, i.e. the exact bytes that get uploaded, including
+        # the trimmed CHANGELOG.md. tests/test_publish_bundle_one_byte.py is its
+        # source-tree twin: it applies the same rule earlier (in the smoke gate and in
+        # every CI run) and also executes THIS block against planted characters, so the
+        # two cannot drift apart. An empty bundle is an error too: a scan of zero files
+        # would otherwise pass vacuously.
+        #
+        # The heredoc delimiter is PYGUARD, not PYEOF, on purpose: the digest step below
+        # is located by tests/test_publish_workflow.py and tests/test_b590_verify_self_
+        # coverage.py as the FIRST PYEOF heredoc in this file, so a second PYEOF block
+        # above it would be picked up in its place.
+        run: |
+          set -euo pipefail
+          python3 - <<'PYGUARD'
+          import pathlib
+          import re
+          import sys
+          import unicodedata
+
+          ROOT = pathlib.Path("dist/clawseccheck")
+          WIDE = re.compile(r"[^\x00-\xff]")
+          MAX_LISTED = 40
+
+          bad = []  # (relative path, line, column, what)
+          scanned = 0
+          for path in sorted(p for p in ROOT.rglob("*") if p.is_file()):
+              scanned += 1
+              rel = path.relative_to(ROOT).as_posix()
+              try:
+                  text = path.read_bytes().decode("utf-8")
+              except UnicodeDecodeError as exc:
+                  bad.append((rel, 0, 0, "not valid UTF-8 (" + exc.reason + ")"))
+                  continue
+              for lineno, line in enumerate(text.split("\n"), 1):
+                  for hit in WIDE.finditer(line):
+                      ch = hit.group()
+                      what = "U+%04X %s" % (ord(ch), unicodedata.name(ch, "<unnamed>"))
+                      bad.append((rel, lineno, hit.start() + 1, what))
+
+          if scanned == 0:
+              print("::error::dist/clawseccheck holds no files - the guard would pass vacuously.")
+              sys.exit(1)
+          if bad:
+              print(
+                  "::error::%d character(s) above U+00FF (or undecodable bytes) in the staged "
+                  "bundle. ClawHub's skill-publish scan (openclaw/clawhub#3831) joins every "
+                  "file's text inside a 64 MiB isolate, and ONE such character makes the whole "
+                  "join two bytes per character, doubling the memory. Fix the source, not this "
+                  "guard: " % len(bad)
+                  + r"use \uXXXX escapes in string literals, plain ASCII in comments and "
+                  r"docstrings, and HTML entities (for example &#x2014;) in Markdown."
+              )
+              for rel, lineno, col, what in bad[:MAX_LISTED]:
+                  print("  %s:%d:%d  %s" % (rel, lineno, col, what))
+              if len(bad) > MAX_LISTED:
+                  print("  ... and %d more" % (len(bad) - MAX_LISTED))
+              sys.exit(1)
+          print("Staged bundle is one-byte text: %d files, no character above U+00FF." % scanned)
+          PYGUARD
 
       - name: Preflight — verify the staged tree locally
         # Cheap, offline, deterministic checks on the artifact we are about to upload.
@@ -918,15 +998,27 @@ jobs:
         # and leaving the surfaced-check unable to run — for a publish that, in fact,
         # had worked (v3.59.0, v3.60.0, v3.61.0). The CLI's own outcome is now advisory
         # input to Decide; the ClawHub API (queried by Confirm below) is authoritative.
+        #
+        # Runs under a pseudo-TTY: `script -qefc '<command>' /dev/null` (util-linux, on
+        # ubuntu-latest). The CLI's spinner, which prints "Uploading <file> (i/N)", is on
+        # only when stdin AND stdout are terminals (dist/cli/ui.js isInteractive(), read
+        # in 0.22.0); on the runner's pipes a failed upload logged just a bare "Server
+        # Error" that hid which step died (openclaw/clawhub#3831). The load-bearing flag
+        # is -e: without it `script` exits 0 whatever the child did, a failed publish
+        # would read as outcome=success, and "Decide release action" would cut a GitHub
+        # Release for a version ClawHub never got. The command is single-quoted so --name
+        # stays ONE argument, byte-identical to the dry-run's (tests/test_publish_workflow.py
+        # runs this line against a stub CLI to prove both). Keep it free of single quotes.
         id: publish
         continue-on-error: true
         run: >
-          clawhub publish ./dist/clawseccheck
+          script -qefc 'clawhub publish ./dist/clawseccheck
           --slug clawseccheck
           --owner gl0di
           --name "ClawSecCheck — OpenClaw Security Self-Audit"
           --version "${{ steps.ver.outputs.version }}"
-          --changelog "Release ${{ steps.ver.outputs.version }} (${{ github.sha }})"
+          --changelog "Release ${{ steps.ver.outputs.version }} (${{ github.sha }})"'
+          /dev/null
 
       - name: Confirm publication surfaced
         # C-368: only runs when the CLI reported failure, so a normal success pays no
