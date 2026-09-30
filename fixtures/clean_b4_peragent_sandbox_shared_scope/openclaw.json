@@ -13,7 +13,7 @@
       {
         "name": "Gary",
         "sandbox": {
-          "mode": "non-main",
+          "mode": "all",
           "scope": "shared",
           "docker": {
             "network": "host"
