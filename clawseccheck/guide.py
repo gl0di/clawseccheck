@@ -464,7 +464,7 @@ _CRON_TRIGGER_JS = r"""// ClawSecCheck drift probe. Runs on every poll; the agen
 // This fails OPEN on purpose: anything it cannot determine returns fire:true, because
 // OpenClaw treats a trigger error or timeout as fire:false, and a watch that goes
 // quiet on error is worse than one that occasionally wakes you for nothing.
-const CMD = "__CSCCMD__ --monitor --probe --exit-code --fail-on __FAILON__ --data-dir __DATADIR__ >/dev/null 2>&1; echo CSC_RC=$?";
+const CMD = "__CSCCMD__ --monitor --probe --exit-code --fail-on __FAILON____STATE__ >/dev/null 2>&1; echo CSC_RC=$?";
 try {
   const hits = await tools.search("run a shell command");
   if (!hits || !hits.length) {
@@ -506,7 +506,8 @@ def _json_str(value: str) -> str:
 
 
 def render_cron_recipe(ascii_only: bool = False,
-                       data_dir: str = "~/.clawseccheck") -> str:
+                       data_dir: str = "~/.clawseccheck",
+                       home: "str | None" = None) -> str:
     """A copy-paste OpenClaw cron job that runs the drift check on a schedule.
 
     Prints only. This never writes a file, never edits openclaw.json and never invokes
@@ -515,15 +516,25 @@ def render_cron_recipe(ascii_only: bool = False,
     has helped itself to a decision that was not offered.
 
     Deterministic: no clock, no randomness, so the same input always prints the same text.
+
+    C-622: the job must watch the setup the user asked about, so a non-default *home* is
+    written into every `--monitor` command (`--home` is omitted at the tool default, which
+    keeps the default output byte-identical). *data_dir* is always named - consent needs
+    the real store path (F-172) - and both values are shell-quoted, then JSON-escaped for
+    the hand-built message fields and the JS literal they land in.
     """
+    # `_state_flags` is used for --home only: it drops --data-dir at the default, which
+    # would delete `--data-dir ~/.clawseccheck` from the default recipe.
+    state = (_state_flags(home, None, wants_home=True, wants_data_dir=False)
+             + " --data-dir " + _quote_cli_path(data_dir))
     job = (
         '{\n'
         f'  "name": "{_CRON_JOB_NAME}",\n'
         f'  "schedule": {{ "kind": "every", "everyMs": {_CRON_EVERY_MS} }},\n'
         '  "payload": {\n'
         '    "kind": "agentTurn",\n'
-        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
-        f'--data-dir {data_dir}\\nExit 0 means nothing at {_CRON_FAIL_ON} severity or above '
+        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON}'
+        f'{_json_inner(state)}\\nExit 0 means nothing at {_CRON_FAIL_ON} severity or above '
         'was recorded \u2014 say nothing and stop; anything below that is advisory and is '
         f'counted by `{_json_inner(machine_command_prefix())} --brief`. Exit 3 means drift was '
         'recorded: report what '
@@ -547,7 +558,9 @@ def render_cron_recipe(ascii_only: bool = False,
     trigger_script = (_CRON_TRIGGER_JS
                       .replace("__CSCCMD__", machine_command_prefix())
                       .replace("__FAILON__", _CRON_FAIL_ON)
-                      .replace("__DATADIR__", data_dir))
+                      # Keep this LAST: it is the only replacement carrying user-controlled
+                      # text, so nothing after it can re-scan that text for a placeholder.
+                      .replace("__STATE__", _json_inner(state)))
     fast_job = (
         '{\n'
         f'  "name": "{_CRON_JOB_NAME}-now",\n'
@@ -555,8 +568,8 @@ def render_cron_recipe(ascii_only: bool = False,
         f'  "trigger": {{ "script": {_json_str(trigger_script)}, "once": false }},\n'
         '  "payload": {\n'
         '    "kind": "agentTurn",\n'
-        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
-        f'--data-dir {data_dir}\\nThe probe that woke you already saw drift but did NOT '
+        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON}'
+        f'{_json_inner(state)}\\nThe probe that woke you already saw drift but did NOT '
         'record it, so this run is the one that reports and records it. Exit 3 means drift: '
         "report what changed, quoting the tool's own output. Exit 1 means monitoring is NOT "
         'established \u2014 say so, it is more urgent than drift. Exit 0 here means the change '
