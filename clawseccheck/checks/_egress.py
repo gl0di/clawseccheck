@@ -22,9 +22,11 @@ from ..catalog import (
 )
 from ..collector import (
     LIMIT_DOMAIN_CONFIG,
+    LIMIT_DOMAIN_STATE_DB,
     Context,
     agent_roster,
     dig,
+    note_limit,
 )
 from .. import trajectorystore as _trajectorystore
 from . import _shared
@@ -2881,11 +2883,15 @@ def _ancestors_allow_other_access(home: Path, stop: "Path | None" = None) -> boo
 # <stateDir>/state/openclaw.sqlite) and against the real file. The -wal sibling matters as
 # much as the DB: it holds recently written rows that have not yet been checkpointed in.
 _B188_DB_NAMES = ("openclaw.sqlite", "openclaw.sqlite-wal", "openclaw.sqlite-shm")
+# The per-tree file bound for the retained-copy scans below (state/**/*.sqlite* and backups/**).
+# One constant, read by both collectors and interpolated into the cut-walk UNKNOWN text, so the
+# number a user is told cannot drift from the number the walk actually stops at.
+_B188_COPY_CAP = 200
 
 
 def _b188_collect_state_copies(
-    state_dir: Path, primary_names: "tuple[str, ...]", cap: int = 200
-) -> "tuple[list[Path], bool]":
+    state_dir: Path, primary_names: "tuple[str, ...]", cap: int = _B188_COPY_CAP
+) -> "tuple[list[Path], bool, bool]":
     """Bounded, symlink-safe scan for sqlite-shaped files under ``state/`` beyond the
     primary DB/-wal/-shm trio ``_B188_DB_NAMES`` already covers (C-555). Exists because
     OpenClaw's own 9.5
@@ -2896,31 +2902,38 @@ def _b188_collect_state_copies(
     ``cap`` mirrors the 200-file bound ``_collect_atrest_transcripts`` uses for the same
     reason: a pathological tree must not turn a permission check into an unbounded walk.
 
-    Returns ``(files, listing_failed)``. ``listing_failed`` is True only when the recursive
-    walk itself raised (e.g. a permission-denied subdirectory partway through), which the
-    caller turns into UNKNOWN rather than a silent PASS - Golden Rule #4: a walk that could
-    not complete is not evidence that nothing is there."""
+    Returns ``(files, listing_failed, truncated)``. ``listing_failed`` is True only when the
+    recursive walk itself raised (e.g. a permission-denied subdirectory partway through),
+    which the caller turns into UNKNOWN rather than a silent PASS - Golden Rule #4: a walk
+    that could not complete is not evidence that nothing is there. ``truncated`` is True only
+    when at least one further QUALIFYING file existed past ``cap`` (a tree with exactly
+    ``cap`` qualifying files is complete); the two flags are independent and must not be
+    merged - a cut walk is the same kind of unfinished walk, but it has its own UNKNOWN text."""
     out: list[Path] = []
+    truncated = False
     if not state_dir.is_dir():
-        return out, False
+        return out, False, False
     try:
         for f in state_dir.rglob("*.sqlite*"):
-            if len(out) >= cap:
-                break
             try:
                 if not f.is_file() or f.is_symlink():
                     continue
                 if f.parent == state_dir and f.name in primary_names:
                     continue  # already covered by the primary FAIL-capable check above
+                if len(out) >= cap:
+                    truncated = True
+                    break
                 out.append(f)
             except OSError:
                 continue
     except OSError:
-        return out, True
-    return sorted(out), False
+        return out, True, truncated
+    return sorted(out), False, truncated
 
 
-def _b188_collect_backups(home: Path, cap: int = 200) -> "tuple[list[Path], bool]":
+def _b188_collect_backups(
+    home: Path, cap: int = _B188_COPY_CAP
+) -> "tuple[list[Path], bool, bool]":
     """Bounded, symlink-safe scan of ``<home>/backups/**`` - OpenClaw's own pre-repair and
     migration backup tree (C-555). Distinct from F-120's ``.openclaw-install-backups/**``
     (covered by B19 above): measured on the reference machine, ``backups/`` holds a full
@@ -2928,24 +2941,26 @@ def _b188_collect_backups(home: Path, cap: int = 200) -> "tuple[list[Path], bool
     ``heartbeat-migration/*.md``) side by side, so this walks every file under it rather than
     filtering by name - any of them can be a retained copy of something sensitive, and the
     directory is a deliberate backup location, not an incidental one. Same cap and
-    listing-failure contract as ``_b188_collect_state_copies``."""
+    ``(files, listing_failed, truncated)`` contract as ``_b188_collect_state_copies``."""
     out: list[Path] = []
+    truncated = False
     backups_dir = home / "backups"
     if not backups_dir.is_dir():
-        return out, False
+        return out, False, False
     try:
         for f in backups_dir.rglob("*"):
-            if len(out) >= cap:
-                break
             try:
                 if not f.is_file() or f.is_symlink():
                     continue
+                if len(out) >= cap:
+                    truncated = True
+                    break
                 out.append(f)
             except OSError:
                 continue
     except OSError:
-        return out, True
-    return sorted(out), False
+        return out, True, truncated
+    return sorted(out), False, truncated
 
 
 def _b188_dir_traversable_by_other(home: Path, target_dir: Path) -> bool:
@@ -2979,6 +2994,32 @@ def _b188_dir_traversable_by_other(home: Path, target_dir: Path) -> bool:
         if not world_ok and not group_ok:
             return False
     return True
+
+
+def _b188_retained_copy_warn(exposed_extra: "list[str]") -> Finding:
+    """The C-555 retained-copy WARN, shared by the live-DB path and the no-live-DB path.
+
+    One builder, so the detail/fix/evidence text cannot drift between the two call sites:
+    ``baseline.fingerprint()`` hashes ``detail``, so these strings are load-bearing for every
+    ``.clawseccheckignore`` entry a user has already written. WARN-only by design - never
+    escalated to the device-keys FAIL wording, since a copy's provenance and freshness are
+    less certain than the live database."""
+    joined = "; ".join(exposed_extra[:8])
+    more = f" (+{len(exposed_extra) - 8} more)" if len(exposed_extra) > 8 else ""
+    return _finding(
+        "B188",
+        WARN,
+        "A retained copy of the state database is readable by another local user: "
+        + joined + more + ". OpenClaw's own recovery snapshots (state/**) and "
+        "pre-repair/migration backups (~/.openclaw/backups/**) default to the same "
+        "0600/0700 protection as the live database, so a readable copy means that "
+        "protection slipped somewhere \u2014 and a copy can carry the same device keys and "
+        "auth tokens as the original.",
+        "Run `chmod 600` on the listed file(s) and `chmod 700` on their containing "
+        "directory. If the copy is no longer needed, delete it instead of just "
+        "tightening it.",
+        evidence=exposed_extra,
+    )
 
 
 def check_state_db_atrest(ctx: Context) -> Finding:
@@ -3042,10 +3083,13 @@ def check_state_db_atrest(ctx: Context) -> Finding:
               because a copy's provenance and freshness are less certain than the live DB -
               same ancestor-reach gate, so a 0600 copy sealed inside a 0700 chain does not
               fire, only a group/world-readable one does.
-    UNKNOWN - no state DB present, non-POSIX (NTFS ACLs make st_mode meaningless), or a
-              subdirectory under ``state/`` or ``backups/`` could not be listed (permission
-              denied) while itself being reachable by other users - never a false PASS over
-              a walk that could not complete.
+    UNKNOWN - no state DB present AND no exposed retained copy (a readable copy is still a
+              WARN with the live DB missing: it is inspected first), non-POSIX (NTFS ACLs
+              make st_mode meaningless), a subdirectory under ``state/`` or ``backups/``
+              could not be listed (permission denied) while itself being reachable by other
+              users, or the retained-copy walk was cut by its per-tree file limit
+              (``_B188_COPY_CAP``) while that tree is reachable by other users - never a
+              false PASS over a walk that could not complete.
     PASS    - present and not reachable-and-readable by others. Loose in-tree modes sealed
               by a restrictive parent directory PASS with a distinct message that names the
               seal, rather than silently reading like a clean 0600 install.
@@ -3071,7 +3115,44 @@ def check_state_db_atrest(ctx: Context) -> Finding:
                 present.append(p)
         except OSError:
             continue
+
+    # Reachability of the chain above ~/.openclaw. Proven, not assumed: `_other_can_reach_read`
+    # stops at ctx.home, so on its own it would call a 0644 file under a 0755 ~/.openclaw
+    # "exposed" even when $HOME above it is 0700 and denies o+x to every non-owner. That is a
+    # false positive, and B188 is a HIGH scored check, so every WARN/FAIL below proves the
+    # whole chain first.
+    ancestors_open = _ancestors_allow_other_access(ctx.home)
+
+    # C-555: retained copies of the state database - a recovery snapshot under state/, or a
+    # file under ~/.openclaw/backups/ - are exactly as exposed as their parent chain, so this
+    # reuses the same path-aware `_other_can_reach_read` + ancestor gate as the primary DB
+    # below. Capped at WARN regardless of what is found (never the device-keys FAIL wording):
+    # a copy's provenance and freshness are less certain than the live DB. The inspection
+    # runs BEFORE the no-live-DB return: a recovery copy is the one artefact that outlives a
+    # missing live database, so "no live DB" must not mean "nobody looked at the copies".
+    extra_files, state_listing_failed, state_truncated = _b188_collect_state_copies(
+        state_dir, _B188_DB_NAMES
+    )
+    backup_files, backups_listing_failed, backups_truncated = _b188_collect_backups(ctx.home)
+    listing_failed = state_listing_failed or backups_listing_failed
+
+    exposed_extra: list[str] = []
+    for p in extra_files + backup_files:
+        if _other_can_reach_read(ctx.home, p):
+            try:
+                mode = p.stat().st_mode & 0o777
+            except OSError:
+                continue
+            try:
+                rel = p.relative_to(ctx.home)
+            except ValueError:
+                rel = p
+            exposed_extra.append(f"{rel} (mode {oct(mode)[-3:]}) is readable by other users")
+
     if not present:
+        if exposed_extra and ancestors_open:
+            # Capped at WARN: with no live DB the only reachable evidence is a retained copy.
+            return _b188_retained_copy_warn(exposed_extra)
         return _finding(
             "B188",
             UNKNOWN,
@@ -3096,34 +3177,41 @@ def check_state_db_atrest(ctx: Context) -> Finding:
                 continue
             exposed.append(f"state/{p.name} (mode {oct(mode)[-3:]}) is readable by other users")
 
-    # `_other_can_reach_read` stops at ctx.home, so on its own it would call a 0644 database
-    # under a 0755 ~/.openclaw "exposed" even when $HOME above it is 0700 and denies o+x to
-    # every non-owner. That is a false positive, and B188 is a HIGH scored FAIL, so it must
-    # prove the whole chain before asserting it.
-    ancestors_open = _ancestors_allow_other_access(ctx.home)
     writable_dir = _other_can_reach_write(ctx.home, state_dir)
 
-    # C-555: retained copies of the state database - a recovery snapshot under state/, or a
-    # file under ~/.openclaw/backups/ - are exactly as exposed as their parent chain, so this
-    # reuses the same path-aware `_other_can_reach_read` + ancestor gate as the primary DB
-    # above. Capped at WARN below regardless of what is found (never the device-keys FAIL
-    # wording): a copy's provenance and freshness are less certain than the live DB.
-    extra_files, state_listing_failed = _b188_collect_state_copies(state_dir, _B188_DB_NAMES)
-    backup_files, backups_listing_failed = _b188_collect_backups(ctx.home)
-    listing_failed = state_listing_failed or backups_listing_failed
-
-    exposed_extra: list[str] = []
-    for p in extra_files + backup_files:
-        if _other_can_reach_read(ctx.home, p):
-            try:
-                mode = p.stat().st_mode & 0o777
-            except OSError:
-                continue
-            try:
-                rel = p.relative_to(ctx.home)
-            except ValueError:
-                rel = p
-            exposed_extra.append(f"{rel} (mode {oct(mode)[-3:]}) is readable by other users")
+    # C-629: a retained-copy walk that hit its per-tree file limit did not look at every file.
+    # It matters only when that tree is itself reachable by another user (same per-tree gate
+    # the listing-failed UNKNOWN uses, so a cut in backups/ is not silenced or triggered by
+    # the state of state/): a 0700 tree, or any 0700 ancestor, makes the unchecked files moot
+    # and the PASS below stands unchanged.
+    state_cut = bool(
+        ancestors_open and state_truncated
+        and _b188_dir_traversable_by_other(ctx.home, state_dir)
+    )
+    backup_cut = bool(
+        ancestors_open and backups_truncated
+        and _b188_dir_traversable_by_other(ctx.home, ctx.home / "backups")
+    )
+    cut_matters = state_cut or backup_cut
+    cut_trees = " and ".join(
+        t for t, hit in (
+            ("~/.openclaw/state/ (files named *.sqlite*)", state_cut),
+            ("~/.openclaw/backups/ (any file)", backup_cut),
+        ) if hit
+    )
+    cut_detail = (
+        "A directory tree checked for retained copies of the state database holds more "
+        f"than the fixed scan limit of {_B188_COPY_CAP} files: {cut_trees}. This audit "
+        f"stopped after the first {_B188_COPY_CAP} files of each and did not check the "
+        "rest, and that tree is reachable by other local users, so whether an unchecked "
+        "file is an exposed copy of the state database cannot be determined."
+    )
+    if cut_matters and not any(
+        getattr(h, "domain", None) == LIMIT_DOMAIN_STATE_DB for h in ctx.limit_hits
+    ):
+        # Recorded before any verdict branch so the disclosure survives when a FAIL/WARN
+        # wins; once per run, so a second invocation on the same ctx adds no duplicate.
+        note_limit(ctx.limit_hits, LIMIT_DOMAIN_STATE_DB, cut_detail)
 
     if exposed and ancestors_open:
         return _finding(
@@ -3166,22 +3254,7 @@ def check_state_db_atrest(ctx: Context) -> Finding:
     # WARN-only by design - never escalated to the device-keys FAIL wording above, since a
     # copy's provenance and freshness are less certain than the live database.
     if exposed_extra and ancestors_open:
-        joined = "; ".join(exposed_extra[:8])
-        more = f" (+{len(exposed_extra) - 8} more)" if len(exposed_extra) > 8 else ""
-        return _finding(
-            "B188",
-            WARN,
-            "A retained copy of the state database is readable by another local user: "
-            + joined + more + ". OpenClaw's own recovery snapshots (state/**) and "
-            "pre-repair/migration backups (~/.openclaw/backups/**) default to the same "
-            "0600/0700 protection as the live database, so a readable copy means that "
-            "protection slipped somewhere \u2014 and a copy can carry the same device keys and "
-            "auth tokens as the original.",
-            "Run `chmod 600` on the listed file(s) and `chmod 700` on their containing "
-            "directory. If the copy is no longer needed, delete it instead of just "
-            "tightening it.",
-            evidence=exposed_extra,
-        )
+        return _b188_retained_copy_warn(exposed_extra)
 
     # C-555: a directory under state/ or backups/ could not be listed (permission denied)
     # while itself being reachable by other users - an incomplete walk must not read as a
@@ -3200,6 +3273,19 @@ def check_state_db_atrest(ctx: Context) -> Finding:
             "be determined.",
             "Check permissions on the unreadable subdirectory yourself, or run this audit "
             "as the account that owns ~/.openclaw.",
+        )
+
+    # C-629: the copy walk was cut by its file limit while that tree is reachable. No exposed
+    # copy was found among the files that WERE checked (a FAIL/WARN above would have won), but
+    # a "verified" PASS over a walk that stopped early is a fake PASS (Golden Rule #4).
+    if cut_matters:
+        return _finding(
+            "B188",
+            UNKNOWN,
+            cut_detail,
+            f"Trim old backups and recovery copies so each directory tree holds at most "
+            f"{_B188_COPY_CAP} files, or check the files past the limit yourself: "
+            "`find ~/.openclaw/backups ~/.openclaw/state -type f -perm /044`.",
         )
 
     names = ", ".join(f"state/{p.name}" for p in present)

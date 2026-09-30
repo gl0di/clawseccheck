@@ -371,6 +371,7 @@ LIMIT_DOMAIN_BOOTSTRAP = "bootstrap"  # AGENTS.md / SOUL.md & friends
 LIMIT_DOMAIN_AGENTS = "agents"        # subagent_runs disk-disclosure (B-296 / B18)
 LIMIT_DOMAIN_AUDIT = "audit"          # audit_events runtime trail (F-134 / B191)
 LIMIT_DOMAIN_PAIRED = "paired"        # migrated paired-device store size/row caps (B176)
+LIMIT_DOMAIN_STATE_DB = "state_db"    # state-DB retained-copy walk file limit (B188)
 
 LIMIT_DOMAINS = (
     LIMIT_DOMAIN_SKILL,
@@ -383,6 +384,7 @@ LIMIT_DOMAINS = (
     LIMIT_DOMAIN_AGENTS,
     LIMIT_DOMAIN_AUDIT,
     LIMIT_DOMAIN_PAIRED,
+    LIMIT_DOMAIN_STATE_DB,
 )
 
 
