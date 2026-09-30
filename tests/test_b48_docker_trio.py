@@ -47,7 +47,7 @@ def _sandbox(**docker_flags) -> dict:
         "agents": {
             "defaults": {
                 "sandbox": {
-                    "mode": "non-main",
+                    "mode": "all",
                     "workspaceAccess": "ro",
                     "docker": docker,
                 }
@@ -123,7 +123,13 @@ def test_clean_fixture_passes_b48():
     assert f.status == PASS
 
 
-def test_bad_fixture_sandbox_check_passes():
-    """The bad fixture's sandbox is otherwise safe — B4 PASSes, only B48 FAILs."""
+def test_bad_fixture_sandbox_check_does_not_fail():
+    """The bad fixture's sandbox is otherwise safe - B4 does not FAIL and does not
+    re-report the dangerouslyAllow* trio; only B48 FAILs. The fixture keeps mode
+    'non-main' on purpose as corpus coverage, so B4 WARNs on the main session
+    (C-641) instead of PASSing."""
     f = check_sandbox(collect(FIXTURES / "bad_b48_docker_trio"))
-    assert f.status == PASS
+    assert f.status != FAIL
+    assert "dangerouslyAllow" not in f.detail
+    for line in f.evidence or []:
+        assert "dangerouslyAllow" not in line

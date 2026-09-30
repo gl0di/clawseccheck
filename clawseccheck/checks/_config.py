@@ -3745,6 +3745,24 @@ def check_sandbox(ctx: Context) -> Finding:
             )
         return _finding("B4", UNKNOWN, "No exec tools and no sandbox config \u2014 not applicable.", "\u2014",
                         config_field_paths={"agents.defaults.sandbox.mode"})
+    if mode == "non-main":
+        # C-641: 'non-main' sandboxes only an agent's NON-main sessions; its own main
+        # session (where an operator usually works) runs exec tooling on the host
+        # (vendor shouldSandboxSession: sessionKey !== mainSessionKey). Say the config
+        # property, never "this session is unsandboxed" - which session is running has no
+        # static answer (B-712, toolpolicy._sandbox_confines -> None).
+        return _finding(
+            "B4",
+            WARN,
+            "agents.defaults.sandbox.mode is 'non-main': only an agent's non-main sessions "
+            "are sandboxed, so its own main session still runs exec tooling directly on the "
+            "host, allowing a prompt-injected message in that session to run commands with "
+            "host access.",
+            "Set agents.defaults.sandbox.mode to 'all' so the main session is sandboxed "
+            "too, and configure agents.defaults.sandbox.docker for network isolation.",
+            evidence=["agents.defaults.sandbox.mode=non-main"],
+            config_field_paths={"agents.defaults.sandbox.mode"},
+        )
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
 
 

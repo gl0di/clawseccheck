@@ -183,11 +183,12 @@ def test_b4_workspace_access_rw_fix_mentions_none_or_ro():
 def test_b4_clean_sandbox_mode_set_no_docker_sock_passes():
     # No binds at all (generic binds always trigger the existing "exposes host paths"
     # evidence line regardless of docker.sock); workspaceAccess ro is safe.
+    # C-641: mode 'all' - 'non-main' leaves the main session on the host and WARNs.
     cfg = {
         "agents": {
             "defaults": {
                 "sandbox": {
-                    "mode": "non-main",
+                    "mode": "all",
                     "docker": {
                         "network": "bridge",
                     },

@@ -690,7 +690,8 @@ class TestTrendMonitorReachC135:
         assert payload["grade"] is None
 
         _, _, graded_reference = audit(SAFE, include_native=False, include_sockets=False)
-        assert graded_reference.score == 98
+        # C-641: 98 -> 97, B4 WARNs on home_safe's sandbox.mode 'non-main'.
+        assert graded_reference.score == 97
         assert graded_reference.grade == "A"
 
     def test_json_reference_is_capped_49_f(self, tmp_path, capsys):
@@ -900,7 +901,8 @@ class TestTrendMonitorReachC135:
         # B-848: 97 -> 98, see test_home_safe_baseline_is_uncapped_and_grades_a.
         ctx, findings, uncapped = audit(SAFE, include_native=False, include_sockets=False)
         assert uncapped.graded is True
-        assert uncapped.score == 98
+        # C-641: 98 -> 97, B4 WARNs on home_safe's sandbox.mode 'non-main'.
+        assert uncapped.score == 97
         assert uncapped.grade == "A"
 
 
