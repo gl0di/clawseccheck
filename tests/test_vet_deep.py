@@ -233,13 +233,17 @@ def test_vet_ignore_instructions_directive_alone_still_flags(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# self-source stays exempt
+# self-source stays skipped (not scanned) - but is never a clean bill (C-636)
 # ---------------------------------------------------------------------------
 
-def test_vet_own_source_is_exempt():
+def test_vet_own_source_is_skipped_and_reported_as_not_scanned():
+    # C-636: the own-source layout is a content heuristic anyone can write, so the skip
+    # is reported honestly (engine-degraded UNKNOWN -> CAUTION), not as a canned PASS.
     f = vet_skill(_REPO)
-    assert f.status == PASS
-    assert "own source" in f.detail
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
+    assert "NOT SCANNED" in f.detail
+    assert "own-source layout" in f.detail
 
 
 # ---------------------------------------------------------------------------

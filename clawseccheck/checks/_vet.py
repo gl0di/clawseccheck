@@ -84,6 +84,7 @@ from ._shared import (
     _is_own_source,
     _is_public_ip,
     _mcp_servers,
+    _own_source_symlinks,
     _skill_declares_telemetry_disclosure,
     _skill_frontmatter_block,
 )
@@ -9305,17 +9306,62 @@ def _vet_resolved_skill(p: Path) -> Finding:
             # branch), so without this a manifest request sees empty maps with no clue
             # why.
             ctx.self_excluded_skills.append(p.name)
-            finding = _custom(
-                "B13",
-                LOW,
-                PASS,
-                "This is ClawSecCheck's own source. A security auditor necessarily "
-                "ships attack signatures and red-team payloads as data, so a naive "
-                "malware scan flags its own signature database \u2014 that is expected here, "
-                "not malware.",
-                "Point --vet at third-party skills you're about to install, not at the "
-                "scanner itself.",
+            # C-636 (Dave, 2026-09-30): a match on the own-source layout is a CONTENT
+            # heuristic, and anyone can write the three marker definitions (or symlink a
+            # directory that has them), so it is NOT proof that the folder is the genuine
+            # scanner - and nothing in it was read. This used to return a canned B13 PASS,
+            # which the dossier turned into Danger PASS -> INSTALL -> exit 0 (and --advise
+            # "Nothing dangerous found"): a clean bill for a tree that was never opened.
+            # It is now an engine-side UNKNOWN (`engine_degraded`), which
+            # `dossier._danger_coverage_gap` leg 1 rolls up to CAUTION and cli.py's
+            # existing FAIL/WARN -> exit 1 rule carries to the exit code - the same route
+            # B-741 used, no new exit rule. Accepted cost: the GENUINE own source reads
+            # CAUTION under --vet too. The advice ("treat it as suspicious") is in `fix`,
+            # never `detail` (baseline.fingerprint() hashes `detail`); `detail` stays a
+            # short fact. The text dossier prints `fix` for FAIL/WARN axes only, so on the
+            # UNKNOWN variant the reader sees the fact ("NOT SCANNED ... a match proves
+            # nothing") and `--json` carries the advice.
+            links = _own_source_symlinks(p)
+            fix = (
+                "Only trust this if it is the genuine ClawSecCheck you installed from "
+                "ClawHub or GitHub. If you did not expect this folder to be ClawSecCheck, "
+                "treat it as suspicious and review it by hand. Point --vet at third-party "
+                "skills, not at the scanner itself."
             )
+            if links:
+                from ..logsafe import redact as _redact  # noqa: PLC0415 - logsafe imports this module
+                shown = ", ".join(
+                    "the folder itself" if n == "." else
+                    _redact(re.sub(r"[^A-Za-z0-9._/-]", "?", n)[:60])
+                    for n in links[:6]
+                )
+                more = f" (+{len(links) - 6} more)" if len(links) > 6 else ""
+                # WARN, not UNKNOWN: a link is a positive tamper-shaped signal (a genuine
+                # ClawHub install is a real directory copy, never a symlink), and WARN
+                # outranks UNKNOWN in `_VET_MERGE_RANK`. Same "not scanned" claim either way.
+                finding = _custom(
+                    "B13",
+                    HIGH,
+                    WARN,
+                    "NOT SCANNED. This directory matched ClawSecCheck's own-source layout, "
+                    "but its engine identity is reached through a symlink "
+                    f"({shown}{more}), so the files that were matched may not live in this "
+                    "folder. No file in it was read, so this is not a clean result.",
+                    fix,
+                )
+            else:
+                finding = _custom(
+                    "B13",
+                    HIGH,
+                    UNKNOWN,
+                    "NOT SCANNED. This directory matched ClawSecCheck's own-source layout, "
+                    "so the scanner skipped it whole rather than scan its own "
+                    "attack-signature data. No file in it was read, so this is not a clean "
+                    "result. Anyone can write the three marker definitions, so a match "
+                    "proves nothing about what else is in the folder.",
+                    fix,
+                    engine_degraded=True,
+                )
             finding.ctx = ctx
             return finding
         text, name = _read_skill_text(p, ctx), p.name
