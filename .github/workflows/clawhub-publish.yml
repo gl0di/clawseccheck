@@ -861,6 +861,15 @@ jobs:
           )
           for name, digest in sorted(extra.items()):
               lines.append(row(name, digest, suncovered))
+          # C-637: the exhaustive top-level listing of the install directory as staged, so
+          # an install can be compared entry for entry (`ls -A`). Section 1 and `combined`
+          # are untouched. Inside the signed file, so the compare is authenticated.
+          tops = sorted(p.name for p in staged.iterdir())
+          lines.append("")
+          lines.append(
+              "Expected top-level entries in the install directory (exhaustive, as staged): "
+              + " ".join(tops)
+          )
           with open("SHA256SUMS.txt", "w") as f:
               f.write("\n".join(lines) + "\n")
           PYEOF

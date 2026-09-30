@@ -66,12 +66,14 @@ from .iocdb import freshness_notice as _iocdb_freshness_notice
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import (
+    NOTE_BUNDLE_EXTRA,
     NOTE_PATH_ESCAPE,
     NOTE_SYMLINK,
     NOTE_UNCHECKED_PYC,
     NOTE_UNREADABLE,
     NOTE_VANISHED,
     build_fingerprint,
+    bundle_root_extras,
     package_digest,
 )
 from .report import _missing_layers_sentence
@@ -4206,6 +4208,34 @@ def _main(argv=None) -> int:
             lines.append("machine, 7,850 .pyc files on the interpreter's own paths were all")
             lines.append("timestamp-based and none was hash-based at all. Worth investigating if")
             lines.append("you did not put it there yourself.")
+        # C-637: importable files beside audit.py sit outside the digested package but are
+        # loaded ahead of the standard library. Presence-only disclosure, never folded into
+        # `combined` or rc (the signed digest is over clawseccheck/ alone), like the two
+        # notes above. audit.py itself refuses to run while any exist.
+        _bundle_rows = bundle_root_extras()
+        _bundle_extras = [(n, why) for k, n, why in _bundle_rows if k == NOTE_BUNDLE_EXTRA]
+        _bundle_unlisted = [(n, why) for k, n, why in _bundle_rows if k == NOTE_UNREADABLE]
+        if _bundle_extras:
+            lines.append("")
+            lines.append(f"Coverage note: {len(_bundle_extras)} importable entr"
+                         f"{'y' if len(_bundle_extras) == 1 else 'ies'} "
+                         f"{'sits' if len(_bundle_extras) == 1 else 'sit'} beside audit.py, "
+                         f"OUTSIDE the digested package:")
+            for _name, _why in _bundle_extras[:10]:
+                lines.append(f"  {ascii(_name)}  \u2014  {_why}")
+            if len(_bundle_extras) > 10:
+                lines.append(f"  (and {len(_bundle_extras) - 10} more)")
+            lines.append("Python puts this directory at the front of its import path, so a module")
+            lines.append("here (json.py, re.py, sitecustomize.py, ...) is loaded ahead of the")
+            lines.append("standard library and its bytes are not in the digest above. A clean")
+            lines.append("install has none of these, and audit.py refuses to run while any exist.")
+            lines.append("Worth investigating if you did not put them there yourself.")
+        for _name, _why in _bundle_unlisted:
+            lines.append("")
+            lines.append(f"Coverage note: the directory beside the package {ascii(_name)} "
+                         f"{_why}.")
+            lines.append("Files there are loaded ahead of the standard library and are not in the")
+            lines.append("digest above.")
         if _unreadable:
             lines.append("")
             lines.append(f"INTEGRITY CANNOT BE ESTABLISHED: {len(_unreadable)} path"

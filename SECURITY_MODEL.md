@@ -398,7 +398,13 @@ chain is therefore a drift/tamper-*evidence* aid, **not** a substitute for files
 permissions on `~/.clawseccheck/`: anyone who can write that file already runs as your
 user and could edit history, patch the engine, or read anything you can. This is the same
 honest boundary as `--verify-self` (it does not defend against an adversary who also
-patches the verifier).
+patches the verifier). One narrow, mechanical guard sits beside it: `audit.py` puts its own
+directory at the front of `sys.path`, so before importing anything it refuses to run
+(exit 2) while an importable file other than itself and `clawseccheck/` sits in that
+directory, and `--verify-self` discloses the same entries. That closes the case of a stray
+`json.py` or `re.py` added beside the shim, which the package digest cannot see; it is not
+a defence against a modified `audit.py` or verifier, or against a file planted between the
+scan and the import.
 
 **The drift BASELINE is a different file, and is NOT chained.** `--monitor`'s comparison
 snapshot (`~/.clawseccheck/state.json` - see "Trust boundaries" above for what it holds)

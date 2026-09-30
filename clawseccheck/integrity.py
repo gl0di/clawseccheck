@@ -52,6 +52,10 @@ NOTE_VANISHED = "vanished"
 # `_pyc_header_flags` and `_scan_for_unchecked_hash_pycs` below for why this is safe to
 # report without becoming environment-dependent (B-069).
 NOTE_UNCHECKED_PYC = "unchecked-pyc"
+# C-637: an importable file beside audit.py, outside the digested package. Reported by
+# `bundle_root_extras` (never by `package_digest`, see its docstring), in the same
+# `(kind, name, detail)` row shape as the notes above.
+NOTE_BUNDLE_EXTRA = "bundle-extra"
 
 # The first 8 bytes of a PEP 552 .pyc: a 4-byte magic number (interpreter/version
 # dependent - never read here) followed by a 4-byte little-endian bit field. Bit 0 set
@@ -431,6 +435,66 @@ def package_digest(
     ).hexdigest()
 
     return combined, per_file
+
+
+# C-637: what `audit.py` may sit beside without being an importable stray. The same rule
+# lives, duplicated on purpose, in `audit.py` (`_bundle_extras`): the shim must run it before
+# it imports anything, so it cannot import this module. tests/test_c637_* pins the two
+# together. `conftest.py` is the dev checkout's one importable extra (nothing in the auditor
+# imports it); `__pycache__` is inert without a matching source file, which is flagged itself.
+_BUNDLE_ALLOWED = frozenset(("audit.py", "conftest.py", "clawseccheck", "__pycache__"))
+_IMPORTABLE_SUFFIXES = (".py", ".pyc", ".pyw", ".pyd", ".so", ".pth")
+_STARTUP_HOOK_PREFIXES = ("sitecustomize", "usercustomize")
+
+
+def bundle_root_extras(pkg_dir: Path | None = None) -> list[tuple[str, str, str]]:
+    """Return ``(kind, name, reason)`` for every importable entry beside ``audit.py``.
+
+    ``audit.py`` (and ``python -m clawseccheck`` from the same directory) puts the bundle
+    root at the front of ``sys.path``, so a stray ``json.py`` / ``re.py`` there is imported
+    ahead of the standard library on every run. ``package_digest`` walks ``clawseccheck/``
+    only and so cannot see it; this is the ``--verify-self`` side of the guard ``audit.py``
+    applies before it imports anything (C-637).
+
+    **Deliberately NOT part of** :func:`package_digest`. That digest is compared against
+    the cosign-signed ``SHA256SUMS.txt`` and :func:`build_fingerprint` is a prefix of it;
+    folding in the parent directory would break both and make the value depend on where the
+    tree happens to sit (the B-069 trap). This is presence-only disclosure.
+
+    Returns ``[]`` unless ``audit.py`` sits beside the package: a pip install into
+    site-packages has no ``audit.py``, and the rest of site-packages must never be flagged.
+    ``kind`` is ``NOTE_BUNDLE_EXTRA``. A root that cannot be listed yields ONE
+    ``NOTE_UNREADABLE`` row named for the root itself, because "could not look" is not
+    "nothing there". A directory name ends in ``/``; a symlink (dangling too) is judged by
+    its name, and a linked directory by whether it is a package.
+    """
+    root = (pkg_dir if pkg_dir is not None else _PKG_DIR).parent
+    if not os.path.isfile(os.path.join(root, "audit.py")):  # os.path: never raises
+        return []
+    rows: list[tuple[str, str, str]] = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError as exc:
+        return [(NOTE_UNREADABLE, str(root),
+                 f"cannot be listed ({exc.strerror or exc}), so a stray importable file "
+                 "cannot be ruled out")]
+    for name in names:
+        if name in _BUNDLE_ALLOWED:
+            continue
+        low = name.lower()
+        if low.endswith(_IMPORTABLE_SUFFIXES):
+            rows.append((NOTE_BUNDLE_EXTRA, name, "importable module or extension file"))
+        elif low.startswith(_STARTUP_HOOK_PREFIXES):
+            rows.append((NOTE_BUNDLE_EXTRA, name, "name Python loads as a startup hook"))
+        elif os.path.isdir(os.path.join(root, name)):  # follows symlinks: importable too
+            try:
+                inner = os.listdir(os.path.join(root, name))
+            except OSError:
+                continue
+            if any(n.startswith("__init__.") and n.lower().endswith(_IMPORTABLE_SUFFIXES)
+                   for n in inner):
+                rows.append((NOTE_BUNDLE_EXTRA, name + "/", "directory importable as a package"))
+    return rows
 
 
 _FINGERPRINT_LEN = 12

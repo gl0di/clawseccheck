@@ -112,7 +112,9 @@ kept here so the always-loaded playbook stays lean.
   ships no indicators for. The same switch suppresses the IOC pair on `--vet-source`, where the
   two print to stderr. All of it is offline and advisory - never a network call, never a finding,
   and never a change to score or grade; none of it appears in `--json` / `--card` / `--sarif`.
-- `--verify-self` - print SHA-256 digest of ClawSecCheck's source files for tamper detection.
+- `--verify-self` - print SHA-256 digest of ClawSecCheck's source files for tamper detection;
+  also discloses importable files beside `audit.py` (`audit.py` itself refuses to run, exit 2,
+  while any exist).
 - `--recursive` - alias for `--vet-all` (vet every installed skill across all discovered skill
   roots - one verdict per skill plus an aggregate). Same flag, same behavior; both spellings
   are accepted.

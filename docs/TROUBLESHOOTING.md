@@ -48,6 +48,20 @@ almost always means an incomplete or partial copy, not a missing dependency:
 - Re-install from scratch rather than patching a partial copy - see
   [USAGE.md's install section](USAGE.md#install--run) for every supported install path.
 
+## `audit.py` refuses to run: importable file beside `audit.py`
+
+`clawseccheck: refusing to run - importable file(s) beside audit.py in <dir>` (exit code 2)
+means the directory holding `audit.py` also holds a Python module or extension of its own -
+a `json.py`, a `*.pyc`, a `sitecustomize.py`, a directory with an `__init__.py`, and so on.
+Python would import it ahead of the standard library on every run, and `--verify-self` does
+not hash it, so the shim stops before importing anything. Nothing was run and nothing was
+changed. Remove the entries it names (ClawSecCheck never deletes them for you) or reinstall
+the skill from a clean copy, then run again. If you did not put them there, treat the install
+as compromised and see the [verification steps](USAGE.md#important---trust-no-one-including-this-skill).
+If the message says it *could not list* the directory, fix that directory's permissions first:
+a stray file cannot be ruled out until it can be read. `python -m clawseccheck --verify-self`
+shows the same entries as a `Coverage note` without refusing.
+
 ## Wrong Python version
 
 ClawSecCheck needs **Python 3.9 or newer**. `pip`/`pipx` enforce this automatically for
@@ -126,7 +140,8 @@ reporting - see "Filing a good bug report" below, and include `--debug` output.
   computed from a compromised copy can't be trusted on its own - see ["trust no
   one"](USAGE.md#important---trust-no-one-including-this-skill) in the user guide for how
   to verify it against a signed release checksum instead of just trusting the tool's own
-  output.
+  output. It also names any importable file sitting beside `audit.py` (see
+  [`audit.py` refuses to run](#auditpy-refuses-to-run-importable-file-beside-auditpy)).
 
 ## Filing a good bug report
 
