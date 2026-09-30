@@ -1692,8 +1692,13 @@ python3 audit.py --log audit.log            # also write log to a local file
     as its own `bundleTemplate` key), a `vetJudged` array of per-target verdicts for the swept skills/plugins
     (escalate-only - can never downgrade a finding on untrusted content), and a `liveTest`
     object carrying a `--canary`/`--dryrun`/`--redteam`/`--multiturn` verdict (F-155): only
-    `VULNERABLE` ever caps the grade - `RESISTANT` or nothing submitted changes nothing - and
-    only a run submitted with a `seed` is recorded into history/trend (see
+    `VULNERABLE` ever caps the grade - a `RESISTANT` verdict never raises or lowers the score,
+    and submitting nothing never caps it - but the cap is not the whole story. The five-layer
+    ledger reads the bucket separately: any structurally valid entry, `RESISTANT` included,
+    marks the live-behaviour layer as run, while submitting nothing leaves it `not_submitted`
+    and the whole run ungraded (no letter; `missing_layers` names it), so submitting nothing
+    is not the same as `RESISTANT`. Only a run submitted with a `seed` is recorded into
+    history/trend (see
     `docs/OUTPUT_SCHEMA.md` §12 for the exact shape). A `canary` entry is also cross-checked
     against your own local trajectory when one is readable (F-193): a submitted id that could
     not have come from the bucket's own `seed`, or a verdict the trajectory disproves, is
