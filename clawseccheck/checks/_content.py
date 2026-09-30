@@ -32,6 +32,7 @@ from ..collector import (
 )
 from ..iocdb import is_known_bad_host as _iocdb_is_known_bad_host
 from ..skillast import (
+    ScriptProseCoverageIncomplete,
     analyze_python,
     extract_script_prose,
 )
@@ -6936,21 +6937,18 @@ def _script_prose_evidence(ctx: Context) -> list[tuple[str, str, str]]:
     (e.g. a synthetic per-skill ``--vet`` context) always starts with no cache
     attribute, so nothing here can leak a cached result across two different
     ``Context`` objects.
+
+    C-619: one unparseable bundled ``.py`` no longer aborts the walk. The
+    ``ScriptProseCoverageIncomplete`` that ``extract_script_prose`` raises for it is
+    caught PER FILE in ``_script_prose_scan`` (the blocks of every parseable file
+    survive) and the unread ``(skill, relpath)`` pairs are memoized beside the triples;
+    see ``_script_prose_unread_notes``. The return type is unchanged (triples only).
     """
     cache = getattr(ctx, "_script_prose_cache", None)
     if cache is not None and "triples" in cache:
         return list(cache["triples"])
 
-    out: list[tuple[str, str, str]] = []
-    for attr_name, ext in (
-        ("installed_skill_py", "py"),
-        ("installed_skill_shell", "sh"),
-        ("installed_skill_js", "js"),
-    ):
-        for name, files in (getattr(ctx, attr_name, None) or {}).items():
-            for relpath, src in files:
-                for block in extract_script_prose(src, ext):
-                    out.append((name, relpath, normalize_for_scan(block)))
+    out, unread = _script_prose_scan(ctx)
 
     if cache is None:
         cache = {}
@@ -6960,7 +6958,71 @@ def _script_prose_evidence(ctx: Context) -> list[tuple[str, str, str]]:
             cache = None  # duck-typed ctx that forbids new attributes -- stay uncached
     if cache is not None:
         cache["triples"] = out
+        cache["unread"] = unread
     return out
+
+
+def _script_prose_scan(
+    ctx: Context,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+    """C-619: the uncached walk behind ``_script_prose_evidence`` --
+    ``(triples, unread)`` where ``unread`` is every ``(skill_name, relpath)`` whose
+    docstrings/comments could NOT be extracted because ``ast.parse`` failed.
+
+    Catches ONLY ``ScriptProseCoverageIncomplete`` (B-377's deliberate "could not read"
+    signal). It must not be widened: ``ScanBudgetExceeded`` is a ``BaseException``
+    (B-352) and has to keep escaping, and a genuine bug still belongs in ``run_all``'s
+    crash isolation. The ``.sh``/``.js`` extractors are lexical and never raise.
+    """
+    out: list[tuple[str, str, str]] = []
+    unread: list[tuple[str, str]] = []
+    for attr_name, ext in (
+        ("installed_skill_py", "py"),
+        ("installed_skill_shell", "sh"),
+        ("installed_skill_js", "js"),
+    ):
+        for name, files in (getattr(ctx, attr_name, None) or {}).items():
+            for relpath, src in files:
+                try:
+                    blocks = extract_script_prose(src, ext)
+                except ScriptProseCoverageIncomplete:
+                    unread.append((name, relpath))  # other files' blocks still survive
+                    continue
+                for block in blocks:
+                    out.append((name, relpath, normalize_for_scan(block)))
+    return out, unread
+
+
+_SCRIPT_PROSE_UNREAD_NOTE_CAP = 10
+
+
+def _script_prose_unread_notes(ctx: Context) -> list[str]:
+    """C-619: ``coverage:`` evidence notes (the B-526 channel) for every bundled
+    script whose docstrings/comments could not be read because the file does not parse.
+
+    Warms ``_script_prose_evidence``'s memo and reads the unread list from it, so B66
+    and B156 share one parse per file; a ctx that forbids attributes (uncached) falls
+    back to a fresh ``_script_prose_scan``. Capped at ``_SCRIPT_PROSE_UNREAD_NOTE_CAP``
+    per-file notes plus one overflow line, so a bundle of hundreds of broken files
+    cannot flood the "Not assessed" block. Evidence only -- callers must never put
+    this text in ``detail`` (``baseline.fingerprint()`` hashes ``detail``).
+    """
+    _script_prose_evidence(ctx)
+    cache = getattr(ctx, "_script_prose_cache", None)
+    if cache is not None and "unread" in cache:
+        unread = cache["unread"]
+    else:
+        unread = _script_prose_scan(ctx)[1]
+    notes = [
+        f"coverage: {name}: {relpath} docstrings/comments not read (file does not parse)"
+        for name, relpath in unread[:_SCRIPT_PROSE_UNREAD_NOTE_CAP]
+    ]
+    if len(unread) > _SCRIPT_PROSE_UNREAD_NOTE_CAP:
+        notes.append(
+            f"coverage: {len(unread) - _SCRIPT_PROSE_UNREAD_NOTE_CAP} more script(s) "
+            "docstrings/comments not read (file does not parse)"
+        )
+    return notes
 
 
 def _fm_metadata_obj(fm: str) -> dict:
@@ -9880,7 +9942,10 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
     PASS - no such directive, or the flagged known-bad host IS the skill's own declared
            homepage/repo/api host (first-party allowlist, B160/B-132 precedent) - never
            escalated, stays WARN in that case (see below).
-    UNKNOWN - nothing to inspect.
+    UNKNOWN - nothing to inspect, OR a bundled Python script could not be parsed (so
+           its docstrings/comments were not scanned) and no other evidence was found
+           (C-619). A FAIL/WARN from readable text is unchanged; the unread script is
+           listed as a ``coverage:`` evidence note either way.
 
     Escalation is corroborator-gated, not host-list-alone: a legitimate cloud / DevOps
     skill may transmit its OWN credential to its OWN backend ("send the api_key to the
@@ -9941,6 +10006,10 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
             )
             warn_ev.append(tag)
 
+    # C-619: a bundled .py that does not parse cannot have its docstrings/comments
+    # read. That must neither erase the hits above nor read as a clean PASS.
+    cov = _script_prose_unread_notes(ctx)
+
     if fail_ev:
         ev_summary = "; ".join(fail_ev[:4])
         extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
@@ -9954,7 +10023,7 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
             "credentials to a paste site, webhook relay, or tunneling service. If a "
             "skill must authenticate, send only to its own documented first-party "
             "endpoint and never route the raw secret value out.",
-            fail_ev,
+            fail_ev + cov,
         )
 
     if warn_ev:
@@ -9969,7 +10038,21 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
             "Never transmit secrets, tokens, or credentials to external or operator-"
             "controlled destinations. If a skill must authenticate, send only to a "
             "documented first-party endpoint and never route the raw secret value out.",
-            warn_ev,
+            warn_ev + cov,
+        )
+
+    if cov:
+        return _finding(
+            "B156",
+            UNKNOWN,
+            "No overt secret-exfil directive was found in the text that could be read, "
+            "but a bundled Python script could not be parsed, so its docstrings and "
+            "comments were not scanned.",
+            "Review the docstrings and comments of the unparsed script(s) by hand before "
+            "trusting the skill. A parse failure can mean a syntax error, a deliberately "
+            "malformed file, or syntax newer than the Python running this scan.",
+            cov,
+            engine_degraded=True,
         )
 
     return _finding(
@@ -12075,7 +12158,10 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
             `_defensive_context`/`_pos_in_source_code_section` (B-305)
             correctly exempts the surrounding CODE.
     PASS  - no persona-jailbreak pattern.
-    UNKNOWN - nothing to inspect.
+    UNKNOWN - nothing to inspect, OR a bundled Python script could not be parsed (so
+            its docstrings/comments were not scanned) and no other evidence was found
+            (C-619). A hit in readable text is still a WARN; the unread script is
+            listed as a ``coverage:`` evidence note either way.
     """
     if not ctx.bootstrap and not ctx.installed_skills:
         return _finding(
@@ -12131,6 +12217,10 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
                 f"authority-override pattern: {hit}"
             )
 
+    # C-619: a bundled .py that does not parse cannot have its docstrings/comments
+    # read. That must neither erase the hits above nor read as a clean PASS.
+    cov = _script_prose_unread_notes(ctx)
+
     if evidence:
         return _finding(
             "B66",
@@ -12139,7 +12229,21 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
             "Remove role-switch instructions that attempt to reset constraints "
             "or inject a low-trust persona. Enforce fixed policy boundaries: "
             "system constraints should remain the top authority.",
-            evidence,
+            evidence + cov,
+        )
+
+    if cov:
+        return _finding(
+            "B66",
+            UNKNOWN,
+            "No persona / role jailbreak indicator was found in the text that could be "
+            "read, but a bundled Python script could not be parsed, so its docstrings "
+            "and comments were not scanned.",
+            "Review the docstrings and comments of the unparsed script(s) by hand before "
+            "trusting the skill. A parse failure can mean a syntax error, a deliberately "
+            "malformed file, or syntax newer than the Python running this scan.",
+            cov,
+            engine_degraded=True,
         )
 
     return _finding(

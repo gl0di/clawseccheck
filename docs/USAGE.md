@@ -1674,7 +1674,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   code**, and that is deliberate: an unread fence is not evidence for a judgement either way,
   and treating it as one would block ordinary skills whose install snippet happens to be
   fenced. Read it as "here is what I did not look at", and open those spots yourself before
-  installing something you do not already trust. Standing limitations that apply to every scan
+  installing something you do not already trust. A bundled Python script that does not parse
+  (a syntax error, a NUL byte, or syntax newer than the Python running the scan) is listed
+  here too: its docstrings and comments could not be read, but that no longer hides a
+  persona-jailbreak or secret-exfil finding that the `SKILL.md` text and the parseable
+  scripts still produce. Standing limitations that apply to every scan
   are not repeated here - they stay in `--json`.
   A target that is **not a skill package at all** - no `SKILL.md`, no executable files, and
   contents that read as an HTML document (the shape you get by saving a ClawHub *web page*
