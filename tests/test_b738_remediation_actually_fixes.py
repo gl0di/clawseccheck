@@ -165,12 +165,12 @@ def test_non_main_still_clears_risk03_today_and_that_is_recorded_not_fixed():
 
     B-738 fixed the ADVICE. It did not change what CLEARS the finding: a user who chooses
     `non-main` on their own still gets a clean RISK-03 while their main session runs on the
-    host. Changing that moves verdicts on 33 of the 36 corpus fixtures that use `non-main`
-    (B4 PASS today), so it is a separate decision with its own C-135, not a rider on a
-    wording fix.
+    host. C-641 landed B4's half of that verdict (B4 WARNs on `non-main`); RISK-03 still
+    clears under `non-main`, which stays a separate decision with its own C-135, not a rider
+    on a wording fix.
 
-    If this test starts failing, the verdict half has been done — update it rather than
-    restoring the old behaviour.
+    If this test starts failing, the RISK-03 verdict half has been done — update it
+    rather than restoring the old behaviour.
     """
     partial = dict(_UNSANDBOXED)
     partial["agents"] = {"defaults": {"sandbox": {"mode": "non-main"}}}
