@@ -132,6 +132,20 @@ SCHEMA_SQL_CONST_MARKER = 'const OPENCLAW_STATE_SCHEMA_SQL = "'
 # case) into false failures, trading a narrow, never-yet-observed risk for a guaranteed one.
 # Pinned by test_a_lone_ambiguous_anchor_cannot_be_told_from_a_step_precondition_guard,
 # not fixed.
+#
+# THE LIMIT BIT ON 2026.9.7, and the narrower fix is the one the note above did NOT reject.
+# `if (readStateSchemaContentVersion(database) !== 1 || tableExists(database,
+# "config_machine_state") || ...)` is a legacy-migration precondition ("is this the pre-
+# `config_machine_state` database?"), so the content-version guard read {1, 19} beside the
+# ladder top 19 and both `--write-state-*` regenerators failed. Requiring corroboration for a
+# LONE match is still rejected (it would break the single-anchor states named above); what
+# is added is a ranking when the evidence is plentiful: the two anchors that spell the
+# vendor's own "highest version I understand" (`_HIGHEST_VERSION_ANCHORS`) are authoritative
+# once they agree on one value, and every `!== N` guard must then be at or below it, with at
+# least one AT it. A guard ABOVE the top, or a top no guard corroborates, is still a loud
+# disagreement, and so is any state where the two authority anchors are absent or differ.
+_HIGHEST_VERSION_ANCHORS = ("named constant (<= 2026.9.4)", "newer-schema error")
+_STEP_GUARD_ANCHORS = ("content-version guard", "migration-version guard")
 _SCHEMA_VERSION_ANCHORS = (
     ("named constant (<= 2026.9.4)",
      re.compile(r"\bOPENCLAW_STATE_SCHEMA_VERSION\s*=\s*(\d+)(?![\w.])")),
@@ -499,6 +513,12 @@ def _state_schema_version_from(dist_dir: Path) -> int:
     them is describing something else."""
     evidence = _state_schema_version_evidence(dist_dir)
     values = {v for found in evidence.values() for v in found}
+    highest = {v for name in _HIGHEST_VERSION_ANCHORS for v in evidence.get(name, ())}
+    if len(highest) == 1:
+        top = next(iter(highest))
+        guards = {v for name in _STEP_GUARD_ANCHORS for v in evidence.get(name, ())}
+        if all(g <= top for g in guards) and (not guards or top in guards):
+            return top
     if not values:
         raise AssertionError(
             f"could not read the state-schema version from any {len(_SCHEMA_VERSION_ANCHORS)} "
@@ -1672,6 +1692,59 @@ def test_state_schema_version_fails_loudly_when_anchors_disagree(tmp_path):
         "openclaw-state-db-contract-X.mjs": "const OPENCLAW_STATE_SCHEMA_VERSION = 16;\n",
         "openclaw-state-db-DS2iNFy4.mjs":
             "if (readStateSchemaContentVersion(database) !== 17) throw 1;\n",
+    })
+    with pytest.raises(AssertionError, match="anchors disagree"):
+        _state_schema_version_from(dist)
+
+
+def test_a_step_precondition_guard_below_the_ladder_top_does_not_break_the_reader(tmp_path):
+    """2026.9.7, measured: the ladder top is 19 (`contentVersion !== 19`, the migration guard
+    and the newer-schema error all say so), while a legacy-migration precondition in the same
+    chunk reads `readStateSchemaContentVersion(database) !== 1 || tableExists(...)`. The
+    reader used to see {1, 19} and refuse to stamp anything."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-uBGB4L5P.mjs":
+            'if (readStateSchemaContentVersion(database) !== 1 || tableExists(database, "t")) x();\n'
+            "if (readStateSchemaContentVersion(database) !== 19) migrate();\n"
+            "const needsRepair = readStateSchemaMigrationVersion(database) !== 19;\n",
+        "openclaw-state-db-schema-version-CXDs-azs.mjs":
+            'if (contentVersion > 19) throw createNewerSqliteSchemaVersionError('
+            '"OpenClaw state database", pathname, contentVersion, 19);\n',
+    })
+    assert _state_schema_version_evidence(dist)["content-version guard"] == {1, 19}
+    assert _state_schema_version_from(dist) == 19
+
+
+def test_the_step_guard_ranking_does_not_hide_a_guard_above_the_ladder_top(tmp_path):
+    """The ranking is a tolerance for guards BELOW the top, not a licence to ignore a guard
+    that says the schema is newer than the named top: that is a real disagreement."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-a.mjs": "if (readStateSchemaContentVersion(db) !== 20) x();\n",
+        "openclaw-state-db-schema-version-b.mjs":
+            'throw createNewerSqliteSchemaVersionError("OpenClaw state database", p, v, 19);\n',
+    })
+    with pytest.raises(AssertionError, match="anchors disagree"):
+        _state_schema_version_from(dist)
+
+
+def test_the_step_guard_ranking_needs_a_guard_at_the_top_when_any_guard_exists(tmp_path):
+    """Guards that all sit below the top and none corroborates it describe some earlier step,
+    not the current schema: nothing has confirmed the top, so the run must fail loudly."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-a.mjs": "if (readStateSchemaContentVersion(db) !== 1) x();\n",
+        "openclaw-state-db-schema-version-b.mjs":
+            'throw createNewerSqliteSchemaVersionError("OpenClaw state database", p, v, 19);\n',
+    })
+    with pytest.raises(AssertionError, match="anchors disagree"):
+        _state_schema_version_from(dist)
+
+
+def test_the_step_guard_ranking_needs_the_two_authority_anchors_to_agree(tmp_path):
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-contract-X.mjs": "const OPENCLAW_STATE_SCHEMA_VERSION = 18;\n",
+        "openclaw-state-db-schema-version-b.mjs":
+            'throw createNewerSqliteSchemaVersionError("OpenClaw state database", p, v, 19);\n',
+        "openclaw-state-db-a.mjs": "if (readStateSchemaContentVersion(db) !== 19) x();\n",
     })
     with pytest.raises(AssertionError, match="anchors disagree"):
         _state_schema_version_from(dist)

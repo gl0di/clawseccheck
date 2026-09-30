@@ -46,7 +46,9 @@ precondition for evidence, not the evidence.
 """
 from __future__ import annotations
 
+import functools
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -157,6 +159,68 @@ def _matches(pattern: str, symbol: str, contains: str | None) -> list:
         f"`grep -rl {symbol!r} {dist}/*` and re-ground this citation. Standing down "
         f"here would turn the guard off at exactly the moment it is needed."
     )
+
+
+#: Vendor-sealed helper bundles, which a locator by DECLARATION must skip by name.
+#: OpenClaw 2026.9.7 ships ``dist/package-update-activation-recovery.mjs``: 66 MB, unhashed,
+#: ``export {}`` only, and no relative import at all. The update path copies it beside the
+#: install and runs it under a recovery ``node`` command (``distWorkerPath`` in
+#: ``package-update-activation-*.mjs``), so it is a dependency-closure of the whole codebase
+#: and re-declares nearly every vendor function. Counted as a declarer it turns every
+#: "declared in exactly one bundle" lookup into a coin toss between the real module and a
+#: snapshot of it. It is skipped by NAME because a structural filter ("has no relative
+#: import") was tried and rejected: the synthetic bundles the unit tests build have none
+#: either. ``test_every_sealed_bundle_is_import_free_in_the_installed_dist`` checks each
+#: listed name against the real dist, so a second such helper is noticed, not swallowed.
+SEALED_BUNDLES = frozenset({"package-update-activation-recovery.mjs"})
+
+
+@functools.lru_cache(maxsize=None)
+def _declaring_bundles(dist: Path, declaration: str) -> "tuple[Path, ...]":
+    """Every top-level bundle under ``dist`` with a line STARTING with ``declaration``.
+
+    Bytes and a substring test before the anchored regex: the dist is ~370 MB, and an
+    anchored multi-line regex over a 70 MB file is ~25x slower than the substring test that
+    rules almost every bundle out."""
+    needle = declaration.encode()
+    rx = re.compile(b"^" + re.escape(needle), re.M)
+    found = []
+    for path in sorted({p for ext in _JS_EXTS for p in dist.glob("*" + ext)}):
+        if path.name in SEALED_BUNDLES:
+            continue
+        data = path.read_bytes()
+        if needle in data and rx.search(data):
+            found.append(path)
+    return tuple(found)
+
+
+def dist_declaring(declaration: str, *, symbol: str) -> Path:
+    """The ONE top-level dist bundle that DECLARES ``symbol`` -- located by content, not name.
+
+    ``declaration`` is the literal text a line of that bundle starts with
+    (``"function collectConfiguredModelRefs("``). This is the locator for a symbol whose
+    host bundle has rotated or been merged away more than once, where a filename glob keeps
+    going stale: the declaration line is the shape, the hash and the file are not.
+    :data:`SEALED_BUNDLES` are skipped. Zero matches is a finding (the dist IS installed),
+    never a skip; two or more is a coin toss and fails the same way :func:`dist_file` does.
+    """
+    dist = require_dist()
+    found = _declaring_bundles(dist, declaration)
+    if not found:
+        raise AssertionError(
+            f"no bundle under {dist} declares {declaration!r} (sealed helpers skipped: "
+            f"{sorted(SEALED_BUNDLES)}). The dist IS installed, so {symbol!r} moved, was "
+            f"renamed or was inlined -- re-locate it with `grep -rlE '^{declaration}' "
+            f"{dist}/*` and re-ground this citation; do not stand down."
+        )
+    if len(found) != 1:
+        raise AssertionError(
+            f"{len(found)} bundles under {dist} declare {declaration!r} "
+            f"({', '.join(p.name for p in found)}), but this citation for {symbol!r} needs "
+            f"exactly one -- taking the first would be a coin toss. If one is a vendor-sealed "
+            f"helper, add its name to SEALED_BUNDLES with the evidence."
+        )
+    return found[0]
 
 
 def dist_files(pattern: str, *, symbol: str, contains: str | None = None) -> list:

@@ -2,8 +2,11 @@
 
 The claim is deliberately narrow: the strict config schema rejects the file, so
 `openclaw config validate` and CLI commands that load it report it invalid until
-`openclaw doctor --fix` runs. Nothing here asserts gateway behaviour -- that was measured on
-one build only, and the gateway repairs a legacy file itself in the common case.
+`openclaw doctor --fix` runs. Nothing in the always-on tests asserts gateway behaviour. The
+vendor's boot path changed underneath this claim: through 2026.9.6 the gateway repaired a
+legacy file itself in memory and started (the common case), and from 2026.9.7 startup
+validates without rewriting and Doctor is the only repair path -- the last section of this
+module pins that premise against the installed build.
 
 Two layers, matching test_b700: always-on behaviour tests, and a LOCAL-ONLY oracle that
 EXECUTES the installed root schema over every key in the shipped table. A key the vendor
@@ -11,8 +14,10 @@ still accepts must not be in the table.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -192,26 +197,167 @@ def test_retired_key_as_an_include_sibling_still_warns(tmp_path):
     assert f.evidence == ["commands.useAccessGroups"]
 
 
-# ---------------------------------------- C-577: dist grounding for the repair hedge
+# ------------------------- C-577 / 2026.9.7: what the installed build does at startup
 #
-# `check_retired_config_keys_invalid`'s `fix` text hedges: "a config that uses $include
-# may be refused automatic repair, so run the command explicitly." That line shipped in
-# 10d766a with no citation. Pin the vendor mechanism it describes so a future dist
-# rotation that changes this behaviour is caught here rather than leaving the hedge to
-# quietly go stale: the installed build's own automatic-startup config repair refuses to
-# run whenever an `$include` is present anywhere in the config.
+# `check_retired_config_keys_invalid`'s `fix` text hedges: "a config that uses $include may
+# be refused automatic repair, so run the command explicitly." C-577 pinned the mechanism
+# behind that hedge on the build then current: the vendor's AUTOMATIC config repair refuses to
+# run whenever an `$include` is present, and that repair ran at every gateway start.
+#
+# 2026.9.7 changed the premise, not just the filename. The module was renamed
+# (`automatic-startup-config-repair-*` -> `automatic-config-repair-*`) and, more to the
+# point, the startup consumer is gone: `resolveStartupConfigSnapshot` and
+# `isStartupConfigRepairResult` are declared nowhere in the package, gateway and CLI startup
+# validate without rewriting, and the only remaining callers of the repair module are Doctor
+# and the two backup modules. Re-globbing the old test would have kept it green while it
+# stopped grounding its own sentence ("startup ... refuses to repair"), so the tests below
+# pin each half of the new premise separately, each with the control that lets it fail:
+#
+#   * startup no longer repairs   -> the two startup-repair symbols are absent from the
+#                                    whole dist, sealed bundle included, while a symbol that
+#                                    exists is found by the very same scan;
+#   * an invalid snapshot is left -> the gateway-run bootstrap records it and returns; the
+#     for Doctor                     startup preflight returns it as read; neither imports
+#                                    the repair module (grounded 2026.9.7:
+#                                    pre-bootstrap-BOq1a3gm.mjs:220-224,
+#                                    startup-config-preflight-gKbH1nbB.mjs:57,96);
+#   * Doctor is the repair path   -> `doctor-config-flow` imports it and plans, then commits,
+#                                    the repair (doctor-config-flow-DJTyZM_K.mjs:73,834);
+#   * the $include gate survives  -> `admitAutomaticConfigRepairSnapshot`
+#                                    (automatic-config-repair-BKjdV4pT.mjs:22-24) still
+#                                    declines on an include, and `planConfigRepair` (:36)
+#                                    still asks it. That is now Doctor's automatic-repair leg
+#                                    only, which is what the fix text's hedge can still mean.
+#
+# Vendor docs shipped in the same build say the same thing in prose
+# (docs/gateway/doctor/config-migrations.md:296: "Gateway and local CLI startup validate
+# current config without rewriting legacy keys. Invalid legacy config remains unchanged and
+# startup prints the `openclaw doctor --fix` hint"); the code below is the evidence, the
+# prose is only a cross-check.
+
+_REPAIR_MODULE = "automatic-config-repair-*.mjs"
+_STARTUP_REPAIR_SYMBOLS = ("resolveStartupConfigSnapshot", "isStartupConfigRepairResult")
+#: Not a startup-repair symbol: one the repair module still declares (2026.9.6 and 9.7
+#: alike), used as the scan's positive control -- a scan that finds nothing for ANY name
+#: proves nothing about these two.
+_CONTROL_SYMBOL = "admitAutomaticConfigRepairSnapshot"
+_REPAIR_CONSUMER_RE = re.compile(rb'from "\./(automatic-config-repair-[A-Za-z0-9_-]+)\.mjs"')
+
+
+def _bundle_family(path: Path) -> str:
+    """``doctor-config-flow-DJTyZM_K.mjs`` -> ``doctor-config-flow`` (the hash rotates)."""
+    return re.sub(r"-[A-Za-z0-9_]{8}\.m?js$", "", path.name)
+
+
+@functools.lru_cache(maxsize=None)
+def _dist_scan(dist: Path) -> "tuple[dict, frozenset]":
+    """One pass over every top-level bundle (the ~66 MB sealed updater helper included, since
+    it is a closure of the whole codebase and so the strictest place to look for an absence):
+    ``({symbol: (bundle names mentioning it)}, families importing the repair module)``."""
+    mentions = {sym: [] for sym in _STARTUP_REPAIR_SYMBOLS + (_CONTROL_SYMBOL,)}
+    consumers = set()
+    for path in sorted({p for ext in (".js", ".mjs") for p in dist.glob("*" + ext)}):
+        data = path.read_bytes()
+        for sym in mentions:
+            if sym.encode() in data:
+                mentions[sym].append(path.name)
+        if b"automatic-config-repair-" in data and _REPAIR_CONSUMER_RE.search(data):
+            consumers.add(_bundle_family(path))
+    return {k: tuple(v) for k, v in mentions.items()}, frozenset(consumers)
+
+
+def test_startup_no_longer_carries_the_automatic_config_repair():
+    """The removed mechanism: through 2026.9.6 the gateway-run bootstrap imported and called
+    these two to repair an invalid snapshot in memory and boot on it. Absent from every
+    bundle now. The control is the point: the same scan must still find a startup symbol."""
+    mentions, _ = _dist_scan(require_dist())
+    assert mentions[_CONTROL_SYMBOL], (
+        f"the scan did not find {_CONTROL_SYMBOL}, which the installed build declares -- the "
+        "absence below would mean nothing; fix the scan before reading it"
+    )
+    for symbol in _STARTUP_REPAIR_SYMBOLS:
+        assert not mentions[symbol], (
+            f"{symbol} is back in {mentions[symbol]}: startup may repair an invalid config "
+            "again, so B382's fix text, B38's 'live bypass' wording and the risk chain that "
+            "assume startup validates without rewriting need re-grounding"
+        )
+
+
+#: The gateway-run bootstrap branch for an invalid config: recorded, then handed back.
+_INVALID_SNAPSHOT_BRANCH_RE = re.compile(
+    r"const snapshot = await readGuardedGatewayRunConfig\(params\);\s*"
+    r"if \(!snapshot\) return false;\s*"
+    r"if \(!snapshot\.valid\) \{\s*"
+    r"lastGuardedGatewayRunSnapshot = snapshot;\s*"
+    r"return true;\s*\}"
+)
+
+
+def test_the_gateway_run_bootstrap_hands_an_invalid_snapshot_back_unrepaired():
+    path = dist_file("pre-bootstrap-*.mjs", symbol="the gateway-run config guard",
+                     contains="lastGuardedGatewayRunSnapshot = snapshot;")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    assert _INVALID_SNAPSHOT_BRANCH_RE.search(text), (
+        f"{path.name}: the invalid-snapshot branch no longer reads 'record it and return' "
+        "(2026.9.7 pre-bootstrap:220-224) -- re-read what startup now does with an invalid "
+        "config before trusting any claim that it is left for Doctor"
+    )
+    assert "automatic-config-repair" not in text and "RepairResult" not in text
+
+
+def test_the_invalid_snapshot_branch_shape_bites_on_a_repair_call():
+    """Control for the shape above: a branch that repairs before returning must not match."""
+    plain = ("const snapshot = await readGuardedGatewayRunConfig(params);\n"
+             "if (!snapshot) return false;\n"
+             "if (!snapshot.valid) {\n\tlastGuardedGatewayRunSnapshot = snapshot;\n\treturn true;\n}\n")
+    repaired = plain.replace("lastGuardedGatewayRunSnapshot = snapshot;",
+                             "snapshot = await resolveStartupConfigSnapshot(snapshot);")
+    assert _INVALID_SNAPSHOT_BRANCH_RE.search(plain)
+    assert not _INVALID_SNAPSHOT_BRANCH_RE.search(repaired)
+
+
+def test_the_startup_preflight_leaves_an_invalid_snapshot_to_doctor():
+    path = dist_file("startup-config-preflight-*.mjs", symbol="runStartupConfigPreflight",
+                     contains="function runStartupConfigPreflight")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    assert "legacy imports and repair receipts belong to Doctor" in text
+    # gateway mode: an invalid read is returned as read, before any state preparation
+    assert re.search(r"if \(!read\.snapshot\.valid\) return result\(read\);", text)
+    for repair in ("automatic-config-repair", "planAutomaticConfigRepair",
+                   "commitAutomaticConfigRepair", "planAdmittedConfigRepair"):
+        assert repair not in text, f"{path.name} now references {repair}"
+
+
+def test_only_doctor_and_the_backup_modules_consume_the_automatic_repair_module():
+    _, consumers = _dist_scan(require_dist())
+    assert "doctor-config-flow" in consumers, (
+        f"Doctor no longer imports the repair module (consumers: {sorted(consumers)}) -- "
+        "find where legacy keys are repaired now"
+    )
+    startup = {"pre-bootstrap", "startup-config-preflight", "config-guard"}
+    assert not (consumers & startup), (
+        f"a startup module imports the repair module again: {sorted(consumers & startup)}"
+    )
 
 
 def test_automatic_repair_gate_still_declines_on_include_present():
+    """C-577's original pin, now scoped to the only caller left: Doctor's automatic-repair leg."""
     require_dist()
     path = dist_file(
-        "automatic-startup-config-repair-*.mjs",
+        _REPAIR_MODULE,
         symbol="admitAutomaticConfigRepairSnapshot",
-        contains="admitAutomaticConfigRepairSnapshot",
+        contains="function admitAutomaticConfigRepairSnapshot(",
     )
     text = path.read_text(encoding="utf-8", errors="replace")
-    assert "containsConfigIncludeDirective" in text
-    assert "includedPaths" in text
+    gate = re.search(r"function admitAutomaticConfigRepairSnapshot\(snapshot\) \{(.*?)\n\}", text, re.S)
+    assert gate, f"{path.name}: the gate's declaration moved"
+    body = gate.group(1)
+    assert "(snapshot.includedPaths?.length ?? 0) === 0" in body
+    assert "!containsConfigIncludeDirective(snapshot.parsed)" in body
+    # ...and the planner still asks it before doing anything
+    assert re.search(
+        r"function planConfigRepair\(.*?\) \{\s*if \(!admitAutomaticConfigRepairSnapshot\(snapshot\)\) return null;",
+        text, re.S), f"{path.name}: planConfigRepair no longer gates on the include check"
 
 
 # --------------------------------------------------- single table, two guards
