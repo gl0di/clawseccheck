@@ -102,6 +102,7 @@ from ._shared import (
     SECRET_KEY_RE,
     SECRET_PATTERNS,
     SENSITIVE_TOOL_HINTS,
+    _startup_repair_removed,
     _substituted_dm_policy_channels,
     _surface_absent,
     _trifecta_leg_sources,
@@ -1006,7 +1007,9 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         # hard FAIL.
         #
         # 1. NO SCOPE GATE. Under `sandbox.scope: "shared"` (at either level, or the legacy
-        #    `perSession: false`) OpenClaw DISCARDS this agent's whole `sandbox.docker` --
+        #    `perSession: false` -- 2026.9.6 and earlier only, C-645: 2026.9.7's resolver
+        #    ignores `perSession`, see `_resolve_sandbox_scope`) OpenClaw DISCARDS this
+        #    agent's whole `sandbox.docker` --
         #    BOTH its `network` and its `binds` -- so neither reaches a container. Executed
         #    against openclaw@2026.8.2 rather than read -- `resolveSandboxConfigForAgent`,
         #    dist/config-*.js:
@@ -1755,6 +1758,14 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
     being in force, or about other findings being unreliable. Names are reported, never
     values. Gated on the INSTALLED build only (see ``_retired_keys_present``).
 
+    Only the ``fix`` advice says anything about WHO repairs the file, and it is version-aware
+    (C-645): through 2026.9.6 the gateway's boot-time self-heal repaired a legacy file in
+    memory (except behind an ``$include``), so the advice hedges on ``$include``; from
+    2026.9.7 startup repairs nothing and only Doctor does (``_startup_repair_removed``), so
+    the advice says that instead. That sentence lives in ``fix`` and never in ``detail``:
+    ``baseline.fingerprint()`` hashes ``detail``, and this note must not orphan a user's
+    ``.clawseccheckignore`` entry.
+
     WARN    - one or more retired keys are present and the installed build rejects them.
     UNKNOWN - no config was read (or it was unreadable).
     PASS    - none present; ``no_signal`` when the installed build could not be determined,
@@ -1803,8 +1814,18 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
         "and CLI commands that load it report it invalid until the keys are migrated. "
         f"{shown}{extra}",
         "Run `openclaw doctor --fix` (it migrates or removes them), or delete the keys by "
-        "hand. A config that uses $include may be refused automatic repair, so run the "
-        "command explicitly.",
+        "hand. " + (
+            # C-645: 2026.9.7 dropped the startup repair, so nothing fixes the file behind
+            # the user's back any more; the $include caveat is now about Doctor's own
+            # automatic preflight repair (`admitAutomaticConfigRepairSnapshot`).
+            "OpenClaw 2026.9.7 and later does not repair a legacy config at startup "
+            "(only Doctor does), so a restart will not fix the file. Doctor's automatic "
+            "preflight repair may decline a config that uses $include, so run the "
+            "command explicitly and re-check with `openclaw config validate`."
+            if _startup_repair_removed(ctx) else
+            "A config that uses $include may be refused automatic repair, so run the "
+            "command explicitly."
+        ),
         evidence=[key for key, _repl in found],
     )
 
@@ -3763,6 +3784,8 @@ def check_sandbox(ctx: Context) -> Finding:
 #       Docker-compatible engine and never falls back to host execution."
 #     "nodeHost.workerRuns.containerImage": "Optional Node 24.16+ or 26.1+ image for
 #       container-isolated workers (default: \"node:24.19.0-slim\")."
+#     (verbatim as of 2026.9.5; the default image is NOT stable across releases -- see
+#     `_NODE_WORKER_DEFAULT_IMAGE_BY_BUILD` below for the measured history.)
 #
 #   dist/zod-schema-DN2u5FdA.mjs:576-580 (the actual schema, `NodeHostWorkerRunsSchema`):
 #     enabled: boolean().optional()
@@ -3788,6 +3811,52 @@ def check_sandbox(ctx: Context) -> Finding:
 # on this host" previously had no line naming it at all. The WARN branch below fires only
 # once the feature is actually opted into (`enabled: true`); it is disclosure of a real,
 # active surface, not a complaint about a default nobody touched.
+# C-645 (2026-09-30): the vendor's DEFAULT container image is not a constant. MEASURED by
+# reading `DEFAULT_NODE_WORKER_CONTAINER_IMAGE` out of every release tarball in the local
+# npm cache (`npm pack openclaw@<ver> --offline`, streamed through `tar -xzO`, nothing
+# installed) and out of the installed 2026.9.7 dist. Builds read, and what each declares:
+#     2026.8.1  2026.8.2  2026.9.1  2026.9.2   node:22-slim   ("Optional Node 22+ image ...")
+#     2026.9.3  2026.9.4  2026.9.5  2026.9.6   node:24.19.0-slim
+#     2026.9.7                                 node:24.21.0-slim
+#                          ("Optional Node 24.16+ or 26.1+ image ...")
+# The literal `node:24.19.0-slim` this check used to print unconditionally was therefore
+# already wrong on 2026.8.1-2026.9.2 and became wrong again on 2026.9.7; it will drift again
+# every few releases. So the image is looked up by the INSTALLED build, EXACT match only:
+# a build nobody read -- an unknown or pre-release version, a release between two measured
+# ones, one before the feature shipped (2026.8.1) or newer than the last row -- gets NO
+# literal at all, because naming an image for it would state a fact about a build we did
+# not see (Golden Rule #4). Extending the table is one row per re-baseline;
+# `tests/test_b391_nodehost_workerruns_isolation.py` re-asks the installed dist (local-only)
+# so a new default is caught then instead of being printed stale.
+_NODE_WORKER_DEFAULT_IMAGE_BY_BUILD = {
+    (2026, 8, 1): "node:22-slim",
+    (2026, 8, 2): "node:22-slim",
+    (2026, 9, 1): "node:22-slim",
+    (2026, 9, 2): "node:22-slim",
+    (2026, 9, 3): "node:24.19.0-slim",
+    (2026, 9, 4): "node:24.19.0-slim",
+    (2026, 9, 5): "node:24.19.0-slim",
+    (2026, 9, 6): "node:24.19.0-slim",
+    (2026, 9, 7): "node:24.21.0-slim",
+}
+
+
+def _node_worker_default_image(ctx: Context) -> "str | None":
+    """The vendor's default worker container image for the INSTALLED build, or ``None``.
+
+    ``None`` -- never a guess -- unless the installed build is EXACTLY one whose default was
+    read (``_NODE_WORKER_DEFAULT_IMAGE_BY_BUILD``): an unknown or unorderable version, a
+    pre-release, a build between two measured ones, or one newer than the table all return
+    ``None``. Reads ONLY ``ctx.installed_dist_version``: the default is resolved by the
+    build that starts the worker, not by the build that last saved the config, so
+    ``meta.lastTouchedVersion`` is deliberately not consulted.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is None:
+        return None
+    return _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD.get(installed)
+
+
 def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
     """B391 - nodeHost.workerRuns execution-isolation disclosure, beside B4 (sandbox).
 
@@ -3836,11 +3905,17 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
     isolation = dig(cfg, "nodeHost.workerRuns.isolation")
     if isolation == "container":
         container_image = dig(cfg, "nodeHost.workerRuns.containerImage")
-        image = (
-            container_image
-            if isinstance(container_image, str) and container_image.strip()
-            else "node:24.19.0-slim (vendor default)"
-        )
+        if isinstance(container_image, str) and container_image.strip():
+            image = container_image
+        else:
+            # C-645: the default is per build (see `_NODE_WORKER_DEFAULT_IMAGE_BY_BUILD`), so it is
+            # named only when the installed build's default was measured.
+            default_image = _node_worker_default_image(ctx)
+            image = (
+                f"{default_image} (vendor default on OpenClaw {ctx.installed_dist_version})"
+                if default_image
+                else "OpenClaw's own default image for the installed build"
+            )
         return _finding(
             "B391",
             PASS,

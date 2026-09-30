@@ -2,8 +2,10 @@
 
 The claim is deliberately narrow: the strict config schema rejects the file, so
 `openclaw config validate` and CLI commands that load it report it invalid until
-`openclaw doctor --fix` runs. Nothing here asserts gateway behaviour -- that was measured on
-one build only, and the gateway repairs a legacy file itself in the common case.
+`openclaw doctor --fix` runs. The verdict and `detail` assert nothing about gateway
+behaviour. Only the `fix` advice says who repairs the file, and it is version-aware
+(C-645): through 2026.9.6 the gateway repaired a legacy file itself in memory (except
+behind an `$include`); from 2026.9.7 startup repairs nothing and only Doctor does.
 
 Two layers, matching test_b700: always-on behaviour tests, and a LOCAL-ONLY oracle that
 EXECUTES the installed root schema over every key in the shipped table. A key the vendor
@@ -23,7 +25,11 @@ from test_b700_version_aware_advice import RETIRED_IN_2026_8_1, RETIRED_IN_2026_
 import clawseccheck.checks as C
 from clawseccheck.catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks._config import check_retired_config_keys_invalid
-from clawseccheck.checks._shared import _RETIRED_CONFIG_KEYS, _retired_keys_present
+from clawseccheck.checks._shared import (
+    _RETIRED_CONFIG_KEYS,
+    _STARTUP_REPAIR_REMOVED_MIN,
+    _retired_keys_present,
+)
 from clawseccheck.collector import Context, collect
 from clawseccheck.configloader import load_openclaw_config
 
@@ -144,6 +150,106 @@ def test_fixtures():
         assert f.status == want, (name, f.detail)
 
 
+# ----------------------------------------- C-645: tools.toolSearch.codeTimeoutMs (2026.9.7)
+
+_TOOLSEARCH = {"tools": {"toolSearch": {"codeTimeoutMs": 5000}}}
+NEW_BUILD = "2026.9.7"
+PRE_REMOVAL_BUILD = "2026.9.6"
+
+
+def test_code_timeout_key_warns_on_2026_9_7_and_names_the_key():
+    f = _run(_TOOLSEARCH, NEW_BUILD)
+    assert f.status == WARN
+    assert f.evidence == ["tools.toolSearch.codeTimeoutMs"]
+    assert "tools.toolSearch.codeTimeoutMs (removed)" in f.detail
+
+
+def test_code_timeout_key_is_quiet_on_the_last_build_that_still_accepts_it():
+    # EXECUTED against the extracted 2026.9.6 package's root zod schema: accepted.
+    f = _run(_TOOLSEARCH, PRE_REMOVAL_BUILD)
+    assert f.status == PASS
+    assert "codeTimeoutMs" not in f.detail
+
+
+def test_code_timeout_key_unknown_build_is_not_adverse():
+    f = _run(_TOOLSEARCH, None)
+    assert f.status == PASS
+    assert f.pass_confidence == "no_signal"
+
+
+def test_live_toolsearch_siblings_are_not_flagged_on_2026_9_7():
+    # `enabled` is accepted by both 2026.9.6 and 2026.9.7 (control for the measured reject).
+    cfg = {"tools": {"toolSearch": {"enabled": True}}}
+    assert _run(cfg, NEW_BUILD).status == PASS
+
+
+def test_code_timeout_key_behind_include_warns_the_same(tmp_path):
+    _write(tmp_path / "fragment.json5", '{"tools": {"toolSearch": {"codeTimeoutMs": 5000}}}')
+    _write(tmp_path / "openclaw.json", '{"$include": "./fragment.json5"}')
+    cfg = load_openclaw_config(tmp_path / "openclaw.json", root_byte_limit=5_000_000)
+    assert _run(cfg, NEW_BUILD).evidence == ["tools.toolSearch.codeTimeoutMs"]
+
+
+# ------------------------------------- C-645: the repair advice names who repairs the file
+#
+# The `fix` text used to say "A config that uses $include may be refused automatic repair",
+# grounded on the gateway's startup self-heal. 2026.9.7 removed that self-heal, so on that
+# build the sentence described something that no longer runs. It must say what is TRUE
+# there -- startup repairs nothing, Doctor does, and Doctor's own automatic preflight repair
+# may decline an $include config -- and keep the original wording for every other build.
+
+_OLD_INCLUDE_HEDGE = "A config that uses $include may be refused automatic repair"
+_NEW_STARTUP_SENTENCE = "does not repair a legacy config at startup"
+
+
+def test_fix_on_2026_9_7_says_startup_no_longer_repairs_and_doctor_does():
+    f = _run({"commands": {"useAccessGroups": False}}, NEW_BUILD)
+    assert f.status == WARN
+    assert _NEW_STARTUP_SENTENCE in f.fix
+    assert "only Doctor does" in f.fix
+    assert "openclaw doctor --fix" in f.fix
+    assert "config validate" in f.fix
+    # the include caveat survives, scoped to Doctor's own automatic preflight repair
+    assert "$include" in f.fix
+    assert "Doctor's automatic preflight repair" in f.fix
+    # ... and the sentence that described the removed startup self-heal is gone
+    assert _OLD_INCLUDE_HEDGE not in f.fix
+
+
+def test_fix_on_older_builds_keeps_the_original_include_hedge():
+    for installed in (MODERN, PRE_REMOVAL_BUILD):
+        f = _run({"commands": {"useAccessGroups": False}}, installed)
+        assert f.status == WARN
+        assert _OLD_INCLUDE_HEDGE in f.fix, installed
+        assert _NEW_STARTUP_SENTENCE not in f.fix, installed
+
+
+def test_the_repair_advice_lives_in_fix_and_detail_is_identical_across_builds():
+    # baseline.fingerprint() hashes `detail`: moving the sentence there would orphan a
+    # user's .clawseccheckignore entry. Same key, same detail wording on 2026.9.6 and 2026.9.7
+    # apart from the build number the sentence quotes.
+    cfg = {"commands": {"useAccessGroups": False}}
+    old = _run(cfg, PRE_REMOVAL_BUILD).detail
+    new = _run(cfg, NEW_BUILD).detail
+    assert new == old.replace(PRE_REMOVAL_BUILD, NEW_BUILD)
+    assert "startup" not in new.lower()
+
+
+def test_fix_advice_keeps_the_no_gateway_claim_vocabulary_out_of_detail_and_fix():
+    cfg = {"commands": {"useAccessGroups": False}}
+    for installed in (MODERN, NEW_BUILD):
+        f = _run(cfg, installed)
+        blob = (f.detail + " " + f.fix).lower()
+        for phrase in _BANNED:
+            assert phrase not in blob, (installed, phrase)
+
+
+def test_repair_removal_constant_is_the_2026_9_7_boundary():
+    assert _STARTUP_REPAIR_REMOVED_MIN == (2026, 9, 7)
+    # and it is the same build that retired the toolSearch key, measured on the same day
+    assert _RETIRED_CONFIG_KEYS["tools.toolSearch.codeTimeoutMs"][1] == _STARTUP_REPAIR_REMOVED_MIN
+
+
 # ------------------------------------------------------- C-577: $include invariance
 #
 # F-184 deliberately left open whether the collector needs to know an `$include` is
@@ -192,31 +298,73 @@ def test_retired_key_as_an_include_sibling_still_warns(tmp_path):
     assert f.evidence == ["commands.useAccessGroups"]
 
 
-# ---------------------------------------- C-577: dist grounding for the repair hedge
+# ---------------------------------------- C-577 / C-645: dist grounding for the repair hedge
 #
-# `check_retired_config_keys_invalid`'s `fix` text hedges: "a config that uses $include
-# may be refused automatic repair, so run the command explicitly." That line shipped in
-# 10d766a with no citation. Pin the vendor mechanism it describes so a future dist
-# rotation that changes this behaviour is caught here rather than leaving the hedge to
-# quietly go stale: the installed build's own automatic-startup config repair refuses to
-# run whenever an `$include` is present anywhere in the config.
+# `check_retired_config_keys_invalid`'s `fix` text says who repairs a legacy file, and the
+# answer changed between 2026.9.6 and 2026.9.7:
+#
+#   through 2026.9.6  the gateway's pre-bootstrap step ran `resolveStartupConfigSnapshot`
+#                     and repaired the file IN MEMORY -- except behind an `$include`, where
+#                     `admitAutomaticConfigRepairSnapshot` declined. That is where the
+#                     "$include may be refused automatic repair" hedge came from (10d766a).
+#   from 2026.9.7     `resolveStartupConfigSnapshot` is declared nowhere; startup validates
+#                     without rewriting ("legacy imports and repair receipts belong to
+#                     Doctor") and only Doctor's own preflight calls the repair planner.
+#
+# The first version of this pin globbed `automatic-startup-config-repair-*.mjs` and went red
+# when 2026.9.7 renamed the file. Re-globbing the new name alone would have turned it green
+# while pinning a claim -- the gateway-run bootstrap wires the gate -- that is FALSE on
+# 2026.9.7. So the pin is re-grounded twice: the gate's body (located by SYMBOL, in either
+# spelling of the file name), and the WIRING, asserted in both directions against
+# `_STARTUP_REPAIR_REMOVED_MIN` so the constant cannot drift from the vendor.
 
 
 def test_automatic_repair_gate_still_declines_on_include_present():
     require_dist()
     path = dist_file(
-        "automatic-startup-config-repair-*.mjs",
+        "automatic-*config-repair-*.mjs",
         symbol="admitAutomaticConfigRepairSnapshot",
-        contains="admitAutomaticConfigRepairSnapshot",
+        contains="function admitAutomaticConfigRepairSnapshot",
     )
     text = path.read_text(encoding="utf-8", errors="replace")
     assert "containsConfigIncludeDirective" in text
     assert "includedPaths" in text
 
 
+def test_startup_wiring_matches_the_removal_constant():
+    """`_STARTUP_REPAIR_REMOVED_MIN` says startup repair is gone from 2026.9.7. Ask the
+    installed dist: the bootstrap references the startup-repair resolver exactly when the
+    installed build is OLDER than the constant, and never when it is at or above it. On a
+    build at or above it, also read what replaced it: the startup preflight leaves legacy
+    repair to Doctor, and the repair planner is committed from Doctor's flow."""
+    require_dist()
+    installed = _installed_tuple()
+    assert installed is not None, "could not read the installed OpenClaw version"
+    bootstrap = dist_file(
+        "pre-bootstrap-*.mjs",
+        symbol="prepareGatewayRunBootstrap (the gateway-run bootstrap)",
+        contains="function prepareGatewayRunBootstrap",
+    ).read_text(encoding="utf-8", errors="replace")
+    wired = "resolveStartupConfigSnapshot" in bootstrap
+    assert wired == (installed < _STARTUP_REPAIR_REMOVED_MIN), (installed, wired)
+    if installed >= _STARTUP_REPAIR_REMOVED_MIN:
+        preflight = dist_file(
+            "startup-config-preflight-*.mjs",
+            symbol="runStartupConfigPreflight",
+            contains="function runStartupConfigPreflight",
+        ).read_text(encoding="utf-8", errors="replace")
+        assert "legacy imports and repair receipts belong to Doctor" in preflight
+        doctor = dist_file(
+            "doctor-config-flow-*.mjs",
+            symbol="commitAutomaticConfigRepair (Doctor's preflight caller)",
+            contains="commitAutomaticConfigRepair",
+        ).read_text(encoding="utf-8", errors="replace")
+        assert "planAutomaticConfigRepair" in doctor
+
+
 # --------------------------------------------------- single table, two guards
 
-def test_package_table_is_the_b700_tables_plus_the_measured_ssrf_key():
+def test_package_table_is_the_b700_tables_plus_the_measured_ssrf_and_toolsearch_keys():
     by_min = {}
     for key, (repl, minb) in _RETIRED_CONFIG_KEYS.items():
         by_min.setdefault(minb, {})[key] = repl
@@ -224,8 +372,15 @@ def test_package_table_is_the_b700_tables_plus_the_measured_ssrf_key():
     assert by_min[(2026, 9, 3)] == RETIRED_IN_2026_9_3
     assert by_min[(2026, 9, 1)] == {
         "browser.ssrfPolicy.hostnameAllowlist": "browser.ssrfPolicy.allowedHostnames"}
-    assert len(_RETIRED_CONFIG_KEYS) == 13
+    # C-645: 2026.9.7 dropped `tools.toolSearch.codeTimeoutMs` ("Tool Search no longer
+    # executes code"); removed outright, no replacement key.
+    assert by_min[(2026, 9, 7)] == {"tools.toolSearch.codeTimeoutMs": None}
+    assert len(_RETIRED_CONFIG_KEYS) == 14
     assert "marketplaces" not in _RETIRED_CONFIG_KEYS
+    # only the KEY is listed: `tools.toolSearch.mode: "code"` is a retired VALUE, which a key
+    # table cannot express, and the live sibling `enabled` must never be in it
+    assert "tools.toolSearch.mode" not in _RETIRED_CONFIG_KEYS
+    assert "tools.toolSearch.enabled" not in _RETIRED_CONFIG_KEYS
 
 
 def test_helper_reads_only_the_installed_build():
@@ -282,3 +437,16 @@ def test_oracle_bites_on_a_still_valid_key():
     """Mutation control: a key the vendor accepts must be reported as accepted."""
     require_dist()
     assert _oracle(["logging.audit.enabled"])["logging.audit.enabled"] is True
+
+
+def test_toolsearch_sibling_control_is_accepted_and_the_retired_key_is_not():
+    """C-645 control pair for the 2026.9.7 row, in ONE oracle call: the live sibling
+    `tools.toolSearch.enabled` is accepted while `codeTimeoutMs` is rejected, so a schema
+    that simply rejected everything under `tools.toolSearch` could not pass this."""
+    require_dist()
+    installed = _installed_tuple()
+    assert installed is not None
+    got = _oracle(["tools.toolSearch.enabled", "tools.toolSearch.codeTimeoutMs"])
+    assert got["tools.toolSearch.enabled"] is True
+    assert got["tools.toolSearch.codeTimeoutMs"] is (
+        installed < _RETIRED_CONFIG_KEYS["tools.toolSearch.codeTimeoutMs"][1])

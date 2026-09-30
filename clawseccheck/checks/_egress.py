@@ -44,6 +44,9 @@ from ._shared import (
     _has_approval_gate,
     _hint,
     _KNOWN_EXFIL_HOST_RE,
+    _LEGACY_SSRF_ALIAS_970_FACT,
+    _LEGACY_SSRF_ALIAS_970_ORDER,
+    _legacy_ssrf_alias_startup_blocked,
     _mcp_has_remote,
     _mcp_servers,
     _mcp_url_is_local,
@@ -335,6 +338,10 @@ def check_browser_ssrf(ctx: Context) -> Finding:
               OR noSandbox == true). Either private-network flag is a CRITICAL-class primitive:
               private-network access enables cloud-metadata credential theft;
               no-sandbox means the headless browser can escape OS isolation.
+              The legacy alias stays a FAIL on every build (Dave, 2026-09-30, C-645) but its
+              WORDING is version-aware: through 2026.9.6 it is live today (startup repairs
+              it in memory); on 2026.9.7 and later the gateway will not start with it and
+              `openclaw doctor --fix` would turn it into a live bypass.
     WARN    - browser is configured but ssrfPolicy.allowedHostnames /
               ssrfPolicy.hostnameAllowlist (the runtime merges both into one combined
               allowlist -- B-515) are both absent/empty (open egress surface - the
@@ -371,7 +378,24 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         )
 
     ssrf_policy = browser.get("ssrfPolicy") if isinstance(browser.get("ssrfPolicy"), dict) else {}
-    # C-135 adversarial pass, 2026-09-16, grounded against the installed 2026.9.4 dist:
+    # C-645 (2026-09-30) -- READ THIS FIRST, the note below is the 2026.9.4-2026.9.6 story.
+    # 2026.9.7 REMOVED the boot-time self-heal it describes: `resolveStartupConfigSnapshot`
+    # is declared nowhere in the 2026.9.7 dist, pre-bootstrap's invalid-snapshot branch just
+    # returns, the startup preflight documents "legacy imports and repair receipts belong to
+    # Doctor" (startup-config-preflight-*.mjs), and an invalid config stops the gateway
+    # (config-guard-*.mjs, exit 78). The strict schema rejects the legacy key on 9.6 and 9.7
+    # alike (EXECUTED: `unrecognized_keys@browser.ssrfPolicy`), so on 2026.9.7+ a config
+    # carrying ONLY the legacy key is NOT a live bypass -- the gateway will not start with
+    # it. It is one Doctor run from live: Doctor's migration (doctor-config-flow-*.mjs)
+    # writes `dangerouslyAllowPrivateNetwork = legacy === true || current === true`, so a
+    # true legacy value wins even over an explicit `false`. Dave ruled (2026-09-30): keep
+    # FAIL, and make the wording version-aware -- the verdict is untouched; the detail and
+    # fix say "will not start / doctor would make it live" on 2026.9.7+ (a build we could
+    # not read keeps the original wording, conservatively). B38 and RISK-05/RISK-15 share
+    # `_LEGACY_SSRF_ALIAS_970_FACT` so they cannot drift.
+    #
+    # C-135 adversarial pass, 2026-09-16, grounded against the installed 2026.9.4 dist
+    # (STILL TRUE through 2026.9.6, superseded from 2026.9.7 by the note above):
     # the browser's own config resolver, resolveBrowserSsrFPolicy (config-Dc3xLSSD.mjs:
     # 117-130), ORs a LEGACY flat `allowPrivateNetwork` alias into
     # `dangerouslyAllowPrivateNetwork` before the browser ever uses the policy --
@@ -408,6 +432,9 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     dangerously_allow_private = ssrf_policy.get("dangerouslyAllowPrivateNetwork")
     legacy_allow_private = ssrf_policy.get("allowPrivateNetwork")
     allow_private = dangerously_allow_private is True or legacy_allow_private is True
+    # C-645: True only for a legacy `true` on a build KNOWN to have dropped the startup
+    # self-heal (2026.9.7+). Unknown build -> False -> the original (pre-9.7) wording.
+    legacy_startup_blocked = _legacy_ssrf_alias_startup_blocked(ctx, cfg)
     no_sandbox = browser.get("noSandbox")
     # B-515: the installed dist honours TWO sibling allowlist keys and merges them at
     # runtime -- allowedHostnames (current) and hostnameAllowlist (legacy/alternate).
@@ -426,10 +453,19 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             trigger_keys.append("dangerouslyAllowPrivateNetwork")
         if legacy_allow_private is True:
             trigger_keys.append("allowPrivateNetwork (legacy alias)")
-        fail_ev.append(
-            f"browser.ssrfPolicy.{'/'.join(trigger_keys)}=true \u2014 "
-            "agent browser can reach internal/metadata IPs (169.254.169.254 cloud-credential theft)"
-        )
+        if legacy_startup_blocked:
+            # C-645: the legacy key means this config does not start on this build, so
+            # "the browser can reach internal IPs" is not true TODAY -- say what is.
+            fail_ev.append(
+                f"browser.ssrfPolicy.{'/'.join(trigger_keys)}=true \u2014 retired key. "
+                f"{_LEGACY_SSRF_ALIAS_970_FACT}; once migrated, the agent browser can "
+                "reach internal/metadata IPs (169.254.169.254 cloud-credential theft)"
+            )
+        else:
+            fail_ev.append(
+                f"browser.ssrfPolicy.{'/'.join(trigger_keys)}=true \u2014 "
+                "agent browser can reach internal/metadata IPs (169.254.169.254 cloud-credential theft)"
+            )
     if no_sandbox is True:
         fail_ev.append(
             "browser.noSandbox=true \u2014 headless browser runs without OS sandbox "
@@ -444,7 +480,16 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             "(or the legacy browser.ssrfPolicy.hostnameAllowlist) to restrict which "
             "hosts the browser may reach."
         )
-        if legacy_allow_private is True:
+        if legacy_startup_blocked:
+            # C-645 (2026.9.7+): do NOT tell the reader to "run doctor --fix to migrate it"
+            # -- with the key still true that is exactly the step that makes it live.
+            fix += (
+                " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
+                f"same flag. {_LEGACY_SSRF_ALIAS_970_FACT}, so "
+                "dangerouslyAllowPrivateNetwork=false alone does not close this. "
+                f"{_LEGACY_SSRF_ALIAS_970_ORDER}"
+            )
+        elif legacy_allow_private is True:
             fix += (
                 " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
                 "same flag \u2014 OpenClaw ORs it into dangerouslyAllowPrivateNetwork before "

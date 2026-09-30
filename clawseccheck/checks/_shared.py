@@ -1348,6 +1348,14 @@ def _portal_model_version(ctx) -> str:
 # the dated note next to REJECTED_BY_2026_9_1 in test_b700_version_aware_advice.py for the
 # full readout). The table's 2026.9.1 floor was already right; 8.x is still unmeasured, so
 # the gate's lower bound is unchanged.
+#
+# C-645 (2026-09-30): `tools.toolSearch.codeTimeoutMs` left in 2026.9.7 ("Tool Search no
+# longer executes code"). EXECUTED, not read: the root zod schema's `safeParse` of
+# `{tools: {toolSearch: {codeTimeoutMs: 5000}}}` is ACCEPTED by the extracted 2026.9.6
+# package and REJECTED (`unrecognized_keys@tools.toolSearch`) by the installed 2026.9.7,
+# with a bogus sibling key rejected by both and the live sibling `enabled` accepted by
+# both as controls. Only the KEY is listed: the companion retirement of the VALUE
+# `tools.toolSearch.mode: "code"` is a value-level rule a key table cannot express.
 _RETIRED_CONFIG_KEYS = {
     "audit.enabled": ("logging.audit.enabled", (2026, 8, 1)),
     "gateway.nodes.allowCommands": ("gateway.nodes.commands.allow", (2026, 8, 1)),
@@ -1363,7 +1371,74 @@ _RETIRED_CONFIG_KEYS = {
     "browser.ssrfPolicy.hostnameAllowlist": ("browser.ssrfPolicy.allowedHostnames",
                                              (2026, 9, 1)),
     "skills.workshop.allowSymlinkTargetWrites": (None, _SYMLINK_KNOB_RETIRED_MIN),
+    "tools.toolSearch.codeTimeoutMs": (None, (2026, 9, 7)),
 }
+
+# C-645: 2026.9.7 removed the boot-time config self-heal. Through 2026.9.6 the gateway's
+# pre-bootstrap step ran `resolveStartupConfigSnapshot`, repaired a config the strict schema
+# rejected IN MEMORY (the same migrations `openclaw doctor` applies) and booted with the
+# result. From 2026.9.7 that function is declared nowhere: startup validates the current
+# config WITHOUT rewriting legacy keys, an invalid one is left unchanged and the gateway
+# stops (exit 78) with the `openclaw doctor --fix` hint. Read from the 2026.9.7 dist
+# (`startup-config-preflight-*.mjs`: "legacy imports and repair receipts belong to Doctor";
+# `config-guard-*.mjs`: exit 78 plus the doctor --fix hint) and consistent with its bundled
+# docs/gateway/doctor/config-migrations.md ("run Doctor before using legacy inputs"), NOT
+# executed end to end (no gateway was started against a legacy file). What still
+# exists is Doctor's own preflight repair (`planAutomaticConfigRepair`), which declines a
+# config that uses $include (`admitAutomaticConfigRepairSnapshot`, body unchanged).
+_STARTUP_REPAIR_REMOVED_MIN = (2026, 9, 7)
+
+
+def _startup_repair_removed(ctx) -> bool:
+    """True only when the INSTALLED build is known to have dropped the boot-time self-heal.
+
+    Reads ONLY ``ctx.installed_dist_version`` (the build that will actually start the
+    config), and answers False for an unknown or pre-release build: "we could not see the
+    build" keeps the pre-9.7 wording rather than asserting a fact about a build nobody
+    read. ``meta.lastTouchedVersion`` is deliberately NOT consulted -- it names the build
+    that last SAVED the file, and a downgrade since would make "the gateway refuses to
+    start" false for the reader.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    return installed is not None and installed >= _STARTUP_REPAIR_REMOVED_MIN
+
+
+# C-645, B38 / RISK-05 / RISK-15 (Dave, 2026-09-30: KEEP FAIL, version-aware wording).
+# The legacy flat `browser.ssrfPolicy.allowPrivateNetwork` alias is still a live SSRF bypass
+# on 2026.9.6 and earlier (the boot-time self-heal folds it into dangerouslyAllowPrivateNetwork
+# in memory), so those builds keep their original wording untouched. On 2026.9.7 and later it
+# is not live -- the strict schema rejects the key (EXECUTED: `unrecognized_keys@
+# browser.ssrfPolicy` on 2026.9.6 and 2026.9.7 alike) and nothing at startup repairs it, so
+# the gateway stops -- but it is one Doctor run from live: Doctor's migration
+# (`doctor-config-flow-*.mjs`, "Moved browser.ssrfPolicy.allowPrivateNetwork ->
+# dangerouslyAllowPrivateNetwork") sets the canonical key to `legacy === true || current ===
+# true`, so a true legacy value wins even over an explicit `dangerouslyAllowPrivateNetwork:
+# false`. The verdict is unchanged (FAIL); only the sentences that would otherwise assert
+# "the browser can reach internal IPs today" are corrected. The strings live HERE, once, so
+# B38, RISK-05 and RISK-15 cannot drift apart.
+_LEGACY_SSRF_ALIAS_970_FACT = (
+    "On OpenClaw 2026.9.7 and later the gateway will not start while the retired "
+    "browser.ssrfPolicy.allowPrivateNetwork key is present, and 'openclaw doctor --fix' "
+    "would migrate a true value into browser.ssrfPolicy.dangerouslyAllowPrivateNetwork=true "
+    "(even when that key is false), which is a live SSRF bypass"
+)
+_LEGACY_SSRF_ALIAS_970_ORDER = (
+    "Remove browser.ssrfPolicy.allowPrivateNetwork (or set it to false) BEFORE running "
+    "'openclaw doctor --fix'."
+)
+
+
+def _legacy_ssrf_alias_startup_blocked(ctx, cfg) -> bool:
+    """True when the legacy alias is literally ``true`` AND the installed build is known to
+    refuse it at startup (``_startup_repair_removed``).
+
+    ``is True`` -- not truthiness -- to match B38's own gate: no JS value other than the
+    boolean satisfies the runtime's ``=== true``. An unknown or pre-release build answers
+    False, so the pre-2026.9.7 wording is kept exactly for every reader whose build we did
+    not read.
+    """
+    return (dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
+            and _startup_repair_removed(ctx))
 
 
 def _has_key_path(cfg, dotted: str) -> bool:
@@ -1402,20 +1477,28 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
       `openclaw.json:<line>` citation prefix when the key resolves from a fragment, which
       is cosmetic (a *where*, never a *whether*). That is the schema-validity claim B382
       actually makes, and it is untouched by the file's shape either way.
-    * There IS a real, reproduced ``$include`` asymmetry, but at a layer B382 explicitly
-      disclaims: OpenClaw's own silent startup self-heal. The installed dist's
-      `admitAutomaticConfigRepairSnapshot` (`automatic-startup-config-repair-*.mjs`) --
-      wired into the real `gateway run` bootstrap path (`pre-bootstrap-*.mjs`) -- refuses
-      to engage whenever `containsConfigIncludeDirective(snapshot.parsed)` is true or any
-      include was actually resolved, so a plain `openclaw.json` with a retired key gets
-      silently auto-migrated and the gateway starts anyway, while the identical key behind
-      an ``$include`` leaves the gateway blocked on the same invalid config `config
-      validate` reports. This grounds (for the first time -- it shipped as an unverified
-      hedge in 10d766a) the existing `fix` text below: "a config that uses $include may be
-      refused automatic repair, so run the command explicitly". It is a fact about the
-      GATEWAY, which B382's own docstring already disclaims making any claim about, so it
-      changes no verdict here. See ``tests/test_f184_retired_key_config_invalid.py`` for
-      the ``$include``-invariance regression and the dist-grounding pin.
+    * There WAS a real, reproduced ``$include`` asymmetry on builds through 2026.9.6, at a
+      layer B382 explicitly disclaims: OpenClaw's own silent STARTUP self-heal. On those
+      builds `admitAutomaticConfigRepairSnapshot` (then `automatic-startup-config-repair-*.mjs`)
+      -- wired into the real `gateway run` bootstrap path (`pre-bootstrap-*.mjs`) via
+      `resolveStartupConfigSnapshot` -- refused to engage whenever
+      `containsConfigIncludeDirective(snapshot.parsed)` was true or any include was actually
+      resolved, so a plain `openclaw.json` with a retired key was silently auto-migrated in
+      memory and the gateway started anyway, while the identical key behind an ``$include``
+      left the gateway blocked on the same invalid config `config validate` reports. That
+      grounded the pre-9.7 `fix` text: "a config that uses $include may be refused
+      automatic repair, so run the command explicitly".
+    * C-645: that startup self-heal is GONE from 2026.9.7 (see
+      ``_STARTUP_REPAIR_REMOVED_MIN``). Startup no longer repairs legacy keys for any
+      config, ``$include`` or not; the only repair left is Doctor's own preflight
+      (`planAutomaticConfigRepair`, called from `doctor-config-flow-*.mjs`), which still
+      declines a config that uses ``$include`` (`admitAutomaticConfigRepairSnapshot`, same
+      body, now in `automatic-config-repair-*.mjs`). So on 2026.9.7 and later the `fix` text
+      says that startup does not repair a legacy file (only Doctor does, so a restart will
+      not fix it), and keeps an ``$include`` caveat scoped to Doctor's automatic repair. Both remain facts about the GATEWAY/Doctor, which
+      B382's own docstring disclaims making any claim about, so neither changes a verdict
+      here. See ``tests/test_f184_retired_key_config_invalid.py`` for the
+      ``$include``-invariance regression and the dist-grounding pin.
 
     Decision: no ``$include``-presence field is added to ``Context``. A separate, unstarted
     piece of work also touches ``collector.py``, but in the skill-content language-routing
@@ -1733,9 +1816,21 @@ def _resolve_sandbox_scope(agent_sandbox: dict, default_sandbox: dict) -> str:
         if (typeof params.perSession === "boolean") return params.perSession ? "session" : "shared";
         return "agent";
 
+    C-645: the legacy boolean ``sandbox.perSession`` is DEAD on OpenClaw 2026.9.7 and later.
+    That build's resolver passes only ``scope`` (``resolveSandboxScope({scope:
+    agentSandbox?.scope ?? agent?.scope})``, ``config-*.mjs``) -- the ``perSession`` argument
+    quoted above is 2026.9.6 and earlier. The strict schema rejects a config carrying it on
+    both (executed: ``unrecognized_keys@agents.defaults.sandbox`` on 2026.9.6 and 2026.9.7),
+    but through 2026.9.6 the gateway's boot-time self-heal migrated such a file in memory and
+    ran it; from 2026.9.7 nothing at startup does (``_STARTUP_REPAIR_REMOVED_MIN``) and
+    Doctor's pre-June-keys gate (``assertPreJuneConfigMigrated``) hard-fails on it, so the
+    file cannot run there. The ``perSession`` branch below is kept unchanged, as behaviour:
+    it is only a 2026.9.6-and-earlier semantic, and on 2026.9.7 it can only fire for a file
+    that build will not run. Do not read it as live 2026.9.7 semantics.
+
     Used to gate the per-agent ``docker.network`` AND ``docker.binds`` checks (FP2 round
     4, widened to ``network`` by B-673): under ``scope: "shared"`` (or the legacy boolean
-    ``perSession: false``, at either level), OpenClaw discards this agent's OWN
+    ``perSession: false``, at either level, through 2026.9.6), OpenClaw discards this agent's OWN
     ``sandbox.docker`` object ENTIRELY (``scopedAgentDocker = scope === "shared" ? void 0
     : agentSandbox?.docker``, symbol ``scopedAgentDocker``, dist/config-*.js:150 - symbol
     re-verified present in openclaw@2026.9.1, line read on 2026.8.2) before

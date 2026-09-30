@@ -56,6 +56,8 @@ _JSONL_SCAN_CAP
 _KNOWN_ADVISORIES
 _KNOWN_EXFIL_HOST_RE
 _KNOWN_NAMES
+_LEGACY_SSRF_ALIAS_970_FACT
+_LEGACY_SSRF_ALIAS_970_ORDER
 _LoopbackHostSet
 _MCP_BROAD_FS_ROOTS
 _MCP_CONN_STRING_CREDENTIAL_RE
@@ -157,6 +159,7 @@ _is_posix
 _is_wildcard_allow_entry
 _key_advice
 _layer_exec_policy
+_legacy_ssrf_alias_startup_blocked
 _levenshtein
 _literal_key_functional
 _local_sink_exfil_hits
@@ -200,6 +203,7 @@ _secret_paths
 _skill_declared_tools
 _skill_frontmatter_block
 _squat_hits
+_startup_repair_removed
 _suspicious_pipe_hosts
 _tool_id_sources
 _tool_policy_view
