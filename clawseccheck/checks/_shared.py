@@ -2567,8 +2567,12 @@ def _mention_gate_scopes(node: dict) -> list:
 _MAX_WALK_DEPTH = 100
 
 
-def _secret_paths(obj, prefix="", depth=0) -> list[str]:
-    """Dotted paths of secret-bearing keys holding a non-trivial string (no values)."""
+def _secret_paths(obj, prefix="", depth=0, min_len=16) -> list[str]:
+    """Dotted paths of secret-bearing keys holding a non-trivial string (no values).
+
+    ``min_len`` is 16 for B1's count (a shorter value is likely a placeholder);
+    ``--incident`` calls it with 1 to inventory short values too.
+    """
     found = []
     if depth >= _MAX_WALK_DEPTH:
         return found
@@ -2577,16 +2581,16 @@ def _secret_paths(obj, prefix="", depth=0) -> list[str]:
             path = f"{prefix}.{k}" if prefix else k
             if (
                 isinstance(v, str)
-                and len(v) >= 16
+                and len(v) >= min_len
                 and SECRET_KEY_RE.search(k)
                 and not _is_secret_reference(v)
             ):
                 found.append(path)
             else:
-                found.extend(_secret_paths(v, path, depth + 1))
+                found.extend(_secret_paths(v, path, depth + 1, min_len))
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
-            found.extend(_secret_paths(v, f"{prefix}[{i}]", depth + 1))
+            found.extend(_secret_paths(v, f"{prefix}[{i}]", depth + 1, min_len))
     return found
 
 
