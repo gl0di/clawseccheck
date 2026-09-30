@@ -4,7 +4,8 @@ This module never writes, never makes a network call, and imports nothing beyond
 stdlib - but "reads only config and bootstrap files" undersells its real scope, which
 every check needs to draw on. The ``LIMIT_DOMAIN_*`` constants below name every domain
 it reads from: ``~/.openclaw/openclaw.json``, workspace bootstrap markdown, installed
-skill/plugin text, the cron job store, exec-approvals state, the OpenClaw dotenv files
+skill/plugin text, the cron job store, exec-approvals state (the legacy JSON file and its
+SQLite successor), the OpenClaw dotenv files
 and systemd ``EnvironmentFile=`` lines, subagent-run and audit-event trails. Each read
 is bounded (size caps, no execution of anything read) - see the individual
 ``_collect_*`` functions and ``SECURITY_MODEL.md`` for the full, itemized capability
@@ -210,6 +211,11 @@ _MAX_CRON_RUN_LOGS = 500
 # read-only and size/entry-capped the same way as the cron store above.
 _MAX_EXEC_APPROVALS_BYTES = _MAX_CONFIG_BYTES
 _MAX_EXEC_APPROVALS_AGENTS = 200
+# Current OpenClaw builds keep the SAME document as one row of the state database's
+# `exec_approvals_config` table (src/infra/exec-approvals-sqlite.ts:
+# EXEC_APPROVALS_CONFIG_KEY = "current"); the legacy file above is then only a pending
+# import. Both readers share the cap constants above and one ingest helper.
+_EXEC_APPROVALS_SQLITE_KEY = "current"
 
 # F-192: `update_runs` is one row per self-update attempt (chat/control-ui/cli/campaign/
 # mac-app/api triggered) -- a far rarer event than a cron tick, so a generous cap that
@@ -912,16 +918,29 @@ class Context:
     # declared digest (`sha256`) -- an in-progress (uncommitted) upload legitimately
     # has a partial/absent actual_sha256, so only committed rows are counted.
     skill_uploads_digest_mismatch_count: int = 0
-    # B-236 (B172): standing exec-approvals.json grants, one dict per agent present in
-    # the store's `agents` map: {agent_id, security, ask, allow_always_count}. Populated
-    # regardless of whether allow_always_count is 0 -- the consuming check filters.
+    # B-236 (B172): standing exec-approvals grants (the legacy exec-approvals.json file
+    # AND/OR the `exec_approvals_config` row of the state database), one dict per agent
+    # present in a store's `agents` map: {agent_id, security, ask, allow_always_count,
+    # binary_wide_count, arg_restricted_count}, plus "store": "sqlite" when the entry came
+    # from the state database (absent for the JSON file). Populated regardless of whether
+    # allow_always_count is 0 -- the consuming check filters.
     exec_approvals_grants: list = field(default_factory=list)
-    exec_approvals_found: bool = False        # exec-approvals.json present and read
+    exec_approvals_found: bool = False        # any store present (or verified-empty) and attempted
     # B-831: the store's top-level `defaults` {security, ask} (str or None each) -- the
     # floor OpenClaw applies to every agent the `agents` map does not override. Empty
-    # when the file is absent or has no `defaults` object.
+    # when no store was read or it has no `defaults` object. The state database is read
+    # FIRST and wins: it is the canonical store on current builds.
     exec_approvals_defaults: dict = field(default_factory=dict)
-    exec_approvals_parse_error: bool = False  # present but could not be parsed/read
+    exec_approvals_parse_error: bool = False  # a PRESENT store could not be parsed/read in full
+    # The state database's exec_approvals_config table was read (a `current` row parsed,
+    # or the table holds no row -- OpenClaw itself treats an absent row as "empty
+    # approvals"). False when the DB or the table is absent (older build) or unreadable.
+    exec_approvals_sqlite_read: bool = False
+    # The state database's exec-approvals store is PRESENT but could not be read in full
+    # (unknown schema, view/virtual-table masquerade, unreadable DB, over the byte cap,
+    # not valid JSON). Distinguishes that failure from a legacy-JSON one; both set
+    # `exec_approvals_parse_error`.
+    exec_approvals_sqlite_unreadable: bool = False
     # B-240 (B177): OpenClaw's OWN persisted per-plugin ClawHub trust verdict, read from
     # the installed_plugin_index.install_records_json column in the shared state SQLite DB
     # (~/.openclaw/state/openclaw.sqlite) -- OR, since OpenClaw's state-consolidation-v13
@@ -6551,9 +6570,242 @@ def _collect_skill_library_state(home: Path, ctx: Context) -> None:
         conn.close()
 
 
+def _ingest_exec_approvals_document(
+    store: dict, ctx: Context, where: str, store_tag: "str | None"
+) -> None:
+    """Tally one parsed exec-approvals document into ``ctx`` (shared by BOTH stores).
+
+    *store* is the decoded ``{version, socket, defaults, agents}`` document -- the SAME
+    shape whether it came from the legacy ``exec-approvals.json`` file or from the
+    ``raw_json`` column of the state database's ``exec_approvals_config`` row
+    (``serializeExecApprovals`` in src/infra/exec-approvals-sqlite.ts writes one string
+    for both). *where* is the already-quoted store label used in limit disclosures.
+    *store_tag* is ``None`` for the legacy file (its grant dicts stay byte-identical to
+    what they always were) and ``"sqlite"`` for the state database.
+
+    Only counts, tier strings and agent ids are retained on ``ctx``: the document also
+    carries ``socket.token`` and allowlist ``pattern`` text, which never leave this frame.
+    """
+    agents = store.get("agents")
+    if not isinstance(agents, dict):
+        agents = {}
+    ctx.exec_approvals_found = True
+    defaults = store.get("defaults")
+    # The state database is ingested FIRST and is canonical on current builds, so a
+    # later (legacy-file) document never overwrites the tiers it already set.
+    if isinstance(defaults, dict) and not ctx.exec_approvals_defaults:
+        ctx.exec_approvals_defaults = {
+            key: defaults.get(key) if isinstance(defaults.get(key), str) else None
+            for key in ("security", "ask")
+        }
+    # B-657: this cap had NO disclosure at all -- unlike the byte-size cap, a store under
+    # the byte cap but with more than _MAX_EXEC_APPROVALS_AGENTS agents parsed fine, and
+    # every agent past the cap was silently never scanned for a standing "allow-always"
+    # grant.
+    if len(agents) > _MAX_EXEC_APPROVALS_AGENTS:
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
+            f"exec-approvals store {where} has {len(agents)} agent(s) \u2014 only the "
+            f"first {_MAX_EXEC_APPROVALS_AGENTS} were scanned for standing grants",
+        )
+    for agent_id, agent in list(agents.items())[:_MAX_EXEC_APPROVALS_AGENTS]:
+        if not isinstance(agent, dict):
+            continue
+        allowlist = agent.get("allowlist")
+        allow_always_count = 0
+        # C-430: split the count by entry SHAPE, not just tallied. Grounded against
+        # the installed dist (exec-approvals-allowlist*.js's buildArgPatternFromArgv/
+        # buildScriptArgPatternFromArgv): both return `undefined` on every non-Windows
+        # platform BY DESIGN, so a POSIX "always allow" click persists an entry with no
+        # `argPattern` key at all - and the matcher (exec-command-resolution*.js) reads
+        # a missing `argPattern` as a wildcard over argv. That is a materially different
+        # standing grant from one WITH an `argPattern` (Windows, or a future OpenClaw
+        # release) - "any arguments to this binary, forever" vs "this exact argv only" -
+        # and the old single tally could not tell a reader which they were looking at.
+        # A present-but-falsy `argPattern` (`""`/`null`) is treated the same as absent:
+        # the matcher's own check is `if (!entry.argPattern)`, so JS falsy is the real
+        # boundary, not merely "is the key present".
+        binary_wide_count = 0
+        arg_restricted_count = 0
+        if isinstance(allowlist, list):
+            for e in allowlist:
+                # `source` is matched as the exact literal, like the vendor's own
+                # normalizePersistedAllowlistSource (anything else becomes undefined);
+                # a bare-string allowlist entry is a manual pattern, never a grant.
+                if not (isinstance(e, dict) and e.get("source") == "allow-always"):
+                    continue
+                allow_always_count += 1
+                if e.get("argPattern"):
+                    arg_restricted_count += 1
+                else:
+                    binary_wide_count += 1
+        security = agent.get("security")
+        ask = agent.get("ask")
+        grant = {
+            "agent_id": agent_id if isinstance(agent_id, str) else str(agent_id),
+            "security": security if isinstance(security, str) else None,
+            "ask": ask if isinstance(ask, str) else None,
+            "allow_always_count": allow_always_count,
+            "binary_wide_count": binary_wide_count,
+            "arg_restricted_count": arg_restricted_count,
+        }
+        if store_tag is not None:
+            grant["store"] = store_tag
+        ctx.exec_approvals_grants.append(grant)
+
+
+def _collect_exec_approvals_sqlite(home: Path, ctx: Context) -> None:
+    """Read the exec-approvals store OpenClaw keeps in the shared state database.
+
+    Current OpenClaw builds no longer use ``~/.openclaw/exec-approvals.json`` (the runtime
+    refuses exec approvals while that file still exists -- ``assertNoPendingLegacyExecApprovals``
+    -- until ``openclaw doctor --fix`` imports it): the document lives in ONE row of
+    ``state/openclaw.sqlite``, table ``exec_approvals_config``, ``config_key = 'current'``.
+    Grounded against the installed dist (2026.9.7, state schema v19), located by symbol in
+    ``src/infra/exec-approvals-sqlite.ts``: ``EXEC_APPROVALS_CONFIG_KEY = "current"``,
+    ``readExecApprovalsConfigRow`` (``SELECT raw_json ... WHERE config_key = 'current'``),
+    ``snapshotFromExecApprovalsRow`` (an absent row means EMPTY approvals) and
+    ``projectionValues`` (the count columns tally ALL allowlist entries, and the persisted
+    ``source`` is only ever ``"allow-always"`` or absent -- so the projection columns cannot
+    answer B172's "how many standing allow-always grants" question).
+
+    ``raw_json`` is therefore parsed, IN MEMORY, for its counts only: exactly one column of
+    exactly one row is selected (no ``SELECT *``; ``socket_path``, the other columns, every
+    ``auth_profile_*`` table and ``config_health_entries`` are never touched), the document
+    never lands on ``ctx``, and no error text embeds it.
+
+    Outcomes, each distinct (collapsing them is the lying-clean this package exists to avoid):
+
+    * DB or table absent (older build)  -> nothing set; the legacy-file reader is the
+      fallback and, with neither store, the check reports UNKNOWN.
+    * table present, no ``current`` row -> ``exec_approvals_sqlite_read`` + ``found``: a
+      verified-empty store (the vendor treats an absent row as empty approvals).
+    * row parsed                         -> ingested via the shared helper, tagged "sqlite".
+    * anything else (a view / virtual table / rootpage alias standing in for the table,
+      an unknown column set, a document over the byte cap, invalid JSON, ``version`` other
+      than 1, ``agents`` of the wrong type, an unreadable DB) -> ``found`` +
+      ``parse_error`` + ``exec_approvals_sqlite_unreadable``: present and NOT read.
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``) after the B-908
+    non-regular-path refusal, the same pattern as ``_collect_config_machine_state``, and
+    deliberately WITHOUT ``immutable=1`` (B-909; it would hide rows still resident in the
+    WAL). Like every reader on this DB, ``mode=ro`` on a WAL-mode database may create or
+    rewrite the ``-shm``/``-wal`` sidecars; that is a property of SQLite, not of this reader.
+    """
+    state_dir = home / "state"
+    capped: list = []
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # A walk that stopped early is not the same fact as an empty state dir (GR#4).
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the exec-approvals store in it was not read"
+            )
+        return
+
+    def _unreadable(why: str) -> None:
+        # Content-free by construction: `why` is a fixed phrase or an exception TYPE name.
+        ctx.errors.append(f"could not read exec_approvals_config from {db_path}: {why}")
+        ctx.exec_approvals_found = True
+        ctx.exec_approvals_parse_error = True
+        ctx.exec_approvals_sqlite_unreadable = True
+
+    raw = None
+    row = None
+    try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            # BEGIN before the schema check, held open across it AND the read below --
+            # the same TOCTOU closure as _collect_config_machine_state (B-977).
+            conn.execute("BEGIN")
+            conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "exec_approvals_config")
+            if kind == "absent":
+                return  # older build: legacy file (or UNKNOWN) downstream
+            if kind != "table":
+                _unreadable(
+                    "the name did not resolve to a real table (found a view, virtual "
+                    "table, or other schema object instead)"
+                )
+                return
+            columns = {info[1] for info in conn.execute(
+                "PRAGMA table_info(exec_approvals_config)").fetchall()}
+            if not {"config_key", "raw_json"} <= columns:
+                _unreadable("the table does not have the expected columns")
+                return
+            row = conn.execute(
+                # ONE column of ONE row, bounded in BYTES (substr over a BLOB counts
+                # bytes; over TEXT it would count characters) and bound, not interpolated.
+                "SELECT substr(CAST(raw_json AS BLOB), 1, ?) FROM exec_approvals_config "
+                "WHERE config_key = ? LIMIT 1",
+                (_MAX_EXEC_APPROVALS_BYTES + 1, _EXEC_APPROVALS_SQLITE_KEY),
+            ).fetchone()
+            if row is not None:
+                raw = row[0]
+                if raw is None:
+                    _unreadable("the stored document is NULL")
+                    return
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        # A state DB predating the table is not a corrupt store -- the same quiet
+        # "absent" as the schema check above. Only a sqlite3 message is quoted (it names
+        # the file or the failure, never a row); anything else is reduced to its type.
+        if "no such table" not in str(exc).lower():
+            _unreadable(str(exc) if isinstance(exc, sqlite3.Error) else type(exc).__name__)
+        return
+
+    if row is None:
+        # The table exists and holds no `current` row: OpenClaw itself reads that as
+        # "empty approvals", so this is a verified-empty store, not an unread one.
+        ctx.exec_approvals_sqlite_read = True
+        ctx.exec_approvals_found = True
+        return
+    where = f"in state database '{db_path}'"
+    if len(raw) > _MAX_EXEC_APPROVALS_BYTES:
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
+            f"exec-approvals store {where} exceeded the "
+            f"{_MAX_EXEC_APPROVALS_BYTES // 1_000_000}MB cap \u2014 content beyond the "
+            "cap was NOT scanned",
+        )
+        _unreadable("the stored document is over the size cap")
+        return
+    try:
+        store = json.loads(bytes(raw).decode("utf-8", errors="replace"))
+    except (ValueError, RecursionError) as exc:
+        # JSONDecodeError's text is position-only, but only the type name is recorded.
+        _unreadable(f"the stored document is not valid JSON ({type(exc).__name__})")
+        return
+    version = store.get("version") if isinstance(store, dict) else None
+    if (
+        not isinstance(store, dict)
+        # the vendor schema is `version: literal(1)`; `true` is not 1 there
+        or ("version" in store and (isinstance(version, bool) or version != 1))
+        # `agents` is a record in the vendor schema: a wrong type is a malformed
+        # document, not "no agents" (which would be a false all-clear)
+        or ("agents" in store and not isinstance(store.get("agents"), dict))
+    ):
+        _unreadable("the stored document does not have the expected shape")
+        return
+    _ingest_exec_approvals_document(store, ctx, where, "sqlite")
+    ctx.exec_approvals_sqlite_read = True
+
+
 def _collect_exec_approvals(home: Path, ctx: Context) -> None:
-    """B-236 (B172): read-only collection of the standing OpenClaw exec-approvals
-    store (~/.openclaw/exec-approvals.json) into ``ctx.exec_approvals_grants``.
+    """B-236 (B172): read-only collection of the LEGACY OpenClaw exec-approvals file
+    (~/.openclaw/exec-approvals.json) into ``ctx.exec_approvals_grants``. Current builds
+    keep the same document in the state database instead -- that successor is
+    ``_collect_exec_approvals_sqlite`` (run first), and both feed
+    ``_ingest_exec_approvals_document``. This file is still read whenever it exists: it
+    is the only store on older builds, and a leftover file beside a canonical row is a
+    pending grant that ``openclaw doctor --fix`` would import.
 
     Grounded against the installed dist (exec-approvals-BIKWP8_V.js): the file is a
     single top-level JSON object (written by OpenClaw itself via JSON.stringify --
@@ -6581,12 +6833,14 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
     matching that helper's own symlink policy without walking the whole home tree just
     to find one top-level file.
 
-    ``ctx.exec_approvals_found`` stays False when the file is absent -- a consuming
+    ``ctx.exec_approvals_found`` stays False when NEITHER store exists -- a consuming
     check reports UNKNOWN, never a fake PASS (Golden Rule #4, the B-228 pattern).
     """
     target = home / "exec-approvals.json"
+    present = False
     try:
         skip = target.is_symlink() or not target.is_file()
+        present = skip and (target.is_symlink() or target.exists())
     except OSError as exc:
         # B-303: same class of exposure as _safe_is_dir/_safe_is_file - a non-traversable
         # ancestor (typically the whole home) must degrade this to "not found" (->
@@ -6594,6 +6848,19 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         ctx.errors.append(f"could not check '{target}': {exc}")
         skip = True
     if skip:
+        if present and ctx.exec_approvals_sqlite_read:
+            # Beside a state-database store that WAS read, a legacy path that exists but is
+            # not a regular file (a symlink, never followed) is a present-but-unread store:
+            # the runtime refuses exec approvals while that path exists, and Doctor would
+            # import whatever it points at. The state database's "no grant" must not stand
+            # alone as a clean bill. (With no state-database store, a skipped path keeps its
+            # historical meaning above: treated as absent.)
+            ctx.errors.append(
+                f"'{target}' exists but is not a regular file (never followed); the "
+                "legacy exec-approvals store was not read"
+            )
+            ctx.exec_approvals_found = True
+            ctx.exec_approvals_parse_error = True
         return
     try:
         with open(target, "rb") as fp:
@@ -6608,64 +6875,7 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         store = json.loads(raw.decode("utf-8", errors="replace"))
         if not isinstance(store, dict):
             raise ValueError("exec-approvals.json root is not a JSON object")
-        agents = store.get("agents")
-        if not isinstance(agents, dict):
-            agents = {}
-        ctx.exec_approvals_found = True
-        defaults = store.get("defaults")
-        if isinstance(defaults, dict):
-            ctx.exec_approvals_defaults = {
-                key: defaults.get(key) if isinstance(defaults.get(key), str) else None
-                for key in ("security", "ask")
-            }
-        # B-657: this cap had NO disclosure at all -- unlike the byte-size cap seven
-        # lines up, a store under the byte cap but with more than
-        # _MAX_EXEC_APPROVALS_AGENTS agents parsed fine, and every agent past the cap
-        # was silently never scanned for a standing "allow-always" grant.
-        if len(agents) > _MAX_EXEC_APPROVALS_AGENTS:
-            note_limit(
-                ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
-                f"exec-approvals store '{target}' has {len(agents)} agent(s) \u2014 only the "
-                f"first {_MAX_EXEC_APPROVALS_AGENTS} were scanned for standing grants",
-            )
-        for agent_id, agent in list(agents.items())[:_MAX_EXEC_APPROVALS_AGENTS]:
-            if not isinstance(agent, dict):
-                continue
-            allowlist = agent.get("allowlist")
-            allow_always_count = 0
-            # C-430: split the count by entry SHAPE, not just tallied. Grounded against
-            # the installed dist (exec-approvals-allowlist*.js's buildArgPatternFromArgv/
-            # buildScriptArgPatternFromArgv): both return `undefined` on every non-Windows
-            # platform BY DESIGN, so a POSIX "always allow" click persists an entry with no
-            # `argPattern` key at all - and the matcher (exec-command-resolution*.js) reads
-            # a missing `argPattern` as a wildcard over argv. That is a materially different
-            # standing grant from one WITH an `argPattern` (Windows, or a future OpenClaw
-            # release) - "any arguments to this binary, forever" vs "this exact argv only" -
-            # and the old single tally could not tell a reader which they were looking at.
-            # A present-but-falsy `argPattern` (`""`/`null`) is treated the same as absent:
-            # the matcher's own check is `if (!entry.argPattern)`, so JS falsy is the real
-            # boundary, not merely "is the key present".
-            binary_wide_count = 0
-            arg_restricted_count = 0
-            if isinstance(allowlist, list):
-                for e in allowlist:
-                    if not (isinstance(e, dict) and e.get("source") == "allow-always"):
-                        continue
-                    allow_always_count += 1
-                    if e.get("argPattern"):
-                        arg_restricted_count += 1
-                    else:
-                        binary_wide_count += 1
-            security = agent.get("security")
-            ask = agent.get("ask")
-            ctx.exec_approvals_grants.append({
-                "agent_id": agent_id if isinstance(agent_id, str) else str(agent_id),
-                "security": security if isinstance(security, str) else None,
-                "ask": ask if isinstance(ask, str) else None,
-                "allow_always_count": allow_always_count,
-                "binary_wide_count": binary_wide_count,
-                "arg_restricted_count": arg_restricted_count,
-            })
+        _ingest_exec_approvals_document(store, ctx, f"'{target}'", None)
     except (OSError, ValueError) as exc:
         ctx.errors.append(f"could not parse {target}: {exc}")
         ctx.exec_approvals_found = True
@@ -9018,6 +9228,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_agent_auth_profile_store_presence(home, ctx)  # B-845: same, per-agent DBs
     _collect_paired_devices_sqlite(home, ctx)  # B176: migrated devices/paired.json fallback
     _collect_cron(home, ctx)
+    _collect_exec_approvals_sqlite(home, ctx)  # canonical store first: its tiers win
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)
     _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)

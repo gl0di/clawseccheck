@@ -977,6 +977,19 @@ _B176_VIEW_MASQUERADE_DECOY = (
     "before any row is read), so both sites share this entry despite differing column "
     "counts. Never a real OpenClaw table name itself."
 )
+_C643_EXEC_APPROVALS_CONFIG_NOT_YET_SNAPSHOTTED = (
+    "exec_approvals_config, declared verbatim from the installed 2026.9.7 (state schema "
+    "v19) dist -- 11 columns, config_key TEXT NOT NULL PRIMARY KEY .. updated_at_ms, STRICT, "
+    "also byte-equal to the live table on this machine -- but classified LEGACY_TABLE, "
+    "not MODERN, for one reason only: the shipped snapshot (stamped 2026.9.6 / schema v18) "
+    "was generated before any reader in clawseccheck/ SELECTed from this table, so it does "
+    "not carry it, and the generator cannot yet be re-run against 2026.9.7 (its state-schema "
+    "version anchors disagree on that build). The vendor DOES declare the table "
+    "(tests/vendor_state_tables.txt lists it). THE NEXT SNAPSHOT REGENERATION WILL ADD IT, "
+    "and this entry must then be flipped to MODERN -- test_legacy_entries_still_differ_"
+    "from_the_snapshot fails on the stale LEGACY_TABLE label by design, which is what "
+    "makes the flip impossible to forget."
+)
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
     # source scanner sees. Pinned by a full fingerprint row at
@@ -1254,6 +1267,11 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b396_paired_node_skill_coverage.py:505": _Entry(
         LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
     ),
+
+    # ---- exec_approvals_config (B172 reads the state-database exec-approvals store) ----
+    "tests/test_c643_exec_approvals_sqlite_store.py:836": _Entry(
+        LEGACY_TABLE, _C643_EXEC_APPROVALS_CONFIG_NOT_YET_SNAPSHOTTED
+    ),
 }
 
 # B-889: +2 (69, was 67) -- round 1's view-masquerade decoy-table DDL site
@@ -1274,7 +1292,12 @@ _REGISTRY: "dict[str, _Entry]" = {
 # build the identical `decoy` table backing a VIEW named `device_pairing_paired` B176's
 # own tests already register above; new call sites, same _B176_VIEW_MASQUERADE_DECOY
 # reason. 78, was 76.
-assert len(_REGISTRY) == 78, f"registry has {len(_REGISTRY)} entries, expected 78"
+# B172 (exec-approvals store moved into the state database): +1 -- the vendor-shaped
+# `exec_approvals_config` DDL in tests/test_c643_exec_approvals_sqlite_store.py, registered
+# LEGACY_TABLE only because the shipped snapshot predates any reader of that table (see
+# _C643_EXEC_APPROVALS_CONFIG_NOT_YET_SNAPSHOTTED; flip to MODERN when the snapshot is next
+# regenerated). 79, was 78.
+assert len(_REGISTRY) == 79, f"registry has {len(_REGISTRY)} entries, expected 79"
 
 
 # ========================================================================================

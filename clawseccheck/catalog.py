@@ -1351,8 +1351,10 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="tools",
     ),
-    # B172 (B-236, re-scoped): inventory of standing ~/.openclaw/exec-approvals.json
-    # "allow-always" grants -- a persisted per-command exec approval that lives entirely
+    # B172 (B-236, re-scoped): inventory of standing exec-approvals "allow-always" grants
+    # (the legacy ~/.openclaw/exec-approvals.json file OR the exec_approvals_config table
+    # of the state database, which is where current builds keep the same document) --
+    # a persisted per-command exec approval that lives entirely
     # outside openclaw.json and, before this check, no check ever read (grep for
     # "exec-approvals" across clawseccheck/ was zero hits). Originally filed as a
     # suspected tools.exec gate BYPASS (a standing grant making B8/B22/B23/B48 give a
@@ -1371,7 +1373,7 @@ CATALOG: list[CheckMeta] = [
     # other check's verdict.
     CheckMeta(
         "B172",
-        "Standing exec-approvals.json allow-always grant (uninventoried persisted authority)",
+        "Standing exec-approvals allow-always grant (uninventoried persisted authority)",
         MEDIUM,
         "hardening",
         "Least Privilege / Exec Approvals",

@@ -2078,11 +2078,17 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
 
 
 def check_exec_approvals_grants(ctx: Context) -> Finding:
-    """B172 (B-236, re-scoped): inventory of standing exec-approvals.json "allow-always"
+    """B172 (B-236, re-scoped): inventory of standing exec-approvals "allow-always"
     grants.
 
-    ``~/.openclaw/exec-approvals.json`` is OpenClaw's persisted per-agent exec-approval
-    store (grounded against the dist: exec-approvals-BIKWP8_V.js). A historical "always
+    OpenClaw's persisted per-agent exec-approval store is ONE document (grounded against
+    the dist: exec-approvals-BIKWP8_V.js; src/infra/exec-approvals-sqlite.ts) that lives
+    in the ``exec_approvals_config`` table of ``~/.openclaw/state/openclaw.sqlite`` on
+    current builds and in ``~/.openclaw/exec-approvals.json`` on older ones (the runtime
+    refuses exec approvals while a leftover file still exists, until Doctor imports it).
+    The collector reads BOTH into the same ``ctx`` fields; the verdict is the UNION: a
+    grant in either store is a WARN, and a store that was present but unreadable can
+    never be turned into a PASS by the other one. A historical "always
     allow" click on an exec confirmation prompt writes a durable
     ``agents.<id>.allowlist[]`` entry with ``source: "allow-always"`` -- a standing,
     per-command exec grant living entirely outside openclaw.json that, before this
@@ -2100,11 +2106,17 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
     may have forgotten about), not a correctness fix for those checks.
 
     WARN    - at least one agent has 1+ "allow-always" allowlist entries: name them so
-              the user can review/revoke stale standing grants.
-    PASS    - the store was read and no agent has an "allow-always" entry (the common
-              case -- e.g. freshly-provisioned defaults/agents are both empty `{}`).
-    UNKNOWN - exec-approvals.json is absent (or a symlink, never followed), or was
-              found but could not be parsed/read; OR (B-657) the store parsed fine but
+              the user can review/revoke stale standing grants. Checked BEFORE the
+              unreadable-store branch: a grant found in a store that WAS read stands
+              even if the other store could not be read.
+    PASS    - a store was read and no agent has an "allow-always" entry (the common
+              case -- e.g. freshly-provisioned defaults/agents are both empty `{}`, or
+              the state database's table holds no row, which OpenClaw itself reads as
+              empty approvals).
+    UNKNOWN - NEITHER store exists (a symlinked legacy file is never followed, and a
+              state database without the table is an older build), or a present store
+              could not be parsed/read (unknown schema, a view standing in for the
+              table, invalid JSON, over the byte cap); OR (B-657) the store parsed fine but
               exceeded the collector's byte cap or its agent-count cap
               (``_MAX_EXEC_APPROVALS_AGENTS``) -- some agents/content were never
               scanned, so "no agent has a grant" cannot be said of the whole store. A
@@ -2119,7 +2131,7 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
     over argv. One click on a POSIX host therefore grants the binary with ANY
     arguments, durably -- for an argument-weaponizable binary (`git`, `tar`, `ssh`,
     `find`, `awk`, ...) that is a standing arbitrary-execution grant, not merely "this
-    binary is trusted". `collector._collect_exec_approvals` now splits each agent's
+    binary is trusted". `collector._ingest_exec_approvals_document` now splits each agent's
     tally into `binary_wide_count` (no `argPattern`) and `arg_restricted_count` (a real
     `argPattern`) so this check's evidence can say which kind a reader is looking at,
     instead of a bare number that reads the same either way. This is a pure disclosure
@@ -2137,48 +2149,85 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
     question this one answers, matching the task's own two-shape framing.
     """
     if not ctx.exec_approvals_found:
+        # Reached only when NEITHER store exists (the state database's table or row, or
+        # the legacy file), so the sentence stays literally true; its wording is left
+        # unchanged on purpose -- baseline.fingerprint() hashes `detail`.
         return _finding(
             "B172",
             UNKNOWN,
             "No exec-approvals.json store found at ~/.openclaw/exec-approvals.json \u2014 "
             "cannot determine whether any standing 'always allow' exec grants are "
             "persisted.",
-            "If exec approvals have ever been granted, ensure the store is "
-            "owner-readable so a future audit can inventory it.",
-        )
-    if ctx.exec_approvals_parse_error:
-        return _finding(
-            "B172",
-            UNKNOWN,
-            "exec-approvals.json was found but could not be parsed/read \u2014 cannot "
-            "determine whether any standing 'always allow' exec grants are persisted.",
-            "Fix the exec-approvals.json store so it is valid JSON and owner-readable, "
-            "then re-run the audit.",
+            "If exec approvals have ever been granted, ensure the store that holds them "
+            "(the OpenClaw state database, ~/.openclaw/state/openclaw.sqlite, or on older "
+            "builds ~/.openclaw/exec-approvals.json) is owner-readable so a future audit "
+            "can inventory them.",
         )
 
     grants = [g for g in ctx.exec_approvals_grants if g.get("allow_always_count")]
     if not grants:
+        if ctx.exec_approvals_parse_error:
+            if ctx.exec_approvals_sqlite_unreadable:
+                # The state database's store is present but was not read in full: an
+                # input this check expected to read turned out unreadable (B-399).
+                return _finding(
+                    "B172",
+                    UNKNOWN,
+                    "An exec-approvals store was found but could not be read in full "
+                    "\u2014 cannot determine whether any standing 'always allow' exec "
+                    "grants are persisted.",
+                    "Make sure the OpenClaw state database "
+                    "(~/.openclaw/state/openclaw.sqlite) and, if one still exists, "
+                    "~/.openclaw/exec-approvals.json are intact, regular files, "
+                    "owner-readable and of ordinary size, then re-run the audit.",
+                    engine_degraded=True,
+                )
+            return _finding(
+                "B172",
+                UNKNOWN,
+                "exec-approvals.json was found but could not be parsed/read \u2014 cannot "
+                "determine whether any standing 'always allow' exec grants are persisted.",
+                "Fix the exec-approvals.json store so it is valid JSON and owner-readable, "
+                "then re-run the audit.",
+            )
         # B-657: "no agent has a standing grant" is a claim about every agent the store
         # holds. exec_approvals_parse_error only catches a store that failed to parse at
         # all -- it does not catch a store that parsed FINE but exceeded the
         # collector's byte cap or agent-count cap (collector._collect_exec_approvals,
         # LIMIT_DOMAIN_APPROVALS), where the agents/content past the cap were never
-        # scanned. Same ordering as B6/B168: a WARN above (a grant found in what WAS
+        # scanned. Same ordering as B6/B168: a WARN below (a grant found in what WAS
         # scanned) stands regardless; only this verdict-by-absence degrades.
         if limit_hits_for(ctx, LIMIT_DOMAIN_APPROVALS):
+            store_read = ctx.exec_approvals_sqlite_read
             return _finding(
                 "B172",
                 UNKNOWN,
                 "No standing 'allow-always' exec grant found among the agents that WERE "
-                "scanned, but exec-approvals.json exceeded a collector size/count cap \u2014 "
+                "scanned, but "
+                + ("an exec-approvals store" if store_read else "exec-approvals.json")
+                + " exceeded a collector size/count cap \u2014 "
                 "some agents or content were never read, so a clean bill of health "
                 "cannot be given.",
+                "Keep the exec-approvals store under the collector's size cap, or prune "
+                "stale agent entries, then re-run the audit."
+                if store_read else
                 "Keep exec-approvals.json under the collector's size cap, or prune "
                 "stale agent entries, then re-run the audit.",
                 # C-135: present-but-unread agents (a real store the collector's own
                 # cap cut short), not a genuinely empty/absent store -- same
                 # Finding.engine_degraded contract as B6's identical branch above.
                 engine_degraded=True,
+            )
+        if ctx.exec_approvals_sqlite_read:
+            return _finding(
+                "B172",
+                PASS,
+                "The OpenClaw exec-approvals store in the state database was read and "
+                "no agent has a standing 'allow-always' exec grant.",
+                "Standing grants are created by clicking 'always allow' on an exec "
+                "confirmation prompt \u2014 avoid them for anything you would not want "
+                "run unattended.",
+                pass_confidence="verified",
             )
         return _finding(
             "B172",
@@ -2211,9 +2260,28 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
             line += f", security={g['security']}"
         if g.get("ask"):
             line += f", ask={g['ask']}"
+        if g.get("store") == "sqlite":
+            # Only the state-database source is tagged; legacy-file lines stay as they were.
+            line += " [state database]"
         evidence.append(line)
     ev_summary = "; ".join(evidence[:4])
     extra = f" (+{len(evidence) - 4} more)" if len(evidence) > 4 else ""
+    fix = (
+        "Review standing exec approvals with `openclaw approvals get`, then revoke any "
+        "'always allow' pattern that is no longer wanted with `openclaw approvals "
+        "allowlist remove \"<pattern>\"`"
+    )
+    if all(g.get("store") == "sqlite" for g in grants):
+        fix += "."
+    else:
+        fix += " (or inspect ~/.openclaw/exec-approvals.json directly)."
+    if ctx.exec_approvals_parse_error:
+        # The WARN above stands, but a present store was not read in full: the list is
+        # what the readable store(s) hold, not necessarily every standing grant.
+        fix += (
+            " Another exec-approvals store could not be read in full, so this list may "
+            "be incomplete."
+        )
     return _finding(
         "B172",
         WARN,
@@ -2222,10 +2290,7 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
         "openclaw.json tools.exec gate (OpenClaw always applies the stricter of the "
         "two), but they ARE a durable per-command exec authority that may have been "
         "forgotten.",
-        "Review standing exec approvals with `openclaw approvals get`, then revoke any "
-        "'always allow' pattern that is no longer wanted with `openclaw approvals "
-        "allowlist remove \"<pattern>\"` (or inspect ~/.openclaw/exec-approvals.json "
-        "directly).",
+        fix,
         evidence,
     )
 
