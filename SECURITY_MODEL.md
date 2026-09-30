@@ -511,8 +511,9 @@ scanner would stop tripping on the tool's own signature vocabulary - the detecti
 regexes, the `"child_process" in masked` logic, and every check's label/severity were
 left completely unchanged, and the full test suite stayed green throughout. The
 project's own `--vet` run against its own source (`clawseccheck --vet .`) reports this honestly rather than
-hiding it: a security tool necessarily ships attack signatures as data, and that is
-disclosed as a note, not papered over. That pass is repeated as new detector vocabulary
+hiding it: a security tool necessarily ships attack signatures as data, so `--vet` does not scan
+its own source - it says `CAUTION` / "NOT SCANNED" (exit `1`) and never clears it, because the
+folder is recognised by content that anyone can write. That is disclosed, not papered over. That pass is repeated as new detector vocabulary
 is added - it is a rewording sweep, not a one-time fix, so re-flag a specific new
 file:line if this note goes stale rather than assuming the class was never addressed.
 

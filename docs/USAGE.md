@@ -1628,6 +1628,9 @@ python3 audit.py --log audit.log            # also write log to a local file
   never makes about one package. Add `--json` for the machine-readable dossier (verdict + per-axis breakdown +
   findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
   CAUTION/DO-NOT-INSTALL so `--vet ... || fail` gates an install pipeline.
+  A folder that matches ClawSecCheck's **own-source layout** is **not scanned**, so it reads
+  `CAUTION` ("NOT SCANNED", exit `1`) - never `INSTALL`, in `--vet`, `--vet-skill`, `--advise`
+  and the `--json` `verdict` alike. See "Vetting the scanner itself" under Limitations.
   Below the axes the dossier may print a **`Not assessed`** block. It lists things the scan
   recognised but could not read - most often a match sitting inside a Markdown code fence
   carrying no example/negation marker the scanner knows, which is exactly where a payload can
@@ -2199,8 +2202,26 @@ hard false positives on real configs.
   sit outside them, in the separate read-only modules `sockets.py` and `deptree.py`.
 - **UNKNOWN is not PASS.** Unreadable files or unparseable configs are reported as
   UNKNOWN and excluded from the score, never silently marked safe.
-- **Vetting the scanner itself** (`--vet` pointed at ClawSecCheck's own source) reports
-  *safe with a note* - a security tool necessarily ships attack signatures as data.
+- **Vetting the scanner itself** (`--vet`, `--vet-skill` or `--advise` pointed at a folder that
+  has ClawSecCheck's own-source layout) reports `CAUTION` / **NOT SCANNED** and exits `1`. A
+  security tool necessarily ships attack signatures as data, so the scanner does not scan its
+  own source - and that also means a match is **not proof** the folder is the genuine
+  scanner. The layout is recognised by content (three engine definitions under
+  `clawseccheck/checks/`), and anyone can write those three definitions, or symlink a directory
+  that has them: such a folder is skipped whole, payload included. This is an accepted,
+  documented limit of a static scanner, not something a smarter rule can close. What you get
+  instead is an honest result: nothing in that folder was read, the verdict never clears it
+  (`CAUTION`, exit `1`), and a match reached through a **symlink** (the folder itself, its
+  `clawseccheck/` package, or an engine file) is a `WARN` that names the link. The genuine
+  scanner reads `CAUTION` too - that is the price of not trusting the match. Only rely on it if
+  it is the copy you installed from ClawHub or GitHub; if you did not expect a folder to be
+  ClawSecCheck, treat it as suspicious and review it by hand.
+  **In the audit** the same folder is skipped from the installed-skill content scan and listed
+  as "not graded" with the note that a match is a content heuristic, not proof - it is
+  informational (INFO) and does not change the score. **`--monitor`** raises no new-skill alert
+  for such a folder, because it diffs the installed-skill list the discovery step produced and
+  discovery skips it; the audit's note is where it stays visible. `--sbom` lists it under
+  `self_excluded_skills` and reports `complete: false`.
 
 **Found a false positive/negative or something confusing?** Open an issue at
 <https://github.com/gl0di/clawseccheck/issues> with the output of `clawseccheck --json`

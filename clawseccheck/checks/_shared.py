@@ -38,6 +38,7 @@ from ..collector import (  # noqa: F401
     _OWN_ENGINE_MARKERS,
     _OWN_SKILL_NAMES,
     _is_own_source,
+    _own_source_symlinks,
 )
 from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
 from ..safeio import walk_dir_safely

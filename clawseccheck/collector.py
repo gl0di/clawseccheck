@@ -4065,6 +4065,88 @@ def _own_engine_symbols_in_ast(tree: ast.AST) -> set:
     return found
 
 
+def _own_engine_sources(p: Path):
+    """C-636: the single layout test behind `_is_own_source` and `_own_source_symlinks`.
+
+    Returns ``None`` when `p` does not have ClawSecCheck's engine layout (or when its
+    engine directory cannot be listed), else ``(components, sources)``:
+
+    * ``components`` - ``[(label, path), ...]``: every path the layout test FOLLOWED to
+      reach the engine (the target itself, the package dir, the ``checks`` dir or
+      ``checks.py``, and each engine source), with `label` relative to `p` in posix form
+      (``"."`` for `p` itself);
+    * ``sources`` - the engine ``.py`` files whose text is parsed for the markers.
+
+    B-303: every is_dir()/is_file()/glob() below goes through the _safe_* helpers (or a
+    try/except) - a non-traversable *p* (e.g. an ancestor chmod 000) must answer "not
+    our own source", never crash the whole audit with an uncaught PermissionError.
+    Behaviour is byte-identical to the chain this replaced in `_is_own_source`.
+    """
+    if _safe_is_dir(p / "clawseccheck" / "checks"):  # repo root / install dir (package)
+        try:
+            sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
+        except OSError:
+            return None
+        spine = [("clawseccheck", p / "clawseccheck"),
+                 ("clawseccheck/checks", p / "clawseccheck" / "checks")]
+        base = p
+    elif _safe_is_file(p / "clawseccheck" / "checks.py"):  # repo root / install dir (legacy)
+        sources = [p / "clawseccheck" / "checks.py"]
+        spine = [("clawseccheck", p / "clawseccheck")]
+        base = p
+    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_dir(p / "checks"):  # package dir
+        try:
+            sources = sorted((p / "checks").glob("*.py"))
+        except OSError:
+            return None
+        spine = [("checks", p / "checks")]
+        base = p
+    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_file(p / "checks.py"):  # package dir (legacy)
+        sources = [p / "checks.py"]
+        spine = []
+        base = p
+    else:
+        return None
+    components = [(".", base), *spine]
+    for src in sources:
+        try:
+            label = src.relative_to(base).as_posix()
+        except ValueError:
+            label = src.name
+        components.append((label, src))
+    return components, sources
+
+
+def _own_source_symlinks(p: Path) -> list:
+    """C-636: the labels of every symlink on the path `_is_own_source` followed to
+    recognise `p` as ClawSecCheck's own engine (``[]`` when `p` is not own source, or when
+    no component is a link).
+
+    Recognition is by content, and a symlink lets a forger point `p` at a directory that
+    really has the engine (or the three stub definitions) while the rest of what the
+    caller thinks it is looking at lives elsewhere. A genuine ClawHub install is a real
+    directory copy, never a symlink, so a link here is worth a WARN in `--vet-skill`.
+
+    Only the identity components are lstat-ed (the target, the package dir, the checks
+    dir/file and each engine source) - never an ancestor, so a symlinked ``/tmp`` or
+    ``$HOME`` does not fire it. An ``OSError`` on one component means "cannot tell" for
+    that component only: it is skipped (never guessed to be a link, never a crash), and
+    the caller's base verdict - already "not scanned" - is unchanged either way.
+    """
+    layout = _own_engine_sources(p)
+    if layout is None:
+        return []
+    components, _sources = layout
+    found = []
+    for label, path in components:
+        try:
+            if path.is_symlink():
+                found.append(label)
+        except OSError:
+            continue
+    return found
+
+
 def _is_own_source(p: Path) -> bool:
     """True if `p` is ClawSecCheck's own source tree (repo root, install dir, or the
     package dir itself). A security auditor necessarily ships attack signatures and
@@ -4096,6 +4178,19 @@ def _is_own_source(p: Path) -> bool:
     a signed/attested identity, not a content heuristic. Separately, `check_installed_
     skills` is only one of the surfaces that sees a skill at all. Pinned by
     `tests/test_b846_self_source_axis_and_marker_forgery.py`.
+
+    C-636 (Dave, 2026-09-30: ACCEPTED, no further static-fix rounds): the same forgery
+    also works through a SYMLINK to any directory that has the three definitions, and a
+    real engine copy beside an arbitrary payload matches too (the whole target is
+    skipped, not only `clawseccheck/`). Nothing here tries to make the oracle smarter.
+    What changed is what a match MEANS to the callers: it is no longer "verified safe".
+    `--vet`/`--vet-skill`/`--advise` report B13 UNKNOWN (engine-degraded) - CAUTION,
+    "NOT SCANNED", exit 1 - and WARN when the engine identity is reached through a
+    symlink (`_own_source_symlinks`); the audit's self-excluded note says "treat it as
+    suspicious" (INFO, no score impact). Consequence, accepted: the GENUINE own source
+    also reads CAUTION under `--vet`. Pinned by
+    `tests/test_c636_own_source_identity_is_not_a_clean_bill.py`, which must flip only
+    by Dave's decision.
 
     RETRACTED APPROACHES (B-846 - do not reintroduce; each was tried and defeated by a
     C-135 reviewer, reproduced end-to-end against the real DO-NOT-INSTALL fixture
@@ -4133,26 +4228,13 @@ def _is_own_source(p: Path) -> bool:
     """
     # The engine is the checks/ package (current) or a legacy single-file checks.py.
     # Read every engine source so the markers are found regardless of which topic module
-    # the I-022 split scattered them into.
-    # B-303: every is_dir()/is_file()/glob() below goes through the _safe_* helpers (or a
-    # try/except) - a non-traversable *p* (e.g. an ancestor chmod 000) must answer "not
-    # our own source", never crash the whole audit with an uncaught PermissionError.
-    if _safe_is_dir(p / "clawseccheck" / "checks"):  # repo root / install dir (package)
-        try:
-            sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
-        except OSError:
-            return False
-    elif _safe_is_file(p / "clawseccheck" / "checks.py"):  # repo root / install dir (legacy)
-        sources = [p / "clawseccheck" / "checks.py"]
-    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_dir(p / "checks"):  # package dir
-        try:
-            sources = sorted((p / "checks").glob("*.py"))
-        except OSError:
-            return False
-    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_file(p / "checks.py"):  # package dir (legacy)
-        sources = [p / "checks.py"]
-    else:
+    # the I-022 split scattered them into. C-636: the layout choice lives in ONE helper
+    # (`_own_engine_sources`) that `_own_source_symlinks` shares, so the symlink warning
+    # can never describe a different set of files than the ones matched here.
+    layout = _own_engine_sources(p)
+    if layout is None:
         return False
+    _components, sources = layout
     heads = []
     for src in sources:
         try:

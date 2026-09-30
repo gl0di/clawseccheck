@@ -321,7 +321,8 @@ SENSITIVE_SUPPRESSED_IDS = frozenset({"B1", "B2", "B13", "B20"})
 SELF_EXCLUDED_NOTE = (
     "not graded -- ClawSecCheck's own installed copy is excluded from the "
     "installed-skill content scan; its ClawHub install integrity and provenance "
-    "(B135/B181/B184) are still checked"
+    "(B135/B181/B184) are still checked. A match is a content heuristic, not proof: "
+    "if you did not install ClawSecCheck under this name, treat it as suspicious"
 )
 
 #: The check ids named in :data:`SELF_EXCLUDED_NOTE`, for the guard that keeps the two in
@@ -6049,11 +6050,12 @@ def render_permission_manifest(ctx, target: str) -> str:
 
     if unprofilable and self_excluded:
         lines = header + [
-            "# this target is ClawSecCheck's own source -- self-scan is deliberately",
-            "# skipped (see its own B13 PASS reason: a security auditor's signature",
-            "# database would otherwise flag itself). This is NOT \"opaque/unparseable/",
-            "# no code\" -- point --emit-manifest at a different skill for a real",
-            "# capability profile.",
+            "# this target matched ClawSecCheck's own-source layout. Its self-scan is deliberately",
+            "# skipped, so NOTHING in it was scanned (see its B13 NOT SCANNED reason: a",
+            "# security auditor's signature database would otherwise flag itself, and a",
+            "# layout match is a content heuristic, not proof this is the genuine scanner).",
+            "# This is NOT \"opaque/unparseable/no code\" -- point --emit-manifest at a",
+            "# different skill for a real capability profile.",
             "unprofilable: true",
             "filesystem:",
             "  read: unknown",

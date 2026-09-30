@@ -371,11 +371,14 @@ def test_vet_skill_with_benign_data_file_drops_b154(tmp_path):
 
 def test_own_source_does_not_false_positive():
     """C-135: clawseccheck's own installed copy under ~/.openclaw must never WARN —
-    verified end-to-end via vet_skill's _is_own_source short-circuit."""
+    verified end-to-end via vet_skill's _is_own_source short-circuit. C-636: that skip
+    is reported as an engine-degraded UNKNOWN ("NOT SCANNED"), not a canned PASS, but it
+    is still never a WARN/FAIL and B154 never sees the tree."""
     own_root = Path(__file__).resolve().parent.parent
     f = vet_skill(own_root)
     assert f.id == "B13"
-    assert f.status == PASS
+    assert f.status == UNKNOWN
+    assert "NOT SCANNED" in f.detail
 
 
 def test_check_registered_in_content_ring():

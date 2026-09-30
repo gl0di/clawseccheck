@@ -880,15 +880,21 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # smarter guess: it is refusing to let the prose axes claim they read text they did not.
     assumed_encoding = tuple(sorted(set(getattr(ctx, "assumed_encoding_files", None) or [])))
     # B-777: `_is_own_source` (checks/_vet.py -> collector.py) short-circuits BEFORE any
-    # text or code is read, returning a single B13 PASS Finding and recording the
-    # resolved target's basename on ctx.self_excluded_skills - the same field report.py's
-    # --emit-manifest self-exclusion note already reads (B-786). Every axis past "danger"
-    # is therefore genuinely unmeasured on this path: not because no code exists (it
-    # does - this fires on ClawSecCheck's own ~7,000-line engine), but because scanning
-    # our own attack-signature database for malware signatures would self-flag by
-    # design. Without this, those axes fell through to `code_measurable=False` ->
-    # "no executable code to analyze" (build/behavior fell through to a bare PASS
-    # instead) - a false claim about the artifact (B-628) on top of an unearned PASS.
+    # text or code is read, returning a single B13 Finding and recording the resolved
+    # target's basename on ctx.self_excluded_skills - the same field report.py's
+    # --emit-manifest self-exclusion note already reads (B-786). Every axis is therefore
+    # genuinely unmeasured on this path: not because no code exists (it does - this fires
+    # on ClawSecCheck's own ~7,000-line engine, or on anything that merely LOOKS like it),
+    # but because scanning our own attack-signature database for malware signatures would
+    # self-flag by design. Without this, the non-danger axes fell through to
+    # `code_measurable=False` -> "no executable code to analyze" (build/behavior fell
+    # through to a bare PASS instead) - a false claim about the artifact (B-628) on top of
+    # an unearned PASS.
+    # C-636: the B13 Finding is now an engine-degraded UNKNOWN (or a WARN behind a
+    # symlink), NOT a canned PASS, so the DANGER axis is no longer special-cased here: it
+    # goes through the ordinary bucket path, `_danger_coverage_gap` rolls it up to CAUTION
+    # and the finding's own "NOT SCANNED" detail is the reason. `self_source` still gates
+    # the four other axes, which must stay UNKNOWN.
     # No `or str(target)` fallback: `vet_skill` appends the exact same
     # `Path(path).expanduser().name` (see `_vet_resolved_skill`/`resolve_skill_target`,
     # which `build_profile`'s `target` argument is always the resolved output of - cli.py
@@ -927,13 +933,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         if not applicable:
             reason, fix = _na_reason(axis, target_type), ""
         elif status == PASS:
-            # B-846: danger's PASS on the self-source path is this function's own
-            # canned Finding (see `self_source` above), not a scan result - the
-            # generic `_clean_reason` text would falsely claim a completed scan.
-            if self_source and axis == "danger":
-                reason, fix = _self_source_danger_reason(), ""
-            else:
-                reason, fix = _clean_reason(axis, families), ""
+            reason, fix = _clean_reason(axis, families), ""
         elif status == UNKNOWN and not bucket:
             reason, fix = _unmeasurable_reason(
                 axis, truncated=scan_truncated,
@@ -1070,21 +1070,6 @@ def _clean_reason(axis: str, families: set) -> str:
     return "no issue found"
 
 
-def _self_source_danger_reason() -> str:
-    """B-846: the danger axis's PASS on the self-source path is a POLICY default, not a
-    scan result. `_vet_resolved_skill` (checks/_vet.py) returns this canned B13 PASS
-    Finding on `_is_own_source(p)` BEFORE any read_skill_python/shell/js call runs, so
-    `_clean_reason`'s "no malware signature or known-bad indicator [found]" would
-    falsely claim a scan ran and came back clean over ClawSecCheck's own ~7,000-line
-    engine. Say what actually happened instead: nothing was read.
-    """
-    return (
-        "not scanned at all \u2014 this is ClawSecCheck's own source, so it is treated as "
-        "safe by policy rather than by a completed malware scan (scanning it would "
-        "self-flag on its own attack-signature data)"
-    )
-
-
 def _unmeasurable_reason(axis: str, *, truncated: bool = False,
                         unanalysed: bool = False, danger_only: bool = False,
                         self_source: bool = False, declared_only: bool = False,
@@ -1131,9 +1116,10 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
       B-846: the first version of THIS string still overclaimed on the danger axis's
       behalf -- "only the danger axis ran, by design" -- when danger did not run either
       (`_vet_resolved_skill` returns the canned B13 PASS before any read_skill_* call).
-      The wording below, and the danger axis's own PASS reason (`build_profile`'s PASS
-      branch), now both say nothing ran; danger's PASS is a policy default, not a
-      completed scan.
+      The wording below says nothing ran, on every axis.
+      C-636: the danger axis no longer carries a PASS on this path at all - the B13
+      Finding is an engine-degraded UNKNOWN (CAUTION), because a layout match is a content
+      heuristic that anyone can write, not proof the folder is the genuine scanner.
 
     Truncation wins the wording when several hold: "we stopped early" already implies the
     rest is unknown, while naming an unread file would suggest the rest WAS read.
@@ -1189,10 +1175,11 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
             "behavior": "so override / jailbreak / forged-provenance directives were not measured",
         }.get(axis, "so this was not measured")
         return (
-            "this is ClawSecCheck's own source; a security auditor necessarily ships "
-            "attack signatures and payload text as data, so scanning it for malware "
+            "this matched ClawSecCheck's own-source layout; a security auditor "
+            "necessarily ships attack signatures and payload text as data, so scanning "
+            "it for malware "
             f"would self-flag \u2014 nothing here was scanned at all, not even the danger "
-            f"axis (its PASS is a policy default, not a completed scan), {tail}"
+            f"axis, and a folder that merely matches this layout proves nothing, {tail}"
         )
     if axis == "connections":
         return "no executable code to analyze for outbound connections"

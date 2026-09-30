@@ -129,6 +129,7 @@ from ._shared import (
     OUTBOUND_TOOL_HINTS,
     OUTBOUND_TOOL_IDS,
     _OWN_ENGINE_MARKERS,
+    _own_source_symlinks,
     parse_bind_host,
     _perms_loose,
     _POWERFUL_PROFILES,
