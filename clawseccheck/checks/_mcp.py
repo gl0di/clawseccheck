@@ -193,6 +193,7 @@ def _reprefix_bundled_evidence(entry: str, name: str, rel_label: str) -> str:
 
 
 _PY_BUDGET_GAP = "the scan budget was reached while it was being read"
+_PY_BUDGET_BEFORE = "the scan budget was reached before it was read"
 
 
 def _scan_loose_plugin_python(
@@ -202,7 +203,9 @@ def _scan_loose_plugin_python(
 
     Returns "" when the file was analysed, or a short phrase naming why it was not - the
     caller turns that into a `coverage:` note AND keeps the file in `unanalysed_code`, so
-    "this scan has no reader for it" stays true of exactly the files it is true of.
+    "this scan has no reader for it" stays true of exactly the files it is true of. Except
+    for a budget gap (which already rides the VET-COVERAGE finding), the caller also emits
+    a B13 UNKNOWN sub-finding so the gap moves the verdict (C-634).
 
     Fail-capable findings become B13 sub-findings on the plugin's own `subs` list rather
     than a parallel channel: `vet_plugin`'s FAIL branch selects `worst` out of `subs`, and
@@ -394,6 +397,11 @@ def vet_plugin(
                        skipped by the lexical pass. Measured: a plugin whose only runtime
                        file was an oversized bundle graded a confident A/PASS and exited
                        0 - it did not even reach the UNKNOWN floor.
+
+    C-634: loose plugin Python that cannot be read, fails to parse, or exceeds
+    `_PLUGIN_PY_MAX_BYTES` (a budget gap excepted - it rides `budget_hit`) emits one
+    aggregate B13 UNKNOWN `engine_degraded` sub-finding, so the gap floors the verdict to
+    CAUTION instead of leaving INSTALL / Danger PASS on code that was never analysed.
     """
     import json as _json
 
@@ -671,6 +679,10 @@ def vet_plugin(
     # the dossier cannot mistake "one bundled skill had Python" for "this plugin's code
     # was measured" -- exactly the affirmative claim the reviewer reproduced.
     unanalysed_code: list[str] = []
+    # C-634: the subset of `unanalysed_code` whose cause is NOT the scan budget - a budget
+    # gap already rides `budget_hit`'s VET-COVERAGE finding, and naming it again would
+    # state one fact twice. Each entry is (plugin-relative name, reason).
+    py_unread: list[tuple[str, str]] = []
     # B-636: plugin Python the Danger pass DID read. Distinct from `unanalysed_code` and
     # from "no code at all": the AST/taint pass covers dangerous patterns, while the
     # Persistence and Connections axes are computed from bundled-skill Contexts that never
@@ -818,13 +830,15 @@ def vet_plugin(
                 # Anything this branch cannot read - over the cap, unparseable, unreadable,
                 # or cut off by the budget - still lands in `unanalysed_code`, so B-628's
                 # honest "no reader for this" keeps firing for exactly the files it is true
-                # of. Doing both in ONE pass is what makes it impossible for the dossier to
-                # claim a file was unread on one line and quote its contents on the next.
+                # of. Except for a budget gap, it also becomes a B13 UNKNOWN sub-finding
+                # (C-634, see `py_unread` below) so the gap moves the verdict. Doing both
+                # in ONE pass is what makes it impossible for the dossier to claim a file
+                # was unread on one line and quote its contents on the next.
                 rel = str(fp.relative_to(root))
                 gap = ""
                 if cpu_exceeded(deadline):
                     budget_hit = True
-                    gap = "the scan budget was reached before it was read"
+                    gap = _PY_BUDGET_BEFORE
                 else:
                     try:
                         py_size = fp.stat().st_size
@@ -852,6 +866,8 @@ def vet_plugin(
                                 budget_hit = True
                 if gap:
                     unanalysed_code.append(rel)
+                    if gap not in (_PY_BUDGET_GAP, _PY_BUDGET_BEFORE):
+                        py_unread.append((rel, gap))
                     notes.append(
                         f"coverage: plugin Python '{rel}' was not analysed \u2014 {gap}"
                     )
@@ -968,6 +984,31 @@ def vet_plugin(
                 "file past that point went unexamined"
             )
         )
+    if py_unread:
+        # C-634: loose plugin Python that could not be read, parsed or fit under the scan
+        # cap used to reach only `unanalysed_code` and a `coverage:` note - neither moves
+        # the verdict - so padding a loader past 2 MB (or making it unparseable) turned a
+        # DO-NOT-INSTALL into INSTALL. B13 UNKNOWN + engine_degraded is what the skill path
+        # emits for the same parse failure, and `dossier._AXIS_BY_ID["B13"]` is already the
+        # danger axis, so `_danger_coverage_gap` floors the headline to CAUTION. It is NOT
+        # a VET-COVERAGE finding: that id flips the dossier's `scan_truncated` and rewrites
+        # the Persistence/Connections wording, and a per-file gap is not a truncated scan
+        # (tests/test_b628_plugin_code_measurable.py::test_i). A budget gap is excluded
+        # above - it already rides `budget_hit`'s VET-COVERAGE finding. Filenames are
+        # plugin-relative, so they may sit in `detail`; the remediation prose is in `fix`
+        # only (baseline.fingerprint() hashes `detail`).
+        shown = "; ".join(f"{r} ({why})" for r, why in sorted(py_unread)[:3])
+        more = "" if len(py_unread) <= 3 else f" (+{len(py_unread) - 3} more)"
+        subs.append(_finding(
+            "B13", UNKNOWN,
+            f"could not analyze plugin Python {shown}{more} \u2014 not scanned by the "
+            "AST/taint layer",
+            "Inspect the flagged file(s) manually before installing: Python a scanner "
+            "cannot read, parse, or fit under the scan cap is how a loader is hidden from "
+            "an AST pass (a parse failure can also mean Python 2 syntax, a template, or "
+            "syntax newer than the Python running this scan).",
+            severity=HIGH, engine_degraded=True,
+        ))
     if js_capped:
         shown = ", ".join(sorted(js_capped)[:3])
         more = "" if len(js_capped) <= 3 else f" (+{len(js_capped) - 3} more)"
