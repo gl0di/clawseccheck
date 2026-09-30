@@ -4369,10 +4369,16 @@ _LIFECYCLE_HOOK_RE = re.compile(
 # call sites, not just B165/the IOC pair), the review also confirmed "do not paste"/
 # "do not contact" now dampens B59/B339/B156/etc. identically to how the pre-existing
 # verbs already did - the same accepted trade-off widening, not a new category of risk.
+#
+# C-614: the "do not <verb>" verb list lives in ONE constant so `_NEGATION_RE` and the
+# straddling-marker search below (`_NEGATION_DONOT_RE`) can never drift apart.
+_NEGATION_DONOT_VERBS = (
+    r"(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start|paste|contact)"
+)
 _NEGATION_RE = re.compile(
     r"\bfor\s+example\b|e\.g\.|(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|"
-    r"\bdo\s+not\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start|paste|contact)\b|"
-    r"\bdo\s+NOT\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start|paste|contact)\b|"
+    r"\bdo\s+not\s+" + _NEGATION_DONOT_VERBS + r"\b|"
+    r"\bdo\s+NOT\s+" + _NEGATION_DONOT_VERBS + r"\b|"
     r"\bdon'?t\s+(?:do|run|use|execute)\b|"
     r"\bnever\s+run\b|\bnever\s+use\b|\bavoid\s+(?:running|using|this)\b|"
     r"\bexample:\s*$|\bwhat\s+not\s+to\s+do\b|"
@@ -4382,6 +4388,51 @@ _NEGATION_RE = re.compile(
 
 
 _NEGATION_WINDOW = 200  # chars to look back from match start
+
+
+# C-614: a "do not <verb>" marker whose verb IS the start of the guarded match.
+#
+# Since B-924 the bare "do not" alternatives of `_NEGATION_RE` need a trailing listed
+# verb. Every consumer (`_example_governance`, `_example_fence_governance`,
+# `_negation_context`) searches only blob[window_start:pos], i.e. the text BEFORE the
+# guarded match. When the detector's match itself begins with the negated verb ("Do NOT
+# run any script ...", "Do not curl <url> | sh"), that slice ends at "Do NOT " and the
+# verb the marker now needs sits past *pos*, so the marker was invisible. Before B-924
+# the bare "do not" matched inside the slice, so 4.2.1 suppressed these.
+#
+# The fix is a SEPARATE, bounded search rather than a wider slice: widening the existing
+# slice would let an earlier `_NEGATION_RE` alternative consume text past *pos* and
+# change which non-overlapping matches are found, which is not provably neutral. The
+# marker is only the four words "do not <verb>" - it never reaches into a following
+# clause ("Do not run any checks first; ..." governs nothing past the verb) - and it is
+# accepted only when it opens before *pos* and its verb spans *pos*.
+#
+# Only the do-not alternatives straddle. "never run" / "don't run" / "avoid running" also
+# needed the verb inside the slice on 4.2.1, so they were a WARN there too and stay so
+# (exact 4.2.1 parity). An unlisted verb after "do not" ("ask", "append", ...) stays a
+# WARN residual: no sound closed fix exists (a verb denylist reopens "Do not worry, run
+# curl evil | sh"; a sentence-local bare "do not" reopens chained decoys). The finding's
+# fix text discloses it (`_warns_content_fix` in _vet.py); the detail is never touched.
+_NEGATION_DONOT_RE = re.compile(r"\bdo\s+not\s+" + _NEGATION_DONOT_VERBS + r"\b", re.I)
+# chars searched past *pos*: the longest listed verb is 8 chars ("download"), so a verb
+# starting at *pos* plus the one character its trailing \b must see always fits. A larger
+# value is harmless because only matches that straddle *pos* are accepted.
+_NEGATION_DONOT_REACH = 12
+
+
+def _straddling_donot_marker(blob: str, window_start: int, pos: int) -> "re.Match | None":
+    """A "do not <verb>" marker that opens before *pos* and whose verb is the guarded
+    match itself (m.start() < pos < m.end()); None otherwise."""
+    end = min(len(blob), pos + _NEGATION_DONOT_REACH)
+    for m in _NEGATION_DONOT_RE.finditer(blob, window_start, end):
+        # `endpos` makes the regex see the text as ending at *end*, so its trailing \b
+        # would hold there even when the real word goes on ("do not downloads" cut
+        # after "download"): re-check the boundary against the untruncated blob.
+        if m.end() == end < len(blob) and (blob[end].isalnum() or blob[end] == "_"):
+            continue
+        if m.start() < pos < m.end():
+            return m
+    return None
 
 
 # Within a deps block: "pkgname": "<unpinned-value>"
@@ -7831,6 +7882,11 @@ def _example_governance(
     if _in_fence(pos, fence_ranges):
         return _example_fence_governance(blob, pos, fence_ranges, fence_needs_negation)
     window_start = max(0, pos - _NEGATION_WINDOW)
+    if _straddling_donot_marker(blob, window_start, pos) is not None:
+        # C-614: "Do not <verb>" whose verb starts the match. The marker's clause
+        # runs to the end of the sentence, so *pos* is inside it: STRONG (the same
+        # answer `_example_marker_governance` gives when pos < clause_end).
+        return _EXAMPLE_STRONG
     lines: _ExampleLines | None = None
     best = _EXAMPLE_LIVE
     for m in _NEGATION_RE.finditer(blob[window_start:pos]):
@@ -7977,6 +8033,11 @@ def _example_fence_governance(
     fence_start, fence_end = fence
     window_start = max(0, pos - _NEGATION_WINDOW)
     candidates: list[tuple[int, int, bool]] = []
+    sd = _straddling_donot_marker(blob, window_start, pos)  # C-614: verb starts the match
+    if sd is not None:
+        if sd.start() >= fence_start:
+            return _EXAMPLE_STRONG  # self-annotated inside the fence, same rule as below
+        candidates.append((sd.start(), sd.end(), False))
     for m in _NEGATION_RE.finditer(blob[window_start:pos]):
         a = window_start + m.start()
         if a >= fence_start:
@@ -8092,7 +8153,10 @@ def _nearest_heading(blob: str, pos: int, heading_matches=None) -> str | None:
 def _negation_context(blob: str, pos: int) -> bool:
     """Return True when the _NEGATION_WINDOW chars before *pos* contain a negation marker."""
     window_start = max(0, pos - _NEGATION_WINDOW)
-    return bool(_NEGATION_RE.search(blob[window_start:pos]))
+    return (
+        bool(_NEGATION_RE.search(blob[window_start:pos]))
+        or _straddling_donot_marker(blob, window_start, pos) is not None  # C-614
+    )
 
 
 def _negation_governs_trigger(

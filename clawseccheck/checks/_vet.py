@@ -102,6 +102,7 @@ from ._content import (
     _EXFIL_RE,
     _IOC_ONION_RE,
     _KNOWN_NAMES,
+    _NEGATION_WINDOW,
     _ambiguous_example_suppression,
     _b62_classify_category,
     _b62_extract_declaration,
@@ -5399,6 +5400,77 @@ def _js_warn_sub_signals(rules: set, contributing_skills: set) -> set:
     return named or {_B13_WINNER_SUBSIGNAL["warns_js"]}
 
 
+# C-614: the suffix `check_installed_skills` puts on a `warns_content` entry when an
+# execute/auto-approve directive was found but sits inside a prohibition ("Do not ..."),
+# and the fix-text builder that discloses what that suffix means. A named constant at both
+# ends so the marker and the test that reads it cannot drift. The disclosure lives in the
+# finding's `fix`, never its `detail` (baseline.fingerprint() hashes `detail`).
+_PROHIBITION_PHRASING_SUFFIX = "(prohibition/safety-constraint phrasing)"
+
+
+def _warns_content_fix(warns_content: list[str]) -> str:
+    """Fix text for the `warns_content` bucket.
+
+    The bucket is a catch-all (test-fixture hits, third-party scanner citations, Tor
+    .onion / public-IP references, over-grant, prohibition-governed directives, ...), so
+    the generic sentence claims nothing narrower than "soft signals". The extra sentence
+    is appended only when a prohibition-phrasing entry contributed: that entry cannot
+    quote the offending sentence, and when the prohibition's verb is not one the scanner
+    recognizes it cannot be told apart from a live directive by static means.
+    """
+    fx = (
+        "These are soft content signals, each worth a human glance but none a verdict "
+        "on its own. Review the skill's prose and any referenced files before trusting it."
+    )
+    if any(e.endswith(_PROHIBITION_PHRASING_SUFFIX) for e in warns_content):
+        fx += (
+            " An entry marked 'prohibition/safety-constraint phrasing' matched an execute "
+            "or auto-approve phrase that sits inside a prohibition. When the prohibition's "
+            "verb is not one the scanner recognizes (for example 'Do not ask the merchant "
+            "to run any scripts'), it cannot be told apart from a live directive by static "
+            "means, so read that sentence in the skill before deciding."
+        )
+    return fx
+
+
+# C-614: the same accepted residual, on the daemonize/backgrounding WARN. There the base
+# severity is WARN whatever a prohibition says, so nothing carries a "(prohibition ...)"
+# suffix: the only sign that the residual is in play is a bare "do not" / "don't" earlier
+# in the SAME sentence as the flagged text, i.e. one `_NEGATION_RE` did not accept because
+# its verb is not one it lists (# Do not append "&" or use nohup in Codex.). It says
+# nothing about severity; it only decides whether the fix text discloses the limit.
+_UNRESOLVED_DONOT_RE = re.compile(r"\bdo\s+not\b|\bdon'?t\b", re.I)
+
+
+def _unresolved_donot_governs(blob: str, pos: int) -> bool:
+    """True when a bare "do not" / "don't" sits before *pos* with no sentence break
+    between it and *pos*. Advisory only: used to decide whether a WARN's fix text
+    discloses the unlisted-verb limit, never to change a verdict."""
+    last = None
+    for m in _UNRESOLVED_DONOT_RE.finditer(blob, max(0, pos - _NEGATION_WINDOW), pos):
+        last = m
+    return last is not None and _SENTENCE_BREAK_RE.search(blob, last.end(), pos) is None
+
+
+def _persist_warn_fix(persist_warn: list[str], donot_entries: set[str]) -> str:
+    """Fix text for the daemonize/backgrounding WARN bucket. The disclosure sentence is
+    appended only when an entry that contributed sat under an unresolved "do not"."""
+    fx = (
+        "Review whether the skill legitimately needs a background process; "
+        "a skill that detaches subprocesses (nohup/disown/setsid) can "
+        "establish hidden persistence on the host."
+    )
+    if any(e in donot_entries for e in persist_warn):
+        fx += (
+            " A 'do not' phrase sits earlier in the same sentence as the flagged text. "
+            "If it prohibits the background process (for example 'Do not append & or use "
+            "nohup'), it cannot be told apart from a live directive by static means when "
+            "its verb is not one the scanner recognizes, so read that sentence in the "
+            "skill before deciding."
+        )
+    return fx
+
+
 # B-634: the reserved `_signal_buckets` key `check_installed_skills` uses to smuggle
 # agent-config-persistence hits (a list of `[status, text]` pairs, NOT plain evidence
 # strings) through to `_b13_verdict` below, regardless of which of its ~28 return sites
@@ -5604,6 +5676,9 @@ def check_installed_skills(ctx: Context) -> Finding:
     # alternative (the accepted residual). Read at the `if high:` branch to route the
     # SS2.5(d) disclosure into that finding's `fix` text.
     _cron_bare_path_hits: list[str] = []
+    # C-614: `_persist_warn` entries whose flagged text sat under an unresolved "do not";
+    # read only to route the unlisted-verb disclosure into that WARN's `fix` text.
+    _persist_warn_donot: set[str] = set()
     # B-849: same scope and idiom as _cron_bare_path_hits above, the complement --
     # non-empty iff at least one HIGH cron/persistence hit across the whole run came
     # from a verb-anchored alternative instead. The disclosure below is only accurate
@@ -5978,7 +6053,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                             + fence_suppression_note(label, _mf, _ff)
                         )
                     elif _agency_prohibited_only:
-                        warns_content.append(f"{name}: {label} (prohibition/safety-constraint phrasing)")
+                        warns_content.append(f"{name}: {label} {_PROHIBITION_PHRASING_SUFFIX}")
 
             # F-021: runtime-external-fetch instruction (OWASP AST05).
             # Fires when a skill's text contains fetch/load verb + external http(s) URL +
@@ -6453,6 +6528,8 @@ def check_installed_skills(ctx: Context) -> Finding:
                         # Actually: collect separately to keep severity correct.
                         # We use a dedicated collector defined just below.
                         _persist_warn.append(f"{name}: {p_label}")
+                        if _unresolved_donot_governs(blob, pm.start()):
+                            _persist_warn_donot.add(f"{name}: {p_label}")
                         break
 
             # AST analysis of the skill's Python files - catches obfuscation regex misses.
@@ -7984,9 +8061,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             "Content signals worth a review in installed skill(s): "
             + "; ".join(warns_content[:6])
             + extra,
-            "These are soft signals (broad activation trigger, delegation to a bundled "
-            "script, or a Tor/.onion or hardcoded-IP reference). Review the skill's prose "
-            "and any referenced files before trusting it.",
+            _warns_content_fix(warns_content),
             warns_content,
             _signal_buckets,
             "warns_content",
@@ -8054,9 +8129,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             WARN,
             "Possible persistence/daemonize pattern in installed skill(s): "
             + "; ".join(_persist_warn[:6]),
-            "Review whether the skill legitimately needs a background process; "
-            "a skill that detaches subprocesses (nohup/disown/setsid) can "
-            "establish hidden persistence on the host.",
+            _persist_warn_fix(_persist_warn, _persist_warn_donot),
             _persist_warn,
             _signal_buckets,
             "persist_warn",
