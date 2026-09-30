@@ -8688,6 +8688,9 @@ def _run_content_ring(
                     # filed for, and a hand-built minimal ring check (`RuntimeError` - no
                     # parse involved at all) proves the pool is empty and the verdict reads
                     # INSTALL/PASS today even where the flag never has a chance to fire.
+                    # (C-619: that natural trigger no longer lands here - B66/B156 catch it
+                    # per file and report UNKNOWN plus a `coverage:` note - so this handler
+                    # is now the backstop for any OTHER exception a ring check raises.)
                     #
                     # Fixed by reusing the SAME kind of disclosure the two handlers above
                     # already use - not a second predicate, not a second `note_limit` idiom -
@@ -9529,7 +9532,12 @@ def _attach_ring_coverage(fx: Finding, ctx: Context) -> None:
     from the render by the status tie, and verdict templates wrapping "we did not look"
     in prose asserting we did.
     """
-    notes = [n for n in getattr(ctx, "ring_coverage_notes", None) or [] if n not in (fx.evidence or [])]
+    notes: list[str] = []
+    for n in getattr(ctx, "ring_coverage_notes", None) or []:
+        # C-619: two ring checks (B66, B156) can emit the byte-identical note for the
+        # same unread script -- keep the first, in order.
+        if n not in (fx.evidence or []) and n not in notes:
+            notes.append(n)
     if notes:
         fx.evidence = (fx.evidence or []) + notes
 

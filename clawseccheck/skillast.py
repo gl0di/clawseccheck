@@ -17820,11 +17820,12 @@ class ScriptProseCoverageIncomplete(Exception):
     anything was skipped (Golden Rule #4: report UNKNOWN, never a confident-looking
     empty result, when state can't be determined).
 
-    Raising instead of returning `[]` lets this reach `checks/__init__.py::run_all`'s
-    existing per-check crash isolation (B-101, `_check_error_finding`), which already
-    degrades a raising check to one honest UNKNOWN finding rather than sinking the
-    audit or silently reporting nothing found -- reusing that already-audited
-    degradation path rather than inventing a second, parallel one."""
+    Raising instead of returning `[]` keeps "could not read" distinguishable from
+    "nothing there". C-619: the caller is `checks/_content.py::_script_prose_scan`,
+    which catches this per file, records the file as unread and lets the calling check
+    (B66/B156) keep its other evidence and report UNKNOWN plus a `coverage:` note when
+    nothing else was found -- so one unparseable script no longer discards the whole
+    check's result through `run_all`'s crash isolation."""
 
 
 def _py_docstring_text(source: str) -> list[str]:
@@ -17840,7 +17841,7 @@ def _py_docstring_text(source: str) -> list[str]:
     succeeded and there were no docstrings to find."""
     try:
         tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError) as exc:
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
         raise ScriptProseCoverageIncomplete(
             f"could not parse Python source for docstring extraction "
             f"({type(exc).__name__}) -- prose coverage is incomplete, not empty"
@@ -17969,9 +17970,10 @@ def extract_script_prose(source: str, ext: str) -> list[str]:
     Raises `ScriptProseCoverageIncomplete` for `ext == "py"` when `ast.parse` cannot
     parse `source` at all (B-377) -- deliberately NOT folded into the `[]` case, which
     would make "no docstrings" and "could not determine" indistinguishable; see that
-    exception's docstring. The "sh"/"js" paths never raise -- their extraction is
-    lexical (line/comment scanning), not a full parse, so there is no analogous
-    failure mode.
+    exception's docstring (C-619: `checks/_content.py::_script_prose_scan` catches it
+    per file and records the file as unread). The "sh"/"js" paths never raise -- their
+    extraction is lexical (line/comment scanning), not a full parse, so there is no
+    analogous failure mode.
     """
     if ext == "py":
         return _py_docstring_text(source)
