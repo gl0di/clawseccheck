@@ -342,8 +342,9 @@ with `--no-history`) and the `--monitor` event journal (`~/.clawseccheck/events.
 timeline viewed with `--watch-log`) are both **tamper-evident via a hash chain**. Each
 entry carries a `chain_hash` field: `sha256(prev_chain_hash +
 canonical_json(entry_without_chain_hash))` (`history.py` and `monitor.py` share the same
-scheme). Editing, reordering, or deleting a historical entry breaks the chain from that
-point forward. Verify either chain with:
+scheme). Editing, reordering, or deleting a non-final historical entry breaks the chain
+from that point forward (deleting the LAST entry leaves a valid shorter chain - see
+below). Verify either chain with:
 
 ```bash
 clawseccheck --verify-history            # ~/.clawseccheck/history.jsonl
@@ -374,14 +375,24 @@ unknown-future-`_schema` entry (`OK (1 unknown-schema entry present)`, pre-exist
 first entry whose recomputed hash does not match its stored `chain_hash` still reports
 exactly where the chain broke (`False, "broken at entry N"`).
 
+**C-624: legacy entries are a PREFIX carve-out.** An entry with no `chain_hash` that
+appears after a chained entry has no legitimate writer (this tool's writers always chain,
+and rotation re-chains every survivor), so it is BROKEN, with the message `unchained entry
+N follows a chained entry - not legacy` - whether the row was inserted, forged, or had its
+`chain_hash` stripped. The one ordinary cause is appending with a build older than the
+chaining (F-094) after a newer one.
+
 **What the chain does and does not defend.** It is a plain SHA-256 chain, not a keyed
 (HMAC) or externally-anchored one, so it detects *accidental corruption* and *naive edits*
 (editing/reordering/deleting an entry breaks it) - not a knowledgeable attacker who already
 has write access to the file, who can simply recompute the whole chain forward after
-tampering - that still verifies "clean", and no local chain can do better. Truncating the
-tail is disclosed as an unparseable line, and deleting or emptying the file is reported as
-`NOT VERIFIED` rather than "clean" (B-589); neither is *proof* of tampering, which is why
-both are their own outcome rather than a verdict. The
+tampering - that still verifies "clean", and no local chain can do better. Cutting the
+tail MID-line (a crash-mid-write shape) is disclosed as an unparseable line; removing WHOLE
+trailing lines leaves a shorter chain that verifies exactly as before and is not
+detectable locally - only an off-machine copy of the last hash could catch it, and this
+tool keeps none (a disclosed limit). Deleting or emptying the file is reported as
+`NOT VERIFIED` (B-589), not clean; neither is *proof* of tampering, which is why both are
+their own outcome rather than a verdict. The
 chain is therefore a drift/tamper-*evidence* aid, **not** a substitute for filesystem
 permissions on `~/.clawseccheck/`: anyone who can write that file already runs as your
 user and could edit history, patch the engine, or read anything you can. This is the same
