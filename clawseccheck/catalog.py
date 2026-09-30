@@ -2895,7 +2895,9 @@ CATALOG: list[CheckMeta] = [
     # to a record at all -- it returns before the record-builder is ever called -- so the
     # one reachable route to a FAIL-qualifying record is a retired
     # plugins.installs.<id>.clawhubTrustDisposition config record imported by a doctor or
-    # startup config-repair pass, not a live moderation verdict on this install. WARN on
+    # startup config-repair pass (C-645: the STARTUP pass was removed in OpenClaw 2026.9.7;
+    # on 2026.9.7 and later the import runs from Doctor's preflight), not a live moderation
+    # verdict on this install. WARN on
     # any other non-clean disposition ("review-required", "review-recommended", or a future
     # value) and on clawhubTrustPending/Stale (an unverified/outdated verdict). UNKNOWN when
     # the state DB, the index row, or the column is absent/locked/unreadable (Golden Rule

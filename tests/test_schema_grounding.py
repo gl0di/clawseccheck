@@ -1340,7 +1340,14 @@ _NOT_IN_CURRENT_SCHEMA = {
         "depend on it."
     ),
 
-    # ---- retired key, still HONOURED by the runtime's own in-memory repair -----------
+    # ---- retired key, HONOURED by the runtime's own in-memory repair (through 2026.9.6) ----
+    # C-645 (2026-09-30): the in-memory startup repair described below was REMOVED in
+    # 2026.9.7 (`resolveStartupConfigSnapshot` is declared nowhere in that dist; startup
+    # validates without rewriting and an invalid config stops the gateway). The key is still
+    # READ, for a different reason: on 2026.9.7 and later it is one `openclaw doctor --fix`
+    # run from a live bypass (Doctor writes `dangerouslyAllowPrivateNetwork = legacy === true
+    # || current === true`), and B38 keeps FAIL (Dave, 2026-09-30) with version-aware
+    # wording. The paragraph below is the 2026.9.4-2026.9.6 story and is left as measured.
     # Same category as agents.defaults.tools below (undeclared but read), for a
     # RETIRED key rather than an undocumented one: EXECUTED against
     # SsrFPolicyConfigSchema (zod-schema.core-mVpnhNqD.mjs:70-76, `.strict()`, 5 fields:
@@ -1362,12 +1369,16 @@ _NOT_IN_CURRENT_SCHEMA = {
     "browser.ssrfPolicy.allowPrivateNetwork": (
         "safeParse: unrecognized_keys@browser.ssrfPolicy keys=[\"allowPrivateNetwork\"] "
         "(SsrFPolicyConfigSchema, zod-schema.core-mVpnhNqD.mjs:70-76, is .strict() with "
-        "exactly 5 fields and does not include this legacy key); READ ANYWAY because the "
-        "runtime's own pre-bootstrap repair (config-Dc3xLSSD.mjs:117-130) folds it into "
+        "exactly 5 fields and does not include this legacy key; the same rejection was "
+        "executed on 2026.9.6 and 2026.9.7); READ ANYWAY because through 2026.9.6 the "
+        "runtime's own pre-bootstrap repair (config-Dc3xLSSD.mjs:117-130) folded it into "
         "dangerouslyAllowPrivateNetwork in memory on every boot without writing the fix "
         "back to disk (doctor-config-flow-BoTzHMKN.mjs:217-228 owns the on-disk migration "
-        "and pre-bootstrap never calls it) — a raw config carrying only this key is a "
-        "live, silent private-network bypass a schema-validity read would miss entirely."
+        "and pre-bootstrap never calls it) -- a raw config carrying only this key was a "
+        "live, silent private-network bypass a schema-validity read would miss entirely. "
+        "From 2026.9.7 that startup repair is gone (the gateway stops on the invalid "
+        "config), and the key is read because `openclaw doctor --fix` would migrate a true "
+        "value into dangerouslyAllowPrivateNetwork."
     ),
 
     # ---- undeclared but HONOURED by the runtime (a category of its own) ---------------

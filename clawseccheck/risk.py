@@ -22,7 +22,7 @@ English-only. Read-only. Pure stdlib.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -32,6 +32,9 @@ from . import trajectory as _trajectory
 from .catalog import CRITICAL, FAIL, FAIL_WEIGHT_STATUSES, HIGH, MEDIUM, WARN, Finding
 from .checks import (
     _key_advice,
+    _legacy_ssrf_alias_startup_blocked,
+    _LEGACY_SSRF_ALIAS_970_FACT,
+    _LEGACY_SSRF_ALIAS_970_ORDER,
     _b62_actual_families,
     _b62_extract_declaration,
     _credential_store_state,
@@ -543,7 +546,8 @@ def _fs_writes_contained(cfg: dict) -> bool:
       docstring for why this does NOT need to replicate OpenClaw's own
       path-blocklist validation to stay sound.
     * **FP2 fixed -- ``scope: "shared"`` discards a per-agent ``docker.binds``.**
-      Reproduced: under ``scope: "shared"`` (or legacy ``perSession: false``),
+      Reproduced: under ``scope: "shared"`` (or legacy ``perSession: false``, which only
+      2026.9.6 and earlier honour -- see ``_resolve_sandbox_scope``),
       ``resolveSandboxDockerConfig`` never reads this agent's own ``sandbox.docker``
       at all, so a per-agent bind that would otherwise defeat containment is inert.
       See ``_resolve_sandbox_scope``. Only the per-agent BINDS leg is scope-gated --
@@ -761,14 +765,22 @@ def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
     `allowPrivateNetwork` alias (checks/_egress.py) -- resolveBrowserSsrFPolicy
     (config-Dc3xLSSD.mjs:117-130) folds it into dangerouslyAllowPrivateNetwork before the
     browser ever uses the policy. The canonical schema rejects the legacy key outright,
-    but the real boot path auto-repairs an invalid config IN MEMORY on every startup
-    (resolveStartupConfigSnapshot, wired at pre-bootstrap-Da_13P9b.mjs:255) via the same
-    migration `openclaw doctor` uses, without writing it back to disk in that step (a
-    later preflight step may, 2026.9.5 -- see B38) -- so a raw config setting ONLY the
-    legacy key is a live, silent bypass on every boot, not something gated behind a
-    doctor run the operator may never have done. See B38's own grounding comment
+    but THROUGH 2026.9.6 the real boot path auto-repaired an invalid config IN MEMORY on
+    every startup (resolveStartupConfigSnapshot, wired at pre-bootstrap-Da_13P9b.mjs:255)
+    via the same migration `openclaw doctor` uses, without writing it back to disk in
+    that step (a later preflight step may, 2026.9.5 -- see B38) -- so a raw config setting
+    ONLY the legacy key was a live, silent bypass on every boot, not something gated
+    behind a doctor run the operator may never have done. See B38's own grounding comment
     (checks/_egress.py) for the full chain. Mirrored here so a raw
-    config setting ONLY the legacy key still drives RISK-05/RISK-15, not just B38. A
+    config setting ONLY the legacy key still drives RISK-05/RISK-15, not just B38.
+
+    C-645 (2026-09-30): 2026.9.7 REMOVED that startup self-heal. On 2026.9.7 and later the
+    gateway does not start with the legacy key present, and `openclaw doctor --fix` would
+    migrate a true value into dangerouslyAllowPrivateNetwork -- so the chain is one Doctor
+    run from live rather than live today. Dave ruled to KEEP the trigger (the verdict here
+    is unchanged) and make the WORDING version-aware: RISK-05 / RISK-15 keep their original
+    text on every build but 2026.9.7+, where `_legacy_ssrf_alias_startup_blocked` selects
+    the corrected sentences (shared with B38 via `_LEGACY_SSRF_ALIAS_970_FACT`). A
     nested `network.allowPrivateNetwork`/
     `network.dangerouslyAllowPrivateNetwork` shape also exists in the installed dist
     (isPrivateNetworkOptInEnabled, ssrf-policy-bu9unXwu.mjs) but is CHANNEL-scoped only
@@ -781,6 +793,54 @@ def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
         dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
         or dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
     )
+
+
+# C-645: the sentence RISK-05 / RISK-15 use in place of "the browser is allowed to reach
+# private addresses" when the trigger is the retired alias on a build that no longer starts
+# with it. Built once from the text B38 uses (`_LEGACY_SSRF_ALIAS_970_FACT`), so the three
+# cannot disagree.
+_LEGACY_SSRF_ALIAS_970_LEAD = (
+    "The browser SSRF policy sets the retired browser.ssrfPolicy.allowPrivateNetwork key to "
+    f"true (B38). {_LEGACY_SSRF_ALIAS_970_FACT}."
+)
+
+
+def _reword_legacy_ssrf_alias(path: RiskPath, ctx: Context, cfg: dict, *, lead: str,
+                              why_marker: str, fix_marker: str = "") -> RiskPath:
+    """RISK-05 / RISK-15 wording on OpenClaw 2026.9.7 and later when the legacy alias is set.
+
+    The trigger is untouched (Dave, 2026-09-30, C-645: keep the chain) -- this only swaps the
+    LEAD of ``why`` (everything before ``why_marker``) and adds the "remove the key BEFORE
+    running Doctor" step to ``fix`` (before ``fix_marker`` when given). It is a post-hoc
+    rewrite of the ordinary ``RiskPath`` rather than a second literal or an in-place
+    conditional, for two reasons: the tail of each text stays single-sourced in the rule,
+    and ``scripts/gen_checks_docs.py`` reads the rule's own literals, so the generated
+    ``docs/CHECKS.md`` keeps showing the reader-independent text.
+
+    A marker that has drifted out of the literal fails CLOSED and loud in the output: the
+    original text is kept whole behind the corrected lead, never silently dropped. The
+    markers are pinned by ``tests/test_c645_legacy_ssrf_alias_wording.py``.
+
+    Every build that is not KNOWN to be 2026.9.7+ (older, unknown, pre-release) gets the
+    original ``path`` back untouched.
+    """
+    if not _legacy_ssrf_alias_startup_blocked(ctx, cfg):
+        return path
+    _head, sep, tail = path.why.partition(why_marker)
+    why = f"{lead}{sep}{tail}" if sep else f"{lead} {path.why}"
+    order = _LEGACY_SSRF_ALIAS_970_ORDER
+    if fix_marker:
+        fix_head, fix_sep, fix_tail = path.fix.partition(fix_marker)
+    else:
+        fix_head, fix_sep, fix_tail = path.fix, "", ""
+    fix = f"{fix_head} {order}{fix_sep}{fix_tail}" if fix_sep else f"{path.fix} {order}"
+    return replace(path, why=why, fix=fix)
+
+
+# The stretch of each rule's own ``why`` / ``fix`` that follows the part being reworded.
+_R05_WHY_MARKER = " A prompt-injection payload in a web page"
+_R15_WHY_MARKER = " A prompt-injection in an untrusted message"
+_R15_FIX_MARKER = " Breaking either leg breaks the chain."
 
 
 def _control_plane_exposed(findings: list[Finding], cfg: dict) -> bool:
@@ -1057,7 +1117,7 @@ def _rule_browser_ssrf_secrets(ctx: Context, findings: list[Finding],
         return None
     if not _has_sensitive_data(tools, ctx):
         return None
-    return RiskPath(
+    path = RiskPath(
         id="RISK-05",
         severity=HIGH,
         title="Browser SSRF to private network + secrets reachable",
@@ -1076,6 +1136,13 @@ def _rule_browser_ssrf_secrets(ctx: Context, findings: list[Finding],
             "Move credentials out of the agent's reach, or gate browser tool "
             "invocations behind human approval."
         ),
+    )
+    # C-645: on 2026.9.7+ a legacy-alias trigger is not live today (the gateway will not
+    # start with the key); every other build gets `path` back untouched.
+    return _reword_legacy_ssrf_alias(
+        path, ctx, cfg,
+        lead=f"{_LEGACY_SSRF_ALIAS_970_LEAD} The agent also has access to sensitive credentials.",
+        why_marker=_R05_WHY_MARKER,
     )
 
 
@@ -1577,7 +1644,7 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
         dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
         or dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
     )
-    return RiskPath(
+    path = RiskPath(
         id="RISK-15",
         severity=HIGH,
         title="Untrusted context + browser SSRF to private network = metadata/credential exfil",
@@ -1643,6 +1710,16 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
             )
             + " Breaking either leg breaks the chain."
         ),
+    )
+    # C-645: as in RISK-05 -- on 2026.9.7+ the legacy alias is one Doctor run from live, not
+    # live today; every other build gets `path` back untouched.
+    return _reword_legacy_ssrf_alias(
+        path, ctx, cfg,
+        lead=("A channel exposes full untrusted context to the agent "
+              "(channels.<p>.contextVisibility='all', B26). "
+              f"{_LEGACY_SSRF_ALIAS_970_LEAD}"),
+        why_marker=_R15_WHY_MARKER,
+        fix_marker=_R15_FIX_MARKER,
     )
 
 

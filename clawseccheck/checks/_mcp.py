@@ -8119,13 +8119,21 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     ``inspectShippedPluginInstallConfigRecords(...).status === "valid"``, never on
     ``--fix``/``--yes``/``shouldRepair`` - and it copies each config-authored record
     into the persisted install index for any plugin id NOT ALREADY present there
-    (``if (!persisted || !Object.hasOwn(persisted, pluginId))``). This importer is not
-    reachable from ``openclaw doctor`` alone: at least one other caller invokes it too -
-    ``automatic-startup-config-repair-<hash>.mjs`` (its own gateway-startup config-repair
-    path) also calls ``importShippedPluginInstallConfigForDoctor`` unconditionally under
-    the same status-gate, so the route runs on at least every ``openclaw doctor`` pass
-    and every startup config-repair pass, and possibly other unaudited callers of the
-    same exported symbol. So the reachable route for a FAIL-qualifying "blocked" record is the retired
+    (``if (!persisted || !Object.hasOwn(persisted, pluginId))``). Through 2026.9.6 this
+    importer was not reachable from ``openclaw doctor`` alone: at least one other caller
+    invoked it too - ``automatic-startup-config-repair-<hash>.mjs`` (its own
+    gateway-startup config-repair path) also called ``importShippedPluginInstallConfigForDoctor``
+    unconditionally under the same status-gate, so the route ran on at least every
+    ``openclaw doctor`` pass and every startup config-repair pass, and possibly other
+    unaudited callers of the same exported symbol. C-645 (2026-09-30): 2026.9.7 REMOVED the
+    startup pass (``resolveStartupConfigSnapshot`` is declared nowhere in that dist; the
+    file is now ``automatic-config-repair-<hash>.mjs`` and its
+    ``importAutomaticConfigRepairInstallRecords`` is called from Doctor's own preflight,
+    ``doctor-config-flow-<hash>.mjs``), so on 2026.9.7 and later the route is Doctor's,
+    plus whatever unaudited callers remain (the update-activation recovery bundle
+    ``package-update-activation-recovery.mjs`` also names the symbol). The FAIL's ``fix``
+    text below is dated to "OpenClaw 2026.9.5" and stays true of that build. So the
+    reachable route for a FAIL-qualifying "blocked" record is the retired
     ``plugins.installs`` config key surviving into a ``doctor`` run, not a live
     ClawHub verdict - the FAIL is still correct (it is still OpenClaw's own
     persisted record, per the ladder above), just reached by a different door than
