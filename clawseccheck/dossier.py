@@ -832,6 +832,13 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     danger_only_code = [
         f for fx in pool for f in (getattr(fx, "analysed_loose_code", None) or [])
     ]
+    # C-633: plugin JS/TS the sweep read with `analyze_javascript`'s five lexical rules
+    # only. Same "read for danger, invisible to Persistence/Connections" shape as
+    # `danger_only_code`, so it joins it below: a JS-only plugin must not fall through to
+    # "no executable code to analyze" (a false claim about the artifact, B-628).
+    lexical_code = [
+        f for fx in pool for f in (getattr(fx, "lexical_loose_code", None) or [])
+    ]
     # B-636: `danger_only_code` bars measurability for the SAME reason `unread_code` does.
     # Giving the sweep a Python reader emptied `unread_code`, and without this line the
     # axes went straight back to an affirmative PASS over a file they still cannot see -
@@ -853,6 +860,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             and not scan_truncated
             and not unread_code
             and not danger_only_code
+            and not lexical_code
             and not unread_language_code
             and not declared_code
         )
@@ -932,13 +940,23 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             # generic `_clean_reason` text would falsely claim a completed scan.
             if self_source and axis == "danger":
                 reason, fix = _self_source_danger_reason(), ""
+            elif (
+                target_type == "plugin" and axis == "danger"
+                and (lexical_code or unread_code)
+            ):
+                # C-633: loose plugin code was read by a few lexical rules only, or not
+                # read at all - "no malware signature or known-bad indicator" would claim
+                # a completed scan over bytes the scan never really looked at. PASS
+                # branch only: a real Danger WARN/FAIL keeps its own detail.
+                reason, fix = _plugin_partial_read_danger_reason(), ""
             else:
                 reason, fix = _clean_reason(axis, families), ""
         elif status == UNKNOWN and not bucket:
             reason, fix = _unmeasurable_reason(
                 axis, truncated=scan_truncated,
                 unanalysed=bool(unread_code) or unread_language_code,
-                danger_only=bool(danger_only_code), self_source=self_source,
+                danger_only=bool(danger_only_code) or bool(lexical_code),
+                self_source=self_source,
                 declared_only=declared_code,
                 assumed_encoding=assumed_encoding if prose_gap else ()), ""
         else:
@@ -1082,6 +1100,24 @@ def _self_source_danger_reason() -> str:
         "not scanned at all \u2014 this is ClawSecCheck's own source, so it is treated as "
         "safe by policy rather than by a completed malware scan (scanning it would "
         "self-flag on its own attack-signature data)"
+    )
+
+
+def _plugin_partial_read_danger_reason() -> str:
+    """C-633: the danger axis's PASS on a plugin whose loose code was only partly read.
+
+    `vet_plugin` reads loose JS/TS with five lexical rules and has NO reader for shell
+    outside a declared skill (or for Python it could not open or parse), so
+    `_clean_reason`'s "no malware signature or known-bad indicator" would state a
+    completed scan over files nothing really looked at. The same bytes one directory
+    lower, inside a declared skill, are convicted. Says what was and was not checked;
+    the wording is generic so it is true of every trigger.
+    """
+    return (
+        "no signature matched in the code this scan could read; loose plugin code "
+        "outside the declared skills was read by a few lexical rules only or not at "
+        "all (see the coverage notes), so pipe-to-shell strings, config or credential "
+        "reads and outbound POSTs in it were not checked"
     )
 
 
