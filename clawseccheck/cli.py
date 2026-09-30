@@ -2353,7 +2353,8 @@ _MODE_FLAG = {attr: flag for attr, flag, _kind in _PRIMARY_MODES}
 
 
 def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit, *,
-                                  coverage_page: dict | None = None) -> None:
+                                  coverage_page: dict | None = None,
+                                  plugin_sweep=None) -> None:
     """B-586: write `--badge`/`--html`/`--sarif` as side outputs of a `--dashboard` run.
 
     These three used to WIN the mode race against `--dashboard`, run their own bare
@@ -2375,12 +2376,17 @@ def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit,
 
     A failed write is reported and does not stop the card: the dashboard is the
     deliverable and the file is its delivery (B-459's rule, applied to the riders).
+
+    *plugin_sweep* is the `--full` dashboard's live plugin sweep (None on the non-full
+    call, where the sweep never ran and "not scanned" is true). Only `--html` reads it,
+    for its Plugins inventory row; `--badge` and `--sarif` have no plugin-row surface, so
+    do not "fix" them by threading it through.
     """
     for value, label, render in (
         (getattr(args, "badge", None), "badge", lambda: render_svg(score, findings)),
         (getattr(args, "html", None), "HTML report",
          lambda: render_html(findings, score, native=ctx.native, ctx=ctx,
-                             coverage_page=coverage_page)),
+                             coverage_page=coverage_page, plugin_sweep=plugin_sweep)),
         (getattr(args, "sarif", None), "SARIF",
          lambda: render_sarif(findings, score, __version__, ctx=ctx)),
     ):
@@ -5808,7 +5814,8 @@ def _main(argv=None) -> int:
                                if args.fast else None))
         # B-586 + B-723: written only now, against the score the completed phases earned.
         _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit,
-                                      coverage_page=_dashboard_coverage_page)
+                                      coverage_page=_dashboard_coverage_page,
+                                      plugin_sweep=plugin_sweep)
         # P9 (adjudication) is deliberately NOT gated on --fast or the budget, same as
         # --full's own P9: it re-runs no check, so there is no expense to skip.
         _dashboard_vet_targets = (
