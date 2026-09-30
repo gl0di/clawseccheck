@@ -24,6 +24,7 @@ network, no subprocess, no execution. Pure stdlib.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 SCHEMA_ID = "clawseccheck-attest/1"
 
@@ -170,17 +171,22 @@ def classify_tools(tools) -> dict:
 
 # ---------------------------------------------------------------- load / template
 def parse_attestation(data) -> dict:
-    """Validate an attestation given as a JSON string or an already-parsed object.
+    """Validate an attestation given as JSON text (str or bytes) or an already-parsed object.
 
-    Returns the dict, or ``{}`` on any problem (bad JSON, non-object root, unknown
-    schema version). Never raises - a malformed attestation means "no attestation",
-    so checks fall back to UNKNOWN. Shared by the file loader and the stdin path so
-    both validate identically.
+    Returns the dict, or ``{}`` on any problem (undecodable bytes, bad JSON,
+    pathologically nested JSON, non-object root, unknown schema version). Never
+    raises - a malformed attestation means "no attestation", so checks fall back to
+    UNKNOWN. Shared by the file loader and the stdin path so both validate
+    identically. Bytes are decoded by ``json.loads`` itself (UTF-8, UTF-8 with BOM,
+    UTF-16, UTF-32), which is why the loaders hand it the raw bytes.
     """
     if isinstance(data, (str, bytes)):
         try:
             data = json.loads(data)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # ValueError covers bad JSON and UnicodeDecodeError (undecodable bytes);
+            # RecursionError (a RuntimeError, not a ValueError) is what the C scanner
+            # raises on pathologically deep nesting (C-626) - same "no attestation".
             return {}
     if not isinstance(data, dict):
         return {}
@@ -194,13 +200,16 @@ def parse_attestation(data) -> dict:
 def load_attestation(path) -> dict:
     """Read + minimally validate an attestation JSON file. Read-only.
 
-    Returns the parsed dict, or ``{}`` on any problem (missing file, bad JSON,
-    non-object root, wrong schema). Never raises.
+    Returns the parsed dict, or ``{}`` on any problem (missing file, undecodable or
+    binary content, bad JSON, non-object root, wrong schema). Never raises.
+
+    C-626: the file is read as BYTES and ``parse_attestation`` decodes it
+    (``json.loads(bytes)`` sniffs UTF-8 / UTF-8-with-BOM / UTF-16 / UTF-32), so a
+    non-UTF-8 file is a malformed attestation ("no attestation"), not a crash.
     """
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return parse_attestation(fh.read())
-    except OSError:
+        return parse_attestation(Path(path).read_bytes())
+    except (OSError, ValueError):
         return {}
 
 

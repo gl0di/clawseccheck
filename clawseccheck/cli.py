@@ -4992,7 +4992,13 @@ def _main(argv=None) -> int:
     if args.attest:
         from . import attest as _attest  # noqa: PLC0415
         if args.attest == "-":
-            attestation = _attest.parse_attestation(sys.stdin.read())
+            # C-626: hand parse_attestation the RAW bytes so it (not the locale codec)
+            # decodes - a non-UTF-8 / binary stdin becomes the "could not read" warning
+            # below instead of a UnicodeDecodeError crash, while valid UTF-8-with-BOM /
+            # UTF-16 / UTF-32 is accepted. A stand-in stdin with no binary layer
+            # (io.StringIO) is already text; parse_attestation takes both.
+            attestation = _attest.parse_attestation(
+                getattr(sys.stdin, "buffer", sys.stdin).read())
             src = "stdin"
         else:
             attestation = _attest.load_attestation(Path(args.attest).expanduser())
