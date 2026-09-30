@@ -31,13 +31,22 @@ true the first time). ``json.dumps({"version": 1, "profiles": {}}, separators=("
 reproduces the same 27 bytes Node's ``JSON.stringify`` writes -- pinned below so a value AT
 that length (freshly-initialized, still empty) does not hedge, only a value ABOVE it does.
 
-No independent C-135 pass was performed on the ORIGINAL B-749 change (the shared-store
-hedge above) -- flagged explicitly in the Pulse comment landing it, and this file was, at
-that point, the implementer's own test suite, not adversarial review. CLAWSECCHECK-B-845
-(the ``TestPerAgentAuthProfileStore*`` classes below) extends the SAME hedge to a second,
-per-agent auth-material source and is, for the same reason, likewise NOT independently
-C-135-reviewed yet -- this is a security-relevant verdict-adjacent change (A1's
-sensitive-data leg) and needs that pass before merge, same as the change it extends.
+Review record (C-135 adversarial passes, both completed):
+
+* B-749, the shared-store hedge above: an independent C-135 review on 2026-09-17 found no
+  blocking issues.
+* B-845, the per-agent hedge (the ``TestPerAgentAuthProfileStore*`` and
+  ``TestA1HedgesOnPerAgentAuthMaterial`` classes below): six C-135 rounds on 2026-09-23.
+  It was rejected for the recursive-VIEW hang, the cap disclosure that never fired, the
+  FIFO hang, the symlink bypass, and the Python 3.12 ``os.path.realpath`` RecursionError,
+  and confirmed safe in round 6. The hang, FIFO, symlink and cap classes below pin those
+  findings.
+
+Settled questions (B-845, 2026-09-30): the database stores hedge A1 only -- they never
+raise the sensitive-data leg (``TestConsumersStayConsistent`` and
+``TestPerAgentConsumersStayConsistent``) -- and the hedge deliberately ignores read
+confinement (``test_the_hedge_fires_on_a_confined_config_by_design``). The reasons are
+written next to the code, in ``collector.py`` and ``checks/_config.py``.
 """
 from __future__ import annotations
 
@@ -57,6 +66,7 @@ from clawseccheck.collector import (
 )
 from clawseccheck.report import _capability_graph
 from clawseccheck.risk import risk_paths
+from clawseccheck.toolpolicy import scopes_reaching_outside_workspace
 from clawseccheck.trajectorystore import _MAX_SQLITE_DBS, sqlite_db_paths_capped
 
 # Isolates the sensitive-data leg exactly like test_b730_sensitive_data_model_agreement's
@@ -257,6 +267,25 @@ class TestA1HedgesOnStateDbAuthMaterial:
         finding = check_trifecta(ctx)
         assert finding.status == WARN, finding.detail
 
+    def test_the_hedge_fires_on_a_confined_config_by_design(self, tmp_path):
+        """ACCEPTED (B-845 item 4, Dave, 2026-09-30): the shared-store hedge does NOT
+        consult read-confinement. CFG sets ``tools.fs.workspaceOnly: true``, so the
+        positive control below proves no scope reaches outside the workspace -- and A1
+        still hedges, with no "not confined" clause, because file-tool confinement does
+        not prove the database is unreachable and the on-disk credential path raises its
+        leg with no confinement test either. If someone makes this hedge honour `reach`,
+        this test goes red and the change has to be a deliberate decision (it restores a
+        clean PASS on every confined config, the B-749 defect)."""
+        assert scopes_reaching_outside_workspace(CFG) == []
+        home = _home(tmp_path, "h", auth_store_json=_EMPTY_STORE_JSON + " ")
+        ctx = collect(home)
+        finding = check_trifecta(ctx)
+        assert finding.status == WARN, finding.detail
+        assert "authProfiles.store" in finding.detail
+        assert "not confined" not in finding.detail
+        assert "not proven confined" not in finding.detail
+        assert _a1_leg(ctx) is False
+
     def test_a_real_on_disk_credential_still_raises_the_leg_directly(self, tmp_path):
         """Regression: the ORIGINAL B-666 content scan is untouched by this change. A
         real on-disk secret must still raise the leg outright (not merely hedge), same
@@ -421,6 +450,23 @@ class TestA1HedgesOnPerAgentAuthMaterial:
         assert "Cannot determine from config: sensitive data" in finding.detail
         assert "auth_profile_store" in finding.detail
         assert "auth_profile_store" in finding.fix
+
+    def test_the_hedge_fires_on_a_confined_config_by_design(self, tmp_path):
+        """Per-agent twin of the shared-store pin of the same name (ACCEPTED, B-845
+        item 4, Dave, 2026-09-30): a confined config (CFG sets
+        ``tools.fs.workspaceOnly: true``) still hedges on a per-agent store one byte over
+        the empty shell, with no "not confined" clause, and the leg stays OFF."""
+        assert scopes_reaching_outside_workspace(CFG) == []
+        home = _agent_home(
+            tmp_path, "h", agent_auth_store_json=_EMPTY_STORE_JSON + " "
+        )
+        ctx = collect(home)
+        finding = check_trifecta(ctx)
+        assert finding.status == WARN, finding.detail
+        assert "auth_profile_store" in finding.detail
+        assert "not confined" not in finding.detail
+        assert "not proven confined" not in finding.detail
+        assert _a1_leg(ctx) is False
 
     def test_no_agent_db_at_all_stays_a_clean_pass(self, tmp_path):
         """The B-730 regression control, re-verified with this second reader wired
@@ -593,6 +639,85 @@ class TestAgentAuthProfileStoreHangGuard:
         # already reports (see `_collect_agent_auth_profile_store_presence`).
         assert ctx.agent_auth_profile_store_read is False
         assert ctx.agent_auth_profile_store_length is None
+
+
+class TestPerAgentReaderRefusesNonTableSchema:
+    """Two hostile-schema shapes the recursive-VIEW test above does not cover, ported from
+    the abandoned early draft of this fix (which used a raw ``sqlite3.connect`` plus a
+    bare ``_table_kind``). Both close through ``trajectorystore._open_and_verify_table``:
+    a per-agent database decides, via its OWN schema, what a query against
+    ``auth_profile_store`` executes, so the reader must verify the name resolves to an
+    ordinary TABLE before any row is fetched. A refused store reads as "could not look"
+    (read False, length None), never as a spoofed length, and A1 must not hedge on a
+    signal that was refused rather than read."""
+
+    @staticmethod
+    def _bare_home(tmp_path: Path) -> Path:
+        home = tmp_path / "h"
+        home.mkdir()
+        (home / "openclaw.json").write_text(json.dumps(CFG))
+        os.chmod(home / "openclaw.json", 0o600)
+        (home / "agents" / "main" / "agent").mkdir(parents=True)
+        return home
+
+    def test_a_view_masquerading_as_the_table_is_refused_not_read(self, tmp_path):
+        """A non-recursive VIEW named ``auth_profile_store`` over an unrelated decoy row
+        would make the LENGTH query return an attacker-chosen 5000 without ever touching
+        a real store. It must be refused outright."""
+        home = self._bare_home(tmp_path)
+        con = sqlite3.connect(home / "agents" / "main" / "agent" / "openclaw-agent.sqlite")
+        try:
+            con.execute(
+                "CREATE TABLE unrelated_table "
+                "(store_key TEXT, store_json TEXT, updated_at INTEGER)"
+            )
+            con.execute(
+                "INSERT INTO unrelated_table VALUES ('primary', ?, 0)", ("x" * 5000,)
+            )
+            con.execute(
+                "CREATE VIEW auth_profile_store AS"
+                " SELECT store_key, store_json, updated_at FROM unrelated_table"
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_read is False
+        assert ctx.agent_auth_profile_store_length is None
+        assert any("could not be read" in e for e in ctx.errors), ctx.errors
+        # No credentials dir and no other signal: a refused read must not hedge.
+        finding = check_trifecta(ctx)
+        assert finding.status == PASS, finding.detail
+
+    def test_a_real_table_with_a_generated_column_is_also_refused(self, tmp_path):
+        """An honestly-declared TABLE (``type='table'``, ordinary CREATE TABLE) can still
+        carry a ``GENERATED ALWAYS AS (...)`` column, which ``_table_kind``'s
+        ``PRAGMA table_xinfo`` check catches where a ``sqlite_master``-only predicate
+        could not. Same expectations as the VIEW case."""
+        home = self._bare_home(tmp_path)
+        con = sqlite3.connect(home / "agents" / "main" / "agent" / "openclaw-agent.sqlite")
+        try:
+            con.execute(
+                "CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, "
+                "store_json TEXT NOT NULL, updated_at INTEGER NOT NULL, "
+                "computed TEXT GENERATED ALWAYS AS (store_json || store_json) VIRTUAL)"
+            )
+            con.execute(
+                "INSERT INTO auth_profile_store (store_key, store_json, updated_at)"
+                " VALUES ('primary', ?, 0)",
+                (json.dumps({"version": 1, "profiles": {"x": _token("N")}}),),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        ctx = collect(home)
+        assert ctx.agent_auth_profile_store_read is False
+        assert ctx.agent_auth_profile_store_length is None
+        assert any("could not be read" in e for e in ctx.errors), ctx.errors
+        finding = check_trifecta(ctx)
+        assert finding.status == PASS, finding.detail
 
 
 # ------------------------------------------------------------------- cap disclosure

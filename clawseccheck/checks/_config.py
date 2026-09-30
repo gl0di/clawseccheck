@@ -4692,6 +4692,29 @@ def check_trifecta(ctx: Context) -> Finding:
             and agent_auth_store_length is not None
             and agent_auth_store_length > _AUTH_PROFILE_STORE_EMPTY_BYTES
         )
+        # ACCEPTED (B-845 item 4, Dave, 2026-09-30): the two database-store hedges above
+        # (`auth_store_present`, `agent_auth_store_present`) deliberately do NOT consult
+        # `reach` or read-confinement. A1 therefore stays WARN on a CONFINED config
+        # (tools.fs.workspaceOnly=true) whenever any auth-profile store holds more than
+        # the empty shell - even a keyRef-only store with no secret at rest. Why:
+        #   1. The on-disk path raises the leg from credential CONTENT with no
+        #      confinement test (`_trifecta_leg_sources`, checks/_shared.py). Gating the
+        #      database hedges on `reach` would make the two credential locations
+        #      disagree about the same secret.
+        #   2. tools.fs.workspaceOnly confines the FILE tools only. It does not prove the
+        #      credentials are unreachable (an exec or browser tool can still read the
+        #      database).
+        #   3. Gating on `reach` would restore a clean PASS with the leg OFF on every
+        #      confined config, which is exactly the B-749 defect this hedge exists to
+        #      remove.
+        # Known cost: a near-permanent A1 WARN on confined configs that hold any provider
+        # profile. Measured once (n=1): the fleet machine, shared store 2123 bytes on a
+        # confined config; the fleet-wide rate is unmeasured. Resolution paths: attest the
+        # tool inventory (`_capabilities_attested`, silences this whole hedge), or a
+        # .clawseccheckignore entry. No verdict change; pinned by
+        # `test_the_hedge_fires_on_a_confined_config_by_design` in
+        # tests/test_b749_auth_profile_store_presence.py, so honouring `reach` later has
+        # to be a deliberate decision (it would need a C-135 pass and the fleet FP gate).
         # B-845 (round 3, 2026-09-23): a C-135 review found the capped flag was read
         # ONLY inside the `agent_auth_store_present` sentence below -- so a home with
         # MORE agent databases than the sweep's own cap allows, where none of the
