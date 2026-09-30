@@ -1270,6 +1270,80 @@ def _code_mode_default(ctx) -> str:
     return "unknown"
 
 
+# B350 (C-640): the build that FLIPPED an UNSET gateway.terminal.enabled from off to ON. The
+# config path did not move; only the gate line did. Gate lines read out of the cached
+# tarballs (npm cache, no network) and, for 2026.9.7, executed in node against the installed
+# dist:
+#
+#   2026.6.9, 6.10, 6.11, 6.34   no `gateway.terminal` string anywhere in dist (feature absent)
+#   2026.7.1, 7.1-2, 7.33-7.35   launch-*.js:109,120 `enabled !== true`; :154 `=== true`;
+#                                server.impl-*.js:1002 and control-ui-*.js:699 `=== true`;
+#                                schema help "when true (default: false)"     (unset = OFF)
+#   2026.8.1, 8.2, 9.1 - 9.7     enabled-*.js:3 `config?.gateway?.terminal?.enabled !== false`;
+#                                schema help "(default: true) ... set false to opt out"
+#                                                                                (unset = ON)
+#
+# So the flip lies in (2026.7.35, 2026.8.1]. Releases strictly between (2026.7.36 and later,
+# any 2026.8.0) were never cached, so the exact build is UNMEASURED and NOT attributed, and
+# the 8.1 CHANGELOG carries no line announcing a default change. 2026.7.2 - 7.32 were not
+# cached either, and they are NOT assumed off: the two cached 2026.7.2 PRE-releases (beta.5,
+# beta.7) already carry the `!== false` gate (unset = ON) while the stable 7.33 - 7.35 read
+# off again, so the default was not monotonic and nothing measured says which way an
+# uncached 7.2 - 7.32 build goes (owner ruling, 2026-09-30: UNKNOWN, not off). "off" is the
+# one answer that PASSes an unset key, so it is given only for the MEASURED stable spans
+# below (7.1, incl. 7.1-2, and 7.33 - 7.35); every other build before 8.1 answers
+# "unknown", and a pre-release string orders as None and answers "unknown" too.
+_TERMINAL_DEFAULT_ON_MIN = (2026, 8, 1)         # first release read with `!== false`
+_TERMINAL_OFF_MEASURED_MIN = (2026, 7, 1)       # oldest release read with `=== true`
+_TERMINAL_OFF_MEASURED_MAX = (2026, 7, 35)      # newest release read with `=== true`
+_TERMINAL_OFF_MEASURED_SPANS = (             # the stable builds actually read off
+    ((2026, 7, 1), (2026, 7, 1)),
+    ((2026, 7, 33), (2026, 7, 35)),
+)
+
+
+def _terminal_default(ctx) -> str:
+    """What does an UNSET ``gateway.terminal.enabled`` mean on the reader's OpenClaw?
+    ``"off"`` / ``"on"`` / ``"unknown"``.
+
+    Three answers for the reason ``_code_mode_default`` has three: "we could not see the
+    build" is not "the build leaves the terminal off", and collapsing them is how a
+    default-ON 2026.8.1+ install reported "the operator terminal is not enabled".
+
+    Sources are ``_cross_context_default``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose gate
+    runs. ``meta.lastTouchedVersion`` is consulted ONLY when it lands at 2026.8.1 or later:
+    that stamp proves an 8.1+ build once SAVED the config, so the default is on. A stamp
+    BELOW the threshold proves nothing about what is installed now (the user may have
+    upgraded five minutes ago and not re-saved), so it answers ``"unknown"``, never
+    ``"off"``. Parsing goes through ``_numeric_version`` (not ``_parse_version``, B-264): a
+    pre-release such as 2026.8.1-beta.1 orders as None and lands on ``"unknown"``.
+
+    ``"off"`` is only given for an installed version shaped like a calendar release
+    (``YYYY.M.P``, three or more numeric parts) whose first three parts fall inside one of
+    ``_TERMINAL_OFF_MEASURED_SPANS`` (2026.7.1 and 2026.7.33 - 2026.7.35, the stable builds
+    read off). A build older than the series (the terminal did not exist), an unmeasured
+    build (2026.7.2 - 7.32, and the window between 2026.7.35 and 2026.8.1), and a string
+    that cannot be placed on the timeline ("0.0.0", "2026.7") are all ``"unknown"``.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _TERMINAL_DEFAULT_ON_MIN:
+            return "on"
+        if len(installed) >= 3 and any(
+                lo <= tuple(installed[:3]) <= hi for lo, hi in _TERMINAL_OFF_MEASURED_SPANS):
+            return "off"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _TERMINAL_DEFAULT_ON_MIN:
+        return "on"
+    return "unknown"
+
+
 # B397: the build that FIRST shipped `gateway.portals` (and its only child,
 # `gateway.portals.ingress`) in the root config schema. Grounded against the installed
 # dist (openclaw@2026.9.6): `GatewayConfigSchema`, `zod-schema-B-u3AXjg.mjs:992-996`.
