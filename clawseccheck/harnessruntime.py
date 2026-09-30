@@ -150,8 +150,14 @@ from .collector import agent_roster
 #: (only its ``build`` stamp differs), so the evidence for 9.5 is still measured, not
 #: assumed. Raising the floor would have turned every 9.5 install's answer into ``unknown``
 #: with no divergence to justify it.
+#:
+#: The ceiling moved to 2026.9.7 on 2026-09-30, on a DRY RUN of the oracle, not on a
+#: regenerated battery: the 773 pinned rows were re-executed against the installed 2026.9.7
+#: (``collectConfiguredModelRefs`` now lives in ``runtime-snapshot-*``, located by its
+#: declaration) and the vendor's answer differed on none of them -- same labels, same
+#: configs, same envs, the same 22 thrown-error rows. The floor stays, for the reason above.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 9, 6)
+ORACLE_MAX = (2026, 9, 7)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 

@@ -102,9 +102,16 @@ for (const c of cases) {
 console.log("@@RESULT@@" + JSON.stringify(out));
 """
 
+#: role -> (filename glob, declaration). A ``None`` glob means "no stable filename": that
+#: symbol is located by the line that DECLARES it (``_distgrounding.dist_declaring``), and
+#: must be declared in exactly one non-sealed top-level bundle. ``refs`` is the one that needs
+#: it: ``collectConfiguredModelRefs`` lived in ``configured-model-refs-*.mjs`` and moved into
+#: ``runtime-snapshot-*.mjs`` on 2026.9.7 -- a host bundle that has rotated out from under a
+#: filename anchor, and that also holds the whole runtime config snapshot machinery, so
+#: re-pointing the glob at its new host would only be waiting for the next move.
 _ANCHORS = {
     "collect": ("harness-runtimes-*.mjs", "function collectConfiguredAgentHarnessRuntimes"),
-    "refs": ("configured-model-refs-*.mjs", "function collectConfiguredModelRefs("),
+    "refs": (None, "function collectConfiguredModelRefs("),
     "policy": ("policy-*.mjs", "function resolveAgentHarnessPolicy"),
     "parse": ("model-catalog-refs-*.mjs", "function parseModelCatalogRef"),
 }
@@ -136,11 +143,18 @@ def dist_version() -> "str | None":
         return None
 
 
+def _locate(role: str) -> Path:
+    """The ONE bundle this role's function is declared in (see ``_ANCHORS``)."""
+    from _distgrounding import dist_declaring, dist_file
+    pattern, needle = _ANCHORS[role]
+    if pattern is None:
+        return dist_declaring(needle, symbol=_WANT[role])
+    return dist_file(pattern, symbol=_WANT[role], contains=needle)
+
+
 def run_oracle(cases: "list[dict]") -> "list[dict]":
     """Execute the vendor over *cases* (each ``{"cfg": ..., "env": {...}}``)."""
-    from _distgrounding import dist_file
-    paths = {k: dist_file(pat, symbol=_WANT[k], contains=needle)
-             for k, (pat, needle) in _ANCHORS.items()}
+    paths = {k: _locate(k) for k in _ANCHORS}
     aliases: "dict[str, str]" = {}
     for k, p in paths.items():
         ex = _exports(p)

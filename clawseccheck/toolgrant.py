@@ -188,7 +188,7 @@ class _GlobalScope:
 GLOBAL_SCOPE = _GlobalScope()
 
 # TOOL_NAME_ALIASES (the tool-policy-shared bundle; a Map since 2026.9.2, its three pairs
-# unchanged through openclaw@2026.9.6 - compared whole against the EXECUTED Map on 2026-09-25).
+# unchanged through openclaw@2026.9.7 - compared whole against the EXECUTED Map on 2026-09-30).
 # Three entries - see the module docstring's "ALIAS TABLE" section for why this is not a copy
 # of checks/_shared.py's/toolpolicy.py's two-entry tables. Grounded directly against the dist
 # in tests/test_toolgrant_dist_grounding.py, never against either sibling copy.
@@ -198,18 +198,24 @@ _TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch", "cron": "aut
 # (``TOOL_GROUPS = { ...CORE_TOOL_GROUPS }`` in tool-policy-shared, built by
 # ``buildCoreToolGroupMap()`` in tool-catalog): "group:openclaw" plus one "group:<section>"
 # per CORE_TOOL_SECTION_ORDER entry. Dumped by EXECUTING the installed dist, not transcribed -
-# grounded against openclaw@2026.9.6 on 2026-09-25 (tests/_toolgrantoracle.py --tables), and
+# grounded against openclaw@2026.9.7 on 2026-09-30 (tests/_toolgrantoracle.py --tables), and
 # compared WHOLE against a fresh execution by tests/test_toolgrant_dist_grounding.py. Versus
 # 2026.9.2: group:fs gained "ls"; group:automation gained "plugins" and "openclaw";
 # group:media gained "pdf"; group:openclaw gained "plugins", "openclaw" and "pdf".
 # Versus 2026.9.5: group:openclaw and group:ui gained "theme" (a UI appearance tool).
+# Versus 2026.9.6: three new catalog tools, each in group:openclaw plus one section group -
+# "decision_evaluate" (group:agents, FIRST), "personal_instructions" (group:memory, last) and
+# "presence" (group:sessions, FIRST). A fourth catalog tool, "transcripts", is in NO group and
+# NO profile (tool-catalog lists it with profiles: [] and includeInSectionGroup: false), so
+# it is absent from these tables and no named profile except "full" (allow "*") grants it.
 _CORE_TOOL_GROUPS = {
     "group:openclaw": [
-        "code_execution", "secrets", "web_search", "web_fetch", "x_search", "memory_search",
-        "memory_get", "sessions", "sessions_list", "sessions_history", "sessions_search",
-        "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
-        "sessions_spawn", "github_identity_status", "github_publish", "agents_wait",
-        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task", "browser",
+        "decision_evaluate", "code_execution", "secrets", "web_search", "web_fetch", "x_search",
+        "memory_search", "memory_get", "personal_instructions", "presence", "sessions",
+        "sessions_list", "sessions_history", "sessions_search", "conversations_list",
+        "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
+        "github_identity_status", "github_publish", "agents_wait", "sessions_yield", "subagents",
+        "session_status", "suggest_task", "dismiss_task", "browser",
         "screen", "theme", "dashboard", "terminal", "portal", "show_widget", "message",
         "heartbeat_respond",
         "automations", "gateway", "plugins", "openclaw", "nodes", "computer", "mobile_ui",
@@ -220,12 +226,12 @@ _CORE_TOOL_GROUPS = {
     "group:fs": ["ls", "read", "write", "edit", "apply_patch"],
     "group:runtime": ["exec", "process", "code_execution", "secrets"],
     "group:web": ["web_search", "web_fetch", "x_search"],
-    "group:memory": ["memory_search", "memory_get"],
+    "group:memory": ["memory_search", "memory_get", "personal_instructions"],
     "group:sessions": [
-        "sessions", "sessions_list", "sessions_history", "sessions_search", "conversations_list",
-        "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
-        "github_identity_status", "github_publish", "agents_wait", "sessions_yield", "subagents",
-        "session_status", "suggest_task", "dismiss_task",
+        "presence", "sessions", "sessions_list", "sessions_history", "sessions_search",
+        "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
+        "sessions_spawn", "github_identity_status", "github_publish", "agents_wait",
+        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task",
     ],
     "group:ui": [
         "browser", "screen", "theme", "dashboard", "terminal", "portal", "canvas", "show_widget",
@@ -234,8 +240,8 @@ _CORE_TOOL_GROUPS = {
     "group:automation": ["heartbeat_respond", "automations", "gateway", "plugins", "openclaw"],
     "group:nodes": ["nodes", "computer", "mobile_ui"],
     "group:agents": [
-        "agents_list", "get_goal", "create_goal", "update_goal", "progress_card", "ask_user",
-        "skill_workshop",
+        "decision_evaluate", "agents_list", "get_goal", "create_goal", "update_goal",
+        "progress_card", "ask_user", "skill_workshop",
     ],
     "group:media": [
         "view_image", "image_generate", "music_generate", "video_generate", "tts", "pdf",
@@ -245,31 +251,35 @@ _CORE_TOOL_GROUPS = {
 # CORE_TOOL_PROFILES - the literal object in tool-catalog, read through
 # ``resolveCoreToolProfilePolicy(profile)`` for each key (an exact, case-sensitive object
 # index). "full" is allow-all; the other three are the exact tool-id lists the runtime grants.
-# Grounded against openclaw@2026.9.6 on 2026-09-25 by execution, and compared WHOLE against a
+# Grounded against openclaw@2026.9.7 on 2026-09-30 by execution, and compared WHOLE against a
 # fresh execution by tests/test_toolgrant_dist_grounding.py. Versus 2026.9.2: "gateway" joined
 # minimal, coding AND messaging (the agent-facing gateway tool is now a default grant, which
 # is why a "coding" agent can reach ``gateway``/``plugins`` without any allow entry);
 # "plugins" joined coding; "ls" joined coding (already so on 2026.9.4). Versus 2026.9.5:
-# "theme" joined coding and messaging.
+# "theme" joined coding and messaging. Versus 2026.9.6: "presence" joined minimal (first),
+# and "decision_evaluate" (first), "personal_instructions" and "presence" joined coding and
+# messaging - so a default "coding" or "messaging" agent is granted the new tools without any
+# allow entry, and a "minimal" one is granted "presence".
 _CORE_TOOL_PROFILES = {
-    "minimal": ["session_status", "gateway"],
+    "minimal": ["presence", "session_status", "gateway"],
     "coding": [
-        "ls", "read", "write", "edit", "apply_patch", "exec", "process", "code_execution",
-        "secrets", "web_search", "web_fetch", "x_search", "memory_search", "memory_get", "sessions",
-        "sessions_list", "sessions_history", "sessions_search", "conversations_list",
-        "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
-        "github_identity_status", "github_publish", "agents_wait", "sessions_yield", "subagents",
-        "session_status", "suggest_task", "dismiss_task", "screen", "theme", "dashboard",
-        "terminal",
+        "decision_evaluate", "ls", "read", "write", "edit", "apply_patch", "exec", "process",
+        "code_execution", "secrets", "web_search", "web_fetch", "x_search", "memory_search",
+        "memory_get", "personal_instructions", "presence", "sessions", "sessions_list",
+        "sessions_history", "sessions_search", "conversations_list", "conversations_send",
+        "conversations_turn", "sessions_send", "sessions_spawn", "github_identity_status",
+        "github_publish", "agents_wait", "sessions_yield", "subagents", "session_status",
+        "suggest_task", "dismiss_task", "screen", "theme", "dashboard", "terminal",
         "portal", "automations", "gateway", "plugins", "get_goal", "create_goal", "update_goal",
         "progress_card", "ask_user", "skill_workshop", "view_image", "image_generate",
         "music_generate", "video_generate", "bundle-mcp",
     ],
     "messaging": [
-        "secrets", "sessions", "sessions_list", "sessions_history", "sessions_search",
-        "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
-        "sessions_spawn", "sessions_yield", "subagents", "session_status", "theme", "message",
-        "gateway", "ask_user", "bundle-mcp",
+        "decision_evaluate", "secrets", "personal_instructions", "presence", "sessions",
+        "sessions_list", "sessions_history", "sessions_search", "conversations_list",
+        "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
+        "sessions_yield", "subagents", "session_status", "theme", "message", "gateway",
+        "ask_user", "bundle-mcp",
     ],
     "full": ["*"],
 }
