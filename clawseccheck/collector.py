@@ -5349,6 +5349,31 @@ CONFIG_MACHINE_STATE_KEYS = (
 # `_collect_auth_profile_store_presence` binds this literal into a `LENGTH(value_json)`
 # query and never selects `value_json` itself, so the secret payload is never read.
 _AUTH_PROFILE_STORE_KEY = "authProfiles.store"
+# B-845 settlements (Dave, 2026-09-30) for the two questions B-749 left open. Recorded
+# here, next to the reader, so neither has to be re-derived from a review thread.
+#
+# Q1 - is credentials/ still populated on some installs? Grounded against the 2026.9.7
+# dist: `resolveOAuthDir` is `<state dir>/credentials` unless OPENCLAW_OAUTH_DIR overrides
+# it (paths-CtO6iw0c.mjs:237). The doctor treats `credentials/auth-profiles/<32-hex>.json`
+# as a LEGACY OAuth secret sidecar to list and migrate
+# (doctor-auth-oauth-sidecar-DAcfHuls.mjs: `listUnreferencedLegacyOAuthSidecars`,
+# `applyLegacyOAuthSidecarMaterial`; dirname constant at :20/:177). The live store is in the
+# state database (`SHARED_STORE_STATE_KEY = "authProfiles.store"`,
+# sqlite-json-DPb0JT1h.mjs:168) and, per agent, in `auth_profile_store`. So the two
+# locations are complementary, not one replacing the other: an un-migrated install can hold
+# real secrets under credentials/, a migrated one holds them in the databases. That is why
+# A1 keeps BOTH the on-disk content scan (`_credential_store_state`, B-666) and the database
+# hedges. Deliberately NOT claimed: that credentials/ has "no current writer" - that is not
+# proven; the accurate word is "legacy per the doctor's own naming".
+#
+# Q3 - should a non-empty database store raise the sensitive-data leg? DECIDED: no. The
+# database stores hedge A1 only (WARN, never a leg and never a FAIL); risk.py, report.py and
+# cli.py read the boolean leg and stay OFF for them by design. That agreement is pinned by
+# `TestConsumersStayConsistent` and `TestPerAgentConsumersStayConsistent`
+# (tests/test_b749_auth_profile_store_presence.py). Reason: whether a non-empty row means a
+# USABLE credential (versus expired, revoked, or keyRef-only) cannot be told from its
+# length, and raising the leg there is FAIL-capable movement on the CRITICAL check that
+# grade-caps the audit (B-499 and B-666 precedent).
 # Grounded by reading the installed dist (2026.9.4: sqlite-CzDV0dcE.mjs,
 # store-BxRoDWvl.mjs, legacy-source-diagnostic-D-_lsE4x.mjs), not inferred: the FIRST
 # save OpenClaw ever makes to this row -- even with zero configured profiles -- writes
@@ -5360,6 +5385,17 @@ _AUTH_PROFILE_STORE_KEY = "authProfiles.store"
 # `json.dumps({"version": 1, "profiles": {}}, separators=(",", ":"))` reproduces the same
 # 27 bytes Node's `JSON.stringify` writes -- a row at or under that length is the
 # vendor's own "initialized, still empty" shape, not evidence of a real credential.
+#
+# RE-GROUND ON EVERY OPENCLAW UPGRADE (part of the upgrade protocol's re-baseline): re-read
+# `buildPersistedAuthProfileSecretsStore` and confirm the empty payload is still exactly
+# `{version: 1, profiles: {}}`, serialized by `JSON.stringify` with no whitespace. Last
+# checked 2026.9.7 (persisted-aVBA9lMv.mjs:660-663: `version: 1, profiles:
+# Object.fromEntries(...)`); grounded at 2026.9.4 and re-checked at 2026.9.5. If the shape
+# drifts: a LONGER empty shape makes the hedge over-fire on empty stores (the safe
+# direction); a SHORTER one means a real store at or under 27 bytes is missed (the unsafe
+# direction). No local-only test asserts this against the installed dist: a tripwire was
+# considered and skipped in maintenance mode, since the upgrade protocol's manual
+# re-baseline already covers it.
 _AUTH_PROFILE_STORE_EMPTY_BYTES = 27
 
 
