@@ -140,6 +140,8 @@ def verify_chain(events_path: "str | Path",
     - ``(True, "OK...")``  - there is a chain here and it is intact. Also covers a
       journal whose entries all lack a 'chain_hash' (legacy graceful mode): that is a
       real chain with unverifiable rows, and the count is disclosed in the message.
+      The legacy carve-out is a PREFIX: unchained rows are tolerated only before the
+      first chained row; after it they are BROKEN (C-624).
     - ``(False, "broken at entry N")`` - there is a chain here and it does not hold.
     - ``(None, ...)`` - there is **no chain here to verify**: the file is absent, empty,
       holds no parseable entry at all, or could not be read.
@@ -175,13 +177,16 @@ def verify_chain(events_path: "str | Path",
     applies: unknown-schema entries (C-167), entries present but not chain-verified
     (legacy, no 'chain_hash' field - reconciles SECURITY_MODEL.md's "whole-file legacy
     carve-out" description with what this always did per-entry: a JOURNAL MIXING legacy
-    and chained entries discloses only the legacy COUNT, not "the whole file is legacy"),
+    and chained entries (legacy rows first) discloses only the legacy COUNT, not "the
+    whole file is legacy"),
     and unparseable lines skipped entirely (see `_iter_jsonl`'s `skipped` out-param) - so
     "OK (1 unknown-schema entry present)" (the pre-existing wording, unchanged when it is
     the only note) can now read "OK (1 unknown-schema entry present; 2 entries not
     chain-verified (legacy, no chain_hash); 1 unparseable line skipped)".
 
-    Returns (False, "broken at entry N") on the first mismatch.
+    Returns (False, "broken at entry N") on the first mismatch, or (False, "unchained
+    entry N follows a chained entry - not legacy") on the first unchained row after a
+    chained one (C-624).
     Never raises - an IO error yields the third outcome (``None``), not a pass: saying
     "OK" about a file that could not be opened is the same lie as saying it about one that
     is not there.
@@ -250,6 +255,7 @@ def verify_chain(events_path: "str | Path",
     prev_hash = ""
     unknown_schema = 0
     unchained = 0
+    seen_chained = False  # C-624: legacy rows are a PREFIX only
     for idx, entry in enumerate(entries):
         # Count lines the loaders would skip (C-167): present + authenticated here,
         # but hidden from load_events()/history.load() by the unknown-schema policy.
@@ -258,10 +264,17 @@ def verify_chain(events_path: "str | Path",
 
         stored = entry.get("chain_hash")
         if stored is None:
+            if seen_chained:
+                # C-624: no writer of this journal leaves an unchained row after a
+                # chained one (record_events / history.record always chain;
+                # _rotate_journal re-chains every survivor). It is a forged or
+                # inserted row, or a row whose chain_hash was stripped.
+                return False, f"unchained entry {idx} follows a chained entry - not legacy"
             # Legacy entry - skip chain verification for this entry, carry prev_hash.
             # C-250: counted, not just silently tolerated - see the docstring above.
             unchained += 1
             continue
+        seen_chained = True
 
         # Recompute over the entry *without* the chain_hash field
         base = {k: v for k, v in entry.items() if k != "chain_hash"}
@@ -764,9 +777,10 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
     responsible for not consuming the event when this returns non-None (see cli.py).
 
     Each entry carries a 'chain_hash' field: sha256(prev_chain_hash + canonical_json)
-    so the journal is tamper-evident. Existing entries without 'chain_hash' are treated
-    as the chain genesis (backward compatible). Each entry also carries '_schema'
-    (C-162) INSIDE the hashed payload, so it is itself tamper-evident.
+    so the journal is tamper-evident. A legacy prefix of entries without 'chain_hash' is
+    tolerated (backward compatible); an unchained entry AFTER a chained one is BROKEN
+    (C-624). Each entry also carries '_schema' (C-162) INSIDE the hashed payload, so it
+    is itself tamper-evident.
 
     B-108: the read-last-hash->append critical section runs under an advisory
     ``journal_lock`` so two concurrent monitor runs can't both read the same prev

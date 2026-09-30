@@ -757,6 +757,10 @@ Both chain verifiers (`--verify-history` too) have **three** outcomes, not two:
 | `chain BROKEN at entry N` | there is a chain here and it does not | 1 |
 | `chain NOT VERIFIED` | there is **no chain here to verify** - the store is absent, empty, holds nothing parseable, is not a regular file, or could not be read | 1 |
 
+`chain BROKEN` also covers an entry with no `chain_hash` that follows a chained one
+(`unchained entry N follows a chained entry - not legacy`): rows without a `chain_hash` are
+only tolerated as a leading legacy prefix, and are counted in the OK message.
+
 The third one exists because deleting the store is the crudest tampering there is, and it
 used to print `chain OK` with exit 0 over a file that was never opened. It is deliberately
 **not** reported as BROKEN either: a first run has no store yet, and calling that tampering
@@ -961,9 +965,10 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   `--verify-baseline`'s own exit code (which flips to 1 on a genuine disagreement between a
   *found* witness and the current file; "no witness on record" changes nothing).
 - **The events chain only catches naive edits.** A knowledgeable attacker who already has write
-  access can recompute the whole chain forward after tampering, truncate the tail, or delete the
-  file outright - all three verify "clean". See "What the chain does and does not defend" in
-  [SECURITY_MODEL.md](../SECURITY_MODEL.md).
+  access can recompute the whole chain forward after tampering, or cut whole lines off the
+  tail - both verify "clean"; deleting the file reports `chain NOT VERIFIED`, not clean, and a
+  row inserted or hash-stripped WITHOUT recomputing the chain is BROKEN (C-624). See "What the
+  chain does and does not defend" in [SECURITY_MODEL.md](../SECURITY_MODEL.md).
 - **Concurrency locking is POSIX-only.** `journal_lock` (the append-time serialization that keeps
   two racing writers from both reading the same "last" hash) takes a `flock`/`fcntl` sidecar
   lock; without `fcntl` - most notably **Windows**, which this project does advertise support for

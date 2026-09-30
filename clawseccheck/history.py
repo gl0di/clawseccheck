@@ -280,7 +280,9 @@ def verify(path: str = DEFAULT_HISTORY,
 
     Delegates to monitor.verify_chain (same generic entry-agnostic algorithm), and so
     has the same THREE outcomes (B-589): (True, "OK...") for a chain that holds - including
-    a legacy file whose rows carry no 'chain_hash', whose count is disclosed -
+    a legacy file whose rows carry no 'chain_hash', whose count is disclosed; legacy is
+    a leading prefix only, and a later unchained row returns
+    (False, "unchained entry N follows a chained entry - not legacy") (C-624) -
     (False, "broken at entry N") on the first tampered/reordered/deleted entry, and
     (None, ...) when there is no chain here to verify at all: absent, empty, holding no
     parseable row, or unreadable.
