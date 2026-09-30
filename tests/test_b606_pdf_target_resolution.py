@@ -86,12 +86,13 @@ def test_resolution_never_creates_the_directory(tmp_path):
 # The helper being right is not the thing that failed. Assert the resolved path reaches the
 # directive the agent is told to emit -- deleting the call site must redden something here.
 
-def _stderr_note(tmp_path: Path, home: Path, pdf_args: list) -> str:
+def _stderr_note(tmp_path: Path, home: Path, pdf_args: list, data_dir: bool = True) -> str:
     fake_home = tmp_path / "fake_home"
     fake_home.mkdir(exist_ok=True)
+    store_args = ["--data-dir", str(tmp_path / "store")] if data_dir else []
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home), "--no-history",
-         "--data-dir", str(tmp_path / "store"), "--no-deptree", "--no-host", "--dashboard", *pdf_args],
+         *store_args, "--no-deptree", "--no-host", "--dashboard", *pdf_args],
         cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "HOME": str(fake_home)})
     return proc.stderr
@@ -112,13 +113,32 @@ def test_a_bare_pdf_flag_points_the_directive_at_the_managed_root(tmp_path):
 def test_a_bare_pdf_flag_without_the_managed_root_warns_the_attachment_may_vanish(tmp_path):
     home = tmp_path / "oc_home"
     home.mkdir()
-    note = _stderr_note(tmp_path, home, ["--pdf"])
+    note = _stderr_note(tmp_path, home, ["--pdf"], data_dir=False)
     media = _media_lines(note)
     assert media, f"no MEDIA: directive was emitted; stderr was:\n{note}"
     assert media[0].endswith(".clawseccheck/report.pdf"), media
     assert "silently dropped" in note, (
         "the fallback must disclose that the attachment may never arrive -- a blocked "
         f"MEDIA line is dropped without an error. stderr was:\n{note}")
+
+
+def test_the_fallback_follows_data_dir_instead_of_the_real_store(tmp_path):
+    """C-621: with --data-dir D a bare --pdf lands in D, never in the real ~/.clawseccheck.
+
+    The store moves together (B-599); the PDF fallback used to be the one file that did
+    not, so a scratch run wrote a full audit report into the user's real store, where a
+    ``--purge --data-dir D`` could not reach it.
+    """
+    home = tmp_path / "oc_home"
+    home.mkdir()
+    note = _stderr_note(tmp_path, home, ["--pdf"])
+    media = _media_lines(note)
+    assert media, f"no MEDIA: directive was emitted; stderr was:\n{note}"
+    assert media[0].endswith("store/report.pdf"), media
+    assert (tmp_path / "store" / "report.pdf").is_file()
+    assert not (tmp_path / "fake_home" / ".clawseccheck" / "report.pdf").exists(), (
+        "a --data-dir run wrote its PDF into the real store")
+    assert "silently dropped" in note, "the fallback caveat must still fire"
 
 
 def test_an_explicit_path_is_never_replaced_by_the_managed_root(tmp_path):

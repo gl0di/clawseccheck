@@ -2697,6 +2697,15 @@ _PURGE_FILENAMES = (
     "sbom_runs.jsonl",
     # C-520: --incident-open's opt-in incident-lifecycle store. Same reasoning.
     "incidents.jsonl",
+    # C-517: --watch's liveness heartbeat (pid + the absolute home path + timestamps).
+    # Written to <store>/watch_heartbeat.json by _watch_heartbeat_path; read by --watch-status.
+    "watch_heartbeat.json",
+    # The bare --pdf default (_default_pdf_target's fallback, <store>/report.pdf). The four
+    # "openclaw-security-report.*" names above are F-162's guess at default names; this is
+    # the name the tool actually writes for PDF. NOT clawseccheck-report.pdf: that is the
+    # managed-attachment name and it lives in <openclaw home>/media/outbound, outside the
+    # store, which --purge must never reach into.
+    "report.pdf",
 )
 
 
@@ -2764,9 +2773,9 @@ def _run_purge(args) -> int:
     """Delete ClawSecCheck's local store (opt-in, confirmation-gated).
 
     Resolves the store directory from --history's parent (all _PURGE_FILENAMES
-    entries - the four store files plus the four default report-renderer
-    filenames, see that constant's comment for why - live alongside each other
-    under ~/.clawseccheck/ by default). Operates ONLY on that fixed whitelist
+    entries - the store files plus the default-named report outputs, see that
+    constant's comment for why - live alongside each other under ~/.clawseccheck/
+    by default). Operates ONLY on that fixed whitelist
     plus their ".lock" sidecars - never globs or rmtree's the directory, so an
     unrelated file the user happens to keep there is never at risk. Read-only
     until the user (or --yes) confirms.
@@ -3471,7 +3480,7 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False, score=
 _PDF_AUTO = "\0pdf-auto\0"
 
 
-def _default_pdf_target(home: str) -> "tuple[str, bool]":
+def _default_pdf_target(home: str, store_dir: "Path | None" = None) -> "tuple[str, bool]":
     """Where a bare ``--pdf`` writes, and whether that is the managed root.
 
     B-606: OpenClaw parses a ``MEDIA:<path>`` directive off the assistant's own reply and
@@ -3490,6 +3499,14 @@ def _default_pdf_target(home: str) -> "tuple[str, bool]":
 
     Never CREATES the directory - an explicit, opt-in ``--pdf`` write is what CLAUDE.md
     allows; auto-resolution must not manufacture the very precondition it is testing for.
+
+    The fallback is ``<store>/report.pdf``. ``store_dir`` is the run's store directory
+    (``_store_dir(args)``) when ``--data-dir``/``--history`` moved it off the default, so
+    a scratch run's bare ``--pdf`` lands in the scratch store instead of the real
+    ``~/.clawseccheck`` - the same "the store moves together" promise ``--data-dir``
+    makes for history/state/events/coverage - and ``--purge`` (which looks in that same
+    directory) can reach it. ``None`` means the default store and keeps the home-relative
+    ``~/.clawseccheck/report.pdf`` spelling, which is what the attach note prints.
     """
     managed = Path(home).expanduser() / "media" / "outbound"
     try:
@@ -3497,6 +3514,8 @@ def _default_pdf_target(home: str) -> "tuple[str, bool]":
             return str(managed / "clawseccheck-report.pdf"), True
     except OSError:
         pass
+    if store_dir is not None:
+        return str(store_dir / "report.pdf"), False
     return "~/.clawseccheck/report.pdf", False
 
 
@@ -3759,7 +3778,8 @@ def _main(argv=None) -> int:
                         "file itself into chat (a mobile client opens it inline; do not "
                         "paste the path or re-render its contents). Given with no PATH, "
                         "auto-resolves to OpenClaw's managed attachment directory when "
-                        "one exists and is writable, else ~/.clawseccheck/report.pdf")
+                        "one exists and is writable, else report.pdf in the local store "
+                        "(~/.clawseccheck/, or --data-dir)")
     # C-426: `--fail-under N` was REMOVED here, not deprecated-in-place. It thresholded
     # the audit SCORE, and under the five-layer rule a run only carries one when all
     # five layers ran - so for the ordinary invocation there was nothing left for it to
@@ -3848,8 +3868,9 @@ def _main(argv=None) -> int:
     p.add_argument("--data-dir", metavar="DIR", default=None,
                    help="put this run's whole local store under DIR \u2014 the monitor state, "
                         "the event journal, the score history AND the coverage/freshness "
-                        "ledger. They move together, so a scratch run cannot half-redirect "
-                        "and write into your real store. An explicitly given "
+                        "ledger, plus a bare --pdf's fallback report.pdf. They move together, "
+                        "so a scratch run cannot half-redirect and write into your real "
+                        "store. An explicitly given "
                         "--state/--events/--history still wins (the ledger follows "
                         "--history, which is also where --purge looks for it).")
     p.add_argument("--no-history", action="store_true",
@@ -3883,8 +3904,9 @@ def _main(argv=None) -> int:
                         "of the audit; read-only, same targeting as --explain")
     p.add_argument("--purge", action="store_true",
                    help="delete ClawSecCheck's local store (history/events/state/coverage "
-                        "files, plus the default-named badge/html/sarif/pdf report files if "
-                        "present, + their lock sidecars) and exit \u2014 confirmation-gated unless "
+                        "files and the --watch heartbeat, plus the default-named "
+                        "badge/html/sarif/pdf report files if present, + their lock "
+                        "sidecars) and exit \u2014 confirmation-gated unless "
                         "--yes is also given; nothing else is touched")
     p.add_argument("--apply-ignore-proposals", metavar="PATH", dest="apply_ignore_proposals",
                    help="apply a --propose-ignore output: append its proposed entries to "
@@ -4035,7 +4057,11 @@ def _main(argv=None) -> int:
     _pdf_used_managed_root = False
     _pdf_was_auto = args.pdf == _PDF_AUTO
     if _pdf_was_auto:
-        args.pdf, _pdf_used_managed_root = _default_pdf_target(args.home)
+        # The store follows --data-dir/--history (B-599), so the PDF fallback does too;
+        # the default store keeps its home-relative spelling (None).
+        args.pdf, _pdf_used_managed_root = _default_pdf_target(
+            args.home,
+            None if args.history == DEFAULT_HISTORY else _store_dir(args))
 
     # Surface (on stderr) any second mode flag or global modifier the resolved mode
     # won't honor, so nothing is dropped silently (B-066 / B-067). Warn-and-continue:

@@ -66,7 +66,8 @@ flag but one only reads and reports. Its permitted operations are:
   `<home>/media/outbound/clawseccheck-report.pdf`, OpenClaw's own managed attachment
   directory, so the report can be attached into the conversation rather than pasted
   (B-606). That resolution is guarded: the directory must already exist and be writable,
-  it is **never created**, and the fallback is `~/.clawseccheck/report.pdf`. Given a PATH,
+  it is **never created**, and the fallback is `report.pdf` in the local store
+  (`~/.clawseccheck/report.pdf`, or `<DIR>/report.pdf` under `--data-dir DIR`). Given a PATH,
   `--pdf` writes exactly there and touches the home not at all. Neither case writes the
   OpenClaw config, a skill, or a bootstrap file. Every other write stays under
   `~/.clawseccheck/` or a path named on the command line.
@@ -541,9 +542,10 @@ reviewer can check every clause below directly against the cited module:
   `safeio.secure_write_bytes`, like every other write. No other write reaches there, and
   neither is the OpenClaw config. (`collector.py` performs no writes at all - it is
   read-only.)
-- `--purge` deletes ClawSecCheck's own store files (a fixed filename list -
-  history.jsonl, events.jsonl, state.json, coverage.json + lock sidecars), never
-  recursive/glob, never outside `~/.clawseccheck/`.
+- `--purge` deletes ClawSecCheck's own store files (a fixed filename list, see
+  docs/USAGE.md "Uninstall / cleanup" - the store files, the `--watch` heartbeat and the
+  default-named report outputs, each with its lock sidecar), never recursive/glob, never
+  outside the store directory (`~/.clawseccheck/` unless `--data-dir`/`--history` moved it).
 - It does **not** make a network connection of any kind, for any reason, ever (grep the
   import graph: there is no `socket`, `http.client`, `urllib.request` call site that
   reaches the network at runtime - `urllib.parse` is used only for local string

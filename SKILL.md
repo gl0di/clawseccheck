@@ -105,12 +105,13 @@ OpenClaw home, both user-requested and explicit - never on a bare/default run: `
 (opt-in, confirmation-gated) appends entries a prior `--propose-ignore` run already proposed to
 `<home>/.clawseccheckignore`, never inventing one - see "Judge-panel fan-out" below; and `--pdf`,
 when the OpenClaw home's own managed attachment directory (`<home>/media/outbound`) already exists
-and is writable, defaults its PDF there instead of `~/.clawseccheck/report.pdf`, so the file lands
+and is writable, defaults its PDF there instead of `~/.clawseccheck/report.pdf` (`<DIR>/report.pdf` under `--data-dir DIR`), so the file lands
 where OpenClaw's own read tool is always allowed to open it back up for a chat attachment - see
 "attachable report" below. Neither write ever touches `openclaw.json`, a skill, or a bootstrap file.
 `--purge`
-deletes its four known store files (history/events/state/coverage) plus their lock siblings in one
-step; a crash-artifact `.tmp` sibling, if one is ever left behind, is not touched by `--purge` and
+deletes its known store files (history, events, state, coverage, the opt-in run/SBOM-run/incident
+stores, and the --watch heartbeat) plus the default-named report files and their lock siblings in
+one step; a crash-artifact `.tmp` sibling, if one is ever left behind, is not touched by `--purge` and
 needs a manual `rm`. Scoping flags at a glance: `--no-history` (skip
 local history), `--no-host` (skip the host-recon bullet above), `--no-native` (skip the one external
 command below), `--no-sockets` (skip the B340 effective-bind socket scan - the escape hatch if it
@@ -609,8 +610,8 @@ chat-sized overview that points at that file. Without `--pdf` the same command p
 whole pipeline inline (~11.5 KB), which a channel like Telegram will truncate or reject.
 Given with no PATH, as above, it picks the destination itself: if the OpenClaw home's own
 managed attachment directory (`<home>/media/outbound`) exists and is writable it writes
-there, else `~/.clawseccheck/report.pdf` as before - the check is existence and
-writability only, never a version.
+there, else `~/.clawseccheck/report.pdf` as before (`<DIR>/report.pdf` under `--data-dir DIR`)
+- the check is existence and writability only, never a version.
 
 **Send it, don't describe it (B-606).** The stderr note this command prints hands you a
 literal directive line - `MEDIA:<the real path>`. Reproduce that exact line, alone, on

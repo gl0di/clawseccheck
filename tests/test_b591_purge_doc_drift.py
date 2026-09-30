@@ -1,7 +1,7 @@
 """B-591: `_PURGE_FILENAMES` and docs/USAGE.md's purge scope sentence must never drift apart.
 
-`_PURGE_FILENAMES` (clawseccheck/cli.py) grew from the original four store files to eight
-when F-162 deliberately added the four default-named report renderer outputs to the
+`_PURGE_FILENAMES` (clawseccheck/cli.py) grew from the original four store files when F-162
+deliberately added the four default-named report renderer outputs to the
 whitelist (see that constant's own comment) — but `--help`, `_run_purge`'s docstring, and
 docs/USAGE.md's "Uninstall / cleanup" section kept saying "four" and promising that
 "anything else you keep under that path is untouched". That promise was false for a report

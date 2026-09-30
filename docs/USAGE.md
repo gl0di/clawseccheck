@@ -194,7 +194,8 @@ for a path its read tool is allowed to open - and on most homes that excludes an
 workspace. `<home>/media/outbound/` is the exception the runtime seeds unconditionally, so a bare
 `--pdf` writes `clawseccheck-report.pdf` there and prints `MEDIA:~/...`. Three guards on that:
 the directory must already exist and be writable, it is **never created**, and if it is missing
-the write falls back to `~/.clawseccheck/report.pdf` and says so. This is the only case where an
+the write falls back to `report.pdf` in your local store - `~/.clawseccheck/report.pdf`, or
+`<DIR>/report.pdf` under `--data-dir DIR` - and says so. This is the only case where an
 output flag writes inside the audited home without you naming the path - give `--pdf <path>` and
 it goes exactly where you said.
 
@@ -402,7 +403,8 @@ the two writes that land inside the audited OpenClaw home rather than under
 previously-proposed entries to `<home>/.clawseccheckignore` (never inventing one), and a
 no-PATH `--pdf`, which puts the report in `<home>/media/outbound/` so it can be attached
 into chat - and only when that directory already exists and is writable; it is never
-created, and the fallback is `~/.clawseccheck/report.pdf`. It is
+created, and the fallback is `report.pdf` in the local store (`~/.clawseccheck/report.pdf`, or
+`<DIR>/report.pdf` under `--data-dir DIR`). It is
 idempotent and says so: re-applying the same proposals reports which entries were already
 present instead of asking you to confirm writes it is not going to make.
 
@@ -1000,7 +1002,8 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   foreign row can be told apart by reading it, though nothing currently filters `--trend` by it.
   `--data-dir` moves the whole local store together - those three plus the coverage/freshness
   ledger `coverage.json`, which follows `--history`'s directory (the same place `--purge` looks
-  for it). The individual flags still work and still win when given explicitly.
+  for it), and the `report.pdf` a bare `--pdf` falls back to. The individual flags still work
+  and still win when given explicitly.
 - **A `--monitor` baseline is bound to the `--home` it was recorded for.** `--state` (or
   `--data-dir`) does not itself scope a baseline to one OpenClaw home - nothing stops two
   different homes from sharing one path. Pointing `--monitor` at the same `--state`/`--data-dir`
@@ -1197,8 +1200,8 @@ clawseccheck --monitor --json --data-dir ~/.clawseccheck
 before this the score history defaulted independently of the other two - so redirecting
 `--state` and `--events` for a scratch run quietly kept appending to your real history.
 `--data-dir` moves the whole local store together - those three plus the coverage/freshness
-ledger, which follows `--history`'s directory. An explicitly given
-`--state`/`--events`/`--history` still wins.
+ledger, which follows `--history`'s directory, and the `report.pdf` a bare `--pdf` falls back to.
+An explicitly given `--state`/`--events`/`--history` still wins.
 
 Without `--exit-code`, the older gate off the journal still works:
 
@@ -1994,33 +1997,38 @@ python3 audit.py --log audit.log            # also write log to a local file
 ## Uninstall / cleanup
 
 Everything ClawSecCheck ever writes lives under `~/.clawseccheck/` (score history, monitor
-state/events, the coverage-freshness ledger) - nothing is scattered elsewhere and nothing is
-ever uploaded. To remove that local store:
+state/events, the coverage-freshness ledger, the `--watch` heartbeat) - nothing is scattered
+elsewhere and nothing is ever uploaded. To remove that local store:
 
 ```bash
 clawseccheck --purge          # lists the files, asks for confirmation, then deletes them
 clawseccheck --purge --yes    # skip the prompt (for scripted uninstall)
 ```
 
-`--purge` only ever touches its own known files: the seven store files (`history.jsonl`,
-`events.jsonl`, `state.json`, `coverage.json`, `runs.jsonl`, `sbom_runs.jsonl`, `incidents.jsonl` -
-the last three are `--save-run`'s, `--save-sbom-run`'s, and `--incident-open`'s opt-in
-stores, present only if you ever used them)
-**and** the four default-named report outputs
+`--purge` only ever touches its own known files: the eight store files (`history.jsonl`,
+`events.jsonl`, `state.json`, `coverage.json`, `runs.jsonl`, `sbom_runs.jsonl`, `incidents.jsonl`,
+`watch_heartbeat.json` - the last four are `--save-run`'s, `--save-sbom-run`'s,
+`--incident-open`'s and `--watch`'s opt-in files, present only if you ever used them; the
+heartbeat holds the watcher's pid and your home path)
+**and** the five default-named report outputs
 (`openclaw-security-badge.svg`, `openclaw-security-report.html`, `openclaw-security-report.sarif`,
-`openclaw-security-report.pdf`), plus all eleven's lock sidecars - never a directory glob or
+`openclaw-security-report.pdf`, and `report.pdf`, which is what a bare `--pdf` writes into the
+store directory), plus each one's lock sidecars - never a directory glob or
 recursive delete. That means if you save a report with `--pdf`/`--html`/`--sarif`/`--badge`
 under this same store directory using ClawSecCheck's own default filename, `--purge` deletes it
 too; anything else - including one of those same reports saved under a different name, or
-outside `~/.clawseccheck/` - is untouched. It exits without deleting anything if you answer no
+outside `~/.clawseccheck/` - is untouched. A bare `--pdf` that lands in OpenClaw's own
+attachment directory (`<home>/media/outbound/clawseccheck-report.pdf`) lives inside your
+OpenClaw home, not the store, so `--purge` does not touch it. `--purge` also does not stop a
+running `--watch`: stop that first, because it rewrites its heartbeat every 30 seconds. It exits without deleting anything if you answer no
 (or there's nothing to purge), and reports the count of files removed on success. Removing the
 `clawseccheck` package/skill itself is a separate, normal uninstall step (e.g.
 `pip uninstall clawseccheck` or removing the skill directory) - `--purge` only clears the local
 data store.
 
-That fixed eight-name list is deliberate (never a glob), but it means a stray `.<name>.<random>.tmp`
+That fixed name list is deliberate (never a glob), but it means a stray `.<name>.<random>.tmp`
 sidecar - left behind only if the process is killed (e.g. `SIGKILL`) between writing the temp file
-and the atomic rename that replaces the real one - is not one of the eight and is not removed by
+and the atomic rename that replaces the real one - is not on it and is not removed by
 `--purge`. It is inert (never read back by anything) and rare; `rm ~/.clawseccheck/.*.tmp` clears
 it by hand if you ever see one.
 
