@@ -3308,9 +3308,11 @@ CATALOG: list[CheckMeta] = [
     ),
     # B350: the gateway operator terminal - a PTY-backed shell with the gateway process
     # environment, served to Control UI and mobile. Grounded on the installed dist
-    # (config-schema.d.ts:4499-4503, description :129-131), default false. WARN-only:
-    # enabling it is the owner's explicit act, so it is a capability disclosure, not a
-    # compromise. A FAIL tier would need its own C-135 pass.
+    # (config-schema.d.ts:4499-4503, description :129-131). The DEFAULT is build-dependent
+    # (C-640): an unset key is OFF on 2026.7.1-2026.7.35 and ON from 2026.8.1 (`!== false`),
+    # so the check forks on the installed build. WARN-only: enabling it (or inheriting the
+    # vendor default) is a capability disclosure, not a compromise. A FAIL tier would need
+    # its own C-135 pass.
     # B351: code mode swaps the model's tool surface for exec+wait behind a catalog
     # bridge. MEDIUM, not HIGH: on releases before 2026.9.6 the guest is sandboxed
     # (QuickJS-WASI) and the feature fails closed, so this is a disclosure that

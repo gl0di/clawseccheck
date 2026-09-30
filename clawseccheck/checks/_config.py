@@ -104,6 +104,7 @@ from ._shared import (
     SENSITIVE_TOOL_HINTS,
     _substituted_dm_policy_channels,
     _surface_absent,
+    _terminal_default,
     _trifecta_leg_sources,
     _trifecta_legs,
     _username_safe_path,
@@ -6445,76 +6446,176 @@ def check_env_vars_path_override(ctx: Context) -> Finding:
 _B350_ABSENT = object()
 
 
+# Advice for BOTH B350 WARN branches. It lives in `fix`, never `detail`: `detail` is hashed
+# by baseline.fingerprint() and this text is free to improve.
+_B350_WARN_FIX = (
+    "Set gateway.terminal.enabled to false unless an operator shell is genuinely "
+    "needed - on OpenClaw 2026.8.1 and later the terminal is ON unless the key is "
+    "explicitly false. It is offered to admin-scope clients only. If it is needed, keep "
+    "the gateway on loopback (or behind your own authenticated tunnel) and confirm the "
+    "agents it can target run with sandbox.mode 'all' - OpenClaw refuses the terminal for "
+    "fully-sandboxed agents, which is the one mitigation this audit cannot verify for you. "
+    "Limit: this check does not read gateway.mode, so on a client-only host "
+    "(gateway.mode 'remote') that serves no terminal itself the finding over-reports; "
+    "setting the key to false clears it either way."
+)
+
+
+def _b350_reach_and_shell(cfg: dict, unset_bind_unresolved: bool = False) -> "tuple[str, str]":
+    """The two sentences both B350 WARN branches (explicit true, and unset on a default-ON
+    build) are built from: how far the shell reaches, and which interpreter it launches.
+
+    One helper so the branches cannot drift apart. The explicit-true detail is hashed by
+    ``baseline.fingerprint()``, so these strings must stay byte-identical to what that
+    branch always emitted - including its long-standing reading of an UNSET bind as
+    loopback (``LOOPBACK`` contains ``""``). ``unset_bind_unresolved`` is the default-ON
+    branch's opt-out from that reading: there the whole surface is present only because of a
+    vendor default, and the schema help for ``gateway.bind`` does not state what an unset
+    bind means, so an unset bind is described as "cannot be resolved" (the over-reporting
+    direction) rather than as a proven loopback.
+    """
+    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    if bind_host in LOOPBACK and not (unset_bind_unresolved and bind_host == ""):
+        reach = (
+            "the gateway is bound to loopback, so the shell is reachable only from this "
+            "host"
+        )
+    else:
+        reason = _gateway_remote_exposure_reason(cfg)
+        if reason:
+            reach = f"the gateway is reachable beyond loopback ({reason}), so the shell is too"
+        else:
+            reach = (
+                "the gateway bind cannot be resolved from config alone, so whether the "
+                "shell is reachable off-host is not established here"
+            )
+
+    shell = dig(cfg, "gateway.terminal.shell")
+    which = (
+        f"it launches the pinned interpreter {shell!r}"
+        if isinstance(shell, str) and shell.strip()
+        else "it launches the host login shell ($SHELL), since gateway.terminal.shell is unset"
+    )
+    return reach, which
+
+
 def check_gateway_operator_terminal(ctx: Context) -> Finding:
     """B350 - the operator terminal: a PTY-backed shell served to Control UI and mobile.
 
-    Grounded against the INSTALLED dist (openclaw@2026.7.1-2), not the recon, and
-    independently re-verified against the RUNTIME rather than the schema alone.
+    Grounded against the INSTALLED dist (openclaw@2026.9.7, 2026-09-30), the cached npm
+    tarballs of twenty releases (2026.6.9 - 2026.9.7), and an executed node call on the vendor's own
+    gate function - not the recon, and not memory.
 
     SHAPE. ``gateway.terminal`` is ``{enabled?: boolean, shell?: string,
-    detachedSessionTimeoutSeconds?: number}`` - object only, ``$strict``, with no boolean
-    shorthand (plugin-sdk/config-schema.d.ts:4499-4503, and the runtime zod builder at
-    zod-schema-O9ml_nmo.js:1365-1369, which wraps no ``union([boolean(), object()])``).
-    That is the OPPOSITE of ``tools.codeMode``, which really is boolean-or-object, so the
-    two must not be read with the same helper.
+    detachedSessionTimeoutSeconds?: number}`` - a ``strictObject`` with no boolean
+    shorthand (2026.9.7: ``zod-schema-BRat_tFr.mjs:1058-1071``; 2026.7.1-2:
+    plugin-sdk/config-schema.d.ts:4499-4503). That is the OPPOSITE of ``tools.codeMode``,
+    which really is boolean-or-object, so the two must not be read with the same helper.
 
-    DEFAULT. There is no zod ``.default(false)`` - ``enabled`` is a bare
-    ``boolean().optional()``. The false default is FUNCTIONAL, enforced by strict equality
-    at three independent runtime sites: launch-BmPwk1y9.js:103, launch-BmPwk1y9.js:154 and
-    server.impl-qYPVZMND.js:1002 all test ``=== true``. That is why this check tests
-    ``is not True`` rather than truthiness: it matches the vendor's own gate exactly, so a
-    truthy non-bool is not "on" here for the same reason it is not "on" there.
+    DEFAULT - BUILD-DEPENDENT (C-640). An UNSET ``enabled`` is OFF on the older releases
+    and ON on the newer ones; the two gates, verbatim:
 
-    NO SECOND LOCATION. ``terminal`` occurs exactly ONCE in the 4,896-line declaration,
-    under top-level ``gateway`` - absent from ``agents``, ``agents.list``,
-    ``agents.profiles`` and ``presets``, and read at runtime from the single source
-    ``config.gateway?.terminal`` (launch-BmPwk1y9.js:88-107). The contrast is the evidence
-    that this is deliberate rather than an omission: ``codeMode`` IS defined both
-    top-level and per-agent, so the schema author wires per-agent overrides where they are
-    intended and did not here.
+      2026.7.1, 7.1-2, 7.33-7.35: launch-*.js:109,120 ``enabled !== true`` and :154
+          ``=== true``; server.impl-*.js:1002 and control-ui-*.js:699 ``=== true``;
+          schema help "when true (default: false)". Unset = OFF.
+      2026.8.1, 8.2, 9.1 - 9.7: ``enabled-BSjeiWpO.mjs:3`` (9.7)
+          ``config?.gateway?.terminal?.enabled !== false``, and every 9.7 reader goes
+          through that one function (``control-ui-DqFGrb-j.mjs:773``,
+          ``server-start-my5aBcwu.mjs:7321``, ``launch-D1oDRtLJ.mjs:101,112``); schema help
+          ``schema-BWEG0nRu.mjs:425`` "(default: true) ... set false to opt out". Unset = ON.
+      2026.6.9 - 6.34: no ``gateway.terminal`` string anywhere in dist (feature absent).
+
+    Executed, not just read: node on the 9.7 ``isTerminalConfigEnabled`` returns true for
+    undefined, ``{}``, ``{gateway: {}}``, ``{gateway: {terminal: {}}}``, ``enabled: true``,
+    ``enabled: "false"`` (a string), ``enabled: null`` and ``terminal: false`` (a bare
+    boolean), and false ONLY for a real boolean ``enabled: false``. That is why this check
+    reads ``enabled`` as ``is False`` / ``is True`` and treats every other value, including
+    a non-bool, as UNSET: it matches the vendor's own gate on both sides.
+
+    WHICH BUILD FLIPPED IT: not attributable. The flip lies in (2026.7.35, 2026.8.1]. The
+    releases strictly between them (2026.7.36 and later, any 2026.8.0) were never cached, so
+    the exact build is UNMEASURED, and the 2026.8.1 CHANGELOG has no line announcing a
+    default change (only "Shared conversation terminals" / "Native catalog terminals"
+    feature bullets). 2026.7.2 - 7.32 were not cached either; default-off is extrapolated
+    across that span (the stable line read off at 7.1 and 7.33 - 7.35). CAVEAT: the two
+    cached 2026.7.2 PRE-releases (beta.5, beta.7) already carry ``!== false`` (unset = ON),
+    so the default was not monotonic across the pre-release line, and the extrapolation
+    rests on the stable line having stayed off, which was not measured for 7.2 - 7.32. A
+    pre-release version string orders as None in ``_terminal_default`` and answers UNKNOWN.
+    The build fork lives in ``_terminal_default`` (``_shared.py``), which answers UNKNOWN
+    inside the unmeasured window rather than guessing a side.
+
+    NO SECOND LOCATION. ``terminal`` occurs exactly ONCE in the declaration, under
+    top-level ``gateway`` - absent from ``agents``, ``agents.list``, ``agents.profiles`` and
+    ``presets``, and read at runtime from the single source ``config.gateway?.terminal``
+    (``launch-D1oDRtLJ.mjs:97``). The contrast is the evidence that this is deliberate
+    rather than an omission: ``codeMode`` IS defined both top-level and per-agent, so the
+    schema author wires per-agent overrides where they are intended and did not here.
 
     ``.shell`` pins the interpreter; unset, the runtime resolves ``$SHELL`` as a login
     shell (``-l``), falling back to ``cmd.exe`` on win32 and to ``/bin/bash -l`` when
-    ``$SHELL`` is itself unset (launch-BmPwk1y9.js:9-30).
+    ``$SHELL`` is itself unset (``resolveTerminalShell``, ``launch-D1oDRtLJ.mjs``).
 
-    PASS - ``gateway.terminal.enabled`` is absent or not true. That is the shipped
-           default, and it is what every config on this machine's fleet carries today.
-    WARN - it is true. The detail names the REACH: whether the gateway is proven
-           reachable beyond loopback, proven loopback-only, or not resolvable from a
-           config file alone.
+    PASS - ``enabled`` is a real boolean false (on every build), OR it is unset and the
+           build is inside the measured default-OFF span (2026.7.1 - 2026.7.35).
+    WARN - ``enabled`` is a real boolean true (on every build), OR it is unset and the build
+           is 2026.8.1 or later (an installed version, or a ``meta.lastTouchedVersion``
+           stamp - a stamp only ever proves "on"). The detail names the REACH: whether the
+           gateway is proven reachable beyond loopback, proven loopback-only, or not
+           resolvable from a config file alone. A config with NO gateway block takes the
+           unset path too: the terminal is a gateway feature that defaults on. On this
+           default-ON branch an UNSET bind (no gateway block, or no ``gateway.bind``) is
+           described as "cannot be resolved from config alone" (the over-reporting
+           direction; no "default bind is loopback" claim is made). The explicit-true
+           branch keeps its older reading of an unset bind as loopback, byte for byte.
+    UNKNOWN - ``enabled`` is unset and the build is not determinable (no installed dist and
+           no stamp at 2026.8.1 or later, an unmeasured 2026.7.36 - 2026.8.0 build, a
+           feature-absent build, an unparseable version). Never PASS: "we could not see the
+           build" is not "the build leaves it off".
 
     WHY THE VERDICT DOES NOT BRANCH ON THE BIND. ``_gateway_remote_exposure_reason``
     returns ``None`` for BOTH "proven loopback" and "no claim possible" (the ``auto``
     profile, and ``custom`` with an unresolvable host - see its docstring, which is
     deliberate and correct). Deciding WHETHER to report on that value would therefore
     turn an unresolvable bind into a silent PASS, which is the fail-open shape this
-    project keeps finding. Turning the terminal on is the owner's explicit act and is
-    reportable on its own; the bind only changes how urgent it is, so it belongs in the
-    detail. The reach sentence is built from ``parse_bind_host``/``LOOPBACK`` first so
-    that a proven-loopback bind is described as such rather than lumped in with the
+    project keeps finding. Having the terminal on - by the owner's act or by the vendor
+    default - is reportable on its own; the bind only changes how urgent it is, so it
+    belongs in the detail. The reach sentence is built from ``parse_bind_host``/``LOOPBACK``
+    first so that a proven-loopback bind is described as such rather than lumped in with the
     unresolvable case.
 
     WHY THE SANDBOX MITIGATION IS NAMED RATHER THAN COMPUTED. The refusal is real and
     verified in code, not just prose: ``resolveTerminalLaunch`` returns
     ``{ok: false, block: {kind: "sandboxed"}}`` when
     ``resolveSandboxConfigForAgent(config, agentId).mode === "all"``
-    (launch-BmPwk1y9.js:55-62), whose own comment calls it fail-closed. But it is
-    PER-AGENT and resolved at launch, so claiming it statically means proving EVERY agent
+    (``launch-D1oDRtLJ.mjs:56-59`` on 9.7), whose own comment calls it fail-closed. But it
+    is PER-AGENT and resolved at launch, so claiming it statically means proving EVERY agent
     is fully sandboxed - including agents added after this audit ran - and a wrong proof
     in either direction is worse than naming the condition. The fix text names it so the
     owner can check the one thing this reader cannot.
 
-    DECLARED LIMITS, both in the over-reporting direction, so neither can hide a real
-    exposure. (1) A config with ``enabled: true`` whose only reachable agents all run
-    ``sandbox.mode: "all"`` still WARNs here, per the paragraph above. (2) There is a
-    transient state this reader cannot see at all: ``createTerminalLaunchPolicy`` keeps
-    ``terminalDisabledUntilRestart`` / ``terminalDisabledUntilCommit`` windows
-    (launch-BmPwk1y9.js:80-179) in which a snapshot showing ``enabled: true`` is
-    functionally disabled until the gateway restarts or commits. A single static config
-    snapshot has no way to observe that, and the honest consequence is a WARN that is
-    momentarily early rather than a silence that is wrong.
+    DECLARED LIMITS, all in the over-reporting direction, so none can hide a real
+    exposure. (1) A config whose terminal is on (explicitly or by default) and whose only
+    reachable agents all run ``sandbox.mode: "all"`` still WARNs here, per the paragraph
+    above. (2) There is a transient state this reader cannot see at all:
+    ``createTerminalLaunchPolicy`` (``launch-D1oDRtLJ.mjs:81``, "fail-closed terminal
+    admission across deferred config restarts") keeps ``restartRestrictions`` /
+    ``commitRestrictions`` windows (``:88-112``) in which a snapshot showing the terminal
+    on can be functionally disabled until the gateway restarts or commits. A single static
+    config snapshot has no way to observe that, and the honest consequence is a WARN that
+    is momentarily early rather than a silence that is wrong.
+    (3) ``gateway.mode: "remote"`` (schema help ``schema-BWEG0nRu.mjs:415``: the host
+    "connects through remote transport") is NOT special-cased, the same residual
+    ``check_gateway_portal_reach`` names: no check reads ``gateway.mode``, and standing the WARN
+    down on it would be a silencer needing its own grounding. On a client-only host that
+    serves no terminal the WARN over-reports; the fix text names this. The default-on branch
+    multiplies how often it is met, which is why it is disclosed there.
+    (4) A ``meta.lastTouchedVersion`` stamp of 2026.8.1 or later with no readable installed
+    dist while the RUNNING gateway is an older build is a false WARN (the stamp proves an
+    8.1+ build once saved the config, not what runs now) - the B363-class residual.
 
-    Never FAILs. This is a configured-capability disclosure, not a proven compromise; a
+    Never FAILs and never CRITICAL. Default enablement alone is not an authentication
+    failure; this is a configured-capability disclosure, not a proven compromise, and a
     FAIL tier would need its own independent C-135 pass against real configs first.
 
     WHY ``.shell`` IS INTERPOLATED VERBATIM (§8). It is an absolute path and it reaches a
@@ -6536,7 +6637,7 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
     # written. `_config_unreadable` only covers "openclaw.json present and unparseable";
     # on a host with NO openclaw.json at all, `config_parse_error` is False and
     # `ctx.config` is `{}` (see `_surface_absent`'s docstring), so falling straight
-    # through would report "the terminal is not enabled" about a config nobody read. A
+    # through would report a verdict about a config nobody read. A
     # malformed `gateway` value (null, a list, a number) is the same hazard by another
     # route -- every dig() below would silently degrade to its default. Both take the
     # B32 precedent: UNKNOWN, with not_applicable set ONLY when the config locus was
@@ -6551,22 +6652,7 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     gw = cfg.get("gateway", _B350_ABSENT)
-    if gw is _B350_ABSENT:
-        # A config that WAS read and simply carries no gateway block. The terminal
-        # cannot be on: `enabled` defaults to false and the vendor gates the feature on
-        # `gateway?.terminal?.enabled === true`, which an absent block cannot satisfy.
-        # This is a real PASS, not an absence of knowledge -- and saying otherwise would
-        # be inconsistent with `{"gateway": {}}`, which reaches the ordinary PASS below
-        # while encoding the identical fact. Measured: 72 of the 651 fixture homes are
-        # this shape, so the distinction is not hypothetical.
-        return _finding(
-            "B350",
-            PASS,
-            "No gateway block is configured, so no operator terminal is served.",
-            "Nothing to do; if you later add a gateway block, leave "
-            "gateway.terminal.enabled off unless you need an operator shell.",
-        )
-    if not isinstance(gw, dict):
+    if gw is not _B350_ABSENT and not isinstance(gw, dict):
         # Present but malformed (null, a list, a number, a bare string). Every dig()
         # below would degrade to its default without raising, which is indistinguishable
         # from "terminal simply not configured" -- a verdict over ground never read.
@@ -6579,50 +6665,65 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
             "Fix the gateway block in openclaw.json so it is a JSON object, then re-run "
             "the audit.",
         )
+    # Only a real boolean counts, matching the vendor's `enabled !== false` / `=== true`
+    # gates exactly: on 2026.8.1+ the string "false", null and a bare `terminal: false` are
+    # all ON (executed on 2026.9.7), and on <= 2026.7.35 the string "true" is off. Anything
+    # else -- including a non-dict `terminal` -- is UNSET. An absent gateway block digs to
+    # None as well, so it is unset by the same path.
     enabled = dig(cfg, "gateway.terminal.enabled")
-    if enabled is not True:
+    if enabled is False:
         return _finding(
             "B350",
             PASS,
-            "The gateway operator terminal is not enabled (gateway.terminal.enabled is "
-            "absent or not true), so no browser- or mobile-reachable shell is served.",
-            "Keep it off unless you specifically need an operator shell; it is off by "
-            "default.",
+            "The gateway operator terminal is explicitly disabled "
+            "(gateway.terminal.enabled is false), so no browser- or mobile-reachable "
+            "shell is served.",
+            "Keep it off unless you specifically need an operator shell.",
+        )
+    if enabled is True:
+        reach, which = _b350_reach_and_shell(cfg)
+        # `detail` is hashed by baseline.fingerprint(): do not edit this string.
+        return _finding(
+            "B350",
+            WARN,
+            f"gateway.terminal.enabled is true: OpenClaw serves a PTY-backed shell running "
+            f"with the gateway process environment to Control UI and mobile clients, and "
+            f"{which}. Right now {reach}.",
+            _B350_WARN_FIX,
         )
 
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
-    if bind_host in LOOPBACK:
-        reach = (
-            "the gateway is bound to loopback, so the shell is reachable only from this "
-            "host"
+    default = _terminal_default(ctx)
+    if default == "off":
+        return _finding(
+            "B350",
+            PASS,
+            "gateway.terminal.enabled is unset, and this OpenClaw build (2026.7.1 - "
+            "2026.7.35) defaults it to off, so no browser- or mobile-reachable shell is "
+            "served.",
+            "Set gateway.terminal.enabled to false explicitly before upgrading: OpenClaw "
+            "2026.8.1 and later turn the operator terminal ON when the key is unset.",
         )
-    else:
-        reason = _gateway_remote_exposure_reason(cfg)
-        if reason:
-            reach = f"the gateway is reachable beyond loopback ({reason}), so the shell is too"
-        else:
-            reach = (
-                "the gateway bind cannot be resolved from config alone, so whether the "
-                "shell is reachable off-host is not established here"
-            )
-
-    shell = dig(cfg, "gateway.terminal.shell")
-    which = (
-        f"it launches the pinned interpreter {shell!r}"
-        if isinstance(shell, str) and shell.strip()
-        else "it launches the host login shell ($SHELL), since gateway.terminal.shell is unset"
-    )
+    if default == "on":
+        reach, which = _b350_reach_and_shell(cfg, unset_bind_unresolved=True)
+        return _finding(
+            "B350",
+            WARN,
+            f"gateway.terminal.enabled is unset and this OpenClaw build (2026.8.1 and "
+            f"later) defaults it to true: OpenClaw serves a PTY-backed shell running with "
+            f"the gateway process environment to admin-scope Control UI and mobile "
+            f"clients, and {which}. Right now {reach}.",
+            _B350_WARN_FIX,
+        )
     return _finding(
         "B350",
-        WARN,
-        f"gateway.terminal.enabled is true: OpenClaw serves a PTY-backed shell running "
-        f"with the gateway process environment to Control UI and mobile clients, and "
-        f"{which}. Right now {reach}.",
-        "Set gateway.terminal.enabled to false unless an operator shell is genuinely "
-        "needed. If it is needed, keep the gateway on loopback (or behind your own "
-        "authenticated tunnel) and confirm the agents it can target run with "
-        "sandbox.mode 'all' - OpenClaw refuses the terminal for fully-sandboxed agents, "
-        "which is the one mitigation this audit cannot verify for you.",
+        UNKNOWN,
+        "gateway.terminal.enabled is unset and the OpenClaw build could not be "
+        "determined, so whether the operator terminal is served could not be "
+        "established: OpenClaw releases up to 2026.7.35 leave it off when it is unset, "
+        "2026.8.1 and later turn it on.",
+        "Set gateway.terminal.enabled explicitly (false is right on every build), or run "
+        "the audit where the installed openclaw can be found so the build is known.",
+        config_field_paths={"gateway.terminal.enabled"},
     )
 
 

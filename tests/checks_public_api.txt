@@ -70,6 +70,9 @@ _SKILL_CRIT
 _SKILL_HIGH
 _SKILL_TOOLS_LINE_RE
 _SOURCE_KNOWN_BAD
+_TERMINAL_DEFAULT_ON_MIN
+_TERMINAL_OFF_MEASURED_MAX
+_TERMINAL_OFF_MEASURED_MIN
 _ToolPolicyView
 _agent_config_write_hits
 _agent_is_powerful
@@ -201,6 +204,7 @@ _skill_declared_tools
 _skill_frontmatter_block
 _squat_hits
 _suspicious_pipe_hosts
+_terminal_default
 _tool_id_sources
 _tool_policy_view
 _trifecta_leg_sources
