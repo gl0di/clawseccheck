@@ -1821,7 +1821,8 @@ python3 audit.py --log audit.log            # also write log to a local file
   *identity* - `clawhub:<slug>`, `npm:<pkg>`, `pypi:<pkg>`, `git:host/owner/repo[@ref]`, or a
   URL - with zero network and nothing fetched. Exact match in the bundled known-compromised
   catalog -> `DO-NOT-INSTALL` (do not fetch, exit 1); typosquat of a well-known name / raw paste
-  or bare-IP host / plaintext http / unpinned git ref -> `CAUTION` (fetch only into an isolated
+  or bare-IP host / plaintext http / unpinned git ref / an npm or pypi name or version starting
+  with `-` (a package manager would read it as an option) -> `CAUTION` (fetch only into an isolated
   quarantine, exit 1); otherwise the honest answer is *no known-bad record* -> `INSTALL` (exit 0) - an
   identity check can never prove unseen code safe, so proceed via quarantine and run `--vet`
   on the fetched copy before installing.
