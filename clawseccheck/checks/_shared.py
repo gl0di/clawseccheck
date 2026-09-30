@@ -1285,17 +1285,20 @@ def _code_mode_default(ctx) -> str:
 # So the flip lies in (2026.7.35, 2026.8.1]. Releases strictly between (2026.7.36 and later,
 # any 2026.8.0) were never cached, so the exact build is UNMEASURED and NOT attributed, and
 # the 8.1 CHANGELOG carries no line announcing a default change. 2026.7.2 - 7.32 were not
-# cached either; default-off is extrapolated across that span (accepted by the owner,
-# 2026-09-30). CAVEAT found while re-checking the cache: the two cached 2026.7.2
-# PRE-releases (beta.5, beta.7) already carry the `!== false` gate (unset = ON), so the
-# "monotonic 7.1 -> 7.35 -> 8.1" premise does not hold for the pre-release line; the
-# extrapolation rests on the STABLE line having stayed off (7.1 and 7.33 - 7.35 were read
-# off), which is unmeasured for 7.2 - 7.32. A pre-release string orders as None here and
-# answers "unknown". "off" is the one answer that PASSes an unset key, so it is given only
-# inside the span below and everything between it and 8.1 answers "unknown".
+# cached either, and they are NOT assumed off: the two cached 2026.7.2 PRE-releases (beta.5,
+# beta.7) already carry the `!== false` gate (unset = ON) while the stable 7.33 - 7.35 read
+# off again, so the default was not monotonic and nothing measured says which way an
+# uncached 7.2 - 7.32 build goes (owner ruling, 2026-09-30: UNKNOWN, not off). "off" is the
+# one answer that PASSes an unset key, so it is given only for the MEASURED stable spans
+# below (7.1, incl. 7.1-2, and 7.33 - 7.35); every other build before 8.1 answers
+# "unknown", and a pre-release string orders as None and answers "unknown" too.
 _TERMINAL_DEFAULT_ON_MIN = (2026, 8, 1)         # first release read with `!== false`
 _TERMINAL_OFF_MEASURED_MIN = (2026, 7, 1)       # oldest release read with `=== true`
 _TERMINAL_OFF_MEASURED_MAX = (2026, 7, 35)      # newest release read with `=== true`
+_TERMINAL_OFF_MEASURED_SPANS = (             # the stable builds actually read off
+    ((2026, 7, 1), (2026, 7, 1)),
+    ((2026, 7, 33), (2026, 7, 35)),
+)
 
 
 def _terminal_default(ctx) -> str:
@@ -1316,9 +1319,10 @@ def _terminal_default(ctx) -> str:
     pre-release such as 2026.8.1-beta.1 orders as None and lands on ``"unknown"``.
 
     ``"off"`` is only given for an installed version shaped like a calendar release
-    (``YYYY.M.P``, three or more numeric parts) inside ``_TERMINAL_OFF_MEASURED_MIN`` ..
-    ``_TERMINAL_OFF_MEASURED_MAX``. A build older than the series (the terminal did not
-    exist), a build in the unmeasured window between 2026.7.35 and 2026.8.1, and a string
+    (``YYYY.M.P``, three or more numeric parts) whose first three parts fall inside one of
+    ``_TERMINAL_OFF_MEASURED_SPANS`` (2026.7.1 and 2026.7.33 - 2026.7.35, the stable builds
+    read off). A build older than the series (the terminal did not exist), an unmeasured
+    build (2026.7.2 - 7.32, and the window between 2026.7.35 and 2026.8.1), and a string
     that cannot be placed on the timeline ("0.0.0", "2026.7") are all ``"unknown"``.
 
     DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
@@ -1328,8 +1332,8 @@ def _terminal_default(ctx) -> str:
     if installed is not None:
         if installed >= _TERMINAL_DEFAULT_ON_MIN:
             return "on"
-        if (len(installed) >= 3
-                and _TERMINAL_OFF_MEASURED_MIN <= installed <= _TERMINAL_OFF_MEASURED_MAX):
+        if len(installed) >= 3 and any(
+                lo <= tuple(installed[:3]) <= hi for lo, hi in _TERMINAL_OFF_MEASURED_SPANS):
             return "off"
         return "unknown"
     stamped = _numeric_version(

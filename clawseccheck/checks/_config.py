@@ -6536,14 +6536,14 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
     releases strictly between them (2026.7.36 and later, any 2026.8.0) were never cached, so
     the exact build is UNMEASURED, and the 2026.8.1 CHANGELOG has no line announcing a
     default change (only "Shared conversation terminals" / "Native catalog terminals"
-    feature bullets). 2026.7.2 - 7.32 were not cached either; default-off is extrapolated
-    across that span (the stable line read off at 7.1 and 7.33 - 7.35). CAVEAT: the two
-    cached 2026.7.2 PRE-releases (beta.5, beta.7) already carry ``!== false`` (unset = ON),
-    so the default was not monotonic across the pre-release line, and the extrapolation
-    rests on the stable line having stayed off, which was not measured for 7.2 - 7.32. A
-    pre-release version string orders as None in ``_terminal_default`` and answers UNKNOWN.
-    The build fork lives in ``_terminal_default`` (``_shared.py``), which answers UNKNOWN
-    inside the unmeasured window rather than guessing a side.
+    feature bullets). 2026.7.2 - 7.32 were not cached either, and they are NOT assumed
+    off: the two cached 2026.7.2 PRE-releases (beta.5, beta.7) already carry ``!== false``
+    (unset = ON) while the stable 7.33 - 7.35 read off again, so the default was not
+    monotonic (owner ruling 2026-09-30: UNKNOWN for that span). A pre-release version
+    string orders as None in ``_terminal_default`` and answers UNKNOWN. The build fork
+    lives in ``_terminal_default`` (``_shared.py``), which says "off" only for the measured
+    stable builds (7.1 and 7.33 - 7.35) and answers UNKNOWN for every unmeasured one rather
+    than guessing a side.
 
     NO SECOND LOCATION. ``terminal`` occurs exactly ONCE in the declaration, under
     top-level ``gateway`` - absent from ``agents``, ``agents.list``, ``agents.profiles`` and

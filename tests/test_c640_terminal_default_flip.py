@@ -26,6 +26,7 @@ from clawseccheck.checks import (
     _TERMINAL_DEFAULT_ON_MIN,
     _TERMINAL_OFF_MEASURED_MAX,
     _TERMINAL_OFF_MEASURED_MIN,
+    _TERMINAL_OFF_MEASURED_SPANS,
     _terminal_default,
     check_gateway_operator_terminal,
 )
@@ -76,6 +77,9 @@ def _run(cfg, tmp_path, version=None):
     ("2026.6.34", "unknown"),       # the feature does not exist yet
     ("2026.6.9", "unknown"),
     ("2026.7.1", "off"),            # oldest measured
+    ("2026.7.2", "unknown"),        # unmeasured stable span 7.2-7.32 (owner ruling 2026-09-30)
+    ("2026.7.15", "unknown"),
+    ("2026.7.32", "unknown"),
     ("2026.7.33", "off"),
     ("2026.7.35", "off"),           # newest measured
     ("2026.7.36", "unknown"),       # unmeasured window
@@ -102,6 +106,7 @@ def test_constants_are_the_measured_ones():
     assert _TERMINAL_DEFAULT_ON_MIN == (2026, 8, 1)
     assert _TERMINAL_OFF_MEASURED_MIN == (2026, 7, 1)
     assert _TERMINAL_OFF_MEASURED_MAX == (2026, 7, 35)
+    assert _TERMINAL_OFF_MEASURED_SPANS == (((2026, 7, 1), (2026, 7, 1)), ((2026, 7, 33), (2026, 7, 35)))
 
 
 def test_a_stamp_only_ever_proves_on(tmp_path):
