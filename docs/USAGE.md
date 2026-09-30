@@ -468,6 +468,31 @@ labelled section, as they sit in the installed bundle. `--verify-self` covers on
 package, so compare those with `sha256sum <file>` from the install directory. The
 published `CHANGELOG.md` is the trimmed copy, so its digest is of that copy.
 
+That section ends with an `Expected top-level entries in the install directory
+(exhaustive, as staged)` line. Compare it with `ls -A <install dir>`: the release should
+account for every entry it names, and anything else is the installer's own metadata or
+something that does not belong. (Observed on a 4.3.1 ClawHub install: `_meta.json`,
+`.clawhub/` and `skill-card.md` are added by the installer; that is an observation, not a
+contract.) The digest above covers `clawseccheck/` only, so a file *added* beside `audit.py`
+is otherwise invisible to it - and it matters, because `audit.py` runs with its own directory
+at the front of Python's import path, so a stray `json.py`, `re.py` or `sitecustomize.py`
+there would run inside the auditor ahead of the standard library.
+
+For that reason `audit.py` looks at its own directory before it imports anything and
+**refuses to run (exit 2, nothing executed)** while an importable entry other than itself
+and the package sits beside it: any `*.py`, `*.pyc`, `*.pyw`, `*.pyd`, `*.so`, `*.pth`, a
+`sitecustomize*` or `usercustomize*` name, or a directory holding an `__init__.*` module.
+The message names the entries (up to ten); remove them or reinstall from a clean copy. If
+you did not put them there, treat the install as compromised. `--verify-self` reports the same
+entries as a `Coverage note` and still exits 0 - the digest itself is complete - so
+`python -m clawseccheck --verify-self` shows what is there without refusing.
+
+**Residuals, stated plainly:** a modified `audit.py` is only caught by the per-file compare
+above; a file dropped in the instant after the scan and before the import cannot be ruled
+out; a non-importable file is not covered by this scan (use the `ls -A` compare); and
+running Python with `-S` on 3.9 or 3.10 is outside what the guard can defend, because you
+choose the interpreter's flags.
+
 **What the digest covers, and when the command exits non-zero.** The walk hashes every file
 in the package tree at every depth, *except* the contents of the regenerated-artifact
 directories `__pycache__`, `.ruff_cache`, `.mypy_cache`, `.pytest_cache` and `.git` - those
