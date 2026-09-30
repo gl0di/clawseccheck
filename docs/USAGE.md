@@ -2056,9 +2056,13 @@ it separately under "expired ignore(s) no longer applied" rather than as a dead 
 appears in the report even if suppressed, and still counts - it stays in
 `fail_counts_by_severity`, which is the same predicate `--exit-code` gates on, so a
 `.clawseccheckignore` line cannot silently turn a CI gate green. Instead of silence you get a
-`WARNING:` line naming the id; that is the tool working, not the ignore file failing. Ordinary
-findings below that bar do go quiet. Run `--show-suppressed` to see every entry, which ones
-actually matched this run, which match nothing any more, and which have expired.
+`WARNING:` line naming the id; that is the tool working, not the ignore file failing. The same
+line is printed by the text report, the `--dashboard` card (and `--dashboard --full`), the
+`--dashboard-findings` block, `--html` and `--pdf` (the card shows at most three, then a
+"+N more" line; the finding's own card stays out of those views), and the "Most urgent" headline
+names it too. Ordinary findings below that bar do go quiet. Run `--show-suppressed` to see every
+entry, which ones actually matched this run, which match nothing any more, and which have
+expired.
 
 ```text
 # ~/.openclaw/.clawseccheckignore

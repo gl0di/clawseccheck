@@ -289,7 +289,8 @@ def _sanitize_tree(value):
 # badge and SARIF. But a suppressed CRITICAL/HIGH FAIL (which caps the score) or a
 # sensitive check id must stay VISIBLE on every surface - one ignore line could otherwise
 # flip an F into an A silently. This predicate is the single source of that rule, shared by
-# the human report, the SVG badge and the SARIF renderer (B-163).
+# the human report, the dashboard card, --dashboard-findings, HTML, PDF, the "Most urgent"
+# headline, the SVG badge and the SARIF renderer (B-163, C-618).
 SENSITIVE_SUPPRESSED_IDS = frozenset({"B1", "B2", "B13", "B20"})
 
 
@@ -363,6 +364,30 @@ def surfaced_despite_suppression(f: Finding) -> bool:
         (f.status in FAIL_WEIGHT_STATUSES and f.severity in (CRITICAL, HIGH))
         or f.id in SENSITIVE_SUPPRESSED_IDS
     )
+
+
+# C-618: the card bounds the notice so it fits the ~4096-char ladders (the header cannot shrink).
+_DASHBOARD_NOTICE_LIMIT = 3
+
+
+def suppressed_notice_lines(findings, *, limit: "int | None" = None) -> list[str]:
+    """C-618: one WARNING sentence per suppressed finding that must still be surfaced.
+
+    The one wording every human surface shares (text, card, findings block, HTML, PDF).
+    `limit` bounds the list for the chat card; the overflow is counted, never dropped.
+    """
+    lines = [
+        f"WARNING: a {_sanitize(str(f.severity))} finding ({_sanitize(str(f.id))}) is suppressed"
+        " via .clawseccheckignore \u2014 it still counts against your real security;"
+        " review your ignore list."
+        for f in findings if surfaced_despite_suppression(f)
+    ]
+    if limit is not None and len(lines) > limit:
+        more = len(lines) - limit
+        lines = lines[:limit] + [
+            f"(+{more} more suppressed finding(s) that still count -- see the full report)"
+        ]
+    return lines
 
 
 # I3: per-severity FAIL counts a CI consumer can assert on without a grade - the
@@ -806,7 +831,9 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     explanation and instead points at the fuller section for it.
     """
     def _pick(pool_findings, pool_risk):
-        best_f = sorted(pool_findings, key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.id))[0] \
+        # C-618: a live finding wins an exact-severity tie against a suppressed one.
+        best_f = sorted(pool_findings, key=lambda f: (
+            _SEV_ORDER.get(f.severity, 9), bool(getattr(f, "suppressed", False)), f.id))[0] \
             if pool_findings else None
         best_p = sorted(pool_risk, key=lambda p: (_SEV_ORDER.get(p.severity, 9), p.id))[0] \
             if pool_risk else None
@@ -821,14 +848,19 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
 
     live = [f for f in findings if not getattr(f, "suppressed", False)]
     live_risk = [p for p in (risk or []) if not getattr(p, "suppressed", False)]
-    fail_candidates = [f for f in live if f.status in FAIL_WEIGHT_STATUSES]
+    # C-618: a suppressed FAIL that must still be surfaced (it caps the score) is a candidate.
+    fail_candidates = [
+        f for f in findings if f.status in FAIL_WEIGHT_STATUSES
+        and (not getattr(f, "suppressed", False) or surfaced_despite_suppression(f))
+    ]
 
     kind, top = _pick(fail_candidates, live_risk)
     if kind == "risk":
         return (f"Most urgent: {top.severity} \u2014 dangerous capability chain: "
                 f"{_sanitize(top.title)}")
     if kind == "finding":
-        return f"Most urgent: {top.severity} \u2014 {_sanitize(top.title)}"
+        _tag = " (suppressed via .clawseccheckignore)" if getattr(top, "suppressed", False) else ""
+        return f"Most urgent: {top.severity} \u2014 {_sanitize(top.title)}{_tag}"
 
     # C-426: the all-clear must not out-run the evidence. This headline leads every
     # ungraded surface, including the card, whose own "Most urgent" section lists
@@ -1322,6 +1354,42 @@ def _degraded_incomplete_clause(score: ScoreResult) -> str:
     return ("this grade is incomplete."
             if getattr(score, "graded", True)
             else "this run's coverage is incomplete.")
+
+
+def _grounding_gap_sentence(ctx) -> "str | None":
+    """C-571/C-615: the run-level 'newer than grounded' disclosure, or None.
+
+    One wording for every surface (text, card, HTML, PDF) - B-483's reason. It is a fact
+    about the BUILD, not about this run's findings. `openclawdist.grounding_gap` answers
+    None on anything it cannot place past GROUNDED_MAX_VERSION (no ctx, unknown install,
+    unparseable/pre-release string, a version too short to be a calendar release), so this
+    never fires on "we don't know". Presentation-only: never touches score/grade/cap
+    (Golden Rule #5 - honesty about a gap, not a manufactured FAIL). It does not name
+    which checks are affected: that set is not sound to enumerate (B363's B-833 flip was
+    found entirely inside the check, with no schema-path diff to hang a list on). No
+    position word ("below"): the card and PDF print this under the grade line.
+    """
+    gap = _openclawdist.grounding_gap(
+        getattr(ctx, "installed_dist_version", None) if ctx is not None else None
+    )
+    if gap is None:
+        return None
+    grounded = ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION)
+    running = ".".join(str(p) for p in gap)  # rebuilt from ints, never the raw string
+    return (
+        f"This build's checks were last grounded against OpenClaw up to {grounded}; "
+        f"you are running {running}. Some checks assume behavior measured on the older "
+        "build and may be mis-grounded on this one \u2014 a real gap can still read as "
+        "a clean PASS. Not a finding; the score is unchanged."
+    )
+
+
+def _grounding_gap_line(ctx, ascii_only: bool) -> "str | None":
+    """C-615: `_grounding_gap_sentence` behind its warning marker (None when silent)."""
+    sentence = _grounding_gap_sentence(ctx)
+    if sentence is None:
+        return None
+    return ("[!] " if ascii_only else "\u26a0\ufe0f ") + sentence
 
 
 # C-418: one heading per reason a comparison was skipped, in the order the monitor's
@@ -3272,31 +3340,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if build_digest:
         lines.append(f"Build: {build_digest}")
     lines.append("=" * 44)
-    # C-571: run-level grounding disclosure, ahead of everything else - this is a fact
-    # about the BUILD, not about this run's findings, so it belongs above the per-run
-    # disclosures that follow. `openclawdist.grounding_gap` answers None on anything it
-    # cannot place past GROUNDED_MAX_VERSION (unknown install, unparseable/pre-release
-    # string, a version too short to be a calendar release), so this never fires on
-    # "we don't know" - only on a build genuinely newer than any check here was measured
-    # against. Presentation-only: never touches score/grade/cap (¶2.4/Golden Rule #5 -
-    # this is honesty about a gap, not a manufactured FAIL), and it does not name which
-    # checks are affected because that set is not sound to enumerate - see B363's B-833
-    # fix for the one flip that WAS found, entirely inside the check, with no schema-path
-    # diff to hang a static list on.
-    _gap = _openclawdist.grounding_gap(
-        getattr(ctx, "installed_dist_version", None) if ctx is not None else None
-    )
-    if _gap is not None:
-        gap_icon = "[!]" if ascii_only else "\u26a0\ufe0f "
-        _grounded_str = ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION)
-        _running_str = ".".join(str(p) for p in _gap)
-        lines.append(
-            f"{gap_icon}This build's checks were last grounded against OpenClaw up to "
-            f"{_grounded_str}; you are running {_running_str}. Some checks assume "
-            "behavior measured on the older build and may be mis-grounded on this one \u2014 "
-            "a real gap can still read as a clean PASS. Not a finding; the score below "
-            "is unchanged."
-        )
+    # C-571/C-615: run-level grounding disclosure, ahead of everything else (a fact about
+    # the BUILD, so above the per-run disclosures that follow); see the helper.
+    _gap_line = _grounding_gap_line(ctx, ascii_only)
+    if _gap_line:
+        lines.append(_gap_line)
     # B-313/B-399: disclosed ABOVE the grade, unconditionally whenever any check degraded
     # this run (crashed, timed out, or - B-399 - ran to completion but could not reach a
     # verdict for an engine-side reason, e.g. an input it expected to read that turned out
@@ -3308,7 +3356,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # config_blind_capped/runtime_capped below).
     _degraded_n = getattr(score, "degraded_count", 0)
     if _degraded_n:
-        warn_icon = "[!]" if ascii_only else "\u26a0\ufe0f "
+        warn_icon = "[!] " if ascii_only else "\u26a0\ufe0f "
         _plural = "check" if _degraded_n == 1 else "checks"
         # B-624: the old sentence ended "...or review the affected finding(s) below for an
         # unreadable-input detail." Nothing below was marked, and nothing could be: every
@@ -3896,13 +3944,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # or hit a sensitive check (B1/B2/B13/B20). Hiding these silently could turn an F into an
         # A via one .clawseccheckignore line, so they stay visible no matter what the ignore says.
         # Same rule the badge and SARIF now use (surfaced_despite_suppression) - one source (B-163).
-        for f in findings:
-            if surfaced_despite_suppression(f):
-                lines.append(
-                    f"WARNING: a {f.severity} finding ({f.id}) is suppressed via"
-                    " .clawseccheckignore \u2014 it still counts against your real security;"
-                    " review your ignore list."
-                )
+        lines.extend(suppressed_notice_lines(findings))
 
     # B-769: a fingerprint entry that matches nothing this run, surfaced in the
     # ORDINARY run rather than only under the opt-in --show-suppressed. Either the
@@ -3991,7 +4033,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
 
 def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = False,
                               compact: bool = False,
-                              why_drop_severities: frozenset = frozenset()) -> str:
+                              why_drop_severities: frozenset = frozenset(),
+                              suppression_notice: bool = True) -> str:
     """Deterministic, framed Findings block for the chat Dashboard (SKILL.md Step 3, Section 3).
 
     Emits ONLY what Section 3 must contain, so the host agent PASTES this verbatim instead
@@ -4016,8 +4059,14 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
     config, the caller re-renders with this set widened (weakest severity first) so
     entire why lines are dropped rather than merely narrowed. Empty by default,
     reproducing the exact prior output.
+
+    `suppression_notice` (C-618): append the bounded WARNING for a suppressed finding that
+    still counts (the body stays excluded). render_dashboard's --full pass turns it off,
+    because its header already carries the notice.
     """
     findings = deduplicate_findings(findings)
+    notice = (suppressed_notice_lines(findings, limit=_DASHBOARD_NOTICE_LIMIT)
+              if suppression_notice else [])
     qualifying = [
         f for f in findings
         if f.status in ACTIONABLE_STATUSES
@@ -4027,6 +4076,8 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
     if not qualifying:
         ok = "[OK]" if ascii_only else "\u2705"
         out = f"No high-confidence issues to fix. {ok}\n"
+        if notice:
+            out += "\n" + "\n".join(notice) + "\n"
         return _asciify(out) if ascii_only else out
 
     lines: list = []
@@ -4052,6 +4103,8 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
                             why_drop_severities=why_drop_severities)
         lines.append("")
 
+    if notice:
+        lines.extend(notice)
     out = "\n".join(lines).rstrip() + "\n"
     return _asciify(out) if ascii_only else out
 
@@ -4570,6 +4623,10 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     _covered_line = _not_fully_covered_line(score)
     if _covered_line:
         grade_lines.append(_covered_line)
+    # C-615: the newer-than-grounded notice (C-571) - the card is what SKILL.md pastes.
+    _gap_line = _grounding_gap_line(ctx, ascii_only)
+    if _gap_line:
+        grade_lines.append(_gap_line)
     # B-767: render_report/render_html/pdf.render_pdf all disclose a degraded check
     # (crashed, timed out, or hit unreadable/corrupted input) unconditionally, above the
     # grade - this renderer never did, even though it is the ONE artifact SKILL.md tells
@@ -4579,7 +4636,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # reader happens to be looking at.
     _degraded_n = getattr(score, "degraded_count", 0)
     if _degraded_n:
-        _degraded_mark = "[!]" if ascii_only else "\u26a0\ufe0f "
+        _degraded_mark = "[!] " if ascii_only else "\u26a0\ufe0f "
         _plural = "check" if _degraded_n == 1 else "checks"
         grade_lines.append(
             f"{_degraded_mark}{_degraded_n} {_plural} could not reach a reliable verdict "
@@ -4615,6 +4672,8 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             f"{_mark} {_cap_primary_reason_text(_cap_primary, score)}"
             f"{_cap_also_clause(_cap_extras)} \u2014 {_UNGRADED_CAP_TAIL}"
         )
+    # C-618: a suppressed finding that still counts (it explains the cap above) - bounded.
+    grade_lines.extend(suppressed_notice_lines(findings, limit=_DASHBOARD_NOTICE_LIMIT))
     if getattr(score, "config_blind_capped", False):
         # C-426: "This grade reflects..." is incoherent on a run that has no grade - and
         # after C-426 the config-blind case is USUALLY ungraded, because a bare run is.
@@ -4771,7 +4830,8 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     def _assemble(why_drop_severities: frozenset = frozenset()) -> str:
         body = render_dashboard_findings(
             findings, ascii_only=ascii_only, compact=compact,
-            why_drop_severities=why_drop_severities).rstrip("\n")
+            why_drop_severities=why_drop_severities,
+            suppression_notice=False).rstrip("\n")  # C-618: the header carries it
         out = header_block + body + "\n" + skills_block + tail_block
 
         # B-381: --compact also tightens the "Worth a glance" limit (12 -> 6) -- this
@@ -6662,7 +6722,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         _also_html = _cap_also_clause([esc(p) for p in _extras])
         capped_html = (f'<p class="capped">{_reason_html}{_also_html} \u2014 '
                        f'{esc(_UNGRADED_CAP_TAIL)}</p>')
-    capped_html = degraded_html + capped_html
+    # C-615: the newer-than-grounded notice (C-571), ahead of the degraded line, as in text.
+    _gap_text = _grounding_gap_line(ctx, False)
+    gap_html = f'<p class="meta">{esc(_gap_text)}</p>' if _gap_text else ""
+    capped_html = gap_html + degraded_html + capped_html
+    # C-618: every suppressed finding that still counts (body stays out; archival, unbounded).
+    suppressed_html = "".join(
+        f'<p class="capped" role="note">{esc(line)}</p>'
+        for line in suppressed_notice_lines(findings))
 
     # C-423: mandatory "not fully covered" line - appears on GRADED runs too,
     # whenever a layer that DID run still didn't exhaust its subject.
@@ -7001,6 +7068,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             {not_checked_html}
             <p class="meta"><strong>{esc(label_trifecta)}</strong> {esc(trifecta)}</p>
             {capped_html}
+            {suppressed_html}
             {summary_html}
         </header>
 

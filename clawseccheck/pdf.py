@@ -64,9 +64,11 @@ from .layers import LAYER_ORDER, describe_layer
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
     _coverage_lines, _degraded_incomplete_clause, _EXPORT_FINDINGS_ONLY_NOTE,
+    _grounding_gap_line,
     _EXPORT_RISK_INCLUDED_NOTE,
     _group_issues_by_subject, _mcp_inventory_lines,
     _plugins_inventory_lines, _redact_home_paths, _risk_chain_lines, _sanitize,
+    suppressed_notice_lines,
     _second_opinion_item_lines,
     _second_opinion_lines,
     _SEV_ORDER, _UNGRADED_CAP_TAIL, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
@@ -767,6 +769,12 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             size=9.5, color="#b94a48",
         )
 
+    # C-615: the newer-than-grounded notice (C-571); ascii_only because this page is
+    # base-14/WinAnsi, and the shared line is still the only wording of it.
+    _gap = _grounding_gap_line(ctx, True)
+    if _gap:
+        flow.wrapped(_gap, size=9.5, color="#b94a48")
+
     degraded_n = getattr(score, "degraded_count", 0)
     if degraded_n:
         plural = "check" if degraded_n == 1 else "checks"
@@ -805,6 +813,10 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         else:
             text = f"{reason}{also} - {_UNGRADED_CAP_TAIL}"
         flow.wrapped(text, size=9.5, color="#b94a48")
+
+    # C-618: a suppressed finding that still counts (body stays out of `issues` above).
+    for line in suppressed_notice_lines(findings):
+        flow.wrapped(line, size=9.5, color="#b94a48")
 
     # B-761: this document's own scope, stated on its first page - the text report
     # additionally carries the "Highest-risk paths" attack-chain synthesis, the
