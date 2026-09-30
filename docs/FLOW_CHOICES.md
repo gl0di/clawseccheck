@@ -57,9 +57,10 @@ itself, or an installed wrapper project under `~/.openclaw/npm/projects/`. Plain
 also works - the type is autodetected and announced on stderr. Report the verdict like the
 skill flow above, and relay two plugin specifics from the evidence when present: bundled
 skills auto-load via `~/.openclaw/plugin-skills/`, and the plugin's JS/TS runtime code gets a
-lexical pass only, so it stays outside the static scan's depth (the report discloses this) -
-suggest the user skim the entry files before trusting. Python outside the declared skills is
-read by the full AST/taint pass, so do not relay it as unscanned.
+lexical pass only, so it stays outside the static scan's depth (the report names the files it
+read that way, and any shell files it did not read) - suggest the user skim those files before
+trusting. Python outside the declared skills is read by the full AST/taint pass, so do not
+relay it as unscanned.
 
 ## Choice: check before download / "is this safe to download" / "vet this link or package"
 

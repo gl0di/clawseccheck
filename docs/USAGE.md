@@ -1831,8 +1831,16 @@ python3 audit.py --log audit.log            # also write log to a local file
   `~/.openclaw/plugin-skills/`) and embedded MCP specs to the MCP engine. Python the plugin
   ships outside its declared skills gets the same AST/taint pass a bundled skill's does, so a
   remote code loader at the plugin root is convicted exactly as it is one directory lower;
-  runtime JS/TS gets a lexical pass only, and any file past the scan cap or that fails to parse
-  is named as unread rather than passed - review entry files before trusting.
+  runtime JS/TS gets five lexical rules only (obfuscated eval, remote fetch-then-eval, dynamic
+  `child_process` command, dynamic `require`, native `dlopen`) - not the signature scan a
+  bundled skill's files get, so a pipe-to-shell string, a config or credential read or an
+  outbound POST in loose plugin JS/TS is not checked. The report names those files in its
+  coverage notes whether or not `package.json` declares `openclaw.extensions`, shell files
+  (`.sh`, `.bash`, `.zsh`) outside a declared skill are named as not read, and the Danger axis
+  says so instead of claiming a clean malware scan. Any Python file that cannot be read, fails
+  to parse, or is over the 2 MB scan cap (and any JS/TS file over its cap) is named as unread
+  and floors the verdict to `CAUTION` (exit 1) with Danger `UNKNOWN`, never `INSTALL` - review
+  entry files before trusting.
 - **`--vet-source SLUG|URL|PKG`** is the pre-download reputation gate: it judges a source's
   *identity* - `clawhub:<slug>`, `npm:<pkg>`, `pypi:<pkg>`, `git:host/owner/repo[@ref]`, or a
   URL - with zero network and nothing fetched. Exact match in the bundled known-compromised

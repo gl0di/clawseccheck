@@ -156,6 +156,11 @@ def test_python_over_the_size_cap_is_disclosed_not_silently_clean(tmp_path):
     assert getattr(out, "unanalysed_code", None) == ["install.py"]
     assert any("was not analysed" in e and "scan cap" in e for e in (out.evidence or [])), \
         out.evidence
+    # C-634: disclosure alone left INSTALL / Danger PASS / rc 0 over the unread loader. The
+    # Danger axis does not depend on the manifest (which draws its own Build WARN here), so
+    # asserting on it is what makes this a test of the Python file and not of the fixture.
+    assert _danger(out).status == UNKNOWN
+    assert build_profile(out, "t", "plugin").verdict == "CAUTION"
 
 
 def test_unparseable_python_is_disclosed_not_silently_clean(tmp_path):
@@ -166,6 +171,9 @@ def test_unparseable_python_is_disclosed_not_silently_clean(tmp_path):
     out = vet_plugin(root)
     assert out.status != PASS
     assert getattr(out, "unanalysed_code", None) == ["install.py"]
+    # C-634: see the oversize case above - the verdict word and Danger axis must move.
+    assert _danger(out).status == UNKNOWN
+    assert build_profile(out, "t", "plugin").verdict == "CAUTION"
 
 
 # ---------------------------------------------------------------------------

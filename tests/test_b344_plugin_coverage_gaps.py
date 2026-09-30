@@ -169,8 +169,14 @@ def test_clean_plugin_output_is_unchanged(tmp_path):
     f = vet_plugin(root)
     assert f.status == PASS, f.detail
     assert _coverage(f) == []
-    # The only coverage line a clean plugin carries is the pre-existing node_modules
-    # exclusion note — no cap/budget truncation is claimed.
-    assert f.evidence == [
+    # A clean plugin carries the pre-existing node_modules exclusion note and, since
+    # C-633, the lexical-read disclosure for its loose JS - and no cap/budget truncation
+    # claim.
+    assert f.evidence[0] == (
         "coverage: node_modules/ (third-party npm deps) excluded from the content scan"
-    ]
+    )
+    assert len(f.evidence) == 2, f.evidence
+    assert f.evidence[1].startswith(
+        "coverage: plugin runtime JS/TS (index.js) was read by five lexical rules only"
+    ), f.evidence
+    assert not any("-file cap" in e or "scan cap" in e or "budget" in e for e in f.evidence)

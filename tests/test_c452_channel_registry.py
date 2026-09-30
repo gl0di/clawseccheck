@@ -115,6 +115,12 @@ _CHANNELS = {
     "analysed_loose_code": (
         "vet", "plugin Python the Danger pass read but the other axes cannot see", None,
     ),
+    "lexical_loose_code": (
+        "vet",
+        "plugin JS/TS the Danger pass read with the five lexical rules only; bars "
+        "Persistence/Connections PASS and hedges Danger PASS",
+        None,
+    ),
     "bundled_contexts": ("vet", "each dispatched bundled skill's engine Context", None),
     "ctx": ("internal", "the vet engine's own Context, handed to the plugin dispatcher", None),
 }

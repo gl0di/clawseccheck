@@ -135,6 +135,10 @@ _PLUGIN_JS_EXT = (".js", ".mjs", ".cjs", ".ts")
 # nothing opens. Kept separate from _PLUGIN_JS_EXT because those ARE lexically scanned;
 # this list is "we can see the file and cannot say anything about it".
 _PLUGIN_UNREAD_SOURCE_EXT = (".py", ".pyw")
+# C-633: shell outside a dispatched skill has no reader at all (a skill's own shell goes
+# through vet_skill's read_skill_shell). Same set as collector._SH_SUFFIXES, kept apart
+# from _PLUGIN_UNREAD_SOURCE_EXT because that tuple drives the Python reader (`loose_py`).
+_PLUGIN_UNREAD_SHELL_EXT = (".sh", ".bash", ".zsh")
 _PLUGIN_JS_MAX_BYTES = 2_000_000
 # B-636: the same input bound the lexical JS pass uses, for the same reason - the AST pass
 # is bounded by input SIZE, not content hostility (F-148). A file over the cap is NOT
@@ -193,6 +197,7 @@ def _reprefix_bundled_evidence(entry: str, name: str, rel_label: str) -> str:
 
 
 _PY_BUDGET_GAP = "the scan budget was reached while it was being read"
+_PY_BUDGET_BEFORE = "the scan budget was reached before it was read"
 
 
 def _scan_loose_plugin_python(
@@ -202,7 +207,9 @@ def _scan_loose_plugin_python(
 
     Returns "" when the file was analysed, or a short phrase naming why it was not - the
     caller turns that into a `coverage:` note AND keeps the file in `unanalysed_code`, so
-    "this scan has no reader for it" stays true of exactly the files it is true of.
+    "this scan has no reader for it" stays true of exactly the files it is true of. Except
+    for a budget gap (which already rides the VET-COVERAGE finding), the caller also emits
+    a B13 UNKNOWN sub-finding so the gap moves the verdict (C-634).
 
     Fail-capable findings become B13 sub-findings on the plugin's own `subs` list rather
     than a parallel channel: `vet_plugin`'s FAIL branch selects `worst` out of `subs`, and
@@ -334,7 +341,10 @@ def vet_plugin(
     vet runs (analyze_javascript: obfuscated-RCE / remote-fetch-then-eval and a couple of
     warn-level signals) - a JS signal raises the verdict to WARN so it is never a silent
     PASS (B-165). That pass is lexical, not a full runtime analysis (the residual D2 limit);
-    the coverage note still says so, and it never forces a FAIL on its own.
+    the coverage note still says so, and it never forces a FAIL on its own. C-633: that note
+    is emitted for every lexically scanned loose JS/TS file whether or not `package.json`
+    declares `openclaw.extensions`, and names the files; shell outside a declared skill has
+    no reader at all and is named as unread (never scanned).
 
     F-148: cost here is driven by INPUT SIZE, not content hostility - a benign target at
     the legal per-skill byte cap can cost far more than a small hostile one (see the
@@ -394,6 +404,11 @@ def vet_plugin(
                        skipped by the lexical pass. Measured: a plugin whose only runtime
                        file was an oversized bundle graded a confident A/PASS and exited
                        0 - it did not even reach the UNKNOWN floor.
+
+    C-634: loose plugin Python that cannot be read, fails to parse, or exceeds
+    `_PLUGIN_PY_MAX_BYTES` (a budget gap excepted - it rides `budget_hit`) emits one
+    aggregate B13 UNKNOWN `engine_degraded` sub-finding, so the gap floors the verdict to
+    CAUTION instead of leaving INSTALL / Danger PASS on code that was never analysed.
     """
     import json as _json
 
@@ -529,13 +544,11 @@ def vet_plugin(
         val = oc.get(key)
         if isinstance(val, list):
             entries.extend(str(x) for x in val)
-    if entries:
-        notes.append(
-            "coverage: plugin runtime JS/TS ("
-            + ", ".join(entries[:3])
-            + ") is lexically scanned for obfuscated-RCE / remote-eval signals only \u2014 not a "
-            "full runtime analysis; still review the entry files before trusting"
-        )
+    # C-633: the JS/TS coverage note is no longer emitted here. It used to be gated on
+    # `entries` (declared extensions), so a plugin without them said nothing about its
+    # loose JS/TS being read by five lexical rules only. It is emitted after the tree
+    # sweep below, naming the files that pass actually read; `entries` is kept for the
+    # declared-but-not-shipped fallback.
     notes.append("coverage: node_modules/ (third-party npm deps) excluded from the content scan")
     npm_spec = dig(pkg, "openclaw.install.npmSpec")
     if isinstance(npm_spec, str) and npm_spec and "@" not in npm_spec.lstrip("@"):
@@ -671,6 +684,10 @@ def vet_plugin(
     # the dossier cannot mistake "one bundled skill had Python" for "this plugin's code
     # was measured" -- exactly the affirmative claim the reviewer reproduced.
     unanalysed_code: list[str] = []
+    # C-634: the subset of `unanalysed_code` whose cause is NOT the scan budget - a budget
+    # gap already rides `budget_hit`'s VET-COVERAGE finding, and naming it again would
+    # state one fact twice. Each entry is (plugin-relative name, reason).
+    py_unread: list[tuple[str, str]] = []
     # B-636: plugin Python the Danger pass DID read. Distinct from `unanalysed_code` and
     # from "no code at all": the AST/taint pass covers dangerous patterns, while the
     # Persistence and Connections axes are computed from bundled-skill Contexts that never
@@ -678,6 +695,16 @@ def vet_plugin(
     # one - after the reader landed, a plugin shipping install.py printed "no executable
     # code to analyze", which is a claim about the ARTIFACT and was simply untrue.
     analysed_loose_code: list[str] = []
+    # C-633: plugin JS/TS the sweep read with `analyze_javascript`'s five lexical rules
+    # and nothing else (no B13 text-signature scan, no content ring). Only files that
+    # were actually read land here: one over `_PLUGIN_JS_MAX_BYTES` (`js_capped`) or cut
+    # off by the budget already rides a VET-COVERAGE finding and must not also be
+    # claimed as read.
+    lexical_loose_code: list[str] = []
+    # C-633: shell outside a dispatched skill dir. No reader exists for it; it is named,
+    # never scanned, and also kept in `unanalysed_code` so the dossier's Persistence /
+    # Connections wording says "no reader for" for exactly these files.
+    unread_shell: list[str] = []
     # B-902: shares B-899's root cause (checks/_content.py's `_enumerate_symlinks`) --
     # `fp.is_symlink()` needs search (`x`) permission on `fp`'s PARENT to `lstat()` an
     # entry inside it, so a plugin subdirectory at mode 0644 (listable, not searchable)
@@ -818,13 +845,15 @@ def vet_plugin(
                 # Anything this branch cannot read - over the cap, unparseable, unreadable,
                 # or cut off by the budget - still lands in `unanalysed_code`, so B-628's
                 # honest "no reader for this" keeps firing for exactly the files it is true
-                # of. Doing both in ONE pass is what makes it impossible for the dossier to
-                # claim a file was unread on one line and quote its contents on the next.
+                # of. Except for a budget gap, it also becomes a B13 UNKNOWN sub-finding
+                # (C-634, see `py_unread` below) so the gap moves the verdict. Doing both
+                # in ONE pass is what makes it impossible for the dossier to claim a file
+                # was unread on one line and quote its contents on the next.
                 rel = str(fp.relative_to(root))
                 gap = ""
                 if cpu_exceeded(deadline):
                     budget_hit = True
-                    gap = "the scan budget was reached before it was read"
+                    gap = _PY_BUDGET_BEFORE
                 else:
                     try:
                         py_size = fp.stat().st_size
@@ -852,6 +881,8 @@ def vet_plugin(
                                 budget_hit = True
                 if gap:
                     unanalysed_code.append(rel)
+                    if gap not in (_PY_BUDGET_GAP, _PY_BUDGET_BEFORE):
+                        py_unread.append((rel, gap))
                     notes.append(
                         f"coverage: plugin Python '{rel}' was not analysed \u2014 {gap}"
                     )
@@ -924,6 +955,8 @@ def vet_plugin(
                             js_signals.append(
                                 f"runtime JS/TS: {af.reason} ({rel}:{af.lineno})"
                             )
+                        # C-633: reached only when the pass ran to completion.
+                        lexical_loose_code.append(str(rel))
                     except ScanBudgetExceeded:
                         budget_hit = True
                         break
@@ -933,6 +966,46 @@ def vet_plugin(
                     f"coverage: runtime JS/TS '{fp.relative_to(root)}' exceeds the "
                     f"{_PLUGIN_JS_MAX_BYTES // 1_000_000}MB scan cap \u2014 not lexically scanned"
                 )
+        elif fp.suffix.lower() in _PLUGIN_UNREAD_SHELL_EXT:
+            # C-633: after the stowaway test on purpose - an ELF named `x.sh` still gets
+            # the native-executable WARN. No reader is added: the file is only named, so
+            # the report can say plainly that it was not read.
+            shell_rel = str(fp.relative_to(root))
+            unanalysed_code.append(shell_rel)
+            unread_shell.append(shell_rel)
+
+    # C-633: name what the sweep did and did not read. Emitted after the loop so the note
+    # lists the files that were actually read, whether or not `package.json` declares
+    # `openclaw.extensions`.
+    if lexical_loose_code:
+        shown_js = ", ".join(sorted(lexical_loose_code)[:3])
+        more_js = (
+            "" if len(lexical_loose_code) <= 3 else f" (+{len(lexical_loose_code) - 3} more)"
+        )
+        notes.append(
+            f"coverage: plugin runtime JS/TS ({shown_js}{more_js}) was read by five lexical "
+            "rules only (obfuscated eval, remote fetch-then-eval, dynamic child_process "
+            "command, dynamic require, native dlopen); NOT checked: pipe-to-shell strings, "
+            "config or credential reads, outbound POSTs - not a full runtime analysis; "
+            "review these files before trusting"
+        )
+    elif entries:
+        # Declared entry points but nothing swept (e.g. build output not shipped): the
+        # long-standing note, unchanged.
+        notes.append(
+            "coverage: plugin runtime JS/TS ("
+            + ", ".join(entries[:3])
+            + ") is lexically scanned for obfuscated-RCE / remote-eval signals only \u2014 not a "
+            "full runtime analysis; still review the entry files before trusting"
+        )
+    if unread_shell:
+        shown_sh = ", ".join(sorted(unread_shell)[:3])
+        more_sh = "" if len(unread_shell) <= 3 else f" (+{len(unread_shell) - 3} more)"
+        notes.append(
+            f"coverage: plugin shell file(s) ({shown_sh}{more_sh}) were not read - this scan "
+            "has no reader for shell outside a declared skill, so pipe-to-shell strings, "
+            "config or credential reads and outbound POSTs in them were not checked"
+        )
 
     # B-344: the CPU budget is not the only way this scan ends up partial. Three other
     # limits truncate it, and until B-344 each reached nothing but `notes` - human text
@@ -968,6 +1041,31 @@ def vet_plugin(
                 "file past that point went unexamined"
             )
         )
+    if py_unread:
+        # C-634: loose plugin Python that could not be read, parsed or fit under the scan
+        # cap used to reach only `unanalysed_code` and a `coverage:` note - neither moves
+        # the verdict - so padding a loader past 2 MB (or making it unparseable) turned a
+        # DO-NOT-INSTALL into INSTALL. B13 UNKNOWN + engine_degraded is what the skill path
+        # emits for the same parse failure, and `dossier._AXIS_BY_ID["B13"]` is already the
+        # danger axis, so `_danger_coverage_gap` floors the headline to CAUTION. It is NOT
+        # a VET-COVERAGE finding: that id flips the dossier's `scan_truncated` and rewrites
+        # the Persistence/Connections wording, and a per-file gap is not a truncated scan
+        # (tests/test_b628_plugin_code_measurable.py::test_i). A budget gap is excluded
+        # above - it already rides `budget_hit`'s VET-COVERAGE finding. Filenames are
+        # plugin-relative, so they may sit in `detail`; the remediation prose is in `fix`
+        # only (baseline.fingerprint() hashes `detail`).
+        shown = "; ".join(f"{r} ({why})" for r, why in sorted(py_unread)[:3])
+        more = "" if len(py_unread) <= 3 else f" (+{len(py_unread) - 3} more)"
+        subs.append(_finding(
+            "B13", UNKNOWN,
+            f"could not analyze plugin Python {shown}{more} \u2014 not scanned by the "
+            "AST/taint layer",
+            "Inspect the flagged file(s) manually before installing: Python a scanner "
+            "cannot read, parse, or fit under the scan cap is how a loader is hidden from "
+            "an AST pass (a parse failure can also mean Python 2 syntax, a template, or "
+            "syntax newer than the Python running this scan).",
+            severity=HIGH, engine_degraded=True,
+        ))
     if js_capped:
         shown = ", ".join(sorted(js_capped)[:3])
         more = "" if len(js_capped) <= 3 else f" (+{len(js_capped) - 3} more)"
@@ -1109,7 +1207,16 @@ def vet_plugin(
             LOW,
             PASS,
             f"{summary}: no manifest, packaging, or bundled-content signals",
-            "Skim the JS/TS entry files anyway \u2014 this vet's JS pass is lexical, not a full runtime analysis.",
+            # C-633: the disclosure lives in `fix`, never `detail` - baseline.fingerprint()
+            # hashes `detail`, so moving it would orphan every existing ignore entry.
+            (
+                "Read the JS/TS and shell files named in the coverage notes before "
+                "installing - this vet ran five lexical JS/TS rules only and did not read "
+                "shell files, so pipe-to-shell strings, config or credential reads and "
+                "outbound POSTs in them were not checked."
+                if lexical_loose_code or unread_shell else
+                "Skim the JS/TS entry files anyway \u2014 this vet's JS pass is lexical, not a full runtime analysis."
+            ),
             evidence,
         )
     finding.ring_findings = actionable
@@ -1119,6 +1226,7 @@ def vet_plugin(
     finding.bundled_contexts = bundled_contexts
     finding.unanalysed_code = unanalysed_code
     finding.analysed_loose_code = analysed_loose_code
+    finding.lexical_loose_code = lexical_loose_code
     axis_reasons: dict[str, list] = {}
     if warns:
         # Container-native signals (manifest sanity, npm lifecycle scripts, floating
