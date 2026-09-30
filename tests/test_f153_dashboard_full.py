@@ -47,7 +47,7 @@ from clawseccheck.scoring import compute
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 VULN = str(FIXTURES / "home_vuln")
 SAFE = str(FIXTURES / "home_safe")
-BASE = ["--no-native", "--no-host", "--no-history"]
+BASE = ["--no-native", "--no-host", "--no-history", "--no-dist"]
 
 
 def _f(id_, status, severity=HIGH, **kw):

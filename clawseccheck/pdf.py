@@ -64,6 +64,7 @@ from .layers import LAYER_ORDER, describe_layer
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
     _coverage_lines, _degraded_incomplete_clause, _EXPORT_FINDINGS_ONLY_NOTE,
+    _grounding_gap_line,
     _EXPORT_RISK_INCLUDED_NOTE,
     _group_issues_by_subject, _mcp_inventory_lines,
     _plugins_inventory_lines, _redact_home_paths, _risk_chain_lines, _sanitize,
@@ -766,6 +767,12 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             f"Not fully covered: {'; '.join(score.not_checked)}",
             size=9.5, color="#b94a48",
         )
+
+    # C-615: the newer-than-grounded notice (C-571); ascii_only because this page is
+    # base-14/WinAnsi, and the shared line is still the only wording of it.
+    _gap = _grounding_gap_line(ctx, True)
+    if _gap:
+        flow.wrapped(_gap, size=9.5, color="#b94a48")
 
     degraded_n = getattr(score, "degraded_count", 0)
     if degraded_n:

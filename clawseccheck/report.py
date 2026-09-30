@@ -1324,6 +1324,42 @@ def _degraded_incomplete_clause(score: ScoreResult) -> str:
             else "this run's coverage is incomplete.")
 
 
+def _grounding_gap_sentence(ctx) -> "str | None":
+    """C-571/C-615: the run-level 'newer than grounded' disclosure, or None.
+
+    One wording for every surface (text, card, HTML, PDF) - B-483's reason. It is a fact
+    about the BUILD, not about this run's findings. `openclawdist.grounding_gap` answers
+    None on anything it cannot place past GROUNDED_MAX_VERSION (no ctx, unknown install,
+    unparseable/pre-release string, a version too short to be a calendar release), so this
+    never fires on "we don't know". Presentation-only: never touches score/grade/cap
+    (Golden Rule #5 - honesty about a gap, not a manufactured FAIL). It does not name
+    which checks are affected: that set is not sound to enumerate (B363's B-833 flip was
+    found entirely inside the check, with no schema-path diff to hang a list on). No
+    position word ("below"): the card and PDF print this under the grade line.
+    """
+    gap = _openclawdist.grounding_gap(
+        getattr(ctx, "installed_dist_version", None) if ctx is not None else None
+    )
+    if gap is None:
+        return None
+    grounded = ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION)
+    running = ".".join(str(p) for p in gap)  # rebuilt from ints, never the raw string
+    return (
+        f"This build's checks were last grounded against OpenClaw up to {grounded}; "
+        f"you are running {running}. Some checks assume behavior measured on the older "
+        "build and may be mis-grounded on this one \u2014 a real gap can still read as "
+        "a clean PASS. Not a finding; the score is unchanged."
+    )
+
+
+def _grounding_gap_line(ctx, ascii_only: bool) -> "str | None":
+    """C-615: `_grounding_gap_sentence` behind its warning marker (None when silent)."""
+    sentence = _grounding_gap_sentence(ctx)
+    if sentence is None:
+        return None
+    return ("[!] " if ascii_only else "\u26a0\ufe0f ") + sentence
+
+
 # C-418: one heading per reason a comparison was skipped, in the order the monitor's
 # NOTE_CATEGORY_ORDER ranks them. Phrased as "because ..." so the enumerated lines read as
 # consequences of a single cause rather than as a list of unrelated malfunctions.
@@ -3272,31 +3308,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if build_digest:
         lines.append(f"Build: {build_digest}")
     lines.append("=" * 44)
-    # C-571: run-level grounding disclosure, ahead of everything else - this is a fact
-    # about the BUILD, not about this run's findings, so it belongs above the per-run
-    # disclosures that follow. `openclawdist.grounding_gap` answers None on anything it
-    # cannot place past GROUNDED_MAX_VERSION (unknown install, unparseable/pre-release
-    # string, a version too short to be a calendar release), so this never fires on
-    # "we don't know" - only on a build genuinely newer than any check here was measured
-    # against. Presentation-only: never touches score/grade/cap (¶2.4/Golden Rule #5 -
-    # this is honesty about a gap, not a manufactured FAIL), and it does not name which
-    # checks are affected because that set is not sound to enumerate - see B363's B-833
-    # fix for the one flip that WAS found, entirely inside the check, with no schema-path
-    # diff to hang a static list on.
-    _gap = _openclawdist.grounding_gap(
-        getattr(ctx, "installed_dist_version", None) if ctx is not None else None
-    )
-    if _gap is not None:
-        gap_icon = "[!]" if ascii_only else "\u26a0\ufe0f "
-        _grounded_str = ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION)
-        _running_str = ".".join(str(p) for p in _gap)
-        lines.append(
-            f"{gap_icon}This build's checks were last grounded against OpenClaw up to "
-            f"{_grounded_str}; you are running {_running_str}. Some checks assume "
-            "behavior measured on the older build and may be mis-grounded on this one \u2014 "
-            "a real gap can still read as a clean PASS. Not a finding; the score below "
-            "is unchanged."
-        )
+    # C-571/C-615: run-level grounding disclosure, ahead of everything else (a fact about
+    # the BUILD, so above the per-run disclosures that follow); see the helper.
+    _gap_line = _grounding_gap_line(ctx, ascii_only)
+    if _gap_line:
+        lines.append(_gap_line)
     # B-313/B-399: disclosed ABOVE the grade, unconditionally whenever any check degraded
     # this run (crashed, timed out, or - B-399 - ran to completion but could not reach a
     # verdict for an engine-side reason, e.g. an input it expected to read that turned out
@@ -3308,7 +3324,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # config_blind_capped/runtime_capped below).
     _degraded_n = getattr(score, "degraded_count", 0)
     if _degraded_n:
-        warn_icon = "[!]" if ascii_only else "\u26a0\ufe0f "
+        warn_icon = "[!] " if ascii_only else "\u26a0\ufe0f "
         _plural = "check" if _degraded_n == 1 else "checks"
         # B-624: the old sentence ended "...or review the affected finding(s) below for an
         # unreadable-input detail." Nothing below was marked, and nothing could be: every
@@ -4570,6 +4586,10 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     _covered_line = _not_fully_covered_line(score)
     if _covered_line:
         grade_lines.append(_covered_line)
+    # C-615: the newer-than-grounded notice (C-571) - the card is what SKILL.md pastes.
+    _gap_line = _grounding_gap_line(ctx, ascii_only)
+    if _gap_line:
+        grade_lines.append(_gap_line)
     # B-767: render_report/render_html/pdf.render_pdf all disclose a degraded check
     # (crashed, timed out, or hit unreadable/corrupted input) unconditionally, above the
     # grade - this renderer never did, even though it is the ONE artifact SKILL.md tells
@@ -4579,7 +4599,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # reader happens to be looking at.
     _degraded_n = getattr(score, "degraded_count", 0)
     if _degraded_n:
-        _degraded_mark = "[!]" if ascii_only else "\u26a0\ufe0f "
+        _degraded_mark = "[!] " if ascii_only else "\u26a0\ufe0f "
         _plural = "check" if _degraded_n == 1 else "checks"
         grade_lines.append(
             f"{_degraded_mark}{_degraded_n} {_plural} could not reach a reliable verdict "
@@ -6648,7 +6668,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         _also_html = _cap_also_clause([esc(p) for p in _extras])
         capped_html = (f'<p class="capped">{_reason_html}{_also_html} \u2014 '
                        f'{esc(_UNGRADED_CAP_TAIL)}</p>')
-    capped_html = degraded_html + capped_html
+    # C-615: the newer-than-grounded notice (C-571), ahead of the degraded line, as in text.
+    _gap_text = _grounding_gap_line(ctx, False)
+    gap_html = f'<p class="meta">{esc(_gap_text)}</p>' if _gap_text else ""
+    capped_html = gap_html + degraded_html + capped_html
 
     # C-423: mandatory "not fully covered" line - appears on GRADED runs too,
     # whenever a layer that DID run still didn't exhaust its subject.
