@@ -1185,7 +1185,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B172 - Standing exec-approvals.json allow-always grant (uninventoried persisted authority)
+### B172 - Standing exec-approvals allow-always grant (uninventoried persisted authority)
 
 - Severity: MEDIUM
 - Block: hardening
@@ -1193,7 +1193,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: none
-- What it checks: Standing exec-approvals.json allow-always grant (uninventoried persisted authority)
+- What it checks: Standing exec-approvals allow-always grant (uninventoried persisted authority)
 - Remediation:
   - none
 

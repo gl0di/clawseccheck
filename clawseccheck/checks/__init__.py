@@ -935,6 +935,7 @@ from ._mcp import (
     _b333_modern_surface_verdict,
     _b333_waived_tool_names,
     _CODEX_APPSERVER_RUNTIME_CAVEAT,
+    _CODEX_APPSERVER_RUNTIME_CAVEAT_STORE_READ,
     _CODEX_EXEC_UNRESOLVED,
     _codex_appserver_posture,
     _codex_appserver_yolo_reach,
@@ -1552,7 +1553,7 @@ CHECKS = [
     check_cron_scheduler,
     check_cron_job_content,  # B168 - cron job store payload.message/trigger.script scan (B-231)
     check_cron_run_log_orphans,  # B189 - cron run log without a surviving job definition (B-294)
-    check_exec_approvals_grants,  # B172 - standing exec-approvals.json allow-always grant inventory (B-236)
+    check_exec_approvals_grants,  # B172 - standing exec-approvals allow-always grant inventory, state DB or legacy file (B-236)
     # Content-security ring - single source of truth (also consumed by vet_skill).
     # SKILL_CONTENT_RING is DEFINED in checks/_vet.py and imported at the top of this
     # file; the block above documents it, it does not declare it. Splicing it here is

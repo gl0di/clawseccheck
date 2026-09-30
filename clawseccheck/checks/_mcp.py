@@ -3667,20 +3667,28 @@ def _codex_effective_exec_modes(cfg: dict) -> "list[tuple[str, str | None]]":
 
 
 def _codex_exec_approvals_floor(ctx: Context) -> "str | None":
-    """A reason the exec-approvals store the collector DID read (B-236,
-    `exec-approvals.json`) could tighten the exec policy, or None.
+    """A reason the exec-approvals store the collector DID read (B-236, the legacy
+    `exec-approvals.json` and/or the state database's `exec_approvals_config` row --
+    `src/infra/exec-approvals-sqlite.ts`) could tighten the exec policy, or None.
 
     The vendor applies it after the config layers (`applyOpenClawExecApprovalFloors`:
     `minSecurity` / `maxAsk`, `@openclaw/codex@2026.9.5 dist/.setup/config-CedDWjM-.mjs`),
     so a floor can only move the mode AWAY from "full" -- it can turn a "yes" into a
     "no", never the reverse. Which agent a per-agent entry applies to is not modelled:
-    any tightening value anywhere in the file is enough to stop a definite "yes".
+    any tightening value anywhere in the store is enough to stop a definite "yes".
     """
     if not getattr(ctx, "exec_approvals_found", False):
         return None
+    # The wording names the file only when the state database was not involved at all (the
+    # historical text, byte-identical); once it was read -- or was present and could NOT be
+    # read -- the tiers may come from either store, so "the file" would be a wrong claim.
+    store = ("the exec-approvals store"
+             if getattr(ctx, "exec_approvals_sqlite_read", False)
+             or getattr(ctx, "exec_approvals_sqlite_unreadable", False)
+             else "exec-approvals.json")
     if getattr(ctx, "exec_approvals_parse_error", False) or limit_hits_for(
             ctx, LIMIT_DOMAIN_APPROVALS):
-        return ("exec-approvals.json is present but could not be read in full, and a "
+        return (f"{store} is present but could not be read in full, and a "
                 "stricter default there would tighten the exec policy")
     sources = [("defaults", getattr(ctx, "exec_approvals_defaults", None) or {})]
     sources += [(f"agents.{g.get('agent_id')}", g)
@@ -3695,7 +3703,7 @@ def _codex_exec_approvals_floor(ctx: Context) -> "str | None":
             # omitted entirely rather than printed as a Python None.
             set_fields = [f"{name}={value!r}" for name, value in
                           (("security", security), ("ask", ask)) if value is not None]
-            return (f"exec-approvals.json {label} sets " + " / ".join(set_fields) +
+            return (f"{store} {label} sets " + " / ".join(set_fields) +
                     ", a floor that tightens the exec policy of the agent(s) it covers")
     return None
 
@@ -3708,7 +3716,8 @@ _CODEX_TRANSPORTS = frozenset(("stdio", "websocket", "unix"))
 #: The run-time inputs `_codex_appserver_yolo_reach` cannot see, said in every WARN it
 #: produces. Each is grounded in `@openclaw/codex@2026.9.5`: the exec-approvals floors
 #: (`loadExecApprovals`, which on this build reads `state/openclaw.sqlite`'s
-#: `exec_approvals_config`, not the legacy JSON the collector reads), the
+#: `exec_approvals_config`; the collector reads that row too, but only when the state
+#: database was readable -- when it was NOT, this original text stands), the
 #: `OPENCLAW_CODEX_APP_SERVER_MODE` / `_SANDBOX` / `_APPROVAL_POLICY` fallbacks in
 #: `resolveCodexAppServerRuntimeOptions`, and `applyCodexSessionPermissionPolicy`.
 _CODEX_APPSERVER_RUNTIME_CAVEAT = (
@@ -3717,6 +3726,13 @@ _CODEX_APPSERVER_RUNTIME_CAVEAT = (
     "OPENCLAW_CODEX_APP_SERVER_* variable in the gateway's environment, or a per-session "
     "permission mode can each change this posture at run time, and none of those is read "
     "here.)"
+)
+#: The same caveat once the collector DID read the state database's exec-approvals row
+#: (`ctx.exec_approvals_sqlite_read`): the store clause is no longer true, so it is dropped.
+_CODEX_APPSERVER_RUNTIME_CAVEAT_STORE_READ = (
+    "(Read from openclaw.json and the exec-approvals store only: an "
+    "OPENCLAW_CODEX_APP_SERVER_* variable in the gateway's environment or a per-session "
+    "permission mode can each change this posture at run time, and neither is read here.)"
 )
 
 
@@ -4116,7 +4132,11 @@ def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
             " Whether that posture actually applies here also cannot be fully determined: "
             + "; ".join(appserver_hedges) + "."
         ) if appserver_hedges else ""
-        appserver_hedge += " " + _CODEX_APPSERVER_RUNTIME_CAVEAT
+        appserver_hedge += " " + (
+            _CODEX_APPSERVER_RUNTIME_CAVEAT_STORE_READ
+            if getattr(ctx, "exec_approvals_sqlite_read", False)
+            else _CODEX_APPSERVER_RUNTIME_CAVEAT
+        )
         if reach.answer == _harnessruntime.YES:
             return _finding(
                 "B353", WARN,

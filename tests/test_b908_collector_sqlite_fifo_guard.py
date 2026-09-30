@@ -56,6 +56,7 @@ from clawseccheck.collector import (
     _collect_config_machine_state,
     _collect_cron,
     _collect_cron_run_logs,
+    _collect_exec_approvals_sqlite,
     _collect_plugin_trust,
     _collect_skill_library_state,
     _collect_subagent_runs,
@@ -274,3 +275,17 @@ class TestGuardIsInvoked:
         _collect_cron(home, ctx)
         assert guard_spy.calls == [db_path, db_path]
         assert ctx.cron_found is False
+
+    def test_collect_exec_approvals_sqlite(self, tmp_path, guard_spy):
+        """The exec-approvals reader (`exec_approvals_config`, the state-database successor
+        of the legacy exec-approvals.json) opens the state database with its own direct
+        `sqlite3.connect`, so it needs its own wiring proof."""
+        home, db_path = _empty_regular_db(tmp_path)
+        ctx = Context(home=home)
+        _collect_exec_approvals_sqlite(home, ctx)
+        assert guard_spy.calls == [db_path]
+        # No exec_approvals_config table on this empty DB -> the genuinely-absent branch
+        # (an older build), not a refusal and not a parse error.
+        assert ctx.exec_approvals_found is False
+        assert ctx.exec_approvals_sqlite_read is False
+        assert ctx.exec_approvals_parse_error is False
