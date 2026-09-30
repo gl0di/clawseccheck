@@ -1066,7 +1066,10 @@ clawseccheck --cron-recipe
 ```
 
 That prints **two** native OpenClaw cron jobs for your agent to create with its own `cron`
-tool, and you want both:
+tool, and you want both. If your OpenClaw home or the store is not the default, pass
+`--home` / `--data-dir` too: both are written, shell-quoted, into all three emitted
+commands, so the schedule watches the setup you named (`--home` appears only when it is not
+`~/.openclaw`).
 
 1. **Tell me quickly.** Polls every five minutes using a `trigger.script` - OpenClaw's own
    mechanism for running a cheap headless check and waking the agent *only* when it returns

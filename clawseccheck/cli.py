@@ -4594,7 +4594,8 @@ def _main(argv=None) -> int:
         # effect of being asked how to install one has taken a decision nobody offered it.
         from .guide import render_cron_recipe  # noqa: PLC0415
         _emit(render_cron_recipe(ascii_only=ascii_only,
-                                 data_dir=args.data_dir or "~/.clawseccheck"))
+                                 data_dir=args.data_dir or "~/.clawseccheck",
+                                 home=args.home))
         return 0
 
     if _mode == "functions":
