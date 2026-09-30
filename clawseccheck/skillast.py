@@ -2510,6 +2510,10 @@ def _external_tainted_names(
 # NARROWS rather than closes: a two-hop chain (helper A returns helper B's fetch) or a
 # fetch routed through a class attribute is still missed. Widening further needs its own
 # C-135 pass, because each extra hop multiplies the over-taint risk this rule avoids.
+# Also not recognised (C-631, disclosed rather than silent): (i) a helper that fetches
+# via `with urlopen(u) as r: return r.read()` - `_remote_returning_funcs` tracks Assign
+# bindings only, not `with ... as` targets; (ii) a helper imported from another module -
+# only helpers DEFINED in the scanned file are known to be remote-returning.
 _REMOTE_FETCH_ATTRS = {"urlopen", "urlretrieve", "get", "post", "request"}
 _REMOTE_FETCH_BASES = {
     "requests",
@@ -2637,21 +2641,29 @@ def _remote_code_load_findings(tree: ast.AST, facts=None) -> list[tuple[int, str
     urllib.request import ...`) is recognised as remote-returning too, not only the
     attribute-call spelling -- see `_is_remote_fetch_call`'s own docstring. Opt-in,
     defaults to `None` (unchanged prior behaviour) like every other consumer of this
-    predicate."""
+    predicate.
+
+    C-631: the helper call may also sit INLINE in the sink's own arguments
+    (`exec(fetch(URL))`, `exec(compile(fetch(URL), ...))`) -- nothing is assigned there,
+    so no tainted NAME exists, and the inline call itself is the source."""
     remote_funcs = _remote_returning_funcs(tree, facts)
     if not remote_funcs:
         return []
+
+    def _calls_remote_helper(expr: ast.AST) -> bool:
+        return any(
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Name)
+            and sub.func.id in remote_funcs
+            for sub in ast.walk(expr)
+        )
+
     tainted: set[str] = set()
     assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
     for _ in range(6):
         changed = False
         for a in assigns:
-            hop = any(
-                isinstance(sub, ast.Call)
-                and isinstance(sub.func, ast.Name)
-                and sub.func.id in remote_funcs
-                for sub in ast.walk(a.value)
-            )
+            hop = _calls_remote_helper(a.value)
             if not (hop or (_names_in(a.value) & tainted)):
                 continue
             for t in a.targets:
@@ -2660,8 +2672,6 @@ def _remote_code_load_findings(tree: ast.AST, facts=None) -> list[tuple[int, str
                     changed = True
         if not changed:
             break
-    if not tainted:
-        return []
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -2670,6 +2680,14 @@ def _remote_code_load_findings(tree: ast.AST, facts=None) -> list[tuple[int, str
         if not (isinstance(f, ast.Name) and f.id in _REMOTE_CODE_EXEC_SINKS):
             continue
         any_t, _direct = _call_args_tainted(node, tainted)
+        if not any_t:
+            # C-631: the helper called INLINE in the sink's own arguments - nothing is
+            # ever assigned, so no tainted NAME exists. Same dataflow the assign path
+            # convicts; mirrors `_call_args_tainted_for_exec_sink`'s inline-source rule.
+            any_t = any(
+                _calls_remote_helper(a)
+                for a in list(node.args) + [kw.value for kw in node.keywords]
+            )
         if any_t:
             found.append(
                 (
