@@ -197,6 +197,115 @@ def test_load_valid_roundtrip(tmp_path):
     assert attest.load_attestation(p)["tools"] == ["search", "send_email"]
 
 
+# C-626: a non-UTF-8 / UTF-16 attestation file is a malformed attestation ("no
+# attestation"), never a crash. The file is read as BYTES and parse_attestation decodes it.
+def _valid_attestation_text() -> str:
+    return json.dumps({"schema": attest.SCHEMA_ID, "tools": ["search", "send_email"]})
+
+
+def test_load_non_utf8_file_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b'{"schema": "' + attest.SCHEMA_ID.encode() + b'", "tools": ["caf\xe9"]}')
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_binary_file_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(bytes(range(256)))
+    assert attest.load_attestation(p) == {}
+
+
+# (guard, not a revert detector: this already passed before C-626)
+def test_load_empty_file_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b"")
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_utf16_valid_attestation_parses(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(_valid_attestation_text().encode("utf-16"))
+    assert attest.load_attestation(p)["tools"] == ["search", "send_email"]
+
+
+def test_load_utf16_bad_json_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes("{not json".encode("utf-16"))
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_utf16_wrong_schema_returns_empty(tmp_path):
+    # The schema gate must still run after the new decode path.
+    p = tmp_path / "a.json"
+    p.write_bytes(json.dumps({"schema": "something-else/9", "tools": ["x"]}).encode("utf-16"))
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_utf16_non_object_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes("[1, 2, 3]".encode("utf-16"))
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_utf8_bom_file_parses(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b"\xef\xbb\xbf" + _valid_attestation_text().encode("utf-8"))
+    assert attest.load_attestation(p)["tools"] == ["search", "send_email"]
+
+
+# (guard, not a revert detector: this already passed before C-626)
+def test_load_utf8_bom_wrong_schema_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b"\xef\xbb\xbf" + json.dumps({"schema": "other/2"}).encode("utf-8"))
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_nul_in_path_returns_empty():
+    # Not reachable from argv (argv cannot hold NUL) but the loader is a public API
+    # documented "Never raises"; Path.read_bytes raises ValueError, not OSError.
+    assert attest.load_attestation("a\0b") == {}
+
+
+def test_parse_attestation_bytes_undecodable_returns_empty():
+    # Positive control: parse_attestation was already safe on undecodable bytes; the
+    # C-626 crash was purely in the read layer.
+    assert attest.parse_attestation(b"\xff\xfe\xfa") == {}
+
+
+# Owner decision (Dave, 2026-09-30): pathologically nested JSON is just another invalid
+# attestation. json.loads raises RecursionError (a RuntimeError, NOT a ValueError) there.
+# 100000 levels is far above every supported interpreter's limit (~1000 on 3.9, ~10000 on
+# 3.12).
+_DEEP = 100000
+
+
+def test_parse_attestation_deeply_nested_bytes_returns_empty():
+    assert attest.parse_attestation(b"[" * _DEEP + b"]" * _DEEP) == {}
+
+
+def test_parse_attestation_deeply_nested_str_returns_empty():
+    assert attest.parse_attestation("[" * _DEEP + "]" * _DEEP) == {}
+
+
+def test_parse_attestation_deeply_nested_object_returns_empty():
+    text = '{"schema": "' + attest.SCHEMA_ID + '", "tools": ' + "[" * _DEEP + "]" * _DEEP + "}"
+    assert attest.parse_attestation(text) == {}
+    assert attest.parse_attestation(text.encode("utf-8")) == {}
+
+
+def test_load_deeply_nested_file_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b'{"schema": "' + attest.SCHEMA_ID.encode() + b'", "tools": '
+                  + b"[" * _DEEP + b"]" * _DEEP + b"}")
+    assert attest.load_attestation(p) == {}
+
+
+def test_parse_attestation_moderately_nested_still_parses():
+    # Positive control: only the pathological depth is refused, not nesting as such.
+    nested = {"schema": attest.SCHEMA_ID, "tools": [[["search"]]]}
+    assert attest.parse_attestation(json.dumps(nested)) == nested
+
+
 def test_parse_attestation_from_dict():
     d = {"schema": attest.SCHEMA_ID, "tools": ["x"]}
     assert attest.parse_attestation(d) == d
