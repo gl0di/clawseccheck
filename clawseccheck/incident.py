@@ -30,7 +30,8 @@ from pathlib import Path
 from . import trajectory as _trajectory
 from . import trajectorystore as _trajectorystore
 from .catalog import ACTIONABLE_STATUSES
-from .checks import SECRET_PATTERNS, _pattern_hits_real_secret, _secret_paths
+from .checks import SECRET_PATTERNS, _is_secret_reference, _pattern_hits_real_secret, _secret_paths
+from .collector import dig
 from .incidentstore import DEFAULT_INCIDENTS, _incident_to_dict, create_incident
 from .monitor import DEFAULT_EVENTS, load_events
 from .monitorstore import _last_chain_hash
@@ -232,6 +233,10 @@ def _trajectory_hash_entries(home, *, max_files: int | None = None) -> list[dict
     return entries
 
 
+# The two config paths check_secrets (B1) names unconditionally, at any length.
+_B1_NAMED_PATHS = ("gateway.auth.password", "hooks.token")
+
+
 def _credential_rotation_list(ctx, findings) -> list[str]:
     """Inventory-driven, not verdict-driven (B-569). The old version returned
     B41's evidence verbatim; B41's scope is "credentials reachable by untrusted
@@ -252,9 +257,19 @@ def _credential_rotation_list(ctx, findings) -> list[str]:
         blast-radius framing; unioned in rather than replaced.
       * checks/_shared.py _secret_paths(ctx.config) - NOW COVERED, this is the
         fix. Every SECRET_KEY_RE-matching config path holding a real inline
-        value (password/secret/token/apiKey/botToken) - the same inventory B1
-        counts but does not always surface - independent of file permissions
-        or any check's PASS/FAIL. Paths only, never values (§8).
+        value of >= 16 chars (password/secret/token/apiKey/botToken) - the same
+        inventory B1 counts but does not always surface - independent of file
+        permissions or any check's PASS/FAIL. Paths only, never values (§8).
+      * B1's two named config paths, gateway.auth.password and hooks.token - NOW
+        COVERED at ANY length (C-623). B1 names them whenever they are set, so
+        the pack lists them whenever they are a non-reference string, however
+        short. A 15-char password is exactly what a person types; silence would
+        read as absence (the same rule as the bootstrap-file bullet below).
+      * Any other SECRET_KEY_RE-matching non-empty, non-reference string shorter
+        than 16 chars - NOW COVERED, marked "(short value, unconfirmed)": it may
+        be a placeholder or a mode word ("env"), so it is listed with that
+        caveat rather than omitted (C-623). The label never carries the value
+        or its length.
       * B1's bootstrap-file pattern hits (ctx.bootstrap, SECRET_PATTERNS) - NOW
         COVERED, marked uncertain. A free-text regex match against prose, not a
         structured key: this can name the FILE but not confirm the string is a
@@ -286,8 +301,19 @@ def _credential_rotation_list(ctx, findings) -> list[str]:
         for line in b41.evidence:
             seen.setdefault(line, None)
 
-    for path in _secret_paths(ctx.config if isinstance(ctx.config, dict) else {}):
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    for path in _secret_paths(cfg):  # >= 16 chars, as before
         seen.setdefault(f"config: {path}", None)
+    # B1 names these two whenever they are set, however short (B1 parity). Strings
+    # only: the structured SecretRef object form is a dict and holds no value.
+    for path in _B1_NAMED_PATHS:
+        v = dig(cfg, path)
+        if isinstance(v, str) and v and not _is_secret_reference(v):
+            seen.setdefault(f"config: {path}", None)
+    # Any other secret-keyed short string: listed, but honestly marked, never omitted.
+    for path in _secret_paths(cfg, min_len=1):
+        if f"config: {path}" not in seen:
+            seen.setdefault(f"config: {path} (short value, unconfirmed)", None)
 
     for fname, text in (ctx.bootstrap or {}).items():
         if _pattern_hits_real_secret(SECRET_PATTERNS, text):

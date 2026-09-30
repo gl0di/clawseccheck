@@ -195,6 +195,139 @@ def test_credential_rotation_list_excludes_secret_reference_placeholders(tmp_pat
     assert payload["credential_rotation_list"] == []
 
 
+# C-623: a credential shorter than _secret_paths' 16-char floor is exactly what a
+# person types. B1 names gateway.auth.password / hooks.token at ANY length, so the
+# pack must list them too, and any other short secret-keyed string must appear
+# marked unconfirmed rather than be omitted (silence reads as absence).
+
+def _short_pw() -> str:
+    # 15 chars, assembled at runtime so no contiguous secret-shaped literal exists.
+    return "".join(["pw", "-", "x" * 12])
+
+
+def _short_tok() -> str:
+    return "".join(["tk", "-", "y" * 12])
+
+
+def _rot(ctx, findings=()):
+    return build_incident(ctx, list(findings), _score(),
+                          when="2026-07-04T00:00:00")
+
+
+def test_credential_rotation_list_includes_short_gateway_password_and_hooks_token(tmp_path):
+    ctx = _ctx(tmp_path)
+    pw, tok = _short_pw(), _short_tok()
+    assert len(pw) == 15 and len(tok) == 15  # below the 16-char walker floor
+    ctx.config = {"gateway": {"auth": {"password": pw}}, "hooks": {"token": tok}}
+    payload = _rot(ctx)
+    rot = payload["credential_rotation_list"]
+    assert rot == ["config: gateway.auth.password", "config: hooks.token"]
+    packed = json.dumps(payload)
+    assert pw not in packed
+    assert tok not in packed
+
+
+def test_short_gateway_password_and_b1_agree(tmp_path):
+    """Parity contract: every config path B1's own detail names is in the list."""
+    from clawseccheck.checks import check_secrets
+
+    ctx = _ctx(tmp_path)
+    ctx.config = {"gateway": {"auth": {"password": _short_pw()}},
+                  "hooks": {"token": _short_tok()}}
+    b1 = check_secrets(ctx)
+    assert b1.status == "FAIL"
+    named = [part.replace(" set in config", "").strip()
+             for part in b1.detail.split(";") if " set in config" in part]
+    assert sorted(named) == ["gateway.auth.password", "hooks.token"]
+    rot = _rot(ctx, [b1])["credential_rotation_list"]
+    for path in named:
+        assert f"config: {path}" in rot
+
+
+def test_credential_rotation_list_marks_other_short_secret_keys_unconfirmed(tmp_path):
+    ctx = _ctx(tmp_path)
+    bot, pw7 = _short_tok(), "p" + "q" * 6
+    assert len(bot) == 15 and len(pw7) == 7
+    ctx.config = {
+        "channels": {"telegram": {"botToken": bot}},
+        "hooks": {"extra": {"list": [{"password": pw7}]}},
+    }
+    payload = _rot(ctx)
+    rot = payload["credential_rotation_list"]
+    assert "config: channels.telegram.botToken (short value, unconfirmed)" in rot
+    # nested dict + list item: pins min_len threading through BOTH recursive calls
+    assert "config: hooks.extra.list[0].password (short value, unconfirmed)" in rot
+    packed = json.dumps(payload)
+    assert bot not in packed
+    assert pw7 not in packed
+
+
+def test_credential_rotation_list_short_scan_skips_empty_and_references(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.config = {
+        "gateway": {"auth": {"password": ""}},
+        "hooks": {"token": "${HOOK_TOKEN}"},
+        "channels": {"telegram": {"botToken": "$TG_BOT_TOKEN"}},
+        "x": {"apiKey": {"source": "env", "id": "K"}},
+        "y": {"apiKey": "secretref-env:Y_KEY", "secret": "__env__:Y_SECRET"},
+    }
+    assert _rot(ctx)["credential_rotation_list"] == []
+    # a config with no secret-keyed keys at all
+    ctx.config = {"gateway": {"port": 18789, "bind": "loopback"}}
+    assert _rot(ctx)["credential_rotation_list"] == []
+    # a reference followed by extra text is NOT a reference: it must be listed
+    ctx.config = {"hooks": {"token": "${HOOK_TOKEN}suffix"}}
+    assert _rot(ctx)["credential_rotation_list"] == ["config: hooks.token"]
+
+
+def test_credential_rotation_list_long_password_not_duplicated(tmp_path):
+    ctx = _ctx(tmp_path)
+    long_pw = "".join(["pw", "-", "z" * 18])
+    assert len(long_pw) == 21
+    ctx.config = {"gateway": {"auth": {"password": long_pw}}}
+    payload = _rot(ctx)
+    assert payload["credential_rotation_list"] == ["config: gateway.auth.password"]
+    assert long_pw not in json.dumps(payload)
+
+
+def test_credential_rotation_list_short_value_independent_of_b1_verdict(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.config = {"gateway": {"auth": {"password": _short_pw()}}}
+    b1_pass = Finding(id="B1", title="t", severity="HIGH", status="PASS",
+                      detail="d", fix="f", framework="fr")
+    b1_fail = Finding(id="B1", title="t", severity="HIGH", status="FAIL",
+                      detail="gateway.auth.password set in config", fix="f",
+                      framework="fr")
+    rot_pass = _rot(ctx, [b1_pass])["credential_rotation_list"]
+    rot_fail = _rot(ctx, [b1_fail])["credential_rotation_list"]
+    assert rot_pass == rot_fail == ["config: gateway.auth.password"]
+
+
+def test_credential_rotation_list_tolerates_a_non_dict_config(tmp_path):
+    # Called directly: build_incident's unrelated SBOM section has its own
+    # non-dict-config behaviour that this test is not about.
+    from clawseccheck.incident import _credential_rotation_list
+
+    ctx = _ctx(tmp_path)
+    for bad in (None, [], "text"):
+        ctx.config = bad
+        assert _credential_rotation_list(ctx, []) == []
+
+
+def test_secret_paths_default_floor_is_unchanged_and_min_len_is_threaded():
+    """B1's FAIL logic is untouched: the default still ignores a 15-char value,
+    while min_len=1 inventories it (top level and nested through dict and list)."""
+    from clawseccheck.checks import _secret_paths
+
+    cfg = {"gateway": {"auth": {"password": _short_pw()}}}
+    assert _secret_paths(cfg) == []
+    assert _secret_paths(cfg, min_len=1) == ["gateway.auth.password"]
+    nested = {"a": {"b": [{"token": _short_tok()}]}}
+    assert _secret_paths(nested) == []
+    assert _secret_paths(nested, min_len=1) == ["a.b[0].token"]
+    assert _secret_paths({"gateway": {"auth": {"password": ""}}}, min_len=1) == []
+
+
 # --------------------------------------------------------------------------- trajectory hashes
 
 def test_trajectory_hashes_present_when_sidecar_files_exist(tmp_path):
