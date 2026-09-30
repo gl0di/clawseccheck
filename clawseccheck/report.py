@@ -5687,23 +5687,35 @@ def _breaks_the_line_it_is_printed_on(text: str) -> bool:
     return bool(text) and text.splitlines() != [text]
 
 
-def _refuse_command_plan(target: str) -> str:
-    """The --vet-plan output for a target carrying a control character: no commands.
+def _refuse_command_plan(target: str, *, option_shaped: bool = False) -> str:
+    """The --vet-plan output for a target it will not build commands for: no commands.
 
     Renders the same 4-step plain-language preamble (a reader still deserves to know what
     the flow does) but replaces every command line with a refusal. The target is shown
     with its control characters escaped via `repr`, so the refusal itself cannot smuggle a
-    line break into the output it is protecting.
+    line break into the output it is protecting. `option_shaped` (C-628) swaps the reason
+    for an npm/pypi spec that a package manager would read as an option.
     """
+    if option_shaped:
+        why = [
+            "Its package name or version starts with '-'. Written into an npm or pip",
+            "command, that text is read as a command-line option, not as a package, and",
+            "could point the fetch at a server of its own choosing. Nothing you can fetch",
+            "by name starts with '-'.",
+        ]
+    else:
+        why = [
+            "It contains a control character (a newline, carriage return, or similar). No real",
+            "package name, URL, git ref, or skill slug does. Because these commands are meant to",
+            "be copied and run line by line, a target that spans lines would let the target's own",
+            "text land on a line of its own \u2014 which is how injected text reaches command position.",
+        ]
     return "\n".join([
         "I will not build a fetch plan for this target.",
         "",
         f"  target (escaped): {target!r}",
         "",
-        "It contains a control character (a newline, carriage return, or similar). No real",
-        "package name, URL, git ref, or skill slug does. Because these commands are meant to",
-        "be copied and run line by line, a target that spans lines would let the target's own",
-        "text land on a line of its own \u2014 which is how injected text reaches command position.",
+        *why,
         "",
         "Treat this as a strong signal about the target itself: something produced an",
         "identifier that cannot be one. Check where it came from before going further.",
@@ -5895,6 +5907,8 @@ def render_vet_plan(target: str) -> str:
         return _refuse_command_plan(target)
 
     info = _parse_source_target(target)
+    if info.get("option_shaped"):
+        return _refuse_command_plan(target, option_shaped=True)
     eco, name, version = info["ecosystem"], info["name"], info.get("version")
     ver_suffix = f"@{version}" if version else ""
 

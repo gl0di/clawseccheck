@@ -9883,6 +9883,7 @@ def _parse_source_target(target: str) -> dict:
         "kind": None,
         "scheme": None,
         "owner": None,
+        "option_shaped": False,
     }
     if low.startswith(("http://", "https://")):
         parsed = urlparse(t)
@@ -9929,6 +9930,15 @@ def _parse_source_target(target: str) -> dict:
             out.update(ecosystem="pypi", name=name, version=ver or None)
         elif low.startswith("clawhub:"):
             out.update(ecosystem="clawhub", name=t[8:])
+    # C-628: an npm/pypi spec whose name or version starts with '-' is argv text, not a
+    # package. shlex.quote cannot stop it (the shell strips the quotes before npm/pip read
+    # argv), so render_vet_plan refuses and vet_source warns. Only npm/pypi: those are the
+    # ecosystems whose name/version reach a package-manager argv. url/git `name` is a
+    # path segment and legitimately may start with '-'. lstrip() so a leading space is
+    # not a way past the check on a tool that trims its spec (not verified either way).
+    if out["ecosystem"] in ("npm", "pypi"):
+        out["option_shaped"] = any(
+            str(v or "").lstrip().startswith("-") for v in (out["name"], out["version"]))
     # Kind guess (informational only - which per-type engine the fetched copy faces).
     nlow = str(out["name"]).lower()
     if out["ecosystem"] == "clawhub":
@@ -10102,6 +10112,14 @@ def vet_source(
         reasons_susp.append(
             "git source without a pinned @ref (tag/sha) \u2014 content "
             "can change between this check and the fetch"
+        )
+    if info.get("option_shaped"):
+        # insert(0): this becomes the headline in `detail`, ahead of any typosquat reason
+        # that may fire on the same string.
+        reasons_susp.insert(
+            0,
+            "the package name or version starts with '-'; a package manager would "
+            "read it as a command-line option, not a package",
         )
 
     evidence = reasons_bad + reasons_susp + notes

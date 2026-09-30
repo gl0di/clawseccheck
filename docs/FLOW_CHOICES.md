@@ -70,7 +70,7 @@ python3 {baseDir}/audit.py --vet-source <slug|url|package>
 Zero network - nothing is fetched. Judges the identity alone (`clawhub:slug`, `npm:pkg`,
 `pypi:pkg`, `git:host/owner/repo@ref`, a URL, or a bare name) against bundled catalogs:
 known-compromised names, typosquats of well-known names, paste/bare-IP hosts, unpinned git
-refs. Relay the band honestly:
+refs, an npm/pypi name or version starting with `-`. Relay the band honestly:
 - KNOWN-BAD -> "Do not fetch this at all."
 - SUSPICIOUS -> "If you must inspect it, fetch it only into an isolated temp folder (never
   under `~/.openclaw`) and I'll vet the local copy."
@@ -85,7 +85,8 @@ steps + a consent line), then prints the exact fetch+isolate+cleanup commands fo
 agent) to run - a temp quarantine dir outside every OpenClaw auto-load path, the right fetch verb
 for the target's ecosystem (npm/pypi/git/url), never executed by the tool itself. (3) Run those
 commands yourself - **unless the tool refused to build a plan**: for a target it cannot quote
-safely (shell metacharacters, control characters) it prints `I will not build a fetch plan for
+safely (shell metacharacters, control characters) or that a package manager would read as an
+option (an npm/pypi name or version starting with `-`) it prints `I will not build a fetch plan for
 this target.` and no commands at all. There is nothing to run; ask the user for a plain target
 rather than improvising a fetch of your own. (4) `--advise <quarantine-path>` - reframes the same risk dossier as an
 install decision: **INSTALL** / **CAUTION** / **DO-NOT-INSTALL**, each with a plain-words
