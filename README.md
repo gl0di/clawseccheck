@@ -282,7 +282,7 @@ and `--pdf` **given with no path** puts the report in `<home>/media/outbound/`,
 which is the one directory OpenClaw always lets its own read tool open, so the
 file can be attached into your chat. It writes there only if that directory
 already exists and is writable - it is never created - and falls back to
-`~/.clawseccheck/report.pdf` otherwise. Name a path (`--pdf report.pdf`) and it
+`~/.clawseccheck/report.pdf` (`<DIR>/report.pdf` under `--data-dir DIR`) otherwise. Name a path (`--pdf report.pdf`) and it
 goes exactly there instead. Neither touches your OpenClaw config.
 
 The widest read that reaches **outside** your OpenClaw home is on by default: to
