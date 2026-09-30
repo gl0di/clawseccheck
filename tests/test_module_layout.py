@@ -687,7 +687,7 @@ _EXEMPT = {
     # means — the table needs one restate-and-reconsider pass, not an entry bumped each
     # time the next commit trips it — and this bump is exactly the pattern it warned about.
     # Recorded rather than quietly corrected: the split below is now owed twice over.
-    "report.py": "~6,699 lines — the output renderers; grew further with F-131's "
+    "report.py": "~7,215 lines (restated 2026-09-30, C-618 — was ~6,699; the shared suppressed-notice helper and its five surface call sites) — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
                  "branching check logic), then with the B-617 inert-disclosure channel "
                  "and the B-547 scope-note rewiring, then with B-758's three report "

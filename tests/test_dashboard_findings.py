@@ -117,6 +117,9 @@ def test_suppressed_excluded():
 
     assert "title B2" not in out
     assert "No high-confidence issues to fix." in out
+    # C-618: the body stays out, but a suppressed CRITICAL FAIL still counts and says so.
+    assert ("WARNING: a CRITICAL finding (B2) is suppressed via .clawseccheckignore"
+            in out)
 
 
 # ─── 7. Severity order within a subject ────────────────────────────────────

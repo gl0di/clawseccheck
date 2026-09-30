@@ -88,6 +88,9 @@ def test_all_suppressed_still_shows_clean_message():
     out = render_report([supp], compute([supp]))
     assert "No known attack pattern matched. Keep it that way." in out
     assert "[Secrets & Data]" not in out
+    # C-618 regression pin: the text report keeps the notice the other surfaces now share.
+    assert ("WARNING: a CRITICAL finding (B1) is suppressed via .clawseccheckignore"
+            in out)
 
 
 def test_unrecognized_id_falls_back_to_other_bucket_not_dropped():

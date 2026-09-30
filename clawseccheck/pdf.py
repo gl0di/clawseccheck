@@ -68,6 +68,7 @@ from .report import (
     _EXPORT_RISK_INCLUDED_NOTE,
     _group_issues_by_subject, _mcp_inventory_lines,
     _plugins_inventory_lines, _redact_home_paths, _risk_chain_lines, _sanitize,
+    suppressed_notice_lines,
     _second_opinion_item_lines,
     _second_opinion_lines,
     _SEV_ORDER, _UNGRADED_CAP_TAIL, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
@@ -812,6 +813,10 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         else:
             text = f"{reason}{also} - {_UNGRADED_CAP_TAIL}"
         flow.wrapped(text, size=9.5, color="#b94a48")
+
+    # C-618: a suppressed finding that still counts (body stays out of `issues` above).
+    for line in suppressed_notice_lines(findings):
+        flow.wrapped(line, size=9.5, color="#b94a48")
 
     # B-761: this document's own scope, stated on its first page - the text report
     # additionally carries the "Highest-risk paths" attack-chain synthesis, the
