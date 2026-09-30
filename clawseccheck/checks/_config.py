@@ -1086,6 +1086,28 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
     return out
 
 
+def _peragent_non_main_agents(cfg: dict) -> list:
+    """Evidence lines for named agents whose OWN ``sandbox.mode`` is ``"non-main"`` (C-641b).
+
+    A per-agent mode wins over the defaults (``resolveSandboxConfigForAgent``:
+    ``mode: agentSandbox?.mode ?? agent?.mode ?? "off"``), and ``"non-main"`` sandboxes only
+    an agent's NON-main sessions, so that agent's own main session runs on the host even
+    when ``agents.defaults.sandbox.mode`` is ``"all"``. Deliberately NOT part of
+    ``_peragent_sandbox_evidence``: that list is an unambiguous-misconfig FAIL, while
+    ``"non-main"`` is B4's WARN tier (same as the defaults-level ``"non-main"``). Reads both
+    roster shapes through ``agent_roster``. Empty when no agent sets it.
+    """
+    out = []
+    for _agent in agent_roster(cfg):
+        sb = _agent.entry.get("sandbox")
+        if isinstance(sb, dict) and sb.get("mode") == "non-main":
+            name = _agent.entry.get("name") or _agent.id or "<unnamed>"
+            out.append(
+                f"agent '{name}': sandbox.mode=non-main (its own main session runs on the host)"
+            )
+    return out
+
+
 # B-233 round 3 (C-135): world-open / near-catch-all PUBLIC CIDRs (e.g. 0.0.0.0/0,
 # ::/0, 0.0.0.0/1) are NOT a genuine trust boundary - every source IP matches, so the
 # trusted-proxy identity header stays attacker-spoofable by anyone. Grounded against
@@ -3784,6 +3806,26 @@ def check_sandbox(ctx: Context) -> Finding:
             "too, and configure agents.defaults.sandbox.docker for network isolation.",
             evidence=["agents.defaults.sandbox.mode=non-main"],
             config_field_paths={"agents.defaults.sandbox.mode"},
+        )
+    non_main_agents = _peragent_non_main_agents(cfg)
+    if non_main_agents:
+        # C-641b: the defaults are not 'non-main' (that returned above), but a NAMED agent
+        # sets it for itself. That agent's own main session runs exec tooling on the host,
+        # so "Execution is sandboxed." would be the same lie one level down. A WARN, never a
+        # FAIL, and placed after every FAIL branch. Defaults unset/'off' are unchanged
+        # (they returned above); this fires when the defaults leave the agents inheriting
+        # a sandbox ('all'), which is the case the PASS below used to cover.
+        return _finding(
+            "B4",
+            WARN,
+            "one or more named agents override the sandbox mode with 'non-main' (see "
+            "evidence): that mode sandboxes only an agent's non-main sessions, so the "
+            "agent's own main session still runs exec tooling directly on the host, "
+            "allowing a prompt-injected message in that session to run commands with host "
+            "access.",
+            "Set sandbox.mode to 'all' on each agent named in the evidence, or remove that "
+            "per-agent sandbox.mode so the agent inherits agents.defaults.sandbox.mode.",
+            non_main_agents,
         )
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
 
