@@ -488,7 +488,7 @@ not the same claim as "we ran it".
 | **Read by the code, each measured against a running install while it was written** | **2026.7.1-2, 2026.8.1, 2026.8.2** - the three builds that moved settings the audit reads. Every moved key is read in *both* spellings: the agent roster as `agents.list` *and* `agents.entries`, the gateway command lists under their old and new parents, and the three settings 2026.8.1 moved out of `openclaw.json` into OpenClaw's machine-owned store. An older or not-yet-migrated config is read, not silently skipped. |
 | **On anything else** | The audit still runs. This is deliberately *not* a claim of a contiguous supported range: the builds between the measured points (2026.7.2 - 2026.8.0) were never run against, so the tool treats a config it cannot date as undated - it names **both** key spellings in its fix advice rather than guessing which one your build accepts, and a key whose home this build does not have is reported as retired or `UNKNOWN`, never resolved to nothing and given a verdict anyway. |
 
-**Operating systems.** CI runs the full suite on **Linux** (Python 3.9 and 3.12) and
+**Operating systems.** CI runs the full suite on **Linux** (Python 3.9, 3.12 and 3.14) and
 **macOS** (Python 3.12) for every push. **Windows** runs the read-only audit and is
 advertised in the skill manifest, but it has **no CI job** and two protections degrade
 there: ClawSecCheck's own `~/.clawseccheck/` store is not owner-restricted (file modes are

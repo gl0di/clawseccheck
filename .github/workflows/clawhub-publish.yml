@@ -148,10 +148,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # A literal block (|), not a folded one (>-): folding joins these with spaces,
           # and a context name is matched against the check-run name exactly, so a stray
-          # space would make every lookup miss and the gate would report all six missing.
+          # space would make every lookup miss and the gate would report every context
+          # missing. C-647: the 3.14 line follows the 3.14 leg added to ci.yml's matrix;
+          # branch protection's own copy of this list is a repository setting and is
+          # updated there, not by this file.
           REQUIRED_CONTEXTS: |
             test (ubuntu-latest, 3.9)
             test (ubuntu-latest, 3.12)
+            test (ubuntu-latest, 3.14)
             test (macos-latest, 3.12)
             markdownlint
             secret-scan
