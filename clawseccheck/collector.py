@@ -194,6 +194,30 @@ _MAX_CONFIG_BYTES = 5_000_000
 # start dropping real sources -- which would cost RECOGNITION of our own tree, not safety.
 _MAX_OWN_SOURCE_BYTES = 2_000_000
 
+# C-616: the per-file cap above bounds ONE file, not the directory. `_is_own_source` also
+# had no bound on how many `*.py` entries the engine directory lists or on the sum of the
+# bytes it reads and parses, so one planted `<root>/clawseccheck/checks/` full of under-cap
+# decoy files (marker names in a comment is enough to force the parse) cost seconds and
+# about 1 GB per directory, unbounded in the number of files. These two bound the WHOLE
+# directory. Either one tripping answers "not our source" (False = scan the tree), the safe
+# direction -- never a grant of identity. They bound files, bytes and entry types, NOT
+# parse time, so they do NOT make one directory cheap: on Python 3.12 the parse of
+# f-string-dense source is superlinear (dominated by the per-file cap), one measured shape
+# that fits every bound costs at least ~110-160 s CPU, a denser one about twice that, and
+# NO ceiling is claimed -- see the C-616 RESIDUAL in `_is_own_source`'s docstring before
+# relying on any figure quoted here.
+#   * _MAX_OWN_SOURCE_FILES: the real engine has 11 files, so 32 is ~2.9x headroom.
+#   * _MAX_OWN_SOURCE_TOTAL_BYTES: the real engine is 11 files, about 4.2 MB in all,
+#     largest about 0.94 MB, so 8 MB is ~1.9x headroom, in line with the ~2x the per-file
+#     cap keeps over the largest real file. Only files under the per-file cap count
+#     toward it. (The engine figures are rounded; a test fails if they drift over 3%.)
+# Do NOT lower any of the three without re-measuring: a cap the real install exceeds loses
+# recognition of the tool's own tree and the audit then self-flags CRITICAL on its own
+# skill. `tests/test_c616_own_source_directory_bounds.py` pins the headroom on the real
+# package so it goes red BEFORE the engine outgrows a cap.
+_MAX_OWN_SOURCE_FILES = 32
+_MAX_OWN_SOURCE_TOTAL_BYTES = 8_000_000
+
 # B-231 sub-item 1: the cron job store (~/.openclaw/cron/jobs.json, or the SQLite-backed
 # cron_jobs table when the legacy JSON file is absent) is read-only, symlink-safe, and
 # capped the same way as the config/bootstrap reads above - a huge/padded store must not
@@ -4086,6 +4110,28 @@ def _own_engine_symbols_in_ast(tree: ast.AST) -> set:
     return found
 
 
+def _list_own_engine_sources(d: Path):
+    """C-616: the `*.py` entries of engine directory `d`, sorted, or ``None`` when the
+    listing cannot be trusted (more than `_MAX_OWN_SOURCE_FILES` entries, or an
+    ``OSError``) -- ``None`` means "not our source", the same fail-closed answer the
+    callers already gave for an unlistable directory.
+
+    The glob is consumed LAZILY and abandoned as soon as the count bound trips, so a
+    directory holding millions of entries is never turned into millions of `Path`
+    objects or sorted in full. Sorting happens only after the bound, so the order (and
+    with it which files get parsed first) stays deterministic.
+    """
+    found = []
+    try:
+        for entry in d.glob("*.py"):
+            found.append(entry)
+            if len(found) > _MAX_OWN_SOURCE_FILES:
+                return None
+    except OSError:
+        return None
+    return sorted(found)
+
+
 def _own_engine_sources(p: Path):
     """C-636: the single layout test behind `_is_own_source` and `_own_source_symlinks`.
 
@@ -4104,10 +4150,9 @@ def _own_engine_sources(p: Path):
     Behaviour is byte-identical to the chain this replaced in `_is_own_source`.
     """
     if _safe_is_dir(p / "clawseccheck" / "checks"):  # repo root / install dir (package)
-        try:
-            sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
-        except OSError:
-            return None
+        sources = _list_own_engine_sources(p / "clawseccheck" / "checks")
+        if sources is None:
+            return None  # C-616: over the file-count bound, or unlistable
         spine = [("clawseccheck", p / "clawseccheck"),
                  ("clawseccheck/checks", p / "clawseccheck" / "checks")]
         base = p
@@ -4116,10 +4161,9 @@ def _own_engine_sources(p: Path):
         spine = [("clawseccheck", p / "clawseccheck")]
         base = p
     elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_dir(p / "checks"):  # package dir
-        try:
-            sources = sorted((p / "checks").glob("*.py"))
-        except OSError:
-            return None
+        sources = _list_own_engine_sources(p / "checks")
+        if sources is None:
+            return None  # C-616: same bound, second layout
         spine = [("checks", p / "checks")]
         base = p
     elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_file(p / "checks.py"):  # package dir (legacy)
@@ -4213,6 +4257,50 @@ def _is_own_source(p: Path) -> bool:
     `tests/test_c636_own_source_identity_is_not_a_clean_bill.py`, which must flip only
     by Dave's decision.
 
+    C-616 (resource bound, no change to what counts as identity): the engine directory is
+    bounded AS A WHOLE, not only per file. More than `_MAX_OWN_SOURCE_FILES` `*.py`
+    entries, an admitted-bytes sum over `_MAX_OWN_SOURCE_TOTAL_BYTES`, or any entry that is
+    not a regular file (a symlink to a device or FIFO defeats a size cap, since `st_size`
+    is 0) each answer False -- "not our source, scan the tree", the safe direction -- and
+    nothing is read once a bound has tripped. A file over `_MAX_OWN_SOURCE_BYTES` is still
+    skipped whole and is NOT counted toward the total, so the total bounds the admitted
+    bytes only. The real engine is 11 files, about 4.2 MB in all, largest about 0.94 MB
+    (rounded; measured 2026-10-05); `tests/test_c616_own_source_directory_bounds.py` pins
+    that headroom and goes red if these quoted figures drift over 3%.
+
+    C-616 RESIDUAL, stated plainly (re-measured in C-135 rounds 2 and 3, 2026-09-30 and
+    2026-10-05). THIS IS NOT A CEILING: the three bounds limit files, bytes and entry
+    types, NOT parse time, and no figure below is the worst case. Two earlier drafts each
+    named a worst case and each was beaten by a denser shape: a flat 2.7 s/MB (about 7x too
+    low on Python 3.12), then `f"{a}";` repeated (about 2x too low for many interpolations
+    per f-string). Do not add a third "worst shape" number: the shape space is open, and
+    only a cap or a parse budget (Dave's decision, below) can turn this into a ceiling.
+    What was measured. The cost of ONE call is NOT linear in bytes. On CPython 3.12
+    `ast.parse` is SUPERLINEAR on f-string-dense source: CPU seconds for `f"{a}";`
+    repeated were 0.6-0.8 at 250 KB, 2.0-2.6 at 500 KB, 7.7-9.5 at 1 MB, 14-16 at 1.4 MB
+    and 27-37 at 1.99 MB (load-dependent), against a steady ~2.0-2.9 s/MB for `a;`
+    repeated. A denser shape costs more again: with 16 interpolations per f-string
+    (`f"{a}{a}...{a}";`) one 1,999,979-byte file took 55.7 s CPU and ~1.0 GB peak RSS,
+    against 27.3 s for the `f"{a}";` file of the same size at the same load (2.0x), and
+    the ratio was 1.7-2.1x at 500 KB, 1 MB and 1.4 MB. So the PER-FILE cap, not the total
+    cap, dominates the cost, and the total cap multiplies it: 4 files of ~2 MB each
+    (7,999,948 bytes, under every bound, the three marker names in a comment header so the
+    parse is forced) cost 126-160 s CPU for a single `_is_own_source` call with `f"{a}";`
+    (up to ~250 s wall on a loaded box) and ~940 MB peak RSS, and the answer is False; the
+    denser shape extrapolates to about 220-300 s CPU, four times its single-file figure
+    because each file is parsed on its own (the 4-file run was not executed end to end).
+    Memory is bounded only per file too: one 1.99 MB `a;` file peaks near 1.8 GB. The bound
+    is per directory, not per run, so the sum over the up-to-`_MAX_SKILLS` (300) candidate
+    directories that discovery admits is unbounded by this change. Not fixed here, and
+    why: lowering the per-file cap trades recognition of the REAL install for speed (its
+    largest file is about 0.94 MB and the headroom test wants 1.5x, so the cap cannot fall
+    below ~1.4 MB, where `f"{a}";` still costs ~14-16 s per file and the denser shape
+    ~33 s); a per-call or per-run CPU/parse budget makes the verdict depend on timing, and
+    a per-RUN one is worse -- an attacker could exhaust it with decoys and so flip the REAL
+    install's recognition, i.e. change a verdict. Whether to tighten a cap or accept an
+    unbounded-shape cost is Dave's decision. Pinned (prose and arithmetic, not wall-clock)
+    by `tests/test_c616_own_source_directory_bounds.py::TestTheDisclosedResidualIsTheTrueOne`.
+
     RETRACTED APPROACHES (B-846 - do not reintroduce; each was tried and defeated by a
     C-135 reviewer, reproduced end-to-end against the real DO-NOT-INSTALL fixture
     `fixtures/bad_b335_runtime_persist_install/skills/envtools`, flipping its verdict
@@ -4254,13 +4342,32 @@ def _is_own_source(p: Path) -> bool:
     # can never describe a different set of files than the ones matched here.
     layout = _own_engine_sources(p)
     if layout is None:
-        return False
+        return False  # C-616: also over the file-count bound, or unlistable
     _components, sources = layout
-    heads = []
+    # C-616: two passes, so NOTHING is read unless every bound holds. Pass 1 only stats:
+    # a non-regular entry (a symlink to /dev/zero reports st_size 0 and would defeat every
+    # byte cap, then read to exhaustion), or an admitted-bytes sum over the total cap,
+    # answers False before a single read. An over-per-file-cap file is skipped whole and
+    # does not count toward the total (see _MAX_OWN_SOURCE_BYTES). `total == cap` is
+    # allowed; `cap + 1` is not.
+    admitted = []
+    total = 0
     for src in sources:
         try:
-            if src.stat().st_size > _MAX_OWN_SOURCE_BYTES:
-                continue  # see _MAX_OWN_SOURCE_BYTES: skipped whole, never truncated
+            st = src.stat()
+        except OSError:
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        if st.st_size > _MAX_OWN_SOURCE_BYTES:
+            continue  # see _MAX_OWN_SOURCE_BYTES: skipped whole, never truncated
+        total += st.st_size
+        if total > _MAX_OWN_SOURCE_TOTAL_BYTES:
+            return False
+        admitted.append(src)
+    heads = []
+    for src in admitted:
+        try:
             heads.append(src.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             return False
@@ -4270,8 +4377,8 @@ def _is_own_source(p: Path) -> bool:
     # source that lexes differently from how it parses) can forge one.
     #
     # PERFORMANCE: `ast.parse` is real parsing, not a cheap scan, and the real engine
-    # is ~3.4M characters across 11 files. The short-circuit below skips parsing a file
-    # outright when none of the still-missing markers' bare IDENTIFIERS appear
+    # is 11 files, about 4.2 MB in all, largest about 0.94 MB. The short-circuit below skips
+    # parsing a file outright when none of the still-missing markers' bare IDENTIFIERS appear
     # anywhere in that file's raw text - sound, not a heuristic: an `ast.FunctionDef`
     # or `ast.Name` node's identifier is always spelled EXACTLY as it appears in the
     # source (the parser reads the characters directly; no lexer/grammar trick renames
@@ -4284,8 +4391,9 @@ def _is_own_source(p: Path) -> bool:
     # `_shared.py`, `_vet.py` - every file whose text mentions `vet_skill`/
     # `check_installed_skills` at all, including plain imports/re-exports that never
     # define them), the other 6 are skipped on the raw-text check alone. `heads`
-    # above is still read in full regardless (reading is cheap and preserves the
-    # existing fail-closed-on-any-unreadable-file behaviour unchanged).
+    # above is still read in full for every admitted file (reading is cheap and
+    # preserves the existing fail-closed-on-any-unreadable-file behaviour unchanged);
+    # C-616 bounds how many files and bytes can be admitted at all.
     # `ast.parse` costs more than tokenizing (parsing does strictly more work than
     # lexing): ~0.39s/call on
     # python3.12.3 and ~0.26s/call on python3.9.25 against the real repo root (a
@@ -4311,6 +4419,9 @@ def _is_own_source(p: Path) -> bool:
             # match. Our own engine sources always parse cleanly (they compile).
             continue
         remaining -= _own_engine_symbols_in_ast(tree)
+        # C-616: release the tree before the next `ast.parse`, so the peak is ONE tree
+        # rather than two (measured on three ~1 MB dense files: 1,262 MB -> 908 MB).
+        tree = None
     return not remaining
 
 
