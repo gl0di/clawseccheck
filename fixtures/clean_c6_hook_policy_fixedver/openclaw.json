@@ -7,7 +7,15 @@
     }
   },
   "meta": {
-    "lastTouchedVersion": "2026.6.10"
+    "lastTouchedVersion": "2026.9.2"
+  },
+  "skills": {
+    "workshop": {
+      "autonomous": {
+        "mode": "off"
+      },
+      "approvalPolicy": "pending"
+    }
   },
   "tools": {
     "exec": {

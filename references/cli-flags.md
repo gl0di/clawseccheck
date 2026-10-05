@@ -99,9 +99,10 @@ kept here so the always-loaded playbook stays lean.
   by that budget is reported as UNKNOWN, never as a clean tree). Use it on a very large installed
   tree, or to keep the scan inside the OpenClaw home. Note the asymmetry with the library API:
   `audit()` takes `include_deptree=False` by default, so only the CLI walks unless asked.
-- `--no-dist` - skip reading the installed OpenClaw package's own version (C4 corroborates it
-  against `meta.lastTouchedVersion` to surface a version rollback). Read-only `PATH` lookup, no
-  subprocess.
+- `--no-dist` - skip reading the installed OpenClaw package's own version (B33 judges that
+  installed build, not the config stamp `meta.lastTouchedVersion`, on this machine's own OpenClaw
+  home, and C4 corroborates it against the stamp to surface a version rollback; with this flag the
+  stamp decides B33). Read-only `PATH` lookup, no subprocess.
 - `--no-update-notice` - suppress the offline "your build may be stale" reminder
   (also via `CLAWSECCHECK_NO_UPDATE_NOTICE=1`). The reminder is offline-only - never a network call.
 - `--no-freshness-notice` - suppress the report's advisory freshness lines (also via

@@ -165,12 +165,13 @@ def test_missing_version_yields_unknown_not_a_fake_verdict():
 
 
 # ---------------------------------------------------------------------------
-# Sanity: a version past every advisory in the (unchanged) newest boundary
-# still PASSes overall — the two additions don't push the table's ceiling.
+# Sanity: a version past every advisory in the table's newest boundary still
+# PASSes overall — the two additions don't push the table's ceiling. (The ceiling
+# is 2026.9.2 since the C-649 batch; it was 2026.6.6 when these two rows landed.)
 # ---------------------------------------------------------------------------
 
 def test_version_past_every_advisory_still_passes_overall():
-    result = check_known_vulns(_ver_ctx("2026.6.6"))
+    result = check_known_vulns(_ver_ctx("2026.9.2"))
     assert result.status == PASS
     assert "CVE-2026-27488" not in result.detail
     assert "CVE-2026-62223" not in result.detail

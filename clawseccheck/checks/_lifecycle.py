@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist  # B-502: C4 single-run version-rollback signal
 from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs (JSONL sidecar)
@@ -33,6 +33,8 @@ from ..collector import (
     agent_roster,
     dig,
     limit_hits_for,
+    openclaw_effective_home,  # B33: where a --profile home lives
+    openclaw_state_dir,  # B33: is the audited home the one the local install serves
 )
 from ..safeio import walk_dir_safely
 from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree enumeration
@@ -143,9 +145,9 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # base version - "2026.7.1-2" parses identically to "2026.7.1" (both -> (2026, 7, 1)).
 # OpenClaw does ship this shape in the wild (observed: package.json "2026.7.1-2").
 # Consequence: the `parsed <= max_vuln` compare below cannot tell a base version from any
-# of its correction releases, so "X", "X-1", "X-2" ... always receive the SAME verdict. This
-# table can therefore only place a boundary BETWEEN base versions, never inside one base
-# version's correction-release family.
+# of its correction releases, so a ROW gives "X", "X-1", "X-2" ... the SAME verdict. A row can
+# therefore only place a boundary BETWEEN base versions, never inside one base version's
+# correction-release family.
 #
 # RULE: max_vulnerable_version_tuple must never be the base tuple of a version whose
 # correction releases straddle this advisory - i.e. never split an "X" / "X-N" family.
@@ -160,14 +162,16 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 #       base tuple with the fixed version, so rule (a) alone would wave the row through,
 #       yet the clean "2026.7.1" FAILs (false positive, GR#5). Backing max_vuln down to
 #       (2026, 7, 0) instead PASSes the vulnerable "2026.7.1-2" (false negative).
-# Neither direction is expressible here: a correction-release boundary needs a comparator
-# change (e.g. a (base_tuple, correction_int) pair), not a new table row.
+# Neither direction is expressible by a ROW: a correction-release boundary needs a comparator
+# change (e.g. a (base_tuple, correction_int) pair), not a new table row. Case (b) has ONE
+# mechanism, for an advisory whose published range is an exact build (`= 2026.7.1-2`): the
+# `_ADVISORY_EXACT_BUILDS` side table below, which matches the version STRING. Case (a) has none.
 #
 # C-414: a row is 4 elements (id, max_vulnerable_version_tuple, fixed_version_str, title) -
-# version-only, matching on `parsed <= max_vuln` alone, exactly as every row below already
-# does - OR 5 elements, with a `condition: Callable[[dict], bool]` appended that takes
-# `ctx.config` and returns whether THIS host's config shape can actually reach the
-# defect. `check_known_vulns` treats a 4-tuple as `condition=None` (version-only,
+# version-only, matching on `parsed <= max_vuln`, narrowed by the two side tables below
+# (`_ADVISORY_FIRST_VULNERABLE`, `_ADVISORY_EXACT_BUILDS`) and by the extended-stable rule -
+# OR 5 elements, with a `condition: Callable[[dict], bool]` appended that takes `ctx.config`
+# and returns whether THIS host's config shape can actually reach the defect. `check_known_vulns` treats a 4-tuple as `condition=None` (version-only,
 # unchanged), so EVERY EXISTING ROW BELOW IS LEFT AS A PLAIN 4-TUPLE - a config-
 # conditioned advisory only ever adds a 5th element to its OWN row, never pads the rest
 # of the table. A condition that raises is treated as unproven (the row does not match) -
@@ -184,25 +188,46 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # row is not exempt from this gate merely because it is more precise than a version-only
 # one - precision does not change what it discloses.
 #
-# Last swept: 2026-09-19 (openclaw-9.5-triage). The newest row below fixes 2026.6.6 - there
-# is simply no advisory on file past that boundary yet. `check_known_vulns`'s PASS wording,
-# "OpenClaw {version} is at or past all known-advisory fixes", is honest but easy to
-# over-read for a build like 2026.9.5, 2026.7.33 or 2026.6.33-6.35: it means "no row in
-# THIS TABLE reaches this version", not "swept and cleared as of this version". Advisories
-# keep arriving; re-sweep on every upgrade response (docs/process/OPENCLAW_UPGRADE_PROTOCOL.md
-# bucket A) and move this date forward, rather than reading an old date as still current.
+# Last swept: 2026-10-05 against the vendor repository's own advisory endpoint (722 published
+# advisories). The global GitHub advisory database lags it and missed a whole batch, so it is
+# not a sweep source. From 2026.6.6 up this table holds EVERY published advisory on the core
+# npm package (70 rows, titles as published); below that it is a curated subset, so the id
+# list for an old build is a lower bound, not a census. Checked against that sweep, a row's
+# max_vulnerable tuple is the upper bound of the range the advisory publishes: for `< X` that is X
+# minus one patch (`< 2026.8.1` -> (2026, 8, 0); no ".0" patch was ever published, so that means
+# "everything below 2026.8.1"); for `<= X` or `= X` it is X itself. One exception:
+# GHSA-mc68-q9jw-2h3v keeps its seed (2026, 1, 28), the vendor publishes `<= 2026.1.24`;
+# GHSA-g8p2-7wf7-98mq covers those builds. `check_known_vulns`'s PASS wording, "OpenClaw {version}
+# is at or past all known-advisory fixes", is honest but easy to over-read: it means "no row in THIS
+# TABLE reaches this version" (the extended-stable exception below aside), not "swept and cleared".
+# Advisories keep arriving; re-sweep on every upgrade response
+# (docs/process/OPENCLAW_UPGRADE_PROTOCOL.md bucket A) and move this date forward, rather
+# than reading an old date as still current.
 #
-# Extended-stable convention: OpenClaw's own `isExtendedStableReleaseVersion` (a final
-# release, minor 1-12, patch >= 33) marks a maintenance line that back-ports fixes onto an
-# otherwise-frozen minor and never auto-applies. This table needs no separate mechanism for
-# that line: a row already supports a per-release-line exemption through its optional 5th
-# element, `condition(config) -> bool` (C-414, tested by
-# tests/test_c414_config_conditioned_advisory.py) - read `meta.lastTouchedVersion`/the
-# resolved build inside the condition and return whether THIS release line actually carries
-# the fix. If a genuine extended-stable advisory ever needs recording, add a config-
-# conditioned row (or a plain version-only one, if the backport boundary is uniform across
-# lines) rather than inventing a second table, a new field, or a bespoke "is this
-# extended-stable" helper.
+# Not tabulated by this sweep: advisories on the vendor's separately versioned plugin packages and
+# on the iOS app (not core version boundaries: a plugin installed on its own can sit on another
+# version, and the app is versioned independently of the npm package). One older row,
+# GHSA-jvm4-4j77-39p6 (@openclaw/qqbot, `<= 2026.4.27`), stays: it moves no verdict, as core row
+# GHSA-w4v6-g3wm-w36c reaches every build this one does, with the same fix.
+#
+# Extended-stable builds (a final release, minor 1-12, patch >= 33 - the maintenance lines
+# 2026.6.33-35, 2026.7.33-35 and 2026.8.33-35) get fixes back-ported selectively and the
+# advisories do not say which. Measured against the vendor's repository: the 2026.8 line is
+# the exact 2026.8.2 release plus back-ports and, as far as could be checked, carries the
+# batch's fixes (the one advisory fixed in 2026.9.2 is back-ported there; its code is absent
+# from the 2026.7 line), while the 2026.7 and 2026.6 lines still contain vulnerable code for
+# some advisories at their newest build. So neither "patch >= 33 means fixed" nor "the
+# published range decides" is true. Rule (`_b33_assess`): take the rows that match
+# numerically, minus _EXTENDED_STABLE_NOT_AFFECTED; none left -> PASS (so 2026.8.33-35 PASS
+# although the published range of the one not-affected id contains them); else, for an exact
+# final of a line and patch we examined, FAIL naming only the advisories confirmed still
+# unfixed there (_EXTENDED_STABLE_LINES); any other build -> UNKNOWN. A build still left with a
+# row after that removal, and never examined, is UNKNOWN - not a guessed FAIL, not a guessed
+# PASS. The vendor reserves EVERY patch >= 33 "including unsupported correction/build
+# variants", so the line is decided on the parsed tuple (2026.8.33-1 is on it: PASS;
+# 2026.7.35-1: UNKNOWN, never FAIL). Every FAIL's `fix` targets the highest fixed version over
+# every row that reaches the build, this one included. The finding text's counts of "published
+# ranges" include the not-affected id's range.
 _KNOWN_ADVISORIES: list[
     tuple[str, tuple[int, ...], str, str]
     | tuple[str, tuple[int, ...], str, str, Callable[[dict], bool]]
@@ -377,7 +402,226 @@ _KNOWN_ADVISORIES: list[
         "MCP loopback feature let lower-trust callers execute owner-only tools "
         "via configured input paths",
     ),
+    # ---- repository-endpoint sweep 2026-10-05: every published core advisory that reaches
+    # 2026.6.6 or later. Generated from the vendor's own advisory dump, never typed by hand.
+    # ---- published 2026-06-30, first stable patched version 2026.6.8
+    ("GHSA-jhfx-v2j8-x3m6", (2026, 6, 6), "2026.6.8",
+     "OpenAI-compatible HTTP model overrides could miss admin authorization"),
+    # ---- published 2026-06-30, first stable patched version 2026.6.9
+    ("GHSA-3fp5-v549-9v66", (2026, 6, 6), "2026.6.9",
+     "flock wrapper could bypass durable exec approval binding"),
+    ("GHSA-3pmr-x9g8-m55r", (2026, 6, 6), "2026.6.9",
+     "Discord guild actions could skip cross-provider requester authorization"),
+    ("GHSA-7vrr-rp4x-4g76", (2026, 6, 8), "2026.6.9",
+     "Plugin install commands could allow non-owner persistence"),
+    ("GHSA-f6p7-6326-vf7v", (2026, 6, 8), "2026.6.9",
+     "Discord moderation actions could miss trusted requester checks"),
+    ("GHSA-m38g-vpwj-mpg9", (2026, 6, 6), "2026.6.9",
+     "OpenShell mirror sync could follow remote symlink parents"),
+    ("GHSA-mm9g-83wh-mhwj", (2026, 6, 8), "2026.6.9",
+     "Isolated cron jobs could regain denied exec tools"),
+    ("GHSA-v7hx-r36p-f68m", (2026, 6, 6), "2026.6.9",
+     "Message mutations could skip requester authorization"),
+    ("GHSA-wgq8-x5wm-g4rw", (2026, 6, 8), "2026.6.9",
+     "Plugin install wrappers could skip install policy"),
+    # ---- published 2026-09-11, first stable patched version 2026.7.1
+    ("GHSA-224w-vfr9-h35c", (2026, 7, 0), "2026.7.1",
+     "Google Meet node commands could skip exec approvals"),
+    ("GHSA-4wvr-f35r-f8w4", (2026, 7, 0), "2026.7.1",
+     "message.action could trust spoofed requester provenance"),
+    ("GHSA-8xxh-v4vc-qvm4", (2026, 7, 0), "2026.7.1",
+     "Cron tool could accept mixed-case command payloads"),
+    ("GHSA-9p6m-2872-xm7x", (2026, 7, 0), "2026.7.1",
+     "Codex bind could omit owner authorization"),
+    ("GHSA-9x88-f7rh-4c83", (2026, 7, 0), "2026.7.1",
+     "Browser node targets could bypass sandbox host control"),
+    ("GHSA-crg9-c62w-j2p5", (2026, 7, 0), "2026.7.1",
+     "OpenShell filesystem mutations could race path validation"),
+    ("GHSA-jghr-xp78-995p", (2026, 7, 0), "2026.7.1",
+     "Browser proxy could miss its admin scope"),
+    ("GHSA-p5g8-m35v-7m82", (2026, 7, 0), "2026.7.1",
+     "Claude permission replies could omit owner authorization"),
+    ("GHSA-pjjr-5qhr-5w6r", (2026, 7, 0), "2026.7.1",
+     "Codex computer-use install could omit owner authorization"),
+    ("GHSA-qw7m-h363-33qw", (2026, 7, 0), "2026.7.1",
+     "chat.send could expose owner-only infrastructure tools"),
+    ("GHSA-r88x-r7jj-f2cf", (2026, 7, 0), "2026.7.1",
+     "Signal reactions could bind to the wrong approval"),
+    ("GHSA-wwx7-573h-pqwc", (2026, 7, 0), "2026.7.1",
+     "MCP configuration changes could omit owner authorization"),
+    ("GHSA-22v4-33m3-8p7m", (2026, 7, 0), "2026.7.1",
+     "Memory dreaming changes could omit owner checks"),
+    ("GHSA-4hwv-rj92-h7rp", (2026, 7, 0), "2026.7.1",
+     "Diagnostics export could omit owner authorization"),
+    ("GHSA-5j27-v2pw-cj9m", (2026, 7, 0), "2026.7.1",
+     "Talk Voice changes could omit admin authorization"),
+    ("GHSA-89cw-7452-cfrf", (2026, 7, 0), "2026.7.1",
+     "Trajectory export could omit owner authorization"),
+    ("GHSA-q9j5-4xr6-xqqw", (2026, 7, 0), "2026.7.1",
+     "Group activation changes could omit owner authorization"),
+    ("GHSA-rgjw-6v73-php6", (2026, 7, 0), "2026.7.1",
+     "Windows allowlist execution could use workspace shadows"),
+    ("GHSA-xw9g-7xvv-gcjc", (2026, 7, 0), "2026.7.1",
+     "Active Memory global toggles could omit owner checks"),
+    # ---- published 2026-09-11, first stable patched version 2026.8.1
+    ("GHSA-3mq7-q27j-mq7q", (2026, 8, 0), "2026.8.1",
+     "Exec approvals could outlive their reviewed working directory"),
+    ("GHSA-4r25-35qc-fr6j", (2026, 8, 0), "2026.8.1",
+     "Gateway upgrade-like requests could retain unauthenticated sockets"),
+    ("GHSA-5mrc-77hj-xjxv", (2026, 8, 0), "2026.8.1",
+     "Workspace Cloud SDK arguments could execute code during Gmail setup"),
+    ("GHSA-62qm-6fjj-6g23", (2026, 8, 0), "2026.8.1",
+     "Dreaming could widen restricted sender authority"),
+    ("GHSA-74gc-hg2m-79p9", (2026, 8, 0), "2026.8.1",
+     "Reusable exec approvals could authorize changed arguments"),
+    ("GHSA-7cp7-87pj-p32v", (2026, 8, 0), "2026.8.1",
+     "Skill tool dispatch could skip owner-only policy"),
+    ("GHSA-9f86-pvv5-rxfw", (2026, 8, 0), "2026.8.1",
+     "Escaped newlines could confuse exec allowlist parsing"),
+    ("GHSA-cf95-m4jv-59rc", (2026, 8, 0), "2026.8.1",
+     "Synology file delivery could lose DNS pinning"),
+    ("GHSA-ghpx-6xwq-2w4w", (2026, 8, 0), "2026.8.1",
+     "Exec wrapper allowlists could trust arbitrary inner commands"),
+    ("GHSA-hpg5-cq3m-phqp", (2026, 8, 0), "2026.8.1",
+     "Agent cron tool could reach operator command jobs"),
+    ("GHSA-p3h6-v2h4-36q2", (2026, 8, 0), "2026.8.1",
+     "Browser CDP connections could discard DNS pinning"),
+    ("GHSA-qgj5-6x35-9g6f", (2026, 8, 0), "2026.8.1",
+     "Config revision hashes could expose password verifiers"),
+    ("GHSA-wwcw-jfpp-gpxw", (2026, 8, 0), "2026.8.1",
+     "Codex native tools could ignore per-chat policy"),
+    ("GHSA-356g-m7rx-7pm3", (2026, 7, 1), "2026.8.1",
+     "ACP file URLs could skip out-of-cwd read approval"),
+    ("GHSA-39hf-qg99-f4qv", (2026, 8, 0), "2026.8.1",
+     "Google Meet attendance CSV could interpret names as formulas"),
+    ("GHSA-4g58-43jr-6738", (2026, 8, 0), "2026.8.1",
+     "Browser wait predicates could reach blocked destinations"),
+    ("GHSA-5fwv-rrvp-8xvr", (2026, 8, 0), "2026.8.1",
+     "Session filename generation could regain denied tools"),
+    ("GHSA-5rx7-34fw-64qg", (2026, 8, 0), "2026.8.1",
+     "Unicode fallback could escape workspaceOnly roots"),
+    ("GHSA-66hm-hxq3-5pfh", (2026, 8, 0), "2026.8.1",
+     "Embedding fallback could forward a provider key across vendors"),
+    ("GHSA-72p2-79fg-pvph", (2026, 8, 0), "2026.8.1",
+     "Trusted-host DNS checks could admit unspecified addresses"),
+    ("GHSA-7jfq-rmfm-29wp", (2026, 8, 0), "2026.8.1",
+     "File-transfer approvals could widen durable authority"),
+    ("GHSA-8938-r7c6-54vq", (2026, 8, 0), "2026.8.1",
+     "Microsoft Teams access-group failures could admit unlisted senders"),
+    ("GHSA-fphf-69cp-h5xw", (2026, 8, 0), "2026.8.1",
+     "Structured attachments could hide unvalidated host paths"),
+    ("GHSA-fvxr-9g24-x3hf", (2026, 8, 0), "2026.8.1",
+     "Video asset downloads could reach private destinations"),
+    ("GHSA-fw6q-2frm-jxxr", (2026, 8, 0), "2026.8.1",
+     "Synology pre-auth limits could lock out valid webhooks"),
+    ("GHSA-g697-vv6h-r8hv", (2026, 8, 0), "2026.8.1",
+     "Revoked Canvas capability could remain active during disconnect"),
+    ("GHSA-h9jh-75j7-7hhx", (2026, 8, 0), "2026.8.1",
+     "Feishu unpin could miss cross-context policy"),
+    ("GHSA-j4mm-p864-vx7f", (2026, 8, 0), "2026.8.1",
+     "sessions.create could miss admin scope for keyed reconfiguration"),
+    ("GHSA-mm7m-wcgh-8mfq", (2026, 8, 0), "2026.8.1",
+     "WhatsApp session resets could bypass command authorization"),
+    ("GHSA-pfrw-r5vr-89hw", (2026, 8, 0), "2026.8.1",
+     "Workspace endpoint override could expose Azure Speech credentials"),
+    ("GHSA-rm45-4jx5-2927", (2026, 8, 0), "2026.8.1",
+     "QQBot voice filenames could escape the staging directory"),
+    ("GHSA-vhpg-cq3w-v8p9", (2026, 8, 0), "2026.8.1",
+     "OpenAI-compatible transport could send provider credentials to the wrong endpoint"),
+    ("GHSA-w5x7-c87m-3jpc", (2026, 8, 0), "2026.8.1",
+     "Outbound attachments could ignore requester read denials"),
+    ("GHSA-xw48-j584-r73h", (2026, 8, 0), "2026.8.1",
+     "Twilio pre-auth limits could lock out valid webhooks"),
+    ("GHSA-xx9p-hc9w-6p5h", (2026, 8, 0), "2026.8.1",
+     "Usage CSV export could interpret session labels as formulas"),
+    ("GHSA-5m4g-88rg-69pj", (2026, 8, 0), "2026.8.1",
+     "MCP loopback could omit sandbox tool deny policy"),
+    ("GHSA-6xpv-wwr5-265h", (2026, 8, 0), "2026.8.1",
+     "Truncated tar listings could bypass extraction limits"),
+    ("GHSA-chr6-w4m5-57fv", (2026, 8, 0), "2026.8.1",
+     "Memory tools could retain revoked access"),
+    ("GHSA-g24w-m94m-59qc", (2026, 8, 0), "2026.8.1",
+     "Webhook TaskFlow cancellation could target unrelated sessions"),
+    ("GHSA-wjfv-5qch-m5vj", (2026, 8, 0), "2026.8.1",
+     "Active Memory recall could ignore requester policy"),
+    # ---- published 2026-09-11, first stable patched version 2026.8.2
+    ("GHSA-m78m-7h3q-q938", (2026, 8, 1), "2026.8.2",
+     "Browser relay authentication could exhaust shared pending capacity"),
+    # ---- published 2026-09-11, first stable patched version 2026.9.2
+    ("GHSA-5x6q-wg56-rxg8", (2026, 9, 1), "2026.9.2",
+     "Discord realtime transcripts could inherit another speaker's owner status"),
 ]
+
+# A range with a lower bound (`>= X, < Y`): the row matches only from X up. A lower bound
+# never changes a verdict (every build below one is covered by an unbounded row); it keeps
+# the list of ids truthful. Keyed by advisory id; a row with no entry is unbounded below.
+_ADVISORY_FIRST_VULNERABLE: dict[str, tuple[int, ...]] = {
+    "GHSA-3pmr-x9g8-m55r": (2026, 6, 6),  # = 2026.6.6
+    "GHSA-7vrr-rp4x-4g76": (2026, 5, 20),  # >= 2026.5.20, < 2026.6.9
+    "GHSA-mm9g-83wh-mhwj": (2026, 6, 1),  # >= 2026.6.1, < 2026.6.9
+    "GHSA-v7hx-r36p-f68m": (2026, 6, 6),  # = 2026.6.6
+    "GHSA-wgq8-x5wm-g4rw": (2026, 6, 5),  # >= 2026.6.5, < 2026.6.9
+    "GHSA-224w-vfr9-h35c": (2026, 5, 1),  # >= 2026.5.1 < 2026.7.1
+    "GHSA-22v4-33m3-8p7m": (2026, 4, 10),  # >= 2026.4.10 < 2026.7.1
+    "GHSA-rgjw-6v73-php6": (2026, 2, 26),  # >= 2026.2.26 < 2026.7.1
+    "GHSA-5mrc-77hj-xjxv": (2026, 3, 28),  # >= 2026.3.28, < 2026.8.1
+    "GHSA-62qm-6fjj-6g23": (2026, 4, 5),  # >= 2026.4.5, < 2026.8.1
+    "GHSA-cf95-m4jv-59rc": (2026, 7, 1),  # >= 2026.7.1, < 2026.8.1
+    "GHSA-ghpx-6xwq-2w4w": (2026, 3, 22),  # >= 2026.3.22, < 2026.8.1
+    "GHSA-p3h6-v2h4-36q2": (2026, 4, 5),  # >= 2026.4.5, < 2026.8.1
+    "GHSA-356g-m7rx-7pm3": (2026, 7, 1),  # = 2026.7.1-2
+    "GHSA-66hm-hxq3-5pfh": (2026, 3, 28),  # >= 2026.3.28, < 2026.8.1
+    "GHSA-fw6q-2frm-jxxr": (2026, 3, 25),  # >= 2026.3.25, < 2026.8.1
+    "GHSA-g697-vv6h-r8hv": (2026, 5, 12),  # >= 2026.5.12, < 2026.8.1
+    "GHSA-h9jh-75j7-7hhx": (2026, 6, 9),  # >= 2026.6.9, < 2026.8.1
+    "GHSA-mm7m-wcgh-8mfq": (2026, 5, 2),  # >= 2026.5.2, < 2026.8.1
+    "GHSA-pfrw-r5vr-89hw": (2026, 4, 25),  # >= 2026.4.25, < 2026.8.1
+    "GHSA-xw48-j584-r73h": (2026, 6, 6),  # >= 2026.6.6, < 2026.8.1
+    "GHSA-6xpv-wwr5-265h": (2026, 5, 28),  # >= 2026.5.28, < 2026.8.1
+    "GHSA-5x6q-wg56-rxg8": (2026, 7, 2),  # >= 2026.7.2, < 2026.9.2
+}
+
+# A range that is one exact build (`= 2026.7.1-2`). _parse_version() collapses 2026.7.1,
+# 2026.7.1-1 and 2026.7.1-2 onto one tuple (the warning above), so such a row matches ONLY
+# when the version string, stripped, is a member of the set. This is the comparator change
+# that warning asks for, kept to the single row that needs it.
+_ADVISORY_EXACT_BUILDS: dict[str, frozenset[str]] = {
+    "GHSA-356g-m7rx-7pm3": frozenset({"2026.7.1-2"}),  # = 2026.7.1-2
+}
+
+# Extended-stable lines (see the paragraph above the table). A RELEASED build is a string that,
+# stripped, is exactly <year>.<minor 1-12>.<patch >= 33> with no suffix (the vendor's
+# isExtendedStableReleaseVersion); a version is ON the line by its parsed tuple (below).
+_EXTENDED_STABLE_MIN_PATCH = 33
+# Advisories that apply to no extended-stable build: back-ported on the 2026.8 line from
+# 2026.8.33, and the affected code is absent from the 2026.7 line.
+_EXTENDED_STABLE_NOT_AFFECTED = frozenset({"GHSA-5x6q-wg56-rxg8"})
+# (year, minor) -> (newest patch examined, advisories confirmed still unfixed there). An
+# advisory is listed only when the vulnerable pre-fix code was OBSERVED at that newest build;
+# one whose fix was merely not found there is not listed.
+_EXTENDED_STABLE_LINES: dict[tuple[int, int], tuple[int, tuple[str, ...]]] = {
+    (2026, 6): (35, ("GHSA-8xxh-v4vc-qvm4", "GHSA-66hm-hxq3-5pfh")),
+    (2026, 7): (35, ("GHSA-66hm-hxq3-5pfh", "GHSA-xx9p-hc9w-6p5h", "GHSA-7cp7-87pj-p32v")),
+    (2026, 8): (35, ()),
+}
+_EXTENDED_STABLE_RE = re.compile(r"([1-9][0-9]{3})\.([1-9]|1[0-2])\.([1-9][0-9]*)")
+
+
+def _extended_stable_build(raw) -> "tuple[int, int, int] | None":
+    """(year, minor, patch) when *raw* is an extended-stable release, else None."""
+    m = _EXTENDED_STABLE_RE.fullmatch(str(raw).strip())
+    if m is None:
+        return None
+    year, minor, patch = (int(g) for g in m.groups())
+    return (year, minor, patch) if patch >= _EXTENDED_STABLE_MIN_PATCH else None
+
+
+def _on_extended_stable_line(raw) -> bool:
+    """The vendor's hasExtendedStablePatch on the PARSED tuple, whatever suffix the string had:
+    3+ parts, 1000 <= year <= 9999, 1 <= minor <= 12, patch >= 33 (reserved, "including
+    unsupported correction/build variants")."""
+    p = _parse_version(str(raw).strip())
+    return bool(p) and len(p) >= 3 and 1000 <= p[0] <= 9999 and 1 <= p[1] <= 12 and p[2] >= _EXTENDED_STABLE_MIN_PATCH
 
 
 # Keys under plugins/skills that are structural config, not installable entries.
@@ -3144,103 +3388,265 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
 _B33_EVIDENCE_CAP = 20
 
 
-def check_known_vulns(ctx: Context) -> Finding:
-    """B33 - Known-vulnerable OpenClaw version gate.
+class _B33Outcome(NamedTuple):
+    """What the advisory table says about one version string (`_b33_assess`)."""
 
-    FAIL    - installed version <= one or more known advisories' max_vulnerable_version_tuple,
-              AND - for a config-conditioned row (C-414) - that row's `condition(ctx.config)`
-              also holds. A version-only row (still the vast majority of the table) has no
-              condition to satisfy, matching on version alone exactly as before this task.
-              Reports EVERY matching advisory (B-332) - not just the first row in table
-              order - and the `fix` targets the HIGHEST fixed_version across all matches,
-              since that is the only version that actually clears the finding. Returning on
-              the first match handed a far-behind user the OLDEST advisory's fixed version
-              as remediation: a version still vulnerable to every later advisory in the
-              table, turning the fix into a multi-step upgrade treadmill instead of a single
-              correct jump.
-    PASS    - installed version is past all known advisory fixes, OR every version-matched
-              config-conditioned row's condition came back False (this host's config shape
-              cannot reach that particular defect) or raised (C-414: an unproven condition
-              never manufactures a FAIL - Golden Rule #5 - so it is treated the same as
-              "condition did not hold", not surfaced as its own UNKNOWN).
-    UNKNOWN - meta.lastTouchedVersion is missing or cannot be parsed.
+    kind: str  # "clear" | "affected" | "unexamined"
+    ids: list  # advisory ids to name, in table order ("affected" only)
+    n_published: int  # published ranges that contain the build (counted BEFORE the not-affected set is removed)
+    fix: "str | None"  # upgrade target ("affected" only)
+    extended: bool  # on the extended-stable line (reserved patch), released build or not
+    variant: bool = False  # "unexamined" only: reserved patch, but not an exact released build
+
+
+def _b33_condition_holds(row: tuple, cfg: dict) -> bool:
+    """C-414: a 4-tuple row is version-only; a 5-tuple row's `condition(cfg)` must also hold.
+    A condition that raises counts as "did not hold" - a broken predicate never manufactures
+    a FAIL (Golden Rule #5)."""
+    if len(row) < 5:
+        return True
+    try:
+        return bool(row[4](cfg))
+    except Exception:
+        return False
+
+
+def _b33_highest_fixed(rows: list) -> str:
+    return max((row[2] for row in rows), key=lambda v: _parse_version(v) or ())
+
+
+def _b33_assess(raw: str, cfg: dict) -> "_B33Outcome | None":
+    """(version string, config) -> outcome. The ONE place a version is matched against the
+    table, used for the installed build and the config stamp alike so the two cannot drift.
+    None when the string cannot be parsed.
+
+    A row matches when parsed <= max_vulnerable, its optional condition holds (C-414),
+    parsed >= its `_ADVISORY_FIRST_VULNERABLE` bound and, for an `_ADVISORY_EXACT_BUILDS`
+    row, the stripped string is a listed member (a row absent from a side table is
+    unbounded). For EVERY FAIL `fix` is the highest fixed version over every row that reaches
+    the build by version (bounds and the not-affected set only trim the id list), so upgrading
+    to it clears the finding in one step. A reserved extended-stable patch follows the rule
+    above the table.
     """
-    raw_ver = dig(ctx.config, "meta.lastTouchedVersion") or dig(ctx.config, "lastTouchedVersion")
-    if not raw_ver:
-        return _finding(
-            "B33",
-            UNKNOWN,
-            "OpenClaw version unknown (meta.lastTouchedVersion / lastTouchedVersion "
-            "not set) \u2014 cannot check against known advisories.",
-            "Set meta.lastTouchedVersion in openclaw.json (or upgrade to a current "
-            "release) and keep OpenClaw current.",
-        )
-
-    parsed = _parse_version(str(raw_ver))
+    s = str(raw).strip()
+    parsed = _parse_version(s)
     if parsed is None:
-        return _finding(
-            "B33",
-            UNKNOWN,
-            f"OpenClaw version {raw_ver!r} could not be parsed \u2014 "
-            "cannot check against known advisories.",
-            "Verify your version string (expected dotted-integer format like '2026.1.29') "
-            "and keep OpenClaw current.",
-        )
+        return None
+    reserved = _on_extended_stable_line(s)
+    ext = _extended_stable_build(s) if reserved else None  # an exact released build, or None
+    reach = [r for r in _KNOWN_ADVISORIES if parsed <= r[1] and _b33_condition_holds(r, cfg)]
+    cover = [
+        r for r in reach
+        if parsed >= _ADVISORY_FIRST_VULNERABLE.get(r[0], ())
+        and s in _ADVISORY_EXACT_BUILDS.get(r[0], (s,))
+    ]
+    n_published = len(cover)  # what the finding text calls "published ranges": the not-affected id counts
+    if reserved:
+        cover = [r for r in cover if r[0] not in _EXTENDED_STABLE_NOT_AFFECTED]
+    if not cover:
+        return _B33Outcome("clear", [], n_published, None, reserved)
+    fix = _b33_highest_fixed(reach)
+    if not reserved:
+        return _B33Outcome("affected", [r[0] for r in cover], n_published, fix, False)
+    newest, confirmed = _EXTENDED_STABLE_LINES.get(ext[:2], (0, ())) if ext else (0, ())
+    listed = [r for r in cover if r[0] in confirmed] if ext and ext[2] <= newest else []
+    if not listed:
+        return _B33Outcome("unexamined", [], n_published, None, True, ext is None)
+    return _B33Outcome("affected", [r[0] for r in listed], n_published, fix, True)
 
-    # Collect EVERY matching row (table order is oldest-first, so this is already a
-    # deterministic, stable ordering across runs) rather than returning on the first.
-    #
-    # C-414: version match alone is not enough for a config-conditioned (5-element) row -
-    # its condition(ctx.config) must also hold. `row[4]` is only ever present on a 5-tuple
-    # (a plain 4-tuple version-only row indexes nothing past row[3]), so `len(row) < 5` is
-    # checked first and short-circuits `row[4]` for every existing row untouched by this
-    # task. A condition that raises is caught and treated as "did not hold" - never let a
-    # broken predicate manufacture a FAIL (Golden Rule #5); it degrades to silently not
-    # matching this one row, not to a crash or a finding of its own.
-    def _condition_holds(row: tuple) -> bool:
-        if len(row) < 5:
+
+_B33_PROFILE_HOME_RE = re.compile(r"\.openclaw-([A-Za-z0-9][A-Za-z0-9_-]{0,63})")  # vendor PROFILE_NAME_RE
+
+
+def _b33_is_this_machines_home(home) -> bool:
+    """True when *home* is a home the local OpenClaw installation serves. Accepted, compared
+    as resolved paths: the vendor's state directory (``collector.openclaw_state_dir``:
+    ``OPENCLAW_STATE_DIR``, else ``~/.openclaw``, else an existing legacy ``~/.clawdbot``); and
+    a ``--profile`` home - *home* is what ``<effective home>/.openclaw-<name>`` resolves to,
+    <name> matching the vendor's profile pattern and not "default" in any case (that profile
+    is the plain ``.openclaw``). Anything else, a home that cannot be stat'ed (missing, a
+    symlink loop, an unreadable parent) and ANY exception while deciding are "not this
+    machine's home". A wrong "yes" cannot turn a FAIL into a PASS: an affected stamp beside a
+    clear installed build is a WARN. It can turn a stamp-only FAIL into that WARN, and a
+    missing stamp's UNKNOWN into a verdict on the installed build. A wrong "no" gives the
+    stamp-only verdict this check gave before the installed build was consulted.
+    """
+    try:
+        os.stat(home)  # raises for a loop or an unreachable home on every Python (resolve() does not)
+        resolved = home.resolve()
+        if resolved == openclaw_state_dir().resolve():
             return True
-        try:
-            return bool(row[4](ctx.config))
-        except Exception:
-            return False
+        base = openclaw_effective_home()
+        for name in (home.name, resolved.name):
+            m = _B33_PROFILE_HOME_RE.fullmatch(name)
+            if m and m.group(1).lower() != "default" and (base / name).resolve() == resolved:
+                return True
+        return False
+    except Exception:
+        return False
 
-    matched = [row for row in _KNOWN_ADVISORIES if parsed <= row[1] and _condition_holds(row)]
-    if not matched:
+
+def _b33_installed_build(ctx: Context) -> "str | None":
+    """The installed OpenClaw build, but ONLY when it is evidence about the audited home.
+
+    ``ctx.installed_dist_version`` is read from whatever ``openclaw`` is on THIS machine's PATH
+    and is filled in even when ``--home`` points at another directory (a copied home, a
+    fixture), so on its own it describes the auditing machine, not the audited config. It is
+    used only when `_b33_is_this_machines_home` says the audited home is served by it.
+    """
+    installed = getattr(ctx, "installed_dist_version", None)
+    if not installed or not _b33_is_this_machines_home(getattr(ctx, "home", None)):
+        return None
+    return str(installed).strip() or None
+
+
+def _b33_verdict(label: str, out: _B33Outcome) -> Finding:
+    """PASS / UNKNOWN / FAIL for one outcome; *label* is "OpenClaw <ver>" (the config stamp,
+    or an installed build that equals it) or "OpenClaw <ver> (installed)". The PASS and FAIL
+    detail wording is byte-identical to what the stamp-only gate always said, so existing
+    ignore-file fingerprints for an unchanged situation survive. The extended-stable FAIL
+    discloses its limit in `fix`, never in `detail` (the fingerprint hashes `detail`); the
+    UNKNOWN states its reason, back-port caveat included, in `detail`."""
+    if out.kind == "clear":
         return _finding(
             "B33",
             PASS,
-            f"OpenClaw {raw_ver} is at or past all known-advisory fixes.",
+            f"{label} is at or past all known-advisory fixes.",
             "Keep OpenClaw updated and re-check after new advisories are published.",
         )
-
-    matched_ids = [row[0] for row in matched]
-    # The only version that actually clears the finding is the HIGHEST fixed_version
-    # across every matched advisory - a lower fixed_version leaves later advisories open.
-    highest_fixed_ver = max(
-        (row[2] for row in matched),
-        key=lambda v: _parse_version(v) or (),
-    )
-
-    n_total = len(matched_ids)
-    if n_total > _B33_EVIDENCE_CAP:
-        shown_ids = matched_ids[:_B33_EVIDENCE_CAP]
-        truncation_note = f" (showing {_B33_EVIDENCE_CAP} of {n_total})"
-    else:
-        shown_ids = matched_ids
-        truncation_note = ""
-
+    if out.kind == "unexamined":
+        what = (
+            "has an extended-stable patch number but is not a released extended-stable build, "
+            "and has not been checked against the advisory table" if out.variant
+            else "is an extended-stable build that has not been checked against the advisory table"
+        )
+        return _finding(
+            "B33",
+            UNKNOWN,
+            f"{label} {what}: {out.n_published} published advisory ranges cover it numerically, "
+            "but the vendor back-ports fixes to extended-stable lines without recording it in "
+            "the advisory, so a version comparison alone cannot say whether it is affected.",
+            "Move to a current OpenClaw release and re-run this check; extended-stable "
+            "builds are examined against the table one build at a time.",
+        )
+    n_total = len(out.ids)
+    shown_ids = out.ids[:_B33_EVIDENCE_CAP]
+    truncation_note = f" (showing {_B33_EVIDENCE_CAP} of {n_total})" if n_total > _B33_EVIDENCE_CAP else ""
     advisory_word = "advisory" if n_total == 1 else "advisories"
+    if out.extended:
+        further = out.n_published - n_total
+        fix = (
+            f"Upgrade OpenClaw to >= {out.fix} to remediate "
+            f"{'this advisory' if n_total == 1 else f'all {n_total} listed advisories'}."
+        )
+        if further > 0:
+            fix += (
+                f" {further} further published advisories cover this build by version range; "
+                "they are not listed because the table has not confirmed them for this build: "
+                "the vendor back-ports some fixes to extended-stable lines, and some affected "
+                "code was never on them, without recording either in the advisory."
+            )
+    else:
+        fix = (
+            f"Upgrade OpenClaw to >= {out.fix} to remediate "
+            f"{'this advisory' if n_total == 1 else f'all {n_total} matched advisories'} "
+            "in a single upgrade."
+        )
     return _finding(
         "B33",
         FAIL,
-        f"OpenClaw {raw_ver} is affected by {n_total} known {advisory_word}: "
+        f"{label} is affected by {n_total} known {advisory_word}: "
         f"{', '.join(shown_ids)}{truncation_note}.",
-        f"Upgrade OpenClaw to >= {highest_fixed_ver} to remediate "
-        f"{'this advisory' if n_total == 1 else f'all {n_total} matched advisories'} "
-        "in a single upgrade.",
+        fix,
         evidence=shown_ids,
     )
+
+
+def check_known_vulns(ctx: Context) -> Finding:
+    """B33 - Known-vulnerable OpenClaw version gate.
+
+    Which version is judged. The INSTALLED build (``ctx.installed_dist_version``) decides only
+    when the audited home is this machine's own OpenClaw home (``_b33_installed_build``).
+    Otherwise - another home (a copy, a fixture), ``--no-dist``, an installed string that does
+    not parse - the config stamp (``meta.lastTouchedVersion``, else the root alias) decides,
+    as it always did. A package upgrade does not re-stamp the config, so a stale stamp must
+    not condemn a patched build; a rolled-back build must not hide behind a newer stamp.
+
+      installed build matches rows ............ FAIL, on the installed build (UNKNOWN when
+                                                it is an unexamined extended-stable one)
+      installed clear, stamp matches rows ..... WARN: the build on PATH is patched, but the
+                                                last build that wrote this config is affected
+                                                or unexamined, and this check does not
+                                                determine which one the running gateway is
+      installed clear, stamp clear/absent/bad . PASS
+      no usable installed build, stamp:
+        matches rows FAIL | clear PASS | absent or unparseable UNKNOWN (as before)
+
+    Residual: when two OpenClaw installations exist on one machine, the one on PATH is the
+    one this check reads. A pre-release reads as its release (``_parse_version``).
+
+    Matching (``_b33_assess``, identical for both versions) reports EVERY matching advisory
+    (B-332), not just the first. For every FAIL, an extended-stable one included, `fix` targets
+    the HIGHEST fixed version over every row that reaches the build by version, listed or
+    not, so upgrading to it clears the finding in one step. A config-conditioned row
+    (C-414) also needs its condition to hold. A version on a reserved extended-stable patch
+    (minor 1-12, patch >= 33) follows the rule above the table: PASS when no row is left; FAIL,
+    naming only the advisories confirmed still unfixed on its line, for an exact released
+    build that was examined; UNKNOWN for any other (an unexamined final, or a variant such
+    as ``2026.7.35-1``).
+    """
+    raw_ver = dig(ctx.config, "meta.lastTouchedVersion") or dig(ctx.config, "lastTouchedVersion")
+    installed = _b33_installed_build(ctx)
+    inst = _b33_assess(installed, ctx.config) if installed else None
+    stamp = _b33_assess(str(raw_ver), ctx.config) if raw_ver else None
+
+    if inst is None:  # the stamp decides, exactly as before
+        if not raw_ver:
+            return _finding(
+                "B33",
+                UNKNOWN,
+                "OpenClaw version unknown (meta.lastTouchedVersion / lastTouchedVersion "
+                "not set) \u2014 cannot check against known advisories.",
+                "Set meta.lastTouchedVersion in openclaw.json (or upgrade to a current "
+                "release) and keep OpenClaw current.",
+            )
+        if stamp is None:
+            return _finding(
+                "B33",
+                UNKNOWN,
+                f"OpenClaw version {raw_ver!r} could not be parsed \u2014 "
+                "cannot check against known advisories.",
+                "Verify your version string (expected dotted-integer format like '2026.1.29') "
+                "and keep OpenClaw current.",
+            )
+        return _b33_verdict(f"OpenClaw {raw_ver}", stamp)
+
+    if inst.kind == "clear" and stamp is not None and stamp.kind != "clear":
+        if stamp.kind == "affected":
+            n = len(stamp.ids)
+            covered = f"is affected by {n} known {'advisory' if n == 1 else 'advisories'}"
+            if n > _B33_EVIDENCE_CAP:
+                covered += f" (the evidence lists the first {_B33_EVIDENCE_CAP})"
+        else:
+            covered = (
+                "has an extended-stable patch number but is not a released extended-stable "
+                "build, and the table has not checked it" if stamp.variant
+                else "is an extended-stable build the table has not checked"
+            ) + f" ({stamp.n_published} published advisory ranges cover it numerically)"
+        return _finding(
+            "B33",
+            WARN,
+            f"The installed OpenClaw build ({installed}) is at or past all known-advisory "
+            f"fixes, but the build that last wrote this config ({str(raw_ver).strip()}) "
+            f"{covered}. This check does not determine which of the two the running gateway is.",
+            "`openclaw --version` prints the installed version, which can differ from the build "
+            "a gateway started before the upgrade is still running. If the gateway was started "
+            "before the upgrade, restart it. The recorded version refreshes the next time "
+            "OpenClaw saves its config.",
+            evidence=stamp.ids[:_B33_EVIDENCE_CAP],
+        )
+    same = bool(raw_ver) and str(raw_ver).strip() == installed
+    return _b33_verdict(f"OpenClaw {raw_ver}" if same else f"OpenClaw {installed} (installed)", inst)
 
 
 def check_memory_poisoning(ctx: Context) -> Finding:

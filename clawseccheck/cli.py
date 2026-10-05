@@ -3587,8 +3587,11 @@ def _main(argv=None) -> int:
                         "tree, so this is the escape hatch on a very large one")
     p.add_argument("--no-dist", action="store_true",
                    help="skip reading the installed OpenClaw package's own version "
-                        "(C4 corroborates it against meta.lastTouchedVersion to "
-                        "surface a version rollback). Read-only PATH lookup, no subprocess")
+                        "(B33 judges that installed build, not the config stamp "
+                        "meta.lastTouchedVersion, on this machine's own OpenClaw home, and C4 "
+                        "corroborates it against the stamp to surface a version rollback; "
+                        "with this flag the stamp decides B33). "
+                        "Read-only PATH lookup, no subprocess")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
     p.add_argument("--save-run", action="store_true", dest="save_run",
                    help="also persist this run's full finding list, addressable by its "

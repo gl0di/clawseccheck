@@ -1520,8 +1520,10 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     # ---- F-174: the OpenClaw installation itself --------------------------------------
     #
-    # B33 and C4 read `meta.lastTouchedVersion` - a string the agent writes about itself.
-    # This compares the artifact on disk instead.
+    # B33 and C4 read `meta.lastTouchedVersion` - a string the agent writes about itself (B33
+    # also reads the installed version NUMBER on this machine's own home, C4 compares the two).
+    # This compares the artifact on disk - its version number and, above all, its program files,
+    # which no version number shows - instead.
     #
     # **Wholesale appearance or disappearance is never an alert**, and this is not caution
     # for its own sake: the install is located from PATH, and a cron job's PATH really is

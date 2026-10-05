@@ -657,7 +657,9 @@ seconds. Three deliberate limits:
 that had no drift dimension at all, even though both sit above everything else the audit reads.
 
 - **The installed OpenClaw package.** B33 and C4 read `meta.lastTouchedVersion` out of your
-  settings - a string the agent writes *about itself*. A scheduled run now also records the
+  settings - a string the agent writes *about itself* (B33 also reads the installed package's
+  version when you audit this machine's own OpenClaw home, and C4 compares the two). A
+  scheduled run now also records the
   artifact on disk: its version, its `package.json`, its lock file, and a content fingerprint of
   the program files it actually runs. A **version going backwards** is reported loudly - a
   downgrade re-opens whatever the newer build fixed - and so is the case a version number cannot
@@ -2061,9 +2063,10 @@ python3 audit.py --log audit.log            # also write log to a local file
   (see "Full read scope" above), so this is the escape hatch on a very large tree or when you
   want the run confined. `--no-host` and `--no-sockets` skip host-monitor detection and the
   listening-socket scan the same way, and `--no-native` skips the built-in native audit.
-  `--no-dist` skips reading the installed OpenClaw package's own version (which C4 corroborates
-  against `meta.lastTouchedVersion` to surface a version rollback) - also a read-only `PATH`
-  lookup, no subprocess.
+  `--no-dist` skips reading the installed OpenClaw package's own version (which B33 judges instead
+  of the config stamp `meta.lastTouchedVersion` on this machine's own OpenClaw home, and which C4
+  corroborates against the stamp to surface a version rollback; with the flag the stamp decides
+  B33) - also a read-only `PATH` lookup, no subprocess.
 
 ## Uninstall / cleanup
 

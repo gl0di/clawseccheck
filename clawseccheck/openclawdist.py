@@ -8,10 +8,12 @@ verdict - `monitor.py` is the consumer, the same leaf->consumer split `sockets.p
 
 **Why this exists.** B33 ("known-vulnerable OpenClaw version gate", HIGH) and C4 read
 `meta.lastTouchedVersion` out of `openclaw.json` - a string the agent writes about itself.
-A swapped `npm install` of openclaw is the top of the supply chain and nothing anywhere
-compared it against the artifact actually on disk. On the maintainer's machine the two
-happen to agree (`2026.7.1-2` in both), which is the expected state and exactly why the
-disagreement is worth watching for.
+B33 also reads the installed package's version number when it audits this machine's own home
+(with `--no-dist` the stamp alone decides), and C4 compares the two numbers. A swapped
+`npm install` of openclaw is the top of the supply chain, and no version number shows it:
+nothing compared the program files actually on disk. On the maintainer's machine the two
+numbers agreed when this was written, which is the expected state and exactly why
+the disagreement is worth watching for.
 
 **What each digest can and cannot catch**, because a field called "integrity" that covers
 less than its name suggests is the failure this project keeps removing:
