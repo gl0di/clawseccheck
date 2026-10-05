@@ -364,8 +364,11 @@ def self_reported_version(config: "dict | None") -> str:
 # a newer dist - the same discipline the code-digest measurements above already keep
 # release over release. Bump it only when a check was actually re-grounded that far, never
 # just because a newer OpenClaw exists. Raised to 2026.9.6 for 4.3.0: the 9.6 pass
-# re-recorded the dist citation baseline and widened the harness oracle to 9.6.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 6)
+# re-recorded the dist citation baseline and widened the harness oracle to 9.6. Raised to
+# 2026.9.7 for 4.4.0: the 9.7 pass made B372 and B350 fork on the installed build, taught
+# B1 and B2 the config template forms, re-read the B396 and B397 dist claims on 9.7,
+# regenerated the schema and state snapshots and re-recorded the dist citation baseline.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 7)
 
 
 def grounding_gap(installed_version: "str | None"):

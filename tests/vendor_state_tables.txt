@@ -1,11 +1,11 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.9.6
-# state-schema-version: 18
-# generated: 2026-09-25
-# tables: 131
+# openclaw-version: 2026.9.7
+# state-schema-version: 19
+# generated: 2026-10-05
+# tables: 132
 #
-# source-bundle: openclaw-state-db-read-connection-Beg0AZE7.mjs
+# source-bundle: openclaw-state-db-legacy-backfills-BOdG1c06.mjs
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
 #   is build output and rotates between releases, so it is evidence, not a locator.
 #
@@ -138,6 +138,7 @@ task_delivery_state
 task_runs
 update_runs
 user_preferences
+user_profile_identities
 web_push_approval_deliveries
 web_push_subscriptions
 worker_environment_credentials

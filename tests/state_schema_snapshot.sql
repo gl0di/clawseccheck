@@ -1,9 +1,9 @@
 -- state_schema_snapshot.sql -- GENERATED. Do not hand-edit.
 --
--- openclaw-version: 2026.9.6
--- state-schema-version: 18
--- generated: 2026-09-26
--- tables: 11
+-- openclaw-version: 2026.9.7
+-- state-schema-version: 19
+-- generated: 2026-10-05
+-- tables: 12
 --
 -- What this is
 -- ------------
@@ -11,7 +11,7 @@
 -- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
 -- declares in a test DDL or that clawseccheck/ reads.
 --
--- source-bundle: openclaw-state-db-read-connection-Beg0AZE7.mjs
+-- source-bundle: openclaw-state-db-legacy-backfills-BOdG1c06.mjs
 --   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
 --   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
 --   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still
@@ -157,6 +157,20 @@ CREATE TABLE IF NOT EXISTS device_pairing_paired (
   approved_at_ms INTEGER NOT NULL,
   last_seen_at_ms INTEGER,
   last_seen_reason TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS exec_approvals_config (
+  config_key TEXT NOT NULL PRIMARY KEY,
+  raw_json TEXT NOT NULL,
+  socket_path TEXT,
+  has_socket_token INTEGER NOT NULL,
+  default_security TEXT,
+  default_ask TEXT,
+  default_ask_fallback TEXT,
+  auto_allow_skills INTEGER,
+  agent_count INTEGER NOT NULL,
+  allowlist_count INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS skill_library_entries (
