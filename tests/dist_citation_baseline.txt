@@ -8,9 +8,9 @@
 # grow: `compare` fails on any pair NOT in this file. Fixing an entry and
 # re-recording removes it here; that is progress, never a failure.
 #
-# openclaw-version: 2026.9.6
-# generated: 2026-09-26
-# violations: 324
+# openclaw-version: 2026.9.7
+# generated: 2026-10-05
+# violations: 320
 #
 clawseccheck/behavioral.py	server-runtime-subscriptions-OlWMLbPY.js
 clawseccheck/behavioral.py	tool-catalog-C8xbUFNe.js
@@ -88,7 +88,6 @@ clawseccheck/checks/_config.py	host-env-security-CWC2ZCy4.js
 clawseccheck/checks/_config.py	host-source-v64nW4u1.mjs
 clawseccheck/checks/_config.py	io-By0s-a_s.js
 clawseccheck/checks/_config.py	io.read-helpers-Bj0GwcNP.mjs
-clawseccheck/checks/_config.py	launch-BmPwk1y9.js
 clawseccheck/checks/_config.py	method-scopes-CF6Mdynq.mjs
 clawseccheck/checks/_config.py	node-command-policy-5uuS2pOn.mjs
 clawseccheck/checks/_config.py	paths-BMBAvkNf.js
@@ -96,7 +95,6 @@ clawseccheck/checks/_config.py	pre-bootstrap-8G8HyMEQ.js
 clawseccheck/checks/_config.py	schema-CwAIqZVE.mjs
 clawseccheck/checks/_config.py	schema-DRyO1XBt.js
 clawseccheck/checks/_config.py	server-runtime-config-r5ejxORO.js
-clawseccheck/checks/_config.py	server.impl-qYPVZMND.js
 clawseccheck/checks/_config.py	shell-env-DaE9Xx3-.js
 clawseccheck/checks/_config.py	ssrf-B1sxrDMt.mjs
 clawseccheck/checks/_config.py	startup-trace-Bc2ebu8Y.js
@@ -104,7 +102,6 @@ clawseccheck/checks/_config.py	status.scan-Bm3xXn8C.js
 clawseccheck/checks/_config.py	telemetry-CwSEtSer.mjs
 clawseccheck/checks/_config.py	tool-catalog-BAOwO8Un.mjs
 clawseccheck/checks/_config.py	types.openclaw-CXjMEWAQ.d.ts
-clawseccheck/checks/_config.py	zod-schema-DN2u5FdA.mjs
 clawseccheck/checks/_config.py	zod-schema-O9ml_nmo.js
 clawseccheck/checks/_egress.py	audit-UjVvFwCi.js
 clawseccheck/checks/_egress.py	browser-config-DCrASvM0.js
@@ -300,7 +297,6 @@ clawseccheck/monitordims/_plugins.py	config-normalization-shared-w2iz0aeC.js
 clawseccheck/monitordims/_plugins.py	config-state-CtMlHVRM.js
 clawseccheck/monitordims/_plugins.py	legacy-config-migrations--PhUdsg4.js
 clawseccheck/monitordims/_plugins.py	zod-schema-O9ml_nmo.js
-clawseccheck/risk.py	agent-tools-BD8WL7ny.js
 clawseccheck/risk.py	audit-UjVvFwCi.js
 clawseccheck/risk.py	audit.nondeep.runtime-C3y1Q5Fi.js
 clawseccheck/risk.py	browser-bridges-DdlAaIG3.js
