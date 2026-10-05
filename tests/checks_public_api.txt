@@ -142,6 +142,7 @@ _enabled_tools
 _example_governance
 _exec_policy_is_gated
 _external_input_channels
+_f052_action_negated
 _fence_ranges
 _finding
 _fm_metadata_obj_multiline
