@@ -28,6 +28,9 @@ SKILL_CONTENT_RING
 UNKNOWN
 WARN
 _ACTIONS_ALLOW_UNDETERMINED
+_ALLOW_BOTS_DEFAULT_ALLOW_MIN
+_ALLOW_BOTS_DENY_MEASURED_MIN
+_ALLOW_BOTS_FLIPPED_CHANNELS
 _AUTHKEY_KEY_TOKEN_RE
 _AUTONOMY_RE
 _B182_ENV_OVERRIDES
@@ -84,6 +87,7 @@ _agent_is_powerful
 _agent_legs
 _agent_profile_widenings
 _agents_without_exec_gate
+_allow_bots_default
 _allow_from_is_present
 _ambiguous_example_suppression
 _ancestors_allow_other_access

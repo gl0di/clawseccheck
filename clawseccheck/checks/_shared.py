@@ -1344,6 +1344,80 @@ def _terminal_default(ctx) -> str:
     return "unknown"
 
 
+# B372 (re-grounded): the build that FLIPPED channels.discord.allowBots and
+# channels.slack.allowBots from default-DENY to default-ACCEPT. The config path, the
+# `boolean | "mentions"` type and the schema enum did not move, so no path diff sees it.
+# The evidence is the vendor's own words, NOT an executed resolver:
+#
+#   * the channel-root help hint reads "(default: false)" in every release whose hint table
+#     was read (2026.7.1-2 through 2026.9.6) and "(default: true)" in 2026.9.7 --
+#     `dist/bundled-channel-config-metadata.generated-*.mjs`, Discord and Slack rows;
+#   * CHANGELOG.md (2026.9.7): "Discord and Slack: accept bot-authored messages by default
+#     when `allowBots` is omitted, still subject to existing access and mention rules
+#     (explicit `false` and "mentions" are unchanged)";
+#   * the 2026.9.7 docs (`channels/bot-loop-protection`, `channels/slack/access-control`)
+#     say the same.
+#
+# THE RESOLVER IS NOT IN THE TREE. The Discord and Slack channel code ships as the
+# out-of-tree `@openclaw/discord` / `@openclaw/slack` packages, so nothing here was executed
+# the way `_cross_context_default`'s `enforceCrossContextPolicy` was. Treat this as a
+# hint-and-changelog grounding: if a later release moves the default again, the hint text
+# is where it will show first. Matrix (hint still "(default: false)"), ClickClack, Feishu
+# and GoogleChat state no flipped default and are NOT covered by this constant.
+_ALLOW_BOTS_DEFAULT_ALLOW_MIN = (2026, 9, 7)        # unset -> accepted, on Discord and Slack
+# The oldest release whose hint was READ ("2026.7.1-2"; the plain 2026.7.1 was not, and
+# sorts below it). "deny" is the direction that PASSes, so it is never extrapolated below it.
+_ALLOW_BOTS_DENY_MEASURED_MIN = (2026, 7, 1, 2)
+# The two channels whose channel-root hint states the flipped default. Nested guild /
+# channel / account scopes carry no default statement of their own, so the inheritance from
+# the channel root is assumed rather than measured: the check decides on the root scope only.
+_ALLOW_BOTS_FLIPPED_CHANNELS = ("discord", "slack")
+
+
+def _allow_bots_default(ctx) -> str:
+    """What does an UNSET ``allowBots`` on a Discord or Slack channel mean on the reader's
+    OpenClaw? ``"deny"`` / ``"allow"`` / ``"unknown"``.
+
+    Three answers for the reason ``_cross_context_default`` has three: "we could not see the
+    build" is not "the build refuses bot-authored input", and collapsing them is what made
+    B372 report a default-accept 2026.9.7+ install as clean.
+
+    Sources are ``_cross_context_default``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose
+    channel plugin resolves the missing key. ``meta.lastTouchedVersion`` is consulted ONLY
+    when it lands at 2026.9.7 or later: that stamp proves a 2026.9.7+ build once SAVED the
+    config, so the default is ``"allow"``. A stamp BELOW the threshold proves nothing about
+    what is installed now (the user may have upgraded five minutes ago and not re-saved), so
+    it answers ``"unknown"``, never ``"deny"``. Parsing goes through ``_numeric_version``
+    (not ``_parse_version``, B-264): a pre-release such as 2026.9.7-beta.1 orders as None
+    and lands on ``"unknown"``.
+
+    ``"deny"`` is the one answer that PASSes an otherwise-unset channel, so it is only given
+    for an installed version shaped like a calendar release (``YYYY.M.P``, three or more
+    numeric parts) at or after ``_ALLOW_BOTS_DENY_MEASURED_MIN`` -- the oldest release whose
+    hint was read. Anything else that sorts below 2026.9.7 ("0.0.0", "2026.9", a build older
+    than the measured series) is ``"unknown"``.
+
+    Grounded on the vendor hint and changelog; the channel resolver is out-of-tree (see the
+    comment above ``_ALLOW_BOTS_DEFAULT_ALLOW_MIN``).
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _ALLOW_BOTS_DEFAULT_ALLOW_MIN:
+            return "allow"
+        if len(installed) >= 3 and installed >= _ALLOW_BOTS_DENY_MEASURED_MIN:
+            return "deny"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _ALLOW_BOTS_DEFAULT_ALLOW_MIN:
+        return "allow"
+    return "unknown"
+
+
 # B397: the build that FIRST shipped `gateway.portals` (and its only child,
 # `gateway.portals.ingress`) in the root config schema. Grounded against the installed
 # dist (openclaw@2026.9.6): `GatewayConfigSchema`, `zod-schema-B-u3AXjg.mjs:992-996`.

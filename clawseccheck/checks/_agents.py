@@ -29,7 +29,10 @@ from ._shared import (
     OUTBOUND_TOOL_HINTS,
     _LEG_KEYS,
     _TIER_NAME,
+    _ALLOW_BOTS_FLIPPED_CHANNELS,
     _agent_legs,
+    _allow_bots_default,
+    _channel_has_implicit_default_account,
     _channels,
     _channels_with_context_visibility_all,
     _config_unreadable,
@@ -1541,13 +1544,43 @@ def check_channel_allow_bots(ctx: Context) -> Finding:
     considered, since a fully closed channel has no bot account to admit in the
     first place.
 
+    THE DEFAULT MOVED (2026.9.7). OpenClaw 2026.9.7 flipped ``channels.discord.allowBots``
+    and ``channels.slack.allowBots`` from default-false to default-TRUE: with the key
+    omitted, those two channels accept bot-authored messages (still subject to the existing
+    access and mention rules). Only an explicit ``false`` keeps them out. An unset key is
+    therefore resolved through ``_allow_bots_default`` (the B363/B351 three-way pattern):
+    ``"allow"`` counts as enabled, ``"deny"`` as not, and ``"unknown"`` -- the build could
+    not be determined -- is UNKNOWN, never PASS. This applies to the Discord and Slack
+    CHANNEL-ROOT scope of each resolved account only (``_ALLOW_BOTS_FLIPPED_CHANNELS``):
+    the nested guild/channel/group scopes state no default of their own, so they are
+    assumed to inherit from the root and are not evaluated for an unset key. Matrix,
+    ClickClack, Feishu and GoogleChat state no flipped default and keep the
+    explicit-value-only reading. GROUNDING LIMIT: the Discord and Slack channel resolvers
+    ship out-of-tree, so the flip rests on the vendor's own help hint and changelog (and the
+    2026.9.7 docs, which say the same), not on an executed resolver. The hint reads
+    ``(default: false)`` on every release whose bundle was read (2026.7.1-2, 8.1, 9.1, 9.3,
+    9.4, 9.5, 9.6) and ``(default: true)`` on 2026.9.7.
+
+    Unlike an explicit value, an UNSET key is judged per resolved account, on that account's
+    OWN reachability (its merged dmPolicy/groupPolicy/wildcard groups, ``enabled: false``
+    included): a closed account beside an open one adds nothing. A Discord base node that
+    carries a ``token`` while ``accounts`` is configured is a live implicit default account
+    (``_channel_has_implicit_default_account``) and is judged too; Slack has no such account.
+    Left open, deliberately: the ``$DISCORD_BOT_TOKEN`` route to an implicit default account
+    is not visible from the config file (a false negative, the safe direction), and a nested
+    guild/channel scope that sets ``allowBots: false`` beside an unset root does not rescue
+    the root, because every other scope, DMs included, still inherits the root's default.
+
     WARN    - at least one externally-reachable channel/scope has
-              ``allowBots: true`` or ``allowBots: "mentions"``.
+              ``allowBots: true`` or ``allowBots: "mentions"``, or is a Discord/Slack
+              channel root that leaves it unset on a build whose default is true.
     PASS    - no externally-reachable channel/scope has allowBots enabled
               (including when no channel admits non-owner senders at all).
     UNKNOWN - the config was not read, ``channels`` is present but not an object,
-              or every scope was free of an enabled allowBots but at least one
-              scope set it to a value this audit does not recognize.
+              every scope was free of an enabled allowBots but at least one scope
+              set it to a value this audit does not recognize, or a Discord/Slack
+              channel root leaves it unset and the OpenClaw build (and so the
+              default) could not be determined.
     """
     unreadable = _config_unreadable("B372", ctx)
     if unreadable is not None:
@@ -1574,8 +1607,12 @@ def check_channel_allow_bots(ctx: Context) -> Finding:
             config_field_paths={"channels"},
         )
     reachable = set(_external_input_channels(cfg))
+    default = _allow_bots_default(ctx)
     enabled: list = []
     drifted: list = []
+    undetermined: list = []
+    from_default: list = []
+    from_default_channels: list = []
     for name, c in _channels(cfg).items():
         if name == "defaults" or name not in reachable or not isinstance(c, dict):
             continue
@@ -1589,32 +1626,110 @@ def check_channel_allow_bots(ctx: Context) -> Finding:
                     enabled.append(f'{prefix}.allowBots="mentions"')
                 elif ab is not None and ab is not False:
                     drifted.append(f"{prefix}.allowBots")
+        if default == "deny" or name not in _ALLOW_BOTS_FLIPPED_CHANNELS:
+            continue
+        # An UNSET allowBots on a Discord/Slack account root, resolved through the build's
+        # default. Each account node is judged on its OWN reachability (the merged account
+        # policy, an account-level ``enabled: false`` included), not the channel-wide gate
+        # above: an unset key only matters where a sender can actually reach the account,
+        # and a closed account beside an open one must not add a finding. A Discord base
+        # node that carries a credential is a live implicit default account beside any
+        # configured ``accounts`` (``_channel_has_implicit_default_account``), so it joins
+        # the walk exactly then. Explicit values above are unchanged by this.
+        nodes = list(_resolved_channel_nodes(c))
+        accounts = c.get("accounts")
+        if isinstance(accounts, dict) and accounts and _channel_has_implicit_default_account(name, c):
+            nodes.append({k: v for k, v in c.items() if k != "accounts"})
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("allowBots") is not None:
+                continue
+            if name not in _external_input_channels({"channels": {name: node}}):
+                continue
+            if default == "allow":
+                entry = f"{name}.allowBots (unset, defaults to true on 2026.9.7+)"
+                enabled.append(entry)
+                from_default.append(entry)
+                from_default_channels.append(name)
+            else:
+                undetermined.append(f"{name}.allowBots (unset)")
     if enabled:
         evidence = sorted(dict.fromkeys(enabled))
-        return _finding(
-            "B372",
-            WARN,
+        detail = (
             f"{len(evidence)} channel scope(s) admit non-owner senders with "
             "allowBots enabled \u2014 messages authored by other bot accounts reach "
             "the agent as input, at whatever rate the bot account can generate "
-            "them.",
+            "them."
+        )
+        fix = (
             "Set allowBots to false for any group/room/channel that admits "
             "non-owner senders, unless accepting bot-authored input is a "
-            "deliberate integration.",
+            "deliberate integration."
+        )
+        if from_default:
+            detail += (
+                " On OpenClaw 2026.9.7 and later, Discord and Slack accept "
+                "bot-authored messages when allowBots is unset, so an unset "
+                "allowBots counts as enabled there."
+            )
+            # Name only the channel(s) that actually left the key unset: telling a
+            # Discord-only user to set channels.slack.allowBots would create an empty
+            # channels.slack block. ``fix`` is not fingerprint-hashed, so this text may
+            # change freely (``detail`` may not).
+            affected = " and ".join(
+                f"channels.{n}.allowBots"
+                for n in sorted(dict.fromkeys(from_default_channels)))
+            fix += (
+                " OpenClaw 2026.9.7 and later ACCEPT bot-authored messages on "
+                "Discord and Slack when allowBots is unset, where earlier builds "
+                f"ignored them: set {affected} to false explicitly (false is right on "
+                'every build; "mentions" still admits a bot that names the agent).'
+            )
+        return _finding(
+            "B372",
+            WARN,
+            detail,
+            fix,
             evidence=evidence[:8],
             config_field_paths={"channels.*.allowBots"},
         )
-    if drifted:
-        evidence = sorted(dict.fromkeys(drifted))
+    if drifted or undetermined:
+        drifted_ev = sorted(dict.fromkeys(drifted))
+        undetermined_ev = sorted(dict.fromkeys(undetermined))
+        details: list = []
+        fixes: list = []
+        if drifted_ev:
+            details.append(
+                f"{len(drifted_ev)} channel scope(s) set allowBots to a value this "
+                "audit does not recognize, so whether bot-authored input is "
+                "accepted there could not be determined."
+            )
+            fixes.append(
+                "Fix the listed field(s) in openclaw.json to a recognized value "
+                '(true, false, or "mentions"), then re-run the audit.'
+            )
+        if undetermined_ev:
+            details.append(
+                f"{len(undetermined_ev)} Discord/Slack channel scope(s) leave "
+                "allowBots unset and the OpenClaw build could not be determined, so "
+                "whether bot-authored input is accepted there could not be "
+                "established: the OpenClaw releases read (2026.7.1-2 through 2026.9.6) "
+                "ignore bot-authored messages when it is unset, 2026.9.7 and later "
+                "accept them."
+            )
+            fixes.append(
+                "Set allowBots explicitly on the listed channel(s) (false stops "
+                "bot-authored messages from triggering turns, and is right on every "
+                "build), or run the audit where the installed openclaw can be found "
+                "so the build is known."
+            )
         return _finding(
             "B372",
             UNKNOWN,
-            f"{len(evidence)} channel scope(s) set allowBots to a value this "
-            "audit does not recognize, so whether bot-authored input is "
-            "accepted there could not be determined.",
-            "Fix the listed field(s) in openclaw.json to a recognized value "
-            '(true, false, or "mentions"), then re-run the audit.',
-            evidence=evidence[:8],
+            " ".join(details),
+            " ".join(fixes),
+            evidence=(drifted_ev + undetermined_ev)[:8],
+            config_field_paths=(
+                {"channels.*.allowBots"} if undetermined_ev else None),
         )
     return _finding(
         "B372",
