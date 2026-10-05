@@ -977,19 +977,6 @@ _B176_VIEW_MASQUERADE_DECOY = (
     "before any row is read), so both sites share this entry despite differing column "
     "counts. Never a real OpenClaw table name itself."
 )
-_C643_EXEC_APPROVALS_CONFIG_NOT_YET_SNAPSHOTTED = (
-    "exec_approvals_config, declared verbatim from the installed 2026.9.7 (state schema "
-    "v19) dist -- 11 columns, config_key TEXT NOT NULL PRIMARY KEY .. updated_at_ms, STRICT, "
-    "also byte-equal to the live table on this machine -- but classified LEGACY_TABLE, "
-    "not MODERN, for one reason only: the shipped snapshot (stamped 2026.9.6 / schema v18) "
-    "was generated before any reader in clawseccheck/ SELECTed from this table, so it does "
-    "not carry it, and the generator cannot yet be re-run against 2026.9.7 (its state-schema "
-    "version anchors disagree on that build). The vendor DOES declare the table "
-    "(tests/vendor_state_tables.txt lists it). THE NEXT SNAPSHOT REGENERATION WILL ADD IT, "
-    "and this entry must then be flipped to MODERN -- test_legacy_entries_still_differ_"
-    "from_the_snapshot fails on the stale LEGACY_TABLE label by design, which is what "
-    "makes the flip impossible to forget."
-)
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
     # source scanner sees. Pinned by a full fingerprint row at
@@ -1279,9 +1266,10 @@ _REGISTRY: "dict[str, _Entry]" = {
     ),
 
     # ---- exec_approvals_config (B172 reads the state-database exec-approvals store) ----
-    "tests/test_c643_exec_approvals_sqlite_store.py:836": _Entry(
-        LEGACY_TABLE, _C643_EXEC_APPROVALS_CONFIG_NOT_YET_SNAPSHOTTED
-    ),
+    # MODERN since the 2026.9.7 re-baseline (state schema v19): the regenerated snapshot
+    # carries exec_approvals_config and this DDL equals the vendor's column for column. It
+    # was registered LEGACY_TABLE only while the shipped snapshot still predated the table.
+    "tests/test_c643_exec_approvals_sqlite_store.py:836": _Entry(MODERN),
 }
 
 # B-889: +2 (69, was 67) -- round 1's view-masquerade decoy-table DDL site
@@ -1304,9 +1292,8 @@ _REGISTRY: "dict[str, _Entry]" = {
 # reason. 78, was 76.
 # B172 (exec-approvals store moved into the state database): +1 -- the vendor-shaped
 # `exec_approvals_config` DDL in tests/test_c643_exec_approvals_sqlite_store.py, registered
-# LEGACY_TABLE only because the shipped snapshot predates any reader of that table (see
-# _C643_EXEC_APPROVALS_CONFIG_NOT_YET_SNAPSHOTTED; flip to MODERN when the snapshot is next
-# regenerated). 79, was 78.
+# LEGACY_TABLE while the shipped snapshot predated the table, MODERN since the 2026.9.7
+# re-baseline. 79, was 78.
 # 81, was 79: the two test_b749 sites registered above (:702 and :671).
 assert len(_REGISTRY) == 81, f"registry has {len(_REGISTRY)} entries, expected 81"
 
