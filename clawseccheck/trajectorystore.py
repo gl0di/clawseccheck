@@ -150,6 +150,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote as _urlquote
+from . import pathprobe
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -743,7 +744,7 @@ def _pointer_files(home: Path) -> "tuple[int, int, bool]":
             if not isinstance(target, str) or not target.strip():
                 continue
             try:
-                if not Path(target).is_file():
+                if not pathprobe.is_file(Path(target)):
                     missing += 1
             except OSError:
                 continue

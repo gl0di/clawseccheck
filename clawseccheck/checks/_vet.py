@@ -17,6 +17,7 @@ import traceback
 import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
+from .. import pathprobe
 from ..catalog import (
     CRITICAL,
     FAIL,
@@ -9265,7 +9266,7 @@ def _looks_like_a_skill_package(p: Path, text, py, sh, js, ctx=None) -> bool:
         getattr(ctx, "limit_hits", None),
     )):
         return True
-    if isinstance(p, Path) and p.is_dir():
+    if isinstance(p, Path) and pathprobe.is_dir(p):
         try:
             for child in p.iterdir():
                 if child.name.lower() == "skill.md":
@@ -9329,7 +9330,7 @@ def _resolved_parent_is_plausible_skill_root(parent: Path) -> bool:
     return not any(
         e.suffix.lower() in _GENERIC_DOWNLOAD_EXTS
         for e in siblings
-        if not e.is_dir()
+        if not pathprobe.is_dir(e)
     )
 
 
@@ -9361,9 +9362,9 @@ def resolve_skill_target(path: str | Path) -> Path:
     """
     p = Path(path).expanduser()
     if (
-        p.is_file()
+        pathprobe.is_file(p)
         and p.name.lower() == "skill.md"
-        and p.parent.is_dir()
+        and pathprobe.is_dir(p.parent)
         and _resolved_parent_is_plausible_skill_root(p.parent)
     ):
         return p.parent
@@ -9495,12 +9496,12 @@ def vet_skill(path: str | Path) -> Finding:
     returned Finding, so the reader can see what was actually scanned either way.
     """
     original = Path(path).expanduser()
-    is_loose_manifest = original.is_file() and original.name.lower() == "skill.md"
+    is_loose_manifest = pathprobe.is_file(original) and original.name.lower() == "skill.md"
     p = resolve_skill_target(path)
     finding = _vet_resolved_skill(p)
     if is_loose_manifest and p != original:
         finding.detail = f"{finding.detail} {_widened_scope_note(finding, p)}".strip()
-    elif is_loose_manifest and p == original and original.parent.is_dir():
+    elif is_loose_manifest and p == original and pathprobe.is_dir(original.parent):
         finding = _merge_narrowed_scope_gap(finding, original.parent)
     return finding
 
@@ -9598,7 +9599,7 @@ def _merge_narrowed_scope_gap(finding: Finding, root: Path) -> Finding:
 def _vet_resolved_skill(p: Path) -> Finding:
     """The B13 scan itself, over an ALREADY-RESOLVED target (see ``vet_skill``)."""
     ctx = Context(home=p)
-    if p.is_dir():
+    if pathprobe.is_dir(p):
         if _is_own_source(p):
             # B-786: record the same way collector.py's sweep-level self-exclusion does
             # (ctx.self_excluded_skills, B-265/B-507/B-521) - this is a FRESH per-call
@@ -9675,7 +9676,7 @@ def _vet_resolved_skill(p: Path) -> Finding:
         shell_sources = read_skill_shell(p, ctx)
         js_sources = read_skill_js(p, ctx)
         declared_sources = read_skill_declared(p, ctx)
-    elif p.is_file():
+    elif pathprobe.is_file(p):
         # B-152: route a bare file target through the SAME archive-aware collection
         # the directory branch above uses (collect_skill_files -> decompress_and_
         # classify), instead of raw-reading its bytes as text. Previously a bare
@@ -9900,14 +9901,14 @@ def _stat_or_reason(path: Path) -> "tuple[os.stat_result | None, str | None]":
     B-966: the docstring below used to lean on ``Path.is_file()``/``is_dir()``
     swallowing ENOENT/ENOTDIR/EBADF/ELOOP internally and letting EACCES/EPERM
     through as a raised ``OSError`` - but that ignored-errno set is pathlib's own
-    internal implementation detail, not a stable public contract. CPython's pathlib
-    rewrite around 3.13 changed which errnos its internal ``is_file()``/``is_dir()``
-    swallow, and on 3.13+ they also swallow EACCES/EPERM (returning ``False``
-    instead of raising). This repo's CI only pins 3.9/3.12 today, where the
-    original ``except OSError`` guard already worked and still does - but a future
-    matrix bump would silently regress the degraded-vs-absent distinction the
-    docstring below exists to preserve, with nothing able to catch it on the
-    versions this repo actually tests.
+    internal implementation detail, not a stable public contract. A later CPython
+    changed which errnos ``is_file()``/``is_dir()`` swallow: measured on 3.14.4 they
+    return ``False`` for EACCES/EPERM too, where 3.9 and 3.12 raise (3.13 was not
+    measured). CI ran only 3.9 and 3.12 when this was written, where the original
+    ``except OSError`` guard worked, so nothing could have caught the regression of
+    the degraded-vs-absent distinction the docstring below exists to preserve. CI
+    has a 3.14 leg since C-647, and every other predicate call in the package now
+    goes through ``pathprobe``, which keeps the raising contract on every Python.
 
     ``os.stat()``'s raised ``OSError.errno`` is the real POSIX-level signal and is
     stable across Python versions, so this reads it directly instead of depending
@@ -10052,7 +10053,7 @@ def detect_vet_type_with_reason(
 
     p = Path(str(target)).expanduser()
     try:
-        _on_disk = p.exists()
+        _on_disk = pathprobe.exists(p)
     except OSError:
         # B-680: an unreadable parent makes Path.exists() RAISE -- EACCES is not in
         # pathlib's ignored-errno set -- so this classifier answered a question about a
@@ -10066,7 +10067,7 @@ def detect_vet_type_with_reason(
         # about any of these answers.
         if _locate_plugin_root(p) is not None:
             return "plugin", None
-        if p.is_file() and p.suffix == ".json":
+        if pathprobe.is_file(p) and p.suffix == ".json":
             try:
                 data = _json.loads(p.read_text(encoding="utf-8", errors="replace"))
             except (OSError, ValueError):
@@ -10082,9 +10083,9 @@ def detect_vet_type_with_reason(
             ):
                 return "mcp", None
             return "unknown", None
-        if p.is_dir():
+        if pathprobe.is_dir(p):
             return "skill", None
-        if p.is_file():
+        if pathprobe.is_file(p):
             # B-790/C-589: content-sniff the label only - routing is untouched. cli.py
             # maps every non-plugin/non-mcp classification to the same skill engine
             # (`detected if detected in ("plugin", "mcp") else "skill"`), so 'unknown'

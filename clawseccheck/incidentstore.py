@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from . import pathprobe
 from .locking import journal_lock
 from .monitorstore import (
     SCHEMA_VERSION,
@@ -148,7 +149,7 @@ def _fold_incident_rows(rows: "list[dict]") -> "Incident | None":
 
 def load_incident(incident_id: str, path: "str | Path" = DEFAULT_INCIDENTS) -> "Incident | None":
     p = Path(path).expanduser()
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return None
     try:
         rows = [e for e in _iter_jsonl(p) if _schema_ok(e) and e.get("id") == incident_id]
@@ -162,7 +163,7 @@ def list_incident_ids(path: "str | Path" = DEFAULT_INCIDENTS) -> "list[str]":
     whose "created" row was rotated away is not listed -- same fail-safe rule
     load_incident applies."""
     p = Path(path).expanduser()
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return []
     seen: "dict[str, None]" = {}
     try:

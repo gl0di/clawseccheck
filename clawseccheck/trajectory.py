@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from . import pathprobe
 
 # Version gate: only parse the format we have grounded. Any other value -> we don't guess.
 _TRACE_SCHEMA = "openclaw-trajectory"
@@ -136,7 +137,7 @@ def _resolve_pointer_target(pointer_path: Path, home_resolved: Path) -> "tuple[s
     # below does not save this, since e.g. a FIFO's st_size is 0. `is_file()` is a stat,
     # not an open, so it cannot itself hang; it must run before ANY read of this path.
     try:
-        if not pointer_path.is_file():
+        if not pathprobe.is_file(pointer_path):
             return "invalid", None
         pointer_size = pointer_path.stat().st_size
     except OSError:
@@ -207,7 +208,7 @@ def _resolve_pointer_target(pointer_path: Path, home_resolved: Path) -> "tuple[s
     if not in_home:
         return "out_of_home", resolved
     try:
-        exists = resolved.is_file()
+        exists = pathprobe.is_file(resolved)
     except OSError:
         exists = False
     return ("resolved", resolved) if exists else ("missing", resolved)
@@ -257,7 +258,7 @@ def explicit_path_problem(explicit_path: str | None) -> str | None:
         return f"{explicit_path}: {exc.strerror or exc}"
     # Reached only after a successful stat, so the parent is readable and this cannot
     # raise for the same reason.
-    if p.is_dir():
+    if pathprobe.is_dir(p):
         return f"{explicit_path}: is a directory, not a trajectory file"
     return None
 
@@ -284,7 +285,7 @@ def resolve_explicit_file(explicit_path) -> "tuple[list, bool]":
     """
     p = Path(explicit_path).expanduser()
     try:
-        return ([p], False) if p.is_file() else ([], False)
+        return ([p], False) if pathprobe.is_file(p) else ([], False)
     except OSError:
         return [], True
 

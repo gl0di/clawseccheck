@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import pathprobe
 from . import brand
 from .catalog import (
     ACTIONABLE_STATUSES,
@@ -2050,30 +2051,30 @@ def _credential_surface_map(ctx) -> list[dict]:
     entries.append({"class": "mcp-passthrough", "reachable": bool(mcp_evidence), "evidence": mcp_evidence})
 
     dotenv_hits: list[str] = []
-    if home_path is not None and home_path.exists():
+    if home_path is not None and pathprobe.exists(home_path):
         candidates = [home_path / ".env", home_path / ".envrc"]
         for ws in WORKSPACE_DIRS:
             candidates.append(home_path / ws / ".env")
             candidates.append(home_path / ws / ".envrc")
         for cand in candidates:
-            if cand.is_file():  # path-existence check only - never reads contents
+            if pathprobe.is_file(cand):  # path-existence check only - never reads contents
                 dotenv_hits.append(_rel(cand))
     entries.append({"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_hits})
 
     keychain_hits: list[str] = []
-    if home_path is not None and home_path.exists():
+    if home_path is not None and pathprobe.exists(home_path):
         for rel in (
             "Library/Keychains",
             ".local/share/keyrings",
             ".gnupg",
         ):
             p = home_path / rel
-            if p.exists():  # path-existence check only - never reads contents
+            if pathprobe.exists(p):  # path-existence check only - never reads contents
                 keychain_hits.append(_rel(p))
     entries.append({"class": "keychain", "reachable": bool(keychain_hits), "evidence": keychain_hits})
 
     cookie_hits: list[str] = []
-    if home_path is not None and home_path.exists():
+    if home_path is not None and pathprobe.exists(home_path):
         for rel in (
             ".config/google-chrome/Default/Cookies",
             ".config/chromium/Default/Cookies",
@@ -2082,22 +2083,22 @@ def _credential_surface_map(ctx) -> list[dict]:
             "Library/Cookies/Cookies.binarycookies",
         ):
             p = home_path / rel
-            if p.is_file():
+            if pathprobe.is_file(p):
                 cookie_hits.append(_rel(p))
-            elif p.is_dir():
+            elif pathprobe.is_dir(p):
                 for child in p.rglob("cookies.sqlite"):
-                    if child.is_file():
+                    if pathprobe.is_file(child):
                         cookie_hits.append(_rel(child))
     entries.append({"class": "cookies", "reachable": bool(cookie_hits), "evidence": cookie_hits})
 
     ssh_hits: list[str] = []
-    if home_path is not None and home_path.exists():
+    if home_path is not None and pathprobe.exists(home_path):
         ssh_dir = home_path / ".ssh"
-        if ssh_dir.is_dir():  # path-existence check only - never reads key contents
+        if pathprobe.is_dir(ssh_dir):  # path-existence check only - never reads key contents
             ssh_hits.append(_rel(ssh_dir))
             for name in ("id_rsa", "id_ed25519", "config", "known_hosts"):
                 p = ssh_dir / name
-                if p.is_file():  # path-existence check only
+                if pathprobe.is_file(p):  # path-existence check only
                     ssh_hits.append(_rel(p))
     entries.append({"class": "ssh", "reachable": bool(ssh_hits), "evidence": ssh_hits})
 

@@ -37,6 +37,13 @@ jobs:
     # is still advertised for the read-only audit but its local-store hardening degrades
     # (see safeio.py / README) — a green Windows CI would not make O_NOFOLLOW/chmod work, so
     # the honest fix is disclosure, not a rubber-stamp OS axis.
+    #
+    # C-647: a 3.14 leg. Python 3.14 rewrote pathlib's exists()/is_dir()/is_file()/
+    # is_symlink() to return False on ANY OSError, where 3.9 and 3.12 raise on a permission
+    # error; the unreadable-path degradations were dead code there and no leg ran it. The
+    # package now routes those predicates through pathprobe.py (identical on every
+    # interpreter), and this leg runs the unreadable-path tests on the interpreter where
+    # the defect lived. 3.13 stays unmeasured and is deliberately not in the matrix.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -44,6 +51,7 @@ jobs:
         include:
           - {os: ubuntu-latest, python-version: "3.9"}
           - {os: ubuntu-latest, python-version: "3.12"}
+          - {os: ubuntu-latest, python-version: "3.14"}
           - {os: macos-latest, python-version: "3.12"}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

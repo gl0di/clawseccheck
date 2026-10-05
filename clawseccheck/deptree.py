@@ -73,6 +73,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import pathprobe
 from .safeio import walk_dir_safely
 
 # Bounds. OpenClaw's real tree measured 380 packages and ClawHub's 39 (2026-08-04; 398 for
@@ -296,7 +297,7 @@ def _version_manager_roots(home: "Path", binary_name: str) -> "list[Path]":
                  home / ".local" / "share" / "fnm" / "node-versions",
                  home / ".asdf" / "installs" / "nodejs"):
         try:
-            versions = sorted((p for p in base.iterdir() if p.is_dir()),
+            versions = sorted((p for p in base.iterdir() if pathprobe.is_dir(p)),
                               key=_version_sort_key, reverse=True)
         except OSError:
             continue
@@ -332,7 +333,7 @@ def find_dep_tree(package_root) -> "Path | None":
     """
     try:
         nm = Path(package_root) / "node_modules"
-        if nm.is_symlink() or not nm.is_dir():
+        if pathprobe.is_symlink(nm) or not pathprobe.is_dir(nm):
             return None
         return nm
     except OSError:
@@ -393,7 +394,7 @@ def _resolve_in_package(candidate: str, pkg_dir: Path) -> "Path | None":
     for ext in _NODE_EXTS:
         p = pkg_dir / (candidate + ext)
         try:
-            if p.is_symlink() or not p.is_file():
+            if pathprobe.is_symlink(p) or not pathprobe.is_file(p):
                 continue
             # Confinement: a `../../..` target must never escape the package we are
             # attributing the finding to.
@@ -533,9 +534,9 @@ def _gyp_directives(pkg_dir: Path, name: str, relpath: str) -> tuple:
     gyp = pkg_dir / GYP_FILENAME
     notes: list = []
     try:
-        if gyp.is_symlink():  # before exists(): a broken link must not read as absent
+        if pathprobe.is_symlink(gyp):  # before exists(): a broken link must not read as absent
             return [], ["build config is a symlink and was not followed"]
-        if not gyp.is_file():
+        if not pathprobe.is_file(gyp):
             return [], notes
         if gyp.stat().st_size > MAX_GYP_BYTES:
             return [], ["build config is too large to examine"]
@@ -584,7 +585,7 @@ def scan_dep_tree(nm_root, *, max_packages: int = MAX_PACKAGES) -> DepTreeScan:
     if nm_root is None:
         return result
     root = Path(nm_root)
-    if not root.is_dir():
+    if not pathprobe.is_dir(root):
         return result
     result.root = root
 

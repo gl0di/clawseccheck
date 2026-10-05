@@ -52,6 +52,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import pathprobe
 from .deptree import find_package_root
 
 # Bounds on the code walk, set to roughly 2.5x the real install. The margin erodes with every
@@ -237,7 +238,7 @@ def describe_install(binary_name: str = "openclaw", *, which=None,
     lock_name, lock_digest = "", ""
     for name in _LOCK_NAMES:
         candidate = root / name
-        if candidate.is_file():
+        if pathprobe.is_file(candidate):
             lock_name, lock_digest = name, _digest_file(candidate)
             break
     if not lock_name:

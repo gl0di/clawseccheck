@@ -57,6 +57,7 @@ import shlex
 import shutil
 import sys
 from pathlib import Path
+from . import pathprobe
 
 #: The console-script name declared in `pyproject.toml` `[project.scripts]`.
 _CONSOLE_NAME = "clawseccheck"
@@ -111,7 +112,7 @@ def _is_our_entry_script(path: str) -> bool:
         return False
     if resolved == pkg.parent / _SHIM_NAME:
         return True
-    if resolved.name == _SHIM_NAME and (resolved.parent / _CONSOLE_NAME).is_dir():
+    if resolved.name == _SHIM_NAME and pathprobe.is_dir(resolved.parent / _CONSOLE_NAME):
         # A shim beside a `clawseccheck/` package that is not the one we were imported
         # from - an installed skill running a checkout, say. Still ours.
         return True
@@ -125,7 +126,7 @@ def _shim_beside_the_package() -> "str | None":
     """The bundled `audit.py`, if this package is laid out as an installed skill."""
     candidate = Path(__file__).resolve().parent.parent / _SHIM_NAME
     try:
-        return str(candidate) if candidate.is_file() else None
+        return str(candidate) if pathprobe.is_file(candidate) else None
     except OSError:
         return None
 

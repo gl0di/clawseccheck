@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from .. import pathprobe
 from .. import hostpersist as _hostpersist
 from .. import trajectory as _trajectory
 from .. import trajectorystore as _trajectorystore
@@ -936,7 +937,7 @@ def check_systemd_persistence(ctx: Context) -> Finding:
               simply absent), or no OpenClaw-related unit file found there.
     """
     user_units_dir = ctx.home.parent / ".config" / "systemd" / "user"
-    if not user_units_dir.is_dir():
+    if not pathprobe.is_dir(user_units_dir):
         return _finding(
             "B150",
             UNKNOWN,
@@ -948,7 +949,7 @@ def check_systemd_persistence(ctx: Context) -> Finding:
 
     try:
         unit_files = sorted(p for p in user_units_dir.iterdir()
-                             if p.is_file() and not p.is_symlink() and p.suffix == ".service")
+                             if pathprobe.is_file(p) and not pathprobe.is_symlink(p) and p.suffix == ".service")
     except OSError:
         unit_files = []
 
@@ -1038,9 +1039,9 @@ def _bounded_read_text(path: Path) -> "str | None":
     reads more of a host file than `hostpersist.scan()` itself was willing to digest.
     """
     try:
-        if path.is_symlink() and not path.exists():
+        if pathprobe.is_symlink(path) and not pathprobe.exists(path):
             return None
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return None
         with open(path, "rb") as fh:
             raw = fh.read(_hostpersist.MAX_FILE_BYTES)
@@ -1416,7 +1417,7 @@ def check_bundled_root_override(ctx: Context) -> Finding:
         # where the code-load root points. The scan below still runs against the literal
         # value; the only thing this changes is what gets PRINTED.
         resolved = Path(value)
-        state = "exists" if resolved.is_dir() else "does not currently exist"
+        state = "exists" if pathprobe.is_dir(resolved) else "does not currently exist"
         # B-349: `resolved` is the LITERAL override value and stays verbatim (it is what
         # the owner has to go unset, and it varies only when the audited subject does).
         # `source` is the artifact this scan happened to read it out of, so it carries the

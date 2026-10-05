@@ -12,6 +12,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
+from .. import pathprobe
 from .. import attest as _attest
 from .. import harnessruntime as _harnessruntime
 from .. import mcpsurface as _mcpsurface
@@ -381,7 +382,7 @@ def _colocated_skill_dirs(p: Path, root: Path, dispatched: "list[Path]") -> "lis
     by the walk that owns it, and never as "confidently no SKILL.md".
     """
     candidates = [root]
-    if root != p and p.is_dir():
+    if root != p and pathprobe.is_dir(p):
         candidates.append(p)
     try:
         covered = {d.resolve() for d in dispatched}
@@ -790,7 +791,7 @@ def vet_plugin(
     from ..skillast import analyze_javascript, analyze_python  # noqa: PLC0415
 
     p = Path(str(path)).expanduser()
-    if not p.exists():
+    if not pathprobe.exists(p):
         return _plugin_finding(
             HIGH,
             UNKNOWN,
@@ -885,7 +886,7 @@ def vet_plugin(
     # -- npm packaging (recon §11.3/§11.4)
     pkg: dict = {}
     pkg_path = root / "package.json"
-    if pkg_path.is_file():
+    if pathprobe.is_file(pkg_path):
         try:
             loaded = _json.loads(pkg_path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError, RecursionError):
@@ -911,8 +912,8 @@ def vet_plugin(
     # have false-WARNed). Only *floating* version ranges are an actionable signal.
     if (
         deps
-        and not (root / "npm-shrinkwrap.json").is_file()
-        and not (root / "package-lock.json").is_file()
+        and not pathprobe.is_file(root / "npm-shrinkwrap.json")
+        and not pathprobe.is_file(root / "package-lock.json")
     ):
         notes.append(
             f"coverage: {len(deps)} runtime dependency(ies) without a lockfile "
@@ -974,13 +975,13 @@ def vet_plugin(
             if escaped:
                 warns.append(f"manifest skills entry escapes the plugin root: {entry_text!r}")
                 continue
-            if not d.is_dir():
+            if not pathprobe.is_dir(d):
                 notes.append(f"manifest skills entry not present in the package: {entry_text!r}")
                 continue
-            if (d / "SKILL.md").is_file():
+            if pathprobe.is_file(d / "SKILL.md"):
                 skill_dirs.append(d)
             else:
-                kids = [c for c in sorted(d.iterdir()) if c.is_dir() and not c.is_symlink()]
+                kids = [c for c in sorted(d.iterdir()) if pathprobe.is_dir(c) and not pathprobe.is_symlink(c)]
                 skill_dirs.extend(kids if kids else [d])
     # C-632: a SKILL.md the manifest did not dispatch is still a skill the user is about to
     # install. Kept OUT of `skill_dirs` (see the docstring), dispatched through the same loop.
@@ -1114,7 +1115,7 @@ def vet_plugin(
     # Only a dispatch that returned counts - a vet_skill that raised read nothing.
     wrapper_findings: list[Finding] = []
     wrapper_code: list[str] = []
-    if root != p and p.is_dir():
+    if root != p and pathprobe.is_dir(p):
         if cpu_exceeded(deadline):
             budget_hit = True
         else:
@@ -1203,7 +1204,7 @@ def vet_plugin(
             for fn in sorted(filenames):
                 fp = Path(dirpath) / fn
                 try:
-                    is_link = fp.is_symlink()
+                    is_link = pathprobe.is_symlink(fp)
                 except OSError as exc:
                     if exc.errno not in WALK_VANISHED_ERRNOS:
                         note_walk_gap(gaps, Path(dirpath), exc)  # gate: parent missing `x`
@@ -1886,7 +1887,7 @@ def sweep_plugins(home_dir, *, ascii_only: bool = False,
             resolved = candidate.resolve()
         except OSError:
             resolved = candidate
-        if resolved in seen or not candidate.is_dir():
+        if resolved in seen or not pathprobe.is_dir(candidate):
             continue
         seen.add(resolved)
         plugin_id = rec.get("plugin_id") or candidate.name
@@ -3168,7 +3169,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
         # own directory mode. Ask the question this branch actually needs ("is there a
         # readable spec file here?") in a form that can answer "I could not look".
         try:
-            _is_spec_file = p.is_file()
+            _is_spec_file = pathprobe.is_file(p)
         except OSError:
             # NOT subject_absent (B-681): whether this names a server or a spec file is
             # exactly what we failed to establish, and the caller turns subject_absent
@@ -3279,7 +3280,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
         cfg_file = home_path / "openclaw.json"
         import json as _json
 
-        _vet_mcp_config_found = cfg_file.is_file()
+        _vet_mcp_config_found = pathprobe.is_file(cfg_file)
         try:
             cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
         except OSError:
@@ -8106,17 +8107,17 @@ def _codex_plugin_doc_cache_dirs(ctx: Context) -> list[Path]:
     """agents/<agent>/agent/codex-home/.tmp/plugins/plugins/ dirs under ctx.home, if any."""
     agents_root = ctx.home / "agents"
     out: list[Path] = []
-    if not agents_root.is_dir():
+    if not pathprobe.is_dir(agents_root):
         return out
     try:
-        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
+        agent_dirs = sorted(p for p in agents_root.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
     except OSError:
         return out
     for agent_dir in agent_dirs:
         cache_dir = agent_dir
         for part in _C015_CODEX_PLUGIN_MARKER:
             cache_dir = cache_dir / part
-        if cache_dir.is_dir():
+        if pathprobe.is_dir(cache_dir):
             out.append(cache_dir)
     return out
 
@@ -8153,12 +8154,12 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
 
     for cache_dir in cache_dirs:
         try:
-            connector_dirs = sorted(p for p in cache_dir.iterdir() if p.is_dir() and not p.is_symlink())
+            connector_dirs = sorted(p for p in cache_dir.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
         except OSError:
             continue
         for connector_dir in connector_dirs:
             hooks_path = connector_dir / "hooks.json"
-            if not hooks_path.is_file() or hooks_path.is_symlink():
+            if not pathprobe.is_file(hooks_path) or pathprobe.is_symlink(hooks_path):
                 continue
             any_hooks_file = True
             try:
@@ -8233,10 +8234,10 @@ def _npm_projects_plugin_ids(ctx: Context) -> dict[str, Path]:
     npm_projects = ctx.home
     for part in _NPM_PROJECTS_REL:
         npm_projects = npm_projects / part
-    if not npm_projects.is_dir():
+    if not pathprobe.is_dir(npm_projects):
         return out
     try:
-        wrapper_dirs = sorted(p for p in npm_projects.iterdir() if p.is_dir() and not p.is_symlink())
+        wrapper_dirs = sorted(p for p in npm_projects.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
     except OSError:
         return out
     import json as _json
@@ -8265,20 +8266,20 @@ def _agent_plugins_ids(ctx: Context) -> dict[str, Path]:
     """{plugin-id: plugin-dir} for each agents/<agent>/agent/plugins/<name>/ directory."""
     out: dict[str, Path] = {}
     agents_root = ctx.home / "agents"
-    if not agents_root.is_dir():
+    if not pathprobe.is_dir(agents_root):
         return out
     try:
-        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
+        agent_dirs = sorted(p for p in agents_root.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
     except OSError:
         return out
     for agent_dir in agent_dirs:
         plugins_dir = agent_dir
         for part in _AGENT_PLUGINS_REL:
             plugins_dir = plugins_dir / part
-        if not plugins_dir.is_dir():
+        if not pathprobe.is_dir(plugins_dir):
             continue
         try:
-            plugin_dirs = sorted(p for p in plugins_dir.iterdir() if p.is_dir() and not p.is_symlink())
+            plugin_dirs = sorted(p for p in plugins_dir.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
         except OSError:
             continue
         for plugin_dir in plugin_dirs:
@@ -8410,10 +8411,10 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
     undeclared: list[str] = []
     checked_any = False
     for load_path in load_paths:
-        if not load_path.is_dir():
+        if not pathprobe.is_dir(load_path):
             continue
         manifest_file = load_path / _PLUGIN_MANIFEST
-        if not manifest_file.is_file():
+        if not pathprobe.is_file(manifest_file):
             continue
         try:
             manifest = _json.loads(manifest_file.read_text(encoding="utf-8", errors="replace"))

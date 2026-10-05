@@ -21,6 +21,7 @@ import errno
 import hashlib
 import os
 from pathlib import Path
+from . import pathprobe
 
 # The directory that contains this file *is* the clawseccheck package.
 _PKG_DIR = Path(__file__).resolve().parent
@@ -328,7 +329,7 @@ def package_digest(
         """
         d = pkg_dir.joinpath(*rel_parts)
         try:
-            is_link = d.is_symlink()
+            is_link = pathprobe.is_symlink(d)
         except OSError:
             is_link = False
         if is_link:
@@ -352,7 +353,7 @@ def package_digest(
             prune_dir=_observe_dir,
             unreadable_dirs=unreadable_dirs,
         )
-        if p.is_file()
+        if pathprobe.is_file(p)
     ]
 
     per_file: dict[str, str] = {}

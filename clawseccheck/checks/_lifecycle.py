@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 from typing import Callable
+from .. import pathprobe
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist  # B-502: C4 single-run version-rollback signal
 from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs (JSONL sidecar)
@@ -539,7 +540,7 @@ def _writable_identity_files(ctx: Context) -> list[str]:
         try:
             st = ws_dir.stat()
             if _writable_by_others(st) and any(
-                (ws_dir / f).is_file() for f in _IDENTITY_TARGETS
+                pathprobe.is_file(ws_dir / f) for f in _IDENTITY_TARGETS
             ):
                 writable.append(f"{ws}/ (dir mode {oct(st.st_mode & 0o777)[-3:]})")
         except OSError:
@@ -547,7 +548,7 @@ def _writable_identity_files(ctx: Context) -> list[str]:
         # Individual identity files
         for fname in _IDENTITY_TARGETS:
             f = ws_dir / fname
-            if not f.is_file():
+            if not pathprobe.is_file(f):
                 continue
             try:
                 st = f.stat()
@@ -569,7 +570,7 @@ def _writable_identity_files(ctx: Context) -> list[str]:
         if f.name not in _IDENTITY_TARGETS:
             continue
         try:
-            if not f.is_file():
+            if not pathprobe.is_file(f):
                 continue
             st = f.stat()
         except OSError:
@@ -582,7 +583,7 @@ def _writable_identity_files(ctx: Context) -> list[str]:
     # Check the skills directories (writing here installs new skills)
     for rel in SKILL_DIRS:
         d = ctx.home / rel
-        if not d.is_dir():
+        if not pathprobe.is_dir(d):
             continue
         try:
             st = d.stat()
@@ -623,7 +624,7 @@ def _writable_skill_dirs(ctx: Context):
     for rel in SKILL_DIRS:
         base = ctx.home / rel
         try:
-            if not base.is_dir() or base.is_symlink():
+            if not pathprobe.is_dir(base) or pathprobe.is_symlink(base):
                 continue
         except OSError:
             continue
@@ -632,7 +633,7 @@ def _writable_skill_dirs(ctx: Context):
             for c in sorted(base.iterdir()):
                 if seen >= 200:
                     break
-                if c.is_dir() and not c.is_symlink():
+                if pathprobe.is_dir(c) and not pathprobe.is_symlink(c):
                     candidates.append(c)
                     seen += 1
         except OSError:
@@ -917,7 +918,7 @@ def _c3_git_covers(directory: Path, boundary: Path) -> bool:
         candidates = [directory, *(p for p in directory.parents if p.is_relative_to(boundary))]
     for candidate in candidates:
         try:
-            if (candidate / ".git").is_dir():
+            if pathprobe.is_dir(candidate / ".git"):
                 return True
         except OSError:
             continue
@@ -1185,7 +1186,7 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
         soft (MEMORY.md/HEARTBEAT.md): WARN on group OR world write.
         critical (SOUL/AGENTS/TOOLS): FAIL on world write, WARN on group write.
         """
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return False
         try:
             real = path.resolve()
@@ -3524,7 +3525,7 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     )
 
     home = getattr(ctx, "home", None)
-    if not isinstance(home, Path) or not home.exists():
+    if not isinstance(home, Path) or not pathprobe.exists(home):
         return _custom(
             "B104", LOW, UNKNOWN,
             "No OpenClaw home filesystem to inspect for offboarding hygiene.",
@@ -3546,7 +3547,7 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
         except OSError:
             continue
         for sd in entries:
-            if sd.is_symlink() or not sd.is_dir():
+            if pathprobe.is_symlink(sd) or not pathprobe.is_dir(sd):
                 continue
             skill_md = sd / "SKILL.md"
             # B-767: stat'ing an entry INSIDE `sd` needs traverse permission on `sd`
@@ -3602,7 +3603,7 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
         if not isinstance(cmd, str) or not cmd.strip():
             continue
         expanded = os.path.expanduser(cmd.strip())
-        if os.path.isabs(expanded) and not Path(expanded).exists():
+        if os.path.isabs(expanded) and not pathprobe.exists(Path(expanded)):
             warns.append(f"MCP server '{name}' command path is missing: {cmd.strip()}")
 
     if warns:
@@ -4325,7 +4326,7 @@ def check_skill_symlink_target_writability(ctx: Context) -> Finding:
                 "local account could plant a symlink target there for the agent to "
                 "load as skill code"
             )
-        elif not p.exists():
+        elif not pathprobe.exists(p):
             warns.append(
                 f"skills.load.allowSymlinkTargets entry {raw!r} could not be resolved "
                 "on this machine \u2014 its permissions cannot be verified from here"
@@ -4451,8 +4452,8 @@ def check_session_approval_policy(ctx: Context) -> Finding:
     # regardless of how safe other agents are - safe agents cannot dilute a dangerous one.
     agents_root = ctx.home / "agents"
     agent_dirs: list[Path] = []
-    if agents_root.is_dir():
-        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
+    if pathprobe.is_dir(agents_root):
+        agent_dirs = sorted(p for p in agents_root.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
 
     any_sessions = False  # at least one .jsonl file found anywhere
     any_turns = False  # at least one turn_context event parsed
@@ -4483,7 +4484,7 @@ def check_session_approval_policy(ctx: Context) -> Finding:
 
     for agent_dir in agent_dirs:
         sessions_dir = agent_dir / "agent" / "codex-home" / "sessions"
-        if not sessions_dir.is_dir():
+        if not pathprobe.is_dir(sessions_dir):
             continue
         agent_files = [p for p in walk_dir_safely(sessions_dir) if p.name.endswith(".jsonl")]
         if not agent_files:
@@ -4627,15 +4628,15 @@ def check_codex_project_trust(ctx: Context) -> Finding:
     """
     agents_root = ctx.home / "agents"
     agent_dirs: list[Path] = []
-    if agents_root.is_dir():
-        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
+    if pathprobe.is_dir(agents_root):
+        agent_dirs = sorted(p for p in agents_root.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
 
     any_config = False
     trusted_ev: list[str] = []
 
     for agent_dir in agent_dirs:
         config_path = agent_dir / "agent" / "codex-home" / "config.toml"
-        if not config_path.is_file():
+        if not pathprobe.is_file(config_path):
             continue
         any_config = True
         try:
@@ -4708,7 +4709,7 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
     import json as _json
 
     pending_path = ctx.home / "devices" / "pending.json"
-    if not pending_path.is_file():
+    if not pathprobe.is_file(pending_path):
         return _finding(
             "B138",
             PASS,
@@ -4886,7 +4887,7 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
 
     using_sqlite_fallback = False
     paired_path = ctx.home / "devices" / "paired.json"
-    if paired_path.is_file():
+    if pathprobe.is_file(paired_path):
         try:
             data = _json.loads(paired_path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
@@ -5226,7 +5227,7 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
     rel = "/".join(parts)
     p = ctx.home.joinpath(*parts)
     try:
-        if not p.is_file():
+        if not pathprobe.is_file(p):
             return None, None
         with p.open("rb") as fh:
             raw = fh.read(_B396_MAX_LEGACY_STORE_BYTES + 1)
@@ -6054,7 +6055,7 @@ def _b181_sha256(path: Path):
     import hashlib
 
     try:
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return "missing", None
         if path.stat().st_size > _B181_MAX_BYTES_PER_FILE:
             return "too-large", None
@@ -6137,7 +6138,7 @@ def _b181_skill_dir(slug: str, lock_parent: Path):
     """
     cand = lock_parent / "skills" / slug
     try:
-        return cand if cand.is_dir() else None
+        return cand if pathprobe.is_dir(cand) else None
     except OSError:
         return None
 
@@ -6186,12 +6187,12 @@ def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
     for rel in SKILL_DIRS:
         root = home / rel
         try:
-            children = sorted(root.iterdir()) if root.is_dir() else []
+            children = sorted(root.iterdir()) if pathprobe.is_dir(root) else []
         except OSError:
             continue
         for skill_dir in children:
             try:
-                if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+                if not pathprobe.is_dir(skill_dir) or skill_dir.name.startswith("."):
                     continue
             except OSError:
                 continue
@@ -6266,7 +6267,7 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
                                 "could not be located on disk")
             continue
         try:
-            is_link = skill_dir.is_symlink()
+            is_link = pathprobe.is_symlink(skill_dir)
         except OSError:
             is_link = False
         if is_link:
@@ -6783,7 +6784,7 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
 
     for store in _b182_candidate_stores(ctx):
         try:
-            if not store.is_file():
+            if not pathprobe.is_file(store):
                 continue
         except OSError:
             continue
@@ -6946,14 +6947,14 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
     unreadable: list[str] = []
 
     cred_dir = ctx.home / "credentials"
-    if cred_dir.is_dir():
+    if pathprobe.is_dir(cred_dir):
         try:
             entries = list(cred_dir.iterdir())
         except OSError:
             unreadable.append("credentials/ is present but could not be listed")
             entries = []
         for entry in entries:
-            if entry.name.endswith(_LEGACY_ALLOWFROM_SUFFIX) and entry.is_file():
+            if entry.name.endswith(_LEGACY_ALLOWFROM_SUFFIX) and pathprobe.is_file(entry):
                 channel = entry.name[: -len(_LEGACY_ALLOWFROM_SUFFIX)]
                 found.append(
                     f"credentials/{channel}{_LEGACY_ALLOWFROM_SUFFIX} "
@@ -6961,7 +6962,7 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
                 )
 
     device_auth = ctx.home / "identity" / "device-auth.json"
-    if device_auth.is_file():
+    if pathprobe.is_file(device_auth):
         found.append("identity/device-auth.json (legacy device-auth store)")
 
     if found:
@@ -7038,7 +7039,7 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
     from datetime import datetime
 
     path = ctx.home / "gateway-supervisor-restart-handoff.json"
-    if not path.is_file():
+    if not pathprobe.is_file(path):
         return _finding(
             "B357",
             PASS,
@@ -7161,7 +7162,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     ):
         for d in dirs:
             try:
-                present = d.is_dir()
+                present = pathprobe.is_dir(d)
             except OSError:
                 present = False
             if not present:
@@ -7199,7 +7200,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 continue
             p = Path(sf) if Path(sf).is_absolute() else (ctx.home / sf)
             try:
-                gone = not p.parent.is_dir()
+                gone = not pathprobe.is_dir(p.parent)
             except OSError:
                 gone = True
             if gone and str(p) not in seen:

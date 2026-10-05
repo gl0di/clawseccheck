@@ -54,6 +54,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from . import pathprobe
 
 # The workspace directory names OpenClaw uses, in the order `collector.WORKSPACE_DIRS`
 # lists them. Duplicated as a literal rather than imported, deliberately: this module is a
@@ -545,7 +546,7 @@ def workspace_roots(home: Path, config: "dict | None" = None, *,
             continue
         seen.add(key)
         try:
-            if r.is_dir():
+            if pathprobe.is_dir(r):
                 out.append(r)
         except OSError:
             continue

@@ -39,6 +39,7 @@ import re
 import shutil
 import struct
 from pathlib import Path
+from . import pathprobe
 
 # detection-class keys (stable; consumed by checks B50-B54 and risk RISK-10)
 NETWORK_IDS = "network_ids"
@@ -108,7 +109,7 @@ def _exists(root: Path, *rels: str) -> bool:
     """True if any of the given root-relative paths exists (never raises)."""
     for rel in rels:
         try:
-            if (root / rel).exists():
+            if pathprobe.exists(root / rel):
                 return True
         except OSError:
             continue
@@ -126,7 +127,7 @@ def _systemd_enabled(root: Path, unit: str) -> bool:
     base = root / "etc/systemd/system"
     try:
         for wants in base.glob("*.wants"):
-            if (wants / unit).exists():
+            if pathprobe.exists(wants / unit):
                 return True
     except OSError:
         pass
@@ -136,7 +137,7 @@ def _systemd_enabled(root: Path, unit: str) -> bool:
 def _read_text(path: Path) -> str | None:
     """Read a small text config file, or None if unreadable (never raises)."""
     try:
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return None
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -452,7 +453,7 @@ def _alf_globalstate(root: Path) -> int | None:
     the caller reports UNKNOWN rather than guessing.
     """
     p = root / "Library/Preferences/com.apple.alf.plist"
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return None
     try:
         import plistlib

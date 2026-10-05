@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+from . import pathprobe
 from . import (
     audit, build_context, fingerprint, load_events, load_ignore, load_state, make_canary,
     record_events,
@@ -2666,10 +2667,10 @@ def _onboarding_reason(home: Path) -> str | None:
     present but unreadable" case, which the dashboard/error path surfaces distinctly -
     onboarding must not hide a real, permission-blocked setup behind a welcome screen.
     """
-    if not home.exists():
+    if not pathprobe.exists(home):
         return "missing"
     try:
-        if home.is_dir() and not any(home.iterdir()):
+        if pathprobe.is_dir(home) and not any(home.iterdir()):
             return "empty"
     except OSError:
         return None
@@ -2728,7 +2729,7 @@ def _run_watch_cli(args) -> int:
     from every other mode in this file.
     """
     home = Path(args.home).expanduser()
-    if not home.is_dir():
+    if not pathprobe.is_dir(home):
         print(f"{cmd('--watch')}: '{home}' is not a directory \u2014 nothing to watch.",
               file=sys.stderr)
         return 1
@@ -2791,7 +2792,7 @@ def _run_purge(args) -> int:
     store_dir = _store_dir(args)
     candidates = [store_dir / name for name in _PURGE_FILENAMES]
     candidates += [store_dir / (name + ".lock") for name in _PURGE_FILENAMES]
-    existing = [p for p in candidates if p.exists()]
+    existing = [p for p in candidates if pathprobe.exists(p)]
 
     if not existing:
         _emit("Nothing to purge \u2014 no ClawSecCheck local store files found.")
@@ -3518,7 +3519,7 @@ def _default_pdf_target(home: str, store_dir: "Path | None" = None) -> "tuple[st
     """
     managed = Path(home).expanduser() / "media" / "outbound"
     try:
-        if managed.is_dir() and os.access(managed, os.W_OK):
+        if pathprobe.is_dir(managed) and os.access(managed, os.W_OK):
             return str(managed / "clawseccheck-report.pdf"), True
     except OSError:
         pass
@@ -4624,7 +4625,7 @@ def _main(argv=None) -> int:
         _state_path = Path(args.state).expanduser()
         _state, _mtime = None, None
         try:
-            if _state_path.is_file():
+            if pathprobe.is_file(_state_path):
                 _mtime = datetime.fromtimestamp(
                     _state_path.stat().st_mtime).isoformat(timespec="seconds")
                 _state = json.loads(_state_path.read_text(encoding="utf-8"))
@@ -4755,11 +4756,13 @@ def _main(argv=None) -> int:
         # B-680: "absent" no longer reaches this line - a path that simply is not there
         # returned 2 above, before anything was assessed. What still lands here is the
         # narrower case the guard deliberately declines to claim is absent: a path we
-        # could not stat at all (an unreadable parent). `.exists()` is False for that
-        # too, so the arm below is unchanged and still keeps it off 0.
+        # could not stat at all (an unreadable parent). The unreadable-target guard above
+        # normally returns for it first; if it does get here the probe below raises
+        # rather than answering False, so it still cannot exit 0. The arm itself covers
+        # a target that vanished mid-run.
         if profile.overall_status in ("FAIL", "WARN"):
             _vet_rc = 1
-        elif profile.overall_status == "UNKNOWN" and not vet_target.exists():
+        elif profile.overall_status == "UNKNOWN" and not pathprobe.exists(vet_target):
             _vet_rc = 1
         else:
             _vet_rc = 0
@@ -5227,7 +5230,7 @@ def _main(argv=None) -> int:
         """
         p = Path(raw).expanduser()
         parent = p.parent
-        if not parent.exists():
+        if not pathprobe.exists(parent):
             parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         return p
 
@@ -6251,7 +6254,7 @@ def _main(argv=None) -> int:
             _revet_roots = _workspace_roots(Path(args.home).expanduser(), ctx.config)
             for _name in _revet_names[:_REVET_CAP]:
                 _target = next((r / "skills" / _name for r in _revet_roots
-                                if (r / "skills" / _name).is_dir()), None)
+                                if pathprobe.is_dir(r / "skills" / _name)), None)
                 if _target is None:
                     # The record moved but the directory is not where the records say. Not
                     # an accusation: a workspace we cannot reach, or a removal mid-update.

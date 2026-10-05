@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from clawseccheck import pathprobe
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_symlink_escape, vet_skill
 from clawseccheck.collector import Context
@@ -621,15 +622,15 @@ def test_vanished_file_entry_before_lstat_is_pass_not_degraded(tmp_path, monkeyp
     sk = _mk_skill(home / "workspace" / "skills", name="clean")
     victim = sk / "flaky.tmp"
     victim.write_text("x", encoding="utf-8")
-    real_is_symlink = Path.is_symlink
+    real_is_symlink = pathprobe.is_symlink
 
-    def flaky_is_symlink(self):
-        if self == victim:
+    def flaky_is_symlink(p):
+        if Path(p) == victim:
             victim.unlink()
             raise FileNotFoundError(2, "No such file or directory", str(victim))
-        return real_is_symlink(self)
+        return real_is_symlink(p)
 
-    monkeypatch.setattr(Path, "is_symlink", flaky_is_symlink)
+    monkeypatch.setattr(pathprobe, "is_symlink", flaky_is_symlink)
 
     f = check_symlink_escape(Context(home=home))
     assert f.status == PASS
@@ -645,15 +646,15 @@ def test_vanished_subdir_entry_before_lstat_is_pass_not_degraded(tmp_path, monke
     sk = _mk_skill(home / "workspace" / "skills", name="clean")
     victim = sk / "vanishing_dir"
     victim.mkdir()
-    real_is_symlink = Path.is_symlink
+    real_is_symlink = pathprobe.is_symlink
 
-    def flaky_is_symlink(self):
-        if self == victim:
+    def flaky_is_symlink(p):
+        if Path(p) == victim:
             victim.rmdir()
             raise FileNotFoundError(2, "No such file or directory", str(victim))
-        return real_is_symlink(self)
+        return real_is_symlink(p)
 
-    monkeypatch.setattr(Path, "is_symlink", flaky_is_symlink)
+    monkeypatch.setattr(pathprobe, "is_symlink", flaky_is_symlink)
 
     f = check_symlink_escape(Context(home=home))
     assert f.status == PASS
@@ -670,14 +671,14 @@ def test_permission_denied_per_entry_still_grades_the_gap(tmp_path, monkeypatch)
     sk = _mk_skill(home / "workspace" / "skills", name="clean")
     victim = sk / "stuck.tmp"
     victim.write_text("x", encoding="utf-8")
-    real_is_symlink = Path.is_symlink
+    real_is_symlink = pathprobe.is_symlink
 
-    def denied_is_symlink(self):
-        if self == victim:
+    def denied_is_symlink(p):
+        if Path(p) == victim:
             raise PermissionError(13, "Permission denied", str(victim))
-        return real_is_symlink(self)
+        return real_is_symlink(p)
 
-    monkeypatch.setattr(Path, "is_symlink", denied_is_symlink)
+    monkeypatch.setattr(pathprobe, "is_symlink", denied_is_symlink)
 
     f = check_symlink_escape(Context(home=home))
     assert f.status == UNKNOWN

@@ -17,8 +17,8 @@ listable, not searchable) made every check inside `_locate_plugin_root` raise
     loop over every `npm/projects/<wrapper>` directory, so ONE unreadable wrapper dir
     aborted visibility into every other plugin cache in the same run.
 
-Confirmed live against the two Python versions this repo's CI actually pins (3.9, 3.12)
-before writing the fix: stat-ing *p* itself never raises (mode 0000 on *p* only blocks
+Confirmed live against the two Python versions this repo's CI pinned when the fix was
+written (3.9, 3.12; CI gained a 3.14 leg later, C-647): stat-ing *p* itself never raises (mode 0000 on *p* only blocks
 searching INTO it — resolving *p* needs search permission on *p*'s PARENT, not on *p*),
 but stat-ing a child of *p* does.
 
@@ -348,19 +348,19 @@ def test_normal_readable_plugin_root_still_resolves_and_scans(tmp_path):
 # 6. B-966 — the EACCES-vs-ENOENT distinction must come from os.stat()'s own  #
 #    errno, not from Path.is_file()/is_dir()'s internal ignore-set.          #
 #                                                                              #
-#    CPython's pathlib was rewritten around 3.13; on 3.13+ Path.is_file()/    #
-#    is_dir() started swallowing EACCES/EPERM too (returning False instead    #
-#    of raising), which is exactly what the guard above depended on NOT       #
-#    happening. os.stat()'s raised OSError.errno is stable across versions,   #
-#    so _locate_plugin_root_or_reason now resolves via _stat_or_reason()      #
-#    instead of Path.is_file()/is_dir(). These tests pin that mechanism       #
-#    directly rather than only the outward behavior sections 1-5 already      #
-#    cover on this repo's pinned 3.9/3.12 -- section 1-5's tests would not    #
-#    have caught this on a 3.13+ interpreter before this fix (Path.is_file()  #
-#    silently returning False looks identical to "genuinely absent"); the     #
-#    tests below no longer route through Path.is_file()/is_dir() at all for   #
-#    the permission check, so they hold regardless of how a future CPython    #
-#    version implements pathlib internally.                                   #
+#    A later CPython changed that: measured on 3.14.4, Path.is_file()/        #
+#    is_dir() return False for EACCES/EPERM too instead of raising (3.9 and   #
+#    3.12 raise; 3.13 was not measured), which is exactly what the guard      #
+#    above depended on NOT happening. os.stat()'s raised OSError.errno is     #
+#    the same on every version, so _locate_plugin_root_or_reason resolves     #
+#    via _stat_or_reason() instead of Path.is_file()/is_dir(). These tests    #
+#    pin that mechanism directly rather than only the outward behavior        #
+#    sections 1-5 already cover: on the 3.9 and 3.12 legs CI had when this    #
+#    was written, sections 1-5 could not have caught the regression           #
+#    (Path.is_file() silently returning False looks identical to              #
+#    "genuinely absent"). The tests below do not route through                #
+#    Path.is_file()/is_dir() at all for the permission check, so they hold    #
+#    however a given CPython implements pathlib internally.                   #
 # --------------------------------------------------------------------------- #
 
 

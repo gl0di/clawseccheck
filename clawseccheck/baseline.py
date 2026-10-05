@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from . import pathprobe
 from .safeio import secure_append_text
 
 # The exact shape fingerprint() produces: <id>:<8 lowercase hex chars>. Used by
@@ -139,7 +140,7 @@ def load_ignore_entries(home: Path | str) -> "list[IgnoreEntry]":
     ``load_ignore()`` always had.
     """
     p = Path(home).expanduser() / ".clawseccheckignore"
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return []
     try:
         text = p.read_text(encoding="utf-8", errors="replace")

@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+from . import pathprobe
 
 _MAX_INCLUDE_BYTES = 2_000_000
 _MAX_INCLUDE_DEPTH = 10
@@ -210,7 +211,7 @@ def _allowed_roots(config_dir: Path) -> tuple[Path, ...]:
             resolved = candidate.resolve(strict=True)
         except (OSError, ValueError, RuntimeError):
             continue
-        if resolved.is_dir() and resolved not in roots:
+        if pathprobe.is_dir(resolved) and resolved not in roots:
             roots.append(resolved)
     return tuple(roots)
 

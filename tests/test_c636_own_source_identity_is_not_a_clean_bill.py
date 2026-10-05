@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck import audit
+from clawseccheck import audit, pathprobe
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import vet_skill
 from clawseccheck.cli import main
@@ -228,10 +228,10 @@ def test_symlinked_ancestor_is_not_a_symlink_warning(tmp_path):
 def test_symlink_probe_oserror_never_crashes_or_downgrades_to_install(tmp_path, monkeypatch):
     stub = _plant_stub(tmp_path / "stub")
 
-    def _boom(self):
+    def _boom(p):
         raise OSError("simulated lstat failure")
 
-    monkeypatch.setattr(Path, "is_symlink", _boom)
+    monkeypatch.setattr(pathprobe, "is_symlink", _boom)
     assert _own_source_symlinks(stub) == []  # "cannot tell" is never guessed to be a link
     f = vet_skill(stub)
     assert f.status == UNKNOWN and f.engine_degraded is True
