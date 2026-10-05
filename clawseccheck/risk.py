@@ -37,6 +37,7 @@ from .checks import (
     _LEGACY_SSRF_ALIAS_970_ORDER,
     _b62_actual_families,
     _b62_extract_declaration,
+    _credential_is_plaintext,
     _credential_store_state,
     _enabled_tools,
     _EVENT_HOOK_PATH_RE,
@@ -1588,7 +1589,12 @@ def _rule_sandbox_cred_controlplane(ctx: Context, findings: list[Finding],
     bind_label = _host_reaching_bind(cfg)
     if not bind_label:
         return None
-    if not dig(cfg, "gateway.auth.password"):
+    # C-646: the chain's premise is B1's "plaintext gateway.auth.password", so it must use
+    # the SAME predicate B1 does - a SecretRef (`${GW_PW}`, the object form) holds nothing
+    # for the agent to read out of openclaw.json, and B1 no longer FAILs it either. `cfg`
+    # is passed for the same reason as in B1: a reference to a variable that openclaw.json's
+    # own env block defines in plaintext is still a plaintext credential.
+    if not _credential_is_plaintext(dig(cfg, "gateway.auth.password"), cfg=cfg):
         return None
     return RiskPath(
         id="RISK-16",
