@@ -502,9 +502,59 @@ SECRET_PATTERNS = [
 # values under a secret-shaped key. No handling needed here for that shape.
 _SECRET_REF_ENV_ID = r"[A-Z][A-Z0-9_]{0,127}"
 
+# C-646: the config env-substitution TEMPLATE forms, `${ID}` and `${ID:-}`.
+#
+# `${ID:-}` (an EMPTY fallback) is accepted by OpenClaw 2026.9.7+ only. Grounded against
+# the installed 2026.9.7 dist, `redact-P3Hzn-ce.mjs` (src/config/env-substitution.ts):
+# `DEFAULT_VALUE_OPERATOR = ":-"` (:56) and `parseEnvTokenBody` (:74-86), which splits
+# the body at the first `:-`, requires the name to match `[A-Z_][A-Z0-9_]*`, and refuses a
+# fallback containing `$` or `{`. A set variable resolves to its value; an unset or empty
+# one resolves to the fallback - here the empty string. Either way the config text
+# carries NO secret material, so `${ID:-}` is a pure env reference exactly like `${ID}`.
+#
+# It is deliberately ONLY the EMPTY fallback. `${ID:-anything}` is a reference PLUS an
+# inline literal, and the literal is whatever the config text says - `${TOKEN:-hunter2}`
+# is a plaintext credential with a decorative wrapper. That shape does not match here, so
+# it keeps flowing through the ordinary secret-shape logic (C015 / `_secret_paths` /
+# the named-credential test in `_credential_is_plaintext`) unchanged.
+#
+# Older builds (checked: 2026.7.1-2, 8.1, 9.1, 9.3-9.6 - `env-substitution-*` /
+# `redact-*`) have NO default operator: the body `ID:-` fails `ENV_VAR_NAME_PATTERN`, the
+# token is not recognised, and the string is passed through verbatim (`parseEnvTokenAt`
+# tests the whole body `ID:-` against the name pattern). So on those builds `${ID:-}` is
+# the literal text `${ID:-}` - a PUBLIC, guessable string - and a credential field holding
+# it authenticates with that text.
+#
+# THE PREDICATES BELOW STAY BUILD-INDEPENDENT, because what they answer is "is a secret
+# held in the file", and on every build the text `${ID:-}` holds none: C015, the generic
+# secret scan and `_secret_paths` ask only that, and none of them reads the installed
+# build. The build decision lives in `check_secrets` (B1) alone, at its two unconditional
+# credential paths (`gateway.auth.password`, `hooks.token`), because there the question is
+# the other one - does the credential IN EFFECT come from the environment? - and for a
+# whole-value `${ID:-}` the answer depends on the build. `_env_default_operator` (below)
+# gives it as "yes" / "no" / "unknown": yes keeps the reference reading (PASS), no is the
+# same FAIL a plaintext value at that path gets, unknown is a B1 UNKNOWN. Only the
+# EMPTY-fallback form is gated; markers, shorthand, embedded references, non-empty
+# fallbacks and the env-block lookup are untouched.
+#
+# The same residue exists on 2026.9.7 for the PLAIN `${ID}` form at `hooks.token` (a plain
+# string in the vendor schema, read verbatim): when ID is unset or empty in the gateway's
+# environment `onMissing` only warns and the text `${ID}` itself becomes the bearer token
+# (measured on the installed dist, C-135 round 3). The predicates here only answer "is a
+# secret held in the file"; `check_secrets` (B1) answers UNKNOWN for a whole-value PLAIN
+# `${ID}` at `hooks.token`, always, because a static scan cannot see the gateway process
+# environment. An evidence model over unit and dotenv files was tried and retracted
+# (C-135 round 4): enumerating the ways a file can define a variable failed once per
+# surface it forgot. On 2026.9.7 and later the EMPTY-fallback `${ID:-}` form is a
+# reference: unset, it substitutes to "" and 2026.9.7 refuses to enable hooks, so no
+# literal token exists.
+_ENV_TEMPLATE_REF = r"\$\{%(id)s(?::-)?\}" % {"id": _SECRET_REF_ENV_ID}
+
+_ENV_SUBSTITUTION_REFERENCE_RE = re.compile(_ENV_TEMPLATE_REF)
+
 _SECRET_REFERENCE_RE = re.compile(
-    r"(?:\$\{%(id)s\}|\$%(id)s|secretref-env:%(id)s|__env__:%(id)s)"
-    % {"id": _SECRET_REF_ENV_ID}
+    r"(?:%(tpl)s|\$%(id)s|secretref-env:%(id)s|__env__:%(id)s)"
+    % {"id": _SECRET_REF_ENV_ID, "tpl": _ENV_TEMPLATE_REF}
 )
 
 
@@ -513,10 +563,326 @@ def _is_secret_reference(value: str) -> bool:
     indirection shorthand - never a substring or a prefix of something longer, so any
     real secret material appended (or prepended) to a reference shape still counts as
     a plaintext secret (C-226 adversarial requirement: the exclusion must stay narrow).
+    C-646: ``${ID:-}`` (EMPTY fallback only) counts too; ``${ID:-x}`` does not.
     """
     if not isinstance(value, str):
         return False
     return bool(_SECRET_REFERENCE_RE.fullmatch(value.strip()))
+
+
+# C-646: the first release whose config env-substitution understands the `:-` default
+# operator (`${ID:-}`). Grounded against the installed 2026.9.7 dist (`redact-P3Hzn-ce.mjs`:
+# `parseEnvTokenBody` + `DEFAULT_VALUE_OPERATOR`) and the unpacked 2026.9.6 dist
+# (`redact-B5EGyLvV.mjs`, `parseEnvTokenAt`: no operator, so the body `ID:-` fails the name
+# pattern and the string passes through verbatim). The series floor only says "this string
+# is a YYYY.M.P calendar release": "0.0.0" or "1.2.3" cannot be placed on the timeline.
+_ENV_DEFAULT_OPERATOR_MIN = (2026, 9, 7)
+_ENV_DEFAULT_OPERATOR_SERIES_YEAR = 2026
+
+
+def _env_default_operator(ctx) -> str:
+    """Does the audited OpenClaw understand the env-substitution default operator, so that
+    a whole-value ``${ID:-}`` is read as an environment reference?
+    ``"yes"`` / ``"no"`` / ``"unknown"``.
+
+    Three answers for the reason ``_terminal_default`` has three: "we could not see the
+    build" is not "the build reads it as a reference", and not "the build uses the text as
+    the credential" either. Only B1 (``check_secrets``) consumes this, at its two credential
+    paths; the shape predicates above stay build-independent.
+
+    Sources are ``_terminal_default``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose
+    parser runs. A calendar release (``YYYY.M.P``, three or more numeric parts, year at or
+    after the series floor) at or after ``_ENV_DEFAULT_OPERATOR_MIN`` is ``"yes"``; one
+    below it is ``"no"``. ``meta.lastTouchedVersion`` is consulted ONLY when there is no
+    usable installed version, and ONLY a stamp at or after the threshold counts: that stamp
+    proves a 2026.9.7+ build once SAVED the config, so the operator exists. A stamp BELOW
+    the threshold proves nothing about what is installed now (the user may have upgraded
+    five minutes ago and not re-saved), so it answers ``"unknown"``, never ``"no"``.
+    Parsing goes through ``_numeric_version`` (not ``_parse_version``, B-264): a pre-release
+    string orders as None and falls through to the stamp; "0.0.0", a two-part version and
+    None are ``"unknown"``.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if len(installed) >= 3 and installed[0] >= _ENV_DEFAULT_OPERATOR_SERIES_YEAR:
+            return "yes" if tuple(installed[:3]) >= _ENV_DEFAULT_OPERATOR_MIN else "no"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if (stamped is not None and len(stamped) >= 3
+            and tuple(stamped[:3]) >= _ENV_DEFAULT_OPERATOR_MIN):
+        return "yes"
+    return "unknown"
+
+
+# C-646: the structured SecretRef OBJECT form, ported from the vendor's own grammar
+# instead of "any dict with a `source` key", because the object form is only "no
+# plaintext here" when it really is nothing but a pointer. Grounded against the installed
+# 2026.9.7 dist: `ref-contract-D0kWy5jy.mjs` (`isSecretRef`: exactly three keys;
+# `isValidSecretRef`: provider alias, per-source id grammar, `validateExecSecretRefId`,
+# `isValidFileSecretRefId`), `zod-schema.core-ZkrXdN0m.mjs:357-385` (every variant is
+# `.strict()`), and `types.secrets-BXEuin38.mjs` (`isLegacySecretRefWithoutProvider`, the
+# two-key `{source, id}` form the runtime still coerces).
+_SECRET_REF_SOURCES = ("env", "file", "exec", "store")
+_SECRET_REF_PROVIDER_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
+_SECRET_REF_ENV_ID_FULL_RE = re.compile(_SECRET_REF_ENV_ID)
+_SECRET_REF_EXEC_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}")
+_SECRET_REF_FILE_SEGMENT_RE = re.compile(r"(?:[^~]|~0|~1)*")
+
+
+def _secret_ref_id_ok(source: str, ref_id) -> bool:
+    if not isinstance(ref_id, str):
+        return False
+    if source in ("env", "store"):
+        return bool(_SECRET_REF_ENV_ID_FULL_RE.fullmatch(ref_id))
+    if source == "file":
+        if ref_id == "value":
+            return True
+        return ref_id.startswith("/") and all(
+            _SECRET_REF_FILE_SEGMENT_RE.fullmatch(seg) for seg in ref_id[1:].split("/")
+        )
+    # exec: pattern + no "." / ".." path segment
+    return bool(_SECRET_REF_EXEC_ID_RE.fullmatch(ref_id)) and not any(
+        seg in (".", "..") for seg in ref_id.split("/")
+    )
+
+
+def _is_secret_ref_object(value) -> bool:
+    """True only for a WELL-FORMED structured SecretRef: a dict whose keys are exactly
+    ``{source, provider, id}`` (or the legacy two-key ``{source, id}`` the runtime still
+    coerces), with a known ``source``, a valid provider alias and an id that satisfies
+    that source's grammar. Anything else - an extra key (a plaintext value smuggled next
+    to the pointer), an unknown source, a non-string or malformed id - is NOT a
+    reference, so a look-alike dict can never hide a credential (C-646).
+    """
+    if not isinstance(value, dict):
+        return False
+    keys = set(value)
+    if keys != {"source", "provider", "id"} and keys != {"source", "id"}:
+        return False
+    source = value.get("source")
+    if source not in _SECRET_REF_SOURCES:
+        return False
+    if "provider" in keys:
+        provider = value.get("provider")
+        if not isinstance(provider, str) or not _SECRET_REF_PROVIDER_RE.fullmatch(provider):
+            return False
+    return _secret_ref_id_ok(source, value.get("id"))
+
+
+# C-646 (C-135 round 2): a reference is only "no plaintext here" when the variable it
+# names is not itself defined in plaintext by the SAME config. OpenClaw applies the
+# config's own env block to the environment BEFORE `${...}` substitution runs
+# (2026.9.7 `io.read-helpers-DIatj3iW.mjs` `resolveConfigForRead`: `applyConfigEnvVars`,
+# then `resolveConfigEnvVars`; `config-env-vars-CcSZNwSV.mjs` `collectConfigRuntimeEnvVars`
+# reads BOTH `env.vars.<NAME>` and the flat `env.<NAME>` catch-all, skipping only
+# `shellEnv` and `vars`, keeps a non-blank string under a portable key, and lets a
+# variable the process already holds win - which a config-only audit cannot see, so the
+# plaintext is treated as live either way). `password: "${GW_PW}"` beside
+# `env.vars.GW_PW: "<text>"` is therefore a plaintext credential in a reference costume.
+_ENV_BLOCK_PORTABLE_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# The vendor treats these spellings as one variable (`ENV_NORMALIZATION_KEY_GROUPS`,
+# `env-D_k2xpwO.mjs`); Windows env names are also case-insensitive, so names are
+# compared upper-cased everywhere (the conservative direction: more names collide).
+_ENV_NAME_ALIAS_GROUPS = (("ZAI_API_KEY", "Z_AI_API_KEY"),)
+_ENV_BLOCK_CHAIN_DEPTH = 8
+# The string shapes the vendor's RUNTIME reads as a SecretRef in a SecretInput field
+# (`gateway.auth.password`): `coerceSecretRef` -> `parseEnvTemplateSecretRef`
+# (2026.9.7 `types.secrets-BXEuin38.mjs`) accepts `${NAME}` and `$NAME` and nothing else;
+# this project adds `${NAME:-}` (see `_ENV_TEMPLATE_REF`). NOT the retired
+# `secretref-env:NAME` / `__env__:NAME` markers that `_is_secret_reference` (C-226, a
+# generic secret scan) also treats as references: that module says they are "parsed only
+# by doctor migration", no runtime path rejects them for `gateway.auth.password` (the
+# web-provider credential reader, `provider-runtime-shared-*.mjs`, does reject markers
+# there - a different field), and `auth-resolve-*.mjs` uses a
+# non-reference `gateway.auth.password` AS the password - so the marker text is the
+# credential in effect, a public and guessable one (C-135 round 2). Reading it as a
+# pointer would turn a CRITICAL FAIL into a clean PASS.
+_SECRET_INPUT_STRING_REF_RE = re.compile(
+    r"(?:%(tpl)s|\$%(id)s)" % {"id": _SECRET_REF_ENV_ID, "tpl": _ENV_TEMPLATE_REF}
+)
+# One capture per accepted string form, so the NAME a reference points at can be read
+# back out. Same alternatives as `_SECRET_INPUT_STRING_REF_RE` / `_ENV_SUBSTITUTION_REFERENCE_RE`.
+_SECRET_INPUT_REFERENCE_NAME_RE = re.compile(
+    r"(?:\$\{(?P<t>%(id)s)(?::-)?\}|\$(?P<s>%(id)s))" % {"id": _SECRET_REF_ENV_ID}
+)
+_ENV_TEMPLATE_NAME_RE = re.compile(
+    r"\$\{(?P<t>%(id)s)(?::-)?\}" % {"id": _SECRET_REF_ENV_ID}
+)
+# ECMAScript `String.prototype.trim()` whitespace (WhiteSpace + LineTerminator). Python's
+# `str.strip()` is NOT the same set: it also strips U+001C..U+001F and U+0085 (which JS
+# keeps, so `<U+001F>$GW_PW` is a literal there and would read as a reference here) and it
+# keeps U+FEFF (which JS strips). Everything in this block that decides "is this a
+# pointer" trims the way the vendor does, so a look-alike never reads as a reference.
+_JS_WHITESPACE = (
+    "\t\n\x0b\x0c\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
+    "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _js_trim(value: str) -> str:
+    return value.strip(_JS_WHITESPACE)
+
+
+def _canonical_env_name(name: str) -> str:
+    upper = name.upper()
+    for group in _ENV_NAME_ALIAS_GROUPS:
+        if upper in group:
+            return group[0]
+    return upper
+
+
+def _config_env_block_entries(cfg) -> "dict[str, list[str]]":
+    """Canonical variable name -> the non-blank string values the config's own env block
+    (``env.vars.<NAME>`` and the flat ``env.<NAME>`` catch-all) declares for it.
+    """
+    env_cfg = cfg.get("env") if isinstance(cfg, dict) else None
+    out: "dict[str, list[str]]" = {}
+    if not isinstance(env_cfg, dict):
+        return out
+    pairs = []
+    vars_block = env_cfg.get("vars")
+    if isinstance(vars_block, dict):
+        pairs.extend(vars_block.items())
+    pairs.extend((k, v) for k, v in env_cfg.items() if k not in ("shellEnv", "vars"))
+    for raw_key, value in pairs:
+        if not isinstance(raw_key, str) or not isinstance(value, str) or not _js_trim(value):
+            continue
+        key = _js_trim(raw_key)
+        if not _ENV_BLOCK_PORTABLE_KEY_RE.fullmatch(key):
+            continue
+        out.setdefault(_canonical_env_name(key), []).append(value)
+    return out
+
+
+def _env_block_defines_plaintext(entries, name: str, _seen=None, _depth: int = 0) -> bool:
+    """True when the config's env block gives ``name`` a value that is not merely another
+    whole-value ``${OTHER}`` / ``${OTHER:-}`` template. A value that IS such a template is
+    followed (bounded, cycle-guarded), because the block can chain to a plaintext entry
+    that a later re-read would publish; a chain deeper than the bound fails CLOSED. Any
+    other non-blank text counts, including text with a template inside it: the file still carries the literal part, and reading a
+    look-alike as a pointer would be a false negative on a CRITICAL check.
+    """
+    key = _canonical_env_name(name)
+    seen = _seen if _seen is not None else set()
+    if key in seen:
+        return False  # a cycle adds no value of its own
+    if _depth > _ENV_BLOCK_CHAIN_DEPTH:
+        # The bound is exhausted, not the chain: what lies beyond was never read, and
+        # "never read" must not be reported as "no plaintext" on a CRITICAL check.
+        return True
+    seen.add(key)
+    for value in entries.get(key, ()):
+        m = _ENV_TEMPLATE_NAME_RE.fullmatch(_js_trim(value))
+        if m is None:
+            return True
+        if _env_block_defines_plaintext(entries, m.group("t"), seen, _depth + 1):
+            return True
+    return False
+
+
+def _reference_env_names(value, *, secret_input: bool) -> "list[str]":
+    """The environment-variable NAME(S) a whole-value SecretRef points at, or ``[]`` when
+    ``value`` is not an env-backed reference (a ``file`` / ``exec`` object resolves outside
+    the config's env block). Which string shapes count follows ``secret_input`` exactly as
+    in :func:`_credential_is_plaintext`.
+    """
+    if isinstance(value, dict):
+        if _is_secret_ref_object(value) and value.get("source") in ("env", "store"):
+            return [value["id"]]
+        return []
+    if isinstance(value, str):
+        pattern = _SECRET_INPUT_REFERENCE_NAME_RE if secret_input else _ENV_TEMPLATE_NAME_RE
+        m = pattern.fullmatch(_js_trim(value))
+        if m is not None:
+            return [next(g for g in m.groups() if g)]
+    return []
+
+
+def _credential_is_plaintext(value, *, secret_input: bool = True, cfg=None) -> bool:
+    """B1's per-path test: is a plaintext credential SET at a NAMED credential path?
+
+    B1 (``check_secrets``) names ``gateway.auth.password`` and ``hooks.token``
+    unconditionally, at any length. It used to test them with bare truthiness, so a
+    SecretRef - the very remedy B1 recommends - still FAILed as "set in config"
+    (C-646). This is that same truthiness minus references, and nothing else:
+
+    * falsy (``None`` / ``""`` / ``0`` / ``False`` / empty container) -> False, exactly
+      as before (nothing is set);
+    * a dict -> plaintext unless it is a well-formed structured SecretRef
+      (:func:`_is_secret_ref_object`); a malformed or over-keyed dict keeps the old
+      "set" verdict rather than being trusted as a pointer;
+    * a string -> plaintext unless it is a whole-value reference;
+    * any other truthy scalar -> plaintext (unchanged);
+    * a WHOLE-VALUE REFERENCE is still plaintext when ``cfg`` is given and the variable
+      it names is defined in plaintext by that same config's env block
+      (:func:`_env_block_defines_plaintext`) - the secret sits in the file, one hop away.
+      Callers that can see the config must pass it; ``cfg=None`` keeps the bare
+      "is this string a pointer" reading.
+
+    ``secret_input`` selects WHICH string shapes are references, because the two named
+    paths are not the same type in the vendor schema (2026.9.7 ``zod-schema-BRat_tFr.mjs``):
+    ``gateway.auth.password`` is ``SecretInputSchema`` (line 1087) - the runtime coerces
+    exactly ``${NAME}`` and the ``$NAME`` shorthand (``coerceSecretRef`` ->
+    ``parseEnvTemplateSecretRef``, ``types.secrets-BXEuin38.mjs``), so those (plus this
+    project's ``${NAME:-}``) are its string references. The retired ``secretref-env:`` /
+    ``__env__:`` markers are NOT: that module says they are "parsed only by doctor
+    migration", and ``auth-resolve-*.mjs`` (``passwordRef ? undefined : authConfig.password``)
+    then uses the marker text itself as the gateway password - a guessable literal, so it
+    keeps reading as "set" (C-135 round 2; C-226's generic scan treats markers as
+    references, which is a different question and is not changed here). ``hooks.token`` is
+    a PLAIN ``string()`` (line 1904), read verbatim after config env substitution
+    (``resolveHooksConfig``, ``hooks-DVyEYaaD.mjs:403-406``), so the ONLY reference is a
+    ``${ID}`` / ``${ID:-}`` template. There ``$HOOK_TOKEN`` is a guessable LITERAL token,
+    not a pointer, and must keep reading as "set" - a look-alike that reads as a reference
+    is a false negative on a CRITICAL check. (A structured object there is not a valid
+    ``hooks.token`` at all, but it carries no plaintext, so B1 - which asks only about
+    plaintext - does not FAIL it.) Whitespace around a string is trimmed the way
+    JavaScript's ``trim()`` does (:func:`_js_trim`), not Python's ``strip()``.
+
+    This answers ONLY "is plaintext SET in the file". A ``hooks.token`` reference whose
+    variable is unset in the gateway's environment is a different question (the text
+    ``${NAME}`` itself becomes the bearer token on 2026.9.7); ``check_secrets`` answers it
+    separately as UNKNOWN for the plain ``${NAME}`` form, with no environment lookup
+    (C-646).
+    """
+    if not value:
+        return False
+    if isinstance(value, dict):
+        if not _is_secret_ref_object(value):
+            return True
+    elif isinstance(value, str):
+        pattern = _SECRET_INPUT_STRING_REF_RE if secret_input else _ENV_SUBSTITUTION_REFERENCE_RE
+        if not pattern.fullmatch(_js_trim(value)):
+            return True
+    else:
+        return True
+    if cfg is None:
+        return False
+    names = _reference_env_names(value, secret_input=secret_input)
+    if not names:
+        return False
+    entries = _config_env_block_entries(cfg)
+    return any(_env_block_defines_plaintext(entries, n) for n in names)
+
+
+def _has_env_template(value) -> bool:
+    """True when a config STRING carries a `${...}` env-substitution token (C-646).
+
+    Used for the enum-typed reads (``gateway.bind``, ``gateway.auth.mode``,
+    ``gateway.tailscale.mode``): OpenClaw substitutes such a token at config load from
+    the GATEWAY'S environment, which a config-only audit cannot see, so the value is
+    neither the literal it appears to be nor any other specific value. It must read as
+    UNKNOWN, never as the text of the template (``${X:-loopback}`` is not a non-loopback
+    host, and ``${M:-none}`` is not an authenticated mode). ``${`` is checked as a bare
+    substring on purpose - no valid enum literal contains it, so nothing legitimate is
+    swallowed, and an unparseable or escaped (``$${``) token is just as undeterminable.
+    """
+    return isinstance(value, str) and "${" in value
 
 
 # F-180/B-666: moved here VERBATIM from checks/_config.py so `_trifecta_leg_sources`
@@ -4764,9 +5130,12 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # `tests/test_b730_sensitive_data_model_agreement.py::
     # test_the_gateway_password_asymmetry_is_the_one_known_divergence`). Dave's decision
     # (2026-09-20): widen A1 to match the other two consumers, not narrow them. B1
-    # (`check_secrets`) still separately FAILs/CRITICALs on the same key - that is a
-    # different question (a plaintext secret sitting in the config file) from this leg's
-    # question (data the agent can reach), and both answers can be true at once.
+    # (`check_secrets`) separately FAILs/CRITICALs on the same key when it holds a
+    # PLAINTEXT value - that is a different question (a plaintext secret sitting in the
+    # config file) from this leg's question (data the agent can reach). Since C-646 the two
+    # can disagree on purpose: a SecretRef (`${GW_PW}`, the object form) is not a plaintext
+    # secret to B1, yet the gateway credential is still reachable, so this leg keeps
+    # counting it.
     if dig(cfg, "gateway.auth.password"):
         sensitive.append("gateway.auth.password is set")
     # B-061: ungated exec/shell can read any private file. Approval-gated exec (see

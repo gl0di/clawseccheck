@@ -259,6 +259,12 @@ from ._shared import (  # B-666
     _credential_store_state,
 )
 from ._shared import (_unpolicied_open_wildcard_group_channels,)  # B-371
+from ._shared import (  # C-646
+    _credential_is_plaintext,
+    _ENV_SUBSTITUTION_REFERENCE_RE,
+    _has_env_template,
+    _is_secret_ref_object,
+)
 from ._agents import (
     _ACTIONS_ALLOW_UNDETERMINED,
     _B21_OBEY_RE,
@@ -426,6 +432,7 @@ from ._shared import (_CROSS_CONTEXT_DEFAULT_ALLOW_MIN, _CROSS_CONTEXT_DENY_MEAS
 from ._shared import (_CODE_MODE_AUTO_DEFAULT_MIN, _CODE_MODE_OFF_MEASURED_MIN, _code_mode_default,)  # B351 re-grounded
 from ._shared import (_TERMINAL_DEFAULT_ON_MIN, _TERMINAL_OFF_MEASURED_MIN, _TERMINAL_OFF_MEASURED_MAX, _TERMINAL_OFF_MEASURED_SPANS, _terminal_default,)  # C-640
 from ._shared import (_ALLOW_BOTS_DEFAULT_ALLOW_MIN, _ALLOW_BOTS_DENY_MEASURED_MIN, _ALLOW_BOTS_FLIPPED_CHANNELS, _allow_bots_default,)  # B372 re-grounded
+from ._shared import (_ENV_DEFAULT_OPERATOR_MIN, _ENV_DEFAULT_OPERATOR_SERIES_YEAR, _env_default_operator,)  # C-646
 from ._shared import (_PORTALS_ABSENT_MEASURED_MIN, _PORTALS_GROUNDED_MIN, _portal_model_version,)  # B397
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
