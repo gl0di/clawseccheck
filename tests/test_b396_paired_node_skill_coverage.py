@@ -19,6 +19,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import (
     CHECKS,
@@ -226,11 +228,24 @@ class TestCollectorNormalisation:
                                               ('""', None), ("true", {}), ("false", None)]):
             assert ctx.paired_devices_sqlite[f"d{i}"]["nodeSurface"] == expected, raw
 
-    def test_deeply_nested_json_sets_unparsed_not_a_crash(self, tmp_path):
+    @pytest.mark.parametrize("depth", [500, 20_000, 100_000])
+    def test_deeply_nested_json_sets_unparsed_not_a_crash(self, tmp_path, depth):
+        # How deep a document json.loads follows is the interpreter's own limit
+        # (measured 2026-10-05: 994 levels on CPython 3.9.25, 9,997 on 3.12.3, about 58,000
+        # on 3.14.4), so the depths below cover all three outcomes - 500 parses on every
+        # supported Python, 20,000 on 3.14 only, 100,000 on none - and the expectation is
+        # taken from what json.loads does in THIS run, never from a version number. Both
+        # arms must be a clean, honest read: no RecursionError, and a surface the parser
+        # could not follow is flagged unparsed rather than reported as absent.
         home = tmp_path / "h"
         _make_state_db(home / "state", [])
-        nested = ("[" * 50_000) + ("]" * 50_000)  # deep enough to blow the C json decoder's stack
+        nested = ("[" * depth) + ("]" * depth)
         assert len(nested) < _MAX_PAIRED_DEVICE_JSON_BYTES
+        try:
+            json.loads(nested)
+            parses = True
+        except RecursionError:
+            parses = False
         conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
         conn.execute(
             "INSERT INTO device_pairing_paired (device_id, public_key, "
@@ -242,8 +257,13 @@ class TestCollectorNormalisation:
         ctx = Context(home=home)
         _collect_paired_devices_sqlite(home, ctx)  # must not raise RecursionError
         entry = ctx.paired_devices_sqlite["d1"]
-        assert entry["nodeSurfaceUnparsed"] is True
-        assert entry["nodeSurface"] is None
+        if parses:
+            # Parsed: a list is "any other truthy JSON shape" - presence only, no commands.
+            assert entry["nodeSurfaceUnparsed"] is False
+            assert entry["nodeSurface"] == {}
+        else:
+            assert entry["nodeSurfaceUnparsed"] is True
+            assert entry["nodeSurface"] is None
 
     def test_oversized_role_or_nodesurface_excludes_row_and_degrades_b176(self, tmp_path):
         home = tmp_path / "h"
