@@ -3875,7 +3875,7 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
 # stay `ask`) - this is `_layer_exec_policy` below's whole reason for being a small,
 # self-contained port rather than a "merge the two dicts" shortcut.
 #
-# `resolveExecPolicyForMode` (`exec-approvals-core-BZ3ECkXD.mjs`) is unchanged from the
+# `resolveExecPolicyForMode` (`exec-approvals-core-GflUelcW.mjs`) is unchanged from the
 # closed 5-row table already cited on `_has_approval_gate` above.
 _EXEC_MODE_SECURITY_ASK = {
     "deny": ("deny", "off"),

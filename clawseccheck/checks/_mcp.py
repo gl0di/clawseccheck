@@ -4410,7 +4410,7 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
        `"codex"` in `plugins.deny`, `entries.codex.enabled: false`, or a non-empty
        `plugins.allow` without `"codex"` each deactivate the plugin. `deny`/`allow`/
        `entries` are matched case-insensitively (B-831 round 2): the real gate compares
-       through `normalizePluginPolicyId` (`plugin-policy-id-C9JZrwYv.mjs:9-11`, trim +
+       through `normalizePluginPolicyId` (`plugin-policy-id-BaT4nwBS.mjs:10-12`, trim +
        lowercase, no alias table -- that is a DIFFERENT normalizer, `normalizePluginId`,
        used elsewhere), because "`plugins.allow`, `plugins.deny`, and `plugins.entries` ...
        are lowercase-normalized when config is normalized" per that function's own
@@ -7595,7 +7595,7 @@ def _plugin_activation_blocked(plugins: dict, plugin_id: str) -> "str | None":
 
     B-831 round 2: the comparison on all three of ``deny``/``entries``/``allow`` is now
     case-insensitive (trimmed + lowercased), matching the real
-    ``normalizePluginPolicyId`` (``plugin-policy-id-C9JZrwYv.mjs:9-11``) that
+    ``normalizePluginPolicyId`` (``plugin-policy-id-BaT4nwBS.mjs:10-12``) that
     ``resolvePluginActivationDecisionShared`` actually compares *plugin_id* against -
     verbatim: "Canonicalizes a plugin id for comparison against ``plugins.allow``,
     ``plugins.deny``, and ``plugins.entries``, which are lowercase-normalized when config

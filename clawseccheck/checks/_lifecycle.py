@@ -5100,7 +5100,7 @@ def _b396_js_truthy(v) -> bool:
 
 
 def _b396_role_list(v) -> list:
-    """`normalizeUniqueSingleOrTrimmedStringList` (string-normalization-_gRhJUDw.mjs:
+    """`normalizeUniqueSingleOrTrimmedStringList` (string-normalization-YMwDjufr.mjs:
     74-82): a list keeps only its non-blank, JS-trimmed string items; a bare non-blank
     string becomes a one-item list; anything else is empty."""
     if isinstance(v, list):
@@ -5121,8 +5121,8 @@ def _b396_safe_int(v) -> bool:
 
 
 def _b396_legacy_record_valid(rec) -> bool:
-    """`normalizeLegacyPairedDevice` (state-migrations.pairing:24-41): the 9.6 migration
-    silently DROPS a legacy `devices/paired.json` record missing a non-blank
+    """`normalizeLegacyPairedDevice` (state-migrations.pairing-DHmgS2jQ.mjs:24-41): the
+    9.6 migration silently DROPS a legacy `devices/paired.json` record missing a non-blank
     `publicKey` or a safe-integer `createdAtMs`/`approvedAtMs` -- so this check, which
     models the post-migration merge (unlike B176's own "legacy wins outright"), must
     drop it too rather than treat it as a live device the runtime would actually admit."""
@@ -5244,28 +5244,29 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
 
 
 # ---------- B396: paired-node skills outside the skill content scan (coverage disclosure) ----------
-# Every dist claim below was read on the installed openclaw@2026.9.6 (2026-09-26), under
+# Every dist claim below was first read on openclaw@2026.9.6 (2026-09-26) and re-read on
+# the installed openclaw@2026.9.7 (2026-10-05), under
 # ~/.npm-global/lib/node_modules/openclaw/dist/. Citations name the symbol first;
 # file:line is only a convenience, since bundle names rotate (CHECK_AUTHORING.md).
 #
 # The gap: a paired NODE (not an operator device -- B176/B138 already cover operator
 # authority) can publish its own machine's ~/.openclaw/skills content into this gateway
-# while connected. `scanNodeHostedSkills` (startup-state-migrations-BqKx_IWS.mjs:
-# 3674-3729) scans the node's own `resolveConfigDir()/skills`
-# (utils-aKqR_F_U.mjs:14-20) and pushes the result via RPC `node.skills.update`
-# (`publishInventory`, :352-355). The gateway's handler
-# (nodes.read-CBW8WUjQ.mjs:205-221) calls `NodeRegistry.updateNodeSkills`
-# (node-registry-zajLqj5_.mjs:703-712), which writes `NODE_SESSION_POLICIES.skills`
-# (in-memory only) and, via `refreshSessionPolicy` (:313), sets
+# while connected. `scanNodeHostedSkills` (startup-state-readiness-CTa-53Jt.mjs:
+# 3622-3677) scans the node's own `resolveConfigDir()/skills`
+# (utils-DUAwk2p5.mjs:14-20) and pushes the result via RPC `node.skills.update`
+# (`publishInventory`, :363-366). The gateway's handler
+# (nodes.read-B476F-9e.mjs:201-217) calls `NodeRegistry.updateNodeSkills`
+# (node-registry-DjS29LU1.mjs:740-749), which writes `NODE_SESSION_POLICIES.skills`
+# (in-memory only) and, via `refreshSessionPolicy` (:353), sets
 # `node.nodeSkills = cfg?.gateway?.nodes?.allowSkills === false ? [] : policy.skills`
-# before calling `replaceRemoteNodeSkills` (:314-319) into the process-memory
-# `remoteSkillNodes` Map (remote-skills-CZuGGEXx.mjs:10) -- cleared on disconnect
-# (node-registry:437,505). `mergeRemoteNodeSkillEntries` (remote-skills:101-104) is the
+# before calling `replaceRemoteNodeSkills` (:354-359) into the process-memory
+# `remoteSkillNodes` Map (remote-skills-CD_mCJvj.mjs:10) -- cleared on disconnect
+# (node-registry:477,544). `mergeRemoteNodeSkillEntries` (remote-skills:100-103) is the
 # ONLY reader of that content, gated on `options.canExec === true` (agent-side, runtime/
 # session-decided -- not modelled here) AND, node-side, `node.canExec` = `node.commands
 # ?.includes("system.run")` (remote-skills:49), where `node.commands` is the paired
-# device's OWN approved surface (`resolveNodeCommandAllowlist`, node-registry:282) minus
-# `gateway.nodes.commands.deny` (node-command-policy-CnGfXM76.mjs:294,312-315).
+# device's OWN approved surface (`resolveNodeCommandAllowlist`, node-registry:322) minus
+# `gateway.nodes.commands.deny` (node-command-policy-B8V85z2C.mjs:229,247-250).
 #
 # So the content this gateway would offer an agent from a paired node is NEVER written to
 # this machine's disk and never reaches B13/B5/B25/SKILL_CONTENT_RING (all of which read
@@ -5278,23 +5279,26 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
 # config weakness in itself; B386 already covers the gate default) or not (PASS).
 #
 # Node admission itself requires a persisted pairing record
-# (`captureAuthenticatedNodePairingState`, device-pairing-node-state-BxpHZHxS.mjs:35-47):
+# (`captureAuthenticatedNodePairingState`, device-pairing-node-state-CLR_uIUn.mjs:30-42):
 # `hasEffectivePairedDeviceRole(device, "node")` (active role intersect approved role,
-# device-pairing-identity-BnU9nqx2.mjs:603-625) AND a truthy `tokens.node`
-# (`resolveNodePairingIdentity`, :627-643), with `approvedSurface.commands` sourced from
-# `device.nodeSurface?.commands ?? []` (node-registry:400). That record lives in
+# device-pairing-identity-DBHygT8F.mjs:563-585) AND a truthy `tokens.node`
+# (`resolveNodePairingIdentity`, :587-603), with `approvedSurface.commands` sourced from
+# `device.nodeSurface?.commands ?? []` (node-registry:440). That record lives in
 # `state/openclaw.sqlite`'s `device_pairing_paired` table (`role`, `roles_json`,
-# `tokens_json`, `node_surface_json` -- confirmed in the real 9.6 DDL on this machine),
+# `tokens_json`, `node_surface_json` -- confirmed in the real 9.6 DDL on this machine
+# and re-read in 9.7's `OPENCLAW_STATE_SCHEMA_SQL`, managed-handoff-runtime.mjs:4954),
 # or, pre-migration / not yet imported, in the legacy `devices/paired.json` +
 # `nodes/paired.json` pair (`listLegacyPairingStoreFiles`,
-# pairing-files-BJQEMPCI.mjs:20-35; folded in by `migrateLegacyNodePairingStore`,
-# state-migrations.pairing-CC8_e_xh.mjs:58-170 -- SQLite wins per device id, legacy node
-# rows folded in only for an id SQLite does not already have).
+# pairing-files-DdxuFZBY.mjs:20-35; folded in by `migrateLegacyNodePairingStore`,
+# state-migrations.pairing-DHmgS2jQ.mjs:58-170 -- SQLite wins per device id: a legacy node
+# row is folded into the device record with the same id only when that record has an
+# approved `node` role and carries no `nodeSurface` yet (:136-140); a row with no such
+# device record is dropped as an orphan).
 #
 # Unlike B176 (which uses "legacy JSON wins outright" -- the RUNTIME's OWN behavior
 # before it ever runs `doctor --fix`), this check deliberately models the 9.6 MIGRATION
 # MERGE instead: what the runtime sees NOW, or after the `doctor --fix` its own startup
-# log demands (`server-startup-plugins-PEmmbrVx.mjs:53-58`). The two checks read the same
+# log demands (`server-startup-plugins-wMQdIPT8.mjs:55-60`). The two checks read the same
 # store with two different, each individually correct, merge rules -- see
 # `_b396_admission_state`'s own docstring below and B176's for the contrast.
 #
@@ -5304,9 +5308,11 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
 #     scores/reports the gate default); scoring it would double-count B386's gate.
 #   - Never FAILs (B-315 invariant) -- WARN is its ceiling.
 #   - Confidence is MEDIUM because of two deliberate over-approximations: the platform
-#     filter (`filterApprovedRuntimeCommands`, node-command-policy:264-271) and the
-#     agent-side exec policy are NOT modelled, and a node sharing THIS machine's home is
-#     not distinguishable from a genuinely remote one (disclosed in the WARN detail).
+#     filter (on 9.6 `filterApprovedRuntimeCommands`; on 9.7 inlined into
+#     `resolveNodeCommandAllowlistInternal` as the `desktop` predicate and the
+#     DESKTOP_HOST_COMMANDS filters, node-command-policy-B8V85z2C.mjs:222-223,227) and
+#     the agent-side exec policy are NOT modelled, and a node sharing THIS machine's home
+#     is not distinguishable from a genuinely remote one (disclosed in the WARN detail).
 #   - `engine_degraded` mirrors B176 exactly: True ONLY for a LIMIT_DOMAIN_PAIRED hit (an
 #     oversized/truncated row, or a capped state-dir walk that never reached the DB) --
 #     never for a plain parse/read failure, which is a plain UNKNOWN.
@@ -5317,7 +5323,8 @@ def check_paired_node_skill_coverage(ctx: Context) -> Finding:
     disclosure).
 
     See this check's own preceding comment block for the full dist grounding (every
-    claim there was read on the installed openclaw@2026.9.6, 2026-09-26) and for why
+    claim there was first read on openclaw@2026.9.6, 2026-09-26, and re-read on the
+    installed openclaw@2026.9.7, 2026-10-05) and for why
     this check reports the CAPABILITY (a skill-capable paired node exists) rather than
     UNKNOWN-for-unreadable-content: the content a paired node would publish is held only
     in gateway memory and on the node's own machine, never on this machine's disk
@@ -5331,7 +5338,7 @@ def check_paired_node_skill_coverage(ctx: Context) -> Finding:
          precedes every store read below: OpenClaw's own runtime applies the SAME gate
          before ever consulting a node's approved commands
          (`node.nodeSkills = allowSkills === false ? [] : policy.skills`,
-         node-registry:313), so the pairing store's content is irrelevant once the gate
+         node-registry:353), so the pairing store's content is irrelevant once the gate
          is shut.
       3. On a build this check's node-admission model was actually read on (2026.9.6 and
          later, judged the same way `_openclaw_generation` judges the config schema
@@ -5341,9 +5348,9 @@ def check_paired_node_skill_coverage(ctx: Context) -> Finding:
          that JS-trims to exactly ``"system.run"`` -> PASS. `node.canExec` requires
          ``system.run`` in the node's OWN approved commands (`remote-skills:49`), and the
          deny list is subtracted from every node's allowlist
-         (node-command-policy:294,312-315) -- so no paired node can ever satisfy the
+         (node-command-policy:229,247-250) -- so no paired node can ever satisfy the
          canExec gate, whatever its own pairing record says. NOT taken on an unmodelled
-         build: the canExec/deny-precedence chain above is only grounded on 9.6.
+         build: the canExec/deny-precedence chain above is only grounded on 9.6 and 9.7.
       4/5/6. Otherwise, the paired-device store (SQLite `device_pairing_paired`, folded
          with any legacy `devices/paired.json` + `nodes/paired.json` per the 9.6
          migration merge -- see the preceding comment block) is read for node-capable

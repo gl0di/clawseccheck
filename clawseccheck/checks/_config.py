@@ -7087,22 +7087,25 @@ def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
 # facts, and `dig()`/`.get()` collapse them to the same default without it.
 _B397_ABSENT = object()
 
-# Grounded against the installed dist (openclaw@2026.9.6, 2026-09-26): the `port` doc
-# comment in `GatewayConfigSchema`, "Single multiplexed port for Gateway WS + HTTP
-# (default: 18789)" (zod-schema-B-u3AXjg.mjs:964), and the literal fallback in the
-# schema's own superRefine, `gateway.port ?? 18789` (zod-schema-B-u3AXjg.mjs:1305).
+# Grounded against the installed dist (openclaw@2026.9.7, re-read 2026-10-05; first read
+# on 2026.9.6, 2026-09-26): the `port` doc comment in `GatewayConfigSchema`, "Single
+# multiplexed port for Gateway WS + HTTP (default: 18789)" (zod-schema-BRat_tFr.mjs:965),
+# and the literal fallback in the schema's own superRefine, `gateway.port ?? 18789`
+# (zod-schema-BRat_tFr.mjs:1310).
 _B397_DEFAULT_GATEWAY_PORT = 18789
 
 # A single DNS label, case-insensitive -- the per-label half of
-# `isValidPortalIngressDomain` (zod-schema-B-u3AXjg.mjs:500-506, openclaw@2026.9.6,
-# 2026-09-26): `/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu` applied to each
+# `isValidPortalIngressDomain` (zod-schema-BRat_tFr.mjs:506-513, openclaw@2026.9.7,
+# re-read 2026-10-05; first read on 2026.9.6, 2026-09-26):
+# `/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu` applied to each
 # `domain.split(".")` element.
 _B397_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
 
 
 def _b397_ingress_domain_ok(domain: str) -> bool:
     """Port of the vendor's ``isValidPortalIngressDomain``
-    (``zod-schema-B-u3AXjg.mjs:500-506``, openclaw@2026.9.6, 2026-09-26):
+    (``zod-schema-BRat_tFr.mjs:506-513``, openclaw@2026.9.7, re-read 2026-10-05; first read
+    on 2026.9.6, 2026-09-26):
 
     .. code-block:: js
 
@@ -7148,8 +7151,8 @@ def _b397_direct_reach(cfg: dict) -> "tuple[str, str]":
     """Reach classification for the "direct" portal transport (T3, the default when
     neither ``gateway.portals.ingress`` nor a managed Tailscale Serve/Funnel route is
     active): a per-portal listener on every address the Gateway's OWN HTTP server binds
-    (``params.httpBindHosts``, ``server-start-BG4nMCFD.mjs:6259-6292``, openclaw@2026.9.6,
-    2026-09-26).
+    (``params.httpBindHosts``, ``server-start-my5aBcwu.mjs:6346-6379``, openclaw@2026.9.7,
+    re-read 2026-10-05; first read on 2026.9.6, 2026-09-26).
 
     Returns ``(reach, label)`` where *reach* is ``"local"``, ``"remote"`` or
     ``"unresolved"`` and *label* names the bind evidence for the finding text.
@@ -7186,73 +7189,83 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     gated only by a per-portal bearer token in the URL, never by ``gateway.auth``,
     trusted-proxy identity or any access layer in front of the Gateway.
 
-    Grounded on the installed dist (openclaw@2026.9.6, read 2026-09-26). Base:
+    Grounded on the installed dist (openclaw@2026.9.7, re-read 2026-10-05; first read
+    on 2026.9.6, 2026-09-26; the one citation kept on 9.6 says so). Base:
     ``integration/4.3.0``. Bundle names rotate on every release; see
     ``docs/CHECK_AUTHORING.md`` "Citing the OpenClaw dist".
 
     THE SCHEMA. ``gateway.portals`` is ``strictObject({ ingress: strictObject({domain,
     port}).optional() }).optional()`` (``GatewayConfigSchema``,
-    ``zod-schema-B-u3AXjg.mjs:993-996``) - no ``enabled`` field, no token/secret/
+    ``zod-schema-BRat_tFr.mjs:994-997``) - no ``enabled`` field, no token/secret/
     SecretRef/env/cookie/bind-host field. There is no "weak auth" or "literal secret"
     mode to express in config, and nothing here for ``logsafe.redact`` to mask beyond the
     domain string itself (which is not a secret, only PII-adjacent hostname text).
 
     PORTAL AUTH IS ALWAYS THE SAME, AND IT IS STRONG. Each portal gets a per-portal
     ``token: randomBytes(32).toString("hex")`` (256 bits,
-    ``createGatewayPortalService``, ``server-start-BG4nMCFD.mjs:6210``).
-    ``authorizePortalRequest`` (``:5726-5745``) accepts only that token, compared
-    timing-safe (``tokensEqual``, ``:5678``). Never gateway.auth, trusted-proxy identity
-    or any front-door access layer: ``handlePortalProxyRequest`` (``:5840``) calls
-    ``authorizePortalRequest`` only, and ``proxyHeaders`` (``:5791-5797``) strips
+    ``createGatewayPortalService``, ``server-start-my5aBcwu.mjs:6323``).
+    ``authorizePortalRequest`` (``:5839-5849``) accepts only that token, compared
+    timing-safe (``tokensEqual``, ``:5791``). Never gateway.auth, trusted-proxy identity
+    or any front-door access layer: ``handlePortalProxyRequest`` (``:5944``) calls
+    ``authorizePortalRequest`` only, and ``proxyHeaders`` (``:5895-5901``) strips
     ``forwarded``/``x-real-ip``/``x-forwarded-*``/``tailscale-*``/``cf-access-*`` before
     the request reaches user code, so upstream identity is never consulted.
 
     THE INGRESS LISTENER IS ALWAYS LOOPBACK-BOUND. ``createPortalIngress`` hard-codes
-    ``bindHost: "127.0.0.1"`` (``:5983-6026``, literal at ``:5997``) and starts with the
-    Gateway (``portalService.startIngress()``, ``:7720``) whether or not any portal is
+    ``bindHost: "127.0.0.1"`` (``:6087-6130``, literal at ``:6101``) and starts with the
+    Gateway (``portalService.startIngress()``, ``:7959``) whether or not any portal is
     open. How far it reaches off-host is entirely a function of the operator's own
     wildcard HTTPS proxy for that domain, which no config field describes.
 
-    AGENTS HOLD THE URL. Every non-sandboxed agent gets ``createPortalTool()``
+    AGENTS HOLD THE URL. In openclaw@2026.9.6 every non-sandboxed agent got
+    ``createPortalTool()`` with no owner check
     (``...options?.sandboxed ? [] : [createTerminalTool(...), createPortalTool()]``,
-    ``openclaw-tools-thu-J91q.mjs:17562-17571``; ``sandboxed: Boolean(sandbox)``,
-    ``agent-tools-g36ho974.mjs:688``), which can open a portal to any local port 1-65535
-    (``PortalOpenParamsSchema``, ``src-BRUl7oDv.mjs:6011-6020``) and whose tool result
+    ``openclaw-tools-thu-J91q.mjs:17562-17571``); ``portal`` was already in the
+    owner-only core tool list on both builds. In 2026.9.7 the non-sandboxed tool list
+    spreads ``...createAvailablePortalTools(options)`` instead (call site
+    ``openclaw-tools-DCQphGzC.mjs:17666-17675``; defined in
+    ``sessions-spawn-tool-B5tfhM3J.mjs:143-145``), which returns no tool when
+    ``senderIsOwner === false`` and there is no ``sessionPortalTarget``, and otherwise
+    returns the portal tool (``sandboxed: Boolean(sandbox)``,
+    ``agent-tools-D5UK6LHM.mjs:656``), which can open a portal to any local port 1-65535
+    (``PortalOpenParamsSchema``, ``src-BvzgK7Oj.mjs:5856-5865``) and whose tool result
     text contains the tokenized URL (``formatPortalResult``,
-    ``sessions-spawn-tool-AW-VALLJ.mjs:133-135``). So a prompt-injected agent can publish
-    an internal service, and its model context holds the bearer URL.
+    ``sessions-spawn-tool-B5tfhM3J.mjs:146-148``). So a prompt-injected agent can publish
+    an internal service, and its model context holds the bearer URL. This check does not
+    model 9.7's session-bound portal tool for a non-owner sender with an attached worker
+    environment (``prepareSessionPortalToolAccess``, ``agent-tools-D5UK6LHM.mjs:309-317``).
 
     THREE TRANSPORTS, evaluated in this order because that is the vendor's own
-    precedence (``createGatewayPortalService.open``, ``server-start-BG4nMCFD.mjs:
-    6196-6310``):
+    precedence (``createGatewayPortalService.open``, ``server-start-my5aBcwu.mjs:
+    6308-6397``):
 
     * T1 **ingress** - used whenever ``gateway.portals.ingress`` is set
-      (``servers = ingress ? [] : ...``, ``:6235``; ingress wins over Tailscale,
-      ``:6197``). URL: ``https://<random-hex>.<domain>``, routed by Host header
-      (``portalIngressHostname``, ``:6028-6031``), served by the loopback listener.
+      (``servers = ingress ? [] : ...``, ``:6336``; ingress wins over Tailscale,
+      ``:6309``). URL: ``https://<random-hex>.<domain>``, routed by Host header
+      (``portalIngressHostname``, ``:6132-6135``), served by the loopback listener.
     * T2 **tailscale** - used when there is no ingress and
       ``gateway.tailscale.mode`` is ``serve``/``funnel`` (``managedTailscaleMode``,
-      ``:7527``). Always claimed as Tailscale **Serve**, never Funnel
-      (``claimTailscaleServePort``, ``tailscale-DHUFjoUd.mjs:309-317``) even when the
+      ``:7766``). Always claimed as Tailscale **Serve**, never Funnel
+      (``claimTailscaleServePort``, ``tailscale-ovAM74O_.mjs:293-301``) even when the
       Gateway itself runs Funnel, and fails closed if the managed route is not active.
       Tailscale serve/funnel also forces a loopback Gateway bind
-      (``validateGatewayTailscaleBind``, ``validation-core-C5ZDhifM.mjs:1245-1256``).
+      (``validateGatewayTailscaleBind``, ``validation-core-BichtBZ7.mjs:1146-1157``).
     * T3 **direct** - every other case. Each portal gets its own listener on every
       address the Gateway's own HTTP server binds (``params.httpBindHosts``,
-      ``:7718``, from ``resolveGatewayListenHosts``, ``net-DU4aWKLv.mjs:217-228``), on a
+      ``:7957``, from ``resolveGatewayListenHosts``, ``net-BwU9smrX.mjs:212-223``), on a
       random port, plain HTTP unless ``gateway.tls.enabled``. **A hardened primary
       gateway on ``bind=lan`` therefore also serves portals on ``0.0.0.0`` with random
       ports, outside gateway.auth** - a check that only fired on the ingress path
       would get this backwards, PASSing the equally-exposed direct-on-LAN shape.
 
     OPERATORS CAN ALWAYS OPEN PORTALS TOO. ``portal.open`` is an ``operator.write``
-    Gateway method (``method-scopes-C7g7eSZh.mjs:2584-2602``), always created
-    (``server-start-BG4nMCFD.mjs:7541-7548``); ``portal.list`` redacts the token for
-    non-write/admin clients (``portals-D5UqY34x.mjs:13-16,49``). The agent-facing
+    Gateway method (``core-method-policy-BePoiMRV.mjs:2426-2445``), always created
+    (``server-start-my5aBcwu.mjs:7780-7787``); ``portal.list`` redacts the token for
+    non-write/admin clients (``portals-D2vM3hFf.mjs:138-141,175``). The agent-facing
     ``gateway`` tool cannot call it - its actions are only config.get,
-    config.schema.lookup and update.run (``openclaw-tools-thu-J91q.mjs:3414-3419``) -
+    config.schema.lookup and update.run (``openclaw-tools-DCQphGzC.mjs:1429-1434``) -
     but an agent with unsandboxed exec may still reach it via
-    ``openclaw gateway call portal.open`` (``gateway-cli-C-ulFTjb.mjs:403``), disclosed
+    ``openclaw gateway call portal.open`` (``gateway-cli-tvaNgE4v.mjs:386``), disclosed
     in the P2 fix text rather than checked here (B4/B8/B43 cover exec itself).
 
     VERSION. ``gateway.portals`` first appears in the 2026.9.6 schema; it is absent from
@@ -7301,7 +7314,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
        exists, or the proxy is private, it overstates reach.
     2. The vendor's own cross-field refinement - a portal domain overlapping
        ``gateway.publicOrigin``/``gateway.controlUi.allowedOrigins``
-       (``zod-schema-B-u3AXjg.mjs:1295-1304``) - is not replicated; OpenClaw refuses
+       (``zod-schema-BRat_tFr.mjs:1300-1309``) - is not replicated; OpenClaw refuses
        such a config outright.
     3. With Tailscale serve/funnel but Tailscale down, ``portal.open`` fails closed, so
        there are no portals at all.
@@ -7316,7 +7329,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     PASS-WRONGLY RESIDUALS: an absent ``gateway.bind`` on a host-networked container
     (the same residual ``_gateway_remote_exposure_reason``, B2, B11, B350 and RISK-20
     accept); CLI overrides (``--bind``/``--host``/``--tailscale``,
-    ``server-runtime-config-CtMMRH47.mjs:70,89``) are invisible; an agent with
+    ``server-runtime-config-D3C6lbI6.mjs:71,90``) are invisible; an agent with
     unsandboxed exec may open portals through ``openclaw gateway call portal.open``
     despite a `portal` tool deny (disclosed in the P2 fix; exec itself is covered by
     B4/B8/B43); and portal behavior on unmeasured builds is evaluated with the 9.6
