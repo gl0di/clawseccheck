@@ -1122,6 +1122,53 @@ def test_risk16_no_bind_no_fire():
     assert not any(p.id == "RISK-16" for p in _paths(cfg))
 
 
+@pytest.mark.parametrize(
+    "password",
+    [
+        "${GW_PW}",
+        "${GW_PW:-}",
+        "$GW_PW",
+        {"source": "env", "provider": "default", "id": "GW_PW"},
+    ],
+)
+def test_risk16_secretref_password_no_fire(password):
+    """C-646: the chain's premise is B1's 'plaintext gateway.auth.password'. A SecretRef
+    holds nothing for the agent to read out of openclaw.json, so the chain must use the
+    same predicate B1 does - otherwise the run says 'B1 PASS' and 'plaintext gateway
+    credential' about the same config."""
+    cfg = _risk16_cfg(binds=["/var/run/docker.sock:/var/run/docker.sock"], password=password)
+    assert not any(p.id == "RISK-16" for p in _paths(cfg))
+
+
+@pytest.mark.parametrize(
+    "password",
+    [
+        "${GW_PW:-x}",
+        "$${GW_PW}",
+        "${GW_PW}" + "a" * 16,
+        "x",
+        # C-135 round 2: retired markers are the literal password at runtime, not pointers
+        "secretref-env:GW_PW",
+        "__env__:GW_PW",
+    ],
+)
+def test_risk16_lookalike_or_short_password_still_fires(password):
+    """A look-alike must not read as a reference, and B1's any-length reading holds."""
+    cfg = _risk16_cfg(binds=["/var/run/docker.sock:/var/run/docker.sock"], password=password)
+    assert any(p.id == "RISK-16" for p in _paths(cfg))
+
+
+def test_risk16_reference_to_a_plaintext_env_block_entry_still_fires():
+    """C-646 (C-135 round 2): OpenClaw applies the config's own env block before ${...}
+    substitution, so a reference to a variable that env.vars defines in plaintext is a
+    plaintext gateway credential - RISK-16 must agree with B1, which FAILs it."""
+    cfg = _risk16_cfg(binds=["/var/run/docker.sock:/var/run/docker.sock"], password="${GW_PW}")
+    cfg["env"] = {"vars": {"GW_PW": "plain" + "text-value"}}
+    assert any(p.id == "RISK-16" for p in _paths(cfg))
+    cfg["env"] = {"vars": {"OTHER_VAR": "plain" + "text-value"}}  # a different name: clean
+    assert not any(p.id == "RISK-16" for p in _paths(cfg))
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule RISK-15: untrusted context (B26) + browser SSRF (B38) -> metadata exfil
 # ──────────────────────────────────────────────────────────────────────────────

@@ -50,6 +50,9 @@ _CRED_STORE_MAX_FILES
 _CRED_STORE_MAX_NAMES
 _DANGER_FIXED_2026_8_1
 _DESTRUCTIVE_CMD_RE
+_ENV_DEFAULT_OPERATOR_MIN
+_ENV_DEFAULT_OPERATOR_SERIES_YEAR
+_ENV_SUBSTITUTION_REFERENCE_RE
 _EXFIL_RE
 _FS_GOVERNED_TOOL_IDS
 _FsScopeGrants
@@ -133,12 +136,14 @@ _check_unicode_obfuscation
 _code_mode_default
 _codex_appserver_yolo_reach
 _codex_unmoded_server_names
+_credential_is_plaintext
 _credential_store_state
 _defensive_context
 _defensive_section
 _dep_names_in_skill
 _effective_group_allow_from
 _enabled_tools
+_env_default_operator
 _example_governance
 _exec_policy_is_gated
 _external_input_channels
@@ -151,6 +156,7 @@ _fs_scope_grants
 _gateway_remote_exposure_reason
 _has_approval_gate
 _has_cred_exfil_outside_fence
+_has_env_template
 _hint
 _hooks_agent_ids_unrestricted
 _hooks_allowed_session_key_prefixes
@@ -162,6 +168,7 @@ _install_host_is_public_ip
 _is_code_example
 _is_owner_wildcard_allow_from
 _is_posix
+_is_secret_ref_object
 _is_wildcard_allow_entry
 _key_advice
 _layer_exec_policy

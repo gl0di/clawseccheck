@@ -61,6 +61,7 @@ from ._shared import (
     _channel_has_implicit_default_account,
     _channels,
     _config_unreadable,
+    _credential_is_plaintext,  # C-646
     _credential_store_state,
     _detail_path,
     _dir_replaceable_by_others,
@@ -71,6 +72,10 @@ from ._shared import (
     _file_readable_by_others,
     _finding,
     _gateway_remote_exposure_reason,
+    _has_env_template,  # C-646
+    _reference_env_names,  # C-646
+    _env_default_operator,  # C-646
+    _js_trim,  # C-646
     _hint,
     _hooks_session_key_exposures,
     INPUT_TOOL_HINTS,
@@ -3026,8 +3031,33 @@ def check_gateway(ctx: Context) -> Finding:
     # B-290: clauses that are worth DISCLOSING but are not proof of a misconfiguration.
     # They never escalate the status; they only add a WARN when nothing FAIL-worthy fired.
     soft_ev: list[str] = []
-    bind = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-646: the three enum-typed reads below (`gateway.bind`, `gateway.auth.mode`,
+    # `gateway.tailscale.mode`) can carry a `${VAR:-default}` env-substitution template
+    # (OpenClaw 2026.9.7 added the `:-` fallback; `${VAR}` itself is older). The
+    # template is filled in from the GATEWAY'S environment, so its text is not the value
+    # in effect - `${X:-loopback}` is not a non-loopback host, and `${M:-none}` is not
+    # an authenticated mode. Reading it as a literal manufactured a FAIL on a loopback
+    # bind and could hide an unauthenticated one. A templated read is skipped by the
+    # legs that depend on it and, when it would have decided the verdict, the whole
+    # check is UNKNOWN (never PASS) - see `_b2_unresolved` below.
+    bind_raw = dig(cfg, "gateway.bind", "")
+    bind_tpl = _has_env_template(bind_raw)
+    bind = "" if bind_tpl else parse_bind_host(bind_raw)
     auth = dig(cfg, "gateway.auth.mode")
+    auth_tpl = _has_env_template(auth)
+    ts_tpl = _has_env_template(dig(cfg, "gateway.tailscale.mode"))
+    # A templated value matters only where the verdict would branch on it: the bind decides
+    # exposure only for a mode that does not itself authenticate (none / absent /
+    # trusted-proxy, or an auth mode that is itself undeterminable); the auth mode decides
+    # only where the bind may be off-loopback; Tailscale funnel exposes the gateway on its
+    # own, whatever the bind.
+    _b2_unresolved = []
+    if bind_tpl and (auth in (None, "none", "trusted-proxy") or auth_tpl):
+        _b2_unresolved.append("gateway.bind")
+    if auth_tpl and (bind_tpl or (bind and bind not in LOOPBACK)):
+        _b2_unresolved.append("gateway.auth.mode")
+    if ts_tpl:
+        _b2_unresolved.append("gateway.tailscale.mode")
     if bind and bind not in LOOPBACK and auth in (None, "none"):
         # B-290 (ENV-4): `auth is None` - i.e. gateway.auth.mode absent or null - is
         # EXACTLY the condition under which resolveGatewayAuth derives the mode from an
@@ -3206,15 +3236,43 @@ def check_gateway(ctx: Context) -> Finding:
         fixes.append("Set every open channel's dmPolicy/groupPolicy to 'allowlist'")
     if (ev or soft_ev) and retired_insecure_auth:
         soft_ev.append(retired_insecure_auth)
+    # C-646: say plainly which templated reads were NOT evaluated, so a FAIL/WARN raised by
+    # an independent leg does not read as a complete assessment. Never raises the status.
+    if _b2_unresolved:
+        _b2_tpl_note = (
+            f"{', '.join(_b2_unresolved)} "
+            + (
+                "carry ${...} environment templates"
+                if len(_b2_unresolved) > 1
+                else "carries a ${...} environment template"
+            )
+            + " that OpenClaw fills in at load from the gateway's environment or from this "
+            "config's own env block, so the value in effect cannot be read from the config "
+            "and the checks that depend on it were not evaluated"
+        )
+        _b2_tpl_fix = (
+            "Write the value literally in openclaw.json (or verify it in the gateway's "
+            "environment) so the exposure can be read from the config"
+        )
+    else:
+        _b2_tpl_note = _b2_tpl_fix = ""
     if ev:
         _insecure_auth_only = ev == ["gateway.controlUi.allowInsecureAuth enabled"]
         sev = WARN if _insecure_auth_only else FAIL
         # soft_ev rides along in the detail so the report still says WHY the exposed bind
         # was not counted, but it can never raise the status - every escalation still
         # comes from `ev`.
+        if _b2_tpl_note:
+            soft_ev.append(_b2_tpl_note)
+            fixes.append(_b2_tpl_fix)
         return _finding("B2", sev, "; ".join(ev + soft_ev), "; ".join(fixes), ev + soft_ev)
     if soft_ev:
+        if _b2_tpl_note:
+            soft_ev.append(_b2_tpl_note)
+            fixes.append(_b2_tpl_fix)
         return _finding("B2", WARN, "; ".join(soft_ev), "; ".join(fixes), soft_ev)
+    if _b2_tpl_note:
+        return _finding("B2", UNKNOWN, "Cannot assess the gateway: " + _b2_tpl_note, _b2_tpl_fix)
     if not cfg:
         return _finding(
             "B2",
@@ -4135,10 +4193,71 @@ def check_secrets(ctx: Context) -> Finding:
     ev = []
     # gateway.auth.password / hooks.token in config are flagged by the native audit too
     # (gateway.password top-level does not exist; password lives at gateway.auth.password)
-    if dig(cfg, "gateway.auth.password"):
-        ev.append("gateway.auth.password set in config")
-    if dig(cfg, "hooks.token"):
-        ev.append("hooks.token set in config")
+    #
+    # C-646: "set in config" is a claim that a PLAINTEXT credential sits in the file, so a
+    # SecretRef (`${GW_PW}`, `${GW_PW:-}`, `$GW_PW`, or the `{source, provider, id}` object)
+    # must not raise it - a reference is exactly the remedy this check recommends. Any
+    # non-empty value that is not a whole-value reference still does, at any length, so a
+    # look-alike never reads as a reference (see `_credential_is_plaintext`). The two paths
+    # differ in vendor type: `gateway.auth.password` is a SecretInput, `hooks.token` a
+    # plain string that only `${...}` env substitution can point elsewhere.
+    #
+    # C-646 (C-135 round 2): a reference is NOT clean when this same config defines the
+    # variable it names in plaintext (`env.vars.GW_PW` / flat `env.GW_PW` - OpenClaw applies
+    # the config's env block before `${...}` substitution), so `cfg` is passed and the
+    # detail text stays the base wording (`.clawseccheckignore` fingerprints hash `detail`);
+    # the explanation goes in `fix`.
+    #
+    # C-646 (C-135 round 2): the retired `secretref-env:NAME` / `__env__:NAME` string markers
+    # are NOT references at runtime (2026.9.7 `types.secrets-*.mjs`: "parsed only by doctor
+    # migration"; `auth-resolve-*.mjs` then uses the marker text itself as the password), so
+    # they keep the base FAIL on both paths; the `fix` says why, since a reader who wrote
+    # one believes it is a SecretRef. Only `detail` is fingerprinted, so the hint is free.
+    _b1_via_env_block = False
+    _b1_retired_marker = False
+    # C-646: the PLAIN whole-value `${NAME}` reference at `hooks.token`, exactly as
+    # configured (trimmed); the empty-fallback `${NAME:-}` form is not recorded here.
+    _b1_hooks_plain_ref: "str | None" = None
+    # C-646 (build gate): a whole-value EMPTY-fallback `${NAME:-}` at either path is a
+    # reference only on an OpenClaw that understands the `:-` operator (2026.9.7+). On an
+    # older build the text is passed through verbatim and IS the credential. The shape
+    # predicates stay build-independent (they ask "is a secret held in the file"); this is
+    # the one place the build decides, via `_env_default_operator`: "yes" is today's
+    # reference reading (PASS, nothing recorded), "no" is the plaintext FAIL with the SAME
+    # detail (fingerprint-stable; the build note goes in `fix`), "unknown" is an UNKNOWN
+    # (below) unless something in B1 FAILs, which always wins.
+    _b1_no_default_op = False
+    _b1_ef_unknown: "list[tuple[str, str]]" = []
+    for _b1_path, _b1_secret_input, _b1_label in (
+        ("gateway.auth.password", True, "gateway.auth.password set in config"),
+        ("hooks.token", False, "hooks.token set in config"),
+    ):
+        _b1_val = dig(cfg, _b1_path)
+        _b1_ef_ref = None  # the whole-value empty-fallback template as configured, or None
+        _b1_ef_build = "yes"
+        if isinstance(_b1_val, str):
+            for _b1_name in _reference_env_names(_b1_val, secret_input=_b1_secret_input):
+                if _js_trim(_b1_val) == "${" + _b1_name + ":-}":
+                    _b1_ef_ref = _js_trim(_b1_val)
+                    _b1_ef_build = _env_default_operator(ctx)
+        if _b1_ef_build == "no":
+            _b1_no_default_op = True
+        if _credential_is_plaintext(_b1_val, secret_input=_b1_secret_input, cfg=cfg):
+            ev.append(_b1_label)
+            if not _credential_is_plaintext(_b1_val, secret_input=_b1_secret_input):
+                _b1_via_env_block = True
+            elif isinstance(_b1_val, str) and _b1_val.strip().startswith(
+                ("secretref-env:", "__env__:")
+            ):
+                _b1_retired_marker = True
+        elif _b1_ef_build == "no":
+            ev.append(_b1_label)
+        elif _b1_ef_build == "unknown":
+            _b1_ef_unknown.append((_b1_path, _b1_ef_ref))
+        elif not _b1_secret_input and isinstance(_b1_val, str):
+            for _b1_name in _reference_env_names(_b1_val, secret_input=False):
+                if "${" + _b1_name + "}" in _b1_val:  # the plain form: no `:-` operator
+                    _b1_hooks_plain_ref = "${" + _b1_name + "}"
     # secrets anywhere in the config are only a real risk if the file is readable by others
     secret_paths = _secret_paths(cfg)
     if secret_paths and _perms_loose(ctx):
@@ -4157,15 +4276,31 @@ def check_secrets(ctx: Context) -> Finding:
         # resolved) so the copy-pasted chmod acts on the config this run diagnosed,
         # not a different home on a machine that has several.
         _b1_cfg = ctx.config_path or (ctx.home / "openclaw.json")
-        return _finding(
-            "B1",
-            FAIL,
-            "; ".join(ev),
+        _b1_fix = (
             "Move secrets to `openclaw secrets configure` / env vars, never into "
             f"bootstrap files; `chmod 600 {_b1_cfg}` and `chmod 700 {ctx.home}` so "
-            "config-stored tokens are not readable by others.",
-            ev,
+            "config-stored tokens are not readable by others."
         )
+        if _b1_via_env_block:
+            _b1_fix += (
+                " A ${NAME} reference does not help while openclaw.json's own env block "
+                "(env.vars.NAME or env.NAME) holds that value in plaintext - remove the "
+                "entry and supply NAME from the gateway's own environment instead."
+            )
+        if _b1_retired_marker:
+            _b1_fix += (
+                " A secretref-env: / __env__: string is a retired marker that OpenClaw "
+                "2026.9.7 reads as the literal value, not a reference (only its doctor "
+                "migration rewrites it) - replace it with ${NAME} or, for "
+                "gateway.auth.password, a {source, provider, id} SecretRef object."
+            )
+        if _b1_no_default_op:
+            _b1_fix += (
+                " This OpenClaw build does not understand the ${NAME:-} fallback form, "
+                "which OpenClaw 2026.9.7 introduced, so it uses the text itself as the "
+                "credential."
+            )
+        return _finding("B1", FAIL, "; ".join(ev), _b1_fix, ev)
     # B-228: openclaw.json present but unparseable/unreadable - bootstrap-file secrets
     # (checked above, config-independent) still legitimately FAILed if present, but a
     # clean verdict at this point is only trustworthy if the config itself was actually
@@ -4212,6 +4347,68 @@ def check_secrets(ctx: Context) -> Finding:
             "Run the audit on the host where ~/.openclaw lives.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
+    # C-646 (C-135 rounds 3-4): `hooks.token` is a PLAIN string in the vendor schema, and
+    # OpenClaw 2026.9.7 leaves a `${NAME}` whose variable is UNSET or empty in the gateway's
+    # environment as its own literal text (`resolveConfigForRead` passes an `onMissing` that
+    # only warns, `io.read-helpers-*.mjs`; `substituteString` keeps the token,
+    # `redact-*.mjs`; `resolveHooksConfig` reads `cfg.hooks.token` verbatim with no
+    # unresolved-path gate, `hooks-*.mjs` - the vendor's own audit DOES gate on that fact,
+    # `audit.nondeep.runtime-*.mjs`). The text `${NAME}` is then the live bearer token: a
+    # public, guessable string, and nothing else in this audit flags it. (`gateway.auth.
+    # password` is not affected: a whole-value reference there is parsed as a SecretRef
+    # and fails closed.)
+    #
+    # THE RULE: a whole-value PLAIN `${NAME}` at `hooks.token` (no fallback operator) with
+    # no other B1 FAIL is UNKNOWN, always - not PASS (the token may be a literal) and not
+    # FAIL (nothing proves it is). There is no environment lookup of any kind, and the
+    # answer is the same whether `hooks.enabled` is true, false or absent: whether NAME is
+    # set is a fact about the environment of the GATEWAY PROCESS, which a static scan
+    # cannot see. An evidence model over systemd unit and dotenv files was tried (round 3)
+    # and retracted (round 4 found six ways to read a file as defining the variable while
+    # the literal was still the live token): enumerating the ways a file can "define" a
+    # variable is a list that failed once per surface it forgot. The EMPTY-FALLBACK form
+    # `${NAME:-}` is a reference (PASS) on 2026.9.7 and later: measured there, an unset variable then
+    # substitutes to the empty string and `resolveHooksConfig` throws "hooks.enabled
+    # requires hooks.token", so no literal token ever exists. A FAIL anywhere in B1 (this
+    # point is reached only with `ev` empty) wins over this UNKNOWN. The disclosure lives
+    # in `fix`, never `detail` (`baseline.fingerprint()` hashes `detail`).
+    #
+    # C-646 (build gate): a whole-value EMPTY-fallback `${NAME:-}` at either credential
+    # path, with the installed build undeterminable (`_env_default_operator` == "unknown"),
+    # is UNKNOWN the same way: 2026.9.7 and later read it as an environment reference, an
+    # earlier build uses the text itself as the credential. When the plain `hooks.token`
+    # UNKNOWN also applies, ONE finding names both; the single-cause texts are unchanged.
+    if _b1_hooks_plain_ref is not None or _b1_ef_unknown:
+        _b1_details = []
+        _b1_fixes = []
+        if _b1_hooks_plain_ref is not None:
+            _b1_nm = _b1_hooks_plain_ref[2:-1]
+            _b1_details.append(
+                "hooks.token is the reference " + _b1_hooks_plain_ref + ", and this audit "
+                "cannot see the environment the gateway runs with, so it cannot confirm "
+                "that the variable is set."
+            )
+            _b1_fixes.append(
+                "Confirm " + _b1_nm + " is set to a non-empty value in the environment the "
+                "gateway process runs with. On OpenClaw 2026.9.7, when hooks are enabled and "
+                "the variable is unset or empty, the gateway logs a warning and uses the "
+                "reference text itself as the hooks bearer token. Writing the empty-fallback "
+                "form ${" + _b1_nm + ":-} instead makes OpenClaw 2026.9.7 refuse to enable "
+                "hooks when the variable is unset, rather than fall back to the literal text."
+            )
+        if _b1_ef_unknown:
+            _b1_details.append(
+                " and ".join(p + " is the reference " + r for p, r in _b1_ef_unknown)
+                + ", and the installed OpenClaw build could not be determined, so this "
+                "audit cannot tell whether that form is read as an environment reference."
+            )
+            _b1_fixes.append(
+                "OpenClaw 2026.9.7 and later read the ${NAME:-} form as an environment "
+                "reference; earlier builds do not understand it and use the text itself as "
+                "the credential. Run the audit where the installed openclaw can be found, "
+                "so the build is known."
+            )
+        return _finding("B1", UNKNOWN, " ".join(_b1_details), " ".join(_b1_fixes))
     note = ""
     pc = "verified"
     if secret_paths:
