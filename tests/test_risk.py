@@ -1140,6 +1140,48 @@ def test_risk16_secretref_password_no_fire(password):
     assert not any(p.id == "RISK-16" for p in _paths(cfg))
 
 
+def _risk16_on_build(password, installed):
+    ctx = _ctx(_risk16_cfg(binds=["/var/run/docker.sock:/var/run/docker.sock"], password=password))
+    ctx.installed_dist_version = installed
+    findings = _findings(ctx)
+    b1 = next(f for f in findings if f.id == "B1")
+    return b1.status, any(p.id == "RISK-16" for p in risk_paths(ctx, findings))
+
+
+@pytest.mark.parametrize(
+    ("installed", "b1_status", "fires"),
+    [
+        ("2026.9.6", FAIL, True),      # no default operator: the text is the password
+        ("2026.7.33", FAIL, True),
+        ("2026.9.7", PASS, False),     # read as an environment reference
+        ("2026.10.0", PASS, False),
+        (None, "UNKNOWN", False),      # build not seen: B1 is UNKNOWN, the chain stays silent
+        ("2026.9.7-beta.1", "UNKNOWN", False),
+    ],
+)
+def test_risk16_follows_b1_on_the_empty_fallback_form(installed, b1_status, fires):
+    """The empty-fallback template is a reference only from OpenClaw 2026.9.7. On an older
+    build the text in openclaw.json is the password, B1 FAILs it, and the chain that rests
+    on B1's premise must fire with it; it must not fire where B1 does not FAIL."""
+    status, fired = _risk16_on_build("${GW_PW:-}", installed)
+    assert status == b1_status, (installed, status)
+    assert fired is fires, (installed, status, fired)
+
+
+@pytest.mark.parametrize("installed", ["2026.9.6", "2026.9.7", None])
+def test_risk16_plain_reference_never_fires_whatever_the_build(installed):
+    """Control: the plain reference at gateway.auth.password fails closed on every build
+    when the variable is unset, so the build gate must not reach it."""
+    status, fired = _risk16_on_build("${GW_PW}", installed)
+    assert status == PASS and fired is False, (installed, status, fired)
+
+
+@pytest.mark.parametrize("installed", ["2026.9.6", "2026.9.7", None])
+def test_risk16_plaintext_fires_whatever_the_build(installed):
+    status, fired = _risk16_on_build("a-plaintext-gateway-password-here", installed)
+    assert status == FAIL and fired is True, (installed, status, fired)
+
+
 @pytest.mark.parametrize(
     "password",
     [

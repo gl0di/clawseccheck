@@ -74,8 +74,8 @@ from ._shared import (
     _gateway_remote_exposure_reason,
     _has_env_template,  # C-646
     _reference_env_names,  # C-646
+    _empty_fallback_template,  # C-646
     _env_default_operator,  # C-646
-    _js_trim,  # C-646
     _hint,
     _hooks_session_key_exposures,
     INPUT_TOOL_HINTS,
@@ -4233,13 +4233,9 @@ def check_secrets(ctx: Context) -> Finding:
         ("hooks.token", False, "hooks.token set in config"),
     ):
         _b1_val = dig(cfg, _b1_path)
-        _b1_ef_ref = None  # the whole-value empty-fallback template as configured, or None
-        _b1_ef_build = "yes"
-        if isinstance(_b1_val, str):
-            for _b1_name in _reference_env_names(_b1_val, secret_input=_b1_secret_input):
-                if _js_trim(_b1_val) == "${" + _b1_name + ":-}":
-                    _b1_ef_ref = _js_trim(_b1_val)
-                    _b1_ef_build = _env_default_operator(ctx)
+        # the whole-value empty-fallback template as configured, or None
+        _b1_ef_ref = _empty_fallback_template(_b1_val, secret_input=_b1_secret_input)
+        _b1_ef_build = _env_default_operator(ctx) if _b1_ef_ref is not None else "yes"
         if _b1_ef_build == "no":
             _b1_no_default_op = True
         if _credential_is_plaintext(_b1_val, secret_input=_b1_secret_input, cfg=cfg):

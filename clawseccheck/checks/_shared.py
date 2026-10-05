@@ -590,18 +590,20 @@ def _env_default_operator(ctx) -> str:
     the credential" either. Only B1 (``check_secrets``) consumes this, at its two credential
     paths; the shape predicates above stay build-independent.
 
-    Sources are ``_terminal_default``'s, in its order and with its asymmetry.
-    ``installed_dist_version`` decides outright -- the installed build is the one whose
-    parser runs. A calendar release (``YYYY.M.P``, three or more numeric parts, year at or
-    after the series floor) at or after ``_ENV_DEFAULT_OPERATOR_MIN`` is ``"yes"``; one
-    below it is ``"no"``. ``meta.lastTouchedVersion`` is consulted ONLY when there is no
-    usable installed version, and ONLY a stamp at or after the threshold counts: that stamp
-    proves a 2026.9.7+ build once SAVED the config, so the operator exists. A stamp BELOW
-    the threshold proves nothing about what is installed now (the user may have upgraded
-    five minutes ago and not re-saved), so it answers ``"unknown"``, never ``"no"``.
-    Parsing goes through ``_numeric_version`` (not ``_parse_version``, B-264): a pre-release
-    string orders as None and falls through to the stamp; "0.0.0", a two-part version and
-    None are ``"unknown"``.
+    ONLY ``installed_dist_version`` answers, and it decides outright -- the installed build
+    is the one whose parser runs. A calendar release (``YYYY.M.P``, three or more numeric
+    parts, year at or after the series floor) at or after ``_ENV_DEFAULT_OPERATOR_MIN`` is
+    ``"yes"``; one below it is ``"no"``. Everything else is ``"unknown"``: no installed
+    version, a pre-release string (``_numeric_version``, not ``_parse_version``, B-264,
+    orders it as None), "0.0.0", a two-part version.
+
+    ``meta.lastTouchedVersion`` is deliberately NOT a source here, unlike in
+    ``_terminal_default`` and its siblings. There a stamp at or after the threshold can only
+    make the answer MORE alarming (the risky default is on). Here ``"yes"`` is the answer
+    that CLEARS a credential, and the stamp is written by whoever last saved the file: it
+    survives a downgrade, and it travels with a config copied from another machine. A
+    stamp saying 2026.9.7 beside an older or unseen build would turn the literal text into
+    a PASS. So an unseen build is ``"unknown"`` whatever the stamp says.
 
     DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
     for why a shared three-way predicate would flip two dozen unrelated call sites.
@@ -610,12 +612,6 @@ def _env_default_operator(ctx) -> str:
     if installed is not None:
         if len(installed) >= 3 and installed[0] >= _ENV_DEFAULT_OPERATOR_SERIES_YEAR:
             return "yes" if tuple(installed[:3]) >= _ENV_DEFAULT_OPERATOR_MIN else "no"
-        return "unknown"
-    stamped = _numeric_version(
-        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
-    if (stamped is not None and len(stamped) >= 3
-            and tuple(stamped[:3]) >= _ENV_DEFAULT_OPERATOR_MIN):
-        return "yes"
     return "unknown"
 
 
@@ -801,6 +797,21 @@ def _reference_env_names(value, *, secret_input: bool) -> "list[str]":
         if m is not None:
             return [next(g for g in m.groups() if g)]
     return []
+
+
+def _empty_fallback_template(value, *, secret_input: bool) -> "str | None":
+    """The whole-value EMPTY-fallback template (``${NAME:-}``) as configured, trimmed, or
+    ``None`` when ``value`` is anything else. One definition for B1 and RISK-16: both ask
+    ``_env_default_operator`` what the audited build does with this text, and they must
+    agree on which text that is.
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = _js_trim(value)
+    for name in _reference_env_names(value, secret_input=secret_input):
+        if trimmed == "${" + name + ":-}":
+            return trimmed
+    return None
 
 
 def _credential_is_plaintext(value, *, secret_input: bool = True, cfg=None) -> bool:

@@ -798,7 +798,30 @@ def _audit_by_id(tmp_path, cfg_text: str):
     return {f.id: f for f in findings}
 
 
-def test_audit_secretref_config_from_disk_is_clean_on_b1_and_c015(tmp_path):
+def test_audit_secretref_config_from_disk_is_clean_on_b1_and_c015(tmp_path, monkeypatch):
+    import clawseccheck
+    from clawseccheck import audit
+
+    # The installed build decides the empty-fallback form; a stamp in the file does not.
+    monkeypatch.setattr(clawseccheck, "_installed_dist_version", lambda *a, **k: _B97)
+    cfg = tmp_path / "openclaw.json"
+    cfg.write_text(
+        '{"gateway": {"bind": "loopback", "auth": {"mode": "password",'
+        ' "password": "${OPENCLAW_GATEWAY_PASSWORD:-}"}},'
+        ' "hooks": {"enabled": false, "token": "${HOOKS_TOKEN_REF:-}"}}',
+        encoding="utf-8",
+    )
+    cfg.chmod(0o600)
+    ctx, findings, _ = audit(tmp_path, include_native=False, include_dist=True)
+    assert ctx.installed_dist_version == _B97
+    by_id = {f.id: f for f in findings}
+    assert by_id["B1"].status == PASS, by_id["B1"].detail
+    assert by_id["C015"].status != WARN, by_id["C015"].detail
+
+
+def test_a_stamp_alone_does_not_clear_the_empty_fallback_form_on_disk(tmp_path):
+    """The same config with only ``meta.lastTouchedVersion`` saying 2026.9.7 and no
+    installed build in sight: B1 is UNKNOWN, never PASS."""
     by_id = _audit_by_id(
         tmp_path,
         '{"gateway": {"bind": "loopback", "auth": {"mode": "password",'
@@ -806,8 +829,7 @@ def test_audit_secretref_config_from_disk_is_clean_on_b1_and_c015(tmp_path):
         ' "hooks": {"enabled": false, "token": "${HOOKS_TOKEN_REF:-}"},'
         ' "meta": {"lastTouchedVersion": "2026.9.7"}}',
     )
-    assert by_id["B1"].status == PASS, by_id["B1"].detail
-    assert by_id["C015"].status != WARN, by_id["C015"].detail
+    assert by_id["B1"].status == UNKNOWN, by_id["B1"].detail
 
 
 def test_audit_plaintext_config_from_disk_still_fails_b1(tmp_path):
@@ -1107,14 +1129,21 @@ def test_round_four_shapes_never_read_as_pass(tmp_path, shape, enabled):
 
 
 @pytest.mark.parametrize("shape", ["none", "dotenv", "unit"])
-def test_empty_fallback_on_disk_is_pass_with_and_without_a_definition(tmp_path, shape):
+def test_empty_fallback_on_disk_is_pass_with_and_without_a_definition(
+        tmp_path, monkeypatch, shape):
+    import clawseccheck
+    from clawseccheck import audit
+
     kw = {
         "none": {},
         "dotenv": dict(dotenv="HOOK_TOKEN=" + _REAL + "\n"),
         "unit": dict(units={_SVC_NAME: _SVC + "Environment=HOOK_TOKEN=" + _REAL + "\n"}),
     }[shape]
-    _, by_id = _audit_home(_disk(tmp_path, "${HOOK_TOKEN:-}", build=_B97, **kw))
-    assert by_id["B1"].status == PASS, by_id["B1"].detail
+    monkeypatch.setattr(clawseccheck, "_installed_dist_version", lambda *a, **k: _B97)
+    home = _disk(tmp_path, "${HOOK_TOKEN:-}", **kw)
+    _, findings, _ = audit(home, include_native=False, include_dist=True)
+    b1 = {f.id: f for f in findings}["B1"]
+    assert b1.status == PASS, b1.detail
 
 
 def test_audit_from_disk_plain_reference_is_unknown_and_a_dotenv_does_not_change_it(tmp_path):
@@ -1176,7 +1205,11 @@ _BUILDS = [
     pytest.param("2026.10.0", None, "yes", id="10.0"),
     pytest.param("2026.7.33", None, "no", id="extended-stable-7.33"),
     pytest.param("2026.9.7-beta.1", None, "unknown", id="prerelease"),
-    pytest.param(None, "2026.9.7", "yes", id="none+stamp-9.7"),
+    # a stamp never answers "yes": it is written by whoever saved the file, survives a
+    # downgrade and travels with a copied config, and "yes" is the answer that clears
+    pytest.param(None, "2026.9.7", "unknown", id="none+stamp-9.7"),
+    pytest.param(None, "2027.1.1", "unknown", id="none+far-newer-stamp"),
+    pytest.param("2026.9.6-beta.2", "2026.9.9", "unknown", id="older-prerelease+newer-stamp"),
     pytest.param(None, "2026.9.6", "unknown", id="none+stamp-9.6"),
     pytest.param(None, None, "unknown", id="none+no-stamp"),
     # the installed build decides outright: a stamp never overrules it, either way

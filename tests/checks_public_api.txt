@@ -146,6 +146,7 @@ _defensive_context
 _defensive_section
 _dep_names_in_skill
 _effective_group_allow_from
+_empty_fallback_template
 _enabled_tools
 _env_default_operator
 _example_governance
