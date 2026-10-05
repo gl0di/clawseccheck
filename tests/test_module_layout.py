@@ -354,8 +354,9 @@ _EXEMPT = {
                       "_content.py first, learn what the shared-machinery module wants to "
                       "look like, then decide here. That is a sequencing decision, not a "
                       "deferral for its own sake.",
-    "checks/_egress.py": "~5,267 lines (restated 2026-09-21 for the 4.3.0 wave build — "
-                         "was ~4,736) — the "
+    "checks/_egress.py": "~5,781 lines (restated 2026-10-05 for the 4.4.0 build - "
+                         "was ~5,267; B390 and the B188 extension to retained state-DB "
+                         "copies landed here since) — the "
                          "egress-hardening topic (proxy/TLS/SSRF/data-at-rest + "
                          "web-fetch/log checks). Crossed the budget with B178's "
                          "check_provider_baseurl (models.providers.<id>.baseUrl "
@@ -705,7 +706,8 @@ _EXEMPT = {
                  "disclosure/scope layer they share) is still deferred, but it is no "
                  "longer only an I-022 secondary target — it is the second-largest "
                  "structural debt after checks/_content.py.",
-    "catalog.py": "~3,916 lines (restated 2026-09-12, C-526/C-527 — was ~3,404) — the "
+    "catalog.py": "~4,417 lines (restated 2026-10-05 for the 4.4.0 build - was ~3,916; "
+                  "20 entries added since) — the "
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",

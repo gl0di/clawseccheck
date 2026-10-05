@@ -4,7 +4,7 @@ from pathlib import Path
 from clawseccheck import (
     audit, evaluate, make_canary, render_svg, vet_skill,
 )
-from clawseccheck.catalog import CRITICAL, FAIL, LOW, PASS, UNKNOWN
+from clawseccheck.catalog import CRITICAL, FAIL, PASS, UNKNOWN
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -54,13 +54,16 @@ def test_vet_unknown_for_missing_path(tmp_path):
 
 def test_vet_own_source_not_flagged_as_malware():
     # A security auditor embeds attack signatures + red-team payloads as data;
-    # vetting its OWN source must not self-flag as malware.
+    # vetting its OWN source must not self-flag as malware. It is not a clean bill
+    # either: a matched own-source layout is skipped whole, so the vet reports it
+    # NOT SCANNED (an engine-degraded UNKNOWN) - never PASS and never FAIL.
     import clawseccheck
     pkg_dir = Path(clawseccheck.__file__).resolve().parent     # the clawseccheck/ package
     repo_root = pkg_dir.parent                                 # repo root (has clawseccheck/)
     for target in (pkg_dir, repo_root):
         f = vet_skill(target)
-        assert f.status == PASS and f.severity == LOW, f"{target} -> {f.status}/{f.severity}"
+        assert f.status == UNKNOWN and f.engine_degraded, f"{target} -> {f.status}/{f.severity}"
+        assert f.detail.startswith("NOT SCANNED."), f.detail
 
 
 def test_vet_name_squat_clawseccheck_still_scanned(tmp_path):
