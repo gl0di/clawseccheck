@@ -6,6 +6,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import os
 import re
+import stat as _stat
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,8 @@ from ..collector import (
     LIMIT_DOMAIN_APPROVALS,
     LIMIT_DOMAIN_CONFIG,
     Context,
+    _NON_CODE_SUFFIXES,
+    _file_language,
     agent_roster,
     classify_bytes,
     collect,
@@ -40,6 +43,7 @@ from ..collector import (
     limit_hits_for,
 )
 from ..configloader import loads_json5
+from ..safeio import _VCS_DIR_NAMES
 from ..scanbudget import (
     DEFAULT_VET_ALL_BUDGET_S,
     DEFAULT_VET_TARGET_BUDGET_S,
@@ -328,6 +332,331 @@ def _attribute_to_bundled_skill(f: Finding, name: str, rel_label: str) -> Findin
     return f
 
 
+# C-632: suffixes that mean "code" in a directory the plugin engine never sweeps. Wider
+# than what the skill/plugin readers analyse on purpose: this list decides only whether a
+# coverage gap is DISCLOSED, never a verdict, so a language nobody parses (.rb, .ps1) must
+# still count as code present. Data/prose suffixes (collector._NON_CODE_SUFFIXES: .md,
+# .txt, .json, images ...) are never code by suffix alone.
+_WRAPPER_CODE_EXT = frozenset({
+    ".py", ".pyw", ".ipynb", ".sh", ".bash", ".zsh", ".ksh", ".csh", ".fish",
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx",
+    ".rb", ".pl", ".pm", ".php", ".lua", ".ps1", ".psm1", ".bat", ".cmd", ".vbs",
+    ".jar", ".node", ".wasm", ".exe", ".dll", ".so", ".dylib", ".class", ".pyc", ".pyo",
+    ".gyp",  # binding.gyp: npm runs `node-gyp rebuild` on install when it is present
+})
+# npm runs these on a plain `npm install` of a package.json; each is a shell command line.
+# Measured against npm 11.11.0 (`npm install --offline` on a scratch package.json whose every
+# script echoed its own name): preinstall, install, postinstall, prepublish, prepare,
+# preprepare and postprepare all ran; prepublishOnly, prepack, postpack, publish and
+# postpublish did not. `prepublish` is deprecated but still fires on a bare install, and
+# `preprepare` / `postprepare` wrap `prepare`, so a list of the "obvious" four is a rename
+# away from a bypass. Any change here needs the same measurement, not a docs read.
+_WRAPPER_LIFECYCLE_KEYS = (
+    "preinstall", "install", "postinstall",
+    "prepublish", "prepare", "preprepare", "postprepare",
+)
+# The three languages vet_skill's readers analyse (collector.read_skill_python / _shell /
+# _js, decided by collector._file_language). Nothing else in a directory dispatched to
+# vet_skill is read as code: Ruby, Perl, PHP, Lua, PowerShell, VBScript, .jsx/.tsx, an
+# exec-bit file with no shebang and a package.json lifecycle script all pass through it
+# unanalysed (`--vet-skill` prints "no executable code to analyze" for them).
+_SKILL_READ_LANGS = frozenset({"py", "sh", "js"})
+
+
+def _colocated_skill_dirs(p: Path, root: Path, dispatched: "list[Path]") -> "list[Path]":
+    """Directories holding a SKILL.md that ``manifest.skills`` did not dispatch (C-632).
+
+    Candidates are the plugin root and, in the node_modules-wrapper case (``p`` is a
+    directory the locator re-rooted into ``node_modules/<pkg>``), the wrapper's own top
+    directory. The match is case-insensitive because ``vet_skill`` / ``resolve_skill_
+    target`` treat ``skill.md`` case-insensitively - matching only ``SKILL.md`` would be
+    a rename away from a bypass on a case-sensitive filesystem. A symlinked SKILL.md still
+    qualifies: the symlink policy belongs to ``vet_skill``, not to this gate. A candidate
+    already covered by a declared skill dir is skipped, so nothing is dispatched twice.
+
+    An OSError listing a candidate is swallowed HERE on purpose: the very same directory
+    is walked by the tree sweep (``root``) or by ``_wrapper_top_level_scan`` (the wrapper
+    top) with an ``onerror`` that records a coverage gap, so unreadable is reported once,
+    by the walk that owns it, and never as "confidently no SKILL.md".
+    """
+    candidates = [root]
+    if root != p and p.is_dir():
+        candidates.append(p)
+    try:
+        covered = {d.resolve() for d in dispatched}
+    except OSError:
+        covered = set()
+    found: list[Path] = []
+    for cand in candidates:
+        try:
+            if cand.resolve() in covered:
+                continue
+            with os.scandir(cand) as it:
+                hit = False
+                for entry in it:
+                    if entry.name.lower() != "skill.md":
+                        continue
+                    try:
+                        is_dir = entry.is_dir()
+                    except OSError:
+                        is_dir = False
+                    if not is_dir:
+                        hit = True
+                        break
+        except OSError:
+            continue
+        if hit:
+            found.append(cand)
+    return found
+
+
+def _wrapper_file_is_code(fp: Path, gaps: dict, skill_reads: bool = False) -> bool:
+    """Whether one file in a directory the plugin engine does not sweep is executable code.
+
+    Any of: a code suffix; a native-executable magic (ELF/PE/Mach-O/class/pyc/wasm); or,
+    for a file whose suffix is not data/prose, a ``#!`` line or an execute permission bit
+    (the shell runs an execute-bit text file with no shebang as a shell script). A README,
+    LICENSE or ``.gitignore`` matches none of these. A symlink is judged by its NAME only
+    and never opened. A file that exists but cannot be opened cannot be classified, so it
+    is recorded as a coverage gap - never treated as "not code".
+
+    ``skill_reads`` is set when this file's directory was ALSO handed to ``vet_skill`` (it
+    carries a SKILL.md) AND the file is somewhere that engine's walk actually goes - the
+    caller clears it under ``.hg``/``.svn``, which ``vet_skill`` prunes. Only then is a
+    regular file the skill engine really analyses - Python, shell or JS/TS, by suffix or by
+    shebang, exactly ``collector._file_language`` - left out: it is not unscanned, so
+    listing it would be a false claim. Everything else stays code, because ``vet_skill``
+    has no reader for it. A benign SKILL.md must never be what switches this disclosure off
+    (C-632 review): it is one file the attacker controls.
+    """
+    suffix = fp.suffix.lower()
+    try:
+        st = os.lstat(fp)
+    except OSError as exc:
+        if exc.errno not in WALK_VANISHED_ERRNOS:
+            note_walk_gap(gaps, fp.parent, exc)
+        return False
+    regular = _stat.S_ISREG(st.st_mode)
+    if suffix in _WRAPPER_CODE_EXT:
+        return not (
+            skill_reads and regular and _file_language(fp.name, "") in _SKILL_READ_LANGS
+        )
+    if not regular:
+        return False
+    try:
+        with open(fp, "rb") as fh:
+            head = fh.read(_PLUGIN_SNIFF_BYTES)
+    except OSError as exc:
+        if exc.errno not in WALK_VANISHED_ERRNOS:
+            note_walk_gap(gaps, fp, exc)
+        return False
+    _cls, fmt = classify_bytes(head, st.st_size)
+    if fmt in ("ELF", "PE", "class", "pyc", "wasm") or (fmt or "").startswith("Mach-O"):
+        return True
+    if suffix in _NON_CODE_SUFFIXES:
+        return False
+    if not (head.startswith(b"#!") or st.st_mode & 0o111):
+        return False
+    if skill_reads:
+        lang = _file_language(fp.name, head.decode("utf-8", errors="replace"))
+        return lang not in _SKILL_READ_LANGS
+    return True
+
+
+@dataclass
+class _WrapperScan:
+    """What ``_wrapper_top_level_scan`` found in a wrapper's own directory (C-632)."""
+
+    code: "list[str]" = field(default_factory=list)  # executable code, relative names
+    gaps: dict = field(default_factory=dict)  # B-902-style unreadable directories / files
+    capped: bool = False  # the walk stopped at _PLUGIN_FILE_CAP files
+    over_budget: bool = False  # the CPU budget ran out mid-walk
+    pkg_unassessed: bool = False  # package.json exists but could not be judged
+
+
+def _json_int_unbounded(_digits: str) -> int:
+    """``parse_int`` hook: read a JSON integer without converting it (value is never used).
+
+    CPython 3.9.14+ / 3.10.7+ / 3.11+ refuse to convert an integer literal of more than
+    4300 digits and raise a plain ``ValueError`` (not a ``JSONDecodeError``) from
+    ``json.loads``. node and npm parse such a file without complaint, so the wrapper's
+    ``scripts`` must still be read; only the ``scripts`` keys matter here, never a number.
+    """
+    return 0
+
+
+def _wrapper_declares_lifecycle_script(top: Path) -> "tuple[bool, bool]":
+    """``(declares an npm lifecycle script, package.json could not be assessed)``.
+
+    A wrapper's own ``package.json`` is a file ``npm install`` runs on: a lifecycle script
+    in it is executable code even though no file with a code suffix exists. The two flags
+    are separate because "no script" and "could not tell" are different claims. Only a
+    file this reader cannot judge but npm could is "could not tell": unreadable, over the
+    size cap, nested deeper than Python's parser will follow, or any other parser refusal
+    that is not a syntax error. Only a ``json.JSONDecodeError`` means "not JSON": npm
+    refuses that file too, so it is inert and neither flag is set. Every other
+    ``ValueError`` is NOT proof of invalid JSON - Python's integer-digit limit raises one
+    on a document node parses happily - so it reads as "could not tell" (C-632 review).
+    Integers are read through :func:`_json_int_unbounded` so that limit is never reached
+    in the first place and the file is judged, not just disclosed. The read strips a
+    leading BOM (``utf-8-sig``) exactly as npm does; a plain ``utf-8`` read would fail to
+    parse a BOM-prefixed file and quietly hide its scripts.
+    """
+    import json as _json  # noqa: PLC0415
+
+    pj = top / "package.json"
+    try:
+        st = os.stat(pj)
+    except OSError as exc:
+        return False, exc.errno not in WALK_VANISHED_ERRNOS
+    if not _stat.S_ISREG(st.st_mode):
+        return False, False
+    if st.st_size > _PLUGIN_JS_MAX_BYTES:
+        return False, True
+    try:
+        loaded = _json.loads(
+            pj.read_text(encoding="utf-8-sig", errors="replace"),
+            parse_int=_json_int_unbounded,
+        )
+    except _json.JSONDecodeError:
+        return False, False
+    except (RecursionError, MemoryError, OSError, ValueError, OverflowError):
+        return False, True
+    scripts = loaded.get("scripts") if isinstance(loaded, dict) else None
+    declares = isinstance(scripts, dict) and any(k in scripts for k in _WRAPPER_LIFECYCLE_KEYS)
+    return declares, False
+
+
+def _wrapper_top_level_scan(top: Path, deadline, skill_reads: bool = False) -> _WrapperScan:
+    """Find executable code in the directory an npm-wrapper vet was pointed at (C-632).
+
+    ``vet_plugin`` re-roots a directory with no manifest of its own into the single
+    ``node_modules/<pkg>/openclaw.plugin.json`` under it, and every reader after that
+    point sees only the plugin. Whatever else sits beside ``node_modules`` in the target
+    the user actually named - ``index.js``, ``run.sh``, ``lib/x.py`` - was therefore read
+    by nothing, and the verdict was INSTALL over it. This walks that directory
+    (``node_modules``, ``.git`` and ``__pycache__`` pruned, exactly as the plugin sweep
+    prunes them; symlinks are never followed, as everywhere in this vet) and reports
+    what it found as a :class:`_WrapperScan`.
+
+    It does NOT analyse the code. The plugin engine has no reader for most of what can
+    sit here (shell, PowerShell, Ruby, extension-less scripts), so a partial scan would
+    still need the UNKNOWN fallback for the rest; the caller reports the PRESENCE
+    instead, which is the one claim that is always sound.
+
+    What counts as code is decided by :func:`_wrapper_file_is_code`; the bound of that
+    decision is deliberate. A build recipe with no code suffix and no shebang (a
+    ``Makefile``, a ``Dockerfile``) is data for another tool and is not judged here, and
+    a benign file that picked up an execute bit on a FAT/NTFS mount is reported by name
+    (UNKNOWN is the safe direction; it never becomes a verdict).
+
+    ``skill_reads`` says ``top`` was also dispatched to ``vet_skill`` because a SKILL.md sits
+    there; the Python, shell and JS/TS it analysed are then not listed (see
+    :func:`_wrapper_file_is_code`). The scan still runs in full: a SKILL.md is a file the
+    attacker controls, and the skill engine has no reader for Ruby, Perl, PHP, Lua,
+    PowerShell, VBScript, an extension-less exec-bit file or an npm lifecycle script.
+    """
+    scan = _WrapperScan()
+    seen = 0
+
+    def _onerror(exc: OSError) -> None:
+        if exc.errno in WALK_VANISHED_ERRNOS:
+            return
+        note_walk_gap(scan.gaps, Path(getattr(exc, "filename", None) or top), exc)
+
+    for dirpath, dirnames, filenames in os.walk(
+        top, topdown=True, onerror=_onerror, followlinks=False
+    ):
+        if cpu_exceeded(deadline):
+            scan.over_budget = True
+            break
+        dirnames[:] = sorted(d for d in dirnames if d not in _PLUGIN_SKIP_DIRS)
+        for fn in sorted(filenames):
+            if seen >= _PLUGIN_FILE_CAP:
+                scan.capped = True
+                break
+            seen += 1
+            fp = Path(dirpath) / fn
+            # vet_skill's own walk prunes `.git`/`.hg`/`.svn` (collector, exclude_vcs=True,
+            # matched on the path as walked - the same spelling it was handed). Code under
+            # .hg/.svn is therefore NOT something it read, so the SKILL.md must not exempt it.
+            reads = skill_reads and not any(v in fp.parts for v in _VCS_DIR_NAMES)
+            if _wrapper_file_is_code(fp, scan.gaps, reads):
+                scan.code.append(str(fp.relative_to(top)))
+        if scan.capped:
+            break
+    declares, scan.pkg_unassessed = _wrapper_declares_lifecycle_script(top)
+    if declares:
+        scan.code.append("package.json")
+    return scan
+
+
+def _wrapper_coverage_findings(
+    top: Path, scan: _WrapperScan, skill_reads: bool = False
+) -> "list[Finding]":
+    """The VET-COVERAGE findings for ``_wrapper_top_level_scan``'s result (C-632).
+
+    One finding per cause, each naming only its own limit (the B-344 rule). File names
+    that come from the target go through ``repr`` so a hostile name cannot smuggle control
+    characters into a rendered report; a host path goes only in ``fix`` (B-902).
+
+    ``skill_reads`` (a SKILL.md there was vetted as a skill) adds WHY the listed files were
+    still not read: the skill engine has no reader for them. Without it a reader would see
+    a skill verdict and a coverage gap side by side and have no way to reconcile them.
+    """
+    out: list[Finding] = []
+    if scan.code:
+        shown = ", ".join(repr(c) for c in sorted(scan.code)[:3])
+        more = "" if len(scan.code) <= 3 else f" (+{len(scan.code) - 3} more)"
+        why = (
+            "; the SKILL.md there was vetted as a skill, but that engine analyses only "
+            "Python, shell and JavaScript/TypeScript, so the files listed were never scanned"
+            if skill_reads else
+            "; the plugin engine reads only the package, so this code was never scanned"
+        )
+        out.append(coverage_gap_finding(
+            "plugin scan coverage is incomplete: the target directory holds executable "
+            f"code outside the plugin package ({shown}{more}), beside the node_modules "
+            f"the plugin was found in{why}",
+            fix=(
+                "Review those files by hand before installing, or remove them and re-run. "
+                "To vet only the plugin package, point --vet at its own directory under "
+                "node_modules."
+            ),
+        ))
+    if scan.capped:
+        out.append(coverage_gap_finding(
+            "plugin scan coverage is incomplete: the walk of the target directory stopped "
+            f"at the {_PLUGIN_FILE_CAP}-file cap, so files beyond it were never checked "
+            "for executable code outside the plugin package"
+        ))
+    if scan.pkg_unassessed:
+        out.append(coverage_gap_finding(
+            "plugin scan coverage is incomplete: the target directory's own package.json "
+            "could not be read (unreadable, over the size cap, or too deeply nested), so "
+            "an npm install script beside the plugin package could not be ruled out"
+        ))
+    if scan.gaps:
+        shown_gaps = []
+        for gate, reason, _err in scan.gaps.values():
+            try:
+                shown_gaps.append(f"{str(gate.relative_to(top))!r} ({reason})")
+            except ValueError:
+                shown_gaps.append(f"{_username_safe_path(gate)!r} ({reason})")
+        shown_gaps.sort()
+        extra = f" (+{len(shown_gaps) - 6} more)" if len(shown_gaps) > 6 else ""
+        out.append(coverage_gap_finding(
+            "plugin scan coverage is incomplete: part of the target directory outside the "
+            "plugin package could not be read, so executable code there could not be ruled "
+            "out",
+            fix=(
+                "Restore read and search permission on the unreadable path(s) (or remove "
+                "them) and re-run: " + "; ".join(shown_gaps[:6]) + extra
+            ),
+        ))
+    return out
+
+
 def vet_plugin(
     path: str | Path, target_budget_s: float = DEFAULT_VET_TARGET_BUDGET_S
 ) -> Finding:
@@ -409,6 +738,33 @@ def vet_plugin(
     `_PLUGIN_PY_MAX_BYTES` (a budget gap excepted - it rides `budget_hit`) emits one
     aggregate B13 UNKNOWN `engine_degraded` sub-finding, so the gap floors the verdict to
     CAUTION instead of leaving INSTALL / Danger PASS on code that was never analysed.
+
+    C-632: `detect_vet_type` deliberately keeps a directory that carries an
+    ``openclaw.plugin.json`` classified as a plugin, so this function is the only place a
+    skill that ALSO carries one can still be vetted as a skill. Two things used to escape
+    it, both measured as INSTALL / rc 0 over an explicit override directive:
+
+      * a SKILL.md beside the manifest (or at the top of an npm wrapper whose only
+        manifest sits under ``node_modules/<pkg>``) that ``manifest.skills`` does not list -
+        only declared skill dirs were dispatched. It is now dispatched to ``vet_skill``
+        through the SAME loop, budget handling and attribution as a declared one. It is
+        deliberately NOT added to ``skill_dirs``: ``_under_skills`` and ``dispatched_dirs``
+        derive from that list, and putting the plugin root there would switch the tree
+        sweep (embedded MCP specs, native stowaways, the JS lexical and loose-Python AST
+        passes) off for the whole plugin;
+      * executable code in the wrapper's own directory (``index.js``, ``run.sh``, ...),
+        which the re-root to ``node_modules/<pkg>`` hides from every reader. Scanned for
+        PRESENCE only (``_wrapper_top_level_scan``) and disclosed as a VET-COVERAGE
+        UNKNOWN - the plugin engine has no reader for most of what can sit there, so
+        presence is the one claim that is always sound. A README or ``.gitignore`` is not
+        code and changes nothing, and neither does a host-generated wrapper
+        (``node_modules`` + ``package.json`` + ``package-lock.json``). The scan also runs
+        when the wrapper's top directory was ITSELF dispatched to ``vet_skill`` (a SKILL.md
+        there): that engine analyses Python, shell and JS/TS only, so Ruby, Perl, PHP, Lua,
+        PowerShell, an exec-bit file with no shebang and a package.json lifecycle script are
+        still listed - a SKILL.md the attacker supplies must not be the switch that turns the
+        disclosure off. Only what ``vet_skill`` really read (and only when it returned) is
+        left out of the list.
     """
     import json as _json
 
@@ -452,6 +808,8 @@ def vet_plugin(
             f"not an OpenClaw plugin: no {_PLUGIN_MANIFEST} found under {p}",
             "A plugin root carries openclaw.plugin.json; for a skill directory use --vet.",
         )
+    manifest_problem: "tuple[str, str] | None" = None
+    manifest = None
     try:
         manifest = loads_json5(
             (root / _PLUGIN_MANIFEST).read_text(encoding="utf-8", errors="replace")
@@ -460,21 +818,34 @@ def vet_plugin(
         # RecursionError (deeply-nested manifest) and MemoryError (huge manifest) are not
         # ValueError - without them a hostile manifest would abort the whole vet instead of
         # degrading to UNKNOWN, the graceful path every other bad manifest takes (C-135).
-        return _plugin_finding(
-            HIGH,
-            UNKNOWN,
+        manifest_problem = (
             f"could not parse {_PLUGIN_MANIFEST}: {type(exc).__name__}",
             "Inspect the manifest manually \u2014 the host would refuse this plugin too.",
         )
-    if not isinstance(manifest, dict):
-        return _plugin_finding(
-            HIGH,
-            UNKNOWN,
-            f"{_PLUGIN_MANIFEST} is not a JSON object",
-            "Inspect the manifest manually \u2014 the host would refuse this plugin too.",
-        )
+    else:
+        if not isinstance(manifest, dict):
+            manifest_problem = (
+                f"{_PLUGIN_MANIFEST} is not a JSON object",
+                "Inspect the manifest manually \u2014 the host would refuse this plugin too.",
+            )
+    if manifest_problem is not None:
+        # C-632: a stub manifest the host refuses is the cheapest way to make `--vet`
+        # classify a directory as a plugin, and stopping here would hand the SKILL.md
+        # beside it a free pass exactly as an unlisted one got before. Only when a
+        # SKILL.md is actually there does the vet continue (as a manifest with no fields,
+        # so the ordinary "invalid manifest" WARN is raised and the skill is dispatched
+        # below); with none, the answer is byte-identical to what it always was.
+        if not _colocated_skill_dirs(p, root, []):
+            return _plugin_finding(HIGH, UNKNOWN, manifest_problem[0], manifest_problem[1])
+        manifest = {}
 
     warns: list[str] = []
+    if manifest_problem is not None:
+        warns.append(
+            manifest_problem[0]
+            + " \u2014 the host would refuse this plugin; the SKILL.md beside it is vetted "
+            "as a standalone skill below"
+        )
     notes: list[str] = []  # coverage / informational evidence - never verdict-moving
     subs: list[Finding] = []  # dispatched engine findings (vet_skill / vet_mcp)
     js_signals: list[str] = []  # B-165: lexical JS/TS findings - raise the verdict to WARN
@@ -590,7 +961,15 @@ def vet_plugin(
             else:
                 kids = [c for c in sorted(d.iterdir()) if c.is_dir() and not c.is_symlink()]
                 skill_dirs.extend(kids if kids else [d])
-    for sd in skill_dirs:
+    # C-632: a SKILL.md the manifest did not dispatch is still a skill the user is about to
+    # install. Kept OUT of `skill_dirs` (see the docstring), dispatched through the same loop.
+    extra_skill_dirs = _colocated_skill_dirs(p, root, skill_dirs)
+    colocated_vetted: list[Path] = []  # co-located dirs vet_skill actually returned for
+    # C-632 x C-633: shell files a co-located `vet_skill` really read (resolved paths, taken
+    # from the context it returned, never inferred from "a SKILL.md sits there"). C-633 names
+    # shell the SWEEP has no reader for as "not read"; for these that would be false.
+    colocated_shell_read: set[str] = set()
+    for sd, colocated in [(d, False) for d in skill_dirs] + [(d, True) for d in extra_skill_dirs]:
         if cpu_exceeded(deadline):
             budget_hit = True
             break
@@ -615,18 +994,40 @@ def vet_plugin(
         # for that cause; it stays as defense-in-depth for a genuinely OUTER deadline
         # (one `vet_skill` would still re-raise, per its own owner-check) and for
         # `vet_skill`'s other, non-ring failure modes.
+        # C-632: `--vet .` hands over `Path(".")`, whose `.name` is "" - the finding would
+        # read "[bundled skill '']" and change with how the same directory was spelled. A
+        # co-located dir is vetted under its real name instead (the same directory, so the
+        # evidence prefix, the detail and the note all agree). Declared skills are untouched.
+        vet_dir = sd
+        if colocated and not sd.name:
+            try:
+                vet_dir = sd.resolve()
+            except (OSError, RuntimeError):
+                vet_dir = sd
         try:
-            sf = vet_skill(sd)
+            sf = vet_skill(vet_dir)
         except ScanBudgetExceeded:
             budget_hit = True
             break
         except Exception:  # noqa: BLE001 - a dispatched engine must never break the vet
             warns.append(f"bundled skill {sd.name!r} could not be vetted")
             continue
+        if colocated:
+            colocated_vetted.append(sd)
         try:
             rel_label = str(sd.resolve().relative_to(root_res))
         except (OSError, ValueError):
             rel_label = sd.name
+        if colocated:
+            # C-632: "." for the root and a ValueError fallback for the wrapper's top
+            # directory are not labels; the directory's own name is what vet_skill prefixes
+            # its evidence with, so it is also the only label that keeps them matching.
+            rel_label = vet_dir.name
+            notes.append(
+                f"coverage: the SKILL.md in {vet_dir.name!r} is not listed in manifest.skills, so "
+                "the plugin engine would not scan it; it was vetted as a standalone skill "
+                "(unlike the plugin sweep, that scan does not skip node_modules/)"
+            )
         # B-614: carry the LOSERS, not just the dispatched primary.
         #
         # vet_skill collapses its content ring into ONE primary
@@ -666,10 +1067,40 @@ def vet_plugin(
         sctx = getattr(sf, "ctx", None)
         if sctx is not None:
             bundled_contexts.append(sctx)
-            for _srcs in (getattr(sctx, "installed_skill_py", None) or {}).values():
+            if colocated:
+                for _shs in (getattr(sctx, "installed_skill_shell", None) or {}).values():
+                    for _shr, _shsrc in _shs:
+                        try:
+                            colocated_shell_read.add(str((vet_dir.resolve() / _shr).resolve()))
+                        except (OSError, RuntimeError):
+                            continue
+            # C-632: a co-located skill's Python is already in `loose_py` (the sweep walks
+            # the root); registering it a second time under a different key would hand
+            # ShippedArtifact two spellings of one file (B-638).
+            for _srcs in (() if colocated else (getattr(sctx, "installed_skill_py", None) or {}).values()):
                 bundled_py.extend((f"{rel_label}/{r}", s) for r, s in _srcs)
-        subs.append(_attribute_to_bundled_skill(sf, sd.name, rel_label))
-        subs.extend(_attribute_to_bundled_skill(rf, sd.name, rel_label) for rf in ring)
+        subs.append(_attribute_to_bundled_skill(sf, vet_dir.name, rel_label))
+        subs.extend(_attribute_to_bundled_skill(rf, vet_dir.name, rel_label) for rf in ring)
+
+    # C-632: the node_modules-wrapper case. `root != p` means the locator re-rooted `p` into
+    # `node_modules/<pkg>`; everything else in `p` is outside every reader below.
+    #
+    # This runs EVEN WHEN `p` itself was dispatched to vet_skill above (a SKILL.md at its
+    # top). vet_skill analyses Python, shell and JS/TS only, so a benign SKILL.md must not
+    # switch the disclosure off for Ruby, Perl, PHP, Lua, PowerShell, an exec-bit file with no
+    # shebang or an npm lifecycle script: the caller-controlled file would then be the
+    # switch. What vet_skill DID read is passed as `skill_reads` and left out of the list.
+    # Only a dispatch that returned counts - a vet_skill that raised read nothing.
+    wrapper_findings: list[Finding] = []
+    wrapper_code: list[str] = []
+    if root != p and p.is_dir():
+        if cpu_exceeded(deadline):
+            budget_hit = True
+        else:
+            _wscan = _wrapper_top_level_scan(p, deadline, skill_reads=p in colocated_vetted)
+            wrapper_code = _wscan.code
+            budget_hit = budget_hit or _wscan.over_budget
+            wrapper_findings = _wrapper_coverage_findings(p, _wscan, p in colocated_vetted)
 
     # -- capped tree sweep (skips node_modules; symlinks never followed) for embedded
     #    MCP specs and native-executable stowaways outside the dispatched skill dirs
@@ -683,7 +1114,7 @@ def vet_plugin(
     # dir rather than inside one, is therefore never opened by any reader. Recorded so
     # the dossier cannot mistake "one bundled skill had Python" for "this plugin's code
     # was measured" -- exactly the affirmative claim the reviewer reproduced.
-    unanalysed_code: list[str] = []
+    unanalysed_code: list[str] = list(wrapper_code)  # C-632: wrapper code nothing read
     # C-634: the subset of `unanalysed_code` whose cause is NOT the scan budget - a budget
     # gap already rides `budget_hit`'s VET-COVERAGE finding, and naming it again would
     # state one fact twice. Each entry is (plugin-relative name, reason).
@@ -971,8 +1402,13 @@ def vet_plugin(
             # the native-executable WARN. No reader is added: the file is only named, so
             # the report can say plainly that it was not read.
             shell_rel = str(fp.relative_to(root))
-            unanalysed_code.append(shell_rel)
-            unread_shell.append(shell_rel)
+            try:
+                read_by_skill_engine = str(fp.resolve()) in colocated_shell_read
+            except (OSError, RuntimeError):
+                read_by_skill_engine = False
+            if not read_by_skill_engine:
+                unanalysed_code.append(shell_rel)
+                unread_shell.append(shell_rel)
 
     # C-633: name what the sweep did and did not read. Emitted after the loop so the note
     # lists the files that were actually read, whether or not `package.json` declares
@@ -1110,6 +1546,8 @@ def vet_plugin(
             )
         )
 
+    subs.extend(wrapper_findings)  # C-632
+
     # F-148: honest degradation - never let a budget-truncated scan read as a clean
     # PASS, and never say so twice. This used to also push a plain-text note onto
     # `notes` (which lands in `evidence` unconditionally) alongside the synthetic
@@ -1152,6 +1590,14 @@ def vet_plugin(
     status = _VET_RANK_STATUS[rank]
 
     n_mcp = sum(1 for f in subs if f.id == "MCP-VET")
+    # C-632: `len(skill_dirs)` on purpose, NOT plus the co-located dirs. `detail` is what
+    # baseline.fingerprint() hashes, so a count that moved for every plugin that has an
+    # undeclared SKILL.md would orphan the .clawseccheckignore entries already written
+    # against those verdicts; the co-located skill is disclosed in `notes` (evidence) and
+    # by its own attributed findings instead. This keeps the COUNT stable only: a plugin
+    # that ships an undeclared SKILL.md beside code the skill engine convicts can still
+    # lead with the bundled-skill finding, so the lead detail of an already-failing plugin
+    # can change (measured on a manifest + SKILL.md + install.py loader).
     summary = f"plugin '{pid}' ({len(skill_dirs)} bundled skill(s), {n_mcp} embedded MCP spec(s))"
     # B-751: sub_rank above already promotes the plugin to FAIL via _VET_MERGE_RANK, but the
     # traversal sub-finding was dropped here - plugin convicted, reason unstated.

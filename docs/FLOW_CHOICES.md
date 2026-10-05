@@ -60,7 +60,12 @@ skills auto-load via `~/.openclaw/plugin-skills/`, and the plugin's JS/TS runtim
 lexical pass only, so it stays outside the static scan's depth (the report names the files it
 read that way, and any shell files it did not read) - suggest the user skim those files before
 trusting. Python outside the declared skills is read by the full AST/taint pass, so do not
-relay it as unscanned.
+relay it as unscanned. A `SKILL.md` the manifest does not list is vetted as a standalone skill
+(the evidence says so), so relay its findings like any skill's. If the verdict is `CAUTION`
+because executable code sits outside the plugin package, beside the `node_modules/` of a
+wrapper project, relay exactly that: the code was never scanned (a `SKILL.md` there does not
+change that for anything but Python, shell and JavaScript/TypeScript), and the user should
+read those files or vet the package directory itself.
 
 ## Choice: check before download / "is this safe to download" / "vet this link or package"
 
