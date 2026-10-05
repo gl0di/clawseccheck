@@ -291,17 +291,24 @@ def test_audit_self_excluded_stub_is_info_with_no_score_impact_and_says_treat_as
     _write_cfg(base)
     with_stub = tmp_path / "with" / ".openclaw"
     _write_cfg(with_stub)
+    # Control: both homes carry one ordinary skill. A skills directory existing at all
+    # moves B87 from UNKNOWN to PASS, and the score with it, whatever the skill is. With
+    # that held equal, the stub is the only difference left between the two arms.
+    for home in (base, with_stub):
+        plain = home / "skills" / "plain"
+        plain.mkdir(parents=True)
+        (plain / "SKILL.md").write_text(_SKILL_MD.replace("stub", "plain"), encoding="utf-8")
     _plant_stub(with_stub / "skills" / "harmless")
 
     _c0, f0, s0 = audit(base)
     ctx, f1, s1 = audit(with_stub)
 
     assert ctx.self_excluded_skills == ["harmless"]
-    # INFO only: no finding turns WARN/FAIL because of the stub (other checks may notice
-    # that a skills dir exists at all -- B87 -- but never as a worse status), B13 is
-    # exactly what it is without the stub, and the score is untouched.
+    # INFO only: no finding changes status because of the stub, B13 is exactly what it
+    # is without the stub, and the score is untouched.
     before = {f.id: f.status for f in f0}
     after = {f.id: f.status for f in f1}
+    assert after == before
     assert {i for i, st in after.items() if st in (WARN, FAIL) and before.get(i) != st} == set()
     assert after["B13"] == before["B13"] != WARN
     assert (s1.score, s1.grade) == (s0.score, s0.grade)

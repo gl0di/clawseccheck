@@ -1021,7 +1021,7 @@ _REGISTRY: "dict[str, _Entry]" = {
         "the 'neither generation matches' negative path -- never meant to resolve against "
         "any real cron_jobs shape.",
     ),
-    "tests/test_limit_hit_domains.py:53": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    "tests/test_limit_hit_domains.py:54": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     # CLAWSECCHECK test-suite-drift sweep (2026-09-24): B-909's own state-DB cron_jobs
     # fixture (test_collect_also_creates_state_db_sidecars_from_nothing, run through the
     # real collect() path, unlike the per-agent-DB entries above) -- never previously
@@ -1034,7 +1034,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     # ---- cron_run_logs (retired table) ----
     "tests/test_b294_cron_run_logs.py:49": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
     "tests/test_b709_cron_run_logs_shapes.py:43": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
-    "tests/test_limit_hit_domains.py:57": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
+    "tests/test_limit_hit_domains.py:58": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
 
     # ---- installed_plugin_index (retired table) ----
     "tests/test_b177_installed_index_shapes.py:68": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
@@ -1063,11 +1063,11 @@ _REGISTRY: "dict[str, _Entry]" = {
     # `CREATE TABLE`), so only this one site needs registering. (Line renumbered from
     # :342 to :925 by the merge that placed the B-845 per-agent test class earlier in
     # this file, ahead of B-889's own class.)
-    "tests/test_b749_auth_profile_store_presence.py:925": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    "tests/test_b749_auth_profile_store_presence.py:1050": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
     # B-889 round 2: the embedded-NUL-byte regression fixture -- same loose (no NOT
     # NULL) 3-column shape as tests/test_b177_installed_index_shapes.py:55, same DDL
     # text verbatim, same classification. (Renumbered from :409 to :992, same reason.)
-    "tests/test_b749_auth_profile_store_presence.py:992": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
+    "tests/test_b749_auth_profile_store_presence.py:1117": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
     # B-977: the decoy table a `CREATE VIEW config_machine_state AS SELECT ... FROM
     # decoy_state` view-masquerade fixture projects from -- never a real OpenClaw
     # table, same shape/reason as B-889's own decoy_secrets entry above. The extractor
@@ -1178,8 +1178,8 @@ _REGISTRY: "dict[str, _Entry]" = {
     # from test_f187's own `_add_agent_db()`), same per-agent-DB reasoning. Shifted
     # 354->357, 459->462 by the C-135-rejection follow-up's new imports (threading/time/
     # trajectorystore) above them -- same DDL, keys renamed to match.
-    "tests/test_b749_auth_profile_store_presence.py:357": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
-    "tests/test_b749_auth_profile_store_presence.py:462": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:386": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:508": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # CLAWSECCHECK-B-845 follow-up (2026-09-23): a third, `_make_agent_auth_db()`'s own
     # helper -- the cap-disclosure test's fixture builder -- same DDL text again, same
     # per-agent-DB reasoning. (The recursive-VIEW hang-guard fixture right above it uses
@@ -1190,7 +1190,17 @@ _REGISTRY: "dict[str, _Entry]" = {
     # widened VIEW-fixture docstring, the C-135-status comment, the new stat-guard
     # commentary) -- same DDL, key renamed to match; the FIFO-guard tests added in the
     # same change reuse this same helper rather than any new literal DDL.
-    "tests/test_b749_auth_profile_store_presence.py:606": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:731": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # 4.4.0 schema-refusal pins (2026-10-05): the same file gained two more DDL sites and
+    # every key above and below moved (357->386, 462->508, 606->731, 925->1050,
+    # 992->1117); same DDL text at each moved site, keys renamed to match.
+    #   :702 is the per-agent `auth_profile_store` with a GENERATED column that the
+    #   reader must refuse -- same table name, same per-agent DB file, so the same
+    #   different-DB reason applies (the snapshot covers the shared state DB only).
+    #   :671 is `unrelated_table`, the decoy a VIEW named auth_profile_store projects
+    #   from -- never a real OpenClaw table.
+    "tests/test_b749_auth_profile_store_presence.py:702": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:671": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
 
     # ---- trajectory_runtime_events (F-187, per-agent DB, different file) ----
     # B-813/B-811: plain-string-literal copies of test_f187's own f-string DDL (invisible
@@ -1297,7 +1307,8 @@ _REGISTRY: "dict[str, _Entry]" = {
 # LEGACY_TABLE only because the shipped snapshot predates any reader of that table (see
 # _C643_EXEC_APPROVALS_CONFIG_NOT_YET_SNAPSHOTTED; flip to MODERN when the snapshot is next
 # regenerated). 79, was 78.
-assert len(_REGISTRY) == 79, f"registry has {len(_REGISTRY)} entries, expected 79"
+# 81, was 79: the two test_b749 sites registered above (:702 and :671).
+assert len(_REGISTRY) == 81, f"registry has {len(_REGISTRY)} entries, expected 81"
 
 
 # ========================================================================================
