@@ -1205,13 +1205,51 @@ def _read_with_limit(file_obj: io.BufferedIOBase, byte_limit: int) -> tuple[byte
             return bytes(out[:byte_limit]), True
 
 
+# The CPython 3.x bytecode magic is a 16-bit little-endian number N followed by CR LF:
+# ``<N low byte><N high byte>\r\n`` (importlib.util.MAGIC_NUMBER). This file recognises
+# N in [0x0d00, 0x0eff] = 3328..3839, i.e. the high byte is CR (0x0d) or SO (0x0e).
+#
+# Measured here (importlib.util.MAGIC_NUMBER on each interpreter): 3.9.25 = 3425
+# (0x0d61), 3.12.3 = 3531 (0x0dcb), 3.14.4 = 3627 (0x0e2b). Read from files installed
+# here, not measured as .pyc files: the table in 3.12's importlib/_bootstrap_external.py
+# gives 3.5b1 = 3330 (the first N inside the range; 3.5a1 = 3320 and 3.4rc2 = 3310 =
+# 0x0cee are below it), and the 3.14.4 header pycore_magic_number.h gives 3.13b1 = 3571
+# (0x0df3) and 3.14a1 = 3600 (0x0e10) .. 3.14rc3 = 3627, plus "Python 3.15 will start
+# with 3650" and the rule "from 3.11 on, Python 3.n starts with magic number 2900+50n".
+# So the range covers a .pyc written by CPython 3.5b1 through 3.14 (all measured or
+# tabulated above) and the START of 3.15 (3650, documented; the later 3.15 numbers are not
+# measured). Derived from the stated rule, NOT measured: 3.16, 3.17 and 3.18 would start at
+# 3700, 3750 and 3800, still inside; 3.19 would start at 3850 = 0x0f0a, outside it. A CI
+# interpreter whose own magic leaves the range fails
+# tests/test_f116_ipynb_stowaway.py::test_the_running_interpreters_own_pyc_is_recognised.
+#
+# Why exactly these two high bytes: the old test was `data[1:4] == \r\r\n`, i.e. high
+# byte 0x0d only, which covers 3.5b1..3.13 and is blind to every 3.14+ file (3.14 starts
+# at 3600 = 0x0e10). 0x0e is the next C0 control byte after 0x0d.
+#
+# The header does NOT decide text vs binary: `_pyc_fmt` is consulted only on the BINARY
+# return paths of `classify_bytes`, so a file that starts with this header but has a
+# printable body (`+\x0e\r\n# Heading ...`, like `#\r\r\n# Heading ...`) still classifies
+# TEXT - measured, and pinned by test_the_widened_byte_does_not_turn_text_into_pyc and
+# test_classify_markdown_crcrlf_not_pyc. What the closed pair of control bytes narrows is
+# which unrecognised BINARY files get named pyc: a printable high byte is not accepted
+# (`AB\r\n` followed by a binary body stays `('BINARY', None)`, measured), so the range is
+# a closed pair and not "anything from 0x0d up". N below 3328 was never matched by the old
+# test either and still is not.
+_PYC_MAGIC_MIN = 0x0D00
+_PYC_MAGIC_MAX = 0x0EFF
+
+
 def _pyc_fmt(data: bytes) -> str | None:
-    r"""Name a would-be-binary file 'pyc' when it carries the CPython bytecode magic
-    (``<version-low-byte>\r\r\n`` - bytes 1..3 are ``\x0d\x0d\x0a`` for every 3.x release,
-    since the 16-bit magic's high byte is 0x0d). F-116: consulted ONLY on the binary return
-    paths, so a benign text file that merely starts with ``#\r\r\n`` (which stays high-
-    printable-ratio TEXT) is never misnamed pyc."""
-    return "pyc" if len(data) >= 4 and data[1:4] == b"\x0d\x0d\x0a" else None
+    r"""Name a would-be-binary file 'pyc' when it carries a CPython bytecode magic in range:
+    ``<N low><N high>\r\n`` with N in ``_PYC_MAGIC_MIN..._PYC_MAGIC_MAX`` (3328..3839,
+    high byte 0x0d or 0x0e - see the comment above for the CPython versions that is).
+    F-116: consulted ONLY on the binary return paths, so a benign text file that merely
+    starts with ``#\r\r\n`` (which stays high-printable-ratio TEXT) is never misnamed pyc.
+    The low byte is deliberately unconstrained: it is the per-release part of the magic."""
+    if len(data) < 4 or data[2:4] != b"\r\n":
+        return None
+    return "pyc" if _PYC_MAGIC_MIN <= int.from_bytes(data[:2], "little") <= _PYC_MAGIC_MAX else None
 
 
 # How many leading bytes classify_bytes samples when deciding text vs binary. Named
@@ -6148,11 +6186,25 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         ctx.errors.append(message)
         note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
 
+    # Set when a scopes/approvedScopes value is nested deeper than this interpreter's JSON
+    # parser follows (RecursionError). It is not a ValueError, so it used to escape this
+    # reader and abort the WHOLE audit ("unexpected internal error (RecursionError)"),
+    # at a depth that differs per interpreter: ~1,000 levels on 3.9, ~10,000 on 3.12,
+    # ~58,000 on 3.14 (measured). A 200 KB value of this shape fits under
+    # `_MAX_PAIRED_DEVICE_JSON_BYTES`, so the byte cap does not stop it. It is reported
+    # as an unreadable table - the same honest UNKNOWN every other "could not reliably
+    # read device_pairing_paired" case gives - never as a device with no scopes.
+    scopes_too_deep = False
+
     def _json_list(raw):
+        nonlocal scopes_too_deep
         if not raw:
             return None
         try:
             value = json.loads(raw)
+        except RecursionError:
+            scopes_too_deep = True
+            return None
         except ValueError:
             return None
         return value if isinstance(value, list) else None
@@ -6259,6 +6311,15 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
             "approvedAtMs": approved_at_ms,
             "lastSeenAtMs": last_seen_at_ms,
         }
+
+    if scopes_too_deep:
+        ctx.errors.append(
+            f"device_pairing_paired in {db_path} holds a scopes/approvedScopes value nested "
+            "deeper than this reader's JSON parser follows; the paired-device store was "
+            "not reliably read"
+        )
+        ctx.paired_devices_sqlite_parse_error = True
+        return
 
     ctx.paired_devices_sqlite = entries
 

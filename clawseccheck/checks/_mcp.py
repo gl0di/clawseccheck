@@ -6,6 +6,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import os
 import re
+import reprlib
 import stat as _stat
 import unicodedata
 from dataclasses import dataclass, field
@@ -657,6 +658,23 @@ def _wrapper_coverage_findings(
     return out
 
 
+def _manifest_value_text(value: object) -> str:
+    """The text of one parsed manifest / package.json value, safe at any nesting depth.
+
+    ``str()`` of a nested list or dict recurses once per level, and where that stops is
+    the interpreter's own business: Python 3.14's JSON parser follows a document tens of
+    thousands of levels deep (3.12's gives up near ten thousand, 3.9's near a thousand),
+    and ``str()`` of the result raised ``RecursionError`` out of ``vet_plugin`` while the
+    parse had succeeded - measured on 3.14.4 with a ``skills`` entry 50,000 levels deep.
+    On 3.12 and earlier the same text, long enough to exceed the file-name limit, made
+    ``Path.is_dir`` raise ``OSError``. ``reprlib.repr`` is bounded by construction (six
+    levels, truncated items), so every interpreter answers the same way. A string - the
+    only shape a real manifest holds here - is returned unchanged, and so is the text of
+    a small scalar or container, so no ordinary manifest reads differently.
+    """
+    return value if isinstance(value, str) else reprlib.repr(value)
+
+
 def vet_plugin(
     path: str | Path, target_budget_s: float = DEFAULT_VET_TARGET_BUDGET_S
 ) -> Finding:
@@ -870,7 +888,9 @@ def vet_plugin(
     if pkg_path.is_file():
         try:
             loaded = _json.loads(pkg_path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
+            # RecursionError for the same reason as the manifest read above: nested deeper
+            # than this interpreter's parser follows is "unreadable", not an abort.
             loaded = None
         if isinstance(loaded, dict):
             pkg = loaded
@@ -914,7 +934,7 @@ def vet_plugin(
     for key in ("extensions", "runtimeExtensions"):
         val = oc.get(key)
         if isinstance(val, list):
-            entries.extend(str(x) for x in val)
+            entries.extend(_manifest_value_text(x) for x in val)
     # C-633: the JS/TS coverage note is no longer emitted here. It used to be gated on
     # `entries` (declared extensions), so a plugin without them said nothing about its
     # loose JS/TS being read by five lexical rules only. It is emitted after the tree
@@ -945,16 +965,17 @@ def vet_plugin(
     skills_field = manifest.get("skills")
     if isinstance(skills_field, list):
         for entry in skills_field:
-            d = root / str(entry)
+            entry_text = _manifest_value_text(entry)
+            d = root / entry_text
             try:
                 escaped = not d.resolve().is_relative_to(root_res)
             except OSError:
                 escaped = True
             if escaped:
-                warns.append(f"manifest skills entry escapes the plugin root: {str(entry)!r}")
+                warns.append(f"manifest skills entry escapes the plugin root: {entry_text!r}")
                 continue
             if not d.is_dir():
-                notes.append(f"manifest skills entry not present in the package: {str(entry)!r}")
+                notes.append(f"manifest skills entry not present in the package: {entry_text!r}")
                 continue
             if (d / "SKILL.md").is_file():
                 skill_dirs.append(d)
@@ -1119,6 +1140,7 @@ def vet_plugin(
     # gap already rides `budget_hit`'s VET-COVERAGE finding, and naming it again would
     # state one fact twice. Each entry is (plugin-relative name, reason).
     py_unread: list[tuple[str, str]] = []
+    deep_json: list[str] = []  # *.json files too deeply nested for the parser to follow
     # B-636: plugin Python the Danger pass DID read. Distinct from `unanalysed_code` and
     # from "no code at all": the AST/taint pass covers dangerous patterns, while the
     # Persistence and Connections axes are computed from bundled-skill Contexts that never
@@ -1329,6 +1351,13 @@ def vet_plugin(
                 data = _json.loads(fp.read_text(encoding="utf-8", errors="replace"))
             except (OSError, ValueError):
                 data = None
+            except RecursionError:
+                # Nested deeper than this interpreter's parser follows. The host's own
+                # parser may read it, so this is "not examined", never "no MCP spec here":
+                # disclosed below instead of aborting the vet (which is what an uncaught
+                # RecursionError did, at a depth that differs per interpreter).
+                data = None
+                deep_json.append(str(fp.relative_to(root)))
             servers = None
             if isinstance(data, dict):
                 servers = (
@@ -1433,6 +1462,13 @@ def vet_plugin(
             + ", ".join(entries[:3])
             + ") is lexically scanned for obfuscated-RCE / remote-eval signals only \u2014 not a "
             "full runtime analysis; still review the entry files before trusting"
+        )
+    if deep_json:
+        shown_dj = ", ".join(sorted(deep_json)[:3])
+        more_dj = "" if len(deep_json) <= 3 else f" (+{len(deep_json) - 3} more)"
+        warns.append(
+            f"JSON file(s) nested too deeply for this scanner's parser ({shown_dj}{more_dj}) "
+            "were not checked for embedded MCP server specs"
         )
     if unread_shell:
         shown_sh = ", ".join(sorted(unread_shell)[:3])

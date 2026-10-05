@@ -8,6 +8,8 @@ crash. Offline, read-only of the tmp_path sandbox, stdlib only.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from clawseccheck.catalog import UNKNOWN
@@ -44,11 +46,38 @@ def test_legitimate_include_dag_still_loads(tmp_path):
     assert cfg["tools"]["web"]["fetch"]["enabled"] is True
 
 
-def test_deep_plugin_manifest_degrades_to_unknown(tmp_path):
-    # A deeply-nested plugin manifest makes loads_json5 raise RecursionError (not ValueError);
-    # vet_plugin must catch it and return UNKNOWN, not abort the whole vet (C-135).
+def _json_parses(text: str) -> bool:
+    """Whether THIS interpreter's own `json.loads` follows `text` to the end.
+
+    How deep a document it can follow is the interpreter's business, not ours: measured
+    2026-10-05 with `json.loads("[" * n + "]" * n)`, the largest n that parses is 994 on
+    CPython 3.9.25, 9,997 on 3.12.3 and about 58,000 on 3.14.4 (that last figure moves by
+    a few dozen from run to run). A test about a deeply nested manifest therefore asks the
+    interpreter instead of assuming an answer.
+    """
+    try:
+        json.loads(text)
+    except RecursionError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("depth", [500, 20_000, 100_000])
+def test_deep_plugin_manifest_degrades_to_unknown(tmp_path, depth):
+    # A deeply-nested plugin manifest used to make loads_json5 raise RecursionError (not
+    # ValueError); vet_plugin must catch it and return UNKNOWN, not abort the whole vet
+    # (C-135). The three depths cover the three outcomes the interpreters disagree about:
+    # 500 parses on every supported Python, 20,000 parses on 3.14 only, 100,000 on none.
+    # Either way the verdict is the same honest UNKNOWN; only the reason differs, and
+    # which reason is expected is decided by what json.loads does HERE, not by a version.
+    text = "[" * depth + "]" * depth
     root = tmp_path / "plug"
-    _write(root / "openclaw.plugin.json", "[" * 20000 + "]" * 20000)
+    _write(root / "openclaw.plugin.json", text)
     f = vet_plugin(root)
     assert f.status == UNKNOWN
-    assert "could not parse" in f.detail.lower()
+    if _json_parses(text):
+        # Parsed: a list, so the manifest is refused for not being an object.
+        assert "not a json object" in f.detail.lower()
+    else:
+        # Not parseable by this interpreter: the C-135 degrade arm.
+        assert "could not parse" in f.detail.lower()
