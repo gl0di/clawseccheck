@@ -30,6 +30,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from . import pathprobe
 from .locking import journal_lock
 from .monitorstore import (
     SCHEMA_VERSION,
@@ -77,7 +78,7 @@ def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" 
 def load_sbom_run(run_id: str, path: str = DEFAULT_SBOM_RUNS) -> "dict | None":
     """Return the stored run whose 'ts' == run_id, last-write-wins on collision."""
     p = Path(path).expanduser()
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return None
     match = None
     try:
@@ -91,7 +92,7 @@ def load_sbom_run(run_id: str, path: str = DEFAULT_SBOM_RUNS) -> "dict | None":
 
 def list_sbom_run_ids(path: str = DEFAULT_SBOM_RUNS) -> "list[str]":
     p = Path(path).expanduser()
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return []
     try:
         return [e["ts"] for e in _iter_jsonl(p)

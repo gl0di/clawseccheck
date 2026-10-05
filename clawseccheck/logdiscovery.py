@@ -43,6 +43,7 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from . import pathprobe
 from .collector import Context, WORKSPACE_DIRS, _safe_is_dir, _safe_is_symlink, dig
 from .safeio import walk_dir_safely
 from .trajectory import find_trajectory_files
@@ -87,9 +88,9 @@ class LogSink:
 def _is_regular_readable_file(path: Path) -> bool:
     """Best-effort existence/type guard. Never raises, never reads content."""
     try:
-        if path.is_symlink():
+        if pathprobe.is_symlink(path):
             return False
-        return path.is_file()
+        return pathprobe.is_file(path)
     except OSError:
         return False
 
@@ -126,17 +127,17 @@ def _transcript_sinks(home: Path, budget: int) -> list[LogSink]:
     """
     out: list[LogSink] = []
     agents_dir = home / "agents"
-    if not agents_dir.is_dir() or agents_dir.is_symlink():
+    if not pathprobe.is_dir(agents_dir) or pathprobe.is_symlink(agents_dir):
         return out
     try:
-        agent_dirs = sorted(p for p in agents_dir.iterdir() if p.is_dir() and not p.is_symlink())
+        agent_dirs = sorted(p for p in agents_dir.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
     except OSError:
         return out
     for agent_dir in agent_dirs:
         if len(out) >= budget:
             break
         sessions_dir = agent_dir / "sessions"
-        if not sessions_dir.is_dir() or sessions_dir.is_symlink():
+        if not pathprobe.is_dir(sessions_dir) or pathprobe.is_symlink(sessions_dir):
             continue
         try:
             files = sorted(sessions_dir.glob("*.jsonl"))
@@ -193,7 +194,7 @@ def _generic_log_sinks(home: Path, budget: int) -> list[LogSink]:
     """
     out: list[LogSink] = []
     logs_dir = home / "logs"
-    if not logs_dir.is_dir() or logs_dir.is_symlink():
+    if not pathprobe.is_dir(logs_dir) or pathprobe.is_symlink(logs_dir):
         return out
     try:
         files = sorted(logs_dir.glob("*.log"))
@@ -244,7 +245,7 @@ def _backup_sinks(home: Path, budget: int) -> list[LogSink]:
     """``<home>/.openclaw-install-backups/**`` - the same convention B19 already knows.
     Symlink-safe, capped."""
     backup_dir = home / _BACKUP_DIRNAME
-    if not backup_dir.is_dir() or backup_dir.is_symlink():
+    if not pathprobe.is_dir(backup_dir) or pathprobe.is_symlink(backup_dir):
         return []
     return [
         LogSink(path=f, kind="backup", source="convention")

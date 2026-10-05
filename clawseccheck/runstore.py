@@ -22,6 +22,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from . import pathprobe
 from .locking import journal_lock
 from .monitorstore import (
     SCHEMA_VERSION,
@@ -89,7 +90,7 @@ def load_run(run_id: str, path: str = DEFAULT_RUNS) -> "dict | None":
     baseline.load_ignore() and history.load() already give a duplicate key.
     """
     p = Path(path).expanduser()
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return None
     match = None
     try:
@@ -105,7 +106,7 @@ def list_run_ids(path: str = DEFAULT_RUNS) -> "list[str]":
     """Every stored run id (its 'ts'), oldest first. Empty list when absent/unreadable
     or the file holds no real run row (only a retention marker, say)."""
     p = Path(path).expanduser()
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return []
     try:
         return [e["ts"] for e in _iter_jsonl(p)

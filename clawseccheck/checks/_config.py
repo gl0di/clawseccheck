@@ -8,6 +8,7 @@ import ipaddress
 import os
 import re
 from pathlib import Path
+from .. import pathprobe
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist
 from .. import sockets as _sockets
@@ -6307,7 +6308,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
         )
     pw_path = Path(raw_path)
     try:
-        exists = pw_path.is_file()
+        exists = pathprobe.is_file(pw_path)
     except OSError:
         exists = False
     if not exists:

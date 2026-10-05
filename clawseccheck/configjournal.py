@@ -31,6 +31,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import pathprobe
 from .logsafe import redact
 
 # Same bound and reasoning as checks/_shared.py's _read_jsonl_tail: these logs are
@@ -163,7 +164,7 @@ def read_writes(home, since: "str | None" = None,
     path = journal_path(home)
     out = Journal()
     try:
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return out
         size = path.stat().st_size
         if size <= cap:

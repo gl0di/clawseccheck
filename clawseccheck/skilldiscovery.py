@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from . import pathprobe
 
 _MAX_DEPTH = 6
 _MAX_DIRS = 2_000
@@ -169,7 +170,7 @@ def iter_discovered_skill_dirs(
 
         manifest = target / "SKILL.md"
         try:
-            is_manifest = manifest.is_file()
+            is_manifest = pathprobe.is_file(manifest)
         except OSError as exc:
             # `Path.is_file()` re-raises anything outside ENOENT/ENOTDIR/EBADF/ELOOP, so
             # EACCES propagates - a `chmod 000` directory anywhere under a skills root
@@ -239,11 +240,11 @@ def iter_discovered_skill_dirs(
             if entry.name in {".git", "node_modules", "__pycache__"}:
                 continue
             try:
-                is_link = entry.is_symlink()
+                is_link = pathprobe.is_symlink(entry)
                 if is_link and not allow_symlink_entries:
                     continue
                 entry_target = entry.resolve() if is_link else entry
-                if not entry_target.is_dir():
+                if not pathprobe.is_dir(entry_target):
                     continue
             except (OSError, ValueError, RuntimeError):
                 continue

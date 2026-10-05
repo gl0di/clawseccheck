@@ -34,6 +34,7 @@ import json
 import re
 from pathlib import Path
 
+from . import pathprobe
 from .locking import journal_lock
 from .safeio import secure_append_text, secure_dir, secure_write_text
 
@@ -209,16 +210,16 @@ def verify_chain(events_path: "str | Path",
         return _no_chain(CHAIN_BAD_PATH, f"no chain here \u2014 this path cannot be resolved "
                                          f"({exc})")
     try:
-        if not p.is_file():
+        if not pathprobe.is_file(p):
             # "It does not exist" and "it is not a regular file" are different facts, and
             # asserting the first about a directory, a FIFO or a dangling symlink repeats
             # the very mistake this function was fixed for: naming a cause the evidence
             # does not establish. Order matters - exists() follows the link, so a dangling
             # symlink is False there and True at is_symlink().
-            if p.exists():
+            if pathprobe.exists(p):
                 return _no_chain(CHAIN_NOT_A_FILE,
                                  "no chain here \u2014 the path is not a regular file")
-            if p.is_symlink():
+            if pathprobe.is_symlink(p):
                 # Deliberately not "its target does not exist": exists() is also False for
                 # a symlink LOOP, whose target does exist - it is the link. Claim only
                 # what was established, which is that following it does not reach a file.
@@ -411,7 +412,7 @@ def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,
     file as last known good (an unrotated, still-valid, still-growing journal).
     """
     try:
-        if not p.is_file():
+        if not pathprobe.is_file(p):
             return
         entries = list(_iter_jsonl(p))
         if len(entries) <= max_lines:
@@ -487,7 +488,7 @@ def read_baseline(path: str | Path = DEFAULT_STATE) -> "tuple[str, dict | None]"
     p = Path(path).expanduser()
     # `exists()` follows symlinks, so a broken symlink reports False - check the link
     # itself too, or a planted dangling symlink at the state path reads as "first run".
-    if not p.exists() and not p.is_symlink():
+    if not pathprobe.exists(p) and not pathprobe.is_symlink(p):
         return BASELINE_ABSENT, None
     try:
         raw = p.read_text(encoding="utf-8")
@@ -705,7 +706,7 @@ def witnessed_reference_for_state(state_path: "str | Path" = DEFAULT_STATE,
     line encountered is the most recent witness, which is what this returns.
     """
     p = Path(events_path).expanduser()
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return None, "no_witness"
     marker = f"(state {_state_path_digest(state_path)[:_STATE_DIGEST_CHARS]})"
     found = None
@@ -749,7 +750,7 @@ def _last_chain_hash(p: Path) -> str:
     whole file into one big list-of-lines, so memory stays flat on a large file;
     only the running "last chain_hash seen so far" is retained.
     """
-    if not p.is_file():
+    if not pathprobe.is_file(p):
         return ""
     last = ""
     try:

@@ -96,6 +96,7 @@ import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from . import pathprobe
 
 # Bounds. A persistence surface is small by nature; anything past these is either a
 # pathological machine or something that is not really this surface, and in both cases a
@@ -177,9 +178,9 @@ def _digest(path: Path) -> "str | None":
     unreadable/undetermined path depends on.
     """
     try:
-        if path.is_symlink() and not path.exists():
+        if pathprobe.is_symlink(path) and not pathprobe.exists(path):
             return None  # a dangling symlink is not a readable file
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return None
         if path.stat().st_size > MAX_FILE_BYTES:
             # Digest the bounded prefix and mark it, rather than silently digesting a
@@ -248,12 +249,12 @@ def scan(home: "str | Path | None" = None,
 
     # ---- systemd user units, timers, and the symlinks that arm them ----------------
     systemd_root = home_path / ".config" / "systemd" / "user"
-    if systemd_root.is_dir():
+    if pathprobe.is_dir(systemd_root):
         if FAMILY_SYSTEMD not in families_seen:
             families_seen.append(FAMILY_SYSTEMD)
         try:
             for child in sorted(systemd_root.iterdir()):
-                if child.is_dir():
+                if pathprobe.is_dir(child):
                     # `*.target.wants/` holds the enable symlinks. A unit file that
                     # exists but is not linked here is inert; the link IS the arming, so
                     # a link appearing with no new unit file is the interesting case.
@@ -270,7 +271,7 @@ def scan(home: "str | Path | None" = None,
     # ---- shell startup files -------------------------------------------------------
     for name in SHELL_RC_NAMES:
         candidate = home_path / name
-        if candidate.exists() or candidate.is_symlink():
+        if pathprobe.exists(candidate) or pathprobe.is_symlink(candidate):
             if FAMILY_SHELL_RC not in families_seen:
                 families_seen.append(FAMILY_SHELL_RC)
             add(FAMILY_SHELL_RC, candidate)
@@ -278,11 +279,11 @@ def scan(home: "str | Path | None" = None,
     # ---- system-wide cron (world-readable) -----------------------------------------
     for raw in crons:
         p = Path(raw)
-        if not p.exists():
+        if not pathprobe.exists(p):
             continue
         if FAMILY_SYSTEM_CRON not in families_seen:
             families_seen.append(FAMILY_SYSTEM_CRON)
-        if p.is_dir():
+        if pathprobe.is_dir(p):
             try:
                 for child in sorted(p.iterdir()):
                     add(FAMILY_SYSTEM_CRON, child)
@@ -297,7 +298,7 @@ def scan(home: "str | Path | None" = None,
     for raw in spools:
         p = Path(raw)
         try:
-            if not p.exists():
+            if not pathprobe.exists(p):
                 continue
             readable = os.access(str(p), os.R_OK)
         except OSError:

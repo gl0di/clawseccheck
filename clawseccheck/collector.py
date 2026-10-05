@@ -32,6 +32,7 @@ import lzma
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from . import pathprobe
 from .configloader import (
     ConfigLoadError as _ConfigLoadError,
     load_openclaw_config as _load_openclaw_config,
@@ -326,7 +327,7 @@ def _note_skill_gap(ctx, skill_dir: Path, entry: str) -> None:
     """
     if ctx is None:
         return
-    owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+    owner = skill_dir.name if pathprobe.is_dir(skill_dir) else skill_dir.parent.name
     ctx.skill_coverage_gaps.setdefault(owner, []).append(entry)
 
 
@@ -350,7 +351,7 @@ def _note_skill_traversal(ctx, skill_dir: Path, entry: str) -> None:
     """
     if ctx is None:
         return
-    owner = skill_dir if skill_dir.is_dir() else skill_dir.parent
+    owner = skill_dir if pathprobe.is_dir(skill_dir) else skill_dir.parent
     ctx.skill_traversal_violations.setdefault(str(owner), []).append(entry)
 
 
@@ -588,7 +589,12 @@ class _ScopedLimitSink:
 # module is surfaced.
 def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None,
                   domain: str | None = None) -> bool:
-    """``Path.is_dir()`` that answers False instead of raising on a permission error.
+    """``is_dir`` that answers False instead of raising on a permission error.
+
+    C-647: the probe is ``pathprobe.is_dir``, not ``Path.is_dir()``. Python 3.14's
+    ``Path.is_dir()`` returns False for ANY OS error, which would make the ``except OSError``
+    arm below dead code (an unreadable path read as absent, with nothing recorded);
+    ``pathprobe`` raises exactly where 3.9-3.12's ``Path.is_dir()`` did, on every interpreter.
 
     B-404: when *domain* is given (alongside *ctx*), a genuine OSError also
     becomes a domain-tagged ``limit_hits`` entry, not just a ``ctx.errors`` note - so a
@@ -599,7 +605,7 @@ def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None,
     to ``ctx.errors``, unchanged.
     """
     try:
-        return p.is_dir()
+        return pathprobe.is_dir(p)
     except OSError as exc:
         if ctx is not None:
             ctx.errors.append(f"could not check {what or p}: {exc}")
@@ -612,9 +618,9 @@ def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None,
 
 
 def _safe_is_file(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
-    """``Path.is_file()`` sibling of ``_safe_is_dir`` - see its docstring (B-303)."""
+    """``is_file`` sibling of ``_safe_is_dir`` - see its docstring (B-303, C-647)."""
     try:
-        return p.is_file()
+        return pathprobe.is_file(p)
     except OSError as exc:
         if ctx is not None:
             ctx.errors.append(f"could not check {what or p}: {exc}")
@@ -622,9 +628,9 @@ def _safe_is_file(p: Path, ctx: Context | None = None, what: str | None = None) 
 
 
 def _safe_is_symlink(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
-    """``Path.is_symlink()`` sibling of ``_safe_is_dir`` - see its docstring (B-303)."""
+    """``is_symlink`` sibling of ``_safe_is_dir`` - see its docstring (B-303, C-647)."""
     try:
-        return p.is_symlink()
+        return pathprobe.is_symlink(p)
     except OSError as exc:
         if ctx is not None:
             ctx.errors.append(f"could not check {what or p}: {exc}")
@@ -2448,7 +2454,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
     # actually misattribute to.
     _stowaway_owner = skill_dir.name
 
-    if skill_dir.is_file():
+    if pathprobe.is_file(skill_dir):
         # Anchor relative paths / traversal checks on the parent dir, same as
         # is_safe_tar_member expects a directory, never the archive file itself.
         base_dir = skill_dir.parent
@@ -2546,7 +2552,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 # about. The probe is itself guarded, because the reason we are here is that
                 # stat calls on this path fail.
                 try:
-                    is_dir = Path(dpath).is_dir()
+                    is_dir = pathprobe.is_dir(Path(dpath))
                 except OSError:
                     is_dir = False
                 label = "directory not entered" if is_dir else "could not be read"
@@ -2565,7 +2571,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     # bridge for the unreadable *file* case; the directory case has to cross it
                     # too or the two paths disagree about the same fact.
                     ctx.unreadable_manifests.add(
-                        skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+                        skill_dir.name if pathprobe.is_dir(skill_dir) else skill_dir.parent.name
                     )
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_SKILL,
@@ -2615,7 +2621,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         if p.name.lower() == "skill.md":
             # Keyed the same way vet_skill/the skill sweep key ctx.installed_skills (the
             # skill DIRECTORY's name), so B88 can tell "unreadable" from "absent".
-            owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+            owner = skill_dir.name if pathprobe.is_dir(skill_dir) else skill_dir.parent.name
             ctx.unreadable_manifests.add(owner)
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_SKILL,
@@ -2623,7 +2629,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         )
 
     for f in files:
-        if not f.is_file():
+        if not pathprobe.is_file(f):
             # B-549: the walk yields everything os.walk did not classify as a directory, so a
             # FIFO, a socket or a device node lands here - and this `continue` dropped it with
             # no bookkeeping. Measured through `--vet-skill` on a skill whose `run.sh` was a
@@ -2650,7 +2656,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     #
                     # B-654: routed through the shared helper so this call site and
                     # `_iter_skill_dirs_guarded`'s discovery-time one agree byte-for-byte.
-                    owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+                    owner = skill_dir.name if pathprobe.is_dir(skill_dir) else skill_dir.parent.name
                     _note_unreadable_manifest(ctx, owner)
                 else:
                     rel = _rel(f)
@@ -3100,7 +3106,7 @@ def skill_tree_signature(skill_dir: Path) -> dict:
         except (ValueError, OSError):
             rel = f.name
         try:
-            if not f.is_file():
+            if not pathprobe.is_file(f):
                 continue
             size = f.stat().st_size
         except OSError:
@@ -4205,7 +4211,7 @@ def _own_source_symlinks(p: Path) -> list:
     found = []
     for label, path in components:
         try:
-            if path.is_symlink():
+            if pathprobe.is_symlink(path):
                 found.append(label)
         except OSError:
             continue
@@ -6950,8 +6956,8 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
     target = home / "exec-approvals.json"
     present = False
     try:
-        skip = target.is_symlink() or not target.is_file()
-        present = skip and (target.is_symlink() or target.exists())
+        skip = pathprobe.is_symlink(target) or not pathprobe.is_file(target)
+        present = skip and (pathprobe.is_symlink(target) or pathprobe.exists(target))
     except OSError as exc:
         # B-303: same class of exposure as _safe_is_dir/_safe_is_file - a non-traversable
         # ancestor (typically the whole home) must degrade this to "not found" (->
@@ -8250,11 +8256,11 @@ def openclaw_state_dir(env: "dict[str, str] | None" = None,
         return _expand_user_path(override, home_dir)
     new_dir = home_dir / OPENCLAW_NEW_STATE_DIRNAME
     try:
-        if new_dir.exists():
+        if pathprobe.exists(new_dir):
             return new_dir
         for legacy in OPENCLAW_LEGACY_STATE_DIRNAMES:
             legacy_dir = home_dir / legacy
-            if legacy_dir.exists():
+            if pathprobe.exists(legacy_dir):
                 return legacy_dir
     except OSError:
         pass
@@ -8277,11 +8283,11 @@ def resolve_config_in_home(home: Path) -> "tuple[Path, bool]":
     """
     canonical = home / OPENCLAW_CONFIG_FILENAME
     try:
-        if canonical.is_file():
+        if pathprobe.is_file(canonical):
             return canonical, True
         for name in OPENCLAW_LEGACY_CONFIG_FILENAMES:
             legacy = home / name
-            if legacy.is_file():
+            if pathprobe.is_file(legacy):
                 return legacy, True
     except OSError:
         pass
@@ -8319,7 +8325,7 @@ def resolve_product_config_path(env: "dict[str, str] | None" = None) -> "tuple[P
     for name in (OPENCLAW_CONFIG_FILENAME,) + OPENCLAW_LEGACY_CONFIG_FILENAMES:
         cand = state_dir / name
         try:
-            if cand.exists():
+            if pathprobe.exists(cand):
                 if name != OPENCLAW_CONFIG_FILENAME:
                     return cand, f"a legacy {name} exists in the resolved state directory"
                 if state_override is not None:
@@ -8339,7 +8345,7 @@ def resolve_product_config_path(env: "dict[str, str] | None" = None) -> "tuple[P
         for name in (OPENCLAW_CONFIG_FILENAME,) + OPENCLAW_LEGACY_CONFIG_FILENAMES:
             cand = base / name
             try:
-                if cand.exists():
+                if pathprobe.exists(cand):
                     return cand, "an existing default config candidate"
             except OSError:
                 continue
@@ -8444,7 +8450,7 @@ def sandbox_sync_marker_present() -> bool:
         pass
     for base in bases:
         try:
-            if (base / "skills" / _SANDBOX_SYNC_MARKER).is_file():
+            if pathprobe.is_file(base / "skills" / _SANDBOX_SYNC_MARKER):
                 return True
         except OSError:
             continue
@@ -8619,7 +8625,7 @@ def _collect_global_dotenv(home: Path, ctx: Context) -> None:
     """
     for path in global_dotenv_paths(home):
         try:
-            if path.is_symlink() or not path.is_file():
+            if pathprobe.is_symlink(path) or not pathprobe.is_file(path):
                 continue
             with open(path, "rb") as fp:
                 raw, truncated = _read_with_limit(fp, _MAX_DOTENV_BYTES)
@@ -8842,7 +8848,7 @@ def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context)
     if not candidate.is_absolute():
         candidate = unit_path.parent / candidate
     try:
-        if candidate.is_symlink() or not candidate.is_file():
+        if pathprobe.is_symlink(candidate) or not pathprobe.is_file(candidate):
             return
         with open(candidate, "rb") as fp:
             raw, truncated = _read_with_limit(fp, _MAX_UNIT_BYTES)
@@ -8880,7 +8886,7 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
     """
     units_dir = systemd_user_unit_dir(home)
     try:
-        units_dir_is_dir = units_dir.is_dir()
+        units_dir_is_dir = pathprobe.is_dir(units_dir)
     except OSError as exc:
         # B-303: an ancestor (e.g. a non-traversable home) can make even this existence
         # check raise. Distinct from "not installed" - record it the same way an
@@ -8894,7 +8900,7 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
     try:
         all_units = sorted(
             p for p in units_dir.iterdir()
-            if p.is_file() and not p.is_symlink() and p.suffix == ".service"
+            if pathprobe.is_file(p) and not pathprobe.is_symlink(p) and p.suffix == ".service"
         )
     except OSError as exc:
         ctx.errors.append(f"could not list {units_dir}: {exc}")
@@ -9270,7 +9276,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
         # bootstrap checks' existing "ctx.bootstrap empty -> UNKNOWN" fallback fires
         # honestly instead of the process crashing.
         try:
-            wdir_is_dir = wdir.is_dir()
+            wdir_is_dir = pathprobe.is_dir(wdir)
         except OSError as exc:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
@@ -9284,7 +9290,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
         for name in BOOTSTRAP_FILES:
             f = wdir / name
             try:
-                f_is_file = f.is_file()
+                f_is_file = pathprobe.is_file(f)
             except OSError as exc:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,

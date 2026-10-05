@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .. import pathprobe
 from ..catalog import (
     FAIL,
     MEDIUM,
@@ -2495,7 +2496,7 @@ def check_config_audit_log(ctx: Context) -> Finding:
     import json as _json
 
     log_path = ctx.home / "logs" / "config-audit.jsonl"
-    if not log_path.is_file():
+    if not pathprobe.is_file(log_path):
         return _finding(
             "B77",
             UNKNOWN,
@@ -2591,7 +2592,7 @@ def check_config_health_integrity(ctx: Context) -> Finding:
     import json as _json
 
     health_path = ctx.home / "logs" / "config-health.json"
-    if not health_path.is_file():
+    if not pathprobe.is_file(health_path):
         return _finding(
             "B78",
             UNKNOWN,
@@ -2705,14 +2706,14 @@ def _collect_atrest_transcripts(home: Path, cap: int = 200) -> list[Path]:
     out: list[Path] = []
 
     def _grab(root: Path, pattern: str) -> None:
-        if len(out) >= cap or not root.is_dir():
+        if len(out) >= cap or not pathprobe.is_dir(root):
             return
         try:
             for f in root.rglob(pattern):  # generator - early break bounds the walk
                 if len(out) >= cap:
                     break
                 try:
-                    if f.is_file() and not f.is_symlink():
+                    if pathprobe.is_file(f) and not pathprobe.is_symlink(f):
                         out.append(f)
                 except OSError:
                     continue
@@ -2721,11 +2722,11 @@ def _collect_atrest_transcripts(home: Path, cap: int = 200) -> list[Path]:
 
     try:
         agents = home / "agents"
-        if agents.is_dir():
+        if pathprobe.is_dir(agents):
             for agent_dir in sorted(agents.iterdir()):
                 if len(out) >= cap:
                     break
-                if not agent_dir.is_dir() or agent_dir.is_symlink():
+                if not pathprobe.is_dir(agent_dir) or pathprobe.is_symlink(agent_dir):
                     continue
                 _grab(agent_dir / "sessions", "*.jsonl")
                 _grab(agent_dir / "agent" / "codex-home" / "sessions", "*.jsonl")
@@ -2755,13 +2756,13 @@ def check_data_atrest(ctx: Context) -> Finding:
     candidates_dirs: list[Path] = []
     try:
         for entry in ctx.home.iterdir():
-            if entry.name.startswith("workspace") and entry.is_dir():
+            if entry.name.startswith("workspace") and pathprobe.is_dir(entry):
                 for sub in ("memory", "logs"):
                     d = entry / sub
-                    if d.is_dir():
+                    if pathprobe.is_dir(d):
                         candidates_dirs.append(d)
         logs_dir = ctx.home / "logs"
-        if logs_dir.is_dir():
+        if pathprobe.is_dir(logs_dir):
             candidates_dirs.append(logs_dir)
     except OSError:
         pass
@@ -2777,7 +2778,7 @@ def check_data_atrest(ctx: Context) -> Finding:
     # *.log files directly under <home>
     try:
         for f in ctx.home.iterdir():
-            if f.is_file() and f.suffix.lower() == ".log":
+            if pathprobe.is_file(f) and f.suffix.lower() == ".log":
                 try:
                     mode = f.stat().st_mode & 0o777
                     if mode & 0o077:
@@ -2956,12 +2957,12 @@ def _b188_collect_state_copies(
     merged - a cut walk is the same kind of unfinished walk, but it has its own UNKNOWN text."""
     out: list[Path] = []
     truncated = False
-    if not state_dir.is_dir():
+    if not pathprobe.is_dir(state_dir):
         return out, False, False
     try:
         for f in state_dir.rglob("*.sqlite*"):
             try:
-                if not f.is_file() or f.is_symlink():
+                if not pathprobe.is_file(f) or pathprobe.is_symlink(f):
                     continue
                 if f.parent == state_dir and f.name in primary_names:
                     continue  # already covered by the primary FAIL-capable check above
@@ -2990,12 +2991,12 @@ def _b188_collect_backups(
     out: list[Path] = []
     truncated = False
     backups_dir = home / "backups"
-    if not backups_dir.is_dir():
+    if not pathprobe.is_dir(backups_dir):
         return out, False, False
     try:
         for f in backups_dir.rglob("*"):
             try:
-                if not f.is_file() or f.is_symlink():
+                if not pathprobe.is_file(f) or pathprobe.is_symlink(f):
                     continue
                 if len(out) >= cap:
                     truncated = True
@@ -3156,7 +3157,7 @@ def check_state_db_atrest(ctx: Context) -> Finding:
     for name in _B188_DB_NAMES:
         p = state_dir / name
         try:
-            if p.is_file() and not p.is_symlink():
+            if pathprobe.is_file(p) and not pathprobe.is_symlink(p):
                 present.append(p)
         except OSError:
             continue
@@ -4638,7 +4639,7 @@ def check_browser_executable_path(ctx: Context) -> Finding:
     for label, raw_path in candidates:
         p = Path(raw_path).expanduser()
         try:
-            found = p.exists()
+            found = pathprobe.exists(p)
         except OSError:
             found = False
         if not found:

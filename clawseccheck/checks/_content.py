@@ -17,6 +17,7 @@ import stat
 import unicodedata
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlparse, urlsplit
+from .. import pathprobe
 from ..catalog import (
     FAIL,
     HIGH,
@@ -6669,7 +6670,7 @@ def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
         for d in sorted(dirnames):
             p = dp / d
             try:
-                is_link = p.is_symlink()
+                is_link = pathprobe.is_symlink(p)
             except OSError as exc:
                 if exc.errno in _B87_VANISHED_ERRNOS:
                     continue  # gone by lstat time -> nothing to hide, no gap (see docstring)
@@ -6684,7 +6685,7 @@ def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
         for f in sorted(filenames):
             p = dp / f
             try:
-                is_link = p.is_symlink()
+                is_link = pathprobe.is_symlink(p)
             except OSError as exc:
                 if exc.errno in _B87_VANISHED_ERRNOS:
                     continue  # gone by lstat time -> nothing to hide, no gap (see docstring)
@@ -8568,7 +8569,7 @@ def _symlink_scan_roots(
 
     def _add(p: Path, gate: Path) -> None:
         try:
-            is_link = p.is_symlink()
+            is_link = pathprobe.is_symlink(p)
         except OSError as exc:
             _note(gate, exc)  # `gate` is the parent that would not let us stat `p`
             return
@@ -8576,21 +8577,21 @@ def _symlink_scan_roots(
             _add_link(p)
             return
         try:
-            if p.is_dir() and str(p) not in seen:
+            if pathprobe.is_dir(p) and str(p) not in seen:
                 seen.add(str(p))
                 roots.append(p)
         except OSError as exc:
             _note(gate, exc)
 
     try:
-        if (home / "SKILL.md").is_file():  # vet: the vetted dir itself
+        if pathprobe.is_file(home / "SKILL.md"):  # vet: the vetted dir itself
             _add(home, home)
     except OSError as exc:
         _note(home, exc)
     for rel in SKILL_DIRS:  # full audit: each installed skill dir
         base = home / rel
         try:
-            is_link = base.is_symlink()
+            is_link = pathprobe.is_symlink(base)
         except OSError as exc:
             _note(base.parent, exc)
             continue
@@ -8598,7 +8599,7 @@ def _symlink_scan_roots(
             _add_link(base)
             continue
         try:
-            if not base.is_dir():
+            if not pathprobe.is_dir(base):
                 continue
         except OSError as exc:
             _note(base.parent, exc)
@@ -8640,7 +8641,7 @@ def _b87_skill_bases(home: Path) -> list[Path]:
 
     bases = [home / rel for rel in SKILL_DIRS]
     try:
-        vet = (home / "SKILL.md").is_file()
+        vet = pathprobe.is_file(home / "SKILL.md")
     except OSError:
         vet = True  # cannot tell -> treat the whole tree as skill content (graded)
     if vet:
@@ -16949,7 +16950,7 @@ def check_symlink_escape(ctx: Context) -> Finding:
             # `sub/.envrc -> ../.envrc`) adds no new reach - the file is already readable
             # without the link. Not an escape; surface as WARN for a human look, never FAIL.
             warns.append(f"{rel} -> {safe_real} [{sclass}, stays in-tree]")
-        elif not real.exists():  # follows the link: False == dangling (or ELOOP: a
+        elif not pathprobe.exists(real):  # follows the link: False == dangling (or ELOOP: a
             # self-referential root symlink resolves to itself via non-strict realpath
             # without raising, then fails .exists() the same way a dangling link does --
             # disclosed here, never silently dropped)

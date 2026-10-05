@@ -38,6 +38,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import pathprobe
 from .invocation import cmd
 from .monitorstore import _now_iso
 from .safeio import secure_dir, secure_write_text
@@ -166,7 +167,7 @@ DEFAULT_MAX_WATCH_DIRS = 20_000
 
 def _is_symlink(p: Path) -> bool:
     try:
-        return p.is_symlink()
+        return pathprobe.is_symlink(p)
     except OSError:
         return False
 
@@ -184,7 +185,7 @@ def _bounded_watch_dirs(root: Path, max_dirs: int = DEFAULT_MAX_WATCH_DIRS
         resolved = root.resolve()
     except OSError:
         return [], False
-    if not resolved.is_dir():
+    if not pathprobe.is_dir(resolved):
         return [], False
     dirs = [resolved]
     capped = False

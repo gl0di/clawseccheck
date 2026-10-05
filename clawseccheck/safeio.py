@@ -29,6 +29,7 @@ import os
 import posixpath
 import tempfile
 from pathlib import Path
+from . import pathprobe
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
@@ -41,7 +42,7 @@ def secure_dir(path: Path) -> None:
     plain ``mkdir(parents=True)`` + later ``chmod`` leaves open.
     """
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.is_symlink():
+    if pathprobe.is_symlink(path):
         raise OSError(f"refusing to use symlinked directory: {path}")
     try:  # tighten in case the dir pre-existed with looser perms (POSIX only)
         path.chmod(0o700)
@@ -101,7 +102,7 @@ def secure_write_bytes(path: Path, data: bytes) -> None:
     # OSError rather than a silent write. (os.replace below is the hard backstop - it never
     # writes *through* a symlink even if one is planted after this check, so the victim is
     # safe regardless; this check just keeps the loud, tested refusal for the common case.)
-    if path.is_symlink():
+    if pathprobe.is_symlink(path):
         raise OSError(f"refusing to write through symlinked target: {path}")
     parent = path.parent
     fd, tmp_name = tempfile.mkstemp(dir=parent, prefix="." + path.name + ".", suffix=".tmp")
@@ -450,7 +451,7 @@ def walk_dir_safely(
             if exclude_vcs and any(vcs in p.parts for vcs in _VCS_DIR_NAMES):
                 continue
             try:
-                is_link = p.is_symlink()
+                is_link = pathprobe.is_symlink(p)
             except OSError as exc:
                 # B-551: `os.walk` succeeded here - `opendir` needs only `r`, which a `0444`
                 # directory grants - so `onerror` never fired and the `unreadable_dirs`

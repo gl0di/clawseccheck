@@ -15,6 +15,7 @@ import re
 from collections.abc import Hashable
 from pathlib import Path
 from urllib.parse import urlparse
+from .. import pathprobe
 from ..catalog import (
     BY_ID,
     UNKNOWN,
@@ -128,7 +129,7 @@ def _username_safe_path(path) -> str:
     """
     try:
         p = Path(path)
-        p = p.resolve() if p.exists() else Path(os.path.normpath(str(p)))
+        p = p.resolve() if pathprobe.exists(p) else Path(os.path.normpath(str(p)))
     except OSError:
         p = Path(path)
     try:
@@ -4944,7 +4945,7 @@ def _credential_store_state(home) -> dict:
     if home is None:
         return out
     store = Path(home) / "credentials"
-    if not store.is_dir():
+    if not pathprobe.is_dir(store):
         return out
     out["present"] = True
     capped: list = []
