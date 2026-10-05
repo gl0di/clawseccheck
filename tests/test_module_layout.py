@@ -315,8 +315,16 @@ _EXEMPT = {
     # `_mcp.py` has owed since I-022 is still owed and is now the second-largest piece of
     # structural debt in the tree after `_content.py`; vet_plugin alone (the dispatcher,
     # its tree sweep and the plugin sweep) is a coherent unit that could leave.
-    "checks/_mcp.py": "~9,871 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
-                      "topic-faithful and over budget by design. Restated 2026-09-24 "
+    "checks/_mcp.py": "~10,564 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
+                      "topic-faithful and over budget by design. Restated 2026-10-05 "
+                      "(C-632: vet_plugin dispatches a SKILL.md the manifest does not list "
+                      "and discloses executable code beside a wrapper's node_modules, +~443 "
+                      "lines, most of it the self-contained wrapper-scan helpers "
+                      "and their docstrings. Those helpers share only the _PLUGIN_* "
+                      "constants with vet_plugin, which the existing tests monkeypatch on "
+                      "this module, so moving them is a split to plan, not a fix-up; they "
+                      "are the first candidate if vet_plugin leaves). Previously restated "
+                      "2026-09-24 "
                       "(+515 lines since the 2026-09-23 restatement below, accumulated "
                       "across many small fixes landing in the 4.3.0 wave rather than one "
                       "large change — B-948's normalize-before-scan fix among the most "

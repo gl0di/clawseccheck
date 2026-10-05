@@ -1872,7 +1872,24 @@ python3 audit.py --log audit.log            # also write log to a local file
   says so instead of claiming a clean malware scan. Any Python file that cannot be read, fails
   to parse, or is over the 2 MB scan cap (and any JS/TS file over its cap) is named as unread
   and floors the verdict to `CAUTION` (exit 1) with Danger `UNKNOWN`, never `INSTALL` - review
-  entry files before trusting.
+  entry files before trusting. A plugin is still a skill when it ships a `SKILL.md` its
+  manifest does not list (beside `openclaw.plugin.json`, or at the top of a wrapper project
+  whose plugin sits under `node_modules/`): that file is vetted as a standalone skill (which,
+  unlike the plugin sweep, does not skip `node_modules/`) and the report says so, so a skill
+  cannot dodge the skill engine by carrying a stub manifest - one the host would refuse
+  (unparseable or not an object) included. Executable code that sits beside a wrapper
+  project's `node_modules/` is outside the plugin package and is never analysed; when it is
+  present the vet says so and answers UNKNOWN (`CAUTION`) rather than `INSTALL`. That holds
+  when the wrapper also carries a `SKILL.md`: the skill engine reads only Python, shell and
+  JavaScript/TypeScript, so Ruby, Perl, PHP, Lua, PowerShell, an execute-bit file with no
+  shebang and an npm install-time script in the wrapper's own `package.json` (`preinstall`,
+  `install`, `postinstall`, `prepublish`, `prepare`, `preprepare`, `postprepare`) are still
+  reported, and a benign `SKILL.md` never turns them back into `INSTALL`. Docs, licences and
+  plain data files such as `.gitignore` or `.npmrc` do not count as code. A name that starts
+  with a dot exempts nothing: a dotfile with a code suffix (`.eslintrc.js`), a shebang or an
+  execute bit is listed, and so is a script inside a dot-directory such as `.hg/` (only
+  `.git/` is not walked). A host-generated wrapper (`node_modules/`, `package.json`,
+  `package-lock.json`) is unchanged.
 - **`--vet-source SLUG|URL|PKG`** is the pre-download reputation gate: it judges a source's
   *identity* - `clawhub:<slug>`, `npm:<pkg>`, `pypi:<pkg>`, `git:host/owner/repo[@ref]`, or a
   URL - with zero network and nothing fetched. Exact match in the bundled known-compromised
