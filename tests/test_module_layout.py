@@ -701,7 +701,9 @@ _EXEMPT = {
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~8,787 lines (restated 2026-09-25 — was ~8,254) — the read-only "
+    "collector.py": "~9,362 lines (restated 2026-10-05, C-616 - was ~8,787; C-616 bounds the "
+                    "own-source engine directory by file count, total bytes and file type, "
+                    "+94 lines, and its residual disclosure is most of the prose) - the read-only "
                     "collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "

@@ -2271,14 +2271,19 @@ hard false positives on real configs.
   own source - and that also means a match is **not proof** the folder is the genuine
   scanner. The layout is recognised by content (three engine definitions under
   `clawseccheck/checks/`), and anyone can write those three definitions, or symlink a directory
-  that has them: such a folder is skipped whole, payload included. This is an accepted,
-  documented limit of a static scanner, not something a smarter rule can close. What you get
-  instead is an honest result: nothing in that folder was read, the verdict never clears it
-  (`CAUTION`, exit `1`), and a match reached through a **symlink** (the folder itself, its
-  `clawseccheck/` package, or an engine file) is a `WARN` that names the link. The genuine
-  scanner reads `CAUTION` too - that is the price of not trusting the match. Only rely on it if
-  it is the copy you installed from ClawHub or GitHub; if you did not expect a folder to be
-  ClawSecCheck, treat it as suspicious and review it by hand.
+  that has them: such a folder is skipped whole, payload included. The match is bounded, in
+  the safe direction: an engine folder with more than 32 `*.py` files, more than 8 MB of
+  `*.py` files that are each under 2 MB (a file over 2 MB is skipped whole and does not count
+  toward the 8 MB), or any entry that is not a regular file is not matched and is scanned
+  like any other folder. The bounds limit files, bytes and entry types, not parse time: a
+  deliberately dense folder that fits every bound can still cost minutes of CPU on Python
+  3.12. This is an accepted, documented limit of a static scanner, not something a smarter
+  rule can close. What you get instead is an honest result: nothing in that folder was read,
+  the verdict never clears it (`CAUTION`, exit `1`), and a match reached through a **symlink**
+  (the folder itself, its `clawseccheck/` package, or an engine file) is a `WARN` that names
+  the link. The genuine scanner reads `CAUTION` too - that is the price of not trusting the
+  match. Only rely on it if it is the copy you installed from ClawHub or GitHub; if you did not
+  expect a folder to be ClawSecCheck, treat it as suspicious and review it by hand.
   **In the audit** the same folder is skipped from the installed-skill content scan and listed
   as "not graded" with the note that a match is a content heuristic, not proof - it is
   informational (INFO) and does not change the score. **`--monitor`** raises no new-skill alert
