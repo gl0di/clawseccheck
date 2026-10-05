@@ -1258,10 +1258,10 @@ _REGISTRY: "dict[str, _Entry]" = {
     # reader (_collect_paired_devices_sqlite) B176 already exercises above, so its own
     # two view-masquerade tests build the identical `decoy` table backing a VIEW named
     # `device_pairing_paired` -- same entry, same reasoning, new call sites.
-    "tests/test_b396_paired_node_skill_coverage.py:487": _Entry(
+    "tests/test_b396_paired_node_skill_coverage.py:507": _Entry(
         LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
     ),
-    "tests/test_b396_paired_node_skill_coverage.py:505": _Entry(
+    "tests/test_b396_paired_node_skill_coverage.py:525": _Entry(
         LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
     ),
 
