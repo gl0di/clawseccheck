@@ -432,7 +432,7 @@ from ._shared import (_CROSS_CONTEXT_DEFAULT_ALLOW_MIN, _CROSS_CONTEXT_DENY_MEAS
 from ._shared import (_CODE_MODE_AUTO_DEFAULT_MIN, _CODE_MODE_OFF_MEASURED_MIN, _code_mode_default,)  # B351 re-grounded
 from ._shared import (_TERMINAL_DEFAULT_ON_MIN, _TERMINAL_OFF_MEASURED_MIN, _TERMINAL_OFF_MEASURED_MAX, _TERMINAL_OFF_MEASURED_SPANS, _terminal_default,)  # C-640
 from ._shared import (_ALLOW_BOTS_DEFAULT_ALLOW_MIN, _ALLOW_BOTS_DENY_MEASURED_MIN, _ALLOW_BOTS_FLIPPED_CHANNELS, _allow_bots_default,)  # B372 re-grounded
-from ._shared import (_ENV_DEFAULT_OPERATOR_MIN, _ENV_DEFAULT_OPERATOR_SERIES_YEAR, _env_default_operator,)  # C-646
+from ._shared import (_ENV_DEFAULT_OPERATOR_MIN, _ENV_DEFAULT_OPERATOR_SERIES_YEAR, _env_default_operator, _empty_fallback_template,)  # C-646
 from ._shared import (_PORTALS_ABSENT_MEASURED_MIN, _PORTALS_GROUNDED_MIN, _portal_model_version,)  # B397
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,

@@ -38,6 +38,8 @@ from .checks import (
     _b62_actual_families,
     _b62_extract_declaration,
     _credential_is_plaintext,
+    _empty_fallback_template,
+    _env_default_operator,
     _credential_store_state,
     _enabled_tools,
     _EVENT_HOOK_PATH_RE,
@@ -1594,8 +1596,15 @@ def _rule_sandbox_cred_controlplane(ctx: Context, findings: list[Finding],
     # for the agent to read out of openclaw.json, and B1 no longer FAILs it either. `cfg`
     # is passed for the same reason as in B1: a reference to a variable that openclaw.json's
     # own env block defines in plaintext is still a plaintext credential.
-    if not _credential_is_plaintext(dig(cfg, "gateway.auth.password"), cfg=cfg):
-        return None
+    # The build gate is B1's too: on an OpenClaw with no `:-` default operator (before
+    # 2026.9.7) a whole-value `${NAME:-}` is passed through verbatim, so the text in
+    # openclaw.json IS the password and B1 FAILs it. On an unseen build B1 is UNKNOWN and
+    # this chain stays silent, as it does for any premise it cannot establish.
+    _gw_pw = dig(cfg, "gateway.auth.password")
+    if not _credential_is_plaintext(_gw_pw, cfg=cfg):
+        if not (_empty_fallback_template(_gw_pw, secret_input=True) is not None
+                and _env_default_operator(ctx) == "no"):
+            return None
     return RiskPath(
         id="RISK-16",
         severity=HIGH,
