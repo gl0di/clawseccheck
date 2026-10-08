@@ -676,6 +676,25 @@ def _manifest_value_text(value: object) -> str:
     return value if isinstance(value, str) else reprlib.repr(value)
 
 
+def _is_symlink_loop(p: Path) -> bool:
+    """Whether ``p`` cannot be reached because a symlink on the way to it loops (ELOOP).
+
+    ``pathprobe`` answers "not there" for ELOOP (pathlib's own contract), so a manifest
+    ``skills`` entry that is a loop reads exactly like one that names nothing - and on
+    3.14 ``Path.resolve`` no longer raises on a loop either, so nothing else notices. A
+    loop is a path the vet could not look at, not an absent one. A dangling link is ENOENT
+    and stays absent.
+    """
+    import errno as _errno  # noqa: PLC0415
+    try:
+        os.stat(p)
+    except OSError as exc:
+        return exc.errno == _errno.ELOOP
+    except ValueError:
+        return False
+    return False
+
+
 def vet_plugin(
     path: str | Path, target_budget_s: float = DEFAULT_VET_TARGET_BUDGET_S
 ) -> Finding:
@@ -968,21 +987,35 @@ def vet_plugin(
         for entry in skills_field:
             entry_text = _manifest_value_text(entry)
             d = root / entry_text
+            # C-659: an entry the file system cannot answer for (a name past the file-name
+            # limit, an embedded NUL, a symlink loop, a directory the user cannot search)
+            # raises out of resolve / the probes / the listing below. That must not end
+            # the vet: the other declared skills are still dispatched and the entry gets
+            # one WARN per such entry (CAUTION floor), never a silent skip and never a clean look.
             try:
-                escaped = not d.resolve().is_relative_to(root_res)
-            except OSError:
-                escaped = True
-            if escaped:
-                warns.append(f"manifest skills entry escapes the plugin root: {entry_text!r}")
-                continue
-            if not pathprobe.is_dir(d):
-                notes.append(f"manifest skills entry not present in the package: {entry_text!r}")
-                continue
-            if pathprobe.is_file(d / "SKILL.md"):
-                skill_dirs.append(d)
-            else:
-                kids = [c for c in sorted(d.iterdir()) if pathprobe.is_dir(c) and not pathprobe.is_symlink(c)]
-                skill_dirs.extend(kids if kids else [d])
+                try:
+                    escaped = not d.resolve().is_relative_to(root_res)
+                except OSError:
+                    escaped = True
+                if escaped:
+                    warns.append(f"manifest skills entry escapes the plugin root: {entry_text!r}")
+                    continue
+                if not pathprobe.is_dir(d):
+                    if _is_symlink_loop(d):
+                        raise OSError("symlink loop")
+                    notes.append(f"manifest skills entry not present in the package: {entry_text!r}")
+                    continue
+                if pathprobe.is_file(d / "SKILL.md"):
+                    skill_dirs.append(d)
+                else:
+                    kids = [c for c in sorted(d.iterdir()) if pathprobe.is_dir(c) and not pathprobe.is_symlink(c)]
+                    skill_dirs.extend(kids if kids else [d])
+            except (OSError, ValueError, RuntimeError):
+                warns.append(
+                    f"manifest skills entry {entry_text[:80]!r} "
+                    "could not be examined (unreadable, over-long, or a symlink loop) - "
+                    "its content was not vetted"
+                )
     # C-632: a SKILL.md the manifest did not dispatch is still a skill the user is about to
     # install. Kept OUT of `skill_dirs` (see the docstring), dispatched through the same loop.
     extra_skill_dirs = _colocated_skill_dirs(p, root, skill_dirs)
