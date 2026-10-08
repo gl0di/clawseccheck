@@ -644,14 +644,34 @@ def test_wrapper_oversized_package_json_is_unknown_not_a_silent_pass(tmp_path, m
     assert not _code_gap(f)  # it did not pretend to have read it
 
 
-def test_wrapper_too_deeply_nested_package_json_is_unknown_not_a_silent_pass(tmp_path):
-    """Python's parser gives up where node's does not; that must read as 'could not tell'."""
+def test_wrapper_too_deeply_nested_package_json_is_unknown_not_a_silent_pass(tmp_path, monkeypatch):
+    """Python's parser gives up where node's does not; that must read as 'could not tell'.
+
+    Where it gives up is not a constant - about 1,000 levels on 3.9, 10,000 on 3.12, and on
+    3.14 a function of the process stack size (a CI runner's larger stack follows more than
+    400,000) - so a hard-coded depth proves nothing on some machines. The degrade path is
+    therefore forced: the parser the wrapper scan calls raises the `RecursionError` a real
+    over-deep file makes it raise. A small real document, which parses on every interpreter
+    and stack, is the positive control."""
     d = _wrapper(tmp_path)
-    depth = 400_000
+    depth = 150
     (d / "package.json").write_text(
         '{"a":' + "[" * depth + "]" * depth + ',"scripts":{"postinstall":"node setup"}}',
         encoding="utf-8",
     )
+    # Positive control, no patch: a nested but ordinary file parses, its install script counts.
+    assert _mcp._wrapper_declares_lifecycle_script(d) == (True, False)
+    assert _code_gap(vet_plugin(d))
+
+    real_loads = json.loads
+
+    def give_up(text, *a, **kw):
+        if "postinstall" in text:
+            raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+        return real_loads(text, *a, **kw)
+
+    monkeypatch.setattr(json, "loads", give_up)
+    assert _mcp._wrapper_declares_lifecycle_script(d) == (False, True)
     f = vet_plugin(d)
     assert _gap(f, "package.json could not be read"), (f.status, [x.detail for x in f.ring_findings])
 

@@ -444,11 +444,36 @@ def test_verify_self_caps_and_escapes_the_names_it_prints(tmp_path, monkeypatch,
 
 # ---------------------------------------------- 7. the two implementations must agree
 
-def _matrix(root: Path) -> None:
+# `json.py` and `JSON.PY` are two entries only on a case-SENSITIVE file system. On a
+# case-folding one (the macOS default, Windows) the second write lands on the first file, so
+# the listing holds one name (`json.py`) and the pair cannot be built. The rule under test
+# lower-cases names, so the pair is there to prove an upper-case SUFFIX is still caught;
+# on a folding file system that is proved by an upper-case name with no lower-case twin.
+_CASE_TWIN = "JSON.PY"
+_CASE_TWIN_FOLDED = "Stray.PY"
+
+
+def _fs_folds_case(directory: Path) -> bool:
+    """True when `directory` is on a case-insensitive file system.
+
+    Probed on the directory under test rather than guessed from `sys.platform`: APFS can be
+    case-sensitive and a Linux directory can be casefold-mounted. The probe file is removed
+    before returning so it never shows up in the listing under test.
+    """
+    probe = directory / "CaseProbe.tmp"
+    probe.write_text("x\n", encoding="utf-8")
+    try:
+        return (directory / "caseprobe.tmp").exists()
+    finally:
+        probe.unlink()
+
+
+def _matrix(root: Path, folds_case: bool = False) -> None:
     """One entry per shape the rule has to decide, flagged or not."""
     (root / "clawseccheck").mkdir()
     (root / "audit.py").write_text("# shim\n", encoding="utf-8")
-    for name in ("json.py", "JSON.PY", "re.pyc", "y.pth", "z.pyd", "w.pyw", "a.so",
+    for name in ("json.py", _CASE_TWIN_FOLDED if folds_case else _CASE_TWIN, "re.pyc",
+                 "y.pth", "z.pyd", "w.pyw", "a.so",
                  "x.cpython-312-x86_64-linux-gnu.so", "sitecustomize.py", "sitecustomize",
                  "UserCustomize.txt", "conftest.py", "foo.py~", "foo.py.bak", "_meta.json",
                  "skill-card.md", "README.md", "real.txt"):
@@ -483,16 +508,23 @@ _EXPECTED_FLAGGED = sorted([
 ])
 
 
+def _expected_flagged(folds_case: bool) -> list:
+    if not folds_case:
+        return _EXPECTED_FLAGGED
+    return sorted(_CASE_TWIN_FOLDED if n == _CASE_TWIN else n for n in _EXPECTED_FLAGGED)
+
+
 def test_audit_shim_and_integrity_flag_exactly_the_same_names(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
-    _matrix(root)
+    folds_case = _fs_folds_case(root)
+    _matrix(root, folds_case)
 
     shim = sorted(_shim_rule()(str(root)))
     lib_rows = bundle_root_extras(root / "clawseccheck")
     lib = sorted(name for _kind, name, _why in lib_rows)
 
-    assert shim == _EXPECTED_FLAGGED, shim
+    assert shim == _expected_flagged(folds_case), shim
     assert lib == shim, "audit.py and integrity.py have drifted apart"
     assert {kind for kind, _n, _w in lib_rows} == {NOTE_BUNDLE_EXTRA}
 

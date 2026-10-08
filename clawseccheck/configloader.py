@@ -12,6 +12,9 @@ import hashlib
 import io
 import json
 import os
+import re
+from array import array
+from itertools import accumulate
 from pathlib import Path
 from . import pathprobe
 
@@ -28,6 +31,127 @@ _NAN_MARKER = "__clawseccheck_json5_nan__"
 
 class ConfigLoadError(ValueError):
     pass
+
+
+# --- bounded nesting (C-648) -------------------------------------------------------------
+# How deep a JSON document may nest before this tool refuses to read it. The limit is OURS,
+# not the interpreter's: `json.loads` gives up (RecursionError) at a depth that is a property
+# of the interpreter and, on the newest, of the process, so a verdict that depended on
+# whether the parser happened to give up differed from machine to machine. Measured
+# 2026-10-05, `json.loads("[" * n + "]" * n)`: the deepest document that parses is 991 levels
+# on CPython 3.9.25 (841 from inside a 150-frame call stack, 691 from 300 frames), 9,997 on
+# 3.12.3, and on 3.14.4 it follows the STACK SIZE - 57,974 with the default 8 MB stack, more
+# than 400,000 under `ulimit -s 65536` (a CI runner's larger stack). One figure, enforced
+# before the parser sees the text, gives the same answer everywhere.
+#
+# 200 because nothing real is anywhere near it. Maximum nesting depth measured the same day,
+# read-only, with a per-byte reference scanner: 20 across the 879 JSON/JSON5/JSONL files
+# under ~/.openclaw (the deepest is a cached tool catalogue; plugin manifests are far
+# shallower), 17 across the 930 *.json files of the installed OpenClaw package, and 10 across
+# the 1,626 JSON-looking values in the SQLite state tables (config_machine_state.value_json
+# is the deepest). 200 is ten times the deepest real document and far below what even
+# Python 3.9 follows from deep inside a call stack.
+#
+# Where it applies: readers for which "too deep -> UNKNOWN" is an honest answer (the
+# attestation file, the paired-device stores), through `loads_bounded`. It is deliberately
+# NOT applied to `loads_json5` or to `vet_plugin`'s manifest: for untrusted third-party
+# JSON a limit of our own would let a manifest padded past it hide what it declares, so
+# that path keeps the interpreter's own recursion guard (a better design is tracked as
+# C-664).
+MAX_JSON_NESTING = 200
+
+
+class JSONNestingError(ValueError):
+    """A JSON text nests deeper than this tool is willing to read.
+
+    A ``ValueError`` on purpose: every reader that already treats "not valid JSON" as
+    "unparseable" (``except ValueError`` / ``except (OSError, ValueError)``) thereby treats
+    "nested too deeply" the same way, which is the honest answer and the same one on every
+    interpreter. The message names the limit, never the document.
+    """
+
+
+# One pass of C-level regex work instead of a Python loop per character (a 2 MB document
+# costs tens of milliseconds, measured):
+#   1. drop every backslash escape pair, so an escaped quote can neither open nor close a
+#      string;
+#   2. drop every string literal (valid JSON has a backslash only inside a string, so step 1
+#      cannot touch anything else);
+#   3. keep only the brackets, as +1 / -1 bytes, and take the maximum running sum.
+# A string left open at the end of the text swallows the rest of it, which is where
+# `json.loads` stops too, with its own ValueError.
+_ESCAPE_STR = re.compile(r"\\.", re.S)
+_ESCAPE_BYTES = re.compile(rb"\\.", re.S)
+_STRING_STR = re.compile(r'"[^"]*"?')
+_STRING_BYTES = re.compile(rb'"[^"]*"?')
+_BRACKET_STEP = bytearray(256)
+for _c in b"[{":
+    _BRACKET_STEP[_c] = 1
+for _c in b"]}":
+    _BRACKET_STEP[_c] = 255  # -1 once read as a signed byte
+_BRACKET_STEP = bytes(_BRACKET_STEP)
+_NOT_A_BRACKET = bytes(c for c in range(256) if c not in b"[]{}")
+
+
+def _depth_exceeds(text_bytes: bytes, limit: int) -> bool:
+    """Whether the brackets of *text_bytes* (strings already removed) nest past *limit*."""
+    steps = text_bytes.translate(_BRACKET_STEP, _NOT_A_BRACKET)
+    return max(accumulate(array("b", steps)), default=0) > limit
+
+
+def json_nesting_exceeds(data, limit: int = MAX_JSON_NESTING) -> bool:
+    """True when the JSON text *data* opens more than *limit* nested arrays/objects at any point.
+
+    Never recurses and never raises: it answers about the TEXT, before any parser sees it.
+    Brackets inside string literals do not count, including after an escaped quote
+    (``\\"``) and after an escaped backslash (``\\\\``). *data* is ``str`` or
+    ``bytes``/``bytearray``; bytes are read the way ``json.loads`` reads them
+    (``json.detect_encoding``: UTF-8, UTF-8 with BOM, UTF-16, UTF-32), and bytes that do not
+    decode, or any other type, answer False so that ``json.loads`` raises its own error.
+
+    The answer is exact for valid JSON, and for any text the stdlib parser would descend
+    into: the parser follows only a strictly valid prefix, and in a valid prefix this scan
+    sees exactly the structure the parser does. Past the first syntax error it is
+    unspecified (the parser has already stopped there), so JSON5-only syntax (single-quoted
+    strings, comments, which this scan does not understand) is outside this model;
+    ``loads_json5`` does not call it.
+    """
+    if isinstance(data, str):
+        if data.count("[") + data.count("{") <= limit:
+            return False  # cannot be deeper than the number of openers - no scan needed
+        stripped = _STRING_STR.sub("", _ESCAPE_STR.sub("", data))
+        return _depth_exceeds(stripped.encode("ascii", "ignore"), limit)
+    if isinstance(data, (bytes, bytearray)):
+        if data.count(b"[") + data.count(b"{") <= limit:
+            return False
+        try:
+            encoding = json.detect_encoding(data)
+        except (TypeError, ValueError):
+            return False
+        if encoding in ("utf-8", "utf-8-sig"):
+            # '[', '{', '"' and the backslash are ASCII, and no byte of a multi-byte UTF-8
+            # sequence is, so UTF-8 can be scanned without decoding it.
+            stripped = _STRING_BYTES.sub(b"", _ESCAPE_BYTES.sub(b"", bytes(data)))
+            return _depth_exceeds(stripped, limit)
+        try:
+            text = bytes(data).decode(encoding, "surrogatepass")
+        except (UnicodeDecodeError, LookupError):
+            return False
+        return json_nesting_exceeds(text, limit)
+    return False
+
+
+def loads_bounded(data, *, max_nesting: int = MAX_JSON_NESTING):
+    """``json.loads`` for text that may be hostile: refuses nesting deeper than *max_nesting*.
+
+    Raises :class:`JSONNestingError` (a ``ValueError``) for a document nested deeper than
+    the limit, before the parser sees it, and otherwise returns exactly what ``json.loads``
+    returns (including its own ``ValueError`` for bad JSON). The ``RecursionError`` net a
+    caller already has stays as a second line of defence; it no longer decides the answer.
+    """
+    if json_nesting_exceeds(data, max_nesting):
+        raise JSONNestingError(f"JSON is nested deeper than {max_nesting} levels")
+    return json.loads(data)
 
 
 def _json5_to_python_literal(text: str) -> str:

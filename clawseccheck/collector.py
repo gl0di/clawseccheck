@@ -35,7 +35,10 @@ from pathlib import Path, PurePosixPath
 from . import pathprobe
 from .configloader import (
     ConfigLoadError as _ConfigLoadError,
+    JSONNestingError as _JSONNestingError,
+    MAX_JSON_NESTING as _MAX_JSON_NESTING,
     load_openclaw_config as _load_openclaw_config,
+    loads_bounded as _loads_bounded,
 )
 from .safeio import walk_dir_safely, is_safe_tar_member
 from .skilldiscovery import (
@@ -6037,6 +6040,16 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     drops ``displayName``/``bins``/host stats/every other vendor field the real
     ``nodeSurface`` object may carry, by construction (an allowlist, not a denylist).
 
+    ``scopesUnparsed`` (C-648, same per-entry dict) is ``True`` iff the row's
+    ``scopes_json`` or ``approved_scopes_json`` was present but could not be read
+    (malformed, or nested deeper than ``configloader.MAX_JSON_NESTING``); both then stay
+    ``None``. A scopes value is read or lost as a whole: a list holding one too-deep
+    element is unreadable, and an ``operator.admin`` beside that element is NOT recovered
+    (that would take an iterative parser). B176 reads the flag to disclose the unread
+    device and to refuse a clean verdict over it; a WARN found in OTHER, readable rows is
+    unaffected. Only when every row is too deep, with no readable scopes list anywhere, is
+    the table reported unreadable (``paired_devices_sqlite_parse_error``).
+
     Bounded, defense in depth against a hostile state DB (C-135 round 1, see
     ``_PAIRED_DEVICE_SQLITE_SELECT``'s own comment for the full grounding): a row
     whose ``scopes_json``/``approved_scopes_json``/``tokens_json``/``role``/
@@ -6192,31 +6205,49 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         ctx.errors.append(message)
         note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
 
-    # Set when a scopes/approvedScopes value is nested deeper than this interpreter's JSON
-    # parser follows (RecursionError). It is not a ValueError, so it used to escape this
-    # reader and abort the WHOLE audit ("unexpected internal error (RecursionError)"),
-    # at a depth that differs per interpreter: ~1,000 levels on 3.9, ~10,000 on 3.12,
-    # ~58,000 on 3.14 (measured). A 200 KB value of this shape fits under
-    # `_MAX_PAIRED_DEVICE_JSON_BYTES`, so the byte cap does not stop it. It is reported
-    # as an unreadable table - the same honest UNKNOWN every other "could not reliably
-    # read device_pairing_paired" case gives - never as a device with no scopes.
-    scopes_too_deep = False
+    # A scopes/approvedScopes value nested deeper than `_MAX_JSON_NESTING` levels is OUR limit,
+    # enforced by `_loads_bounded` before the parser runs (C-648). Before that the
+    # interpreter's own parser decided: a RecursionError, which is not a ValueError, so it
+    # escaped this reader and aborted the WHOLE audit ("unexpected internal error
+    # (RecursionError)") at a depth that differs per interpreter (~1,000 levels on 3.9,
+    # ~10,000 on 3.12, ~58,000 on 3.14 with its default stack and unbounded in practice with
+    # a larger one - measured), so the same row read differently on different machines. A
+    # 200 KB value of this shape fits under `_MAX_PAIRED_DEVICE_JSON_BYTES`, so the byte cap
+    # does not stop it. RecursionError stays caught as a second net.
+    #
+    # The unit that cannot be read is the VALUE, not the table: a too-deep value (or a
+    # malformed one - same treatment) leaves `scopes`/`approvedScopes` None and sets that
+    # entry's `scopesUnparsed`, which B176 reads to say so and to refuse a clean verdict. The
+    # value is lost WHOLE: a scopes list that contains one too-deep element is unreadable,
+    # and an `operator.admin` next to that element in the same list is not salvaged (that
+    # takes an iterative parser), so that device is UNKNOWN, never a WARN and never clean.
+    # What this per-row split protects is the OTHER rows: a hostile value in one device's
+    # column must not turn another device's readable `operator.admin` from a WARN into
+    # UNKNOWN (B176: "a WARN found in what WAS scanned stands regardless"). Only when EVERY
+    # row is too deep, with no readable scopes anywhere, is there nothing left to evaluate,
+    # and then the table is reported unreadable - the same honest UNKNOWN every other "could
+    # not reliably read device_pairing_paired" case gives, never a device with no scopes.
+    row_scopes_unparsed = False
+    row_scopes_too_deep = False
 
     def _json_list(raw):
-        nonlocal scopes_too_deep
+        nonlocal row_scopes_unparsed, row_scopes_too_deep
         if not raw:
             return None
         try:
-            value = json.loads(raw)
-        except RecursionError:
-            scopes_too_deep = True
+            value = _loads_bounded(raw)
+        except (_JSONNestingError, RecursionError):
+            row_scopes_unparsed = row_scopes_too_deep = True
             return None
         except ValueError:
+            row_scopes_unparsed = True
             return None
         return value if isinstance(value, list) else None
 
     ctx.paired_devices_sqlite_found = True
     entries: dict = {}
+    too_deep_rows = 0
+    malformed_rows = 0
     for (
         device_id, platform, scopes_json, approved_scopes_json, tokens_json,
         created_at_ms, approved_at_ms, last_seen_at_ms,
@@ -6225,15 +6256,26 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         if not isinstance(device_id, str) or not device_id:
             continue
 
+        row_scopes_unparsed = row_scopes_too_deep = False
+        scopes_value = _json_list(scopes_json)
+        approved_scopes_value = _json_list(approved_scopes_json)
+        if row_scopes_too_deep:
+            too_deep_rows += 1
+        elif row_scopes_unparsed:
+            malformed_rows += 1
+
         # B396: RecursionError is caught here too (not just ValueError) -- "harden it
         # in the same style as the new keys" (see this reader's own follow-up note in
         # its docstring) -- so a deeply-nested tokens_json sets tokensUnparsed rather
-        # than propagating an uncaught exception out of a read-only collector.
+        # than propagating an uncaught exception out of a read-only collector. C-648:
+        # the nesting limit is `_MAX_JSON_NESTING` (`_loads_bounded` raises a ValueError
+        # past it), not the interpreter's parser, so tokens / roles / nodeSurface below
+        # answer the same on every interpreter; RecursionError is the second net.
         tokens: dict = {}
         tokens_unparsed = False
         if tokens_json:
             try:
-                raw_tokens = json.loads(tokens_json)
+                raw_tokens = _loads_bounded(tokens_json)
             except (ValueError, RecursionError):
                 raw_tokens = None
                 tokens_unparsed = True
@@ -6261,7 +6303,7 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         roles_unparsed = False
         if roles_json is not None:
             try:
-                raw_roles = json.loads(roles_json)
+                raw_roles = _loads_bounded(roles_json)
             except (ValueError, RecursionError):
                 roles_unparsed = True
             else:
@@ -6281,7 +6323,7 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         node_surface_unparsed = False
         if node_surface_json is not None:
             try:
-                raw_surface = json.loads(node_surface_json)
+                raw_surface = _loads_bounded(node_surface_json)
             except (ValueError, RecursionError):
                 node_surface_unparsed = True
             else:
@@ -6304,8 +6346,9 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         entries[device_id] = {
             "deviceId": device_id,
             "platform": platform,
-            "scopes": _json_list(scopes_json),
-            "approvedScopes": _json_list(approved_scopes_json),
+            "scopes": scopes_value,
+            "approvedScopes": approved_scopes_value,
+            "scopesUnparsed": row_scopes_unparsed,
             "role": role_value,
             "roles": roles_value,
             "rolesUnparsed": roles_unparsed,
@@ -6318,14 +6361,28 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
             "lastSeenAtMs": last_seen_at_ms,
         }
 
-    if scopes_too_deep:
+    if too_deep_rows:
+        # Nothing left to evaluate: every row is too deep AND none kept a readable scopes
+        # list in its other column (a readable `operator.admin` there is still a WARN).
+        everything = too_deep_rows == len(entries) and all(
+            e["scopes"] is None and e["approvedScopes"] is None for e in entries.values()
+        )
         ctx.errors.append(
             f"device_pairing_paired in {db_path} holds a scopes/approvedScopes value nested "
-            "deeper than this reader's JSON parser follows; the paired-device store was "
-            "not reliably read"
+            f"deeper than the {_MAX_JSON_NESTING} levels this reader follows; "
+            + (
+                "the paired-device store was not reliably read" if everything
+                else f"the scopes of {too_deep_rows} paired-device row(s) were not read"
+            )
         )
-        ctx.paired_devices_sqlite_parse_error = True
-        return
+        if everything:
+            ctx.paired_devices_sqlite_parse_error = True
+            return
+    if malformed_rows:
+        ctx.errors.append(
+            f"device_pairing_paired in {db_path} holds {malformed_rows} paired-device row(s) "
+            "whose scopes/approvedScopes value is not valid JSON; their scopes were not read"
+        )
 
     ctx.paired_devices_sqlite = entries
 
