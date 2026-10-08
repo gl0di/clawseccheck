@@ -412,6 +412,55 @@ def _colocated_skill_dirs(p: Path, root: Path, dispatched: "list[Path]") -> "lis
     return found
 
 
+def _plugin_nonregular_kind(fp: Path) -> str | None:
+    """C-654: what a tree entry is when it must NOT be opened, else ``None``.
+
+    Only the kinds whose ``open()`` can block: a named pipe with no writer blocks forever
+    (neither scan budget can fire inside a blocked ``open()`` - ``cpu_exceeded`` counts CPU
+    time, ``sweep_plugins`` checks its wall clock only between plugins), and a character or
+    block device can block or stall too. ``lstat`` only, never ``open``. A socket is NOT
+    listed: opening one fails at once, so it keeps the verdict it always had (an unreadable
+    file, handled by the readers). A symlink is judged by itself, not its target, so it
+    reports ``None`` - the sweep skips every symlink before this is asked. An entry
+    ``lstat`` cannot classify is also ``None`` and falls through to the readers' own
+    handling of an unreadable path.
+    """
+    try:
+        mode = os.lstat(fp).st_mode
+    except OSError:
+        return None
+    if _stat.S_ISFIFO(mode):
+        return "named pipe"
+    if _stat.S_ISCHR(mode) or _stat.S_ISBLK(mode):
+        return "device file"
+    return None
+
+
+def _nonregular_gap_finding(entries: "list[tuple[str, str]]", total: int, where: str) -> Finding:
+    """The coverage gap for entries ``_plugin_nonregular_kind`` declined to open.
+
+    A file that was NOT READ is a coverage gap, not a warning about content: it goes
+    through the same ``coverage_gap_finding`` vehicle an unreadable file or a capped sweep
+    uses, so the dossier keeps every axis the gap hides UNKNOWN instead of reading a WARN as
+    "something was assessed". The standard fix text ("restore read and search permission")
+    is wrong for a pipe, so this carries its own. ``entries`` is the first few
+    ``(relative path, kind)``; ``total`` counts them all. Names come from the target, so
+    they go through ``repr`` (a hostile name cannot smuggle control characters into a
+    report) and are plugin-relative, never a host path.
+    """
+    shown = ", ".join(f"{r!r} ({k})" for r, k in entries)
+    more = "" if total <= len(entries) else f" (+{total - len(entries)} more)"
+    return coverage_gap_finding(
+        f"plugin scan coverage is incomplete: non-regular file(s) in {where} were not "
+        f"read ({shown}{more}) - this scan does not open a named pipe or device it finds "
+        "when it lists the tree, because reading one can block forever",
+        fix=(
+            "Remove the listed named pipe(s) or device file(s) from the scanned directory "
+            "(or replace them with regular files) and re-run; this scan does not read them."
+        ),
+    )
+
+
 def _wrapper_file_is_code(fp: Path, gaps: dict, skill_reads: bool = False) -> bool:
     """Whether one file in a directory the plugin engine does not sweep is executable code.
 
@@ -474,6 +523,7 @@ class _WrapperScan:
     capped: bool = False  # the walk stopped at _PLUGIN_FILE_CAP files
     over_budget: bool = False  # the CPU budget ran out mid-walk
     pkg_unassessed: bool = False  # package.json exists but could not be judged
+    unread: "list[tuple[str, str]]" = field(default_factory=list)  # C-654: pipes/devices not opened
 
 
 def _json_int_unbounded(_digits: str) -> int:
@@ -585,6 +635,12 @@ def _wrapper_top_level_scan(top: Path, deadline, skill_reads: bool = False) -> _
             reads = skill_reads and not any(v in fp.parts for v in _VCS_DIR_NAMES)
             if _wrapper_file_is_code(fp, scan.gaps, reads):
                 scan.code.append(str(fp.relative_to(top)))
+            elif not reads:
+                # C-654: a pipe or device is not opened (above), but must not vanish. Not
+                # where `vet_skill` walked (`reads`): it reports the pipe itself there.
+                kind = _plugin_nonregular_kind(fp)
+                if kind:
+                    scan.unread.append((str(fp.relative_to(top)), kind))
         if scan.capped:
             break
     declares, scan.pkg_unassessed = _wrapper_declares_lifecycle_script(top)
@@ -821,6 +877,17 @@ def vet_plugin(
                 "subdirectory) and re-run.",
                 engine_degraded=True,
             )
+        return _plugin_finding(
+            HIGH,
+            UNKNOWN,
+            f"not an OpenClaw plugin: no {_PLUGIN_MANIFEST} found under {p}",
+            "A plugin root carries openclaw.plugin.json; for a skill directory use --vet.",
+        )
+    if root != p and _plugin_nonregular_kind(root / _PLUGIN_MANIFEST):
+        # C-654: the wrapper locator's `node_modules/*/openclaw.plugin.json` glob matches a
+        # named pipe or device, and the read below would block forever on a FIFO. The same
+        # shape at the top level is already "no manifest" (the locator wants a regular
+        # file), so this answers exactly that.
         return _plugin_finding(
             HIGH,
             UNKNOWN,
@@ -1123,6 +1190,11 @@ def vet_plugin(
             wrapper_code = _wscan.code
             budget_hit = budget_hit or _wscan.over_budget
             wrapper_findings = _wrapper_coverage_findings(p, _wscan, p in colocated_vetted)
+            if _wscan.unread:  # C-654: same disclosure as the tree sweep's
+                wrapper_findings.append(_nonregular_gap_finding(
+                    _wscan.unread[:3], len(_wscan.unread),
+                    "the target directory outside the plugin package",
+                ))
 
     # -- capped tree sweep (skips node_modules; symlinks never followed) for embedded
     #    MCP specs and native-executable stowaways outside the dispatched skill dirs
@@ -1142,6 +1214,10 @@ def vet_plugin(
     # state one fact twice. Each entry is (plugin-relative name, reason).
     py_unread: list[tuple[str, str]] = []
     deep_json: list[str] = []  # *.json files too deeply nested for the parser to follow
+    # C-654: pipes and devices the sweep does not open (a pipe with no writer blocks
+    # `open()` forever). Count plus the first few (rel path, kind): the disclosure is bounded.
+    nonregular: list[tuple[str, str]] = []
+    nonregular_n = 0
     # B-636: plugin Python the Danger pass DID read. Distinct from `unanalysed_code` and
     # from "no code at all": the AST/taint pass covers dangerous patterns, while the
     # Persistence and Connections axes are computed from bundled-skill Contexts that never
@@ -1210,6 +1286,22 @@ def vet_plugin(
                         note_walk_gap(gaps, Path(dirpath), exc)  # gate: parent missing `x`
                     continue  # unclassifiable -> never trust it enough to open it
                 if is_link:
+                    continue
+                # C-654: classify with lstat BEFORE anything below can open it. Not counted
+                # against the cap either: it is never read, so it cannot be "a file the cap
+                # left unscanned".
+                #
+                # Not under a dispatched skill dir: nothing below ever opened an entry there
+                # (the readers skip it, `vet_skill` reports the pipe itself), so such a tree
+                # never hung and keeps exactly the output it always had.
+                kind = (
+                    None if any(sd in fp.parents for sd in skill_dirs)
+                    else _plugin_nonregular_kind(fp)
+                )
+                if kind:
+                    nonregular_n += 1
+                    if len(nonregular) < 3:
+                        nonregular.append((str(fp.relative_to(root)), kind))
                     continue
                 # B-344: the cap test runs BEFORE the append, not after it. Tripping
                 # `truncated` while appending the Nth file claims files went unscanned
@@ -1471,6 +1563,11 @@ def vet_plugin(
             f"JSON file(s) nested too deeply for this scanner's parser ({shown_dj}{more_dj}) "
             "were not checked for embedded MCP server specs"
         )
+    if nonregular_n:
+        # C-654: a coverage gap, not a note and not a WARN - a tree holding an entry this
+        # scan declined to open cannot read as INSTALL/PASS, and a WARN would make the
+        # dossier treat the tree as assessed and flip the axes the gap hides back to PASS.
+        subs.append(_nonregular_gap_finding(nonregular, nonregular_n, "the plugin tree"))
     if unread_shell:
         shown_sh = ", ".join(sorted(unread_shell)[:3])
         more_sh = "" if len(unread_shell) <= 3 else f" (+{len(unread_shell) - 3} more)"
