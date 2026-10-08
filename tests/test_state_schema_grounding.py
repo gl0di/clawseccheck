@@ -1032,6 +1032,8 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b187_plugin_tool_result_middleware.py:332": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
     "tests/test_f150_plugin_sweep.py:82": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
     "tests/test_f153_dashboard_full.py:351": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
+    # C-654: the plugin-vet FIFO tests build the same retired-table home as test_f150_plugin_sweep.
+    "tests/test_c654_plugin_tree_fifo.py:605": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
 
     # ---- config_machine_state (F-183) ----
     "tests/test_b177_installed_index_shapes.py:55": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
@@ -1295,7 +1297,8 @@ _REGISTRY: "dict[str, _Entry]" = {
 # LEGACY_TABLE while the shipped snapshot predated the table, MODERN since the 2026.9.7
 # re-baseline. 79, was 78.
 # 81, was 79: the two test_b749 sites registered above (:702 and :671).
-assert len(_REGISTRY) == 81, f"registry has {len(_REGISTRY)} entries, expected 81"
+# 82, was 81: the one test_c654 site registered above (:605).
+assert len(_REGISTRY) == 82, f"registry has {len(_REGISTRY)} entries, expected 82"
 
 
 # ========================================================================================
