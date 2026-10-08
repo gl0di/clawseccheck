@@ -45,6 +45,7 @@ from clawseccheck.collector import (
     collect,
     limit_hits_for,
 )
+from clawseccheck.configloader import MAX_JSON_NESTING
 
 # Reused rather than duplicated -- same precedent as test_f184_retired_key_config_invalid.py
 # importing from test_b700_version_aware_advice (pytest puts tests/ on sys.path).
@@ -228,24 +229,23 @@ class TestCollectorNormalisation:
                                               ('""', None), ("true", {}), ("false", None)]):
             assert ctx.paired_devices_sqlite[f"d{i}"]["nodeSurface"] == expected, raw
 
-    @pytest.mark.parametrize("depth", [500, 20_000, 100_000])
+    @pytest.mark.parametrize("depth", [150, MAX_JSON_NESTING, MAX_JSON_NESTING + 1, 1_500,
+                                       20_000, 100_000])
     def test_deeply_nested_json_sets_unparsed_not_a_crash(self, tmp_path, depth):
-        # How deep a document json.loads follows is the interpreter's own limit
-        # (measured 2026-10-05: 994 levels on CPython 3.9.25, 9,997 on 3.12.3, about 58,000
-        # on 3.14.4), so the depths below cover all three outcomes - 500 parses on every
-        # supported Python, 20,000 on 3.14 only, 100,000 on none - and the expectation is
-        # taken from what json.loads does in THIS run, never from a version number. Both
-        # arms must be a clean, honest read: no RecursionError, and a surface the parser
-        # could not follow is flagged unparsed rather than reported as absent.
+        # C-648: how deep a document the collector reads is OUR limit (MAX_JSON_NESTING,
+        # enforced before any parser runs), not the interpreter's - json.loads follows 991
+        # levels on CPython 3.9.25, 9,997 on 3.12.3 and, on 3.14, a depth that follows the
+        # process stack size (57,974 with the default 8 MB, more than 400,000 with a larger
+        # one). So the expectation below is a property of the limit and is the same on every
+        # interpreter and stack size: at or below it the surface parses (a list is "any other
+        # truthy JSON shape": presence only, no commands); above it - including 20,000 and
+        # 100,000, which a 3.14 with a large stack WOULD have parsed - a surface the reader
+        # refused is flagged unparsed rather than reported as absent. Never a RecursionError.
+        # (100,000 levels is the deepest value under the paired-device byte cap, 256 KB.)
         home = tmp_path / "h"
         _make_state_db(home / "state", [])
         nested = ("[" * depth) + ("]" * depth)
         assert len(nested) < _MAX_PAIRED_DEVICE_JSON_BYTES
-        try:
-            json.loads(nested)
-            parses = True
-        except RecursionError:
-            parses = False
         conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
         conn.execute(
             "INSERT INTO device_pairing_paired (device_id, public_key, "
@@ -257,13 +257,35 @@ class TestCollectorNormalisation:
         ctx = Context(home=home)
         _collect_paired_devices_sqlite(home, ctx)  # must not raise RecursionError
         entry = ctx.paired_devices_sqlite["d1"]
-        if parses:
-            # Parsed: a list is "any other truthy JSON shape" - presence only, no commands.
+        if depth <= MAX_JSON_NESTING:
             assert entry["nodeSurfaceUnparsed"] is False
             assert entry["nodeSurface"] == {}
         else:
             assert entry["nodeSurfaceUnparsed"] is True
             assert entry["nodeSurface"] is None
+
+    @pytest.mark.parametrize("column", ["roles_json", "tokens_json"])
+    @pytest.mark.parametrize("depth", [MAX_JSON_NESTING, MAX_JSON_NESTING + 1, 20_000])
+    def test_the_other_node_columns_obey_the_same_limit(self, tmp_path, column, depth):
+        # roles_json and tokens_json go through the same bounded reader as node_surface_json:
+        # over the limit they are flagged unparsed (their own flag), not a crash and not "none".
+        home = tmp_path / "h"
+        _make_state_db(home / "state", [])
+        shape = ("[" * depth + "]" * depth) if column == "roles_json" else (
+            '{"a":' * depth + "1" + "}" * depth)
+        conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
+        conn.execute(
+            f"INSERT INTO device_pairing_paired (device_id, public_key, {column}, "
+            "created_at_ms, approved_at_ms) VALUES (?, ?, ?, ?, ?)",
+            ("d1", "pk", shape, 1, 1),
+        )
+        conn.commit()
+        conn.close()
+        ctx = Context(home=home)
+        _collect_paired_devices_sqlite(home, ctx)  # must not raise
+        entry = ctx.paired_devices_sqlite["d1"]
+        flag = "rolesUnparsed" if column == "roles_json" else "tokensUnparsed"
+        assert entry[flag] is (depth > MAX_JSON_NESTING)
 
     def test_oversized_role_or_nodesurface_excludes_row_and_degrades_b176(self, tmp_path):
         home = tmp_path / "h"

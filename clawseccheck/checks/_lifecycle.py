@@ -37,6 +37,11 @@ from ..collector import (
     openclaw_effective_home,  # B33: where a --profile home lives
     openclaw_state_dir,  # B33: is the audited home the one the local install serves
 )
+from ..configloader import (  # C-648: bounded JSON nesting
+    JSONNestingError as _JSONNestingError,
+    MAX_JSON_NESTING as _MAX_JSON_NESTING,
+    loads_bounded as _loads_bounded,
+)
 from ..safeio import walk_dir_safely
 from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree enumeration
 from ..skillast import analyze_javascript as _analyze_javascript
@@ -5242,13 +5247,15 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     WARN    -- one or more paired devices hold standing operator.admin/operator.write
               authority via a live (non-revoked) token -- an inventory advisory (count +
               age), never proof of compromise.
-    UNKNOWN -- devices/paired.json exists but is unreadable or not valid JSON, OR (when
+    UNKNOWN -- devices/paired.json exists but is unreadable, not valid JSON, or nested
+              deeper than ``configloader.MAX_JSON_NESTING`` levels (C-648), OR (when
               that file is absent) the device_pairing_paired state-DB table exists but
               could not be reliably read, OR (when that file is absent) no device among
               those actually read holds high-privilege authority BUT the collector's own
               size/row cap excluded one or more device_pairing_paired rows -- a verdict
               built only over what WAS read cannot be trusted as a clean bill of health
-              when rows were dropped for size (see the C-135 round 2 note below).
+              when rows were dropped for size (see the C-135 round 2 note below), OR no
+              device read holds authority BUT a device's scopes could not be read (C-648).
 
     B-661: exempt from the "23 checks PASS on an unread config" audit. This check
     never reads ``ctx.config`` -- the locus is ``devices/paired.json`` under
@@ -5287,15 +5294,28 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     was dropped, the same ``LIMIT_DOMAIN_APPROVALS``/B172 precedent this codebase
     already uses for its own collector-cap case: "a WARN found in what WAS scanned
     stands regardless; only a verdict built on ABSENCE degrades."
+
+    C-648 (nesting limit): the unit that is lost to a too-deep value is the WHOLE document,
+    or for the SQLite store the whole scopes value of one row - never part of it. A legacy
+    ``devices/paired.json`` nested deeper than ``MAX_JSON_NESTING`` is UNKNOWN as a
+    whole: an ``operator.admin`` inside that same unreadable document cannot be salvaged
+    (that would take an iterative parser), so no WARN is claimed for it. Likewise a
+    scopes list that contains one too-deep element is unreadable as a whole, and so is its
+    ``operator.admin`` sitting next to that element. What stands is a WARN found in OTHER,
+    readable SQLite rows; a device whose scopes were not read is disclosed (``fix`` only)
+    and is never counted as "no authority".
     """
-    import json as _json
     import time as _time
 
     using_sqlite_fallback = False
     paired_path = ctx.home / "devices" / "paired.json"
     if pathprobe.is_file(paired_path):
         try:
-            data = _json.loads(paired_path.read_text(encoding="utf-8", errors="replace"))
+            # C-648: nesting deeper than MAX_JSON_NESTING raises JSONNestingError here, before
+            # the parser runs, so every interpreter answers alike. Before, a document past the
+            # interpreter's own limit raised RecursionError out of this check (an `ERR:`
+            # degrade), and one inside it parsed - a different answer per machine.
+            data = _loads_bounded(paired_path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             return _finding(
                 "B176",
@@ -5303,6 +5323,20 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                 "devices/paired.json present but unreadable \u2014 cannot evaluate paired "
                 "device operator authority.",
                 "Ensure devices/paired.json is owner-readable, or review it manually.",
+            )
+        except _JSONNestingError:
+            # UNKNOWN as a whole: one document, and a too-deep value leaves every device in
+            # it unread. A WARN inside that same unreadable document cannot be salvaged
+            # (that needs an iterative parser), so none is claimed. It is VALID JSON, so it
+            # must not be called invalid.
+            return _finding(
+                "B176",
+                UNKNOWN,
+                "devices/paired.json present but nested deeper than the "
+                f"{_MAX_JSON_NESTING} levels this audit reads \u2014 its paired devices could "
+                "not be read, so paired device operator authority was not evaluated.",
+                "A real devices/paired.json nests only a few levels. Review the file manually "
+                "and run `openclaw devices list` to see the paired devices and their scopes.",
             )
         except ValueError:
             return _finding(
@@ -5389,6 +5423,10 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     # up to 12 evidence lines for a WARN), so the reader still sees how stale each device is.
     high_scope: list[str] = []
     high_scope_ev: list[str] = []
+    # C-648: SQLite-store devices whose scopes could not be read (malformed / too deep): they
+    # never hide a WARN found in another row, are disclosed in `fix` (never `detail`, which a
+    # fingerprint hashes), and degrade a no-finding result to UNKNOWN.
+    unread: list[str] = []
     for key, entry in data.items():
         if not isinstance(entry, dict):
             continue
@@ -5399,6 +5437,8 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                 scopes.update(s for s in values if isinstance(s, str))
         granted = sorted(s for s in scopes if s in _HIGH_SCOPE_NAMES)
         if not granted:
+            if entry.get("scopesUnparsed"):
+                unread.append(_redact(str(entry.get("deviceId") or key)))
             continue
 
         tokens = entry.get("tokens")
@@ -5424,6 +5464,16 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
         high_scope.append(_redact(base))
         high_scope_ev.append(_redact(f"{base} lastSeenAgeDays={age_desc}"))
 
+    unread_note = ""
+    if unread:
+        more = f" (+{len(unread) - 6} more)" if len(unread) > 6 else ""
+        unread_note = (
+            f" {len(unread)} paired device(s) ({', '.join(unread[:6])}{more}) have a "
+            "scopes/approvedScopes value that could not be read (not valid JSON, or nested "
+            f"deeper than {_MAX_JSON_NESTING} levels), so their authority was not evaluated "
+            "- review them with `openclaw devices list`."
+        )
+
     if not high_scope_ev:
         if using_sqlite_fallback and limit_hits_for(ctx, LIMIT_DOMAIN_PAIRED):
             # C-135 round 2: none of the devices that WERE read hold high-privilege
@@ -5443,8 +5493,18 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                 "so a clean bill of health cannot be given.",
                 "Investigate why device_pairing_paired holds an oversized row "
                 "(scopes/approvedScopes/tokens/role/roles/nodeSurface past the size cap) or "
-                "more rows than the collector's cap, then re-run the audit.",
+                "more rows than the collector's cap, then re-run the audit." + unread_note,
                 engine_degraded=True,
+            )
+        if unread:
+            return _finding(
+                "B176",
+                UNKNOWN,
+                f"{len(data) - len(unread)} paired device(s) were read and none hold "
+                f"operator.admin/operator.write authority, but {len(unread)} paired "
+                "device(s) have a scopes/approvedScopes value that could not be read "
+                "\u2014 a clean bill of health cannot be given.",
+                unread_note.strip(),
             )
         return _finding(
             "B176",
@@ -5466,7 +5526,7 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
         "devices list`); remove any unknown or stale device (`openclaw devices remove "
         "<deviceId>`) and rotate the token of any you keep "
         "(`openclaw devices rotate --device <id> --role <role>`) so an old standing "
-        "token cannot be replayed.",
+        "token cannot be replayed." + unread_note,
         evidence=high_scope_ev[:6],
     )
 

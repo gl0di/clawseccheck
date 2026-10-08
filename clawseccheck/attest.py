@@ -23,8 +23,9 @@ network, no subprocess, no execution. Pure stdlib.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from .configloader import MAX_JSON_NESTING, loads_bounded
 
 SCHEMA_ID = "clawseccheck-attest/1"
 
@@ -173,20 +174,26 @@ def classify_tools(tools) -> dict:
 def parse_attestation(data) -> dict:
     """Validate an attestation given as JSON text (str or bytes) or an already-parsed object.
 
-    Returns the dict, or ``{}`` on any problem (undecodable bytes, bad JSON,
-    pathologically nested JSON, non-object root, unknown schema version). Never
-    raises - a malformed attestation means "no attestation", so checks fall back to
+    Returns the dict, or ``{}`` on any problem (undecodable bytes, bad JSON, JSON nested
+    deeper than ``MAX_JSON_NESTING`` levels, non-object root, unknown schema version).
+    Never raises - a malformed attestation means "no attestation", so checks fall back to
     UNKNOWN. Shared by the file loader and the stdin path so both validate
     identically. Bytes are decoded by ``json.loads`` itself (UTF-8, UTF-8 with BOM,
     UTF-16, UTF-32), which is why the loaders hand it the raw bytes.
+
+    How deep a document may nest is OUR limit (``configloader.MAX_JSON_NESTING``, checked
+    before the parser runs), not whatever the running interpreter's parser happens to
+    follow: that figure differs between CPython versions and, on 3.14, with the process
+    stack size, so the answer would otherwise differ between machines (C-648).
     """
     if isinstance(data, (str, bytes)):
         try:
-            data = json.loads(data)
+            data = loads_bounded(data, max_nesting=MAX_JSON_NESTING)
         except (ValueError, RecursionError):
-            # ValueError covers bad JSON and UnicodeDecodeError (undecodable bytes);
-            # RecursionError (a RuntimeError, not a ValueError) is what the C scanner
-            # raises on pathologically deep nesting (C-626) - same "no attestation".
+            # ValueError covers bad JSON, undecodable bytes (UnicodeDecodeError) and the
+            # nesting limit (JSONNestingError). RecursionError (a RuntimeError, not a
+            # ValueError) stays as a second net for the parser's own guard (C-626) - same
+            # "no attestation".
             return {}
     if not isinstance(data, dict):
         return {}

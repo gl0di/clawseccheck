@@ -179,7 +179,10 @@ _EXEMPT = {
     # says it is not alone — `checks/_mcp.py` sits at 97% of its own tolerance, and five
     # more modules are past 70%. That whole table needs a restate-and-reconsider pass, not
     # one entry at a time as each next commit trips it.
-    "checks/_lifecycle.py": "~8,208 lines (restated 2026-09-26, B396 — was ~7,329; "
+    "checks/_lifecycle.py": "~8,721 lines (restated 2026-10-08, C-648 — was ~8,208; B176's "
+                            "bounded-JSON nesting handling for devices/paired.json and the "
+                            "unread-device disclosure added ~60 lines. Restated 2026-09-26, "
+                            "B396 — was ~7,329; "
                             "check_paired_node_skill_coverage plus its own faithful-port "
                             "helpers and a dense dist-grounding comment block added "
                             "~880 lines) — the approval / update-pinning / "

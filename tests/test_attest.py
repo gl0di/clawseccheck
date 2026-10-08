@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from clawseccheck import attest, audit
 from clawseccheck.catalog import ATTESTED, HIGH, PASS, UNKNOWN, WARN
 from clawseccheck.checks import (
@@ -17,6 +19,7 @@ from clawseccheck.checks import (
     check_capability_blast_radius,
 )
 from clawseccheck.collector import Context
+from clawseccheck.configloader import MAX_JSON_NESTING
 
 
 def _ctx(config=None, attestation=None, host=None):
@@ -273,9 +276,12 @@ def test_parse_attestation_bytes_undecodable_returns_empty():
 
 
 # Owner decision (Dave, 2026-09-30): pathologically nested JSON is just another invalid
-# attestation. json.loads raises RecursionError (a RuntimeError, NOT a ValueError) there.
-# 100000 levels is far above every supported interpreter's limit (~1000 on 3.9, ~10000 on
-# 3.12).
+# attestation. C-648: the line is OURS - `configloader.MAX_JSON_NESTING` levels, enforced
+# before the parser runs - not wherever the running interpreter's `json.loads` gives up
+# (991 levels on 3.9, 9,997 on 3.12, and on 3.14 a function of the process stack size:
+# 57,974 with the default 8 MB, more than 400,000 with a CI runner's larger one). 100000
+# levels is far above the limit on every interpreter and stack size, and is refused for
+# that reason, never because a parser happened to give up.
 _DEEP = 100000
 
 
@@ -298,6 +304,42 @@ def test_load_deeply_nested_file_returns_empty(tmp_path):
     p.write_bytes(b'{"schema": "' + attest.SCHEMA_ID.encode() + b'", "tools": '
                   + b"[" * _DEEP + b"]" * _DEEP + b"}")
     assert attest.load_attestation(p) == {}
+
+
+def _tools_nested(levels: int) -> str:
+    """An attestation whose whole document is exactly *levels* deep: the root object plus a
+    `tools` value nested `levels - 1` times."""
+    return '{"schema": "' + attest.SCHEMA_ID + '", "tools": ' + "[" * (levels - 1) + "]" * (levels - 1) + "}"
+
+
+def test_the_nesting_limit_is_ours_just_below_it_parses():
+    # Exactly MAX_JSON_NESTING levels (the root counts as one) is read, on every interpreter.
+    text = _tools_nested(MAX_JSON_NESTING)
+    parsed = attest.parse_attestation(text)
+    assert parsed["schema"] == attest.SCHEMA_ID
+    assert attest.parse_attestation(text.encode("utf-8")) == parsed
+
+
+def test_the_nesting_limit_is_ours_just_above_it_is_refused():
+    text = _tools_nested(MAX_JSON_NESTING + 1)
+    assert attest.parse_attestation(text) == {}
+    assert attest.parse_attestation(text.encode("utf-8")) == {}
+
+
+def test_the_nesting_limit_holds_through_the_file_loader(tmp_path):
+    below = tmp_path / "below.json"
+    below.write_text(_tools_nested(MAX_JSON_NESTING), encoding="utf-8")
+    above = tmp_path / "above.json"
+    above.write_text(_tools_nested(MAX_JSON_NESTING + 1), encoding="utf-8")
+    assert attest.load_attestation(below)["schema"] == attest.SCHEMA_ID
+    assert attest.load_attestation(above) == {}
+
+
+@pytest.mark.parametrize("levels", [1_500, 20_000, 400_000])
+def test_depths_an_interpreter_might_have_parsed_are_refused_by_our_limit(levels):
+    # 20,000 and 400,000 are depths CPython 3.14 follows with a large stack: refusing them
+    # is the limit's doing, so the answer is the same there as on 3.9 and 3.12.
+    assert attest.parse_attestation(_tools_nested(levels)) == {}
 
 
 def test_parse_attestation_moderately_nested_still_parses():
