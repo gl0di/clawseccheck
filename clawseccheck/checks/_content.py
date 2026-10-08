@@ -7674,7 +7674,21 @@ def _example_paren_close(
     """Offset of the ')' closing a parenthesis that encloses the marker on its own
     line (plain bracket matching, no vocabulary); None when the marker is not
     parenthesised. Without this, "Setup steps (e.g. on Linux):" would hand its
-    trailing colon to the "e.g." aside instead of to "Setup steps"."""
+    trailing colon to the "e.g." aside instead of to "Setup steps".
+
+    C-651: answered from a per-line bracket table (`_ExampleBlockIndex.paren_close`)
+    instead of re-scanning the line from its start for every marker, which made a
+    line holding N markers cost O(N * line length)."""
+    return _example_index_for(lines).paren_close(m_start, m_end)
+
+
+def _example_paren_close_scan(
+    lines: "_ExampleLines", m_start: int, m_end: int
+) -> int | None:
+    """The plain character scan `_example_paren_close` is defined by. Kept as the
+    answer for the one shape the bracket table cannot model: a marker span that itself
+    contains a bracket (never produced by `_NEGATION_RE`, whose alternatives are
+    brackets-free)."""
     blob = lines.blob
     k = lines.index_of(m_start)
     depth = 0
@@ -7707,26 +7721,20 @@ def _example_clause_end(
     end of a line whose next line opens a new block. An INLINE marker's clause
     additionally ends at a soft-wrapped line whose next line starts a new,
     unpunctuated (capitalised) sentence rather than a continuation."""
-    blob = lines.blob
-    sb = _SENTENCE_BREAK_RE.search(blob, m_end)
-    best = sb.start() if sb else len(blob)
+    idx = _example_index_for(lines)
+    best = idx.sentence_break(m_end)
     if m_start is not None:
         pc = _example_paren_close(lines, m_start, m_end)
         if pc is not None:
             best = min(best, pc)
-    k = lines.index_of(m_end)
-    while k + 1 < len(lines) and lines.starts[k + 1] <= best:
-        nxt_kind = lines.kind(k + 1)[0]
-        cur_kind = lines.kind(k)[0]
-        if nxt_kind in _EXAMPLE_BLOCK_START_KINDS or (nxt_kind == "quote" and cur_kind != "quote"):
-            best = min(best, lines.ends[k])
-            break
-        if inline and nxt_kind == "prose":
-            first = lines.text(k + 1).lstrip()[:1]
-            if first.isupper():
-                best = min(best, lines.ends[k])
-                break
-        k += 1
+    # The original walked line by line from the marker's line until a line opened a new
+    # block, once per marker (O(paragraph) each, C-651). The first line that does so
+    # depends only on where the walk starts and on `inline`, so it is read off a memo.
+    # The walk stopped short of it only when *best* already fell inside an earlier
+    # line, and then `min` with that later line's end leaves *best* as it was.
+    q = idx.clause_stop(lines.index_of(m_end), inline)
+    if q >= 0:
+        best = min(best, lines.ends[q])
     return best
 
 
@@ -7757,41 +7765,258 @@ def _example_item_extent(lines: "_ExampleLines", k: int) -> tuple[int, int]:
     return k, e
 
 
+_EXAMPLE_BREAK_AT_RE = re.compile("(?=" + _SENTENCE_BREAK_RE.pattern + ")", _SENTENCE_BREAK_RE.flags)
+_EXAMPLE_PAREN_RE = re.compile(r"[()]")
+_EXAMPLE_STOP_B = frozenset(("list", "heading", "fence", "table"))
+_EXAMPLE_STOP_A = _EXAMPLE_STOP_B | {"blank"}
+
+
+class _ExampleBlockIndex:
+    """Memoised block extents over one `_ExampleLines` model (C-651). The block walks
+    in `_example_block_of` / `_example_marker_governance` each cost O(paragraph) and
+    ran once per marker, so N example markers in one paragraph cost O(N^2) and one
+    hostile skill could exhaust `check_installed_skills`' whole wall-clock budget.
+    Every table here answers exactly what the original walk answered, filled once per
+    run / item / paragraph: the work stays linear in the blob. Built once per
+    `_ExampleLines` and held in a 1-entry identity cache, like the model itself."""
+
+    __slots__ = ("lines", "_run", "_stop_a", "_stop_b", "_items", "_heads", "_next",
+                 "_tails", "_long", "_breaks", "_stops", "_parens", "_unions")
+
+    def __init__(self, lines: "_ExampleLines") -> None:
+        n = len(lines)
+        self.lines = lines
+        self._run: list = [None] * n
+        self._stop_a: list = [None] * n
+        self._stop_b: list = [None] * n
+        self._items: dict = {}
+        self._heads: dict = {}
+        self._next: dict = {}
+        self._tails: dict = {}
+        self._long: list | None = None
+        self._breaks: list | None = None
+        self._stops: tuple = ([None] * n, [None] * n)  # [not inline, inline]
+        self._parens: dict = {}
+        self._unions: dict = {}
+
+    def sentence_break(self, p: int) -> int:
+        """`_SENTENCE_BREAK_RE.search(blob, p).start()`, or len(blob) when there is no
+        break. Whether the pattern matches at an offset does not depend on where the
+        search began, so every matching offset is listed once (a zero-width lookahead,
+        so overlapping matches are all kept) and each query is a bisect."""
+        if self._breaks is None:
+            blob = self.lines.blob
+            self._breaks = [m.start() for m in _EXAMPLE_BREAK_AT_RE.finditer(blob)]
+        i = bisect.bisect_left(self._breaks, p)
+        return self._breaks[i] if i < len(self._breaks) else len(self.lines.blob)
+
+    def clause_stop(self, k: int, inline: bool) -> int:
+        """First line q >= k with a following line, whose successor opens a new block
+        (or, for an INLINE marker, a new capitalised sentence): the line where
+        `_example_clause_end`'s walk stops. -1 when the walk never stops."""
+        lines = self.lines
+        n = len(lines)
+        arr = self._stops[1 if inline else 0]
+        if arr[k] is None:
+            t = k
+            while True:
+                if arr[t] is not None:
+                    q = arr[t]
+                    break
+                if t + 1 >= n:
+                    q = -1
+                    break
+                nxt_kind = lines.kind(t + 1)[0]
+                if (
+                    nxt_kind in _EXAMPLE_BLOCK_START_KINDS
+                    or (nxt_kind == "quote" and lines.kind(t)[0] != "quote")
+                    or (inline and nxt_kind == "prose" and lines.text(t + 1).lstrip()[:1].isupper())
+                ):
+                    q = t
+                    break
+                t += 1
+            for u in range(k, t + 1):
+                arr[u] = q
+        return arr[k]
+
+    def paren_close(self, m_start: int, m_end: int) -> int | None:
+        """The bracket table of the marker's line, built once: where each bracket is, the
+        depth after it (a ')' at depth 0 is ignored, as in the plain scan), the last
+        depth-0 bracket so far, and which ')' closes which '('."""
+        lines = self.lines
+        k = lines.index_of(m_start)
+        tab = self._parens.get(k)
+        if tab is None:
+            blob = lines.blob
+            pos: list[int] = []
+            depth_after: list[int] = []
+            last_zero: list[int] = []
+            closes: dict[int, int] = {}
+            stack: list[int] = []
+            lz = -1
+            for m in _EXAMPLE_PAREN_RE.finditer(blob, lines.starts[k], lines.ends[k]):
+                i = len(pos)
+                p = m.start()
+                pos.append(p)
+                if blob[p] == "(":
+                    stack.append(i)
+                elif stack:
+                    closes[stack.pop()] = p
+                depth_after.append(len(stack))
+                if not stack:
+                    lz = i
+                last_zero.append(lz)
+            tab = self._parens[k] = (pos, depth_after, last_zero, closes)
+        pos, depth_after, last_zero, closes = tab
+        cut = bisect.bisect_left(pos, m_start)  # brackets before the marker
+        if cut == 0 or depth_after[cut - 1] == 0:
+            return None
+        if cut < len(pos) and pos[cut] < m_end:
+            return _example_paren_close_scan(lines, m_start, m_end)
+        # the marker is inside `depth_after[cut-1]` open brackets; the scan from its end
+        # reaches depth 0 exactly where the outermost of them (the first bracket after
+        # the last depth-0 one) is closed
+        return closes.get(last_zero[cut - 1] + 1)
+
+    def run(self, i: int) -> tuple[int, int]:
+        """[start, end) of the maximal run of consecutive lines sharing line *i*'s kind."""
+        r = self._run[i]
+        if r is None:
+            lines = self.lines
+            kd = lines.kind(i)[0]
+            s, e = i, i + 1
+            while s > 0 and lines.kind(s - 1)[0] == kd:
+                s -= 1
+            while e < len(lines) and lines.kind(e)[0] == kd:
+                e += 1
+            r = (s, e)
+            for t in range(s, e):
+                self._run[t] = r
+        return r
+
+    def stopper(self, k: int) -> int:
+        """The line where `_example_block_of`'s backward scan from *k* stops, or -1.
+        A blank stops it, except that a blank above an indented *k* is walked through."""
+        lines = self.lines
+        if lines.kind(k)[0] == "blank":
+            return k
+        arr, stops = (
+            (self._stop_b, _EXAMPLE_STOP_B) if lines.indent(k) > 0
+            else (self._stop_a, _EXAMPLE_STOP_A)
+        )
+        if arr[k] is None:
+            t = k
+            while t >= 0 and arr[t] is None and lines.kind(t)[0] not in stops:
+                t -= 1
+            if t < 0:
+                res, lo = -1, 0
+            elif arr[t] is not None:
+                res, lo = arr[t], t + 1
+            else:
+                res, lo = t, t
+            for u in range(lo, k + 1):
+                arr[u] = res
+        return arr[k]
+
+    def item_extent(self, j: int) -> tuple[int, int]:
+        r = self._items.get(j)
+        if r is None:
+            r = self._items[j] = _example_item_extent(self.lines, j)
+        return r
+
+    def heading_boundary(self, bs: int) -> int:
+        """Offset of the next heading line after line *bs* (or the end of the blob)."""
+        r = self._heads.get(bs)
+        if r is None:
+            lines = self.lines
+            k = bs + 1
+            while k < len(lines) and lines.kind(k)[0] != "heading":
+                k += 1
+            r = self._heads[bs] = lines.starts[k] if k < len(lines) else len(lines.blob)
+        return r
+
+    def next_regions(self, be: int) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+        r = self._next.get(be)
+        if r is None:
+            r = self._next[be] = _example_next_block_regions(self.lines, be)
+        return r
+
+    def in_region(self, be: int, which: int, pos: int) -> bool:
+        """`_example_pos_in_spans(next_regions(be)[which], pos)` (which: 0 strong, 1
+        ambiguous) against the union of the spans, merged and sorted once, not an
+        `any` over every span per marker."""
+        u = self._unions.get((be, which))
+        if u is None:
+            starts: list[int] = []
+            ends: list[int] = []
+            for a, b in sorted(sp for sp in self.next_regions(be)[which] if sp[0] < sp[1]):
+                if ends and a <= ends[-1]:
+                    ends[-1] = max(ends[-1], b)
+                else:
+                    starts.append(a)
+                    ends.append(b)
+            u = self._unions[(be, which)] = (starts, ends)
+        i = bisect.bisect_right(u[0], pos) - 1
+        return i >= 0 and pos < u[1][i]
+
+    def rstrip_end(self, pk: int) -> int:
+        """Offset just past the last non-whitespace character at or before the end of
+        line *pk* - `len(blob[:ends[pk]].rstrip())` without the O(blob) copy."""
+        r = self._tails.get(pk)
+        if r is None:
+            blob = self.lines.blob
+            r = self.lines.ends[pk]
+            while r > 0 and blob[r - 1].isspace():
+                r -= 1
+            self._tails[pk] = r
+        return r
+
+    def para_end(self, km: int, be: int) -> int:
+        """Last line of the marker's own paragraph inside a "para" block: the block's
+        last line, unless an absurdly indented (> 10**6 columns) line cuts it short."""
+        if self._long is None:
+            lines = self.lines
+            self._long = (
+                [i for i in range(len(lines)) if lines.ends[i] - lines.starts[i] > 10**6]
+                if len(lines.blob) > 10**6 else []
+            )
+        for t in self._long[bisect.bisect_right(self._long, km):]:
+            if t >= be:
+                break
+            if self.lines.indent(t) > 10**6:
+                return t - 1
+        return be - 1
+
+
+_EXAMPLE_INDEX_CACHE: list = [None, None]  # [lines, _ExampleBlockIndex(lines)]
+
+
+def _example_index_for(lines: "_ExampleLines") -> "_ExampleBlockIndex":
+    if _EXAMPLE_INDEX_CACHE[0] is not lines:
+        _EXAMPLE_INDEX_CACHE[0] = lines
+        _EXAMPLE_INDEX_CACHE[1] = _ExampleBlockIndex(lines)
+    return _EXAMPLE_INDEX_CACHE[1]
+
+
 def _example_block_of(lines: "_ExampleLines", k: int) -> tuple[str, int, int]:
     """(kind, first_line, end_line_exclusive) of the block containing line *k*: a
     list item (with its continuations/nested content), a heading line, a quote or
     table run, or a paragraph."""
     n = len(lines)
-    j = k
-    while j >= 0:
-        kj = lines.kind(j)
-        if kj[0] == "list":
-            s, e = _example_item_extent(lines, j)
-            if s <= k < e:
-                return ("item", s, e)
-            break
-        if kj[0] == "blank" and not (j < k and lines.indent(k) > 0):
-            break
-        if kj[0] in ("heading", "fence", "table"):
-            break
-        j -= 1
+    idx = _example_index_for(lines)
+    j = idx.stopper(k)
+    if j >= 0 and lines.kind(j)[0] == "list":
+        s, e = idx.item_extent(j)
+        if s <= k < e:
+            return ("item", s, e)
     kd = lines.kind(k)[0]
     if kd == "heading":
         return ("heading", k, k + 1)
     if kd in ("table", "quote"):
-        s = k
-        while s - 1 >= 0 and lines.kind(s - 1)[0] == kd:
-            s -= 1
-        e = k + 1
-        while e < n and lines.kind(e)[0] == kd:
-            e += 1
+        s, e = idx.run(k)
         return (kd, s, e)
-    s = k
-    while s - 1 >= 0 and lines.kind(s - 1)[0] == "prose":
-        s -= 1
-    e = k + 1
-    while e < n and lines.kind(e)[0] == "prose":
-        e += 1
+    s = idx.run(k - 1)[0] if k >= 1 and lines.kind(k - 1)[0] == "prose" else k
+    e = idx.run(k + 1)[1] if k + 1 < n and lines.kind(k + 1)[0] == "prose" else k + 1
     return ("para", s, e)
 
 
@@ -7889,48 +8114,47 @@ def _example_marker_governance(
     clause_end = _example_clause_end(lines, m_end, m_start, inline)
     if pos < clause_end:
         return _EXAMPLE_STRONG
+    idx = _example_index_for(lines)
     km = lines.index_of(m_start)
     bkind, bs, be = _example_block_of(lines, km)
     if bkind == "heading":
         if inline:
             return _EXAMPLE_LIVE  # an "e.g." in a heading annotates its own phrase only
-        k = bs + 1
-        while k < len(lines) and lines.kind(k)[0] != "heading":
-            k += 1
-        boundary = lines.starts[k] if k < len(lines) else len(blob)
-        return _EXAMPLE_AMBIGUOUS if pos < boundary else _EXAMPLE_LIVE
+        return _EXAMPLE_AMBIGUOUS if pos < idx.heading_boundary(bs) else _EXAMPLE_LIVE
     b_lo, b_hi = _example_span(lines, bs, be)
     # The marker's own paragraph: from its line to the first line that opens a new
     # block. For a list item this is its FIRST paragraph only - deeper-nested
-    # content is not part of the intro a trailing colon could be labelling.
+    # content is not part of the intro a trailing colon could be labelling. A table
+    # or quote run opens no paragraph (the next line of the run is itself a block
+    # start), so only an item and a paragraph have anything to extend over (C-651:
+    # read off the memoised run instead of re-walking it once per marker).
     pk = km
-    while (
-        pk + 1 < be
-        and lines.kind(pk + 1)[0] not in _EXAMPLE_BLOCK_START_KINDS + ("quote",)
-        and lines.indent(pk + 1) <= (lines.indent(bs) if bkind == "item" else 10**6)
-    ):
-        pk += 1
     if bkind == "item":
-        pk = km
-        while pk + 1 < be and lines.kind(pk + 1)[0] == "prose":
-            pk += 1
-    block_text = blob[m_start:lines.ends[pk]].rstrip()
-    colon_at = m_start + len(block_text) - 1
-    colon_intro = block_text.endswith(":") and colon_at >= m_end and clause_end >= colon_at
+        if km + 1 < be and lines.kind(km + 1)[0] == "prose":
+            pk = min(idx.run(km + 1)[1], be) - 1
+    elif bkind == "para":
+        pk = idx.para_end(km, be)
+    # `blob[m_start:ends[pk]].rstrip()` without copying the paragraph per marker: its
+    # end is `text_end` whenever that lies past *m_start*, and an empty/blank slice can
+    # never satisfy `text_end > m_start` below
+    text_end = idx.rstrip_end(pk)
+    colon_at = text_end - 1
+    colon_intro = (
+        text_end > m_start and blob[colon_at] == ":" and colon_at >= m_end and clause_end >= colon_at
+    )
     if b_lo <= pos < b_hi:
         if bkind == "item" and colon_intro:
             return _EXAMPLE_STRONG  # the item's own nested content under "...:"
         return _EXAMPLE_LIVE if inline else _EXAMPLE_AMBIGUOUS
     if bkind == "item":
         return _EXAMPLE_LIVE  # an item never governs a sibling or anything after its list
-    strong, ambig = _example_next_block_regions(lines, be)
     if colon_intro:
-        if _example_pos_in_spans(strong, pos):
+        if idx.in_region(be, 0, pos):
             return _EXAMPLE_STRONG
-        if _example_pos_in_spans(ambig, pos):
+        if idx.in_region(be, 1, pos):
             return _EXAMPLE_AMBIGUOUS
         return _EXAMPLE_LIVE
-    if not inline and (_example_pos_in_spans(strong, pos) or _example_pos_in_spans(ambig, pos)):
+    if not inline and (idx.in_region(be, 0, pos) or idx.in_region(be, 1, pos)):
         return _EXAMPLE_AMBIGUOUS
     return _EXAMPLE_LIVE
 

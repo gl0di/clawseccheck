@@ -18347,6 +18347,18 @@ def _sh_mask_comments(source: str) -> str:
     return "\n".join("" if ln.lstrip().startswith("#") else ln for ln in source.splitlines())
 
 
+def _sh_newline_offsets(text: str) -> list[int]:
+    """Offsets of every "\\n" in *text*, ascending. `bisect.bisect_left(offsets, x)` is
+    exactly `text.count("\\n", 0, x)` for any x >= 0 (C-651), without the O(x) rescan from
+    the start of the file that made a script of N lines cost O(N^2)."""
+    offs: list[int] = []
+    i = text.find("\n")
+    while i != -1:
+        offs.append(i)
+        i = text.find("\n", i + 1)
+    return offs
+
+
 def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Conservative regex pass over a bundled .sh/.bash/.zsh file (F-050). No shell AST;
     stdlib regex only; never raises, never executes. Flags high-confidence shapes:
@@ -18500,9 +18512,10 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     loop_direct_lines, loop_hop_lines, header_blanked = _sh_loop_cred_exfil_lines(source, masked)
     joined = _sh_loop_join_continuations(header_blanked)
     pos = 0
+    masked_nl = _sh_newline_offsets(masked)
     for raw in joined.split("\n"):
-        i = masked.count("\n", 0, pos) + 1
-        line_end = masked.count("\n", 0, pos + len(raw)) + 1
+        i = bisect.bisect_left(masked_nl, pos) + 1
+        line_end = bisect.bisect_left(masked_nl, pos + len(raw)) + 1
         pos += len(raw) + 1
         # B-430: same OR pattern as above - see _sh_bare_nc_invocation's docstring.
         if not (_SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw)):
