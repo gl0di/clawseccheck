@@ -3367,7 +3367,7 @@ def check_gateway(ctx: Context) -> Finding:
         )
         soft_ev.append(
             "gateway.auth.token holds a retired secretref-env:/__env__: marker string "
-            "\u2014 OpenClaw does not read that as an environment reference at this key, so "
+            "\u2014 at this key it is not resolved as an environment reference, so "
             f"{_marker_is}, a public and guessable value rather than a secret taken from "
             "the environment"
         )
