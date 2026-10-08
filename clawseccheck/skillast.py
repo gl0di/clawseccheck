@@ -1284,7 +1284,14 @@ def _is_trusted_installer_url(url: str) -> bool:
         return False
     if p.scheme != "https":
         return False
-    if p.port is not None or p.query or p.fragment:
+    try:
+        has_port = p.port is not None
+    except ValueError:
+        # C-652: `.port` is lazy and raises on a non-numeric ("$PORT") or out-of-range
+        # port, which urlparse() itself accepts. A port that cannot be read is not the
+        # canonical installer URL: fail closed (not trusted -> the finding is kept), never raise.
+        return False
+    if has_port or p.query or p.fragment:
         return False
     host = (p.hostname or "").lower()
     path = p.path or ""

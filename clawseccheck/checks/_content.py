@@ -3904,7 +3904,13 @@ def _clickfix_trusted_installer(cmd: str) -> bool:
             return False
         if p.scheme != "https":
             return False
-        if p.port is not None or p.query or p.fragment:
+        try:
+            has_port = p.port is not None
+        except ValueError:
+            # C-652: `.port` is lazy and raises on a non-numeric ("$PORT") or out-of-range
+            # port, which urlparse() itself accepts. Unreadable port -> not trusted.
+            return False
+        if has_port or p.query or p.fragment:
             return False  # canonical installer URL only - no explicit port, query, or fragment
         host = (p.hostname or "").lower()
         path = p.path or ""
