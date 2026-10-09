@@ -371,7 +371,12 @@ def self_reported_version(config: "dict | None") -> str:
 # 2026.9.7 for 4.4.0: the 9.7 pass made B372 and B350 fork on the installed build, taught
 # B1 and B2 the config template forms, re-read the B396 and B397 dist claims on 9.7,
 # regenerated the schema and state snapshots and re-recorded the dist citation baseline.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 7)
+# Raised to 2026.9.8 on 2026-10-09: 9.8 removed two config paths no check reads and moved
+# no default, table, column or tool table a check stands on (the delta was read against
+# the vendor source and the installed dist); the pass added the 9.8 row of the B391 image
+# table, re-read the B350, B396 and B397 dist claims there, widened the harness oracle to
+# 9.8 and regenerated the schema, state and channel snapshots.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 8)
 
 
 def grounding_gap(installed_version: "str | None"):

@@ -156,8 +156,15 @@ from .collector import agent_roster
 #: (``collectConfiguredModelRefs`` now lives in ``runtime-snapshot-*``, located by its
 #: declaration) and the vendor's answer differed on none of them -- same labels, same
 #: configs, same envs, the same 22 thrown-error rows. The floor stays, for the reason above.
+#:
+#: The ceiling moved to 2026.9.8 on 2026-10-09. The 773 rows pinned on 2026.9.6 were first
+#: re-executed against the installed 2026.9.8 and the vendor's answer differed on none of
+#: them (the same 22 thrown-error rows); the battery was then regenerated there, which moved
+#: its ``build`` stamp and the inputs of two fixture rows whose config had changed in this
+#: repo since (``clean_b4_peragent_sandbox*``), and no answer. So the chain 9.5 = 9.6 = 9.7 =
+#: 9.8 is measured row by row and the floor stays where it is.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 9, 7)
+ORACLE_MAX = (2026, 9, 8)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 

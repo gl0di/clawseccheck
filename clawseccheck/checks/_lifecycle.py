@@ -5588,7 +5588,7 @@ def _b396_safe_int(v) -> bool:
 
 
 def _b396_legacy_record_valid(rec) -> bool:
-    """`normalizeLegacyPairedDevice` (state-migrations.pairing-DHmgS2jQ.mjs:24-41): the
+    """`normalizeLegacyPairedDevice` (state-migrations.pairing-DFzHgpP3.mjs:24-41, 2026.9.8): the
     9.6 migration silently DROPS a legacy `devices/paired.json` record missing a non-blank
     `publicKey` or a safe-integer `createdAtMs`/`approvedAtMs` -- so this check, which
     models the post-migration merge (unlike B176's own "legacy wins outright"), must
@@ -5711,23 +5711,25 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
 
 
 # ---------- B396: paired-node skills outside the skill content scan (coverage disclosure) ----------
-# Every dist claim below was first read on openclaw@2026.9.6 (2026-09-26) and re-read on
-# the installed openclaw@2026.9.7 (2026-10-05), under
+# Every dist claim below was first read on openclaw@2026.9.6 (2026-09-26), re-read on the
+# installed openclaw@2026.9.7 (2026-10-05) and again on the installed openclaw@2026.9.8
+# (2026-10-09, whose bundle names are the ones cited; 2026.9.9 carries the same code at the
+# same lines), under
 # ~/.npm-global/lib/node_modules/openclaw/dist/. Citations name the symbol first;
 # file:line is only a convenience, since bundle names rotate (CHECK_AUTHORING.md).
 #
 # The gap: a paired NODE (not an operator device -- B176/B138 already cover operator
 # authority) can publish its own machine's ~/.openclaw/skills content into this gateway
-# while connected. `scanNodeHostedSkills` (startup-state-readiness-CTa-53Jt.mjs:
+# while connected. `scanNodeHostedSkills` (startup-state-readiness-ucrJBHoD.mjs:
 # 3622-3677) scans the node's own `resolveConfigDir()/skills`
 # (utils-DUAwk2p5.mjs:14-20) and pushes the result via RPC `node.skills.update`
 # (`publishInventory`, :363-366). The gateway's handler
-# (nodes.read-B476F-9e.mjs:201-217) calls `NodeRegistry.updateNodeSkills`
-# (node-registry-DjS29LU1.mjs:740-749), which writes `NODE_SESSION_POLICIES.skills`
+# (nodes.read-uaBfLm1n.mjs:201-217) calls `NodeRegistry.updateNodeSkills`
+# (node-registry-D-enNN7q.mjs:740-749), which writes `NODE_SESSION_POLICIES.skills`
 # (in-memory only) and, via `refreshSessionPolicy` (:353), sets
 # `node.nodeSkills = cfg?.gateway?.nodes?.allowSkills === false ? [] : policy.skills`
 # before calling `replaceRemoteNodeSkills` (:354-359) into the process-memory
-# `remoteSkillNodes` Map (remote-skills-CD_mCJvj.mjs:10) -- cleared on disconnect
+# `remoteSkillNodes` Map (remote-skills-Co_eXsF5.mjs:10, 2026.9.8) -- cleared on disconnect
 # (node-registry:477,544). `mergeRemoteNodeSkillEntries` (remote-skills:100-103) is the
 # ONLY reader of that content, gated on `options.canExec === true` (agent-side, runtime/
 # session-decided -- not modelled here) AND, node-side, `node.canExec` = `node.commands
@@ -5746,18 +5748,20 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
 # config weakness in itself; B386 already covers the gate default) or not (PASS).
 #
 # Node admission itself requires a persisted pairing record
-# (`captureAuthenticatedNodePairingState`, device-pairing-node-state-CLR_uIUn.mjs:30-42):
+# (`captureAuthenticatedNodePairingState`, device-pairing-node-state-DT8PKpkZ.mjs:30-42,
+# 2026.9.8):
 # `hasEffectivePairedDeviceRole(device, "node")` (active role intersect approved role,
-# device-pairing-identity-DBHygT8F.mjs:563-585) AND a truthy `tokens.node`
+# device-pairing-identity-DEwtmAba.mjs:563-585) AND a truthy `tokens.node`
 # (`resolveNodePairingIdentity`, :587-603), with `approvedSurface.commands` sourced from
-# `device.nodeSurface?.commands ?? []` (node-registry:440). That record lives in
+# `device.nodeSurface?.commands ?? []` (device-pairing-node-state:38; node-registry:440
+# reads it back as `opts.approvedSurface?.commands`). That record lives in
 # `state/openclaw.sqlite`'s `device_pairing_paired` table (`role`, `roles_json`,
 # `tokens_json`, `node_surface_json` -- confirmed in the real 9.6 DDL on this machine
 # and re-read in 9.7's `OPENCLAW_STATE_SCHEMA_SQL`, managed-handoff-runtime.mjs:4954),
 # or, pre-migration / not yet imported, in the legacy `devices/paired.json` +
 # `nodes/paired.json` pair (`listLegacyPairingStoreFiles`,
 # pairing-files-DdxuFZBY.mjs:20-35; folded in by `migrateLegacyNodePairingStore`,
-# state-migrations.pairing-DHmgS2jQ.mjs:58-170 -- SQLite wins per device id: a legacy node
+# state-migrations.pairing-DFzHgpP3.mjs:125-170, 2026.9.8 -- SQLite wins per device id: a legacy node
 # row is folded into the device record with the same id only when that record has an
 # approved `node` role and carries no `nodeSurface` yet (:136-140); a row with no such
 # device record is dropped as an orphan).
@@ -5765,7 +5769,7 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
 # Unlike B176 (which uses "legacy JSON wins outright" -- the RUNTIME's OWN behavior
 # before it ever runs `doctor --fix`), this check deliberately models the 9.6 MIGRATION
 # MERGE instead: what the runtime sees NOW, or after the `doctor --fix` its own startup
-# log demands (`server-startup-plugins-wMQdIPT8.mjs:55-60`). The two checks read the same
+# log demands (`server-startup-plugins-BGnrh3LD.mjs:55-60`, 2026.9.8). The two checks read the same
 # store with two different, each individually correct, merge rules -- see
 # `_b396_admission_state`'s own docstring below and B176's for the contrast.
 #
@@ -5791,7 +5795,7 @@ def check_paired_node_skill_coverage(ctx: Context) -> Finding:
 
     See this check's own preceding comment block for the full dist grounding (every
     claim there was first read on openclaw@2026.9.6, 2026-09-26, and re-read on the
-    installed openclaw@2026.9.7, 2026-10-05) and for why
+    installed openclaw@2026.9.7, 2026-10-05, and openclaw@2026.9.8, 2026-10-09) and for why
     this check reports the CAPABILITY (a skill-capable paired node exists) rather than
     UNKNOWN-for-unreadable-content: the content a paired node would publish is held only
     in gateway memory and on the node's own machine, never on this machine's disk
