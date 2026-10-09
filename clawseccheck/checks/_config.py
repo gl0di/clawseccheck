@@ -7060,11 +7060,13 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
 
     Grounded against the INSTALLED dist (openclaw@2026.9.7, 2026-09-30), the cached npm
     tarballs of twenty releases (2026.6.9 - 2026.9.7), and an executed node call on the vendor's own
-    gate function - not the recon, and not memory.
+    gate function - not the recon, and not memory. Re-read on the installed openclaw@2026.9.8
+    and on the 2026.9.9 release package on 2026-10-09 (code read; the node call was not
+    repeated): the gate function is the same file and its readers sit where cited below.
 
     SHAPE. ``gateway.terminal`` is ``{enabled?: boolean, shell?: string,
     detachedSessionTimeoutSeconds?: number}`` - a ``strictObject`` with no boolean
-    shorthand (2026.9.7: ``zod-schema-BRat_tFr.mjs:1058-1071``; 2026.7.1-2:
+    shorthand (2026.9.8: ``zod-schema-b5tlDVBo.mjs:1055-1069``; 2026.7.1-2:
     plugin-sdk/config-schema.d.ts:4499-4503). That is the OPPOSITE of ``tools.codeMode``,
     which really is boolean-or-object, so the two must not be read with the same helper.
 
@@ -7074,11 +7076,15 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
       2026.7.1, 7.1-2, 7.33-7.35: launch-*.js:109,120 ``enabled !== true`` and :154
           ``=== true``; server.impl-*.js:1002 and control-ui-*.js:699 ``=== true``;
           schema help "when true (default: false)". Unset = OFF.
-      2026.8.1, 8.2, 9.1 - 9.7: ``enabled-BSjeiWpO.mjs:3`` (9.7)
-          ``config?.gateway?.terminal?.enabled !== false``, and every 9.7 reader goes
-          through that one function (``control-ui-DqFGrb-j.mjs:773``,
-          ``server-start-my5aBcwu.mjs:7321``, ``launch-D1oDRtLJ.mjs:101,112``); schema help
-          ``schema-BWEG0nRu.mjs:425`` "(default: true) ... set false to opt out". Unset = ON.
+      2026.8.1, 8.2, 9.1 - 9.9: ``enabled-BSjeiWpO.mjs:3`` (the same file in 9.7, 9.8, 9.9)
+          ``config?.gateway?.terminal?.enabled !== false``. The gateway's readers go
+          through that one function (2026.9.8: ``control-ui-Dep1rXpY.mjs:773``,
+          ``server-start-BkBmUb8t.mjs:7322``, ``launch-DWYZq3xK.mjs:101,112``); one more
+          reader, the Anthropic session-catalog registration
+          (``session-catalog-registration-D3EOZX8C.mjs:94``), inlines the same ``!== false``
+          predicate. Schema help ``schema-NqC6_AOV.mjs:425`` "(default: true) ... set false
+          to opt out". Unset = ON. (9.8 read from the installed dist and 9.9 from its
+          release package on 2026-10-09: same code at the same lines.)
       2026.6.9 - 6.34: no ``gateway.terminal`` string anywhere in dist (feature absent).
 
     Executed, not just read: node on the 9.7 ``isTerminalConfigEnabled`` returns true for
@@ -7104,13 +7110,13 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
     NO SECOND LOCATION. ``terminal`` occurs exactly ONCE in the declaration, under
     top-level ``gateway`` - absent from ``agents``, ``agents.list``, ``agents.profiles`` and
     ``presets``, and read at runtime from the single source ``config.gateway?.terminal``
-    (``launch-D1oDRtLJ.mjs:97``). The contrast is the evidence that this is deliberate
+    (``launch-DWYZq3xK.mjs:97``, 2026.9.8). The contrast is the evidence that this is deliberate
     rather than an omission: ``codeMode`` IS defined both top-level and per-agent, so the
     schema author wires per-agent overrides where they are intended and did not here.
 
     ``.shell`` pins the interpreter; unset, the runtime resolves ``$SHELL`` as a login
     shell (``-l``), falling back to ``cmd.exe`` on win32 and to ``/bin/bash -l`` when
-    ``$SHELL`` is itself unset (``resolveTerminalShell``, ``launch-D1oDRtLJ.mjs``).
+    ``$SHELL`` is itself unset (``resolveTerminalShell``, ``launch-DWYZq3xK.mjs``).
 
     PASS - ``enabled`` is a real boolean false (on every build), OR it is unset and the
            build is inside the measured default-OFF span (2026.7.1 - 2026.7.35).
@@ -7144,7 +7150,7 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
     verified in code, not just prose: ``resolveTerminalLaunch`` returns
     ``{ok: false, block: {kind: "sandboxed"}}`` when
     ``resolveSandboxConfigForAgent(config, agentId).mode === "all"``
-    (``launch-D1oDRtLJ.mjs:56-59`` on 9.7), whose own comment calls it fail-closed. But it
+    (``launch-DWYZq3xK.mjs:56-59`` on 2026.9.8), whose own comment calls it fail-closed. But it
     is PER-AGENT and resolved at launch, so claiming it statically means proving EVERY agent
     is fully sandboxed - including agents added after this audit ran - and a wrong proof
     in either direction is worse than naming the condition. The fix text names it so the
@@ -7154,13 +7160,13 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
     exposure. (1) A config whose terminal is on (explicitly or by default) and whose only
     reachable agents all run ``sandbox.mode: "all"`` still WARNs here, per the paragraph
     above. (2) There is a transient state this reader cannot see at all:
-    ``createTerminalLaunchPolicy`` (``launch-D1oDRtLJ.mjs:81``, "fail-closed terminal
+    ``createTerminalLaunchPolicy`` (``launch-DWYZq3xK.mjs:81`` on 2026.9.8, "fail-closed terminal
     admission across deferred config restarts") keeps ``restartRestrictions`` /
     ``commitRestrictions`` windows (``:88-112``) in which a snapshot showing the terminal
     on can be functionally disabled until the gateway restarts or commits. A single static
     config snapshot has no way to observe that, and the honest consequence is a WARN that
     is momentarily early rather than a silence that is wrong.
-    (3) ``gateway.mode: "remote"`` (schema help ``schema-BWEG0nRu.mjs:415``: the host
+    (3) ``gateway.mode: "remote"`` (schema help ``schema-NqC6_AOV.mjs:415`` on 2026.9.8: the host
     "connects through remote transport") is NOT special-cased, the same residual
     ``check_gateway_portal_reach`` names: no check reads ``gateway.mode``, and standing the WARN
     down on it would be a silencer needing its own grounding. On a client-only host that
@@ -7485,16 +7491,16 @@ def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
 # facts, and `dig()`/`.get()` collapse them to the same default without it.
 _B397_ABSENT = object()
 
-# Grounded against the installed dist (openclaw@2026.9.7, re-read 2026-10-05; first read
+# Grounded against the installed dist (openclaw@2026.9.8, re-read 2026-10-09; first read
 # on 2026.9.6, 2026-09-26): the `port` doc comment in `GatewayConfigSchema`, "Single
-# multiplexed port for Gateway WS + HTTP (default: 18789)" (zod-schema-BRat_tFr.mjs:965),
+# multiplexed port for Gateway WS + HTTP (default: 18789)" (zod-schema-b5tlDVBo.mjs:962),
 # and the literal fallback in the schema's own superRefine, `gateway.port ?? 18789`
-# (zod-schema-BRat_tFr.mjs:1310).
+# (zod-schema-b5tlDVBo.mjs:1307).
 _B397_DEFAULT_GATEWAY_PORT = 18789
 
 # A single DNS label, case-insensitive -- the per-label half of
-# `isValidPortalIngressDomain` (zod-schema-BRat_tFr.mjs:506-513, openclaw@2026.9.7,
-# re-read 2026-10-05; first read on 2026.9.6, 2026-09-26):
+# `isValidPortalIngressDomain` (zod-schema-b5tlDVBo.mjs:503-510, openclaw@2026.9.8,
+# re-read 2026-10-09; first read on 2026.9.6, 2026-09-26):
 # `/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu` applied to each
 # `domain.split(".")` element.
 _B397_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
@@ -7502,7 +7508,7 @@ _B397_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re
 
 def _b397_ingress_domain_ok(domain: str) -> bool:
     """Port of the vendor's ``isValidPortalIngressDomain``
-    (``zod-schema-BRat_tFr.mjs:506-513``, openclaw@2026.9.7, re-read 2026-10-05; first read
+    (``zod-schema-b5tlDVBo.mjs:503-510``, openclaw@2026.9.8, re-read 2026-10-09; first read
     on 2026.9.6, 2026-09-26):
 
     .. code-block:: js
@@ -7549,8 +7555,8 @@ def _b397_direct_reach(cfg: dict) -> "tuple[str, str]":
     """Reach classification for the "direct" portal transport (T3, the default when
     neither ``gateway.portals.ingress`` nor a managed Tailscale Serve/Funnel route is
     active): a per-portal listener on every address the Gateway's OWN HTTP server binds
-    (``params.httpBindHosts``, ``server-start-my5aBcwu.mjs:6346-6379``, openclaw@2026.9.7,
-    re-read 2026-10-05; first read on 2026.9.6, 2026-09-26).
+    (``params.httpBindHosts``, ``server-start-BkBmUb8t.mjs:6347-6380``, openclaw@2026.9.8,
+    re-read 2026-10-09; first read on 2026.9.6, 2026-09-26).
 
     Returns ``(reach, label)`` where *reach* is ``"local"``, ``"remote"`` or
     ``"unresolved"`` and *label* names the bind evidence for the finding text.
@@ -7587,31 +7593,32 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     gated only by a per-portal bearer token in the URL, never by ``gateway.auth``,
     trusted-proxy identity or any access layer in front of the Gateway.
 
-    Grounded on the installed dist (openclaw@2026.9.7, re-read 2026-10-05; first read
-    on 2026.9.6, 2026-09-26; the one citation kept on 9.6 says so). Base:
+    Grounded on the installed dist (openclaw@2026.9.8, re-read 2026-10-09; first read
+    on 2026.9.6, 2026-09-26, and re-read on 2026.9.7, 2026-10-05; a citation kept on an
+    older build names that build). Base:
     ``integration/4.3.0``. Bundle names rotate on every release; see
     ``docs/CHECK_AUTHORING.md`` "Citing the OpenClaw dist".
 
     THE SCHEMA. ``gateway.portals`` is ``strictObject({ ingress: strictObject({domain,
     port}).optional() }).optional()`` (``GatewayConfigSchema``,
-    ``zod-schema-BRat_tFr.mjs:994-997``) - no ``enabled`` field, no token/secret/
+    ``zod-schema-b5tlDVBo.mjs:991-994``, 2026.9.8) - no ``enabled`` field, no token/secret/
     SecretRef/env/cookie/bind-host field. There is no "weak auth" or "literal secret"
     mode to express in config, and nothing here for ``logsafe.redact`` to mask beyond the
     domain string itself (which is not a secret, only PII-adjacent hostname text).
 
     PORTAL AUTH IS ALWAYS THE SAME, AND IT IS STRONG. Each portal gets a per-portal
     ``token: randomBytes(32).toString("hex")`` (256 bits,
-    ``createGatewayPortalService``, ``server-start-my5aBcwu.mjs:6323``).
-    ``authorizePortalRequest`` (``:5839-5849``) accepts only that token, compared
-    timing-safe (``tokensEqual``, ``:5791``). Never gateway.auth, trusted-proxy identity
-    or any front-door access layer: ``handlePortalProxyRequest`` (``:5944``) calls
-    ``authorizePortalRequest`` only, and ``proxyHeaders`` (``:5895-5901``) strips
+    ``createGatewayPortalService``, ``server-start-BkBmUb8t.mjs:6324`` on 2026.9.8).
+    ``authorizePortalRequest`` (``:5840-5850``) accepts only that token, compared
+    timing-safe (``tokensEqual``, ``:5792``). Never gateway.auth, trusted-proxy identity
+    or any front-door access layer: ``handlePortalProxyRequest`` (``:5945``) calls
+    ``authorizePortalRequest`` only, and ``proxyHeaders`` (``:5896-5902``) strips
     ``forwarded``/``x-real-ip``/``x-forwarded-*``/``tailscale-*``/``cf-access-*`` before
     the request reaches user code, so upstream identity is never consulted.
 
     THE INGRESS LISTENER IS ALWAYS LOOPBACK-BOUND. ``createPortalIngress`` hard-codes
-    ``bindHost: "127.0.0.1"`` (``:6087-6130``, literal at ``:6101``) and starts with the
-    Gateway (``portalService.startIngress()``, ``:7959``) whether or not any portal is
+    ``bindHost: "127.0.0.1"`` (``:6088-6131``, literal at ``:6102``) and starts with the
+    Gateway (``portalService.startIngress()``, ``:7960``) whether or not any portal is
     open. How far it reaches off-host is entirely a function of the operator's own
     wildcard HTTPS proxy for that domain, which no config field describes.
 
@@ -7634,23 +7641,23 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     environment (``prepareSessionPortalToolAccess``, ``agent-tools-D5UK6LHM.mjs:309-317``).
 
     THREE TRANSPORTS, evaluated in this order because that is the vendor's own
-    precedence (``createGatewayPortalService.open``, ``server-start-my5aBcwu.mjs:
-    6308-6397``):
+    precedence (``createGatewayPortalService.open``, ``server-start-BkBmUb8t.mjs:
+    6280-6443`` on 2026.9.8; the transport choice is ``:6309-6398``):
 
     * T1 **ingress** - used whenever ``gateway.portals.ingress`` is set
-      (``servers = ingress ? [] : ...``, ``:6336``; ingress wins over Tailscale,
-      ``:6309``). URL: ``https://<random-hex>.<domain>``, routed by Host header
-      (``portalIngressHostname``, ``:6132-6135``), served by the loopback listener.
+      (``servers = ingress ? [] : ...``, ``:6337``; ingress wins over Tailscale,
+      ``:6310``). URL: ``https://<random-hex>.<domain>``, routed by Host header
+      (``portalIngressHostname``, ``:6133-6136``), served by the loopback listener.
     * T2 **tailscale** - used when there is no ingress and
       ``gateway.tailscale.mode`` is ``serve``/``funnel`` (``managedTailscaleMode``,
-      ``:7766``). Always claimed as Tailscale **Serve**, never Funnel
-      (``claimTailscaleServePort``, ``tailscale-ovAM74O_.mjs:293-301``) even when the
+      ``:7767``). Always claimed as Tailscale **Serve**, never Funnel
+      (``claimTailscaleServePort``, ``tailscale-Ci7R_gvD.mjs:293-302``) even when the
       Gateway itself runs Funnel, and fails closed if the managed route is not active.
       Tailscale serve/funnel also forces a loopback Gateway bind
-      (``validateGatewayTailscaleBind``, ``validation-core-BichtBZ7.mjs:1146-1157``).
+      (``validateGatewayTailscaleBind``, ``validation-core-YrPXii0X.mjs:1146-1157``).
     * T3 **direct** - every other case. Each portal gets its own listener on every
       address the Gateway's own HTTP server binds (``params.httpBindHosts``,
-      ``:7957``, from ``resolveGatewayListenHosts``, ``net-BwU9smrX.mjs:212-223``), on a
+      ``:7958``, from ``resolveGatewayListenHosts``, ``net-BD0odJBF.mjs:212-223``, 2026.9.8), on a
       random port, plain HTTP unless ``gateway.tls.enabled``. **A hardened primary
       gateway on ``bind=lan`` therefore also serves portals on ``0.0.0.0`` with random
       ports, outside gateway.auth** - a check that only fired on the ingress path
@@ -7658,12 +7665,12 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
 
     OPERATORS CAN ALWAYS OPEN PORTALS TOO. ``portal.open`` is an ``operator.write``
     Gateway method (``core-method-policy-BePoiMRV.mjs:2426-2445``), always created
-    (``server-start-my5aBcwu.mjs:7780-7787``); ``portal.list`` redacts the token for
-    non-write/admin clients (``portals-D2vM3hFf.mjs:138-141,175``). The agent-facing
+    (``server-start-BkBmUb8t.mjs:7781-7788``); ``portal.list`` redacts the token for
+    non-write/admin clients (``portals-CLsDFlsV.mjs:138-141,175``). The agent-facing
     ``gateway`` tool cannot call it - its actions are only config.get,
-    config.schema.lookup and update.run (``openclaw-tools-DCQphGzC.mjs:1429-1434``) -
+    config.schema.lookup and update.run (``openclaw-tools-BwWTN0hs.mjs:1429-1434``) -
     but an agent with unsandboxed exec may still reach it via
-    ``openclaw gateway call portal.open`` (``gateway-cli-tvaNgE4v.mjs:386``), disclosed
+    ``openclaw gateway call portal.open`` (``gateway-cli-D_7tPFxy.mjs:386``, 2026.9.8), disclosed
     in the P2 fix text rather than checked here (B4/B8/B43 cover exec itself).
 
     VERSION. ``gateway.portals`` first appears in the 2026.9.6 schema; it is absent from
@@ -7712,7 +7719,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
        exists, or the proxy is private, it overstates reach.
     2. The vendor's own cross-field refinement - a portal domain overlapping
        ``gateway.publicOrigin``/``gateway.controlUi.allowedOrigins``
-       (``zod-schema-BRat_tFr.mjs:1300-1309``) - is not replicated; OpenClaw refuses
+       (``zod-schema-b5tlDVBo.mjs:1297-1306``, 2026.9.8) - is not replicated; OpenClaw refuses
        such a config outright.
     3. With Tailscale serve/funnel but Tailscale down, ``portal.open`` fails closed, so
        there are no portals at all.
@@ -7727,7 +7734,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     PASS-WRONGLY RESIDUALS: an absent ``gateway.bind`` on a host-networked container
     (the same residual ``_gateway_remote_exposure_reason``, B2, B11, B350 and RISK-20
     accept); CLI overrides (``--bind``/``--host``/``--tailscale``,
-    ``server-runtime-config-D3C6lbI6.mjs:71,90``) are invisible; an agent with
+    ``server-runtime-config-Dq81F5gv.mjs:71-74,88-90``, 2026.9.8) are invisible; an agent with
     unsandboxed exec may open portals through ``openclaw gateway call portal.open``
     despite a `portal` tool deny (disclosed in the P2 fix; exec itself is covered by
     B4/B8/B43); and portal behavior on unmeasured builds is evaluated with the 9.6
