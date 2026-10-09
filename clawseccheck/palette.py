@@ -25,7 +25,7 @@ Two registries, both single-source-of-truth:
   any flag is unassigned or claimed twice, so a new flag cannot be silently
   orphaned from the presentation.
 
-Read-only, pure stdlib (Python 3.9+), English only - the host agent localizes.
+Read-only, pure stdlib (Python 3.10+), English only - the host agent localizes.
 """
 from __future__ import annotations
 

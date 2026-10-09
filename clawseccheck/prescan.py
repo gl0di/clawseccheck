@@ -12,7 +12,7 @@ current-value preference, not a tamper-evident audit trail, so (unlike
 ``history.jsonl`` / ``ledger.py``'s ``record_run``) writes are a plain overwrite: no
 ``journal_lock``, no hash chain, no ``_schema`` stamp.
 
-Local-only. No network. Pure stdlib. Python 3.9+.
+Local-only. No network. Pure stdlib. Python 3.10+.
 """
 from __future__ import annotations
 

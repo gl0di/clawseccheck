@@ -12,7 +12,7 @@ Colour is a *presentation* layer for the human terminal report only. It is:
 - **Strippable:** ``strip_ansi`` removes exactly the SGR codes we emit, so a
   saved report (``--save``) or a piped stream can be made plain again.
 
-No third-party dependency (no ``colorama``); Python 3.9+.
+No third-party dependency (no ``colorama``); Python 3.10+.
 """
 from __future__ import annotations
 

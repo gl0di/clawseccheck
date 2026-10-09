@@ -210,9 +210,31 @@ def test_main_rejects_old_python_before_doing_any_other_work(monkeypatch, capsys
 
     assert rc == 1
     out = capsys.readouterr()
-    assert "Python 3.9+" in out.err
+    assert "Python 3.10+" in out.err
     assert "3.8" in out.err
     assert "unexpected internal error" not in out.err  # _explode never ran
+
+
+def test_main_floor_is_python_3_10_not_3_9(monkeypatch, capsys):
+    """The support floor is 3.10 (3.9 reached end of life in October 2025): 3.9 is
+    refused with the exact message, 3.10 is the first interpreter let through.
+    ``audit`` is rigged to blow up so "let through" is observable: the guard did not
+    fire and the pipeline ran (and degraded) instead."""
+    monkeypatch.setattr(cli, "audit", _explode)
+
+    monkeypatch.setattr(cli.sys, "version_info", (3, 9, 25, "final", 0))
+    rc = cli.main(["--home", _SAFE_HOME])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "clawseccheck: needs Python 3.10+ (found 3.9)" in err
+    assert "unexpected internal error" not in err  # the pipeline never ran
+
+    monkeypatch.setattr(cli.sys, "version_info", (3, 10, 0, "final", 0))
+    rc = cli.main(["--home", _SAFE_HOME])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "needs Python" not in err  # the guard did not fire at the floor itself
+    assert "unexpected internal error" in err  # the pipeline ran and _explode degraded
 
 
 def test_main_accepts_current_python():

@@ -1135,7 +1135,8 @@ _MIN_IPV4_PREFIXLEN = 8
 _MIN_IPV6_PREFIXLEN = 16
 
 # Do NOT use ``ipaddress.*Network.is_private`` here - its meaning changed across the
-# Python versions we support (3.9+). On older interpreters it was computed as
+# Python versions this project has supported (measured: 3.9.25 old, 3.12.3 and 3.14.4
+# new). On older interpreters it was computed as
 # "network address is private AND broadcast address is private", which makes
 # ``0.0.0.0/0`` report is_private=True (0.0.0.0 falls in 0.0.0.0/8 and
 # 255.255.255.255 is itself special-cased), and likewise ``0.0.0.0/1`` (broadcast

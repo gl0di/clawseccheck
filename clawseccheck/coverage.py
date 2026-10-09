@@ -1,6 +1,6 @@
 """Coverage engine for the Dashboard: surface -> 7-family roll-up + coverage map.
 
-Pure stdlib, Python 3.9+, deterministic, read-only.
+Pure stdlib, Python 3.10+, deterministic, read-only.
 
 Grounded against docs/research/output-redesign-dashboard.md (2026-06-27) and
 docs/research/openclaw-schema-recon.md.

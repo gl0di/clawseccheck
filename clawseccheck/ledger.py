@@ -15,7 +15,7 @@ Capability mapping
 ``"vet_mcp"``
     Covers ``--vet-mcp`` (MCP supply-chain vetting).  14-day threshold.
 
-Local-only. No network. Pure stdlib. Python 3.9+.
+Local-only. No network. Pure stdlib. Python 3.10+.
 """
 from __future__ import annotations
 

@@ -6,7 +6,7 @@ what was actually verified, not assumed.
 
 ## 1. The constraint
 
-ClawSecCheck ships zero runtime dependencies (Python 3.9+, stdlib only - see `pyproject.toml`'s
+ClawSecCheck ships zero runtime dependencies (Python 3.10+, stdlib only - see `pyproject.toml`'s
 empty `dependencies = []` and this project's own golden rule). A real file-change notification
 API on Linux is `inotify(7)`, but the Python standard library has no binding for it - the usual
 third-party answer is a package like `inotify_simple` or `watchdog`, both of which are exactly

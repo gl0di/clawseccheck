@@ -3195,8 +3195,9 @@ def main(argv=None) -> int:
 
     C-314: the Python-version check runs before anything else in this
     function - including the try/except below - because an unpacked (non-pip)
-    install on Python <3.9 parses cleanly (no clean ImportError) but can fail later
-    with a confusing runtime error; see docs/TROUBLESHOOTING.md.
+    install on Python <3.10 parses cleanly (no clean ImportError) but can fail later
+    with a confusing runtime error; see docs/TROUBLESHOOTING.md. The source stays
+    3.9-parsable on purpose: a 3.9 user must reach this message, not a SyntaxError.
 
     I-038: all three ``except`` arms below already return exactly the exit code
     ``--exit-code-scheme graduated`` reserves for "could not produce a trustworthy
@@ -3211,9 +3212,9 @@ def main(argv=None) -> int:
     1 is already the right code for "the tool itself did not finish" under both
     schemes.
     """
-    if sys.version_info < (3, 9):
+    if sys.version_info < (3, 10):
         print(
-            "clawseccheck: needs Python 3.9+ (found "
+            "clawseccheck: needs Python 3.10+ (found "
             f"{sys.version_info[0]}.{sys.version_info[1]}); see "
             "docs/TROUBLESHOOTING.md for how to point the skill at a newer interpreter.",
             file=sys.stderr,
