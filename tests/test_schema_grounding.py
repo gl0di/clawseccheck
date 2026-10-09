@@ -1528,7 +1528,7 @@ _NOT_IN_CURRENT_SCHEMA = {
         "(report.py::_credential_surface_map and checks/_config.py::check_credential_blast_radius "
         "spell it out; checks/_config.py::_gateway_token_raw is the one reader behind "
         "::_gateway_config_token and ::check_gateway, and keeps the legacy key only when it is a "
-        "string — C-667: a SecretRef object there is not auth) — legacy second term. "
+        "string - C-667: a SecretRef object there is not auth) - legacy second term. "
         "B-730 follow-up removed the one read that BROKE that rule: report.py::_capability_graph "
         "read this legacy key ALONE, with no gateway.auth.token first, so the capability graph's "
         "sensitive-data term was blind on every config the current schema accepts (measured: 0 of "
