@@ -8,7 +8,9 @@ The vendor's boot path changed underneath this claim: through 2026.9.6 the gatew
 legacy file itself in memory and started (the common case; except behind an `$include`), and
 from 2026.9.7 startup validates without rewriting and Doctor is the only repair path. The
 dist-grounding section of this module pins that premise against the installed build, claim by
-claim. 2026.9.7 also retired `tools.toolSearch.codeTimeoutMs`, which B382 now flags.
+claim. 2026.9.7 also retired `tools.toolSearch.codeTimeoutMs`, and 2026.9.8 retired
+`silentReply.internal` (agent defaults, and the per-surface block whose surface name is
+free-form), which B382 now flags.
 
 Two layers, matching test_b700: always-on behaviour tests, and a LOCAL-ONLY oracle that
 EXECUTES the installed root schema over every key in the shipped table. A key the vendor
@@ -33,6 +35,8 @@ from clawseccheck.checks._config import check_retired_config_keys_invalid
 from clawseccheck.checks._shared import (
     _RETIRED_CONFIG_KEYS,
     _STARTUP_REPAIR_REMOVED_MIN,
+    _has_key_path,
+    _present_key_paths,
     _retired_keys_present,
 )
 from clawseccheck.collector import Context, collect
@@ -193,6 +197,216 @@ def test_code_timeout_key_behind_include_warns_the_same(tmp_path):
     _write(tmp_path / "openclaw.json", '{"$include": "./fragment.json5"}')
     cfg = load_openclaw_config(tmp_path / "openclaw.json", root_byte_limit=5_000_000)
     assert _run(cfg, NEW_BUILD).evidence == ["tools.toolSearch.codeTimeoutMs"]
+
+
+# ------------------- 2026.9.8: silentReply.internal (agent defaults + the per-surface block)
+#
+# 2026.9.8 removed `internal` from the silent-reply policy block in two places: the agent
+# defaults (`agents.defaults.silentReply`) and every surface's own block
+# (`surfaces.<surface>.silentReply`, where the surface name is free-form). The second row of
+# the table therefore carries a `*` segment, and the finding must name the CONCRETE surface
+# keys the file holds, never the pattern. Measured by executing the root schema: see the
+# local-only oracle at the end of this module.
+
+SILENT_BUILD = "2026.9.8"
+SILENT_PRE_BUILD = "2026.9.7"
+_AGENT_SILENT_KEY = "agents.defaults.silentReply.internal"
+_AGENT_SILENT = {"agents": {"defaults": {"silentReply": {"internal": "allow"}}}}
+
+
+def _surface_silent(*names, **blocks):
+    """``surfaces`` holding ``silentReply.internal`` for each name (blocks override a name)."""
+    surfaces = {n: {"silentReply": {"internal": "allow"}} for n in names}
+    surfaces.update(blocks)
+    return {"surfaces": surfaces}
+
+
+def test_agent_defaults_silent_reply_internal_warns_on_2026_9_8_and_later():
+    for build in (SILENT_BUILD, "2026.9.9"):
+        f = _run(_AGENT_SILENT, build)
+        assert f.status == WARN, build
+        assert f.evidence == [_AGENT_SILENT_KEY], build
+        assert f"{_AGENT_SILENT_KEY} (removed)" in f.detail, build
+
+
+def test_surface_silent_reply_internal_names_each_concrete_surface():
+    f = _run(_surface_silent("webchat", "telegram"), SILENT_BUILD)
+    assert f.status == WARN
+    assert f.evidence == ["surfaces.telegram.silentReply.internal",
+                          "surfaces.webchat.silentReply.internal"]
+    assert "2 key(s)" in f.detail
+    for path in f.evidence:
+        assert f"{path} (removed)" in f.detail
+    # the pattern itself is table-internal and must never reach the reader
+    assert "surfaces.*" not in f.detail + " ".join(f.evidence)
+
+
+def test_both_silent_reply_rows_in_one_file_are_all_named_in_table_order():
+    cfg = {**_AGENT_SILENT, **_surface_silent("telegram")}
+    f = _run(cfg, SILENT_BUILD)
+    assert f.status == WARN
+    assert f.evidence == [_AGENT_SILENT_KEY, "surfaces.telegram.silentReply.internal"]
+    assert "2 key(s)" in f.detail
+
+
+def test_silent_reply_internal_is_quiet_on_builds_that_still_accept_it():
+    # EXECUTED against the extracted 2026.9.7 package's root zod schema: both accepted.
+    for cfg in (_AGENT_SILENT, _surface_silent("telegram", "webchat")):
+        for build in (SILENT_PRE_BUILD, MODERN, LEGACY):
+            f = _run(cfg, build)
+            assert f.status == PASS, build
+            assert "silentReply" not in f.detail, build
+
+
+def test_silent_reply_internal_unknown_build_is_not_adverse():
+    for cfg in (_AGENT_SILENT, _surface_silent("telegram")):
+        f = _run(cfg, None)
+        assert f.status == PASS
+        assert f.pass_confidence == "no_signal"
+        assert "silentReply" not in f.detail
+
+
+def test_live_silent_reply_siblings_are_not_flagged_on_2026_9_8():
+    # `group` is accepted by both 2026.9.7 and 2026.9.8 (control for the measured reject).
+    cfg = {"agents": {"defaults": {"silentReply": {"group": "allow"}}},
+           "surfaces": {"webchat": {"silentReply": {"group": "allow"}}}}
+    f = _run(cfg, SILENT_BUILD)
+    assert f.status == PASS
+    assert f.pass_confidence != "no_signal"
+
+
+def test_only_the_internal_key_is_named_when_a_live_sibling_sits_beside_it():
+    cfg = {"surfaces": {"webchat": {"silentReply": {"group": "allow", "internal": "allow"}}}}
+    assert _run(cfg, SILENT_BUILD).evidence == ["surfaces.webchat.silentReply.internal"]
+
+
+def test_silent_reply_internal_is_flagged_on_presence_not_truthiness_and_value_never_shown():
+    for v in (False, None, 0, "", [], {}):
+        assert _run({"surfaces": {"a": {"silentReply": {"internal": v}}}},
+                    SILENT_BUILD).status == WARN, v
+    marker = "value-marker-" + "k4m2p9"
+    f = _run(_surface_silent("a", a={"silentReply": {"internal": marker}}), SILENT_BUILD)
+    assert f.status == WARN
+    assert marker not in (f.detail + " " + f.fix + " " + " ".join(f.evidence))
+
+
+def test_malformed_silent_reply_shapes_are_neither_a_crash_nor_a_finding():
+    for cfg in (
+        {"surfaces": []}, {"surfaces": "x"}, {"surfaces": None}, {"surfaces": 3},
+        {"surfaces": {}},
+        {"surfaces": {"telegram": "x"}},
+        {"surfaces": {"telegram": None, "webchat": [1], "slack": 5}},
+        {"surfaces": {"telegram": {}}},
+        {"surfaces": {"telegram": {"silentReply": "allow"}}},
+        {"surfaces": {"telegram": {"silentReply": ["internal"]}}},
+        {"surfaces": {"telegram": {"silentReply": None}}},
+        {"agents": {"defaults": {"silentReply": "allow"}}},
+        {"agents": {"defaults": None}},
+        {"agents": []},
+    ):
+        f = _run(cfg, SILENT_BUILD)
+        assert f.status == PASS, cfg
+
+
+def test_a_malformed_surface_does_not_hide_a_well_formed_one():
+    cfg = {"surfaces": {"bad": "x", "worse": None, "telegram": {"silentReply": {"internal": 1}}}}
+    assert _run(cfg, SILENT_BUILD).evidence == ["surfaces.telegram.silentReply.internal"]
+
+
+def test_a_literal_star_surface_is_an_ordinary_surface_name():
+    f = _run(_surface_silent("*"), SILENT_BUILD)
+    assert f.status == WARN
+    assert f.evidence == ["surfaces.*.silentReply.internal"]
+    # ... and beside a real surface both are named, each exactly once
+    f = _run(_surface_silent("*", "webchat"), SILENT_BUILD)
+    assert f.evidence == ["surfaces.*.silentReply.internal",
+                          "surfaces.webchat.silentReply.internal"]
+    # a star key does not act as a wildcard over its siblings: only a surface that really
+    # holds the key is named
+    cfg = {"surfaces": {"*": {"silentReply": {"group": "allow"}},
+                        "webchat": {"silentReply": {"internal": "allow"}}}}
+    assert _run(cfg, SILENT_BUILD).evidence == ["surfaces.webchat.silentReply.internal"]
+
+
+def test_silent_reply_internal_behind_include_warns_the_same(tmp_path):
+    _write(tmp_path / "fragment.json5",
+           '{"surfaces": {"telegram": {"silentReply": {"internal": "allow"}}}}')
+    _write(tmp_path / "openclaw.json", '{"$include": "./fragment.json5"}')
+    cfg = load_openclaw_config(tmp_path / "openclaw.json", root_byte_limit=5_000_000)
+    assert _run(cfg, SILENT_BUILD).evidence == ["surfaces.telegram.silentReply.internal"]
+
+
+def test_a_surface_name_with_a_dot_or_an_empty_name_is_named_as_written():
+    # A surface name is free-form, so it may hold a dot or be empty. The path is then joined
+    # as written: it reads as one more level than the file has. Pinned, not prettified - the
+    # entry is still unique per surface and still names the key that has to go.
+    cfg = {"surfaces": {"a.b": {"silentReply": {"internal": "allow"}},
+                        "": {"silentReply": {"internal": "allow"}}}}
+    f = _run(cfg, SILENT_BUILD)
+    assert f.status == WARN
+    assert f.evidence == ["surfaces..silentReply.internal",
+                          "surfaces.a.b.silentReply.internal"]
+
+
+def test_threat_coverage_states_the_real_size_of_the_table():
+    # The B382 row of the shipped coverage document gives the number of measured keys. Tie it
+    # to the table, so a row added later cannot leave the document behind.
+    row = next(line for line in (Path(__file__).resolve().parents[1] / "docs"
+                                 / "THREAT_COVERAGE.md").read_text(encoding="utf-8").splitlines()
+               if "| B382 |" in line)
+    stated = re.search(r"\((\d+) measured keys", row)
+    assert stated, "the B382 row no longer states how many keys the table holds"
+    assert int(stated.group(1)) == len(_RETIRED_CONFIG_KEYS)
+
+
+def test_wildcard_rows_have_exactly_one_whole_segment_star():
+    """Tripwire for the table's own shape: the expander is only ever validated against a
+    single whole-segment ``*``, so a row with a partial or a second star is a question."""
+    starred = [k for k in _RETIRED_CONFIG_KEYS if "*" in k]
+    assert starred == ["surfaces.*.silentReply.internal"]
+    for key in starred:
+        parts = key.split(".")
+        assert parts.count("*") == 1
+        assert all(p == "*" or "*" not in p for p in parts)
+
+
+# ------------------------------------------------ _present_key_paths (the wildcard expander)
+
+def test_present_key_paths_without_a_star_agrees_with_has_key_path():
+    cfg = {"a": {"b": {"c": None}, "d": False}, "e": 0, "f": [1], "g": {}}
+    for dotted in ("a", "a.b", "a.b.c", "a.d", "e", "f", "g", "a.x", "a.b.c.d", "e.x", "f.0",
+                   "g.x", "zz", "a.b.x.c"):
+        assert _present_key_paths(cfg, dotted) == ([dotted] if _has_key_path(cfg, dotted) else []), dotted
+
+
+def test_present_key_paths_expands_a_star_over_dict_keys_sorted():
+    cfg = {"s": {"zeta": {"k": 1}, "alpha": {"k": 2}, "mid": {"other": 3}, "odd": "x", "nul": None}}
+    assert _present_key_paths(cfg, "s.*.k") == ["s.alpha.k", "s.zeta.k"]
+    assert _present_key_paths(cfg, "s.*") == ["s.alpha", "s.mid", "s.nul", "s.odd", "s.zeta"]
+    assert _present_key_paths(cfg, "s.*.k.deeper") == []
+
+
+def test_present_key_paths_star_over_a_non_dict_or_an_empty_dict_finds_nothing():
+    for node in ([], "x", None, 5, True, {}, [{"k": 1}]):
+        assert _present_key_paths({"s": node}, "s.*.k") == [], node
+    assert _present_key_paths({}, "s.*.k") == []
+    assert _present_key_paths([], "s.*.k") == []
+    assert _present_key_paths(None, "s.*.k") == []
+
+
+def test_present_key_paths_star_matches_a_whole_segment_only():
+    cfg = {"s": {"a*": {"k": 1}, "b": {"k": 2}}}
+    assert _present_key_paths(cfg, "s.a*.k") == ["s.a*.k"]       # literal, not a pattern
+    assert _present_key_paths(cfg, "s.*.k") == ["s.a*.k", "s.b.k"]
+
+
+def test_present_key_paths_does_not_mutate_or_alias_the_config():
+    cfg = {"s": {"x": {"k": 1}}}
+    before = json.dumps(cfg)
+    out = _present_key_paths(cfg, "s.*.k")
+    out.append("junk")
+    assert json.dumps(cfg) == before
+    assert _present_key_paths(cfg, "s.*.k") == ["s.x.k"]
 
 
 # ------------------------------------- C-645: the repair advice names who repairs the file
@@ -497,7 +711,7 @@ def test_startup_wiring_matches_the_removal_constant():
 
 # --------------------------------------------------- single table, two guards
 
-def test_package_table_is_the_b700_tables_plus_the_measured_ssrf_and_toolsearch_keys():
+def test_package_table_is_the_b700_tables_plus_the_measured_later_keys():
     by_min = {}
     for key, (repl, minb) in _RETIRED_CONFIG_KEYS.items():
         by_min.setdefault(minb, {})[key] = repl
@@ -508,7 +722,11 @@ def test_package_table_is_the_b700_tables_plus_the_measured_ssrf_and_toolsearch_
     # C-645: 2026.9.7 dropped `tools.toolSearch.codeTimeoutMs` ("Tool Search no longer
     # executes code"); removed outright, no replacement key.
     assert by_min[(2026, 9, 7)] == {"tools.toolSearch.codeTimeoutMs": None}
-    assert len(_RETIRED_CONFIG_KEYS) == 14
+    # 2026.9.8 dropped `silentReply.internal` from the agent defaults and from every surface's
+    # block (the surface name is free-form, hence the `*`); removed outright, no replacement.
+    assert by_min[(2026, 9, 8)] == {"agents.defaults.silentReply.internal": None,
+                                    "surfaces.*.silentReply.internal": None}
+    assert len(_RETIRED_CONFIG_KEYS) == 16
     assert "marketplaces" not in _RETIRED_CONFIG_KEYS
     # only the KEY is listed: `tools.toolSearch.mode: "code"` is a retired VALUE, which a key
     # table cannot express, and the live sibling `enabled` must never be in it
@@ -562,8 +780,13 @@ def test_every_table_key_is_rejected_by_the_installed_schema():
     keys = [k for k, (_r, m) in _RETIRED_CONFIG_KEYS.items()
             if installed is not None and installed >= m]
     assert keys, "installed build older than every table entry -- nothing to ground"
-    accepted = _oracle(keys)
-    assert not [k for k, ok in accepted.items() if ok], accepted
+    # A `*` row is a pattern, not a key: probe it under a concrete surface name. The probe's
+    # value is a boolean, which the two `silentReply.internal` rows reject for their TYPE
+    # whatever the build, so for those rows this test proves nothing about the key -- the typed
+    # test below (`test_silent_reply_internal_rows_match_the_installed_schema`) grounds them.
+    probe = {k: ".".join("webchat" if p == "*" else p for p in k.split(".")) for k in keys}
+    accepted = _oracle(list(probe.values()))
+    assert not [k for k, c in probe.items() if accepted[c]], accepted
 
 
 def test_oracle_bites_on_a_still_valid_key():
@@ -583,3 +806,81 @@ def test_toolsearch_sibling_control_is_accepted_and_the_retired_key_is_not():
     assert got["tools.toolSearch.enabled"] is True
     assert got["tools.toolSearch.codeTimeoutMs"] is (
         installed < _RETIRED_CONFIG_KEYS["tools.toolSearch.codeTimeoutMs"][1])
+
+
+# `_oracle` builds its config from the dotted key with a boolean (or an empty array), which is
+# the wrong TYPE for `silentReply.internal`: the vendor would reject it on 2026.9.7 too, so it
+# could not tell "the key was removed" from "the value was malformed". This one takes whole
+# config objects, so each case is exactly the config the measurement used.
+_CASES_SCRIPT = """
+const z = await import(process.env.OC_SCHEMA);
+const cases = JSON.parse(process.env.OC_CASES);
+const out = {};
+for (const [name, cfg] of Object.entries(cases)) out[name] = z.t.safeParse(cfg).success;
+console.log(JSON.stringify(out));
+"""
+
+
+def _oracle_configs(cases):
+    """``{case name: config object}`` -> ``{case name: accepted by the installed root schema}``."""
+    schema = dist_file("zod-schema-*.js", symbol="the root zod schema bundle (export `t`)")
+    env = dict(os.environ, OC_SCHEMA=str(schema), OC_CASES=json.dumps(cases))
+    proc = subprocess.run(["node", "--input-type=module", "-e", _CASES_SCRIPT],
+                          capture_output=True, text=True, timeout=120, env=env)
+    if proc.returncode != 0:
+        pytest.skip(f"could not execute the dist schema: {proc.stderr.strip()[:200]}")
+    return json.loads(proc.stdout)
+
+
+def test_silent_reply_internal_rows_match_the_installed_schema():
+    """2026.9.8 control set for both `silentReply.internal` rows, in ONE oracle call.
+
+    The retired key is rejected exactly when the installed build is at or above the row's min
+    build; every control is build-independent: the bare config and the live sibling `group`
+    (agent defaults, and under a surface) are accepted, a bogus sibling is rejected (so a
+    schema that merely accepted anything under `silentReply` could not pass), and a surface
+    name the vendor has never heard of is accepted (so the `*` really is free-form). Then the
+    check itself is run on the same configs against the installed build and must flag
+    precisely the ones the vendor rejected for a retired key."""
+    require_dist()
+    installed = _installed_tuple()
+    assert installed is not None
+
+    def agents(**block):
+        return {"agents": {"entries": {"main": {"default": True}},
+                           "defaults": {"silentReply": block}}}
+
+    def surface(name, **block):
+        return {"agents": {"entries": {"main": {"default": True}}},
+                "surfaces": {name: {"silentReply": block}}}
+
+    configs = {
+        "control": {"agents": {"entries": {"main": {"default": True}}}},
+        "agent_live_sibling": agents(group="allow"),
+        "agent_internal": agents(internal="allow"),
+        "agent_bogus_sibling": agents(zzzBogus="allow"),
+        "surface_live_sibling": surface("webchat", group="allow"),
+        "surface_internal_webchat": surface("webchat", internal="allow"),
+        "surface_internal_telegram": surface("telegram", internal="allow"),
+        "surface_free_form_name": surface("zzzNoSuchSurface", group="allow"),
+        "surface_bogus_sibling": surface("webchat", zzzBogus="allow"),
+    }
+    got = _oracle_configs(configs)
+    assert set(got) == set(configs)
+    for name in ("control", "agent_live_sibling", "surface_live_sibling",
+                 "surface_free_form_name"):
+        assert got[name] is True, name
+    for name in ("agent_bogus_sibling", "surface_bogus_sibling"):
+        assert got[name] is False, name
+    agent_min = _RETIRED_CONFIG_KEYS["agents.defaults.silentReply.internal"][1]
+    surface_min = _RETIRED_CONFIG_KEYS["surfaces.*.silentReply.internal"][1]
+    assert got["agent_internal"] is (installed < agent_min)
+    assert got["surface_internal_webchat"] is (installed < surface_min)
+    assert got["surface_internal_telegram"] is (installed < surface_min)
+
+    build = ".".join(str(n) for n in installed)
+    for name in ("control", "agent_live_sibling", "agent_internal", "surface_live_sibling",
+                 "surface_internal_webchat", "surface_internal_telegram",
+                 "surface_free_form_name"):
+        flagged = bool(_retired_keys_present(_ctx(configs[name], build)))
+        assert flagged is (not got[name]), (name, build)

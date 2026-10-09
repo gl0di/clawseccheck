@@ -1883,6 +1883,25 @@ def _portal_model_version(ctx) -> str:
 # with a bogus sibling key rejected by both and the live sibling `enabled` accepted by
 # both as controls. Only the KEY is listed: the companion retirement of the VALUE
 # `tools.toolSearch.mode: "code"` is a value-level rule a key table cannot express.
+#
+# 2026-10-09: `silentReply.internal` left in 2026.9.8, in two places -- the agent defaults
+# and every surface's own block. EXECUTED, not read: the root zod schema's `safeParse` over
+# the extracted 2026.9.7 release package (sha512 equal to the registry's) and over the
+# installed 2026.9.8. `agents.defaults.silentReply.internal: "allow"` is ACCEPTED by 9.7 and
+# REJECTED by 9.8 (`unrecognized_keys@agents.defaults.silentReply[internal]`);
+# `surfaces.webchat.silentReply.internal` and `surfaces.telegram.silentReply.internal` the
+# same. Controls on both builds: the bare config and the live sibling `silentReply.group` are
+# accepted, a bogus sibling (`zzzBogus`) beside it is rejected, and
+# `surfaces.zzzNoSuchSurface.silentReply.group` is accepted -- the surface name is free-form,
+# which is why the second row is a pattern (one `*` segment, expanded over the keys the file
+# really holds by `_present_key_paths`) rather than a list of surface names. 2026.9.9's
+# generated config schema lists the same 5,408 paths as 9.8's (path lists compared; the root
+# schema was not executed on 9.9). Not added here, measured on the way: `silentReply.direct`
+# is rejected by 9.7 and by 9.8 alike, but the build that removed it was not measured (it is
+# in no saved schema path list back to 2026.7.1-2), so no min build can be stated for it and
+# B382 stays silent about it. The `channels.*.webhook*` paths that left the generated schema
+# in 2026.9.7 are not table material: the root schema still ACCEPTS them, and a bogus key
+# beside them too (that parent passes unknown keys through at this level).
 _RETIRED_CONFIG_KEYS = {
     "audit.enabled": ("logging.audit.enabled", (2026, 8, 1)),
     "gateway.nodes.allowCommands": ("gateway.nodes.commands.allow", (2026, 8, 1)),
@@ -1899,6 +1918,8 @@ _RETIRED_CONFIG_KEYS = {
                                              (2026, 9, 1)),
     "skills.workshop.allowSymlinkTargetWrites": (None, _SYMLINK_KNOB_RETIRED_MIN),
     "tools.toolSearch.codeTimeoutMs": (None, (2026, 9, 7)),
+    "agents.defaults.silentReply.internal": (None, (2026, 9, 8)),
+    "surfaces.*.silentReply.internal": (None, (2026, 9, 8)),
 }
 
 # C-645: 2026.9.7 removed the boot-time config self-heal. Through 2026.9.6 the gateway's
@@ -1979,6 +2000,31 @@ def _has_key_path(cfg, dotted: str) -> bool:
     return True
 
 
+def _present_key_paths(cfg, dotted: str) -> "list[str]":
+    """The concrete dotted paths of ``dotted`` that ``cfg`` holds, sorted.
+
+    A path with no ``*`` segment is exactly ``_has_key_path``: ``[dotted]`` when present, else
+    ``[]``. A segment that is exactly ``*`` stands for every key of the dict at that level
+    (a free-form name such as a surface), and is replaced by each real key, so the paths
+    returned name keys the file really holds -- never the pattern. A ``*`` over anything but
+    a dict (a list, a scalar, ``null``) finds nothing; ``a*`` or ``*a`` is a literal key
+    name, and a literal key named ``*`` is an ordinary key like any other.
+    """
+    parts = dotted.split(".")
+    if "*" not in parts:
+        return [dotted] if _has_key_path(cfg, dotted) else []
+    live = [([], cfg)]
+    for part in parts:
+        nxt = []
+        for trail, node in live:
+            if not isinstance(node, dict):
+                continue
+            names = list(node) if part == "*" else [part] if part in node else []
+            nxt.extend((trail + [name], node[name]) for name in names)
+        live = nxt
+    return sorted(".".join(trail) for trail, _node in live)
+
+
 def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
     """Retired keys (with replacement) that the config holds AND the installed build rejects.
 
@@ -1994,7 +2040,7 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
 
     * ``ctx.config`` (read above) is what ``collector.collect()`` gets back from
       ``configloader.load_openclaw_config()`` -- already the fully ``$include``-resolved,
-      deep-merged dict, never the raw root file. So ``_has_key_path`` sees a retired key
+      deep-merged dict, never the raw root file. So ``_present_key_paths`` sees a retired key
       exactly the same way whether it sits in ``openclaw.json`` or in an included fragment;
       there is nothing for a presence flag to add here.
     * Confirmed live against the installed CLI too: a retired key placed directly in
@@ -2036,8 +2082,11 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
     cfg = getattr(ctx, "config", None)
     if installed is None or not isinstance(cfg, dict):
         return []
-    return [(key, repl) for key, (repl, min_build) in _RETIRED_CONFIG_KEYS.items()
-            if installed >= min_build and _has_key_path(cfg, key)]
+    # A row with a `*` segment yields one entry per concrete path the file holds (so the
+    # finding names `surfaces.telegram.silentReply.internal`, never `surfaces.*...`); every
+    # other row yields exactly `(key, repl)` when present, as before.
+    return [(path, repl) for key, (repl, min_build) in _RETIRED_CONFIG_KEYS.items()
+            if installed >= min_build for path in _present_key_paths(cfg, key)]
 
 
 def _meta(cid: str):
