@@ -84,6 +84,7 @@ from ._shared import (
     _hooks_session_key_exposures,
     INPUT_TOOL_HINTS,
     _is_posix,
+    _is_secret_ref_object,  # C-667
     _is_secret_reference,  # noqa: F401 - re-exported for existing importers
     _js_trim,  # C-653
     _LEG_KEYS,
@@ -1441,8 +1442,35 @@ def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
     return None, None
 
 
+# C-667: what `_gateway_config_token` returns as "the credential" for a SecretRef object. A
+# fixed string, so nothing of the object (its id, its provider) can ride along into a message.
+_GATEWAY_TOKEN_OBJECT_PLACEHOLDER = "<SecretRef object>"
+
+
+def _gateway_token_raw(cfg):
+    """The raw value B2 and B80 read as "the gateway token": ``gateway.auth.token``, else the
+    legacy ``gateway.token``, in that order (B-312). The one reader, so the order cannot
+    drift between the two checks and `_gateway_config_token`.
+
+    C-667: the legacy root key is returned ONLY when it holds a string. OpenClaw 2026.9.8
+    has no ``gateway.token`` (``GatewayConfigSchema`` is a strictObject without it, and the
+    vendor logs that the key "is ignored"), so a SecretRef object there is not configured
+    auth and must keep the "no token" verdict it always had - while a string there keeps the
+    older reading this project already gives it. Dropping a non-string legacy value changes
+    nothing else: every consumer of this value already treated a non-string as "no token".
+    A truthy value at ``gateway.auth.token`` is returned whatever its type, so a malformed
+    one at the first key is never skipped in favour of a well-formed one at the second.
+    """
+    auth_token = dig(cfg, "gateway.auth.token")
+    if auth_token:
+        return auth_token
+    legacy = dig(cfg, "gateway.token")
+    return legacy if isinstance(legacy, str) else None
+
+
 def _gateway_token_form(value, ctx=None) -> str:
-    """How OpenClaw reads the TEXT of a ``gateway.auth.token`` / ``gateway.token`` string.
+    """How OpenClaw reads the value of ``gateway.auth.token`` (and the legacy
+    ``gateway.token`` string); *value* is what `_gateway_token_raw` returned.
 
     C-653. ``"reference"``: a whole-value ``${ID}`` / ``$ID`` - the string shapes the
     ``gateway.auth.password`` path counts (`_SECRET_INPUT_STRING_REF_RE`) - or a whole-value
@@ -1454,6 +1482,21 @@ def _gateway_token_form(value, ctx=None) -> str:
     ``"literal"``: anything else. Trimmed the way the vendor trims (`_js_trim`), never a
     substring match, so material appended to a shape stays a literal.
 
+    C-667: a WELL-FORMED SecretRef OBJECT (`_is_secret_ref_object`, the same grammar B1 uses
+    at ``gateway.auth.password``) is ``"reference"`` too - the vendor types this key
+    ``string | SecretRef{source, provider, id}`` and reads both spellings as one
+    configuration. Every ``source`` counts alike, ``exec`` included: the running gateway
+    resolves an exec reference for this key at startup by the same path as env / file / store
+    (OpenClaw 2026.9.8 ``resolve-*.mjs``, no carve-out; only the service installer and
+    ``openclaw doctor`` skip it). An object reference that cannot be resolved makes the
+    gateway refuse to start - the key is registered fail-closed - so it never yields an
+    unauthenticated listener (read from the 2026.9.8 code, not executed; an unset ``${ID}``
+    string differs - the gateway starts on a generated token - but is authenticated too). A
+    malformed object (a missing id, an unknown source, an extra key, a wrong type, a list, a
+    nested object) is a ``"literal"``: nothing of it is trusted, and the caller keeps
+    today's no-token verdict. The legacy ``gateway.token`` key never reaches here as an
+    object (`_gateway_token_raw`).
+
     The empty-fallback ``${ID:-}`` is gated on the installed build through
     ``_env_default_operator``, the predicate B1 uses at ``gateway.auth.password`` - but only
     its ``"yes"`` answer is acted on here. ``"yes"`` is the answer that CLEARS a credential
@@ -1463,6 +1506,8 @@ def _gateway_token_form(value, ctx=None) -> str:
     would be cleaner than the literal reading B2 gave before. *ctx* is optional: without it
     the build is unseen.
     """
+    if _is_secret_ref_object(value):
+        return "reference"
     if not isinstance(value, str):
         return "literal"
     text = _js_trim(value)
@@ -1538,6 +1583,13 @@ def _gateway_config_token(cfg: dict, auth_mode, ctx=None) -> "tuple[str | None, 
     value - no minimum length exists in the dist - so only length is a signal; the value
     itself must never reach a message, evidence entry, fix string, or log, §8).
 
+    C-667: a well-formed SecretRef OBJECT at ``gateway.auth.token`` (`_gateway_token_form`)
+    is a credential set by reference, so it is ``strong`` like a ``${ID}`` string. ``token``
+    is then the fixed placeholder ``_GATEWAY_TOKEN_OBJECT_PLACEHOLDER``, never any part of the
+    object: callers only ask whether it is ``None``, and the id and provider are not text
+    that may be echoed where a token value would not be. A malformed object, and an object at
+    the legacy ``gateway.token`` key, are ``(None, False)`` - no credential.
+
     C-653: a whole-value ``${ID}`` reference counts as ``strong`` whatever its text length -
     the length of the variable NAME says nothing about the secret behind it, and B2 and B80
     must read the same input the same way (a short reference used to be "no credential" here
@@ -1548,12 +1600,18 @@ def _gateway_config_token(cfg: dict, auth_mode, ctx=None) -> "tuple[str | None, 
     (`_gateway_token_form`). A retired ``secretref-env:`` / ``__env__:`` marker is an ordinary
     literal here: its text length decides, exactly as for any other literal token.
     """
-    raw = dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
-    token = (
-        raw.strip()
-        if auth_mode is None and isinstance(raw, str) and raw.strip()
-        else None
-    )
+    raw = _gateway_token_raw(cfg)
+    if auth_mode is None and isinstance(raw, str) and raw.strip():
+        token = raw.strip()
+    elif (
+        auth_mode is None
+        and isinstance(raw, dict)
+        and _gateway_token_form(raw, ctx) == "reference"
+    ):
+        # C-667: a well-formed SecretRef object (the string form was handled above).
+        token = _GATEWAY_TOKEN_OBJECT_PLACEHOLDER
+    else:
+        token = None
     strong = token is not None and (
         len(token) >= 24 or _gateway_token_form(raw, ctx) == "reference"
     )
@@ -3149,7 +3207,9 @@ def check_gateway(ctx: Context) -> Finding:
     # the credential in effect - mode exactly "token", or no mode (OpenClaw then derives
     # "token" from it). Under any other mode (password, none, trusted-proxy, an unrecognised
     # string, a templated one) a token is a leftover key and every verdict stays what it was.
-    _b2_tok_text = dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
+    # C-667: a well-formed SecretRef OBJECT at gateway.auth.token is the "reference" form too,
+    # whatever its source; a malformed one, or one at the legacy gateway.token key, is not.
+    _b2_tok_text = _gateway_token_raw(cfg)
     _b2_tok_form = _gateway_token_form(_b2_tok_text, ctx)
     _b2_tok_in_effect = auth in (None, "token")
     # A reference whose variable the config's own env block defines: a short (or marker)
@@ -3322,7 +3382,7 @@ def check_gateway(ctx: Context) -> Finding:
         fixes.append("Set gateway.tailscale.mode to 'serve' or 'off' (not 'funnel')")
     # gateway.auth_no_rate_limit does NOT exist in OpenClaw schema
     # Rate limiting is configured via gateway.auth.rateLimit (optional object)
-    token = dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
+    token = _b2_tok_text
     _marker_fix = (
         "Replace the retired marker in gateway.auth.token with a ${ID} environment "
         "reference (for example ${OPENCLAW_GATEWAY_TOKEN}) so OpenClaw substitutes the "
