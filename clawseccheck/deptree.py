@@ -66,7 +66,6 @@ it is its own change with its own adversarial pass.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import shlex
@@ -74,6 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import pathprobe
+from .configloader import loads_shallow
 from .safeio import walk_dir_safely
 
 # Bounds. OpenClaw's real tree measured 380 packages and ClawHub's 39 (2026-08-04; 398 for
@@ -342,13 +342,23 @@ def find_dep_tree(package_root) -> "Path | None":
 
 def _read_manifest(path: Path) -> "dict | None":
     """Parse one `package.json`, bounded. Returns None on any read/parse failure."""
+    return _read_manifest_shallow(path)[0]
+
+
+def _read_manifest_shallow(path: Path) -> "tuple[dict | None, int]":
+    """:func:`_read_manifest` plus how many subtrees were too deep to follow (C-664).
+
+    A package.json is third-party content, so a depth limit would be an evasion (pad the
+    manifest and its `scripts` stop being read). ``loads_shallow`` hands back every field
+    within its depth exactly as ``json.loads`` does, with the deeper subtrees marked
+    ``ELIDED``, and no recursion to exhaust."""
     try:
         if path.stat().st_size > MAX_MANIFEST_BYTES:
-            return None
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            return None, 0
+        shallow = loads_shallow(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError, RecursionError):
-        return None
-    return data if isinstance(data, dict) else None
+        return None, 0
+    return (shallow.value, shallow.elided) if isinstance(shallow.value, dict) else (None, 0)
 
 
 def resolve_hook_targets(command: str, pkg_dir: Path) -> tuple:
@@ -606,7 +616,7 @@ def scan_dep_tree(nm_root, *, max_packages: int = MAX_PACKAGES) -> DepTreeScan:
     gyp_capped: list = []
     for manifest in sorted(files):
         pkg_dir = manifest.parent
-        data = _read_manifest(manifest)
+        data, elided = _read_manifest_shallow(manifest)
         if data is None:
             result.unreadable += 1
             continue
@@ -625,6 +635,14 @@ def scan_dep_tree(nm_root, *, max_packages: int = MAX_PACKAGES) -> DepTreeScan:
         pkg_directives, pkg_capped = _gyp_directives(pkg_dir, name, relpath)
         directives.extend(pkg_directives)
         gyp_capped.extend(f"{name} ({relpath}): {reason}" for reason in pkg_capped)
+        if elided:
+            # C-664: `scripts` was read exactly as on an unpadded file, but a subtree below
+            # the depth this reader follows was not, and the package author wrote it. Same
+            # list, same degrade-to-UNKNOWN as a build config the walk could not finish.
+            gyp_capped.append(
+                f"{name} ({relpath}): package.json nested deeper than this reader follows "
+                "\u2014 the rest of the manifest was not examined"
+            )
 
         scripts = data.get("scripts")
         if not isinstance(scripts, dict):

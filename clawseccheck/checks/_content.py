@@ -10,7 +10,6 @@ import bisect
 import errno
 import html
 import ipaddress
-import json
 import os
 import re
 import stat
@@ -31,6 +30,7 @@ from ..collector import (
     Context,
     dig,
 )
+from ..configloader import loads_shallow as _loads_shallow  # C-664: third-party JSON, no depth limit
 from ..iocdb import is_known_bad_host as _iocdb_is_known_bad_host
 from ..skillast import (
     ScriptProseCoverageIncomplete,
@@ -7036,14 +7036,26 @@ def _fm_metadata_obj(fm: str) -> dict:
     """Parse the single-line JSON `metadata:` value from a frontmatter block, best-effort.
     Returns {} when absent or not single-line JSON (multi-line YAML metadata is skipped -
     B89 only needs the boolean invocation flags, which our fleet writes as inline JSON)."""
+    return _fm_metadata_obj_shallow(fm)[0]
+
+
+def _fm_metadata_obj_shallow(fm: str) -> "tuple[dict, int]":
+    """:func:`_fm_metadata_obj` plus how many subtrees were too deep to follow (C-664).
+
+    The value is read by ``loads_shallow``: every field within the first 64 levels is what
+    ``json.loads`` returns however the line is padded, and a subtree below that is
+    ``ELIDED`` (neither a dict, a list nor a str, so every ``isinstance`` guard downstream
+    skips it). A caller that could return a clean verdict must not do so when the count is
+    non-zero. A line nested past the interpreter's stack used to raise ``RecursionError``
+    out of the check."""
     m = _FM_METADATA_LINE_RE.search(fm)
     if not m:
-        return {}
+        return {}, 0
     try:
-        obj = json.loads(m.group(1))
+        shallow = _loads_shallow(m.group(1))
     except (ValueError, TypeError):
-        return {}
-    return obj if isinstance(obj, dict) else {}
+        return {}, 0
+    return (shallow.value, shallow.elided) if isinstance(shallow.value, dict) else ({}, 0)
 
 
 def _fm_metadata_obj_multiline(fm: str) -> dict:
@@ -7057,12 +7069,18 @@ def _fm_metadata_obj_multiline(fm: str) -> dict:
     never evidence of malice (§5, zero false-positive FAIL). Brace-scanning does not track
     braces inside string values, so a hostile skill can only DODGE the check (-> {} -> UNKNOWN),
     never trip a false finding."""
+    return _fm_metadata_obj_multiline_shallow(fm)[0]
+
+
+def _fm_metadata_obj_multiline_shallow(fm: str) -> "tuple[dict, int]":
+    """:func:`_fm_metadata_obj_multiline` plus the count of too-deep subtrees (C-664); see
+    :func:`_fm_metadata_obj_shallow` for the contract."""
     m = _FM_METADATA_KEY_RE.search(fm)
     if not m:
-        return {}
+        return {}, 0
     start = fm.find("{", m.end())
     if start < 0:
-        return {}
+        return {}, 0
     depth = 0
     end = -1
     for j in range(start, len(fm)):
@@ -7075,13 +7093,13 @@ def _fm_metadata_obj_multiline(fm: str) -> dict:
                 end = j + 1
                 break
     if end < 0:
-        return {}
+        return {}, 0
     raw = re.sub(r",(\s*[}\]])", r"\1", fm[start:end])  # strip trailing commas
     try:
-        obj = json.loads(raw)
+        shallow = _loads_shallow(raw)
     except (ValueError, TypeError):
-        return {}
-    return obj if isinstance(obj, dict) else {}
+        return {}, 0
+    return (shallow.value, shallow.elided) if isinstance(shallow.value, dict) else ({}, 0)
 
 
 def _fm_tag_is_suspicious(fm: str, m) -> bool:
@@ -7252,10 +7270,17 @@ def _skill_own_host(blob: str, fence_ranges: list[tuple[int, int]] | None = None
         if fence_ranges is not None and _in_fence(sm.start(), fence_ranges):
             continue
         try:
-            manifest = json.loads(sm.group("body"))
-        except (json.JSONDecodeError, ValueError):
+            shallow = _loads_shallow(sm.group("body"))
+        except ValueError:
             continue
+        manifest = shallow.value
         if not isinstance(manifest, dict) or "name" not in manifest:
+            continue
+        # C-664: a manifest with a subtree too deep to follow is one we did not fully read,
+        # and a declared own-host is a TRUST grant (callers drop findings aimed at it), so
+        # it grants nothing. Padding a manifest used to be a way to get the grant (it
+        # parsed) or an internal error (it did not).
+        if shallow.elided:
             continue
         if fm_name and str(manifest.get("name", "")).strip().lower() != fm_name.strip().lower():
             continue
@@ -11072,11 +11097,14 @@ def check_dormant_capability(ctx: Context) -> Finding:
     js = getattr(ctx, "installed_skill_js", {})
     warns: list[str] = []
     inspected = 0
+    too_deep: list[str] = []  # C-664: metadata with a subtree too deep to follow
     for name, blob in skills.items():
         fm = _skill_frontmatter_block(blob)
         if fm is None:
             continue
         inspected += 1
+        if _fm_metadata_obj_shallow(fm)[1]:
+            too_deep.append(name)
         if not _skill_is_unreachable(fm):
             continue
         ships_code = bool(py.get(name) or sh.get(name) or js.get(name))
@@ -11104,6 +11132,21 @@ def check_dormant_capability(ctx: Context) -> Finding:
             "code \u2014 this is the shape of a payload staged for later activation. Remove the "
             "unused code, or make the skill reachable and review what the code does.",
             warns,
+        )
+    if too_deep:
+        # C-664: the reachability flags sit near the top and were read in full, but the
+        # metadata holds a subtree nested deeper than this reader follows - part of the
+        # document went unread, so no clean PASS.
+        return _custom(
+            "B89",
+            MEDIUM,
+            UNKNOWN,
+            f"Assessed {inspected} skill(s), but the metadata of {len(too_deep)} skill(s) is "
+            "nested too deeply to read in full: " + ", ".join(too_deep[:6]) + ".",
+            "Flatten the SKILL.md metadata block so the reachability flags can be confirmed "
+            "by a full read.",
+            too_deep,
+            engine_degraded=True,
         )
     return _custom(
         "B89",
@@ -11626,11 +11669,15 @@ def check_install_directive_supply_chain(ctx: Context) -> Finding:
         )
     fails: list[str] = []
     inspected = 0
+    too_deep: list[str] = []  # C-664: skills whose metadata had a subtree too deep to follow
     for name, blob in skills.items():
         fm = _skill_frontmatter_block(blob)
         if fm is None:
             continue
-        install = dig(_fm_metadata_obj_multiline(fm), "openclaw.install")
+        meta, elided = _fm_metadata_obj_multiline_shallow(fm)
+        if elided:
+            too_deep.append(name)
+        install = dig(meta, "openclaw.install")
         if not install:
             continue
         inspected += 1
@@ -11650,6 +11697,19 @@ def check_install_directive_supply_chain(ctx: Context) -> Finding:
             ".onion host, is an unverified supply-chain source that can be silently swapped. "
             "Pin the source to an HTTPS URL on a named host, or remove the directive.",
             fails,
+        )
+    if too_deep:
+        # C-664: the install[] list was read in full (it sits near the top), but the
+        # metadata holds a subtree nested deeper than this reader follows - an unread
+        # part of the document, so no clean PASS.
+        return _custom(
+            "B103", HIGH, UNKNOWN,
+            f"Inspected {inspected} skill(s) with install directives, but the metadata of "
+            f"{len(too_deep)} skill(s) is nested too deeply to read in full: "
+            + ", ".join(too_deep[:6]) + ".",
+            "Flatten the SKILL.md metadata block, or review its install[] directives by hand.",
+            too_deep,
+            engine_degraded=True,
         )
     return _custom(
         "B103", HIGH, PASS,

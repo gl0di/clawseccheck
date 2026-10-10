@@ -49,12 +49,12 @@ walk wander outside the package root. Skipping is recorded in `notes`.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import pathprobe
+from .configloader import loads_shallow
 from .deptree import find_package_root
 
 # Bounds on the code walk, set to roughly 2.5x the real install. The margin erodes with every
@@ -135,8 +135,10 @@ def _digest_file(p: Path) -> str:
 def _read_version(root: Path) -> str:
     """The `version` string out of the package manifest, or ``""``."""
     try:
-        manifest = json.loads((root / "package.json").read_text(encoding="utf-8",
-                                                                errors="replace"))
+        # C-664: `version` is a top-level field, so it is read exactly however the file is
+        # padded; the old json.loads raised RecursionError out of the monitor on a deep file.
+        manifest = loads_shallow((root / "package.json").read_text(encoding="utf-8",
+                                                                   errors="replace")).value
     except (OSError, ValueError):
         return ""
     version = manifest.get("version") if isinstance(manifest, dict) else None

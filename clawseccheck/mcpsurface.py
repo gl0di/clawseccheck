@@ -32,11 +32,11 @@ as "cannot give a confident PASS", never silently drop the excess (B-092).
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import trajectory as _trajectory
+from .configloader import loads_shallow  # C-664: a dump is third-party content; no depth limit
 
 # Caps -- see the module docstring: every input here is attacker-influenced.
 _MAX_FILE_BYTES = 2_000_000
@@ -204,9 +204,10 @@ def from_manifest(path: "str | Path") -> "ToolSurface | None":
     if truncated_read:
         text = text[:_MAX_FILE_BYTES]
     try:
-        data = json.loads(text)
+        shallow = loads_shallow(text)
     except ValueError:
         return None
+    data = shallow.value
 
     server = p.stem
     tools: object = None
@@ -222,7 +223,9 @@ def from_manifest(path: "str | Path") -> "ToolSurface | None":
     if tools is None:
         return None
     surface = from_tool_defs(server, tools, source="manifest", completeness="full")
-    if surface is not None and truncated_read:
+    if surface is not None and (truncated_read or shallow.elided):
+        # C-664: a subtree below the depth this reader follows is a part of the dump that
+        # went unread, which the surface's "truncated" flag already says to every consumer.
         surface.truncated = True
     return surface
 
@@ -335,9 +338,10 @@ def from_probe_json(path: "str | Path") -> list:
     if len(text) > _MAX_FILE_BYTES:
         text = text[:_MAX_FILE_BYTES]
     try:
-        data = json.loads(text)
+        shallow = loads_shallow(text)
     except ValueError:
         return []
+    data = shallow.value
     if not isinstance(data, dict):
         return []
     names = data.get("tools")
@@ -346,7 +350,7 @@ def from_probe_json(path: "str | Path") -> list:
     servers_field = data.get("servers")
     known_servers = set(servers_field) if isinstance(servers_field, dict) else None
 
-    truncated = len(names) > _MAX_PROBE_NAMES
+    truncated = len(names) > _MAX_PROBE_NAMES or shallow.elided > 0  # C-664: unread depth
     by_server: dict = {}
     for raw in names[:_MAX_PROBE_NAMES]:
         if not isinstance(raw, str):

@@ -18,6 +18,7 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 from .. import pathprobe
+from ..configloader import loads_shallow as _loads_shallow
 from ..catalog import (
     CRITICAL,
     FAIL,
@@ -10117,7 +10118,11 @@ def detect_vet_type_with_reason(
             return "plugin", None
         if pathprobe.is_file(p) and p.suffix == ".json":
             try:
-                data = _json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                # C-664: the target is third-party content and the shape test below reads
+                # top-level keys only, so it is read shallow: padding it cannot change the
+                # classification and this detection no longer raises on a deep file. A
+                # later reader of the same file (vet_mcp's) may still do so.
+                data = _loads_shallow(p.read_text(encoding="utf-8", errors="replace")).value
             except (OSError, ValueError):
                 data = None
             # Strict spec shapes only (mcpServers / mcp.servers / a bare server spec) -

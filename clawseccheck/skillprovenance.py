@@ -50,11 +50,11 @@ made a scan target, are user-chosen.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from . import pathprobe
+from .configloader import ELIDED, loads_shallow
 
 # The workspace directory names OpenClaw uses, in the order `collector.WORKSPACE_DIRS`
 # lists them. Duplicated as a literal rather than imported, deliberately: this module is a
@@ -238,7 +238,17 @@ class ProvenanceScan:
 
 
 def _load_json(p: Path, *, max_bytes: int) -> "dict | None":
-    """A bounded JSON object read, or None. Never raises.
+    """A bounded JSON object read, or None. Never raises. See :func:`_load_json_shallow`."""
+    return _load_json_shallow(p, max_bytes=max_bytes)[0]
+
+
+def _load_json_shallow(p: Path, *, max_bytes: int) -> "tuple[dict | None, int]":
+    """``(object or None, subtrees too deep to follow)``. Never raises.
+
+    C-664: read by ``loads_shallow``, so a record padded past any fixed depth is still read
+    field for field, and a subtree below the depth it follows is ``ELIDED`` and counted.
+    The older ``json.loads`` raised ``RecursionError`` out of the monitor on a deep enough
+    file, and a fixed depth limit here would have turned padding into "no record at all".
 
     Bounded because this reads a file the audited agent writes: a 4 MB ceiling is roughly
     150x the real 27 KB lock file, generous enough never to fire in normal use and tight
@@ -247,11 +257,11 @@ def _load_json(p: Path, *, max_bytes: int) -> "dict | None":
     """
     try:
         if p.stat().st_size > max_bytes:
-            return None
-        data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            return None, 0
+        shallow = loads_shallow(p.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+        return None, 0
+    return (shallow.value, shallow.elided) if isinstance(shallow.value, dict) else (None, 0)
 
 
 def _digest_pair(rec: dict) -> "tuple[str, str]":
@@ -571,10 +581,14 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
     per_root: dict = {}
     for root in workspace_roots(home, config, searched=searched):
         root_id = _root_identity(home, root)
-        lock = _load_json(root / ".clawhub" / "lock.json", max_bytes=MAX_LOCK_BYTES)
+        lock, lock_elided = _load_json_shallow(root / ".clawhub" / "lock.json",
+                                               max_bytes=MAX_LOCK_BYTES)
         if lock is None:
             continue
         present = True
+        if lock_elided:
+            notes.append("the install record is nested deeper than this reader follows; "
+                         "part of it was not examined")
         records = lock.get("skills")
         if not isinstance(records, dict):
             notes.append("the install record has no skills section")
@@ -659,14 +673,62 @@ def _corroborate(root: Path, name: str, rec: dict) -> "bool | None":
     separate writes, and building a mismatch signal on clock equality is how a benign
     millisecond becomes an accusation.
     """
-    origin = _load_json(root / "skills" / name / ".clawhub" / "origin.json",
-                        max_bytes=MAX_LOCK_BYTES)
+    origin, origin_elided = _load_json_shallow(
+        root / "skills" / name / ".clawhub" / "origin.json", max_bytes=MAX_LOCK_BYTES)
     if origin is None:
         return None
     o_artifact, o_skill_file = _digest_pair(origin)
     l_artifact, l_skill_file = _digest_pair(rec)
-    o_version = origin.get("installedVersion")
-    l_version = rec.get("version")
-    return (o_artifact == l_artifact
-            and o_skill_file == l_skill_file
-            and o_version == l_version)
+    # C-664: a compared value holding an ELIDED marker was cut at a depth that differs
+    # between the two files (the lock record sits deeper than the origin), so it can
+    # neither confirm nor refute: `_compare` answers None for it unless the visible part
+    # already differs. A mismatch on any other, fully visible field is still False (the
+    # monitor alerts on `False`), and a match is only ever reported when nothing was cut.
+    results = [
+        _compare(o_artifact, l_artifact),
+        _compare(o_skill_file, l_skill_file),
+        _compare(origin.get("installedVersion"), rec.get("version")),
+    ]
+    if False in results:
+        return False
+    if None in results or origin_elided:
+        return None
+    return True
+
+
+def _holds_elided(value) -> bool:
+    """True when an ELIDED marker sits anywhere inside *value* (shallow, so no recursion)."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if item is ELIDED:
+            return True
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+def _surely_differ(a, b) -> bool:
+    """True when *a* and *b* differ in a part that was read in full. ELIDED stands for an
+    array or object of unknown content, so against a scalar it is a sure difference and
+    against another container (or ELIDED) it is unknown."""
+    if a is ELIDED or b is ELIDED:
+        other = b if a is ELIDED else a
+        return not (other is ELIDED or isinstance(other, (list, dict)))
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) != len(b) or any(_surely_differ(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() != b.keys() or any(_surely_differ(a[k], b[k]) for k in a)
+    if isinstance(a, (list, dict)) or isinstance(b, (list, dict)):
+        return True
+    return a != b
+
+
+def _compare(a, b) -> "bool | None":
+    """``a == b`` as before when both were read in full; otherwise False only where a
+    fully-read part already differs, else None (neither confirmed nor refuted)."""
+    if not (_holds_elided(a) or _holds_elided(b)):
+        return a == b
+    return False if _surely_differ(a, b) else None
