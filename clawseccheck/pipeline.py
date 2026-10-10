@@ -63,6 +63,7 @@ from .behavioral import analyze as behavioral_analyze
 from .behavioral import render_behavioral_analysis
 from .canary import TOKEN_PREFIX as _CANARY_TOKEN_PREFIX
 from .catalog import UNKNOWN
+from .configloader import ELIDED, loads_shallow
 # F-193 (interim check): the real scenario-id-generating functions themselves, so the
 # liveTest id validator below asks "did make_*() actually produce this?" instead of a
 # free-form regex - see _valid_live_test_entries()'s own docstring. All four are pure
@@ -1003,15 +1004,24 @@ def split_judged_bundle(raw: str) -> dict:
     if len(raw.encode("utf-8", "surrogatepass")) > MAX_BUNDLE_BYTES:
         _note_bundle_dropped(raw, f"it is larger than the {MAX_BUNDLE_BYTES}-byte cap")
         return empty
-    # C-664: model-supplied content - a depth limit would be an evasion; shallow reader later (slice C)
+    # C-664: the bundle carries model output a hostile skill can steer, so a depth limit
+    # would be an evasion (one padded key would drop every bucket beside it). Read it
+    # shallow: the buckets and the fields inside them sit a few levels down and come back
+    # as `json.loads` returns them; only a subtree below the reader's depth is replaced.
     try:
-        data = json.loads(raw)
+        shallow = loads_shallow(raw)
     except ValueError:
         _note_bundle_dropped(raw, "it is not valid JSON")
         return empty
+    data = shallow.value
     if not isinstance(data, dict):
         _note_bundle_dropped(raw, "its top level is not a JSON object")
         return empty
+    if shallow.elided:
+        # The buckets are serialised again for the verdict parsers (json.dumps), which
+        # cannot write the reader's marker: it becomes null, a value no bucket field
+        # accepts, so a field that was itself that deep is unusable as it always was.
+        data = _nulled_elided(data)
     out = dict(empty)
     if isinstance(data.get("attestation"), dict):
         out["attestation"] = data["attestation"]
@@ -1024,6 +1034,17 @@ def split_judged_bundle(raw: str) -> dict:
         out["liveTest"] = data["liveTest"]
     _note_misplaced_bundle_content(data, out)
     return out
+
+
+def _nulled_elided(node):
+    """*node* (a ``loads_shallow`` value) with every ``ELIDED`` marker replaced by None."""
+    if node is ELIDED:
+        return None
+    if isinstance(node, dict):
+        return {k: _nulled_elided(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_nulled_elided(v) for v in node]
+    return node
 
 
 def _note_bundle_dropped(raw: str, reason: str) -> None:

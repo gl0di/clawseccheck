@@ -49,6 +49,7 @@ from pathlib import Path
 
 from ..baseline import fingerprint
 from ..catalog import ATTESTED, FAIL, MEDIUM, UNKNOWN, WARN, Finding
+from ..configloader import ELIDED, loads_shallow
 from ..sar import _VERDICT_VALUES
 
 from ._builder import (
@@ -171,9 +172,13 @@ def _parse_verdicts(raw: str) -> dict:
         _note_nothing_applied(
             raw, f"it is not text, or exceeds the {_MAX_VERDICTS_BYTES} byte bound")
         return {}
-    # C-664: model-supplied content - a depth limit would be an evasion; shallow reader later (slice C)
+    # C-664: the payload is model output a hostile skill can steer, so a depth limit would
+    # be an evasion (one padded key would drop every verdict beside it). Read it shallow:
+    # whatever the fields below need sits within a few levels and is read as `json.loads`
+    # reads it; a subtree below the reader's depth is the opaque ELIDED, never a dict or a
+    # list, so a field that IS that deep falls out as the unusable shape it would be anyway.
     try:
-        data = json.loads(raw)
+        data = loads_shallow(raw).value
     except ValueError:
         _note_nothing_applied(raw, "it is not valid JSON")
         return {}
@@ -191,13 +196,28 @@ def _parse_verdicts(raw: str) -> dict:
         # mistake; the hint that follows still gives the entry contract.
         _note_nothing_applied(raw, 'it has no "verdicts" array')
         return {}
+    def _unelided(node):
+        # `votes` is echoed into the emitted artifacts, and an ELIDED marker is not JSON:
+        # a subtree the reader did not follow goes out as null. The tally reads it as the
+        # non-number it already is for a nested list (no vote count), as before.
+        if node is ELIDED:
+            return None
+        if isinstance(node, dict):
+            return {k: _unelided(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_unelided(v) for v in node]
+        return node
+
     out: dict = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         fid, target = entry.get("finding_id"), entry.get("target")
         verdict = entry.get("verdict")
-        if not (isinstance(fid, str) and isinstance(target, str) and verdict in _VALID_VERDICTS):
+        # A verdict that is a list or an object (hashing it is a TypeError) is as unusable as
+        # a verdict that names no known value; C-664 found it by padding the field.
+        if not (isinstance(fid, str) and isinstance(target, str)
+                and isinstance(verdict, str) and verdict in _VALID_VERDICTS):
             continue
         key = (fid, target)
         existing = out.get(key)
@@ -209,7 +229,7 @@ def _parse_verdicts(raw: str) -> dict:
         if existing is not None and _VERDICT_RANK[verdict] < _VERDICT_RANK[existing["verdict"]]:
             continue
         votes = entry.get("votes")
-        out[key] = {"verdict": verdict, "votes": votes if isinstance(votes, dict) else None}
+        out[key] = {"verdict": verdict, "votes": _unelided(votes) if isinstance(votes, dict) else None}
     # An explicitly empty "verdicts": [] IS "no verdicts submitted" -- say nothing.
     # Entries that were submitted and all rejected is the case worth shouting about.
     if entries and not out:
@@ -545,9 +565,11 @@ def _verdicts_fingerprint_matches(verdicts_raw, expected_fingerprint: str) -> bo
     """
     if not isinstance(verdicts_raw, str) or len(verdicts_raw.encode("utf-8", "surrogatepass")) > _MAX_VERDICTS_BYTES:
         return False
-    # C-664: model-supplied content - a depth limit would be an evasion; shallow reader later (slice C)
+    # C-664: model-supplied content - a depth limit would be an evasion (an unrelated padded
+    # key would void a payload that names the right fingerprint), so read it shallow; the
+    # fingerprint sits at the top level, and an ELIDED marker never equals a string.
     try:
-        data = json.loads(verdicts_raw)
+        data = loads_shallow(verdicts_raw).value
     except ValueError:
         return False
     if not isinstance(data, dict):

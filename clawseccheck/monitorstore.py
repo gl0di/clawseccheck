@@ -35,7 +35,7 @@ import re
 from pathlib import Path
 
 from . import pathprobe
-from .configloader import loads_bounded
+from .configloader import ELIDED, loads_bounded, loads_shallow
 from .locking import journal_lock
 from .safeio import secure_append_text, secure_dir, secure_write_text
 
@@ -85,6 +85,57 @@ def _chain_hash(prev_hash: str, entry: dict) -> str:
     canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
     raw = (prev_hash + canonical).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+def _nulled_elided(node):
+    """*node* (a ``loads_shallow`` value) with every ``ELIDED`` marker replaced by None."""
+    if node is ELIDED:
+        return None
+    if isinstance(node, dict):
+        return {k: _nulled_elided(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_nulled_elided(v) for v in node]
+    return node
+
+
+def _iter_jsonl_marked(p: Path, *, skipped: "list | None" = None):
+    """:func:`_iter_jsonl`'s reader, yielding ``(entry, lossy)`` pairs.
+
+    *lossy* is True for a line this tool did not write in full: one nested deeper than the
+    shallow reader follows, so a subtree of it was NOT read, or one that cannot be read at
+    all because of its depth. The tool's own entries are shallow, so such a line is padding
+    that somebody added. *entry* is the dict (its unread subtrees None), or None where no
+    entry could be read; that placeholder is still yielded, in its place in the sequence,
+    so the caller's entry numbers stay the ones it reports. A line that is not valid JSON
+    (``JSONDecodeError``: the truncated tail of an append that died) or is valid JSON that
+    is not an object, and is not lossy, is skipped exactly as before.
+    """
+    with p.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                shallow = loads_shallow(line)
+            except json.JSONDecodeError:
+                if skipped is not None:
+                    skipped.append(line)
+                continue
+            except ValueError:
+                # C-664: not a syntax error but a line the reader cannot follow at all
+                # (JSONNestingError), or a number past the interpreter's digit limit.
+                if skipped is not None:
+                    skipped.append(line)
+                yield None, True
+                continue
+            entry = shallow.value
+            if isinstance(entry, dict):
+                yield (_nulled_elided(entry) if shallow.elided else entry), bool(shallow.elided)
+                continue
+            if skipped is not None:
+                skipped.append(line)
+            if shallow.elided:
+                yield None, True
+
+
 def _iter_jsonl(p: Path, *, skipped: "list | None" = None):
     """Stream-parse a JSONL file, yielding one dict per well-formed non-blank line.
 
@@ -99,6 +150,13 @@ def _iter_jsonl(p: Path, *, skipped: "list | None" = None):
     (skipped, same as any other malformed line) instead of raising
     ``UnicodeDecodeError`` and permanently wedging every future invocation.
 
+    C-664: a line is read with the shallow reader, never refused for its depth. A line
+    nested past the reader's depth still yields its entry (every subtree below that depth
+    is None, so the entry stays JSON-serialisable); a deep line no entry can be read from
+    is skipped here. ``verify_chain`` and ``_rotate_journal`` are the readers that must
+    not shrug at either: they go through ``_iter_jsonl_marked`` instead (a break at that
+    entry; a journal left unrotated).
+
     C-250: when *skipped* (a list) is given, every non-blank line that could NOT be
     turned into a usable entry (a JSON-decode error, or valid JSON that isn't a dict -
     e.g. a tail-truncated final line from a write that died mid-append) is appended to
@@ -108,23 +166,9 @@ def _iter_jsonl(p: Path, *, skipped: "list | None" = None):
     the identical bare ``OK``. Same opt-in out-param idiom ``_snapshot_memory_files``'s
     ``capped`` already uses: a caller that does not ask for it sees no behaviour change.
     """
-    with p.open("r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            # C-664: tamper-evidence store - a depth limit would let a padded entry read as
-            # a skipped line instead of a broken chain; shallow reader later (slice C)
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                if skipped is not None:
-                    skipped.append(line)
-                continue
-            if isinstance(entry, dict):
-                yield entry
-            elif skipped is not None:
-                skipped.append(line)
+    for entry, _lossy in _iter_jsonl_marked(p, skipped=skipped):
+        if entry is not None:
+            yield entry
 # The machine-readable causes `verify_chain` reports through its `cause` out-param when it
 # returns the third outcome. Same vocabulary shape as `_verify_baseline`'s `_why`, and for
 # the same reason: the CLI has to pick between sentences that say opposite things, and
@@ -188,9 +232,11 @@ def verify_chain(events_path: "str | Path",
     the only note) can now read "OK (1 unknown-schema entry present; 2 entries not
     chain-verified (legacy, no chain_hash); 1 unparseable line skipped)".
 
-    Returns (False, "broken at entry N") on the first mismatch, or (False, "unchained
-    entry N follows a chained entry - not legacy") on the first unchained row after a
-    chained one (C-624).
+    Returns (False, "broken at entry N") on the first mismatch, or on the first line this
+    tool did not write in full (C-664: nested deeper than the shallow reader follows, or
+    too deep to read at all - any such line is a break, never a skipped line), or (False,
+    "unchained entry N follows a chained entry - not legacy") on the first unchained row
+    after a chained one (C-624).
     Never raises - an IO error yields the third outcome (``None``), not a pass: saying
     "OK" about a file that could not be opened is the same lie as saying it about one that
     is not there.
@@ -231,7 +277,9 @@ def verify_chain(events_path: "str | Path",
                                  "resolve to a readable file")
             return _no_chain(CHAIN_ABSENT, "no chain here \u2014 the file does not exist")
         _skipped: "list[str]" = []
-        entries = list(_iter_jsonl(p, skipped=_skipped))
+        # C-664: marked, because a line this tool did not write in full (padded deeper than
+        # the reader follows) is a break in a tamper-evident chain, not a line to skip.
+        entries = list(_iter_jsonl_marked(p, skipped=_skipped))
     except OSError as exc:
         # A malformed path is not an unreadable store. ENAMETOOLONG / ENOTDIR / ELOOP say
         # the string cannot name a file at all, and routing them to "unreadable" produced
@@ -260,7 +308,11 @@ def verify_chain(events_path: "str | Path",
     unknown_schema = 0
     unchained = 0
     seen_chained = False  # C-624: legacy rows are a PREFIX only
-    for idx, entry in enumerate(entries):
+    for idx, (entry, lossy) in enumerate(entries):
+        if lossy:
+            # C-664: its unread part cannot be authenticated, and the entry's own hash
+            # was taken over a document without that padding.
+            return False, f"broken at entry {idx}"
         # Count lines the loaders would skip (C-167): present + authenticated here,
         # but hidden from load_events()/history.load() by the unknown-schema policy.
         if not _schema_ok(entry):
@@ -409,6 +461,10 @@ def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,
     local-file honesty this module cannot promise past a rotation boundary anywhere
     else (see the re-genesis note above) - not a new gap.
 
+    C-664: a journal holding a line this tool did not write in full (see
+    ``_iter_jsonl_marked``) is not rotated at all: it stays byte-identical and keeps
+    verifying as BROKEN, rather than being re-chained into one that verifies OK.
+
     Must be called from inside the caller's ``journal_lock`` critical section
     (immediately after an append) - it does not take the lock itself.
     Never raises: any OSError during read/rewrite is swallowed, leaving the
@@ -417,7 +473,14 @@ def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,
     try:
         if not pathprobe.is_file(p):
             return
-        entries = list(_iter_jsonl(p))
+        rows = list(_iter_jsonl_marked(p))
+        if any(lossy for _entry, lossy in rows):
+            # C-664: a line this tool did not write in full (padded deeper than the shallow
+            # reader follows, or too deep to read at all). Re-chaining the survivors would
+            # drop or rewrite it and leave a journal that verifies OK, erasing the break
+            # verify_chain reports - so the file is left as it is, not rotated.
+            return
+        entries = [entry for entry, _lossy in rows]
         if len(entries) <= max_lines:
             return  # no-op - file untouched, byte-identical
 
