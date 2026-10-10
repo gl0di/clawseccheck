@@ -19,7 +19,6 @@ import errno
 import math
 import hashlib
 import io
-import json
 import re
 import os
 import sqlite3
@@ -37,8 +36,10 @@ from .configloader import (
     ConfigLoadError as _ConfigLoadError,
     JSONNestingError as _JSONNestingError,
     MAX_JSON_NESTING as _MAX_JSON_NESTING,
+    SHALLOW_JSON_DEPTH as _SHALLOW_JSON_DEPTH,
     load_openclaw_config as _load_openclaw_config,
     loads_bounded as _loads_bounded,
+    loads_shallow as _loads_shallow,
 )
 from .safeio import walk_dir_safely, is_safe_tar_member
 from .skilldiscovery import (
@@ -843,6 +844,12 @@ class Context:
     #                          WHERE store_key = ? (store-ScQ9SjOe.js:643-645): rows filed
     #                          under a DIFFERENT cron.store are not a shadow of this file.
     cron_jobs_truncated: bool = False
+    # C-664: a job store (jobs.json, or a job_json column) nests deeper than the shallow
+    # reader follows, so the jobs ARE read (their payload/trigger fields sit a few levels
+    # down) but whatever lay below that depth was not. Only a clean verdict is unsound over
+    # that, so B168 degrades its PASS to UNKNOWN; B189 reasons about job ids, which the
+    # padding cannot hide, and does not read this.
+    cron_content_elided: bool = False
 
     # F-183: the machine-owned config store (`config_machine_state` in the state DB).
     # `_read` False means the store could not be consulted at all -- UNDETERMINED. An
@@ -3193,7 +3200,8 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
     source, or None when the notebook JSON can't be parsed - in which case a limit_hit is
     recorded so the AST layer degrades to UNKNOWN (AST_UNANALYZABLE), never a false PASS."""
     try:
-        nb = json.loads(text)
+        shallow = _loads_shallow(text)
+        nb = shallow.value
         cells = nb["cells"]
         if not isinstance(cells, list):
             raise ValueError("cells is not a list")
@@ -3205,6 +3213,14 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
                 "were NOT analyzed (AST_UNANALYZABLE)",
             )
         return None
+    if shallow.elided and ctx is not None:
+        # The code cells sit a few levels down and are read; only what lay below the depth
+        # the reader follows was not.
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+            f"notebook in skill '{skill_name}' nests deeper than {_SHALLOW_JSON_DEPTH} "
+            "levels \u2014 content below that depth was NOT analyzed (AST_UNANALYZABLE)",
+        )
     parts: list[str] = []
     for cell in cells:
         if not isinstance(cell, dict) or cell.get("cell_type") != "code":
@@ -4922,6 +4938,14 @@ def _dormant_cron_payload_text(job: dict) -> "str | None":
     return candidate if isinstance(candidate, str) and candidate.strip() else None
 
 
+def _elided_note(what: str) -> str:
+    """C-664: the note recorded in ctx.limit_hits or ctx.errors for a user-owned state document the shallow reader cut short."""
+    return (
+        f"{what} nests deeper than {_SHALLOW_JSON_DEPTH} levels \u2014 content below that "
+        "depth was NOT scanned"
+    )
+
+
 def _collect_cron(home: Path, ctx: Context) -> None:
     """B-231 sub-item 1: read-only, symlink-safe, size/entry-capped collection of the
     OpenClaw cron job store into ``ctx.cron_jobs``.
@@ -4986,7 +5010,12 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     f"{_MAX_CRON_BYTES // 1_000_000}MB cap \u2014 content beyond the cap "
                     "was NOT scanned",
                 )
-            store = json.loads(raw.decode("utf-8", errors="replace"))
+            shallow = _loads_shallow(raw.decode("utf-8", errors="replace"))
+            store = shallow.value
+            if shallow.elided:
+                ctx.cron_content_elided = True
+                note_limit(ctx.limit_hits, LIMIT_DOMAIN_CRON,
+                           _elided_note(f"cron store '{jobs_json}'"))
             jobs = store.get("jobs") if isinstance(store, dict) else None
             if not isinstance(jobs, list):
                 jobs = []
@@ -5166,7 +5195,12 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 job_spec = None
                 if isinstance(job_json, (str, bytes)):
                     try:
-                        parsed = json.loads(job_json)
+                        shallow = _loads_shallow(job_json)
+                        parsed = shallow.value
+                        if shallow.elided:
+                            ctx.cron_content_elided = True
+                            note_limit(ctx.limit_hits, LIMIT_DOMAIN_CRON, _elided_note(
+                                f"job_json for cron job '{job_id}' in '{db_path}'"))
                     except (TypeError, ValueError):
                         parsed = None
                     if isinstance(parsed, dict):
@@ -6397,7 +6431,12 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     * ``config_machine_state``           key -> parsed value, for the keys that were set
     * ``config_machine_state_unparsed``  keys whose row exists but whose ``value_json``
                                          is not valid JSON -- present, and NOT readable,
-                                         which is neither "set to X" nor "not set"
+                                         which is neither "set to X" nor "not set". It
+                                         also lists a key whose document parsed but had
+                                         subtrees nested past the shallow reader's depth
+                                         cut off (C-664): that key is ALSO in
+                                         ``config_machine_state``, holding the value as
+                                         read, with the cut-off subtrees replaced by a marker
 
     Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
     the cron and plugin-trust readers already use on this exact database.
@@ -6511,7 +6550,13 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
             ctx.config_machine_state_unparsed.add(state_key)
             continue
         try:
-            ctx.config_machine_state[state_key] = json.loads(value_json)
+            shallow = _loads_shallow(value_json)
+            ctx.config_machine_state[state_key] = shallow.value
+            if shallow.elided:
+                # The value is delivered as read (every consumer looks at its top level
+                # only), and the key is also listed as not fully read.
+                ctx.config_machine_state_unparsed.add(state_key)
+                ctx.errors.append(_elided_note(f"config_machine_state[{state_key!r}]"))
         except (TypeError, ValueError):
             # Present but unreadable. Recording it as absent would let a consumer answer
             # "not set" about a row that exists.
@@ -7013,7 +7058,8 @@ def _collect_exec_approvals_sqlite(home: Path, ctx: Context) -> None:
         _unreadable("the stored document is over the size cap")
         return
     try:
-        store = json.loads(bytes(raw).decode("utf-8", errors="replace"))
+        shallow = _loads_shallow(bytes(raw).decode("utf-8", errors="replace"))
+        store = shallow.value
     except (ValueError, RecursionError) as exc:
         # JSONDecodeError's text is position-only, but only the type name is recorded.
         _unreadable(f"the stored document is not valid JSON ({type(exc).__name__})")
@@ -7031,6 +7077,11 @@ def _collect_exec_approvals_sqlite(home: Path, ctx: Context) -> None:
         return
     _ingest_exec_approvals_document(store, ctx, where, "sqlite")
     ctx.exec_approvals_sqlite_read = True
+    if shallow.elided:
+        # The grants read stay (a WARN found in what WAS read stands); the store is also
+        # flagged as not read in full, so "no grant" can never be a clean verdict over it.
+        _unreadable(f"the stored document nests deeper than {_SHALLOW_JSON_DEPTH} levels; "
+                    "content below that depth was not read")
 
 
 def _collect_exec_approvals(home: Path, ctx: Context) -> None:
@@ -7044,7 +7095,7 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
 
     Grounded against the installed dist (exec-approvals-BIKWP8_V.js): the file is a
     single top-level JSON object (written by OpenClaw itself via JSON.stringify --
-    never JSON5, so this reads it with plain ``json.loads``, not the config loader)
+    never JSON5, so this reads it with ``loads_bounded``, not the config loader)
     shaped ``{version, socket, defaults: {security, ask, askFallback, autoAllowSkills},
     agents: {<agentId>: {security, ask, askFallback, allowlist: [{pattern, argPattern?,
     source, id, ...}]}}}``. An ``agents.<id>.allowlist[]`` entry with
@@ -7107,10 +7158,18 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
                 f"{_MAX_EXEC_APPROVALS_BYTES // 1_000_000}MB cap \u2014 content beyond the "
                 "cap was NOT scanned",
             )
-        store = json.loads(raw.decode("utf-8", errors="replace"))
+        shallow = _loads_shallow(raw.decode("utf-8", errors="replace"))
+        store = shallow.value
         if not isinstance(store, dict):
             raise ValueError("exec-approvals.json root is not a JSON object")
         _ingest_exec_approvals_document(store, ctx, f"'{target}'", None)
+        if shallow.elided:
+            # Same shape as a store that is read in part: the grants found stand, and the
+            # store is flagged unread-in-full so an empty result is UNKNOWN, never PASS.
+            ctx.errors.append(f"could not read all of {target}: "
+                              + _elided_note("the document"))
+            ctx.exec_approvals_found = True
+            ctx.exec_approvals_parse_error = True
     except (OSError, ValueError) as exc:
         ctx.errors.append(f"could not parse {target}: {exc}")
         ctx.exec_approvals_found = True
@@ -7659,14 +7718,25 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             ctx.plugin_index_found = True
             ctx.plugin_index_parse_error = True
         else:
+            state_elided = 0
             try:
-                state_obj = json.loads(state_value_json)
+                shallow = _loads_shallow(state_value_json)
+                state_obj, state_elided = shallow.value, shallow.elided
             except (TypeError, ValueError) as exc:
                 ctx.errors.append(
                     "could not parse config_machine_state['plugins.installedIndex'] in "
                     f"{db_path}: {exc}"
                 )
                 state_obj = None
+            if state_elided:
+                # Every field this reader takes sits within a few levels of the root, so
+                # the padding hides none of them. It is recorded in ctx.limit_hits (no
+                # finding shows it); a document whose top level is not the expected object
+                # is the existing unusable case below.
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                    _elided_note(f"config_machine_state['plugins.installedIndex'] in '{db_path}'"),
+                )
 
             revision = state_obj.get("revision") if isinstance(state_obj, dict) else None
             revision_is_number = (
@@ -7796,8 +7866,10 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             )
             raw = raw[:_MAX_PLUGIN_TRUST_BYTES]
 
+        installs_elided = 0
         try:
-            installs = json.loads(raw)
+            shallow = _loads_shallow(raw)
+            installs, installs_elided = shallow.value, shallow.elided
         except ValueError as exc:
             ctx.errors.append(f"could not parse install_records_json in {db_path}: {exc}")
             ctx.plugin_trust_found = True
@@ -7807,6 +7879,15 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             ctx.plugin_trust_found = True
             ctx.plugin_trust_parse_error = True
             installs = None
+        if installs_elided:
+            note_limit(ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                       _elided_note(f"install_records_json in '{db_path}'"))
+            if isinstance(installs, dict) and not any(
+                    isinstance(r, dict) for r in installs.values()):
+                # Nothing usable was read: the same unreadable state a malformed one gets.
+                ctx.plugin_trust_found = True
+                ctx.plugin_trust_parse_error = True
+                installs = None
 
         if installs is not None:
             ctx.plugin_trust_found = True
@@ -7833,8 +7914,10 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             )
             raw2 = raw2[:_MAX_PLUGIN_INDEX_BYTES]
 
+        plugins_elided = 0
         try:
-            plugins = json.loads(raw2)
+            shallow = _loads_shallow(raw2)
+            plugins, plugins_elided = shallow.value, shallow.elided
         except ValueError as exc:
             ctx.errors.append(f"could not parse plugins_json in {db_path}: {exc}")
             ctx.plugin_index_found = True
@@ -7844,6 +7927,13 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             ctx.plugin_index_found = True
             ctx.plugin_index_parse_error = True
             plugins = None
+        if plugins_elided:
+            note_limit(ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                       _elided_note(f"plugins_json in '{db_path}'"))
+            if isinstance(plugins, list) and not any(isinstance(r, dict) for r in plugins):
+                ctx.plugin_index_found = True
+                ctx.plugin_index_parse_error = True
+                plugins = None
 
         if plugins is not None:
             ctx.plugin_index_found = True
@@ -7860,7 +7950,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                 )
 
 
-def _parse_subagent_outcome(raw) -> "tuple[dict | None, bool]":
+def _parse_subagent_outcome(raw, elided_out: "list | None" = None) -> "tuple[dict | None, bool]":
     """Best-effort parse of one ``subagent_runs.outcome_json`` cell.
 
     Returns ``(outcome, ok)``. ``ok`` is False ONLY when *raw* is a non-empty string that
@@ -7870,21 +7960,28 @@ def _parse_subagent_outcome(raw) -> "tuple[dict | None, bool]":
     invalidates the whole row's disclosure - see ``_collect_subagent_runs``). A value that
     parses but is not a JSON object (bare ``null``/number/string) is also ``(None, True)``:
     syntactically valid, just no outcome fields to surface.
+
+    C-664: the cell is read with the shallow reader, so a row padded with deeply nested
+    JSON is still read (its fields sit near the top) and still counted. When *elided_out*
+    is given, the number of subtrees the reader cut short is appended to it.
     """
     if raw is None:
         return None, True
     if not isinstance(raw, str) or not raw.strip():
         return None, True
     try:
-        parsed = json.loads(raw)
+        shallow = _loads_shallow(raw)
     except ValueError:
         return None, False
+    parsed = shallow.value
+    if shallow.elided and elided_out is not None:
+        elided_out.append(shallow.elided)
     if isinstance(parsed, dict):
         return parsed, True
     return None, True
 
 
-def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
+def _parse_subagent_modern_payload(raw, elided_out: "list | None" = None) -> "tuple[dict, bool]":
     """B-709: parse one MODERN ``subagent_runs.payload_json`` cell (the consolidated blob
     that replaced the ``model``/``run_timeout_seconds``/``outcome_json``/``ended_reason``
     columns when the ``payload_json`` column is present) into a plain dict, for named-key
@@ -7910,9 +8007,12 @@ def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
     if not raw.strip():
         return {}, True
     try:
-        parsed = json.loads(raw)
+        shallow = _loads_shallow(raw)
     except ValueError:
         return {}, False
+    parsed = shallow.value
+    if shallow.elided and elided_out is not None:
+        elided_out.append(shallow.elided)
     if isinstance(parsed, dict):
         # A run whose `completionTarget` is "parent" is stored wrapped as
         # `{"parentCompletion": <record>}` (`bindSubagentRunRecord`) rather than as the flat
@@ -8123,9 +8223,10 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
 
     good: list[dict] = []
     bad_count = 0
+    elided_rows: list = []
     if modern:
         for child_session_key, created_at, payload_json in rows:
-            fields, ok = _parse_subagent_modern_payload(payload_json)
+            fields, ok = _parse_subagent_modern_payload(payload_json, elided_rows)
             if not ok:
                 # Whole payload unreadable -- there is nothing else on this row to fall
                 # back on (unlike the legacy columns, every extracted field lives inside
@@ -8157,7 +8258,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     else:
         for (child_session_key, model, agent_dir, workspace_dir, spawn_mode,
              run_timeout_seconds, task, outcome_json, ended_reason, created_at) in rows:
-            outcome, ok = _parse_subagent_outcome(outcome_json)
+            outcome, ok = _parse_subagent_outcome(outcome_json, elided_rows)
             if not ok:
                 bad_count += 1
                 continue
@@ -8176,6 +8277,15 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
                 "ended_reason": ended_reason,
                 "created_at": created_at,
             })
+
+    if elided_rows:
+        # The rows are read and counted (the fields B18 takes sit near the top of each), so
+        # the padding is recorded in ctx.limit_hits (no finding shows it) - the channel
+        # B18's not-applicable proof already reads - rather than dropping a row.
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
+            _elided_note(f"{len(elided_rows)} subagent_runs row(s) in '{db_path}'"),
+        )
 
     if not good and bad_count:
         # Every row's payload was unparseable -- nothing here can be asserted reliably

@@ -1732,7 +1732,8 @@ def check_cron_job_content(ctx: Context) -> Finding:
               on: an unread job past the cap can only ADD a directive this scan would have
               caught, never remove one, so a clean verdict over a truncated read is unsound
               regardless of whether anything suspicious turned up among the jobs that WERE
-              read. All causes above suppress only a clean verdict - a FAIL/WARN found in
+              read; or (C-664) part of the store nests deeper than the collector's shallow
+              reader follows, so that content was never scanned. All causes above suppress only a clean verdict - a FAIL/WARN found in
               what WAS read still stands, so none of them can hide a payload the scan
               actually caught.
     PASS    - a cron store was read and no job triggers any signal, with the row cap not
@@ -2013,6 +2014,23 @@ def check_cron_job_content(ctx: Context) -> Finding:
             # store, just never read -- present-but-unread, same Finding.engine_degraded
             # contract as this check's cron_store_shadowed branch and B189's identical
             # truncation shape.
+            engine_degraded=True,
+        )
+    # C-664: a job store nested deeper than the collector's shallow reader follows. The jobs
+    # (and the payload/trigger fields this check scans, a few levels down) were read and
+    # scanned above, and a FAIL/WARN found in them stands; only the verdict by absence is
+    # unsound, because padding of unbounded depth can hold anything the reader never saw.
+    if ctx.cron_content_elided:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            f"Scanned {len(ctx.cron_jobs)} cron job(s) and found no embedded "
+            "instruction-override or install directive \u2014 but part of the job store "
+            "nests deeper than the audit reads, so that content was never scanned. A clean "
+            "bill of health cannot be given over it.",
+            "Remove the deeply nested padding from the cron job store (jobs.json or the "
+            "job_json column of the state database) so the whole store can be read, then "
+            "re-run the audit.",
             engine_degraded=True,
         )
     return _finding(
