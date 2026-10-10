@@ -163,8 +163,14 @@ from .collector import agent_roster
 #: its ``build`` stamp and the inputs of two fixture rows whose config had changed in this
 #: repo since (``clean_b4_peragent_sandbox*``), and no answer. So the chain 9.5 = 9.6 = 9.7 =
 #: 9.8 is measured row by row and the floor stays where it is.
+#:
+#: The ceiling moved to 2026.9.9 on 2026-10-10. The battery was regenerated against the
+#: installed 2026.9.9 (build bcfc888) and compared with the 2026.9.8 one: 773 rows each, the
+#: same labels, configs and envs, the same 22 thrown-error rows, and the vendor's answer
+#: identical on every row -- only its ``build`` stamp moved. The chain is now 9.5 = 9.6 = 9.7
+#: = 9.8 = 9.9, measured row by row, and the floor stays where it is.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 9, 8)
+ORACLE_MAX = (2026, 9, 9)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 

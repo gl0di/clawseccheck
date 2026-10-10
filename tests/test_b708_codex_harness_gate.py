@@ -40,6 +40,7 @@ def _tmp_path_factory_bridge(tmp_path_factory):
 #: INSTALLED dist is grounded separately, in ``test_harnessruntime_dist_grounding``.
 VALIDATED = ".".join(str(x) for x in hr.ORACLE_MAX)
 ABOVE_WINDOW = (hr.ORACLE_MAX[0], hr.ORACLE_MAX[1], hr.ORACLE_MAX[2] + 1)
+ABOVE_WINDOW_STR = ".".join(str(x) for x in ABOVE_WINDOW)
 BELOW = "2026.8.2"
 
 _APPROVE = {"mcp": {"servers": {"ops": {"command": "c",
@@ -145,7 +146,7 @@ def test_b353_hermetic_run_with_no_known_build_stays_unknown():
 def test_a_config_stamp_at_the_floor_counts_but_an_older_one_does_not():
     base = _cfg(_APPROVE, _models())
     # a stamp NEWER than the validated window is not extrapolated from: it degrades to WARN
-    for stamp, expect in ((VALIDATED, PASS), ("2026.9.9", WARN), ("2026.7.1", WARN),
+    for stamp, expect in ((VALIDATED, PASS), (ABOVE_WINDOW_STR, WARN), ("2026.7.1", WARN),
                           ("2026.8.2", WARN)):
         cfg = _cfg(base, {"meta": {"lastTouchedVersion": stamp}})
         home = _TMP_PATH_FACTORY.mktemp("b708")
@@ -328,7 +329,7 @@ def test_an_unorderable_installed_build_never_falls_through_to_the_stamp():
 def test_an_absent_installed_build_still_uses_an_in_window_stamp():
     for installed in (None, ""):
         assert _harness_build(installed, stamp=VALIDATED) == hr.ORACLE_MAX
-        assert _harness_build(installed, stamp="2026.9.9") is None
+        assert _harness_build(installed, stamp=ABOVE_WINDOW_STR) is None
         assert _harness_build(installed) is None
     # a correction release of the validated build is orderable, stays inside the window, and
     # the (older) stamp plays no part in it

@@ -139,7 +139,7 @@ def test_a_newer_build_is_never_definite_until_the_battery_is_rerun():
     ``value?.id?.trim`` on a numeric ``agentRuntime.id``) where 9.4 returned a runtime."""
     for label in ("openai-primary", "anthropic-primary", "pin-provider-codex"):
         row = next(r for r in ROWS if r["label"] == label)
-        for newer in (ABOVE_WINDOW, (2026, 10, 1), (2027, 1, 1), (2026, 9, 9)):
+        for newer in (ABOVE_WINDOW, (2026, 10, 1), (2027, 1, 1), (2026, 9, 10)):
             assert _reach(row, newer).answer == hr.UNKNOWN, (label, newer)
 
 
