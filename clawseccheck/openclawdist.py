@@ -376,7 +376,13 @@ def self_reported_version(config: "dict | None") -> str:
 # the vendor source and the installed dist); the pass added the 9.8 row of the B391 image
 # table, re-read the B350, B396 and B397 dist claims there, widened the harness oracle to
 # 9.8 and regenerated the schema, state and channel snapshots.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 8)
+# Raised to 2026.9.9 on 2026-10-10: 9.9 moved nothing a check stands on - the config schema
+# is identical (5,408 paths, +0/-0), the 167 dist-verified paths, the 12 state tables, the 132
+# vendor tables and the DM-policy manifest differ by version stamp and bundle name only, the
+# 773-row harness battery re-ran on the installed build with no moved answer, and no new
+# advisory was published. The pass widened the harness oracle to 9.9 and regenerated the
+# schema, state, channel and citation snapshots.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 9)
 
 
 def grounding_gap(installed_version: "str | None"):
