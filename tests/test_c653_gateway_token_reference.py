@@ -519,10 +519,12 @@ def test_env_block_long_value_behind_a_long_named_reference_is_unknown_not_pass(
 
 def test_env_block_repro_process_environment_wins_over_the_config_value():
     """A 40-character value in the config's env block, but the gateway unit sets
-    GW_TOKEN=abc: the process environment wins, so a PASS would be false."""
+    GW_TOKEN=abc: the process environment wins, so a PASS would be false. C-672: the unit's
+    short value is now read, so the answer is the short-token FAIL (it was an UNKNOWN)."""
     cfg = _envcfg({"vars": {"GW_TOKEN": _LONG_VALUE}})
     f = check_gateway(_with_unit_env(cfg, {"GW_TOKEN": "abc"}))
-    assert f.status == UNKNOWN and f.status != PASS, f.detail
+    assert f.status == FAIL and f.status != PASS, f.detail
+    assert f.detail == "gateway auth token shorter than 24 chars"
 
 
 def test_env_block_repro_lowercase_key_is_never_a_pass():
