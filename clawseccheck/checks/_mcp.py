@@ -103,6 +103,7 @@ from ._vet import (
     _decoded_payloads,
     _locate_plugin_root,
     _locate_plugin_root_or_reason,
+    _read_plugin_manifest_text,
     coverage_gap_finding,
     vet_skill,
 )
@@ -916,9 +917,7 @@ def vet_plugin(
     manifest_problem: "tuple[str, str] | None" = None
     manifest = None
     try:
-        manifest = loads_json5(
-            (root / _PLUGIN_MANIFEST).read_text(encoding="utf-8", errors="replace")
-        )
+        manifest = loads_json5(_read_plugin_manifest_text(root / _PLUGIN_MANIFEST))
     except (OSError, ValueError, RecursionError, MemoryError) as exc:
         # RecursionError (deeply-nested manifest) and MemoryError (huge manifest) are not
         # ValueError - without them a hostile manifest would abort the whole vet instead of
@@ -8357,9 +8356,64 @@ _NPM_PROJECTS_REL = ("npm", "projects")
 _AGENT_PLUGINS_REL = ("agent", "plugins")
 
 
-def _npm_projects_plugin_ids(ctx: Context) -> dict[str, Path]:
+def _manifest_unread_kind(fp: Path) -> str | None:
+    """C-665: why the manifest at ``fp`` is never opened, else ``None``.
+
+    Only a NAMED PIPE: opening one that has no writer blocks forever, and no scan budget can
+    fire inside a blocked ``open()``. A manifest is the one place a symlink is followed (the
+    locator accepts a link to a regular file), so a link that resolves to a pipe is a pipe;
+    ``lstat`` alone cannot see that. ``lstat`` and ``stat`` classify the path and do not open
+    the file. Everything else reports ``None`` and keeps the handling it always had: a device
+    is opened and read through a ceiling (``_read_plugin_manifest_text``), so ``/dev/null`` is
+    an empty manifest and ``/dev/zero`` ends as an oversized one; a directory, a dangling
+    link, a link to a directory, a regular file, a socket and an absent path read, or fail at
+    once.
+    """
+    try:
+        mode = os.lstat(fp).st_mode
+        if _stat.S_ISFIFO(mode):
+            return "named pipe"
+        if _stat.S_ISLNK(mode) and _stat.S_ISFIFO(os.stat(fp).st_mode):
+            return "symlink to a named pipe"
+    except OSError:
+        return None
+    return None
+
+
+def _wrapper_unread_manifest_kind(wrapper_dir: Path) -> str | None:
+    """C-665: the kind of a named-pipe manifest sitting where the wrapper locator looks.
+
+    Same three places as ``_locate_plugin_root_or_reason`` (the wrapper itself,
+    ``node_modules/<pkg>`` and ``node_modules/@<scope>/<pkg>``), and nothing else: this
+    names the one reason a wrapper's manifest went unread, it is not a tree walk, so a pipe
+    under ``.git`` or ``__pycache__`` never reaches it.
+    """
+    cands = [wrapper_dir / _PLUGIN_MANIFEST]
+    nm = wrapper_dir / "node_modules"
+    try:
+        cands += sorted(nm.glob("*/" + _PLUGIN_MANIFEST))
+        cands += sorted(nm.glob("@*/*/" + _PLUGIN_MANIFEST))
+    except OSError:
+        pass
+    for fp in cands:
+        kind = _manifest_unread_kind(fp)
+        if kind:
+            return kind
+    return None
+
+
+def _npm_projects_plugin_ids(
+    ctx: Context, unread: "list[tuple[str, str]] | None" = None
+) -> dict[str, Path]:
     """{plugin-id: wrapper-dir} for each ~/.openclaw/npm/projects/<wrapper>/ whose
-    manifest (found via the shared _locate_plugin_root helper) declares an id."""
+    manifest (found via the shared _locate_plugin_root helper) declares an id.
+
+    C-665: a wrapper whose manifest is a named pipe (or a link to one) is never opened - the
+    locator treats it as "no manifest" - and, when ``unread`` is given, is appended to it as
+    ``(wrapper name, kind)``. The manifest read is bounded, so a link to an endless device
+    ends as an unreadable manifest (the wrapper's directory name is the key). It still falls back to the wrapper's own
+    name below, so the caller must not read that fallback as a verified plugin id.
+    """
     out: dict[str, Path] = {}
     npm_projects = ctx.home
     for part in _NPM_PROJECTS_REL:
@@ -8377,13 +8431,15 @@ def _npm_projects_plugin_ids(ctx: Context) -> dict[str, Path]:
         pid: str | None = None
         if root is not None:
             try:
-                manifest = _json.loads(
-                    (root / _PLUGIN_MANIFEST).read_text(encoding="utf-8", errors="replace")
-                )
+                manifest = _json.loads(_read_plugin_manifest_text(root / _PLUGIN_MANIFEST))
             except (OSError, ValueError):
                 manifest = None
             if isinstance(manifest, dict) and isinstance(manifest.get("id"), str) and manifest["id"]:
                 pid = manifest["id"]
+        else:
+            kind = _wrapper_unread_manifest_kind(wrapper_dir)
+            if kind and unread is not None:
+                unread.append((wrapper_dir.name, kind))
         if pid is None:
             # No manifest / unresolvable id - fall back to the wrapper dir name itself so
             # the on-disk presence is still surfaced (never silently dropped, F-061 spirit).
@@ -8429,9 +8485,14 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
     PASS    - on-disk plugin cache directories found, all match a declared entry.
     WARN    - at least one on-disk plugin cache directory has no matching
               plugins.entries key.
-    UNKNOWN - no on-disk plugin cache directory found at either known location.
+    UNKNOWN - no on-disk plugin cache directory found at either known location; OR
+              (C-665) every cache matches a declared entry, but a wrapper's plugin
+              manifest is a named pipe (or a link to one) and was not read, so that
+              cache is keyed by directory name rather than its declared
+              id (a WARN in the same situation says so in its ``fix``).
     """
-    npm_ids = _npm_projects_plugin_ids(ctx)
+    unread: list[tuple[str, str]] = []
+    npm_ids = _npm_projects_plugin_ids(ctx, unread)
     agent_ids = _agent_plugins_ids(ctx)
 
     if not npm_ids and not agent_ids:
@@ -8450,6 +8511,18 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
 
     orphaned = sorted(pid for pid in on_disk if pid not in declared)
 
+    # C-665: a manifest that is a pipe was never opened, so its wrapper is keyed by
+    # directory name, not by the id it declares. Said in `fix` (the `detail` of the existing
+    # WARN is fingerprinted), and the PASS below cannot stand over an id nobody read.
+    unread_txt = ", ".join(f"{n!r} ({k})" for n, k in unread[:6])
+    unread_txt += f" (+{len(unread) - 6} more)" if len(unread) > 6 else ""
+    unread_fix = (
+        f" The plugin manifest of {unread_txt} was not read (this check does not open a "
+        "named pipe), so that cache is listed by directory name, not by its "
+        "declared id; replace it with a regular file and re-run."
+        if unread else ""
+    )
+
     if orphaned:
         # C-456 FU (B-819): on_disk[pid] is always ctx.home-relative (built
         # from ctx.home / "npm"/"agents"/..., this check only fires in full-audit mode),
@@ -8466,8 +8539,18 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
             "under a different key \u2014 not proof of malice.",
             "Review each undeclared plugin cache: if it is stale, remove it; if it is "
             "an intentional plugin, ensure it is declared under plugins.entries so it "
-            "is covered by plugin-permission and supply-chain checks.",
+            "is covered by plugin-permission and supply-chain checks." + unread_fix,
             evidence=ev,
+        )
+
+    if unread:
+        return _finding(
+            "B152",
+            UNKNOWN,
+            "Plugin manifest(s) not read, so the on-disk cache id(s) could not be matched "
+            f"against plugins.entries: {unread_txt}.",
+            unread_fix.strip(),
+            evidence=sorted(on_disk)[:6],
         )
 
     return _finding(
