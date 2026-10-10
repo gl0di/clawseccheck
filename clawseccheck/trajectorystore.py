@@ -1518,6 +1518,7 @@ def _iter_db_tool_candidates(values: "list[str]", meta: dict):
         if len(raw) > _MAX_COMPILED_LINE_LEN:
             meta["truncated"] = True
             continue
+        # C-664: model-supplied content - read with the shallow reader, not a depth limit (slice C)
         try:
             rec = json.loads(raw)
         except ValueError:

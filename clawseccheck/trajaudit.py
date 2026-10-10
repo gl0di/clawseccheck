@@ -445,6 +445,7 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                     saw_ours = True
                 if '"tool.call"' not in line:
                     continue
+                # C-664: model-supplied content - read with the shallow reader, not a depth limit (slice C)
                 try:
                     rec = json.loads(line)
                 except ValueError:

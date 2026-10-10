@@ -27,11 +27,11 @@ Layer 1 leaf: stdlib plus ``logsafe`` only. Read-only, offline, bounded.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import pathprobe
+from .configloader import loads_bounded
 from .logsafe import redact
 
 # Same bound and reasoning as checks/_shared.py's _read_jsonl_tail: these logs are
@@ -186,8 +186,8 @@ def read_writes(home, since: "str | None" = None,
         if not line:
             continue
         try:
-            record = json.loads(line)
-        except ValueError:
+            record = loads_bounded(line)
+        except ValueError:  # JSONNestingError too (C-664)
             out.unparsable_lines += 1
             continue
         if not isinstance(record, dict):

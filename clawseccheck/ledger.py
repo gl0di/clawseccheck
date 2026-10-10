@@ -23,6 +23,8 @@ import json
 from datetime import date
 from pathlib import Path
 
+from .configloader import loads_bounded
+
 DEFAULT_COVERAGE = "~/.clawseccheck/coverage.json"
 
 # Capability -> stale threshold in days (hard-coded per spec).
@@ -82,7 +84,7 @@ def load_ledger(home: str | None = None, *, path: str | None = None) -> dict[str
     """
     p = _ledger_path(home, path)
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = loads_bounded(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):

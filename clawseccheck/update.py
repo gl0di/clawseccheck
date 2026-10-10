@@ -15,10 +15,11 @@ beyond reading that one local file, and never opens a socket.
 """
 from __future__ import annotations
 
-import json
 import re
 from datetime import date
 from pathlib import Path
+
+from .configloader import loads_bounded
 
 DEFAULT_LATEST = "~/.clawseccheck/latest.json"
 
@@ -58,7 +59,7 @@ def read_latest_hint(path: str = DEFAULT_LATEST) -> str | None:
     by returning None - the advisory simply stays silent rather than erroring.
     """
     try:
-        data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        data = loads_bounded(Path(path).expanduser().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):

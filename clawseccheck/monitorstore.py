@@ -35,6 +35,7 @@ import re
 from pathlib import Path
 
 from . import pathprobe
+from .configloader import loads_bounded
 from .locking import journal_lock
 from .safeio import secure_append_text, secure_dir, secure_write_text
 
@@ -112,6 +113,8 @@ def _iter_jsonl(p: Path, *, skipped: "list | None" = None):
             line = line.strip()
             if not line:
                 continue
+            # C-664: tamper-evidence store - a depth limit would let a padded entry read as
+            # a skipped line instead of a broken chain; shallow reader later (slice C)
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
@@ -496,8 +499,8 @@ def read_baseline(path: str | Path = DEFAULT_STATE) -> "tuple[str, dict | None]"
         # Unreadable (perms), a directory, a dangling symlink: present but unusable.
         return BASELINE_CORRUPT, None
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
+        payload = loads_bounded(raw)
+    except ValueError:  # C-664: JSONDecodeError and "nested too deeply" alike
         return BASELINE_CORRUPT, None
     if not isinstance(payload, dict) or not payload:
         # Non-dict payloads are what crashed diff() with an AttributeError at
@@ -605,7 +608,7 @@ def baseline_reference(path: str | Path = DEFAULT_STATE) -> "tuple[str, str]":
     except OSError:
         return "", "unreadable"
     try:
-        snap = json.loads(raw)
+        snap = loads_bounded(raw)
     except ValueError:
         return "", "unreadable"
     value = snapshot_reference(snap)

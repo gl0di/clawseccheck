@@ -45,6 +45,7 @@ from .brand import WORDMARK
 # public name - stays exactly as it was, wrapping it.
 from .checks import detect_vet_type_with_reason, resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for, sandbox_sync_marker_present
+from .configloader import loads_bounded
 from .checks import CHECKS_BY_ID, _credential_store_state
 from .invocation import cmd, command_prefix, display_path_for_delivery
 from .locking import journal_lock
@@ -4632,7 +4633,7 @@ def _main(argv=None) -> int:
             if pathprobe.is_file(_state_path):
                 _mtime = datetime.fromtimestamp(
                     _state_path.stat().st_mtime).isoformat(timespec="seconds")
-                _state = json.loads(_state_path.read_text(encoding="utf-8"))
+                _state = loads_bounded(_state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             _state = None
         try:

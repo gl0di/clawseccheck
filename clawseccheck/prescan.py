@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .configloader import loads_bounded
 from .safeio import secure_dir, secure_write_text
 
 DEFAULT_PRESCAN = "~/.clawseccheck/prescan.json"
@@ -60,7 +61,7 @@ def read_last_mode(home: str | None = None) -> str:
     """
     p = _path(home)
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = loads_bounded(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return DEFAULT_MODE
     if not isinstance(data, dict):

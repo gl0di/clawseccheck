@@ -29,6 +29,7 @@ import json
 import re
 from pathlib import Path
 from . import pathprobe
+from .configloader import loads_bounded
 
 # Version gate: only parse the format we have grounded. Any other value -> we don't guess.
 _TRACE_SCHEMA = "openclaw-trajectory"
@@ -151,7 +152,7 @@ def _resolve_pointer_target(pointer_path: Path, home_resolved: Path) -> "tuple[s
     if len(raw) > _POINTER_MAX_BYTES:
         return "invalid", None
     try:
-        rec = json.loads(raw.decode("utf-8", "replace"))
+        rec = loads_bounded(raw.decode("utf-8", "replace"))
     except ValueError:
         return "invalid", None
     if not isinstance(rec, dict):
@@ -766,6 +767,7 @@ def _iter_source_tool_candidates(path, max_bytes_per_file: int, meta: dict):
                 if len(line) > _MAX_COMPILED_LINE_LEN:
                     meta["truncated"] = True
                     continue
+                # C-664: model-supplied content - read with the shallow reader, not a depth limit (slice C)
                 try:
                     rec = json.loads(line)
                 except ValueError:
@@ -1128,6 +1130,7 @@ def read_events(
                     # event types we don't read, e.g. model.completed).
                     if not any(f'"{t}"' in line for t in _EVENT_TYPES):
                         continue
+                    # C-664: model-supplied content - read with the shallow reader, not a depth limit (slice C)
                     try:
                         rec = json.loads(line)
                     except ValueError:

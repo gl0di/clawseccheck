@@ -171,6 +171,7 @@ def _parse_verdicts(raw: str) -> dict:
         _note_nothing_applied(
             raw, f"it is not text, or exceeds the {_MAX_VERDICTS_BYTES} byte bound")
         return {}
+    # C-664: model-supplied content - a depth limit would be an evasion; shallow reader later (slice C)
     try:
         data = json.loads(raw)
     except ValueError:
@@ -544,6 +545,7 @@ def _verdicts_fingerprint_matches(verdicts_raw, expected_fingerprint: str) -> bo
     """
     if not isinstance(verdicts_raw, str) or len(verdicts_raw.encode("utf-8", "surrogatepass")) > _MAX_VERDICTS_BYTES:
         return False
+    # C-664: model-supplied content - a depth limit would be an evasion; shallow reader later (slice C)
     try:
         data = json.loads(verdicts_raw)
     except ValueError:

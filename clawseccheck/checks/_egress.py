@@ -30,6 +30,7 @@ from ..collector import (
     note_limit,
 )
 from .. import trajectorystore as _trajectorystore
+from ..configloader import loads_bounded as _loads_bounded
 from . import _shared
 from ._shared import (
     LOOPBACK,
@@ -2589,8 +2590,6 @@ def check_config_audit_log(ctx: Context) -> Finding:
 # B78 - Config-health integrity tracker review
 # ---------------------------------------------------------------------------
 def check_config_health_integrity(ctx: Context) -> Finding:
-    import json as _json
-
     health_path = ctx.home / "logs" / "config-health.json"
     if not pathprobe.is_file(health_path):
         return _finding(
@@ -2601,7 +2600,7 @@ def check_config_health_integrity(ctx: Context) -> Finding:
             "detect and flag suspicious config states.",
         )
     try:
-        data = _json.loads(health_path.read_text(encoding="utf-8", errors="replace"))
+        data = _loads_bounded(health_path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
         return _finding(
             "B78",

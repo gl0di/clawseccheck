@@ -1003,6 +1003,7 @@ def split_judged_bundle(raw: str) -> dict:
     if len(raw.encode("utf-8", "surrogatepass")) > MAX_BUNDLE_BYTES:
         _note_bundle_dropped(raw, f"it is larger than the {MAX_BUNDLE_BYTES}-byte cap")
         return empty
+    # C-664: model-supplied content - a depth limit would be an evasion; shallow reader later (slice C)
     try:
         data = json.loads(raw)
     except ValueError:
