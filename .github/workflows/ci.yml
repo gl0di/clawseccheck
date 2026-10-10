@@ -44,12 +44,15 @@ jobs:
     # package now routes those predicates through pathprobe.py (identical on every
     # interpreter), and this leg runs the unreadable-path tests on the interpreter where
     # the defect lived. 3.13 stays unmeasured and is deliberately not in the matrix.
+    #
+    # Python 3.9 is no longer supported or tested (end of life since October 2025; the
+    # floor is 3.10, see pyproject.toml's requires-python). The matrix is the Python
+    # versions the project states as tested: Linux 3.12 and 3.14, macOS 3.12.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-latest, python-version: "3.9"}
           - {os: ubuntu-latest, python-version: "3.12"}
           - {os: ubuntu-latest, python-version: "3.14"}
           - {os: macos-latest, python-version: "3.12"}

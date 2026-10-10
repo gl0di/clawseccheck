@@ -64,13 +64,13 @@ shows the same entries as a `Coverage note` without refusing.
 
 ## Wrong Python version
 
-ClawSecCheck needs **Python 3.9 or newer**. `pip`/`pipx` enforce this automatically for
+ClawSecCheck needs **Python 3.10 or newer**. `pip`/`pipx` enforce this automatically for
 that install path - but the skill's actual install path (an unpacked copy under
 OpenClaw's own skills directory) never goes through pip, so nothing stops it from being
 run under an older interpreter that just happens to be the system default `python3`.
 
 Recent releases fail fast with a plain one-line message (`clawseccheck: needs Python
-3.9+ (found X.Y)`) instead of a confusing error somewhere deep in a module. If you don't
+3.10+ (found X.Y)`) instead of a confusing error somewhere deep in a module. If you don't
 see that message and something still looks wrong on an older Python, that's itself a
 sign the interpreter is too old - check with:
 
@@ -78,8 +78,8 @@ sign the interpreter is too old - check with:
 python3 --version
 ```
 
-If it's below 3.9, point OpenClaw (or your own invocation) at a newer interpreter -
-`python3.9`, `python3.11`, etc. - whatever your system provides alongside the default.
+If it's below 3.10, point OpenClaw (or your own invocation) at a newer interpreter -
+`python3.12`, `python3.14`, etc. - whatever your system provides alongside the default.
 
 ## OpenClaw doesn't list the skill, or never runs it
 

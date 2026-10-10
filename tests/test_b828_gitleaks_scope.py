@@ -3,7 +3,7 @@
 The old config exempted `fixtures/` and `tests/` wholesale (about 93% of tracked files)
 plus a global stopword list, so a real-shaped secret pasted into a test was invisible to
 the only mechanical enforcement of the no-secrets-in-source rule. These tests read the
-config as TEXT (tomllib is 3.11+, the CI floor is 3.9) and pin the narrow shape.
+config as TEXT (tomllib is 3.11+, the CI floor is 3.10) and pin the narrow shape.
 
 B-841: the original `_allow_regexes()` understood exactly one shape --
 `regexes = ['''...''']`, a single triple-single-quoted entry per list. A double-quoted

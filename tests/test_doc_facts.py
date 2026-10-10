@@ -575,7 +575,7 @@ def _third_party_imports(sources=None):
 def _declared_runtime_dependencies():
     """The `[project] dependencies` array from pyproject.toml.
 
-    Parsed by hand because `tomllib` is 3.11+ and the CI floor is 3.9 -- and adding a TOML
+    Parsed by hand because `tomllib` is 3.11+ and the CI floor is 3.10 -- and adding a TOML
     library to read the file that proves there are no libraries would be its own joke.
     """
     text = (REPO / "pyproject.toml").read_text(encoding="utf-8")

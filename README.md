@@ -11,7 +11,7 @@
   <a href="https://github.com/gl0di/clawseccheck/releases"><img src="https://img.shields.io/github/v/tag/gl0di/clawseccheck?label=version&color=E34234&labelColor=2b2b2b" alt="version"></a>
   <a href="https://github.com/gl0di/clawseccheck/actions/workflows/ci.yml"><img src="https://github.com/gl0di/clawseccheck/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://clawhub.ai/gl0di/skills/clawseccheck"><img src="https://img.shields.io/badge/ClawHub-clawseccheck-FF6B47?labelColor=2b2b2b" alt="ClawHub"></a>
-  <img src="https://img.shields.io/badge/python-3.9%2B-E8A33D?labelColor=2b2b2b" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/python-3.10%2B-E8A33D?labelColor=2b2b2b" alt="Python 3.10+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-E34234?labelColor=2b2b2b" alt="License: MIT"></a>
 </p>
 
@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <sub>Verified against <b>OpenClaw 2026.9.8</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.9+ · <a href="#-compatibility">details</a></sub>
+  <sub>Verified against <b>OpenClaw 2026.9.8</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.10+ · <a href="#-compatibility">details</a></sub>
 </p>
 
 ---
@@ -427,7 +427,7 @@ regression test pins that the value never reaches a finding, a log, or disk.
 <details>
 <summary><b>&#x2699;&#xFE0F; For terminal users: CLI, JSON, SARIF, CI gates</b></summary>
 
-ClawSecCheck is also a full standalone CLI (zero dependencies, Python 3.9+).
+ClawSecCheck is also a full standalone CLI (zero dependencies, Python 3.10+).
 Nothing above replaced this: the three conversational modes sit on top of the
 same CI/power surface, they didn't shrink it. One flag did go in 4.0.0 -
 `--fail-under <score>`, because a default run no longer carries a score to
@@ -488,7 +488,7 @@ not the same claim as "we ran it".
 | **Read by the code, each measured against a running install while it was written** | **2026.7.1-2, 2026.8.1, 2026.8.2** - the three builds that moved settings the audit reads. Every moved key is read in *both* spellings: the agent roster as `agents.list` *and* `agents.entries`, the gateway command lists under their old and new parents, and the three settings 2026.8.1 moved out of `openclaw.json` into OpenClaw's machine-owned store. An older or not-yet-migrated config is read, not silently skipped. |
 | **On anything else** | The audit still runs. This is deliberately *not* a claim of a contiguous supported range: the builds between the measured points (2026.7.2 - 2026.8.0) were never run against, so the tool treats a config it cannot date as undated - it names **both** key spellings in its fix advice rather than guessing which one your build accepts, and a key whose home this build does not have is reported as retired or `UNKNOWN`, never resolved to nothing and given a verdict anyway. |
 
-**Operating systems.** CI runs the full suite on **Linux** (Python 3.9, 3.12 and 3.14) and
+**Operating systems.** CI runs the full suite on **Linux** (Python 3.12 and 3.14) and
 **macOS** (Python 3.12) for every push. **Windows** runs the read-only audit and is
 advertised in the skill manifest, but it has **no CI job** and two protections degrade
 there: ClawSecCheck's own `~/.clawseccheck/` store is not owner-restricted (file modes are

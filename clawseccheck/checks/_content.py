@@ -4293,7 +4293,7 @@ _LIFECYCLE_HOOK_RE = re.compile(
 # Scans the skill blob for manifest sections (requirements.txt, package.json, pyproject.toml)
 # that declare unpinned/floating dependencies - a supply-chain vector where a compromised
 # package update silently delivers malware into the skill bundle on next install.
-# Tomllib (3.11+) is not available on 3.9/3.10; use regex-only approach for 3.9 compat.
+# Tomllib (3.11+) is not available on 3.10; use regex-only approach for 3.10 compat.
 #
 # _MANIFEST_HEADER_RE (recognises the "# file: <name>\n" section header injected by
 # _read_skill_text) moved to _shared.py (B-193) - it's now reused by _vet.py too.
