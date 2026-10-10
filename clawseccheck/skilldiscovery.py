@@ -1,6 +1,7 @@
 """Bounded discovery of configured and grouped OpenClaw skill directories."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from . import pathprobe
 
@@ -60,6 +61,25 @@ def _discovery_gap_label(display: Path, depth: int) -> str:
     return name
 
 
+def _declared_root_key(path: Path) -> Path:
+    """De-duplication key for a declared load root - and never a reason to drop it (C-658).
+
+    A declared root is dropped here only if the audit decided it is not a root at all; a root
+    that merely cannot be resolved (a symlink loop, an unsearchable parent) is exactly the
+    "declared but not readable" fact B158 exists to report, so it must reach the caller. The
+    old ``Path.resolve()`` hid it on some interpreters only: it raises ``RuntimeError`` for a
+    loop on 3.9 / 3.12 (the root was dropped, B158 PASSed) and returns the path on 3.14 (the
+    root was kept, B158 WARNed). ``os.path.realpath`` does not raise for a loop in non-strict
+    mode (measured on 3.12 and 3.14: same result), and whether the kept root is present is
+    decided by the caller through ``pathprobe``, which raises or classifies ELOOP the same way
+    on every interpreter. The key is only for collapsing two spellings of one directory.
+    """
+    try:
+        return Path(os.path.realpath(path))
+    except (OSError, ValueError):
+        return Path(os.path.abspath(path))
+
+
 def config_extra_skill_dirs(home: Path, cfg: dict) -> list[Path]:
     """Resolve ``skills.load.extraDirs`` without guessing outside the audited config."""
     skills = cfg.get("skills") if isinstance(cfg, dict) else None
@@ -74,10 +94,7 @@ def config_extra_skill_dirs(home: Path, cfg: dict) -> list[Path]:
         path = Path(value).expanduser()
         if not path.is_absolute():
             path = home / path
-        try:
-            resolved = path.resolve()
-        except (OSError, ValueError, RuntimeError):
-            continue
+        resolved = _declared_root_key(path)
         if resolved not in seen:
             seen.add(resolved)
             out.append(path)
@@ -87,7 +104,7 @@ def config_extra_skill_dirs(home: Path, cfg: dict) -> list[Path]:
 def config_plugin_load_paths(home: Path, cfg: dict) -> list[Path]:
     """Resolve ``plugins.load.paths`` (a real dist key) - extra plugin roots whose bundled
     skills live under ``<plugin>/skills/`` and enter the auto-load surface. Mirrors
-    ``config_extra_skill_dirs``: no guessing outside the audited config; ``\\x00`` / OSError /
+    ``config_extra_skill_dirs``: no guessing outside the audited config; ``\\x00`` /
     dedup guards; relative paths resolve against *home*."""
     plugins = cfg.get("plugins") if isinstance(cfg, dict) else None
     load = plugins.get("load") if isinstance(plugins, dict) else None
@@ -101,10 +118,7 @@ def config_plugin_load_paths(home: Path, cfg: dict) -> list[Path]:
         path = Path(value).expanduser()
         if not path.is_absolute():
             path = home / path
-        try:
-            resolved = path.resolve()
-        except (OSError, ValueError, RuntimeError):
-            continue
+        resolved = _declared_root_key(path)
         if resolved not in seen:
             seen.add(resolved)
             out.append(path)
