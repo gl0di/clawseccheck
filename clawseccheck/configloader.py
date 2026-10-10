@@ -13,9 +13,11 @@ import io
 import json
 import os
 import re
+import secrets
 from array import array
 from itertools import accumulate
 from pathlib import Path
+from typing import NamedTuple
 from . import pathprobe
 
 _MAX_INCLUDE_BYTES = 2_000_000
@@ -56,8 +58,9 @@ class ConfigLoadError(ValueError):
 # attestation file, the paired-device stores), through `loads_bounded`. It is deliberately
 # NOT applied to `loads_json5` or to `vet_plugin`'s manifest: for untrusted third-party
 # JSON a limit of our own would let a manifest padded past it hide what it declares, so
-# that path keeps the interpreter's own recursion guard (a better design is tracked as
-# C-664).
+# that path keeps the interpreter's own recursion guard. The reader that does not need to
+# reject is `loads_shallow` below (C-664): it returns the shallow part of any document and
+# replaces what lies deeper with a marker, so padding hides nothing.
 MAX_JSON_NESTING = 200
 
 
@@ -257,20 +260,287 @@ def _restore_special_numbers(value: object) -> object:
     return value
 
 
+def _loads_json5_lenient(text: str, strict_error: "Exception | None" = None):
+    """The JSON5 half of :func:`loads_json5`: *text* has already failed (or skipped) strict JSON."""
+    try:
+        parsed = ast.literal_eval(_json5_to_python_literal(text).strip())
+    except (SyntaxError, ValueError, TypeError, MemoryError) as exc:
+        pos = getattr(exc, "offset", None)
+        raise json.JSONDecodeError(str(exc), text, max(0, int(pos or 1) - 1)) from strict_error
+    parsed = _restore_special_numbers(parsed)
+    if not _is_json_value(parsed):
+        raise json.JSONDecodeError("value is not JSON-compatible", text, 0) from strict_error
+    return parsed
+
+
 def loads_json5(text: str):
     """Parse strict JSON first, then the bounded JSON5-compatible lexical form."""
     try:
         return json.loads(text)
     except json.JSONDecodeError as strict_error:
+        return _loads_json5_lenient(text, strict_error)
+
+
+# --- shallow reading of untrusted JSON (C-664) --------------------------------------------
+# `json.loads` and `ast.literal_eval` recurse, so the depth they give up at is a property of
+# the interpreter and the process (see MAX_JSON_NESTING above) and a hostile document can
+# end a whole audit with a RecursionError. Rejecting a document that nests too deeply is an
+# evasion when the document is a third party's: padding a manifest past the limit hides what
+# it declares. `loads_shallow` reads it instead. It cuts the text into LAYERS of at most
+# `max_depth` levels with a flat, stack-based scan (no recursion, so the answer does not
+# depend on the interpreter, its recursion limit or the stack size), parses every layer with
+# the ordinary parser, and keeps the top layer, in which each subtree that opens at
+# `max_depth` + 1 is replaced by ELIDED. No value parser of our own: every byte of the text
+# is read by `json.loads` (or by the JSON5 reader), so ValueError, duplicate keys, big
+# numbers, NaN and lone surrogates behave as they do there.
+SHALLOW_JSON_DEPTH = 64
+
+
+class _Elided:
+    """Type of :data:`ELIDED`: a singleton, deliberately not a ``str``, ``list`` or ``dict``."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "ELIDED"
+
+    def __reduce__(self):
+        return "ELIDED"  # copy / pickle give back the same object, so `is ELIDED` holds
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+ELIDED = _Elided()
+
+
+class ShallowJSON(NamedTuple):
+    """What :func:`loads_shallow` returns: the value and how many ELIDED markers it holds."""
+
+    value: object
+    elided: int
+
+
+# Same lexing as `_json5_to_python_literal` (strings with escapes, `//` and block comments;
+# an unterminated string runs to the end of the text), reduced to what a nesting scan needs:
+# the strings and comments to skip, and the brackets. A `/*` that never closes is an error
+# there, so it is a token here. JSON5 mode has three more tokens: the JSON5 reader hands its
+# output to `ast.literal_eval`, which reads `#` (a Python comment) and a tripled quote (a
+# Python triple-quoted string) in ways this scan cannot follow, and either can hide or show
+# brackets. Neither is JSON5, so seeing one makes the stage parse the text whole, as
+# `loads_json5` does (`_Unlexable`).
+_STRICT_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"?|[\[\]{}]', re.S)
+_JSON5_TOKEN = re.compile(
+    r"'''|\"\"\"|#"
+    r'|"[^"\\]*(?:\\.[^"\\]*)*"?|\'[^\'\\]*(?:\\.[^\'\\]*)*\'?'
+    r'|//[^\r\n]*|/\*.*?\*/|/\*|[\[\]{}]',
+    re.S,
+)
+_BRACKET_PAIR = {"]": "[", "}": "{"}
+
+
+class _Unlexable(Exception):
+    """The text uses a Python-only spelling the layer scan cannot follow (JSON5 mode only)."""
+
+
+def _split_layers(text: str, token_re: "re.Pattern", bound: int) -> list:
+    """Cut *text* into layers: ``[start, end, child_spans]``, layer 0 being the whole text.
+
+    An opener at depth ``d`` with ``(d - 1) % bound == 0`` (and ``d > 1``) starts a layer
+    that ends at its matching closer; the span is recorded in the layer around it. Brackets
+    that do not match raise ``JSONDecodeError``, as every parser would.
+    """
+    layers: list = [[0, len(text), []]]
+    open_layers = [0]
+    stack: list = []
+    for m in token_re.finditer(text):
+        tok = m.group()
+        if tok == "[" or tok == "{":
+            stack.append(tok)
+            depth = len(stack)
+            if depth > 1 and (depth - 1) % bound == 0:
+                layers.append([m.start(), 0, []])
+                open_layers.append(len(layers) - 1)
+        elif tok == "]" or tok == "}":
+            depth = len(stack)
+            if not stack or stack.pop() != _BRACKET_PAIR[tok]:
+                raise json.JSONDecodeError("mismatched brackets", text, m.start())
+            if depth > 1 and (depth - 1) % bound == 0:
+                index = open_layers.pop()
+                layers[index][1] = m.end()
+                layers[open_layers[-1]][2].append((layers[index][0], m.end()))
+        elif tok == "/*":
+            raise json.JSONDecodeError("unterminated block comment", text, m.start())
+        elif tok == "#" or tok == "'''" or tok == '"""':
+            raise _Unlexable
+    if stack:
+        raise json.JSONDecodeError("unclosed bracket", text, len(text))
+    return layers
+
+
+# A plain ValueError, not a JSONDecodeError: the JSON5 mode retries on a JSONDecodeError, and
+# a forged marker is not "this text is not strict JSON".
+_FORGED = "document contains the marker token"
+
+
+def _new_nonce(text: str) -> str:
+    """A fresh random token that does not occur in *text* (a marker cannot be forged)."""
+    while True:
+        nonce = secrets.token_hex(16)
+        if nonce not in text:
+            return nonce
+
+
+def _parse_layer(parse, text: str):
+    try:
+        return parse(text)
+    except RecursionError as exc:
+        # A layer is at most `max_depth` + 1 levels, so this means the caller's own stack
+        # (or an absurd `max_depth`) is spent: refuse like any unreadable document.
+        raise JSONNestingError("JSON could not be parsed within the available stack") from exc
+
+
+def _swap_markers(root, nonce: str) -> tuple:
+    """Replace every ``[nonce]`` list in *root* by ELIDED, in place; return (root, count).
+
+    Iterative. The nonce anywhere else (a key, or a string that only the escapes of the
+    original can produce, since the text itself does not contain it) means the text forged
+    a marker: ``ValueError``.
+    """
+    count = 0
+    todo = [root]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, dict):
+            for key in node:
+                if nonce in key:
+                    raise ValueError(_FORGED)
+            slots = list(node.items())
+        elif isinstance(node, list):
+            slots = list(enumerate(node))
+        else:
+            continue
+        for slot, item in slots:
+            if isinstance(item, list):
+                if len(item) == 1 and item[0] == nonce:
+                    node[slot] = ELIDED
+                    count += 1
+                else:
+                    todo.append(item)
+            elif isinstance(item, dict):
+                todo.append(item)
+            elif isinstance(item, str) and nonce in item:
+                raise ValueError(_FORGED)
+    return root, count
+
+
+def _read_layers(text: str, layers: list, nonce: str, parse) -> tuple:
+    """Parse every layer with *parse*; return (top layer's value, markers left in it)."""
+    marker = ' ["%s"] ' % nonce  # a list: unhashable, so never a key; the spaces are defensive
+    top, elided = None, 0
+    checked: set = set()  # short deeper layers already found valid (padding repeats them)
+    for index, (start, end, kids) in enumerate(layers):
+        pieces = []
+        pos = start
+        for kid_start, kid_end in kids:
+            pieces.append(text[pos:kid_start])
+            pieces.append(marker)
+            pos = kid_end
+        pieces.append(text[pos:end])
+        chunk = "".join(pieces)
+        if index and len(chunk) <= 1024:
+            if chunk in checked:
+                continue
+            checked.add(chunk)
+        value = _parse_layer(parse, chunk)
+        if index == 0:
+            top, elided = _swap_markers(value, nonce)
+            if elided > len(kids):
+                # More markers than were inserted (a duplicate key can only remove them).
+                raise ValueError(_FORGED)
+        # Deeper layers are read for validity only; their values are dropped here.
+    return top, elided
+
+
+def _shallow(text: str, bound: int, json5: bool) -> ShallowJSON:
+    whole = loads_json5 if json5 else json.loads
+    direct, refusal_is_final = None, True
+    if text.count("[") + text.count("{") <= bound:
+        direct = whole  # cannot nest past the bound, whatever the syntax
+    elif not json_nesting_exceeds(text, bound):
+        # The scan is exact for valid JSON and only for that: in JSON5 mode this is a first
+        # try, and text that is not strict JSON goes to the layered read below.
+        direct, refusal_is_final = json.loads, not json5
+    if direct is not None:
         try:
-            parsed = ast.literal_eval(_json5_to_python_literal(text).strip())
-        except (SyntaxError, ValueError, TypeError, MemoryError) as exc:
-            pos = getattr(exc, "offset", None)
-            raise json.JSONDecodeError(str(exc), text, max(0, int(pos or 1) - 1)) from strict_error
-        parsed = _restore_special_numbers(parsed)
-        if not _is_json_value(parsed):
-            raise json.JSONDecodeError("value is not JSON-compatible", text, 0) from strict_error
-        return parsed
+            return ShallowJSON(_parse_layer(direct, text), 0)
+        except JSONNestingError:
+            pass  # not even this fits the stack we have: the layered read below decides
+        except json.JSONDecodeError:
+            if refusal_is_final:
+                raise
+    try:
+        layers = _split_layers(text, _JSON5_TOKEN if json5 else _STRICT_TOKEN, bound)
+    except _Unlexable:
+        # Parsed whole, as `loads_json5` parses it: nothing is elided, and a text too deep
+        # for the stack is JSONNestingError rather than RecursionError.
+        return ShallowJSON(_parse_layer(whole, text), 0)
+    nonce = _new_nonce(text)
+    if not json5:
+        return ShallowJSON(*_read_layers(text, layers, nonce, json.loads))
+    # JSON5 mode reads as `loads_json5` does: strict JSON for the whole text if it is valid
+    # JSON, else the JSON5 reader for the whole text. Valid JSON has no token the JSON5 scan
+    # adds (no single quote, comment or `#` outside a string), so one scan serves both; if
+    # any layer is not strict JSON the whole text is not, and every layer is read again.
+    try:
+        return ShallowJSON(*_read_layers(text, layers, nonce, json.loads))
+    except json.JSONDecodeError as strict_error:
+        return ShallowJSON(*_read_layers(
+            text, layers, nonce,
+            lambda chunk, cause=strict_error: _loads_json5_lenient(chunk, cause)))
+
+
+def loads_shallow(text, *, json5: bool = False,
+                  max_depth: int = SHALLOW_JSON_DEPTH) -> ShallowJSON:
+    """Read untrusted JSON (``json5=True``: JSON5 as :func:`loads_json5` reads it) without
+    recursing and without refusing it for being deep.
+
+    Returns ``ShallowJSON(value, elided)``. Arrays and objects nested up to *max_depth*
+    levels (the root is level 1) come back exactly as ``json.loads`` / ``loads_json5``
+    return them; each array or object that opens at level *max_depth* + 1 is replaced by
+    :data:`ELIDED`, and *elided* counts the markers that remain in the value. Nothing in
+    the first *max_depth* levels depends on what lies deeper, so padding hides nothing.
+
+    Raises ``ValueError`` where ``json.loads`` / ``loads_json5`` would for the same text if
+    they had an unlimited stack (the whole text is parsed, layer by layer), never
+    ``RecursionError``: a stack too small even for one layer is ``JSONNestingError``.
+    *text* is ``str`` or ``bytes`` (decoded as ``json.loads`` decodes it).
+
+    JSON5 caveats. (1) When the text has a ``#`` comment or a tripled quote outside a
+    string (neither is JSON5; ``ast.literal_eval`` accepts both and the layer scan cannot
+    follow them) the text is parsed whole, as ``loads_json5`` parses it: NOTHING is
+    elided, however deep it is, and a document deeper than ``literal_eval`` follows is a
+    ``ValueError``. For example ``'{"pad": ' + '[' * 100 + ']' * 100 + '} # c'`` comes back
+    with all 101 levels and ``elided == 0``, and 300 levels followed by ``# x`` is a
+    ``ValueError``. (2) A layer is *max_depth* + 1 levels and ``literal_eval`` accepts 200
+    nested brackets and refuses 201, so keep *max_depth* at 199 or less in JSON5 mode.
+    (3) Accepted differences, pinned by ``tests/test_c664_loads_shallow.py``: a Python-only
+    literal (a set, a tuple) inside a too-deep subtree that a later duplicate key discards
+    is rejected here, where ``loads_json5`` drops it with the key; and, because layers are
+    parsed separately, ``"(" * 100 + "[" * 150 + "]" * 150 + ")" * 100`` is accepted here
+    while ``loads_json5`` refuses it for the tokenizer's 200-nesting limit. The second
+    difference only ever accepts; nothing ``loads_json5`` accepts is refused for it.
+    """
+    if isinstance(text, (bytes, bytearray)):
+        text = bytes(text).decode(json.detect_encoding(text), "surrogatepass")
+    elif not isinstance(text, str):
+        raise TypeError(f"the JSON text must be str, bytes or bytearray, not {type(text).__name__}")
+    if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 1:
+        raise ValueError("max_depth must be a positive integer")
+    return _shallow(text, max_depth, json5)
 
 
 def _read_with_limit(file_obj: io.BufferedIOBase, byte_limit: int) -> tuple[bytes, bool]:
