@@ -48,6 +48,7 @@ from .checks import (
     check_audit_trail_signals,
 )
 from .collector import dig
+from .configloader import SHALLOW_JSON_DEPTH
 from .scanbudget import limits_for
 from .trajectory import (
     EXTERNAL_ORIGIN_KINDS,
@@ -522,7 +523,7 @@ def _t1_thread_trifecta(
 
 def check_behavioral_trifecta(
     groups: dict[str, list[dict]], untrusted_origin_channels: "frozenset[str]" = frozenset(),
-    *, incomplete: "str | None" = None,
+    *, incomplete: "str | None" = None, incomplete_note: "str | None" = None,
 ) -> object:
     """T1 - behavioral trifecta, proven by the trajectory log (not declared capability).
 
@@ -590,7 +591,8 @@ def check_behavioral_trifecta(
             "a whole.",
             "Nothing to act on yet: the sequence was not observed in the sessions that "
             "were read, and the ones that were not read cannot be spoken for. Re-run "
-            "once the unread sessions are within reach to turn this into a verdict.",
+            "once the unread sessions are within reach to turn this into a verdict."
+            + (f" {incomplete_note}" if incomplete_note else ""),
         )
     return _finding(
         "T1",
@@ -634,7 +636,8 @@ def _t2_thread_anomaly(thread_events: list[dict]) -> bool:
 
 
 def check_outcome_anomaly(groups: dict[str, list[dict]], *,
-                          incomplete: "str | None" = None) -> object:
+                          incomplete: "str | None" = None,
+                          incomplete_note: "str | None" = None) -> object:
     """T2 - outcome anomaly: repeated failure then success on a sensitive verb.
 
     WARN    - a sensitive verb failed at least twice in a row, then succeeded, within
@@ -679,7 +682,8 @@ def check_outcome_anomaly(groups: dict[str, list[dict]], *,
             f"{incomplete}, so this is not a clean result for the log as a whole.",
             "Nothing to act on yet: the series was not observed in the sessions that "
             "were read, and the ones that were not read cannot be spoken for. Re-run "
-            "once the unread sessions are within reach to turn this into a verdict.",
+            "once the unread sessions are within reach to turn this into a verdict."
+            + (f" {incomplete_note}" if incomplete_note else ""),
         )
     return _finding(
         "T2",
@@ -1084,6 +1088,9 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         # B-767: a line that looked like a target event and failed to parse -- a
         # different reason a read is not exhaustive than the byte cap (`truncated`).
         "unparseable_lines": meta.get("unparseable_lines", False),
+        # C-664: a line nested deeper than the shallow reader follows (valid JSON, only
+        # partly read) - `unparseable_lines` is also set for it; see `deep_lines_note`.
+        "deep_lines": meta.get("deep_lines", False),
         "event_count": len(events),
         "thread_count": 0,
         "findings": [],
@@ -1121,9 +1128,11 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     # Computed once, here, because this is where every incompleteness flag is known;
     # the detectors take the reason as a string so they never re-derive it.
     incomplete = analysis_incompleteness(result)
+    note = deep_lines_note(result) if incomplete else None
     result["findings"] = [
-        check_behavioral_trifecta(groups, untrusted_origin_channels, incomplete=incomplete),
-        check_outcome_anomaly(groups, incomplete=incomplete),
+        check_behavioral_trifecta(groups, untrusted_origin_channels, incomplete=incomplete,
+                                  incomplete_note=note),
+        check_outcome_anomaly(groups, incomplete=incomplete, incomplete_note=note),
         # B-770: confine T3 to the same target `read_events` above just used, so a
         # `--behavioral PATH` run assesses drift against the named file, not home-wide.
         check_capability_drift(ctx, explicit_path=explicit_path),
@@ -1249,6 +1258,17 @@ def analysis_incompleteness(result: dict) -> "str | None":
     # for per-run alarm fatigue, the opposite of Golden Rule #5. Left unbuilt; the
     # total-blindness branch above is the whole of this fix.
     return None
+
+
+def deep_lines_note(result: dict) -> "str | None":
+    """C-664: the true sentence for the `fix` of a T1/T2 UNKNOWN when a line was nested deeper
+    than the shallow reader follows. That line also sets `unparseable_lines`, whose reason
+    ("could not be parsed as JSON") is an existing `detail` string and says something false
+    of a valid line, so the truth goes here, beside it, in the advice text."""
+    if not result.get("deep_lines"):
+        return None
+    return (f"A line was invalid JSON or nested deeper than {SHALLOW_JSON_DEPTH} levels, "
+            "so it was only partly read.")
 
 
 def analysis_is_conclusive(result: dict) -> bool:

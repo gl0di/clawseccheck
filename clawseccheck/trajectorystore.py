@@ -140,7 +140,6 @@ to it). Read-only, offline, bounded. Never imports ``checks/`` or anything above
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import sqlite3
@@ -151,6 +150,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote as _urlquote
 from . import pathprobe
+from .configloader import loads_shallow
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -735,7 +735,9 @@ def _pointer_files(home: Path) -> "tuple[int, int, bool]":
                 break
             total += 1
             try:
-                rec = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                # C-664: a pointer file is small and its two fields are top-level; the
+                # shallow reader keeps a padded one readable (and never crashes on it).
+                rec = loads_shallow(p.read_text(encoding="utf-8", errors="replace")).value
             except (OSError, ValueError):
                 continue
             if not isinstance(rec, dict) or rec.get("traceSchema") != POINTER_SCHEMA:
@@ -1029,7 +1031,7 @@ def _jsonl_session_seq_pairs(files: "list[Path]") -> "set":
                     if read > _MAX_JSONL_BYTES_PER_FILE_FOR_DEDUP:
                         break
                     try:
-                        rec = json.loads(line)
+                        rec = loads_shallow(line).value  # C-664: two top-level fields only
                     except ValueError:
                         continue
                     if not isinstance(rec, dict):
@@ -1518,11 +1520,16 @@ def _iter_db_tool_candidates(values: "list[str]", meta: dict):
         if len(raw) > _MAX_COMPILED_LINE_LEN:
             meta["truncated"] = True
             continue
-        # C-664: model-supplied content - read with the shallow reader, not a depth limit (slice C)
+        # C-664: model-supplied content - read with the shallow reader, not a depth limit
+        # (see trajectory.py): the record is delivered unchanged and a row with an elided
+        # subtree is disclosed the way an oversized one is.
         try:
-            rec = json.loads(raw)
+            shallow = loads_shallow(raw)
         except ValueError:
             continue
+        rec = shallow.value
+        if shallow.elided:
+            meta["truncated"] = True
         if not isinstance(rec, dict):
             continue
         if rec.get("traceSchema") != _TRACE_SCHEMA:
