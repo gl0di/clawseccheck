@@ -29,6 +29,7 @@ from .catalog import (
 from .dossier import axis_for
 from .layers import LAYER_ORDER
 from .report import (
+    _grounding_block,
     _redact_home_paths,
     _sanitize,
     _sanitize_tree,
@@ -519,6 +520,10 @@ def render_sarif(
         self_excluded=list(getattr(ctx, "self_excluded_skills", None) or []),
         score=score,
     )
+    # C-678: the same `grounding` object --json carries (one helper, one sentence), beside
+    # the other run-level properties. Emitted on every render, ctx or not: an absent key
+    # must never read as "no gap". Presentation only - no result, rule or score moves.
+    _run["properties"]["grounding"] = _grounding_block(ctx)
 
     if ctx is not None:
         total_files_inspected = getattr(ctx, "total_files_inspected", 0)

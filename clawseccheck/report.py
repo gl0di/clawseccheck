@@ -1386,6 +1386,39 @@ def _grounding_gap_sentence(ctx) -> "str | None":
     )
 
 
+def _grounding_block(ctx) -> dict:
+    """C-678: the grounding gap as the `grounding` object `--json` and `--sarif` carry.
+
+    Always returns a full object, so an absent key can never be read as "no gap".
+    `newer_than_grounded` is a tri-state: True past GROUNDED_MAX_VERSION, False for a
+    build the window covers, None for one it cannot place (no ctx, unknown install,
+    unparseable/pre-release string, fewer than three numeric parts) - `grounding_gap`'s own
+    "we do not know" set, which never claims a gap either way. `installed` is rebuilt from
+    the parsed ints (never the raw string) and is None exactly when the flag is. `detail`
+    is `_grounding_gap_sentence` - marker-free, the one wording every surface shares - or
+    None when there is no gap to describe. Presentation-only: nothing here reaches
+    score/grade/cap.
+    """
+    raw = getattr(ctx, "installed_dist_version", None) if ctx is not None else None
+    gap = _openclawdist.grounding_gap(raw)
+    if gap is not None:
+        build, newer = gap, True
+    else:
+        parts = _openclawdist._numeric_parts(raw) if isinstance(raw, str) else None
+        # `grounding_gap` documents "0.0.0" as a build it cannot place, but it answers
+        # None for it the same as for an in-window one (it sorts below the ceiling). A
+        # placeholder version is "we do not know", never "inside the window", so False
+        # needs a calendar-shaped build (three parts, a four-digit year first).
+        placeable = parts is not None and len(parts) >= 3 and parts[0] >= 1000
+        build, newer = (parts[:3], False) if placeable else (None, None)
+    return {
+        "grounded_max": ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION),
+        "installed": ".".join(str(p) for p in build) if build is not None else None,
+        "newer_than_grounded": newer,
+        "detail": _grounding_gap_sentence(ctx),
+    }
+
+
 def _grounding_gap_line(ctx, ascii_only: bool) -> "str | None":
     """C-615: `_grounding_gap_sentence` behind its warning marker (None when silent)."""
     sentence = _grounding_gap_sentence(ctx)
@@ -6437,6 +6470,11 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     _cfg_reason = getattr(ctx, "config_parse_reason", None) if ctx is not None else None
     payload["config_parse_reason"] = _sanitize(_cfg_reason) if _cfg_reason else None
     payload["errors"] = [_sanitize(e) for e in getattr(ctx, "errors", [])] if ctx is not None else []
+    # C-678: the grounding gap (C-571/C-615) on the machine surface -- ALWAYS present, and
+    # `newer_than_grounded` is null (not false) when the installed build is unknown, so an
+    # absent or false value can never be the way "we could not tell" is read. Presentation
+    # only: never folded into score/grade/findings above.
+    payload["grounding"] = _grounding_block(ctx)
     # B-769: same fact as the text report's dead-suppression note, structurally --
     # a fingerprint .clawseccheckignore entry that matched no finding this run.
     # Always present (empty list when none), matching this payload's own convention

@@ -66,6 +66,7 @@ before assuming a nested key is part of the contract; notably, the subject keys 
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
 | `dead_ignore_entries` | `array[str]` | yes | B-769: fingerprint-form (`<id>:<8-hex>`) `.clawseccheckignore` entries that matched no finding this run - either the suppressed issue was fixed, or the check's wording changed and the same problem is back under a new fingerprint. Bare-id entries are never listed here (an id always matches its own check's Finding object regardless of status). Empty array when every fingerprint entry still matches, or the ignore file has none. |
+| `grounding` | `object` | yes | C-678: whether the installed OpenClaw build is newer than the newest build this ClawSecCheck release's checks were grounded against - the machine-readable form of the grounding-gap notice the text report, `--dashboard` card, HTML and PDF already print. **Always present**, so an absent key can never be read as "no gap". Four keys: `grounded_max` (`str`, the newest grounded build, e.g. `"2026.9.9"`); `installed` (`str \| null`, the installed build rebuilt from its three numeric parts, `null` when unknown); `newer_than_grounded` (`bool \| null` - `true` past `grounded_max`, `false` when the build is inside the window, `null` when it cannot be placed: no installed OpenClaw found, an unparseable or pre-release version string, fewer than three numeric parts or a non-calendar placeholder such as `0.0.0`; `null` is "we do not know", never "no gap"); `detail` (`str \| null`, the one plain-English sentence every surface shares, `null` unless `newer_than_grounded` is `true`). When `true`, some checks assume behaviour measured on the older build and a real gap can still read as a clean PASS. **Presentation only:** `score`, `grade`, the caps, `findings` and the exit code do not change. The same object rides in SARIF at `runs[0].properties.grounding` (§10). Out of scope and still text-only: `--judge-packet`, `--sbom`, `--risk-paths`, the `--card` badge and the `Build:` digest line. |
 | `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (OpenClaw core/Host machine/Agents/Skills/MCP/Plugins/Channels/Logs & trajectories) of the SAME `findings` above. Purely additive/presentation - never affects `score`/`grade`. See §18. |
 | `skill_sweep` | `object` | only with `--full` | Per-skill vet verdict for every installed skill (the second engine, on top of the audit) - the machine-readable form of `--full`'s printed SKILL SWEEP section. Absent (key not present) on a plain `--json` run without `--full`. Visibility only - never affects `score`/`grade`. See §19. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature - a drift/tamper-evidence checksum for the scan output itself. |
@@ -127,6 +128,7 @@ before assuming a nested key is part of the contract; notably, the subject keys 
   "config_symlink_escapes_home": false,
   "config_parse_reason": null,
   "errors": [],
+  "grounding": { "grounded_max": "2026.9.9", "installed": "2026.9.9", "newer_than_grounded": false, "detail": null },
   "inventory": {
     "openclaw": { "status": "FAIL", "findings": ["B2"], "unassessed": 24, "not_applicable_count": 0 },
     "host": { "status": "WARN", "findings": ["B50"], "unassessed": 0, "not_applicable_count": 0 },
@@ -648,6 +650,16 @@ Present whenever a context object reached the renderer - that is, on any CLI run
 
 Present only when at least one installed skill has a non-empty effect profile (F-018).
 Keys are skill names; values are arrays of effect-profile entry objects.
+
+### `runs[0].properties.grounding`
+
+C-678. Always present - audit **and** vet, with or without a context - and identical in
+shape and producer to §2's `grounding` object: `grounded_max`, `installed`,
+`newer_than_grounded` (`true` / `false` / `null`, where `null` means the installed build
+is unknown or cannot be placed) and `detail` (the shared grounding-gap sentence, `null`
+unless the flag is `true`). Presentation only - no result, rule or score moves. A `--vet`
+run does not read the installed OpenClaw build, so it carries `installed: null` and
+`newer_than_grounded: null`.
 
 ---
 
