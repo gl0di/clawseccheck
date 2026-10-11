@@ -258,3 +258,50 @@ def dist_text(pattern: str, *, symbol: str, contains: str | None = None) -> str:
         p.read_text(encoding="utf-8", errors="replace")
         for p in _matches(pattern, symbol, contains)
     )
+
+
+# --------------------------------------------------------------- the tool-catalog records
+# C-472 / C-683: ONE parser for ``CORE_TOOL_DEFINITIONS``, shared by every test that grounds
+# a tool id against it (B-667, B-674) -- two private copies had already drifted apart once.
+#
+# A tool record is ``{ id, [executionLocation,] description, sectionId, profiles, ... }`` and
+# a CATEGORY record is ``{ id, label }``. OpenClaw 2026.10.1 inserted an ``executionLocation``
+# line BETWEEN ``id`` and ``description`` on 14 tool records (``read``, ``write``, ``edit``,
+# ``exec``, ``ls``, ``apply_patch``, ``browser``, ``computer``, ``portal``, ``presence``,
+# ``process``, ``sessions_send``, ``sessions_spawn``, ``skill_workshop``), so the earlier
+# ``id`` / ``description`` / ``sectionId`` ADJACENCY regex stopped seeing those tools. The
+# parser therefore reads each record as a unit -- its ``id:`` line up to its closing brace --
+# and asks what the record CARRIES, not which line follows which. A record that carries
+# neither ``sectionId`` nor ``label`` is returned as neither, and the callers' partition
+# assertion (every ``id:`` in the file is a tool or a category) turns that into a red test.
+_CATALOG_RECORD_RE = re.compile(
+    r'\n\t*\{\n\t*id: "([a-z0-9_]+)",(.*?)\n\t*\},?(?=\n)', re.S)
+_CATALOG_SECTION_RE = re.compile(r'\n\t*sectionId: "([a-z0-9_]+)"')
+
+
+def catalog_tool_sections(text: str) -> "dict[str, str]":
+    """``{tool id: sectionId}`` for the TOOL records -- the ones carrying ``sectionId``.
+
+    No category record carries one (measured on 2026.10.1: 66 tool records, 14 category
+    records, none in neither bucket); ``nodes`` and ``sessions`` are each both a tool and a
+    category, which is why the discriminator is the field and not the id.
+    """
+    return {
+        m.group(1): s.group(1)
+        for m in _CATALOG_RECORD_RE.finditer(text)
+        for s in [_CATALOG_SECTION_RE.search(m.group(2))] if s
+    }
+
+
+def catalog_tool_ids(text: str) -> set:
+    """Ids of TOOL records (the ones carrying ``sectionId``)."""
+    return set(catalog_tool_sections(text))
+
+
+def catalog_category_ids(text: str) -> set:
+    """Ids of CATEGORY records (the ones carrying ``label``)."""
+    return {
+        m.group(1)
+        for m in _CATALOG_RECORD_RE.finditer(text)
+        if re.match(r'\n\t*label:', m.group(2))
+    }

@@ -15,11 +15,10 @@ a tool named `copywriter`, and "edit" would convict `credit`/`editorial`.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
-from _distgrounding import dist_file
+from _distgrounding import catalog_tool_ids, catalog_tool_sections, dist_file
 
 from clawseccheck.checks import _shared
 from clawseccheck.checks._shared import (
@@ -161,7 +160,9 @@ def test_the_id_set_and_the_hint_tuple_stay_disjoint_in_kind():
 
 # --------------------------------------------------------------------- dist grounding
 # Local-only: proves the ids are real OpenClaw tools. Skipped where the dist is absent
-# (CI). Reuses the same catalog-parse shape B-667's test pins (C-472's ONE parser).
+# (CI). Uses the ONE catalog parser (`_distgrounding.catalog_tool_ids`, C-472) that
+# B-667's test uses too; it reads each record whole, so a field OpenClaw inserts between
+# `id:` and `description:` (2026.10.1's `executionLocation:`) cannot hide a tool.
 
 def _catalog_text() -> str:
     return dist_file("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
@@ -169,13 +170,8 @@ def _catalog_text() -> str:
         encoding="utf-8", errors="replace")
 
 
-def _tool_ids(text: str) -> set:
-    return set(re.findall(
-        r'\n\t*id: "([a-z0-9_]+)",\n\t*description:[^\n]*\n\t*sectionId:', text))
-
-
 def test_every_id_is_a_real_core_tool():
-    ids = _tool_ids(_catalog_text())
+    ids = catalog_tool_ids(_catalog_text())
     missing = sorted(OUTBOUND_TOOL_IDS - ids)
     assert not missing, f"not tools OpenClaw defines: {missing}"
 
@@ -184,11 +180,7 @@ def test_every_id_carries_the_fs_section():
     """OUTBOUND_TOOL_IDS is specifically the write-capable FS family — same `sectionId`
     as SENSITIVE_TOOL_IDS's `read`, grounded the same way `_B55_FS_WRITE_TOOLS` already
     is (checks/_shared.py, B55/B-395)."""
-    text = _catalog_text()
+    sections = catalog_tool_sections(_catalog_text())
     for name in OUTBOUND_TOOL_IDS:
-        m = re.search(
-            r'\n\t*id: "%s",\n\t*description:[^\n]*\n\t*sectionId: "([a-z]+)"' % re.escape(name),
-            text,
-        )
-        assert m, f"{name}: could not locate its sectionId in the catalog"
-        assert m.group(1) == "fs", f"{name}: sectionId is {m.group(1)!r}, expected 'fs'"
+        assert name in sections, f"{name}: could not locate its sectionId in the catalog"
+        assert sections[name] == "fs", f"{name}: sectionId is {sections[name]!r}, expected 'fs'"
