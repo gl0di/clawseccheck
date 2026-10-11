@@ -61,13 +61,16 @@ def _resolve_312(self, strict=False):
 _CONTRACTS = {"312": _resolve_312, "314": _resolve_314}
 
 
-def _under_both(monkeypatch, build, run, shape):
-    """Build the fixture once, run *run* under each contract, return {contract: shape(result)}."""
+def _under_both(monkeypatch, build, exercise, shape):
+    """Build the fixture once, call *exercise* under each contract, return {contract: shape(result)}.
+
+    (The parameter is not called `run`: the subprocess hermeticity guards read a bare `run(...)`
+    call as `subprocess.run` and then cannot trace its argv.)"""
     fixture = build()
     out = {}
     for which, fn in _CONTRACTS.items():
         monkeypatch.setattr(Path, "resolve", fn)
-        out[which] = shape(run(fixture))
+        out[which] = shape(exercise(fixture))
     return out
 
 
