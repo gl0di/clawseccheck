@@ -351,7 +351,7 @@ config. **The scanner itself makes no network calls.** Full read scope:
 
 - `~/.openclaw/openclaw.json` and workspace bootstrap files (`SOUL.md`, `AGENTS.md`, etc.)
 - text of installed skills/plugins (Python files are AST-parsed, never executed)
-- `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` (config-log checks)
+- the config-write journal (`diagnostic_events` rows, scope `config-audit`, in `~/.openclaw/state/openclaw.sqlite`; older installs: `~/.openclaw/logs/config-audit.jsonl`) and `config-health.json` (config-log checks)
 - `~/.openclaw/agents/.../sessions/*.jsonl` (approval-policy posture)
 - the cron job store, the two global OpenClaw dotenv files (`.env`/`gateway.env` - these can hold
   real operational secrets; parsed in full, but only a handful of named toggle/URL keys are ever
@@ -918,8 +918,9 @@ be fixed, and not a substitute for host-level file-integrity monitoring or a rea
 IDS. Disclosed here so they are a known trade-off, not a surprise:
 
 - **Changes are attributed, and a change that was undone is still reported.** OpenClaw keeps its
-  own record of every config write it makes (`~/.openclaw/logs/config-audit.jsonl`), including a
-  hash chain over the file's bytes. `--monitor` reads it, so a config drift alert carries who wrote
+  own record of every config write it makes (the `config-audit` rows of its state database,
+  `~/.openclaw/state/openclaw.sqlite`; older installs write `~/.openclaw/logs/config-audit.jsonl`),
+  including a hash chain over the config file's bytes. `--monitor` reads it, so a config drift alert carries who wrote
   the file and when - `[written 2026-08-03T08:39:10.769Z by pid 149054 (node)]` - rather than only
   what changed. Only the program's **name** is ever shown; the full command line and working
   directory the journal also stores are never read into the report.

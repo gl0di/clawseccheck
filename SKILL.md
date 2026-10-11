@@ -56,7 +56,7 @@ user's own agent. **Full read scope:**
 - `~/.openclaw/openclaw.json` - main config
 - workspace bootstrap files (`SOUL.md`, `AGENTS.md`, `TOOLS.md`, `MEMORY.md`, etc.)
 - text of **installed skills/plugins** (including Python AST-scan, parse-only - never executed)
-- `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` - config-write provenance & integrity
+- the config-write journal (`config-audit` rows in `~/.openclaw/state/openclaw.sqlite`; older installs: `~/.openclaw/logs/config-audit.jsonl`) and `config-health.json` - config-write provenance & integrity
 - `~/.openclaw/agents/.../sessions/*.jsonl` - Codex session logs for approval-policy posture
 - the cron job store, the two global OpenClaw dotenv files (`~/.openclaw/.env` and
   `~/.config/openclaw/gateway.env` - these can hold real operational secrets: provider API keys,
@@ -137,8 +137,10 @@ It checks, among other things:
   credential/wallet theft, paste-host uploads, and base64-obfuscated payloads (decoded and
   re-scanned, never executed),
 - the **content of bootstrap files** (`SOUL.md` etc.) for prompt-injection-prone directives,
-- **B77 - config-write audit log:** reads `~/.openclaw/logs/config-audit.jsonl` for unexpected
-  writers or suspicious-diff flags (advisory, `scored=False`),
+- **B77 - config-write audit log:** reads the config-write journal (`config-audit` rows in
+  `~/.openclaw/state/openclaw.sqlite`, and `~/.openclaw/logs/config-audit.jsonl` on older
+  installs; both when both exist) for unexpected writers or suspicious-diff flags (advisory,
+  `scored=False`),
 - **B78 - config-health integrity:** reads `~/.openclaw/logs/config-health.json` for a non-null
   `lastObservedSuspiciousSignature` field (advisory, `scored=False`),
 - **B79 - session approval-policy posture:** samples recent Codex session JSONL files to detect

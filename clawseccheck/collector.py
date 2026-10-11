@@ -5818,6 +5818,108 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
         ctx.auth_profile_store_length = int(row[0])
 
 
+# C-674: OpenClaw's config-write journal moved out of ``logs/config-audit.jsonl`` into the
+# state database -- table ``diagnostic_events``, scope ``config-audit`` (dist
+# ``io.audit-*.mjs``: "SQLite diagnostic_events/config-audit state (latest 50000 rows)").
+# The vendor keeps at most 50,000 rows, so that is the row bound; the byte bound is the
+# caller's (``configjournal.read_writes(cap=...)``) and is applied PER ROW as well as in
+# total, exactly as the legacy file reader applies it: a record larger than the whole budget
+# is never read there either (it falls off the tail window), so a row over the budget is
+# counted as not examined, never parsed and never silently dropped.
+CONFIG_AUDIT_SCOPE = "config-audit"
+CONFIG_AUDIT_MAX_ROWS = 50_000
+# Read statuses of :func:`read_config_audit_rows`. Five, not two: "the table is not there"
+# and "I could not look" must never collapse (a refused view is NOT an absent table).
+CONFIG_AUDIT_OK = "ok"                # rows seen (>= 1 row in the scope)
+CONFIG_AUDIT_NO_DB = "no_db"          # no state database
+CONFIG_AUDIT_NO_TABLE = "no_table"    # a state DB that predates the table
+CONFIG_AUDIT_NO_SCOPE = "no_scope"    # a real table, no config-audit rows in it
+CONFIG_AUDIT_UNREADABLE = "unreadable"  # present but refused / locked / corrupt
+
+
+def read_config_audit_rows(home, max_bytes: int, max_rows: int = CONFIG_AUDIT_MAX_ROWS):
+    """``(status, payloads, truncated, oversized, null_rows)`` for the config-write journal
+    rows in ``<home>/state/openclaw.sqlite`` (``diagnostic_events``, scope ``config-audit``).
+
+    *payloads* are the raw ``payload_json`` values, OLDEST first; the NEWEST rows are the
+    ones kept when a bound bites (``ORDER BY sequence DESC``), the same tail the file
+    reader keeps. *truncated* means rows existed that were not returned (the row cap or
+    *max_bytes* in total bit). *oversized* counts rows larger than *max_bytes* on their own
+    and *null_rows* rows whose payload is NULL or not text: neither was examined, and the
+    caller must say so rather than count them as clean.
+
+    Same rules as ``_collect_auth_profile_store_presence`` (B-889) and the exec-approvals
+    reader (B-908), reused rather than re-derived: ``trajectorystore._open_and_verify_table``
+    opens read-only (``mode=ro`` + ``query_only``), refuses a FIFO/device at the database or
+    a sidecar path before ``sqlite3.connect``, and refuses a name that is not a REAL TABLE
+    in the file's own schema (view / virtual table / rootpage alias / generated column)
+    inside the one transaction that also runs the SELECTs. Takes *home*, not a ``Context``:
+    ``configjournal`` is a leaf the monitor calls with a home alone. Never raises.
+    """
+    db_path = Path(home).expanduser() / "state" / "openclaw.sqlite"
+    try:
+        if not pathprobe.exists(db_path):
+            return CONFIG_AUDIT_NO_DB, [], False, 0, 0
+    except OSError:
+        return CONFIG_AUDIT_UNREADABLE, [], False, 0, 0
+    conn, kind, unreadable = _trajectorystore._open_and_verify_table(
+        db_path, "diagnostic_events"
+    )
+    if unreadable:
+        return CONFIG_AUDIT_UNREADABLE, [], False, 0, 0
+    if conn is None:  # kind == "absent"
+        return CONFIG_AUDIT_NO_TABLE, [], False, 0, 0
+    # The three SELECTs are written INLINE at their `.execute()` calls (not named
+    # constants): `scripts/state_db_drift_gate.py` extracts only literal strings handed to
+    # `.execute()`, so a named constant would leave this reader invisible to the drift oracle.
+    try:
+        cur = conn.execute(
+            "SELECT payload_json FROM diagnostic_events "
+            "WHERE scope = ? AND length(CAST(payload_json AS BLOB)) <= ? "
+            "ORDER BY sequence DESC, created_at DESC LIMIT ?",
+            (CONFIG_AUDIT_SCOPE, max_bytes, max_rows + 1),
+        )
+        payloads: list = []
+        used = 0
+        truncated = False
+        null_rows = 0
+        for (payload,) in cur:
+            if len(payloads) + null_rows >= max_rows:
+                truncated = True
+                break
+            if isinstance(payload, bytes):
+                payload = payload.decode("utf-8", "replace")
+            if not isinstance(payload, str):
+                null_rows += 1  # a non-text value in a payload column is not a record
+                continue
+            size = len(payload.encode("utf-8", "replace"))
+            if payloads and used + size > max_bytes:
+                truncated = True
+                break
+            used += size
+            payloads.append(payload)
+        oversized = conn.execute(
+            "SELECT count(*) FROM diagnostic_events "
+            "WHERE scope = ? AND length(CAST(payload_json AS BLOB)) > ?",
+            (CONFIG_AUDIT_SCOPE, max_bytes),
+        ).fetchone()[0]
+        # `length(CAST(NULL AS BLOB))` is NULL, so a NULL payload matches neither the read
+        # nor the oversized predicate above and would otherwise vanish uncounted.
+        null_rows += conn.execute(
+            "SELECT count(*) FROM diagnostic_events "
+            "WHERE scope = ? AND payload_json IS NULL",
+            (CONFIG_AUDIT_SCOPE,),
+        ).fetchone()[0]
+    except sqlite3.Error:
+        return CONFIG_AUDIT_UNREADABLE, [], False, 0, 0
+    finally:
+        conn.close()
+    if not payloads and not oversized and not null_rows:
+        return CONFIG_AUDIT_NO_SCOPE, [], False, 0, 0
+    payloads.reverse()
+    return CONFIG_AUDIT_OK, payloads, truncated, int(oversized or 0), int(null_rows)
+
+
 # B-845: the row key every real read/write of the per-agent store uses.
 # Grounded against the installed dist (2026.9.5, sqlite-Cp6HSWY4.mjs): `PRIMARY_ROW_KEY
 # = "primary"`, and every one of `readPersistedAuthProfileStoreRaw` /

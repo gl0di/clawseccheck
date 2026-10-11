@@ -17,7 +17,10 @@ grounds that boundary against the real dist). The sinks this module knows about:
                                            (on by default; reuses ``trajectory.find_trajectory_files``)
   - session transcripts                 - ``agents/*/sessions/*.jsonl`` (NOT the trajectory
                                            sidecar files, which are already covered above)
-  - config-audit log                    - ``logs/config-audit.jsonl`` (B77 already reads it)
+  - config-audit log                    - ``logs/config-audit.jsonl`` (B77 already reads it);
+                                           LEGACY installs only - current OpenClaw keeps the journal
+                                           in the state database (``diagnostic_events``, scope
+                                           ``config-audit``), which is not a file sink
   - generic rotated/ad-hoc logs         - ``logs/*.log``
   - memory files                        - ``<workspace>/memory/**`` (same convention
                                            ``check_data_atrest`` (B19, checks/_egress.py) knows)
@@ -178,7 +181,15 @@ def _default_cache_trace_sink(home: Path) -> "LogSink | None":
 
 
 def _config_audit_sink(home: Path) -> "LogSink | None":
-    """``logs/config-audit.jsonl`` - the same file B77 (check_config_audit_log) reads."""
+    """``logs/config-audit.jsonl`` - the legacy-container file B77 (check_config_audit_log) reads.
+
+    C-674: current OpenClaw no longer writes this file (the journal lives in the state
+    database, and the old file is renamed ``config-audit.jsonl.migrated``). The entry stays
+    because a legacy install still has a real file here, and is returned only for a regular
+    readable file at exactly this name - a migrated-only ``logs/`` yields no sink, so no sink
+    is ever advertised for a file that does not exist. The state-database container is not
+    a log file the log hunt can walk, so it has no sink of its own.
+    """
     p = home / "logs" / "config-audit.jsonl"
     if not _is_regular_readable_file(p):
         return None

@@ -29,6 +29,7 @@ from ..collector import (
     dig,
     note_limit,
 )
+from .. import configjournal as _configjournal
 from .. import trajectorystore as _trajectorystore
 from ..configloader import loads_bounded as _loads_bounded
 from . import _shared
@@ -56,7 +57,7 @@ from ._shared import (
     _mcp_servers,
     _mcp_url_is_local,
     _plugins,
-    _read_jsonl_tail,
+    _JSONL_SCAN_CAP,
     _surface_absent,
     correlation_indicators,
     parse_bind_host,
@@ -2494,96 +2495,193 @@ _B77_WINDOW_NOTE = (
 )
 
 
-def check_config_audit_log(ctx: Context) -> Finding:
-    import json as _json
+# C-674: the SQLite-era wording. The legacy-file strings below are unchanged byte for byte
+# - a fingerprint hashes `detail` - so only inputs that reach a NEW situation (a
+# state-database journal, or both containers at once) get new text.
+_B77_FIX_NOT_FOUND = (
+    "Keep OpenClaw's config-write audit journal enabled so config writes stay attributable "
+    "and reviewable: current OpenClaw records it in the state database "
+    "(state/openclaw.sqlite, table diagnostic_events, scope config-audit); older versions "
+    "wrote logs/config-audit.jsonl."
+)
+_B77_DB_WHERE = "the state-database config-audit journal"
+_B77_DB_WINDOW_NOTE = (
+    " Only the most recent journal rows within this scan's budget were read, so earlier "
+    "writes were not scanned."
+)
+_B77_WARN_FIX = (
+    "Review each flagged config write. A write you did not initiate \u2014 or one "
+    "carrying a suspicious marker \u2014 may indicate config tampering; restore from a "
+    "known-good backup and rotate any exposed credentials."
+)
 
-    log_path = ctx.home / "logs" / "config-audit.jsonl"
-    if not pathprobe.is_file(log_path):
-        return _finding(
-            "B77",
-            UNKNOWN,
-            "config audit log not found \u2014 cannot verify config change history.",
-            "Keep the config-io audit log (logs/config-audit.jsonl) enabled so config "
-            "writes stay attributable and reviewable.",
-        )
-    try:
-        raw, truncated = _read_jsonl_tail(log_path)
-    except OSError:
-        return _finding(
-            "B77",
+
+def _b77_db_unread_reasons(journal) -> str:
+    """Why part of a state-database journal was not examined, or "" when all of it was."""
+    parts = []
+    if journal.truncated:
+        parts.append("the journal is larger than this scan's budget and earlier writes were "
+                     "not read")
+    if journal.unparsable_lines:
+        parts.append(f"{journal.unparsable_lines} row(s) could not be read as a "
+                     "config-write record")
+    if journal.oversized_rows:
+        parts.append(f"{journal.oversized_rows} row(s) exceeded this scan's size budget and "
+                     "were not read")
+    return "; ".join(parts)
+
+
+def _b77_judge(journal):
+    """``(status, detail, fix, evidence)`` for ONE container's journal."""
+    in_db = journal.container == _configjournal.CONTAINER_STATE_DB
+    if journal.unreadable:
+        if in_db:
+            return (
+                UNKNOWN,
+                "config audit journal in the state database present but unreadable "
+                "\u2014 cannot verify config change history.",
+                "Ensure state/openclaw.sqlite is a regular, owner-readable SQLite file whose "
+                "diagnostic_events entry is a real table.",
+                [],
+            )
+        return (
             UNKNOWN,
             "config audit log present but unreadable \u2014 cannot verify config change history.",
             "Ensure logs/config-audit.jsonl is readable by the owner.",
+            [],
         )
+    truncated = journal.truncated
 
     evidence: list[str] = []
-    total = 0
-    for ln in raw.splitlines():
-        ln = ln.strip()
-        if not ln:
-            continue
-        try:
-            rec = _json.loads(ln)
-        except ValueError:
-            continue
-        if not isinstance(rec, dict):
-            continue
-        total += 1
-
-        suspicious = rec.get("suspicious")
-        if isinstance(suspicious, list) and suspicious:
-            event = str(rec.get("event", "config.write"))
-            labels = ", ".join(str(s) for s in suspicious[:5])
-            evidence.append(f"{event}: flagged suspicious [{labels}]")
-
-        argv = rec.get("argv")
-        if isinstance(argv, list) and argv:
-            if not any("openclaw" in str(a).lower() for a in argv):
-                proc = os.path.basename(str(argv[0]))
-                evidence.append(f"config written by unexpected process: {proc}")
+    total = len(journal.writes)
+    for w in journal.writes:
+        if w.suspicious:
+            labels = ", ".join(w.suspicious[:5])
+            evidence.append(f"{w.event}: flagged suspicious [{labels}]")
+        if w.argv_names_openclaw is False:
+            evidence.append(f"config written by unexpected process: {w.argv_label}")
 
     if total == 0:
-        return _finding(
-            "B77",
+        if in_db:
+            return (
+                UNKNOWN,
+                f"{_B77_DB_WHERE} holds {journal.rows_seen} row(s) but none could be read "
+                "as a config-write record within this scan's budget.",
+                _B77_FIX_NOT_FOUND,
+                [],
+            )
+        return (
             UNKNOWN,
             "config audit log present but contains no parseable config-write records.",
             "Keep the config-io audit log (logs/config-audit.jsonl) enabled so config "
             "writes stay attributable and reviewable.",
+            [],
         )
     if evidence:
         n = len(evidence)
-        return _finding(
-            "B77",
-            WARN,
-            f"config-write audit log shows {n} entr{'y' if n == 1 else 'ies'} of concern "
-            f"across {total} recorded write(s): suspicious markers and/or writes from an "
-            "unexpected process." + (_B77_WINDOW_NOTE if truncated else ""),
-            "Review each flagged config write. A write you did not initiate \u2014 or one "
-            "carrying a suspicious marker \u2014 may indicate config tampering; restore from a "
-            "known-good backup and rotate any exposed credentials.",
-            evidence=evidence[:10],
+        if in_db:
+            unread = _b77_db_unread_reasons(journal)
+            detail = (
+                f"config-write audit journal (state database) shows {n} "
+                f"entr{'y' if n == 1 else 'ies'} of concern across {total} recorded "
+                "write(s): suspicious markers and/or writes from an unexpected process."
+                + (_B77_DB_WINDOW_NOTE if truncated else "")
+                + (f" Not examined: {unread}." if unread else "")
+            )
+        else:
+            detail = (
+                f"config-write audit log shows {n} entr{'y' if n == 1 else 'ies'} of concern "
+                f"across {total} recorded write(s): suspicious markers and/or writes from an "
+                "unexpected process." + (_B77_WINDOW_NOTE if truncated else "")
+            )
+        return WARN, detail, _B77_WARN_FIX, evidence[:10]
+    if in_db and _b77_db_unread_reasons(journal):
+        # Same rule as the file branch below (B-727): a count over a window, or over the
+        # rows that happened to parse, is not a claim about the whole journal.
+        return (
+            UNKNOWN,
+            f"the {total} readable config write(s) in the state database are clean and "
+            f"openclaw-originated, but {_b77_db_unread_reasons(journal)} \u2014 cannot "
+            "verify the full config change history.",
+            "Review the config-audit rows of state/openclaw.sqlite (table diagnostic_events, "
+            "scope config-audit) directly for the writes this scan did not read.",
+            [],
         )
     if truncated:
-        # B-727: `_read_jsonl_tail` is bounded at `_JSONL_SCAN_CAP` because these journals
+        # B-727: the file reader is bounded at `_JSONL_SCAN_CAP` because these journals
         # reach GB (B-104). The bound is right; claiming completeness over it is not.
         # "all N recorded config write(s) are clean" was false in both halves on an
         # over-cap file - `total` counts the window, "all" covers only what was read - so
         # a write from an unexpected process before the window was reported as absent.
         # Golden Rule #4: the check cannot determine the file's state, so it says so.
-        return _finding(
-            "B77",
+        return (
             UNKNOWN,
             f"the {total} most recent config write(s) are clean and openclaw-originated, "
             "but the audit log is larger than this scan's budget and earlier writes were "
             "not read \u2014 cannot verify the full config change history.",
             "Review logs/config-audit.jsonl directly for writes older than the most "
             "recent 1 MB, or rotate it so a full scan fits.",
+            [],
         )
-    return _finding(
-        "B77",
+    if in_db:
+        return (
+            PASS,
+            f"all {total} recorded config write(s) in the state database are clean and "
+            "openclaw-originated.",
+            "Periodically review the config-audit journal (state database, diagnostic_events "
+            "scope config-audit) for unexpected config writers.",
+            [],
+        )
+    return (
         PASS,
         f"all {total} recorded config write(s) are clean and openclaw-originated.",
         "Periodically review logs/config-audit.jsonl for unexpected config writers.",
+        [],
+    )
+
+
+# Most severe first. A WARN is a finding; an UNKNOWN is "could not tell" and must never be
+# outvoted by a clean PASS from a different container.
+_B77_RANK = {WARN: 2, UNKNOWN: 1, PASS: 0}
+
+
+def check_config_audit_log(ctx: Context) -> Finding:
+    journals = _configjournal.read_journals(ctx.home, cap=_JSONL_SCAN_CAP)
+    if not journals:
+        return _finding(
+            "B77",
+            UNKNOWN,
+            "config audit log not found \u2014 cannot verify config change history.",
+            _B77_FIX_NOT_FOUND,
+        )
+    if len(journals) == 1:
+        status, detail, fix, evidence = _b77_judge(journals[0])
+        return _finding("B77", status, detail, fix, evidence=evidence)
+
+    # C-674: BOTH containers exist (an OpenClaw rollback re-created the file beside a
+    # database that already holds rows). Neither one speaks for the other: judge each, take
+    # the most severe verdict, and name both in the detail so a clean database can never
+    # hide a suspicious file (or the reverse).
+    judged = [(j, _b77_judge(j)) for j in journals]
+    judged.sort(key=lambda item: -_B77_RANK[item[1][0]])
+    status, _, fix, _ = judged[0][1]
+    if status == PASS:
+        fix = ("Periodically review both config-write journals (the config-audit rows of "
+               "state/openclaw.sqlite and logs/config-audit.jsonl) for unexpected config "
+               "writers; keep only the one your OpenClaw version writes.")
+    parts, evidence = [], []
+    for journal, (_, detail, _, ev) in judged:
+        in_db = journal.container == _configjournal.CONTAINER_STATE_DB
+        tag = "state database" if in_db else "legacy file logs/config-audit.jsonl"
+        parts.append(f"{tag}: {detail}")
+        evidence.extend(f"[{'state database' if in_db else 'legacy file'}] {e}" for e in ev)
+    return _finding(
+        "B77",
+        status,
+        "config-write audit journals exist in two places and were each checked \u2014 "
+        + " ".join(parts),
+        fix,
+        evidence=evidence[:10],
     )
 
 
