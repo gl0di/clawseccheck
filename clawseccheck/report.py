@@ -2051,15 +2051,24 @@ def _credential_surface_map(ctx) -> list[dict]:
     entries.append({"class": "mcp-passthrough", "reachable": bool(mcp_evidence), "evidence": mcp_evidence})
 
     dotenv_hits: list[str] = []
+    dotenv_unread = 0
     if home_path is not None and pathprobe.exists(home_path):
         candidates = [home_path / ".env", home_path / ".envrc"]
         for ws in WORKSPACE_DIRS:
             candidates.append(home_path / ws / ".env")
             candidates.append(home_path / ws / ".envrc")
         for cand in candidates:
-            if pathprobe.is_file(cand):  # path-existence check only - never reads contents
-                dotenv_hits.append(_rel(cand))
-    entries.append({"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_hits})
+            try:
+                if pathprobe.is_file(cand):  # path-existence check only - never reads contents
+                    dotenv_hits.append(_rel(cand))
+            except OSError:
+                # C-661: an unreadable workspace (mode 000, a root-owned directory) used to end
+                # the whole run here with "unexpected internal error"
+                dotenv_unread += 1
+    dotenv_evidence = list(dotenv_hits)
+    if dotenv_unread:
+        dotenv_evidence.append(f"{dotenv_unread} dotenv location(s) could not be read (permission denied)")
+    entries.append({"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_evidence})
 
     keychain_hits: list[str] = []
     if home_path is not None and pathprobe.exists(home_path):
@@ -2069,8 +2078,11 @@ def _credential_surface_map(ctx) -> list[dict]:
             ".gnupg",
         ):
             p = home_path / rel
-            if pathprobe.exists(p):  # path-existence check only - never reads contents
-                keychain_hits.append(_rel(p))
+            try:
+                if pathprobe.exists(p):  # path-existence check only - never reads contents
+                    keychain_hits.append(_rel(p))
+            except OSError:
+                continue  # C-661: unreadable parent; the keychain class stays "not seen"
     entries.append({"class": "keychain", "reachable": bool(keychain_hits), "evidence": keychain_hits})
 
     cookie_hits: list[str] = []
