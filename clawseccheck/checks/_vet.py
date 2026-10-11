@@ -9939,28 +9939,41 @@ def _read_plugin_manifest_text(path: Path) -> str:
     ``/dev/urandom`` never reach end-of-file, so an unbounded ``read_text`` grows until the
     process is killed. A regular file is finite and is read whole, exactly as before. Anything
     else is read through a ceiling (:data:`_PLUGIN_MANIFEST_MAX_BYTES`); one that does not end
-    inside it raises ``OSError`` - the same "manifest unreadable" state a dangling link or a
-    directory already produced, and handled the same way by each caller: ``vet_plugin``
-    reports "could not parse" (UNKNOWN, or the dispatch of a co-located SKILL.md) and the
-    bundled content is still scanned; B152 keys the wrapper by its directory name, exactly as
-    for a dangling link, so it can still answer PASS when that name is a declared entry. A
-    device that ends at once (``/dev/null``) is an empty manifest, as it always was. A named pipe is refused outright (opening it for a writer that
-    never comes is what blocks); the file is opened non-blocking so even a pipe that slipped
-    through cannot hold the open. The text is decoded and newline-normalised like
+    inside it raises ``OSError``, the same "manifest unreadable" state a dangling link or a
+    directory already produced. A device that ends at once (``/dev/null``) is an empty text.
+    A named pipe is refused outright (opening one for a writer that never comes is what
+    blocks), and the file is opened non-blocking so even a pipe cannot hold the open. The
+    descriptor is closed on every path. The text is decoded and newline-normalised like
     ``Path.read_text(encoding="utf-8", errors="replace")``, whose place this takes.
+
+    What a caller does with the ``OSError`` differs and is the caller's: ``vet_plugin``
+    reports the manifest as unreadable and still scans what is bundled with it; B152 keys the
+    wrapper by its directory name, exactly as for a dangling link, so it can still answer PASS
+    when that name is a declared entry.
     """
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-    with os.fdopen(fd, "rb") as fh:
-        mode = os.fstat(fh.fileno()).st_mode
-        if stat.S_ISREG(mode):
-            raw = fh.read()
-        elif stat.S_ISFIFO(mode):
+    try:
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISFIFO(mode):
             raise OSError(errno.ENXIO, "the manifest is a named pipe")
-        else:
-            raw = fh.read(_PLUGIN_MANIFEST_MAX_BYTES + 1)
-            if raw is None or len(raw) > _PLUGIN_MANIFEST_MAX_BYTES:
-                raise OSError(errno.EFBIG, "the manifest is not a regular file and does not end")
-    return raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        # `os.read` on the descriptor, not `os.fdopen`: wrapping a directory's descriptor
+        # raises with the descriptor still open, and a vet that meets many such manifests
+        # would run out of them. The `finally` closes it on every path.
+        limit = None if stat.S_ISREG(mode) else _PLUGIN_MANIFEST_MAX_BYTES
+        chunks: list[bytes] = []
+        total = 0
+        while limit is None or total <= limit:
+            want = 65536 if limit is None else min(65536, limit + 1 - total)
+            chunk = os.read(fd, want)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if limit is not None and total > limit:
+            raise OSError(errno.EFBIG, "the manifest is not a regular file and does not end")
+    finally:
+        os.close(fd)
+    return b"".join(chunks).decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _locate_plugin_root_or_reason(p: Path) -> "tuple[Path | None, str | None]":
@@ -10022,18 +10035,12 @@ def _locate_plugin_root_or_reason(p: Path) -> "tuple[Path | None, str | None]":
             )
             if len(hits) == 1:
                 # C-665: a glob hit is a NAME - it matches a named pipe as readily as a
-                # regular file, and opening a pipe that has no writer blocks forever. Only a
-                # hit that RESOLVES to a FIFO (`os.stat` follows a link and does not open
-                # the file) is dropped. Everything else keeps the hit exactly as before - a
-                # regular file, a directory, a dangling or unstattable link, a socket and a
-                # device (`/dev/null` is an empty manifest) - so the plugin root is still
-                # returned and its bundled content still scanned. An endless device
-                # (`/dev/zero`) is ended at the READ, by `_read_plugin_manifest_text`, not
-                # here. The hit COUNT is taken before this test, so a pipe beside a real
-                # manifest stays ambiguous rather than being skipped.
-                hit_st, _reason = _stat_or_reason(hits[0])
-                if hit_st is not None and stat.S_ISFIFO(hit_st.st_mode):
-                    return None, None
+                # regular file - and it is returned whatever it is, so the plugin root is
+                # still found and its bundled content still scanned: a manifest that cannot
+                # be read must not be a way to hide what sits beside it. Opening a pipe that
+                # has no writer blocks forever, so nothing here opens the hit; the READ
+                # (`_read_plugin_manifest_text`) refuses a pipe and ends an endless device.
+                # The hit COUNT above is what makes two manifests ambiguous, unchanged.
                 return hits[0].parent, None
     except OSError as exc:
         # Defense in depth: _stat_or_reason() covers every is_file()/is_dir() check

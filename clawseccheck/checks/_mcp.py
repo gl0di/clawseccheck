@@ -903,18 +903,10 @@ def vet_plugin(
             f"not an OpenClaw plugin: no {_PLUGIN_MANIFEST} found under {p}",
             "A plugin root carries openclaw.plugin.json; for a skill directory use --vet.",
         )
-    if root != p and _plugin_nonregular_kind(root / _PLUGIN_MANIFEST):
-        # C-654: the wrapper locator's `node_modules/*/openclaw.plugin.json` glob matches a
-        # named pipe or device, and the read below would block forever on a FIFO. The same
-        # shape at the top level is already "no manifest" (the locator wants a regular
-        # file), so this answers exactly that.
-        return _plugin_finding(
-            HIGH,
-            UNKNOWN,
-            f"not an OpenClaw plugin: no {_PLUGIN_MANIFEST} found under {p}",
-            "A plugin root carries openclaw.plugin.json; for a skill directory use --vet.",
-        )
     manifest_problem: "tuple[str, str] | None" = None
+    manifest_unreadable = False  # C-665: no readable regular file (a pipe, a dangling link, ...)
+    manifest_read_failed = False  # C-665: ... and the READ itself raised, vs read-but-not-regular
+    colocated_skill = False
     manifest = None
     try:
         manifest = loads_json5(_read_plugin_manifest_text(root / _PLUGIN_MANIFEST))
@@ -922,6 +914,16 @@ def vet_plugin(
         # RecursionError (deeply-nested manifest) and MemoryError (huge manifest) are not
         # ValueError - without them a hostile manifest would abort the whole vet instead of
         # degrading to UNKNOWN, the graceful path every other bad manifest takes (C-135).
+        # "Unreadable" is a READ that failed OR a manifest that is not a regular file (a
+        # link to /dev/null reads as an empty, unparseable text). Either way the file is not
+        # the author's JSON, so what it declares is unknown.
+        manifest_read_failed = isinstance(exc, OSError)
+        try:
+            manifest_unreadable = manifest_read_failed or not _stat.S_ISREG(
+                os.stat(root / _PLUGIN_MANIFEST).st_mode
+            )
+        except OSError:
+            manifest_unreadable = True
         manifest_problem = (
             f"could not parse {_PLUGIN_MANIFEST}: {type(exc).__name__}",
             "Inspect the manifest manually \u2014 the host would refuse this plugin too.",
@@ -939,7 +941,18 @@ def vet_plugin(
         # SKILL.md is actually there does the vet continue (as a manifest with no fields,
         # so the ordinary "invalid manifest" WARN is raised and the skill is dispatched
         # below); with none, the answer is byte-identical to what it always was.
-        if not _colocated_skill_dirs(p, root, []):
+        #
+        # C-665: EXCEPT when the manifest could not be READ (a named pipe, a dangling link,
+        # a directory, an endless device read to its ceiling). The locator returns such a
+        # hit, so `--vet` routes the directory here; an early UNKNOWN would leave the other
+        # bundled files (an `mcp.json`, an `index.js`) unscanned and turn a manifest the
+        # attacker can make unreadable into a way past the content scan. Everything below
+        # is the SAME code a readable manifest goes through, with the manifest treated as
+        # `{}` (id unknown, no declared skills), so its exclusions (docs, tests, examples,
+        # README ...) apply unchanged; the WARN floor is the manifest warning itself. A
+        # manifest that was read but is not usable JSON keeps the answer above.
+        colocated_skill = bool(_colocated_skill_dirs(p, root, []))
+        if not colocated_skill and not manifest_unreadable:
             return _plugin_finding(HIGH, UNKNOWN, manifest_problem[0], manifest_problem[1])
         manifest = {}
 
@@ -947,8 +960,25 @@ def vet_plugin(
     if manifest_problem is not None:
         warns.append(
             manifest_problem[0]
-            + " \u2014 the host would refuse this plugin; the SKILL.md beside it is vetted "
-            "as a standalone skill below"
+            + (
+                " \u2014 the host would refuse this plugin; the SKILL.md beside it is vetted "
+                "as a standalone skill below"
+                if colocated_skill else
+                " \u2014 what it declares is unknown; the files bundled with it are "
+                "scanned below without it"
+            )
+        )
+    # C-665: said in `fix`, never in `detail` (baseline.fingerprint() hashes `detail`).
+    manifest_fix = ""
+    if manifest_problem is not None and manifest_unreadable:
+        manifest_fix = (
+            (
+                f" The plugin manifest could not be read ({manifest_problem[0].rsplit(': ', 1)[-1]})"
+                if manifest_read_failed else
+                " The plugin manifest is not a regular file"
+            )
+            + ", so what it declares is unknown; the files bundled with it were scanned "
+            "without it."
         )
     notes: list[str] = []  # coverage / informational evidence - never verdict-moving
     subs: list[Finding] = []  # dispatched engine findings (vet_skill / vet_mcp)
@@ -1786,7 +1816,8 @@ def vet_plugin(
             sev,
             FAIL,
             f"dangerous bundled content in {summary}: {worst.detail}",
-            "Do NOT install this plugin. " + (worst.fix or "Review the flagged content."),
+            "Do NOT install this plugin. " + (worst.fix or "Review the flagged content.")
+            + manifest_fix,
             evidence,
         )
     elif status == WARN:
@@ -1803,7 +1834,7 @@ def vet_plugin(
             WARN,
             f"{label} in {summary}: {head_sig}",
             "Review the flagged signals before installing; prefer pinned, shrinkwrapped, "
-            "source-readable plugins.",
+            "source-readable plugins." + manifest_fix,
             evidence,
         )
     elif status == UNKNOWN:
@@ -8408,11 +8439,12 @@ def _npm_projects_plugin_ids(
     """{plugin-id: wrapper-dir} for each ~/.openclaw/npm/projects/<wrapper>/ whose
     manifest (found via the shared _locate_plugin_root helper) declares an id.
 
-    C-665: a wrapper whose manifest is a named pipe (or a link to one) is never opened - the
-    locator treats it as "no manifest" - and, when ``unread`` is given, is appended to it as
-    ``(wrapper name, kind)``. The manifest read is bounded, so a link to an endless device
-    ends as an unreadable manifest (the wrapper's directory name is the key). It still falls back to the wrapper's own
-    name below, so the caller must not read that fallback as a verified plugin id.
+    C-665: a wrapper whose manifest is a named pipe (or a link to one) is never opened (the
+    read refuses it; a TOP-LEVEL pipe is not even a located manifest) and, when ``unread`` is
+    given, is appended to it as ``(wrapper name, kind)``. The manifest read is bounded, so a
+    link to an endless device ends as an unreadable manifest. Both fall back to the wrapper's
+    own directory name below, so the caller must not read that fallback as a verified plugin
+    id.
     """
     out: dict[str, Path] = {}
     npm_projects = ctx.home
@@ -8430,16 +8462,19 @@ def _npm_projects_plugin_ids(
         root = _locate_plugin_root(wrapper_dir)
         pid: str | None = None
         if root is not None:
-            try:
-                manifest = _json.loads(_read_plugin_manifest_text(root / _PLUGIN_MANIFEST))
-            except (OSError, ValueError):
-                manifest = None
+            kind = _manifest_unread_kind(root / _PLUGIN_MANIFEST)
+            manifest = None
+            if kind is None:
+                try:
+                    manifest = _json.loads(_read_plugin_manifest_text(root / _PLUGIN_MANIFEST))
+                except (OSError, ValueError):
+                    manifest = None
             if isinstance(manifest, dict) and isinstance(manifest.get("id"), str) and manifest["id"]:
                 pid = manifest["id"]
         else:
             kind = _wrapper_unread_manifest_kind(wrapper_dir)
-            if kind and unread is not None:
-                unread.append((wrapper_dir.name, kind))
+        if kind and unread is not None:
+            unread.append((wrapper_dir.name, kind))
         if pid is None:
             # No manifest / unresolvable id - fall back to the wrapper dir name itself so
             # the on-disk presence is still surfaced (never silently dropped, F-061 spirit).
@@ -8630,7 +8665,7 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
         if not pathprobe.is_file(manifest_file):
             continue
         try:
-            manifest = _json.loads(manifest_file.read_text(encoding="utf-8", errors="replace"))
+            manifest = _json.loads(_read_plugin_manifest_text(manifest_file))
         except (OSError, ValueError):
             continue
         if not isinstance(manifest, dict):

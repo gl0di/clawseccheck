@@ -543,25 +543,40 @@ def test_a_pipe_where_the_skill_engine_walked_a_wrapper_dir_is_left_to_it(tmp_pa
 # ---------------------------------------------------------------------------
 
 def test_a_fifo_as_the_wrapped_plugins_manifest_does_not_hang(tmp_path):
+    """C-665: the locator no longer drops the pipe, so the wrapper is a plugin whose manifest
+    could not be read - the answer a dangling link in the same place gets - and not "no
+    plugin here" (which let a malicious bundle beside the pipe go unscanned)."""
     w = _wrapper(tmp_path)
     mf = w / "node_modules/pkg/openclaw.plugin.json"
     mf.unlink()
     _fifo(mf)
     res = _vet(w)
-    assert res["status"] == "UNKNOWN", res
-    assert res["detail"].startswith("not an OpenClaw plugin: no openclaw.plugin.json found"), res
+    assert res["status"] == "WARN", res
+    assert "could not parse openclaw.plugin.json: " in res["detail"], res
+    twin = _wrapper(tmp_path, "twin")
+    (twin / "node_modules/pkg/openclaw.plugin.json").unlink()
+    os.symlink("missing.json", twin / "node_modules/pkg/openclaw.plugin.json")
+    assert _vet(twin)["status"] == res["status"]
 
 
-def test_a_fifo_manifest_answers_the_same_at_the_top_level_and_in_a_wrapper(tmp_path):
+def test_a_fifo_manifest_at_the_top_level_is_no_manifest_but_in_a_wrapper_it_is_unreadable(tmp_path):
+    """A top-level manifest must be a regular file to count, whatever else it is (a pipe, a
+    dangling link, a directory): unchanged. Inside a wrapper the pipe is a manifest that
+    could not be read (C-665)."""
     top = _plugin(tmp_path, "top")
     (top / "openclaw.plugin.json").unlink()
     _fifo(top / "openclaw.plugin.json")
+    dangling = _plugin(tmp_path, "dangling")
+    (dangling / "openclaw.plugin.json").unlink()
+    os.symlink("missing.json", dangling / "openclaw.plugin.json")
     w = _wrapper(tmp_path)
     (w / "node_modules/pkg/openclaw.plugin.json").unlink()
     _fifo(w / "node_modules/pkg/openclaw.plugin.json")
-    rt, rw = _vet(top), _vet(w)
-    assert rt["status"] == rw["status"] == "UNKNOWN"
-    assert rt["detail"].split(" under ")[0] == rw["detail"].split(" under ")[0]
+    rt, rd, rw = _vet(top), _vet(dangling), _vet(w)
+    assert rt["status"] == rd["status"] == "UNKNOWN" and rw["status"] == "WARN"
+    assert rt["detail"].split(" under ")[0] == rd["detail"].split(" under ")[0]
+    assert rt["detail"].startswith("not an OpenClaw plugin: no openclaw.plugin.json found")
+    assert "could not parse openclaw.plugin.json: " in rw["detail"]
 
 
 def test_the_wrapper_manifest_fifo_has_a_regular_file_twin_that_still_passes(tmp_path):
