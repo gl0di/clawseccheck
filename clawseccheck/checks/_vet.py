@@ -10144,7 +10144,6 @@ def detect_vet_type_with_reason(
     The reason is composed here, from fixed text plus the config path, so the caller does
     not have to re-derive which file was unreadable.
     """
-    import json as _json
 
     p = Path(str(target)).expanduser()
     try:
@@ -10199,8 +10198,12 @@ def detect_vet_type_with_reason(
         return "unknown", None
     # Not a path on disk: maybe a configured MCP server name.
     cfg_file = Path(str(home)).expanduser() / "openclaw.json"
+    cfg_elided = 0
     try:
-        cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
+        # C-680 (C-664): read to 64 levels like json.loads, a deeper subtree is counted, not
+        # followed (no RecursionError, no depth limit that would hide a server named here).
+        shallow_cfg = _loads_shallow(cfg_file.read_text(encoding="utf-8", errors="replace"))
+        cfg, cfg_elided = shallow_cfg.value, shallow_cfg.elided
     except (FileNotFoundError, NotADirectoryError):
         # B-682: an ABSENT config is not an unreadable one, and the difference is the whole
         # point of this function's second return value. With no config there are no
@@ -10227,6 +10230,13 @@ def detect_vet_type_with_reason(
         )
     if isinstance(cfg, dict) and str(target) in _mcp_servers(cfg):
         return "mcp", None
+    if cfg_elided:
+        # A server found in the part that was read stands (above); "this is not one" is not a
+        # sound conclusion about a config whose deeper part was not read.
+        return "unknown", (
+            f"the OpenClaw config at {cfg_file} is nested too deeply to be read in full, so "
+            "whether this names a configured MCP server is undetermined"
+        )
     return "unknown", None
 
 

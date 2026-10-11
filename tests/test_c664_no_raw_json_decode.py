@@ -300,23 +300,14 @@ _R_OWN_OUTPUT = "own output: round trip of the tool's own render_json/render_vet
 _RAW_DECODE_ALLOWLIST: dict = {
     ("clawseccheck/adjudication/_verdicts.py", "render_judged_json", "json.loads"):
         (1, _R_OWN_OUTPUT),
-    ("clawseccheck/checks/_config.py", "_c015_is_generated_plugin_model_catalog", "json.loads"):
-        (1, "residual of C-664: plugin-installed catalog.json text, only a top-level marker key "
-            "is read; the handler catches ValueError only"),
     ("clawseccheck/checks/_mcp.py", "_wrapper_declares_lifecycle_script", "json.loads"):
         (1, "guarded: runs only when json_nesting_exceeds(text, SHALLOW_JSON_DEPTH) is false "
             "(deeper text goes to loads_shallow); the parse_int hook needs the plain parser"),
-    ("clawseccheck/checks/_mcp.py", "vet_mcp", "json.loads"):
-        (2, _R_USER + " (vet_mcp's two reads of the home's openclaw.json)"),
-    ("clawseccheck/checks/_vet.py", "detect_vet_type_with_reason", "json.loads"):
-        (1, _R_USER + " (vet type detection's read of the home's openclaw.json)"),
     ("clawseccheck/cli.py", "_main", "json.loads"):
         (1, _R_OWN_OUTPUT + " (the --full merge of the pipeline keys into the audit payload)"),
     ("clawseccheck/cli.py", "_run_apply_ignore_proposals", "json.loads"):
         (1, "explicit CLI argument: the proposals file the user passed to --apply-ignore-proposals; "
             "ValueError-only handler"),
-    ("clawseccheck/logscan.py", "_scan_trajectory_record", "json.loads"):
-        (1, _R_AGENT + " (trajectory JSONL lines, top-level keys only; ValueError-only handler)"),
     ("clawseccheck/native.py", "_parse", "json.loads"):
         (2, "vendor subprocess stdout: the OpenClaw CLI's own audit JSON, plain and last-{...} "
             "fallback; JSONDecodeError-only handler"),
@@ -539,8 +530,8 @@ def test_the_real_allowlist_is_small_and_only_names_json_loads():
     """Keep the accepted set small and named: a long allowlist is how a guard becomes a
     rubber stamp. Raising these numbers needs a reason written next to the new entry, and a
     conversion to loads_bounded / loads_shallow lowers them."""
-    assert len(_RAW_DECODE_ALLOWLIST) == 11
-    assert sum(count for count, _ in _RAW_DECODE_ALLOWLIST.values()) == 13
+    assert len(_RAW_DECODE_ALLOWLIST) == 7
+    assert sum(count for count, _ in _RAW_DECODE_ALLOWLIST.values()) == 8
     assert {spelling for (_rel, _fn, spelling) in _RAW_DECODE_ALLOWLIST} == {"json.loads"}
 
 

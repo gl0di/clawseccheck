@@ -602,12 +602,19 @@ def _c015_is_generated_plugin_model_catalog(parts: tuple, text: str) -> bool:
         return False
     if parts[-4] != "agent" or parts[-3] != "plugins":
         return False
-    import json as _json
+    from ..configloader import loads_shallow as _loads_shallow
 
     try:
-        parsed = _json.loads(text)
+        shallow = _loads_shallow(text)
     except ValueError:
         return False
+    # C-680 (C-664): a plugin-written file read to 64 levels. The marker is a top-level key,
+    # but this answer EXEMPTS the whole file from the secret scan, and a file with an unread
+    # subtree is not one OpenClaw generated (a real catalog is a few levels deep): it is
+    # scanned like any other. A deep document no longer ends the check in RecursionError.
+    if shallow.elided:
+        return False
+    parsed = shallow.value
     return isinstance(parsed, dict) and parsed.get("generatedBy") == (
         "openclaw-plugin-model-catalog-v1"
     )

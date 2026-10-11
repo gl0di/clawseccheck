@@ -3453,7 +3453,6 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
             name = str(target)
             home_path = Path(str(home)).expanduser()
             cfg_file = home_path / "openclaw.json"
-            import json as _json
 
             # B-681: whether the config could be READ decides what we are entitled to
             # say next. Both failures used to collapse into `cfg = {}`, which makes an
@@ -3462,14 +3461,27 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
             # managed to open. Harmless while it was only a sentence; not harmless once
             # it drives an exit code, which is what this task added.
             cfg_read = True
+            cfg_elided = 0
             try:
-                cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
+                # C-680 (C-664): the user's own config, read to 64 levels exactly as
+                # json.loads reads it; a deeper subtree is counted (cfg_elided), not followed.
+                # Accepted difference (owner-visible residual): a server whose `command` or
+                # `args` is itself a list nested ~60 levels or more reads FAIL on the previous
+                # head and WARN here, with "nested too deeply" in `fix` - never a PASS. No MCP
+                # host runs such a spec (`args` is an array of strings), and the raw text of the
+                # elided span cannot be scanned to reproduce the old verdict exactly.
+                shallow_cfg = loads_shallow(cfg_file.read_text(encoding="utf-8", errors="replace"))
             except (OSError, ValueError):
                 cfg, cfg_read = {}, False
+            else:
+                cfg, cfg_elided = _without_elided(shallow_cfg.value), shallow_cfg.elided
+                if not isinstance(cfg, dict):
+                    cfg, cfg_read = {}, False
             all_servers = _mcp_servers(cfg)
             if name in all_servers:
                 servers = {name: all_servers[name]}
-            elif not cfg_read:
+                spec_elided = cfg_elided
+            elif not cfg_read or cfg_elided:
                 # The server may well be configured -- a truncated or unreadable
                 # openclaw.json cannot tell us either way. UNKNOWN, and NOT
                 # subject_absent: this keeps its dossier rather than being reported as
@@ -3485,7 +3497,12 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                             f"'{name}' is a configured server is undetermined."
                         ),
                         fix="Check that the config exists and is valid JSON, or point "
-                        "--vet-mcp at a JSON spec file.",
+                        "--vet-mcp at a JSON spec file."
+                        + (
+                            " The config is nested too deeply for this scan to read in full."
+                            if cfg_elided
+                            else ""
+                        ),
                         framework="MCP Trust",
                         scored=False,
                     )
@@ -3515,16 +3532,20 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
         # Vet all servers from config at home.
         home_path = Path(str(home)).expanduser()
         cfg_file = home_path / "openclaw.json"
-        import json as _json
-
         _vet_mcp_config_found = pathprobe.is_file(cfg_file)
         try:
-            cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
+            # C-680 (C-664): see the named-server read above.
+            shallow_cfg = loads_shallow(cfg_file.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             cfg = {}
         except ValueError:
             cfg = {}
             _vet_mcp_config_parse_error = _vet_mcp_config_found
+        else:
+            cfg, spec_elided = _without_elided(shallow_cfg.value), shallow_cfg.elided
+            if not isinstance(cfg, dict):
+                cfg = {}
+                _vet_mcp_config_parse_error = _vet_mcp_config_found
         servers = _mcp_servers(cfg)
 
     if not servers:
@@ -3535,10 +3556,17 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                 severity=HIGH,
                 status=UNKNOWN,
                 detail="No MCP servers configured.",
-                fix="Configure MCP servers under mcp.servers.<name> in openclaw.json.",
+                fix="Configure MCP servers under mcp.servers.<name> in openclaw.json."
+                + (
+                    " The config is nested too deeply for this scan to read in full."
+                    if spec_elided
+                    else ""
+                ),
                 framework="MCP Trust",
                 scored=False,
-                not_applicable=_vet_mcp_config_found and not _vet_mcp_config_parse_error,
+                not_applicable=(
+                    _vet_mcp_config_found and not _vet_mcp_config_parse_error and not spec_elided
+                ),
             )
         ]
 
