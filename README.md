@@ -404,7 +404,7 @@ false FAIL here is a hard blocker and not a tuning preference. See the
 [security model](SECURITY_MODEL.md) for the complete capability surface, and
 [`docs/IOC_DATA.md`](docs/IOC_DATA.md) for the IOC dataset's provenance policy.
 
-**A second worked example, from ClawHub's own listing scan (v4.0.1, 2026-09-08).**
+**A second worked example, from ClawHub's own listing scan (2026-09-08).**
 Its "hardcoded secret" and "disabled TLS verification" findings are the same
 point-3-adjacent shape as above, aimed at different lines: the flagged
 "secret" is `checks/_content.py`'s `_URL_AUTH_QUERY_PARAM_NAME_RE` - a regex
