@@ -13,12 +13,16 @@ Two different regimes live in this file, on purpose.
   400,000 under `ulimit -s 65536` (a CI runner's larger stack). So those tests derive every
   expectation from the limit and none from the interpreter.
 * `vet_plugin` reads UNTRUSTED third-party manifests and has no limit of our own: one would
-  turn a manifest padded past it into a way to hide what it declares. It keeps the
-  interpreter's own recursion guard, so there a document is read or disclosed depending on
-  what `json.loads` does in this run (never on a version number), and the shallowest depth
-  parses everywhere. Beyond the guard the readers must degrade, never abort:
-  `vet_plugin` used to call `str()` on a `skills` entry and on `openclaw.extensions` entries
-  and raised `RecursionError` out of the vet on a document 3.14 parsed but 3.12 refused.
+  turn a manifest padded past it into a way to hide what it declares. C-664 (slice C3a):
+  it reads them with `configloader.loads_shallow`, which returns every field in the first
+  `SHALLOW_JSON_DEPTH` levels exactly as `json.loads` does and elides what is nested deeper,
+  so the answer no longer depends on what `json.loads` does in this run. A document with
+  anything elided is never INSTALL: it is a WARN (CAUTION) that says so. Before C-664 a
+  padded document that this interpreter's parser followed was read whole (and could be a
+  PASS), one it refused was UNKNOWN or "unreadable"; those branches pinned an interpreter
+  accident and are replaced by the one deliberate result below. `vet_plugin` also used to
+  call `str()` on a `skills` entry and on `openclaw.extensions` entries and raised
+  `RecursionError` out of the vet on a document 3.14 parsed but 3.12 refused.
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ import sqlite3
 import pytest
 
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
-from clawseccheck.checks import check_paired_device_operator_authority, vet_plugin
+from clawseccheck.checks import _mcp, check_paired_device_operator_authority, vet_plugin
 from clawseccheck.collector import (
     LIMIT_DOMAIN_PAIRED,
     Context,
@@ -38,6 +42,7 @@ from clawseccheck.collector import (
     limit_hits_for,
 )
 from clawseccheck.configloader import MAX_JSON_NESTING as LIMIT
+from clawseccheck.configloader import JSONNestingError
 from test_b176_paired_devices_sqlite_migration import (
     _DEVICE_PAIRING_PAIRED_DDL,
     _migrated_home,
@@ -97,18 +102,18 @@ def _plugin(tmp_path, manifest: str, extra: dict | None = None):
 def test_a_deep_skills_entry_is_noted_not_a_crash(tmp_path, depth):
     """`skills: [<deep list>]`. The entry is not a path, so it is reported as a skills entry
     that is not present - the same note a shallow non-string entry already got - and the
-    vet carries on. If this interpreter cannot parse the manifest at all, that is the
-    ordinary honest UNKNOWN."""
+    vet carries on. C-664: the manifest is read shallow at every depth, so this no longer
+    depends on the interpreter (old: PASS where the parser followed it, UNKNOWN "could not
+    parse" where it did not); the part nested past the bound was not examined, so the
+    answer is a WARN that says so, never a PASS."""
     manifest = '{"id":"d","configSchema":{},"skills":[%s]}' % _deep(depth)
     f = vet_plugin(_plugin(tmp_path, manifest))  # must not raise
-    if _json_parses(manifest):
-        assert f.status == PASS, f.detail
-        assert any("manifest skills entry not present" in e for e in f.evidence), f.evidence
-        # Bounded text: the note never carries the whole document.
-        assert all(len(e) < 400 for e in f.evidence), [len(e) for e in f.evidence]
-    else:
-        assert f.status == UNKNOWN
-        assert "could not parse" in f.detail.lower()
+    assert f.status == WARN, f.detail
+    assert any("manifest skills entry not present" in e for e in f.evidence), f.evidence
+    assert any("nested too deeply" in e for e in f.evidence), f.evidence
+    assert "nested too deeply" in f.fix
+    # Bounded text: the note never carries the whole document.
+    assert all(len(e) < 400 for e in f.evidence), [len(e) for e in f.evidence]
 
 
 def test_an_ordinary_skills_entry_reads_exactly_as_before(tmp_path):
@@ -124,12 +129,13 @@ def test_an_ordinary_skills_entry_reads_exactly_as_before(tmp_path):
 def test_a_deep_package_extensions_entry_is_not_a_crash(tmp_path, depth):
     pkg = '{"name":"p","version":"1.0.0","openclaw":{"extensions":[%s]}}' % _deep(depth)
     f = vet_plugin(_plugin(tmp_path, '{"id":"d","configSchema":{}}', {"package.json": pkg}))
-    if _json_parses(pkg):
-        assert f.status == PASS, f.detail  # parsed, read, nothing to report
-    else:
-        # Beyond this interpreter's parser: disclosed as an unreadable package.json.
-        assert f.status == WARN, f.detail
-        assert any("unreadable/unparseable package.json" in e for e in f.evidence), f.evidence
+    # C-664: read shallow at every depth. Old: PASS where this interpreter's parser followed
+    # the file ("parsed, read, nothing to report"), WARN "unreadable/unparseable package.json"
+    # where it did not. Now the part past the bound is disclosed as not examined, whichever
+    # interpreter this is - a WARN either way, never a PASS.
+    assert f.status == WARN, f.detail
+    assert any("nested too deeply" in e and "package.json" in e for e in f.evidence), f.evidence
+    assert "nested too deeply" in f.fix
 
 
 @pytest.mark.parametrize("depth", DEPTHS)
@@ -143,20 +149,39 @@ def test_a_deep_package_json_is_read_or_disclosed_never_a_crash(tmp_path, depth)
 # ---------------------------------------------------- stray *.json in the plugin tree
 @pytest.mark.parametrize("depth", DEPTHS)
 def test_a_deep_json_file_in_the_tree_is_disclosed_not_a_crash(tmp_path, depth):
-    """The tree sweep reads every `*.json` looking for embedded MCP server specs. One the
-    parser cannot follow is NOT 'no spec here': it is disclosed as not examined (WARN), so
-    nesting cannot be used to hide a spec from the vet. One it can follow is read as usual."""
+    """The tree sweep reads every `*.json` looking for embedded MCP server specs. C-664: the
+    spec sits in a shallow field, so it is found and vetted however the file is padded (old:
+    only where this interpreter's parser followed the pad; elsewhere "0 embedded MCP spec"
+    and a WARN that the file was not examined), and the part nested past the bound is
+    disclosed as not examined (WARN), so nesting is neither a way to hide a spec nor a way
+    to a clean answer."""
     doc = '{"mcpServers":{"s":{"command":"echo","args":["hi"]}},"pad":%s}' % _deep(depth)
     f = vet_plugin(_plugin(tmp_path, '{"id":"d","configSchema":{}}', {"mcp.json": doc}))
-    if _json_parses(doc):
-        assert "nested too deeply" not in " ".join(f.evidence)
-        assert "1 embedded MCP spec" in f.detail, f.detail  # still found and vetted
-    else:
-        assert f.status == WARN, f.detail
-        assert any(
-            "nested too deeply for this scanner's parser (mcp.json)" in e for e in f.evidence
-        ), f.evidence
-        assert "0 embedded MCP spec" in f.detail  # it really was not examined
+    assert f.status == WARN, f.detail
+    assert "1 embedded MCP spec" in f.detail, f.detail  # still found and vetted
+    assert any("nested too deeply to be read in full (mcp.json)" in e for e in f.evidence), f.evidence
+    assert "nested too deeply" in f.fix
+
+
+def test_a_file_the_shallow_reader_cannot_hold_is_still_disclosed_not_skipped(tmp_path, monkeypatch):
+    """The old "not examined" arm, forced: when even one layer does not fit the stack the
+    shallow reader raises `JSONNestingError`, and the tree sweep must say the file was not
+    examined rather than treat it as "no MCP spec here" (WARN, 0 specs)."""
+    def too_big(*_a, **_k):
+        raise JSONNestingError("no room for one layer")
+
+    real = _mcp.loads_shallow
+    monkeypatch.setattr(
+        _mcp, "loads_shallow",
+        lambda text, **kw: too_big() if text.startswith('{"mcpServers"') else real(text, **kw),
+    )
+    doc = '{"mcpServers":{"s":{"command":"echo","args":["hi"]}}}'
+    f = vet_plugin(_plugin(tmp_path, '{"id":"d","configSchema":{}}', {"mcp.json": doc}))
+    assert f.status == WARN, f.detail
+    assert any(
+        "nested too deeply for this scanner's parser (mcp.json)" in e for e in f.evidence
+    ), f.evidence
+    assert "0 embedded MCP spec" in f.detail  # it really was not examined
 
 
 # ------------------------------------------------- paired-device scopes (the audit)

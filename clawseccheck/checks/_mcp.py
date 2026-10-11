@@ -44,7 +44,13 @@ from ..collector import (
     dig,
     limit_hits_for,
 )
-from ..configloader import loads_json5
+from ..configloader import (
+    ELIDED,
+    SHALLOW_JSON_DEPTH,
+    JSONNestingError,
+    json_nesting_exceeds,
+    loads_shallow,
+)
 from ..safeio import _VCS_DIR_NAMES
 from ..scanbudget import (
     DEFAULT_VET_ALL_BUDGET_S,
@@ -567,17 +573,27 @@ def _wrapper_declares_lifecycle_script(top: Path) -> "tuple[bool, bool]":
     if st.st_size > _PLUGIN_JS_MAX_BYTES:
         return False, True
     try:
-        loaded = _json.loads(
-            pj.read_text(encoding="utf-8-sig", errors="replace"),
-            parse_int=_json_int_unbounded,
-        )
+        text = pj.read_text(encoding="utf-8-sig", errors="replace")
+        if json_nesting_exceeds(text, SHALLOW_JSON_DEPTH):
+            # C-664: decided on the TEXT, so the answer is the same on every interpreter
+            # (whether json.loads would follow such a file is the interpreter's business).
+            # The shallow reader has no integer hook, so a huge integer in a file this deep
+            # is "could not tell".
+            shallow = loads_shallow(text)
+            loaded, elided = shallow.value, shallow.elided
+        else:
+            loaded, elided = _json.loads(text, parse_int=_json_int_unbounded), 0
     except _json.JSONDecodeError:
         return False, False
     except (RecursionError, MemoryError, OSError, ValueError, OverflowError):
         return False, True
     scripts = loaded.get("scripts") if isinstance(loaded, dict) else None
     declares = isinstance(scripts, dict) and any(k in scripts for k in _WRAPPER_LIFECYCLE_KEYS)
-    return declares, False
+    # npm reads `scripts` only at the top level, so a script buried below the bound is not
+    # wired and `declares` is exact. A file with a subtree nested past the bound that
+    # declares no script is still reported as "could not read in full" (the second flag),
+    # the same on every interpreter, so a partly read file is never called clean.
+    return declares, bool(elided) and not declares
 
 
 def _wrapper_top_level_scan(top: Path, deadline, skill_reads: bool = False) -> _WrapperScan:
@@ -861,7 +877,6 @@ def vet_plugin(
         disclosure off. Only what ``vet_skill`` really read (and only when it returned) is
         left out of the list.
     """
-    import json as _json
 
     from ..shippedexec import ShippedArtifact as _ShippedArtifact  # noqa: PLC0415
     from ..skillast import analyze_javascript, analyze_python  # noqa: PLC0415
@@ -908,8 +923,17 @@ def vet_plugin(
     manifest_read_failed = False  # C-665: ... and the READ itself raised, vs read-but-not-regular
     colocated_skill = False
     manifest = None
+    # C-664: documents the author padded past the shallow reader's bound. Their shallow
+    # fields are read exactly as unpadded, but a part of the file was never examined, so the
+    # vet can be at most CAUTION and says so (see the disclosure after the sweep).
+    elided_docs: list[str] = []
     try:
-        manifest = loads_json5(_read_plugin_manifest_text(root / _PLUGIN_MANIFEST))
+        shallow_manifest = loads_shallow(
+            _read_plugin_manifest_text(root / _PLUGIN_MANIFEST), json5=True
+        )
+        manifest = shallow_manifest.value
+        if shallow_manifest.elided:
+            elided_docs.append(_PLUGIN_MANIFEST)
     except (OSError, ValueError, RecursionError, MemoryError) as exc:
         # RecursionError (deeply-nested manifest) and MemoryError (huge manifest) are not
         # ValueError - without them a hostile manifest would abort the whole vet instead of
@@ -1003,13 +1027,16 @@ def vet_plugin(
     pkg_path = root / "package.json"
     if pathprobe.is_file(pkg_path):
         try:
-            loaded = _json.loads(pkg_path.read_text(encoding="utf-8", errors="replace"))
+            shallow_pkg = loads_shallow(pkg_path.read_text(encoding="utf-8", errors="replace"))
+            loaded = shallow_pkg.value
         except (OSError, ValueError, RecursionError):
-            # RecursionError for the same reason as the manifest read above: nested deeper
-            # than this interpreter's parser follows is "unreadable", not an abort.
-            loaded = None
+            # A parser refusal (or a stack too small even for the shallow reader) is
+            # "unreadable", not an abort.
+            loaded, shallow_pkg = None, None
         if isinstance(loaded, dict):
             pkg = loaded
+            if shallow_pkg.elided:
+                elided_docs.append("package.json")
         else:
             warns.append("unreadable/unparseable package.json \u2014 npm packaging not assessed")
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
@@ -1503,7 +1530,13 @@ def vet_plugin(
             continue  # bundled-skill content already dispatched to vet_skill above
         if fp.suffix == ".json" and fp.name not in _PLUGIN_MCP_SKIP:
             try:
-                data = _json.loads(fp.read_text(encoding="utf-8", errors="replace"))
+                shallow_json = loads_shallow(fp.read_text(encoding="utf-8", errors="replace"))
+                data = shallow_json.value
+                if shallow_json.elided:
+                    elided_docs.append(str(fp.relative_to(root)))
+            except JSONNestingError:
+                data = None  # the stack cannot even hold one layer: not examined
+                deep_json.append(str(fp.relative_to(root)))
             except (OSError, ValueError):
                 data = None
             except RecursionError:
@@ -1624,6 +1657,22 @@ def vet_plugin(
         warns.append(
             f"JSON file(s) nested too deeply for this scanner's parser ({shown_dj}{more_dj}) "
             "were not checked for embedded MCP server specs"
+        )
+    elision_fix = ""
+    if elided_docs:
+        # C-664: the shallow fields of these files were read as if unpadded; what lies below
+        # the bound was not. Never INSTALL (a WARN floors the headline at CAUTION); the
+        # remediation goes in `fix`, which baseline.fingerprint() does not hash.
+        shown_ed = ", ".join(sorted(set(elided_docs))[:3])
+        more_ed = "" if len(set(elided_docs)) <= 3 else f" (+{len(set(elided_docs)) - 3} more)"
+        warns.append(
+            f"JSON file(s) nested too deeply to be read in full ({shown_ed}{more_ed}): "
+            f"everything below {SHALLOW_JSON_DEPTH} levels was not examined"
+        )
+        elision_fix = (
+            f" Part of {shown_ed}{more_ed} is nested too deeply (over {SHALLOW_JSON_DEPTH} "
+            "levels) for this scan to read; inspect it manually - the scan cannot say what "
+            "that part declares."
         )
     if nonregular_n:
         # C-654: a coverage gap, not a note and not a WARN - a tree holding an entry this
@@ -1834,7 +1883,7 @@ def vet_plugin(
             WARN,
             f"{label} in {summary}: {head_sig}",
             "Review the flagged signals before installing; prefer pinned, shrinkwrapped, "
-            "source-readable plugins." + manifest_fix,
+            "source-readable plugins." + manifest_fix + elision_fix,
             evidence,
         )
     elif status == UNKNOWN:
@@ -3186,6 +3235,20 @@ def _mcp_reason_axis(reason: str) -> str | None:
     return None
 
 
+def _without_elided(node):
+    """``None`` for every ELIDED marker in a ``loads_shallow`` value.
+
+    The value is at most ``SHALLOW_JSON_DEPTH`` + 1 levels deep, so the recursion is bounded.
+    ``None`` is a JSON ``null`` and every spec reader already ignores a field it cannot use;
+    the marker itself would reach code that calls ``json.dumps`` or ``.get`` on it.
+    """
+    if isinstance(node, dict):
+        return {k: _without_elided(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_without_elided(v) for v in node]
+    return None if node is ELIDED else node
+
+
 def _load_mcp_spec_file(path: Path) -> dict[str, dict] | None:
     """Load a JSON file and normalise to {name: spec}.
 
@@ -3210,13 +3273,26 @@ def _load_mcp_spec_file(path: Path) -> dict[str, dict] | None:
     contract. The caller (vet_mcp) detects it separately and routes it through
     mcpsurface.from_probe_json instead.
     """
-    import json as _json
+    return _load_mcp_spec_file_ex(path)[0]
 
+
+def _load_mcp_spec_file_ex(path: Path) -> "tuple[dict[str, dict] | None, int]":
+    """:func:`_load_mcp_spec_file` plus how many subtrees the shallow reader elided (C-664).
+
+    A spec file is the server author's document: it is read to ``SHALLOW_JSON_DEPTH`` levels
+    exactly as ``json.loads`` would, and a subtree nested deeper is dropped to ``None`` and
+    counted, so the caller can say the file was only partly read.
+    """
     try:
-        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        shallow = loads_shallow(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
-        return None
+        return None, 0
+    data, elided = _without_elided(shallow.value), shallow.elided
+    servers = _spec_servers(path, data)
+    return servers, (elided if servers is not None else 0)
 
+
+def _spec_servers(path: Path, data) -> "dict[str, dict] | None":
     if not isinstance(data, dict):
         return None
 
@@ -3319,6 +3395,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
     # these; both stay False everywhere else.
     _vet_mcp_config_found = False
     _vet_mcp_config_parse_error = False
+    spec_elided = 0  # C-664: subtrees of a --vet-mcp spec file the shallow reader dropped
 
     if target is not None:
         p = Path(str(target)).expanduser()
@@ -3348,7 +3425,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                 )
             ]
         if _is_spec_file:
-            loaded = _load_mcp_spec_file(p)
+            loaded, spec_elided = _load_mcp_spec_file_ex(p)
             if loaded is None:
                 # F-142: none of the four {name: spec} config shapes matched - last
                 # resort, try the openclaw probe --json (names-only) shape before
@@ -3468,6 +3545,11 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
     findings: list[Finding] = []
     for sname, spec in servers.items():
         dangerous, suspicious = _vet_mcp_server(sname, spec)
+        if spec_elided:
+            suspicious = suspicious + [
+                f"{sname}: the spec file is nested too deeply to be read in full "
+                f"(over {SHALLOW_JSON_DEPTH} levels) - the part below that was not examined"
+            ]
 
         if dangerous:
             status = FAIL
@@ -3489,6 +3571,12 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
             status = PASS
             all_reasons = []
             fix = "No supply-chain signals detected \u2014 keep specs pinned and env vars minimal."
+
+        if spec_elided:
+            fix += (
+                " The spec file is nested too deeply for this scan to read in full; "
+                "inspect it manually."
+            )
 
         # Reasons are collected with a "<sname>: " prefix; strip it so the server name
         # appears once (as the finding title), not repeated on every line.
@@ -8282,6 +8370,11 @@ def _codex_plugin_doc_cache_dirs(ctx: Context) -> list[Path]:
     return out
 
 
+_HOOKS_TOO_DEEP_FIX = (
+    " hooks.json in {} is nested too deeply for this scan to read in full; inspect it by hand."
+)
+
+
 def check_codex_plugin_hooks(ctx: Context) -> Finding:
     """B151 - codex connector shell hooks in the plugin doc-cache (informational).
 
@@ -8306,11 +8399,11 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
             "No action needed unless Codex CLI connectors are adopted later.",
         )
 
-    import json as _json
 
     any_hooks_file = False
     shell_ev: list[str] = []
     clean_connectors: list[str] = []
+    too_deep: list[str] = []
 
     for cache_dir in cache_dirs:
         try:
@@ -8323,17 +8416,19 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
                 continue
             any_hooks_file = True
             try:
-                data = _json.loads(hooks_path.read_text(encoding="utf-8", errors="replace"))
+                shallow = loads_shallow(hooks_path.read_text(encoding="utf-8", errors="replace"))
             except (OSError, ValueError):
                 continue
+            if shallow.elided:
+                too_deep.append(connector_dir.name)  # C-664: partly read - never "clean"
             refs: list[tuple[str, str]] = []
-            _walk_hook_shell_refs(data, None, refs)
+            _walk_hook_shell_refs(shallow.value, None, refs)
             if refs:
                 for event_name, script in refs[:3]:
                     shell_ev.append(
                         f"{connector_dir.name}/hooks.json: {event_name} -> {script}"
                     )
-            else:
+            elif not shallow.elided:
                 clean_connectors.append(connector_dir.name)
 
     if not any_hooks_file:
@@ -8356,8 +8451,20 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
             "surface disclosed for awareness \u2014 not proof of malice; many legitimate "
             "connectors do this.",
             "Review the referenced script(s) before trusting the connector, and confirm "
-            "they only run with your consent (e.g. as part of an explicit workflow).",
+            "they only run with your consent (e.g. as part of an explicit workflow)."
+            + (_HOOKS_TOO_DEEP_FIX.format(", ".join(too_deep[:6])) if too_deep else ""),
             evidence=shell_ev[:6],
+        )
+
+    if too_deep:
+        return _finding(
+            "B151",
+            UNKNOWN,
+            "Codex connector hooks.json file(s) nested too deeply to be read in full "
+            f"({', '.join(too_deep[:6])}) \u2014 no shell-hook wiring was found in the part "
+            "that was read, and the rest was not examined.",
+            _HOOKS_TOO_DEEP_FIX.format(", ".join(too_deep[:6])).strip(),
+            evidence=too_deep[:6],
         )
 
     return _finding(
@@ -8456,7 +8563,6 @@ def _npm_projects_plugin_ids(
         wrapper_dirs = sorted(p for p in npm_projects.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
     except OSError:
         return out
-    import json as _json
 
     for wrapper_dir in wrapper_dirs:
         root = _locate_plugin_root(wrapper_dir)
@@ -8466,7 +8572,10 @@ def _npm_projects_plugin_ids(
             manifest = None
             if kind is None:
                 try:
-                    manifest = _json.loads(_read_plugin_manifest_text(root / _PLUGIN_MANIFEST))
+                    # C-664: only `id` is read, and it sits at the first level, so a padded
+                    # manifest still yields its id exactly as unpadded and an elided subtree
+                    # cannot change the answer - no disclosure needed (nothing here vets the file).
+                    manifest = loads_shallow(_read_plugin_manifest_text(root / _PLUGIN_MANIFEST)).value
                 except (OSError, ValueError):
                     manifest = None
             if isinstance(manifest, dict) and isinstance(manifest.get("id"), str) and manifest["id"]:
@@ -8651,7 +8760,6 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
 
     from ..skilldiscovery import config_plugin_load_paths
 
-    import json as _json
 
     load_paths = config_plugin_load_paths(ctx.home, cfg)
     declared = set(_plugins(cfg))
@@ -8665,7 +8773,10 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
         if not pathprobe.is_file(manifest_file):
             continue
         try:
-            manifest = _json.loads(_read_plugin_manifest_text(manifest_file))
+            # C-664: as in `_npm_projects_plugin_ids`, only the first-level `id` is read; a
+            # padded manifest still yields its id, so an elided subtree changes nothing and
+            # this id comparison needs no disclosure.
+            manifest = loads_shallow(_read_plugin_manifest_text(manifest_file)).value
         except (OSError, ValueError):
             continue
         if not isinstance(manifest, dict):
