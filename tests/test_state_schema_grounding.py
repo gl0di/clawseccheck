@@ -355,31 +355,27 @@ def _extract_vendor_schema_sql(js_text: str) -> str:
 # rather than silently returning literal `${...}` text as if it were SQL.
 # --------------------------------------------------------------------------------------
 
-_WORKER_TEMPLATE_MARKER_RE = re.compile(r"\bOPENCLAW_STATE_SCHEMA_SQL\s*=\s*`")
+# C-683 (2026.10.1): the build moved the worker's copy out of `worker/worker.mjs` (a template
+# literal) into `state/openclaw-state-read.worker.js`, where it is a DOUBLE-QUOTED string
+# assigned after a bare `var OPENCLAW_STATE_SCHEMA_SQL;`. A filename is build output, so the
+# copy is located the way the primary definition is: by the constant, anywhere in the dist,
+# in either spelling. A `const`/`let` declaration is the primary definition, not a copy.
+_WORKER_TEMPLATE_MARKER_RE = re.compile(r"\bOPENCLAW_STATE_SCHEMA_SQL\s*=\s*([`\"])")
+_DECLARATION_BEFORE_RE = re.compile(r"\b(?:const|let)\s+$")
 
 
-def _extract_worker_template_schema_sql(js_text: str) -> str:
-    """The unescaped SQL text of the worker thread's `OPENCLAW_STATE_SCHEMA_SQL = \\`...\\``
-    template-literal copy (`worker/worker.mjs`, grounded against the installed 2026.9.5
-    dist, where the assignment is minified: no `const`, no spaces around `=`). The regex
-    tolerates optional spacing either way, not because spacing has been observed to vary
-    on its own, but because nothing about this proof depends on it staying minified.
-
-    Reuses `_unescape_js_double_quoted` for the escape table: `\\n`/`\\t`/`\\\\`/`\\uXXXX`/
-    the JS fallback rule are the same set for a template literal as for a double-quoted
-    string (ECMA-262 11.8.6). A raw, unescaped newline needs no special handling either --
-    the unescape pass only transforms backslash-prefixed sequences and leaves it as-is.
-    """
-    m = _WORKER_TEMPLATE_MARKER_RE.search(js_text)
-    if m is None:
-        raise AssertionError(
-            f"{_WORKER_TEMPLATE_MARKER_RE.pattern!r} not found in the text -- the worker "
-            "thread no longer embeds the state schema as a template literal the way this "
-            "guard expects; re-ground it against the current bundle before trusting "
-            "anything downstream."
-        )
+def _read_assigned_schema_literal(js_text: str, m: "re.Match") -> str:
+    """The unescaped SQL of the literal opening just past *m* (a `_WORKER_TEMPLATE_MARKER_RE`
+    match). A template literal fails loudly on a `${...}`; a double-quoted string cannot
+    interpolate. Both spellings share one escape table (ECMA-262 11.8.4 / 11.8.6)."""
     start = m.end()
     i, n = start, len(js_text)
+    if m.group(1) == '"':
+        while i < n and js_text[i] != '"':
+            i += 2 if js_text[i] == "\\" else 1
+        if i >= n:
+            raise AssertionError("unterminated worker-thread double-quoted schema string in the dist")
+        return _unescape_js_double_quoted(js_text[start:i])
     while i < n:
         c = js_text[i]
         if c == "\\":
@@ -399,39 +395,94 @@ def _extract_worker_template_schema_sql(js_text: str) -> str:
     return _unescape_js_double_quoted(js_text[start:i])
 
 
+def _extract_worker_template_schema_sql(js_text: str) -> str:
+    """The unescaped SQL of the first `OPENCLAW_STATE_SCHEMA_SQL = <backtick or double-quote
+    literal>` assignment in *js_text* -- the worker thread's copy of the schema (a template literal in
+    `worker/worker.mjs` through 2026.9.9, a double-quoted string in
+    `state/openclaw-state-read.worker.js` on 2026.10.1). The regex tolerates optional spacing
+    either way, not because spacing has been observed to vary on its own, but because nothing
+    about this proof depends on it staying minified.
+
+    Reuses `_unescape_js_double_quoted` for the escape table: `\\n`/`\\t`/`\\\\`/`\\uXXXX`/
+    the JS fallback rule are the same set for a template literal as for a double-quoted
+    string. A raw, unescaped newline needs no special handling either -- the unescape pass
+    only transforms backslash-prefixed sequences and leaves it as-is.
+    """
+    m = _WORKER_TEMPLATE_MARKER_RE.search(js_text)
+    if m is None:
+        raise AssertionError(
+            f"{_WORKER_TEMPLATE_MARKER_RE.pattern!r} not found in the text -- the worker "
+            "thread no longer embeds the state schema as a literal the way this "
+            "guard expects; re-ground it against the current bundle before trusting "
+            "anything downstream."
+        )
+    return _read_assigned_schema_literal(js_text, m)
+
+
+def _worker_copy_sqls(js_text: str) -> "list[str]":
+    """The SQL of every assignment of the constant that is NOT its `const`/`let` declaration."""
+    return [
+        _read_assigned_schema_literal(js_text, m)
+        for m in _WORKER_TEMPLATE_MARKER_RE.finditer(js_text)
+        if not _DECLARATION_BEFORE_RE.search(js_text[max(0, m.start() - 16):m.start()])
+    ]
+
+
+def _worker_schema_copies(dist_dir: Path) -> "list[tuple[Path, str]]":
+    """(file, SQL) for every non-declaration copy of the schema constant anywhere in the dist.
+    An unreadable regular file fails loudly (it could be the one that holds the copy)."""
+    copies = []
+    for ext in _JS_EXTS:
+        for path in sorted(dist_dir.rglob("*" + ext)):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise AssertionError(
+                    f"cannot read {path} while looking for the worker's copy of the state "
+                    f"schema: {exc}. An unreadable bundle could be the one that holds it.") from exc
+            if "OPENCLAW_STATE_SCHEMA_SQL" not in text:
+                continue
+            copies.extend((path, sql) for sql in _worker_copy_sqls(text))
+    return copies
+
+
 def _assert_worker_template_copy_matches_primary(dist_dir: Path, primary_sql: str) -> None:
     """C-580: the second half of `_find_state_schema_defining_js`'s identity proof --
-    verifying, not merely asserting in a docstring, that `worker/worker.mjs`'s
-    template-literal copy of the schema is the SAME schema as *primary_sql* (the text that
-    function already proved every double-quoted definition agrees on).
+    verifying, not merely asserting in a docstring, that the worker thread's copy of the
+    schema is the SAME schema as *primary_sql* (the text that function already proved every
+    primary definition agrees on).
+
+    C-683: the copy is found by the constant, in any bundle of the dist and in either
+    spelling, never by `worker/worker.mjs` -- 2026.10.1 moved it. At least one copy must
+    exist and EVERY copy must equal the primary; none found is a loud failure, never a skip.
 
     Deliberately a standalone function, not folded into `_find_state_schema_defining_js`
     itself: that function's own synthetic unit tests build tiny tmp_path dists with none
-    of the surrounding bundle layout, and requiring a `worker/worker.mjs` fixture in every
-    one of them to keep constructing a valid dist would test this proof's plumbing, not
-    its logic. Called only where a real dist -- or a synthetic stand-in built specifically
-    to exercise this function -- is already in hand.
+    of the surrounding bundle layout, and requiring a worker bundle in every one of them
+    to keep constructing a valid dist would test this proof's plumbing, not its logic.
     """
-    worker_path = dist_dir / "worker" / "worker.mjs"
-    if not worker_path.is_file():
+    copies = _worker_schema_copies(dist_dir)
+    if not copies:
         raise AssertionError(
-            f"{worker_path} does not exist -- the worker thread embedded a template-"
-            "literal copy of the state schema on every release 8.2 through 9.5; re-ground "
-            "this guard against the current bundle layout before trusting anything "
-            "downstream."
+            f"no worker-thread copy of the state schema (an `OPENCLAW_STATE_SCHEMA_SQL = ...` "
+            f"assignment outside its const declaration) was found in any bundle under "
+            f"{dist_dir} -- the worker thread embedded one on every release 8.2 through "
+            "10.1; re-ground this guard against the current bundle layout before trusting "
+            "anything downstream."
         )
-    worker_text = worker_path.read_text(encoding="utf-8", errors="replace")
-    worker_sql = _extract_worker_template_schema_sql(worker_text)
-    if worker_sql != primary_sql:
-        # surrogatepass: matches _find_state_schema_defining_js's own digest comparison.
-        primary_digest = hashlib.sha256(primary_sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
-        worker_digest = hashlib.sha256(worker_sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
-        raise AssertionError(
-            f"{worker_path}'s template-literal copy of the state schema ({worker_digest}) "
-            f"does NOT match the primary definition ({primary_digest}). Byte-identical on "
-            "every release 8.2 through 9.5 until now -- decide which the runtime actually "
-            "uses before trusting a snapshot taken from either."
-        )
+    # surrogatepass: matches _find_state_schema_defining_js's own digest comparison.
+    primary_digest = hashlib.sha256(primary_sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    for path, sql in copies:
+        if sql != primary_sql:
+            copy_digest = hashlib.sha256(sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+            raise AssertionError(
+                f"{path}'s copy of the state schema ({copy_digest}) does NOT match the "
+                f"primary definition ({primary_digest}). Byte-identical on every release 8.2 "
+                "through 10.1 until now -- decide which the runtime actually uses before "
+                "trusting a snapshot taken from either."
+            )
 
 
 def _dist_table_ddl_texts(sql_text: str) -> "dict[str, str]":
@@ -907,6 +958,12 @@ _CONFIG_MACHINE_STATE_LOOSE_LEGACY = (
     "constraint on the vendor table; not a subset since every real column is nullable "
     "here, not merely a fewer-columns slice."
 )
+_CONFIG_MACHINE_STATE_UPDATED_AT_LEGACY = (
+    "carries `updated_at INTEGER` where the vendor's config_machine_state has `updated_at_ms "
+    "INTEGER NOT NULL`, and `state_key` without the vendor's NOT NULL -- a column the vendor "
+    "table does not have, so not a subset. The test reads only the cron.store row's "
+    "value_json, never the timestamp column."
+)
 _AUTH_PROFILE_TABLES_DIFFERENT_DB = (
     "auth_profile_store/auth_profile_state (F-187) live in the PER-AGENT database "
     "(agents/<agent>/agent/openclaw-agent.sqlite), never in the state database "
@@ -1045,6 +1102,10 @@ _REGISTRY: "dict[str, _Entry]" = {
     # classifications, same reasons.
     "tests/test_b704_state_db_shm_sidecar.py:42": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b704_state_db_shm_sidecar.py:46": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
+    # C-680c: the cron.store machine-state key test builds a config_machine_state with the
+    # column `updated_at` (the vendor's is `updated_at_ms`) and no NOT NULL on state_key --
+    # a hand-written shape no OpenClaw release ever shipped.
+    "tests/test_c680c_elided_disclosure.py:168": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_UPDATED_AT_LEGACY),
     # B-889 round 1: the decoy table a `CREATE VIEW config_machine_state AS SELECT ...
     # FROM decoy_secrets` view-masquerade fixture projects from -- never a real
     # OpenClaw table, same shape as every other _UNRELATED_DECOY entry above/below. The
@@ -1298,7 +1359,8 @@ _REGISTRY: "dict[str, _Entry]" = {
 # re-baseline. 79, was 78.
 # 81, was 79: the two test_b749 sites registered above (:702 and :671).
 # 82, was 81: the one test_c654 site registered above (:605).
-assert len(_REGISTRY) == 82, f"registry has {len(_REGISTRY)} entries, expected 82"
+# 83, was 82: the one test_c680c_elided_disclosure site registered above (:168).
+assert len(_REGISTRY) == 83, f"registry has {len(_REGISTRY)} entries, expected 83"
 
 
 # ========================================================================================
@@ -1648,8 +1710,58 @@ def test_assert_worker_template_copy_matches_primary_raises_when_it_diverges(tmp
 
 
 def test_assert_worker_template_copy_matches_primary_raises_when_the_file_is_missing(tmp_path):
-    with pytest.raises(AssertionError, match="does not exist"):
+    with pytest.raises(AssertionError, match="no worker-thread copy"):
         _assert_worker_template_copy_matches_primary(tmp_path, "CREATE TABLE t (a TEXT);")
+
+
+# ---- C-683: the 2026.10.1 layout -- a double-quoted copy in state/*.worker.js -------------
+
+_T = "CREATE TABLE t (a TEXT);\n"
+_V101_COPY = 'var OPENCLAW_STATE_SCHEMA_SQL;\nfoo();\n\tOPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE t (a TEXT);\\n";\n'
+
+
+def test_extract_worker_template_schema_sql_reads_a_double_quoted_assignment():
+    assert _extract_worker_template_schema_sql(_V101_COPY) == _T
+
+
+def test_a_double_quoted_copy_in_any_bundle_is_found_and_compared(tmp_path):
+    _write_dist(tmp_path, {"state/openclaw-state-read.worker.js": _V101_COPY})
+    _assert_worker_template_copy_matches_primary(tmp_path, _T)
+
+
+def test_a_double_quoted_copy_that_diverges_is_refused(tmp_path):
+    _write_dist(tmp_path, {"state/openclaw-state-read.worker.js": _V101_COPY})
+    with pytest.raises(AssertionError, match="does NOT match"):
+        _assert_worker_template_copy_matches_primary(tmp_path, "CREATE TABLE u (b TEXT);\n")
+
+
+def test_one_diverging_copy_among_agreeing_ones_is_refused(tmp_path):
+    _write_dist(tmp_path, {
+        "a/one.js": _V101_COPY,
+        "b/two.mjs": 'OPENCLAW_STATE_SCHEMA_SQL=`CREATE TABLE u (b TEXT);\n`',
+    })
+    with pytest.raises(AssertionError, match="does NOT match"):
+        _assert_worker_template_copy_matches_primary(tmp_path, _T)
+
+
+def test_a_const_declaration_alone_is_the_primary_not_a_copy(tmp_path):
+    """The primary definition must not satisfy the copy check: a dist whose only assignment is
+    the `const` declaration has NO worker copy, and that fails loudly instead of passing."""
+    _write_dist(tmp_path, {"main.mjs": 'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE t (a TEXT);\\n";'})
+    with pytest.raises(AssertionError, match="no worker-thread copy"):
+        _assert_worker_template_copy_matches_primary(tmp_path, _T)
+
+
+def test_a_non_literal_assignment_is_not_mistaken_for_a_copy(tmp_path):
+    _write_dist(tmp_path, {"x.mjs": "OPENCLAW_STATE_SCHEMA_SQL = build();\nif (OPENCLAW_STATE_SCHEMA_SQL == 1) {}"})
+    with pytest.raises(AssertionError, match="no worker-thread copy"):
+        _assert_worker_template_copy_matches_primary(tmp_path, _T)
+
+
+def test_an_unterminated_double_quoted_copy_fails_loudly(tmp_path):
+    _write_dist(tmp_path, {"x.js": 'OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE t (a TEXT);'})
+    with pytest.raises(AssertionError, match="unterminated"):
+        _assert_worker_template_copy_matches_primary(tmp_path, _T)
 
 
 # ---- B-834: the version reader ---------------------------------------------------------
@@ -2222,9 +2334,6 @@ _STATE_REDECLARING_CONSTANTS = {
     "WORKER_ENVIRONMENT_SSH_FALLBACK_PORTS_SCHEMA_SQL":
         _ALREADY_IN_MAIN + "worker_environment_ssh_fallback_ports "
         "(openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema)",
-    "CRON_RUNTIME_AUTHORITY_SCHEMA_SQL":
-        _ALREADY_IN_MAIN + "cron_job_runtime_authorities "
-        "(runtime-authority-store-*.mjs: replaceCronRuntimeAuthorityRows, same db as cron_jobs)",
     "STANDING_GRANT_SCHEMA_SQL":
         _ALREADY_IN_MAIN + "operator_approval_standing_grants, "
         "operator_approval_standing_grant_generations "
@@ -2232,6 +2341,18 @@ _STATE_REDECLARING_CONSTANTS = {
     "OPERATOR_APPROVAL_EXECUTION_IDENTITY_SCHEMA_SQL":
         _ALREADY_IN_MAIN + "operator_approval_execution_identities "
         "(operator-approval-store.operations-*.mjs: database.db.exec)",
+}
+
+# name -> evidence. C-683 (2026.10.1): applied to the state database, and defined NOT as a literal
+# but as `NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>)`, so it declares a
+# table the main constant already lists BY CONSTRUCTION. A distinct classification from the
+# literal re-declarers above: the definition shape is parsed (`_DERIVED_DEFINITION_RE`), the
+# named table must be in the main set, and any other shape of definition stops the generator.
+_STATE_DERIVED_CONSTANTS = {
+    "CRON_RUNTIME_AUTHORITY_SCHEMA_SQL":
+        "applied to the state database (runtime-authority-store-*.mjs: "
+        "replaceCronRuntimeAuthorityRows, same db as cron_jobs); 2026.10.1 derives it from the "
+        "main constant for CRON_RUNTIME_AUTHORITY_TABLE = \"cron_job_runtime_authorities\"",
 }
 
 # name -> why it is not read.
@@ -2375,6 +2496,68 @@ def _survey_schema_sql_constants(dist_dir: Path, wanted) -> "tuple[set, dict]":
     return seen, found
 
 
+_DERIVED_DEFINITION_RE = re.compile(
+    r"extractSqliteTableSchema\(\s*OPENCLAW_STATE_SCHEMA_SQL\s*,\s*"
+    r"(?:\"([^\"\\\n]*)\"|([A-Za-z_$][\w$]*))\s*\)\s*;")
+
+
+def _survey_derived_state_constants(dist_dir: Path, derived) -> "dict[str, list]":
+    """name -> [(path, table)] for every definition of a *derived* constant. A definition is
+    understood only as `NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>);`
+    where <table> is a string literal or an identifier bound once, in the same file, to one.
+    Any other right-hand side (a literal, a different source constant, an options argument, a
+    computed table) raises: the constant composes its DDL in a way nothing here has read."""
+    found: dict = {name: [] for name in derived}
+    for ext in _JS_EXTS:
+        for path in sorted(dist_dir.rglob("*" + ext)):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise AssertionError(
+                    f"cannot read {path} while classifying derived *_SCHEMA_SQL constants: "
+                    f"{exc}. An unreadable bundle could define one.") from exc
+            for name in derived:
+                if name not in text:
+                    continue
+                for m in re.finditer(rf"\b{name}\s*=(?!=)\s*", text):
+                    d = _DERIVED_DEFINITION_RE.match(text, m.end())
+                    if d is None:
+                        raise AssertionError(
+                            f"{name} is classified as derived from OPENCLAW_STATE_SCHEMA_SQL but "
+                            f"{path} defines it as `{text[m.end():m.end() + 100].strip()}...` -- "
+                            "not the one shape this guard models (`extractSqliteTableSchema("
+                            "OPENCLAW_STATE_SCHEMA_SQL, <table>);`). Re-ground the classification.")
+                    table = d.group(1)
+                    if table is None:
+                        bound = set(re.findall(
+                            rf"\b(?:const|let|var)\s+{re.escape(d.group(2))}\s*=\s*\"([^\"\\\n]*)\"\s*[;,]",
+                            text))
+                        if len(bound) != 1:
+                            raise AssertionError(
+                                f"{name}: the table argument `{d.group(2)}` is not bound to exactly "
+                                f"one string literal in {path} ({sorted(bound)}); re-ground.")
+                        table = next(iter(bound))
+                    found[name].append((path, table))
+    return found
+
+
+def _check_derived_state_constant(name: str, defs: list, dist_dir: Path, main_tables) -> None:
+    if not defs:
+        raise AssertionError(
+            f"{name} is classified as derived from OPENCLAW_STATE_SCHEMA_SQL but no bundle under "
+            f"{dist_dir} defines it -- the vendor renamed, moved or rewrote it; re-ground.")
+    tables = sorted({t for _, t in defs})
+    if len(tables) != 1:
+        raise AssertionError(f"{name} is derived for DIFFERENT tables ({tables}); decide which "
+                             "one the runtime applies before trusting either.")
+    if tables[0] not in set(main_tables):
+        raise AssertionError(
+            f"{name} is derived from OPENCLAW_STATE_SCHEMA_SQL for {tables[0]!r}, which the main "
+            "constant does not declare -- the derivation would fail at runtime; re-ground.")
+
+
 def _resolve_state_constant(name: str, defs: list, dist_dir: Path, main_tables) -> dict:
     """{"tables", "adds", "bundle", "copies"} for one allowlisted constant's definitions."""
     if not defs:
@@ -2416,7 +2599,7 @@ def _resolve_state_constant(name: str, defs: list, dist_dir: Path, main_tables) 
 
 
 def _satellite_state_tables(dist_dir: Path, main_tables, satellites=None, excluded=None,
-                            redeclaring=None) -> "dict[str, dict]":
+                            redeclaring=None, derived=None) -> "dict[str, dict]":
     """name -> {"tables", "adds", "bundle", "copies"} for every allowlisted satellite.
 
     Raises on: a `*_SCHEMA_SQL` name in no list; an allowlisted constant with no literal
@@ -2425,13 +2608,17 @@ def _satellite_state_tables(dist_dir: Path, main_tables, satellites=None, exclud
     uses); a `CREATE TABLE` whose name is not a literal; a spliced table the main constant
     does not declare; a satellite that declares nothing; and a REDECLARING constant that
     declares a table the main constant does not (it must then be promoted to the allowlist
-    deliberately). Redeclaring constants add no name, so they are checked, not returned."""
+    deliberately). Redeclaring constants add no name, so they are checked, not returned. A
+    DERIVED constant (`NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>)`)
+    is checked the same way: its definition shape must be that one, its table must be in the
+    main set, and anything else raises."""
     satellites = _STATE_SATELLITE_CONSTANTS if satellites is None else satellites
     excluded = _STATE_EXCLUDED_CONSTANTS if excluded is None else excluded
     redeclaring = _STATE_REDECLARING_CONSTANTS if redeclaring is None else redeclaring
+    derived = _STATE_DERIVED_CONSTANTS if derived is None else derived
     seen, found = _survey_schema_sql_constants(dist_dir, set(satellites) | set(redeclaring))
     unclassified = sorted(seen - {_PRIMARY_STATE_SCHEMA_CONSTANT} - set(satellites)
-                          - set(redeclaring) - set(excluded))
+                          - set(redeclaring) - set(derived) - set(excluded))
     if unclassified:
         raise AssertionError(
             f"unclassified *_SCHEMA_SQL constant(s) in {dist_dir}: {unclassified}. Read where "
@@ -2447,18 +2634,21 @@ def _satellite_state_tables(dist_dir: Path, main_tables, satellites=None, exclud
                 f"{name} is listed as re-declaring only tables OPENCLAW_STATE_SCHEMA_SQL already "
                 f"has, but it declares {extra}, which the main constant does not. Read where it "
                 "is applied and move it to _STATE_SATELLITE_CONSTANTS deliberately.")
+    derived_defs = _survey_derived_state_constants(dist_dir, set(derived)) if derived else {}
+    for name in sorted(derived):
+        _check_derived_state_constant(name, derived_defs[name], dist_dir, main_tables)
     return {name: _resolve_state_constant(name, found[name], dist_dir, main_tables)
             for name in sorted(satellites)}
 
 
 def _vendor_state_table_surface(dist_dir: Path, satellites=None, excluded=None,
-                                redeclaring=None) -> "tuple[set, dict, Path]":
+                                redeclaring=None, derived=None) -> "tuple[set, dict, Path]":
     """(every state-database table name the dist declares, per-satellite provenance, the
     bundle the main constant was read from). The one function the generator AND the
     dist-comparison test call, so they cannot disagree about what the file covers."""
     js_path = _find_state_schema_defining_js(dist_dir)
     main = set(_dist_table_ddl_texts(_extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))))
-    provenance = _satellite_state_tables(dist_dir, main, satellites, excluded, redeclaring)
+    provenance = _satellite_state_tables(dist_dir, main, satellites, excluded, redeclaring, derived)
     return main | {t for p in provenance.values() for t in p["tables"]}, provenance, js_path
 
 

@@ -1,9 +1,9 @@
 -- state_schema_snapshot.sql -- GENERATED. Do not hand-edit.
 --
--- openclaw-version: 2026.9.9
--- state-schema-version: 19
--- generated: 2026-10-10
--- tables: 12
+-- openclaw-version: 2026.10.1
+-- state-schema-version: 20
+-- generated: 2026-10-11
+-- tables: 13
 --
 -- What this is
 -- ------------
@@ -11,7 +11,7 @@
 -- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
 -- declares in a test DDL or that clawseccheck/ reads.
 --
--- source-bundle: openclaw-state-db-legacy-backfills-BSKqroDt.mjs
+-- source-bundle: openclaw-state-db-legacy-backfills-Dn2j69HZ.mjs
 --   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
 --   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
 --   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still
@@ -157,6 +157,15 @@ CREATE TABLE IF NOT EXISTS device_pairing_paired (
   approved_at_ms INTEGER NOT NULL,
   last_seen_at_ms INTEGER,
   last_seen_reason TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS diagnostic_events (
+  scope TEXT NOT NULL,
+  event_key TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, event_key)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS exec_approvals_config (

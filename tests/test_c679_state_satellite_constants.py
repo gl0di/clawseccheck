@@ -18,6 +18,7 @@ from _realhome import REAL_HOME
 from test_state_schema_grounding import (
     OPENCLAW_DIST,
     _CREATE_TABLE_NAMED_RE,
+    _STATE_DERIVED_CONSTANTS,
     _STATE_EXCLUDED_CONSTANTS,
     _STATE_REDECLARING_CONSTANTS,
     _STATE_SATELLITE_CONSTANTS,
@@ -33,8 +34,11 @@ _MAIN_TABLES = {"a_main", "b_main"}
 _SAT = "FOO_SCHEMA_SQL"
 _EXCLUDED = "BAR_SCHEMA_SQL"
 _REDECL = "BAZ_SCHEMA_SQL"
-_LISTS = {"satellites": {_SAT: "test"}, "excluded": {_EXCLUDED: "test"}, "redeclaring": {}}
+_DERIVED = "QUX_SCHEMA_SQL"
+_LISTS = {"satellites": {_SAT: "test"}, "excluded": {_EXCLUDED: "test"}, "redeclaring": {},
+          "derived": {}}
 _WITH_REDECL = {**_LISTS, "redeclaring": {_REDECL: "test"}}
+_WITH_DERIVED = {**_LISTS, "derived": {_DERIVED: "test"}}
 
 
 def _ddl(*names: str) -> str:
@@ -91,6 +95,65 @@ def test_a_redeclaring_constant_the_dist_no_longer_defines_fails_loudly(tmp_path
     dist = _write_dist(tmp_path, {"a.mjs": _sat_template(_ddl("sat_one"))})
     with pytest.raises(AssertionError, match="allowlisted"):
         _tables(dist, **_WITH_REDECL)
+
+
+# ---- C-683: a constant derived from the main one (2026.10.1's CRON_RUNTIME_AUTHORITY) -----
+
+_DERIVED_OK = ('const T = "a_main";\n'
+               f"const {_DERIVED} = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, T);\n")
+
+
+def _derived_dist(tmp_path, body):
+    return _write_dist(tmp_path, {"a.mjs": _sat_template(_ddl("sat_one")), "d.mjs": body})
+
+
+def test_a_derived_constant_over_a_main_table_passes_and_adds_nothing(tmp_path):
+    got = _tables(_derived_dist(tmp_path, _DERIVED_OK), **_WITH_DERIVED)
+    assert set(got) == {_SAT}, "a derived constant is checked, never returned as a source"
+
+
+def test_a_derived_constant_with_an_inline_table_literal_passes(tmp_path):
+    body = f'const {_DERIVED} = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, "b_main");\n'
+    assert set(_tables(_derived_dist(tmp_path, body), **_WITH_DERIVED)) == {_SAT}
+
+
+def test_a_derived_constant_for_a_table_the_main_constant_lacks_stops_the_generator(tmp_path):
+    body = _DERIVED_OK.replace("a_main", "brand_new")
+    with pytest.raises(AssertionError, match="brand_new"):
+        _tables(_derived_dist(tmp_path, body), **_WITH_DERIVED)
+
+
+@pytest.mark.parametrize("rhs", [
+    f"`{_ddl('a_main')}`",                                              # a literal, not a derivation
+    "extractSqliteTableSchema(OTHER_SOURCE_SQL, T)",                    # a different source constant
+    "extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, T, { x: 1 })",  # an options argument
+    "extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, tableFor(1))",  # a computed table
+    "compose(OPENCLAW_STATE_SCHEMA_SQL)",
+])
+def test_an_unrecognised_derived_definition_shape_stops_the_generator(tmp_path, rhs):
+    body = f'const T = "a_main";\nconst {_DERIVED} = {rhs};\n'
+    with pytest.raises(AssertionError, match="not the one shape|re-ground"):
+        _tables(_derived_dist(tmp_path, body), **_WITH_DERIVED)
+
+
+def test_a_table_identifier_bound_twice_or_not_at_all_is_refused(tmp_path):
+    for binding in ('const T = "a_main";\nconst T2 = "b_main";\nlet T = "b_main";\n', ""):
+        body = binding + f"const {_DERIVED} = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, T);\n"
+        with pytest.raises(AssertionError, match="not bound to exactly one"):
+            _tables(_derived_dist(tmp_path, body), **_WITH_DERIVED)
+
+
+def test_a_derived_constant_the_dist_no_longer_defines_fails_loudly(tmp_path):
+    dist = _write_dist(tmp_path, {"a.mjs": _sat_template(_ddl("sat_one"))})
+    with pytest.raises(AssertionError, match="no bundle under"):
+        _tables(dist, **_WITH_DERIVED)
+
+
+def test_a_derived_constant_is_not_a_literal_redeclarer(tmp_path):
+    """The old classification demanded a literal definition; the derived one must not."""
+    dist = _derived_dist(tmp_path, _DERIVED_OK)
+    with pytest.raises(AssertionError, match="allowlisted"):
+        _tables(dist, **{**_LISTS, "redeclaring": {_DERIVED: "test"}})
 
 
 def test_an_unclassified_schema_constant_stops_the_generator(tmp_path):
@@ -192,7 +255,8 @@ def test_the_header_block_carries_provenance_without_touching_the_data_lines():
 
 
 def test_every_allowlisted_name_is_absent_from_the_exclusions():
-    lists = (_STATE_SATELLITE_CONSTANTS, _STATE_REDECLARING_CONSTANTS, _STATE_EXCLUDED_CONSTANTS)
+    lists = (_STATE_SATELLITE_CONSTANTS, _STATE_REDECLARING_CONSTANTS, _STATE_DERIVED_CONSTANTS,
+             _STATE_EXCLUDED_CONSTANTS)
     names = [n for lst in lists for n in lst]
     assert len(names) == len(set(names)), "a constant is classified twice"
     assert all(v for lst in lists for v in lst.values()), "every entry needs its evidence/reason"
