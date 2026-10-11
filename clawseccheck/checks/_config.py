@@ -75,6 +75,8 @@ from ._shared import (
     _finding,
     _gateway_remote_exposure_reason,
     _has_env_template,  # C-646
+    _effective_gateway_bind,  # C-653
+    _cfg_with_bind,  # C-653
     _reference_env_names,  # C-646
     _empty_fallback_template,  # C-646
     _env_default_operator,  # C-646
@@ -1283,7 +1285,8 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
         )
 
     # WARN: gateway is network-exposed and control-plane tools are not denied
-    bind = parse_bind_host(gw.get("bind", ""))
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, gw.get("bind", ""))
+    bind = parse_bind_host(bind_raw)
     auth_mode = dig(cfg, "gateway.auth.mode")
     is_exposed = (
         bind and bind not in LOOPBACK and bind not in {"", "loopback"}
@@ -1307,6 +1310,17 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
             evidence=[warn_detail],
         )
 
+    if bind_unres and cp_not_denied:
+        return _finding(
+            "B32",
+            UNKNOWN,
+            f"{bind_unres}, so whether the gateway is network-exposed is unknown, and "
+            "control-plane tools are not explicitly in gateway.tools.deny.",
+            "Write gateway.bind literally in openclaw.json (e.g. \"loopback\"), or verify its "
+            "value in the gateway's environment; or add the control-plane tools to "
+            "gateway.tools.deny, which makes the bind irrelevant.",
+            config_field_paths={"gateway.bind"},
+        )
     denied_preview = sorted(_B32_CONTROL_PLANE_TOOLS & deny_set)
     pass_detail = (
         "Control-plane tools are not re-enabled via gateway.tools.allow"
@@ -3826,12 +3840,15 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     cfg = ctx.config
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host).
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    bind_host = parse_bind_host(bind_raw)
+    _b80_bind_is = "the bind is non-loopback" if not bind_unres else "the bind is a ${...} template"
     # Loopback is checked before mode/credential resolution: a loopback bind is not
     # exposed to remote brute-force regardless of auth mode, so it must never need an
     # env-credential read to resolve - that would manufacture a spurious UNKNOWN on the
-    # common, already-safe case.
-    if bind_host in LOOPBACK:
+    # common, already-safe case. An unresolved bind is not known to be loopback.
+    if bind_host in LOOPBACK and not bind_unres:
         return _finding(
             "B80",
             PASS,
@@ -3864,7 +3881,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
                 return _finding(
                     "B80",
                     UNKNOWN,
-                    "gateway.auth.mode is not set in config, the bind is non-loopback, and no "
+                    f"gateway.auth.mode is not set in config, {_b80_bind_is}, and no "
                     "usable environment-supplied gateway credential was found in the systemd "
                     "unit(s) or global dotenv file(s) that were read \u2014 but at least one of "
                     "them exceeded the collector's byte cap, so a credential past the cut "
@@ -3880,7 +3897,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
                 return _finding(
                     "B80",
                     UNKNOWN,
-                    "gateway.auth.mode is not set in config, the bind is non-loopback, and no "
+                    f"gateway.auth.mode is not set in config, {_b80_bind_is}, and no "
                     "systemd user unit or global dotenv file was readable to check for an "
                     "environment-supplied gateway credential \u2014 cannot determine whether the "
                     "auth endpoint is brute-forceable.",
@@ -3913,6 +3930,17 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             PASS,
             "Gateway auth has rate limiting configured (gateway.auth.rateLimit).",
             "Keep gateway.auth.rateLimit aligned with the exposure of the gateway.",
+        )
+    if bind_unres:
+        return _finding(
+            "B80",
+            UNKNOWN,
+            f"{bind_unres}; the gateway authenticates with a token/password and has no "
+            "gateway.auth.rateLimit, so it is brute-forceable if the bind is non-loopback.",
+            "Write gateway.bind literally in openclaw.json, or verify its value in the "
+            "gateway's environment; configure gateway.auth.rateLimit to make the bind "
+            "irrelevant.",
+            config_field_paths={"gateway.bind"},
         )
     evidence = (
         [f"gateway.auth.mode={mode!r}"]
@@ -5175,7 +5203,9 @@ def check_redactor_blind_secret_paths(ctx: Context) -> Finding:
 
 def check_tls(ctx: Context) -> Finding:
     cfg = ctx.config
-    bind = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host).
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    bind = parse_bind_host(bind_raw)
     # Real path: gateway.tls.enabled (bool, default false)
     # gateway.tls as a bare boolean and gateway.https do NOT exist in OpenClaw schema
     tls = dig(cfg, "gateway.tls.enabled")
@@ -5188,6 +5218,8 @@ def check_tls(ctx: Context) -> Finding:
         ev.append(
             f"openclaw.json is group/world-readable ({oct(ctx.config_mode)[-3:]}) \u2014 at-rest risk"
         )
+    if ev and bind_unres and not tls:
+        ev.append(f"{bind_unres}; the transport leg was not evaluated")
     if ev:
         # B-759: see B1's own comment above - named against the audited home, not a
         # hardcoded `~/.openclaw`.
@@ -5246,6 +5278,15 @@ def check_tls(ctx: Context) -> Finding:
             "could not be determined.",
             "Run the audit on the host where ~/.openclaw lives.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    if bind_unres and not tls:
+        return _finding(
+            "B11",
+            UNKNOWN,
+            f"{bind_unres}, so whether the gateway binds beyond loopback is unknown.",
+            "Write gateway.bind literally in openclaw.json (e.g. \"loopback\"), or verify its "
+            "value in the gateway's environment, so the transport can be assessed.",
+            config_field_paths={"gateway.bind"},
         )
     return _finding(
         "B11",
@@ -5656,12 +5697,27 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
             # NOT mean the surface is off.)
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
-    if mode == "trusted-proxy" and bind_host not in LOOPBACK:
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host).
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    bind_host = parse_bind_host(bind_raw)
+
+    def _b70_unknown(what: str) -> Finding:
+        return _finding(
+            "B70",
+            UNKNOWN,
+            f"{bind_unres}, so whether {what} is unknown.",
+            "Write gateway.bind literally in openclaw.json (e.g. \"loopback\"), or verify its "
+            "value in the gateway's environment.",
+            config_field_paths={"gateway.bind"},
+        )
+
+    if mode == "trusted-proxy" and (bind_unres or bind_host not in LOOPBACK):
         required_headers = dig(cfg, "gateway.auth.trustedProxy.requiredHeaders")
         allow_users = dig(cfg, "gateway.auth.trustedProxy.allowUsers")
         trusted_proxies_ok = _trusted_proxies_ok(dig(cfg, "gateway.trustedProxies"))
         if not required_headers and not allow_users and not trusted_proxies_ok:
+            if bind_unres:
+                return _b70_unknown("the trusted-proxy identity header is spoofable by a direct caller")
             user_header = dig(cfg, "gateway.auth.trustedProxy.userHeader") or "x-forwarded-user"
             # B-315: was FAIL. B70 belongs to the B68-B73 block, whose catalog comment
             # documents the group as "WARN-only ... zero false-positive FAILs on real
@@ -5687,7 +5743,9 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
                     "gateway.trustedProxies not set",
                 ],
             )
-    if allow_loopback is True and bind_host not in LOOPBACK:
+    if allow_loopback is True and (bind_unres or bind_host not in LOOPBACK):
+        if bind_unres:
+            return _b70_unknown("the trusted-proxy header can be forged")
         return _finding(
             "B70",
             WARN,
@@ -6123,7 +6181,19 @@ def check_effective_bind(ctx: Context) -> Finding:
             "Fix `gateway` to be a config object, or remove the key.",
         )
 
-    bind_raw = dig(cfg, "gateway.bind", "")
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host
+    # to look up a socket for); a resolved one is read exactly as the literal it stands for.
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    if bind_unres:
+        return _finding(
+            "B340",
+            UNKNOWN,
+            f"{bind_unres} \u2014 nothing to corroborate against the actual listening socket.",
+            "Write gateway.bind literally in openclaw.json, or verify its value in the "
+            "gateway's environment, so this check can state what is actually declared.",
+            config_field_paths={"gateway.bind"},
+        )
+    cfg = _cfg_with_bind(cfg, bind_raw)
     declared_class = _declared_bind_class(cfg)
     if declared_class == "ambiguous":
         return _finding(
@@ -7246,7 +7316,9 @@ _B350_WARN_FIX = (
 )
 
 
-def _b350_reach_and_shell(cfg: dict, unset_bind_unresolved: bool = False) -> "tuple[str, str]":
+def _b350_reach_and_shell(
+    cfg: dict, unset_bind_unresolved: bool = False, ctx=None
+) -> "tuple[str, str]":
     """The two sentences both B350 WARN branches (explicit true, and unset on a default-ON
     build) are built from: how far the shell reaches, and which interpreter it launches.
 
@@ -7259,8 +7331,13 @@ def _b350_reach_and_shell(cfg: dict, unset_bind_unresolved: bool = False) -> "tu
     bind means, so an unset bind is described as "cannot be resolved" (the over-reporting
     direction) rather than as a proven loopback.
     """
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
-    if bind_host in LOOPBACK and not (unset_bind_unresolved and bind_host == ""):
+    # C-653: a templated bind is resolved by the one shared rule or is not established.
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    cfg = _cfg_with_bind(cfg, bind_raw) if not bind_unres else cfg
+    bind_host = parse_bind_host(bind_raw)
+    if bind_unres:
+        reach = f"{bind_unres}, so whether the shell is reachable off-host is not established here"
+    elif bind_host in LOOPBACK and not (unset_bind_unresolved and bind_host == ""):
         reach = (
             "the gateway is bound to loopback, so the shell is reachable only from this "
             "host"
@@ -7472,7 +7549,7 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
             "Keep it off unless you specifically need an operator shell.",
         )
     if enabled is True:
-        reach, which = _b350_reach_and_shell(cfg)
+        reach, which = _b350_reach_and_shell(cfg, ctx=ctx)
         # `detail` is hashed by baseline.fingerprint(): do not edit this string.
         return _finding(
             "B350",
@@ -7495,7 +7572,7 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
             "2026.8.1 and later turn the operator terminal ON when the key is unset.",
         )
     if default == "on":
-        reach, which = _b350_reach_and_shell(cfg, unset_bind_unresolved=True)
+        reach, which = _b350_reach_and_shell(cfg, unset_bind_unresolved=True, ctx=ctx)
         return _finding(
             "B350",
             WARN,
@@ -8148,7 +8225,14 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
             transport = "tailscale"
         else:
             transport = "direct"
-            direct_reach, direct_label = _b397_direct_reach(cfg)
+            _b397_bind, _b397_unres = _effective_gateway_bind(
+                ctx, cfg, dig(cfg, "gateway.bind", "")
+            )
+            if _b397_unres:
+                # C-653: a templated bind is not a host - the existing "unresolved" reach.
+                direct_reach, direct_label = "unresolved", _b397_unres
+            else:
+                direct_reach, direct_label = _b397_direct_reach(_cfg_with_bind(cfg, _b397_bind))
 
     if transport == "direct" and direct_reach == "local":
         return _finding(
@@ -8472,7 +8556,7 @@ def check_local_model_service_command(ctx: Context) -> Finding:
     )
 
 
-def _gateway_http_reach(cfg: dict, surface: str) -> str:
+def _gateway_http_reach(cfg: dict, surface: str, ctx=None) -> str:
     """Disclosure clause for a gateway-HTTP-surface finding: whether *surface* (a short
     noun phrase, e.g. "this endpoint", "the Control UI") is reachable beyond loopback.
 
@@ -8480,7 +8564,12 @@ def _gateway_http_reach(cfg: dict, surface: str) -> str:
     ``_gateway_remote_exposure_reason`` rather than re-deriving the classification, so
     B340/B350/B358/B360 can never disagree about what counts as "exposed".
     """
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-653: a templated bind is resolved by the one shared rule or is not established.
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    if bind_unres:
+        return f"{bind_unres}, so whether {surface} is reachable off-host is not established here"
+    cfg = _cfg_with_bind(cfg, bind_raw)
+    bind_host = parse_bind_host(bind_raw)
     if bind_host in LOOPBACK:
         return f"the gateway is bound to loopback, so {surface} is reachable only from this host"
     reason = _gateway_remote_exposure_reason(cfg)
@@ -8586,7 +8675,7 @@ def check_chat_completions_endpoint(ctx: Context) -> Finding:
             config_field_paths={"gateway.http.endpoints.chatCompletions.images"},
         )
 
-    reach = _gateway_http_reach(cfg, "this endpoint")
+    reach = _gateway_http_reach(cfg, "this endpoint", ctx)
     if dig(cfg, "gateway.http.endpoints.chatCompletions.images.allowUrl") is True:
         allowlist = dig(cfg, "gateway.http.endpoints.chatCompletions.images.urlAllowlist")
         scoped = isinstance(allowlist, list) and bool(allowlist)
@@ -8765,7 +8854,7 @@ def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
             "Nothing to do.",
         )
     if mode == "trusted":
-        reach = _gateway_http_reach(cfg, "the Control UI \u2014 and any embed of it")
+        reach = _gateway_http_reach(cfg, "the Control UI \u2014 and any embed of it", ctx)
         return _finding(
             "B360",
             WARN,

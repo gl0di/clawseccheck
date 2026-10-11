@@ -44,6 +44,7 @@ from ._shared import (
     _openclaw_generation,
     _pattern_hits_real_secret,
     _retired_key_note,
+    _effective_gateway_bind,  # C-653
     _finding,
     _has_approval_gate,
     _hint,
@@ -3544,7 +3545,21 @@ def check_discovery_mdns_mode(ctx: Context) -> Finding:
             "Keep discovery.mdns.mode at 'minimal' or 'off' when the gateway is exposed "
             "beyond loopback.",
         )
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host).
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    if bind_unres:
+        return _finding(
+            "B73",
+            UNKNOWN,
+            f"discovery.mdns.mode is 'full' and {bind_unres}, so whether the gateway is "
+            "bound beyond loopback (broadly advertising the agent on the local network) "
+            "is unknown.",
+            "Write gateway.bind literally in openclaw.json (e.g. \"loopback\"), or verify its "
+            "value in the gateway's environment; or set discovery.mdns.mode to 'minimal' "
+            "or 'off'.",
+            config_field_paths=frozenset({"gateway.bind"}),
+        )
+    bind_host = parse_bind_host(bind_raw)
     if bind_host in LOOPBACK:
         return _finding(
             "B73",

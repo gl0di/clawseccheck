@@ -26,6 +26,7 @@ from ..collector import (
     agent_roster,
     dig,
     limit_hits_for,
+    persistent_env_evidence,
 )
 # _escape_embedded_header_lines lives in collector.py (the sole legitimate emitter of
 # the "# file: <name>" header convention) - reused here so MCP tool descriptions get
@@ -895,6 +896,76 @@ def _has_env_template(value) -> bool:
     swallowed, and an unparseable or escaped (``$${``) token is just as undeterminable.
     """
     return isinstance(value, str) and "${" in value
+
+
+# C-653: a whole-value `${NAME}` / `${NAME:-default}` at `gateway.bind`. Extraction only -
+# whether a value IS a template stays `_has_env_template`'s question.
+_BIND_TEMPLATE_RE = re.compile(
+    r"\$\{(?P<id>%(id)s)(?::-(?P<dflt>[^${}]*))?\}" % {"id": _SECRET_REF_ENV_ID}
+)
+
+
+def _is_bind_template(raw) -> bool:
+    """True for a ``gateway.bind`` string that is (or tries to be) an env template: anything
+    `_has_env_template` flags, plus a bare whole-value ``$NAME`` (no host, no substitution)."""
+    return _has_env_template(raw) or (
+        isinstance(raw, str) and re.fullmatch(r"\$" + _SECRET_REF_ENV_ID, _js_trim(raw)) is not None
+    )
+
+
+def _effective_gateway_bind(ctx, cfg, raw) -> "tuple[object, str | None]":
+    """C-653: the bind a ``gateway.bind`` value stands for, as ``(value, None)``, or
+    ``(None, note)`` when it is a ``${...}`` template whose value this audit cannot know.
+
+    A literal (`_is_bind_template` rejects it) is returned untouched. A whole-value template
+    is resolved to the first NON-loopback value the audit can SEE for the variable - the
+    gateway's persistent environment (`persistent_env_evidence`: unit, then dotenv), then the
+    config's own env block - else, for ``NAME:-default``, a NON-loopback default (so
+    ``${GW_BIND:-lan}`` stays the exposure it is). A visible LOOPBACK value never clears
+    anything: the unit view is partial (no drop-in handling, units overwrite each other) and
+    the process environment overrides the env block, so it is treated as not seen and the
+    note says so. Everything else - no default, a loopback default, an unseen variable, a
+    value that is itself a template, a malformed or embedded template, a bare ``$NAME`` (OpenClaw
+    substitutes only ``${...}``, ``parseEnvTokenAt``) - is unresolved and the *note* names the
+    template verbatim, so a caller reports UNKNOWN instead of reading the template text as a
+    host (`parse_bind_host` would lowercase it and split it at its first colon).
+    """
+    if not _is_bind_template(raw):
+        return raw, None
+    note = (
+        f"gateway.bind is the environment template {raw!r}, whose value comes from the "
+        "gateway's environment or the config's own env block and cannot be read by this audit"
+    )
+    m = _BIND_TEMPLATE_RE.fullmatch(_js_trim(raw))
+    if m is None:
+        return None, note
+    name, dflt = m.group("id"), m.group("dflt")
+    seen, _src = persistent_env_evidence(ctx, name) if ctx is not None else (None, None)
+    block = _config_env_block_entries(cfg).get(_canonical_env_name(name), ())
+    loopback_seen = False
+    for value in ([seen] if isinstance(seen, str) else []) + sorted(block):
+        value = value.strip()
+        if not value or _has_env_template(value):
+            continue
+        if parse_bind_host(value) in LOOPBACK:
+            loopback_seen = True
+        else:
+            return value, None
+    if dflt and parse_bind_host(dflt) not in LOOPBACK:
+        return dflt, None
+    if loopback_seen:
+        note += (
+            "; a loopback value was seen for it, but that view is partial (the process "
+            "environment decides) and does not clear the bind"
+        )
+    return None, note
+
+
+def _cfg_with_bind(cfg, bind):
+    """A shallow copy of *cfg* whose ``gateway.bind`` is *bind* (the caller's config is
+    never mutated); *cfg* itself when it has no gateway object to put it in."""
+    gw = cfg.get("gateway") if isinstance(cfg, dict) else None
+    return cfg if not isinstance(gw, dict) else {**cfg, "gateway": {**gw, "bind": bind}}
 
 
 # F-180/B-666: moved here VERBATIM from checks/_config.py so `_trifecta_leg_sources`
@@ -5802,6 +5873,11 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
             # very confusion this helper exists to undo).
             return f"gateway.customBindHost={host}"
     elif profile != "auto":
+        if _is_bind_template(raw):
+            # C-653: the template text, verbatim - not its lowercased first-colon fragment.
+            # No ctx here, so it stays "remote" as before; the converted callers resolve
+            # the template (`_effective_gateway_bind`) before they ask.
+            return f"gateway.bind={raw.strip()}"
         bind_host = parse_bind_host(raw)
         if bind_host not in LOOPBACK:
             return f"gateway.bind={bind_host}"
