@@ -2858,7 +2858,8 @@ def check_path_safety(ctx: Context) -> Finding:
 
     def _flag(d: Path, label: str, suffix: str = "", *, after: str = "") -> None:
         try:
-            rd = d.resolve()
+            # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+            rd = Path(os.path.realpath(d))
         except OSError:
             rd = d
         if rd in checked:
@@ -2910,7 +2911,7 @@ def check_path_safety(ctx: Context) -> Finding:
         openclaw_index: int | None = None
         for i, d in enumerate(path_dirs):
             try:
-                if d.resolve() == bin_dir:
+                if Path(os.path.realpath(d)) == bin_dir:
                     openclaw_index = i
                     break
             except OSError:

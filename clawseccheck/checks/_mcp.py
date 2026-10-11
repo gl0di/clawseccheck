@@ -2159,18 +2159,32 @@ def sweep_plugins(home_dir, *, ascii_only: bool = False,
 
     seen: set = set()
     plugin_dirs: list = []
+    loop_roots: set = set()  # C-682: recorded roots that loop (ELOOP), never vetted
     for rec in ctx.plugin_index_records:
         root_dir = rec.get("root_dir")
         if not root_dir:
             continue
         candidate = Path(root_dir)
+        # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve`
+        # raises RuntimeError on 3.12 (aborting the whole sweep) and returns on 3.14.
         try:
-            resolved = candidate.resolve()
-        except OSError:
+            resolved = Path(os.path.realpath(candidate))
+        except (OSError, ValueError):
             resolved = candidate
-        if resolved in seen or not pathprobe.is_dir(candidate):
+        key = resolved
+        if not pathprobe.is_dir(candidate):
+            if not _is_symlink_loop(candidate):
+                continue  # an absent root: a stale index record, as before
+            # A looping root is a plugin the index records and the sweep could not look at -
+            # not an absent one. It rides the sweep's not-scanned channel (TRUNCATED row).
+            # Its de-duplication key is the recorded text, not the partial `realpath`, which
+            # collapses `loop/..` lexically and would swallow a later, readable record of
+            # the directory that path names (C-135, C-682b).
+            loop_roots.add(candidate)
+            key = candidate
+        if key in seen:
             continue
-        seen.add(resolved)
+        seen.add(key)
         plugin_id = rec.get("plugin_id") or candidate.name
         plugin_dirs.append((plugin_id, candidate))
 
@@ -2200,6 +2214,19 @@ def sweep_plugins(home_dir, *, ascii_only: bool = False,
         name = _plugin_narrate_safe(str(plugin_id))
         if narrate:
             print(f"\n=== {name} ===")
+        if plugin_dir in loop_roots:
+            if narrate:
+                print("  (plugin root is a symlink loop \u2014 not scanned; not counted as safe)")
+            results.append((name, "TRUNCATED", 0))
+            sweep.findings.append((name, _plugin_finding(
+                HIGH, UNKNOWN,
+                f"plugin root for {name!r} could not be resolved: a symlink on the way to it loops",
+                "Repair the symlink loop at the plugin's recorded root, then re-run.",
+                engine_degraded=True,
+            )))
+            sweep.target_paths[name] = str(plugin_dir)
+            truncated = True
+            continue
         try:
             f = vet_plugin(str(plugin_dir))
         except ScanBudgetExceeded:

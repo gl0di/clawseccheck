@@ -366,9 +366,35 @@ _R_ROOT_PROBED = ("the glob root is probed with pathprobe.is_dir first (raises i
 _R_LITERAL_SEGMENT = (" (glob pattern with a literal segment under a '*' match, the cell A/C shape of "
                       "the task: the answer differs between 3.12 and 3.9/3.14 and the direction of "
                       "cell C was not reproduced; also under except OSError)")
-_R_VET_PLUGIN_MIXED = (" (9 sites, none unguarded: the former unguarded `dispatched_dirs` list now uses "
-                       "os.path.realpath (C-682); the rest sit under OSError, OSError/ValueError or "
-                       "OSError/RuntimeError handlers, the declared-entry loop is pinned by C-659 and C-682)")
+_R_VET_PLUGIN = ("plugin root, dispatched skill dirs and swept files are probed (pathprobe.exists / is_dir / "
+                 "not a symlink) or listed before resolve(), so a loop never reaches them; the declared-entry, "
+                 "empty-name and shell-read sites sit under except RuntimeError; traced on 3.12.3 and 3.14.4 "
+                 "and pinned by tests/test_c682b_vet_plugin_resolve.py (C-682)")
+
+_R_STAT_GATE = ("the path (or its child) is stat()ed / probed first and a loop is ELOOP there, so resolve() "
+                "never sees a loop; verified by reading every caller")
+_R_DEPTREE_GATE = ("p is probed with pathprobe.is_file first and pkg_dir is its ancestor; the which() result is an "
+                   "existing executable, so neither path loops")
+_R_COLOCATED = ("candidates are the located plugin root / existing p and the dispatched skill dirs, all probed "
+                "(pathprobe.exists / is_dir) first; pinned by tests/test_c682b_vet_plugin_resolve.py (C-682)")
+_R_WALK_FILE = ("the file p comes from os.walk(followlinks=False) and is not a symlink (checked just above), "
+                "so no component of its path loops; the base_dir root now goes through os.path.realpath (C-682)")
+
+_R_LOOP_HOME = ("ctx.home never loops here: `run_all(collect(<looping home>))` raised no error finding on 3.12 and "
+                "the audit output is identical on 3.12 and 3.14 (measured, C-682)")
+_R_BACKUPS = ("the bootstrap keys are files collect() already read, walk_dir_safely yields non-symlink files, and "
+              "ctx.home never loops here (`run_all(collect(<looping home>))` raised no error finding on 3.12, "
+              "measured, C-682)")
+_R_CRON_READ = ("both callers run after jobs_json was read successfully (collector cron-store load), so its path "
+                "cannot loop")
+_R_CONFIG_PROBED = ("the config file was probed present (cfg_found / stat) before the load, so its parent cannot "
+                    "loop; a looping config, config parent or $include gives the same audit on 3.12 and 3.14 "
+                    "(measured, C-682)")
+_R_WATCH_ROOT = ("the watch root is --home, which cli.py refuses identically on 3.12 and 3.14 when it loops "
+                 "(measured: `--home <loop> --watch` exits 1 with the same message), so a looping root never "
+                 "reaches the watcher")
+_R_WHICH_EXE = ("exe is shutil.which('openclaw'), an existing executable (which() stat()s it), so its path "
+                "cannot loop; the PATH-dir and attested-dir resolves now use os.path.realpath (C-682)")
 
 _NON_PATHLIB: dict = {
     ("clawseccheck/shippedexec.py", "_FileFacts._join", "self", "resolve"):
@@ -385,16 +411,12 @@ _NON_PATHLIB: dict = {
 # Enumerated by running the scanner over the tree (dev 8bfc9039); every reason was decided by
 # reading the site and its enclosing handlers, never inferred from its name.
 _ALLOWED: dict = {
-    ("clawseccheck/adjudication/_verdicts.py", "_vet_run_fingerprint", "resolve"):
-        (1, _C_SURVEY),
     ("clawseccheck/checks/_capability.py", "check_path_safety", "resolve"):
-        (2, _C_SURVEY),
-    ("clawseccheck/checks/_capability.py", "check_path_safety._flag", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_WHICH_EXE),
     ("clawseccheck/checks/_config.py", "_c015_candidate_files._keep_file", "resolve"):
         (1, _C_SAME + _R_SAFE_IS_FILE_GATE),
     ("clawseccheck/checks/_content.py", "check_symlink_escape", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_LOOP_HOME),
     ("clawseccheck/checks/_egress.py", "_ancestors_allow_other_access", "resolve"):
         (2, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
     ("clawseccheck/checks/_egress.py", "_b188_collect_backups", "rglob"):
@@ -406,31 +428,27 @@ _ALLOWED: dict = {
     ("clawseccheck/checks/_egress.py", "check_browser_executable_path", "resolve"):
         (1, _C_GUARDED + "except (OSError, RuntimeError)"),
     ("clawseccheck/checks/_host.py", "_check_incident_readiness_sqlite", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_STAT_GATE),
     ("clawseccheck/checks/_host.py", "check_incident_readiness", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_STAT_GATE),
     ("clawseccheck/checks/_lifecycle.py", "_b104_user_home", "resolve"):
         (2, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
-    ("clawseccheck/checks/_lifecycle.py", "_b181_confined_path", "resolve"):
-        (2, _C_SURVEY),
     ("clawseccheck/checks/_lifecycle.py", "_b33_is_this_machines_home", "resolve"):
         (3, _C_GUARDED + "except Exception"),
     ("clawseccheck/checks/_lifecycle.py", "_writable_identity_files._first_time", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_STAT_GATE),
     ("clawseccheck/checks/_lifecycle.py", "check_backups", "resolve"):
-        (3, _C_SURVEY),
+        (3, _C_SAME + _R_BACKUPS),
     ("clawseccheck/checks/_lifecycle.py", "check_bootstrap_write_protection._classify_file", "resolve"):
         (1, _C_SAME + _R_IS_FILE_GATE),
     ("clawseccheck/checks/_lifecycle.py", "check_clawhub_lock_verification", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_SAFE_IS_FILE_GATE),
     ("clawseccheck/checks/_mcp.py", "_colocated_skill_dirs", "resolve"):
-        (2, _C_SURVEY),
+        (2, _C_SAME + _R_COLOCATED),
     ("clawseccheck/checks/_mcp.py", "_wrapper_unread_manifest_kind", "glob"):
         (2, _C_GUARDED + "except OSError"),
-    ("clawseccheck/checks/_mcp.py", "sweep_plugins", "resolve"):
-        (1, _C_SURVEY),
     ("clawseccheck/checks/_mcp.py", "vet_plugin", "resolve"):
-        (9, _C_UNCLASSIFIED + _R_VET_PLUGIN_MIXED),
+        (9, _C_SAME + _R_VET_PLUGIN),
     ("clawseccheck/checks/_shared.py", "_username_safe_path", "resolve"):
         (2, _C_SAME + _R_EXISTS_GATE),
     ("clawseccheck/checks/_vet.py", "_locate_plugin_root_or_reason", "glob"):
@@ -438,11 +456,11 @@ _ALLOWED: dict = {
     ("clawseccheck/cli.py", "_threat_coverage_note", "resolve"):
         (1, _C_SAME + _R_OWN_FILE),
     ("clawseccheck/collector.py", "_bootstrap_identity", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_IS_FILE_GATE),
     ("clawseccheck/collector.py", "_config_workspace_dirs", "resolve"):
         (2, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
     ("clawseccheck/collector.py", "_cron_store_key_candidates", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_CRON_READ),
     ("clawseccheck/collector.py", "_list_own_engine_sources", "glob"):
         (1, _C_GUARDED + "except OSError"),
     ("clawseccheck/collector.py", "_read_installed_skills", "resolve"):
@@ -460,19 +478,19 @@ _ALLOWED: dict = {
     ("clawseccheck/configjournal.py", "_same_config", "resolve"):
         (2, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
     ("clawseccheck/configloader.py", "_allowed_roots", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_CONFIG_PROBED),
     ("clawseccheck/configloader.py", "_allowed_roots", "resolve(strict)"):
         (1, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
     ("clawseccheck/configloader.py", "_resolve", "resolve(strict)"):
         (1, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
     ("clawseccheck/configloader.py", "load_openclaw_config", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_CONFIG_PROBED),
     ("clawseccheck/configloader.py", "load_openclaw_config", "resolve(strict)"):
         (1, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
     ("clawseccheck/deptree.py", "_resolve_in_package", "resolve"):
-        (2, _C_SURVEY),
+        (2, _C_SAME + _R_DEPTREE_GATE),
     ("clawseccheck/deptree.py", "find_package_root", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_DEPTREE_GATE),
     ("clawseccheck/hostwatch.py", "_has_files", "glob"):
         (1, _C_GUARDED + "except OSError"),
     ("clawseccheck/hostwatch.py", "_systemd_enabled", "glob"):
@@ -483,30 +501,18 @@ _ALLOWED: dict = {
         (1, _C_GUARDED + "except (OSError, RuntimeError)"),
     ("clawseccheck/invocation.py", "_is_our_entry_script", "resolve"):
         (1, _C_SAME + _R_OWN_FILE),
-    ("clawseccheck/invocation.py", "_resolve", "resolve"):
-        (1, _C_SURVEY),
     ("clawseccheck/invocation.py", "_shim_beside_the_package", "resolve"):
         (1, _C_SAME + _R_OWN_FILE),
-    ("clawseccheck/livetestproof.py", "_within_home", "resolve"):
-        (2, _C_SURVEY),
     ("clawseccheck/logdiscovery.py", "_generic_log_sinks", "glob"):
         (1, _C_GUARDED + "except OSError"),
     ("clawseccheck/logdiscovery.py", "_transcript_sinks", "glob"):
         (1, _C_GUARDED + "except OSError"),
-    ("clawseccheck/logdiscovery.py", "discover_log_sinks._add_many", "resolve"):
-        (1, _C_SURVEY),
-    ("clawseccheck/monitor.py", "_home_identity", "resolve"):
-        (1, _C_SURVEY),
     ("clawseccheck/monitordims/_memory.py", "_snapshot_memory_files", "rglob"):
         (1, _C_SAME + _R_ROOT_PROBED),
-    ("clawseccheck/monitorstore.py", "_state_path_digest", "resolve"):
-        (1, _C_SURVEY),
     ("clawseccheck/report.py", "_credential_surface_map", "rglob"):
         (1, _C_SAME + _R_ROOT_PROBED),
-    ("clawseccheck/report.py", "_looks_like_quarantine", "resolve"):
-        (2, _C_SURVEY),
     ("clawseccheck/safeio.py", "walk_dir_safely", "resolve"):
-        (2, _C_SURVEY),
+        (1, _C_SAME + _R_WALK_FILE),
     ("clawseccheck/skilldiscovery.py", "iter_discovered_skill_dirs", "resolve"):
         (2, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
     ("clawseccheck/skillprovenance.py", "_root_identity", "resolve"):
@@ -518,9 +524,9 @@ _ALLOWED: dict = {
     ("clawseccheck/trajectory.py", "find_trajectory_files", "resolve"):
         (2, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
     ("clawseccheck/watch.py", "PollWatcher._scan", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_WATCH_ROOT),
     ("clawseccheck/watch.py", "_bounded_watch_dirs", "resolve"):
-        (1, _C_SURVEY),
+        (1, _C_SAME + _R_WATCH_ROOT),
 }
 
 
@@ -594,16 +600,16 @@ def test_the_real_allowlist_size_is_pinned_by_reason_class():
         sites[cls] += count
     assert {c: (entries[c], sites[c]) for c in _CLASSES} == {
         _C_GUARDED: (31, 48),
-        _C_SAME: (9, 10),
-        _C_SURVEY: (27, 36),
-        _C_UNCLASSIFIED: (1, 9),
+        _C_SAME: (27, 40),
+        _C_SURVEY: (0, 0),
+        _C_UNCLASSIFIED: (0, 0),
     }
-    assert (len(_ALLOWED), sum(c for c, _ in _ALLOWED.values())) == (68, 103)
+    assert (len(_ALLOWED), sum(c for c, _ in _ALLOWED.values())) == (58, 88)
     assert (len(_NON_PATHLIB), sum(c for c, _ in _NON_PATHLIB.values())) == (4, 9)
     by_name: Counter = Counter()
     for (_rel, _fn, spelling), (count, _reason) in _ALLOWED.items():
         by_name[spelling] += count
-    assert dict(by_name) == {"glob": 9, "rglob": 5, "resolve": 85, "resolve(strict)": 4}, by_name
+    assert dict(by_name) == {"glob": 9, "rglob": 5, "resolve": 70, "resolve(strict)": 4}, by_name
     assert not [k for k in _ALLOWED if k[2].startswith("glob.")], "the glob module is unused today"
 
 

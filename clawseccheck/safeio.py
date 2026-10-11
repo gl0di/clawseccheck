@@ -368,8 +368,11 @@ def walk_dir_safely(
     Default `None` keeps the previous behaviour for every existing caller, so opting in is
     per-call-site - the same additive discipline as `skips` and `capped`.
     """
+    # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises
+    # RuntimeError on 3.12 (crashing the caller) and returns on 3.14; the walk below then
+    # reports the unlistable root through `unreadable_dirs`, the same on every interpreter.
     try:
-        root = base_dir.resolve()
+        root = Path(os.path.realpath(base_dir))
     except OSError:
         return []
 

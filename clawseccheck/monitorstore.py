@@ -695,7 +695,9 @@ def _state_path_digest(path: "str | Path") -> str:
     the path to exist, so a ``--state`` that has never been saved still gets a stable
     identity rather than raising.
     """
-    resolved = str(Path(path).expanduser().resolve())
+    import os  # noqa: PLC0415
+    # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+    resolved = os.path.realpath(Path(path).expanduser())
     return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()
 
 

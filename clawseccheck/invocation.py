@@ -135,7 +135,8 @@ def _resolve(path: str) -> str:
     """Absolutise without requiring the file to exist - `resolve()` is enough, and
     `strict=True` would turn a moved-but-still-runnable install into an exception."""
     try:
-        return str(Path(path).resolve())
+        # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+        return os.path.realpath(path)
     except OSError:
         return os.path.abspath(path)
 

@@ -286,7 +286,7 @@ def discover_log_sinks(ctx: Context, unreadable: list | None = None) -> list[Log
             if len(sinks) >= _MAX_SINKS:
                 return
             try:
-                key = str(sink.path.resolve())
+                key = os.path.realpath(sink.path)  # C-682: never raises on a symlink loop
             except OSError:
                 key = str(sink.path)
             if key in seen:

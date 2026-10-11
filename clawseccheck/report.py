@@ -5858,9 +5858,11 @@ def _looks_like_quarantine(target: str) -> bool:
     False otherwise. --advise can be pointed at ANY path, including a real installed
     skill - never suggest an unconditional `rm -rf` outside temp, or a user could paste
     it against their live install."""
+    import os  # noqa: PLC0415
     try:
-        resolved = Path(target).expanduser().resolve()
-        tmp = Path(tempfile.gettempdir()).resolve()
+        # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+        resolved = Path(os.path.realpath(Path(target).expanduser()))
+        tmp = Path(os.path.realpath(tempfile.gettempdir()))
         return resolved == tmp or tmp in resolved.parents
     except OSError:
         return False

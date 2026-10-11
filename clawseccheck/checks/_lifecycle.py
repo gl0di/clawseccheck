@@ -6683,9 +6683,12 @@ def _b181_confined_path(base: Path, rel: str):
     if candidate.is_absolute() or ".." in candidate.parts:
         return None
     target = base / candidate
+    # C-682: `os.path.realpath` never raises on a symlink loop (`Path.resolve` raises
+    # RuntimeError on 3.12 and returns on 3.14). A recorded path that loops is judged the same
+    # way on every interpreter: it stays inside `base`, and the file is then reported as recorded but gone.
     try:
-        resolved_base = base.resolve()
-        resolved = target.resolve()
+        resolved_base = Path(os.path.realpath(base))
+        resolved = Path(os.path.realpath(target))
     except OSError:
         return None
     if resolved != resolved_base and resolved_base not in resolved.parents:

@@ -133,6 +133,7 @@ finding vocabulary; this is a leaf->consumer split like `trajectorystore.py`.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -229,8 +230,9 @@ def not_reached_lines(proof: LiveTestProof) -> "tuple[str, ...]":
 
 def _within_home(path: Path, home: Path) -> bool:
     try:
-        resolved = path.resolve()
-        home_resolved = home.resolve()
+        # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+        resolved = Path(os.path.realpath(path))
+        home_resolved = Path(os.path.realpath(home))
     except OSError:
         return False
     return resolved == home_resolved or home_resolved in resolved.parents

@@ -249,7 +249,9 @@ def _home_identity(home: "Path | str") -> "tuple[str, str]":
     own ``home`` field -- never used for the identity comparison itself.
     """
     from .report import _sanitize  # noqa: PLC0415 (Layer 3 cluster; see history._sanitize_home)
-    resolved = str(Path(home).expanduser().resolve())
+    import os  # noqa: PLC0415
+    # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+    resolved = os.path.realpath(Path(home).expanduser())
     digest = hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()
     return digest, _sanitize(str(home))
 

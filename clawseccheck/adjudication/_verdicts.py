@@ -548,8 +548,10 @@ def _vet_run_fingerprint(target: str) -> str:
     within one flow, which this feature was never meant to detect anyway (a
     static scanner only ever describes one moment-in-time state).
     """
+    import os  # noqa: PLC0415
     try:
-        resolved = str(Path(target).expanduser().resolve())
+        # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+        resolved = os.path.realpath(Path(target).expanduser())
     except OSError:
         resolved = str(target)
     return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()[:16]
