@@ -303,22 +303,6 @@ _RAW_DECODE_ALLOWLIST: dict = {
     ("clawseccheck/checks/_config.py", "_c015_is_generated_plugin_model_catalog", "json.loads"):
         (1, "residual of C-664: plugin-installed catalog.json text, only a top-level marker key "
             "is read; the handler catches ValueError only"),
-    ("clawseccheck/checks/_lifecycle.py", "_b181_read_json", "json.loads"):
-        (1, _R_AGENT + " (B181 ClawHub-written JSON record)"),
-    ("clawseccheck/checks/_lifecycle.py", "_b396_read_legacy_store", "json.loads"):
-        (1, _R_USER + " (B396 legacy store; the handler already catches RecursionError)"),
-    ("clawseccheck/checks/_lifecycle.py", "check_clawhub_lock_verification", "json.loads"):
-        (1, _R_AGENT + " (B135 .clawhub/lock.json)"),
-    ("clawseccheck/checks/_lifecycle.py", "check_clawhub_token_store", "json.loads"):
-        (1, _R_USER + " (B182 ClawHub token store)"),
-    ("clawseccheck/checks/_lifecycle.py", "check_declared_skill_reconciliation", "json.loads"):
-        (1, _R_AGENT + " (.clawhub/lock.json)"),
-    ("clawseccheck/checks/_lifecycle.py", "check_pending_device_pairing_scope", "json.loads"):
-        (1, _R_USER + " (B138 devices/pending.json)"),
-    ("clawseccheck/checks/_lifecycle.py", "check_restart_handoff_stale", "json.loads"):
-        (1, _R_USER + " (B357 gateway-supervisor-restart-handoff.json)"),
-    ("clawseccheck/checks/_lifecycle.py", "check_session_approval_policy", "json.loads"):
-        (1, _R_AGENT + " (session turn_context JSONL lines)"),
     ("clawseccheck/checks/_mcp.py", "_wrapper_declares_lifecycle_script", "json.loads"):
         (1, "guarded: runs only when json_nesting_exceeds(text, SHALLOW_JSON_DEPTH) is false "
             "(deeper text goes to loads_shallow); the parse_int hook needs the plain parser"),
@@ -555,8 +539,8 @@ def test_the_real_allowlist_is_small_and_only_names_json_loads():
     """Keep the accepted set small and named: a long allowlist is how a guard becomes a
     rubber stamp. Raising these numbers needs a reason written next to the new entry, and a
     conversion to loads_bounded / loads_shallow lowers them."""
-    assert len(_RAW_DECODE_ALLOWLIST) == 19
-    assert sum(count for count, _ in _RAW_DECODE_ALLOWLIST.values()) == 21
+    assert len(_RAW_DECODE_ALLOWLIST) == 11
+    assert sum(count for count, _ in _RAW_DECODE_ALLOWLIST.values()) == 13
     assert {spelling for (_rel, _fn, spelling) in _RAW_DECODE_ALLOWLIST} == {"json.loads"}
 
 

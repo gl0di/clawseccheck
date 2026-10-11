@@ -38,9 +38,12 @@ from ..collector import (
     openclaw_state_dir,  # B33: is the audited home the one the local install serves
 )
 from ..configloader import (  # C-648: bounded JSON nesting
+    ELIDED as _ELIDED,
     JSONNestingError as _JSONNestingError,
     MAX_JSON_NESTING as _MAX_JSON_NESTING,
+    SHALLOW_JSON_DEPTH as _SHALLOW_JSON_DEPTH,
     loads_bounded as _loads_bounded,
+    loads_shallow as _loads_shallow,
 )
 from ..safeio import walk_dir_safely
 from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree enumeration
@@ -4867,7 +4870,6 @@ _B79_WINDOW_NOTE = (
 
 
 def check_session_approval_policy(ctx: Context) -> Finding:
-    import json as _json
 
     no_sessions = _finding(
         "B79",
@@ -4910,6 +4912,7 @@ def check_session_approval_policy(ctx: Context) -> Finding:
     # sampling bound, and it needs its own C-135 rather than riding along with a wording
     # fix. Filed with B-727.
     any_truncated = False
+    any_partial = False  # C-680: a line nested past the shallow bound was read in part
 
     for agent_dir in agent_dirs:
         sessions_dir = agent_dir / "agent" / "codex-home" / "sessions"
@@ -4936,9 +4939,10 @@ def check_session_approval_policy(ctx: Context) -> Finding:
                 if not ln:
                     continue
                 try:
-                    rec = _json.loads(ln)
+                    rec, line_elided = _loads_shallow(ln)
                 except ValueError:
                     continue
+                any_partial = any_partial or bool(line_elided)
                 if not isinstance(rec, dict) or rec.get("type") != "turn_context":
                     continue
                 payload = rec.get("payload")
@@ -4989,6 +4993,15 @@ def check_session_approval_policy(ctx: Context) -> Finding:
                 f"approval_policy=never: {worst_never}",
                 f"session files sampled: {worst_files}",
             ],
+        )
+    if any_partial:
+        return _finding(
+            "B79",
+            UNKNOWN,
+            "recent Codex sessions sampled include human-approval gates in the part of "
+            "each log line that was read, but at least one log line was nested too deep "
+            "to be read in full.",
+            _C680_PARTIAL_FIX.replace("file", "log line"),
         )
     return _finding(
         "B79",
@@ -5120,6 +5133,46 @@ def check_codex_project_trust(ctx: Context) -> Finding:
 _HIGH_SCOPE_NAMES = frozenset({"operator.admin", "operator.write"})
 
 
+_C680_PARTIAL_FIX = (
+    f"Part of the file is nested deeper than {_SHALLOW_JSON_DEPTH} levels and was not read, so "
+    "this result covers only the part that was read. Review the file manually."
+)
+
+
+def _c680_unread_as_null(value):
+    """*value* with every unread-subtree marker replaced by None (iterative; <= 64 levels)."""
+    todo = [value]
+    while todo:
+        node = todo.pop()
+        items = enumerate(node) if isinstance(node, list) else (
+            list(node.items()) if isinstance(node, dict) else ())
+        for key, child in items:
+            if child is _ELIDED:
+                node[key] = None
+            elif isinstance(child, (list, dict)):
+                todo.append(child)
+    return value
+
+
+def _c680_has_elided(value) -> bool:
+    """Does *value* hold the unread-subtree marker anywhere (iterative; <= 64 levels deep)?"""
+    todo = [value]
+    while todo:
+        node = todo.pop()
+        if node is _ELIDED:
+            return True
+        if isinstance(node, list):
+            todo.extend(node)
+        elif isinstance(node, dict):
+            todo.extend(node.values())
+    return False
+
+
+def _c680_text(value, default="unknown"):
+    """*value*, or *default* when it is, or holds, the unread-subtree marker (never str() it)."""
+    return default if _c680_has_elided(value) else value
+
+
 def check_pending_device_pairing_scope(ctx: Context) -> Finding:
     """B138 - dangling high-scope pending device pairing (devices/pending.json).
 
@@ -5135,7 +5188,6 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
     ``ctx.home``, checked by presence/content alone regardless of whether
     openclaw.json was found or parsed.
     """
-    import json as _json
 
     pending_path = ctx.home / "devices" / "pending.json"
     if not pathprobe.is_file(pending_path):
@@ -5147,7 +5199,7 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
         )
 
     try:
-        data = _json.loads(pending_path.read_text(encoding="utf-8", errors="replace"))
+        data, elided = _loads_shallow(pending_path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return _finding(
             "B138",
@@ -5183,9 +5235,9 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
             continue
         if not any(s in _HIGH_SCOPE_NAMES for s in scopes if isinstance(s, str)):
             continue
-        device_id = entry.get("deviceId", "unknown")
-        platform = entry.get("platform", "unknown")
-        is_repair = bool(entry.get("isRepair", False))
+        device_id = _c680_text(entry.get("deviceId", "unknown"))
+        platform = _c680_text(entry.get("platform", "unknown"))
+        is_repair = bool(_c680_text(entry.get("isRepair", False), False))
         high_scope_ev.append(
             f"deviceId={device_id} platform={platform} isRepair={is_repair}"
         )
@@ -5211,6 +5263,16 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
             "admin/write scope for a device you recognize and expect; reject/ignore "
             "unrecognized requests.",
             evidence=high_scope_ev[:6],
+        )
+
+    if elided:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            f"{len(data)} pending device pairing request(s) found; none of the part of "
+            "devices/pending.json that was read requests a high-privilege scope, but part "
+            "of it was not read.",
+            _C680_PARTIAL_FIX,
         )
 
     return _finding(
@@ -5706,8 +5768,6 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
     absent, or (None, reason) for every other outcome -- unreadable, over the 4MB cap,
     invalid JSON, or not a JSON object. *parts* are joined with "/" for the reason
     string ONLY -- never an absolute path (fingerprint/privacy discipline)."""
-    import json as _json  # noqa: PLC0415 -- lazy, matches this module's own local-import idiom
-
     rel = "/".join(parts)
     p = ctx.home.joinpath(*parts)
     try:
@@ -5720,11 +5780,17 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
     if len(raw) > _B396_MAX_LEGACY_STORE_BYTES:
         return None, f"{rel} is larger than the 4 MB read cap"
     try:
-        data = _json.loads(raw.decode("utf-8"))
+        data, elided = _loads_shallow(raw.decode("utf-8"))
     except (ValueError, RecursionError):
         return None, f"{rel} is present but is not valid JSON"
     if not isinstance(data, dict):
         return None, f"{rel} is present but is not a JSON object"
+    if elided:
+        # C-680: the shallow part is delivered; an unread subtree reads as JSON null (every
+        # consumer already handles a missing/null field) and the gap is disclosed.
+        return _c680_unread_as_null(data), (
+            f"{rel} is nested deeper than {_SHALLOW_JSON_DEPTH} levels and was read only in part"
+        )
     return data, None
 
 
@@ -6322,7 +6388,6 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
     found or parsed. "No lock file" is a real, directly-observed disk fact on any
     host, config-readable or not.
     """
-    import json as _json
 
     from ..collector import WORKSPACE_DIRS
 
@@ -6379,13 +6444,15 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
     inconclusive_ev: list[str] = []
     any_parsed = False
     any_unreadable = False
+    partial = False
 
     for lock_path in lock_paths:
         try:
-            data = _json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
+            data, elided = _loads_shallow(lock_path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
             any_unreadable = True
             continue
+        partial = partial or bool(elided)
         if not isinstance(data, dict):
             any_unreadable = True
             continue
@@ -6404,19 +6471,19 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             if ok is False or decision == "fail":
                 reasons = verification.get("reasons")
                 reasons_str = (
-                    ", ".join(str(r) for r in reasons)
+                    ", ".join(str(_c680_text(r, "(unread)")) for r in reasons)
                     if isinstance(reasons, list) and reasons
                     else "none listed"
                 )
                 signature = verification.get("signature")
                 sig_status = (
-                    signature.get("status")
+                    _c680_text(signature.get("status"))
                     if isinstance(signature, dict)
                     else "unknown"
                 )
-                version = entry.get("version", "unknown")
+                version = _c680_text(entry.get("version", "unknown"))
                 line = (
-                    f"{slug}@{version}: decision={decision!r} ok={ok!r} "
+                    f"{slug}@{version}: decision={_c680_text(decision)!r} ok={_c680_text(ok)!r} "
                     f"reasons=[{reasons_str}] signature={sig_status}"
                 )
                 # B-258: separate "rejected" from "not answered yet" - see the block
@@ -6436,7 +6503,7 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             f"skill(s) installed despite failed ClawHub verification: {detail}.",
             "Review the flagged skill(s) manually \u2014 ClawHub's own verification rejected "
             "them but they are installed and running; uninstall or re-verify their "
-            "provenance before trusting them.",
+            "provenance before trusting them." + (" " + _C680_PARTIAL_FIX if partial else ""),
             evidence=rejected_ev[:6],
         )
 
@@ -6446,7 +6513,7 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             UNKNOWN,
             ".clawhub/lock.json found but unreadable or not valid JSON \u2014 cannot evaluate "
             "ClawHub skill-verification state.",
-            "Review .clawhub/lock.json manually.",
+            "Review .clawhub/lock.json manually." + (" " + _C680_PARTIAL_FIX if partial else ""),
         )
 
     if inconclusive_ev:
@@ -6462,8 +6529,17 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             "Re-check these skills once ClawHub's audit has completed (re-installing or "
             "updating the skill refreshes the recorded verification). A verdict that stays "
             "unresolved, or reasons that change to a real rejection code, is worth a manual "
-            "review of the skill's provenance.",
+            "review of the skill's provenance." + (" " + _C680_PARTIAL_FIX if partial else ""),
             evidence=inconclusive_ev[:6],
+        )
+
+    if partial:
+        return _finding(
+            "B135",
+            UNKNOWN,
+            ".clawhub/lock.json found; no skill in the part that was read failed registry "
+            "verification, but part of the file was not read.",
+            _C680_PARTIAL_FIX,
         )
 
     return _finding(
@@ -6556,13 +6632,15 @@ def _b181_sha256(path: Path):
     return "ok", digest.hexdigest()
 
 
-def _b181_read_json(path: Path):
-    import json as _json
-
+def _b181_read_json(path: Path, partial_out: "list | None" = None):
+    # C-680: a record nested past the shallow bound is read in part; the caller that passes
+    # *partial_out* learns of it (and can refuse a clean answer for the unread part).
     try:
-        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        data, elided = _loads_shallow(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
         return None
+    if elided and partial_out is not None:
+        partial_out.append(path.name)
     return data if isinstance(data, dict) else None
 
 
@@ -6631,7 +6709,8 @@ def _b181_skill_dir(slug: str, lock_parent: Path):
         return None
 
 
-def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
+def _b181_provenance_records(home: Path, ctx: "Context | None" = None,
+                             partial_out: "list | None" = None):
     """[(slug, skill_dir | None, record, source_label)] from every lock + origin.json found.
 
     *ctx*, when given, routes an unreadable lock/origin path through `_safe_is_file` so a
@@ -6656,7 +6735,7 @@ def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
             lock_path = home / rel / dot / "lock.json"
             if not _safe_is_file(lock_path, ctx, what=f"'{lock_path.name}'"):
                 continue
-            data = _b181_read_json(lock_path)
+            data = _b181_read_json(lock_path, partial_out)
             skills = data.get("skills") if data else None
             if not isinstance(skills, dict):
                 # Unparseable/!schema - the CLI falls through to the legacy path, so do we.
@@ -6694,12 +6773,13 @@ def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
                 # Path.is_file() does not swallow (EACCES).
                 if not _safe_is_file(origin, ctx, what=f"'{dot}/origin.json' in a skill dir"):
                     continue
-                data = _b181_read_json(origin)
+                data = _b181_read_json(origin, partial_out)
                 if data is None:
                     continue
                 seen_dirs.add(str(skill_dir))
                 records.append(
-                    (data.get("slug") or skill_dir.name, skill_dir, data, f"{dot}/origin.json")
+                    (_c680_text(data.get("slug"), None) or skill_dir.name, skill_dir, data,
+                     f"{dot}/origin.json")
                 )
                 break
     return records
@@ -6719,7 +6799,8 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
               unreadable / too large to hash, or a record's skill directory could not be
               located. Never a fake PASS (Golden Rule #4).
     """
-    records = _b181_provenance_records(ctx.home, ctx)
+    partial: list = []
+    records = _b181_provenance_records(ctx.home, ctx, partial)
     if not records:
         return _finding(
             "B181",
@@ -6730,7 +6811,7 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
             "detected either way.",
             "Skills installed through ClawHub record a SHA-256 of their files at install "
             "time. If you installed skills another way, verify their contents against the "
-            "upstream source yourself.",
+            "upstream source yourself." + (" " + _C680_PARTIAL_FIX if partial else ""),
         )
 
     tampered: list[str] = []
@@ -6819,6 +6900,17 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
             evidence=items[:6],
         )
 
+    if verified and partial:
+        return _finding(
+            "B181",
+            UNKNOWN,
+            f"Every install-time digest that could be checked ({verified} file(s)) matches "
+            "the bytes on disk, but part of an install record was not read, so post-install "
+            "modification cannot be ruled out for what it describes.",
+            _C680_PARTIAL_FIX,
+            evidence=unverifiable[:6],
+        )
+
     if verified:
         note = (
             f" ({len(unverifiable)} recorded file(s) could not be checked)"
@@ -6842,7 +6934,8 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
         "against disk, so post-install modification cannot be ruled in or out: "
         + "; ".join(unverifiable[:6])
         + extra,
-        "Check that the installed skill directories are readable, then re-run the audit.",
+        "Check that the installed skill directories are readable, then re-run the audit."
+        + (" " + _C680_PARTIAL_FIX if partial else ""),
         evidence=unverifiable[:6],
     )
 
@@ -7001,7 +7094,8 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
     env_bad: "list[str]" = []
     observed_canonical = 0
 
-    for slug, _skill_dir, record, source in _b181_provenance_records(ctx.home, ctx):
+    partial: list = []
+    for slug, _skill_dir, record, source in _b181_provenance_records(ctx.home, ctx, partial):
         if not isinstance(record, dict):
             continue
         verdict = _b184_is_canonical(record.get("registry"), _B184_CANONICAL_REGISTRY_HOST)
@@ -7094,6 +7188,16 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
             engine_degraded=True,
         )
 
+    if partial and observed_canonical:
+        return _finding(
+            "B184",
+            UNKNOWN,
+            f"Every recorded ClawHub endpoint that was read ({observed_canonical} "
+            "record(s)/setting(s)) is the public https://clawhub.ai, but part of an install "
+            "record was not read.",
+            _C680_PARTIAL_FIX,
+        )
+
     if observed_canonical:
         return _finding(
             "B184",
@@ -7113,7 +7217,8 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
         "that B135, B177 and B181 report on.",
         "If skills were installed some other way, confirm for yourself where they came "
         "from. Running the audit on the machine and account the agent runs as, with no "
-        "--home argument, also lets the persistent override locations be checked.",
+        "--home argument, also lets the persistent override locations be checked."
+        + (" " + _C680_PARTIAL_FIX if partial else ""),
     )
 
 
@@ -7261,7 +7366,6 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
     The token value itself is never read into a message, logged, or placed in evidence -
     only whether the `token` key holds a non-empty string (§8).
     """
-    import json as _json
 
     exposed: list[str] = []
     swappable: list[str] = []
@@ -7269,6 +7373,7 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
     tokenless: list[str] = []
     unreadable: list[str] = []
     found_any = False
+    partial = False
 
     for store in _b182_candidate_stores(ctx):
         try:
@@ -7278,7 +7383,7 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
             continue
         found_any = True
         try:
-            data = _json.loads(store.read_text(encoding="utf-8", errors="replace"))
+            data, elided = _loads_shallow(store.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
             unreadable.append(f"{store}: present but could not be read or parsed")
             continue
@@ -7290,7 +7395,14 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
         raw_token = data.get("token")
         has_token = isinstance(raw_token, str) and bool(raw_token.strip())
         if not has_token:
-            tokenless.append(f"{store}: no token stored")
+            if elided:
+                unreadable.append(
+                    f"{store}: no token in the part that was read, but part of the file "
+                    "was not read"
+                )
+                partial = True
+            else:
+                tokenless.append(f"{store}: no token stored")
             continue
 
         try:
@@ -7321,6 +7433,12 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
                 f"{store}: token file is owner-only (mode {mode}) but its directory is "
                 "writable by others"
             )
+        elif elided:
+            unreadable.append(
+                f"{store}: holds a token, mode {mode} (owner-only), but part of the file "
+                "was not read"
+            )
+            partial = True
         else:
             safe.append(f"{store}: holds a ClawHub API token, mode {mode} (owner-only)")
 
@@ -7377,7 +7495,8 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
             "A ClawHub CLI config file was found but its token state or permissions could "
             "not be determined: " + "; ".join(unreadable[:4]),
             "Check the file manually \u2014 it holds a token that can publish new versions of "
-            "your skills, and it should be readable only by you.",
+            "your skills, and it should be readable only by you."
+            + (" " + _C680_PARTIAL_FIX if partial else ""),
             evidence=unreadable[:4],
         )
 
@@ -7522,7 +7641,6 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
     ``gateway-supervisor-restart-handoff.json`` under ``ctx.home``, checked by
     presence/content alone regardless of whether openclaw.json was found or parsed.
     """
-    import json as _json
     import time as _time
     from datetime import datetime
 
@@ -7536,7 +7654,7 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
         )
 
     try:
-        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        data, elided = _loads_shallow(path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return _finding(
             "B357",
@@ -7603,6 +7721,15 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
             "after a clean restart, remove it manually and investigate why the "
             "supervisor did not clean it up.",
         )
+    if elided:
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present and, in the part that was read, "
+            f"still within its own expiresAt window ({expires_label}), but part of the file "
+            "was not read.",
+            _C680_PARTIAL_FIX,
+        )
     return _finding(
         "B357",
         PASS,
@@ -7622,7 +7749,6 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     skillFile. (skills.entries/plugins.entries are apiKey/config OVERLAYS keyed by an already-
     installed id - they carry no source/url and are deliberately NOT reconciled here.)
     """
-    import json as _json
 
     from ..collector import WORKSPACE_DIRS
     from ..skilldiscovery import config_extra_skill_dirs, config_plugin_load_paths
@@ -7666,6 +7792,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     # checked, so a permission problem is never silently folded into "nothing to
     # reconcile here".
     unreadable_lock_paths: list[str] = []
+    partial_lock_paths: list[str] = []
     for rel in [""] + list(WORKSPACE_DIRS):
         lock = ctx.home / rel / ".clawhub" / "lock.json"
         errs_before = len(ctx.errors)
@@ -7674,9 +7801,11 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 unreadable_lock_paths.append(str(lock))
             continue
         try:
-            data = _json.loads(lock.read_text(encoding="utf-8", errors="replace"))
+            data, elided = _loads_shallow(lock.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
             continue
+        if elided:
+            partial_lock_paths.append(str(lock))
         skills = data.get("skills") if isinstance(data, dict) else None
         if not isinstance(skills, dict):
             continue
@@ -7699,6 +7828,15 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 )
 
     if not missing:
+        if partial_lock_paths and not unreadable_lock_paths:
+            return _finding(
+                "B158",
+                UNKNOWN,
+                "Every declared skill-load source in the part of the ClawHub lock file(s) "
+                "that was read resolves to a present directory, but part of "
+                f"{len(partial_lock_paths)} lock file(s) was not read.",
+                _C680_PARTIAL_FIX,
+            )
         if unreadable_lock_paths:
             joined = "; ".join(unreadable_lock_paths[:8])
             extra = (
@@ -7713,7 +7851,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 f"skill-load sources: {joined}{extra} \u2014 reconciliation against disk "
                 "is incomplete.",
                 "Fix permissions on the listed path(s) (or their parent workspace "
-                "dir) and re-run.",
+                "dir) and re-run." + (" " + _C680_PARTIAL_FIX if partial_lock_paths else ""),
             )
         return _finding(
             "B158",
@@ -7737,7 +7875,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
         WARN,
         detail,
         "Remove the stale declaration, or install the skill/plugin so ClawSecCheck can scan it "
-        "before it auto-loads.",
+        "before it auto-loads." + (" " + _C680_PARTIAL_FIX if partial_lock_paths else ""),
         evidence=missing,
     )
 
