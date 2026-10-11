@@ -790,7 +790,10 @@ def _reference_env_names(value, *, secret_input: bool) -> "list[str]":
     in :func:`_credential_is_plaintext`.
     """
     if isinstance(value, dict):
-        if _is_secret_ref_object(value) and value.get("source") in ("env", "store"):
+        # C-681: only an ``env`` object names an environment variable. A ``store`` object is
+        # resolved from OpenClaw's secret store, never from the environment, so a variable
+        # of the same name (in the config's env block or a unit) says nothing about it.
+        if _is_secret_ref_object(value) and value.get("source") == "env":
             return [value["id"]]
         return []
     if isinstance(value, str):
@@ -905,6 +908,19 @@ _BIND_TEMPLATE_RE = re.compile(
 )
 
 
+def _env_default_template(value) -> "tuple[str, str] | None":
+    """C-681: ``(NAME, default)`` for a whole-value ``${NAME:-default}`` whose default holds
+    something other than whitespace, else ``None``. The default is returned verbatim - the
+    vendor substitutes it unchanged (``substituteString``), so it is a literal, not a trimmed
+    one. ``${NAME}`` and the empty ``${NAME:-}`` are not default templates."""
+    if not isinstance(value, str):
+        return None
+    m = _BIND_TEMPLATE_RE.fullmatch(_js_trim(value))
+    if m is None or m.group("dflt") is None or not m.group("dflt").strip():
+        return None
+    return m.group("id"), m.group("dflt")
+
+
 def _is_bind_template(raw) -> bool:
     """True for a ``gateway.bind`` string that is (or tries to be) an env template: anything
     `_has_env_template` flags, plus a bare whole-value ``$NAME`` (no host, no substitution)."""
@@ -939,7 +955,8 @@ def _effective_gateway_bind(ctx, cfg, raw) -> "tuple[object, str | None]":
     m = _BIND_TEMPLATE_RE.fullmatch(_js_trim(raw))
     if m is None:
         return None, note
-    name, dflt = m.group("id"), m.group("dflt")
+    # C-681: the default is trimmed, so ``${GW_BIND:- lan}`` is ``lan``, not ``" lan"``.
+    name, dflt = m.group("id"), _js_trim(m.group("dflt") or "")
     seen, _src = persistent_env_evidence(ctx, name) if ctx is not None else (None, None)
     block = _config_env_block_entries(cfg).get(_canonical_env_name(name), ())
     loopback_seen = False

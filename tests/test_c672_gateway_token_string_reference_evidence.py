@@ -17,7 +17,8 @@ three-character token were both a FAIL. What this file pins:
 * B80 is unchanged: it measures nothing about a reference, the object's behaviour today;
 * a long persistent value that is itself a ``${NAME}`` template or a retired marker is no
   evidence of strength (the env-block leg's own weak-shape rule): the cell keeps its verdict
-  from before the lookup. The object form does not make this test;
+  from before the lookup (C-681: the object form and B2's fixed-name leg make this test
+  too, ``tests/test_c681a_gateway_token_defects.py``);
 * nothing visible leaves the string form exactly as it was (the long-named / short-named
   verdicts and caveats are pinned by ``tests/test_c653_gateway_token_reference.py``);
 * the value, the unit path and the auditing shell's own environment never reach a message.

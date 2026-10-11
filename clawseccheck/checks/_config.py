@@ -77,6 +77,7 @@ from ._shared import (
     _gateway_remote_exposure_reason,
     _has_env_template,  # C-646
     _effective_gateway_bind,  # C-653
+    _env_default_template,  # C-681
     _cfg_with_bind,  # C-653
     _reference_env_names,  # C-646
     _empty_fallback_template,  # C-646
@@ -1448,12 +1449,26 @@ def _gateway_env_source_label(source, home) -> str:
     return _detail_path(source, home) if source else "an environment file"
 
 
-def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
+def _is_reference_shaped_value(secret: str) -> bool:
+    """C-672 / C-681: is an environment-supplied value itself a ``${NAME}`` / ``$NAME``
+    template or a retired ``secretref-env:`` / ``__env__:`` marker? Such a value is a
+    pointer's text, not a credential, so it is no evidence of strength (the env-block leg
+    weighs it as weak the same way, `_gateway_token_env_block_strength`)."""
+    return _SECRET_REFERENCE_RE.fullmatch(_js_trim(secret)) is not None
+
+
+def _gateway_env_credential(
+    ctx: Context, *, skip_reference_shaped: bool = False
+) -> "tuple[str | None, str | None]":
     """An env-supplied gateway credential observed in a persistent artifact.
 
     Returns ``(value, source)`` or ``(None, None)``. The value is returned only so the
     caller can test presence - it is a secret and must never reach a message, evidence
     entry, or log (§8).
+
+    ``skip_reference_shaped`` (C-681): a value of 24+ characters that is itself a ``${NAME}``
+    template or a retired marker is skipped (the next variable is tried) instead of returned.
+    Only B2 asks for it; B41 and B80 keep reading presence as before.
 
     ``source`` IS meant to reach evidence/detail (every caller names it so the operator
     knows where to go fix the setting), so it is redacted here, once, for all three
@@ -1467,6 +1482,15 @@ def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
     for var in _GATEWAY_ENV_CREDENTIAL_VARS:
         value, source = persistent_env_evidence(ctx, var)
         if value is not None and value.strip():
+            # C-681 (B2 only): a LONG value that is itself a template / marker is no
+            # credential - B2 would otherwise call it a strong one and clear the exposure.
+            # A short one stays (it is then reported as the short secret it is).
+            if (
+                skip_reference_shaped
+                and len(value.strip()) >= 24
+                and _is_reference_shaped_value(value)
+            ):
+                continue
             return value, _gateway_env_source_label(source, ctx.home)
     return None, None
 
@@ -1477,7 +1501,58 @@ def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
 _GATEWAY_TOKEN_OBJECT_PLACEHOLDER = "<SecretRef object>"
 
 
-def _gateway_token_raw(cfg):
+def _b2_dflt_fix(name: str) -> str:
+    """C-681: B2's advice for a short unseen ``${NAME:-default}`` gateway token."""
+    return (
+        f"Set {name} to a secret of at least 24 characters in the gateway's own environment, "
+        "or replace the short fallback in gateway.auth.token with a token of at least 24 "
+        "characters (or drop the fallback)"
+    )
+
+
+def _gateway_token_default_applied(value, cfg, ctx):
+    """C-681. A whole-value ``${ID:-default}`` string (default not empty or blank) at the
+    gateway token, as the build understands it: OpenClaw 2026.9.7+ substitutes the variable
+    when it is set and non-empty, else the default text verbatim (``substituteString``).
+
+    Returns the plain reference ``${ID}`` when the audit can SEE a value for ``ID`` (the
+    config's own env block, or the gateway's persistent environment) - so it is measured
+    exactly like any reference - else the default text, measured as a literal token. Any
+    other value, and any build that is not known to understand ``:-`` (an older one reads the
+    whole text as the token; an unseen one is unknown, and only ``"yes"`` is acted on here,
+    as in `_gateway_token_form`), is returned untouched. ``${ID:-}`` is not a default
+    template: it keeps its reference reading.
+    """
+    parsed = _env_default_template(value)
+    if parsed is None or _env_default_operator(ctx) != "yes":
+        return value
+    name, default = parsed
+    return "${" + name + "}" if _gateway_env_value_visible(name, cfg, ctx) else default
+
+
+def _gateway_env_value_visible(name, cfg, ctx) -> bool:
+    """C-681: can the audit SEE a value for variable *name* - in the gateway's persistent
+    environment (a unit, a dotenv file) or in the config's own env block? Not the process
+    environment of the gateway, which a static audit cannot read."""
+    seen, _src = persistent_env_evidence(ctx, name)
+    return (isinstance(seen, str) and bool(seen.strip())) or _env_block_defines_plaintext(
+        _config_env_block_entries(cfg), name
+    )
+
+
+def _gateway_token_unseen_default(cfg, ctx) -> "str | None":
+    """C-681. The variable NAME of a configured whole-value ``${NAME:-default}`` gateway token
+    whose default is in effect on the audited build (2026.9.7+) but whose variable the audit
+    cannot see anywhere, else ``None``. The default then applies only if the gateway's own
+    environment leaves NAME unset or empty, which this audit cannot read - so the token is
+    either that default or a secret of unknown strength."""
+    parsed = _env_default_template(_gateway_token_raw(cfg))
+    if parsed is None or _env_default_operator(ctx) != "yes":
+        return None
+    return None if _gateway_env_value_visible(parsed[0], cfg, ctx) else parsed[0]
+
+
+def _gateway_token_raw(cfg, ctx=None):
     """The raw value B2 and B80 read as "the gateway token": ``gateway.auth.token``, else the
     legacy ``gateway.token``, in that order (B-312). The one reader, so the order cannot
     drift between the two checks and `_gateway_config_token`.
@@ -1490,12 +1565,16 @@ def _gateway_token_raw(cfg):
     nothing else: every consumer of this value already treated a non-string as "no token".
     A truthy value at ``gateway.auth.token`` is returned whatever its type, so a malformed
     one at the first key is never skipped in favour of a well-formed one at the second.
+
+    C-681: with *ctx*, a whole-value ``${ID:-default}`` is returned as the value it stands
+    for (`_gateway_token_default_applied`); without *ctx* the build is unseen and the text is
+    returned as configured.
     """
     auth_token = dig(cfg, "gateway.auth.token")
     if auth_token:
-        return auth_token
+        return _gateway_token_default_applied(auth_token, cfg, ctx)
     legacy = dig(cfg, "gateway.token")
-    return legacy if isinstance(legacy, str) else None
+    return _gateway_token_default_applied(legacy, cfg, ctx) if isinstance(legacy, str) else None
 
 
 def _gateway_token_form(value, ctx=None) -> str:
@@ -1574,8 +1653,8 @@ def _gateway_token_env_block_strength(value, cfg) -> "str | None":
     ``file`` or ``exec`` reference is resolved by its own provider (OpenClaw's secret store, a
     file, a command) and never from the environment or from the env block of openclaw.json,
     so an entry the block happens to hold under the same name is not its value: ``None``.
-    (`_reference_env_names` maps ``store`` to a name because B1 asks a different question of
-    it; it is not changed, and the restriction lives here.)
+    (C-681: `_reference_env_names` now names a variable only for an ``env`` object, so B1
+    does not judge a ``store`` reference by the env block either; the check here is kept.)
 
     A value found here is NEVER proof that the token is strong. OpenClaw 2026.9.8
     (``config-env-vars``) lets the process environment win over a config env value, drops a
@@ -1655,15 +1734,13 @@ def _gateway_token_env_evidence(value, ctx) -> "tuple[str, str, str] | None":
     if secret is None or not secret.strip():
         return None
     kind = "short" if len(secret.strip()) < 24 else "long"
-    if kind == "long" and not isinstance(value, dict):
+    if kind == "long" and _is_reference_shaped_value(secret):
         # C-672: a long persistent value that is itself a `${NAME}` template or a retired
         # marker is not a credential (the env-block leg weighs it as weak the same way,
         # `_gateway_token_env_block_strength`), so it is no evidence of strength: the cell
-        # keeps the verdict it had with nothing found. The object form and the fixed-name
-        # leg (`_gateway_env_credential`) do not make this test.
-        trimmed = _js_trim(secret)
-        if _ENV_TEMPLATE_NAME_RE.fullmatch(trimmed) or _SECRET_REFERENCE_RE.fullmatch(trimmed):
-            return None
+        # keeps the verdict it had with nothing found. C-681: the object form and the
+        # fixed-name leg (`_gateway_env_credential`, B2) make this test too.
+        return None
     return name, kind, _gateway_env_source_label(source, ctx.home)
 
 
@@ -1706,7 +1783,7 @@ def _gateway_config_token(cfg: dict, auth_mode, ctx=None) -> "tuple[str | None, 
     (`_gateway_token_form`). A retired ``secretref-env:`` / ``__env__:`` marker is an ordinary
     literal here: its text length decides, exactly as for any other literal token.
     """
-    raw = _gateway_token_raw(cfg)
+    raw = _gateway_token_raw(cfg, ctx)
     if auth_mode is None and isinstance(raw, str) and raw.strip():
         token = raw.strip()
     elif (
@@ -1718,8 +1795,12 @@ def _gateway_config_token(cfg: dict, auth_mode, ctx=None) -> "tuple[str | None, 
         token = _GATEWAY_TOKEN_OBJECT_PLACEHOLDER
     else:
         token = None
+    # C-681: a `${ID:-default}` whose variable is unseen is a credential of unknown strength
+    # (the default is used only while ID is unset or empty), so B80 reads it as one.
     strong = token is not None and (
-        len(token) >= 24 or _gateway_token_form(raw, ctx) == "reference"
+        len(token) >= 24
+        or _gateway_token_form(raw, ctx) == "reference"
+        or _gateway_token_unseen_default(cfg, ctx) is not None
     )
     return token, strong
 
@@ -3321,7 +3402,9 @@ def check_gateway(ctx: Context) -> Finding:
     # string, a templated one) a token is a leftover key and every verdict stays what it was.
     # C-667: a well-formed SecretRef OBJECT at gateway.auth.token is the "reference" form too,
     # whatever its source; a malformed one, or one at the legacy gateway.token key, is not.
-    _b2_tok_text = _gateway_token_raw(cfg)
+    # C-681: a `${ID:-default}` token is read as the value it stands for only where the token
+    # is the credential in effect; under any other mode it stays the text it always was.
+    _b2_tok_text = _gateway_token_raw(cfg, ctx if auth in (None, "token") else None)
     _b2_tok_form = _gateway_token_form(_b2_tok_text, ctx)
     _b2_tok_in_effect = auth in (None, "token")
     # A reference whose variable the config's own env block defines: a short (or marker)
@@ -3358,6 +3441,16 @@ def check_gateway(ctx: Context) -> Finding:
         and _b2_tok_ref_env is None
     )
     _b2_tok_ref_skipped = False
+    # C-681: a `${ID:-default}` token on a 2026.9.7+ build whose variable the audit cannot see
+    # and whose default is short and non-empty. The default is used only while the gateway's
+    # own environment leaves ID unset or empty, which this audit cannot read, so it is a WARN
+    # of its own - never the FAIL a short literal gets, never a silent pass. Name only.
+    _b2_tok_dflt = (
+        _gateway_token_unseen_default(cfg, ctx)
+        if _b2_tok_in_effect and isinstance(_b2_tok_text, str) and 0 < len(_b2_tok_text) < 24
+        else None
+    )
+    _b2_tok_dflt_said = False
     # A templated value matters only where the verdict would branch on it: the bind decides
     # exposure only for a mode that does not itself authenticate (none / absent /
     # trusted-proxy, or an auth mode that is itself undeterminable); the auth mode decides
@@ -3392,6 +3485,8 @@ def check_gateway(ctx: Context) -> Finding:
         # precedence). Left OUT of ENV-4/B-290 deliberately (config-only, no env
         # component); closed here with its own triage.
         _cfg_token, _cfg_token_strong = _gateway_config_token(cfg, auth, ctx)
+        if _b2_tok_dflt is not None:
+            _cfg_token_strong = False  # a short default of unknown standing, said below
         if _b2_tok_env == "weak" or _b2_tok_ref_short:
             # C-653 (c) outcome 1: a short (or marker) value in the env block is the short
             # credential below, exactly as before. B80 keeps reading the reference as a
@@ -3400,7 +3495,9 @@ def check_gateway(ctx: Context) -> Finding:
             # gateway's persistent environment.
             _cfg_token_strong = False
         _env_cred, _env_cred_src = (
-            _gateway_env_credential(ctx) if auth is None and _cfg_token is None else (None, None)
+            _gateway_env_credential(ctx, skip_reference_shaped=True)
+            if auth is None and _cfg_token is None
+            else (None, None)
         )
         # C-135 (independent adversarial pass on B-290): presence alone is NOT enough to
         # clear this FAIL, and softening on truthiness made the scanner lie. The bind guard
@@ -3471,6 +3568,16 @@ def check_gateway(ctx: Context) -> Finding:
                 "Replace the environment-supplied gateway credential with one of at least "
                 "24 characters, or bind the gateway to loopback"
             )
+        elif _cfg_token is not None and _b2_tok_dflt is not None:
+            _b2_tok_dflt_said = True
+            soft_ev.append(
+                f"gateway.bind={bind} is non-loopback and the only gateway credential is "
+                f"gateway.auth.token, a ${{{_b2_tok_dflt}:-...}} template whose short "
+                f"({len(_b2_tok_text)} chars) fallback OpenClaw uses whenever {_b2_tok_dflt} "
+                "is unset or empty - this audit cannot see the gateway's environment, so it "
+                f"cannot tell whether {_b2_tok_dflt} supplies a stronger secret"
+            )
+            fixes.append(_b2_dflt_fix(_b2_tok_dflt))
         elif _cfg_token is not None:
             ev.append(
                 f"gateway.bind={bind} is non-loopback and the only gateway credential is "
@@ -3591,6 +3698,17 @@ def check_gateway(ctx: Context) -> Finding:
             # C-672 found the variable's value (a long one; a short one took the branch
             # above), which is then measured and needs no caveat, as for an object.
             _b2_tok_ref_skipped = _b2_tok_ref_env is None
+        elif _b2_tok_dflt is not None:
+            if not _b2_tok_dflt_said:
+                soft_ev.append(
+                    f"gateway.auth.token is a ${{{_b2_tok_dflt}:-...}} template whose short "
+                    f"({len(token)} chars) fallback OpenClaw uses whenever {_b2_tok_dflt} is "
+                    "unset or empty - this audit cannot see the gateway's environment, so it "
+                    f"cannot tell whether {_b2_tok_dflt} supplies a stronger secret"
+                )
+                fixes.append(_b2_dflt_fix(_b2_tok_dflt))
+            if _b2_tok_form == "marker":
+                fixes.append(_marker_fix)
         else:
             ev.append("gateway auth token shorter than 24 chars")
             fixes.append("Use a gateway auth token of at least 24 characters")
