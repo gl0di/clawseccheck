@@ -2,8 +2,8 @@
 #
 # openclaw-version: 2026.9.9
 # state-schema-version: 19
-# generated: 2026-10-10
-# tables: 132
+# generated: 2026-10-11
+# tables: 135
 #
 # source-bundle: openclaw-state-db-legacy-backfills-BSKqroDt.mjs
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
@@ -11,10 +11,24 @@
 #
 # What this is
 # ------------
-# Every table name the installed OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL` declares -- the
-# vendor's whole state-SQLite surface, NOT the part this tree models. Its sibling
+# Every table name the installed OpenClaw declares for its STATE SQLite database
+# (state/openclaw.sqlite) -- the vendor's whole state-SQLite surface, NOT the part this tree
+# models. That is the whole `OPENCLAW_STATE_SCHEMA_SQL` constant PLUS the allowlisted
+# satellite constants below, each applied to the same database through the state-database
+# write path (runOpenClawStateWriteTransaction / openOpenClawStateDatabase). Its sibling
 # state_schema_snapshot.sql is deliberately the opposite: full DDL, projected to the few
 # tables we read.
+#
+# Not covered: the per-agent database, the workboard store, the memory index, the debug-proxy
+# capture sidecar and the retired shapes (the explicit exclusions in
+# tests/test_state_schema_grounding.py). A name here means the vendor DECLARES a table, not
+# that a given database has it yet: many are created on first use.
+#
+# Satellite constants read (bundle it came from, tables it adds beyond the main constant):
+#   USER_PROFILES_SCHEMA_SQL  [user-profiles-internal-CkeSs8R5.mjs, 4 copies]
+#     adds: user_profile_emails, user_profiles
+#   WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL  [openclaw-state-worker-runtime-DsFyroJI.mjs, 2 copies]
+#     adds: worker_environment_session_attachments
 #
 # Why it exists
 # -------------
@@ -138,10 +152,13 @@ task_delivery_state
 task_runs
 update_runs
 user_preferences
+user_profile_emails
 user_profile_identities
+user_profiles
 web_push_approval_deliveries
 web_push_subscriptions
 worker_environment_credentials
+worker_environment_session_attachments
 worker_environment_ssh_fallback_ports
 worker_environments
 worker_inference_turns

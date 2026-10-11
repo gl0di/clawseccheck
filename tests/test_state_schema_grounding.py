@@ -2105,11 +2105,16 @@ def test_a_wrong_state_schema_stamp_is_reported_and_a_right_one_is_not(tmp_path)
 # state_db_drift_gate.py already applies to its `unread col` line.
 #
 # WHAT THIS DOES NOT CLAIM. Being in the baseline says the vendor DECLARES a table, not
-# that any database has one: measured on this machine, 13 declared tables (the whole
-# skill_library family among them) are absent from the live DB even though the DDL is all
-# `CREATE TABLE IF NOT EXISTS`. So a check built on this surface must treat an absent
-# table as UNKNOWN and never as a clean PASS -- "the table is not here" is not evidence
-# the feature is unused.
+# that any database has one: measured on this machine (2026.9.9), 25 declared tables (the
+# whole skill_library family among them) are absent from the live DB even though the DDL is
+# all `CREATE TABLE IF NOT EXISTS`; the vendor lists them itself as FIRST_USE_STATE_TABLES /
+# LAZY_ADDITIVE_STATE_TABLES in `openclaw-state-db-contract-*`. So a check built on this
+# surface must treat an absent table as UNKNOWN and never as a clean PASS -- "the table is
+# not here" is not evidence the feature is unused.
+#
+# C-679: the set is NOT only `OPENCLAW_STATE_SCHEMA_SQL`. Three live tables (user_profiles,
+# user_profile_emails, worker_environment_session_attachments) are created by satellite
+# constants applied to the same database; the section below reads the allowlisted ones.
 # ========================================================================================
 
 VENDOR_TABLES_FILE = Path(__file__).resolve().parent / "vendor_state_tables.txt"
@@ -2171,6 +2176,304 @@ _DIFFERENT_DB_TABLES_STILL_READ = {
 # own docstring for why the check exists.
 _SQLITE_BUILTIN_CATALOG_TABLES = {"sqlite_master"}
 
+# --------------------------------------------------------------------------------------
+# C-679: the state database is declared by MORE than one constant.
+#
+# `OPENCLAW_STATE_SCHEMA_SQL` is the bulk, but on 2026.9.9 three live tables
+# (user_profiles, user_profile_emails, worker_environment_session_attachments) come from
+# SATELLITE constants that the vendor applies to the same state database at first use. A
+# generator that read only the main constant would never name a table a future release
+# adds the same way -- the exact blindness B-721 was written to remove.
+#
+# A blanket `*_SCHEMA_SQL` pattern over-collects (per-agent DB, workboard, memory index,
+# retired shapes), so classification is by EXPLICIT NAME, in two lists. A `*_SCHEMA_SQL`
+# name found anywhere in the dist that is in neither list stops the generator: a new
+# constant has to be classified by someone who read where it is applied. Camel-case
+# constants and constants not spelled `*_SCHEMA_SQL` are NOT covered by this net.
+# --------------------------------------------------------------------------------------
+
+_PRIMARY_STATE_SCHEMA_CONSTANT = "OPENCLAW_STATE_SCHEMA_SQL"
+
+# name -> evidence: the write path that applies the DDL to the STATE database (grounded
+# against the installed 2026.9.9 dist; function names, not rotating bundle hashes).
+_STATE_SATELLITE_CONSTANTS = {
+    "USER_PROFILES_SCHEMA_SQL": (
+        "user-profiles-internal-*.mjs: ensureUserProfilesSchema -> runUserProfileWriteTransaction "
+        "-> runOpenClawStateWriteTransaction, `db.exec(USER_PROFILES_SCHEMA_SQL)`; opens the "
+        "database with openOpenClawStateDatabase"
+    ),
+    "WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL": (
+        "openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema -> "
+        "runOpenClawStateWriteTransaction, `db.exec(SSH_FALLBACK_PORTS + SESSION_ATTACHMENTS)`"
+    ),
+}
+
+_NOT_STATE_DB = "NOT the state database: "
+_ALREADY_IN_MAIN = (
+    "applied to the state database; declares only tables OPENCLAW_STATE_SCHEMA_SQL already "
+    "lists (measured 2026.9.9), and is PARSED on every run to keep that true: "
+)
+
+# name -> what it re-declares. Applied to the state database but, today, adding no table of
+# its own. They are parsed with the same extractor as the satellites and every table they
+# declare must already be in the main constant: a table that is not stops the generator, so
+# promoting the constant to _STATE_SATELLITE_CONSTANTS is a deliberate act, not a miss.
+_STATE_REDECLARING_CONSTANTS = {
+    "WORKER_ENVIRONMENT_SSH_FALLBACK_PORTS_SCHEMA_SQL":
+        _ALREADY_IN_MAIN + "worker_environment_ssh_fallback_ports "
+        "(openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema)",
+    "CRON_RUNTIME_AUTHORITY_SCHEMA_SQL":
+        _ALREADY_IN_MAIN + "cron_job_runtime_authorities "
+        "(runtime-authority-store-*.mjs: replaceCronRuntimeAuthorityRows, same db as cron_jobs)",
+    "STANDING_GRANT_SCHEMA_SQL":
+        _ALREADY_IN_MAIN + "operator_approval_standing_grants, "
+        "operator_approval_standing_grant_generations "
+        "(operator-approval-standing-grants-*.mjs: ensureStandingGrantSchema)",
+    "OPERATOR_APPROVAL_EXECUTION_IDENTITY_SCHEMA_SQL":
+        _ALREADY_IN_MAIN + "operator_approval_execution_identities "
+        "(operator-approval-store.operations-*.mjs: database.db.exec)",
+}
+
+# name -> why it is not read.
+_STATE_EXCLUDED_CONSTANTS = {
+    **dict.fromkeys((
+        "OPENCLAW_AGENT_SCHEMA_SQL", "OPENCLAW_AGENT_BOARD_SCHEMA_SQL",
+        "AGENT_PROGRESS_CARD_SCHEMA_SQL", "AGENT_V14_BOARD_SCHEMA_SQL",
+        "AGENT_V14_SESSION_SHARING_SCHEMA_SQL", "AGENT_V14_ADDITIVE_SCHEMA_SQL",
+        "AGENT_V14_CORE_SCHEMA_SQL",
+    ), _NOT_STATE_DB + "the per-agent database (agents/<id>/agent/openclaw-agent.sqlite)"),
+    "WORKBOARD_SCHEMA_SQL": _NOT_STATE_DB + "the workboard extension's own sqlite store",
+    "DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL": (
+        _NOT_STATE_DB + "a legacy debug-proxy sidecar; its capture_* tables are listed by the "
+        "main constant in their current shape (the B-710 trap)"),
+    **dict.fromkeys((
+        "MEMORY_INDEX_CHUNKS_SCHEMA_SQL", "MEMORY_INDEX_CHUNK_PROVENANCE_SCHEMA_SQL",
+        "MEMORY_INDEX_CHUNK_RECALL_METADATA_SCHEMA_SQL",
+    ), _NOT_STATE_DB + "the memory index database; table names are interpolated"),
+    **dict.fromkeys((
+        "RETIRED_COMMITMENTS_SCHEMA_SQL", "SHIPPED_RETIRED_COMMITMENTS_SCHEMA_SQL",
+        "RETIRED_AGENT_STATE_LEASE_SCHEMA_SQL",
+    ), "retired shape, kept by the vendor only to migrate old databases away"),
+}
+
+_SCHEMA_SQL_NAME_RE = re.compile(r"\b[A-Z][A-Z0-9_]*_SCHEMA_SQL\b")
+_CREATE_TABLE_RE = re.compile(r"\bCREATE\s+TABLE\b", re.IGNORECASE)
+# The negative lookahead stops `CREATE TABLE IF NOT EXISTS ${name}` from reading "IF" as a
+# table name once the optional group backtracks.
+_CREATE_TABLE_NAMED_RE = re.compile(
+    r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?!IF\s+NOT\s+EXISTS\b)(\w+)", re.IGNORECASE)
+# The one interpolation shape an allowlisted constant may carry: a table spliced from the
+# MAIN constant. Anything else is unmodelled composition and stops the generator.
+_STATE_TABLE_SPLICE_RE = re.compile(
+    r"""\s*extractSqliteTableSchema\(\s*OPENCLAW_STATE_SCHEMA_SQL\s*,\s*(["'`])(\w+)\1\s*\)\s*""")
+
+
+def _skip_js_expression(js_text: str, i: int) -> int:
+    """Index of the `}` closing a `${` whose body starts at *i* (strings and nested
+    template literals inside the expression are stepped over)."""
+    depth, n = 1, len(js_text)
+    while i < n:
+        c = js_text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "\"'":
+            j = i + 1
+            while j < n and js_text[j] != c:
+                j += 2 if js_text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if c == "`":
+            i = _scan_js_template(js_text, i + 1)[2] + 1
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise AssertionError("unterminated ${...} interpolation in a template literal")
+
+
+def _scan_js_template(js_text: str, i: int) -> "tuple[list, list, int]":
+    """(static pieces, interpolation expressions, index of the closing backtick) for the
+    template literal whose body starts at *i*. `len(pieces) == len(exprs) + 1`. Unlike
+    `_extract_worker_template_schema_sql`, an interpolation is TOLERATED here -- reported,
+    not refused -- because the caller decides whether it understands each one."""
+    pieces, exprs, start, n = [], [], i, len(js_text)
+    while i < n:
+        c = js_text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            pieces.append(js_text[start:i])
+            return pieces, exprs, i
+        if c == "$" and js_text[i:i + 2] == "${":
+            pieces.append(js_text[start:i])
+            end = _skip_js_expression(js_text, i + 2)
+            exprs.append(js_text[i + 2:end])
+            i = start = end + 1
+            continue
+        i += 1
+    raise AssertionError("unterminated template literal in the dist")
+
+
+def _extract_satellite_schema_sql(js_text: str, start: int, delim: str, const: str) -> "tuple[str, list]":
+    """(canonical SQL, tables spliced in from the main constant) for the literal opening at
+    *start* (just past its delimiter). Each understood `${extractSqliteTableSchema(
+    OPENCLAW_STATE_SCHEMA_SQL, "t")}` becomes a fixed marker, so the readable copy and the
+    minified worker copy of the same constant compare equal; any other interpolation
+    raises."""
+    if delim != "`":
+        i, n = start, len(js_text)
+        while i < n and js_text[i] != delim:
+            i += 2 if js_text[i] == "\\" else 1
+        if i >= n:
+            raise AssertionError(f"unterminated string literal for {const} in the dist")
+        return _unescape_js_double_quoted(js_text[start:i]), []
+    pieces, exprs, _ = _scan_js_template(js_text, start)
+    spliced, out = [], [_unescape_js_double_quoted(pieces[0])]
+    for expr, piece in zip(exprs, pieces[1:]):
+        m = _STATE_TABLE_SPLICE_RE.fullmatch(expr)
+        if m is None:
+            raise AssertionError(
+                f"{const} interpolates `${{{expr.strip()[:100]}}}` -- not the one shape this "
+                "extractor models (a table spliced from OPENCLAW_STATE_SCHEMA_SQL). The "
+                "constant composes its DDL in a way nothing here has read; re-ground it.")
+        spliced.append(m.group(2))
+        out.append(f"/*splice:{m.group(2)}*/" + _unescape_js_double_quoted(piece))
+    return "".join(out), spliced
+
+
+def _survey_schema_sql_constants(dist_dir: Path, wanted) -> "tuple[set, dict]":
+    """(every `*_SCHEMA_SQL` name appearing in any dist bundle, name -> [(path, canonical
+    SQL, spliced tables)] for each literal definition of a *wanted* constant). One read per
+    file; an unreadable bundle fails loudly, as in `_state_schema_defining_files`."""
+    seen: set = set()
+    found: dict = {name: [] for name in wanted}
+    for ext in _JS_EXTS:
+        for path in sorted(dist_dir.rglob("*" + ext)):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise AssertionError(
+                    f"cannot read {path} while classifying *_SCHEMA_SQL constants: {exc}. An "
+                    "unreadable bundle could define a state-schema constant.") from exc
+            if "_SCHEMA_SQL" not in text:
+                continue
+            seen.update(_SCHEMA_SQL_NAME_RE.findall(text))
+            for name in wanted:
+                if name not in text:
+                    continue
+                for m in re.finditer(rf"\b{name}\s*=\s*([`\"'])", text):
+                    sql, spliced = _extract_satellite_schema_sql(text, m.end(), m.group(1), name)
+                    found[name].append((path, sql, spliced))
+    return seen, found
+
+
+def _resolve_state_constant(name: str, defs: list, dist_dir: Path, main_tables) -> dict:
+    """{"tables", "adds", "bundle", "copies"} for one allowlisted constant's definitions."""
+    if not defs:
+        raise AssertionError(
+            f"{name} is allowlisted as a state-database schema constant but no bundle under "
+            f"{dist_dir} defines it as a string or template literal -- the vendor renamed, "
+            "moved or rewrote it; re-ground the allowlist entry.")
+    by_digest: "dict[str, list[Path]]" = {}
+    for path, sql, _ in defs:
+        by_digest.setdefault(
+            hashlib.sha256(sql.encode("utf-8", "surrogatepass")).hexdigest()[:12], []).append(path)
+    if len(by_digest) != 1:
+        listing = "; ".join(f"{d}: {[str(p.relative_to(dist_dir)) for p in ps]}"
+                            for d, ps in sorted(by_digest.items()))
+        raise AssertionError(
+            f"{name} is defined with DIFFERENT schemas ({listing}); decide which one the "
+            "runtime applies before trusting a table set taken from either.")
+    _, sql, spliced = defs[0]
+    named = _CREATE_TABLE_NAMED_RE.findall(sql)
+    if not named or len(named) != len(_CREATE_TABLE_RE.findall(sql)):
+        raise AssertionError(
+            f"{name}: {len(_CREATE_TABLE_RE.findall(sql))} CREATE TABLE statement(s) but "
+            f"{len(named)} table name(s) read -- a quoted or computed name is not a bare "
+            "identifier, so this extractor cannot name that table. Re-ground it.")
+    absent = sorted(set(spliced) - set(main_tables))
+    if absent:
+        raise AssertionError(
+            f"{name} splices {absent} from OPENCLAW_STATE_SCHEMA_SQL, which declares no "
+            "such table -- the splice would fail at runtime; re-ground.")
+    paths = [p for p, _, _ in defs]
+    bundle = min(paths, key=lambda p: (len(p.relative_to(dist_dir).parts), p.stat().st_size, str(p)))
+    tables = sorted(set(named))
+    return {
+        "tables": tables,
+        "adds": sorted(set(tables) - set(main_tables)),
+        "bundle": bundle.name,
+        "copies": len(paths),
+    }
+
+
+def _satellite_state_tables(dist_dir: Path, main_tables, satellites=None, excluded=None,
+                            redeclaring=None) -> "dict[str, dict]":
+    """name -> {"tables", "adds", "bundle", "copies"} for every allowlisted satellite.
+
+    Raises on: a `*_SCHEMA_SQL` name in no list; an allowlisted constant with no literal
+    definition (the vendor moved or renamed it); definitions that are not the same schema
+    (any number of identical copies is fine -- the rule `_find_state_schema_defining_js`
+    uses); a `CREATE TABLE` whose name is not a literal; a spliced table the main constant
+    does not declare; a satellite that declares nothing; and a REDECLARING constant that
+    declares a table the main constant does not (it must then be promoted to the allowlist
+    deliberately). Redeclaring constants add no name, so they are checked, not returned."""
+    satellites = _STATE_SATELLITE_CONSTANTS if satellites is None else satellites
+    excluded = _STATE_EXCLUDED_CONSTANTS if excluded is None else excluded
+    redeclaring = _STATE_REDECLARING_CONSTANTS if redeclaring is None else redeclaring
+    seen, found = _survey_schema_sql_constants(dist_dir, set(satellites) | set(redeclaring))
+    unclassified = sorted(seen - {_PRIMARY_STATE_SCHEMA_CONSTANT} - set(satellites)
+                          - set(redeclaring) - set(excluded))
+    if unclassified:
+        raise AssertionError(
+            f"unclassified *_SCHEMA_SQL constant(s) in {dist_dir}: {unclassified}. Read where "
+            "each is applied. If the DDL reaches the STATE database "
+            "(runOpenClawStateWriteTransaction / openOpenClawStateDatabase), add it to "
+            "_STATE_SATELLITE_CONSTANTS (or _STATE_REDECLARING_CONSTANTS if it adds no table) "
+            "with that evidence; otherwise add it to _STATE_EXCLUDED_CONSTANTS with the "
+            "reason. Guessing here is how a vendor table goes unnamed.")
+    for name in sorted(redeclaring):
+        extra = _resolve_state_constant(name, found[name], dist_dir, main_tables)["adds"]
+        if extra:
+            raise AssertionError(
+                f"{name} is listed as re-declaring only tables OPENCLAW_STATE_SCHEMA_SQL already "
+                f"has, but it declares {extra}, which the main constant does not. Read where it "
+                "is applied and move it to _STATE_SATELLITE_CONSTANTS deliberately.")
+    return {name: _resolve_state_constant(name, found[name], dist_dir, main_tables)
+            for name in sorted(satellites)}
+
+
+def _vendor_state_table_surface(dist_dir: Path, satellites=None, excluded=None,
+                                redeclaring=None) -> "tuple[set, dict, Path]":
+    """(every state-database table name the dist declares, per-satellite provenance, the
+    bundle the main constant was read from). The one function the generator AND the
+    dist-comparison test call, so they cannot disagree about what the file covers."""
+    js_path = _find_state_schema_defining_js(dist_dir)
+    main = set(_dist_table_ddl_texts(_extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))))
+    provenance = _satellite_state_tables(dist_dir, main, satellites, excluded, redeclaring)
+    return main | {t for p in provenance.values() for t in p["tables"]}, provenance, js_path
+
+
+def _satellite_header_block(provenance: "dict[str, dict]") -> str:
+    """`#` comment lines naming each satellite, the bundle it was read from and the tables it
+    adds. Provenance lives in the header, never on a data line: the reader treats a whole data
+    line as a table name."""
+    lines = []
+    for name, p in sorted(provenance.items()):
+        adds = ", ".join(p["adds"]) or "(none beyond the main constant)"
+        lines.append(f"#   {name}  [{p['bundle']}, {p['copies']} cop{'y' if p['copies'] == 1 else 'ies'}]"
+                     f"\n#     adds: {adds}")
+    return "\n".join(lines)
+
+
 _VENDOR_TABLES_HEADER = """\
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
@@ -2185,10 +2488,21 @@ _VENDOR_TABLES_HEADER = """\
 #
 # What this is
 # ------------
-# Every table name the installed OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL` declares -- the
-# vendor's whole state-SQLite surface, NOT the part this tree models. Its sibling
+# Every table name the installed OpenClaw declares for its STATE SQLite database
+# (state/openclaw.sqlite) -- the vendor's whole state-SQLite surface, NOT the part this tree
+# models. That is the whole `OPENCLAW_STATE_SCHEMA_SQL` constant PLUS the allowlisted
+# satellite constants below, each applied to the same database through the state-database
+# write path (runOpenClawStateWriteTransaction / openOpenClawStateDatabase). Its sibling
 # state_schema_snapshot.sql is deliberately the opposite: full DDL, projected to the few
 # tables we read.
+#
+# Not covered: the per-agent database, the workboard store, the memory index, the debug-proxy
+# capture sidecar and the retired shapes (the explicit exclusions in
+# tests/test_state_schema_grounding.py). A name here means the vendor DECLARES a table, not
+# that a given database has it yet: many are created on first use.
+#
+# Satellite constants read (bundle it came from, tables it adds beyond the main constant):
+{satellite_block}
 #
 # Why it exists
 # -------------
@@ -2233,12 +2547,12 @@ def _write_vendor_table_baseline() -> int:
             "vacuous table baseline. Run this on a machine with the matching OpenClaw "
             "installed."
         )
-    js_path = _find_state_schema_defining_js(OPENCLAW_DIST)
+    all_tables, provenance, js_path = _vendor_state_table_surface(OPENCLAW_DIST)
     sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
     # C-580: same reasoning as _write_state_snapshot -- verify the worker.mjs copy before
     # trusting this text to build a baseline.
     _assert_worker_template_copy_matches_primary(OPENCLAW_DIST, sql_text)
-    tables = sorted(_dist_table_ddl_texts(sql_text))
+    tables = sorted(all_tables)
     if not tables:
         raise RuntimeError(
             "extracted ZERO tables from the vendor schema -- refusing to write an empty "
@@ -2250,6 +2564,7 @@ def _write_vendor_table_baseline() -> int:
         generated=date.today().isoformat(),
         count=len(tables),
         source_file=js_path.name,
+        satellite_block=_satellite_header_block(provenance),
         regen_cmd=REGENERATE_TABLES_CMD,
     )
     VENDOR_TABLES_FILE.write_text(header + "\n".join(tables) + "\n", encoding="utf-8")
@@ -2385,9 +2700,9 @@ def test_vendor_table_baseline_matches_the_installed_dist():
     upgrade, where both existing state-DB oracles came back clean.
     """
     dist_dir = _require_dist()
-    js_path = _find_state_schema_defining_js(dist_dir)
-    sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
-    vendor = set(_dist_table_ddl_texts(sql_text))
+    # C-679: the main constant PLUS the allowlisted satellites; an unclassified
+    # `*_SCHEMA_SQL` constant raises here, so this test also stops on one.
+    vendor, _, _ = _vendor_state_table_surface(dist_dir)
 
     text, names = _read_vendor_table_baseline()
     added, removed = _table_set_delta(vendor, names)
