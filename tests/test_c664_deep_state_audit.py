@@ -15,9 +15,10 @@ the file. A FAIL/WARN found in what was read stands.
 
 "Recorded" is exact. For the cron, exec-approvals and notebook readers the cut-off shows in a
 finding (B168 / B172 go UNKNOWN). For the plugin-trust, plugin-index, subagent and
-config_machine_state readers it is recorded in `ctx.limit_hits` / `ctx.errors` only: no
-finding shows it, and the check's verdict is the baseline's (those checks live outside this
-slice). The tests below pin the record in the context, not a finding.
+config_machine_state readers it is recorded in `ctx.limit_hits` / `ctx.errors`, and since
+CLAWSECCHECK-C-680 the consuming checks (B177, B187, B18, B179, B168) show it too:
+`tests/test_c680c_elided_disclosure.py` pins that. The tests below pin the record in the
+context, and the verdicts that did not need to change.
 
 What each case pins, per reader:
 
@@ -283,13 +284,13 @@ SITES = {
         "hostile": (B172, WARN, None), "whole": (B172, UNKNOWN, None)}),
     "config_machine_state": (_build_machine_state, {}),
     "plugin_state_row": (_build_plugin_state, {
-        "clean": (B177, PASS, None), "clean_padded": (B177, PASS, None),
+        "clean": (B177, PASS, None), "clean_padded": (B177, UNKNOWN, None),
         "hostile": (B177, FAIL, None), "whole": (B177, UNKNOWN, None)}),
     "install_records_json": (_build_install_records, {
-        "clean": (B177, PASS, None), "clean_padded": (B177, PASS, None),
+        "clean": (B177, PASS, None), "clean_padded": (B177, UNKNOWN, None),
         "hostile": (B177, FAIL, None), "whole": (B177, UNKNOWN, None)}),
     "plugins_json": (_build_plugins_json, {
-        "clean": (B187, PASS, None), "clean_padded": (B187, PASS, None),
+        "clean": (B187, PASS, None), "clean_padded": (B187, UNKNOWN, None),
         "hostile": (B187, WARN, None), "whole": (B187, UNKNOWN, None)}),
     "subagent_outcome_json": (_build_subagent_outcome, {
         "clean": (B18, WARN, _spawns(1)), "clean_padded": (B18, WARN, _spawns(1)),

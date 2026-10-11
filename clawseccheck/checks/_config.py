@@ -3276,6 +3276,7 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     cfg = ctx.config
     evidence: list[str] = []
     extra_dirs_hit = False
+    installs_elided = False
 
     if dig(cfg, "hooks.enabled") is True:
         evidence.append(
@@ -3322,6 +3323,10 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
             evidence.append(
                 f"hooks.internal.installs \u2014 {len(installs)} internal hook install(s) registered"
             )
+        # C-680: the stored value was cut short by the depth limit (padding is not an
+        # install record). Evidence found above stands; only a clean PASS is unsound.
+        installs_elided = "hooks.internal.installs" in (
+            getattr(ctx, "config_machine_state_elided", None) or ())
 
         extra_dirs = dig(cfg, "hooks.internal.load.extraDirs")
         if isinstance(extra_dirs, list):
@@ -3352,6 +3357,19 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     for _kind, _line in _hooks_session_key_exposures(cfg):
         evidence.append(_line)
 
+    if not evidence and installs_elided:
+        return _finding(
+            "B179",
+            UNKNOWN,
+            "No hooks.enabled flag or hooks.internal load surface was found in what the "
+            "audit reads \u2014 but the hooks.internal.installs value in OpenClaw's state "
+            "database nests deeper than the audit reads, so that content was never "
+            "examined. A clean bill of health cannot be given over it.",
+            "Remove the deeply nested padding from the hooks.internal.installs entry of the "
+            "config_machine_state table in ~/.openclaw/state/openclaw.sqlite so all of it "
+            "can be read, then re-run the audit.",
+            engine_degraded=True,
+        )
     if not evidence:
         return _finding(
             "B179",
@@ -3388,6 +3406,11 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
             "Confirm the enabled surface is intentional; hooks.token (B1), "
             "hooks.mappings[].allowUnsafeExternalContent (B48), and hook-template "
             "content scanning (B169) already cover the higher-risk adjacent settings."
+        )
+    if installs_elided:
+        fix += (
+            " Note: the hooks.internal.installs value in the state database nests deeper "
+            "than the audit reads, so content below that depth was never examined."
         )
     return _finding("B179", WARN, detail, fix, evidence)
 

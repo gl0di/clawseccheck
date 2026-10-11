@@ -2041,6 +2041,23 @@ def check_cron_job_content(ctx: Context) -> Finding:
             "re-run the audit.",
             engine_degraded=True,
         )
+    # C-680: the state store's `cron.store` value is nested deeper than the audit reads, so
+    # which store the runtime uses is unknown. Not the shadow branch above (that one is
+    # proven and its texts are about a SQLite table): its own detail and advice.
+    if ctx.cron_store_key_elided:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            f"Scanned {len(ctx.cron_jobs)} cron job(s) and found no embedded "
+            "instruction-override or install directive \u2014 but the cron.store value in "
+            "OpenClaw's state database nests deeper than the audit reads, so which job "
+            "store the runtime actually uses is unknown. A clean bill of health cannot be "
+            "given over a store that may not be the one that runs.",
+            "Remove the deeply nested padding from the cron.store entry of the "
+            "config_machine_state table in ~/.openclaw/state/openclaw.sqlite so the "
+            "configured store can be read, then re-run the audit.",
+            engine_degraded=True,
+        )
     return _finding(
         "B168",
         PASS,
@@ -2348,7 +2365,14 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         "If you did not schedule these, review the sessions they ran under with "
         "`--analyze-trajectory`. A prompt-injected agent can schedule its own self-erasing "
         "job (deleteAfterRun is exposed as a cron-tool option), which leaves exactly this "
-        "trace and nothing else.",
+        "trace and nothing else."
+        + (
+            # C-680: the orphans are real against the store that was read; the padded
+            # cron.store value means that store may not be the one the runtime uses.
+            " Note: the cron.store value in the state database nests deeper than the audit "
+            "reads, so the job store compared against may not be the one the runtime uses."
+            if ctx.cron_store_key_elided else ""
+        ),
         ev,
     )
 

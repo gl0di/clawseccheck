@@ -850,6 +850,12 @@ class Context:
     # that, so B168 degrades its PASS to UNKNOWN; B189 reasons about job ids, which the
     # padding cannot hide, and does not read this.
     cron_content_elided: bool = False
+    # C-680: the machine-state `cron.store` value is nested deeper than the shallow reader
+    # follows, so the store it names is unknown. Read by B168 only (a clean PASS over the
+    # store that was scanned becomes UNKNOWN). Deliberately NOT cron_store_shadowed: that flag
+    # makes B189 decline before it compares run logs with job ids, and the padding hides
+    # neither the jobs nor the run logs, so a real orphan must still be reported.
+    cron_store_key_elided: bool = False
 
     # F-183: the machine-owned config store (`config_machine_state` in the state DB).
     # `_read` False means the store could not be consulted at all -- UNDETERMINED. An
@@ -858,6 +864,10 @@ class Context:
     config_machine_state: dict = field(default_factory=dict)
     config_machine_state_read: bool = False
     config_machine_state_unparsed: set = field(default_factory=set)
+    # C-680: keys whose value was read but had a subtree nested past the shallow reader's
+    # depth cut off (a subset of config_machine_state_unparsed). Consumers that would answer
+    # "not set" for such a key must not.
+    config_machine_state_elided: set = field(default_factory=set)
     cron_store_shadowed: bool = False
     # B-749: presence-only signal for `config_machine_state["authProfiles.store"]` -- the
     # machine-owned auth-profile SECRETS row, deliberately excluded from
@@ -994,6 +1004,10 @@ class Context:
     plugin_trust_records: list = field(default_factory=list)
     plugin_trust_found: bool = False        # a usable trust-index row was found and read
     plugin_trust_parse_error: bool = False  # present but could not be read/parsed (locked/corrupt)
+    # C-680: the trust document nests deeper than the shallow reader follows. Records are read
+    # (their fields sit near the root) but whatever lay below the cut was not, so B177 may not
+    # answer a clean PASS over it and discloses it in the finding's `fix`.
+    plugin_trust_elided: bool = False
     # B-292 (RT-2): the SIBLING plugins_json column -- installed_plugin_index.plugins_json,
     # or (2026.8.2+) config_machine_state['plugins.installedIndex'].index.plugins, read over
     # the exact same connection and the exact same row/state-key as plugin_trust_records
@@ -1010,6 +1024,9 @@ class Context:
     plugin_index_records: list = field(default_factory=list)
     plugin_index_found: bool = False        # a usable plugin-index row was found and read
     plugin_index_parse_error: bool = False  # present but could not be read/parsed (locked/corrupt)
+    # C-680: the plugin index nests deeper than the shallow reader follows; same contract as
+    # plugin_trust_elided, consumed by B187 (and disclosed by B177).
+    plugin_index_elided: bool = False
     # B-296 (DISK-5 increment 1): rows from the subagent-spawn registry (``subagent_runs`` in
     # the shared state SQLite DB), most-recent first. Each entry is a plain dict:
     # child_session_key, model, agent_dir, workspace_dir, spawn_mode, run_timeout_seconds,
@@ -1025,6 +1042,9 @@ class Context:
     subagent_runs: list = field(default_factory=list)
     subagent_runs_found: bool = False        # state DB + subagent_runs table present and read
     subagent_runs_parse_error: bool = False  # present but no row could be reliably parsed
+    # C-680: how many rows had a payload/outcome cell nested deeper than the shallow reader
+    # follows. The rows are read and counted; B18's disk disclosure names the number.
+    subagent_runs_elided: int = 0
     # B176 follow-up (2026-09-25): OpenClaw 2026.9.6 migrates the legacy
     # devices/paired.json store into a dedicated device_pairing_paired table in
     # state/openclaw.sqlite, leaving only devices/paired.json.migrated behind --
@@ -5341,6 +5361,19 @@ def _flag_cron_store_config_mismatch(ctx: Context, jobs_json: Path) -> None:
     # a current build - the shadow it exists to catch would go unreported. The state value
     # wins where present; the config key remains authoritative on builds that still have
     # one, and on any machine whose state store could not be read.
+    if "cron.store" in ctx.config_machine_state_elided:
+        # C-680: the stored value is nested deeper than the shallow reader follows, so what
+        # it names was not read. The runtime reads the store it names, which may not be the
+        # one just scanned: B168 may not answer a clean PASS (cron_store_key_elided). It is
+        # not the mismatch state above, which is proven, so cron_store_shadowed stays False.
+        ctx.cron_store_key_elided = True
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_CRON,
+            _elided_note("config_machine_state['cron.store']")
+            + f" \u2014 the configured store could not be determined, and the store "
+            f"actually scanned was '{jobs_json}'",
+        )
+        return
     configured = (ctx.config_machine_state or {}).get("cron.store")
     if not isinstance(configured, str) or not configured.strip():
         configured = dig(ctx.config, "cron.store")
@@ -6658,6 +6691,7 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
                 # The value is delivered as read (every consumer looks at its top level
                 # only), and the key is also listed as not fully read.
                 ctx.config_machine_state_unparsed.add(state_key)
+                ctx.config_machine_state_elided.add(state_key)
                 ctx.errors.append(_elided_note(f"config_machine_state[{state_key!r}]"))
         except (TypeError, ValueError):
             # Present but unreadable. Recording it as absent would let a consumer answer
@@ -7839,6 +7873,8 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                     _elided_note(f"config_machine_state['plugins.installedIndex'] in '{db_path}'"),
                 )
+                ctx.plugin_trust_elided = True
+                ctx.plugin_index_elided = True
 
             revision = state_obj.get("revision") if isinstance(state_obj, dict) else None
             revision_is_number = (
@@ -7984,6 +8020,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         if installs_elided:
             note_limit(ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                        _elided_note(f"install_records_json in '{db_path}'"))
+            ctx.plugin_trust_elided = True
             if isinstance(installs, dict) and not any(
                     isinstance(r, dict) for r in installs.values()):
                 # Nothing usable was read: the same unreadable state a malformed one gets.
@@ -8032,6 +8069,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         if plugins_elided:
             note_limit(ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                        _elided_note(f"plugins_json in '{db_path}'"))
+            ctx.plugin_index_elided = True
             if isinstance(plugins, list) and not any(isinstance(r, dict) for r in plugins):
                 ctx.plugin_index_found = True
                 ctx.plugin_index_parse_error = True
@@ -8380,10 +8418,12 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
                 "created_at": created_at,
             })
 
+    ctx.subagent_runs_elided = len(elided_rows)
     if elided_rows:
         # The rows are read and counted (the fields B18 takes sit near the top of each), so
-        # the padding is recorded in ctx.limit_hits (no finding shows it) - the channel
-        # B18's not-applicable proof already reads - rather than dropping a row.
+        # the padding is recorded in ctx.limit_hits - the channel B18's not-applicable
+        # proof already reads - and counted in ctx.subagent_runs_elided, which B18's disk
+        # disclosure names in its `fix`, rather than dropping a row.
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
             _elided_note(f"{len(elided_rows)} subagent_runs row(s) in '{db_path}'"),

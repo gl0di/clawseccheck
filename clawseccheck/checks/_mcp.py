@@ -8870,6 +8870,23 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
     )
 
 
+_PLUGIN_ELIDED_FIX = (
+    " Note: part of the persisted plugin data nests deeper than the audit reads, so "
+    "content below that depth was never examined. Remove the deeply nested padding "
+    "from ~/.openclaw/state/openclaw.sqlite so all of it can be read, then re-run the "
+    "audit."
+)
+
+
+def _plugin_elided_note(finding: Finding, elided: bool) -> Finding:
+    """C-680: a FAIL/WARN found in the part of the plugin data that WAS read stands; when
+    the document was also cut short by the depth limit, say so in the finding's ``fix`` (never
+    ``detail``, which a fingerprint hashes)."""
+    if elided:
+        finding.fix += _PLUGIN_ELIDED_FIX
+    return finding
+
+
 # ---------- B177 (B-240): OpenClaw's own persisted per-plugin ClawHub trust verdict ----------
 def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     """B177 (B-240) - OpenClaw's OWN persisted per-plugin ClawHub trust verdict.
@@ -9176,7 +9193,7 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             len(warn_ev) - len(warn_ev[: max(0, 6 - len(blocked_ev[:6]))])
         )
         extra = f" (+{extra_n} more)" if extra_n > 0 else ""
-        return _finding(
+        return _plugin_elided_note(_finding(
             "B177",
             FAIL,
             "OpenClaw's own ClawHub trust verdict marks installed plugin(s) as "
@@ -9190,12 +9207,12 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             "history) for that record. Do not override or acknowledge the verdict "
             "without independently re-verifying provenance.",
             evidence=ev,
-        )
+        ), ctx.plugin_trust_elided)
 
     if warn_ev:
         ev = warn_ev[:6]
         extra = f" (+{len(warn_ev) - 6} more)" if len(warn_ev) > 6 else ""
-        return _finding(
+        return _plugin_elided_note(_finding(
             "B177",
             WARN,
             "OpenClaw's own ClawHub trust verdict flags installed plugin(s) as "
@@ -9205,7 +9222,7 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             "verdict is not proof of malice, but it means ClawHub has not (yet) "
             "cleared the install.",
             evidence=ev,
-        )
+        ), ctx.plugin_trust_elided)
 
     detail = (
         "No installed plugin in the persisted plugin index carries an adverse "
@@ -9260,6 +9277,21 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             "path, the scan has not run yet, or no install record is on file for "
             "them) \u2014 this reflects absence of a bad verdict for those, not a positive "
             "clean scan, and says nothing about their trust status."
+        )
+    if ctx.plugin_trust_elided:
+        # C-680: part of the trust document nests deeper than the audit reads. A verdict
+        # found in what WAS read stands (above); only the clean answer is unsound, because
+        # padding of unbounded depth can hold anything the reader never saw.
+        return _finding(
+            "B177",
+            UNKNOWN,
+            "No adverse ClawHub trust verdict was found in the part of OpenClaw's persisted "
+            "plugin index that the audit reads \u2014 but part of the index nests deeper than "
+            "the audit reads, so that content was never examined. A clean bill of health "
+            "cannot be given over it.",
+            "Remove the deeply nested padding from ~/.openclaw/state/openclaw.sqlite so the "
+            "whole plugin index can be read, then re-run the audit.",
+            engine_degraded=True,
         )
     return _finding(
         "B177",
@@ -9351,7 +9383,7 @@ def check_plugin_tool_result_middleware(ctx: Context) -> Finding:
     if hits:
         ev = hits[:6]
         extra = f" (+{len(hits) - 6} more)" if len(hits) > 6 else ""
-        return _finding(
+        return _plugin_elided_note(_finding(
             "B187",
             WARN,
             "Non-bundled installed plugin(s) declare the agentToolResultMiddleware "
@@ -9363,8 +9395,22 @@ def check_plugin_tool_result_middleware(ctx: Context) -> Finding:
             "with this level of interception, especially for a plugin whose FAIL/PASS "
             "output you rely on elsewhere.",
             evidence=ev,
-        )
+        ), ctx.plugin_index_elided)
 
+    if ctx.plugin_index_elided:
+        # C-680: same contract as B177 above - a WARN found in what was read stands, a clean
+        # PASS over a depth-limited read does not.
+        return _finding(
+            "B187",
+            UNKNOWN,
+            "No non-bundled installed plugin in the part of the persisted plugin index "
+            "that the audit reads declares the agentToolResultMiddleware contract \u2014 but "
+            "part of the index nests deeper than the audit reads, so that content was never "
+            "examined. A clean bill of health cannot be given over it.",
+            "Remove the deeply nested padding from ~/.openclaw/state/openclaw.sqlite so the "
+            "whole plugin index can be read, then re-run the audit.",
+            engine_degraded=True,
+        )
     return _finding(
         "B187",
         PASS,

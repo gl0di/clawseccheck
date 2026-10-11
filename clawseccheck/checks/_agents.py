@@ -2131,7 +2131,12 @@ def _disk_subagent_disclosure(ctx: Context) -> "Finding | None":
         "approval-gate check (this same B18) applies to it going forward. If it is not "
         "intentional, use the child_session_key values below to find out what spawned "
         "these runs before assuming the capability is gone \u2014 it may simply be unrecorded "
-        "by config, not absent.",
+        "by config, not absent."
+        + (
+            f" Note: {ctx.subagent_runs_elided} of these row(s) hold data nested deeper "
+            "than the audit reads, so content below that depth was never examined."
+            if ctx.subagent_runs_elided else ""
+        ),
         evidence=ev,
     )
 
