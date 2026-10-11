@@ -234,16 +234,20 @@ def test_under_mode_token_a_long_unit_value_is_a_pass_like_the_object(label, ref
     assert _key(f) == _key(check_gateway(_ctx(_cfg(_obj(name), mode="token"), unit={name: _LONG})))
 
 
-def test_nothing_visible_keeps_the_verdicts_the_name_length_gave_on_dev():
-    """The open question (owner not asked): with no evidence the long-named reference is a
-    PASS under mode token and the short-named one an UNKNOWN. Not changed here."""
+def test_nothing_visible_is_one_answer_whatever_the_length_of_the_name():
+    """The owner's ruling (C-681, 2026-10-11): with no evidence the long-named reference is
+    the UNKNOWN-with-the-caveat the short-named one always was, not a PASS under mode token.
+    The no-mode lan WARN keeps its detail (a fingerprint hashes it) and says it in `fix`."""
     long_ = check_gateway(_ctx(_cfg("${" + _LONG_NAME + "}", mode="token")))
     short = check_gateway(_ctx(_cfg("${" + _SHORT_NAME + "}", mode="token")))
-    assert long_.status == PASS
-    assert short.status == UNKNOWN and _CAVEAT in short.detail
+    assert long_.status == short.status == UNKNOWN and _CAVEAT in long_.detail
+    assert (long_.detail, long_.fix) == (short.detail, short.fix)
     no_mode = check_gateway(_ctx(_cfg("${" + _SHORT_NAME + "}")))
     assert no_mode.status == WARN and _CAVEAT in no_mode.detail
-    assert _CAVEAT not in check_gateway(_ctx(_cfg("${" + _LONG_NAME + "}"))).detail
+    long_no_mode = check_gateway(_ctx(_cfg("${" + _LONG_NAME + "}")))
+    assert long_no_mode.status == WARN
+    assert _CAVEAT not in long_no_mode.detail
+    assert long_no_mode.fix == no_mode.fix
 
 
 @pytest.mark.parametrize("label,ref,name", _REFS, ids=_REF_IDS)

@@ -311,10 +311,15 @@ def test_pins_dev_behaviour_for_the_long_named_empty_fallback_which_is_a_known_g
     27 characters, so B2 passes it by text length on every build. On a build before 2026.9.7
     (or an unseen one) that text is a public 27-character literal and the PASS is wrong; that
     is the known gap tracked as item (d) of the C-653 task, deliberately left as it was. This
-    test only guards against this change moving the verdict by accident."""
+    test only guards against this change moving the verdict by accident.
+
+    C-681 (owner ruling): on a build that understands `:-` (2026.9.7+) the text IS a reference
+    (`_gateway_token_form`), so with nothing visible behind it the answer is the UNKNOWN every
+    unmeasured reference gets; the gap remains only where the text is the token itself."""
     cfg = _gw(bind="lan", mode="token", token="${OPENCLAW_GATEWAY_TOKEN:-}")
-    for build in (None, "2026.9.6", "2026.9.7"):
+    for build in (None, "2026.9.6"):
         assert check_gateway(_ctx_build(cfg, build)).status == PASS, build
+    assert check_gateway(_ctx_build(cfg, "2026.9.7")).status == UNKNOWN
 
 
 def test_an_independent_fail_still_wins_and_the_reference_note_rides_along():
@@ -365,13 +370,23 @@ def test_thirty_two_char_literal_token_still_passes():
     assert "Gateway is authenticated (gateway.auth.mode=token)" in f.detail
 
 
-def test_the_long_named_reference_keeps_its_verdicts():
+def test_the_long_named_reference_is_unknown_like_the_short_one_where_nothing_is_visible():
+    """C-681 (owner ruling, 2026-10-11): the length of the variable NAME no longer decides.
+    `${OPENCLAW_GATEWAY_TOKEN}` (25 characters) used to PASS by text length under mode token;
+    with nothing visible behind it, it is the UNKNOWN `${GW_TOKEN}` gets. The no-mode lan WARN
+    keeps its status and its detail (a fingerprint hashes it); the caveat rides in `fix`."""
     ref = "${OPENCLAW_GATEWAY_TOKEN}"
-    assert check_gateway(_ctx(_gw(bind="lan", mode="token", token=ref))).status == PASS
-    assert check_gateway(_ctx(_gw(bind="loopback", mode="token", token=ref))).status == PASS
+    short = "${GW_TOKEN}"
+    for bind in ("lan", "loopback"):
+        long_ = check_gateway(_ctx(_gw(bind=bind, mode="token", token=ref)))
+        short_ = check_gateway(_ctx(_gw(bind=bind, mode="token", token=short)))
+        assert long_.status == UNKNOWN, long_.detail
+        assert (long_.status, long_.detail, long_.fix) == (short_.status, short_.detail, short_.fix)
     lan_no_mode = check_gateway(_ctx(_gw(bind="lan", token=ref)))
     assert lan_no_mode.status == WARN
     assert "authenticated" in lan_no_mode.detail
+    assert "were not evaluated" not in lan_no_mode.detail
+    assert "holds a secret of at least 24 characters" in lan_no_mode.fix
 
 
 def test_a_literal_with_no_mode_on_lan_keeps_the_authenticated_disclosure():

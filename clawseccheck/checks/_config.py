@@ -1508,6 +1508,29 @@ def _gateway_env_credential(
 _GATEWAY_TOKEN_OBJECT_PLACEHOLDER = "<SecretRef object>"
 
 
+# C-681 (owner ruling): the one caveat B2 gives a gateway token that is a reference nothing
+# visible resolves, and the advice that goes with it. Worded once so every cell that carries
+# it carries the same text - a string reference (`${ID}` / `$ID`, whatever the length of the
+# name) and a SecretRef object of any source (the id, provider and source stay out).
+_B2_REF_STR_NOTE = (
+    "gateway.auth.token is an environment reference, so its length and strength cannot be "
+    "read from the config and were not evaluated"
+)
+_B2_REF_STR_FIX = (
+    "Check in the gateway's environment that the variable gateway.auth.token points at "
+    "holds a secret of at least 24 characters"
+)
+_B2_REF_OBJ_NOTE = (
+    "gateway.auth.token is a secret reference, so the length and strength of the secret "
+    "behind it cannot be read from the config and were not evaluated"
+)
+_B2_REF_OBJ_FIX = (
+    "Check, where the reference is resolved (the gateway's environment, the secret store, "
+    "a file or a command), that the secret gateway.auth.token points at holds at least 24 "
+    "characters"
+)
+
+
 def _b2_dflt_fix(name: str) -> str:
     """C-681: B2's advice for a short unseen ``${NAME:-default}`` gateway token."""
     return (
@@ -3469,24 +3492,29 @@ def check_gateway(ctx: Context) -> Finding:
     # name. A short value there is a FAIL of its own, and it is read even when the env block
     # holds a long value for the same name: the process environment wins over a config env
     # value (see `_gateway_token_env_block_strength`), so the short one is what the gateway
-    # uses. A long one, or none, changes no verdict - except that "nothing was found" for an
-    # OBJECT reference (`_b2_tok_obj_opaque`) is said in the no-mode disclosure below, because
-    # the disclosure otherwise reads as a verified authenticated gateway. A STRING reference
-    # with nothing found keeps its old notes; one whose variable a long value IS found for
-    # loses the "not evaluated" caveat (its detail text changes, so a fingerprint of that
-    # finding changes with it).
+    # uses. A long one changes no verdict. Nothing found at all is UNKNOWN with the "not evaluated"
+    # caveat for a string or object reference alike (C-681, owner ruling: an unmeasured credential
+    # is never a PASS), and the no-mode object disclosure below says it in both fields because it
+    # otherwise reads as a verified authenticated gateway. One whose variable a long value IS
+    # found for loses the caveat (its detail text changes, so a fingerprint of that finding
+    # changes with it).
     _b2_tok_ref_env = (
         _gateway_token_env_evidence(_b2_tok_text, ctx)
         if _b2_tok_form == "reference" and _b2_tok_in_effect and _b2_tok_env != "weak"
         else None
     )
     _b2_tok_ref_short = _b2_tok_ref_env is not None and _b2_tok_ref_env[1] == "short"
-    _b2_tok_obj_opaque = (
-        isinstance(_b2_tok_text, dict)
-        and _b2_tok_form == "reference"
+    # C-681 (owner ruling): a reference that is the credential in effect and that nothing
+    # visible resolves - not the config's env block, not a systemd / dotenv value. Its strength
+    # is unmeasured, so it is never a PASS (UNKNOWN with the "not evaluated" caveat, below).
+    _b2_tok_unmeasured = (
+        _b2_tok_form == "reference"
+        and _b2_tok_in_effect
         and _b2_tok_env is None
         and _b2_tok_ref_env is None
     )
+    _b2_tok_obj_opaque = isinstance(_b2_tok_text, dict) and _b2_tok_unmeasured
+    _b2_tok_obj_said = False
     _b2_tok_ref_skipped = False
     # C-681: a `${ID:-default}` token on a 2026.9.7+ build whose variable the audit cannot see
     # and whose default is short and non-empty. The default is used only while the gateway's
@@ -3589,16 +3617,9 @@ def check_gateway(ctx: Context) -> Finding:
                 # C-667: a reference object whose secret the audit could not find anywhere.
                 # Same caveat the string reference carries when its text is short, worded for
                 # a reference of any source (the provider, the id and the source stay out).
-                soft_ev.append(
-                    "gateway.auth.token is a secret reference, so the length and strength of "
-                    "the secret behind it cannot be read from the config and were not "
-                    "evaluated"
-                )
-                fixes.append(
-                    "Check, where the reference is resolved (the gateway's environment, the "
-                    "secret store, a file or a command), that the secret gateway.auth.token "
-                    "points at holds at least 24 characters"
-                )
+                _b2_tok_obj_said = True
+                soft_ev.append(_B2_REF_OBJ_NOTE)
+                fixes.append(_B2_REF_OBJ_FIX)
         elif _cfg_token is not None and _b2_tok_ref_short:
             # C-667: an env-source object whose variable the gateway's persistent environment
             # sets to a short value - the environment leg's sentence, for a token that is a
@@ -3855,16 +3876,21 @@ def check_gateway(ctx: Context) -> Finding:
                 "block - supply it from the gateway's own environment instead"
             )
         else:
-            _b2_tok_note = (
-                "gateway.auth.token is an environment reference, so its length and strength "
-                "cannot be read from the config and were not evaluated"
-            )
-            _b2_tok_fix = (
-                "Check in the gateway's environment that the variable gateway.auth.token "
-                "points at holds a secret of at least 24 characters"
-            )
+            _b2_tok_note = _B2_REF_STR_NOTE
+            _b2_tok_fix = _B2_REF_STR_FIX
         _b2_tpl_note = "; ".join(n for n in (_b2_tpl_note, _b2_tok_note) if n)
         _b2_tpl_fix = "; ".join(n for n in (_b2_tpl_fix, _b2_tok_fix) if n)
+    # C-681 (owner ruling): every other unmeasured reference - a long-named `${ID}` string
+    # (its TEXT passed the length bar), an object under an explicit mode or on loopback - gets
+    # the same caveat. It is the whole answer (UNKNOWN) only where nothing else was found; on a
+    # finding that existed before it rides in `fix` alone, because a fingerprint hashes `detail`.
+    # The no-mode non-loopback object already said it in both fields (`_b2_tok_obj_said`).
+    _b2_tok_new_note = _b2_tok_new_fix = ""
+    if _b2_tok_unmeasured and not _b2_tok_ref_skipped and not _b2_tok_obj_said:
+        if isinstance(_b2_tok_text, dict):
+            _b2_tok_new_note, _b2_tok_new_fix = _B2_REF_OBJ_NOTE, _B2_REF_OBJ_FIX
+        else:
+            _b2_tok_new_note, _b2_tok_new_fix = _B2_REF_STR_NOTE, _B2_REF_STR_FIX
     if ev:
         _insecure_auth_only = ev == ["gateway.controlUi.allowInsecureAuth enabled"]
         sev = WARN if _insecure_auth_only else FAIL
@@ -3874,14 +3900,27 @@ def check_gateway(ctx: Context) -> Finding:
         if _b2_tpl_note:
             soft_ev.append(_b2_tpl_note)
             fixes.append(_b2_tpl_fix)
+        if _b2_tok_new_fix:
+            fixes.append(_b2_tok_new_fix)
         return _finding("B2", sev, "; ".join(ev + soft_ev), "; ".join(fixes), ev + soft_ev)
     if soft_ev:
         if _b2_tpl_note:
             soft_ev.append(_b2_tpl_note)
             fixes.append(_b2_tpl_fix)
+        if _b2_tok_new_fix:
+            fixes.append(_b2_tok_new_fix)
         return _finding("B2", WARN, "; ".join(soft_ev), "; ".join(fixes), soft_ev)
     if _b2_tpl_note:
-        return _finding("B2", UNKNOWN, "Cannot assess the gateway: " + _b2_tpl_note, _b2_tpl_fix)
+        return _finding(
+            "B2",
+            UNKNOWN,
+            "Cannot assess the gateway: " + _b2_tpl_note,
+            "; ".join(n for n in (_b2_tpl_fix, _b2_tok_new_fix) if n),
+        )
+    if _b2_tok_new_note:
+        return _finding(
+            "B2", UNKNOWN, "Cannot assess the gateway: " + _b2_tok_new_note, _b2_tok_new_fix
+        )
     if not cfg:
         return _finding(
             "B2",

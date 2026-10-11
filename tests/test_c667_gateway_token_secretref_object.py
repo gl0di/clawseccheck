@@ -125,11 +125,16 @@ def test_object_token_with_no_evidence_reads_like_the_long_named_string_referenc
     str_b2, str_b80 = _both(_gw(bind="lan", token=_STRING_REF))
     assert obj_b2.status == str_b2.status == WARN
     assert obj_b2.detail.startswith(str_b2.detail + "; ")
-    assert obj_b2.fix.startswith(str_b2.fix + "; ")
+    # C-681: the string now carries its own advice in `fix` (its `detail` stays as it was), so
+    # the two fixes share the base advice and each ends in the caveat worded for its form
+    str_caveat_fix = "; Check in the gateway's environment that the variable"
+    assert str_caveat_fix in str_b2.fix
+    base_fix = str_b2.fix.split(str_caveat_fix)[0]
+    assert obj_b2.fix.startswith(base_fix + "; ")
     assert obj_b2.evidence[: len(str_b2.evidence)] == str_b2.evidence
     assert len(obj_b2.evidence) == len(str_b2.evidence) + 1
     assert _CAVEAT in obj_b2.detail[len(str_b2.detail):]
-    assert _CAVEAT_FIX in obj_b2.fix[len(str_b2.fix):]
+    assert _CAVEAT_FIX in obj_b2.fix[len(base_fix):]
     assert _same(obj_b80, str_b80)
     assert obj_b80.evidence == str_b80.evidence
 
@@ -152,13 +157,16 @@ def test_rate_limit_set_clears_b80_for_an_object_token_like_for_a_string_referen
 # the matrix: object x bind x mode (what changes, and what must not)
 # --------------------------------------------------------------------------------------
 
-# (bind, mode) -> (B2, B80). Only (lan, no mode) moved; every other cell is today's verdict.
+# (bind, mode) -> (B2, B80). (lan, no mode) moved with C-667; C-681 (owner ruling) moved the
+# cells where the token is the credential in effect and nothing visible resolves it from PASS
+# to UNKNOWN: (lan, token), (loopback, no mode), (loopback, token). B80 measures nothing about
+# a reference and did not move. The password-mode cells are as they were.
 _MATRIX = {
     ("lan", None): (WARN, WARN),
-    ("lan", "token"): (PASS, WARN),
+    ("lan", "token"): (UNKNOWN, WARN),
     ("lan", "password"): (PASS, WARN),
-    ("loopback", None): (PASS, PASS),
-    ("loopback", "token"): (PASS, PASS),
+    ("loopback", None): (UNKNOWN, PASS),
+    ("loopback", "token"): (UNKNOWN, PASS),
     ("loopback", "password"): (PASS, PASS),
 }
 
@@ -173,17 +181,18 @@ def test_object_token_matrix():
             assert (b2.status, b80.status) == expected, (source, bind, mode, b2.detail, b80.detail)
 
 
-def test_under_mode_token_an_object_with_no_evidence_gets_the_verdict_of_a_long_reference():
-    """No extra note, no UNKNOWN: with an explicit mode and nothing found for the secret the
-    object gets what the long-named string reference and a long literal get. (A short-named
-    string reference such as ``${X}`` is not that: its text length triggers an UNKNOWN note
-    of its own, which an object does not have.)"""
+def test_under_mode_token_an_object_with_no_evidence_is_unknown_like_a_string_reference():
+    """C-681 (owner ruling): with an explicit mode and nothing found for the secret, the object
+    is the UNKNOWN-with-the-caveat that every string reference gets (long-named or short), not
+    the PASS a long literal gets. Its caveat is worded for a reference of any source, the
+    string's for an environment variable; the status is the same and the literal is untouched."""
     ref = check_gateway(_ctx(_gw(bind="lan", mode="token", token=_STRING_REF)))
     lit = check_gateway(_ctx(_gw(bind="lan", mode="token", token="t" * 32)))
+    assert lit.status == PASS and ref.status == UNKNOWN
     for source, tok in sorted(_OBJECTS.items()):
         obj = check_gateway(_ctx(_gw(bind="lan", mode="token", token=tok)))
-        assert _same(obj, ref) and _same(obj, lit), source
-        assert obj.status == PASS, source
+        assert obj.status == ref.status == UNKNOWN, source
+        assert _CAVEAT in obj.detail and _CAVEAT_FIX in obj.fix, source
 
 
 def test_under_password_mode_the_object_is_not_the_credential_in_effect():
@@ -482,7 +491,8 @@ def test_object_env_block_reading_is_the_string_reference_reading_in_both_modes(
     """Where the token is the credential in effect (no mode, or mode exactly "token") the
     object follows the string reference through the env block, so under mode "token" a short
     value the config itself defines is a FAIL for both spellings - the same input, read the
-    same way - while an undefined variable (no env block entry) stays the plain PASS."""
+    same way - while an undefined variable (no env block entry) is the unmeasured reference:
+    the disclosure with no mode, UNKNOWN under mode "token" (C-681; it was a PASS)."""
     obj = _OBJECTS["env"]
     short = "abc"
     for value, expect in ((short, FAIL), ("v" * 40, WARN if mode is None else UNKNOWN)):
@@ -493,7 +503,7 @@ def test_object_env_block_reading_is_the_string_reference_reading_in_both_modes(
         assert o.status == expect, (mode, len(value), o.detail)
         assert _same(o, s), (mode, len(value))
     undefined = check_gateway(_ctx(_gw(bind="lan", mode=mode, token=obj)))
-    assert undefined.status == (WARN if mode is None else PASS)
+    assert undefined.status == (WARN if mode is None else UNKNOWN)
 
 
 @pytest.mark.parametrize("mode", ["password", "none", "trusted-proxy"])
@@ -521,14 +531,19 @@ def _store_obj(var: str = "OPENCLAW_GATEWAY_TOKEN") -> dict:
 
 @pytest.mark.parametrize("env_value", ["abc", "v" * 40])
 def test_store_object_ignores_the_env_block_whatever_it_holds(env_value):
-    """The two configs a reviewer built for the store source. On dev both are PASS (the
-    object read as no token, and mode "token" asks nothing more); the round-one branch read
-    the store id through the env block and turned them into a FAIL and an UNKNOWN."""
+    """The two configs a reviewer built for the store source. The env block is no evidence for
+    a store reference, so it is the unmeasured reference whatever the block holds: the same
+    answer as with no block at all (C-681 made that an UNKNOWN; it was a PASS, and the
+    round-one branch read the store id through the env block and turned them into a FAIL and
+    an UNKNOWN for the wrong reason)."""
     cfg = {
         "gateway": {"bind": "lan", "auth": {"mode": "token", "token": _store_obj()}},
         "env": {"vars": {"OPENCLAW_GATEWAY_TOKEN": env_value}},
     }
-    assert check_gateway(_ctx(cfg)).status == PASS
+    bare = {"gateway": {"bind": "lan", "auth": {"mode": "token", "token": _store_obj()}}}
+    f = check_gateway(_ctx(cfg))
+    assert f.status == UNKNOWN and _same(f, check_gateway(_ctx(bare)))
+    assert _CAVEAT in f.detail
 
 
 _PROVIDER_RESOLVED = {
@@ -558,14 +573,15 @@ def test_store_file_exec_object_ignores_the_env_block_and_reads_as_unevaluated(n
 def test_store_file_exec_object_ignores_the_unit_environment(name, unit_value):
     """Even when a unit sets a variable that has the object's own id as its name, a store /
     file / exec reference does not read it: no FAIL, the caveat in the no-mode disclosure,
-    and PASS under mode "token"."""
+    and under mode "token" the same UNKNOWN as with no unit at all (C-681; it was a PASS)."""
     obj = dict(_PROVIDER_RESOLVED[name])
     unit = {obj["id"]: unit_value, "OPENCLAW_GATEWAY_TOKEN": unit_value}
     plain = check_gateway(_ctx(_gw(bind="lan", token=obj)))
     nomode = check_gateway(_with_unit_env(_gw(bind="lan", token=obj), unit))
     assert _same(nomode, plain)
     token_mode = check_gateway(_with_unit_env(_gw(bind="lan", mode="token", token=obj), unit))
-    assert token_mode.status == PASS, token_mode.detail
+    assert token_mode.status == UNKNOWN, token_mode.detail
+    assert _same(token_mode, check_gateway(_ctx(_gw(bind="lan", mode="token", token=obj))))
 
 
 # --------------------------------------------------------------------------------------
@@ -682,11 +698,14 @@ def test_under_mode_token_a_short_env_value_is_the_token_length_clause(bind):
 
 
 @pytest.mark.parametrize("bind", ["lan", "loopback"])
-def test_under_mode_token_a_long_or_unseen_env_value_is_a_pass(bind):
+def test_under_mode_token_a_long_env_value_is_a_pass_and_an_unseen_one_is_unknown(bind):
+    """C-681 (owner ruling): a long value the audit can SEE is still a PASS; with nothing
+    found the strength is unmeasured, which is an UNKNOWN with the caveat (it was a PASS)."""
     long_ = check_gateway(_with_unit_env(_lan(bind=bind, mode="token"), {_UNIT_VAR: _LONG}))
     none = check_gateway(_ctx(_lan(bind=bind, mode="token")))
-    assert long_.status == PASS and none.status == PASS
-    assert _same(long_, none)
+    assert long_.status == PASS and none.status == UNKNOWN
+    assert _CAVEAT in none.detail and _CAVEAT_FIX in none.fix
+    assert _LONG not in _blob(long_) and _LONG not in _blob(none)
 
 
 def test_a_loopback_bind_with_no_mode_and_a_short_env_value_gets_the_clause_of_a_short_literal():
@@ -696,8 +715,8 @@ def test_a_loopback_bind_with_no_mode_and_a_short_env_value_gets_the_clause_of_a
     obj = check_gateway(_with_unit_env(_lan(bind="loopback"), {_UNIT_VAR: _SHORT}))
     assert lit.status == obj.status == FAIL
     assert obj.detail == lit.detail == "gateway auth token shorter than 24 chars"
-    # and nothing seen, or a long value: unchanged, PASS
-    assert check_gateway(_ctx(_lan(bind="loopback"))).status == PASS
+    # a long value the audit can see: unchanged, PASS; nothing seen: UNKNOWN (C-681, was PASS)
+    assert check_gateway(_ctx(_lan(bind="loopback"))).status == UNKNOWN
     assert check_gateway(_with_unit_env(_lan(bind="loopback"), {_UNIT_VAR: _LONG})).status == PASS
 
 
@@ -800,6 +819,16 @@ def test_wiring_collect_reads_the_unit_and_the_message_hides_the_path(tmp_path):
 # caveat is gone (a short-named reference under mode token: UNKNOWN to PASS). Every other
 # cell of those rows, and every other row, is as generated on dev. See
 # tests/test_c672_gateway_token_string_reference_evidence.py.
+#
+# C-681 (owner ruling, 2026-10-11) moved three rows more, the LONG-named whole-value `${ID}`
+# references (`ref-long-name`, `ref-padded`, `legacy-ref-long`): in the twelve cells where the
+# reference is the credential in effect (no mode or mode "token") and nothing visible resolves
+# it, B2 is UNKNOWN with the "not evaluated" caveat, no longer PASS (a short-named reference
+# was always that); and the four no-mode non-loopback WARN cells keep status and detail and
+# gain the same advice in `fix`. Those three B2 rows were regenerated on the branch and
+# checked cell by cell against dev: the only differences are those twelve PASS-to-UNKNOWN
+# cells and four fix-only cells per row; B80 and every other row are the dev values. See
+# tests/test_c681c_unmeasured_reference_is_unknown.py.
 
 _DIFF_VAR_LONG = "OPENCLAW_GATEWAY_TOKEN"
 _DIFF_VAR_SHORT = "GW_T"
@@ -955,14 +984,14 @@ _DIFF_EXPECTED: dict = {
     'lit-bearer': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'lit-null-word': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'lit-none-word': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
-    'ref-long-name': ('P1F1U1P1F1U1F3P1F1U1P1F1U1P1F1U1F3P1F1U1P25F1U1P1F1U1F3P1F1U1P1F1U1P1F1U1F3P1F1U1P24W1F1W2F1W1F3W1F1W1P1F1U1P1F1U1F3P1F1U1P12F12W1F1W2F1W1F3W1F1W1P1F1U1P1F1U1F3P1F1U1P12F12', 'd84c3113a155aa6b', 'P96W36P12W36P12', 'b25325a6e4d86091'),
+    'ref-long-name': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1P24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1P24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1P12F12W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1P12F12', '5bc6d6c9be708ca9', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'ref-short-name': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24', '9dc230ce5fcd0726', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'ref-shorthand-long': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24', 'ebeeaa542f6bfac6', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'ref-shorthand-short': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24', '9dc230ce5fcd0726', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'ref-fallback-empty-long': ('P96W12P24F12W12P24F12', '27aa7dc74ac4278d', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'ref-fallback-empty-short': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'ref-fallback-value': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
-    'ref-padded': ('P1F1U1P1F1U1F3P1F1U1P1F1U1P1F1U1F3P1F1U1P25F1U1P1F1U1F3P1F1U1P1F1U1P1F1U1F3P1F1U1P24W1F1W2F1W1F3W1F1W1P1F1U1P1F1U1F3P1F1U1P12F12W1F1W2F1W1F3W1F1W1P1F1U1P1F1U1F3P1F1U1P12F12', 'd84c3113a155aa6b', 'P96W36P12W36P12', 'b25325a6e4d86091'),
+    'ref-padded': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1P24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1P24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1P12F12W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1P12F12', '5bc6d6c9be708ca9', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'ref-trailing-newline': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24', '9dc230ce5fcd0726', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'ref-prefixed': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'ref-suffixed': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
@@ -985,7 +1014,7 @@ _DIFF_EXPECTED: dict = {
     'list-of-dict': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
     'legacy-lit-3': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'legacy-lit-32': ('P96W12P24F12W12P24F12', '27aa7dc74ac4278d', 'P96W36P12W36P12', 'b25325a6e4d86091'),
-    'legacy-ref-long': ('P1F1U1P1F1U1F3P1F1U1P1F1U1P1F1U1F3P1F1U1P25F1U1P1F1U1F3P1F1U1P1F1U1P1F1U1F3P1F1U1P24W1F1W2F1W1F3W1F1W1P1F1U1P1F1U1F3P1F1U1P12F12W1F1W2F1W1F3W1F1W1P1F1U1P1F1U1F3P1F1U1P12F12', 'd84c3113a155aa6b', 'P96W36P12W36P12', 'b25325a6e4d86091'),
+    'legacy-ref-long': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1P24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1P24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1P12F12W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1P12F12', '5bc6d6c9be708ca9', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'legacy-ref-short': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24', '9dc230ce5fcd0726', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'legacy-int': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
     'legacy-true': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
