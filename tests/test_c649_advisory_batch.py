@@ -110,7 +110,11 @@ _PUBLISHED = (  # (advisory id, vulnerable_version_range, first stable patched v
 _EXACT_ID = "GHSA-356g-m7rx-7pm3"  # the only exact-build range: `= 2026.7.1-2`
 _NOT_AFFECTED_ID = "GHSA-5x6q-wg56-rxg8"  # `>= 2026.7.2, < 2026.9.2`; back-ported on the 2026.8 line
 _OLD_TABLE_LEN = 25  # rows that predate the batch: ids[24] is CVE-2026-62195, fixed 2026.6.6
-_GENERIC_FIX = "Keep OpenClaw updated and re-check after new advisories are published."
+_SCOPE_NOTE = (  # appended to the `fix` of every verdict that judged a version (C-662, b)
+    " Advisories on separately versioned plugin packages and on the iOS app are not tabulated "
+    "here, so this result says nothing about them."
+)
+_GENERIC_FIX = "Keep OpenClaw updated and re-check after new advisories are published." + _SCOPE_NOTE
 
 
 def _vkey(v: str) -> tuple:
@@ -1073,7 +1077,7 @@ def test_the_unknown_tells_the_user_what_to_do():
     assert result.status == UNKNOWN
     assert result.fix == (
         "Move to a current OpenClaw release and re-run this check; extended-stable "
-        "builds are examined against the table one build at a time."
+        "builds are examined against the table one build at a time." + _SCOPE_NOTE
     )
 
 
@@ -1088,7 +1092,7 @@ def test_an_extended_stable_fail_with_nothing_further_does_not_claim_further_adv
     monkeypatch.setattr(_lifecycle, "_EXTENDED_STABLE_NOT_AFFECTED", frozenset())
     result = check_known_vulns(_stamp_ctx("2026.7.35"))
     assert result.status == FAIL
-    assert result.fix == "Upgrade OpenClaw to >= 2026.9.2 to remediate all 41 listed advisories."
+    assert result.fix == "Upgrade OpenClaw to >= 2026.9.2 to remediate all 41 listed advisories." + _SCOPE_NOTE
 
 
 def test_hermetic_default_context_never_sees_an_installed_build():
@@ -1112,13 +1116,13 @@ def test_stamp_only_pass_text_is_unchanged():
 def test_stamp_only_fail_texts_are_unchanged_in_form():
     one = check_known_vulns(_stamp_ctx("2026.9.1"))
     assert one.detail == "OpenClaw 2026.9.1 is affected by 1 known advisory: GHSA-5x6q-wg56-rxg8."
-    assert one.fix == "Upgrade OpenClaw to >= 2026.9.2 to remediate this advisory in a single upgrade."
+    assert one.fix == "Upgrade OpenClaw to >= 2026.9.2 to remediate this advisory in a single upgrade." + _SCOPE_NOTE
     assert one.evidence == ["GHSA-5x6q-wg56-rxg8"]
     two = check_known_vulns(_stamp_ctx("2026.8.1"))
     assert two.detail == (
         "OpenClaw 2026.8.1 is affected by 2 known advisories: GHSA-m78m-7h3q-q938, GHSA-5x6q-wg56-rxg8."
     )
-    assert two.fix == "Upgrade OpenClaw to >= 2026.9.2 to remediate all 2 matched advisories in a single upgrade."
+    assert two.fix == "Upgrade OpenClaw to >= 2026.9.2 to remediate all 2 matched advisories in a single upgrade." + _SCOPE_NOTE
 
 
 def test_stamp_only_unknown_texts_are_unchanged():

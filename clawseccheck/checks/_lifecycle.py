@@ -218,6 +218,11 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # version, and the app is versioned independently of the npm package). One older row,
 # GHSA-jvm4-4j77-39p6 (@openclaw/qqbot, `<= 2026.4.27`), stays: it moves no verdict, as core row
 # GHSA-w4v6-g3wm-w36c reaches every build this one does, with the same fix.
+# Owner ruling (C-662, b): that stays out of scope of this table; it is disclosed in every
+# verdict's `fix` (`_B33_SCOPE_NOTE`) and in the docs. B33 reads no installed plugin version.
+# The title (element 3) is documentation only: nothing in the package reads it, and it is shown
+# in no output; `tests/test_c662_b33_documented_decisions.py` pins one row's title so a silent edit
+# of a published summary is noticed (owner ruling C-662, g).
 #
 # Extended-stable builds (a final release, minor 1-12, patch >= 33 - the maintenance lines
 # 2026.6.33-35, 2026.7.33-35 and 2026.8.33-35) get fixes back-ported selectively and the
@@ -3414,6 +3419,24 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
 # precedent used elsewhere in this module for enumerable evidence lists.
 _B33_EVIDENCE_CAP = 20
 
+# C-662 (b), owner ruling "out of scope of the core-advisory table; disclosed": text only, in
+# `fix` (the fingerprint hashes `detail`), on every verdict that judged a version.
+_B33_SCOPE_NOTE = (
+    "Advisories on separately versioned plugin packages and on the iOS app are not tabulated "
+    "here, so this result says nothing about them."
+)
+
+
+def _b33_further_note(further: int, what: str = "this build") -> str:
+    """The extended-stable disclosure: published ranges that contain the build but that the
+    table has not confirmed for it. Shared by the FAIL and, since C-662 (d), the WARN."""
+    return (
+        f"{further} further published advisories cover {what} by version range; "
+        f"they are not listed because the table has not confirmed them for {what}: "
+        "the vendor back-ports some fixes to extended-stable lines, and some affected "
+        "code was never on them, without recording either in the advisory."
+    )
+
 
 class _B33Outcome(NamedTuple):
     """What the advisory table says about one version string (`_b33_assess`)."""
@@ -3497,6 +3520,13 @@ def _b33_is_this_machines_home(home) -> bool:
     clear installed build is a WARN. It can turn a stamp-only FAIL into that WARN, and a
     missing stamp's UNKNOWN into a verdict on the installed build. A wrong "no" gives the
     stamp-only verdict this check gave before the installed build was consulted.
+
+    Owner ruling (C-662, i): KEPT. A ``.openclaw-<name>`` directory is judged this machine's
+    home by its NAME and PATH alone; nothing local says it is run as a profile, so an ordinary
+    backup copy such as ``~/.openclaw-backup`` is judged by the installed build (stale-stamp
+    FAIL -> WARN; a copy without a stamp -> PASS on the installed build). Accepted because no
+    case turns a stamp-only FAIL into a PASS. A profile directory that is a symlink elsewhere
+    is the mirror image: served by the vendor, judged another home (stamp decides).
     """
     try:
         os.stat(home)  # raises for a loop or an unreachable home on every Python (resolve() does not)
@@ -3539,7 +3569,8 @@ def _b33_verdict(label: str, out: _B33Outcome) -> Finding:
             "B33",
             PASS,
             f"{label} is at or past all known-advisory fixes.",
-            "Keep OpenClaw updated and re-check after new advisories are published.",
+            "Keep OpenClaw updated and re-check after new advisories are published. "
+            + _B33_SCOPE_NOTE,
         )
     if out.kind == "unexamined":
         what = (
@@ -3554,7 +3585,7 @@ def _b33_verdict(label: str, out: _B33Outcome) -> Finding:
             "but the vendor back-ports fixes to extended-stable lines without recording it in "
             "the advisory, so a version comparison alone cannot say whether it is affected.",
             "Move to a current OpenClaw release and re-run this check; extended-stable "
-            "builds are examined against the table one build at a time.",
+            "builds are examined against the table one build at a time. " + _B33_SCOPE_NOTE,
         )
     n_total = len(out.ids)
     shown_ids = out.ids[:_B33_EVIDENCE_CAP]
@@ -3567,24 +3598,22 @@ def _b33_verdict(label: str, out: _B33Outcome) -> Finding:
             f"{'this advisory' if n_total == 1 else f'all {n_total} listed advisories'}."
         )
         if further > 0:
-            fix += (
-                f" {further} further published advisories cover this build by version range; "
-                "they are not listed because the table has not confirmed them for this build: "
-                "the vendor back-ports some fixes to extended-stable lines, and some affected "
-                "code was never on them, without recording either in the advisory."
-            )
+            fix += " " + _b33_further_note(further)
     else:
         fix = (
             f"Upgrade OpenClaw to >= {out.fix} to remediate "
             f"{'this advisory' if n_total == 1 else f'all {n_total} matched advisories'} "
             "in a single upgrade."
         )
+    # C-662 (a), owner ruling: a FAIL on the stamp alone (another home, --no-dist, no usable
+    # installed build) is KEPT although a stamp can be stale (only a config write refreshes it,
+    # never a package install); the stamp is the only evidence about a copied or foreign home.
     return _finding(
         "B33",
         FAIL,
         f"{label} is affected by {n_total} known {advisory_word}: "
         f"{', '.join(shown_ids)}{truncation_note}.",
-        fix,
+        fix + " " + _B33_SCOPE_NOTE,
         evidence=shown_ids,
     )
 
@@ -3611,6 +3640,25 @@ def check_known_vulns(ctx: Context) -> Finding:
 
     Residual: when two OpenClaw installations exist on one machine, the one on PATH is the
     one this check reads. A pre-release reads as its release (``_parse_version``).
+
+    Owner rulings (C-662): the behaviour above is the DECISION for each open point, pinned by
+    ``tests/test_c662_b33_documented_decisions.py``.
+      a  A stamp-only affected result stays FAIL, though a stamp can be stale.
+      b  Plugin-package and iOS advisories are not tabulated; every verdict's `fix` says so.
+      c  A pre-release collapses onto its release (``2026.9.2-beta.1`` reads as ``2026.9.2``,
+         so it PASSes; a beta of an affected build FAILs). ``_parse_version`` is shared with
+         C6, and ordering a pre-release would move verdicts.
+      d  The WARN for an affected extended-stable stamp carries the "N further published
+         advisories" disclosure in `fix`, as the FAIL does.
+      e  C4's rollback WARN keeps its `detail`; its `fix` says when B33 reads the stamp.
+      f  The WARN advice names only ``openclaw --version`` (executed); ``openclaw gateway
+         status`` exists in the installed dist but its output with the gateway down was read,
+         not executed, so it is not named.
+      g  A table row's title is documentation only.
+      h  ``fixtures/reliability/clean_b33_version_patched`` (stamp 2026.2.14) FAILs B33; the
+         name is historical and is not changed (documented in ``fixtures/README.md``).
+      i  A ``.openclaw-<name>`` directory is judged this machine's home by name and path
+         (``_b33_is_this_machines_home``).
 
     Matching (``_b33_assess``, identical for both versions) reports EVERY matching advisory
     (B-332), not just the first. For every FAIL, an extended-stable one included, `fix` targets
@@ -3660,16 +3708,23 @@ def check_known_vulns(ctx: Context) -> Finding:
                 "build, and the table has not checked it" if stamp.variant
                 else "is an extended-stable build the table has not checked"
             ) + f" ({stamp.n_published} published advisory ranges cover it numerically)"
+        # C-662 (f): only `openclaw --version` is named (executed). Not `openclaw gateway status`.
+        fix = (
+            "`openclaw --version` prints the installed version, which can differ from the build "
+            "a gateway started before the upgrade is still running. If the gateway was started "
+            "before the upgrade, restart it. The recorded version refreshes the next time "
+            "OpenClaw saves its config."
+        )
+        further = stamp.n_published - len(stamp.ids)
+        if stamp.kind == "affected" and stamp.extended and further > 0:  # C-662 (d)
+            fix += " " + _b33_further_note(further, "the build that last wrote this config")
         return _finding(
             "B33",
             WARN,
             f"The installed OpenClaw build ({installed}) is at or past all known-advisory "
             f"fixes, but the build that last wrote this config ({str(raw_ver).strip()}) "
             f"{covered}. This check does not determine which of the two the running gateway is.",
-            "`openclaw --version` prints the installed version, which can differ from the build "
-            "a gateway started before the upgrade is still running. If the gateway was started "
-            "before the upgrade, restart it. The recorded version refreshes the next time "
-            "OpenClaw saves its config.",
+            fix + " " + _B33_SCOPE_NOTE,
             evidence=stamp.ids[:_B33_EVIDENCE_CAP],
         )
     same = bool(raw_ver) and str(raw_ver).strip() == installed
@@ -8266,8 +8321,12 @@ def check_version(ctx: Context) -> Finding:
             "another machine that ran a newer build can all produce this. This is not a "
             "vulnerability claim \u2014 B33 checks the installed version against real "
             "advisories.",
+            # C-662 (e): the sentence above is in `detail` (hashed by baseline fingerprints), so
+            # its nuance goes here: B33 reads the installed build only on this machine's home.
             "Confirm this rollback was intentional; if not, reinstall the OpenClaw "
-            "version you expect and re-run the checks.",
+            "version you expect and re-run the checks. B33 judges the installed build only "
+            "when you audit this machine's own OpenClaw home; with --no-dist, or on another "
+            "home, it judges the version recorded in the config instead.",
         )
     if order == "up":
         return _custom(

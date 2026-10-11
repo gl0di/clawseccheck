@@ -2346,6 +2346,51 @@ hard false positives on real configs.
   `--vet-judge-packet` hands the skill to a judge, who can only escalate a finding, never
   clear one. If you did not write the skill, read any command that uses the token.
 
+### B33, the known-vulnerable version gate: what it decides and where it stops
+
+B33 compares an OpenClaw build with a maintained table of the advisories the vendor published
+on the core `openclaw` npm package. These are the standing decisions behind its verdicts, each
+pinned by a test, with the consequence for you.
+
+- **Which version is judged.** On this machine's own OpenClaw home the installed build decides.
+  On any other home, with `--no-dist`, or when no installed build can be read, the version the
+  config records (`meta.lastTouchedVersion`) decides.
+- **A stale recorded version still fails.** OpenClaw rewrites that field only when it saves
+  its config, not when the package is upgraded, so after an upgrade it can lag by hours or days.
+  Where the installed build does not decide (a copied backup, a run with `--no-dist`) the
+  recorded version is the only evidence there is, so an affected one stays a FAIL, not a WARN.
+  If it names a build you have already replaced, audit the live home, or let OpenClaw save its
+  config once. A WARN on your own home means the installed build is patched but the recorded
+  one is not.
+- **Plugin packages and the iOS app are not tabulated.** Advisories on separately versioned
+  plugin packages (for example `@openclaw/discord`) and on the iOS app are not in the table,
+  and B33 reads no installed plugin version. A PASS means no table row applies to the core
+  build - not that plugins or the app were checked. Every B33 result says so in its advice.
+- **A pre-release reads as its release.** `2026.9.2-beta.1` is judged as `2026.9.2`, and a
+  correction release `X-N` as `X`. So a beta of a patched build reads as patched (PASS) although
+  the vendor orders it below that build, and a beta of an affected build fails. No such beta
+  of a patched build is published today.
+- **Extended-stable builds list only what is confirmed.** For the maintenance lines
+  (patch 33 or later) only advisories confirmed still unfixed on that line are named. The rest
+  are counted as "further published advisories" in the advice, in the FAIL and now also in the
+  WARN that an affected recorded version produces beside a patched installed build.
+- **The WARN names one command.** Its advice points to `openclaw --version`, which prints the
+  installed build, and says to restart a gateway started before the upgrade. It does not name
+  `openclaw gateway status`: that command exists, but what it prints with the gateway down was
+  read, not run.
+- **The rollback warning (C4) and B33 agree only on your own home.** When the installed build
+  is older than the recorded one, C4 says B33 judges the installed version. That holds on this
+  machine's own home; with `--no-dist` or on another home B33 judges the recorded version. C4's
+  advice now says so.
+- **A directory named `.openclaw-<name>` counts as this machine's home.** It is treated as a
+  profile by its name and place alone, whether or not anything runs it as one. A backup copied
+  to `~/.openclaw-backup` is therefore judged by the installed build: an affected recorded
+  version shows as a WARN, not a FAIL, and a copy with no recorded version is judged on the
+  installed build. To judge a backup by its own recorded version, point `--home` at a directory
+  with another name or use `--no-dist`. A profile directory that is a symbolic link to a
+  directory elsewhere is treated as another home.
+- **A table row's title is documentation.** No output shows it.
+
 **Found a false positive/negative or something confusing?** Open an issue at
 <https://github.com/gl0di/clawseccheck/issues> with the output of `clawseccheck --json`
 (it redacts secret *values* - only key names/paths appear) and your OpenClaw version. Do
