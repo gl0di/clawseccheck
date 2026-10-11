@@ -1292,6 +1292,18 @@ The highest-risk chains it detects now span **RISK-01..RISK-26**:
 | RISK-25 | MEDIUM | Non-canonical marketplace feed + install-policy gate disabled (or its exec path-safety bypassed) -> skills and plugins install from a non-default source with nothing reviewing what arrives |
 | RISK-26 | HIGH | Skill Workshop autonomous authoring enabled + an untrusted-ingress leg (open DM/group policy, or hooks with an unconstrained session-key) -> one inbound message becomes persistent executable code on disk |
 
+**A known limit of RISK-03.** RISK-03 treats only sandbox mode `off` or absent as "no
+sandbox". Mode `non-main` leaves the agent's own main session unsandboxed, and check B4
+reports that as a WARN, but it does **not** open RISK-03, so a setup can show the B4 WARN
+without a RISK-03 chain (RISK-01 and RISK-12 may still fire for the same setup). This is
+deliberate. A per-peer `session.dmScope` (`per-peer`, `per-channel-peer`,
+`per-account-channel-peer`) gives each channel DM its own session, and `non-main` does
+sandbox those. Treating `non-main` as "no sandbox" in RISK-03 raised a false chain on
+clean configurations that use exactly that shape, so the two are left unaligned rather
+than guessed at. With `session.dmScope` set to `main`, DMs do land in the main session,
+so there the missing chain is a real gap. Treat the B4 WARN as the signal for `non-main`,
+and set the mode to `all` if the main session must be contained.
+
 Each chain fires **only when every link has positive evidence** - no chain is invented from
 absent or UNKNOWN data, so findings are evidence-gated, which keeps false positives low -
 but this is a heuristic audit, not a guarantee; manual review is still required. The risk

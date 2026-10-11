@@ -436,6 +436,13 @@ def _has_untrusted_ingress(tools: list[str], cfg: dict) -> bool:
 
 def _sandbox_off(cfg: dict) -> bool:
     """True when sandbox is explicitly off OR completely absent alongside exec tools."""
+    # Documented limitation, pinned by tests/test_c656_risk03_non_main_documented_limit.py:
+    # only "off"/absent count as no sandbox here, so "non-main" - which B4 WARNs on because
+    # the agent's own main session stays on the host - does NOT open RISK-03. Aligning the
+    # two was tried and dropped: it added a RISK-03 on clean fixtures (home_safe and 17
+    # clean_* ones) and on the dev machine, although a per-peer session.dmScope routes
+    # channel DMs into sandboxed (non-main) sessions. Making this dmScope-aware would hide
+    # real exposure (groupScope "main", per-binding dmScope, sessionToolsVisibility "all").
     mode = dig(cfg, "agents.defaults.sandbox.mode")
     return mode == "off" or mode is None
 

@@ -4319,7 +4319,9 @@ def check_sandbox(ctx: Context) -> Finding:
             "host, allowing a prompt-injected message in that session to run commands with "
             "host access.",
             "Set agents.defaults.sandbox.mode to 'all' so the main session is sandboxed "
-            "too, and configure agents.defaults.sandbox.docker for network isolation.",
+            "too, and configure agents.defaults.sandbox.docker for network isolation. "
+            "The RISK-03 attack chain treats only mode 'off' or absent as no sandbox, so "
+            "this WARN does not by itself open that chain.",
             evidence=["agents.defaults.sandbox.mode=non-main"],
             config_field_paths={"agents.defaults.sandbox.mode"},
         )
@@ -4340,7 +4342,9 @@ def check_sandbox(ctx: Context) -> Finding:
             "allowing a prompt-injected message in that session to run commands with host "
             "access.",
             "Set sandbox.mode to 'all' on each agent named in the evidence, or remove that "
-            "per-agent sandbox.mode so the agent inherits agents.defaults.sandbox.mode.",
+            "per-agent sandbox.mode so the agent inherits agents.defaults.sandbox.mode. "
+            "The RISK-03 attack chain treats only mode 'off' or absent as no sandbox, so "
+            "this WARN does not by itself open that chain.",
             non_main_agents,
         )
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
