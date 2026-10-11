@@ -6071,6 +6071,109 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
                 ctx.agent_auth_profile_store_length = length
 
 
+# C-675: what the MONITOR may record about the SQLite credential stores. Owner ruling: key
+# NAMES, value LENGTH and the store's own `updated_at_ms` / `updated_at` column -- enough to
+# see a store appear, vanish or be rewritten without ever reading a value, and never a digest
+# of a credential. `authProfiles.store` is the allowlist-exempt key B-749 reads for length
+# only; `auth.sharedStore` is its sibling in the same table (its row is a few bytes).
+_AUTH_SHARED_STORE_KEY = "auth.sharedStore"
+# Rows read per agent database. The runtime itself reads one (`primary`); the bound only
+# stops a hostile table from making the sweep unbounded, and biting is disclosed.
+_MAX_CREDENTIAL_STORE_ROWS = 64
+_CRED_LABEL_MAX = 256
+
+
+def _cred_label(text) -> str:
+    """A key or agent id with anything outside a plain name made inert, bounded at
+    ``_CRED_LABEL_MAX``. Redaction and the short display length belong to the monitor
+    dimension (``monitordims._credentials._safe_store_label``), which must see the whole key
+    to redact it; a name this function altered gets a hash of the original so two different
+    names never merge into one label."""
+    raw = str(text)[:_CRED_LABEL_MAX]
+    clean = re.sub(r"[^A-Za-z0-9._@:-]", "?", raw)
+    if clean != raw:
+        clean += "~" + hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:6]
+    return clean
+
+
+def _cred_int(value) -> "int | None":
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def read_credential_store_rows(home) -> dict:
+    """``{"stores", "incomplete", "reason"}`` for the monitor's credential_store
+    dimension (C-675): one entry per credential store that lives in a SQLite database.
+
+    ``stores`` maps a label (``state/authProfiles.store``, ``state/auth.sharedStore``,
+    ``agent/<agent-id>/<store_key>``) to ``{"length": bytes, "updated": the store's own
+    timestamp}``; ``stores`` is empty when no database exists, and the monitor still records
+    that empty set so the first store to appear is an addition. ``incomplete`` is True when
+    any database was present but could not be read, or a bound bit -- "unreadable" must never
+    read as "unchanged", so the caller stands removals down and says why.
+
+    Same access discipline as the B-749/B-845 readers: ``trajectorystore._open_and_verify_table``
+    (read-only, FIFO/device refused before ``sqlite3.connect``, refuses a name that is not a
+    REAL TABLE inside the transaction that also runs the SELECT). ``LENGTH(CAST(.. AS BLOB))``
+    is selected, never the value column, and the keys are bound parameters. Takes *home*, not
+    a ``Context``, like ``read_config_audit_rows``. Never raises.
+    """
+    out = {"stores": {}, "incomplete": False, "reason": ""}
+    reasons: list = []
+    try:
+        home = Path(home).expanduser()
+        db_path = home / "state" / "openclaw.sqlite"
+        if pathprobe.exists(db_path):
+            conn, _kind, unreadable = _trajectorystore._open_and_verify_table(
+                db_path, "config_machine_state")
+            if unreadable:
+                reasons.append("the state database could not be read")
+            elif conn is not None:
+                try:
+                    for key, length, updated in conn.execute(
+                        "SELECT state_key, LENGTH(CAST(value_json AS BLOB)), updated_at_ms "
+                        "FROM config_machine_state WHERE state_key IN (?, ?) "
+                        "ORDER BY state_key",
+                        (_AUTH_PROFILE_STORE_KEY, _AUTH_SHARED_STORE_KEY),
+                    ):
+                        out["stores"][f"state/{_cred_label(key)}"] = {
+                            "length": _cred_int(length), "updated": _cred_int(updated)}
+                except sqlite3.Error:
+                    reasons.append("the state database could not be read")
+                finally:
+                    conn.close()
+        if _trajectorystore.sqlite_db_paths_capped(home):
+            reasons.append("more agent databases exist than were read")
+        for agent_db in _trajectorystore.sqlite_db_paths(home):
+            agent = _cred_label(agent_db.parent.parent.name)
+            conn, _kind, unreadable = _trajectorystore._open_and_verify_table(
+                agent_db, table_name="auth_profile_store")
+            if conn is None:
+                if unreadable:
+                    reasons.append(f"the database of agent {agent} could not be read")
+                continue
+            try:
+                rows = conn.execute(
+                    "SELECT store_key, LENGTH(CAST(store_json AS BLOB)), updated_at "
+                    "FROM auth_profile_store ORDER BY store_key LIMIT ?",
+                    (_MAX_CREDENTIAL_STORE_ROWS + 1,),
+                ).fetchall()
+            except sqlite3.Error:
+                reasons.append(f"the database of agent {agent} could not be read")
+                continue
+            finally:
+                conn.close()
+            if len(rows) > _MAX_CREDENTIAL_STORE_ROWS:
+                reasons.append(f"agent {agent} holds more credential rows than were read")
+            for key, length, updated in rows[:_MAX_CREDENTIAL_STORE_ROWS]:
+                out["stores"][f"agent/{agent}/{_cred_label(key)}"] = {
+                    "length": _cred_int(length), "updated": _cred_int(updated)}
+    except Exception:  # noqa: BLE001 - never let this reader end a monitor run
+        reasons.append("the credential databases could not be read")
+    out["incomplete"] = bool(reasons)
+    out["reason"] = "; ".join(dict.fromkeys(reasons))
+    return out
+
+
 # B176 follow-up (2026-09-25): legacy devices/paired.json -> device_pairing_paired
 # (state/openclaw.sqlite) migration.
 #

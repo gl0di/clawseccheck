@@ -255,7 +255,9 @@ want to know before agreeing to a baseline:
   moving (updated, or drifted from what ClawHub recorded) without the user doing it themselves.
 - **What your agent is allowed to do** - a plugin newly allowed to load (including an allowlist
   quietly bypassed on an OpenClaw upgrade), the resolved shell-command policy widening, and a
-  new or replaced entry in the credential store.
+  new credential in the credential store or in OpenClaw's agent databases (a store appearing, or
+  an empty one filled in; growth of one that already held a credential is recorded, not paged,
+  because without reading the value it looks the same as a routine token refresh).
 - **Your agent's identity and config** - drift in `SOUL.md`/`AGENTS.md`/bootstrap files, the
   resolved config file, and any file appearing, changing or disappearing under
   `<workspace>/memory/` (INFO by default - OpenClaw's own pre-compaction flush writes there too).

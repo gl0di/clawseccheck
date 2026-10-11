@@ -595,8 +595,10 @@ it), `SOUL.md` drift, **any file appearing, changing or disappearing under
 `<workspace>/memory/`** (a new file there is reported even when nothing in it looks hostile -
 that subtree is where OpenClaw's own pre-compaction flush writes, so its appearance is INFO, not
 an accusation), a plugin newly allowed to load (including `bundledDiscovery` flipping to
-allowlist bypass on upgrade), the resolved `tools.exec` shell-command policy widening, a new or
-replaced entry in the credential store, a dropped
+allowlist bypass on upgrade), the resolved `tools.exec` shell-command policy widening, a new
+credential in the credential store or in OpenClaw's agent databases (a store appearing, or an empty
+one filled in; growth of one that already held a credential is recorded, not paged, because without
+reading the value it looks the same as a routine token refresh), a dropped
 score (on the pair of runs being compared, when both carry a grade - see
 [Scoring](#scoring); the file/config/MCP/channel signals here don't depend on either
 run having one), **a check leaving PASS (for FAIL,

@@ -96,9 +96,14 @@ from ._coverage import (  # noqa: F401
 
 from ._credentials import (  # noqa: F401
     _CRED_NAME_CAP,
+    _EMPTY_STORE_BYTES,
+    _LABEL_CAP,
     _credentials_sig,
+    _diff_credential_stores,
     _diff_credentials,
     _credential_names,
+    _safe_store_label,
+    _store_names,
 )
 
 from ._execpolicy import (  # noqa: F401

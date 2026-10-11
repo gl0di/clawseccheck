@@ -176,6 +176,45 @@ def _plugin_allowlist_bypassed_via_state(home):
         con.close()
 
 
+_SHELL_JSON = '{"version":1,"profiles":{}}'  # the 27-byte row OpenClaw writes at first save
+
+
+def _seed_an_empty_agent_credential_shell(home, store):
+    """The real shape: `agent/main/primary` already exists as the empty shell."""
+    import sqlite3
+    d = home / "agents" / "main" / "agent"
+    d.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(d / "openclaw-agent.sqlite")
+    try:
+        con.execute(
+            " ".join(("CREATE", "TABLE")) + " IF NOT EXISTS auth_profile_store "
+            "(store_key TEXT NOT NULL PRIMARY KEY, store_json TEXT NOT NULL, "
+            "updated_at INTEGER NOT NULL) STRICT"
+        )
+        con.execute("INSERT OR REPLACE INTO auth_profile_store VALUES (?,?,?)",
+                    ("primary", _SHELL_JSON, 1))
+        con.commit()
+    finally:
+        con.close()
+
+
+def _credential_lands_in_the_empty_shell(home, store):
+    """A credential is written into the existing empty row, where OpenClaw keeps them now.
+
+    The directory the dimension used to watch is empty on current OpenClaw, so before the
+    SQLite stores were recorded this moved nothing the watch was looking at.
+    """
+    import sqlite3
+    con = sqlite3.connect(home / "agents" / "main" / "agent" / "openclaw-agent.sqlite")
+    try:
+        con.execute("UPDATE auth_profile_store SET store_json = ?, updated_at = ? "
+                    "WHERE store_key = ?",
+                    ('{"version":1,"profiles":{"p":{}}}' + " " * 300, 2, "primary"))
+        con.commit()
+    finally:
+        con.close()
+
+
 def _sandbox_disabled(home):
     c = _cfg(home)
     c["agents"]["defaults"]["sandbox"] = {"mode": "off"}
@@ -426,6 +465,12 @@ INCOMPLETENESS = {
     "coverage-lost-skill-version":
         (_seed_a_versioned_skill, _add_an_unversioned_skill, 1,
          "could not make a comparison it made at the last check"),
+    # C-675: a credential landing in an agent's existing empty store row. Judged on the
+    # sentence rather than on "any alert": on a real home this write also flips the
+    # Lethal Trifecta, which is an alert whether or not the credential is reported.
+    "credential-lands-in-an-empty-agent-store":
+        (_seed_an_empty_agent_credential_shell, _credential_lands_in_the_empty_shell, 0,
+         "that were empty now hold a credential"),
     # CLAWSECCHECK-B-765: an existing check id's verdict moving across a ClawSecCheck
     # upgrade must not read as an ordinary, unqualified config regression.
     "check-verdict-crossed-a-known-version-boundary":

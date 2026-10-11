@@ -28,6 +28,7 @@ from .hostpersist import FAMILY_SYSTEM_CRON as _hp_FAMILY_SYSTEM_CRON  # noqa: F
 from .hostpersist import FAMILY_SYSTEMD as _hp_FAMILY_SYSTEMD  # noqa: F401
 from .logsafe import redact_urls_in_text, sanitize_url_host_only  # noqa: F401
 from .openclawdist import compare_versions as _version_order  # noqa: F401
+from .collector import read_credential_store_rows as _read_credential_stores
 from .configjournal import find_by_hash as _journal_find_by_hash
 from .configjournal import newest_hash as _journal_newest_hash
 from .configjournal import read_writes as _journal_read
@@ -88,6 +89,8 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _config_file_digest,
     _config_resolved_digest,
     _CRED_NAME_CAP,
+    _EMPTY_STORE_BYTES,
+    _LABEL_CAP,
     _COVERAGE_ALREADY_ANNOUNCED,
     _COVERAGE_DIGITS_RE,
     _COVERAGE_MAX_ENTRIES,
@@ -97,6 +100,8 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _coverage_signature,
     _credential_names,
     _credentials_sig,
+    _safe_store_label,
+    _store_names,
     _describe,
     _diff_behavioral,
     _diff_bootstrap_added,
@@ -108,6 +113,7 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _diff_config_digest_unmoved,
     _diff_config_journal,
     _diff_coverage,
+    _diff_credential_stores,
     _diff_credentials,
     _diff_exec_policy,
     _diff_gateway_bind_moved,
@@ -773,9 +779,17 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     # discovery, and this module stays a pure function of what it is given.
     if isinstance(host_persist, dict) and host_persist:
         snap["host_persist"] = host_persist
-    # B-677: OpenClaw's own credential store. Conditional on the caller having scanned it,
-    # so an absent key means "that layer did not run", never "the store is empty".
-    _cred = _credentials_sig(credentials)
+    # B-677: OpenClaw's own credential store. The directory part is conditional on the caller
+    # having scanned it, so an absent `files` means "that layer did not run", never "the store
+    # is empty". The database part (C-675) is read below from the home and is always written.
+    # C-675: the same dimension also covers the credential stores OpenClaw keeps in its
+    # SQLite databases. Read here from the home alone (names, lengths and the stores' own
+    # timestamps - never a value), contained so an unreadable database cannot end the run.
+    try:
+        _cred_stores = _read_credential_stores(ctx.home)
+    except Exception:  # noqa: BLE001 - the dimension degrades, the run goes on
+        _cred_stores = None
+    _cred = _credentials_sig(credentials, _cred_stores)
     if _cred:
         snap["credential_store"] = _cred
 
