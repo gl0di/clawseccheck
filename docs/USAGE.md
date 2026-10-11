@@ -2327,6 +2327,24 @@ hard false positives on real configs.
   for such a folder, because it diffs the installed-skill list the discovery step produced and
   discovery skips it; the audit's note is where it stays visible. `--sbom` lists it under
   `self_excluded_skills` and reports `complete: false`.
+- **`--vet-skill` can clear a second destination next to an in-cluster call.** To keep
+  honest in-cluster helpers from failing, the credential-plus-network-sink rule explains
+  away two narrow pairings: a Kubernetes service-account token read paired with a request
+  to `kubernetes.default.svc`, and an `.npmrc` read paired with `registry.npmjs.org`. The
+  scan decides "this call goes to the credential's own host" by finding that host in the
+  call's text, so a skill that names the token path and then sends it with a second
+  destination in the same command (the known host plus another host, a scheme-less host
+  after the known one, a known host spelled inside another URL's query, or inside a shell
+  variable's value) can still read `INSTALL`. A call whose only destination is another host
+  is `DO-NOT-INSTALL`, as is a variable bound to another host. Making the rule strict enough
+  to catch the crafted cases was tried and rejected: it turned ordinary shapes (the word
+  `curl` in prose, a trailing `> file` or `2>&1`, a `;` inside a quoted header, a call whose
+  URL sits on the next line) into false `DO-NOT-INSTALL` verdicts, and prose that runs on
+  after a command reads the same as a second destination to a static scan. This is an
+  accepted, documented limit. The clean result carries a "not assessed" note whenever this
+  exemption applied; it never changes the verdict. Where the mitigation lives:
+  `--vet-judge-packet` hands the skill to a judge, who can only escalate a finding, never
+  clear one. If you did not write the skill, read any command that uses the token.
 
 **Found a false positive/negative or something confusing?** Open an issue at
 <https://github.com/gl0di/clawseccheck/issues> with the output of `clawseccheck --json`

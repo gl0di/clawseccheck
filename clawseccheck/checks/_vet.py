@@ -4986,6 +4986,30 @@ def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]
 # payload is a different credential type entirely, e.g. AWS keys smuggled
 # toward the npm registry as a covert channel) - the forward-window
 # destination check above is what does the anti-bypass work.
+#
+# ACCEPTED LIMITATION (documented, test-pinned, routed to adjudication - not a bug to
+# chase with another regex). Measured with `--vet-skill`: this exemption explains a
+# call whose window names the known host ANYWHERE, so it can also clear (a) a SECOND
+# destination in the same command (a known host then an attacker host, either order,
+# or a scheme-less attacker host after it), (b) the known host spelled inside an
+# attacker URL's query or inside a `$VAR`'s resolved value, and (c) a scheme-less
+# second host after a `$VAR` destination (the whitespace tokenizer only sees
+# `http(s)://` and `$` words). A deliberately crafted skill that names the in-cluster
+# token path and sends it with such a call reads INSTALL with Danger PASS. The cure
+# was tried: reading the destination from curl's own argv grammar and matching the
+# whole word against an anchored host (task branch b-986-neighbours, roughly 2,000
+# lines) FAILED its adversarial review - it turned ordinary shapes the exemption
+# exists for into false FAILs (the word `curl` in prose or a comment, a trailing
+# `> file` / `2>&1`, a `;` inside a quoted header, a `requests.post(` whose URL sits on
+# the next line, a README bullet "curl ... /pods - returns JSON") and opened a false
+# negative of its own (backtick parity let a command substitution add a hidden second
+# destination). Prose that runs on after the command reads, to a static scanner,
+# exactly like a second destination, and the non-curl verbs (wget, requests.post,
+# fetch) have no argv grammar to anchor on. So the limit stays, is disclosed on the
+# clean verdict (see the coverage note at the call site, which never moves a
+# verdict), and is mitigated by `--vet-judge-packet`, where a judge can only escalate.
+# Pinned by tests/test_c657_cluster_token_exemption_limit.py: change a verdict there
+# only deliberately, with a fresh adversarial pass.
 _CRED_EXFIL_OWN_DEST_WINDOW = 200  # chars after the exfil verb - matches _PERSIST_WINDOW's scale
 _CRED_EXFIL_OWN_DEST_PAIRS = (
     (re.compile(r"\.npmrc"), re.compile(r'://registry\.npmjs\.org(?=[/"\'\s]|$)', re.I)),
@@ -6430,6 +6454,21 @@ def check_installed_skills(ctx: Context) -> Finding:
             # exfiltration, so this specific co-occurrence is explained away.
             if _has_cross and _exfil_hits_all_target_own_known_destination(_blob_nofence):
                 _has_cross = False
+                # Accepted limitation (see the note above `_CRED_EXFIL_OWN_DEST_WINDOW`):
+                # say so on the verdict this exemption just cleared. Evidence only, via
+                # the `_coverage_fence` bucket - it never reaches status, severity,
+                # detail or a finding id, so it cannot move INSTALL to anything else.
+                if not _has_same_line:
+                    coverage_fence.append(
+                        f"coverage: {name}: a credential read paired with its own"
+                        " destination (an in-cluster Kubernetes token sent to"
+                        " kubernetes.default.svc, or an .npmrc credential sent to"
+                        " registry.npmjs.org) was treated as legitimate; the scan"
+                        " cannot tell a second destination or a variable host in the"
+                        " same command from that legitimate call, so read the command"
+                        " (--vet-judge-packet hands the skill to a judge, who can only"
+                        " escalate)"
+                    )
             if not _has_same_line and _has_cross:
                 high.append(
                     f"{name}: credential path and exfil sink both present in skill (split-stage risk)"
