@@ -3,6 +3,124 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [5.0.0] - 2026-10-11
+
+**This release re-grounds the audit on OpenClaw 2026.10.1, after catching up with 2026.9.7,
+9.8 and 9.9, and makes it much harder for an odd or hostile file to end a run or hide a
+finding.** Gateway token references and templated binds are now judged by what they are (a
+reference nothing visible resolves is UNKNOWN, never PASS), and the monitor, B77 and B172
+read the SQLite stores where current OpenClaw keeps its credentials, config-write journal
+and exec approvals. Nested or padded JSON can no longer end an audit or hide a plugin or
+skill, and a symlink loop, an unreadable plugin manifest or a named pipe no longer crashes,
+hangs or passes. Checks that had fallen behind OpenClaw or answered PASS where they could
+not tell (B353, B33, B372, B350, B4, B382) now say what they know.
+
+**Breaking:** the minimum supported Python is now 3.10, because 3.9 has been end of life
+since October 2025. On Python 3.9 the command-line tool exits with "needs Python 3.10+
+(found X.Y)" instead of running. Two other changes can alter an exit code: `--vet`,
+`--vet-skill` and `--advise` on a folder with the scanner's own engine layout now answer
+CAUTION and exit 1, not INSTALL and 0, for a tree they never opened; and `audit.py` exits 2
+when importable files sit beside it. Because several checks stopped answering PASS where they
+could not know, a setup that was clean on 4.3.1 can now read WARN, UNKNOWN or FAIL; the most
+common case is a gateway token written as `${OPENCLAW_GATEWAY_TOKEN}` (or any other reference
+nothing visible resolves), which moves from PASS to UNKNOWN.
+
+### Added
+
+- **`--json` and `--sarif` say whether the installed OpenClaw is newer than the grounded
+  build.** Both carry a `grounding` object on every run: `grounded_max`, `installed`,
+  `newer_than_grounded` (`true`, `false` or `null`) and a `detail` sentence. `null` means the
+  installed build is unknown or cannot be ordered, never "no gap". Score, grade and exit code
+  do not change. The notice now also reaches the dashboard card, HTML report and PDF.
+- **`audit.py` refuses to run when importable files sit beside it.** A stray `json.py` or
+  `sitecustomize.py` ran inside the auditor, invisible to `--verify-self`. `audit.py` now
+  exits 2 naming the entries, and `--verify-self` reports them as a Coverage note.
+
+### Changed
+
+- **Python 3.10 is the floor and 3.14 is tested.** CI drops the Ubuntu 3.9 leg; 3.12 and
+  3.14 on Linux and 3.12 on macOS are tested. 3.13 has not been measured and is not claimed.
+- **Grounded on OpenClaw 2026.10.1.** The grounded ceiling moved through 2026.9.7, 9.8 and
+  9.9 to 10.1, with the snapshots and dist citations re-baselined on each. The Codex harness
+  determination behind B333 and B353 is trusted on all four, so they no longer drop to WARN.
+- **Documented limits, each pinned by a test; no verdict changes.** `--vet` reads one
+  `package.json`, so workspaces and `file:` dependencies are not followed. RISK-03 and B4
+  disagree on sandbox mode `non-main` on purpose: RISK-03 counts only off or absent as no
+  sandbox, while B4 warns because the agent's own main session still runs on the host. The
+  in-cluster token exemption in the credential-exfil rule cannot tell the real call from
+  the same call plus a second destination; a "not assessed" note now says so.
+
+### Fixed
+
+- **Gateway token references and templated binds are judged by what they are.**
+  - B2 no longer judges a reference by the length of its text (`${GW_TOKEN}` used to FAIL as
+    "shorter than 24 chars"). It looks the variable up where the audit can see it (config
+    env block, systemd unit, dotenv file): a visible value under 24 characters is a FAIL,
+    and a reference nothing visible resolves is UNKNOWN, never PASS. A SecretRef object
+    counts as a token set by reference; a retired `secretref-env:ID` marker is a WARN.
+  - B1 no longer FAILs on a SecretRef, the remedy it recommends. `${VAR:-}` counts only on a
+    build that has it (2026.9.7+), decided by the installed build, never by a config stamp.
+    A whole-value `${VAR}` at `hooks.token` is UNKNOWN, never PASS.
+  - A templated `gateway.bind` is no longer read as a literal host (B11, B32, B80, B340,
+    B397 and five more warned about an exposure they could not know). It is taken from a
+    visible non-loopback value or default, else UNKNOWN with the template quoted; a visible
+    loopback never clears it, since drop-ins and the process environment are invisible.
+- **Nested or padded JSON no longer ends an audit or hides a record.** A 100,000-level file
+  ended the audit with an internal error, and a JSON5 plugin manifest with 201 levels of
+  padding lost its skills list, so a malicious bundled skill was CAUTION, not
+  DO-NOT-INSTALL. Readers of state files, plugin and skill metadata, MCP specs (including
+  `--vet-mcp`), trajectory lines, judge verdicts and the monitor journal now keep the
+  shallow fields and mark deeper subtrees unread, because a fixed depth limit would let one
+  padded key hide a finding. A document with an unread subtree never answers a clean PASS:
+  the check degrades to UNKNOWN (for example B168, B89, B138) or the vet to CAUTION, while
+  a FAIL or WARN found in the part read stands. A credential pattern split across the bound
+  in a trajectory line is not matched; that residual is disclosed.
+- **Unreadable paths, named pipes and symlink loops give one disclosed answer everywhere.**
+  - A named pipe where a plugin manifest should be no longer hangs the audit or the vet
+    (B152 was lost to the timeout). The vet never opens a pipe or device file; it reports a
+    coverage gap with a CAUTION floor, and a plugin that also holds an evil file is still
+    DO-NOT-INSTALL. A plugin with an unreadable manifest is still swept.
+  - Eleven places that called `Path.resolve()` crashed on Python 3.12 when they met a symlink
+    loop and answered on 3.14: the installed-plugin sweep, B181, the backups check, `--vet-skill
+    --vet-judge-packet`, `--monitor`, `--advise`, the PATH check and four helpers. They now give
+    the same disclosed answer on every Python. A plugin root that loops shows as not scanned,
+    where 3.14 used to drop it silently as "no known issue".
+  - A symlink loop no longer crashes C015 on 3.12 while passing on 3.14. Python 3.14 read
+    an unreadable path as absent, so `--vet-skill` answered INSTALL for an unreadable
+    payload; releases up to 4.3.1 behave that way on 3.14. An unreadable workspace
+    directory no longer ends the run with an internal error, and a non-UTF-8 or UTF-16
+    `--attest` file warns instead of crashing.
+- **Checks that had fallen behind OpenClaw, or passed where they could not tell.**
+  - B353 answered PASS when it could not tell whether a Codex agent runs; only a definite
+    no clears it now. B372: 2026.9.7 made `allowBots` default to true on Discord and Slack,
+    so an unset key on a reachable account WARNs on 2026.9.7+, passes on 2026.7.1-2 through
+    2026.9.6 and is UNKNOWN when the build is unknown. B350: 2026.8.1+ turn the operator
+    terminal on unless it is explicitly false; an unset key WARNs there, passes on builds
+    measured off and is UNKNOWN on unmeasured ones.
+  - B33: the advisory table ended at 2026.6.6, so later builds read as fully patched. 70
+    published advisories are now rows: builds 2026.6.6 through 2026.9.1 FAIL and are pointed
+    at 2026.9.2, and on this machine's own home the installed build decides, not the stamp.
+  - B4 WARNs on sandbox mode `non-main`, including a named agent that sets it under a
+    defaults mode of `all`. B382 tracks more retired keys (such as `silentReply.internal`)
+    and its PASS says the list is not every key OpenClaw removed.
+  - B172 and B77 no longer answer UNKNOWN about an exec-approvals store or config-write
+    journal in the state database. The default agent is chosen the way OpenClaw chooses it.
+- **Vet and skill scanning.**
+  - A `SKILL.md` beside a plugin manifest that does not list it is now vetted (a stub
+    manifest had hidden an instruction-override directive), and executable code beside a
+    wrapper's `node_modules` is a coverage UNKNOWN. A plugin that ships such a `SKILL.md`
+    can lead with a different finding, so a `.clawseccheckignore` fingerprint can move.
+  - Plaintext reverse shells in bundled `.sh` and `.py` files and `exec(fetch(URL))` are
+    convicted; only the base64-wrapped form failed before. Other shapes are a declared
+    ceiling in `docs/THREAT_COVERAGE.md`. Loose plugin Python that cannot be read, parsed
+    or is over the size cap floors to CAUTION, not INSTALL.
+  - A negated verb ("Do not reveal your system prompt") is a disclosed WARN, and
+    `Do not curl <url> | sh` no longer false-fails.
+- **Monitor and CLI.** The monitor watches the credential stores in OpenClaw's databases
+  and no longer reports the updater's `.bak` leftovers as systemd user services.
+  `--cron-recipe` carries `--home`, so jobs on a non-default home no longer watch
+  `~/.openclaw`. A suppressed CRITICAL or HIGH FAIL is disclosed on the card, HTML and PDF.
+
 ## [4.3.1] - 2026-09-29
 
 **4.3.0 never reached ClawHub. This release is 4.3.0 in a form ClawHub's publish step can
