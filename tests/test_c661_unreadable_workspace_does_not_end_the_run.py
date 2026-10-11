@@ -71,6 +71,7 @@ def test_a_readable_workspace_dotenv_is_still_reported(readable_home):
 def test_an_unreadable_workspace_is_disclosed_not_a_crash(locked_home):
     entry = _dotenv_entry(locked_home)
     assert entry["reachable"] is False
+    assert entry["unread"] == 2, entry  # not reachable AS FAR AS SEEN: workspace/.env and .envrc were not readable
     assert len(entry["evidence"]) == 1
     assert "could not be read" in entry["evidence"][0]
     assert "permission denied" in entry["evidence"][0]
@@ -96,5 +97,7 @@ def test_the_cli_ends_in_a_report_not_an_internal_error(locked_home, extra):
         rows = payload["secret_reachability"]
         dotenv = next(r for r in rows if r["class"] == ".env")
         assert any("could not be read" in e for e in dotenv["evidence"]), dotenv
+        assert dotenv["unread"] == 2, dotenv
     else:
         assert cp.stdout.strip(), "no report was printed"
+        assert ".env: reachable=unknown" in cp.stdout, "an unread location must not read as 'reachable=no'"

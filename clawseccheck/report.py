@@ -2068,7 +2068,12 @@ def _credential_surface_map(ctx) -> list[dict]:
     dotenv_evidence = list(dotenv_hits)
     if dotenv_unread:
         dotenv_evidence.append(f"{dotenv_unread} dotenv location(s) could not be read (permission denied)")
-    entries.append({"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_evidence})
+    dotenv_entry: dict = {"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_evidence}
+    if dotenv_unread:
+        # a location that could not be read is not a location that was seen empty: "reachable"
+        # stays the boolean of what WAS seen, "unread" says how many were not
+        dotenv_entry["unread"] = dotenv_unread
+    entries.append(dotenv_entry)
 
     keychain_hits: list[str] = []
     if home_path is not None and pathprobe.exists(home_path):
@@ -2158,7 +2163,8 @@ def _credential_surface_lines(ctx) -> list[str]:
         # evidence carries untrusted MCP server names / config-derived strings - strip
         # terminal-control sequences before they reach the terminal (B-164).
         evidence = _sanitize("; ".join(item["evidence"])) if item["evidence"] else "none"
-        lines.append(f"- {item['class']}: reachable={_bool_word(item['reachable'])}; {evidence}")
+        reach = "unknown" if item.get("unread") and not item["reachable"] else _bool_word(item["reachable"])
+        lines.append(f"- {item['class']}: reachable={reach}; {evidence}")
     return lines
 
 
