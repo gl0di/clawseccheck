@@ -411,26 +411,24 @@ def _normalize_agent_id(value) -> str:
     return normalized.strip("-")[:64] or DEFAULT_AGENT_ID
 
 
-def _default_agent_id(agents_list) -> str:
-    """The entry flagged `default`, else the FIRST entry, else `main`.
+def _default_agent_id(agents_list, explicit_ownership: bool = False) -> "str | None":
+    """The agent whose workspace is the plain one: the leaf's copy of the collector's rule.
 
-    The "else the first entry" half matters: with one entry in `agents.list`, that entry IS
-    the default agent and its workspace is the plain `workspace` directory, so nothing is
-    derived for it at all.
+    ``tryResolveRawLegacyDefaultAgentId(cfg) ?? tryResolveSoleAgentId(cfg)`` as
+    ``resolveAgentWorkspaceDir`` uses it (C-684, executed in node): the one entry with
+    ``default`` equal to boolean ``true`` and only when exactly one carries it (never under
+    ``agents.ownership: "explicit"``), else the sole agent, else NOBODY - ``None``, and every
+    agent's directory is then derived. Compared with the collector's copy over a battery in
+    ``tests/test_c684_default_agent_differential.py``.
     """
-    chosen = None
-    for entry in agents_list:
-        if isinstance(entry, dict) and entry.get("default"):
-            chosen = entry
-            break
-    if chosen is None and agents_list:
-        # `agents[0]` unconditionally, NOT the first dict. A truthy non-object entry survives
-        # JS's own `listAgentEntries` filter (it drops only falsy ones), and `"junk"?.id` is
-        # `undefined`, which normalises to the default id. Skipping to the first dict picked a
-        # different default agent than the product does, and therefore derived a different set
-        # of workspaces.
-        chosen = agents_list[0]
-    return _normalize_agent_id(chosen.get("id") if isinstance(chosen, dict) else None)
+    if not explicit_ownership:
+        marked = [e for e in agents_list if isinstance(e, dict) and e.get("default") is True]
+        if len(marked) == 1:
+            return _normalize_agent_id(marked[0].get("id"))
+    if len(agents_list) == 1:
+        sole = agents_list[0]
+        return _normalize_agent_id(sole.get("id") if isinstance(sole, dict) else None)
+    return None
 
 
 def _agent_entries(config: dict) -> "list[dict]":
@@ -481,7 +479,8 @@ def _derived_agent_workspaces(config: dict) -> "list[str]":
     fallback = ""
     if isinstance(defaults, dict) and isinstance(defaults.get("workspace"), str):
         fallback = defaults["workspace"].strip()
-    default_id = _default_agent_id(listed)
+    default_id = _default_agent_id(
+        listed, explicit_ownership=isinstance(agents, dict) and agents.get("ownership") == "explicit")
     out: list[str] = []
     for entry in listed:
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):

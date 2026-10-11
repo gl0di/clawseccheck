@@ -3964,43 +3964,48 @@ def agent_roster(cfg) -> "list[AgentEntry]":
     return []
 
 
-def _default_agent_id(agents_list) -> str:
-    """OpenClaw's `resolveDefaultAgentId`: the entry flagged `default`, else the FIRST one.
+def _default_agent_id(agents_list, explicit_ownership: bool = False) -> "str | None":
+    """The agent whose workspace is the PLAIN one: ``tryResolveLegacyDataOwnerAgentId``.
 
-    ```js
-    const chosen = (agents.find((agent) => agent?.default) ?? agents[0])?.id;
-    return normalizeAgentId(chosen);
-    ```
+    ``resolveAgentWorkspaceDir`` (``dist/agent-scope-config-*.mjs``) gives the plain
+    ``workspace`` (or ``agents.defaults.workspace``) to exactly one agent and derives every
+    other agent's directory from its id. Who that agent is, executed in node across a
+    generated battery (``tests/test_c684_default_agent_differential.py``)::
 
-    The "else the first one" half is the part that is easy to get wrong and changes the
-    answer completely: with a SINGLE entry in `agents.list`, that entry IS the default agent,
-    so its workspace is the ordinary `workspace` directory and nothing is derived at all. A
-    first measurement of this defect used a one-agent config and drew the wrong conclusion
-    from it (B-610).
+        tryResolveRawLegacyDefaultAgentId(cfg) ?? tryResolveSoleAgentId(cfg)
+
+    * the one entry whose ``default`` is the boolean ``true`` - ``"yes"`` and ``1`` are
+      ignored - and only when EXACTLY one entry carries it; never under
+      ``agents.ownership: "explicit"``, where the marker is not consulted at all
+      (``agents.defaults.systemAgent.agentId`` does not place a workspace either: measured);
+    * otherwise the SOLE agent;
+    * otherwise NOBODY (``None``): with two or more agents and no unique marker every agent's
+      directory is derived, the first one included. There is no ``agents[0]`` fallback here -
+      this function used to invent one, which hid ``workspace-<first id>`` from the scan.
+      (``resolveMemoryHostAgentWorkspaceDir`` in ``config-utils-*`` DOES keep that fallback,
+      but it places the memory-search workspace, not the agent's, and is not what this mirrors.)
+
+    ``None`` derives every agent's directory, so on a scan surface it can only add to what is read.
     """
-    chosen = None
-    for entry in agents_list:
-        if isinstance(entry, dict) and entry.get("default"):
-            chosen = entry
-            break
-    if chosen is None and agents_list:
-        # `agents[0]` unconditionally, NOT the first dict. A truthy non-object entry survives
-        # JS's own `listAgentEntries` filter (it drops only falsy ones), and `"junk"?.id` is
-        # `undefined`, which normalises to the default id. Skipping to the first dict picked a
-        # different default agent than the product does, and therefore derived a different set
-        # of workspaces.
-        chosen = agents_list[0]
-    return _normalize_agent_id(chosen.get("id") if isinstance(chosen, dict) else None)
+    if not explicit_ownership:
+        marked = [e for e in agents_list if isinstance(e, dict) and e.get("default") is True]
+        if len(marked) == 1:
+            return _normalize_agent_id(marked[0].get("id"))
+    if len(agents_list) == 1:
+        sole = agents_list[0]
+        return _normalize_agent_id(sole.get("id") if isinstance(sole, dict) else None)
+    return None
 
 
 def _derived_agent_workspaces(cfg: dict) -> "list[str]":
     """The workspace directories OpenClaw DERIVES for configured agents (B-610).
 
-    `resolveAgentWorkspaceDir` (`dist/config-utils-*.js`) has four branches in priority
+    `resolveAgentWorkspaceDir` (`dist/agent-scope-config-*.mjs`) has four branches in priority
     order, and until B-610 this project implemented only the first two:
 
     1. the agent's own `workspace`, if set;
-    2. for the DEFAULT agent, `agents.defaults.workspace` or the plain `workspace` dir;
+    2. for the DEFAULT agent (see `_default_agent_id` - there may be none), `agents.defaults.workspace`
+       or the plain `workspace` dir;
     3. otherwise, if `agents.defaults.workspace` is set, ``join(that, id)``;
     4. otherwise ``join(stateDir, "workspace-" + id)``.
 
@@ -4032,8 +4037,13 @@ def _derived_agent_workspaces(cfg: dict) -> "list[str]":
     default_workspace = dig(cfg, "agents.defaults.workspace")
     fallback = default_workspace.strip() if isinstance(default_workspace, str) else ""
     # `agent_roster` injects the record KEY as `id` on the entries shape, so
-    # `_default_agent_id` keeps reading `entry["id"]` and needs no change.
-    default_id = _default_agent_id([a.entry for a in roster])
+    # `_default_agent_id` keeps reading `entry["id"]` and needs no change. It may answer
+    # `None` (several agents, no unique `default: true`): then NO agent owns the plain
+    # workspace and every one of them is derived, as in the product.
+    agents = cfg.get("agents")
+    default_id = _default_agent_id(
+        [a.entry for a in roster],
+        explicit_ownership=isinstance(agents, dict) and agents.get("ownership") == "explicit")
     out: list[str] = []
     for entry in (a.entry for a in roster):
         if not isinstance(entry.get("id"), str):
