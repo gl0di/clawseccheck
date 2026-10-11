@@ -82,7 +82,11 @@ def test_every_other_setting_is_clean(codex):
     above, and `auto` in particular must stay clean — it is the default, and reporting the
     default would make this fire on every server anyone has."""
     kw = {} if codex is None else {"codex": codex}
-    assert _finding(_server(**kw)).status == PASS
+    # C-673: an un-moded server with no codex entry is only clean when the harness reach is a
+    # definite "no" -- on a build the reach cannot be determined for it is the disclosed WARN
+    # (tests/test_c673_b353_unknown_harness_reach.py) -- so this pins one that is.
+    cfg = dict(_server(**kw), agents={"defaults": {"model": "anthropic/claude-x"}})
+    assert _finding(cfg, installed=_VALIDATED).status == PASS
 
 
 def test_no_mcp_servers_is_unknown():
@@ -363,8 +367,11 @@ def _codex_cfg(appserver=None, plugin_extra=None, servers=None):
 def test_no_codex_plugin_is_unaffected():
     """No `plugins.entries.codex` at all — the appServer mechanism cannot fire, and the
     un-moded server (no codex block of its own either) is reported exactly as it always
-    was: PASS, generic wording."""
-    f = _finding(_codex_cfg())
+    was: PASS, generic wording. (C-673: with a definite "no" harness reach -- on a build the
+    reach cannot be determined for, this shape is the disclosed WARN instead.)"""
+    cfg = _codex_cfg()
+    cfg["agents"] = {"defaults": {"model": "anthropic/claude-x"}}
+    f = _finding(cfg, installed=_VALIDATED)
     assert f.status == PASS
     assert "not enumerated here" in (f.detail or "")
 

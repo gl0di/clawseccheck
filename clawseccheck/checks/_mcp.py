@@ -4700,7 +4700,9 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
        used elsewhere), because "`plugins.allow`, `plugins.deny`, and `plugins.entries` ...
        are lowercase-normalized when config is normalized" per that function's own
        comment. A missing `plugins.entries.codex` block entirely does not by itself mean
-       "not installed" either -- see the harness-reach fallback below.
+       "not installed" either -- see the harness-reach fallback below: only a definite
+       "no" reach reads as "not installed"; an "unknown" one (every config on a build
+       outside the oracle window) stays "unknown" with a hedge saying so (C-673).
     2. The effective exec mode, PER AGENT (`_codex_effective_exec_modes`: global
        `tools.exec`, then each roster agent's own, with the mode derived from
        `security`/`ask` when `mode` is absent). "deny"/"allowlist" make the app-server
@@ -4719,6 +4721,7 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     """
     cfg = ctx.config if isinstance(ctx.config, dict) else {}
     codex_entry = _plugins(cfg).get("codex")
+    reach_hedge = ""
     if isinstance(codex_entry, dict):
         if codex_entry.get("enabled") is False:
             return "no", ["the Codex plugin is not installed/enabled "
@@ -4735,10 +4738,20 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
         # "no" is "not installed/enabled" a safe reading; a "yes" (or an "unknown" this
         # audit cannot rule out) gets the same treatment as an empty, all-implicit
         # `config.appServer: {}` (`_codex_appserver_posture`), never a confident "no".
-        if _harness_reach(ctx).answer != _harnessruntime.YES:
+        # C-673: the code used to test `!= YES` here, which folded `unknown` into "no" --
+        # and `codex_harness_reach` answers `unknown` for EVERY config on a build outside
+        # `ORACLE_MIN..ORACLE_MAX`, so each OpenClaw release made B353 PASS. The gates below
+        # (activation, exec mode) are stated facts and still answer "no" whatever the reach.
+        reach = _harness_reach(ctx)
+        if reach.answer == _harnessruntime.NO:
             return "no", ["the Codex plugin is not installed/enabled "
                           "(plugins.entries.codex)"], []
         codex_entry = {}
+        if reach.answer != _harnessruntime.YES:
+            reach_hedge = (
+                "there is no plugins.entries.codex block, and this audit cannot determine, on "
+                "this OpenClaw build, whether any agent runs the Codex app-server harness (" +
+                "; ".join(reach.reasons[:2]) + ")")
     plugins_cfg = cfg.get("plugins")
     blocked = (_plugin_activation_blocked(plugins_cfg, _CODEX_PLUGIN_ID)
                if isinstance(plugins_cfg, dict) else None)
@@ -4758,6 +4771,8 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     answer, reasons, hedges = _codex_appserver_posture(codex_entry)
     if answer == "no":
         return "no", reasons, []
+    if reach_hedge:
+        hedges.insert(0, reach_hedge)
     if closed:
         # B-831 round 2 (item 3, reviewed and left as-is): a mixed roster (e.g. one
         # agent's exec mode "full", another non-full) stays hedged to "unknown" here on
