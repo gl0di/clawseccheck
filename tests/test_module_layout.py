@@ -165,7 +165,8 @@ _EXEMPT = {
                           "schema-verification layer (~900 lines would remain, per "
                           "B-845's own analysis) — either narrows this file with no "
                           "import cycle.",
-    "checks/_config.py": "~8,600 lines (restated 2026-10-08, C-653 — was ~8,019, +7% "
+    "checks/_config.py": "~9,230 lines (restated 2026-10-11, C-681 — was ~8,600, +7% "
+                         "stale; earlier 2026-10-08, C-653 — was ~8,019, +7% "
                          "stale; earlier 2026-09-26, B397 — was ~6,986, +15% "
                          "stale; earlier 2026-09-21 for the 4.3.0 wave build — was "
                          "~6,302, +11% stale; earlier 2026-09-18, B382 — ~5,743) — the "
@@ -319,7 +320,7 @@ _EXEMPT = {
     # `_mcp.py` has owed since I-022 is still owed and is now the second-largest piece of
     # structural debt in the tree after `_content.py`; vet_plugin alone (the dispatcher,
     # its tree sweep and the plugin sweep) is a coherent unit that could leave.
-    "checks/_mcp.py": "~10,564 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
+    "checks/_mcp.py": "~11,150 lines (restated 2026-10-11, C-682 — was ~10,564, +6% stale) — the MCP / plugin checks + vet_mcp / vet_plugin; "
                       "topic-faithful and over budget by design. Restated 2026-10-05 "
                       "(C-632: vet_plugin dispatches a SKILL.md the manifest does not list "
                       "and discloses executable code beside a wrapper's node_modules, +~443 "
