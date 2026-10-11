@@ -1905,6 +1905,17 @@ python3 audit.py --log audit.log            # also write log to a local file
   execute bit is listed, and so is a script inside a dot-directory such as `.hg/` (only
   `.git/` is not walked). A host-generated wrapper (`node_modules/`, `package.json`,
   `package-lock.json`) is unchanged.
+  **Packages a `package.json` wires in are not read.** The vet opens exactly one
+  `package.json` per target: the one at the top of the directory you named (a plugin root's
+  own, or a wrapper's, beside its `node_modules/`). When that file declares `workspaces`, or a
+  dependency (`dependencies`, `devDependencies`, `optionalDependencies`, `peerDependencies`)
+  whose spec starts with `file:` or `link:`, npm can load packages from those local paths,
+  and an install script in one of them is never examined: the verdict is not lowered and the
+  answer can still be `INSTALL`. The report names the limit instead, as a line under "Not
+  assessed" (it does not change the verdict). That line is keyed on those two markers only; a
+  local package reached some other way (an `overrides` entry, a bare path or tarball spec, a
+  symlinked directory) is not recognised and gets no line. Read the nested `package.json`
+  files yourself before running `npm install` in a directory you have not written.
 - **`--vet-source SLUG|URL|PKG`** is the pre-download reputation gate: it judges a source's
   *identity* - `clawhub:<slug>`, `npm:<pkg>`, `pypi:<pkg>`, `git:host/owner/repo[@ref]`, or a
   URL - with zero network and nothing fetched. Exact match in the bundled known-compromised

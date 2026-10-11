@@ -300,7 +300,7 @@ _R_OWN_OUTPUT = "own output: round trip of the tool's own render_json/render_vet
 _RAW_DECODE_ALLOWLIST: dict = {
     ("clawseccheck/adjudication/_verdicts.py", "render_judged_json", "json.loads"):
         (1, _R_OWN_OUTPUT),
-    ("clawseccheck/checks/_mcp.py", "_wrapper_declares_lifecycle_script", "json.loads"):
+    ("clawseccheck/checks/_mcp.py", "_wrapper_read_package_json", "json.loads"):
         (1, "guarded: runs only when json_nesting_exceeds(text, SHALLOW_JSON_DEPTH) is false "
             "(deeper text goes to loads_shallow); the parse_int hook needs the plain parser"),
     ("clawseccheck/cli.py", "_main", "json.loads"):

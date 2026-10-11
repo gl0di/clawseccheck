@@ -531,6 +531,7 @@ class _WrapperScan:
     over_budget: bool = False  # the CPU budget ran out mid-walk
     pkg_unassessed: bool = False  # package.json exists but could not be judged
     unread: "list[tuple[str, str]]" = field(default_factory=list)  # C-654: pipes/devices not opened
+    local_pkgs: bool = False  # C-650: package.json wires in workspaces / file: packages (not read)
 
 
 def _json_int_unbounded(_digits: str) -> int:
@@ -542,6 +543,92 @@ def _json_int_unbounded(_digits: str) -> int:
     ``scripts`` must still be read; only the ``scripts`` keys matter here, never a number.
     """
     return 0
+
+
+_NO_DOC = object()  # _wrapper_read_package_json: "there is no JSON document to look at"
+
+
+def _wrapper_read_package_json(top: Path) -> "tuple[object, int, bool]":
+    """``(parsed value or _NO_DOC, subtrees elided, package.json could not be assessed)``.
+
+    The one reader of a wrapper's own ``package.json``. Its judgement rules - what is
+    "could not tell", what is inert - are documented on
+    :func:`_wrapper_declares_lifecycle_script`, the caller they were written for.
+    """
+    import json as _json  # noqa: PLC0415
+
+    pj = top / "package.json"
+    try:
+        st = os.stat(pj)
+    except OSError as exc:
+        return _NO_DOC, 0, exc.errno not in WALK_VANISHED_ERRNOS
+    if not _stat.S_ISREG(st.st_mode):
+        return _NO_DOC, 0, False
+    if st.st_size > _PLUGIN_JS_MAX_BYTES:
+        return _NO_DOC, 0, True
+    try:
+        text = pj.read_text(encoding="utf-8-sig", errors="replace")
+        if json_nesting_exceeds(text, SHALLOW_JSON_DEPTH):
+            # C-664: decided on the TEXT, so the answer is the same on every interpreter
+            # (whether json.loads would follow such a file is the interpreter's business).
+            # The shallow reader has no integer hook, so a huge integer in a file this deep
+            # is "could not tell".
+            shallow = loads_shallow(text)
+            loaded, elided = shallow.value, shallow.elided
+        else:
+            loaded, elided = _json.loads(text, parse_int=_json_int_unbounded), 0
+    except _json.JSONDecodeError:
+        return _NO_DOC, 0, False
+    except (RecursionError, MemoryError, OSError, ValueError, OverflowError):
+        return _NO_DOC, 0, True
+    return loaded, elided, False
+
+
+# C-650: a documented limit, not a reader. A package.json that the wrapper (or the plugin
+# root) pulls in through `workspaces` or a `file:` / `link:` dependency lives in a nested
+# directory, and its install-time script is never opened: this vet reads exactly one
+# package.json per target. The shipped fix is a disclosure only - an evidence-only note,
+# never a verdict. A reader was built and retracted: following the wired-in manifests means
+# modelling npm's workspace-glob and dependency-spec grammar by hand, and that list does
+# not close (a symlinked intermediate directory, `overrides`, `FILE:` / bare-path / tarball
+# specs, negated and character-class patterns, a pattern count that outruns the CPU budget);
+# each shape missed was a silent INSTALL, i.e. a false sense of coverage worse than the
+# stated limit. Pinned by tests/test_c650_wired_package_limit.py.
+_DEP_SECTIONS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
+_LOCAL_PKG_NOTE = (
+    "coverage: this package.json declares workspaces or a local file:/link: dependency; "
+    "npm can load packages from those paths, and this vet reads no package.json other "
+    "than the one at the top of the target, so an install script in a package it wires "
+    "in was not examined (the verdict does not account for it)"
+)
+
+
+def _declares_local_packages(pkg: object) -> bool:
+    """Whether a parsed package.json carries the two markers C-650 discloses.
+
+    ``workspaces`` with any non-empty value, or a dependency spec that starts with
+    ``file:`` / ``link:`` (any case, as npm reads the scheme). A marker test and nothing
+    more: a spec spelled some other way (a bare path, a tarball name, an ``overrides``
+    entry) is not recognised, and the docs say so.
+    """
+    if not isinstance(pkg, dict):
+        return False
+    if pkg.get("workspaces"):
+        return True
+    for section in _DEP_SECTIONS:
+        deps = pkg.get(section)
+        if isinstance(deps, dict) and any(
+            isinstance(v, str) and v.strip().lower().startswith(("file:", "link:"))
+            for v in deps.values()
+        ):
+            return True
+    return False
+
+
+def _wrapper_declares_local_packages(top: Path) -> bool:
+    """:func:`_declares_local_packages` for the ``package.json`` at the top of ``top``."""
+    loaded, _elided, _unassessed = _wrapper_read_package_json(top)
+    return loaded is not _NO_DOC and _declares_local_packages(loaded)
 
 
 def _wrapper_declares_lifecycle_script(top: Path) -> "tuple[bool, bool]":
@@ -561,32 +648,9 @@ def _wrapper_declares_lifecycle_script(top: Path) -> "tuple[bool, bool]":
     leading BOM (``utf-8-sig``) exactly as npm does; a plain ``utf-8`` read would fail to
     parse a BOM-prefixed file and quietly hide its scripts.
     """
-    import json as _json  # noqa: PLC0415
-
-    pj = top / "package.json"
-    try:
-        st = os.stat(pj)
-    except OSError as exc:
-        return False, exc.errno not in WALK_VANISHED_ERRNOS
-    if not _stat.S_ISREG(st.st_mode):
-        return False, False
-    if st.st_size > _PLUGIN_JS_MAX_BYTES:
-        return False, True
-    try:
-        text = pj.read_text(encoding="utf-8-sig", errors="replace")
-        if json_nesting_exceeds(text, SHALLOW_JSON_DEPTH):
-            # C-664: decided on the TEXT, so the answer is the same on every interpreter
-            # (whether json.loads would follow such a file is the interpreter's business).
-            # The shallow reader has no integer hook, so a huge integer in a file this deep
-            # is "could not tell".
-            shallow = loads_shallow(text)
-            loaded, elided = shallow.value, shallow.elided
-        else:
-            loaded, elided = _json.loads(text, parse_int=_json_int_unbounded), 0
-    except _json.JSONDecodeError:
-        return False, False
-    except (RecursionError, MemoryError, OSError, ValueError, OverflowError):
-        return False, True
+    loaded, elided, unassessed = _wrapper_read_package_json(top)
+    if loaded is _NO_DOC:
+        return False, unassessed
     scripts = loaded.get("scripts") if isinstance(loaded, dict) else None
     declares = isinstance(scripts, dict) and any(k in scripts for k in _WRAPPER_LIFECYCLE_KEYS)
     # npm reads `scripts` only at the top level, so a script buried below the bound is not
@@ -663,6 +727,7 @@ def _wrapper_top_level_scan(top: Path, deadline, skill_reads: bool = False) -> _
     declares, scan.pkg_unassessed = _wrapper_declares_lifecycle_script(top)
     if declares:
         scan.code.append("package.json")
+    scan.local_pkgs = _wrapper_declares_local_packages(top)
     return scan
 
 
@@ -1039,6 +1104,8 @@ def vet_plugin(
                 elided_docs.append("package.json")
         else:
             warns.append("unreadable/unparseable package.json \u2014 npm packaging not assessed")
+    if _declares_local_packages(pkg) and _LOCAL_PKG_NOTE not in notes:
+        notes.append(_LOCAL_PKG_NOTE)  # C-650: disclosure only, no verdict
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
     lifecycle = [k for k in ("preinstall", "install", "postinstall") if k in scripts]
     if lifecycle:
@@ -1279,6 +1346,8 @@ def vet_plugin(
             wrapper_code = _wscan.code
             budget_hit = budget_hit or _wscan.over_budget
             wrapper_findings = _wrapper_coverage_findings(p, _wscan, p in colocated_vetted)
+            if _wscan.local_pkgs and _LOCAL_PKG_NOTE not in notes:
+                notes.append(_LOCAL_PKG_NOTE)  # C-650: disclosure only, no verdict
             if _wscan.unread:  # C-654: same disclosure as the tree sweep's
                 wrapper_findings.append(_nonregular_gap_finding(
                     _wscan.unread[:3], len(_wscan.unread),
