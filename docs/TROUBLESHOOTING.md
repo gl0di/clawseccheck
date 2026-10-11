@@ -1,9 +1,10 @@
 # ClawSecCheck - Troubleshooting
 
 This page is for when **ClawSecCheck itself** is the problem - the command isn't found,
-it crashes, OpenClaw never picks it up, or a scan hangs. If instead you're looking at a
-grade, a finding, or output you don't understand, that's a question about *your audited
-setup*, not the engine - see [FAQ.md](FAQ.md) instead.
+it crashes, OpenClaw never picks it up, a scan hangs, or a scan says a file could not be
+read in full. If instead you're looking at a grade, a finding, or output you don't
+understand, that's a question about *your audited setup*, not the engine - see
+[FAQ.md](FAQ.md) instead.
 
 ---
 
@@ -125,6 +126,23 @@ mechanism** - the fix is to re-run narrower:
 
 If a *plain* audit (no flags) still hits its budget, that's unusual enough to be worth
 reporting - see "Filing a good bug report" below, and include `--debug` output.
+
+## UNKNOWN or CAUTION says a file could not be read in full
+
+An audit answers `UNKNOWN`, or a `--vet` answers `CAUTION` (never a clean `INSTALL`), and
+the advice text says a manifest or other file was not read in full. Two causes:
+
+- The file is not a regular file - for example a named pipe, a dangling link or a device
+  where `openclaw.plugin.json` should be. The file is refused or read through a size cap, so
+  nothing hangs; what is bundled beside it is still scanned.
+- The JSON is nested deeper than the reader follows. The part that was read is judged as
+  usual, and a problem found there still counts, but a clean result is not given for the
+  part that was not read.
+
+What to do: open the file named in the advice text and look at it. ClawSecCheck only reads
+it and changes nothing. If it is a pipe, a device or padded with nesting you did not write,
+treat the plugin or skill as suspect and remove or replace the file; once it is an ordinary
+file with sensible nesting, re-run to get a verdict.
 
 ## Where the diagnostics live
 

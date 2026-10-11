@@ -492,7 +492,7 @@ entries as a `Coverage note` and still exits 0 - the digest itself is complete -
 **Residuals, stated plainly:** a modified `audit.py` is only caught by the per-file compare
 above; a file dropped in the instant after the scan and before the import cannot be ruled
 out; a non-importable file is not covered by this scan (use the `ls -A` compare); and
-running Python with `-S` on 3.9 or 3.10 is outside what the guard can defend, because you
+running Python with `-S` on 3.10 is outside what the guard can defend, because you
 choose the interpreter's flags.
 
 **What the digest covers, and when the command exits non-zero.** The walk hashes every file
@@ -2283,6 +2283,10 @@ hard false positives on real configs.
   and credential-store *contents* are never read. `collector.py`'s `LIMIT_DOMAIN_*` constants
   name the collector's own read domains in full; the socket scan and the dependency-tree walk
   sit outside them, in the separate read-only modules `sockets.py` and `deptree.py`.
+  JSON nested deeper than the reader follows (200 levels for state files; 64 levels for
+  scanned third-party documents, tool-call lines and the cron job store) is read as
+  damaged or only partly. The check that depends on it answers UNKNOWN or CAUTION instead of
+  a clean result, and the run's notes list what was not read in full.
 - **UNKNOWN is not PASS.** Unreadable files or unparseable configs are reported as
   UNKNOWN and excluded from the score, never silently marked safe.
 - **Vetting the scanner itself** (`--vet`, `--vet-skill` or `--advise` pointed at a folder that
