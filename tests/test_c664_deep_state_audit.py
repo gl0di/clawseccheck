@@ -468,7 +468,7 @@ def _stack_to_64_mib():
 def _cli_findings(home: Path, data_dir: Path, *, big_stack: bool) -> dict:
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(home), "--json",
-         "--no-history", "--data-dir", str(data_dir)],
+         "--no-history", "--data-dir", str(data_dir), "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=300,
         preexec_fn=_stack_to_64_mib if big_stack else None,
     )

@@ -339,7 +339,8 @@ def test_plain_audit_does_not_lose_b152_to_the_check_timeout(tmp_path):
     cfg = home / "openclaw.json"
     cfg.write_text("{}", encoding="utf-8")
     cfg.chmod(0o600)
-    cp = _run(["-m", "clawseccheck", "--home", str(home), "--no-history", "--json"], timeout=300)
+    cp = _run(["-m", "clawseccheck", "--home", str(home), "--no-history", "--json",
+               "--no-deptree", "--no-host"], timeout=300)
     data = json.loads(cp.stdout)
     findings = data["findings"] if isinstance(data, dict) else data
     b152 = [f for f in findings if f.get("id") == "B152"]
@@ -623,7 +624,7 @@ def test_cli_benign_docs_quoting_an_injection_are_caution_not_do_not_install(tmp
     w = tmp_path / "wrapper"
     _bundle(w, shape, content="docs")
     for mode in ("--vet-plugin", "--vet"):
-        cp = _run(["-m", "clawseccheck", mode, str(w), "--no-history"])
+        cp = _run(["-m", "clawseccheck", mode, str(w), "--no-history", "--no-deptree", "--no-host"])
         head = cp.stdout.splitlines()[0] if cp.stdout else ""
         assert "CAUTION" in head and "DO-NOT-INSTALL" not in head, (mode, cp.stdout[:400])
 

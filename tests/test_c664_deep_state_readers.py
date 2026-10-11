@@ -98,7 +98,7 @@ def _brief(tmp_path, state_text, stack: int = _STACK):
     return _run_cli(["--brief", "--state", str(state),
                      "--events", str(tmp_path / "no-events.jsonl"),
                      "--history", str(tmp_path / "no-history.jsonl"),
-                     "--home", str(tmp_path)], tmp_path, stack)
+                     "--home", str(tmp_path), "--no-deptree", "--no-host"], tmp_path, stack)
 
 
 # 8 MiB is the default stack (a 100,000-level parse overflows it); 64 MiB is a CI runner's.

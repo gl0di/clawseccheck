@@ -630,9 +630,9 @@ def _mutate(rng: random.Random, text: str, rate: float) -> str:
     return text[:at] + rng.choice(_MUTATIONS) + text[at + 1:]
 
 
-def _outcome(call):
+def _outcome(read):
     try:
-        return "ok", call()
+        return "ok", read()
     except ValueError:
         return "error", None
 

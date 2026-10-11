@@ -1033,7 +1033,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_f150_plugin_sweep.py:82": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
     "tests/test_f153_dashboard_full.py:351": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
     # C-654: the plugin-vet FIFO tests build the same retired-table home as test_f150_plugin_sweep.
-    "tests/test_c654_plugin_tree_fifo.py:605": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
+    "tests/test_c654_plugin_tree_fifo.py:620": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
 
     # ---- config_machine_state (F-183) ----
     "tests/test_b177_installed_index_shapes.py:55": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
