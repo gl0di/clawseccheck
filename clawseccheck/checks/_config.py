@@ -2217,7 +2217,8 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
         "hand. " + (
             # C-645: 2026.9.7 dropped the startup repair, so nothing fixes the file behind
             # the user's back any more; the $include caveat is now about Doctor's own
-            # automatic preflight repair (`admitAutomaticConfigRepairSnapshot`).
+            # automatic preflight repair (`canPlanAutomaticConfigRepair` from 2026.10.1,
+            # `admitAutomaticConfigRepairSnapshot` before).
             "OpenClaw 2026.9.7 and later does not repair a legacy config at startup "
             "(only Doctor does), so a restart will not fix the file. Doctor's automatic "
             "preflight repair may decline a config that uses $include, so run the "

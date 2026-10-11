@@ -2041,7 +2041,9 @@ _RETIRED_CONFIG_KEYS = {
 # docs/gateway/doctor/config-migrations.md ("run Doctor before using legacy inputs"), NOT
 # executed end to end (no gateway was started against a legacy file). What still
 # exists is Doctor's own preflight repair (`planAutomaticConfigRepair`), which declines a
-# config that uses $include (`admitAutomaticConfigRepairSnapshot`, body unchanged).
+# config that uses $include (`canPlanAutomaticConfigRepair`, called
+# `admitAutomaticConfigRepairSnapshot` through 2026.9.9; the include clauses are unchanged,
+# the gate gained two others in 2026.10.1).
 _STARTUP_REPAIR_REMOVED_MIN = (2026, 9, 7)
 
 
@@ -2160,7 +2162,8 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
       actually makes, and it is untouched by the file's shape either way.
     * There WAS a real, reproduced ``$include`` asymmetry on builds through 2026.9.6, at a
       layer B382 explicitly disclaims: OpenClaw's own silent STARTUP self-heal. On those
-      builds `admitAutomaticConfigRepairSnapshot` (then `automatic-startup-config-repair-*.mjs`)
+      builds `admitAutomaticConfigRepairSnapshot` (then `automatic-startup-config-repair-*.mjs`;
+      the name survived to 2026.9.9)
       -- wired into the real `gateway run` bootstrap path (`pre-bootstrap-*.mjs`) via
       `resolveStartupConfigSnapshot` -- refused to engage whenever
       `containsConfigIncludeDirective(snapshot.parsed)` was true or any include was actually
@@ -2173,8 +2176,9 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
       ``_STARTUP_REPAIR_REMOVED_MIN``). Startup no longer repairs legacy keys for any
       config, ``$include`` or not; the only repair left is Doctor's own preflight
       (`planAutomaticConfigRepair`, called from `doctor-config-flow-*.mjs`), which still
-      declines a config that uses ``$include`` (`admitAutomaticConfigRepairSnapshot`, same
-      body, now in `automatic-config-repair-*.mjs`). So on 2026.9.7 and later the `fix` text
+      declines a config that uses ``$include`` (`admitAutomaticConfigRepairSnapshot` through
+      2026.9.9, `canPlanAutomaticConfigRepair` from 2026.10.1; the include clauses are the
+      same, now in `automatic-config-repair-*.mjs`). So on 2026.9.7 and later the `fix` text
       says that startup does not repair a legacy file (only Doctor does, so a restart will
       not fix it), and keeps an ``$include`` caveat scoped to Doctor's automatic repair. Both remain facts about the GATEWAY/Doctor, which
       B382's own docstring disclaims making any claim about, so neither changes a verdict
@@ -4410,7 +4414,7 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
 # stay `ask`) - this is `_layer_exec_policy` below's whole reason for being a small,
 # self-contained port rather than a "merge the two dicts" shortcut.
 #
-# `resolveExecPolicyForMode` (`exec-approvals-core-GflUelcW.mjs`) is unchanged from the
+# `resolveExecPolicyForMode` (`exec-approvals-core-s7tTQC_a.mjs`, 2026.10.1) is unchanged from the
 # closed 5-row table already cited on `_has_approval_gate` above.
 _EXEC_MODE_SECURITY_ASK = {
     "deny": ("deny", "off"),

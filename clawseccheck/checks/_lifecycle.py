@@ -5726,8 +5726,8 @@ def _b396_js_truthy(v) -> bool:
 
 
 def _b396_role_list(v) -> list:
-    """`normalizeUniqueSingleOrTrimmedStringList` (string-normalization-YMwDjufr.mjs:
-    74-82): a list keeps only its non-blank, JS-trimmed string items; a bare non-blank
+    """`normalizeUniqueSingleOrTrimmedStringList` (string-normalization-CECOqf64.mjs:
+    74-82, grounded against 2026.10.1): a list keeps only its non-blank, JS-trimmed string items; a bare non-blank
     string becomes a one-item list; anything else is empty."""
     if isinstance(v, list):
         return [s.strip(_JS_TRIM_CHARS) for s in v if isinstance(s, str) and s.strip(_JS_TRIM_CHARS)]

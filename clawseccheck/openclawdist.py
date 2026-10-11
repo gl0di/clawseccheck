@@ -384,7 +384,16 @@ def self_reported_version(config: "dict | None") -> str:
 # 773-row harness battery re-ran on the installed build with no moved answer, and no new
 # advisory was published. The pass widened the harness oracle to 9.9 and regenerated the
 # schema, state, channel and citation snapshots.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 9)
+# Raised to 2026.10.1 on 2026-10-11: the 167 dist-verified paths are all still accepted by the
+# installed build, the DM-policy manifest moved no channel shape (its version stamp, bundle
+# name and total path count 5,408 -> 5,430 only), the 773-row harness battery re-ran with no
+# moved answer and the oracle window was widened to 10.1, and three citations whose bundle
+# names rotated were re-read in the new bundles and still hold. The vendor renamed the
+# automatic-repair gate `admitAutomaticConfigRepairSnapshot` -> `canPlanAutomaticConfigRepair`;
+# its two $include clauses are unchanged, and it gained two others (it declines a config with
+# a retired-format upgrade requirement and now also admits a VALID snapshot that carries a
+# legacy Talk voice-call inheritance rule issue); nothing in this repo models either.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 1)
 
 
 def grounding_gap(installed_version: "str | None"):

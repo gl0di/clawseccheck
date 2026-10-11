@@ -4795,8 +4795,8 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
        `"codex"` in `plugins.deny`, `entries.codex.enabled: false`, or a non-empty
        `plugins.allow` without `"codex"` each deactivate the plugin. `deny`/`allow`/
        `entries` are matched case-insensitively (B-831 round 2): the real gate compares
-       through `normalizePluginPolicyId` (`plugin-policy-id-BaT4nwBS.mjs:10-12`, trim +
-       lowercase, no alias table -- that is a DIFFERENT normalizer, `normalizePluginId`,
+       through `normalizePluginPolicyId` (`plugin-policy-id-1GfPFu0U.mjs:10-12` as of 2026.10.1,
+       trim + lowercase, no alias table -- that is a DIFFERENT normalizer, `normalizePluginId`,
        used elsewhere), because "`plugins.allow`, `plugins.deny`, and `plugins.entries` ...
        are lowercase-normalized when config is normalized" per that function's own
        comment. A missing `plugins.entries.codex` block entirely does not by itself mean
@@ -7995,13 +7995,13 @@ def _plugin_activation_blocked(plugins: dict, plugin_id: str) -> "str | None":
 
     B-831 round 2: the comparison on all three of ``deny``/``entries``/``allow`` is now
     case-insensitive (trimmed + lowercased), matching the real
-    ``normalizePluginPolicyId`` (``plugin-policy-id-BaT4nwBS.mjs:10-12``) that
+    ``normalizePluginPolicyId`` (``plugin-policy-id-1GfPFu0U.mjs:10-12``, 2026.10.1) that
     ``resolvePluginActivationDecisionShared`` actually compares *plugin_id* against -
     verbatim: "Canonicalizes a plugin id for comparison against ``plugins.allow``,
     ``plugins.deny``, and ``plugins.entries``, which are lowercase-normalized when config
     is normalized." This is deliberately a PLAIN case fold, not
     ``_normalize_plugin_id``'s alias table (``google-gemini-cli`` -> ``google``,
-    ``config-state-BxYVV2MR.mjs:19-22``'s ``normalizePluginId``) -- that is a different
+    ``config-state-CIAkTpZu.mjs:19-23``'s ``normalizePluginId``, 2026.10.1) -- that is a different
     function for a different comparison (the B342 allow/deny CONTRADICTION check), and
     replicating its alias table here would be fabricating a codex/memory-core alias that
     does not exist. A case-only variant of a NON-alias id (``Memory-Core`` vs

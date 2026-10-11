@@ -544,11 +544,14 @@ def test_retired_key_as_an_include_sibling_still_warns(tmp_path):
 #                                    startup-config-preflight-gKbH1nbB.mjs:57,96);
 #   * Doctor is the repair path   -> `doctor-config-flow` imports it and plans, then commits,
 #                                    the repair (doctor-config-flow-DJTyZM_K.mjs:73,834);
-#   * the $include gate survives  -> `admitAutomaticConfigRepairSnapshot`
-#                                    (automatic-config-repair-BKjdV4pT.mjs:22-24) still
-#                                    declines on an include, and `planConfigRepair` (:36)
-#                                    still asks it. That is now Doctor's automatic-repair leg
-#                                    only, which is what the fix text's hedge can still mean;
+#   * the $include gate survives  -> the gate (`admitAutomaticConfigRepairSnapshot` through
+#                                    2026.9.9, automatic-config-repair-BKjdV4pT.mjs:22-24;
+#                                    renamed `canPlanAutomaticConfigRepair` in 2026.10.1,
+#                                    automatic-config-repair-mpgxrwwh.mjs:18-20) still
+#                                    declines on an include, and `planConfigRepair` (:32 as
+#                                    of 2026.10.1) still asks it. That is now Doctor's
+#                                    automatic-repair leg only, which is what the fix text's
+#                                    hedge can still mean;
 #   * the constant tracks the     -> `_STARTUP_REPAIR_REMOVED_MIN` is what makes B382's `fix`
 #     vendor                         build-aware, so `test_startup_wiring_matches_the_removal_
 #                                    constant` asks the installed dist in BOTH directions
@@ -562,10 +565,11 @@ def test_retired_key_as_an_include_sibling_still_warns(tmp_path):
 
 _REPAIR_MODULE = "automatic-config-repair-*.mjs"
 _STARTUP_REPAIR_SYMBOLS = ("resolveStartupConfigSnapshot", "isStartupConfigRepairResult")
-#: Not a startup-repair symbol: one the repair module still declares (2026.9.6 and 9.7
-#: alike), used as the scan's positive control -- a scan that finds nothing for ANY name
-#: proves nothing about these two.
-_CONTROL_SYMBOL = "admitAutomaticConfigRepairSnapshot"
+#: Not a startup-repair symbol: one the repair module still declares, used as the scan's
+#: positive control -- a scan that finds nothing for ANY name proves nothing about these two.
+#: It was `admitAutomaticConfigRepairSnapshot` through 2026.9.9 and is
+#: `canPlanAutomaticConfigRepair` from 2026.10.1 (renamed; the include clauses are unchanged).
+_CONTROL_SYMBOL = "canPlanAutomaticConfigRepair"
 _REPAIR_CONSUMER_RE = re.compile(rb'from "\./(automatic-config-repair-[A-Za-z0-9_-]+)\.mjs"')
 
 
@@ -670,18 +674,18 @@ def test_automatic_repair_gate_still_declines_on_include_present():
     require_dist()
     path = dist_file(
         _REPAIR_MODULE,
-        symbol="admitAutomaticConfigRepairSnapshot",
-        contains="function admitAutomaticConfigRepairSnapshot(",
+        symbol="canPlanAutomaticConfigRepair",
+        contains="function canPlanAutomaticConfigRepair(",
     )
     text = path.read_text(encoding="utf-8", errors="replace")
-    gate = re.search(r"function admitAutomaticConfigRepairSnapshot\(snapshot\) \{(.*?)\n\}", text, re.S)
+    gate = re.search(r"function canPlanAutomaticConfigRepair\(snapshot\) \{(.*?)\n\}", text, re.S)
     assert gate, f"{path.name}: the gate's declaration moved"
     body = gate.group(1)
     assert "(snapshot.includedPaths?.length ?? 0) === 0" in body
     assert "!containsConfigIncludeDirective(snapshot.parsed)" in body
     # ...and the planner still asks it before doing anything
     assert re.search(
-        r"function planConfigRepair\(.*?\) \{\s*if \(!admitAutomaticConfigRepairSnapshot\(snapshot\)\) return null;",
+        r"function planConfigRepair\(.*?\) \{\s*if \(!canPlanAutomaticConfigRepair\(snapshot\)\) return null;",
         text, re.S), f"{path.name}: planConfigRepair no longer gates on the include check"
 
 

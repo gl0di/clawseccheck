@@ -169,8 +169,16 @@ from .collector import agent_roster
 #: same labels, configs and envs, the same 22 thrown-error rows, and the vendor's answer
 #: identical on every row -- only its ``build`` stamp moved. The chain is now 9.5 = 9.6 = 9.7
 #: = 9.8 = 9.9, measured row by row, and the floor stays where it is.
+#:
+#: The ceiling moved to 2026.10.1 on 2026-10-11. The battery was regenerated against the
+#: installed 2026.10.1 and compared with the 2026.9.9 one: 773 rows each,
+#: the same labels, configs and envs, the same 22 thrown-error rows, and the vendor's answer
+#: identical on every row -- only its ``build`` stamp moved. The chain is now 9.5 = 9.6 = 9.7
+#: = 9.8 = 9.9 = 10.1, and the floor stays where it is: raising it would turn every 9.5-9.9
+#: install into ``unknown`` with no divergence to justify it, and ``unknown`` is the one
+#: answer ``_codex_appserver_yolo_reach`` reads as "Codex plugin not installed" (C-673).
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 9, 9)
+ORACLE_MAX = (2026, 10, 1)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 
