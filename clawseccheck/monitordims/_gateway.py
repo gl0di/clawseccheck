@@ -14,10 +14,24 @@ from ._shared import (  # noqa: F401
 
 
 def _diff_gateway_bind_moved(_cgb, _pgb, alerts, compare_config) -> None:
-    """The gateway moved from a local bind to one the network can reach."""
+    """The gateway moved from a local bind to one the network can reach.
+
+    C-681: a whole-value templated bind (``${VAR}`` / ``${VAR:-default}``) used to be stored
+    as ``parse_bind_host`` of the template text - lowercased and cut at a colon, e.g.
+    ``${gw_bind`` - and is now stored as written (`_gateway_bind`). Against an older baseline
+    that is a re-spelling and must not alert once, so a previous value equal to the old
+    function's output for THIS template is skipped. That old record is lossy: it cannot tell
+    two templates apart when they differ only in what the old function dropped (the
+    ``:-default`` after the variable name), so such a change is not reported on that one
+    run; every run after it compares the full text. A different variable, a template that
+    became a literal and a literal that became a template still alert.
+    """
     if (compare_config and isinstance(_pgb, str) and isinstance(_cgb, str)
             and _pgb != _cgb):
-        from ..checks import EXPOSED_BINDS  # noqa: PLC0415
+        from ..checks import EXPOSED_BINDS, parse_bind_host  # noqa: PLC0415
+        from ..checks._shared import _BIND_TEMPLATE_RE, _js_trim  # noqa: PLC0415
+        if _BIND_TEMPLATE_RE.fullmatch(_js_trim(_cgb)) and parse_bind_host(_cgb) == _pgb:
+            return
         cb = _cgb
         exposed = cb in EXPOSED_BINDS
         alerts.append(("CRITICAL" if exposed else "HIGH",
@@ -43,7 +57,23 @@ def _note_gateway_bind_unreadable(_cgb, _pgb, compare_config, note, prev) -> Non
 
 
 def _gateway_bind(ctx) -> str:
+    """The bind the snapshot records: the host of a literal bind, lowercased as always.
+
+    C-681: a WHOLE-VALUE ``${VAR}`` / ``${VAR:-default}`` bind is recorded as WRITTEN
+    (trimmed, original case, whole value), never through ``parse_bind_host`` - which
+    lowercased it and cut it at a colon (``${gw_bind``), so the monitor compared garbled
+    text. The value the variable stands for is deliberately NOT resolved here
+    (``_effective_gateway_bind``): that answer depends on which unit and dotenv files this
+    particular run could read, so a baseline taken on one run would differ from the next for
+    reasons that are not a change of the config. The template text is stable. A template
+    EMBEDDED in a literal host (``0.0.0.0:${GW_PORT}``) is recorded exactly as before: its
+    visible host part (``0.0.0.0``) is what `_diff_gateway_bind_moved` tests for exposure,
+    and recording the whole text would turn a CRITICAL "now exposed" into a plain change.
+    """
     from ..checks import parse_bind_host  # noqa: PLC0415
+    from ..checks._shared import _BIND_TEMPLATE_RE, _js_trim  # noqa: PLC0415
     from ..collector import dig  # noqa: PLC0415
-    return parse_bind_host(dig(ctx.config, "gateway.bind")
-                           or dig(ctx.config, "gateway.host") or "")
+    raw = dig(ctx.config, "gateway.bind") or dig(ctx.config, "gateway.host") or ""
+    if isinstance(raw, str) and _BIND_TEMPLATE_RE.fullmatch(_js_trim(raw)):
+        return _js_trim(raw)
+    return parse_bind_host(raw)

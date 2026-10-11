@@ -2003,6 +2003,7 @@ def _credential_surface_map(ctx) -> list[dict]:
     NOT a credential reader.
     """
     from .checks import SECRET_KEY_RE, _mcp_servers  # noqa: PLC0415
+    from .checks._config import _gateway_token_configured  # noqa: PLC0415
     from .collector import WORKSPACE_DIRS, dig  # noqa: PLC0415
 
     cfg = getattr(ctx, "config", {}) or {}
@@ -2164,7 +2165,9 @@ def _credential_surface_map(ctx) -> list[dict]:
     cloud_hits: list[str] = []
     if providers:
         cloud_hits.append(_summarize(sorted(providers), "auth.profiles providers"))
-    if dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token"):
+    # C-681: the same "is a credential configured" reading B2 and B41 use - not bare
+    # truthiness, which counted a malformed object, a list or a bool as a token.
+    if _gateway_token_configured(cfg, ctx):
         cloud_hits.append("gateway token present")
     entries.append({"class": "cloud", "reachable": bool(cloud_hits), "evidence": cloud_hits})
 

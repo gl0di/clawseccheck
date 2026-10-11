@@ -60,6 +60,14 @@ from .checks import (
     _sandbox_has_writable_bind,
     SENSITIVE_TOOL_HINTS,
 )
+from .checks._shared import (  # C-681
+    _BIND_TEMPLATE_RE,
+    _cfg_with_bind,
+    _effective_gateway_bind,
+    _is_bind_template,
+    _js_trim,
+    parse_bind_host,
+)
 from .collector import Context, agent_roster, dig
 from .scanbudget import limits_for
 # B-483: `_asciify` was a SECOND, narrower copy of report.py's table (no ·, ×,
@@ -1967,7 +1975,27 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
     arms = [label for kind, label in _R20_ARMS.items() if kind in kinds]
     if not arms:
         return None
-    exposure = _gateway_remote_exposure_reason(cfg)
+    # C-681 (C-653 b): a WHOLE-VALUE templated ``gateway.bind`` (``${VAR}`` /
+    # ``${VAR:-default}`` and nothing else) is resolved by the one shared rule - the value the
+    # audit can SEE for the variable, else a non-loopback ``:-default`` - and then read
+    # exactly as the literal it stands for. Where it cannot be resolved the bind is unknown,
+    # and this module's rule is that UNKNOWN inputs yield no chain (the same stance as
+    # ``bind=auto``): the template text is never read as proof of remote exposure. The
+    # tailscale serve/funnel leg does not depend on the bind and still applies, so the bind
+    # is neutralised to ``auto`` (no bind-derived claim) rather than the whole check skipped.
+    # A template EMBEDDED in a literal host (``0.0.0.0:${GW_PORT}``, ``lan${X}``) keeps the
+    # earlier reading - its literal host part is visible and is not made unknown by the
+    # variable - so it chains with its own text as the label; one whose host part is itself a
+    # variable (``${A}${B}``, ``${A}:8080``, bare ``$A``) is undecidable and yields no chain.
+    raw_bind = dig(cfg, "gateway.bind", "")
+    bind_cfg = cfg  # a literal bind, or an embedded template: read untouched, as before
+    if isinstance(raw_bind, str) and _is_bind_template(raw_bind):
+        if _BIND_TEMPLATE_RE.fullmatch(_js_trim(raw_bind)):
+            bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, raw_bind)
+            bind_cfg = _cfg_with_bind(cfg, "auto" if bind_unres else bind_raw)
+        elif parse_bind_host(raw_bind).startswith("$"):
+            bind_cfg = _cfg_with_bind(cfg, "auto")
+    exposure = _gateway_remote_exposure_reason(bind_cfg)
     if exposure is None:
         return None
 

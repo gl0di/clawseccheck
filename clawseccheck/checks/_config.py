@@ -1805,6 +1805,20 @@ def _gateway_config_token(cfg: dict, auth_mode, ctx=None) -> "tuple[str | None, 
     return token, strong
 
 
+def _gateway_token_configured(cfg: dict, ctx=None) -> bool:
+    """C-681: is a gateway credential configured in the config, by the SAME reading B2 and
+    B80 give it? ``_gateway_config_token``'s answer with no ``auth.mode`` in play (that
+    argument only withholds the token from the mode-derivation caller; the credential is
+    there either way). A well-formed string, ``${ID}`` reference or SecretRef object counts;
+    a malformed object, a list, a number, a bool, an empty or whitespace string, and any
+    non-string at the legacy ``gateway.token`` key do not. The inventory readers (B41, the
+    credential surface map) used a bare truthiness test and disagreed with B2 on exactly
+    those shapes. *ctx* may be a partial stub: it is consulted only for the ``${ID:-}``
+    build gate.
+    """
+    return _gateway_config_token(cfg, None, ctx)[0] is not None
+
+
 def check_credential_blast_radius(ctx: Context) -> Finding:
     """B41 - Credential blast-radius assessment.
 
@@ -1832,7 +1846,9 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
 
     # --- inventory credential surface ---
     profiles = dig(cfg, "auth.profiles") or {}
-    has_gateway_token = bool(dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token"))
+    # C-681: B2's own reading of "a gateway credential is configured" (a malformed object, a
+    # list, a bool or a blank string is none), not bare truthiness.
+    has_gateway_token = _gateway_token_configured(cfg, ctx)
     # B-290 (ENV-4): the gateway credential does not have to be in the config at all.
     # resolveGatewayCredentialsFromValues (credentials-DesN22Ui.js:32-33) reads
     # OPENCLAW_GATEWAY_TOKEN / OPENCLAW_GATEWAY_PASSWORD straight from the environment, so
