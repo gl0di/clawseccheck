@@ -54,6 +54,7 @@ from ._content import (
     _secrecy_credential_or_encoding_anchor,
 )
 from ._shared import (
+    _RETIRED_CONFIG_KEYS,
     _b323_contains_env_var_reference,
     _B55_FS_WRITE_TOOLS,
     _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 - re-exported (moved to _shared, B-666)
@@ -2089,8 +2090,14 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
         return _finding(
             "B382",
             PASS,
-            f"The file audited holds no key that OpenClaw {installed} removed.",
-            "No action needed.",
+            # C-671: say what was checked. The table lists the retired keys that were
+            # measured, not every key the vendor ever removed, so "holds no removed key"
+            # would read as a completeness claim this check cannot make.
+            f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS)} retired config "
+            "keys this check tracks.",
+            "No action needed. The list covers only the retired keys that were measured, "
+            "not every key OpenClaw has removed; `openclaw config validate` is the full "
+            "test of the file against the installed build.",
         )
     notes = [f"{key} ({'replaced by ' + repl if repl else 'removed'})" for key, repl in found]
     shown = "; ".join(notes[:6])

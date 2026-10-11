@@ -363,7 +363,8 @@ def test_wildcard_rows_have_exactly_one_whole_segment_star():
     """Tripwire for the table's own shape: the expander is only ever validated against a
     single whole-segment ``*``, so a row with a partial or a second star is a question."""
     starred = [k for k in _RETIRED_CONFIG_KEYS if "*" in k]
-    assert starred == ["surfaces.*.silentReply.internal"]
+    assert starred == ["surfaces.*.silentReply.internal", "surfaces.*.silentReply.direct",
+                       "surfaces.*.silentReplyRewrite"]
     for key in starred:
         parts = key.split(".")
         assert parts.count("*") == 1
@@ -721,12 +722,18 @@ def test_package_table_is_the_b700_tables_plus_the_measured_later_keys():
         "browser.ssrfPolicy.hostnameAllowlist": "browser.ssrfPolicy.allowedHostnames"}
     # C-645: 2026.9.7 dropped `tools.toolSearch.codeTimeoutMs` ("Tool Search no longer
     # executes code"); removed outright, no replacement key.
-    assert by_min[(2026, 9, 7)] == {"tools.toolSearch.codeTimeoutMs": None}
+    # C-671: plus four silent-reply rows carrying 2026.9.7 as a measured FLOOR (the earliest
+    # build executed and found rejecting them; the removal build is unmeasured).
+    assert by_min[(2026, 9, 7)] == {"tools.toolSearch.codeTimeoutMs": None,
+                                    "agents.defaults.silentReply.direct": None,
+                                    "surfaces.*.silentReply.direct": None,
+                                    "agents.defaults.silentReplyRewrite": None,
+                                    "surfaces.*.silentReplyRewrite": None}
     # 2026.9.8 dropped `silentReply.internal` from the agent defaults and from every surface's
     # block (the surface name is free-form, hence the `*`); removed outright, no replacement.
     assert by_min[(2026, 9, 8)] == {"agents.defaults.silentReply.internal": None,
                                     "surfaces.*.silentReply.internal": None}
-    assert len(_RETIRED_CONFIG_KEYS) == 16
+    assert len(_RETIRED_CONFIG_KEYS) == 20
     assert "marketplaces" not in _RETIRED_CONFIG_KEYS
     # only the KEY is listed: `tools.toolSearch.mode: "code"` is a retired VALUE, which a key
     # table cannot express, and the live sibling `enabled` must never be in it

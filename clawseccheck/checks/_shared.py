@@ -1973,6 +1973,21 @@ def _portal_model_version(ctx) -> str:
 # B382 stays silent about it. The `channels.*.webhook*` paths that left the generated schema
 # in 2026.9.7 are not table material: the root schema still ACCEPTS them, and a bogus key
 # beside them too (that parent passes unknown keys through at this level).
+#
+# C-671 (2026-10-11): the four rows `agents.defaults.silentReply.direct`,
+# `surfaces.*.silentReply.direct`, `agents.defaults.silentReplyRewrite` and
+# `surfaces.*.silentReplyRewrite` carry the build 2026.9.7 as a FLOOR, not the removal build:
+# it is the EARLIEST build whose root schema was EXECUTED and rejected each of them (a valid
+# value, a live sibling `silentReply.group` / `workspace` accepted, a bogus sibling rejected,
+# and a free-form surface name accepted, on the extracted 2026.9.7 release package and on the
+# installed 2026.9.9; probed with an object and with a scalar so the verdict is the key, not
+# its value type). The four paths are in no saved generated-schema path list back to
+# 2026.7.1-2, so the build that actually removed them is older and unmeasured: on a build
+# between that unknown build and 2026.9.6 B382 stays silent about them, which is the safe
+# direction (quiet, never a false WARN). Owner ruling 2026-10-11; 2026.9.8 itself was not
+# re-executed for these four. Because the table follows measurements and not the vendor's
+# own retired-path lists (three lists, 111 paths counted on 2026.8.1), a PASS says only that
+# none of the keys in this table is present, and its text says exactly that.
 _RETIRED_CONFIG_KEYS = {
     "audit.enabled": ("logging.audit.enabled", (2026, 8, 1)),
     "gateway.nodes.allowCommands": ("gateway.nodes.commands.allow", (2026, 8, 1)),
@@ -1991,6 +2006,11 @@ _RETIRED_CONFIG_KEYS = {
     "tools.toolSearch.codeTimeoutMs": (None, (2026, 9, 7)),
     "agents.defaults.silentReply.internal": (None, (2026, 9, 8)),
     "surfaces.*.silentReply.internal": (None, (2026, 9, 8)),
+    # C-671: the build is a measured FLOOR (see the comment above the table), not the removal.
+    "agents.defaults.silentReply.direct": (None, (2026, 9, 7)),
+    "surfaces.*.silentReply.direct": (None, (2026, 9, 7)),
+    "agents.defaults.silentReplyRewrite": (None, (2026, 9, 7)),
+    "surfaces.*.silentReplyRewrite": (None, (2026, 9, 7)),
 }
 
 # C-645: 2026.9.7 removed the boot-time config self-heal. Through 2026.9.6 the gateway's
