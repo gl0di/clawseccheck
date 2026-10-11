@@ -1379,7 +1379,9 @@ def diff_with_notes(prev: dict | None, curr: dict
     # SEVERITY, and why it differs by family rather than being uniform. An entry APPEARING
     # is an execution entry point that did not exist at the last check, which is the shape
     # of the published attack (a host job rewriting an identity file), so it is MEDIUM
-    # across the board. A MODIFICATION splits: `~/.config/systemd/user` and `/etc/cron.*`
+    # in every family that is an execution entry point (a file in the systemd user unit
+    # directory that systemd does not load, such as an updater's `.bak`, is INFO). A
+    # MODIFICATION splits: `~/.config/systemd/user` and `/etc/cron.*`
     # are infrastructure that changes rarely and whose every line can start a process, so a
     # modification there is MEDIUM too; a shell startup file or a `.pth` is edited by
     # humans and by ordinary package managers (`pip install -e` writes a `.pth`, every

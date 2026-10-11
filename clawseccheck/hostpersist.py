@@ -131,6 +131,14 @@ USER_CRON_SPOOLS = (
 )
 
 FAMILY_SYSTEMD = "systemd_user"
+# C-676: a file directly inside the systemd user unit directory whose name carries no unit
+# suffix. systemd loads a unit only from a name ending in one of SYSTEMD_UNIT_SUFFIXES (or
+# from a drop-in / `.wants/` directory), so an updater's `x.service.bak` or
+# `x.service.reconcile-<id>.receipt.bak` starts nothing. It is still recorded - a staged
+# unit can be renamed into place later - but it is NOT an execution entry point, so it is
+# deliberately outside FAMILIES (the families that are execution entry points) and has its
+# own label table; `monitordims/_hostpersist.py` places its appearance on the INFO side.
+FAMILY_SYSTEMD_NOT_LOADED = "systemd_user_not_loaded"
 FAMILY_SHELL_RC = "shell_rc"
 FAMILY_SYSTEM_CRON = "system_cron"
 FAMILY_PYTHON_AUTOEXEC = "python_autoexec"
@@ -147,6 +155,26 @@ FAMILY_LABELS = {
     FAMILY_SHELL_RC: "shell startup file",
     FAMILY_SYSTEM_CRON: "system cron entry",
 }
+
+# Label for the family above that is not in FAMILIES (C-676). Kept apart from
+# FAMILY_LABELS because that table is pinned to FAMILIES one-to-one.
+FAMILY_LABELS_NOT_LOADED = {
+    FAMILY_SYSTEMD_NOT_LOADED:
+        "file in the systemd user unit directory that systemd does not load",
+}
+
+# systemd.unit(5): the unit-name suffixes. A name that ends in none of these is never
+# loaded as a unit. Case-sensitive on purpose - systemd's own match is.
+SYSTEMD_UNIT_SUFFIXES = (
+    ".service", ".socket", ".device", ".mount", ".automount", ".swap",
+    ".target", ".path", ".timer", ".slice", ".scope",
+)
+
+
+def is_systemd_unit_name(name: str) -> bool:
+    """True when *name* ends in a systemd unit suffix (derived from the suffix list, never
+    from a tool's or a unit's name)."""
+    return name.endswith(SYSTEMD_UNIT_SUFFIXES)
 
 
 @dataclass(frozen=True)
@@ -263,8 +291,11 @@ def scan(home: "str | Path | None" = None,
                             add(FAMILY_SYSTEMD, link)
                     except OSError:
                         unreadable.append(_rel(child, home_path))
-                else:
+                elif is_systemd_unit_name(child.name):
                     add(FAMILY_SYSTEMD, child)
+                else:
+                    # C-676: recorded, not suppressed, but never called a service.
+                    add(FAMILY_SYSTEMD_NOT_LOADED, child)
         except OSError:
             unreadable.append(_rel(systemd_root, home_path))
 
