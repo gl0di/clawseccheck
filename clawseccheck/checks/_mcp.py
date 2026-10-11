@@ -1415,7 +1415,10 @@ def vet_plugin(
     def _under_skills(fp: Path) -> bool:
         return any(sd in fp.parents for sd in skill_dirs)
 
-    dispatched_dirs = [d.resolve() for d in skill_dirs]
+    # C-682: `os.path.realpath` never raises on a symlink loop (`Path.resolve` raises
+    # RuntimeError on 3.12 and returns on 3.14); a declared entry that loops was already
+    # refused with a WARN above, so this only keeps the answer interpreter-independent.
+    dispatched_dirs = [Path(os.path.realpath(d)) for d in skill_dirs]
     # B-638: read the loose plugin Python up front, so each file is analysed knowing every
     # other one -- an exec() of a file the plugin ships is judged by where its path
     # resolves, and that needs the whole set (shippedexec.ShippedArtifact). A file that

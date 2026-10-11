@@ -342,18 +342,14 @@ def find_trajectory_files(
             stats["pointer_out_of_home"] = 0
             stats["pointer_invalid"] = 0
             stats["pointer_scan_capped"] = False
+            stats["unlistable_dirs"] = 0
         return []
-    try:
-        files = list(home.glob("agents/*/sessions/*.trajectory.jsonl"))
-    except OSError:
-        if stats is not None:
-            stats["files_total"] = 0
-            stats["files_capped"] = False
-            stats["pointer_targets_missing"] = 0
-            stats["pointer_out_of_home"] = 0
-            stats["pointer_invalid"] = 0
-            stats["pointer_scan_capped"] = False
-        return []
+    # C-682: `pathprobe.walk_segments`, not `Path.glob` -- found whenever the path is
+    # searchable (a home at mode 111, `agents/<id>` at 311), on every Python; a directory
+    # that must be listed and cannot be is counted in `unlistable_dirs`, never "no sidecars".
+    unlistable: list = []
+    files = list(pathprobe.walk_segments(
+        home, ("agents", "*", "sessions", "*.trajectory.jsonl"), errors=unlistable))
 
     try:
         home_resolved = home.resolve()
@@ -370,10 +366,9 @@ def find_trajectory_files(
     pointer_invalid = 0
     pointer_scan_capped = False
     scanned = 0
-    try:
-        pointer_it = home.glob(f"agents/*/sessions/*{_POINTER_SUFFIX}")
-    except OSError:
-        pointer_it = iter(())
+    pointer_unlistable: list = []
+    pointer_it = pathprobe.walk_segments(
+        home, ("agents", "*", "sessions", f"*{_POINTER_SUFFIX}"), errors=pointer_unlistable)
     try:
         # C-135: iterated LAZILY with an early break, mirroring trajectorystore.py's
         # own _pointer_files -- `list(home.glob(...))` first would fully enumerate and
@@ -426,6 +421,7 @@ def find_trajectory_files(
         # mean the same thing operationally (pointer counts are a lower bound, not
         # exhaustive) -- the distinct CAUSE is not worth a second stats key.
         pointer_scan_capped = True
+    pointer_scan_capped = pointer_scan_capped or bool(pointer_unlistable)  # C-682
 
     # Per-path mtime lookup that never raises: list.sort() evaluates the key for
     # every element before comparing any of them, so if the plain
@@ -454,6 +450,9 @@ def find_trajectory_files(
         stats["pointer_out_of_home"] = pointer_out_of_home
         stats["pointer_invalid"] = pointer_invalid
         stats["pointer_scan_capped"] = pointer_scan_capped
+        # The sidecar pass's count only: the pointer pass lists the same directories (its own
+        # gaps surface as `pointer_scan_capped`).
+        stats["unlistable_dirs"] = len(unlistable)
     return files[:max_files]
 
 

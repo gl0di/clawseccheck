@@ -776,7 +776,8 @@ def check_incident_readiness(ctx: Context) -> Finding:
         )
 
     from ..scanbudget import limits_for  # noqa: PLC0415 (F-164, leaf import, no cycle)
-    files = _trajectory.find_trajectory_files(ctx.home, max_files=limits_for(ctx).traj_max_files) if isinstance(ctx.home, Path) else []
+    traj_stats: dict = {}
+    files = _trajectory.find_trajectory_files(ctx.home, max_files=limits_for(ctx).traj_max_files, stats=traj_stats) if isinstance(ctx.home, Path) else []
     if not files:
         corr = (
             _trajectorystore.corroborate(ctx.home)
@@ -802,7 +803,10 @@ def check_incident_readiness(ctx: Context) -> Finding:
             "(OPENCLAW_TRAJECTORY=0), relocated (OPENCLAW_TRAJECTORY_DIR), or the agent "
             "may simply not have run yet.",
             "Keep trajectory tracing on (the default) so tool use is recorded, and run "
-            "this audit on the host where those session logs live.",
+            "this audit on the host where those session logs live."
+            + (f" {traj_stats['unlistable_dirs']} director{'y' if traj_stats['unlistable_dirs'] == 1 else 'ies'} "
+               "under agents/ could not be listed (check their permissions), so a sidecar there "
+               "was not seen." if traj_stats.get("unlistable_dirs") else ""),
         )
 
     tamper: list[str] = []

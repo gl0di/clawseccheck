@@ -721,10 +721,15 @@ def _pointer_files(home: Path) -> "tuple[int, int, bool]":
     that a session existed) but never toward ``pointer_targets_missing`` -- an unreadable
     record is an honest "we don't know", not a claim its target is gone.
     """
+    # C-682: `pathprobe.walk_segments`, not `Path.glob` (the same answer on every Python
+    # for a searchable-but-not-listable directory). A directory that had to be listed and
+    # could not be makes the counts a lower bound: reported through `capped`.
+    unlistable: list = []
     try:
-        it = home.glob("agents/*/sessions/*.trajectory-path.json")
+        it = pathprobe.walk_segments(
+            home, ("agents", "*", "sessions", "*.trajectory-path.json"), errors=unlistable)
     except OSError:
-        return 0, 0, False
+        return 0, 0, True
     total = 0
     missing = 0
     capped = False
@@ -751,8 +756,8 @@ def _pointer_files(home: Path) -> "tuple[int, int, bool]":
             except OSError:
                 continue
     except OSError:
-        pass
-    return total, missing, capped
+        capped = True
+    return total, missing, capped or bool(unlistable)
 
 
 def _archive_entries(home: Path) -> "tuple[int, bool]":
@@ -761,10 +766,12 @@ def _archive_entries(home: Path) -> "tuple[int, bool]":
     NAMES ONLY -- an archived sidecar's filename is disk metadata (the vendor doctor's
     own restore-tier naming convention), never its content.
     """
+    unlistable: list = []  # C-682: a directory that could not be listed makes `count` a lower bound
     try:
-        it = home.glob("agents/*/session-sqlite-import-archive/*")
+        it = pathprobe.walk_segments(
+            home, ("agents", "*", "session-sqlite-import-archive", "*"), errors=unlistable)
     except OSError:
-        return 0, False
+        return 0, True
     count = 0
     capped = False
     try:
@@ -776,8 +783,8 @@ def _archive_entries(home: Path) -> "tuple[int, bool]":
                 break
             count += 1
     except OSError:
-        pass
-    return count, capped
+        capped = True
+    return count, capped or bool(unlistable)
 
 
 def _sqlite_dbs(
@@ -796,16 +803,23 @@ def _sqlite_dbs(
     when some databases were never even opened. The default (``None``) keeps the
     original behaviour for existing callers.
     """
+    # C-682: `pathprobe.walk_segments`, not `Path.glob`. An unreadable `agent` directory still
+    # reports its store (absence is unproven) so the reader's open fails and is disclosed on
+    # every Python; an unlistable `agents` directory is counted in `dbs_unlistable`.
+    unlistable: list = []
     try:
-        dbs = sorted(home.glob("agents/*/agent/openclaw-agent.sqlite"))
+        dbs = sorted(pathprobe.walk_segments(
+            home, ("agents", "*", "agent", "openclaw-agent.sqlite"), errors=unlistable))
     except OSError:
         if stats is not None:
             stats["dbs_total"] = 0
             stats["dbs_capped"] = False
+            stats["dbs_unlistable"] = max(1, len(unlistable))
         return []
     if stats is not None:
         stats["dbs_total"] = len(dbs)
         stats["dbs_capped"] = len(dbs) > max_dbs
+        stats["dbs_unlistable"] = len(unlistable)
     return dbs[:max_dbs]
 
 
@@ -842,7 +856,8 @@ def sqlite_db_paths_capped(home) -> bool:
     if not isinstance(home, Path):
         return False
     try:
-        found = list(home.glob("agents/*/agent/openclaw-agent.sqlite"))
+        found = list(pathprobe.walk_segments(
+            home, ("agents", "*", "agent", "openclaw-agent.sqlite"), errors=[]))
     except OSError:
         return False
     return len(found) > _MAX_SQLITE_DBS

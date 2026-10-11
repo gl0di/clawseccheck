@@ -366,9 +366,9 @@ _R_ROOT_PROBED = ("the glob root is probed with pathprobe.is_dir first (raises i
 _R_LITERAL_SEGMENT = (" (glob pattern with a literal segment under a '*' match, the cell A/C shape of "
                       "the task: the answer differs between 3.12 and 3.9/3.14 and the direction of "
                       "cell C was not reproduced; also under except OSError)")
-_R_VET_PLUGIN_MIXED = (" (10 sites: 5 under a RuntimeError handler, 4 under OSError/ValueError-only "
-                       "handlers, 1 unguarded `dispatched_dirs = [d.resolve() for d in skill_dirs]` "
-                       "that may be the looping manifest-skills site the task names; not verified)")
+_R_VET_PLUGIN_MIXED = (" (9 sites, none unguarded: the former unguarded `dispatched_dirs` list now uses "
+                       "os.path.realpath (C-682); the rest sit under OSError, OSError/ValueError or "
+                       "OSError/RuntimeError handlers, the declared-entry loop is pinned by C-659 and C-682)")
 
 _NON_PATHLIB: dict = {
     ("clawseccheck/shippedexec.py", "_FileFacts._join", "self", "resolve"):
@@ -430,7 +430,7 @@ _ALLOWED: dict = {
     ("clawseccheck/checks/_mcp.py", "sweep_plugins", "resolve"):
         (1, _C_SURVEY),
     ("clawseccheck/checks/_mcp.py", "vet_plugin", "resolve"):
-        (10, _C_UNCLASSIFIED + _R_VET_PLUGIN_MIXED),
+        (9, _C_UNCLASSIFIED + _R_VET_PLUGIN_MIXED),
     ("clawseccheck/checks/_shared.py", "_username_safe_path", "resolve"):
         (2, _C_SAME + _R_EXISTS_GATE),
     ("clawseccheck/checks/_vet.py", "_locate_plugin_root_or_reason", "glob"):
@@ -515,18 +515,8 @@ _ALLOWED: dict = {
         (1, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
     ("clawseccheck/trajectory.py", "_resolve_pointer_target", "resolve"):
         (1, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
-    ("clawseccheck/trajectory.py", "find_trajectory_files", "glob"):
-        (2, _C_UNCLASSIFIED + _R_LITERAL_SEGMENT),
     ("clawseccheck/trajectory.py", "find_trajectory_files", "resolve"):
         (2, _C_GUARDED + "except (OSError, RuntimeError, ValueError)"),
-    ("clawseccheck/trajectorystore.py", "_archive_entries", "glob"):
-        (1, _C_UNCLASSIFIED + _R_LITERAL_SEGMENT),
-    ("clawseccheck/trajectorystore.py", "_pointer_files", "glob"):
-        (1, _C_UNCLASSIFIED + _R_LITERAL_SEGMENT),
-    ("clawseccheck/trajectorystore.py", "_sqlite_dbs", "glob"):
-        (1, _C_UNCLASSIFIED + _R_LITERAL_SEGMENT),
-    ("clawseccheck/trajectorystore.py", "sqlite_db_paths_capped", "glob"):
-        (1, _C_UNCLASSIFIED + _R_LITERAL_SEGMENT),
     ("clawseccheck/watch.py", "PollWatcher._scan", "resolve"):
         (1, _C_SURVEY),
     ("clawseccheck/watch.py", "_bounded_watch_dirs", "resolve"):
@@ -592,8 +582,10 @@ def test_the_real_allowlist_is_well_formed():
 def test_the_real_allowlist_size_is_pinned_by_reason_class():
     """Keep the accepted set named and sized: a growing allowlist is how a guard becomes a
     rubber stamp. Raising a number needs a reason written next to the new entry; a site routed
-    through a probe lowers it. (entries, sites) per class, measured on dev 8bfc9039 - 20 glob /
-    rglob calls and 99 resolve calls, 9 of which are shippedexec's own method."""
+    through a probe lowers it. (entries, sites) per class, measured on dev 8bfc9039 and re-counted by C-682 (the six trajectory-store glob
+    sites now go through pathprobe.walk_segments, one vet_plugin resolve through
+    os.path.realpath) - 14 glob / rglob calls and 98 resolve calls, 9 of which are
+    shippedexec's own method."""
     entries: Counter = Counter()
     sites: Counter = Counter()
     for (_rel, _fn, _spelling), (count, reason) in _ALLOWED.items():
@@ -604,14 +596,14 @@ def test_the_real_allowlist_size_is_pinned_by_reason_class():
         _C_GUARDED: (31, 48),
         _C_SAME: (9, 10),
         _C_SURVEY: (27, 36),
-        _C_UNCLASSIFIED: (6, 16),
+        _C_UNCLASSIFIED: (1, 9),
     }
-    assert (len(_ALLOWED), sum(c for c, _ in _ALLOWED.values())) == (73, 110)
+    assert (len(_ALLOWED), sum(c for c, _ in _ALLOWED.values())) == (68, 103)
     assert (len(_NON_PATHLIB), sum(c for c, _ in _NON_PATHLIB.values())) == (4, 9)
     by_name: Counter = Counter()
     for (_rel, _fn, spelling), (count, _reason) in _ALLOWED.items():
         by_name[spelling] += count
-    assert dict(by_name) == {"glob": 15, "rglob": 5, "resolve": 86, "resolve(strict)": 4}, by_name
+    assert dict(by_name) == {"glob": 9, "rglob": 5, "resolve": 85, "resolve(strict)": 4}, by_name
     assert not [k for k in _ALLOWED if k[2].startswith("glob.")], "the glob module is unused today"
 
 

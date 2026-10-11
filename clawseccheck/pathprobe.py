@@ -42,6 +42,12 @@ Contract, identical on every interpreter, for a ``str`` or ``os.PathLike``:
   caller's ``except OSError`` is live again;
 * ``ValueError`` (an embedded NUL byte)  -> ``False``.
 
+:func:`walk_segments` is the same idea for ``Path.glob``, whose answer on a directory that is
+searchable but not listable (mode 111 / 311) follows the interpreter (C-682). It expands a
+pattern of literal and ``*``-style segments with ``os.lstat`` / ``os.scandir`` only, so a file
+is FOUND whenever the path to it is traversable and a listing is needed only for a ``*``
+segment.
+
 A Layer-1 leaf: stdlib imports only, imports nothing from this package. Read-only; no
 network. Not a drop-in for ``os.path.exists`` and friends - those swallow every error on
 every interpreter, which is the opposite contract.
@@ -49,8 +55,11 @@ every interpreter, which is the opposite contract.
 from __future__ import annotations
 
 import errno
+import fnmatch
 import os
 import stat
+from collections.abc import Iterator
+from pathlib import Path
 
 # Copied from CPython 3.12's pathlib (``_IGNORED_ERRNOS`` / ``_IGNORED_WINERRORS``), not
 # paraphrased: the point is to reproduce that contract exactly.
@@ -112,3 +121,95 @@ def is_symlink(p: "str | os.PathLike[str]") -> bool:
     """Whether *p* is itself a symlink (``lstat``; the target is never consulted)."""
     mode = _mode(p, follow=False)
     return mode is not None and stat.S_ISLNK(mode)
+
+
+def _gap(exc: OSError, errors: "list | None") -> None:
+    """A directory that had to be listed could not be: raise it, or record it in *errors*.
+
+    "Not there" errors (:func:`_ignore_error`) are silent either way.
+    """
+    if _ignore_error(exc):
+        return
+    if errors is None:
+        raise exc
+    errors.append(exc)
+
+
+def _walk(base: Path, segs: "tuple[str, ...]", errors: "list | None") -> "Iterator[Path]":
+    seg, rest = segs[0], segs[1:]
+    if any(c in seg for c in "*?["):
+        try:
+            it = os.scandir(base)
+        except OSError as exc:
+            _gap(exc, errors)
+            return
+        except ValueError:
+            return
+        with it:
+            while True:
+                try:
+                    entry = next(it)
+                except StopIteration:
+                    return
+                except OSError as exc:
+                    _gap(exc, errors)
+                    return
+                if not fnmatch.fnmatchcase(entry.name, seg):
+                    continue
+                if rest:
+                    yield from _walk(base / entry.name, rest, errors)
+                else:
+                    yield base / entry.name
+        return
+    child = base / seg
+    if rest:
+        yield from _walk(child, rest, errors)
+        return
+    try:
+        os.lstat(child)
+    except OSError as exc:
+        if _ignore_error(exc):
+            return
+        # The parent is not searchable. Whether the name exists is then a question for its
+        # listing: a listable parent (mode 444) answers it honestly (found only if the name is
+        # there, so the consumer's own open fails loudly); one that is neither searchable nor
+        # listable (mode 000) leaves existence UNKNOWN, which is a gap, never a found path.
+        try:
+            names = os.listdir(base)
+        except OSError as lexc:
+            _gap(lexc, errors)
+            return
+        except ValueError:
+            return
+        if seg not in names:
+            return
+    except ValueError:
+        return
+    yield child
+
+
+def walk_segments(root: "str | os.PathLike[str]", segments: "list[str] | tuple[str, ...]",
+                  *, errors: "list | None" = None) -> "Iterator[Path]":
+    """Expand *segments* below *root*; the same result on every Python (C-682).
+
+    Each segment is a literal name or an fnmatch pattern (``*``, ``?``, ``[...]``; ``*``
+    matches dotfiles, as ``Path.glob`` does). A literal segment needs only execute permission
+    on the directories before it; a pattern segment needs the directory listed. The last
+    segment matches files and directories alike, and a dangling symlink counts as present.
+
+    * "Not there" (:func:`_ignore_error`: ENOENT, ENOTDIR, ELOOP, ...) is silent.
+    * A directory that must be listed but cannot be (EACCES, EIO, ...) raises its
+      ``OSError``, unless *errors* is a list: then it is appended there and the walk
+      continues with the remaining directories, so one unlistable agent directory does not
+      hide the others.
+    * A literal last segment under a parent that is not searchable (EACCES) is decided by
+      listing that parent: found only if the name is listed (so opening it fails where the
+      caller can say so); if the parent cannot be listed either, existence is UNKNOWN and is
+      an unlistable-directory gap (raised, or appended to *errors*), never a found path.
+
+    Yields lazily, in ``os.scandir`` order.
+    """
+    segs = tuple(segments)
+    if not segs:
+        return iter(())
+    return _walk(Path(root), segs, errors)

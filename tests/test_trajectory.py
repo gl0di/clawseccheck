@@ -234,7 +234,7 @@ def test_find_trajectory_files_stats_missing_home(tmp_path):
     assert stats == {
         "files_total": 0, "files_capped": False,
         "pointer_targets_missing": 0, "pointer_out_of_home": 0, "pointer_invalid": 0,
-        "pointer_scan_capped": False,
+        "pointer_scan_capped": False, "unlistable_dirs": 0,
     }
 
 
@@ -752,19 +752,21 @@ def test_pointer_scan_interrupted_by_oserror_is_also_disclosed(tmp_path):
     missing = tmp_path / "agents" / "main" / "sessions" / "gone.trajectory.jsonl"
     _write_pointer(tmp_path, "main", "s0", missing)
 
-    real_glob = Path.glob
+    from clawseccheck import pathprobe
 
-    def _raising_glob(self, pattern):
-        if pattern.endswith(".trajectory-path.json"):
+    real_walk = pathprobe.walk_segments
+
+    def _raising_walk(root, segments, **kw):
+        if segments[-1].endswith(".trajectory-path.json"):
             def _gen():
-                yield from real_glob(self, pattern)
+                yield from real_walk(root, segments, **kw)
                 raise OSError("simulated mid-scan failure")
             return _gen()
-        return real_glob(self, pattern)
+        return real_walk(root, segments, **kw)
 
     import unittest.mock
 
-    with unittest.mock.patch.object(Path, "glob", _raising_glob):
+    with unittest.mock.patch.object(pathprobe, "walk_segments", _raising_walk):
         stats: dict = {}
         files = find_trajectory_files(tmp_path, stats=stats)
     assert files == []
