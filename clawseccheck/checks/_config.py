@@ -643,7 +643,11 @@ def _c015_candidate_files(
     rather than per candidate file, both for cost and so a single unreadable root is
     recorded once, not once per file examined.
     """
-    skip_roots = [(ctx.home / rel).resolve() for rel in SKILL_DIRS]
+    # C-658: `Path.resolve()` raises RuntimeError for a symlink loop on 3.9-3.12 (an unhandled
+    # crash that capped the whole audit) and returns the path on 3.14. `os.path.realpath` does
+    # not raise in non-strict mode on any interpreter. A loop then fails the `_safe_is_dir`
+    # probe below (ELOOP reads as "not there"), so it is not a skip root and the scan goes on.
+    skip_roots = [Path(os.path.realpath(ctx.home / rel)) for rel in SKILL_DIRS]
     skill_dir_parts = tuple(Path(rel).parts for rel in SKILL_DIRS)
 
     skip_roots_existing: list[Path] = []
