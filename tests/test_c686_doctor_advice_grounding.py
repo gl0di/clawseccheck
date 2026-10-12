@@ -39,7 +39,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -209,8 +208,26 @@ console.log("@@RESULT@@" + JSON.stringify(out));
 """
 
 
+_SCRATCH_ROOT: "list[Path]" = []
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _c686_scratch(tmp_path_factory):
+    """Keep the node oracle's throwaway directories inside pytest's own tmp tree."""
+    _SCRATCH_ROOT.append(tmp_path_factory.mktemp("c686-oracle"))
+    yield
+    _SCRATCH_ROOT.clear()
+
+
+def _scratch(prefix: str) -> str:
+    import uuid
+    d = _SCRATCH_ROOT[0] / f"{prefix}{uuid.uuid4().hex[:8]}"
+    d.mkdir()
+    return str(d)
+
+
 def _node(script: str, args: "list[str]") -> list:
-    work = Path(tempfile.mkdtemp(prefix="c686-"))  # mkdtemp: module-level helper outside any fixture; removed in the finally below
+    work = Path(_scratch(prefix="c686-"))
     try:
         (work / "run.mjs").write_text(script, encoding="utf-8")
         proc = subprocess.run(["node", str(work / "run.mjs"), *args],
@@ -234,7 +251,7 @@ def _run_config_cases(cases: "list[dict]") -> list:
     finder = oracle.finder_bundle()
     migrate = dist_declaring("function applyLegacyDoctorMigrations(",
                              symbol="applyLegacyDoctorMigrations")
-    work = Path(tempfile.mkdtemp(prefix="c686-cases-"))  # mkdtemp: module-level helper outside any fixture; removed in the finally below
+    work = Path(_scratch(prefix="c686-cases-"))
     try:
         (work / "cases.json").write_text(json.dumps(cases), encoding="utf-8")
         return _node(_CONFIG_SCRIPT, [
@@ -278,7 +295,7 @@ def vendor_state_answers() -> "dict[str, dict]":
                                          "identity/device-auth.json"],
         "auth-profiles file that is not a sidecar": ["credentials/auth-profiles/x.json"],
     }
-    work = Path(tempfile.mkdtemp(prefix="c686-scn-"))  # mkdtemp: module-level helper outside any fixture; removed in the finally below
+    work = Path(_scratch(prefix="c686-scn-"))
     try:
         (work / "scenarios.json").write_text(json.dumps(list(scenarios.values())),
                                              encoding="utf-8")
@@ -408,7 +425,7 @@ def test_installed_browser_ignores_the_retired_ssrf_alias_but_not_the_canonical_
     cases = [{"allowPrivateNetwork": True},
              {"allowPrivateNetwork": True, "dangerouslyAllowPrivateNetwork": False},
              {"dangerouslyAllowPrivateNetwork": True}]
-    work = Path(tempfile.mkdtemp(prefix="c686-browser-"))  # mkdtemp: module-level helper outside any fixture; removed in the finally below
+    work = Path(_scratch(prefix="c686-browser-"))
     try:
         (work / "cases.json").write_text(json.dumps(cases), encoding="utf-8")
         alias_only, alias_and_false, canonical = _node(_BROWSER_SCRIPT, [
