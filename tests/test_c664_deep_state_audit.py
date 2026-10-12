@@ -463,7 +463,10 @@ def _stack_to_64_mib():
     want = 64 * 1024 * 1024
     if hard != resource.RLIM_INFINITY:
         want = min(want, hard)
-    resource.setrlimit(resource.RLIMIT_STACK, (want, hard))
+    try:
+        resource.setrlimit(resource.RLIMIT_STACK, (want, hard))
+    except (ValueError, OSError):
+        pass  # macOS may refuse; an exception in a preexec_fn would fail the spawn itself
 
 
 def _cli_findings(home: Path, data_dir: Path, *, big_stack: bool) -> dict:

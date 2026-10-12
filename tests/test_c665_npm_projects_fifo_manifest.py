@@ -96,8 +96,15 @@ print(json.dumps({"status": f.status, "detail": f.detail, "fix": f.fix,
 
 
 def _cap_memory() -> None:
-    """Child-side: an unbounded read of an endless device must fail, not eat the machine."""
-    resource.setrlimit(resource.RLIMIT_AS, (4 << 30, 4 << 30))
+    """Child-side: an unbounded read of an endless device must fail, not eat the machine.
+
+    Best effort: macOS refuses ``RLIMIT_AS`` (and an exception raised here surfaces as
+    ``SubprocessError: Exception occurred in preexec_fn``), so there the cap is simply absent
+    and the run is bounded by the timeout alone."""
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (4 << 30, 4 << 30))
+    except (ValueError, OSError):
+        pass
 
 
 def _run(args: list, *, timeout: int = TIMEOUT_S) -> subprocess.CompletedProcess:

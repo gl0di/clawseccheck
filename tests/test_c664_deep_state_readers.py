@@ -78,7 +78,12 @@ def _run_cli(args, cwd, stack: int = _STACK):
     limit = _stack_limit(stack)
 
     def _pre():
-        resource.setrlimit(resource.RLIMIT_STACK, (limit, limit))
+        # Best effort: macOS refuses to lower the hard stack limit, and an exception in a
+        # preexec_fn surfaces as SubprocessError; the run then uses the default stack.
+        try:
+            resource.setrlimit(resource.RLIMIT_STACK, (limit, limit))
+        except (ValueError, OSError):
+            pass
 
     env = dict(os.environ, PYTHONPATH=str(REPO), PYTHONDONTWRITEBYTECODE="1",
                CLAWSECCHECK_NO_UPDATE_NOTICE="1", CLAWSECCHECK_NO_FRESHNESS_NOTICE="1")
