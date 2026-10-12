@@ -11,6 +11,7 @@ from pathlib import Path
 from .. import pathprobe
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist
+from .. import retiredformats as _retiredformats
 from .. import sockets as _sockets
 from .. import toolgrant as _toolgrant
 from ..catalog import (
@@ -2166,6 +2167,21 @@ def check_config_externally_managed(ctx: Context) -> Finding:
     )
 
 
+def _retired_finder_present(ctx) -> "_retiredformats.RetiredFormats | None":
+    """OpenClaw's own retired-format finder over ``ctx.config``, or ``None``.
+
+    ``None`` means "nothing named" ONLY when the installed build is inside the window the
+    port was validated on (``retiredformats.in_window``); outside it the caller must not read
+    ``None`` as "the finder was applied and found nothing" -- it was not applied at all.
+    Reads ONLY ``ctx.installed_dist_version``, like ``_retired_keys_present``.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    cfg = getattr(ctx, "config", None)
+    if not _retiredformats.in_window(installed) or not isinstance(cfg, dict):
+        return None
+    return _retiredformats.find_retired(cfg)
+
+
 def check_retired_config_keys_invalid(ctx: Context) -> Finding:
     """B382 - openclaw.json still holds a key the installed OpenClaw build removed.
 
@@ -2182,6 +2198,17 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
     the advice says that instead. That sentence lives in ``fix`` and never in ``detail``:
     ``baseline.fingerprint()`` hashes ``detail``, and this note must not orphan a user's
     ``.clawseccheckignore`` entry.
+
+    C-689: two sources are unioned (a path both name is reported once, as a table row). The
+    hand table (``_RETIRED_CONFIG_KEYS``) holds keys MEASURED against a build's root schema;
+    on a build inside the port's window (``retiredformats.in_window``) OpenClaw's own
+    retired-format finder is added. Its hits include 33 ``channels.*`` keys the root schema
+    passes through and the bundled channel schemas reject; they are WARN like the root rows,
+    because Doctor and ``openclaw update`` refuse the config the same way. A finder row says
+    "retired on the installed build" and the vendor's own ``bridgeVersion`` (the release it
+    tells the user to install to migrate); the sentence about WHO refuses lives in ``detail``
+    only for finder rows, so a table-only finding's ``detail`` (and its fingerprint) is
+    byte-identical to what it was.
 
     WARN    - one or more retired keys are present and the installed build rejects them.
     UNKNOWN - no config was read (or it was unreadable).
@@ -2213,31 +2240,88 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
             pass_confidence="no_signal",
         )
     found = _retired_keys_present(ctx)
-    if not found:
+    finder = _retired_finder_present(ctx)
+    in_window = _retiredformats.in_window(_numeric_version(installed))
+    table_paths = {path for path, _repl in found}
+    finder_only = list(dict.fromkeys(p for p in (finder.paths if finder else ())
+                                     if p not in table_paths))
+    if not found and not finder_only:
+        if in_window:
+            return _finding(
+                "B382",
+                PASS,
+                # C-671: say what was checked. The table lists the retired keys that were
+                # measured, not every key the vendor ever removed, so "holds no removed key"
+                # would read as a completeness claim this check cannot make. C-689: inside
+                # the finder's window the PASS also says the vendor's own list was applied.
+                f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS)} retired "
+                f"config keys this check tracks, and OpenClaw {installed}'s own "
+                "retired-format finder names nothing in it.",
+                "No action needed. The list covers only the retired keys that were measured, "
+                "not every key OpenClaw has removed; `openclaw config validate` is the full "
+                "test of the file against the installed build.",
+            )
+        window = "-".join(".".join(str(n) for n in v)
+                          for v in (_retiredformats.ORACLE_MIN, _retiredformats.ORACLE_MAX))
+        # C-689: outside the finder's window the vendor's own list was NOT consulted, and a
+        # clean-reading PASS would claim more than was checked. The caveat is in `detail`
+        # (the list renderer never shows `fix`) and the PASS carries no signal; a PASS has no
+        # ignore fingerprint to orphan.
         return _finding(
             "B382",
             PASS,
-            # C-671: say what was checked. The table lists the retired keys that were
-            # measured, not every key the vendor ever removed, so "holds no removed key"
-            # would read as a completeness claim this check cannot make.
             f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS)} retired config "
-            "keys this check tracks.",
-            "No action needed. The list covers only the retired keys that were measured, "
-            "not every key OpenClaw has removed; `openclaw config validate` is the full "
-            "test of the file against the installed build.",
+            "keys this check tracks. OpenClaw's own retired-format list was NOT checked: it "
+            f"is ported only for {window} and this build is {installed}.",
+            "No action needed for the keys this check tracks. The list covers only the "
+            "retired keys that were measured, not every key OpenClaw has removed; "
+            "`openclaw config validate` is the full test of the file against the installed "
+            "build.",
+            pass_confidence="no_signal",
         )
     notes = [f"{key} ({'replaced by ' + repl if repl else 'removed'})" for key, repl in found]
+    notes += [f"{path} (retired on the installed build)" for path in finder_only]
     shown = "; ".join(notes[:6])
     extra = f" (+{len(notes) - 6} more)" if len(notes) > 6 else ""
-    return _finding(
-        "B382",
-        WARN,
-        f"The file audited still contains {len(found)} key(s) that OpenClaw {installed} "
-        "removed, so its strict config schema rejects the file: `openclaw config validate` "
-        "and CLI commands that load it report it invalid until the keys are migrated. "
-        f"{shown}{extra}",
-        "Run `openclaw doctor --fix` (it migrates or removes them), or delete the keys by "
-        "hand. " + (
+    evidence = [key for key, _repl in found] + finder_only
+    if finder_only:
+        # Finder rows: the consequence the vendor attaches (Doctor, `openclaw update`).
+        # The 33 channel-level keys the root schema accepts are in here too -- the finder,
+        # not the root schema, is what makes Doctor and update refuse them.
+        total, named = len(notes), len(finder_only)
+        table_clause = (
+            f"{len(found)} of them left the strict config schema, which rejects the file: "
+            "`openclaw config validate` and CLI commands that load it report it invalid. "
+            if found else "")
+        detail = (
+            f"The file audited still contains {total} {'key' if total == 1 else 'keys'} that "
+            f"OpenClaw {installed} retired or removed. {table_clause}{named} "
+            f"{'is' if named == 1 else 'are'} named by OpenClaw's own retired-format finder "
+            f"(retired on the installed build; bridge release {finder.bridge_version}): "
+            "Doctor and `openclaw update` refuse this config until "
+            f"{'it is' if named == 1 else 'they are'} removed. {shown}{extra}")
+    else:
+        detail = (
+            f"The file audited still contains {len(found)} key(s) that OpenClaw {installed} "
+            "removed, so its strict config schema rejects the file: `openclaw config validate` "
+            "and CLI commands that load it report it invalid until the keys are migrated. "
+            f"{shown}{extra}")
+    if finder is not None:
+        # The installed Doctor refuses the whole config once the finder names anything, so
+        # `openclaw doctor --fix` cannot migrate the table rows either: do not advise it.
+        # The bridge-release route is the vendor's own and is offered only for the keys the
+        # vendor's list names (whether that bridge ever migrated a table-only key is
+        # unverified).
+        fix = (
+            "Delete the retired keys listed above by hand. For the keys the vendor's list "
+            f"names, the vendor's own route is to install OpenClaw {finder.bridge_version}, "
+            "run `openclaw doctor --fix` there, then upgrade to latest. On the installed "
+            "build Doctor and `openclaw update` refuse a config that holds them, so "
+            "`openclaw doctor --fix` cannot migrate it. Run `openclaw doctor` afterwards to "
+            "confirm the config is accepted.")
+    else:
+        fix = "Run `openclaw doctor --fix` (it migrates or removes them), or delete the keys by " \
+            "hand. " + (
             # C-645: 2026.9.7 dropped the startup repair, so nothing fixes the file behind
             # the user's back any more; the $include caveat is now about Doctor's own
             # automatic preflight repair (`canPlanAutomaticConfigRepair` from 2026.10.1,
@@ -2249,9 +2333,8 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
             if _startup_repair_removed(ctx) else
             "A config that uses $include may be refused automatic repair, so run the "
             "command explicitly."
-        ),
-        evidence=[key for key, _repl in found],
-    )
+        )
+    return _finding("B382", WARN, detail, fix, evidence=evidence)
 
 
 def check_dangerous_overrides(ctx: Context) -> Finding:

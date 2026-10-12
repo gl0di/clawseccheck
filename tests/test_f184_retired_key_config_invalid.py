@@ -90,9 +90,14 @@ def test_unknown_installed_version_is_not_adverse():
 
 
 def test_clean_modern_config_passes_verified():
-    f = _run({"logging": {"audit": {"enabled": True}}, "gateway": {"port": 1}}, MODERN)
-    assert f.status == PASS
-    assert f.pass_confidence != "no_signal"
+    cfg = {"logging": {"audit": {"enabled": True}}, "gateway": {"port": 1}}
+    # C-689: a PASS is "verified" only where OpenClaw's own retired-format list was also
+    # consulted (inside the port's window); on an older build the table alone answered, and
+    # the PASS says so and carries no signal.
+    f = _run(cfg, MODERN)
+    assert f.status == PASS and f.pass_confidence == "no_signal"
+    f = _run(cfg, "2026.10.2")
+    assert f.status == PASS and f.pass_confidence != "no_signal"
 
 
 def test_symlink_knob_is_build_scoped():
@@ -271,8 +276,9 @@ def test_live_silent_reply_siblings_are_not_flagged_on_2026_9_8():
     cfg = {"agents": {"defaults": {"silentReply": {"group": "allow"}}},
            "surfaces": {"webchat": {"silentReply": {"group": "allow"}}}}
     f = _run(cfg, SILENT_BUILD)
-    assert f.status == PASS
-    assert f.pass_confidence != "no_signal"
+    assert f.status == PASS and f.pass_confidence == "no_signal"  # C-689: table-only build
+    f = _run(cfg, "2026.10.2")
+    assert f.status == PASS and f.pass_confidence != "no_signal"
 
 
 def test_only_the_internal_key_is_named_when_a_live_sibling_sits_beside_it():
@@ -502,8 +508,9 @@ def test_clean_config_behind_include_still_passes(tmp_path):
     _write(tmp_path / "openclaw.json", '{"$include": "./fragment.json5"}')
     cfg = load_openclaw_config(tmp_path / "openclaw.json", root_byte_limit=5_000_000)
     f = _run(cfg, MODERN)
-    assert f.status == PASS
-    assert f.pass_confidence != "no_signal"
+    assert f.status == PASS and f.pass_confidence == "no_signal"  # C-689: table-only build
+    f = _run(cfg, "2026.10.2")
+    assert f.status == PASS and f.pass_confidence != "no_signal"
 
 
 def test_retired_key_as_an_include_sibling_still_warns(tmp_path):
